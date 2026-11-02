@@ -1523,7 +1523,10 @@ impl Supervisor<'_> {
                 warn!(error = %format_args!("{error:#}"), "agent eval {} run {label} could not start: {error:#}", round.id);
                 self.record_eval(
                     EventKind::AgentEvalRunStarted,
-                    json!({"eval_id": round.id, "case": case, "round": run, "provider": round.provider, "job": label}),
+                    json!({
+                        "eval_id": round.id, "case": case, "round": run, "provider": round.provider,
+                        "model": round.launch.model, "effort": round.launch.effort, "job": label,
+                    }),
                 )?;
                 let cost = run_cost(None, &round.prices, round.per_run_usd);
                 self.record_eval(

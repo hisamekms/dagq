@@ -1652,6 +1652,9 @@ struct AgentResultsParams {
     agent: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// `--by-launch`: add the finished rounds side by side by launch.
+    #[serde(default)]
+    by_launch: bool,
 }
 
 /// `agent_result`'s params: those of `dagq agent result`.
@@ -2052,8 +2055,11 @@ fn run(
         }
         UseCase::AgentResults => {
             let p: AgentResultsParams = params(use_case, raw)?;
-            super::agent_eval::AgentEvals::new(&*store.0, actor, &StaticPolicy)
-                .list(p.agent.as_deref(), p.limit.unwrap_or(20))
+            super::agent_eval::AgentEvals::new(&*store.0, actor, &StaticPolicy).list(
+                p.agent.as_deref(),
+                p.limit.unwrap_or(20),
+                p.by_launch,
+            )
         }
         UseCase::AgentResult => {
             let p: AgentResultParams = params(use_case, raw)?;

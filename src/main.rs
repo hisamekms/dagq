@@ -2126,17 +2126,23 @@ enum AgentCommand {
     /// One production set whole: its request, the reviews left out, each case's label and
     /// its cases as `agent eval --set` runs them.
     Set { id: i64 },
-    /// List the rounds of the eval, newest first, with their status and scores (a worker's
-    /// own run's only). Prints {"evals"}.
+    /// List the rounds of the eval, newest first, with their status, launch, scores, tokens
+    /// and time (a worker's own run's only). Prints {"evals"}, and {"by_launch"} with
+    /// --by-launch.
     Results {
         /// Only this agent's.
         #[arg(long)]
         agent: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Also print the finished rounds listed grouped by agent, case set and launch
+        /// (provider, model, effort), each with its scores, errors, tokens and time.
+        #[arg(long)]
+        by_launch: bool,
     },
-    /// One round of the eval whole: its request, its start or refusal, each run and its
-    /// scores (a worker's own run's only).
+    /// One round of the eval whole: its request, its start or refusal, its launches, each run
+    /// with its launch, tokens and time, its scores and what it used (a worker's own run's
+    /// only).
     Result { id: i64 },
 }
 
@@ -4085,10 +4091,19 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
                 (UseCase::AgentSets, json!({"agent": agent, "limit": limit}))
             }
             AgentCommand::Set { id } => (UseCase::AgentSet, json!({"id": id})),
-            AgentCommand::Results { agent, limit } => (
-                UseCase::AgentResults,
-                json!({"agent": agent, "limit": limit}),
-            ),
+            AgentCommand::Results {
+                agent,
+                limit,
+                by_launch,
+            } => {
+                let mut params = json!({"agent": agent, "limit": limit});
+                // Sent only when asked, so a service of a build before it
+                // reads the rest as it did.
+                if *by_launch {
+                    params["by_launch"] = json!(true);
+                }
+                (UseCase::AgentResults, params)
+            }
             AgentCommand::Result { id } => (UseCase::AgentResult, json!({"id": id})),
         },
         // A worker's proposal on its own run (ADR-t1521-2 decision 3).
@@ -7068,6 +7083,10 @@ mod tests {
                     (
                         &["dagq", "agent", "results", "--limit", "5"],
                         json!({"agent": null, "limit": 5}),
+                    ),
+                    (
+                        &["dagq", "agent", "results", "--by-launch"],
+                        json!({"agent": null, "limit": 20, "by_launch": true}),
                     ),
                     (&["dagq", "agent", "result", "3"], json!({"id": 3})),
                 ] {

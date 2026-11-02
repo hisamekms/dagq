@@ -113,10 +113,10 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 
 ## 記録と成績の作り直し
 
-- 依頼・周の開始と拒否・providerを待つこと・実行ごとの開始と終わり・成績は、全てqueueのeventで、周の状態はeventだけから作り直す。
+- 依頼・周の開始と拒否・providerを待つこと・実行ごとの開始と終わり・版ごとの成績は、全てeventだけが持ち（repositoryに置かない）、周の状態はeventだけから作り直す。
   別の表を持たず、supervisorが入れ替わっても同じ状態を読む。
 - incompleteの周は閾値を超えてもpassに数えない。
-- 版ごとの成績はeventだけが持ち、repositoryに置かない。
+- 周の成績は起動した組（provider・model・effort、混ざれば回ごと）とtokenの和と時間を持ち、`agent results`は同じagentとケースの周を組ごとに並べる。
 
 ## 費用の上限
 
@@ -153,7 +153,7 @@ built-inの定義の変更には広げない（定義がdagqのsourceにあり�
   landing branchのcommitに`evals/dev.json`が無いagent（ケースがまだ無い）と、runが定義を消したagentは流さず、理由を`run_agent_eval_requested`の`skipped`に残す。
   定義を変えないrunは何も記録しない。
 - reviewのpassの後、衝突の事前判定の前に、supervisorが依頼を記録し（`before_landing`、定義のcommitはrunのhead）、周はlanding branchのcommitの`evals/dev.json`とpatchとprogramでrunの定義を測る。
-  run branchのケースの追加・変更は使わない（`agent_eval_started`の`cases_commit`）。
+  run branchのケースの追加・変更は使わない。
   依頼はheadごとに1回で、同じheadを引き継いだsupervisorは同じ周を待つ。
 - 待つ間と流す間、runはsessionを開いたまま自分のslotとleaseを持つ（e2eと同じくslotを放さない。差し戻しを生きているsessionに送るため、sessionを閉じる前に待つ）。
   待ちの理由は`run_agent_eval_waiting`で、`status`の`progress`には工程`agent_eval`として出る。
@@ -173,7 +173,7 @@ built-inの定義の変更には広げない（定義がdagqのsourceにあり�
   集合を作るsupervisorは1つで、取るのも居なくなった持ち主から引き取るのも1つの書き込みのtransaction（`agent_cases_taken`）。
   ほかのsupervisorは持ち主が生きている間その集合に触らないので、2つが同じケースにjobを起動したりtreeを共有したりしない。
   引き取ったsupervisorは、前の持ち主のjobが引き継ぎで止められた後、ラベルの無いケースを付け直す。
-- 準備: landing branchのcommitの定義とケースの一覧から、規則コード・`k`・規則の文書のpathと、規則コードごとの規則の場所の対応を決め、期間の`review_started`（`subagents`がそのagentを選んだもの）と同じrunとattemptの`review_finished`（そのagentの判定）から（`--since`が無ければ作る時の遡りの上限から読み、`--until`がそれ以前なら`period_before_lookback`で断る）、`<base>...<head>`の差分を内容のhashで集合のpatchに書く。
+- 準備: landing branchのcommitの定義とケースの一覧から、規則コード・`k`・規則の文書のpathと、規則コードごとの規則の場所の対応を決め、期間の`review_started`（`subagents`がそのagentを選んだもの）と同じrunとattemptの`review_finished`（そのagentの判定）から、`<base>...<head>`の差分を内容のhashで集合のpatchに書く。
   baseかheadのcommitがrepositoryのどのrefからも辿れないreviewは、objectが残っていても（branchを消した後、GCの前）理由つきで飛ばす。
   差分が読めないreviewも理由つきで飛ばし、1つのreviewが集合と後の依頼を止めない。
   reviewが多すぎる依頼は作らず理由を記録し、人・inbox・plannerが期間を狭めて依頼し直す（上限は`application::supervise::execution::agent_cases`のmodule doc）。

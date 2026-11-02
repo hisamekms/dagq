@@ -12,18 +12,21 @@
 //!   (`provider`, `reason`, a [`super::round::ProviderWait`]); recorded
 //!   when the reason changes.
 //! - `agent_eval_started`: the round started ([`Started`]), with its
-//!   estimate as its reservation and its owner, the supervisor that runs
-//!   it (`supervisor`, its token).
+//!   estimate as its reservation, its owner, the supervisor that runs it
+//!   (`supervisor`, its token), and the launch it starts its runs with
+//!   (`provider`, `model`, `effort`, [`Launch`]).
 //! - `agent_eval_taken_up`: another supervisor took the round up from an
 //!   owner that is gone (`supervisor`, the new owner, and `from`).
 //! - `agent_eval_run_started`: one run of a case started (`case`, `round`
-//!   from 0, `provider`, and the agent job's `prompt_bytes`).
+//!   from 0, the launch the job started with, `provider`, `model` and
+//!   `effort` ([`Launch`]), and the agent job's `prompt_bytes`).
 //! - `agent_eval_run_finished`: that run ended (`case`, `round`, the
 //!   agent's `result` or `null` without a judgment, `error`, `cost`
 //!   ([`super::round::RunCost`]), and `abandoned` for a run a supervisor
 //!   stopped without its end or one stopped at a provider's wall, which is
 //!   run again but whose cost counts as spent, with `retry` for the one
-//!   retry of a non-zero exit).
+//!   retry of a non-zero exit), with the job's `tokens` (`null` with a
+//!   `tokens_reason` when not measured) and `duration_secs`.
 //! - `agent_eval_case_checked`: a case's program reviews ended its check
 //!   before its agent (`case`, and `outcome`, `program` and `failure` of
 //!   [`super::programs::CaseCheck`], with `programs`, those that ran
@@ -42,7 +45,37 @@ use serde_json::{Value, json};
 use super::Split;
 use super::programs::CaseCheck;
 use super::round::{RoundKey, RunCost, Waiting, held_out};
+use crate::domain::tokens::TokenUsage;
 use crate::domain::{EventKind, Provider, RecordedKind};
+
+/// The launch a round's start or a run's start records: the provider, the
+/// model and the effort its agent job started with (the destination's
+/// when the job was switched). `model` and `effort` are `None` for the
+/// provider's own default. An event recorded before launches were (no
+/// `model` or no `effort` key) reads as no launch: unknown, never a
+/// default.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Launch {
+    pub provider: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl Launch {
+    /// The launch `payload` records; `None` when it records none.
+    pub fn read(payload: &Value) -> Option<Self> {
+        let (model, effort) = (payload.get("model")?, payload.get("effort")?);
+        Some(Self {
+            provider: payload["provider"].as_str()?.to_owned(),
+            model: model.as_str().map(str::to_owned),
+            effort: effort.as_str().map(str::to_owned),
+        })
+    }
+
+    pub fn record(&self) -> Value {
+        json!({"provider": self.provider, "model": self.model, "effort": self.effort})
+    }
+}
 
 /// A request of an eval (`agent_eval_requested`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +232,10 @@ pub struct RunEnd {
     /// Run again as the one retry of a non-zero exit, which a run gets
     /// once.
     pub retry: bool,
+    /// The job's tokens; `None` when they were not measured.
+    pub tokens: Option<TokenUsage>,
+    /// How long the job ran; `None` when its end records none.
+    pub duration_secs: Option<u64>,
 }
 
 /// One run of a round.
@@ -206,6 +243,8 @@ pub struct RunEnd {
 pub struct RunRecord {
     pub case: String,
     pub round: u32,
+    /// The launch its start records; `None` for a start that records none.
+    pub launch: Option<Launch>,
     pub end: Option<RunEnd>,
 }
 
@@ -222,6 +261,13 @@ pub struct Round {
     pub started: Option<Started>,
     /// The started payload as recorded.
     pub started_payload: Option<Value>,
+    /// The launch its start records ([`Launch::read`]).
+    pub launch: Option<Launch>,
+    /// When it started and finished (Unix milliseconds of the events'
+    /// `created_at`), when the events were read with their times
+    /// ([`rounds_at`]).
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
     pub runs: Vec<RunRecord>,
     /// What each case's program reviews said, by case id, for the cases
     /// whose check ended.
@@ -297,6 +343,84 @@ impl Round {
             .collect()
     }
 
+    /// The launches it ran with: the start's and each run's that records
+    /// one, each once, in order. More than one is a round whose launch
+    /// was mixed (a supervisor that took it up started its runs with
+    /// another).
+    pub fn launches(&self) -> Vec<Launch> {
+        let mut launches: Vec<Launch> = Vec::new();
+        let runs = self.runs.iter().filter_map(|run| run.launch.as_ref());
+        for launch in self.launch.iter().chain(runs) {
+            if !launches.contains(launch) {
+                launches.push(launch.clone());
+            }
+        }
+        launches
+    }
+
+    /// Whether its start or a run of it records no launch (an event of a
+    /// build before launches were recorded): what that part ran with is
+    /// not known.
+    pub fn unknown_launch(&self) -> bool {
+        (self.started_payload.is_some() && self.launch.is_none())
+            || self.runs.iter().any(|run| run.launch.is_none())
+    }
+
+    /// The launch the whole round is known to have run with: its one
+    /// launch, when its start and every run record that one; `None` when
+    /// it records none, more than one, or one beside a part not known.
+    pub fn one_launch(&self) -> Option<Launch> {
+        match self.launches().as_slice() {
+            [one] if !self.unknown_launch() => Some(one.clone()),
+            _ => None,
+        }
+    }
+
+    /// Mixed: more than one launch, or a known one beside a part whose
+    /// launch is not known (an older start taken up by a newer build), so
+    /// that its scores are never read as one launch's.
+    pub fn mixed_launch(&self) -> bool {
+        let known = self.launches().len();
+        known > 1 || (known == 1 && self.unknown_launch())
+    }
+
+    /// The tokens and the time of a round (see [`Usage`]).
+    pub fn usage(&self) -> Usage {
+        let ends: Vec<&RunEnd> = self
+            .runs
+            .iter()
+            .filter_map(|run| run.end.as_ref())
+            .collect();
+        let mut tokens: Option<UsageTokens> = None;
+        let mut unmeasured_runs = 0;
+        for end in &ends {
+            match &end.tokens {
+                Some(used) => {
+                    let sum = tokens.get_or_insert_with(UsageTokens::default);
+                    sum.input += used.input;
+                    sum.cache_read += used.cache_read;
+                    sum.cache_creation += used.cache_creation;
+                    sum.output += used.output;
+                }
+                None => unmeasured_runs += 1,
+            }
+        }
+        let ended = self.started_payload.is_some() && self.finished.is_some();
+        let wall_secs = match (self.started_at, self.finished_at) {
+            (Some(from), Some(to)) if ended => Some((to - from).max(0) / 1000),
+            _ => None,
+        };
+        let durations: Vec<u64> = ends.iter().filter_map(|end| end.duration_secs).collect();
+        let job_secs = (ended && !durations.is_empty()).then(|| durations.iter().sum());
+        Usage {
+            tokens,
+            unmeasured_runs,
+            wall_secs,
+            job_secs,
+            untimed_runs: ends.len() - durations.len(),
+        }
+    }
+
     /// The key of a started round (ADR-t1728-1 decision 7).
     pub fn key(&self) -> Option<RoundKey> {
         let started = self.started.as_ref()?;
@@ -304,6 +428,53 @@ impl Round {
             agent: self.request.agent.clone(),
             definition_digest: started.definition_digest.clone(),
             case_set_digest: started.case_set_digest.clone(),
+        })
+    }
+}
+
+/// The tokens of a round's runs by kind, summed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsageTokens {
+    pub input: i64,
+    pub cache_read: i64,
+    pub cache_creation: i64,
+    pub output: i64,
+}
+
+/// What a round used, from its events alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    /// The tokens of every run that ended (an abandoned one and a retry
+    /// too, and a run of a case a program stopped), summed by kind; `None`
+    /// when no run's tokens were measured, never 0.
+    pub tokens: Option<UsageTokens>,
+    /// The runs that ended with no tokens measured, left out of `tokens`.
+    pub unmeasured_runs: usize,
+    /// From its start to its finish, in seconds; `None` for a round that
+    /// did not start or has not finished, or read without its events'
+    /// times.
+    pub wall_secs: Option<i64>,
+    /// The sum of its runs' `duration_secs`; `None` for a round that did
+    /// not start or has not finished, or no run of which records one.
+    pub job_secs: Option<u64>,
+    /// The runs that ended with no `duration_secs`, left out of `job_secs`.
+    pub untimed_runs: usize,
+}
+
+impl Usage {
+    /// As `agent result` and `agent results` print it.
+    pub fn record(&self) -> Value {
+        json!({
+            "tokens": self.tokens.map(|tokens| json!({
+                "input": tokens.input,
+                "cache_read": tokens.cache_read,
+                "cache_creation": tokens.cache_creation,
+                "output": tokens.output,
+            })),
+            "unmeasured_runs": self.unmeasured_runs,
+            "wall_secs": self.wall_secs,
+            "job_secs": self.job_secs,
+            "untimed_runs": self.untimed_runs,
         })
     }
 }
@@ -327,8 +498,21 @@ pub const KINDS: [EventKind; 9] = [
 pub fn rounds<'a>(
     events: impl IntoIterator<Item = (i64, &'a RecordedKind, &'a Value)>,
 ) -> Vec<Round> {
+    rounds_at(
+        events
+            .into_iter()
+            .map(|(id, kind, payload)| (id, kind, payload, None)),
+    )
+}
+
+/// [`rounds`] of events read with their `created_at`, which give each
+/// round its start's and finish's times.
+pub fn rounds_at<'a>(
+    events: impl IntoIterator<Item = (i64, &'a RecordedKind, &'a Value, Option<&'a str>)>,
+) -> Vec<Round> {
     let mut rounds: BTreeMap<i64, Round> = BTreeMap::new();
-    for (id, kind, payload) in events {
+    for (id, kind, payload, created_at) in events {
+        let at = created_at.and_then(super::production::event_instant);
         if *kind == EventKind::AgentEvalRequested {
             if let Some(request) = Request::read(payload) {
                 rounds.insert(
@@ -340,6 +524,9 @@ pub fn rounds<'a>(
                         waiting: None,
                         started: None,
                         started_payload: None,
+                        launch: None,
+                        started_at: None,
+                        finished_at: None,
                         owner: None,
                         runs: Vec::new(),
                         checks: BTreeMap::new(),
@@ -368,6 +555,8 @@ pub fn rounds<'a>(
         } else if *kind == EventKind::AgentEvalStarted {
             round.started = Started::read(payload);
             round.started_payload = Some(payload.clone());
+            round.launch = Launch::read(payload);
+            round.started_at = at;
             round.waiting = None;
             round.owner = payload["supervisor"].as_str().map(str::to_owned);
         } else if *kind == EventKind::AgentEvalTakenUp {
@@ -376,6 +565,7 @@ pub fn rounds<'a>(
             round.runs.push(RunRecord {
                 case,
                 round: run,
+                launch: Launch::read(payload),
                 end: None,
             });
         } else if *kind == EventKind::AgentEvalRunFinished {
@@ -387,6 +577,8 @@ pub fn rounds<'a>(
                 }),
                 abandoned: payload["abandoned"].as_bool().unwrap_or(false),
                 retry: payload["retry"].as_bool().unwrap_or(false),
+                tokens: TokenUsage::from_payload(&payload["tokens"]),
+                duration_secs: payload["duration_secs"].as_u64(),
             };
             if let Some(record) =
                 round.runs.iter_mut().rev().find(|record| {
@@ -405,6 +597,7 @@ pub fn rounds<'a>(
             }
         } else if *kind == EventKind::AgentEvalFinished {
             round.finished = Some(payload.clone());
+            round.finished_at = at;
         }
     }
     rounds.into_values().collect()
@@ -720,5 +913,286 @@ mod tests {
             definition_commit: Some("abc".into()),
         };
         assert_eq!(Request::read(&request.record()), Some(request));
+    }
+
+    /// The events `(id, kind, payload, created_at)` read as rounds.
+    fn timed(events: &[(i64, &str, Value, &str)]) -> Vec<Round> {
+        let kinds: Vec<RecordedKind> = events
+            .iter()
+            .map(|(_, kind, _, _)| (*kind).into())
+            .collect();
+        rounds_at(
+            events
+                .iter()
+                .zip(&kinds)
+                .map(|((id, _, payload, at), kind)| (*id, kind, payload, Some(*at))),
+        )
+    }
+
+    fn launched(mut payload: Value, model: Option<&str>, effort: Option<&str>) -> Value {
+        payload["model"] = json!(model);
+        payload["effort"] = json!(effort);
+        payload
+    }
+
+    /// A round's launch is read from its start and each run's from its
+    /// own start: a run started with another launch (a supervisor that
+    /// took the round up on the role's launch) makes the round mixed, with
+    /// each launch once and each run's kept. A start recorded with no
+    /// launch's keys reads as unknown, never as the provider's default.
+    #[test]
+    fn a_rounds_launch_is_read_from_its_start_and_runs_and_a_mix_is_kept() {
+        let haiku = Launch {
+            provider: "claude".into(),
+            model: Some("claude-haiku-5-5".into()),
+            effort: Some("low".into()),
+        };
+        let role = Launch {
+            provider: "claude".into(),
+            model: None,
+            effort: Some("high".into()),
+        };
+        let run = |case: &str, model: Option<&str>, effort: Option<&str>| {
+            launched(
+                json!({"eval_id": 1, "case": case, "round": 0, "provider": "claude"}),
+                model,
+                effort,
+            )
+        };
+        let t = "2026-11-02T00:00:00Z";
+        let events = [
+            (
+                1,
+                EventKind::AgentEvalRequested.as_str(),
+                request("x", Split::Dev),
+                t,
+            ),
+            (
+                2,
+                EventKind::AgentEvalStarted.as_str(),
+                launched(
+                    started(1, "claude", "d"),
+                    Some("claude-haiku-5-5"),
+                    Some("low"),
+                ),
+                t,
+            ),
+            (
+                3,
+                EventKind::AgentEvalRunStarted.as_str(),
+                run("a", Some("claude-haiku-5-5"), Some("low")),
+                t,
+            ),
+            (
+                4,
+                EventKind::AgentEvalRunStarted.as_str(),
+                run("b", None, Some("high")),
+                t,
+            ),
+        ];
+        let rounds = timed(&events);
+        assert!(rounds[0].mixed_launch() && !rounds[0].unknown_launch());
+        assert_eq!(rounds[0].one_launch(), None);
+        assert_eq!(rounds[0].launch.as_ref(), Some(&haiku));
+        assert_eq!(rounds[0].runs[0].launch.as_ref(), Some(&haiku));
+        assert_eq!(rounds[0].runs[1].launch.as_ref(), Some(&role));
+        assert_eq!(rounds[0].launches(), vec![haiku.clone(), role]);
+        // One launch throughout is no mix.
+        let rounds = timed(&events[..3]);
+        assert_eq!(rounds[0].launches(), vec![haiku.clone()]);
+        assert_eq!(rounds[0].one_launch(), Some(haiku.clone()));
+        assert!(!rounds[0].mixed_launch() && !rounds[0].unknown_launch());
+        // An older start and run with no launch's keys: unknown.
+        let older = [
+            (
+                1,
+                EventKind::AgentEvalRequested.as_str(),
+                request("x", Split::Dev),
+                t,
+            ),
+            (
+                2,
+                EventKind::AgentEvalStarted.as_str(),
+                started(1, "claude", "d"),
+                t,
+            ),
+            (
+                3,
+                EventKind::AgentEvalRunStarted.as_str(),
+                json!({"eval_id": 1, "case": "a", "round": 0, "provider": "claude"}),
+                t,
+            ),
+        ];
+        let rounds = timed(&older);
+        assert_eq!(rounds[0].launch, None);
+        assert_eq!(rounds[0].runs[0].launch, None);
+        assert!(rounds[0].launches().is_empty());
+        assert!(rounds[0].unknown_launch() && !rounds[0].mixed_launch());
+        assert_eq!(rounds[0].one_launch(), None);
+        // The older round taken up by a newer build whose run records a
+        // launch: the known launch is not the whole round's, which reads
+        // as mixed with a part not known, never as that launch's.
+        let mut taken_up = older.to_vec();
+        taken_up.push((
+            4,
+            EventKind::AgentEvalRunStarted.as_str(),
+            run("b", Some("claude-haiku-5-5"), Some("low")),
+            t,
+        ));
+        let rounds = timed(&taken_up);
+        assert_eq!(rounds[0].launches(), vec![haiku]);
+        assert_eq!(rounds[0].one_launch(), None);
+        assert!(rounds[0].unknown_launch() && rounds[0].mixed_launch());
+    }
+
+    fn ended(
+        case: &str,
+        abandoned: bool,
+        tokens: Option<(i64, i64, i64, i64)>,
+        secs: Option<u64>,
+    ) -> Value {
+        let mut payload = finished_run(1, case, 0, 0.1, "actual", abandoned);
+        match tokens {
+            Some((input, cache_read, cache_creation, output)) => {
+                payload["tokens"] = json!({"input": input, "cache_read": cache_read,
+                    "cache_creation": cache_creation, "output": output, "messages": 1});
+                payload["tokens_reason"] = Value::Null;
+            }
+            None => {
+                payload["tokens"] = Value::Null;
+                payload["tokens_reason"] = json!("tokens_not_read");
+            }
+        }
+        if let Some(secs) = secs {
+            payload["duration_secs"] = json!(secs);
+        }
+        payload
+    }
+
+    /// A round's tokens are summed by kind over every run that ended, an
+    /// abandoned one run again included, and a run with none measured is
+    /// counted apart; its wall time runs from its start's event to its
+    /// finish's and its jobs' time sums the runs' `duration_secs`, a run
+    /// without one counted apart.
+    #[test]
+    fn a_rounds_usage_sums_every_ended_runs_tokens_and_times() {
+        let start = |id| {
+            (
+                id,
+                EventKind::AgentEvalRunStarted.as_str(),
+                json!({"eval_id": 1, "case": "a", "round": 0}),
+                "2026-11-02T00:00:10Z",
+            )
+        };
+        let events = [
+            (
+                1,
+                EventKind::AgentEvalRequested.as_str(),
+                request("x", Split::Dev),
+                "2026-11-02T00:00:00Z",
+            ),
+            (
+                2,
+                EventKind::AgentEvalStarted.as_str(),
+                started(1, "claude", "d"),
+                "2026-11-02T00:00:05Z",
+            ),
+            start(3),
+            // Abandoned and run again: its tokens were used.
+            (
+                4,
+                EventKind::AgentEvalRunFinished.as_str(),
+                ended("a", true, Some((10, 100, 20, 5)), Some(30)),
+                "2026-11-02T00:00:40Z",
+            ),
+            start(5),
+            (
+                6,
+                EventKind::AgentEvalRunFinished.as_str(),
+                ended("a", false, Some((1, 2, 3, 4)), Some(12)),
+                "2026-11-02T00:01:00Z",
+            ),
+            start(7),
+            (
+                8,
+                EventKind::AgentEvalRunFinished.as_str(),
+                ended("a", false, None, None),
+                "2026-11-02T00:01:10Z",
+            ),
+            (
+                9,
+                EventKind::AgentEvalFinished.as_str(),
+                json!({"eval_id": 1}),
+                "2026-11-02T00:02:05Z",
+            ),
+        ];
+        let usage = timed(&events)[0].usage();
+        assert_eq!(
+            usage,
+            Usage {
+                tokens: Some(UsageTokens {
+                    input: 11,
+                    cache_read: 102,
+                    cache_creation: 23,
+                    output: 9
+                }),
+                unmeasured_runs: 1,
+                wall_secs: Some(120),
+                job_secs: Some(42),
+                untimed_runs: 1,
+            }
+        );
+        assert_eq!(
+            usage.record()["tokens"],
+            json!({"input": 11, "cache_read": 102, "cache_creation": 23, "output": 9})
+        );
+        // Not finished: no time yet, the tokens so far.
+        let running = timed(&events[..8])[0].usage();
+        assert_eq!((running.wall_secs, running.job_secs), (None, None));
+        assert_eq!(running.tokens.map(|t| t.input), Some(11));
+        // No run measured: the total is null, never 0.
+        let unmeasured = [
+            events[0].clone(),
+            events[1].clone(),
+            start(3),
+            (
+                4,
+                EventKind::AgentEvalRunFinished.as_str(),
+                ended("a", false, None, Some(7)),
+                "2026-11-02T00:00:40Z",
+            ),
+            events[8].clone(),
+        ];
+        let usage = timed(&unmeasured)[0].usage();
+        assert_eq!((usage.tokens, usage.unmeasured_runs), (None, 1));
+        assert_eq!(usage.record()["tokens"], Value::Null);
+        assert_eq!(usage.job_secs, Some(7));
+        // Refused, never started: no time.
+        let refused = [
+            events[0].clone(),
+            (
+                2,
+                EventKind::AgentEvalRefused.as_str(),
+                json!({"eval_id": 1, "reason": "cost_unknown"}),
+                "2026-11-02T00:00:05Z",
+            ),
+        ];
+        let usage = timed(&refused)[0].usage();
+        assert_eq!(
+            (usage.tokens, usage.wall_secs, usage.job_secs),
+            (None, None, None)
+        );
+        // Read without times: the wall time is not known.
+        let untimed: Vec<(i64, RecordedKind, Value)> = events
+            .iter()
+            .map(|(id, kind, payload, _)| (*id, (*kind).into(), payload.clone()))
+            .collect();
+        let usage = rounds(
+            untimed
+                .iter()
+                .map(|(id, kind, payload)| (*id, kind, payload)),
+        )[0]
+        .usage();
+        assert_eq!((usage.wall_secs, usage.job_secs), (None, Some(42)));
     }
 }

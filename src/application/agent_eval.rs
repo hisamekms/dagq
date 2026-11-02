@@ -32,8 +32,13 @@ pub trait EvalStore: DenialLog {
 /// The rounds the eval's events of `store` say, oldest first.
 pub fn rounds(store: &dyn EvalStore) -> Result<Vec<Round>> {
     let events = store.eval_events()?;
-    Ok(record::rounds(events.iter().map(|event| {
-        (event.id.as_i64(), &event.kind, &event.payload)
+    Ok(record::rounds_at(events.iter().map(|event| {
+        (
+            event.id.as_i64(),
+            &event.kind,
+            &event.payload,
+            Some(event.created_at.as_str()),
+        )
     })))
 }
 
@@ -159,21 +164,27 @@ impl<'a> AgentEvals<'a> {
     }
 
     /// `agent results`: the rounds, newest first, `agent`'s only when given,
-    /// at most `limit`; a worker's of its run only.
-    pub fn list(&self, agent: Option<&str>, limit: usize) -> Result<Value> {
+    /// at most `limit`; a worker's of its run only. `by_launch`
+    /// (`--by-launch`) adds `by_launch`, the finished ones of them side by
+    /// side by launch ([`by_launch`]).
+    pub fn list(&self, agent: Option<&str>, limit: usize, by_launch: bool) -> Result<Value> {
         self.gate
             .authorize(self.store, Capability::EvalRead, &self.own())?;
         let own_run = self.actor().run_id().map(ToString::to_string);
         let rounds = rounds(self.store)?;
-        let listed: Vec<Value> = rounds
+        let listed: Vec<&Round> = rounds
             .iter()
             .rev()
             .filter(|round| agent.is_none_or(|agent| round.request.agent == agent))
             .filter(|round| own_run.is_none() || round.request.run_id == own_run)
             .take(limit)
-            .map(summary)
             .collect();
-        Ok(json!({"evals": listed}))
+        let mut value =
+            json!({"evals": listed.iter().map(|round| summary(round)).collect::<Vec<_>>()});
+        if by_launch {
+            value["by_launch"] = self::by_launch(&listed);
+        }
+        Ok(value)
     }
 
     /// `agent result <id>`: one round whole, if the actor may read it.
@@ -215,7 +226,61 @@ pub fn status(round: &Round) -> &'static str {
     }
 }
 
-/// A round in a list: its request, where it is and its result.
+/// The launch a round ran with: its one launch when the whole round is
+/// known to have run with it ([`Round::one_launch`]), else `null`: none
+/// recorded (`unknown_launch`), more than one, or one beside a part not
+/// known (`mixed_launch`, [`Round::mixed_launch`]).
+fn launch(round: &Round) -> Value {
+    round.one_launch().map_or(Value::Null, |one| one.record())
+}
+
+/// `agent results --by-launch`: the finished rounds of `rounds` (newest
+/// first) grouped by agent, case set (`case_set_digest`) and launch
+/// (`launch`, `mixed_launch` and `unknown_launch`: a mixed round in a
+/// group of its own with `launch` `null`, an older round's unknown launch
+/// in one with `unknown_launch` true, and a round of a known launch beside
+/// a part not known in one with both true, never in the known launch's
+/// group), each group with its rounds' outcome, scores (the
+/// judgment's and the rule codes' recall and precision, the runs and the
+/// errors) and usage ([`record::Usage`]), so that one agent's launches
+/// read side by side on the same cases.
+pub fn by_launch(rounds: &[&Round]) -> Value {
+    let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+    for round in rounds.iter().filter(|round| round.finished.is_some()) {
+        let finished = round.finished.as_ref().expect("finished");
+        let key = json!({
+            "agent": round.request.agent,
+            "case_set_digest": round.started.as_ref().map(|s| &s.case_set_digest),
+            "launch": launch(round),
+            "mixed_launch": round.mixed_launch(),
+            "unknown_launch": round.unknown_launch(),
+        });
+        let row = json!({
+            "eval_id": round.id,
+            "split": round.request.split.as_str(),
+            "outcome": finished["outcome"],
+            "passed": finished["passed"],
+            "scores": finished["scores"],
+            "usage": round.usage().record(),
+        });
+        match groups.iter_mut().find(|(group, _)| *group == key) {
+            Some((_, rows)) => rows.push(row),
+            None => groups.push((key, vec![row])),
+        }
+    }
+    json!(
+        groups
+            .into_iter()
+            .map(|(mut group, rows)| {
+                group["rounds"] = json!(rows);
+                group
+            })
+            .collect::<Vec<_>>()
+    )
+}
+
+/// A round in a list: its request, where it is, its launch, its result
+/// and what it used.
 fn summary(round: &Round) -> Value {
     let request = &round.request;
     let finished = round.finished.as_ref();
@@ -233,6 +298,10 @@ fn summary(round: &Round) -> Value {
         "passed": finished.map(|finished| &finished["passed"]),
         "scores": finished.map(|finished| &finished["scores"]),
         "spent_usd": round.spent_usd(),
+        "launch": launch(round),
+        "mixed_launch": round.mixed_launch(),
+        "unknown_launch": round.unknown_launch(),
+        "usage": round.usage().record(),
     })
 }
 
@@ -243,6 +312,13 @@ fn detail(round: &Round) -> Value {
     value["request"] = round.request.record();
     value["refusal"] = json!(round.refused);
     value["started"] = json!(round.started_payload);
+    value["launches"] = json!(
+        round
+            .launches()
+            .iter()
+            .map(record::Launch::record)
+            .collect::<Vec<_>>()
+    );
     value["runs"] = json!(
         round
             .runs
@@ -254,6 +330,9 @@ fn detail(round: &Round) -> Value {
                 "abandoned": run.end.as_ref().map(|end| end.abandoned),
                 "verdict": run.end.as_ref().and_then(|end| end.result.as_ref()).map(|result| &result["verdict"]),
                 "cost": run.end.as_ref().map(|end| end.cost.record()),
+                "launch": run.launch.as_ref().map(record::Launch::record),
+                "tokens": run.end.as_ref().and_then(|end| end.tokens.as_ref()).map(crate::domain::tokens::TokenUsage::payload),
+                "duration_secs": run.end.as_ref().and_then(|end| end.duration_secs),
             }))
             .collect::<Vec<_>>()
     );
@@ -318,7 +397,11 @@ fn metrics(metrics: &Metrics) -> Value {
 /// dollars spent by where they came from; and the definition's and the
 /// cases' digests, and, for a built-in, its name, build and definition's
 /// digest as the start recorded them (`builtin`, `null` for a project's
-/// agent). `incomplete` says why it ended before every run. The
+/// agent); the launch it ran with (`launch`, `null` when unknown or
+/// mixed) and every launch its start and runs record (`launches`), with
+/// `mixed_launch` and `unknown_launch` ([`Round::mixed_launch`],
+/// [`Round::unknown_launch`]). `incomplete` says why it ended before
+/// every run. The
 /// cases a program review stopped are out of the agent's scores and
 /// counted in `program_stopped` with each one's id and program
 /// ([`programs::stopped_record`]); those with a program not run for them
@@ -400,6 +483,10 @@ pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete
         "program_base_failing": programs::base_failing_record(all_cases, &round.base_failing),
         "runs": runs.len(),
         "cost": {"spent_usd": round.spent_usd(), "by_source": by_source},
+        "launch": launch(round),
+        "launches": round.launches().iter().map(record::Launch::record).collect::<Vec<_>>(),
+        "mixed_launch": round.mixed_launch(),
+        "unknown_launch": round.unknown_launch(),
         "definition_digest": started.map(|s| &s.definition_digest),
         "builtin": round.started_payload.as_ref().and_then(|payload| payload.get("builtin")).filter(|builtin| !builtin.is_null()),
         "case_set_digest": started.map(|s| &s.case_set_digest),
@@ -821,5 +908,303 @@ mod tests {
         assert_eq!(scores["incomplete_reason"], "program_failed");
         assert_eq!(scores["passed"], false);
         assert!(scores["below"].as_array().unwrap().is_empty(), "{scores}");
+    }
+
+    /// A store whose eval's events are `events`.
+    struct Recorded(Vec<RunEvent>);
+
+    impl DenialLog for Recorded {
+        fn record_denial(&self, _: Value) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl EvalStore for Recorded {
+        fn record_eval_event(&self, _: EventKind, _: Value) -> Result<EventId> {
+            bail!("read only")
+        }
+        fn eval_events(&self) -> Result<Vec<RunEvent>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A launch's `model` and `effort`; `None` records no launch's keys
+    /// (an older event).
+    type Written = Option<(Option<&'static str>, Option<&'static str>)>;
+
+    /// One run: its case, its judgment, the launch its start records and
+    /// its tokens (`None` not measured).
+    type EvalRun = (&'static str, Option<Value>, Written, Option<i64>);
+
+    /// The events of round `eval` of "demo" on claude, started with
+    /// `launch`, each of `runs` started and ended a minute in, and
+    /// finished with its scores when `finish`.
+    fn round_events(eval: i64, launch: Written, runs: &[EvalRun], finish: bool) -> Vec<RunEvent> {
+        let with = |mut payload: Value, written: Written| {
+            if let Some((model, effort)) = written {
+                payload["model"] = json!(model);
+                payload["effort"] = json!(effort);
+            }
+            payload
+        };
+        let mut events = vec![
+            (
+                EventKind::AgentEvalRequested,
+                Request {
+                    agent: "demo".into(),
+                    split: Split::Dev,
+                    k: None,
+                    cases: None,
+                    set: None,
+                    rerun: false,
+                    requested_by: "user".into(),
+                    requested_by_id: "user".into(),
+                    run_id: None,
+                    before_landing: false,
+                    definition_commit: None,
+                }
+                .record(),
+            ),
+            (
+                EventKind::AgentEvalStarted,
+                with(
+                    json!({"eval_id": eval, "provider": "claude", "definition_commit": "c",
+                           "definition_digest": "dd", "case_set_digest": "cd",
+                           "planned": [["needs-d1", 1], ["clean-one", 1]],
+                           "estimate": {"per_run_usd": 0.4}, "max_cost_usd": 30.0,
+                           "concurrency": 4, "threshold": 0.9}),
+                    launch,
+                ),
+            ),
+        ];
+        for (case, result, written, tokens) in runs {
+            events.push((
+                EventKind::AgentEvalRunStarted,
+                with(
+                    json!({"eval_id": eval, "case": case, "round": 0, "provider": "claude"}),
+                    *written,
+                ),
+            ));
+            events.push((
+                EventKind::AgentEvalRunFinished,
+                json!({"eval_id": eval, "case": case, "round": 0, "result": result,
+                       "error": result.is_none().then_some("no verdict"),
+                       "cost": {"usd": 0.1, "source": "actual"}, "abandoned": false,
+                       "tokens": tokens.map(|n| json!({"input": n, "output": 1, "cache_read": 0, "cache_creation": 0})),
+                       "tokens_reason": tokens.is_none().then_some("tokens_not_read"),
+                       "duration_secs": 20}),
+            ));
+        }
+        let at = |n: usize| format!("2026-11-02T{:02}:{:02}:00Z", eval % 24, n);
+        let mut recorded: Vec<RunEvent> = events
+            .into_iter()
+            .enumerate()
+            .map(|(n, (kind, payload))| RunEvent {
+                id: EventId::new(if n == 0 {
+                    eval
+                } else {
+                    eval + i64::try_from(n).unwrap()
+                }),
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: kind.into(),
+                payload,
+                created_at: at(n),
+                actor: None,
+            })
+            .collect();
+        if finish {
+            let round = super::rounds(&Recorded(recorded.clone()))
+                .unwrap()
+                .remove(0);
+            let n = recorded.len();
+            recorded.push(RunEvent {
+                id: EventId::new(eval + i64::try_from(n).unwrap()),
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: EventKind::AgentEvalFinished.into(),
+                payload: finished(&round, &cases(), None),
+                created_at: at(n),
+                actor: None,
+            });
+        }
+        recorded
+    }
+
+    /// `agent results` and `agent result` print each round's launch and
+    /// what it used, and `--by-launch` puts the finished rounds of one
+    /// agent and case set side by side by launch with their scores
+    /// (judgment and codes, recall and precision, the errors), tokens and
+    /// time: a mixed round and an older round of no known launch each in
+    /// a group of their own, a running round in none.
+    #[test]
+    fn agent_results_by_launch_compares_one_agents_rounds_by_their_launch() {
+        use crate::domain::StaticPolicy;
+        use crate::domain::actor::ActorRole;
+        let haiku: Written = Some((Some("claude-haiku-5-5"), Some("low")));
+        let opus: Written = Some((Some("claude-opus-5-5"), Some("high")));
+        let right = |written: Written| -> [EvalRun; 2] {
+            [
+                (
+                    "needs-d1",
+                    verdict("revise", &["D-1"], "adds notes.txt"),
+                    written,
+                    Some(100),
+                ),
+                ("clean-one", verdict("pass", &[], "fine"), written, Some(50)),
+            ]
+        };
+        let mut events = Vec::new();
+        events.extend(round_events(100, haiku, &right(haiku), true));
+        events.extend(round_events(
+            200,
+            opus,
+            &[
+                (
+                    "needs-d1",
+                    verdict("revise", &["D-1"], "adds notes.txt"),
+                    opus,
+                    Some(300),
+                ),
+                ("clean-one", None, opus, None),
+            ],
+            true,
+        ));
+        events.extend(round_events(300, None, &right(None), true));
+        // Taken up on the role's launch for its second run.
+        let role: Written = Some((None, Some("high")));
+        events.extend(round_events(
+            400,
+            haiku,
+            &[
+                right(haiku)[0].clone(),
+                ("clean-one", verdict("pass", &[], "fine"), role, Some(50)),
+            ],
+            true,
+        ));
+        events.extend(round_events(500, haiku, &right(haiku), true));
+        // Started and run in part by an older build, taken up by a newer
+        // one whose run records haiku.
+        events.extend(round_events(
+            700,
+            None,
+            &[right(None)[0].clone(), right(haiku)[1].clone()],
+            true,
+        ));
+        events.extend(round_events(600, haiku, &right(haiku)[..1], false));
+        let store = Recorded(events);
+        let user = ActorContext::instance(ActorRole::User, "1");
+        let evals = AgentEvals::new(&store, &user, &StaticPolicy);
+        let listed = evals.list(Some("demo"), 20, false).unwrap();
+        assert!(listed.get("by_launch").is_none());
+        let listed = evals.list(Some("demo"), 20, true).unwrap();
+        let summaries = listed["evals"].as_array().unwrap();
+        assert_eq!(summaries.len(), 7);
+        let of = |id: i64| summaries.iter().find(|s| s["eval_id"] == id).unwrap();
+        let haiku_launch =
+            json!({"provider": "claude", "model": "claude-haiku-5-5", "effort": "low"});
+        assert_eq!(of(100)["launch"], haiku_launch);
+        assert_eq!(of(300)["launch"], Value::Null);
+        assert_eq!(of(300)["mixed_launch"], false);
+        assert_eq!(of(300)["unknown_launch"], true);
+        assert_eq!(of(100)["unknown_launch"], false);
+        assert_eq!(
+            (
+                of(700)["launch"].clone(),
+                of(700)["mixed_launch"].clone(),
+                of(700)["unknown_launch"].clone()
+            ),
+            (Value::Null, json!(true), json!(true))
+        );
+        assert_eq!(
+            (of(400)["launch"].clone(), of(400)["mixed_launch"].clone()),
+            (Value::Null, json!(true))
+        );
+        assert_eq!(of(100)["usage"]["tokens"]["input"], 150);
+        assert_eq!(of(100)["usage"]["job_secs"], 40);
+        assert_eq!(of(100)["usage"]["wall_secs"], 300, "{}", of(100));
+        assert_eq!(of(200)["usage"]["unmeasured_runs"], 1);
+        assert_eq!(of(600)["usage"]["wall_secs"], Value::Null);
+        let groups = listed["by_launch"].as_array().unwrap();
+        assert_eq!(groups.len(), 5, "{groups:#?}");
+        let group_of = |launch: &Value, mixed: bool, unknown: bool| {
+            groups
+                .iter()
+                .find(|g| {
+                    g["launch"] == *launch
+                        && g["mixed_launch"] == mixed
+                        && g["unknown_launch"] == unknown
+                })
+                .unwrap()
+        };
+        let group =
+            |launch: &Value, mixed: bool| group_of(launch, mixed, launch.is_null() && !mixed);
+        let fast = group(&haiku_launch, false);
+        assert_eq!(
+            (fast["agent"].clone(), fast["case_set_digest"].clone()),
+            (json!("demo"), json!("cd"))
+        );
+        let ids: Vec<&Value> = fast["rounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| &r["eval_id"])
+            .collect();
+        assert_eq!(
+            ids,
+            vec![&json!(500), &json!(100)],
+            "the running round is not compared"
+        );
+        let row = &fast["rounds"][0];
+        assert_eq!(row["scores"]["errors"], 0);
+        for metric in Metric::ALL {
+            assert_eq!(row["scores"][metric.as_str()], 1.0, "{row}");
+        }
+        assert_eq!(row["usage"]["tokens"]["input"], 150);
+        assert_eq!(row["usage"]["job_secs"], 40);
+        let heavy = group(
+            &json!({"provider": "claude", "model": "claude-opus-5-5", "effort": "high"}),
+            false,
+        );
+        let row = &heavy["rounds"][0];
+        assert_eq!(
+            (row["eval_id"].clone(), row["scores"]["errors"].clone()),
+            (json!(200), json!(1))
+        );
+        assert_eq!(row["passed"], false);
+        assert_eq!(row["usage"]["tokens"]["input"], 300);
+        assert_eq!(row["usage"]["unmeasured_runs"], 1);
+        assert_eq!(group(&Value::Null, false)["rounds"][0]["eval_id"], 300);
+        assert_eq!(group(&Value::Null, true)["rounds"][0]["eval_id"], 400);
+        // The partly older round is in a group of its own, not haiku's.
+        let partly = group_of(&Value::Null, true, true);
+        assert_eq!(partly["rounds"].as_array().unwrap().len(), 1);
+        assert_eq!(partly["rounds"][0]["eval_id"], 700);
+        assert_eq!(evals.show(700).unwrap()["finished"]["unknown_launch"], true);
+        // One round whole: its launches, each run's launch, tokens and time.
+        let shown = evals.show(400).unwrap();
+        assert_eq!(shown["launches"].as_array().unwrap().len(), 2);
+        assert_eq!(shown["runs"][0]["launch"], haiku_launch);
+        assert_eq!(
+            shown["runs"][1]["launch"],
+            json!({"provider": "claude", "model": null, "effort": "high"})
+        );
+        assert_eq!(shown["runs"][1]["tokens"]["input"], 50);
+        assert_eq!(shown["runs"][1]["duration_secs"], 20);
+        assert_eq!(shown["usage"]["tokens"]["input"], 150);
+        // The scores recorded the launches.
+        assert_eq!(shown["finished"]["launch"], Value::Null);
+        assert_eq!(shown["finished"]["launches"].as_array().unwrap().len(), 2);
+        assert_eq!(evals.show(100).unwrap()["finished"]["launch"], haiku_launch);
+        let older = evals.show(300).unwrap();
+        assert_eq!(
+            (
+                older["launches"].clone(),
+                older["runs"][0]["launch"].clone()
+            ),
+            (json!([]), Value::Null)
+        );
     }
 }
