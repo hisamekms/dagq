@@ -201,6 +201,7 @@ pub(super) const READS: &[&str] = &[
     "ledger_wait_rows",
     "ledger_supervisor_stops",
     "ledger_settled_waits",
+    "ledger_sessions_written",
     "run_events_after",
     "task_events_after",
 ];
@@ -357,6 +358,8 @@ const SUPERVISE: &[&str] = &[
     "remove_steps",
     "stage_ledger_row",
     "write_staged_ledger_row_over",
+    "write_session_rows_over",
+    "write_staged_session_rows_over",
 ];
 
 /// The operations of one capability other than `scheduler.supervise`.

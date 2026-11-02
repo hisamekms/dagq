@@ -35,13 +35,15 @@ use super::*;
 use crate::application::LedgerQueue;
 use crate::domain::EventFilter;
 use crate::domain::host_metrics::{local_day, oldest_kept_day};
-use crate::domain::ledger::LedgerKind;
 use crate::domain::ledger::builder::{
     Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, RESOURCES_PER_READ, RunResources,
-    RunSteps, STEPS_PER_READ, Target, WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
+    RunSteps, SESSION_BYTES_PER_WRITE, SESSION_ROWS_PER_WRITE, STEPS_PER_READ, Target,
+    WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
 };
 use crate::domain::ledger::queue::QueueBook;
+use crate::domain::ledger::session::written::{SessionsWritten, written_through};
 use crate::domain::ledger::session::{SessionBook, SessionsHeld};
+use crate::domain::ledger::{LedgerKind, LedgerRow};
 use crate::domain::pre_claim::{self, PreClaimBook};
 use crate::domain::session_step::{self, StepTarget};
 use crate::domain::supervisor_life::Lives;
@@ -98,8 +100,11 @@ pub type Classifier =
 /// What one pass did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Built {
-    /// The rows written.
+    /// The run, task, queue and node rows written, at most
+    /// [`WRITES_PER_PASS`].
     pub written: usize,
+    /// The session rows written, all at once ([`write_sessions`]).
+    pub sessions: usize,
     /// The marks left for the next pass.
     pub backlog: usize,
     /// The node rows the retention removed.
@@ -166,13 +171,33 @@ pub fn build_pass(
 fn build_pass_reading(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
-    (now_ms, built_at): (i64, &str),
+    at: (i64, &str),
     retain: Retain,
     classifier: Option<&crate::domain::command_rules::CommandClassifier>,
     per_read: usize,
 ) -> Built {
+    build_pass_bounded(
+        store,
+        builder,
+        at,
+        retain,
+        classifier,
+        (per_read, SESSION_BYTES_PER_WRITE),
+    )
+}
+
+/// [`build_pass_reading`], a write of the session rows holding at most
+/// `session_bytes` of them ([`write_sessions`]).
+fn build_pass_bounded(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    (now_ms, built_at): (i64, &str),
+    retain: Retain,
+    classifier: Option<&crate::domain::command_rules::CommandClassifier>,
+    (per_read, session_bytes): (usize, usize),
+) -> Built {
     let mut built = Built::default();
-    let read = (classifier, per_read);
+    let read = (classifier, per_read, session_bytes);
     if let Err(error) = pass(store, builder, (now_ms, built_at), read, &mut built) {
         built.failure = Some(format!("{error:#}"));
     }
@@ -212,8 +237,9 @@ fn pass(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
     (now_ms, built_at): (i64, &str),
-    (classifier, per_read): (
+    (classifier, per_read, session_bytes): (
         Option<&crate::domain::command_rules::CommandClassifier>,
+        usize,
         usize,
     ),
     built: &mut Built,
@@ -258,12 +284,47 @@ fn pass(
     let now_ms = builder.folds_at(now_ms);
     builder.due(now_ms);
     if !builder.marked() {
+        // No row changed: the mark alone moves on.
+        built.sessions = write_sessions(store, builder, (now_ms, built_at), session_bytes)?;
         return Ok(());
     }
     let rows = builder.rows_to_build(builder.kept());
     restore(store, builder, &rows)?;
     let after = builder.take_rows_after();
     fold_rows(store, builder, (now_ms, built_at), &rows, after, false)?;
+    let sessions = write_sessions(store, builder, (now_ms, built_at), session_bytes);
+    // The session rows left marked (a write that failed, a fold behind)
+    // wait aside for the next pass's write of them all, so that none is
+    // written alone, and a failure of theirs stops no other row.
+    let aside = builder.take_sessions();
+    let taken = write_taken(
+        store,
+        builder,
+        (now_ms, built_at),
+        classifier,
+        built,
+        &rows,
+        aside,
+    );
+    built.sessions = sessions?;
+    taken
+}
+
+/// Write the marks a pass takes ([`Builder::take`], [`CHECKS_PER_PASS`]
+/// of them) at most [`WRITES_PER_PASS`] rows, the session rows aside
+/// ([`write_sessions`]), then sweep the session and queue rows of `rows`
+/// left marked by a builder that has not swept ([`fold_rows`]). The
+/// session rows taken `aside` are marked again before the sweep, so that
+/// it keeps their records.
+fn write_taken(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    (now_ms, built_at): (i64, &str),
+    classifier: Option<&crate::domain::command_rules::CommandClassifier>,
+    built: &mut Built,
+    rows: &BTreeSet<(LedgerKind, String)>,
+    aside: Vec<Target>,
+) -> Result<()> {
     let taken = builder.take(CHECKS_PER_PASS);
     let rows_taken: BTreeSet<(LedgerKind, String)> = taken
         .iter()
@@ -285,18 +346,190 @@ fn pass(
             if let Some(next) = targets.next() {
                 builder.put_back(next, targets);
             }
+            aside.into_iter().for_each(|target| builder.keep(target));
             return Err(error);
         }
     }
     drop(inputs);
+    aside.into_iter().for_each(|target| builder.keep(target));
     let left: BTreeSet<(LedgerKind, String)> = builder
-        .rows_to_sweep(&rows)
+        .rows_to_sweep(rows)
         .iter()
         .map(Target::row_key)
         .collect();
     fold_rows(store, builder, (now_ms, built_at), &left, None, true)?;
     builder.swept();
     Ok(())
+}
+
+/// What [`fold_sessions`] made of the session rows marked.
+#[derive(Default)]
+struct SessionsFolded {
+    /// The rows to write, each with the row the store held as it was read.
+    write: Vec<(Target, LedgerRow, Option<LedgerRow>)>,
+    /// The rows the store holds as folded, which are tracked as they are.
+    held: Vec<(Target, LedgerRow)>,
+    /// The rows whose fold is [`behind`] the store's, left marked.
+    behind: Vec<Target>,
+}
+
+/// Fold the session rows of `targets` ([`Inputs::of`]), each over the row
+/// the store holds of it, and sort them by what [`writes`] and [`behind`]
+/// say.
+fn fold_sessions(
+    store: &dyn LedgerQueue,
+    builder: &Builder,
+    (now_ms, built_at): (i64, &str),
+    targets: &[Target],
+) -> Result<SessionsFolded> {
+    let mut folded = SessionsFolded::default();
+    let keys: BTreeSet<(LedgerKind, String)> = targets.iter().map(Target::row_key).collect();
+    let inputs = Inputs::of(builder.kept(), now_ms, built_at, &keys);
+    for target in targets {
+        let (kind, key) = target.row_key();
+        let stored = store.ledger_row(kind, &key)?;
+        let Some(row) = build(target, &inputs, &[]) else {
+            continue;
+        };
+        if !writes(stored.as_ref(), &row) {
+            if let Some(stored) = stored {
+                folded.held.push((target.clone(), stored));
+            }
+        } else if stored.as_ref().is_some_and(|stored| behind(stored, &row)) {
+            folded.behind.push(target.clone());
+        } else {
+            folded.write.push((target.clone(), row, stored));
+        }
+    }
+    Ok(folded)
+}
+
+/// Fold every session row marked ([`Builder::take_sessions`]), whatever
+/// [`WRITES_PER_PASS`], [`SESSION_ROWS_PER_WRITE`] at a time, and write
+/// those that change in chunks of at most as many rows and `bytes` of them
+/// (each row's text, as it crosses to the queue service; a row past
+/// `bytes` alone is a chunk of its own), each in one transaction
+/// ([`crate::application::LedgerStore::write_session_rows_over`]); the
+/// pass's last chunk (none of rows when nothing is left to write) carries
+/// the mark of the builder's cursor when it gives one
+/// ([`Builder::sessions_mark`]: its session book is the fold of every
+/// session event, and no session row is left marked). So the mark is
+/// written only once every session row the pass changed is written before
+/// it or with it, and the store's session rows record every session event
+/// up to the position it gives. A chunk written before a later one fails
+/// only adds records to its rows: the mark the store holds from before
+/// stays true. A fold [`behind`] the stored row, and a chunk another writer
+/// wrote a row of since its read, stay marked, and so no mark is written;
+/// a read or a write that fails leaves its chunk and those after it marked
+/// and writes no mark. The number of rows written.
+fn write_sessions(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    at: (i64, &str),
+    bytes: usize,
+) -> Result<usize> {
+    let targets = builder.take_sessions();
+    let mut written = 0;
+    // The chunk filled last, written once the next row would take it past
+    // its bounds, or with the mark at the end.
+    let mut pending = SessionChunk::default();
+    for (index, share) in targets.chunks(SESSION_ROWS_PER_WRITE).enumerate() {
+        let after = (index + 1) * SESSION_ROWS_PER_WRITE;
+        let folded = match fold_sessions(store, builder, at, share) {
+            Ok(folded) => folded,
+            Err(error) => {
+                keep_all(builder, pending.targets());
+                keep_all(builder, targets[index * SESSION_ROWS_PER_WRITE..].to_vec());
+                return Err(error);
+            }
+        };
+        for (target, stored) in &folded.held {
+            builder.track(target, stored);
+        }
+        keep_all(builder, folded.behind);
+        let mut rows = folded.write.into_iter();
+        while let Some(row) = rows.next() {
+            let size = serde_json::to_vec(&row.1).map_or(0, |text| text.len());
+            if !pending.takes(size, bytes) {
+                match write_chunk(store, builder, std::mem::take(&mut pending).rows, None) {
+                    Ok(count) => written += count,
+                    Err(error) => {
+                        keep_all(builder, [row.0]);
+                        keep_all(builder, rows.map(|(target, ..)| target));
+                        keep_all(builder, targets.get(after..).unwrap_or_default().to_vec());
+                        return Err(error);
+                    }
+                }
+            }
+            pending.push(row, size);
+        }
+    }
+    let mark = builder.sessions_mark();
+    if pending.rows.is_empty() && mark.is_none() {
+        return Ok(written);
+    }
+    Ok(written + write_chunk(store, builder, pending.rows, mark)?)
+}
+
+/// The session rows of one write ([`write_sessions`]), each with its target
+/// and the row the store held as it was read, and the bytes of their text.
+#[derive(Default)]
+struct SessionChunk {
+    rows: Vec<(Target, LedgerRow, Option<LedgerRow>)>,
+    bytes: usize,
+}
+
+impl SessionChunk {
+    /// Whether a row of `size` bytes goes in without taking it past
+    /// [`SESSION_ROWS_PER_WRITE`] rows or `bytes`: always into an empty one.
+    fn takes(&self, size: usize, bytes: usize) -> bool {
+        self.rows.is_empty()
+            || (self.rows.len() < SESSION_ROWS_PER_WRITE
+                && self.bytes.saturating_add(size) <= bytes)
+    }
+
+    fn push(&mut self, row: (Target, LedgerRow, Option<LedgerRow>), size: usize) {
+        self.rows.push(row);
+        self.bytes = self.bytes.saturating_add(size);
+    }
+
+    fn targets(self) -> impl Iterator<Item = Target> {
+        self.rows.into_iter().map(|(target, ..)| target)
+    }
+}
+
+/// Write `chunk` (each target with its row and the row the store held as
+/// it was read) in one transaction, with `mark` when given, and track its
+/// rows; another writer that wrote one of them since its read, or a
+/// failure, writes none of them and leaves them marked. The rows written.
+fn write_chunk(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    chunk: Vec<(Target, LedgerRow, Option<LedgerRow>)>,
+    mark: Option<SessionsWritten>,
+) -> Result<usize> {
+    let (targets, rows): (Vec<Target>, Vec<(LedgerRow, Option<LedgerRow>)>) = chunk
+        .into_iter()
+        .map(|(target, row, stored)| (target, (row, stored)))
+        .unzip();
+    let written = store.write_session_rows_over(&rows, mark.as_ref());
+    if !matches!(written, Ok(true)) {
+        // Folded again next pass.
+        keep_all(builder, targets);
+        return written.map(|_| 0);
+    }
+    for (target, (row, _)) in targets.iter().zip(&rows) {
+        builder.track(target, row);
+    }
+    if let Some(mark) = mark {
+        builder.wrote_sessions_mark(mark);
+    }
+    Ok(rows.len())
+}
+
+/// Mark `targets` again for the next pass ([`Builder::keep`]).
+fn keep_all(builder: &mut Builder, targets: impl IntoIterator<Item = Target>) {
+    targets.into_iter().for_each(|target| builder.keep(target));
 }
 
 /// Build the session and queue rows the page of events just read changed
@@ -451,12 +684,36 @@ pub fn pre_claim_books(store: &dyn LedgerQueue, closed_to: i64) -> Result<(Lives
     Ok((lives, book))
 }
 
+/// The position W the session rows `store` holds record every session
+/// event up to, by its mark and the rows' heads ([`written_through`]).
+/// `None` for a store with no mark (its rows written one by one): a
+/// builder then does not go on from the rows, and folds the session
+/// events from its cursors' start (cursor 0), whose first pass's writes
+/// fill what the rows lack and write the mark.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
+    )
+)]
+pub fn sessions_written_through(store: &dyn LedgerQueue) -> Result<Option<EventId>> {
+    Ok(written_through(
+        store.sessions_written()?.as_ref(),
+        &store.ledger_heads(LedgerKind::Session)?,
+    ))
+}
+
 /// Make `builder` go on from the session rows `store` holds as they were
 /// at its cursor ([`SessionsHeld::at`], [`Builder::restore_sessions`]):
 /// the heads and anchors of every session row, and the records of only
 /// those not settled at the cursor, so that what it keeps of the sessions
-/// settled is their records' ids. The cursor must be one the store's
-/// session rows record every session event up to: this does not find it.
+/// settled is their records' ids. The rows give the fold of every event
+/// only when the store's session rows record every session event up to
+/// the cursor: when the cursor is the position W the store's mark gives
+/// ([`written_through`]) they are held at W
+/// ([`SessionsHeld::written_at`]) and the builder writes the mark again
+/// as it goes on; at any other cursor it writes none.
 #[cfg_attr(
     not(test),
     expect(
@@ -465,11 +722,14 @@ pub fn pre_claim_books(store: &dyn LedgerQueue, closed_to: i64) -> Result<(Lives
     )
 )]
 pub fn restore_sessions(store: &dyn LedgerQueue, builder: &mut Builder) -> Result<()> {
-    let held = SessionsHeld::at(
-        &store.ledger_heads(LedgerKind::Session)?,
-        &store.ledger_session_anchors()?,
-        builder.events,
-    );
+    let heads = store.ledger_heads(LedgerKind::Session)?;
+    let anchors = store.ledger_session_anchors()?;
+    let held =
+        if written_through(store.sessions_written()?.as_ref(), &heads) == Some(builder.events) {
+            SessionsHeld::written_at(&heads, &anchors, builder.events)
+        } else {
+            SessionsHeld::at(&heads, &anchors, builder.events)
+        };
     let mut records = Vec::new();
     for key in &held.open {
         if let Some(row) = store.ledger_row(LedgerKind::Session, key)? {
@@ -766,9 +1026,14 @@ impl LedgerWatch {
                     );
                     self.kept_logged = Some((at, kept.bytes));
                 }
-                if built.written > 0 || built.removed > 0 || built.steps_removed > 0 {
+                if built.written > 0
+                    || built.sessions > 0
+                    || built.removed > 0
+                    || built.steps_removed > 0
+                {
                     tracing::debug!(
                         written = built.written,
+                        sessions = built.sessions,
                         backlog = built.backlog,
                         removed = built.removed,
                         steps_removed = built.steps_removed,

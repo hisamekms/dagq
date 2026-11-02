@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::application::LedgerStore;
+use crate::domain::ledger::session::written::{self, SessionsWritten};
 use crate::domain::ledger::{
     InputsThrough, LedgerHead, LedgerKind, LedgerRow, Measure, Subject, Totals, node,
 };
@@ -49,6 +50,30 @@ fn held_row(conn: &rusqlite::Connection, kind: LedgerKind, key: &str) -> Result<
     )
     .optional()?
     .transpose()
+}
+
+/// Write `mark` on `conn` as the one row of its kind
+/// ([`written::KIND`]): its position as the `events` of its
+/// `inputs_through`, its version as its `ledger_v`, nothing else. No
+/// reader of the rows of a [`LedgerKind`] reads it.
+fn write_mark(conn: &rusqlite::Connection, mark: &SessionsWritten) -> Result<()> {
+    let through = text(&InputsThrough {
+        events: mark.through,
+        supervisor: None,
+        life_ended: Vec::new(),
+        node_samples: None,
+        steps: None,
+        resources: None,
+        inside_resources: None,
+    })?;
+    conn.execute(
+        "INSERT INTO ledger_rows(kind, key, ledger_v, built_at, inputs_through)
+         VALUES (?1, ?2, ?3, '', ?4)
+         ON CONFLICT(kind, key) DO UPDATE SET
+           ledger_v=excluded.ledger_v, inputs_through=excluded.inputs_through",
+        params![written::KIND, written::KEY, mark.ledger_v, through],
+    )?;
+    Ok(())
 }
 
 /// Write `row` on `conn` as [`LedgerStore::write_ledger_row`] says.
@@ -235,6 +260,45 @@ impl LedgerStore for SqliteQueue {
         let written = upsert(&tx, row)?;
         tx.commit()?;
         Ok(Some(written))
+    }
+
+    /// Every row read again and written, and the mark, under one write
+    /// lock in one transaction: a row another writer wrote since its read,
+    /// or a failure part way, rolls back the rows written before it.
+    fn write_session_rows_over(
+        &self,
+        rows: &[(LedgerRow, Option<LedgerRow>)],
+        mark: Option<&SessionsWritten>,
+    ) -> Result<bool> {
+        let tx = self.write_tx("ledger_session_rows", TransactionBehavior::Immediate)?;
+        for (row, read) in rows {
+            if held_row(&tx, row.kind, &row.key)?.as_ref() != read.as_ref() {
+                return Ok(false);
+            }
+            upsert(&tx, row)?;
+        }
+        if let Some(mark) = mark {
+            write_mark(&tx, mark)?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn sessions_written(&self) -> Result<Option<SessionsWritten>> {
+        self.conn
+            .query_row(
+                "SELECT ledger_v, inputs_through FROM ledger_rows WHERE kind=?1 AND key=?2",
+                params![written::KIND, written::KEY],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .map(|(ledger_v, through)| {
+                Ok(SessionsWritten {
+                    through: serde_json::from_str::<InputsThrough>(&through)?.events,
+                    ledger_v: u32::try_from(ledger_v)?,
+                })
+            })
+            .transpose()
     }
 
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
@@ -1068,5 +1132,130 @@ mod tests {
         let read = queue.ledger_row(LedgerKind::Run, RUN).unwrap().unwrap();
         assert_eq!(read, legacy);
         assert_eq!(read.legacy.unwrap()["work"], 60);
+    }
+
+    /// The session rows of [`crate::domain::ledger::testkit::sessions_across`].
+    fn sessions() -> Vec<LedgerRow> {
+        let (log, _) = crate::domain::ledger::testkit::sessions_across();
+        let rows = ledger::session::session_rows(&log.events, "2030-01-01T00:00:00.000Z");
+        assert!(rows.len() >= 3);
+        rows
+    }
+
+    /// The session rows and the mark are written in one transaction, each
+    /// over the row it read: they read back as written, and the mark is in
+    /// no reading of the rows by their kind (nor a window of every kind);
+    /// a row another writer wrote since its read writes none of them, the
+    /// rows before it in the batch rolled back, and the mark stays as it
+    /// was.
+    #[test]
+    fn the_session_rows_and_the_mark_are_written_all_or_none() {
+        use crate::domain::ledger::session::written::SessionsWritten;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        assert_eq!(queue.sessions_written().unwrap(), None);
+        let rows = sessions();
+        let batch: Vec<(LedgerRow, Option<LedgerRow>)> =
+            rows.iter().map(|row| (row.clone(), None)).collect();
+        let mark = SessionsWritten::at(EventId::new(7));
+        assert!(queue.write_session_rows_over(&batch, Some(&mark)).unwrap());
+        assert_eq!(queue.sessions_written().unwrap(), Some(mark));
+        let mut sorted = rows.clone();
+        sorted.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(queue.ledger_rows(LedgerKind::Session).unwrap(), sorted);
+        assert_eq!(
+            queue.ledger_heads(LedgerKind::Session).unwrap().len(),
+            rows.len()
+        );
+        for kind in LedgerKind::ALL {
+            assert!(
+                queue
+                    .ledger_rows(kind)
+                    .unwrap()
+                    .iter()
+                    .all(|row| row.key != ledger::session::written::KEY),
+                "{kind:?}"
+            );
+        }
+        let window = queue
+            .ledger_window(&ledger::window::WindowQuery::default())
+            .unwrap();
+        assert!(!format!("{window:?}").contains(ledger::session::written::KIND));
+        assert_eq!(rows_of_kind(&queue, ledger::session::written::KIND), 1);
+
+        // Over a stale read of the last: none written, the mark as it was.
+        let mut again: Vec<(LedgerRow, Option<LedgerRow>)> = rows
+            .iter()
+            .map(|row| {
+                let mut later = row.clone();
+                later.built_at = "2031-01-01T00:00:00.000Z".into();
+                (later, Some(row.clone()))
+            })
+            .collect();
+        let stale = again.len() - 1;
+        again[stale].1 = None;
+        let later = SessionsWritten::at(EventId::new(9));
+        assert!(!queue.write_session_rows_over(&again, Some(&later)).unwrap());
+        assert_eq!(queue.ledger_rows(LedgerKind::Session).unwrap(), sorted);
+        assert_eq!(queue.sessions_written().unwrap(), Some(mark));
+        // Over the rows read: all written, the mark moved; none moves it.
+        again[stale].1 = Some(rows[stale].clone());
+        assert!(queue.write_session_rows_over(&again, Some(&later)).unwrap());
+        assert_eq!(queue.sessions_written().unwrap(), Some(later));
+        assert!(
+            queue
+                .ledger_rows(LedgerKind::Session)
+                .unwrap()
+                .iter()
+                .all(|row| row.built_at.starts_with("2031"))
+        );
+        assert!(queue.write_session_rows_over(&[], None).unwrap());
+        assert_eq!(queue.sessions_written().unwrap(), Some(later));
+    }
+
+    /// How many rows of `kind` the table holds, whatever reads them.
+    fn rows_of_kind(queue: &SqliteQueue, kind: &str) -> i64 {
+        queue
+            .conn
+            .query_row(
+                "SELECT count(*) FROM ledger_rows WHERE kind=?1",
+                [kind],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A write of the session rows that fails part way (here as the mark
+    /// is written, after every row) writes no row and no mark: the
+    /// transaction rolls back the rows written before the failure.
+    #[test]
+    fn a_write_of_the_session_rows_that_fails_part_way_writes_no_row_and_no_mark() {
+        use crate::domain::ledger::session::written::SessionsWritten;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        queue
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER part_way BEFORE INSERT ON ledger_rows
+                   WHEN NEW.kind = 'sessions_written'
+                 BEGIN SELECT RAISE(ABORT, 'part way'); END;",
+            )
+            .unwrap();
+        let batch: Vec<(LedgerRow, Option<LedgerRow>)> =
+            sessions().into_iter().map(|row| (row, None)).collect();
+        let mark = SessionsWritten::at(EventId::new(7));
+        let error = queue
+            .write_session_rows_over(&batch, Some(&mark))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("part way"), "{error:#}");
+        assert_eq!(rows_of_kind(&queue, "session"), 0);
+        assert_eq!(queue.sessions_written().unwrap(), None);
+        queue.conn.execute_batch("DROP TRIGGER part_way").unwrap();
+        assert!(queue.write_session_rows_over(&batch, Some(&mark)).unwrap());
+        assert_eq!(
+            rows_of_kind(&queue, "session"),
+            i64::try_from(batch.len()).unwrap()
+        );
+        assert_eq!(queue.sessions_written().unwrap(), Some(mark));
     }
 }

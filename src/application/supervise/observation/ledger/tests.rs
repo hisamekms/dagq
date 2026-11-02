@@ -9,6 +9,7 @@ use crate::domain::environment::{Resources, RunResource};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
 use crate::domain::ledger::queue::QueueBook;
 use crate::domain::ledger::session::SessionBook;
+use crate::domain::ledger::session::written::{SessionsWritten, written_through};
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
 use crate::domain::ledger::testkit::{Log, T0, ms, queue_across, run_id, sessions_across};
 use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node};
@@ -61,6 +62,20 @@ struct Memory {
     /// Runs once, as the steps after a cursor are next read: another
     /// builder's pass between a pass's read of the events and of the steps.
     before_steps: RefCell<Option<Between>>,
+    /// The mark of where the session rows record every session event up
+    /// to ([`LedgerStore::sessions_written`]).
+    mark: RefCell<Option<SessionsWritten>>,
+    /// How many of the next writes of the session rows fail part way.
+    batch_fails: Cell<usize>,
+    /// How many writes of the session rows were committed.
+    batches: Cell<usize>,
+    /// How many writes of the session rows were tried, and which of them
+    /// (counted from 0) fails part way.
+    batch_calls: Cell<usize>,
+    batch_fails_at: Cell<Option<usize>>,
+    /// The bytes of the rows' text of each write of the session rows
+    /// committed, and whether it held the mark.
+    batch_bytes: RefCell<Vec<(usize, bool)>>,
 }
 
 /// Another builder's pass, run on the store between a read and a write.
@@ -220,6 +235,45 @@ impl LedgerStore for Memory {
             return Ok(None);
         }
         self.write_ledger_row(row).map(Some)
+    }
+    /// All or none, as one transaction: a refused write or a batch set to
+    /// fail ([`Memory::batch_fails`]) writes no row and no mark.
+    fn write_session_rows_over(
+        &self,
+        rows: &[(LedgerRow, Option<LedgerRow>)],
+        mark: Option<&SessionsWritten>,
+    ) -> Result<bool> {
+        ensure!(!self.refuses.get(), "attempt to write a readonly database");
+        let call = self.batch_calls.get();
+        self.batch_calls.set(call + 1);
+        if self.batch_fails_at.get() == Some(call) {
+            anyhow::bail!("the transaction failed part way");
+        }
+        if self.batch_fails.get() > 0 {
+            self.batch_fails.set(self.batch_fails.get() - 1);
+            anyhow::bail!("the transaction failed part way");
+        }
+        for (row, read) in rows {
+            if self.ledger_row(row.kind, &row.key)?.as_ref() != read.as_ref() {
+                return Ok(false);
+            }
+        }
+        for (row, _) in rows {
+            self.write_ledger_row(row)?;
+        }
+        if let Some(mark) = mark {
+            self.mark.replace(Some(*mark));
+        }
+        self.batches.set(self.batches.get() + 1);
+        let bytes = rows
+            .iter()
+            .map(|(row, _)| serde_json::to_vec(row).unwrap().len())
+            .sum();
+        self.batch_bytes.borrow_mut().push((bytes, mark.is_some()));
+        Ok(true)
+    }
+    fn sessions_written(&self) -> Result<Option<SessionsWritten>> {
+        Ok(*self.mark.borrow())
     }
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
         let row = (kind, key.to_owned());
@@ -3049,6 +3103,16 @@ impl LedgerStore for HeldRows<'_> {
     fn write_ledger_row_over(&self, _: &LedgerRow, _: Option<&LedgerRow>) -> Result<Option<bool>> {
         unreachable!("no write here")
     }
+    fn write_session_rows_over(
+        &self,
+        _: &[(LedgerRow, Option<LedgerRow>)],
+        _: Option<&SessionsWritten>,
+    ) -> Result<bool> {
+        unreachable!("no write here")
+    }
+    fn sessions_written(&self) -> Result<Option<SessionsWritten>> {
+        unreachable!("no mark here")
+    }
     fn ledger_row(&self, _: LedgerKind, _: &str) -> Result<Option<LedgerRow>> {
         unreachable!("no row by key here")
     }
@@ -3702,4 +3766,435 @@ fn folding_a_task_again_reads_as_many_wait_rows_however_many_waits_settled_befor
     let few = read(3);
     assert_eq!(read(300), few);
     assert!(few.0 > 0);
+}
+
+/// The planners' sessions of `planners` planners, each opened and closed,
+/// and `tasks` tasks created, every one at once: more session rows and
+/// more task rows than a pass writes of the bounded kinds.
+fn sessions_and_tasks(planners: i64, tasks: i64) -> Log {
+    let mut log = Log::default();
+    for task in 1..=tasks {
+        log.add(
+            Some(task),
+            None,
+            "task_created",
+            json!({"status": "draft"}),
+            1,
+        );
+    }
+    for planner in 1..=planners {
+        log.add(
+            None,
+            None,
+            "session_opened",
+            json!({"kind": "runtime_planner", "planner_id": planner}),
+            2,
+        );
+        let opened = log.last().as_i64();
+        log.add(
+            None,
+            None,
+            "session_closed",
+            json!({"kind": "runtime_planner", "planner_id": planner,
+                   "opened_event_id": opened, "session_id": format!("p-{planner}")}),
+            3,
+        );
+    }
+    log
+}
+
+/// The session rows a pass changed are written that pass, past
+/// [`WRITES_PER_PASS`], [`SESSION_ROWS_PER_WRITE`] a write, the last with
+/// the mark of the pass's position; the task rows keep their bound and their order, and are
+/// written by the next passes, which write no mark again while no event
+/// came in.
+#[test]
+fn the_session_rows_a_pass_changed_are_written_that_pass_past_the_bound_with_the_mark() {
+    let bound = i64::try_from(WRITES_PER_PASS).unwrap();
+    let log = sessions_and_tasks(bound + 50, bound + 30);
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    let built = pass(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert_eq!(built.sessions, WRITES_PER_PASS + 50);
+    assert_eq!(memory.count(LedgerKind::Session), WRITES_PER_PASS + 50);
+    assert_eq!(built.written, WRITES_PER_PASS);
+    assert_eq!(memory.count(LedgerKind::Task), WRITES_PER_PASS);
+    // The first tasks by their order.
+    assert!(
+        memory
+            .rows
+            .borrow()
+            .contains_key(&(LedgerKind::Task, "1".into()))
+    );
+    let batches = (WRITES_PER_PASS + 50).div_ceil(SESSION_ROWS_PER_WRITE);
+    assert!(batches > 1);
+    assert_eq!(memory.batches.get(), batches);
+    assert_eq!(*memory.mark.borrow(), Some(SessionsWritten::at(log.last())));
+    let next = drain(&memory, &mut builder, LATER);
+    assert_eq!(next.sessions, 0);
+    assert_eq!(memory.count(LedgerKind::Task), WRITES_PER_PASS + 30);
+    assert_eq!(memory.batches.get(), batches);
+    assert!(are_of_every_event(
+        &rows_of_kind(&memory, LedgerKind::Session),
+        &log
+    ));
+}
+
+/// The rows of `kind` `memory` holds.
+fn rows_of_kind(memory: &Memory, kind: LedgerKind) -> BTreeMap<(LedgerKind, String), LedgerRow> {
+    memory
+        .rows
+        .borrow()
+        .iter()
+        .filter(|((of, _), _)| *of == kind)
+        .map(|(key, row)| (key.clone(), row.clone()))
+        .collect()
+}
+
+/// A write of the session rows that fails part way writes none of them and
+/// no mark, and leaves them marked: the next pass writes them all with
+/// the mark.
+#[test]
+fn a_write_of_the_session_rows_that_fails_writes_none_and_the_next_pass_writes_them() {
+    let log = sessions_and_tasks(30, 0);
+    let memory = Memory::of(&log);
+    memory.batch_fails.set(1);
+    let mut builder = Builder::default();
+    let failed = pass(&memory, &mut builder, LATER);
+    assert!(failed.failure.is_some());
+    assert_eq!(memory.count(LedgerKind::Session), 0);
+    assert_eq!(*memory.mark.borrow(), None);
+    assert!(failed.backlog >= 30);
+    let built = drain(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert_eq!(memory.count(LedgerKind::Session), 30);
+    assert_eq!(*memory.mark.borrow(), Some(SessionsWritten::at(log.last())));
+}
+
+/// The events of [`sessions_across`] after [`WRITES_PER_PASS`] and more
+/// tasks created, their ids and the events they name moved past the
+/// tasks', and where the events after its position start: a pass over the
+/// first of them leaves the task rows behind its bound.
+fn sessions_behind_tasks() -> (Log, usize) {
+    let tasks = WRITES_PER_PASS + 40;
+    let (sessions, position) = sessions_across();
+    let mut log = sessions_and_tasks(0, i64::try_from(tasks).unwrap());
+    let shift = log.last().as_i64();
+    for event in sessions.events {
+        let mut payload = event.payload.clone();
+        if let Some(opened) = payload["opened_event_id"].as_i64() {
+            payload["opened_event_id"] = json!(opened + shift);
+        }
+        log.events.push(RunEvent {
+            id: EventId::new(event.id.as_i64() + shift),
+            payload,
+            ..event
+        });
+    }
+    (log, tasks + position)
+}
+
+/// On a store the new writes wrote, whose task rows lag the session rows
+/// behind [`WRITES_PER_PASS`], the position the mark gives
+/// ([`sessions_written_through`]) is the pass's, and a builder going on
+/// from it (the rows held there, [`restore_sessions`]) writes the session
+/// rows of every event: whether a new session opens and a closed one gets
+/// a late record after it, or before it, or the position is the last.
+#[test]
+fn going_on_from_the_position_of_the_mark_writes_the_session_rows_of_every_event() {
+    let (log, position) = sessions_behind_tasks();
+    let closed = (
+        LedgerKind::Session,
+        "runtime_planner/1/session/1".to_owned(),
+    );
+    let next = (
+        LedgerKind::Session,
+        "runtime_planner/1/session/2".to_owned(),
+    );
+    for upto in [
+        position - 2,
+        position,
+        position + 1,
+        position + 2,
+        position + 3,
+        log.events.len(),
+    ] {
+        let memory = Memory::default();
+        memory.events.replace(log.events[..upto].to_vec());
+        let built = pass(&memory, &mut Builder::default(), LATER);
+        assert_eq!(built.failure, None, "{upto}");
+        assert!(built.backlog > 0, "{upto}: the task rows lag");
+        assert!(memory.count(LedgerKind::Task) < WRITES_PER_PASS + 40);
+        let w = sessions_written_through(&memory).unwrap();
+        assert_eq!(w, Some(id_at(&log, upto)), "{upto}");
+        // Before the position, after it, or neither.
+        let rows = rows_of_kind(&memory, LedgerKind::Session);
+        assert_eq!(rows.contains_key(&next), upto > position + 1, "{upto}");
+        assert!(rows.contains_key(&closed));
+
+        memory.events.replace(log.events.clone());
+        let mut builder = Builder::default();
+        builder.events = w.unwrap();
+        restore_sessions(&memory, &mut builder).unwrap();
+        drain(&memory, &mut builder, LATER + 1);
+        assert!(
+            are_of_every_event(&rows_of_kind(&memory, LedgerKind::Session), &log),
+            "{upto}"
+        );
+        assert_eq!(
+            *memory.mark.borrow(),
+            Some(SessionsWritten::at(log.last())),
+            "{upto}"
+        );
+    }
+}
+
+/// The store of [`going_on_from_where_the_lagging_rows_record_every_event_writes_the_rows_of_every_event`]
+/// (written one row at a time: the planner's next session has no row and
+/// its closed one lacks its late record), `p` its position and the rows
+/// there, with no mark.
+fn lagging_store(log: &Log, w: usize) -> (Memory, usize) {
+    let p = w + 3;
+    let at_w = drained_to(log, w).rows.into_inner();
+    let mut lagging = drained_to(log, p).rows.into_inner();
+    let closed = (
+        LedgerKind::Session,
+        "runtime_planner/1/session/1".to_owned(),
+    );
+    lagging.insert(closed.clone(), at_w[&closed].clone());
+    lagging.remove(&(
+        LedgerKind::Session,
+        "runtime_planner/1/session/2".to_owned(),
+    ));
+    let memory = Memory::default();
+    memory.rows.replace(lagging);
+    memory.events.replace(log.events[..p].to_vec());
+    (memory, p)
+}
+
+/// A store with no mark, the session rows written one at a time and
+/// lagging (a new session with no row, a closed one without its late
+/// record), gives no position: not the largest `inputs_through` of its
+/// rows, from which going on misses both.
+#[test]
+fn a_store_of_lagging_rows_with_no_mark_gives_no_position() {
+    let (log, w) = sessions_across();
+    let (memory, p) = lagging_store(&log, w);
+    let largest = memory
+        .rows
+        .borrow()
+        .values()
+        .filter(|row| row.kind == LedgerKind::Session)
+        .map(|row| row.inputs_through.last())
+        .max()
+        .unwrap();
+    assert!(largest >= id_at(&log, w));
+    assert_eq!(*memory.mark.borrow(), None);
+    assert_eq!(sessions_written_through(&memory).unwrap(), None);
+    let heads = memory.ledger_heads(LedgerKind::Session).unwrap();
+    assert_eq!(written_through(None, &heads), None);
+    assert!(p <= log.events.len());
+}
+
+/// A builder from its cursors' start on a store with no mark and lagging
+/// rows fills what they lack and writes the mark, decided by the store
+/// alone; going on from it then writes the rows of every event. Stopped
+/// part way: (i) a first write that fails leaves no mark, and a builder
+/// from its cursors' start again finishes; (ii) once a mark is written, a
+/// later write that fails leaves it, and a builder going on from it after
+/// a start again writes the rows of every event; (iii) a builder made
+/// again from the rows' heads at a position not the mark's writes no mark.
+#[test]
+fn a_store_with_no_mark_is_filled_and_marked_by_a_builder_from_its_cursors_start() {
+    let (log, w) = sessions_across();
+    let (memory, p) = lagging_store(&log, w);
+    let to_p = Log {
+        events: log.events[..p].to_vec(),
+    };
+    // (i)
+    memory.batch_fails.set(1);
+    assert!(
+        pass(&memory, &mut Builder::default(), LATER + 1)
+            .failure
+            .is_some()
+    );
+    assert_eq!(sessions_written_through(&memory).unwrap(), None);
+    let filled = rows_of_every_event(&to_p);
+    assert_ne!(rows_of_kind(&memory, LedgerKind::Session), filled);
+    drain(&memory, &mut Builder::default(), LATER + 1);
+    assert_eq!(rows_of_kind(&memory, LedgerKind::Session), filled);
+    let w1 = sessions_written_through(&memory).unwrap();
+    assert_eq!(w1, Some(id_at(&log, p)));
+
+    // (ii)
+    memory.events.replace(log.events.clone());
+    memory.batch_fails.set(1);
+    let mut builder = Builder::default();
+    builder.events = w1.unwrap();
+    restore_sessions(&memory, &mut builder).unwrap();
+    assert!(pass(&memory, &mut builder, LATER + 1).failure.is_some());
+    assert_eq!(sessions_written_through(&memory).unwrap(), w1);
+    drop(builder);
+    let mut started_again = Builder::default();
+    started_again.events = w1.unwrap();
+    restore_sessions(&memory, &mut started_again).unwrap();
+    drain(&memory, &mut started_again, LATER + 1);
+    assert!(are_of_every_event(
+        &rows_of_kind(&memory, LedgerKind::Session),
+        &log
+    ));
+    assert_eq!(sessions_written_through(&memory).unwrap(), Some(log.last()));
+
+    // (iii)
+    let marked = drained_to(&log, w);
+    let at_w = Some(id_at(&log, w));
+    assert_eq!(sessions_written_through(&marked).unwrap(), at_w);
+    marked.events.replace(log.events.clone());
+    let mut elsewhere = Builder::default();
+    elsewhere.events = id_at(&log, w + 3);
+    restore_sessions(&marked, &mut elsewhere).unwrap();
+    drain(&marked, &mut elsewhere, LATER + 1);
+    assert_eq!(sessions_written_through(&marked).unwrap(), at_w);
+    let mut book_alone = Builder::default();
+    book_alone.events = id_at(&log, w);
+    book_alone.restore_session_rows(session_book(&marked).unwrap());
+    // Its folds of the rows the one before wrote past it stay behind them.
+    let built = passes_to_drain(&marked, &mut book_alone, LATER + 1);
+    assert_eq!(built.failure, None);
+    assert_eq!(sessions_written_through(&marked).unwrap(), at_w);
+}
+
+/// A write of the session rows that fails stops no other row: the task
+/// rows are written in their bound that pass, and the session rows wait
+/// aside, none written alone, for the next pass's write of them all.
+#[test]
+fn a_failed_write_of_the_session_rows_stops_no_other_row() {
+    let log = sessions_and_tasks(30, 10);
+    let memory = Memory::of(&log);
+    memory.batch_fails.set(1);
+    let mut builder = Builder::default();
+    let failed = pass(&memory, &mut builder, LATER);
+    assert!(failed.failure.is_some());
+    assert_eq!(memory.count(LedgerKind::Task), 10);
+    assert_eq!(memory.count(LedgerKind::Session), 0);
+    assert_eq!(*memory.mark.borrow(), None);
+    let built = drain(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert_eq!(memory.count(LedgerKind::Session), 30);
+    assert_eq!(memory.batches.get(), 1);
+    assert_eq!(*memory.mark.borrow(), Some(SessionsWritten::at(log.last())));
+}
+
+/// A builder whose cursor was set past its session book's (not read up to,
+/// nor gone on from the rows there) writes no mark: its book lacks the
+/// session events before its cursor.
+#[test]
+fn a_builder_whose_cursor_was_set_past_its_book_writes_no_mark() {
+    let (log, position) = sessions_across();
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    builder.events = id_at(&log, position);
+    let built = passes_to_drain(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert_eq!(*memory.mark.borrow(), None);
+}
+
+/// A write of a later chunk of the session rows that fails leaves the
+/// chunks written before it written and the mark held from before as it
+/// was: the rows written only add records, and a builder going on from
+/// that mark after a start again writes the session rows of every event.
+#[test]
+fn a_later_chunk_that_fails_leaves_the_mark_from_before_true() {
+    let planners = i64::try_from(SESSION_ROWS_PER_WRITE * 2).unwrap();
+    let log = sessions_and_tasks(planners, 0);
+    let memory = Memory::default();
+    memory.events.replace(log.events[..20].to_vec());
+    drain(&memory, &mut Builder::default(), LATER);
+    let before = sessions_written_through(&memory).unwrap();
+    assert_eq!(before, Some(id_at(&log, 20)));
+    let mut builder = Builder::default();
+    builder.events = before.unwrap();
+    restore_sessions(&memory, &mut builder).unwrap();
+    memory.events.replace(log.events.clone());
+    memory
+        .batch_fails_at
+        .set(Some(memory.batch_calls.get() + 1));
+    let failed = pass(&memory, &mut builder, LATER);
+    assert!(failed.failure.is_some());
+    let written = memory.count(LedgerKind::Session);
+    assert!(
+        written > 10 && written < SESSION_ROWS_PER_WRITE * 2,
+        "{written}"
+    );
+    assert_eq!(sessions_written_through(&memory).unwrap(), before);
+    drop(builder);
+    let mut started_again = Builder::default();
+    started_again.events = before.unwrap();
+    restore_sessions(&memory, &mut started_again).unwrap();
+    drain(&memory, &mut started_again, LATER + 1);
+    assert_eq!(
+        rows_of_kind(&memory, LedgerKind::Session),
+        rows_of_every_event(&log)
+    );
+    assert_eq!(sessions_written_through(&memory).unwrap(), Some(log.last()));
+}
+
+/// The session rows a pass writes are cut by the bytes of their text as
+/// well as by [`SESSION_ROWS_PER_WRITE`]: rows each of which crosses alone,
+/// fewer than a write holds by their number but more than its bytes
+/// together, go in several writes each within the bytes (a row past them
+/// alone a write of its own), every row is written, and the mark goes with
+/// the last of them only.
+#[test]
+fn the_session_rows_are_cut_by_their_bytes_too() {
+    let log = sessions_and_tasks(12, 0);
+    let whole = Memory::of(&log);
+    drain(&whole, &mut Builder::default(), LATER);
+    let sizes: Vec<usize> = rows_of_kind(&whole, LedgerKind::Session)
+        .values()
+        .map(|row| serde_json::to_vec(row).unwrap().len())
+        .collect();
+    let largest = *sizes.iter().max().unwrap();
+    let bound = largest * 3;
+    assert!(sizes.iter().sum::<usize>() > bound);
+    assert!(sizes.len() < SESSION_ROWS_PER_WRITE);
+
+    let memory = Memory::of(&log);
+    let built = build_pass_bounded(
+        &memory,
+        &mut Builder::default(),
+        (ms(LATER), BUILT),
+        Retain::default(),
+        None,
+        (EVENTS_PER_READ, bound),
+    );
+    assert_eq!(built.failure, None);
+    assert_eq!(built.sessions, 12);
+    let batches = memory.batch_bytes.borrow().clone();
+    assert!(batches.len() > 1, "{batches:?}");
+    assert!(
+        batches.iter().all(|(bytes, _)| *bytes <= bound),
+        "{batches:?}"
+    );
+    let marked: Vec<bool> = batches.iter().map(|(_, mark)| *mark).collect();
+    assert_eq!(marked.iter().filter(|mark| **mark).count(), 1);
+    assert_eq!(marked.last(), Some(&true));
+    assert_eq!(
+        rows_of_kind(&memory, LedgerKind::Session),
+        rows_of_kind(&whole, LedgerKind::Session)
+    );
+
+    // A row past the bytes alone is a write of its own.
+    let alone = Memory::of(&log);
+    build_pass_bounded(
+        &alone,
+        &mut Builder::default(),
+        (ms(LATER), BUILT),
+        Retain::default(),
+        None,
+        (EVENTS_PER_READ, 1),
+    );
+    assert_eq!(alone.batch_bytes.borrow().len(), 12);
+    assert_eq!(alone.count(LedgerKind::Session), 12);
 }

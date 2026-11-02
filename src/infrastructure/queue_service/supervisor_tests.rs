@@ -933,3 +933,107 @@ fn only_the_supervisor_principal_reads_and_writes_a_workflows_freshness() {
     assert!(call(&backend, &owner_token, "record_ci_freshness", record).ok);
     assert_eq!(events(&backend, "ci_workflow_stale").len(), 1);
 }
+
+/// What builds the ledger writes the session rows of a pass and the mark
+/// through the service in one operation, each row over the one it read,
+/// and reads the mark back by its own: whole in one request, or staged in
+/// parts first when past one request whole, either way written in one
+/// transaction; one row another writer wrote since its read writes none
+/// and leaves the mark. A worker's token is refused both.
+#[test]
+fn the_session_rows_and_the_mark_cross_in_one_write_whole_or_staged() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::session::written::SessionsWritten;
+    use crate::domain::ledger::{LedgerKind, LedgerRow};
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let worker = Principal::worker(&RunId::new(RUN).unwrap(), crate::domain::TaskId::new(1));
+    let worker_token = token_of(&backend, &worker);
+    for (op, args) in [
+        ("write_session_rows_over", json!([[], null])),
+        ("write_staged_session_rows_over", json!(["d"])),
+        ("ledger_sessions_written", json!([])),
+    ] {
+        let denied = call(&backend, &worker_token, op, args);
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code),
+            Some(ServiceErrorCode::AuthorizationDenied),
+            "{op}: {denied:?}"
+        );
+    }
+    let db = backend.db.clone();
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let (log, _) = crate::domain::ledger::testkit::sessions_across();
+    let rows =
+        crate::domain::ledger::session::session_rows(&log.events, "2030-01-01T00:00:00.000Z");
+    let batch: Vec<(LedgerRow, Option<LedgerRow>)> =
+        rows.iter().map(|row| (row.clone(), None)).collect();
+    let mark = SessionsWritten::at(crate::domain::EventId::new(7));
+    assert_eq!(queue.sessions_written().unwrap(), None);
+    assert!(queue.write_session_rows_over(&batch, Some(&mark)).unwrap());
+    assert_eq!(queue.sessions_written().unwrap(), Some(mark));
+    let direct = SqliteQueue::open(&db).unwrap();
+    assert_eq!(
+        direct.ledger_rows(LedgerKind::Session).unwrap().len(),
+        rows.len()
+    );
+    assert_eq!(
+        *service.ops.lock().unwrap(),
+        [
+            "ledger_sessions_written",
+            "write_session_rows_over",
+            "ledger_sessions_written"
+        ]
+    );
+
+    // Past one request whole: staged, then written as one.
+    let mut large = rows[0].clone();
+    large.detail = json!({"text": "a".repeat(crate::domain::queue_service::MAX_REQUEST_BYTES)});
+    let over = [(large.clone(), Some(rows[0].clone()))];
+    let later = SessionsWritten::at(crate::domain::EventId::new(9));
+    service.ops.lock().unwrap().clear();
+    assert!(queue.write_session_rows_over(&over, Some(&later)).unwrap());
+    let ops = service.ops.lock().unwrap().clone();
+    assert_eq!(
+        ops.last().map(String::as_str),
+        Some("write_staged_session_rows_over")
+    );
+    assert!(
+        ops[..ops.len() - 1]
+            .iter()
+            .all(|op| op == "stage_ledger_row"),
+        "{ops:?}"
+    );
+    assert_eq!(direct.sessions_written().unwrap(), Some(later));
+    assert_eq!(
+        direct.ledger_row(LedgerKind::Session, &large.key).unwrap(),
+        Some(large.clone())
+    );
+
+    // The second over a stale read (the first's row before it was
+    // written large): none written, the mark as it was.
+    let mut moved = rows[1].clone();
+    moved.built_at = "2031-01-01T00:00:00.000Z".into();
+    let stale = [
+        (moved.clone(), Some(rows[1].clone())),
+        (rows[0].clone(), Some(rows[0].clone())),
+    ];
+    let last = SessionsWritten::at(crate::domain::EventId::new(11));
+    assert!(!queue.write_session_rows_over(&stale, Some(&last)).unwrap());
+    assert_eq!(direct.sessions_written().unwrap(), Some(later));
+    assert_eq!(
+        direct.ledger_row(LedgerKind::Session, &moved.key).unwrap(),
+        Some(rows[1].clone())
+    );
+}

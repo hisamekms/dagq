@@ -2989,6 +2989,12 @@ fn not_sent(op: &str) -> anyhow::Error {
 // What builds the ledger reads and writes: the reads in pages, each after
 // the last of the page before, and a write over a row read naming that row
 // by its fingerprint, so a request holds one row.
+// A write of the session rows (at most this many bytes of rows, with
+// their reads' fingerprints) stages within what the service holds of one.
+const _: () = assert!(
+    crate::domain::ledger::builder::SESSION_BYTES_PER_WRITE * 2 <= super::large::STAGED_BYTES
+);
+
 impl LedgerStore for SupervisorQueue {
     fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
         EventStore::run_events(self, run)
@@ -3026,6 +3032,54 @@ impl LedgerStore for SupervisorQueue {
             "write_staged_ledger_row_over",
             vec![to_value(&digest)?, read],
         )
+    }
+    // The rows and the mark cross in one request, or in parts staged
+    // first when past one request whole ([`super::large`]): either way
+    // one operation writes them, in one transaction.
+    fn write_session_rows_over(
+        &self,
+        rows: &[(
+            crate::domain::ledger::LedgerRow,
+            Option<crate::domain::ledger::LedgerRow>,
+        )],
+        mark: Option<&crate::domain::ledger::session::written::SessionsWritten>,
+    ) -> Result<bool> {
+        let rows: Vec<(&crate::domain::ledger::LedgerRow, Option<String>)> = rows
+            .iter()
+            .map(|(row, read)| {
+                (
+                    row,
+                    read.as_ref()
+                        .map(crate::domain::ledger::LedgerRow::fingerprint),
+                )
+            })
+            .collect();
+        let text = serde_json::to_string(&(&rows, mark))?;
+        if text.len() <= LEDGER_ROW_REQUEST_BYTES {
+            return self.remote(
+                "write_session_rows_over",
+                vec![to_value(&rows)?, to_value(mark)?],
+            );
+        }
+        let digest = super::large::digest(&text);
+        let parts = super::large::split(&text, super::large::WRITE_PART_BYTES);
+        for (index, part) in parts.iter().enumerate() {
+            let () = self.remote(
+                "stage_ledger_row",
+                vec![
+                    to_value(&digest)?,
+                    to_value(index)?,
+                    to_value(parts.len())?,
+                    to_value(part)?,
+                ],
+            )?;
+        }
+        self.remote("write_staged_session_rows_over", vec![to_value(&digest)?])
+    }
+    fn sessions_written(
+        &self,
+    ) -> Result<Option<crate::domain::ledger::session::written::SessionsWritten>> {
+        self.remote("ledger_sessions_written", vec![])
     }
     // A row past one answer whole is read in parts.
     fn ledger_row(

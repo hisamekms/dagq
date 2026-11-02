@@ -140,6 +140,27 @@ pub trait LedgerStore {
         row: &LedgerRow,
         read: Option<&LedgerRow>,
     ) -> Result<Option<bool>>;
+    /// Write every row of `rows`, each as [`Self::write_ledger_row_over`]
+    /// writes it over the row it read (its second, `None`: none), and with
+    /// `mark` the store's mark that its session rows record every session
+    /// event up to its position
+    /// ([`crate::domain::ledger::session::written::SessionsWritten`]), in one
+    /// transaction: all of them or none. False, nothing written, when
+    /// another writer wrote one of the rows since it was read; a failure
+    /// part way writes nothing either. What builds the ledger writes the
+    /// session rows a pass changed so, a bounded number at a time, the
+    /// mark with the last of them.
+    fn write_session_rows_over(
+        &self,
+        rows: &[(LedgerRow, Option<LedgerRow>)],
+        mark: Option<&crate::domain::ledger::session::written::SessionsWritten>,
+    ) -> Result<bool>;
+    /// The store's mark of where its session rows record every session
+    /// event up to, if it holds one: a store whose rows were written one by
+    /// one holds none ([`crate::domain::ledger::session::written::written_through`]).
+    fn sessions_written(
+        &self,
+    ) -> Result<Option<crate::domain::ledger::session::written::SessionsWritten>>;
     /// The row of `kind` and `key`, if there is one.
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
     /// Every row of `kind`, by key.

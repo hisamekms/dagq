@@ -16,6 +16,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{Map, Value, json};
 
+pub mod written;
+
 use super::{LEDGER_V, LedgerHead, LedgerKind, LedgerRow, Subject};
 use crate::domain::{
     EventId, EventKind, RunEvent,
@@ -248,7 +250,11 @@ pub fn anchors(rows: &[LedgerRow]) -> Vec<(String, RunEvent)> {
 /// session rows record every session event up to `through`: a row the
 /// store has not written yet, or a record it has not written to a row,
 /// is not in the heads, and a builder going on from `through` misses it.
-/// Which `through` the store has written up to it does not find.
+/// Which `through` the store has written up to it does not find: the
+/// store's mark does ([`written::written_through`], W), and the
+/// rows held at W ([`Self::written_at`]) are the fold of every event.
+/// Going on from W is safe whatever the store wrote after its mark: the
+/// records after W are cut here, and the builder reads those events again.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionsHeld {
     pub through: EventId,
@@ -258,6 +264,10 @@ pub struct SessionsHeld {
     /// The keys of the rows not settled at `through` or folded by an
     /// older version.
     pub open: Vec<String>,
+    /// Whether `through` is the store's mark (W): a builder that takes the
+    /// rows held keeps the fold of every session event, and writes the
+    /// mark again ([`super::builder::Builder::sessions_mark`]).
+    pub written: bool,
 }
 
 impl SessionsHeld {
@@ -302,6 +312,20 @@ impl SessionsHeld {
             .collect();
         held.book = SessionBook::from_heads(&cut, &anchors);
         held
+    }
+
+    /// The rows held at `written`, the position the store's mark gives
+    /// ([`written::written_through`]), as [`Self::at`] holds them:
+    /// those of the fold of every session event up to it.
+    pub fn written_at(
+        heads: &[LedgerHead],
+        anchors: &[(String, RunEvent)],
+        written: EventId,
+    ) -> Self {
+        Self {
+            written: true,
+            ..Self::at(heads, anchors, written)
+        }
     }
 
     /// The ids of the records of the rows not settled, those what builds

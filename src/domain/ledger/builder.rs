@@ -79,12 +79,25 @@
 //!   and the waits that move over its time ready after it settled leave it
 //!   as it was ([`keeps_settled`]). A row ended and not settled yet is
 //!   marked again when its grace is over ([`Builder::due`]).
-//! - **Bounds**: at most [`WRITES_PER_PASS`] rows written and
-//!   [`CHECKS_PER_PASS`] marks looked at per pass; the rest stay marked for
-//!   the next pass, which starts at them and goes round ([`Builder::take`]),
-//!   so that no mark waits behind those marked again each pass (more tasks
-//!   ready under a slots full than a pass writes, which each event of its
-//!   supervisor marks and makes dirty).
+//! - **Bounds**: at most [`WRITES_PER_PASS`] run, task, queue and node
+//!   rows written and [`CHECKS_PER_PASS`] of their marks looked at per
+//!   pass; the rest stay marked for the next pass, which starts at them and
+//!   goes round ([`Builder::take`]), so that no mark waits behind those
+//!   marked again each pass (more tasks ready under a slots full than a
+//!   pass writes, which each event of its supervisor marks and makes
+//!   dirty). The session rows are not bounded so: a pass folds every one
+//!   marked ([`Builder::take_sessions`]) and writes all those that changed,
+//!   [`SESSION_ROWS_PER_WRITE`] rows and [`SESSION_BYTES_PER_WRITE`] a
+//!   transaction, the last with the store's
+//!   mark of its position ([`super::session::written`]): a write that fails
+//!   or a fold behind the stored row leaves its rows marked and no mark. Only a builder whose session book is the fold of every
+//!   session event (from its cursors' start, or gone on from the mark)
+//!   writes the mark, and only when no session row is left marked
+//!   ([`Builder::sessions_mark`]), so that the store's session rows record
+//!   every session event up to the position the mark gives (W,
+//!   [`super::session::written::written_through`]). A store with no mark gives
+//!   none: a builder folds the session events from its cursors' start,
+//!   and its writes fill what the rows lack and write the mark.
 //! - **What a pass reads**: the events after its cursor, [`EVENTS_PER_READ`]
 //!   at a time, and the events of each run and task it folds. It folds at
 //!   its clock's time, or at the latest event's it read when that is later
@@ -114,8 +127,9 @@
 //!   made of the session events up to that position
 //!   ([`Builder::restore_sessions`]); a builder going on from there writes
 //!   the rows of every event only when the store's session rows record
-//!   every session event up to it, and which position that is the rows'
-//!   heads do not say. So is which queue row each is a
+//!   every session event up to it, which the rows' heads do not say and
+//!   the store's mark does (W, held at by [`SessionsHeld::written_at`]).
+//!   So is which queue row each is a
 //!   record of ([`QueueBook`]: the findings, alerts and streams open, what
 //!   the supervisors' lives reach, the landing slot's attempts and what
 //!   each read up to), from the queue rows' heads with their times,
@@ -157,7 +171,7 @@ use super::{
     node::{self, BUCKET_SECS},
     owner::{self, Owner},
     queue::{self, QueueBook},
-    session::{SessionBook, SessionsHeld},
+    session::{SessionBook, SessionsHeld, written::SessionsWritten},
     settle::{self, SETTLE_GRACE_MS},
 };
 use crate::domain::environment::{self, CountedSample, Folded, RunResource, Window};
@@ -177,6 +191,18 @@ pub const INTERVAL_SECS: u64 = 60;
 /// task before the switch takes several passes, and no pass holds the
 /// queue long.
 pub const WRITES_PER_PASS: usize = 200;
+
+/// How many session rows one write of them holds at most, each write one
+/// transaction: a pass writes every session row it changed, in as many
+/// writes as it takes, so that none holds the queue long or crosses the
+/// queue service in a request past its bounds.
+pub const SESSION_ROWS_PER_WRITE: usize = 200;
+
+/// How many bytes of the session rows' text one write of them holds at
+/// most (a row past it alone is a write of its own): well within what the
+/// queue service takes of one write staged in parts (256 MiB), so that a
+/// write of rows each of which crosses alone crosses too.
+pub const SESSION_BYTES_PER_WRITE: usize = 32 << 20;
 
 /// How many marks one pass looks at at most (a mark of a row the store
 /// already holds up to date is looked at and not written).
@@ -854,6 +880,19 @@ pub struct Builder {
     /// Whether a pass swept the session and queue rows it built from its
     /// cursors' start ([`Self::sweep`]).
     swept: bool,
+    /// Whether its session book and records are the fold of every session
+    /// event up to its cursor: from its cursors' start, or gone on from the
+    /// store's mark ([`SessionsHeld::written`]); not once made again from
+    /// the rows' heads at a position not the mark's. Only then does it
+    /// write the mark ([`Self::sessions_mark`]).
+    sessions_whole: bool,
+    /// The position of the last mark it wrote or went on from.
+    sessions_marked: Option<EventId>,
+    /// How far its session book folds the events: from its cursors' start
+    /// or the position it went on from, moved only as it reads the events
+    /// ([`Self::mark_events`]); a cursor set past it otherwise leaves the
+    /// book short of the events up to it, and it writes no mark.
+    sessions_through: EventId,
 }
 
 impl Default for Builder {
@@ -878,6 +917,9 @@ impl Default for Builder {
             kept: Arc::default(),
             rules: None,
             swept: false,
+            sessions_whole: true,
+            sessions_marked: None,
+            sessions_through: EventId::new(0),
         }
     }
 }
@@ -891,6 +933,7 @@ impl Builder {
     /// with time ready ([`Self::mark_ready`]): the wait it starts or ends
     /// may fall on a time ready that ended, which reads no other move.
     pub fn mark_events(&mut self, new: &[RunEvent]) {
+        let folds_on = self.sessions_through == self.events;
         let kept = Arc::make_mut(&mut self.kept);
         let mut waits = WaitsMoved::default();
         // A move of a wait timed before an event read before it.
@@ -930,6 +973,9 @@ impl Builder {
             if let Some(at) = timestamp_millis(&event.created_at) {
                 self.read_ms = self.read_ms.max(at);
             }
+        }
+        if folds_on {
+            self.sessions_through = self.events;
         }
         if waits.reopened || out_of_order {
             self.mark_ready(true);
@@ -1397,6 +1443,7 @@ impl Builder {
     /// events after its cursor go to the rows and rounds the fold of every
     /// event gives them.
     pub fn restore_session_rows(&mut self, book: SessionBook) {
+        self.sessions_whole = false;
         Arc::make_mut(&mut self.kept).session_rows = book;
     }
 
@@ -1454,13 +1501,19 @@ impl Builder {
     /// the cursor is tracked and settles as the fold of every event's does,
     /// and one folded by an older version is folded again ([`writes`]);
     /// a builder with marks refuses a queue book
-    /// ([`Self::restore_queue_rows`]), so that is taken first.
+    /// ([`Self::restore_queue_rows`]), so that is taken first. Held at the
+    /// store's mark ([`SessionsHeld::written_at`]) it keeps the fold of
+    /// every session event and writes the mark again as it goes on; held
+    /// at any other position it writes no mark ([`Self::sessions_mark`]).
     pub fn restore_sessions(&mut self, held: SessionsHeld, records: Vec<RunEvent>) {
         self.marks.extend(
             held.open
                 .iter()
                 .map(|key| Target::Row(LedgerKind::Session, key.clone())),
         );
+        self.sessions_whole = held.written;
+        self.sessions_marked = held.written.then_some(held.through);
+        self.sessions_through = held.through;
         Arc::make_mut(&mut self.kept).restore_sessions(held, records);
     }
 
@@ -1483,6 +1536,52 @@ impl Builder {
             id: events.first()?.id,
         };
         (from.ms < held.ms || from.id < held.id).then_some((held, from))
+    }
+
+    /// Take every session row marked, whatever [`CHECKS_PER_PASS`] and
+    /// [`WRITES_PER_PASS`]: a pass folds and writes them all,
+    /// [`SESSION_ROWS_PER_WRITE`] a transaction, the last with the mark
+    /// ([`Self::sessions_mark`]), so that the store's session rows record
+    /// every session event up to the position the mark gives. Those it does not write go back
+    /// ([`Self::keep`]).
+    pub fn take_sessions(&mut self) -> Vec<Target> {
+        let sessions: Vec<Target> = self
+            .marks
+            .iter()
+            .filter(|target| matches!(target, Target::Row(LedgerKind::Session, _)))
+            .cloned()
+            .collect();
+        for target in &sessions {
+            self.marks.remove(target);
+        }
+        sessions
+    }
+
+    /// The mark of its cursor ([`SessionsWritten`]) a pass writes with its
+    /// session rows: only while its session book and records are the fold
+    /// of every session event (from its cursors' start, or gone on from
+    /// the store's mark, its cursor moved only as it read the events since),
+    /// no session row is left
+    /// marked or to be built (all it changed are written or the store
+    /// holds them as folded), and not when it wrote the mark of its cursor
+    /// already.
+    pub fn sessions_mark(&self) -> Option<SessionsWritten> {
+        let left = self.rows_after.is_some()
+            || !self.touched.is_empty()
+            || self
+                .marks
+                .iter()
+                .any(|target| matches!(target, Target::Row(LedgerKind::Session, _)));
+        (self.sessions_whole
+            && self.sessions_through == self.events
+            && !left
+            && self.sessions_marked != Some(self.events))
+        .then(|| SessionsWritten::at(self.events))
+    }
+
+    /// Note that the store holds `mark` now, written with the session rows.
+    pub fn wrote_sessions_mark(&mut self, mark: SessionsWritten) {
+        self.sessions_marked = Some(mark.through);
     }
 
     /// The rows of `rows` (those [`Self::rows_to_build`] names) whose
