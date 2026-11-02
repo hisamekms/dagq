@@ -517,7 +517,9 @@ pub struct JobOptions {
     pub log: PathBuf,
     /// A shell command in place of `cargo build --release --locked -p dagq`
     /// (tests), run in the checkout with the variable of
-    /// [`UpdatePaths::target_env`] set to [`UpdatePaths::target`].
+    /// [`UpdatePaths::target_env`] set to [`UpdatePaths::target`]. Like
+    /// cargo, it replaces `release/dagq` rather than writing over it: the
+    /// last build's binary may still run, and Linux refuses the write.
     pub build_command: Option<String>,
     /// The e2e the build passes before it is put in place (ADR-t963-1
     /// decision 1), run in the checkout building into

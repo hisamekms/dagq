@@ -758,9 +758,14 @@ for a in \"$@\"; do if [ \"$a\" = supervise ]; then echo 'broken build' >&2; exi
 exec {quoted_bin} \"$@\"\n"
         ),
     );
+    // The copy replaces the last build's binary (by a rename) rather than
+    // writing over it, as cargo does: a process of it may still run (the install probe's throwaway
+    // service as it exits), and Linux refuses a write over a running
+    // binary (ETXTBSY), which failed the broken build at its build stage.
     let build = format!(
         "mkdir -p \"$CARGO_TARGET_DIR/release\" && if [ -f src/broken ]; then cp {} \
-\"$CARGO_TARGET_DIR/release/dagq\"; else cp {quoted_bin} \"$CARGO_TARGET_DIR/release/dagq\"; fi",
+\"$CARGO_TARGET_DIR/release/dagq.new\"; else cp {quoted_bin} \"$CARGO_TARGET_DIR/release/dagq.new\"; fi \
+&& mv -f \"$CARGO_TARGET_DIR/release/dagq.new\" \"$CARGO_TARGET_DIR/release/dagq\"",
         crate::common::shell_path(&broken)
     );
     let fixed = dir.path().join("bin").join("dagq");
@@ -945,7 +950,9 @@ exec {quoted_bin} \"$@\"\n"
     });
     let failed = updates()
         .into_iter()
-        .find(|u| u.kind == EventKind::UpdateFailed)
+        .find(|u| {
+            u.kind == EventKind::UpdateFailed && u.payload["commit"] == broken_commit.as_str()
+        })
         .unwrap();
     let assert_supervisor_actor = |kind: EventKind, commit: &str| {
         let event = updates()
