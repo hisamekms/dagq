@@ -279,6 +279,20 @@ pub trait Spawner: Send + Sync {
     fn spawn(&self, command: &CommandSpec, streams: Streams<'_>) -> Result<Box<dyn Spawned>>;
 }
 
+/// A write changed no leader row: takeover fenced this caller before it
+/// wrote anything. The caller may resend to the current service; this is
+/// reported as `not_leader` rather than a possibly committed write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotLeader;
+
+impl fmt::Display for NotLeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("not_leader: leadership is changing; the write may be resent")
+    }
+}
+
+impl std::error::Error for NotLeader {}
+
 /// How long a connection to the queue waits for another connection's
 /// write lock before its statement fails as busy.
 pub const QUEUE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);

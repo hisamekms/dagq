@@ -177,10 +177,11 @@ impl SqliteQueue {
     /// Fill the message of the landed commit `id` when it still has none:
     /// how many were filled (0 or 1).
     pub fn fill_commit_message(&mut self, id: i64, message: &str) -> Result<usize> {
-        Ok(self.conn.execute(
+        self.write_statement(
+            "fill_commit_message",
             "UPDATE landed_commits SET message = ?2 WHERE id = ?1 AND message IS NULL",
             params![id, message],
-        )?)
+        )
     }
 }
 

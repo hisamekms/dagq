@@ -24,10 +24,11 @@ impl SqliteQueue {
     /// Refresh every lease this supervisor holds. Zero rows is not an error:
     /// an idle supervisor owns nothing.
     pub fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize> {
-        Ok(self.conn.execute(
+        self.write_statement(
+            "heartbeat_leases",
             "UPDATE run_leases SET heartbeat_at=?2 WHERE token=?1",
             params![token, self.generators.clock.now()],
-        )?)
+        )
     }
 
     /// One heartbeat of a process identified by `token`: its registration
@@ -130,7 +131,8 @@ impl SqliteQueue {
         workspace_id: Option<&str>,
     ) -> Result<()> {
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "set_supervisor_mode",
                 "UPDATE supervisors SET mode=?2, workspace_id=?3 WHERE token=?1",
                 params![token, mode.as_str(), workspace_id],
             )? == 1,
@@ -145,10 +147,11 @@ impl SqliteQueue {
     /// ([`Self::prune_supervisor`]). Leases are untouched; a missing row is
     /// not an error.
     pub fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM supervisors WHERE token=?1", [token])?
-            == 1)
+        Ok(self.write_statement(
+            "deregister_supervisor",
+            "DELETE FROM supervisors WHERE token=?1",
+            [token],
+        )? == 1)
     }
 
     /// Remove the registration of `token` and record the queue event of
@@ -187,7 +190,8 @@ impl SqliteQueue {
     /// (ADR-0045 decision 10): its process execs another binary when asked.
     pub fn accept_handoff(&self, token: &LeaseToken) -> Result<()> {
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "accept_handoff",
                 "UPDATE supervisors SET handoff_accepted=1 WHERE token=?1",
                 [token],
             )? == 1,
@@ -200,7 +204,8 @@ impl SqliteQueue {
     /// short steps. `false` when it is not registered or does not take a
     /// handoff.
     pub fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        Ok(self.conn.execute(
+        Ok(self.write_statement(
+            "request_handoff",
             "UPDATE supervisors SET handoff_binary=?2, handoff_requested_at=?3
              WHERE token=?1 AND handoff_accepted=1",
             params![token, binary, self.generators.clock.now()],
@@ -210,7 +215,8 @@ impl SqliteQueue {
     /// Withdraw the request that the supervisor `token` exec `binary`, if
     /// it has not taken it yet; `false` when there was none.
     pub fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        Ok(self.conn.execute(
+        Ok(self.write_statement(
+            "cancel_handoff",
             "UPDATE supervisors SET handoff_binary=NULL, handoff_requested_at=NULL
              WHERE token=?1 AND handoff_binary=?2",
             params![token, binary],
@@ -223,7 +229,8 @@ impl SqliteQueue {
     /// request, which also tells a waiting `hand_off` that the exec is in
     /// progress rather than over.
     pub fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        Ok(self.conn.execute(
+        Ok(self.write_statement(
+            "take_handoff",
             "UPDATE supervisors SET handoff_binary=NULL, handoff_requested_at=NULL,
                     handoff_accepted=0
              WHERE token=?1 AND handoff_binary=?2",
@@ -306,7 +313,8 @@ impl SqliteQueue {
     /// (ADR-0045 decision 17).
     pub fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()> {
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "set_auto_update",
                 "UPDATE supervisors SET auto_update=?2 WHERE token=?1",
                 params![token, i64::from(enabled)],
             )? == 1,
@@ -325,7 +333,8 @@ impl SqliteQueue {
         source: Option<SettingSource>,
     ) -> Result<()> {
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "set_max_load",
                 "UPDATE supervisors SET max_load=?2, max_load_source=?3 WHERE token=?1",
                 params![token, max_load, source.map(SettingSource::as_str)],
             )? == 1,
@@ -341,14 +350,24 @@ impl SqliteQueue {
         token: &LeaseToken,
         providers: &[ProviderCheck],
     ) -> Result<()> {
-        write_providers(&self.conn, token, providers)
+        {
+            let tx = self.write_tx("write_providers")?;
+            write_providers(&tx, token, providers)?;
+            tx.commit()?;
+            Ok(())
+        }
     }
 
     /// Record the supervisor `token`'s `parallel`, `max_waiting`,
     /// `runtime_planners` and `claim_spacing` in use (ADR-0062 decision 7,
     /// task 941, ADR-t1479-1) and where each comes from (task 698).
     pub fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
-        write_slot_limits(&self.conn, token, limits)
+        {
+            let tx = self.write_tx("write_slot_limits")?;
+            write_slot_limits(&tx, token, limits)?;
+            tx.commit()?;
+            Ok(())
+        }
     }
 
     /// Every registered supervisor, oldest registration first, whether its
@@ -687,7 +706,8 @@ impl SqliteQueue {
     pub fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()> {
         // Registration is immutable and a run ID is never reused.
         assert_wrapper(&self.conn, id, pid)?;
-        self.conn.execute(
+        self.write_statement(
+            "heartbeat_wrapper",
             "UPDATE run_processes SET heartbeat_at=?2 WHERE run_id=?1 AND exited_at IS NULL",
             params![id, self.generators.clock.now()],
         )?;

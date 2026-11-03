@@ -186,7 +186,12 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<()> {
         match run {
-            Some(id) => run_event(&self.conn, id, EventKind::BackendCallFailed, payload),
+            Some(id) => {
+                let tx = self.write_tx("record_backend_failure")?;
+                run_event(&tx, id, EventKind::BackendCallFailed, payload)?;
+                tx.commit()?;
+                Ok(())
+            }
             None => self
                 .record_queue_event(EventKind::BackendCallFailed, payload)
                 .map(drop),

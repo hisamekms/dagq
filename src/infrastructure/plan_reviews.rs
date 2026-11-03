@@ -1012,7 +1012,8 @@ impl PlanReviewStore for SqliteQueue {
     /// work ([`super::plan_requests::REVISE_WAITS_FOR_GOAL`]): it waits.
     fn claim_revise(&mut self, proposal_id: ProposalId) -> Result<bool> {
         let now = self.generators.clock.now();
-        Ok(self.conn.execute(
+        Ok(self.write_statement(
+            "claim_revise",
             &format!(
                 "UPDATE proposals SET revise_sent_at=?2, revise_planner_id=NULL
                  WHERE id=?1 AND status='revising' AND revise_sent_at IS NULL

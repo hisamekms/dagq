@@ -1199,7 +1199,7 @@ mod tests {
                 }),
             )
             .unwrap();
-            let tx = WriteTx::write(&conn, "t", std::time::Duration::MAX).unwrap();
+            let tx = WriteTx::leader(&conn, "t", std::time::Duration::MAX).unwrap();
             let session =
                 remove_session_rows(&tx, "s", BEFORE, ROWS_PER_TRANSACTION, &mut candidates)
                     .unwrap();

@@ -803,7 +803,7 @@ fn connection(use_case: UseCase, params: &Value) -> Connection {
 
 /// The answer of a use case's `result`: a refusal of the policy as
 /// `authorization_denied`, params that do not read as `bad_request`, and
-/// any other failure as `failed`, with its
+/// a fenced write as retryable `not_leader`, and any other failure as `failed`, with its
 /// [`crate::domain::queue_service::FailureKind`] when the caller
 /// tells it apart.
 fn respond(result: Result<Value>) -> ServiceResponse {
@@ -828,6 +828,9 @@ fn respond(result: Result<Value>) -> ServiceResponse {
                     .is_some() =>
             {
                 ServiceResponse::failure(ServiceErrorCode::BadRequest, format!("{error:#}"))
+            }
+            None if error.downcast_ref::<super::NotLeader>().is_some() => {
+                ServiceResponse::failure(ServiceErrorCode::NotLeader, format!("{error:#}"))
             }
             None => {
                 let mut response =
@@ -5789,5 +5792,20 @@ mod tests {
         let supervisor = ActorContext::instance(ActorRole::Supervisor, 7);
         authorize_supervisor(&mut queue, &supervisor, true).unwrap();
         assert!(queue.denials.borrow().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod write_leader_tests {
+    use super::*;
+
+    #[test]
+    fn a_fenced_write_answers_not_leader_even_with_error_context() {
+        let response = respond(Err(
+            anyhow::Error::new(crate::application::NotLeader).context("write task")
+        ));
+        let error = response.error.unwrap();
+        assert_eq!(error.code, ServiceErrorCode::NotLeader);
+        assert!(error.message.contains("may be resent"));
     }
 }

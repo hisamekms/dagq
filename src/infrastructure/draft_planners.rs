@@ -780,7 +780,8 @@ impl SqliteQueue {
     pub fn set_follow_up_depth(&mut self, task: TaskId, depth: i64) -> Result<()> {
         ensure!(depth >= 0, "follow_up_depth must not be negative");
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "set_follow_up_depth",
                 "UPDATE tasks SET follow_up_depth=?2 WHERE id=?1",
                 params![task, depth],
             )? == 1,
@@ -859,7 +860,12 @@ impl DraftPlannerStore for SqliteQueue {
         SqliteQueue::close_planner_answer(self, ask, why)
     }
     fn record_task_event(&mut self, task: TaskId, kind: EventKind, payload: Value) -> Result<()> {
-        event(&self.conn, task, None, kind, payload)
+        {
+            let tx = self.write_tx("draft_planner_event")?;
+            event(&tx, task, None, kind, payload)?;
+            tx.commit()?;
+            Ok(())
+        }
     }
     fn exhausted_drafts(&self) -> Result<Vec<Task>> {
         SqliteQueue::exhausted_drafts(self)

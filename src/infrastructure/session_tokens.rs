@@ -41,13 +41,22 @@ use crate::domain::{
 /// A transcript of an open span that cannot be read or counted now is left
 /// for the next time; one of a closed span is cut as not measured, once. One span
 /// that fails holds back no other. Returns the cuts recorded.
-pub(super) fn record_session_tokens(conn: &Connection, write_hold_warn: Duration) -> Result<usize> {
+pub(super) fn record_session_tokens(
+    conn: &Connection,
+    write_hold_warn: Duration,
+    identity: &super::write_leader::WriteIdentity,
+) -> Result<usize> {
     let now = now(conn)?;
-    record_at(conn, write_hold_warn, &now)
+    record_at(conn, write_hold_warn, identity, &now)
 }
 
 /// [`record_session_tokens`] at `now` (in the form of `created_at`).
-fn record_at(conn: &Connection, write_hold_warn: Duration, now: &str) -> Result<usize> {
+fn record_at(
+    conn: &Connection,
+    write_hold_warn: Duration,
+    identity: &super::write_leader::WriteIdentity,
+    now: &str,
+) -> Result<usize> {
     let now = rfc3339_millis(now).context("the time now does not parse")?;
     let mut cuts = Vec::new();
     for span in open_hook_spans(conn)? {
@@ -78,9 +87,16 @@ fn record_at(conn: &Connection, write_hold_warn: Duration, now: &str) -> Result<
             continue;
         };
         let (opened, kind) = (cut.span.opened_event_id, cut.span.kind().to_owned());
-        match write(conn, write_hold_warn, &cut) {
+        match write(conn, write_hold_warn, identity, &cut) {
             Ok(true) => recorded += 1,
             Ok(false) => {}
+            Err(error)
+                if error
+                    .downcast_ref::<crate::application::NotLeader>()
+                    .is_some() =>
+            {
+                return Err(error);
+            }
             Err(error) => info!("session span {opened} ({kind}): tokens not cut now: {error:#}"),
         }
     }
@@ -148,8 +164,13 @@ fn prepare(conn: &Connection, span: OpenSpan, start: i64, at: i64, last: bool) -
 /// span's cut that adds nothing is not recorded (an idle inbox writes no
 /// event each hour), so the next pass tries again. `false` when nothing was
 /// recorded.
-fn write(conn: &Connection, write_hold_warn: Duration, cut: &Cut) -> Result<bool> {
-    let tx = WriteTx::write(conn, "session_tokens_cut", write_hold_warn)?.recorded();
+fn write(
+    conn: &Connection,
+    write_hold_warn: Duration,
+    identity: &super::write_leader::WriteIdentity,
+    cut: &Cut,
+) -> Result<bool> {
+    let tx = WriteTx::write(conn, "session_tokens_cut", write_hold_warn, identity)?.recorded();
     let opened = cut.span.opened_event_id;
     let earlier = recorded_cuts(&tx, opened)?;
     let stale = if cut.last {
@@ -298,6 +319,10 @@ fn closed_without_final_cut(conn: &Connection, after: i64) -> Result<Vec<(OpenSp
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn identity(conn: &Connection) -> super::super::write_leader::WriteIdentity {
+        super::super::write_leader::WriteIdentity::read(conn).unwrap()
+    }
+
     use crate::infrastructure::sqlite::WRITE_HOLD_WARN;
     use crate::{
         domain::{
@@ -391,8 +416,13 @@ mod tests {
         let db = dir.path().join("q.db");
         let queue = SqliteQueue::init(&db).unwrap();
         let conn = &queue.conn;
-        let opened = record_hook(conn, WRITE_HOLD_WARN, &hook(dir.path(), true, INBOX, "s"))
-            .unwrap()["opened"]
+        let opened = record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &identity(conn),
+            &hook(dir.path(), true, INBOX, "s"),
+        )
+        .unwrap()["opened"]
             .as_i64()
             .unwrap();
         set_time(conn, opened, "2026-10-01T22:00:00.000Z");
@@ -403,11 +433,23 @@ mod tests {
         assistant(dir.path(), "s", "m3", "2026-10-02T00:40:00.000Z", (7, 7));
         // Not an hour since it opened.
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-01T22:59:59.999Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-01T22:59:59.999Z"
+            )
+            .unwrap(),
             0
         );
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-01T23:30:00.000Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-01T23:30:00.000Z"
+            )
+            .unwrap(),
             1
         );
         drop(queue);
@@ -416,15 +458,33 @@ mod tests {
         let queue = SqliteQueue::init(&db).unwrap();
         let conn = &queue.conn;
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-02T00:00:00.000Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-02T00:00:00.000Z"
+            )
+            .unwrap(),
             0
         );
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-02T00:45:00.000Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-02T00:45:00.000Z"
+            )
+            .unwrap(),
             1
         );
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-02T00:45:00.000Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-02T00:45:00.000Z"
+            )
+            .unwrap(),
             0
         );
         // A cut prepared at a time a cut reached already writes nothing.
@@ -432,7 +492,7 @@ mod tests {
         let start = span.opened_ms.unwrap();
         let at = rfc3339_millis("2026-10-02T00:45:00.000Z").unwrap();
         let stale = prepare(conn, span, start, at, false).unwrap();
-        assert!(!write(conn, WRITE_HOLD_WARN, &stale).unwrap());
+        assert!(!write(conn, WRITE_HOLD_WARN, &identity(conn), &stale).unwrap());
         let recorded = cuts(conn);
         assert_eq!(recorded.len(), 2);
         assert_eq!(recorded[0].payload["at"], "2026-10-01T23:30:00.000Z");
@@ -451,7 +511,13 @@ mod tests {
         assistant(dir.path(), "s", "m4", "2026-10-02T00:50:00.000Z", (1, 1));
         READS.set(0);
         let analysed = crate::domain::transcript::ANALYSED.get();
-        record_hook(conn, WRITE_HOLD_WARN, &hook(dir.path(), false, INBOX, "s")).unwrap();
+        record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &identity(conn),
+            &hook(dir.path(), false, INBOX, "s"),
+        )
+        .unwrap();
         assert_eq!(READS.get(), 0);
         assert_eq!(crate::domain::transcript::ANALYSED.get(), analysed);
         assert_eq!(cuts(conn).len(), 2);
@@ -466,11 +532,23 @@ mod tests {
         assistant(dir.path(), "s", "m5", "2026-10-02T01:05:00.000Z", (50, 50));
         // The cut at the close is due at once, and only once.
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-02T01:01:00.000Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-02T01:01:00.000Z"
+            )
+            .unwrap(),
             1
         );
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-02T03:00:00.000Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-02T03:00:00.000Z"
+            )
+            .unwrap(),
             0
         );
         let recorded = cuts(conn);
@@ -506,7 +584,8 @@ mod tests {
     /// The tokens of the final `session_turns` the supervisor's intake of
     /// the hook's closes writes, in order.
     fn final_turns_tokens(conn: &Connection) -> Vec<(i64, i64)> {
-        crate::infrastructure::sessions::record_open_turns(conn, WRITE_HOLD_WARN).unwrap();
+        crate::infrastructure::sessions::record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn))
+            .unwrap();
         conn.prepare(&format!(
             "SELECT * FROM run_events WHERE kind='session_turns'
                AND {}=1 ORDER BY id",
@@ -527,7 +606,13 @@ mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &queue.conn;
-        record_hook(conn, WRITE_HOLD_WARN, &hook(dir.path(), true, PLANNER, "p")).unwrap();
+        record_hook(
+            conn,
+            WRITE_HOLD_WARN,
+            &identity(conn),
+            &hook(dir.path(), true, PLANNER, "p"),
+        )
+        .unwrap();
         assistant(dir.path(), "p", "m1", "2099-01-01T00:00:00.000Z", (3, 4));
         let span = open_hook_spans(conn).unwrap().remove(0);
         let start = span.opened_ms.unwrap();
@@ -538,7 +623,7 @@ mod tests {
         assert_eq!(READS.get(), 1);
         let before = crate::domain::transcript::ANALYSED.get();
         assert!(before > analysed);
-        assert!(write(conn, WRITE_HOLD_WARN, &cut).unwrap());
+        assert!(write(conn, WRITE_HOLD_WARN, &identity(conn), &cut).unwrap());
         assert_eq!(READS.get(), 1);
         assert_eq!(crate::domain::transcript::ANALYSED.get(), before);
         assert_eq!(io(&cuts(conn)[0].payload), (3, 4));
@@ -546,7 +631,7 @@ mod tests {
         // An hour later with nothing new: no cut.
         let span = open_hook_spans(conn).unwrap().remove(0);
         let idle = prepare(conn, span, start, at + 3_600_000, false).unwrap();
-        assert!(!write(conn, WRITE_HOLD_WARN, &idle).unwrap());
+        assert!(!write(conn, WRITE_HOLD_WARN, &identity(conn), &idle).unwrap());
         assert_eq!(cuts(conn).len(), 1);
     }
 
@@ -562,6 +647,7 @@ mod tests {
         let opened = record_hook(
             conn,
             WRITE_HOLD_WARN,
+            &identity(conn),
             &hook(dir.path(), true, INBOX, "gone"),
         )
         .unwrap()["opened"]
@@ -569,12 +655,19 @@ mod tests {
             .unwrap();
         set_time(conn, opened, "2026-10-01T00:00:00.000Z");
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-01T02:00:00.000Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-01T02:00:00.000Z"
+            )
+            .unwrap(),
             0
         );
         record_hook(
             conn,
             WRITE_HOLD_WARN,
+            &identity(conn),
             &hook(dir.path(), false, INBOX, "gone"),
         )
         .unwrap();
@@ -584,15 +677,33 @@ mod tests {
         set_time(conn, closed, "2026-10-01T03:00:00.000Z");
         // A week and more after the close: no cut.
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-08T03:00:00.001Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-08T03:00:00.001Z"
+            )
+            .unwrap(),
             0
         );
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-01T04:00:00.000Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-01T04:00:00.000Z"
+            )
+            .unwrap(),
             1
         );
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-01T05:00:00.000Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-01T05:00:00.000Z"
+            )
+            .unwrap(),
             0
         );
         let recorded = cuts(conn);
@@ -620,6 +731,7 @@ mod tests {
             let opened = record_hook(
                 conn,
                 WRITE_HOLD_WARN,
+                &identity(conn),
                 &hook(dir.path(), true, INBOX, session),
             )
             .unwrap()["opened"]
@@ -649,6 +761,7 @@ mod tests {
                     write(
                         conn,
                         WRITE_HOLD_WARN,
+                        &identity(conn),
                         &prepare(conn, b, start, at, false).unwrap()
                     )
                     .unwrap()
@@ -657,6 +770,7 @@ mod tests {
             record_hook(
                 conn,
                 WRITE_HOLD_WARN,
+                &identity(conn),
                 &hook(dir.path(), false, INBOX, session),
             )
             .unwrap();
@@ -684,7 +798,13 @@ mod tests {
             }
         }
         assert_eq!(
-            record_at(conn, WRITE_HOLD_WARN, "2026-10-01T04:00:00.000Z").unwrap(),
+            record_at(
+                conn,
+                WRITE_HOLD_WARN,
+                &identity(conn),
+                "2026-10-01T04:00:00.000Z"
+            )
+            .unwrap(),
             3
         );
         let recorded = cuts(conn);

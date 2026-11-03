@@ -162,17 +162,21 @@ impl SqliteQueue {
         origin: PlannerOrigin,
         proposal: Option<ProposalId>,
     ) -> Result<PlannerSession> {
-        self.planner(PlannerId::new(super::sqlite::insert_id(
-            &self.conn,
+        let tx = self.write_tx("open_planner")?;
+        let id = PlannerId::new(super::sqlite::insert_id(
+            &tx,
             "INSERT INTO planners(origin, proposal_id, created_at) VALUES (?1, ?2, ?3)",
             params![origin.as_str(), proposal, self.generators.clock.now()],
-        )?))
+        )?);
+        tx.commit()?;
+        self.planner(id)
     }
 
     /// The UUID of the workspace cmux opened for the planner.
     pub fn planner_workspace_created(&self, id: PlannerId, workspace_id: &str) -> Result<()> {
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "planner_workspace_created",
                 "UPDATE planners SET workspace_id=?2 WHERE id=?1 AND workspace_id IS NULL",
                 params![id, workspace_id],
             )? == 1,
@@ -227,7 +231,8 @@ impl SqliteQueue {
     /// its session starts; interactive is left as the column's NULL.
     pub fn set_planner_route(&self, id: PlannerId, route: PlannerRoute) -> Result<()> {
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "set_planner_route",
                 "UPDATE planners SET route=?2 WHERE id=?1 AND wrapper_pid IS NULL",
                 params![
                     id,
@@ -255,7 +260,8 @@ impl SqliteQueue {
     /// one session: a second wrapper, or one for a closed planner, is refused.
     pub fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()> {
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "register_planner_wrapper",
                 "UPDATE planners SET wrapper_pid=?2, heartbeat_at=?3
                  WHERE id=?1 AND wrapper_pid IS NULL AND closed_at IS NULL",
                 params![id, pid, self.generators.clock.now()],
@@ -272,7 +278,8 @@ impl SqliteQueue {
         agent: u32,
     ) -> Result<()> {
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "register_planner_agent",
                 "UPDATE planners SET agent_pid=?3 WHERE id=?1 AND wrapper_pid=?2",
                 params![id, wrapper_pid, agent],
             )? == 1,
@@ -283,7 +290,8 @@ impl SqliteQueue {
 
     pub fn heartbeat_planner(&self, id: PlannerId, wrapper_pid: u32) -> Result<()> {
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "heartbeat_planner",
                 "UPDATE planners SET heartbeat_at=?3
                  WHERE id=?1 AND wrapper_pid=?2 AND exited_at IS NULL",
                 params![id, wrapper_pid, self.generators.clock.now()],
@@ -296,7 +304,8 @@ impl SqliteQueue {
     /// The planner's agent exited with `exit_code`.
     pub fn planner_exited(&self, id: PlannerId, wrapper_pid: u32, exit_code: i32) -> Result<()> {
         ensure!(
-            self.conn.execute(
+            self.write_statement(
+                "planner_exited",
                 "UPDATE planners SET exit_code=?3, exited_at=?4
                  WHERE id=?1 AND wrapper_pid=?2 AND exited_at IS NULL",
                 params![id, wrapper_pid, exit_code, self.generators.clock.now()],

@@ -334,7 +334,10 @@ impl LedgerStore for SqliteQueue {
     }
 
     fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool> {
-        upsert(&self.conn, row)
+        let tx = self.write_tx("write_ledger_row")?;
+        let changed = upsert(&tx, row)?;
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// Reads the row again and writes under one write lock, so no other

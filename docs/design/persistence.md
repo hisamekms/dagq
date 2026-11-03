@@ -50,7 +50,6 @@ related:
 SQLiteのDBはqueueの正本で、プロセス間の共有と再起動の後の復旧に使う。
 stdoutやsessionの画面は正本にしない。
 runtimeが状態を変えるのは、このDBへの書き込みトランザクションの中だけである。
-列・既定値・eventの欄の意味は定義のそばのコメントが持つ（下の「表」）。
 
 ## 全体の流れ
 
@@ -231,13 +230,15 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
 
 ## Transactions and constraints
 
+- 名前付き入口`WriteTx::write`から`write_leader::fence`を呼ぶ。
+- 全部の書き込みのtransactionは最初の文で係と世代を確かめ、0行なら何も書かずに`not_leader`で拒む（期限は条件に入れない）。
+
 - `BEGIN IMMEDIATE`で状態の変更・依存グラフの検証・claimを直列化する。
   ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#起動とheartbeat)）。
-- queue DBのtransactionは包み`WriteTx`（`infrastructure::sqlite`）の書き込みの入口`write`（`BEGIN IMMEDIATE`）か読み取りの入口`read`（deferred）で始まる。
+- queue DBのtransactionは`WriteTx`（`infrastructure::sqlite`）の入口`write`（immediate）か`read`（deferred）で始まる。
   書き込みと終わりの経路によらず、閾値を超えてwrite lockを握ればwarnし、queueのevent（`queue_write_held_long`）に記録する。
   入口の外の開始（SQLの`BEGIN`を含む）と`TransactionBehavior`の名指しはtest（`src/context_boundaries/write_tx.rs`）が拒む。
-  見方と近似は`WriteTx`・`WriteTxTimes`、欄は`QUEUE_WRITE_HELD_LONG`のdoc commentが持つ。
   eventはlockを放した後に同じ接続で別に短く書き、その失敗は元のtransactionを変えない。
 - 挿入した行のIDは`insert_id`で取り、`last_insert_rowid`は内部の`insert_counted`だけが呼ぶ（[architecture](architecture.md) X4）。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。

@@ -74,6 +74,8 @@ use crate::{
     },
 };
 
+pub use super::write_leader::WriteIdentity;
+
 const APPLICATION_ID: i64 = 0x43545131;
 
 /// How long a [`WriteTx`] may hold the queue's write lock before it warns
@@ -113,7 +115,7 @@ pub struct WriteTxTimes {
     pub wrote: bool,
     /// When its commit or rollback returned.
     pub ended: Duration,
-    /// The rows its write statements through [`WriteTx::execute`] and
+    /// Business rows (excluding the leader fence) its write statements through [`WriteTx::execute`] and
     /// [`WriteTx::wrote`] changed; those through the transaction it derefs
     /// to are not counted.
     pub rows: usize,
@@ -252,9 +254,10 @@ pub fn held_long_payload(
 /// connections it writes through. A failure of that record is a WARN and
 /// changes nothing of the transaction's result.
 ///
-/// It begins at one of two entries, [`WriteTx::write`] for a transaction
-/// that writes and [`WriteTx::read`] for one that reads; nothing else
-/// begins one (`context_boundaries::write_tx`). A write one holds the lock
+/// Ordinary transactions begin at [`WriteTx::write`] or [`WriteTx::read`].
+/// The leader's conditional mutations and schema migration use
+/// [`WriteTx::leader`] for their own first update; the boundary test restricts
+/// its callers (`context_boundaries::write_tx`). A write one holds the lock
 /// from its `BEGIN`. A read one has it once a write statement took it: the first through
 /// [`WriteTx::execute`] tells when, when no write before it took the lock;
 /// one through the transaction it derefs to, reported with
@@ -271,15 +274,35 @@ pub struct WriteTx<'c> {
     wrote: std::cell::Cell<bool>,
     rows: std::cell::Cell<usize>,
     record: bool,
+    identity: Option<WriteIdentity>,
 }
 
 impl<'c> WriteTx<'c> {
     /// The write entry: begin `name` on `conn` as `BEGIN IMMEDIATE`, which
     /// has the write lock when it returns, so a writer that loses the race
     /// waits (or is told busy) at its `BEGIN` and not at its first write.
-    /// For every transaction that writes. It warns of a long hold and
-    /// records none until [`WriteTx::recorded`].
+    /// Its first statement fences `identity` and extends its lease; a
+    /// mismatch rolls back and returns `NotLeader`. Only the leader port
+    /// and schema bootstrap/migration use their own conditional first update.
+    /// It warns of a long hold and records none until [`WriteTx::recorded`].
     pub fn write(
+        conn: &'c Connection,
+        name: &'static str,
+        threshold: Duration,
+        identity: &WriteIdentity,
+    ) -> Result<Self> {
+        let tx = Self::leader(conn, name, threshold)?;
+        super::write_leader::fence(&tx, identity)?;
+        tx.rows.set(0);
+        let mut tx = tx;
+        tx.identity = Some(identity.clone());
+        Ok(tx)
+    }
+
+    /// Unfenced start only for the leader port's conditional mutations and
+    /// schema bootstrap/migration, which supply their own first statement.
+    /// The boundary test restricts every call to these implementations.
+    pub(super) fn leader(
         conn: &'c Connection,
         name: &'static str,
         threshold: Duration,
@@ -301,9 +324,9 @@ impl<'c> WriteTx<'c> {
     }
 
     /// Begin `name` on `conn` as `behavior`: the one place a queue DB
-    /// transaction begins, reached only through [`WriteTx::write`] and
-    /// [`WriteTx::read`]. An immediate one has the lock when its `BEGIN`
-    /// returns.
+    /// transaction begins, reached through [`WriteTx::leader`] (the write
+    /// entry and conditional leader/schema updates) or [`WriteTx::read`].
+    /// An immediate one has the lock when its `BEGIN` returns.
     fn begin(
         conn: &'c Connection,
         name: &'static str,
@@ -324,6 +347,7 @@ impl<'c> WriteTx<'c> {
             locked: std::cell::Cell::new(locked),
             rows: std::cell::Cell::new(0),
             record: false,
+            identity: None,
         })
     }
 
@@ -516,9 +540,17 @@ impl Drop for WriteTx<'_> {
             return;
         }
         let payload = held_long_payload(self.name, hold, actor.role().as_str(), command, pid);
-        if let Err(error) =
-            record_queue_event_in(self.conn, EventKind::QueueWriteHeldLong, &payload)
-        {
+        let record = || -> Result<()> {
+            let identity = self
+                .identity
+                .as_ref()
+                .context("read transaction has no writer identity")?;
+            let tx = WriteTx::write(self.conn, "queue_write_held_long", Duration::MAX, identity)?;
+            record_queue_event_in(&tx, EventKind::QueueWriteHeldLong, &payload)?;
+            tx.commit()?;
+            Ok(())
+        };
+        if let Err(error) = record() {
             tracing::warn!(
                 transaction = self.name,
                 error = %format_args!("{error:#}"),
@@ -619,6 +651,9 @@ pub struct PlanningRules {
 
 pub struct SqliteQueue {
     pub(super) conn: Connection,
+    /// The opening service's identity; never reread by an ordinary write.
+    /// None only while opening a schema predating the leader table.
+    pub(super) write_identity: Option<WriteIdentity>,
     /// `runs/` next to the database as opened now. A run's directory, worktree,
     /// receipt and log are resolved under it by run ID, never read from the
     /// absolute paths stored at claim time, so a moved queue keeps its runs.
@@ -707,6 +742,7 @@ impl SqliteQueue {
             .state()?
             .context("queue is not initialized; use init first")?
             .check_opens()?;
+        queue.write_identity = Some(WriteIdentity::read(&queue.conn)?);
         queue.conn.pragma_update(None, "journal_mode", "WAL")?;
         Ok(())
     }
@@ -856,18 +892,20 @@ impl SqliteQueue {
             .state()?
             .context("queue is not initialized; use init first")?;
         state.check_floor()?;
-        let pending = pending_migrations(state.version);
-        let backup = if pending.is_empty() {
+        let mut applied_from = state.version;
+        let backup = if pending_migrations(state.version).is_empty() {
             None
         } else {
-            queue.apply(
+            let (backup, version) = queue.apply(
                 state.version,
                 Some(&BreakingGuard {
                     alive,
                     db: path,
                     now,
                 }),
-            )?
+            )?;
+            applied_from = version;
+            backup
         };
         let after = queue
             .state()?
@@ -877,7 +915,7 @@ impl SqliteQueue {
             schema_version: after.version,
             binary_schema_version: BINARY_SCHEMA,
             floor: after.floor,
-            applied: pending,
+            applied: pending_migrations(applied_from),
             backup,
         })
     }
@@ -975,18 +1013,50 @@ impl SqliteQueue {
         self
     }
 
+    /// Use the identity acquired by the service that opens this store.
+    /// Startup owns takeover; ordinary writes retain this value even after
+    /// another service advances the generation.
+    pub fn with_write_identity(mut self, identity: WriteIdentity) -> Self {
+        self.write_identity = Some(identity);
+        self
+    }
+
     /// A transaction that writes, named `name` on this connection
     /// ([`WriteTx::write`], `BEGIN IMMEDIATE`), which records its long hold
     /// on this connection.
     pub fn write_tx(&self, name: &'static str) -> Result<WriteTx<'_>> {
-        Ok(WriteTx::write(&self.conn, name, self.write_hold_warn)?.recorded())
+        Ok(WriteTx::write(
+            &self.conn,
+            name,
+            self.write_hold_warn,
+            self.write_identity
+                .as_ref()
+                .context("queue has no write leader identity")?,
+        )?
+        .recorded())
+    }
+
+    /// A single-statement write still uses the named, fenced transaction
+    /// entry, with exactly the statement's affected-row result.
+    pub(super) fn write_statement<P: rusqlite::Params>(
+        &self,
+        name: &'static str,
+        sql: &str,
+        params: P,
+    ) -> Result<usize> {
+        let tx = self.write_tx(name)?;
+        let changed = tx.execute(sql, params)?;
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// A transaction that reads one snapshot, named `name` on this
     /// connection ([`WriteTx::read`], deferred), which records a long hold
     /// of a write in it on this connection.
     pub fn read_tx(&self, name: &'static str) -> Result<WriteTx<'_>> {
-        Ok(WriteTx::read(&self.conn, name, self.write_hold_warn)?.recorded())
+        let mut tx = WriteTx::read(&self.conn, name, self.write_hold_warn)?.recorded();
+        tx.identity = self.write_identity.clone();
+        Ok(tx)
     }
 
     pub fn generators(&self) -> &Generators {
@@ -1038,8 +1108,12 @@ impl SqliteQueue {
         // symlinked `--db` still names the queue's real `runs/`.
         let db = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let actors = EventActors::attach(&conn, process_actor())?;
+        let write_identity = has_table(&conn, "write_leader")?
+            .then(|| WriteIdentity::read(&conn))
+            .transpose()?;
         Ok(Self {
             conn,
+            write_identity,
             runs_dir: runs_dir(&db),
             generators: clock::system(),
             actors,
@@ -1089,7 +1163,11 @@ impl SqliteQueue {
     /// Apply the migrations after `from` in one transaction; before a
     /// breaking one, what `guard` asks for in the same transaction: the
     /// copy it took, if any.
-    fn apply(&mut self, from: i64, guard: Option<&BreakingGuard>) -> Result<Option<PathBuf>> {
+    fn apply(
+        &mut self,
+        from: i64,
+        guard: Option<&BreakingGuard>,
+    ) -> Result<(Option<PathBuf>, i64)> {
         // Table rebuilds drop and rename tables that other rows reference, so
         // enforcement is off during migration (a no-op inside a transaction)
         // and integrity is checked explicitly before commit.
@@ -1099,22 +1177,47 @@ impl SqliteQueue {
         result
     }
 
+    /// Read the current holder outside BEGIN and retry if it moved before
+    /// the first UPDATE. The callback is empty in production; adapter tests
+    /// interleave a takeover here without threads, waits or the real clock.
+    fn migration_tx(&self, mut after_read: impl FnMut() -> Result<()>) -> Result<WriteTx<'_>> {
+        loop {
+            let identity = has_table(&self.conn, "write_leader")?
+                .then(|| WriteIdentity::read(&self.conn))
+                .transpose()?;
+            after_read()?;
+            let tx = WriteTx::leader(&self.conn, "schema_migrations", self.write_hold_warn)?;
+            if let Some(identity) = identity
+                && !super::write_leader::lock_migration(&tx, &identity)?
+            {
+                drop(tx);
+                continue;
+            }
+            // Before the leader table exists, bootstrap must create it in
+            // this transaction. All later migrations lock its current row.
+            return Ok(tx);
+        }
+    }
+
     fn apply_migrations(
         &mut self,
         from: i64,
         guard: Option<&BreakingGuard>,
-    ) -> Result<Option<PathBuf>> {
+    ) -> Result<(Option<PathBuf>, i64)> {
         // Warns of a long hold but records none: the queue's events are
         // written at the schema this transaction changes, which a rolled
         // back or an empty queue does not have.
-        let tx = WriteTx::write(&self.conn, "schema_migrations", self.write_hold_warn)?;
+        let tx = self.migration_tx(|| Ok(()))?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if from == 0 && version != 0 {
             // Another `init` created the queue first; the caller checks it.
-            return Ok(None);
+            return Ok((None, version));
+        }
+        if version >= BINARY_SCHEMA {
+            return Ok((None, version));
         }
         ensure!(
-            version == from,
+            version >= from,
             "queue schema changed from {from} to {version} while migrating; run migrate again"
         );
         let pending = pending_migrations(version);
@@ -1145,7 +1248,7 @@ impl SqliteQueue {
             "queue migration would break {violations} foreign key references"
         );
         tx.commit()?;
-        Ok(backup)
+        Ok((backup, version))
     }
 }
 
@@ -4305,6 +4408,57 @@ mod schema_state_tests {
                 .collect(),
             opens: true,
         }
+    }
+
+    #[test]
+    fn migration_rereads_after_takeover_and_an_applied_version_does_nothing() {
+        use crate::application::WriteLeaderStore;
+        use crate::domain::write_leader::LEASE;
+        let uri = format!("file:/migration-fencing-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let mut queue = SqliteQueue::init(uri).unwrap();
+        // An unheld generation zero is locked too, without renewing its lease.
+        queue.migration_tx(|| Ok(())).unwrap().commit().unwrap();
+        assert_eq!(queue.write_leader().unwrap().0.lease_until_ms, 0);
+        let mut reads = 0;
+        let before_schema = queue
+            .conn
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        let tx = queue
+            .migration_tx(|| {
+                reads += 1;
+                assert!(reads <= 2, "migration failed to lock the reread leader row");
+                if reads == 1 {
+                    queue.take_write_leader("replacement", LEASE, true)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(reads, 2);
+        let generation: i64 = tx
+            .query_row("SELECT generation FROM write_leader", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(generation, 1);
+        tx.execute_batch("CREATE TABLE migration_probe (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        tx.commit().unwrap();
+        let before = queue.conn.total_changes();
+        assert_eq!(
+            queue.apply_migrations(BINARY_SCHEMA - 1, None).unwrap(),
+            (None, BINARY_SCHEMA)
+        );
+        // Only the row lock UPDATE, no schema_floor or migration writes.
+        assert_eq!(queue.conn.total_changes() - before, 1);
+        assert_eq!(
+            queue
+                .conn
+                .query_row("SELECT count(*) FROM sqlite_master", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            before_schema + 1
+        );
     }
 
     /// `up` and `install` apply pending migrations only when every one is

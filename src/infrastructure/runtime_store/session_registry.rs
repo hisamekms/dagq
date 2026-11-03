@@ -11,7 +11,8 @@ impl SqliteQueue {
     /// (ADR-0026); this binary records none, and tests make such a record
     /// with it.
     pub fn register_session_workspace(&self, role: SessionRole, workspace_id: &str) -> Result<()> {
-        self.conn.execute(
+        self.write_statement(
+            "register_session_workspace",
             "INSERT INTO session_workspaces(role,workspace_id,created_at) VALUES (?1,?2,?3)
              ON CONFLICT(role) DO UPDATE SET workspace_id=excluded.workspace_id,
                                               created_at=excluded.created_at",
@@ -34,7 +35,8 @@ impl SqliteQueue {
 
     /// Forget the workspace of `role`; `false` when none was recorded.
     pub fn remove_session_workspace(&self, role: SessionRole) -> Result<bool> {
-        Ok(self.conn.execute(
+        Ok(self.write_statement(
+            "remove_session_workspace",
             "DELETE FROM session_workspaces WHERE role=?1",
             [role.as_str()],
         )? == 1)
@@ -48,10 +50,11 @@ impl SqliteQueue {
     /// how many were forgotten; the workspaces themselves are a person's to
     /// close.
     pub fn forget_retired_session_workspaces(&self) -> Result<usize> {
-        Ok(self.conn.execute(
+        self.write_statement(
+            "forget_retired_session_workspaces",
             "DELETE FROM session_workspaces WHERE role != ?1",
             params![SessionRole::Supervisor.as_str()],
-        )?)
+        )
     }
 }
 
@@ -211,19 +214,35 @@ impl SessionRegistry for SqliteQueue {
         SqliteQueue::planner_silent(self, id, payload)
     }
     fn record_session_turns(&self) -> Result<usize> {
-        crate::infrastructure::sessions::record_open_turns(&self.conn, self.write_hold_warn)
+        crate::infrastructure::sessions::record_open_turns(
+            &self.conn,
+            self.write_hold_warn,
+            self.write_identity
+                .as_ref()
+                .context("queue has no write leader identity")?,
+        )
     }
     fn record_session_tokens(&self) -> Result<usize> {
         crate::infrastructure::session_tokens::record_session_tokens(
             &self.conn,
             self.write_hold_warn,
+            self.write_identity
+                .as_ref()
+                .context("queue has no write leader identity")?,
         )
     }
     fn record_session_hook(
         &self,
         hook: &crate::domain::sessions::SessionHook,
     ) -> Result<serde_json::Value> {
-        crate::infrastructure::sessions::record_hook(&self.conn, self.write_hold_warn, hook)
+        crate::infrastructure::sessions::record_hook(
+            &self.conn,
+            self.write_hold_warn,
+            self.write_identity
+                .as_ref()
+                .context("queue has no write leader identity")?,
+            hook,
+        )
     }
     fn open_hook_session_spans(&self) -> Result<Vec<crate::domain::sessions::OpenSpan>> {
         crate::infrastructure::sessions::hook_spans(&self.conn)
@@ -232,6 +251,9 @@ impl SessionRegistry for SqliteQueue {
         crate::infrastructure::sessions::close_inferred_hook_spans(
             &self.conn,
             self.write_hold_warn,
+            self.write_identity
+                .as_ref()
+                .context("queue has no write leader identity")?,
             ended,
         )
     }

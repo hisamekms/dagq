@@ -841,6 +841,9 @@ string_enum!(
     /// `failed`: the use case failed (a missing task, a bad option, ...),
     /// or the broker could not read a token or a run.
     Failed => "failed",
+    /// Leadership changed before the write. No change was committed; the
+    /// caller may resend to the current service.
+    NotLeader => "not_leader",
     /// `forbidden_destination`, only the queue broker's
     /// ([`crate::domain::queue_broker`]): the request goes to a destination
     /// the broker does not pass (anything but the queue service and the

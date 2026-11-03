@@ -328,7 +328,12 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<()> {
         let current = read_finding(&self.conn, finding)?;
-        finding_event(&self.conn, &current, kind, payload)
+        {
+            let tx = self.write_tx("finding_planner_event")?;
+            finding_event(&tx, &current, kind, payload)?;
+            tx.commit()?;
+            Ok(())
+        }
     }
 
     /// Whether the supervisor typed the answer of `ask` into `workspace`

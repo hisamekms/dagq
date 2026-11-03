@@ -9,6 +9,12 @@
 //! deferred) is chosen by the entry it begins at (`WriteTx::write` or
 //! `WriteTx::read`), not by its caller.
 //!
+//! Unfenced starts are restricted to the leader's conditional mutations
+//! and schema migration. Direct queue-connection execute calls and calls
+//! passing that connection to helpers containing literal write SQL are
+//! rejected too. Aliases of the queue connection and dynamically assembled
+//! SQL require review; the existing begin/behavior checks still apply.
+//!
 //! What counts as a begin:
 //!
 //! - a method call `.transaction_with_behavior(..)`, `.unchecked_transaction()`
@@ -47,16 +53,22 @@ use proc_macro2::{Delimiter, TokenTree};
 use std::collections::BTreeSet;
 use syn::visit::{self, Visit};
 
-/// The implementation of `WriteTx`, whose private begin under its two
-/// entries (`WriteTx::write`, `WriteTx::read`) is the one way in.
+/// The implementation of `WriteTx`: its private begin is reached through
+/// the fenced write entry, the conditional leader/schema entry, or read.
 const IMPLEMENTATION: (&str, &str) = ("src/infrastructure/sqlite.rs", "WriteTx::begin");
 
 /// The file that implements the entries of `WriteTx`, and the places in
 /// it whose code may name `TransactionBehavior`: its `use` outside any fn
-/// (`-`), the two entries and the private begin under them.
-const ENTRIES: (&str, [&str; 4]) = (
+/// (`-`), its entries and the private begin under them.
+const ENTRIES: (&str, [&str; 5]) = (
     "src/infrastructure/sqlite.rs",
-    ["-", "WriteTx::write", "WriteTx::read", "WriteTx::begin"],
+    [
+        "-",
+        "WriteTx::write",
+        "WriteTx::leader",
+        "WriteTx::read",
+        "WriteTx::begin",
+    ],
 );
 
 /// The identifier of rusqlite's transaction behavior, which only
@@ -128,6 +140,25 @@ fn check(rust: &[(String, String)], exceptions: &[Exception]) -> Vec<String> {
             errors.insert(format!("{at}: listed twice"));
         }
     }
+    // Helpers with literal write SQL may only receive an open transaction,
+    // never the queue's raw connection. Dynamic SQL remains a review concern.
+    // ID-returning insert helpers receive SQL as an argument, so they do
+    // not carry a literal write statement of their own.
+    let mut writers: BTreeSet<String> = ["insert_id", "insert_id_if_inserted", "insert_counted"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    for (_, text) in rust {
+        if let Ok(source) = source::read(text) {
+            for literal in source.literals {
+                if !super::sql::writes(&literal.text).is_empty() {
+                    for function in literal.fns {
+                        writers.insert(function.rsplit("::").next().unwrap().to_owned());
+                    }
+                }
+            }
+        }
+    }
     let mut matched = BTreeSet::new();
     for (path, file) in &read {
         let (entries, places) = ENTRIES;
@@ -135,6 +166,40 @@ fn check(rust: &[(String, String)], exceptions: &[Exception]) -> Vec<String> {
             if *path != entries || !places.contains(&function.as_str()) {
                 errors.insert(format!(
                     "{path}: names {BEHAVIOR} in {function}; begin at the entry that fits, WriteTx::write (SqliteQueue::write_tx) to write or WriteTx::read (SqliteQueue::read_tx) to read"
+                ));
+            }
+        }
+        let mut reader = Reader::default();
+        reader.visit_file(file);
+        for call in reader.raw_calls {
+            if SQL_METHODS.contains(&call.what.as_str()) || writers.contains(&call.what) {
+                errors.insert(format!(
+                    "{path}: raw connection write {} in {}; use a named write transaction",
+                    call.what, call.function
+                ));
+            }
+        }
+        for call in reader.unfenced {
+            let allowed = match *path {
+                "src/infrastructure/sqlite.rs" => match call.what.as_str() {
+                    "Self::leader" => call.function == "WriteTx::write",
+                    "Self::begin" => {
+                        ["WriteTx::leader", "WriteTx::read"].contains(&call.function.as_str())
+                    }
+                    "WriteTx::leader" => call.function == "SqliteQueue::migration_tx",
+                    _ => false,
+                },
+                "src/infrastructure/write_leader.rs" => {
+                    ["LeaderRow::take", "LeaderRow::renew", "LeaderRow::release"]
+                        .contains(&call.function.as_str())
+                        && call.what == "WriteTx::leader"
+                }
+                _ => false,
+            };
+            if !allowed {
+                errors.insert(format!(
+                    "{path}: {} bypasses fencing in {}",
+                    call.what, call.function
                 ));
             }
         }
@@ -161,6 +226,19 @@ fn check(rust: &[(String, String)], exceptions: &[Exception]) -> Vec<String> {
         ));
     }
     errors.into_iter().collect()
+}
+
+/// Direct uses of the queue's raw connection, including a reference to it.
+fn is_queue_connection(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Reference(r) => is_queue_connection(&r.expr),
+        syn::Expr::Paren(p) => is_queue_connection(&p.expr),
+        syn::Expr::Field(f) => {
+            matches!(&f.member, syn::Member::Named(n) if n == "conn")
+                && matches!(&*f.base, syn::Expr::Path(p) if p.path.is_ident("self"))
+        }
+        _ => false,
+    }
 }
 
 /// The direct begins of `file` outside its test code.
@@ -218,6 +296,8 @@ struct Reader {
     found: BTreeSet<Begin>,
     /// The fns that name [`BEHAVIOR`].
     behaviors: BTreeSet<String>,
+    unfenced: BTreeSet<Begin>,
+    raw_calls: BTreeSet<Begin>,
 }
 
 impl Reader {
@@ -262,6 +342,14 @@ impl Reader {
 
     /// A path whose last two segments are `owner::name`.
     fn path(&mut self, owner: &str, name: &str) {
+        if (owner == "WriteTx" && (name == "leader" || name == "begin"))
+            || (owner == "Self" && (name == "leader" || name == "begin"))
+        {
+            self.unfenced.insert(Begin {
+                function: self.function(),
+                what: format!("{owner}::{name}"),
+            });
+        }
         let new = self.aliases.contains(owner) && (name == "new" || name == "new_unchecked");
         let method =
             METHODS.contains(&name) || (self.connections.contains(owner) && name == "transaction");
@@ -517,6 +605,14 @@ impl<'ast> Visit<'ast> for Reader {
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         let method = call.method.to_string();
+        if is_queue_connection(&call.receiver)
+            && ["execute", "execute_batch"].contains(&method.as_str())
+        {
+            self.raw_calls.insert(Begin {
+                function: self.function(),
+                what: method.clone(),
+            });
+        }
         self.method(&method, call.args.is_empty());
         if let Some(syn::Expr::Lit(syn::ExprLit {
             lit: syn::Lit::Str(sql),
@@ -526,6 +622,19 @@ impl<'ast> Visit<'ast> for Reader {
             self.sql(&method, &sql.value());
         }
         visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if call.args.first().is_some_and(is_queue_connection)
+            && let syn::Expr::Path(path) = &*call.func
+            && let Some(name) = path.path.segments.last()
+        {
+            self.raw_calls.insert(Begin {
+                function: self.function(),
+                what: name.ident.to_string(),
+            });
+        }
+        visit::visit_expr_call(self, call);
     }
 
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
@@ -812,7 +921,7 @@ mod fixtures {
             );
             assert!(found.is_empty(), "{text}: {found:?}");
         }
-        let entries = "use rusqlite::TransactionBehavior;\nuse rusqlite::TransactionBehavior as Tb;\nimpl<'c> WriteTx<'c> {\n    pub fn write(c: &'c Connection) -> Self { Self::begin(c, TransactionBehavior::Immediate) }\n    pub fn read(c: &'c Connection) -> Self { Self::begin(c, TransactionBehavior::Deferred) }\n    fn begin(c: &'c Connection, b: TransactionBehavior) -> Self { let _ = vec![TransactionBehavior::Immediate]; todo!() }\n}";
+        let entries = "use rusqlite::TransactionBehavior;\nuse rusqlite::TransactionBehavior as Tb;\nimpl<'c> WriteTx<'c> {\n    pub fn write(c: &'c Connection) -> Self { Self::leader(c) }\n    fn leader(c: &'c Connection) -> Self { Self::begin(c, TransactionBehavior::Immediate) }\n    pub fn read(c: &'c Connection) -> Self { Self::begin(c, TransactionBehavior::Deferred) }\n    fn begin(c: &'c Connection, b: TransactionBehavior) -> Self { let _ = vec![TransactionBehavior::Immediate]; todo!() }\n}";
         let found = errors(
             &[
                 ("src/infrastructure/sqlite.rs", entries),
@@ -825,4 +934,32 @@ mod fixtures {
         );
         assert!(found.is_empty(), "{found:?}");
     }
+}
+
+#[test]
+fn bypassing_the_fence_is_rejected() {
+    let errors = check(
+        &[(
+            "src/infrastructure/rogue.rs".into(),
+            "fn write(c: &Connection) { WriteTx::leader(c, \"rogue\", Duration::MAX); }".into(),
+        )],
+        &[],
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("bypasses fencing")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn raw_queue_writes_must_use_the_named_entry() {
+    let rust = [("src/infrastructure/rogue.rs".into(),
+        r#"impl Q { fn bypass(&self) { self.conn.execute("UPDATE tasks SET title='x'", []); helper(&self.conn); insert_id(&self.conn, "INSERT INTO tasks(title) VALUES ('x')", []); } }
+        fn helper(conn: &Connection) { conn.execute("DELETE FROM tasks", []); }"#.into())];
+    let errors = check(&rust, &[]);
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    assert!(
+        errors.iter().all(|e| e.contains("raw connection write")),
+        "{errors:?}"
+    );
 }

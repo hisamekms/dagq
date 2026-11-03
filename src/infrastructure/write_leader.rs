@@ -17,6 +17,64 @@ use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 use std::time::Duration;
 
+/// The caller's identity, retained by the service that opened the store.
+/// Until startup takes over explicitly, init and open inherit the current row,
+/// including the unheld generation zero. It is never refreshed by a write.
+#[derive(Clone, Debug)]
+pub struct WriteIdentity {
+    pub holder: Option<String>,
+    pub generation: i64,
+}
+
+impl WriteIdentity {
+    pub(super) fn read(conn: &rusqlite::Connection) -> Result<Self> {
+        Ok(conn.query_row(
+            "SELECT holder, generation FROM write_leader WHERE singleton = 1",
+            [],
+            |r| {
+                Ok(Self {
+                    holder: r.get(0)?,
+                    generation: r.get(1)?,
+                })
+            },
+        )?)
+    }
+}
+
+/// The first statement after BEGIN: match the caller's holder and generation,
+/// and extend from the DB clock. Expiry is deliberately absent: only takeover
+/// fences an old writer. NULL equality admits the unheld generation zero.
+/// A zero-row update drops (rolls back) the transaction before returning the
+/// retryable application error; it must never record a diagnostic write.
+pub(super) fn fence(tx: &super::sqlite::WriteTx<'_>, identity: &WriteIdentity) -> Result<()> {
+    let changed = tx.execute(
+        &renew_sql(&now_millis()),
+        params![
+            identity.holder,
+            identity.generation,
+            millis(crate::domain::write_leader::LEASE)?
+        ],
+    )?;
+    if changed == 0 {
+        return Err(crate::application::NotLeader.into());
+    }
+    Ok(())
+}
+
+/// Migration locks the row it read outside the transaction, without extending
+/// another service's lease. A takeover in between returns false, so the caller
+/// rolls back and rereads. Even an unheld generation zero is locked this way.
+pub(super) fn lock_migration(
+    tx: &super::sqlite::WriteTx<'_>,
+    identity: &WriteIdentity,
+) -> Result<bool> {
+    Ok(tx.execute(
+        "UPDATE write_leader SET generation = generation \
+         WHERE singleton = 1 AND (holder = ?1 OR (holder IS NULL AND ?1 IS NULL)) AND generation = ?2",
+        params![identity.holder, identity.generation],
+    )? == 1)
+}
+
 /// The row and the DB's clock now.
 fn read_sql(now: &str) -> String {
     format!(
@@ -44,7 +102,7 @@ const TAKEN_SQL: &str = "SELECT generation FROM write_leader WHERE singleton = 1
 fn renew_sql(now: &str) -> String {
     format!(
         "UPDATE write_leader SET lease_until_ms = {now} + ?3 \
-         WHERE singleton = 1 AND holder = ?1 AND generation = ?2",
+         WHERE singleton = 1 AND (holder = ?1 OR (holder IS NULL AND ?1 IS NULL)) AND generation = ?2",
     )
 }
 
@@ -95,7 +153,11 @@ impl<'q> LeaderRow<'q> {
     }
 
     fn take(&self, holder: &str, lease: Duration, local_proof: bool) -> Result<Option<i64>> {
-        let tx = self.queue.write_tx("take_write_leader")?;
+        let tx = super::sqlite::WriteTx::leader(
+            &self.queue.conn,
+            "take_write_leader",
+            self.queue.write_hold_warn,
+        )?;
         let taken = tx.execute(
             &take_sql(&self.now),
             params![holder, millis(lease)?, local_proof],
@@ -110,7 +172,11 @@ impl<'q> LeaderRow<'q> {
     }
 
     fn renew(&self, holder: &str, generation: i64, lease: Duration) -> Result<bool> {
-        let tx = self.queue.write_tx("renew_write_leader")?;
+        let tx = super::sqlite::WriteTx::leader(
+            &self.queue.conn,
+            "renew_write_leader",
+            self.queue.write_hold_warn,
+        )?;
         let renewed = tx.execute(
             &renew_sql(&self.now),
             params![holder, generation, millis(lease)?],
@@ -120,7 +186,11 @@ impl<'q> LeaderRow<'q> {
     }
 
     fn release(&self, holder: &str, generation: i64) -> Result<bool> {
-        let tx = self.queue.write_tx("release_write_leader")?;
+        let tx = super::sqlite::WriteTx::leader(
+            &self.queue.conn,
+            "release_write_leader",
+            self.queue.write_hold_warn,
+        )?;
         let released = tx.execute(RELEASE_SQL, params![holder, generation])?;
         tx.commit()?;
         Ok(released == 1)
@@ -306,5 +376,53 @@ mod tests {
 
         assert!(past_end.release("b", 2).unwrap());
         assert_eq!(past_end.read().unwrap().0.lease_until_ms, 0);
+    }
+    #[test]
+    fn a_stale_writer_changes_nothing_and_the_current_generation_writes() {
+        let mut queue = queue();
+        at(&queue, 10_000).take("a", LEASE, false).unwrap();
+        queue.write_identity = Some(WriteIdentity::read(&queue.conn).unwrap());
+        at(&queue, 10_001).take("a", LEASE, true).unwrap();
+        let before = at(&queue, 10_001).read().unwrap().0;
+        let changes = queue.conn.total_changes();
+        let error = queue
+            .write_tx("stale_writer")
+            .err()
+            .expect("stale generation refused");
+        assert!(
+            error
+                .downcast_ref::<crate::application::NotLeader>()
+                .is_some()
+        );
+        assert_eq!(queue.conn.total_changes(), changes);
+        // A formerly implicit single-statement write uses the same entry.
+        let error = queue.fill_commit_message(1, "stale").unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::application::NotLeader>()
+                .is_some()
+        );
+        assert_eq!(queue.conn.total_changes(), changes);
+        assert_eq!(at(&queue, 10_001).read().unwrap().0, before);
+        assert_eq!(
+            queue
+                .conn
+                .query_row("SELECT count(*) FROM tasks", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        queue.write_identity = Some(WriteIdentity::read(&queue.conn).unwrap());
+        // No expiry predicate: the synthetic lease is long expired by now.
+        let tx = queue.write_tx("current_writer").unwrap();
+        tx.execute("INSERT INTO tasks(title, description, acceptance, verification_commands, status) VALUES ('fenced', '', '', '[]', 'draft')", []).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            queue
+                .conn
+                .query_row("SELECT count(*) FROM tasks", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 }

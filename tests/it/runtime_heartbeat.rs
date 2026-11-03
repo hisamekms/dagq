@@ -16,6 +16,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
+/// A bare connection used to measure transactions still fences against the
+/// same initial leader row as a newly initialized queue.
+fn write_identity(conn: &Connection) -> dagq::infrastructure::sqlite::WriteIdentity {
+    conn.execute_batch(include_str!("../../migrations/0094_write_leader.sql"))
+        .unwrap();
+    dagq::infrastructure::sqlite::WriteIdentity {
+        holder: None,
+        generation: 0,
+    }
+}
+
 /// How long one heartbeat write waits for the test's lock.
 const ATTEMPT: Duration = Duration::from_millis(100);
 
@@ -406,7 +417,8 @@ fn a_write_tx_is_named_once_it_held_the_lock_and_not_when_it_only_read() {
         tx.execute(sql, []).unwrap()
     };
     let begin_read = |name| WriteTx::read(&conn, name, Duration::ZERO).unwrap();
-    let begin_write = |name| WriteTx::write(&conn, name, Duration::ZERO).unwrap();
+    let identity = write_identity(&conn);
+    let begin_write = |name| WriteTx::write(&conn, name, Duration::ZERO, &identity).unwrap();
 
     let tx = begin_read("deferred_read");
     read(&tx);
@@ -705,7 +717,8 @@ fn a_write_tx_savepoint_rolls_back_only_its_own_writes() {
     let _test = common::test();
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE t(x)").unwrap();
-    let mut tx = WriteTx::write(&conn, "savepoints", WRITE_HOLD_WARN).unwrap();
+    let identity = write_identity(&conn);
+    let mut tx = WriteTx::write(&conn, "savepoints", WRITE_HOLD_WARN, &identity).unwrap();
     tx.execute("INSERT INTO t VALUES (1)", []).unwrap();
     {
         let savepoint = tx.savepoint().unwrap();
@@ -762,7 +775,8 @@ fn a_failed_record_of_a_long_hold_leaves_the_transaction_as_it_was() {
         tracing::subscriber::set_default(tracing_subscriber::registry().with(holds.clone()));
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE t(x)").unwrap();
-    let tx = WriteTx::write(&conn, "unrecorded", Duration::ZERO)
+    let identity = write_identity(&conn);
+    let tx = WriteTx::write(&conn, "unrecorded", Duration::ZERO, &identity)
         .unwrap()
         .recorded();
     tx.execute("INSERT INTO t VALUES (1)", []).unwrap();
