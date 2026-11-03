@@ -237,11 +237,11 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
 ## evalが本番と共有する起動経路
 
 - ケースごとの1回は、本番のrunのreviewのagentのjobと同じ経路で、測るagentの1本のjobだけを起動する。
-  経路はheadlessのjobの共通の経路（[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、1本のagentのjobの組み立て（`application::agent_job::build`、[Prompt](supervisor-lifecycle/prompt.md#agentのjobの上限)）、上の「道具の宣言」の変換、provider・model・effortも本番と同じ。
+  経路はheadlessのjobの共通の経路（[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、1本のagentのjobの組み立て（`application::agent_job::build`、[Prompt](supervisor-lifecycle/prompt.md#agentのjobの上限)）、上の「道具の宣言」の変換、provider・model・effortも本番と同じ（evalに無い[runの群](supervisor-lifecycle/review.md#reviewのprovider)の上書きは除く）。
   eval専用の起動の組み立ては作らない。
-- 本番のrunのreviewのagentのjobも同じ組み立て・起動のコマンド・1つのverdictの読み取りを使う。
-  ケースのjobは組み立ての入力の読める場所の欄（`AgentReads`）を持ち、本番のrunのreviewのagentのjobはその欄を空にする。
-  同じ定義・provider・道具の宣言なら、argvの差はその欄からproviderが作る読み取りの制限の引数だけで、stdinのpromptの差は材料の行だけである。
+- 本番のagentのjobも同じ起動のコマンドと1つのverdictの読み取りを使う。
+  ケースのjobは読める場所の欄（`AgentReads`）を持ち、本番のjobはその欄を空にする。
+  同じ定義・provider・道具の宣言なら、argvの差はその欄からproviderが作る読み取りの制限の引数、stdinのpromptの差は材料の行だけである。
 - 実行の入口は`application::supervise::execution::agent_eval`。
 - ケースのtreeは、queueのdata dirの`agent-evals/`の下に周ごとに置く、tree自身のGitのrepositoryである。
   `base_commit`のケースは、supervisorが`base_commit`にpatchを当てたcommitをrepositoryの中に作り、材料のファイルをそこから作って、ケースのdirの材料だけのdirに書く。
@@ -252,7 +252,7 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   採点の期待はsupervisorがtreeの外で持つ。
 - jobのcwdはそのtreeで、Codexのjobが読めるのはtree・ケースの材料のdir・commandの実行に要るsystemの場所だけである。
   repositoryのcheckoutとGit directory、queueのdata dirのほか（ほかのケースと実行の出力、productionのケースの集合）は読めない。
-  Claudeのjobは読める場所の欄を使わず、`--add-dir`でtree・材料のdir・自分のjobのdirを足す今の起動のままである（shellを宣言した定義のcommandは限らない）。
+  Claudeのjobは読める場所の欄を使わず、`--add-dir`でtree・材料のdir・自分のjobのdirを足す起動のままである（shellを宣言した定義のcommandは限らない）。
   Codexのjobは、`--sandbox read-only`の代わりに、読める場所の欄から作るjobのpermission profileの読み取りの設定で限る。
   書き込みとnetworkはread-onlyのsandbox・jobのpermission profile（ADR-t1233-5）・`untrusted`（ADR-t1570-1）のまま変えない。
   ケースのdirは番号で名付け、promptにもpathにもケースのidと期待を出さない。

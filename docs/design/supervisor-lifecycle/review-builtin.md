@@ -33,4 +33,5 @@ related:
   書かないrepositoryでも既定で有効なbuilt-inが流れる。
 - 全体のreviewのjobはbuilt-inのacceptanceになり、常に走る（実装済み）。
   無効にできず、範囲とproviderも設定できない（全ての差分で走り、providerは`[roles.review]`が決める）。
+  ただしproviderの組の試しを有効にしたrepositoryでは、群がreviewのproviderを名指すrunの全体のreviewはそのproviderで起動する（[Review](review.md#reviewのprovider)の「runの群」）。
 - pjが中身を変えたいときはbuilt-inを無効にして自分のagentかprogramを作り、同じ名前で上書きしない。
