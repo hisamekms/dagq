@@ -81,12 +81,14 @@ max_spikes = 1
 max_investigations = 2
 
 [provider_fallback]
-# worker は使えない provider から別の provider へ切り替えず、控えが解けるのを待って同じ provider で続ける。人の判断（2026-10-06）。
+# worker も使えない provider（使用量の上限など）から別の provider へ切り替える。人の判断（2026-11-03、request 226）で、
+# 2026-10-06 の人の判断（切り替えずに控えが解けるのを待って同じ provider で続ける）を見直した。
 # 振る舞いは ADR-t1857-1 と docs/design/provider-lifecycle.md の「切り替えを止める設定」、書式は run-environment.md の [provider_fallback] の項。
+# 既定と同じ true でも節を消さずに書くのは、判断の経緯を設定のそばに残すため。
 # jobs は書かない（job の切り替えを止めるかは人が決めていないので、既定 true のまま）。
 # supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
 # [provider_fallback] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1857 を含んでから足した。
-workers = false
+workers = true
 
 [worker.provider_trial]
 # 実装（worker）と review の provider の組の試し（request 216、ADR-t4005-1。振る舞いは docs/design/supervisor-lifecycle/worker-model.md の「限定の試し」と
@@ -94,7 +96,8 @@ workers = false
 # A（実装は task の provider の Claude、review は [roles.review]・[review.subagents.*] の設定のまま）と
 # B（実装 Codex・review Claude）を比べる。どちらの群も書いた provider と見る provider が違う（A でも Claude を名指す subagent は設定のまま Claude で動く）。
 # B の割合は人の指定の 10〜20% のうち小さく始める方の 10%。値は既定と同じでも、人の決めた値として書いておく。
-# B の worker は上の [provider_fallback] workers = false に従い、Codex が控えに入れば Claude へ切り替えず控えが解けるのを待つ。
+# B の worker は上の [provider_fallback] workers = true に従い、Codex が控えに入れば Claude へ切り替わり、その run は provider の組の比べで
+# 切り替えた run として数えられる（ADR-t4005-1 の決定6・7 と、それを amends にする ADR-t4118-1）。
 # 群を広げる・止める・全面に入れ替えるのは kpi の群の比べの値を見て planner か人が別に決める。
 # supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
 # [worker.provider_trial] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 4006・4007 を含んでから足した。
