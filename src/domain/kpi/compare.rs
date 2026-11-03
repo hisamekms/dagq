@@ -38,6 +38,16 @@ pub struct WindowSpan {
     /// How much of it the records of the tokens cover (`full`, `partial`,
     /// `none`): a side before the records has no `tokens` to compare.
     pub token_coverage: Coverage,
+    /// Why a KPI of it has no value, as a period's `unavailable`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub unavailable: BTreeMap<&'static str, &'static str>,
+    /// How the record of the late quality stands to its landed runs, per
+    /// stratum, as a period's `details.post_landing`
+    /// ([`super::trial::PostLandingArrival`]): read at the window's end,
+    /// how long after its end, how far the record reached and why a
+    /// stratum has no value.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub post_landing: BTreeMap<String, super::trial::PostLandingArrival>,
 }
 
 /// The change split at, when `--compare` names a mark or a time.
@@ -68,6 +78,14 @@ pub struct Confounder {
 pub struct Side {
     pub before: Measure,
     pub after: Measure,
+    /// Why a side has no value, where its window names it: a late
+    /// quality's reason for the stratum
+    /// ([`super::trial::PostLandingArrival::reason`]), else the window's
+    /// `unavailable` for `all`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_missing: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_missing: Option<&'static str>,
     #[serde(flatten)]
     pub change: Change,
 }
@@ -302,7 +320,25 @@ pub(super) fn compare(
         runs: window.runs,
         host: context.host.map(|host| host.between(start, end)),
         token_coverage: window.token_coverage,
+        unavailable: window.unavailable.clone(),
+        post_landing: window.post_landing.clone(),
     };
+    // Why a side of `name` in `stratum` has no value.
+    let missing =
+        |window: &super::WindowKpis, measure: Option<&Measure>, name: &str, stratum: &str| {
+            if measure.is_some_and(|measure| measure.primary().is_some()) {
+                return None;
+            }
+            window
+                .post_landing
+                .get(stratum)
+                .and_then(|arrival| arrival.reason(name))
+                .or_else(|| {
+                    (stratum == super::ALL)
+                        .then(|| window.unavailable.get(name).copied())
+                        .flatten()
+                })
+        };
     let empty = Measure::default();
     let after_partial = after.1 > now_ms;
     let mut strata: Kpis<Side> = BTreeMap::new();
@@ -319,6 +355,8 @@ pub(super) fn compare(
                 Side {
                     before: before.cloned().unwrap_or_default(),
                     after: after.clone(),
+                    before_missing: missing(&windows[0], before, name, stratum),
+                    after_missing: missing(&windows[1], Some(after), name, stratum),
                     change: {
                         let mut change = Change::between(name, before, after, min_samples);
                         if after_partial {

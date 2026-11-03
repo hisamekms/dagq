@@ -284,6 +284,7 @@ fn one_window_of_any_length() {
             host: None,
             ledger: None,
             rows: &[],
+            post_landing: None,
         },
         &KpiQuery {
             since: query.until,

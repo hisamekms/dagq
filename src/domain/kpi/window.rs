@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{ALL, Axis, Derived, KpiInput, Kpis, Measure, RunLayers, UNKNOWN, float, round3};
+use super::{
+    ALL, Axis, Derived, KpiInput, Kpis, Measure, RunLayers, UNKNOWN, float, round3, trial,
+};
 use crate::domain::{
     DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskChange, TaskId,
     areas::RunAreas,
@@ -99,6 +101,10 @@ pub struct WindowKpis {
     /// comparison's sides.
     #[serde(skip)]
     pub token_coverage: Coverage,
+    /// The late quality's arrival per stratum (`details.post_landing`),
+    /// for a comparison's sides.
+    #[serde(skip)]
+    pub post_landing: BTreeMap<String, trial::PostLandingArrival>,
 }
 
 /// A run's hold on a slot (`slot_usage`): from its claim to its end, and
@@ -205,6 +211,25 @@ pub(super) struct Context<'a> {
     pub host: Option<super::HostReader<'a>>,
     /// The ledger's run rows by their run.
     rows: HashMap<&'a str, &'a LedgerRow>,
+    /// The common read's reverts and CI failures
+    /// ([`KpiInput::post_landing`]).
+    post_landing: Option<&'a crate::domain::ledger::post_landing::PostLandingBook>,
+    /// Every run `stats` derives of the whole ledger, by its id, for the
+    /// layers of a run's Executions' tokens.
+    runs: HashMap<RunId, RunStats>,
+    /// The layers of each claimed run `stats` does not derive (one still
+    /// in flight), for the same.
+    open: HashMap<RunId, OpenRun>,
+}
+
+/// A claimed run still in flight, as its layers read: its row's
+/// attributes and facts after the claim, else its first claim's recorded
+/// attributes; its task's change; and the `nature` of its task's last
+/// prediction before the claim, as `stats` gives a finished run's.
+struct OpenRun {
+    layers: RunLayers,
+    change: Option<TaskChange>,
+    nature: Option<String>,
 }
 
 /// Ends `run_id`'s open span out of the slots, if any, `at`.
@@ -469,6 +494,9 @@ impl<'a> Context<'a> {
                 .filter(|row| row.kind == LedgerKind::Run)
                 .map(|row| (row.key.as_str(), *row))
                 .collect(),
+            post_landing: input.post_landing,
+            runs: HashMap::new(),
+            open: HashMap::new(),
         };
         context.forecast = score::score(events, &context.marks);
         let everything = context.stats(None, None);
@@ -514,6 +542,54 @@ impl<'a> Context<'a> {
             .collect();
         finishes.sort_unstable();
         context.finishes = finishes;
+        context.runs = everything
+            .runs
+            .into_iter()
+            .map(|run| (run.run_id.clone(), run))
+            .collect();
+        context.open = context
+            .first_claims
+            .iter()
+            .filter(|(run_id, _)| !context.runs.contains_key(*run_id))
+            .map(|(run_id, claim)| {
+                let row = rows.get(run_id.as_str());
+                let attributes = match row {
+                    Some(values) if !values.attributes.is_empty() => values.attributes.clone(),
+                    _ => claim
+                        .payload
+                        .get(crate::domain::claim_facts::ATTRIBUTES)
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .unwrap_or_default(),
+                };
+                let nature = events
+                    .iter()
+                    .take_while(|event| event.id < claim.id)
+                    .filter(|event| {
+                        event.kind == EventKind::TaskWeightPredicted
+                            && event.task_id == claim.task_id
+                    })
+                    .filter_map(|event| {
+                        event.payload["prediction"]["nature"]
+                            .as_str()
+                            .map(str::to_owned)
+                    })
+                    .last();
+                let open = OpenRun {
+                    layers: RunLayers {
+                        attributes,
+                        after_claim: row
+                            .and_then(|values| values.after_claim.clone())
+                            .unwrap_or_default(),
+                    },
+                    change: claim
+                        .task_id
+                        .and_then(|task| context.changes.get(&task).cloned().flatten()),
+                    nature,
+                };
+                (run_id.clone(), open)
+            })
+            .collect();
         context
     }
 
@@ -619,6 +695,43 @@ impl<'a> Context<'a> {
                 &fallback
             }
         };
+        let nature = run
+            .prediction
+            .as_ref()
+            .and_then(|p| p.prediction.get("nature")?.as_str().map(str::to_owned));
+        self.layer_value(layers, run.change.as_ref(), nature, axis)
+    }
+
+    /// The values of `axis` (not the area) of the run `run_id`, by the
+    /// rule of [`Self::axis_values`]: of a run `stats` derives, else of one
+    /// still in flight ([`OpenRun`]), else `unknown`.
+    fn run_axis_values(&self, run_id: &RunId, axis: &Axis) -> Vec<String> {
+        if let Some(run) = self.runs.get(run_id) {
+            return self.axis_values(run, axis);
+        }
+        if matches!(axis.derived(), Some(Derived::Toolchain)) && !self.rust_toolchain {
+            return Vec::new();
+        }
+        match self.open.get(run_id) {
+            Some(open) => vec![self.layer_value(
+                &open.layers,
+                open.change.as_ref(),
+                open.nature.clone(),
+                axis,
+            )],
+            None => vec![UNKNOWN.to_owned()],
+        }
+    }
+
+    /// The value of `axis` (not the area) of a run of `layers`, its task's
+    /// `change` and its prediction's `nature`.
+    fn layer_value(
+        &self,
+        layers: &RunLayers,
+        change: Option<&TaskChange>,
+        nature: Option<String>,
+        axis: &Axis,
+    ) -> String {
         let Some(derived) = axis.derived() else {
             return layers
                 .attribute(axis.as_str())
@@ -628,11 +741,7 @@ impl<'a> Context<'a> {
         let text = |value: Option<String>| value.unwrap_or_else(|| UNKNOWN.to_owned());
         let number = |key: &str| layers.attribute(key)?.parse::<f64>().ok();
         match derived {
-            Derived::Change => run
-                .change
-                .as_ref()
-                .map_or(UNKNOWN, TaskChange::as_str)
-                .to_owned(),
+            Derived::Change => change.map_or(UNKNOWN, TaskChange::as_str).to_owned(),
             Derived::Area => unreachable!("an area is one of a run's values (axis_values)"),
             Derived::Provider => text(after.last_provider.clone()),
             // A run that worked on Codex is no run of the host's Claude
@@ -652,11 +761,7 @@ impl<'a> Context<'a> {
                     (None, None) => UNKNOWN.to_owned(),
                 }
             }
-            Derived::Nature => text(
-                run.prediction
-                    .as_ref()
-                    .and_then(|p| p.prediction.get("nature")?.as_str().map(str::to_owned)),
-            ),
+            Derived::Nature => text(nature),
             Derived::Slot => match (number("slots"), number("parallel")) {
                 (Some(slots), Some(parallel)) if parallel > 0.0 => {
                     let used = slots / parallel;
@@ -809,12 +914,20 @@ impl<'a> Context<'a> {
         }
         let mut landings: BTreeMap<&str, usize> = BTreeMap::new();
         let mut by_tags: BTreeMap<String, Breakdown> = BTreeMap::new();
+        let mut arrivals: BTreeMap<String, trial::PostLandingArrival> = BTreeMap::new();
         for (stratum, runs) in &groups {
             for (name, measure) in self.run_kpis(runs) {
                 if name == "landings" {
                     landings.insert(stratum, measure.n);
                 }
                 put(name.as_str(), stratum, measure);
+            }
+            let (trial_kpis, arrival) = self.trial_kpis(runs, end);
+            for (name, measure) in trial_kpis {
+                put(name, stratum, measure);
+            }
+            if let Some(arrival) = arrival {
+                arrivals.insert(stratum.clone(), arrival);
             }
             let of = self.breakdown(runs);
             put(
@@ -1163,6 +1276,26 @@ impl<'a> Context<'a> {
             }
         }
         details.insert("tokens", json(&stats.execution_tokens));
+        // The late quality's arrival per stratum, and why `all` has no
+        // value (ADR-t3957-1 decision 5).
+        if let Some(all) = arrivals.get(ALL) {
+            for (arrival, names) in [
+                (&all.reverts, [trial::REVERTS, trial::REVERT_RATE]),
+                (
+                    &all.ci_failures,
+                    [trial::CI_FAILURES, trial::CI_FAILURE_RATE],
+                ),
+            ] {
+                if let Some(reason) = arrival.reason {
+                    for name in names {
+                        unavailable.insert(name, reason);
+                    }
+                }
+            }
+        }
+        if !arrivals.is_empty() {
+            details.insert("post_landing", json(&arrivals));
+        }
 
         // The quality of the plans (ADR-0079 decision 7): split by the
         // judging plan review session's and submitting planner span's model
@@ -1383,7 +1516,30 @@ impl<'a> Context<'a> {
             routes: stats.worker_routes.clone(),
             planner_routes: stats.planner_routes.clone(),
             token_coverage,
+            post_landing: arrivals,
         }
+    }
+
+    /// [`trial::kpis`] of `runs`' landed runs, in a period ending at
+    /// `end` (unix milliseconds).
+    fn trial_kpis(
+        &self,
+        runs: &[&RunStats],
+        end: i64,
+    ) -> (
+        Vec<(&'static str, Measure)>,
+        Option<trial::PostLandingArrival>,
+    ) {
+        let landed: Vec<trial::Landed<'_>> = runs
+            .iter()
+            .filter(|run| run.status.as_deref() == Some("integrated"))
+            .map(|run| trial::Landed {
+                run_id: &run.run_id,
+                revises: self.revises.get(&run.run_id).copied().unwrap_or(0),
+                row: self.rows.get(run.run_id.as_str()).copied(),
+            })
+            .collect();
+        trial::kpis(&landed, self.post_landing, end)
     }
 
     /// The breakdown by tags of `runs`' ledger rows (a run without a row
@@ -1410,8 +1566,12 @@ impl<'a> Context<'a> {
     /// so an actor whose records began later lacks its earlier part there
     /// (its `actor=` stratum tells). Only an Execution of a run (a worker's
     /// turn, a review, a recovery job) is in `change=` and `area=` (a run
-    /// with no areas, one not landed, under `area=unknown`), and those
-    /// strata's landings are their own; the others' are `all`'s. Returns the coverage.
+    /// with no areas, one not landed, under `area=unknown`), and in the
+    /// run's other `--by` layers (its claim's `group=`, `effort=`, ..., as
+    /// the run KPIs read them, a run still in flight by its row's or first
+    /// claim's recorded attributes; `unknown` for a run with no claim), and
+    /// those strata's landings are their own; the others' are `all`'s.
+    /// Returns the coverage.
     fn token_kpis(
         &self,
         stats: &stats::Stats,
@@ -1425,6 +1585,14 @@ impl<'a> Context<'a> {
                 .replace('%', "%25")
                 .replace('|', "%7C")
                 .replace('=', "%3D")
+        };
+        // The tokens' own strata: an Execution's actor, provider and models,
+        // and a run's change and area.
+        let own_layer = |axis: &Axis| {
+            !matches!(
+                axis.derived(),
+                Some(Derived::Change | Derived::Area | Derived::Model | Derived::Provider)
+            ) && axis.as_str() != "actor"
         };
         let mut strata: BTreeMap<String, ExecutionTotals> = BTreeMap::new();
         strata.insert(ALL.to_owned(), ExecutionTotals::default());
@@ -1444,6 +1612,18 @@ impl<'a> Context<'a> {
                 match areas.get(run).filter(|areas| !areas.is_empty()) {
                     Some(areas) => whole.extend(areas.iter().map(|area| format!("area={area}"))),
                     None => whole.push(format!("area={UNKNOWN}")),
+                }
+            }
+            // The run's other `--by` layers (its claim's group, effort,
+            // ...): the axes the tokens split by their own rule keep it.
+            if let Some(run) = execution.run_id.as_ref() {
+                for axis in axes.iter().filter(|axis| own_layer(axis)) {
+                    let values = self.run_axis_values(run, axis);
+                    whole.extend(
+                        values
+                            .into_iter()
+                            .map(|value| format!("{}={value}", axis.as_str())),
+                    );
                 }
             }
             for stratum in whole {
@@ -1487,7 +1667,14 @@ impl<'a> Context<'a> {
             put("tokens", stratum, Measure::total(value, totals.measured()));
             // The landings of the same change or area; of all of them for
             // the strata no run is split by.
-            let landings = if stratum.starts_with("change=") || stratum.starts_with("area=") {
+            let landings = if stratum.starts_with("change=")
+                || stratum.starts_with("area=")
+                || axes.iter().any(|axis| {
+                    own_layer(axis)
+                        && stratum
+                            .strip_prefix(axis.as_str())
+                            .is_some_and(|rest| rest.starts_with('='))
+                }) {
                 landed(stratum)
             } else {
                 landed(ALL)

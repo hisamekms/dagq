@@ -150,6 +150,7 @@ fn a_claim_under_the_trial_records_its_group_and_candidate() {
             host: None,
             ledger: None,
             rows: &[],
+            post_landing: None,
         },
         &KpiQuery {
             last: 1,

@@ -25,7 +25,9 @@ pub struct Host {
 /// rows own, the tasks' goals, changes and drafts' origins of the
 /// attribute records, the landed runs' areas `areas` (`[areas]`) gives
 /// main's history the supervisor recorded, the supervisors' lives of
-/// their own records, and each window's host load of the node rows.
+/// their own records, each window's host load of the node rows, and the
+/// reverts and CI failures after the landings the window's common read
+/// matches to the runs ([`LedgerWindow::post_landing_book`]).
 pub fn kpi(
     queue: &(impl LedgerStore + ?Sized),
     now: i64,
@@ -65,6 +67,7 @@ pub fn of_window(
     let read = |from: i64, until: i64| window.host_between(from * 1000 - 1000, until * 1000);
     let rows: Vec<&crate::domain::ledger::LedgerRow> =
         window.of(crate::domain::ledger::LedgerKind::Run).collect();
+    let post_landing = window.post_landing_book();
     derive(
         &KpiInput {
             events: &events,
@@ -81,6 +84,7 @@ pub fn of_window(
             host: Some(HostReader(&read)),
             ledger: Some(&ledger),
             rows: &rows,
+            post_landing: Some(&post_landing),
         },
         query,
     )
@@ -128,4 +132,78 @@ pub fn improvements(
         "reached": improvements.reached(),
         "waiting": waiting,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::domain::ledger::{
+        build,
+        testkit::{Log, T0, ms, run_id},
+        window::select,
+    };
+    use crate::domain::stats::Cursor;
+
+    /// From the ledger's window to the KPIs: a landed run's row gives its
+    /// time, and the window's common read the revert of its commit.
+    #[test]
+    fn the_window_gives_the_time_and_the_quality_after_landing() {
+        let mut log = Log::default();
+        log.landed(1, &run_id(1), 0);
+        for event in &mut log.events {
+            if event.kind.as_str() == "run_integrated" {
+                event.payload["result_commit"] = json!("c1");
+            }
+        }
+        log.add(
+            None,
+            None,
+            "main_commits_recorded",
+            json!({"after": null, "commits": [
+                {"sha": "c1", "at": T0 + 900, "reverts": null},
+                {"sha": "r1", "at": T0 + 1500, "reverts": "c1"},
+            ]}),
+            1600,
+        )
+        .add(
+            None,
+            None,
+            "main_observed",
+            json!({"head": "r1", "at": T0 + 1600, "since": T0 - 1, "reverts": true}),
+            1600,
+        );
+        let now_ms = ms(2000);
+        let window = select(
+            build(&log.events, now_ms, "2030-01-01T00:00:00.000Z"),
+            &WindowQuery {
+                until: Some(Cursor::Time(now_ms)),
+                now_ms,
+                ..WindowQuery::default()
+            },
+        );
+        let kpi = of_window(
+            &window,
+            now_ms / 1000,
+            Host {
+                utc_offset_secs: 0,
+                cores: None,
+                rust_toolchain: false,
+            },
+            &KpiConfig::default(),
+            None,
+            &KpiQuery {
+                since: Some(Cursor::Time(ms(-1))),
+                until: Some(Cursor::Time(now_ms)),
+                ..KpiQuery::default()
+            },
+        )
+        .unwrap();
+        let kpis = &kpi.periods[0].window.kpis;
+        assert_eq!(kpis["post_landing.revert_rate"]["all"].value, Some(1.0));
+        assert_eq!(kpis["post_landing.reverts"]["all"].value, Some(1.0));
+        assert_eq!(kpis["run_duration"]["all"].n, 1);
+        assert_eq!(kpis["run_duration_without_human"]["all"].n, 1);
+    }
 }

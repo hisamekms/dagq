@@ -28,6 +28,7 @@ mod review_kpis;
 mod slot_check;
 mod strata;
 mod tokens;
+mod trial_compare;
 mod trial_strata;
 
 /// The events of a queue, built in time order.
@@ -281,6 +282,7 @@ impl Queue {
     ) -> Kpi {
         self.sort();
         let rows: Vec<&crate::domain::ledger::LedgerRow> = self.rows.iter().collect();
+        let post_landing = crate::domain::ledger::post_landing::fold(&self.events, now * 1000);
         kpi(
             &KpiInput {
                 events: &self.events,
@@ -297,6 +299,7 @@ impl Queue {
                 host,
                 ledger: None,
                 rows: &rows,
+                post_landing: Some(&post_landing),
             },
             query,
         )

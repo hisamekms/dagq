@@ -36,6 +36,7 @@ pub mod config;
 pub mod observe;
 pub mod push;
 pub mod report;
+pub mod trial;
 mod window;
 
 pub use candidates::{CandidatesSample, ClaimPassEnd};
@@ -572,6 +573,11 @@ pub struct KpiInput<'a> {
     /// row does ([`crate::domain::ledger::claim_attributes`],
     /// [`crate::domain::ledger::after_claim_of`]).
     pub rows: &'a [&'a super::ledger::LedgerRow],
+    /// The reverts and CI failures matched to the landed runs, as the
+    /// ledger window's common read gives them
+    /// ([`super::ledger::window::LedgerWindow::post_landing_book`]), for
+    /// the late quality of [`trial`]; none leaves it out.
+    pub post_landing: Option<&'a super::ledger::post_landing::PostLandingBook>,
 }
 
 /// One KPI over one stratum of one window: how many samples, and the value

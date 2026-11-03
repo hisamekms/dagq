@@ -52,6 +52,8 @@ related:
   完了見込み（`forecast`）の標本は台帳のrunの行を共通の読み取り関数で読み、`status`・`timeline`・`forecast`の工程はrunのeventの畳みから読む（[計測](../measurement.md#畳む関数)）。
   plan reviewとclaimの控えの衝突の多いファイルは、`stats`全体を通さずに`stats`の既定の窓の規則（`domain::stats::window`）と同じ数え方（`domain::stats::conflicts::conflict_hotspots_over`）を当てる。
 - 同じ記録・同じ今の時刻・同じ観測からは同じ出力になる。
+  着地の後のrevertとCIの失敗は窓の終わりで読むので、過ぎた期間の`kpi`の値も後の読み取りで増える。
+  `kpi`はその値に窓の終わりまでの経過と記録の到達を添え、記録より前の窓は値でなく理由を出す。
 - 出力はstdoutのJSONで、既存の欄は変えず足すだけにする。
   observer・レポート・plan reviewやスループットの見直しのpromptが欄を名前で読むため。
 - 記録の無い古いeventは書き換えず、null・`unknown`・`unlabeled`として数え、0と区別する。

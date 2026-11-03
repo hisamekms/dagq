@@ -71,7 +71,7 @@ SSOTは消えてはいけない正本、ビューはSSOTから作り直せるも
 
 runの一生を、重ならず隙間なく全体を覆う区間の列で表す（ADR-t1662-1決定1〜5）。
 
-- **境目の記録**（実装済み）: supervisorが工程を移るたびに`run_phase_changed`を書き、次の記録が前の工程を閉じる。
+- **境目の記録**: supervisorが工程を移るたびに`run_phase_changed`を書き、次の記録が前の工程を閉じる。
   payloadの欄と`attempt`の数え方は`PhaseChange::payload`と`Attempt`のdoc commentが持つ。
   後の工程は、次のrevise・resumeまで前のattemptのまま。
 - **書く所**: supervisorの中の移りは工程ごとの状態のmoduleの移す操作を通り、外では下の`Integrator`とstoreが書く。
@@ -215,7 +215,7 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 行は入力のevent idの範囲と時刻の範囲で窓に当て（event idの境界は時刻で越えない）、旧方式の行は`legacy`から同じ名前と形の値を印つきで返し、行の無い切り替え前のrunはnullで数える。
 行の無い走っているrunは読むときに畳む関数で畳む。
 絞り込みはtask・goal・runの行を選び（nodeの行は時刻だけで当てる）、窓に状態を持ち込む畳み（属性・finding・mainの履歴・今の判定）は全ての行の記録を窓の終わりで畳む。
-段3の統計のmoduleはこの関数が返す値だけを取り、StateStore・run dir・process・Gitを読まない（D1）。
+統計のmoduleはこの関数が返す値だけを取り、StateStore・run dir・process・Gitを読まない。
 欄・指標・節と今のuse caseの入力ごとの元の行は、同じmoduleのdoc commentの表が持つ。
 
 - 今の名前の意味の違い（`work`の終わり、人の答え待ちは`ask`）は`ledger::read`のdoc comment。
@@ -238,7 +238,7 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 
 ## 並走の比較と照合
 
-`stats`・`kpi`・`report`は台帳のwindowだけから作り、全eventもStateStoreも読まない（[ADR-t3745-1](../adr/2026-10-31-t3745-1-stop-readers-of-every-event-until-the-ledger-readers.md)）。
+`stats`・`kpi`・`report`は全eventも読まない（[ADR-t3745-1](../adr/2026-10-31-t3745-1-stop-readers-of-every-event-until-the-ledger-readers.md)）。
 `stats --ledger`は止めたままで、段2の並走の比較はせず、段3の後に消す。
 比べ方と照合は`domain::ledger::compare`のmodule docが持つ。
 
@@ -252,6 +252,7 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
 - 予約名（派生の軸。属性のキーにしない）は`claim_facts::RESERVED`が持ち、kpiが派生の規則で作る。
 - 読み取りの優先: 層のキーが予約名なら派生の値、それ以外は属性の値、無ければ`unknown`。
 - [指示の版](supervisor-lifecycle/prompt.md#workerが読んだ指示の版)も属性のキーで、`kpi --by`で層になる。
+- 群の比べは`--by group`で読み、組は`domain::kpi::trial`のdoc comment。
 
 ## 送る口
 

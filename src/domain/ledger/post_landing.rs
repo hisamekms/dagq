@@ -374,6 +374,11 @@ fn commits_of<'a>(payload: &'a Value, key: &str) -> impl Iterator<Item = &'a Val
 }
 
 impl PostLandingBook {
+    /// The window's end the events were read to (unix milliseconds).
+    pub fn end_ms(&self) -> i64 {
+        self.end_ms
+    }
+
     /// What befell `run` after its landing.
     pub fn of_run(&self, run: &RunId) -> PostLanding {
         let landing = self.landings.get(run);
