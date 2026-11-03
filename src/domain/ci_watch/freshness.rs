@@ -103,6 +103,50 @@ impl FreshnessState {
     }
 }
 
+/// The [`CI_WORKFLOW_STALE`] records still open in `events` (oldest
+/// first), one per workflow, oldest first: what the inbox is told stands.
+/// With `declared` (`[[ci_watch.freshness]]` as read), only the declared
+/// workflows' count, so taking a declaration out ends its attention; with
+/// `None` (the file cannot be read) every open one does.
+pub fn standing_stale(events: &[RunEvent], declared: Option<&[FreshnessWatch]>) -> Vec<RunEvent> {
+    let mut workflows: Vec<&str> = Vec::new();
+    for event in events {
+        if let Some(workflow) = event.payload["workflow"].as_str()
+            && !workflows.contains(&workflow)
+            && declared
+                .is_none_or(|declared| declared.iter().any(|watch| watch.workflow == workflow))
+        {
+            workflows.push(workflow);
+        }
+    }
+    let mut open: Vec<RunEvent> = workflows
+        .into_iter()
+        .filter_map(|workflow| {
+            let id = FreshnessState::fold(events, workflow).open?.event;
+            events.iter().find(|event| event.id.as_i64() == id).cloned()
+        })
+        .collect();
+    open.sort_by_key(|event| event.id.as_i64());
+    open
+}
+
+/// What the inbox reads of an open [`CI_WORKFLOW_STALE`] `payload`: the
+/// workflow and branch, its latest success (or none) and how old it was
+/// against the limit when it was found.
+pub fn stale_summary(payload: &Value) -> String {
+    let hours = |key: &str| payload[key].as_u64().map(|secs| secs / 3600);
+    let workflow = payload["workflow"].as_str().unwrap_or("?");
+    let branch = payload["branch"].as_str().unwrap_or("?");
+    let latest = match (payload["run_id"].as_i64(), payload["created_at"].as_str()) {
+        (Some(run), Some(at)) => format!("latest success run {run} created {at}"),
+        (Some(run), None) => format!("latest success run {run}"),
+        _ => "no success".to_owned(),
+    };
+    let age = hours("age_secs").map_or_else(|| "age unknown".to_owned(), |h| format!("{h}h old"));
+    let limit = hours("max_age_secs").map_or_else(String::new, |h| format!(", limit {h}h"));
+    format!("{workflow} on {branch}: {latest}, {age}{limit}; workflow_dispatch tried once")
+}
+
 /// What one look at a workflow's latest success decides.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FreshnessDecision {
@@ -523,6 +567,46 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<FreshnessRecord>(wire).unwrap(),
             record
+        );
+    }
+
+    /// The open stale record of each workflow stands, a closed one does
+    /// not, and with the declarations read only a declared workflow's
+    /// stands; its summary names the workflow, its success, age and limit.
+    #[test]
+    fn the_open_stale_records_of_the_declared_workflows_stand() {
+        let stale = |id, workflow: &str, run: Option<i64>| {
+            event(
+                id,
+                EventKind::CiWorkflowStale,
+                json!({"workflow": workflow, "branch": "main", "run_id": run,
+                       "created_at": run.map(|_| "2026-10-30T00:13:49Z"),
+                       "age_secs": 151_200, "max_age_secs": 172_800}),
+            )
+        };
+        let events = vec![
+            stale(1, "table.yml", Some(9)),
+            stale(2, "gone.yml", None),
+            stale(3, "closed.yml", Some(4)),
+            event(
+                4,
+                EventKind::CiWorkflowFresh,
+                json!({"workflow": "closed.yml", "closes": 3}),
+            ),
+        ];
+        let ids = |open: Vec<RunEvent>| open.iter().map(|e| e.id.as_i64()).collect::<Vec<_>>();
+        assert_eq!(ids(standing_stale(&events, None)), vec![1, 2]);
+        assert_eq!(ids(standing_stale(&events, Some(&[watch()]))), vec![1]);
+        assert_eq!(ids(standing_stale(&events, Some(&[]))), Vec::<i64>::new());
+        assert_eq!(
+            stale_summary(&events[0].payload),
+            "table.yml on main: latest success run 9 created 2026-10-30T00:13:49Z, 42h old, limit 48h; workflow_dispatch tried once"
+        );
+        assert_eq!(
+            stale_summary(
+                &json!({"workflow": "gone.yml", "branch": "main", "run_id": null, "age_secs": null})
+            ),
+            "gone.yml on main: no success, age unknown; workflow_dispatch tried once"
         );
     }
 }

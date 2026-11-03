@@ -804,6 +804,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut kpi = KpiTables::default();
     let mut telemetry = TelemetryTables::default();
     let mut recurring = RecurringTables::default();
+    let mut freshness = super::ci_freshness_config::FreshnessTables::default();
     let mut areas: Option<Vec<(String, Vec<String>)>> = None;
     let mut e2e_paths_seen: Option<usize> = None;
     let mut review_code_seen: Option<usize> = None;
@@ -876,6 +877,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             if recurring.header(name, number)? {
                 table = Some(RECURRING_TABLE);
+                continue;
+            }
+            if freshness.header(name, number)? {
+                table = Some(super::ci_freshness_config::CI_FRESHNESS_TABLE);
                 continue;
             }
             if let Some(name) = name.strip_prefix(ROLES_PREFIX) {
@@ -1145,6 +1150,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         junit_artifacts: Vec::new(),
                         required_jobs: Vec::new(),
                         scheduled_workflows: Vec::new(),
+                        freshness: Vec::new(),
                     },
                 ));
             }
@@ -1635,6 +1641,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             Some(TELEMETRY_TABLE) => telemetry.entry(number, key, rest.trim())?,
             Some(RECURRING_TABLE) => recurring.entry(number, key, rest.trim())?,
+            Some(super::ci_freshness_config::CI_FRESHNESS_TABLE) => {
+                freshness.entry(number, key, rest.trim())?;
+            }
             Some(KPI_TABLE) => kpi
                 .entry(key, rest.trim())
                 .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?,
@@ -2421,12 +2430,20 @@ pub fn parse_config(text: &str) -> Result<Config> {
             config.review_subagents.last().expect("an open agent").name
         );
     }
-    if let Some((line, watch)) = ci_watch {
+    // `[[ci_watch.freshness]]` belongs to `[ci_watch]` (ADR-t3924-1).
+    let (freshness_line, freshness) = freshness.finish()?;
+    if let Some((line, mut watch)) = ci_watch {
         ensure!(
             !watch.workflow.is_empty(),
             "{CONFIG_FILE_NAME}:{line}: [{CI_WATCH_TABLE}] has no workflow"
         );
+        watch.freshness = freshness;
         config.ci_watch = Some(watch);
+    } else if let Some(line) = freshness_line {
+        bail!(
+            "{CONFIG_FILE_NAME}:{line}: [[{}]] needs [{CI_WATCH_TABLE}]",
+            super::ci_freshness_config::CI_FRESHNESS_TABLE
+        );
     }
     if let Some(line) = build_output {
         ensure!(
@@ -6590,6 +6607,7 @@ LITERAL = 'no \n escapes # here'
                 junit_artifacts: Vec::new(),
                 required_jobs: Vec::new(),
                 scheduled_workflows: Vec::new(),
+                freshness: Vec::new(),
             })
         );
         assert_eq!(
@@ -6605,6 +6623,7 @@ LITERAL = 'no \n escapes # here'
                 junit_artifacts: vec!["junit-*".into(), "more".into()],
                 required_jobs: vec!["Rust (macOS)".into(), "linux".into()],
                 scheduled_workflows: vec!["it-budget.yml".into(), "Stress".into()],
+                freshness: Vec::new(),
             })
         );
         for (text, expected) in [
@@ -6688,6 +6707,125 @@ LITERAL = 'no \n escapes # here'
             load_ci_watch(dir.path()).unwrap().unwrap().workflow,
             "ci.yml"
         );
+    }
+
+    /// `[[ci_watch.freshness]]` (ADR-t3924-1) declares the workflows whose
+    /// latest success is watched for its age, each with its limit and the
+    /// lead before it (a quarter of the limit when left out); a
+    /// `[ci_watch]` without one watches none, and its mistakes are errors
+    /// with their line.
+    #[test]
+    fn parses_the_freshness_tables_of_ci_watch() {
+        use crate::domain::ci_watch::freshness::FreshnessWatch;
+        let without = parse_config("[ci_watch]\nworkflow = 'ci.yml'\n")
+            .unwrap()
+            .ci_watch
+            .unwrap();
+        assert_eq!(without.freshness, Vec::new());
+        let watch = parse_config(
+            "[ci_watch]\nworkflow = 'ci.yml'\nscheduled_workflows = ['b.yml']\n\n[[ci_watch.freshness]]\nworkflow = 'table.yml'\nmax_age_hours = 48 # two days\nwarn_before_hours = 12\n\n[[ci_watch.freshness]] # another\nworkflow = 'Other'\nmax_age_hours = 10\n\n[supervisor]\nparallel = 2\n",
+        )
+        .unwrap()
+        .ci_watch
+        .unwrap();
+        assert_eq!(watch.workflow, "ci.yml");
+        assert_eq!(watch.scheduled_workflows, vec!["b.yml".to_owned()]);
+        assert_eq!(
+            watch.freshness,
+            vec![
+                FreshnessWatch {
+                    workflow: "table.yml".into(),
+                    max_age_secs: 48 * 3600,
+                    lead_secs: 12 * 3600,
+                },
+                FreshnessWatch {
+                    workflow: "Other".into(),
+                    max_age_secs: 10 * 3600,
+                    lead_secs: 9000,
+                },
+            ]
+        );
+        // The largest limit whose seconds an age in milliseconds can reach
+        // is read as it is.
+        let largest = parse_config(
+            "[ci_watch]\nworkflow = 'a'\n[[ci_watch.freshness]]\nworkflow = 't'\nmax_age_hours = 2562047788015\nwarn_before_hours = 2562047788014\n",
+        )
+        .unwrap()
+        .ci_watch
+        .unwrap()
+        .freshness;
+        assert_eq!(
+            largest,
+            vec![FreshnessWatch {
+                workflow: "t".into(),
+                max_age_secs: 2_562_047_788_015 * 3600,
+                lead_secs: 2_562_047_788_014 * 3600,
+            }]
+        );
+        let base = "[ci_watch]\nworkflow = 'a'\n[[ci_watch.freshness]]\n";
+        for (text, expected) in [
+            (
+                "[[ci_watch.freshness]]\nworkflow = 't'\nmax_age_hours = 1\n".to_owned(),
+                "dagq.toml:1: [[ci_watch.freshness]] needs [ci_watch]",
+            ),
+            (
+                "[ci_watch]\nworkflow = 'a'\n[ci_watch.freshness]\n".to_owned(),
+                "dagq.toml:3: [ci_watch.freshness] holds one workflow per table",
+            ),
+            (
+                format!("{base}max_age_hours = 1\n"),
+                "dagq.toml:3: [[ci_watch.freshness]] has no workflow",
+            ),
+            (
+                format!("{base}workflow = 't'\n"),
+                "dagq.toml:3: [[ci_watch.freshness]] has no max_age_hours",
+            ),
+            (
+                format!("{base}workflow = 't'\nbranch = 'x'\n"),
+                "dagq.toml:5: unknown key branch in [[ci_watch.freshness]]; the keys are workflow, max_age_hours, warn_before_hours",
+            ),
+            (
+                format!("{base}workflow = 't'\nworkflow = 'u'\n"),
+                "dagq.toml:5: workflow is defined twice",
+            ),
+            (
+                format!("{base}workflow = ' '\n"),
+                "dagq.toml:4: workflow is blank",
+            ),
+            (
+                format!("{base}workflow = 't'\nmax_age_hours = 0\n"),
+                "dagq.toml:5: value of max_age_hours",
+            ),
+            (
+                format!("{base}workflow = 't'\nmax_age_hours = 4\nwarn_before_hours = 'x'\n"),
+                "dagq.toml:6: value of warn_before_hours",
+            ),
+            (
+                format!("{base}workflow = 't'\nmax_age_hours = 4\nwarn_before_hours = 4\n"),
+                "dagq.toml:3: warn_before_hours of [[ci_watch.freshness]] must be less than max_age_hours (4), not 4",
+            ),
+            (
+                format!(
+                    "{base}workflow = 't'\nmax_age_hours = 6000000000000000\nwarn_before_hours = 5999999999999999\n"
+                ),
+                "dagq.toml:5: max_age_hours is too large: 6000000000000000 hours",
+            ),
+            (
+                format!(
+                    "{base}workflow = 't'\nmax_age_hours = 2562047788015\nwarn_before_hours = 2562047788016\n"
+                ),
+                "dagq.toml:6: warn_before_hours is too large: 2562047788016 hours",
+            ),
+            (
+                format!(
+                    "{base}workflow = 't'\nmax_age_hours = 4\n[[ci_watch.freshness]]\nworkflow = 't'\nmax_age_hours = 5\n"
+                ),
+                "dagq.toml:6: [[ci_watch.freshness]] repeats workflow \"t\" of line 3",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(&text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
     }
 
     /// `[landing_verification]` needs both `replaces` and `command`; the

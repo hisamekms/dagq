@@ -8,7 +8,10 @@
 //! The readers of the list (`ci failures`, `status`) fold the same events.
 //! The same check then records the runs of the scheduled workflows
 //! `[ci_watch]` declares (ADR-t3807-1), apart from the list, the state and
-//! the holds.
+//! the holds, and then the age of the latest success of each workflow
+//! `[[ci_watch.freshness]]` declares (ADR-t3924-1): one too old is told to
+//! the inbox and started once by `workflow_dispatch`, until a newer success
+//! closes it.
 //! What GitHub says comes through [`CiSource`]; what it means is
 //! `domain::ci_watch`.
 
@@ -19,6 +22,9 @@ use serde_json::{Value, json};
 
 use super::{QueueRecords, RunLog};
 use crate::domain::EventKind;
+use crate::domain::ci_watch::freshness::{
+    FreshnessDecision, FreshnessRecord, FreshnessState, FreshnessWatch, decide_freshness,
+};
 use crate::domain::ci_watch::scheduled::{
     SCHEDULED_FINDING_KIND, ScheduledCheckRecord, ScheduledState, decide_scheduled,
     scheduled_runs_to_process,
@@ -78,6 +84,9 @@ pub struct CheckOutcome {
     pub recorded: usize,
     /// The runs of the scheduled workflows it recorded.
     pub scheduled: usize,
+    /// The records of the declared workflows' freshness it wrote: each
+    /// stale one started its workflow once, each fresh one closed one.
+    pub freshness: usize,
     /// Another supervisor recorded a run first; the next check goes on
     /// after it.
     pub taken: bool,
@@ -99,7 +108,11 @@ pub struct CheckOutcome {
 /// whether it contains a red range. An error (a call that failed or ran
 /// out of time) is a passing failure the caller counts. Then, unless
 /// another supervisor took a run, the scheduled workflows'
-/// runs ([`check_scheduled`]), whose error is only warned of.
+/// runs ([`check_scheduled`]), whose error is only warned of, and the
+/// declared workflows' freshness at `now_millis` (Unix milliseconds,
+/// [`check_freshness`]), whatever another supervisor took: it reads and
+/// writes its own records only, and a failure of it is warned of too.
+#[allow(clippy::too_many_arguments)]
 pub fn check<Q: RunLog + QueueRecords + ?Sized>(
     queue: &Q,
     source: &dyn CiSource,
@@ -108,6 +121,7 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
     supervisor: &LeaseToken,
     build: &str,
     jobs_unread: &JobsUnread,
+    now_millis: i64,
 ) -> Result<CheckOutcome> {
     let access = source.access()?;
     let last = queue.latest_queue_event(&CI_WATCH_ACCESS_KINDS)?;
@@ -121,6 +135,7 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
         available: access.is_available(),
         recorded: 0,
         scheduled: 0,
+        freshness: 0,
         taken: false,
         jobs_unread: JobsUnread::default(),
     };
@@ -144,7 +159,82 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
         // the scheduled runs are read again at the next check.
         tracing::warn!(error = %format_args!("{error:#}"), "the scheduled workflows of [ci_watch] could not be read; they are read again at the next check: {error:#}");
     }
+    check_freshness(
+        queue,
+        source,
+        &config.freshness,
+        branch,
+        supervisor,
+        now_millis,
+        &mut outcome,
+    );
     Ok(outcome)
+}
+
+/// The age of the latest success of each workflow in `watches` on
+/// `branch`, into `outcome` (ADR-t3924-1): what [`decide_freshness`] makes
+/// of it against the workflow's records is written once through the queue
+/// ([`FreshnessRecord`]), and only the supervisor whose stale record was
+/// written starts the workflow by `workflow_dispatch`, so it is started
+/// once per latest success. A workflow that cannot be read, a record that
+/// cannot be written and a start GitHub refuses are warned of and leave
+/// the rest as they are: none of it is a failure of the check, nor reads
+/// or writes the list, the state or a hold. With nothing declared, nothing
+/// is read.
+fn check_freshness<Q: RunLog + QueueRecords + ?Sized>(
+    queue: &Q,
+    source: &dyn CiSource,
+    watches: &[FreshnessWatch],
+    branch: &str,
+    supervisor: &LeaseToken,
+    now_millis: i64,
+    outcome: &mut CheckOutcome,
+) {
+    for watch in watches {
+        match check_one_freshness(queue, source, watch, branch, supervisor, now_millis) {
+            Ok(written) => outcome.freshness += usize::from(written),
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "the freshness of {} of [ci_watch] could not be read; it is read again at the next check: {error:#}", watch.workflow);
+            }
+        }
+    }
+}
+
+/// [`check_freshness`] of one workflow: whether it wrote a record.
+fn check_one_freshness<Q: RunLog + QueueRecords + ?Sized>(
+    queue: &Q,
+    source: &dyn CiSource,
+    watch: &FreshnessWatch,
+    branch: &str,
+    supervisor: &LeaseToken,
+    now_millis: i64,
+) -> Result<bool> {
+    let latest = source.latest_success(&watch.workflow, branch)?;
+    let state = FreshnessState::fold(&queue.ci_freshness_events()?, &watch.workflow);
+    let mut decision = decide_freshness(watch, branch, latest.as_ref(), now_millis, &state);
+    if let FreshnessDecision::Alert(payload) | FreshnessDecision::Close(payload) = &mut decision {
+        payload["supervisor"] = json!(supervisor);
+    }
+    let Some(record) = FreshnessRecord::of(&decision, &state) else {
+        return Ok(false);
+    };
+    if queue.record_ci_freshness(record)?.is_none() {
+        // Another supervisor wrote first, or this one before a restart.
+        return Ok(false);
+    }
+    if matches!(decision, FreshnessDecision::Alert(_)) {
+        match source.dispatch(&watch.workflow, branch) {
+            Ok(()) => tracing::info!(
+                "the latest success of {} on {branch} is too old: the inbox is told and the workflow started once",
+                watch.workflow
+            ),
+            // The attention stands all the same; the inbox tells a person.
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "{} could not be started by workflow_dispatch: {error:#}", watch.workflow)
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// The push runs of one [`check`], into `outcome`; it returns early where
@@ -458,6 +548,17 @@ pub fn run_known_failures<Q: RunLog + QueueRecords + ?Sized>(
     Ok(view)
 }
 
+/// `[[ci_watch.freshness]]` as `status` reads a `ci_workflow_stale`
+/// against it: the declarations, none without the table, and `None` when
+/// `dagq.toml` cannot be read (every open record stands).
+pub fn freshness_reading(read: &Result<Option<CiWatchConfig>>) -> Option<&[FreshnessWatch]> {
+    match read {
+        Ok(Some(config)) => Some(&config.freshness),
+        Ok(None) => Some(&[]),
+        Err(_) => None,
+    }
+}
+
 /// What `status` takes from `[ci_watch]` as read now (`read`): the jobs it
 /// names, so a `ci_jobs_missing` it no longer names is not an attention
 /// (ADR-t2034-1 decision 5), `None` when it could not be read (unknown,
@@ -524,6 +625,7 @@ mod tests {
             junit_artifacts: Vec::new(),
             required_jobs: vec!["test".into()],
             scheduled_workflows: Vec::new(),
+            freshness: Vec::new(),
         };
         let named = Ok(Some(config));
         assert_eq!(

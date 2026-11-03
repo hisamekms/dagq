@@ -30,7 +30,8 @@ pub(super) const REASON_CHARS: usize = 300;
 /// newest event id (`cursor`) to `watch` from (ADR-0016), with `actors`,
 /// each AI actor's backend and enforcement ([`actor_executions`]), the
 /// worker's per provider once a supervisor can run Codex. `ci_named_jobs`
-/// is what [`attention`] reads `ci_jobs_missing` against.
+/// is what [`attention`] reads `ci_jobs_missing` against, `ci_freshness`
+/// what it reads `ci_workflow_stale` against.
 pub fn status(
     queue: &(
          impl AskStore
@@ -49,6 +50,7 @@ pub fn status(
     clock: &dyn Clock,
     role: Option<SessionRole>,
     ci_named_jobs: Option<&[String]>,
+    ci_freshness: Option<&[crate::domain::ci_watch::freshness::FreshnessWatch]>,
 ) -> Result<Value> {
     // Read before the state it describes, so a transition in between is
     // seen again by `watch --after cursor` rather than missed.
@@ -94,7 +96,14 @@ pub fn status(
         "supervisors": supervisors,
         "runs": runs,
         "waiting": waiting,
-        "attention": attention(queue, &registrations, now, control, ci_named_jobs)?
+        "attention": attention(
+            queue,
+            &registrations,
+            now,
+            control,
+            ci_named_jobs,
+            ci_freshness,
+        )?
             .into_iter()
             .filter(|_| for_role(role))
             .collect::<Vec<_>>(),

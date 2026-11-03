@@ -1642,6 +1642,7 @@ impl OneShot {
             &*self.generators.clock,
             role,
             ci_named_jobs,
+            crate::application::ci_watch::freshness_reading(&ci_watch),
         )?;
         health::add_duplicate_supervisors(
             &mut status,

@@ -138,6 +138,8 @@ pub(super) struct Wiring {
     processes: Arc<FakeProcesses>,
     tokens: Arc<MemoryTokens>,
     pub(super) sessions: Arc<FakeSessions>,
+    /// The CI watch's port; none by default, as `--once` without it.
+    ci_watch: Option<supervise::CiWatchPort>,
 }
 
 impl Wiring {
@@ -189,7 +191,14 @@ impl Wiring {
             processes,
             tokens,
             sessions,
+            ci_watch: None,
         }
+    }
+
+    /// The wiring whose supervisor watches the CI through `port`.
+    pub(super) fn with_ci_watch(mut self, port: supervise::CiWatchPort) -> Self {
+        self.ci_watch = Some(port);
+        self
     }
 
     /// The wiring whose supervisor also runs Codex headless workers and
@@ -330,8 +339,29 @@ impl Wiring {
             &*self.generators.clock,
             None,
             None,
+            None,
         )
         .expect("read the queue's status")
+    }
+
+    /// What a `watch --role inbox` from the queue's start returns now, as
+    /// the inbox reads it: its events in their compact form.
+    pub(super) fn inbox_watch(&self) -> Vec<Value> {
+        let watched = crate::application::watch::watch(
+            &self.queue(),
+            &*self.generators.clock,
+            &*self.processes,
+            None,
+            None,
+            &crate::application::watch::WatchOptions {
+                after: Some(crate::domain::EventId::new(0)),
+                timeout: Some(Duration::ZERO),
+                interval: Duration::from_millis(10),
+                role: Some(crate::domain::SessionRole::Inbox),
+            },
+        )
+        .expect("watch the queue as the inbox");
+        watched["events"].as_array().cloned().unwrap_or_default()
     }
 
     /// A person's `recover` of `run` on this test's queue, its processes
@@ -441,6 +471,7 @@ impl Wiring {
                 processes: self.processes.clone(),
                 tokens: self.tokens.clone(),
                 sessions: self.sessions.clone(),
+                ci_watch: self.ci_watch.clone(),
                 stop: stop.clone(),
             };
             std::thread::Builder::new()
@@ -514,6 +545,7 @@ struct Parts {
     processes: Arc<FakeProcesses>,
     tokens: Arc<MemoryTokens>,
     sessions: Arc<FakeSessions>,
+    ci_watch: Option<supervise::CiWatchPort>,
     stop: Arc<AtomicBool>,
 }
 
@@ -637,7 +669,7 @@ impl Parts {
             broker_relay: None,
             run_e2e: None,
             sccache: None,
-            ci_watch: None,
+            ci_watch: self.ci_watch,
             ledger: None,
             environment: None,
             resources: None,

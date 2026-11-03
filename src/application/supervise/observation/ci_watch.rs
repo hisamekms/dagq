@@ -9,6 +9,8 @@
 //! `[run.env]` (ADR-0049 decision 9). A passing failure is retried at the
 //! next interval, and recorded as `ci_check_failed` once the same one
 //! repeats [`crate::domain::ci_watch::CI_WATCH_FAILURE_LIMIT`] times.
+//! The age of the declared workflows' latest successes (ADR-t3924-1) is
+//! read by the same check and never fails it, so it holds nothing.
 
 use super::*;
 use crate::application::ci_watch::{CheckOutcome, CiSource};
@@ -178,6 +180,14 @@ impl ObservationState {
         let token = env.token.clone();
         let build = env.layout.version.clone();
         let jobs_unread = self.ci.jobs_unread.clone();
+        let now_millis = env
+            .generators
+            .clock
+            .system_time()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|since| i64::try_from(since.as_millis()).ok())
+            .unwrap_or(0);
         self.ci.job = Some(spawn_traced(move || {
             let queue = queues.open()?;
             crate::application::ci_watch::check(
@@ -188,6 +198,7 @@ impl ObservationState {
                 &token,
                 &build,
                 &jobs_unread,
+                now_millis,
             )
         }));
     }
@@ -220,6 +231,12 @@ impl ObservationState {
                 self.ci.jobs_unread = outcome.jobs_unread;
                 if outcome.recorded > 0 {
                     info!("the CI watch recorded {} run(s)", outcome.recorded);
+                }
+                if outcome.freshness > 0 {
+                    info!(
+                        "the CI watch recorded the freshness of {} declared workflow(s)",
+                        outcome.freshness
+                    );
                 }
                 if outcome.scheduled > 0 {
                     info!(

@@ -5,6 +5,7 @@ pub mod asks;
 pub mod background;
 pub mod binaries;
 pub mod broker_relay;
+mod ci_freshness_config;
 pub mod ci_watch;
 mod ci_watch_store;
 pub mod claude;

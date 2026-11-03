@@ -1454,7 +1454,7 @@ mod tests {
         let now = queue.generators.clock.now();
         let registrations = queue.supervisors().unwrap();
         let attention =
-            health::attention(&*queue, &registrations, now, &SystemProcesses, None).unwrap();
+            health::attention(&*queue, &registrations, now, &SystemProcesses, None, None).unwrap();
         let applying = attention
             .iter()
             .find(|a| a.ask_id == Some(ask.id))
@@ -1851,7 +1851,7 @@ mod tests {
         let recorded = payload["runtime_delivers"].as_bool().unwrap();
         let registrations = queue.supervisors().unwrap();
         let attention =
-            health::attention(&queue, &registrations, now, &SystemProcesses, None).unwrap();
+            health::attention(&queue, &registrations, now, &SystemProcesses, None, None).unwrap();
         let delivering = attention
             .iter()
             .find(|a| a.ask_id == Some(ask.id))

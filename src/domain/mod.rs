@@ -2527,6 +2527,15 @@ pub enum AttentionNext {
     /// (`container_runtime_unavailable`, goal 38): what it holds waits
     /// until the container can be used or a task sets it back to the host.
     FixDagqToml,
+    /// A workflow `[[ci_watch.freshness]]` declares has no success on the
+    /// watched branch younger than its limit less its lead
+    /// (`ci_workflow_stale`, ADR-t3924-1): the supervisor tried once to
+    /// start it by `workflow_dispatch` (GitHub may have refused it), and a
+    /// person looks at its runs (cancelled, failed, never started, or a
+    /// refused start) if no new success comes.
+    /// It ends once a newer success is read, or the declaration is taken
+    /// out.
+    CheckStaleWorkflow,
     /// Stop the faulty server on the host; let the supervisor start its
     /// replacement so the recorded start clears restart-failure attention.
     CheckSccache,
@@ -2738,6 +2747,7 @@ impl fmt::Display for AttentionNext {
             Self::FixRecheckTarget => f.write_str("fix the recheck target"),
             Self::LogInToGh => f.write_str("log in to gh"),
             Self::FixDagqToml => f.write_str("fix dagq.toml"),
+            Self::CheckStaleWorkflow => f.write_str("look at the stale workflow's runs"),
             Self::ReportUpdate => f.write_str("report the update"),
             Self::ReportSupervisorEnd => f.write_str("report the supervisor's end"),
             Self::ReportReview => f.write_str("report the review"),
@@ -2810,6 +2820,9 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::CONTAINER_MEMORY_WAIT_LONG,
     ci_watch::CI_WATCH_UNAVAILABLE,
     ci_watch::CI_JOBS_MISSING,
+    // A declared workflow's latest success too old (ADR-t3924-1); its
+    // close `ci_workflow_fresh` is no attention.
+    ci_watch::freshness::CI_WORKFLOW_STALE,
     sccache::RESTART_FAILED,
     UPDATE_INSTALLED,
     // A supervisor that ended on its heartbeat, told with why (a queue
@@ -3148,6 +3161,9 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         // `required_jobs` names a job a success run lacks (ADR-t2034-1
         // decision 5): `dagq.toml` or the workflow is fixed by a task.
         (Some(EventKind::CiJobsMissing), _) => Some(AttentionNext::FixDagqToml),
+        // A declared workflow's latest success is too old (ADR-t3924-1);
+        // the newer success that closes it is no attention.
+        (Some(EventKind::CiWorkflowStale), _) => Some(AttentionNext::CheckStaleWorkflow),
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
         (Some(EventKind::UpdateInstalled), _) => Some(AttentionNext::ReportUpdate),
@@ -4506,6 +4522,16 @@ mod attention_tests {
                 Some(FixDagqToml),
             ),
             (
+                "ci_workflow_stale",
+                json!({"workflow": "t.yml", "run_id": 1}),
+                Some(CheckStaleWorkflow),
+            ),
+            (
+                "ci_workflow_fresh",
+                json!({"workflow": "t.yml", "closes": 2}),
+                None,
+            ),
+            (
                 "kpi_push_abandoned",
                 json!({"push_kind": "daily", "period": "2026-09-26"}),
                 Some(FixPush),
@@ -4904,6 +4930,10 @@ mod attention_tests {
         assert_eq!(FixRecheckTarget.to_string(), "fix the recheck target");
         assert_eq!(LogInToGh.to_string(), "log in to gh");
         assert_eq!(FixDagqToml.to_string(), "fix dagq.toml");
+        assert_eq!(
+            CheckStaleWorkflow.to_string(),
+            "look at the stale workflow's runs"
+        );
         assert_eq!(CheckE2e.to_string(), "check the e2e host");
         assert_eq!(ReportUpdate.to_string(), "report the update");
         assert_eq!(

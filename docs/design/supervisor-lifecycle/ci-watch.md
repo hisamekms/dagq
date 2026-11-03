@@ -6,6 +6,7 @@ status: current
 created: 2026-10-06
 scope: runtime
 related:
+  - adr-t3924-1
   - adr-t3807-1
   - adr-t2034-1
   - adr-t1920-1
@@ -35,6 +36,7 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
         └─ 成否の決まらない実行は次に決まった実行が引き受ける
         └─ 決まった実行ごとに 落ちたjobとstep・JUnit → 一覧の足し引き → 1つのトランザクションで記録（ci_checked・赤緑の転換・finding・resolved）
       → 宣言した定時のworkflowごとに 未処理の実行を作られた順に → 1つのトランザクションで記録（ci_scheduled_checked・finding・resolved）
+      → 古さを見張るworkflowごとに（[成果物の古さ](#成果物の古さ)）
 読み手: ci failures・status・着地の検証・workerとreviewのprompt
 ```
 
@@ -55,6 +57,7 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 - 名指したjobが揃って通ったと分からない`success`の実行を緑と読まないので、一覧はjobの分からない実行では空にならない（[ADR-t2034-1](../../adr/2026-10-07-t2034-1-skip-rust-ci-jobs-on-docs-only-changes-and-do-not-read-skipped-runs-as-green.md)）。
 - 読む手段が無い間と最初の答えの前は、新しいclaim・resume・着地を始めない。
 - 定時のworkflowの実行は一覧・赤と緑・着地の検証・claimと着地の保留を変えず、読めないときも見張りの一時の失敗に数えない（[ADR-t3807-1](../../adr/2026-10-31-t3807-1-ci-watch-reads-declared-scheduled-workflows-and-files-their-failures-as-findings.md)）。
+- 成果物の古さの見張りも同じで、読めないときは何も書かず何も起動しない（[ADR-t3924-1](../../adr/2026-11-03-t3924-1-ci-watch-measures-declared-workflows-age-by-latest-success-and-dispatches-once-before-the-limit.md)）。
 
 ## いつ確かめるか
 
@@ -87,6 +90,18 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
   同じ実行の記録の取り合いはpushと同じ形（`ScheduledCheckRecord::previous`）。
 - findingは`ci_failure`と別の種類で、改善として数える。
   plannerへの載せ方は[Finding planners](finding-planners.md)の「CIの見張りの定時のworkflowのfinding」。
+
+## 成果物の古さ
+
+- `[ci_watch]`が古さを見張ると宣言したworkflowごとに、同じ確かめの最後に着地先のbranchの最新の成功した実行を読み、その作られた時刻から古さを測る（[ADR-t3924-1](../../adr/2026-11-03-t3924-1-ci-watch-measures-declared-workflows-age-by-latest-success-and-dispatches-once-before-the-limit.md)）。
+  宣言の無いprojectでは何も読まない。
+- 宣言は`[ci_watch]`の後に来る`[[ci_watch.freshness]]`の表で、書式と既定は`infrastructure::ci_freshness_config`のmodule docが持つ。
+- 判断（知らせる・保つ・閉じる）は`domain::ci_watch::freshness::decide_freshness`、1回の確かめは`application::ci_watch::check_freshness`、記録は`SqliteQueue::record_ci_freshness`が持つ。
+- 古いと決めた記録を書けたsupervisorだけがそのworkflowを`workflow_dispatch`で起動するので、起動は最新の成功ごとに1回である。
+  記録の取り合いは`FreshnessRecord`のdoc commentが持つ。
+- attentionは`ci_workflow_stale`で、閉じる`ci_workflow_fresh`はattentionではない。
+  `status`の行は`application::health::attention`が`freshness::standing_stale`で出し、宣言を外したworkflowの行は出さない。
+- 落とし穴: 起動が拒まれても（`workflow_dispatch`の無いworkflow・権限）記録は残り、同じ成功について起動し直さないので、attentionが人に届くだけになる。
 
 ## 一覧
 

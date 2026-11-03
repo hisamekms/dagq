@@ -90,7 +90,8 @@ pub const RUN_LIST_LIMIT: usize = 50;
 pub const CI_WATCH_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// `[ci_watch]` of `dagq.toml`: the workflow whose pushes to the branch
-/// the supervisor watches.
+/// the supervisor watches. Without the table the watch is off: nothing is
+/// read from GitHub and nothing is recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CiWatchConfig {
     /// The workflow file name or name (`gh run list --workflow`).
@@ -119,6 +120,15 @@ pub struct CiWatchConfig {
     /// state green or red, nor any hold of the claims or the landings.
     /// Empty (the key left out) reads none.
     pub scheduled_workflows: Vec<String>,
+    /// `[[ci_watch.freshness]]`: the workflows whose latest success on the
+    /// watched branch each check reads for its age
+    /// ([`freshness::decide_freshness`], ADR-t3924-1): one too old is told
+    /// to the inbox ([`freshness::CI_WORKFLOW_STALE`]) and started once by
+    /// `workflow_dispatch`, until a newer success closes it. Like the
+    /// scheduled workflows, they touch neither the list, the state nor any
+    /// hold, and a failure to read one is no failure of the check. Empty
+    /// (no such table) reads none.
+    pub freshness: Vec<freshness::FreshnessWatch>,
 }
 
 impl CiWatchConfig {
@@ -2610,6 +2620,7 @@ mod tests {
             junit_artifacts: Vec::new(),
             required_jobs: vec!["rust".into(), "linux".into()],
             scheduled_workflows: Vec::new(),
+            freshness: Vec::new(),
         };
         let success = run(2, "success", "2026-10-06T02:00:00Z");
         let linux = vec!["linux".to_owned()];

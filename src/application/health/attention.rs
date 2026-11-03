@@ -125,6 +125,16 @@ pub fn compact_event(event: &RunEvent) -> Value {
     {
         object.insert("reason".into(), json!(truncate_reason(reason)));
     }
+    if event.kind == EventKind::CiWorkflowStale {
+        // Which declared workflow is too old, its latest success, its age
+        // and the limit (ADR-t3924-1): the record has no reason of its own.
+        object.insert(
+            "reason".into(),
+            json!(truncate_reason(
+                &crate::domain::ci_watch::freshness::stale_summary(payload)
+            )),
+        );
+    }
     if let Some(next) = event_attention(&event.kind, payload) {
         object.insert("next".into(), json!(next));
     }
@@ -185,6 +195,9 @@ pub(super) fn update_failure_applied(
 /// of `[ci_watch]` names now (empty without the table, `None` when
 /// `dagq.toml` cannot be read): a `ci_jobs_missing` stands only while it
 /// names a missing job ([`crate::domain::ci_watch::WatchState::standing_jobs_missing`]).
+/// `ci_freshness` is `[[ci_watch.freshness]]` as read now, with the same
+/// `None`: a `ci_workflow_stale` stands while it is open and its workflow
+/// declared ([`crate::domain::ci_watch::freshness::standing_stale`]).
 pub fn attention(
     queue: &(
          impl AskStore
@@ -203,6 +216,7 @@ pub fn attention(
     now: i64,
     control: &dyn ProcessControl,
     ci_named_jobs: Option<&[String]>,
+    ci_freshness: Option<&[crate::domain::ci_watch::freshness::FreshnessWatch]>,
 ) -> Result<Vec<Attention>> {
     let pulses = pulses(registrations, now, control);
     // A stale supervisor shows why its heartbeat stopped, when it recorded
@@ -568,6 +582,28 @@ pub fn attention(
                 .map(truncate_reason),
             last_error_code: None,
             next: AttentionNext::FixDagqToml,
+        });
+    }
+    // A declared workflow's latest success is too old (ADR-t3924-1): the
+    // supervisor started it once, and a person looks at its runs until a
+    // newer success closes it.
+    for event in crate::domain::ci_watch::freshness::standing_stale(
+        &queue.ci_freshness_events()?,
+        ci_freshness,
+    ) {
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "stale".into(),
+            kind: crate::domain::ci_watch::freshness::CI_WORKFLOW_STALE.into(),
+            last_error: Some(truncate_reason(
+                &crate::domain::ci_watch::freshness::stale_summary(&event.payload),
+            )),
+            last_error_code: None,
+            next: AttentionNext::CheckStaleWorkflow,
         });
     }
     // The host's KPI push command that failed a message three times waits
