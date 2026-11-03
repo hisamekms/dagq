@@ -73,7 +73,7 @@ related:
 ### 書くもの・書かないもの
 
 - 書くのは、流れ・責務と境界・不変条件、コードから読めない約束と落とし穴、コードへの入口（module・型・関数の名前を入口として指すのはよい）、ADRへのリンク。
-- 書かないのは次のもので、差分が足した・変えたdesignの行がどれに当たるかは`.dagq/agents/design-layers/`のreviewのagentがこの規則コードで判定する（[ADR-t1942-1](../adr/2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)決定7、予算のための削除のDL-3は下の「形と予算」）。
+- 書かないのは次のもので、`docs/design/`を変えるrunのreviewで、`.dagq/agents/design-layers/`のagentが差分の足した・変えた・消したdesignの行の層を見て、どれに当たるかをこの規則コードで判定する（[ADR-t1942-1](../adr/2026-10-07-t1942-1-design-docs-in-four-layers-with-size-budgets.md)決定7、予算のための削除のDL-3は下の「形と予算」）。
   - DL-1: 場面・分岐ごとに誰が何をどの順にするか（書く・読む・起動する）の列挙（コードを読めば分かる手順の書き写し）。
   - DL-2: eventの欄・CLIのflag・既定値と閾値の数値・関数や型の名前・test名の並び（入口として1つ指すのはよい）。
   - DL-4: 経緯（task・goal・requestの番号、「以前は」「〜から変えた」、文字数や件数の変遷）。
