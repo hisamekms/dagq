@@ -120,7 +120,10 @@ validationを通ったrun（awaiting_integration）
 - **runの群**: providerの組の試しを有効にしたrepositoryでは、reviewのjobのproviderはrunの群に従う（[ADR-t4005-1](../../adr/2026-11-02-t4005-1-production-ab-of-worker-and-review-provider-pairs.md)決定5）。
   Codexで実装した群のrunでは、全体の判定とproviderがCodexのsubagent（明示したものと役割の設定を継ぐもの）をClaudeで起動し、Claudeの側のmodelとeffortを渡す。
   providerをClaudeと書いたsubagentと、もう一方の群のrunは設定のまま起動する。
+  群はrunのclaimの記録から読み（`RunPair::of_run`）、jobの起動の組は副作用のない`RoleModels::review_plan`が決める。
 - **予定provider**: 切り替えはjobごとに、そのjobに群と設定を当てたfallback前の予定providerと実際のproviderを比べて判じ、群の上書きと設定どおりの混在は切り替えでない（決定6）。
+  群の上書きは起動を切り替えとして扱わないので、jobの切り替えの元は今のfallbackで予定providerから動いたときだけ付き、予定providerと一致する。
+  reviewのjobの記録とsessionの起動の記録はrunの群とjobの予定providerを持つ（`job_launch`・`planned_fields`）。
 
 ## reviewのsubagent<a id="reviewのsubagent"></a>
 
@@ -134,7 +137,7 @@ validationを通ったrun（awaiting_integration）
   - 表の起動の組（`provider`・`model`・`effort`）のうち書いた`model`と`effort`はそのjobに渡り、書かない項目は`[roles.review]`を継ぐ（modelとeffortは起動先のproviderでの役割の値、`RoleModels::written_agent_launch`）。
   - 起動先のproviderが受けない値は、表を読むときもjobを起動するとき（その間に`[roles.review]`が変わったとき）も設定の誤りで、reviewは通らない（`ReviewAgents::launch_problems`・`RoleModels::checked_agent_launch`）。
   - 別のproviderへ切り替えたjobには書いた`model`と`effort`を渡さず、切り替え先で`[roles.review]`が与える値で起動する（`RoleModels::moved_agent_launch`）。
-  - agentのevalの1回も本番のjobと同じ組で起動する。
+  - agentのevalの1回も本番のjobと同じ組で起動するが、共有するのは群の上書きの前の設定で、evalはrunの群を持たないので群に従わない。
 - **誤り**: 必須の検査が分からないときは空にせず、起動せずにreviewの失敗にする。
 
 ## プログラムのreview<a id="プログラムのreview"></a>
@@ -180,6 +183,7 @@ ADR-t451-1決定3。
 
 - 約束: jobはsnapshotのheadで作り直したworkerが書けない木で判定し、mainが進んでいれば`high`のpassでも閉じない。
 - 判定から開くaskと閉じは判定元のjobの依頼として記録する（[roles](roles.md#eventのactor)）。
+- 判定はrunのreviewで、jobは全体の判定と同じく[runの群](#reviewのprovider)に従って起動し、群と予定providerを記録する。
 
 ## 再計画の操作が保護するrun
 

@@ -2617,6 +2617,7 @@ mod tests {
         let job = |state| ReviewJob {
             id: ReviewJobId::Whole,
             written: Default::default(),
+            pair: Default::default(),
             input: ReviewJobInput::Whole {
                 prompt: String::new(),
                 prompt_bytes: crate::application::prompt::PromptBytes::default(),

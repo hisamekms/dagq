@@ -19,6 +19,7 @@ use crate::application::prompt::{
     NEXT_TURN_NAME_BYTES, PROVIDER_MESSAGE_BYTES, PROVIDER_TURN_LIMIT, UNDELIVERED_REQUEST_BYTES,
 };
 use crate::application::prompt_fit::{Fit, Keep, NOT_READABLE};
+use crate::domain::provider_trial::RunPair;
 use crate::domain::{
     actor_model::{
         ActorLaunch, AgentModel, JobRoute, JobStartRoute, ModelRole, RoleModels,
@@ -588,18 +589,21 @@ pub(super) fn review_route(
 /// ([`RoleModels::moved_agent_launch`]). When the roles read now send
 /// it to a provider that does not take what the table writes
 /// ([`RoleModels::checked_agent_launch`]), the job does not start and goes
-/// to the person, as a mistake of the configuration.
+/// to the person, as a mistake of the configuration. `review` is the
+/// provider the run's pair assigns its review (`None` for the review as
+/// configured): a job configured elsewhere is planned there instead
+/// ([`RoleModels::review_plan`], ADR-t4005-1 decision 5), and falls back
+/// from it as any job does.
 pub(super) fn agent_job_route(
     models: &RoleModels,
-    written: &AgentModel,
+    (written, review): (&AgentModel, Option<Provider>),
     (no_claude, fallback): (bool, bool),
     queue_hold: Option<QueueHold>,
     unusable: impl Fn(Provider) -> Option<SwitchReason>,
 ) -> ReviewRoute {
     let role = ModelRole::Review;
-    let switchable = written.provider.is_some() || models.switchable(role);
-    let launch = match models.checked_agent_launch(role, written) {
-        Ok(launch) => launch,
+    let (launch, switchable) = match models.review_plan(written, review) {
+        Ok(plan) => (plan.launch, plan.switchable),
         Err(why) => return ReviewRoute::Manual(why),
     };
     match review_route(
@@ -676,13 +680,14 @@ impl Supervisor<'_> {
     /// queue's hold ask with the job as `hold`; another provider that
     /// cannot be used is held when the job's role names its provider
     /// (`switchable`), and the job moves when the route of what its table
-    /// `written` ([`Self::review_job_route`]) then sends it elsewhere.
+    /// `written`, as the run's `pair` plans it ([`Self::review_job_route`]),
+    /// then sends it elsewhere.
     pub(super) fn review_job_failed(
         &mut self,
         ended: &HeadlessJob,
         (error, stdout): (&str, &str),
         hold: &HoldJob,
-        (written, switchable): (&AgentModel, bool),
+        (pair, written, switchable): (&RunPair, &AgentModel, bool),
     ) -> ReviewJobFailure {
         let wall = self.job_wall(ended);
         let raised = wall.is_some_and(|wall| self.raise_job_wall(wall, hold, error));
@@ -693,7 +698,7 @@ impl Supervisor<'_> {
             let failure = self.job_failure(ended);
             self.job_provider_failed(ended.provider, failure, (error, &said), hold, switchable)
                 .map(|(provider, reason)| {
-                    let moves = review_moves(&self.review_job_route(written), provider);
+                    let moves = review_moves(&self.review_job_route(pair, written), provider);
                     (provider, reason, moves)
                 })
         };

@@ -424,7 +424,9 @@ impl Supervisor<'_> {
                 retried,
                 providers,
             } => {
-                if !self.review_held_waits(providers) {
+                let events = self.queue.run_events(slot.run.id())?;
+                let pair = crate::domain::provider_trial::RunPair::of_run(&events);
+                if !self.review_held_waits(&pair, providers) {
                     let (session, retried) = (session.take(), *retried);
                     let run = self.queue.run(slot.run.id())?;
                     let review = self.resume_review(&run, session, retried)?;

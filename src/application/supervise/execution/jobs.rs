@@ -1755,6 +1755,11 @@ pub(super) struct ReviewJob {
     /// role's (`Supervisor::review_job_route`); nothing for the whole
     /// review's and an agent whose table writes none.
     pub(super) written: crate::domain::actor_model::AgentModel,
+    /// Its run's pair as the run's claim recorded it: a treatment's job is
+    /// planned on the provider the pair assigns its review
+    /// (`Supervisor::review_job_route`, ADR-t4005-1 decision 5), and each
+    /// of its records names the run's group.
+    pub(super) pair: crate::domain::provider_trial::RunPair,
     /// What starts it.
     pub(super) input: ReviewJobInput,
     /// A built-in's record of which built-in judges: the whole review's,
@@ -2811,6 +2816,7 @@ mod tests {
         let review_job = |id: ReviewJobId, state: ReviewJobState| ReviewJob {
             id,
             written: Default::default(),
+            pair: Default::default(),
             input: ReviewJobInput::Whole {
                 prompt: String::new(),
                 prompt_bytes: crate::application::prompt::PromptBytes::default(),

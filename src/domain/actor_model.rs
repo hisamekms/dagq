@@ -369,6 +369,103 @@ impl RoleModels {
     }
 }
 
+/// What a job of a run's review is planned to start with, before any
+/// fallback ([`RoleModels::review_plan`]): its launch, and whether it
+/// names its provider (`switchable`), so that a provider it cannot use
+/// moves it or holds it ([`job_route`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewPlan {
+    pub launch: ActorLaunch,
+    pub switchable: bool,
+}
+
+/// The field a run's review job records beside its run's group
+/// ([`crate::domain::provider_trial::GROUP`]): its planned provider, the
+/// one [`RoleModels::review_plan`] gave it before any fallback
+/// (ADR-t4005-1 decision 6).
+pub const PLANNED_PROVIDER: &str = "planned_provider";
+
+impl RoleModels {
+    /// What the job of a run's review starts with before any fallback, its
+    /// agent's table writing `written` (nothing for the whole review's)
+    /// and `review` the provider the run's pair assigns its review
+    /// ([`crate::domain::provider_trial::RunPair::review`], `None` for the
+    /// review as configured; ADR-t4005-1 decision 5). A job whose
+    /// configured provider (its table's, else `[roles.review]`'s) is not
+    /// the assigned one starts on the assigned one, with what
+    /// `[roles.review]` gives when that table is the assigned provider's,
+    /// else that provider's default ([`Self::assigned_launch`]); it names
+    /// its provider. Any other job starts as configured: an agent's as
+    /// [`Self::checked_agent_launch`] gives it (`Err` when what its table
+    /// writes does not fit), else as [`Self::launch`] gives the role. The
+    /// plan never moves a launch ([`ActorLaunch::switched`]), so a job's
+    /// `switched_from` says only a fallback from its planned provider.
+    pub fn review_plan(
+        &self,
+        written: &AgentModel,
+        review: Option<Provider>,
+    ) -> Result<ReviewPlan, String> {
+        let role = ModelRole::Review;
+        let configured = written.provider.unwrap_or_else(|| self.provider(role).0);
+        if let Some(assigned) = review.filter(|assigned| *assigned != configured) {
+            return Ok(ReviewPlan {
+                launch: self.assigned_launch(role, written, assigned),
+                switchable: true,
+            });
+        }
+        let launch = if written.written() {
+            self.checked_agent_launch(role, written)?
+        } else {
+            self.launch(role)
+        };
+        Ok(ReviewPlan {
+            launch,
+            switchable: written.provider.is_some() || self.switchable(role),
+        })
+    }
+
+    /// The launch of a job of `role` that a run's pair moves to
+    /// `provider` from the one its configuration gives: none of the model
+    /// and effort its agent's table (`written`) writes, which are the
+    /// configured provider's own, but `[roles.<role>]`'s when that table
+    /// is on `provider`, else `provider`'s default (Opus 5.5 on Claude, no
+    /// model on Codex) with `medium`. Its source is the agent's table when
+    /// it writes any, else `dagq.toml`, where the trial is.
+    fn assigned_launch(
+        &self,
+        role: ModelRole,
+        written: &AgentModel,
+        provider: Provider,
+    ) -> ActorLaunch {
+        let own = Some(self.launch(role)).filter(|launch| launch.provider == provider);
+        let model = own
+            .as_ref()
+            .and_then(|launch| launch.model.clone())
+            .or_else(|| (provider == Provider::Claude).then(|| OPUS.to_owned()));
+        let effort = own
+            .and_then(|launch| launch.effort)
+            .unwrap_or_else(|| MEDIUM.to_owned());
+        ActorLaunch {
+            provider,
+            model,
+            effort: Some(effort),
+            source: if written.written() {
+                LaunchSource::Subagent
+            } else {
+                LaunchSource::Config
+            },
+            ..ActorLaunch::default_of(role)
+        }
+    }
+}
+
+/// The provider a run's review job that started on `launch` was planned
+/// for: the one it moved from ([`ActorLaunch::switched`]), else its own,
+/// as [`RoleModels::review_plan`] never moves a launch.
+pub fn planned_provider(launch: &ActorLaunch) -> Provider {
+    launch.switched_from.unwrap_or(launch.provider)
+}
+
 /// What a review agent's `[review.subagents.<agent>]` (a built-in's
 /// `[review.subagents."builtin:<name>"]` alike) writes of its job's
 /// launch, each key optional: `provider` (`"claude"` or `"codex"`), the
@@ -1764,5 +1861,206 @@ mod tests {
             error.contains("effort huge is not a step claude takes"),
             "{error}"
         );
+    }
+
+    /// `[roles.review]` on Codex (gpt-5.5, `high`) as this repository
+    /// writes it, with a `design-layers` agent on Claude.
+    fn codex_review() -> RoleModels {
+        let mut models = RoleModels::default();
+        let table = models.entry(ModelRole::Review);
+        table.provider = Some(Provider::Codex);
+        table.model = Some("gpt-5.5".to_owned());
+        table.effort = Some("high".to_owned());
+        models
+    }
+
+    fn plan_of(models: &RoleModels, w: &AgentModel, review: Option<Provider>) -> ReviewPlan {
+        models.review_plan(w, review).unwrap()
+    }
+
+    /// A treatment's run (its pair assigns Claude) starts its whole review
+    /// and each Codex agent (named or the role's) on Claude, with Claude's
+    /// default model and effort, never a Codex model; a control's run, a
+    /// run outside the trial and a Claude agent start as configured
+    /// (ADR-t4005-1 decision 5).
+    #[test]
+    fn a_treatments_review_starts_on_its_assigned_provider_and_a_controls_as_configured() {
+        let models = codex_review();
+        let some = |v: &str| Some(v.to_owned());
+        let whole = AgentModel::default();
+        let inherits = written(None, None, Some("xhigh"));
+        let codex = written(Some(Provider::Codex), Some("gpt-5.5-mini"), Some("low"));
+        let design = written(
+            Some(Provider::Claude),
+            Some("claude-haiku-5-5"),
+            Some("low"),
+        );
+        let on = |w: &AgentModel, review| {
+            let plan = plan_of(&models, w, review);
+            let l = plan.launch;
+            (l.provider, l.model, l.effort, plan.switchable)
+        };
+        // The control and outside the trial: as configured.
+        assert_eq!(
+            on(&whole, None),
+            (Provider::Codex, some("gpt-5.5"), some("high"), true)
+        );
+        assert_eq!(
+            on(&inherits, None),
+            (Provider::Codex, some("gpt-5.5"), some("xhigh"), true)
+        );
+        assert_eq!(
+            on(&codex, None),
+            (Provider::Codex, some("gpt-5.5-mini"), some("low"), true)
+        );
+        assert_eq!(
+            plan_of(&models, &whole, None).launch,
+            models.launch(ModelRole::Review)
+        );
+        assert_eq!(
+            plan_of(&models, &codex, None).launch,
+            models
+                .checked_agent_launch(ModelRole::Review, &codex)
+                .unwrap()
+        );
+        // The treatment: Claude's default for each Codex job.
+        let claude = Some(Provider::Claude);
+        for w in [&whole, &inherits, &codex] {
+            assert_eq!(
+                on(w, claude),
+                (Provider::Claude, some(OPUS), some(MEDIUM), true)
+            );
+        }
+        assert_eq!(
+            plan_of(&models, &whole, claude).launch.source,
+            LaunchSource::Config
+        );
+        assert_eq!(
+            plan_of(&models, &codex, claude).launch.source,
+            LaunchSource::Subagent
+        );
+        // A Claude agent is the same in both groups.
+        let configured = models
+            .checked_agent_launch(ModelRole::Review, &design)
+            .unwrap();
+        assert_eq!(plan_of(&models, &design, claude).launch, configured);
+        assert_eq!(plan_of(&models, &design, None).launch, configured);
+        assert_eq!(
+            on(&design, claude),
+            (
+                Provider::Claude,
+                some("claude-haiku-5-5"),
+                some("low"),
+                true
+            )
+        );
+        // A Codex agent under a Claude `[roles.review]` takes the role's
+        // Claude model and effort when the pair moves it to Claude.
+        let mut claude_role = RoleModels::default();
+        let table = claude_role.entry(ModelRole::Review);
+        table.provider = Some(Provider::Claude);
+        table.model = Some("claude-sonnet-5-5".to_owned());
+        table.effort = Some("high".to_owned());
+        let moved = plan_of(&claude_role, &codex, claude).launch;
+        assert_eq!(
+            (
+                moved.provider,
+                moved.model.as_deref(),
+                moved.effort.as_deref()
+            ),
+            (Provider::Claude, Some("claude-sonnet-5-5"), Some("high"))
+        );
+        // A pair that assigns Codex moves a Claude job there with Codex's
+        // default model, never a Claude one.
+        let to_codex = plan_of(&RoleModels::default(), &whole, Some(Provider::Codex)).launch;
+        assert_eq!(
+            (
+                to_codex.provider,
+                to_codex.model,
+                to_codex.effort.as_deref()
+            ),
+            (Provider::Codex, None, Some(MEDIUM))
+        );
+        // What the table writes that does not fit still stops the job.
+        let wrong = written(None, Some("claude-haiku-5-5"), None);
+        assert!(models.review_plan(&wrong, None).is_err());
+    }
+
+    /// Whatever a plan's launch gives is its provider's own: the model
+    /// fits the provider as `[roles.<role>]`'s does ([`RoleModel::check`],
+    /// [`AgentModel::check_on`]).
+    #[test]
+    fn an_assigned_launch_keeps_the_model_its_providers() {
+        let models = codex_review();
+        for w in [
+            AgentModel::default(),
+            written(None, None, Some("xhigh")),
+            written(Some(Provider::Codex), Some("gpt-5.5-mini"), Some("low")),
+            written(Some(Provider::Claude), Some("claude-haiku-5-5"), None),
+        ] {
+            for review in [None, Some(Provider::Claude), Some(Provider::Codex)] {
+                let launch = plan_of(&models, &w, review).launch;
+                let given = AgentModel {
+                    provider: None,
+                    model: launch.model.clone(),
+                    effort: launch.effort.clone(),
+                };
+                assert_eq!(
+                    given.check_on(launch.provider, ModelRole::Review),
+                    Ok(()),
+                    "{w:?} {review:?}"
+                );
+            }
+        }
+    }
+
+    /// Each job's planned provider is its plan's, before any fallback: a
+    /// control's run whose whole review is on Codex and `design-layers` on
+    /// Claude, and a treatment's moved by its pair, start on their planned
+    /// providers with no `switched_from`; only a job whose planned
+    /// provider cannot be used and that falls back has one, which is its
+    /// planned provider (ADR-t4005-1 decision 6).
+    #[test]
+    fn only_a_fallback_from_the_planned_provider_marks_a_switch() {
+        let models = codex_review();
+        let design = written(Some(Provider::Claude), None, None);
+        let usable = |_: Provider| None;
+        let start = |plan: ReviewPlan, unusable: &dyn Fn(Provider) -> Option<SwitchReason>| {
+            match job_route(&plan.launch, plan.switchable, true, unusable) {
+                JobRoute::Start(launch) => launch,
+                JobRoute::Wait { .. } => panic!("it waits"),
+            }
+        };
+        for (w, review, planned) in [
+            (AgentModel::default(), None, Provider::Codex),
+            (design.clone(), None, Provider::Claude),
+            (
+                AgentModel::default(),
+                Some(Provider::Claude),
+                Provider::Claude,
+            ),
+            (design.clone(), Some(Provider::Claude), Provider::Claude),
+        ] {
+            let launch = start(plan_of(&models, &w, review), &usable);
+            assert_eq!(
+                (launch.provider, launch.switched_from, launch.switch_reason),
+                (planned, None, None),
+                "{w:?} {review:?}"
+            );
+            assert_eq!(planned_provider(&launch), planned);
+            // Its planned provider unusable: it falls back, from it.
+            let limit =
+                move |provider: Provider| (provider == planned).then_some(SwitchReason::UsageLimit);
+            let moved = start(plan_of(&models, &w, review), &limit);
+            assert_eq!(
+                (moved.provider, moved.switched_from, moved.switch_reason),
+                (
+                    planned.other(),
+                    Some(planned),
+                    Some(SwitchReason::UsageLimit)
+                )
+            );
+            assert_eq!(planned_provider(&moved), planned);
+        }
     }
 }

@@ -1936,7 +1936,7 @@ mod tests {
             let super::super::landing::ReviewRoute::Start(review, _) =
                 super::super::provider::agent_job_route(
                     &models,
-                    written,
+                    (written, None),
                     (false, true),
                     None,
                     |_| None,

@@ -7,6 +7,10 @@
 //! ([`ClaimJudgment::parse`]), a job that gives none runs once more as a
 //! run review's does, and a provider that cannot be used holds, moves or
 //! waits as it does for a run review's job ([`Supervisor::review_job_failed`]).
+//! It is a review of the run, so it follows the run's provider pair as the
+//! run's whole review does (ADR-t4005-1 decision 5): its job is planned on
+//! the provider the pair assigns, and its records name the run's group and
+//! the job's planned provider.
 //! What it judged is decided against main's head at that moment
 //! ([`satisfied_judgment::decide`], ADR-t1818-1 decisions 3 and 5): a
 //! `high` pass on a snapshot main is still at closes the task as
@@ -36,7 +40,9 @@
 //! (`satisfied_judgment::unstarted_question`). The verification passed,
 //! so every such ask offers `close`.
 
-use super::landing::{AfterUnusable, ReviewRoute, StartedReview, after_unusable};
+use super::landing::{
+    AfterUnusable, ReviewRoute, StartedReview, after_unusable, job_launch, planned_fields,
+};
 use super::provider::ReviewJobFailure;
 use super::*;
 use crate::application::job_start_failure;
@@ -44,6 +50,7 @@ use crate::application::prompt::{REVIEW_ACCESS, claim_review_prompt};
 use crate::domain::ActorContext;
 use crate::domain::actor_model::ActorLaunch;
 use crate::domain::headless_job::{JobKind, JobStop};
+use crate::domain::provider_trial::{self, RunPair};
 use crate::domain::review_jobs::{self, JobMiss};
 use crate::domain::satisfied::{self, SnapshotVerification};
 use crate::domain::satisfied_judgment::{self, ClaimJudgment, JudgmentStep};
@@ -62,6 +69,11 @@ pub(super) struct ClaimReviewWatch {
     /// Whether a park withheld where it stands, which the park's later
     /// looks do not record again; a step after the fence went resets it.
     pub(super) withheld: bool,
+    /// The run's pair as its claim recorded it: the judgment is a review
+    /// of the run, so its job is planned as the run's whole review's
+    /// (`Supervisor::review_route`, ADR-t4005-1 decision 5) and its records
+    /// name the run's group and the job's planned provider.
+    pair: RunPair,
 }
 
 /// Where the one job of a claim's judgment stands.
@@ -69,9 +81,12 @@ enum ClaimJob {
     /// It waits to start (for its provider, or as its run once more), why
     /// it waited last noted.
     Waiting(Option<String>),
+    /// `launch` is what it started with, whose planned provider its end
+    /// records.
     Running {
         job: Box<HeadlessJob>,
         switchable: bool,
+        launch: Box<ActorLaunch>,
     },
     /// It printed a judgment, not acted on yet.
     Judged(ClaimJudgment),
@@ -265,7 +280,12 @@ impl Supervisor<'_> {
         self.queue.record_runtime_event(
             run.id(),
             EventKind::RunSatisfiedReviewStarted,
-            json!({"attempt": attempt, "head": verification.head, "prompt_bytes": fitted.bytes}),
+            json!({
+                "attempt": attempt,
+                "head": verification.head,
+                "prompt_bytes": fitted.bytes,
+                provider_trial::GROUP: RunPair::of_run(&events).group,
+            }),
         )?;
         info!(run_id = %run.id(), "run {}: its already_satisfied claim passed on main {}; the review judges it there (judgment {attempt})", run.id(), verification.head);
         Ok(Phase::SatisfiedReview(ClaimReviewWatch {
@@ -275,6 +295,7 @@ impl Supervisor<'_> {
             again: false,
             state: ClaimJob::Waiting(None),
             withheld: false,
+            pair: RunPair::of_run(&events),
         }))
     }
 
@@ -345,6 +366,7 @@ impl Supervisor<'_> {
         let ClaimJob::Running {
             job: ended,
             switchable,
+            launch,
         } = std::mem::replace(&mut watch.state, ClaimJob::Waiting(None))
         else {
             unreachable!("the job runs");
@@ -362,6 +384,7 @@ impl Supervisor<'_> {
             "duration_secs": duration_secs,
             "output": &output,
         });
+        planned_fields(&mut finished, &watch.pair, Some(&launch));
         crate::domain::headless_job::JobSession::record_execution(
             agent.job_session(&stdout, ended.started_at()).as_ref(),
             &mut finished,
@@ -389,7 +412,7 @@ impl Supervisor<'_> {
             &ended,
             (&error, &stdout),
             &HoldJob::Review(run.id().clone()),
-            (&Default::default(), switchable),
+            (&watch.pair, &Default::default(), switchable),
         );
         finished["error"] = json!(error);
         match failure {
@@ -423,7 +446,7 @@ impl Supervisor<'_> {
         error: &str,
         output: Option<String>,
     ) -> bool {
-        let manual = matches!(self.review_route(), ReviewRoute::Manual(_));
+        let manual = matches!(self.review_route(&watch.pair), ReviewRoute::Manual(_));
         let retry = self.landing.retry_unreadable_review;
         match claim_miss(failure, (retry, watch.again, manual)) {
             ClaimMiss::Wait => {
@@ -476,7 +499,7 @@ impl Supervisor<'_> {
             );
             return Ok(());
         }
-        let (mut launch, mut switchable) = match self.review_route() {
+        let (mut launch, mut switchable) = match self.review_route(&watch.pair) {
             ReviewRoute::Wait(why) => {
                 note_claim_wait(run, watch, why);
                 return Ok(());
@@ -519,6 +542,7 @@ impl Supervisor<'_> {
                     watch.state = ClaimJob::Running {
                         job: Box::new(started),
                         switchable,
+                        launch: Box::new(launch.clone()),
                     };
                     self.queue.record_runtime_event(
                         run.id(),
@@ -526,7 +550,8 @@ impl Supervisor<'_> {
                         json!({
                             "attempt": watch.attempt,
                             "again": watch.again,
-                            "launch": launch.to_value(),
+                            "launch": job_launch(&watch.pair, &launch),
+                            provider_trial::GROUP: watch.pair.group,
                             "session_id": session_id,
                             "output": output,
                         }),
@@ -551,22 +576,21 @@ impl Supervisor<'_> {
                         &HoldJob::Review(run.id().clone()),
                         switchable,
                     ) {
-                        let next = after_unusable(self.review_route(), provider);
+                        let next = after_unusable(self.review_route(&watch.pair), provider);
                         if !matches!(next, AfterUnusable::Fail) {
                             warn!(run_id = %run.id(), error = %error, "run {} judgment {}: {} cannot be used ({})", run.id(), watch.attempt, provider.as_str(), reason.as_str());
-                            self.record_claim_job_finished(
-                                run,
-                                json!({
-                                    "attempt": watch.attempt,
-                                    "again": watch.again,
-                                    "provider": provider,
-                                    "outcome": "held",
-                                    "error": error,
-                                    "switch_reason": reason.as_str(),
-                                    "duration_secs": 0,
-                                    "output": output,
-                                }),
-                            )?;
+                            let mut held = json!({
+                                "attempt": watch.attempt,
+                                "again": watch.again,
+                                "provider": provider,
+                                "outcome": "held",
+                                "error": error,
+                                "switch_reason": reason.as_str(),
+                                "duration_secs": 0,
+                                "output": output,
+                            });
+                            planned_fields(&mut held, &watch.pair, Some(&launch));
+                            self.record_claim_job_finished(run, held)?;
                         }
                         match next {
                             AfterUnusable::Start(next, next_switchable) => {
@@ -582,7 +606,7 @@ impl Supervisor<'_> {
                                 return self.claim_start_missed(
                                     run,
                                     watch,
-                                    ReviewJobFailure::Unusable,
+                                    (ReviewJobFailure::Unusable, &launch),
                                     &error,
                                 );
                             }
@@ -593,17 +617,22 @@ impl Supervisor<'_> {
                 // Its own preparation failed: no provider was tried.
                 Err(prepared) => format!("it could not start: {prepared:#}"),
             };
-            return self.claim_start_missed(run, watch, ReviewJobFailure::Failed, &error);
+            return self.claim_start_missed(
+                run,
+                watch,
+                (ReviewJobFailure::Failed, &launch),
+                &error,
+            );
         }
     }
 
-    /// Record that the job of `watch` could not start with `error`, and run
-    /// it once more or fail it ([`Self::claim_job_missed`]).
+    /// Record that the job of `watch` could not start on `launch` with
+    /// `error`, and run it once more or fail it ([`Self::claim_job_missed`]).
     fn claim_start_missed(
         &mut self,
         run: &TaskRun,
         watch: &mut ClaimReviewWatch,
-        failure: ReviewJobFailure,
+        (failure, launch): (ReviewJobFailure, &ActorLaunch),
         error: &str,
     ) -> Result<()> {
         warn!(run_id = %run.id(), error = %error, "run {} judgment {}: its job {error}", run.id(), watch.attempt);
@@ -615,6 +644,7 @@ impl Supervisor<'_> {
             "duration_secs": 0,
             "output": claim_output(watch.attempt, watch.again),
         });
+        planned_fields(&mut finished, &watch.pair, Some(launch));
         // The output named on a failure is its earlier run's, if any.
         let earlier = watch.again.then(|| claim_output(watch.attempt, false));
         let again = self.claim_job_missed(run, watch, failure, error, earlier);
@@ -954,6 +984,7 @@ mod tests {
             again: false,
             state,
             withheld: false,
+            pair: RunPair::default(),
         }
     }
 

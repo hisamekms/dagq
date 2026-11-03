@@ -124,8 +124,8 @@ pub(super) struct Wiring {
     deadline: Instant,
     generators: Generators,
     pid: u32,
-    /// Whether the supervisor also runs Codex headless workers (on the
-    /// same fake agent); Claude only by default.
+    /// Whether the supervisor also runs Codex headless workers and jobs
+    /// (on the same fake agent); Claude only by default.
     codex: bool,
     /// `[provider_fallback] workers`; on by default.
     worker_fallback: bool,
@@ -192,8 +192,8 @@ impl Wiring {
         }
     }
 
-    /// The wiring whose supervisor also runs Codex headless workers, on
-    /// the same fake agent.
+    /// The wiring whose supervisor also runs Codex headless workers and
+    /// jobs (a review's among them), on the same fake agent.
     pub(super) fn with_codex(mut self) -> Self {
         self.codex = true;
         self
@@ -557,7 +557,7 @@ impl Parts {
             sessions: &*self.sessions,
             workers,
             reviewer: agent as &dyn AgentProvider,
-            codex_jobs: None,
+            codex_jobs: self.codex.then_some(agent as &dyn AgentProvider),
             spawner: agent,
             programs: crate::application::review_programs::ProgramBackends::new(
                 &Nothing,
