@@ -3,7 +3,7 @@
 //! its `worker_question` asks.
 
 use super::*;
-use crate::application::prompt::{HandoffMaterial, PromptBytes, handoff_text};
+use crate::application::prompt::{HandoffMaterial, PreviousDecisions, PromptBytes, handoff_text};
 use crate::domain::EventKind;
 use crate::domain::e2e_quarantine;
 use crate::domain::fresh_session::{self, NextSession};
@@ -144,6 +144,41 @@ impl Supervisor<'_> {
             Some(inherited) => Ok(Some(inherited)),
             None => self.replan_inheritance(run, run_dir),
         }
+    }
+    /// The decisions of a person on the earlier runs of `run`'s task that
+    /// never reached a session, from the run just before it when a retry
+    /// ended that one, and further back past each run whose session took no
+    /// prompt in (ADR-t4018-1, [`PreviousDecisions::of_runs`]); an answer
+    /// recorded before its event carried the text gets the ask's answer,
+    /// and one that cannot be read fails the prompt, and so the run's
+    /// provisioning, rather than start it without the decision.
+    /// Whether or not `run` carries a branch over.
+    fn previous_decisions(&mut self, run: &TaskRun) -> Result<Option<PreviousDecisions>> {
+        let runs = self.queue.show(run.task_id())?.runs;
+        let earlier: Vec<&TaskRun> = runs
+            .iter()
+            .take_while(|other| other.id() != run.id())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let events = earlier
+            .iter()
+            .map(|earlier| self.queue.run_events(earlier.id()))
+            .collect::<Result<Vec<_>>>()?;
+        let pairs: Vec<(&TaskRun, &[RunEvent])> = earlier
+            .iter()
+            .copied()
+            .zip(events.iter().map(Vec::as_slice))
+            .collect();
+        let queue = &self.queue;
+        // An answer kept on its ask must be read: a run is not started
+        // with a person's decision it could not read.
+        PreviousDecisions::of_runs(&pairs, &mut |ask| {
+            crate::application::prompt::kept_answer(
+                &queue.read_ask(crate::domain::AskId::new(ask))?,
+            )
+        })
     }
     /// What `run` inherits from `previous`, a retry that carried its branch
     /// over with `events`.
@@ -313,6 +348,7 @@ impl Supervisor<'_> {
             receipt_path: None,
             summary: String::new(),
             by_hand: None,
+            job_reason: None,
             replan: Some(crate::application::prompt::ReplanCarried {
                 operation: carry.operation,
                 task: carry.from_task,
@@ -371,8 +407,9 @@ impl Supervisor<'_> {
         };
         let siblings = siblings_in_progress(task, self.queue.tasks_in_progress()?);
         let inherited = self.inheritance(run, run_dir)?;
+        let decisions = self.previous_decisions(run)?;
         let known_failures = self.known_failures(task.id(), &run_dir.join(KNOWN_FAILURES_FILE));
-        let fitted = prompt(
+        let fitted = prompt_after(
             task,
             run,
             goal.as_ref(),
@@ -382,6 +419,7 @@ impl Supervisor<'_> {
             inherited.as_ref(),
             &self.e2e_paths(),
             known_failures.as_ref(),
+            decisions.as_ref(),
         )?;
         let fitted = fitted.with_language(self.verifier.language().as_ref());
         self.files

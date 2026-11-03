@@ -2332,4 +2332,21 @@ mod telemetry_policy_tests {
                                "owner": "plan_review:4"})
         );
     }
+
+    /// A worker reads the queue (`queue.read`), so the `dagq events` command
+    /// its prompt names for a person's decision cut by the section's limit
+    /// reads it in full (ADR-t4018-1 decision 2), as it reads its own run.
+    #[test]
+    fn a_worker_reads_the_queue_where_a_cut_decision_is_kept() {
+        assert!(grants(ActorRole::Worker).contains(&C::QueueRead));
+        assert!(
+            StaticPolicy
+                .authorize(
+                    &ActorContext::instance(ActorRole::Worker, 1),
+                    C::QueueRead,
+                    &Resource::Queue
+                )
+                .is_ok()
+        );
+    }
 }

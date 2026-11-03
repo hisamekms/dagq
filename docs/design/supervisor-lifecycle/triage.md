@@ -147,7 +147,7 @@ decideのaskの答えに無い引き継ぎを、人の判断として直接打�
   どちらの順でも、runの引き継ぎは高々1回になる。
 - 確定はtaskを`ready`にし（plan reviewを通らない）、runの復旧jobの閉じていない`decide`のaskをruntimeとして閉じ（その答えは誰も適用しない）、`triage_finished`（`action: retry_inherit`）を記録する。
   その`by`（`user`か`inbox`）が手での引き継ぎを自動のものと分け、eventのactorが誰が打ったかを持つ。
-- 次のrunは自動の引き継ぎと同じく`run_inherited`とpromptの「Carried over from run」で始まり、promptは人が手で引き継いだことと理由を書く。
+- 次のrunは自動の引き継ぎと同じ節で始まる。
 - 自動の`retry_inherit`のtaskごとに1回の制限は掛けず、手での引き継ぎはその回数を使わない。
 
 ## Codexで動かす

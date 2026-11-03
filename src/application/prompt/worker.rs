@@ -3,7 +3,13 @@
 //! (execution and landing).
 
 use super::*;
-use crate::domain::local_checks::LocalChecks;
+use crate::domain::{
+    local_checks::LocalChecks,
+    unapplied_decisions::{
+        DecisionKind, RetriedBy, RetryEnd, UnappliedDecision, prompt_delivered, retry_end,
+        unapplied_decisions,
+    },
+};
 
 /// What the prompt says about one direct predecessor: the task, the squash
 /// commit `integrate` put on `main` for it, and the summary its agent wrote.
@@ -132,9 +138,10 @@ impl GoalPredecessorSummary {
     }
 }
 
-/// The run a retry carries over (ADR-0047 decision 24): its resumes were
-/// used up on conflicts with main after its review passed, so the next run
-/// of its task starts from its commit instead of from scratch.
+/// The run a retry carries over (ADR-0047 decision 24): the runtime's when
+/// its resumes were used up on conflicts with main after its review passed,
+/// the recovery job's or a person's by hand, so the next run of its task
+/// starts from its commit instead of from scratch.
 #[derive(Debug, Clone, Serialize)]
 pub struct Inheritance {
     pub run_id: RunId,
@@ -153,6 +160,10 @@ pub struct Inheritance {
     /// that carried it over (`ready --inherit`, ADR-t1962-1); `None` for the
     /// runtime's and the recovery job's.
     pub by_hand: Option<(String, String)>,
+    /// The reason of the recovery job's verdict that carried it over (its
+    /// `triage_finished`'s `reason`); `None` for the runtime's retry on
+    /// conflicts and a person's by hand.
+    pub job_reason: Option<String>,
     /// The part of a replaced run's saved work this child of the
     /// replacement takes (ADR-t1521-2 decision 5); `None` for a retry's.
     pub replan: Option<ReplanCarried>,
@@ -196,15 +207,11 @@ impl Inheritance {
         }
         let retry = events.iter().rev().find(|e| resume::is_inherit_retry(e))?;
         let inherit = &retry.payload["inherit"];
-        let by_hand = resume::is_inherit_retry_by_hand(retry).then(|| {
-            (
-                retry.payload["by"].as_str().unwrap_or_default().to_owned(),
-                retry.payload["reason"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-            )
-        });
+        let (by_hand, job_reason) = match retry_end(events).map(|end| (end.by, end.reason)) {
+            Some((RetriedBy::ByHand(by), reason)) => (Some((by, reason)), None),
+            Some((RetriedBy::RecoveryJob | RetriedBy::Answer, reason)) => (None, Some(reason)),
+            _ => (None, None),
+        };
         let head = inherit["head"].as_str()?.to_owned();
         let receipt_path = previous.receipt_path().map(str::to_owned);
         let summary = receipt_path
@@ -228,6 +235,7 @@ impl Inheritance {
             receipt_path,
             summary,
             by_hand,
+            job_reason,
             replan: None,
         })
     }
@@ -242,7 +250,12 @@ impl Inheritance {
             Some((by, reason)) => format!(
                 "{by} carried its work over by hand after it ended ({reason}), so this run starts from its work instead of from scratch."
             ),
-            None => "its review passed, but its landing kept conflicting with the landing branch until its resumes were used up, so this run starts from its work instead of from scratch.".to_owned(),
+            None => match &self.job_reason {
+                Some(reason) => format!(
+                    "the recovery job retried its task carrying its work over ({reason}), so this run starts from its work instead of from scratch."
+                ),
+                None => "its review passed, but its landing kept conflicting with the landing branch until its resumes were used up, so this run starts from its work instead of from scratch.".to_owned(),
+            },
         };
         format!(
             "Carried over from run {run}: {why} \
@@ -303,6 +316,297 @@ impl Inheritance {
             op = replan.operation,
         )
     }
+}
+
+/// A person's decisions on the earlier runs of the task that never reached
+/// a session (ADR-t4018-1), with the retry that ended the run just before
+/// this one: the prompt's section a worker must follow.
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviousDecisions {
+    /// The run just before this one.
+    pub run_id: RunId,
+    pub task_id: TaskId,
+    /// The retry that ended it.
+    pub retry: RetryEnd,
+    /// Oldest first, each naming the run it was made on.
+    pub decisions: Vec<UnappliedDecision>,
+}
+
+impl PreviousDecisions {
+    /// The decisions of `previous`, the run of the task before this one,
+    /// with its `events` ([`Self::of_runs`] of that run alone, the answers
+    /// recorded without their text left as they are).
+    pub fn of(previous: &TaskRun, events: &[RunEvent]) -> Option<Self> {
+        Self::of_runs(&[(previous, events)], &mut |_| Ok(None))
+            .ok()
+            .flatten()
+    }
+
+    /// The decisions to hand to the next run of a task, given its earlier
+    /// runs newest first with their events (`earlier`): from the run just
+    /// before it, when a retry (`retry` or `retry_inherit`, by anyone) ended
+    /// it, each decision of a person that never reached its session
+    /// ([`unapplied_decisions`]); and, while the run looked at took no
+    /// prompt into a session ([`prompt_delivered`]), so that its own prompt
+    /// carried them to nobody, those of the run before it too, as long as a
+    /// retry ended that one. An answer whose event holds no text gets the
+    /// ask's answer from `answer_of` (`None`: not looked up, and its text
+    /// stays unrecorded); a failure to read it is this function's, so that
+    /// no prompt goes without a text that is kept. `None` when there is no
+    /// decision and no recovery job's reason to hand over
+    /// ([`Self::job_reason`]).
+    pub fn of_runs(
+        earlier: &[(&TaskRun, &[RunEvent])],
+        answer_of: &mut dyn FnMut(i64) -> Result<Option<String>>,
+    ) -> Result<Option<Self>> {
+        let mut latest: Option<(&TaskRun, RetryEnd)> = None;
+        let mut decisions: Vec<UnappliedDecision> = Vec::new();
+        for (run, events) in earlier {
+            let Some(retry) = retry_end(events) else {
+                break;
+            };
+            if latest.is_none() {
+                latest = Some((run, retry));
+            }
+            let mut own = unapplied_decisions(events);
+            for decision in &mut own {
+                if decision.text.is_empty()
+                    && let Some(ask) = decision.ask_id
+                    && let Some(answer) = answer_of(ask)
+                        .with_context(|| format!("the answer of ask {ask} could not be read"))?
+                {
+                    decision.text = answer.trim().to_owned();
+                }
+            }
+            own.append(&mut decisions);
+            decisions = own;
+            if prompt_delivered(events) {
+                break;
+            }
+        }
+        let Some((run, retry)) = latest else {
+            return Ok(None);
+        };
+        let previous = Self {
+            run_id: run.id().clone(),
+            task_id: run.task_id(),
+            retry,
+            decisions,
+        };
+        Ok((!previous.decisions.is_empty() || previous.job_reason().is_some()).then_some(previous))
+    }
+
+    /// The recovery job's reason for a retry that carried no branch over,
+    /// which the prompt hands over with or without a person's decision (a
+    /// retry that carried one over says it in the carried-over section).
+    pub fn job_reason(&self) -> Option<&str> {
+        (matches!(self.retry.by, RetriedBy::RecoveryJob)
+            && !self.retry.inherit
+            && !self.retry.reason.is_empty())
+        .then_some(self.retry.reason.as_str())
+    }
+
+    /// How a worker reads the whole text of a decision cut or left out by
+    /// the section's limit, with the worker's token (`queue.read`;
+    /// ADR-t4018-1 decision 2, the exception to ADR-t2072-1 decision 2 for
+    /// this section only): the event of `kind` that holds it.
+    pub fn read_command(&self, kind: crate::domain::EventKind) -> String {
+        format!(
+            "dagq events --full --task {} --kind {}",
+            self.task_id,
+            kind.as_str()
+        )
+    }
+
+    /// [`Self::read_command`] of `decision`'s event, or, for an answer whose
+    /// event holds no text, the asks with their answers.
+    pub fn read_command_of(&self, decision: &UnappliedDecision) -> String {
+        if decision.in_event {
+            self.read_command(decision.kind.event_kind())
+        } else {
+            ASKS_READ_COMMAND.to_owned()
+        }
+    }
+}
+
+/// The answer kept on `ask` for [`PreviousDecisions::of_runs`]: an error
+/// when it holds none, since an answered ask always keeps its answer and a
+/// run is not started without a person's decision it could not read.
+pub fn kept_answer(ask: &crate::domain::Ask) -> Result<Option<String>> {
+    ask.answer
+        .clone()
+        .map(Some)
+        .with_context(|| format!("ask {} is answered but holds no answer", ask.id))
+}
+
+/// The read of every ask of the queue with its answer, closed ones
+/// included: no read of the asks narrows them to a task, so an answer
+/// whose event holds no text is found by its ask's id among them.
+pub const ASKS_READ_COMMAND: &str = "dagq asks --all";
+
+/// The section on [`PreviousDecisions`]: never left out of the prompt and
+/// held to its own limit. Each text is cut past [`WORKER_DECISION_BYTES`];
+/// the lines are kept within [`WORKER_DECISIONS_BYTES`], the send_backs
+/// first and then the answers, the newest first; those left out are
+/// counted, named by their asks up to the note's limit, and readable all
+/// with the commands it names (each prints every decision of its kind of
+/// the task); a cut or a left-out line is said in `over_limit`. Without a
+/// person's decision there is no such heading or line. The recovery job's
+/// reason for a retry that carried no branch over follows either way (one
+/// that did is in the carried-over section), cut as that section cuts a
+/// job's reason, with no read named: it is no person's decision.
+pub(super) fn decisions_section(fit: &mut Fit, previous: Option<&PreviousDecisions>) -> String {
+    let Some(previous) = previous else {
+        return String::new();
+    };
+    let mut text = if previous.decisions.is_empty() {
+        String::new()
+    } else {
+        decision_lines(fit, previous)
+    };
+    if let Some(job_reason) = previous.job_reason() {
+        // No person's decision: cut as the carried-over section cuts the
+        // job's reason, naming no read (ADR-t2072-1 decision 2; the
+        // exception of ADR-t4018-1 decision 2 is a person's decisions').
+        let reason = fit.text(
+            "decisions",
+            job_reason,
+            WORKER_INHERITED_REASON_BYTES,
+            Keep::Start,
+            NOT_READABLE,
+        );
+        if previous.decisions.is_empty() {
+            text.push_str(&format!(
+                "The recovery job retried run {run}, the previous run of this task, for this run; its reason: {reason}\n",
+                run = previous.run_id,
+            ));
+        } else {
+            text.push_str(&format!(
+                "The recovery job's reason for the retry: {reason}\n"
+            ));
+        }
+    }
+    fit.section("decisions", &text);
+    text
+}
+
+/// The lines of [`decisions_section`] on a person's decisions: its heading,
+/// the lines kept and the note of those left out.
+fn decision_lines(fit: &mut Fit, previous: &PreviousDecisions) -> String {
+    let retried = match &previous.retry.by {
+        RetriedBy::RuntimeOnConflicts => {
+            "the runtime retried it after its resumes were used up on conflicts".to_owned()
+        }
+        RetriedBy::RecoveryJob => "the recovery job retried it".to_owned(),
+        RetriedBy::ByHand(by) => format!("{by} retried it by hand"),
+        RetriedBy::Answer => "a person's answer to the recovery's ask retried it".to_owned(),
+    };
+    let earlier = if previous
+        .decisions
+        .iter()
+        .any(|d| d.run_id.as_ref().is_some_and(|run| *run != previous.run_id))
+    {
+        " and earlier runs whose sessions never took them in"
+    } else {
+        ""
+    };
+    let mut text = format!(
+        "Decisions a person made on run {run}, the previous run of this task{earlier}, that never reached its session ({retried}, and this run starts a new session). They are a person's decisions: follow each of them, over that run's receipt and its work where they differ:\n",
+        run = previous.run_id,
+    );
+    let ask_of = |decision: &UnappliedDecision| {
+        decision
+            .ask_id
+            .map_or_else(|| "an ask".to_owned(), |id| format!("ask {id}"))
+    };
+    let lines: Vec<(String, bool)> = previous
+        .decisions
+        .iter()
+        .map(|decision| {
+            let ask = ask_of(decision);
+            let read = format!(
+                "{ask}: `{}` prints its whole text",
+                previous.read_command_of(decision)
+            );
+            let (body, cut) = if decision.text.is_empty() {
+                ("(no text recorded)".to_owned(), false)
+            } else {
+                prompt_fit::cut_part(&decision.text, WORKER_DECISION_BYTES, Keep::Start, &read)
+            };
+            let what = match decision.kind {
+                DecisionKind::SendBack => "the landing's send_back, its reason",
+                DecisionKind::WorkerQuestion => "the answer to the worker's question",
+                DecisionKind::Decide => "the answer to the decide ask",
+            };
+            let run = decision
+                .run_id
+                .as_ref()
+                .map(|run| format!(", run {run}"))
+                .unwrap_or_default();
+            (
+                format!(
+                    "- {ask} ({kind}, {at}{run}), {what}:\n{body}\n",
+                    kind = decision.kind.ask_kind(),
+                    at = decision.at,
+                ),
+                cut,
+            )
+        })
+        .collect();
+    let newest = |kind_first: bool| {
+        (0..previous.decisions.len())
+            .rev()
+            .filter(move |i| (previous.decisions[*i].kind == DecisionKind::SendBack) == kind_first)
+    };
+    let order: Vec<usize> = newest(true).chain(newest(false)).collect();
+    let (kept, left_out) = picked_lines(
+        fit,
+        "decisions",
+        &lines,
+        order,
+        (usize::MAX, WORKER_DECISIONS_BYTES),
+    );
+    for ((line, _), kept) in lines.iter().zip(&kept) {
+        if *kept {
+            text.push_str(line);
+        }
+    }
+    let cut = lines
+        .iter()
+        .zip(&kept)
+        .filter(|((_, cut), kept)| *cut && **kept)
+        .count();
+    if cut > 0 {
+        fit.over(format!(
+            "decisions: {cut} texts cut by their limit of {WORKER_DECISION_BYTES}"
+        ));
+    }
+    if !left_out.is_empty() {
+        fit.over(format!(
+            "decisions: {} of {} left out by its limit of {WORKER_DECISIONS_BYTES}",
+            left_out.len(),
+            lines.len()
+        ));
+        let ids: Vec<String> = left_out
+            .iter()
+            .map(|i| ask_of(&previous.decisions[*i]))
+            .collect();
+        let mut commands: Vec<String> = left_out
+            .iter()
+            .map(|i| format!("`{}`", previous.read_command_of(&previous.decisions[*i])))
+            .collect();
+        commands.sort();
+        commands.dedup();
+        text.push_str(&left_out_note(
+            "decisions",
+            &ids,
+            &format!(
+                "{} print their whole texts (page on with `--after`)",
+                commands.join(" and ")
+            ),
+        ));
+    }
+    text
 }
 
 /// The other tasks a worker is told are executing alongside it: of the
@@ -959,11 +1263,13 @@ pub(crate) fn local_checks(verify: &str) -> String {
 /// sum of the sections' limits below (93,000 bytes), the fixed instructions
 /// (about 10,000) and the headings and notes of what was left out (about
 /// 4,000; the largest input of the unit test takes 103,869 bytes), with room
-/// for the language's instruction, and the section on the tests that fail
-/// already on the landing branch's CI ([`KNOWN_FAILURES_LIMIT`]). A prompt
+/// for the language's instruction, the section on a person's decisions on
+/// the previous run (its lines' [`WORKER_DECISIONS_BYTES`], a job's reason,
+/// its heading and the note of what it left out: 9,000 more, ADR-t4018-1), and the section on the tests
+/// that fail already on the landing branch's CI ([`KNOWN_FAILURES_LIMIT`]). A prompt
 /// at p99 is not cut as a whole; how much of each section is kept is said
 /// by its own limit.
-pub const WORKER_PROMPT_LIMIT: usize = 112_000 + KNOWN_FAILURES_LIMIT;
+pub const WORKER_PROMPT_LIMIT: usize = 121_000 + KNOWN_FAILURES_LIMIT;
 
 /// The bytes of the task's own title, description, acceptance,
 /// verification commands and declared paths: required material, cut only
@@ -1011,6 +1317,16 @@ pub const WORKER_SIBLINGS_BYTES: usize = 3_000;
 /// person carried it over by hand.
 pub const WORKER_INHERITED_SUMMARY_BYTES: usize = 3_000;
 pub const WORKER_INHERITED_REASON_BYTES: usize = 1_000;
+
+/// The bytes of the lines of a person's decisions on the earlier runs
+/// (ADR-t4018-1), and of one decision's text: a send_back's reason holds
+/// the person's words and the review's reasons it sent back. The lines
+/// left out past them are named by their asks (at most 40, the rest
+/// counted) with the commands that print them, so the section stays within
+/// these, its heading, that note and a job's reason however many decisions
+/// there are.
+pub const WORKER_DECISIONS_BYTES: usize = 6_000;
+pub const WORKER_DECISION_BYTES: usize = 2_000;
 
 /// How a worker reads a predecessor's whole summary or a left-out one: the
 /// landing commit's message holds the receipt's summary (ADR-t2072-1: only
@@ -1211,6 +1527,36 @@ pub fn prompt(
     e2e_paths: &[String],
     known_failures: Option<&KnownFailures>,
 ) -> Result<FittedPrompt> {
+    prompt_after(
+        task,
+        run,
+        goal,
+        predecessors,
+        goal_predecessors,
+        siblings,
+        inherited,
+        e2e_paths,
+        known_failures,
+        None,
+    )
+}
+
+/// [`prompt`] of a run whose task's previous run a retry ended with
+/// `decisions` of a person that never reached its session: their section
+/// ([`decisions_section`]) follows the declared paths, before the goal.
+#[allow(clippy::too_many_arguments)]
+pub fn prompt_after(
+    task: &Task,
+    run: &TaskRun,
+    goal: Option<&Goal>,
+    predecessors: &[PredecessorSummary],
+    goal_predecessors: &[GoalPredecessorSummary],
+    siblings: &[Task],
+    inherited: Option<&Inheritance>,
+    e2e_paths: &[String],
+    known_failures: Option<&KnownFailures>,
+    decisions: Option<&PreviousDecisions>,
+) -> Result<FittedPrompt> {
     let receipt = run.receipt_path().context("missing receipt path")?;
     let mut fit = Fit::new(WORKER_PROMPT_LIMIT);
     let title = fit.required("task", task.title(), WORKER_TITLE_BYTES, NOT_READABLE);
@@ -1258,9 +1604,19 @@ pub fn prompt(
                 );
                 (by.clone(), reason)
             });
+            let job_reason = inherited.job_reason.as_ref().map(|reason| {
+                fit.text(
+                    "inherited",
+                    reason,
+                    WORKER_INHERITED_REASON_BYTES,
+                    Keep::Start,
+                    NOT_READABLE,
+                )
+            });
             let section = Inheritance {
                 summary,
                 by_hand: reason,
+                job_reason,
                 ..inherited.clone()
             }
             .section();
@@ -1268,6 +1624,7 @@ pub fn prompt(
             section
         })
         .unwrap_or_default();
+    let decisions = decisions_section(&mut fit, decisions);
     let goal = match goal {
         None => "Goal: none, this task stands alone\n".to_owned(),
         Some(goal) => {
@@ -1396,7 +1753,7 @@ pub fn prompt(
          Task title: {title}\nDescription:\n{description}\nAcceptance criteria:\n{acceptance}\n\
          Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):\n{verification}\n\
          {local_checks}\n\
-         {evidence}{paths}{goal}{context}{predecessors}{siblings}{inherited}{known_failures}\
+         {evidence}{paths}{decisions}{goal}{context}{predecessors}{siblings}{inherited}{known_failures}\
          Your assignment is this task only. Do not change what a sibling task owns; if you find work outside this task, record it in the receipt as follow_ups instead of doing it.\n\
          {acceptance_map}{docs_check}\
          Write a completion receipt to {receipt} using a temporary file in the same directory and atomic rename.\n\
@@ -1535,7 +1892,25 @@ pub fn worker_template(provider: Provider) -> Result<String> {
         receipt_path: Some(value("receipt")),
         summary: value("summary"),
         by_hand: None,
+        job_reason: None,
         replan: None,
+    };
+    let decisions = PreviousDecisions {
+        run_id: run.id().clone(),
+        task_id: task.id(),
+        retry: RetryEnd {
+            inherit: true,
+            by: RetriedBy::RecoveryJob,
+            reason: value("job reason"),
+        },
+        decisions: vec![UnappliedDecision {
+            ask_id: Some(1),
+            kind: DecisionKind::SendBack,
+            at: value("at"),
+            text: value("decision"),
+            in_event: true,
+            run_id: Some(run.id().clone()),
+        }],
     };
     let failure = KnownFailure {
         name: value("failing test"),
@@ -1554,7 +1929,7 @@ pub fn worker_template(provider: Provider) -> Result<String> {
         fixing: vec![failure],
         file: value("known failures file"),
     };
-    let full = prompt(
+    let full = prompt_after(
         &task,
         &run,
         Some(&goal),
@@ -1564,6 +1939,7 @@ pub fn worker_template(provider: Provider) -> Result<String> {
         Some(&inherited),
         &[value("e2e path")],
         Some(&known),
+        Some(&decisions),
     )?
     .text;
     // The other branch of each section: `none`, and a run a person carried
@@ -1577,10 +1953,16 @@ pub fn worker_template(provider: Provider) -> Result<String> {
     })?;
     let by_hand = Inheritance {
         by_hand: Some((value("by"), value("reason"))),
-        ..inherited
+        ..inherited.clone()
     };
     let empty = prompt(&bare, &run, None, &[], &[], &[], Some(&by_hand), &[], None)?.text;
-    Ok(format!("{full}\n{empty}"))
+    // The third branch of the carried-over run: the recovery job's.
+    let by_job = Inheritance {
+        job_reason: Some(value("job reason")),
+        ..inherited
+    }
+    .section();
+    Ok(format!("{full}\n{empty}\n{by_job}"))
 }
 
 /// What the worker's prompt says to a Spike's run (ADR-t1487-1 decisions

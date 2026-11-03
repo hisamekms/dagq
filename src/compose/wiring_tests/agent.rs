@@ -94,7 +94,8 @@ pub(super) fn verdict(decision: &str, summary: &str) -> Value {
 
 /// What the agent is told to do: the receipt of each worker's turn in
 /// order (a turn past them writes none), and the verdict of each review
-/// job in order (the last one again for any after it).
+/// job and recovery job in the order they start (the last one again for
+/// any after it).
 pub(super) struct Script {
     pub(super) receipts: Vec<Receipt>,
     pub(super) verdicts: Vec<Value>,
@@ -105,6 +106,7 @@ pub(super) struct Script {
 const TURN: &str = "wiring-worker-turn";
 const REVIEW: &str = "wiring-review";
 const AGENT_JOB: &str = "wiring-agent-job";
+const JOB: &str = "wiring-job";
 
 /// The agent: its script, and what it started, by program, in order.
 pub(super) struct FakeAgent {
@@ -302,6 +304,14 @@ impl AgentProvider for FakeAgent {
         Ok(command)
     }
 
+    /// A headless job's (the recovery job's): it answers the script's
+    /// next verdict, as a review does.
+    fn headless_command(&self, cwd: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
+        let mut command = CommandSpec::new(JOB);
+        command.current_dir(cwd);
+        Ok(command)
+    }
+
     fn agent_job_command(&self, job: &AgentJobLaunch) -> Result<CommandSpec> {
         let mut command = CommandSpec::new(AGENT_JOB);
         command.current_dir(&job.cwd).stdin(job.prompt.as_str());
@@ -462,6 +472,7 @@ impl Spawner for FakeAgent {
                     format!("{verdict}\n")
                 }
             }
+            JOB => format!("{}\n", self.next_verdict()?),
             AGENT_JOB => {
                 self.agent_jobs
                     .lock()

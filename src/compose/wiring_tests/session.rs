@@ -61,6 +61,12 @@ pub(super) struct FakeSessions {
     /// session, once: it waits, started and not yet registered, until it
     /// says so or is dropped (by the test's deadline at the latest).
     launch_gate: Mutex<Option<mpsc::Receiver<()>>>,
+    /// Whether a resume's wrapper fails to start, as a launch that the
+    /// host refused.
+    pub(super) fail_resumes: std::sync::atomic::AtomicBool,
+    /// Whether a new run's wrapper fails to start, as a launch that the
+    /// host refused.
+    pub(super) fail_claims: std::sync::atomic::AtomicBool,
 }
 
 impl FakeSessions {
@@ -81,6 +87,8 @@ impl FakeSessions {
             clock,
             wrappers: Mutex::default(),
             launch_gate: Mutex::default(),
+            fail_resumes: std::sync::atomic::AtomicBool::new(false),
+            fail_claims: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -157,6 +165,12 @@ impl SessionWrappers for FakeSessions {
         let token =
             LeaseToken::new(after(&words, "--lease").context("the wrapper names no lease")?);
         let resume = words.contains(&"--resume");
+        if !resume && self.fail_claims.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("the wiring test refuses to start the wrapper of run {id}");
+        }
+        if resume && self.fail_resumes.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("the wiring test refuses to start the wrapper of run {id}'s resume");
+        }
         let (pid, start) = self.processes.start();
         let handle = BackgroundHandle {
             pid,

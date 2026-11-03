@@ -22,4 +22,5 @@ mod main_log;
 mod provider_trial;
 mod review_launch;
 mod task_release;
+mod unapplied_decisions;
 mod worker_trial;

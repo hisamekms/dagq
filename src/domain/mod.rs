@@ -1361,6 +1361,7 @@ pub mod tokens;
 pub mod toolchain;
 pub mod transcript;
 pub mod turn;
+pub mod unapplied_decisions;
 pub mod validation;
 pub mod verification_limit;
 pub mod verify_failure;

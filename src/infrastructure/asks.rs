@@ -200,6 +200,13 @@ impl SqliteQueue {
         let mut payload =
             json!({"ask_id": id, "kind": ask.kind, "reason_category": ask.reason_category});
         write_answer(&tx, &ask, text, answerer, now, &mut payload)?;
+        // A person's decision on a run that its next run may have to be
+        // told when it never reached the run's session (ADR-t4018-1): its
+        // whole text, read off the events by
+        // `domain::unapplied_decisions` and by `events --full`.
+        if matches!(ask.kind, AskKind::WorkerQuestion | AskKind::Decide) && ask.run_id.is_some() {
+            payload["answer"] = json!(text);
+        }
         // A `propose` or `dismiss` answer the ask offered is applied to its
         // finding here (ADR-0044 decision 19): nobody has to carry it. The
         // observer's `blocked` ask is done with it; a `stalled` ask stays

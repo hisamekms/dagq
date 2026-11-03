@@ -236,6 +236,20 @@ impl Wiring {
         self.generators.clone()
     }
 
+    /// From now on, the wrapper of a resume fails to start.
+    pub(super) fn fail_resume_launches(&self) {
+        self.sessions
+            .fail_resumes
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the wrapper of a new run fails to start from now on.
+    pub(super) fn fail_claim_launches(&self, fail: bool) {
+        self.sessions
+            .fail_claims
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The test's queue, as the test reads and writes it.
     pub(super) fn queue(&self) -> SqliteQueue {
         SqliteQueue::open(&self.db)
@@ -368,6 +382,14 @@ impl Wiring {
         self.supervise(false, None)
     }
 
+    /// [`Self::supervise_once`] whose outcome may name the errors of the
+    /// runs it went on past (a resume that could not start), or the error
+    /// the supervisor stopped on (`supervisor_failed`), which the caller
+    /// checks.
+    pub(super) fn supervise_once_reporting(&self) -> Value {
+        self.supervise_reporting(false, None)
+    }
+
     /// [`Self::supervise_once`] with a stop asked before its first pass:
     /// a supervisor that drains.
     pub(super) fn supervise_draining(&self) -> Value {
@@ -385,7 +407,18 @@ impl Wiring {
         self.supervise(false, Some(&mut act))
     }
 
+    /// [`Self::supervise_reporting`] whose outcome must name no error.
     fn supervise(
+        &self,
+        stopped: bool,
+        act: Option<&mut dyn FnMut(&mut SqliteQueue) -> bool>,
+    ) -> Value {
+        let outcome = self.supervise_reporting(stopped, act);
+        assert_eq!(outcome["errors"], serde_json::json!([]), "{outcome}");
+        outcome
+    }
+
+    fn supervise_reporting(
         &self,
         stopped: bool,
         mut act: Option<&mut dyn FnMut(&mut SqliteQueue) -> bool>,
@@ -449,13 +482,18 @@ impl Wiring {
         let wrappers = self.sessions.join_by(&self.name, self.deadline);
         let outcome = outcome
             .unwrap_or_else(|_| panic!("{}: the supervisor panicked", self.name))
-            .unwrap_or_else(|error| panic!("{}: the supervisor failed: {error:#}", self.name));
+            // A supervisor that stopped on an error (one that stops its
+            // claims, as a run's wrapper that could not start) says it as
+            // the outcome's only error, for the caller to check.
+            .unwrap_or_else(|error| {
+                serde_json::json!({"supervisor_failed": true,
+                                   "errors": [{"message": format!("{error:#}")}]})
+            });
         for wrapper in wrappers {
             wrapper.unwrap_or_else(|error| {
                 panic!("{}: a session wrapper failed: {error:#}", self.name)
             });
         }
-        assert_eq!(outcome["errors"], serde_json::json!([]), "{outcome}");
         outcome
     }
 }

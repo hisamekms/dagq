@@ -2,6 +2,7 @@ use super::*;
 use crate::application::memory_files::MemoryFiles;
 use crate::application::review::{LANDING_ANSWERS_INTRO, PersonAnswer, PersonAnswers};
 use crate::domain::local_checks::LocalChecks;
+use crate::domain::unapplied_decisions::{DecisionKind, RetriedBy, RetryEnd, UnappliedDecision};
 use crate::domain::worker::WorkerMode;
 use crate::domain::{
     EvidenceCheck, GoalRecord, GoalStatus, GoalVerdict, Provider, RunId, RunRecord, TaskRecord,
@@ -657,6 +658,7 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
         receipt_path: None,
         summary: "earlier".into(),
         by_hand: None,
+        job_reason: None,
         replan: None,
     };
     let retried = prompt(
@@ -678,6 +680,7 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
     assert!(carried.contains("its landing kept conflicting"));
     let by_hand = Inheritance {
         by_hand: Some(("inbox".into(), "the person chose retry_inherit".into())),
+        job_reason: None,
         ..inheritance.clone()
     };
     let retried = prompt(
@@ -6402,6 +6405,7 @@ fn worker_material(
         receipt_path: Some("/runs/earlier/receipt.json".into()),
         summary: format!("inherited {}", "か".repeat(size / 3)),
         by_hand: Some(("inbox".into(), format!("reason {}", "き".repeat(size / 3)))),
+        job_reason: None,
         replan: None,
     };
     (
@@ -8427,4 +8431,636 @@ fn the_ended_runs_material_shows_the_latest_integrate_attempt_and_names_the_earl
         )),
         "{material}"
     );
+}
+
+/// The previous run's decisions of a person that never reached its session
+/// (ADR-t4018-1), as `kind` with `text`.
+fn previous_decisions(
+    by: RetriedBy,
+    inherit: bool,
+    texts: &[(DecisionKind, &str)],
+) -> PreviousDecisions {
+    PreviousDecisions {
+        run_id: RunId::new(RUN).unwrap(),
+        task_id: TaskId::new(7),
+        retry: RetryEnd {
+            inherit,
+            by,
+            reason: "the person sent it back in ask 1424".into(),
+        },
+        decisions: texts
+            .iter()
+            .enumerate()
+            .map(|(at, (kind, text))| UnappliedDecision {
+                ask_id: Some(1424 + i64::try_from(at).unwrap()),
+                kind: *kind,
+                at: "2026-11-02T11:50:00Z".into(),
+                text: (*text).into(),
+                in_event: true,
+                run_id: Some(RunId::new(RUN).unwrap()),
+            })
+            .collect(),
+    }
+}
+
+/// The prompt of a retried run carries the previous run's decisions a
+/// person made that never reached its session, with their ask ids, whether
+/// the retry carried the branch over (the runtime's, the recovery job's or
+/// a person's `ready --inherit`) or not (`retry`); the recovery job's
+/// reason goes with them. A run with none gets no such section.
+#[test]
+fn a_retried_runs_prompt_carries_the_previous_runs_unapplied_decisions() {
+    let verified = verified_task(7, "work", TaskStatus::InProgress, Vec::new());
+    let own_run = run(7, RunStatus::Claimed, None);
+    let inheritance = Inheritance {
+        run_id: RunId::new(RUN).unwrap(),
+        base: CommitSha::try_from(SHA).unwrap(),
+        head: SHA.into(),
+        branch: None,
+        receipt_path: None,
+        summary: "earlier".into(),
+        by_hand: None,
+        job_reason: None,
+        replan: None,
+    };
+    let texts = [
+        (
+            DecisionKind::SendBack,
+            "keep the flag; the review was wrong",
+        ),
+        (DecisionKind::WorkerQuestion, "take the second option"),
+        (DecisionKind::Decide, "retry: start from the ADR"),
+    ];
+    let by_job = Inheritance {
+        job_reason: Some("the person sent it back in ask 1424".into()),
+        ..inheritance.clone()
+    };
+    let by_hand = Inheritance {
+        by_hand: Some(("user".into(), "carry it".into())),
+        ..inheritance.clone()
+    };
+    for (by, inherited) in [
+        (RetriedBy::RecoveryJob, Some(&by_job)),
+        (RetriedBy::RuntimeOnConflicts, Some(&inheritance)),
+        (RetriedBy::ByHand("user".into()), Some(&by_hand)),
+        (RetriedBy::RecoveryJob, None),
+        (RetriedBy::Answer, None),
+    ] {
+        let decisions = previous_decisions(by.clone(), inherited.is_some(), &texts);
+        let fitted = prompt_after(
+            &verified,
+            &own_run,
+            None,
+            &[],
+            &[],
+            &[],
+            inherited,
+            &[],
+            None,
+            Some(&decisions),
+        )
+        .unwrap();
+        let text = &fitted.text;
+        assert!(
+            text.contains(&format!("Decisions a person made on run {RUN}")),
+            "{text}"
+        );
+        assert!(text.contains("follow each of them"), "{text}");
+        for (at, (_, body)) in texts.iter().enumerate() {
+            assert!(text.contains(body), "{by:?} {body}\n{text}");
+            assert!(text.contains(&format!("- ask {} (", 1424 + at)), "{text}");
+        }
+        assert!(
+            text.contains(&format!(
+                "- ask 1424 (approve_landing, 2026-11-02T11:50:00Z, run {RUN})"
+            )),
+            "{text}"
+        );
+        assert_eq!(
+            text.contains(
+                "The recovery job's reason for the retry: the person sent it back in ask 1424"
+            ),
+            by == RetriedBy::RecoveryJob && inherited.is_none(),
+            "{by:?}\n{text}"
+        );
+        assert!(
+            fitted.bytes.over_limit.is_none(),
+            "{:?}",
+            fitted.bytes.over_limit
+        );
+        assert_eq!(fitted.bytes.sections.values().sum::<usize>(), text.len());
+    }
+    // None of them: no section.
+    let none = prompt_after(
+        &verified,
+        &own_run,
+        None,
+        &[],
+        &[],
+        &[],
+        Some(&inheritance),
+        &[],
+        None,
+        None,
+    )
+    .unwrap()
+    .text;
+    assert!(!none.contains("Decisions a person made"), "{none}");
+    assert_eq!(
+        none,
+        prompt(
+            &verified,
+            &own_run,
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&inheritance),
+            &[],
+            None
+        )
+        .unwrap()
+        .text
+    );
+    // A previous run whose decisions all reached its session, or that no
+    // retry ended, gives none.
+    let event = |kind: &str, payload: serde_json::Value| crate::domain::RunEvent {
+        id: crate::domain::EventId::new(0),
+        task_id: None,
+        goal_id: None,
+        run_id: None,
+        kind: kind.into(),
+        payload,
+        created_at: String::new(),
+        actor: None,
+    };
+    let sent_back = event(
+        "landing_decided",
+        json!({"code": "sent_back", "ask_id": 1, "reason": "do it"}),
+    );
+    let retried = event("triage_finished", json!({"action": "retry"}));
+    let previous = run(7, RunStatus::Failed, None);
+    assert!(PreviousDecisions::of(&previous, &[sent_back.clone(), retried.clone()]).is_some());
+    assert!(
+        PreviousDecisions::of(
+            &previous,
+            &[
+                sent_back.clone(),
+                event("resume_request_sent", json!({})),
+                retried
+            ]
+        )
+        .is_none()
+    );
+    assert!(PreviousDecisions::of(&previous, &[sent_back]).is_none());
+}
+
+/// The section of a person's decisions is never left out and holds to its
+/// own limit however many decisions there are: with 300 long ones and every
+/// other section at its largest, the send_back comes first, its text cut
+/// past its limit with its ask and the `dagq events` command that prints it
+/// (ADR-t4018-1 decision 2), the newest answers follow, and those left out
+/// are named by their asks with the commands that print them; the cuts are
+/// said in `over_limit`, and the whole stays within [`WORKER_PROMPT_LIMIT`]
+/// without cutting its middle.
+#[test]
+fn many_long_decisions_keep_the_section_within_its_limit_naming_how_to_read_them() {
+    let (task, goal, predecessors, goals, siblings, inherited) = worker_material(300, 400_000);
+    let own_run = run(9, RunStatus::Claimed, None);
+    let long = format!("start {}", "判".repeat(200_000));
+    let mut texts = vec![(DecisionKind::SendBack, long.as_str())];
+    texts.extend((1..300).map(|at| {
+        (
+            if at % 2 == 0 {
+                DecisionKind::Decide
+            } else {
+                DecisionKind::WorkerQuestion
+            },
+            long.as_str(),
+        )
+    }));
+    let decisions = previous_decisions(RetriedBy::RecoveryJob, false, &texts);
+    let fitted = prompt_after(
+        &task,
+        &own_run,
+        Some(&goal),
+        &predecessors,
+        &goals,
+        &siblings,
+        Some(&inherited),
+        &[],
+        None,
+        Some(&decisions),
+    )
+    .unwrap();
+    let (text, bytes) = (&fitted.text, &fitted.bytes);
+    assert!(
+        text.len() <= WORKER_PROMPT_LIMIT - prompt_fit::LANGUAGE_ROOM,
+        "{}",
+        text.len()
+    );
+    let over = bytes.over_limit.as_deref().unwrap();
+    assert!(!over.contains("past its limit"), "{over}");
+    assert!(over.contains("decisions: "), "{over}");
+    assert_eq!(bytes.omitted.get("decisions"), Some(&300));
+    let section = text
+        .split_once("Decisions a person made")
+        .unwrap()
+        .1
+        .split_once("Goal (")
+        .unwrap()
+        .0;
+    assert!(
+        section.len() < WORKER_DECISIONS_BYTES + 3_000,
+        "{}",
+        section.len()
+    );
+    assert!(
+        section.contains(
+            "ask 1424: `dagq events --full --task 7 --kind landing_decided` prints its whole text"
+        ),
+        "{section}"
+    );
+    assert!(section.contains("- ask 1723 ("), "{section}");
+    assert!(
+        section.contains("decisions left out by this section's limit: ask "),
+        "{section}"
+    );
+    assert!(section.contains(" more. To read them: "), "{section}");
+    assert!(
+        section.contains("`dagq events --full --task 7 --kind ask_answered`"),
+        "{section}"
+    );
+    assert!(
+        section.contains("The recovery job's reason for the retry"),
+        "{section}"
+    );
+}
+
+/// The decisions to hand over are those of the run just before, and of
+/// each run before it whose own prompt never reached a session: a run
+/// whose wrapper was launched but whose first turn did not succeed, or
+/// that failed before it started, passes them on; a run that took its
+/// prompt in, or that no retry ended, stops the search. An answer recorded
+/// before its event carried the text gets the ask's answer, and the
+/// command that prints it is the read of the asks.
+#[test]
+fn decisions_pass_over_runs_whose_sessions_never_took_their_prompt_in() {
+    let event = |run: &str, kind: &str, payload: serde_json::Value| crate::domain::RunEvent {
+        id: crate::domain::EventId::new(0),
+        task_id: None,
+        goal_id: None,
+        run_id: Some(RunId::new(run).unwrap()),
+        kind: kind.into(),
+        payload,
+        created_at: String::new(),
+        actor: None,
+    };
+    let (first, second) = (
+        "00000000-0000-4000-8000-00000000000a",
+        "00000000-0000-4000-8000-00000000000b",
+    );
+    let earlier_run = |id: &str| {
+        TaskRun::restore(RunRecord {
+            id: RunId::new(id).unwrap(),
+            ..run_record(7, RunStatus::Failed, None)
+        })
+        .unwrap()
+    };
+    let (n, n1) = (earlier_run(first), earlier_run(second));
+    let started = event(first, "turn_finished", json!({"outcome": "succeeded"}));
+    let n_events = vec![
+        started.clone(),
+        event(
+            first,
+            "landing_decided",
+            json!({"code": "sent_back", "ask_id": 1424, "reason": "keep the flag"}),
+        ),
+        event(first, "triage_finished", json!({"action": "retry_inherit"})),
+    ];
+    // N+1: its wrapper was launched, its first turn failed, and a person's
+    // answer to the recovery's ask (kept without its text) retried it.
+    let n1_events = vec![
+        event(second, "wrapper_launched", json!({})),
+        event(
+            second,
+            "turn_finished",
+            json!({"outcome": "failed", "failure": "launch"}),
+        ),
+        event(
+            second,
+            "ask_opened",
+            json!({"ask_id": 1500, "kind": "decide"}),
+        ),
+        event(
+            second,
+            "ask_answered",
+            json!({"ask_id": 1500, "kind": "decide", "authority": "person"}),
+        ),
+        event(
+            second,
+            "triage_decided",
+            json!({"ask_id": 1500, "answer": "retry"}),
+        ),
+    ];
+    let mut asked = Vec::new();
+    let mut answer_of = |ask: i64| {
+        asked.push(ask);
+        Ok(Some(
+            "retry: the first run's send_back still holds".to_owned(),
+        ))
+    };
+    let decisions = PreviousDecisions::of_runs(
+        &[(&n1, n1_events.as_slice()), (&n, n_events.as_slice())],
+        &mut answer_of,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(asked, [1500]);
+    assert_eq!(decisions.run_id.as_str(), second);
+    let got: Vec<(Option<i64>, &str, bool)> = decisions
+        .decisions
+        .iter()
+        .map(|d| (d.ask_id, d.text.as_str(), d.in_event))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Some(1424), "keep the flag", true),
+            (
+                Some(1500),
+                "retry: the first run's send_back still holds",
+                false
+            ),
+        ]
+    );
+    assert_eq!(
+        decisions.read_command_of(&decisions.decisions[1]),
+        ASKS_READ_COMMAND
+    );
+    let verified = verified_task(7, "work", TaskStatus::InProgress, Vec::new());
+    let text = prompt_after(
+        &verified,
+        &run(7, RunStatus::Claimed, None),
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        Some(&decisions),
+    )
+    .unwrap()
+    .text;
+    assert!(text.contains("keep the flag"), "{text}");
+    assert!(
+        text.contains("retry: the first run's send_back still holds"),
+        "{text}"
+    );
+    assert!(
+        text.contains("and earlier runs whose sessions never took them in"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("- ask 1424 (approve_landing, , run {first})")),
+        "{text}"
+    );
+    // A launched wrapper alone passes them on too.
+    let launched_only = vec![
+        event(second, "wrapper_launched", json!({})),
+        event(second, "triage_finished", json!({"action": "retry"})),
+    ];
+    let passed = PreviousDecisions::of_runs(
+        &[(&n1, launched_only.as_slice()), (&n, n_events.as_slice())],
+        &mut |_| Ok(None),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(passed.decisions.len(), 1);
+    assert_eq!(passed.decisions[0].text, "keep the flag");
+    // N+1 took its prompt in (which carried N's decisions): only its own.
+    let mut took = launched_only.clone();
+    took.insert(
+        1,
+        event(second, "turn_finished", json!({"outcome": "succeeded"})),
+    );
+    assert!(
+        PreviousDecisions::of_runs(
+            &[(&n1, took.as_slice()), (&n, n_events.as_slice())],
+            &mut |_| Ok(None)
+        )
+        .unwrap()
+        .is_none()
+    );
+    // An answer kept on its ask that cannot be read fails the search, so
+    // that no run starts without it.
+    let failed = PreviousDecisions::of_runs(
+        &[(&n1, n1_events.as_slice()), (&n, n_events.as_slice())],
+        &mut |_| Err(anyhow::anyhow!("the queue could not be read")),
+    )
+    .unwrap_err();
+    let failed = format!("{failed:#}");
+    assert!(
+        failed.contains("the answer of ask 1500 could not be read"),
+        "{failed}"
+    );
+    assert!(failed.contains("the queue could not be read"), "{failed}");
+    // An answered ask that holds no answer is such a failure; one that
+    // holds it gives it.
+    let mut kept = asked_decide(1500, Some("retry: keep it"));
+    assert_eq!(
+        kept_answer(&kept).unwrap().as_deref(),
+        Some("retry: keep it")
+    );
+    kept.answer = None;
+    let none = format!("{:#}", kept_answer(&kept).unwrap_err());
+    assert!(
+        none.contains("ask 1500 is answered but holds no answer"),
+        "{none}"
+    );
+    // A run no retry ended stops the search.
+    let ended = vec![event(second, "wrapper_launched", json!({}))];
+    assert!(
+        PreviousDecisions::of_runs(
+            &[(&n1, ended.as_slice()), (&n, n_events.as_slice())],
+            &mut |_| Ok(None)
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+/// The section on a carried-over run says why it was carried over as it
+/// was: the recovery job's reason for its retry, the runtime's conflicts,
+/// or a person's by hand; [`Inheritance::of`] reads which from the retry.
+#[test]
+fn a_carried_over_runs_why_is_the_retrys_own() {
+    let inherited = |job_reason: Option<&str>| {
+        Inheritance {
+            run_id: RunId::new(RUN).unwrap(),
+            base: CommitSha::try_from(SHA).unwrap(),
+            head: SHA.into(),
+            branch: None,
+            receipt_path: None,
+            summary: "earlier".into(),
+            by_hand: None,
+            job_reason: job_reason.map(str::to_owned),
+            replan: None,
+        }
+        .section()
+    };
+    let by_job = inherited(Some("the person sent it back in ask 1424"));
+    assert!(
+        by_job.contains(
+            "the recovery job retried its task carrying its work over (the person sent it back in ask 1424)"
+        ),
+        "{by_job}"
+    );
+    assert!(!by_job.contains("its landing kept conflicting"), "{by_job}");
+    assert!(inherited(None).contains("its landing kept conflicting"));
+
+    let files = MemoryFiles::default();
+    let previous = run(7, RunStatus::Failed, None);
+    let retry = |payload: serde_json::Value| {
+        Inheritance::of(
+            &files,
+            &previous,
+            &[crate::domain::RunEvent {
+                id: crate::domain::EventId::new(0),
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: "triage_finished".into(),
+                payload,
+                created_at: String::new(),
+                actor: None,
+            }],
+        )
+        .unwrap()
+    };
+    let inherit = json!({"head": SHA, "branch": "dagq/earlier"});
+    let job =
+        retry(json!({"action": "retry_inherit", "reason": "the job's reason", "inherit": inherit}));
+    assert_eq!(job.job_reason.as_deref(), Some("the job's reason"));
+    assert_eq!(job.by_hand, None);
+    let runtime = retry(json!({"action": "retry_inherit", "by": "runtime",
+                               "code": "resume_exhausted", "reason": "used up", "inherit": inherit}));
+    assert_eq!(runtime.job_reason, None);
+    let by_hand = retry(
+        json!({"action": "retry_inherit", "by": "user", "reason": "mine", "inherit": inherit}),
+    );
+    assert_eq!(by_hand.by_hand, Some(("user".into(), "mine".into())));
+    assert_eq!(by_hand.job_reason, None);
+}
+
+/// A `decide` ask of a run, answered with `answer`.
+fn asked_decide(id: i64, answer: Option<&str>) -> Ask {
+    serde_json::from_value(json!({
+        "id": id, "kind": "decide", "task_id": 7, "run_id": RUN,
+        "question": "retry?", "options": ["retry", "cancel"], "answer": answer,
+        "asked_by": "supervisor", "reason_category": "scope", "created_at": 0,
+        "answered_at": 1, "closed_at": null,
+    }))
+    .unwrap()
+}
+
+/// The recovery job's reason for a retry that carried no branch over goes
+/// into the next run's prompt even when no decision of a person is left:
+/// the section on a person's decisions is not there, the job's reason is.
+/// A retry that carried the branch over says it in the carried-over
+/// section only, and the runtime's or a person's retry with nothing left
+/// gives nothing.
+#[test]
+fn a_recovery_jobs_retry_hands_its_reason_over_without_any_decision() {
+    let previous = run(7, RunStatus::Failed, None);
+    let event = |payload: serde_json::Value| crate::domain::RunEvent {
+        id: crate::domain::EventId::new(0),
+        task_id: None,
+        goal_id: None,
+        run_id: None,
+        kind: "triage_finished".into(),
+        payload,
+        created_at: String::new(),
+        actor: None,
+    };
+    let retried = [event(
+        json!({"action": "retry", "reason": "the run's worktree was lost; start again from main"}),
+    )];
+    let decisions = PreviousDecisions::of(&previous, &retried).unwrap();
+    assert!(decisions.decisions.is_empty());
+    assert_eq!(
+        decisions.job_reason(),
+        Some("the run's worktree was lost; start again from main")
+    );
+    let verified = verified_task(7, "work", TaskStatus::InProgress, Vec::new());
+    let own_run = run(7, RunStatus::Claimed, None);
+    let fitted = prompt_after(
+        &verified,
+        &own_run,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        Some(&decisions),
+    )
+    .unwrap();
+    let text = &fitted.text;
+    assert!(
+        text.contains(&format!(
+            "The recovery job retried run {RUN}, the previous run of this task, for this run; its reason: the run's worktree was lost; start again from main\n"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("Decisions a person made"), "{text}");
+    assert_eq!(fitted.bytes.sections.values().sum::<usize>(), text.len());
+    // A reason past its limit is cut as the carried-over section cuts a
+    // job's reason, naming no read of the queue: it is no person's
+    // decision (ADR-t2072-1 decision 2).
+    let long = format!(
+        "{}the job's reason ends here",
+        "the run's worktree was lost. ".repeat(WORKER_INHERITED_REASON_BYTES / 20)
+    );
+    let decisions = PreviousDecisions::of(
+        &previous,
+        &[event(json!({"action": "retry", "reason": long}))],
+    )
+    .unwrap();
+    let fitted = prompt_after(
+        &verified,
+        &own_run,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        Some(&decisions),
+    )
+    .unwrap();
+    let text = &fitted.text;
+    assert!(
+        text.contains(&format!(
+            "The recovery job retried run {RUN}, the previous run of this task, for this run; its reason: the run's worktree was lost."
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("the job's reason ends here"), "{text}");
+    assert!(text.contains(NOT_READABLE), "{text}");
+    assert!(!text.contains("--kind triage_finished"), "{text}");
+    assert_eq!(omitted(&fitted.bytes, "decisions"), 1);
+    for payload in [
+        json!({"action": "retry_inherit", "reason": "carried", "inherit": {"head": SHA}}),
+        json!({"action": "retry", "by": "user", "reason": "by hand"}),
+        json!({"action": "retry"}),
+    ] {
+        assert!(
+            PreviousDecisions::of(&previous, &[event(payload.clone())]).is_none(),
+            "{payload}"
+        );
+    }
 }

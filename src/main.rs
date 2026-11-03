@@ -7569,4 +7569,100 @@ mod tests {
             json!({"error": "not served", "queue_service": {"code": "no_use_case"}})
         );
     }
+
+    /// The command the worker's prompt names to read a person's decision
+    /// cut by its section's limit (ADR-t4018-1 decision 2) is a `dagq`
+    /// command as written: a read of the queue (`queue.read`) a worker's
+    /// token holds, sent to the queue service as a read.
+    #[test]
+    fn the_command_a_prompt_names_for_a_cut_decision_is_a_read_a_worker_may_send() {
+        // Clap's parser of every command needs more than a test thread's
+        // stack, as `main` gives it; the join is bounded so that a stalled
+        // parse fails here by name.
+        let (done, finished) = std::sync::mpsc::channel();
+        let parsing = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                cut_decision_command_is_a_read_a_worker_may_send();
+                done.send(()).unwrap();
+            })
+            .unwrap();
+        match finished.recv_timeout(std::time::Duration::from_secs(60)) {
+            // A panic in the thread drops `done`: its join says why.
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                parsing.join().unwrap();
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "the_command_a_prompt_names_for_a_cut_decision_is_a_read_a_worker_may_send: \
+                 the read commands were not parsed and checked within 60s"
+            ),
+        }
+    }
+
+    fn cut_decision_command_is_a_read_a_worker_may_send() {
+        use dagq::application::prompt::PreviousDecisions;
+        use dagq::domain::unapplied_decisions::{RetriedBy, RetryEnd};
+        let decisions = PreviousDecisions {
+            run_id: RunId::new("00000000-0000-4000-8000-000000000001").unwrap(),
+            task_id: TaskId::new(3976),
+            retry: RetryEnd {
+                inherit: true,
+                by: RetriedBy::RecoveryJob,
+                reason: String::new(),
+            },
+            decisions: Vec::new(),
+        };
+        for kind in [
+            dagq::domain::EventKind::LandingDecided,
+            dagq::domain::EventKind::AskAnswered,
+        ] {
+            let command = decisions.read_command(kind);
+            let argv: Vec<&str> = command.split(' ').collect();
+            let cli =
+                Cli::try_parse_from(&argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+            let Command::Events {
+                full,
+                task,
+                kind: kinds,
+                all,
+                ..
+            } = &cli.command
+            else {
+                panic!("{argv:?} is not `events`");
+            };
+            assert!(*full && !*all, "{argv:?}");
+            assert_eq!(*task, Some(3976));
+            assert_eq!(kinds, &[kind.as_str().to_owned()]);
+            assert_eq!(
+                requests(&cli.command),
+                [(Capability::QueueRead, Resource::Queue)]
+            );
+            assert!(
+                client_request(&cli.command).unwrap().is_some(),
+                "{argv:?} is sent as a read"
+            );
+        }
+        // An answer recorded before its event carried the text is read
+        // with the asks, a read too.
+        let argv: Vec<&str> = dagq::application::prompt::ASKS_READ_COMMAND
+            .split(' ')
+            .collect();
+        let cli = Cli::try_parse_from(&argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+        assert!(
+            matches!(
+                cli.command,
+                Command::Asks {
+                    all: true,
+                    open: false,
+                    ..
+                }
+            ),
+            "{argv:?}"
+        );
+        assert_eq!(
+            requests(&cli.command),
+            [(Capability::QueueRead, Resource::Queue)]
+        );
+        assert!(client_request(&cli.command).unwrap().is_some());
+    }
 }
