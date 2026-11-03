@@ -15,6 +15,7 @@
 //! finds the hold still open and settling, and the release reads whether
 //! it settled in its own, so a release while `settling` is refused and a
 //! park after a release writes nothing.
+use super::sql_dialect::{JsonType, json_field};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -459,9 +460,13 @@ impl SqliteQueue {
         for hold in holds {
             let last: Option<i64> = tx
                 .query_row(
-                    "SELECT json_extract(payload,'$.at') FROM run_events
-                     WHERE task_id=?1 AND kind=?2 AND json_extract(payload,'$.hold_id')=?3
+                    &format!(
+                        "SELECT {} FROM run_events
+                     WHERE task_id=?1 AND kind=?2 AND {}=?3
                      ORDER BY id DESC LIMIT 1",
+                        json_field("payload", "$.at", JsonType::Integer),
+                        json_field("payload", "$.hold_id", JsonType::Integer)
+                    ),
                     params![hold.task_id, EventKind::TaskHoldReminded.as_str(), hold.id],
                     |r| r.get(0),
                 )
@@ -597,13 +602,14 @@ fn discard_kept_of_ended(
     now: i64,
 ) -> Result<()> {
     let unsettled: Vec<crate::domain::RunEvent> = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT e.* FROM run_events e
              WHERE e.task_id=?1 AND e.kind=?2 AND e.run_id IS NOT NULL
                AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
-                 AND s.kind IN (?3,?4) AND json_extract(s.payload,'$.kept_id')=e.id)
+                 AND s.kind IN (?3,?4) AND {}=e.id)
              ORDER BY e.id",
-        )?
+            json_field("s.payload", "$.kept_id", JsonType::Integer)
+        ))?
         .query_map(
             params![
                 task,
@@ -839,9 +845,12 @@ fn record_phase(
 /// (`hold_result_kept`) that is neither applied nor discarded yet.
 fn kept_unsettled(conn: &Connection, run: &RunId) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM run_events e WHERE e.run_id=?1 AND e.kind=?2
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM run_events e WHERE e.run_id=?1 AND e.kind=?2
            AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
-             AND s.kind IN (?3,?4) AND json_extract(s.payload,'$.kept_id')=e.id))",
+             AND s.kind IN (?3,?4) AND {}=e.id))",
+            json_field("s.payload", "$.kept_id", JsonType::Integer)
+        ),
         params![
             run,
             EventKind::HoldResultKept.as_str(),

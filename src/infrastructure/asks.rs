@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
 use super::adapters::process_alive;
+use super::sql_dialect::{JsonType, json_field, json_field_at};
 use super::sqlite::{SqliteQueue, enum_col, json_col};
 use crate::domain::Ask;
 use crate::domain::write_rules::check_run_has_task;
@@ -371,9 +372,13 @@ impl SqliteQueue {
             // apply, a build's one with the automatic update.
             let source: Option<String> = tx
                 .query_row(
-                    "SELECT json_extract(payload,'$.source') FROM run_events
-                     WHERE kind=?1 AND json_extract(payload,'$.ask_id')=?2
+                    &format!(
+                        "SELECT {} FROM run_events
+                     WHERE kind=?1 AND {}=?2
                      ORDER BY id DESC LIMIT 1",
+                        json_field("payload", "$.source", JsonType::Text),
+                        json_field("payload", "$.ask_id", JsonType::Integer),
+                    ),
                     params![crate::domain::UPDATE_FAILED, id],
                     |row| row.get(0),
                 )
@@ -506,8 +511,12 @@ impl SqliteQueue {
         {
             let opened: Option<i64> = tx
                 .query_row(
-                    "SELECT json_extract(payload,'$.ask_id') FROM run_events WHERE kind=?1
-                     AND json_extract(payload,?3)=?2 ORDER BY id LIMIT 1",
+                    &format!(
+                        "SELECT {} FROM run_events WHERE kind=?1
+                     AND {}=?2 ORDER BY id LIMIT 1",
+                        json_field("payload", "$.ask_id", JsonType::Integer),
+                        json_field_at("payload", "?3", JsonType::Text),
+                    ),
                     params![
                         EventKind::AskOpened.as_str(),
                         record,
@@ -538,8 +547,11 @@ impl SqliteQueue {
         for ask in open {
             let opened: Option<String> = tx
                 .query_row(
-                    "SELECT payload FROM run_events WHERE kind=?1
-                     AND json_extract(payload,'$.ask_id')=?2 ORDER BY id DESC LIMIT 1",
+                    &format!(
+                        "SELECT payload FROM run_events WHERE kind=?1
+                     AND {}=?2 ORDER BY id DESC LIMIT 1",
+                        json_field("payload", "$.ask_id", JsonType::Integer),
+                    ),
                     params![EventKind::AskOpened.as_str(), ask.id],
                     |r| r.get(0),
                 )
@@ -638,8 +650,11 @@ impl SqliteQueue {
         let payload: Option<String> = self
             .conn
             .query_row(
-                "SELECT payload FROM run_events WHERE kind=?1
-                 AND json_extract(payload,'$.ask_id')=?2 ORDER BY id DESC LIMIT 1",
+                &format!(
+                    "SELECT payload FROM run_events WHERE kind=?1
+                 AND {}=?2 ORDER BY id DESC LIMIT 1",
+                    json_field("payload", "$.ask_id", JsonType::Integer),
+                ),
                 params![EventKind::AskOpened.as_str(), id],
                 |r| r.get(0),
             )

@@ -6,6 +6,7 @@
 //! kept unique per workflow and success, and the `ci_failure` findings a
 //! task fixes.
 
+use super::sql_dialect::{JsonType, json_field};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -185,10 +186,13 @@ impl SqliteQueue {
         let latest = |workflow: Option<&str>| -> Result<Option<(i64, String)>> {
             Ok(tx
                 .query_row(
-                    "SELECT id, kind FROM run_events WHERE kind IN (?1,?2)
+                    &format!(
+                        "SELECT id, kind FROM run_events WHERE kind IN (?1,?2)
                      AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
-                     AND json_extract(payload,'$.workflow')=?3
+                     AND {}=?3
                      ORDER BY id DESC LIMIT 1",
+                        json_field("payload", "$.workflow", JsonType::Text)
+                    ),
                     params![stale.as_str(), fresh.as_str(), workflow],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
@@ -201,10 +205,14 @@ impl SqliteQueue {
                     return Ok(None);
                 }
                 let there: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
                        AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
-                       AND json_extract(payload,'$.workflow')=?2
-                       AND json_extract(payload,'$.run_id') IS ?3)",
+                       AND {}=?2
+                       AND {} IS ?3)",
+                        json_field("payload", "$.workflow", JsonType::Text),
+                        json_field("payload", "$.run_id", JsonType::Integer)
+                    ),
                     params![stale.as_str(), workflow, payload["run_id"].as_i64()],
                     |r| r.get(0),
                 )?;

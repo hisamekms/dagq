@@ -28,12 +28,15 @@
 //! and C7 for the records of the ports and of the modules of
 //! `src/application/`, are checked by [`modules`] with the same table.
 //! That every transaction of the queue DB begins as a `WriteTx` is checked
-//! by [`write_tx`].
+//! by [`write_tx`], and that the SQL spells the functions whose spelling
+//! differs between the dialects only in the dialect's functions by
+//! [`dialect`].
 //!
 //! This is test code of the library (a `#[cfg(test)]` module of
 //! `src/lib.rs`, run by `cargo test --lib`), outside the library's layers,
 //! and reads the sources and the migrations as files.
 
+mod dialect;
 mod fixtures;
 mod module_fixtures;
 mod modules;

@@ -1,5 +1,6 @@
 //! SQL read as SQLite reads it, as far as the boundary tests need: the
-//! tables a statement writes, and the tables the migrations leave.
+//! tables a statement writes, the functions it calls, and the tables the
+//! migrations leave.
 
 use std::collections::BTreeSet;
 
@@ -141,6 +142,24 @@ fn name(tokens: &[Token], at: usize, values: bool) -> Option<(String, usize)> {
         Some(table) if dotted && is_name(table) => Some((table.text.clone(), at + 3)),
         _ => Some((first.text.clone(), at + 1)),
     }
+}
+
+/// The functions of `functions` (in lower case) `sql` calls, in its order:
+/// a word or a quoted name of the list followed by `(`, in any case and
+/// with or without space between, so a value in quotes, a comment and a
+/// longer word that spell one are no call.
+pub(super) fn calls(sql: &str, functions: &[&str]) -> Vec<String> {
+    let tokens = tokens(sql);
+    (0..tokens.len())
+        .filter(|&at| {
+            matches!(tokens[at].kind, Kind::Word | Kind::Name)
+                && functions.contains(&tokens[at].text.as_str())
+                && tokens
+                    .get(at + 1)
+                    .is_some_and(|t| t.kind == Kind::Punct && t.text == "(")
+        })
+        .map(|at| tokens[at].text.clone())
+        .collect()
 }
 
 /// The tables `sql` writes: `INSERT [OR choice] INTO t`, `REPLACE INTO t`,
@@ -300,6 +319,25 @@ mod tests {
         assert_eq!(
             written("UPDATE OR IGNORE main.task_runs AS r INDEXED BY i SET id = 1"),
             ["task_runs"]
+        );
+    }
+
+    #[test]
+    fn a_call_is_a_listed_word_before_a_parenthesis() {
+        let listed = ["json_extract", "strftime"];
+        assert_eq!(
+            calls(
+                "SELECT JSON_EXTRACT(p,'$.a'), strftime ('%s', x), json_each(p), \"strftime\"(x)",
+                &listed
+            ),
+            ["json_extract", "strftime", "strftime"]
+        );
+        assert!(
+            calls(
+                "SELECT 'json_extract(p)', strftime, my_strftime(x) -- json_extract(p)\n/* strftime(x) */",
+                &listed
+            )
+            .is_empty()
         );
     }
 

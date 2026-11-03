@@ -5,6 +5,7 @@
 //! (`asks.request_id`). Opening a planner is one write transaction that
 //! re-checks the request first, so two supervisors never open one for the
 //! same request. A request's events are the queue's.
+use super::sql_dialect::{JsonType, json_field};
 use crate::domain::event_kind::EventKind;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -129,7 +130,8 @@ pub(super) const REVISE_GOAL_WAIT_ENDED: &str = concat!(
 /// that is no longer with the planner. A closed operation whose restore
 /// failed that goes on to the planner again gets a new request
 /// ([`renew_declined`]) rather than this one back.
-const TARGETS: &str = concat!("SELECT r.id FROM plan_requests r WHERE r.status='open'
+fn targets() -> String {
+    format!(concat!("SELECT r.id FROM plan_requests r WHERE r.status='open'
     AND (r.replan_operation_id IS NULL OR EXISTS(SELECT 1 FROM replan_operations o
         WHERE o.id=r.replan_operation_id AND o.snapshot_id IS NOT NULL
         AND o.status IN ('parked','planning','reviewing','awaiting_answer')))
@@ -144,14 +146,19 @@ const TARGETS: &str = concat!("SELECT r.id FROM plan_requests r WHERE r.status='
         AND NOT EXISTS(SELECT 1 FROM draft_origins o WHERE o.task_id=t.id)
         AND NOT EXISTS(SELECT 1 FROM draft_revisits v WHERE v.task_id=t.id)
         AND NOT EXISTS(SELECT 1 FROM draft_reopens d WHERE d.task_id=t.id
-            AND json_extract(d.material,'$.proposal_id')=t.proposal_id)
+            AND {reopened_proposal}=t.proposal_id)
         AND NOT EXISTS(SELECT 1 FROM proposals x WHERE x.id=t.proposal_id AND x.status!='canceled'))
     AND NOT ", goal_replanned_elsewhere!(), "
     AND NOT EXISTS(SELECT 1 FROM json_each(r.refs) j JOIN planners p ON p.closed_at IS NULL
-        AND p.origin='runtime' AND (p.draft_task_id=json_extract(j.value,'$.id')
+        AND p.origin='runtime' AND (p.draft_task_id={ref_id}
              OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id
-                 AND m.task_id=json_extract(j.value,'$.id')))
-        WHERE json_extract(j.value,'$.kind')='task')");
+                 AND m.task_id={ref_id}))
+        WHERE {ref_kind}='task')"),
+        reopened_proposal = json_field("d.material", "$.proposal_id", JsonType::Integer),
+        ref_id = json_field("j.value", "$.id", JsonType::Integer),
+        ref_kind = json_field("j.value", "$.kind", JsonType::Text),
+    )
+}
 
 impl SqliteQueue {
     /// Record `request` as `by_role` (`inbox`, `user`) with actor id
@@ -218,11 +225,11 @@ impl SqliteQueue {
     }
 
     /// The `open` requests waiting for a planner of the runtime's
-    /// ([`TARGETS`]), oldest first.
+    /// ([`targets`]), oldest first.
     pub fn planner_requests(&self) -> Result<Vec<PlanRequest>> {
         let ids: Vec<RequestId> = self
             .conn
-            .prepare(&format!("{TARGETS} ORDER BY r.id"))?
+            .prepare(&format!("{} ORDER BY r.id", targets()))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         ids.into_iter()
@@ -318,7 +325,7 @@ impl PlanRequestStore for SqliteQueue {
         let tx = self.write_tx("open_request_planner")?;
         let eligible = match answer {
             None => tx.query_row(
-                &format!("SELECT EXISTS({TARGETS} AND r.id=?1)"),
+                &format!("SELECT EXISTS({} AND r.id=?1)", targets()),
                 [request],
                 |r| r.get(0),
             )?,
@@ -648,11 +655,16 @@ pub(super) fn declined_at_close(
     op: crate::domain::ReplanId,
 ) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM plan_requests r JOIN run_events e ON e.kind=?3
-             AND json_extract(e.payload,'$.request_id')=r.id
-             AND json_extract(e.payload,'$.by')='runtime'
-             AND json_extract(e.payload,'$.replan_operation_id')=?2
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM plan_requests r JOIN run_events e ON e.kind=?3
+             AND {}=r.id
+             AND {}='runtime'
+             AND {}=?2
          WHERE r.id=?1 AND r.status='declined')",
+            json_field("e.payload", "$.request_id", JsonType::Integer),
+            json_field("e.payload", "$.by", JsonType::Text),
+            json_field("e.payload", "$.replan_operation_id", JsonType::Integer)
+        ),
         params![request, op, EventKind::RequestDeclined.as_str()],
         |r| r.get(0),
     )?)

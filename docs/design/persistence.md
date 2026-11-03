@@ -71,7 +71,7 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 - 例外は全体のグラフが要る依存の循環の検出（再帰CTE）だけで、拒むかの判断はdomainが持つ。
 - 時刻とIDは`SqliteQueue`が持つ`Generators`（`Clock`と`IdGenerator`）から取り、SQLの`now`で作らない。
 - schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`、場所は`src/infrastructure/location.rs`が持つ。
-- 方言の違う式の断片（JSONの欄の読み出しと日時の関数）は`src/infrastructure/sql_dialect.rs`の関数が返し、文が埋める（ADR-t3982-1）。
+- 方言の違う式の断片（JSONの欄の読み出しと日時の関数）は`src/infrastructure/sql_dialect.rs`の関数が返して文が埋め、外のSQLが書かないことをtest（`src/context_boundaries/dialect.rs`）が守る（ADR-t3982-1）。
 - runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く。
 
 ## 不変条件
@@ -144,7 +144,7 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 
 ### planning requests（`plan_requests.rs`）
 
-人がinboxに頼んだ計画の依頼と、依頼ごとに立てるruntimeのplanner（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)、[inboxからの計画の依頼](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)）。
+人がinboxに頼んだ計画の依頼と、依頼ごとに立てるruntimeのplanner（ADR-t1394-1、[inboxからの計画の依頼](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)）。
 入口は`src/infrastructure/plan_requests.rs`。
 
 - 依頼のeventはtask・goal・runに付かないqueueのeventで、payloadに`request_id`を持つ。

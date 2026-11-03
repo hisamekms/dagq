@@ -147,7 +147,7 @@ draftに再検討の時刻を1つ持たせ、時刻が来たらruntimeのplanner
 - **依頼の経路と並べる**: `keep_draft`で残したdraftの行き先（inboxの参照付きの依頼か人のterminal。5の(c)）はそのままで、時刻の経路を並べる。
   `open`の計画の依頼が`task:N`で参照するdraftは対象にしない（依頼のplannerが決める。時刻は残る）。
   そのdraftへの`planner_question`のanswerを運ぶ新しいplannerも立てず、answerは依頼が`open`でなくなるまで待つ（`named_by_open_request`）。
-  依頼のplanner（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）は、参照する`task:N`に開いているruntimeのdraftのplanner（再検討のものを含む）がある間は立たない（`plan_requests`の`TARGETS`）。
+  依頼のplanner（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）は、参照する`task:N`に開いているruntimeのdraftのplanner（再検討のものを含む）がある間は立たない（`plan_requests`の`targets`）。
 - **時刻の無い`keep_draft`**: 対象から外れ、依頼を待つ（ADR-t1540-1決定6）。
 - **記録**: 付ける・消す・使い切るのはどれもtaskのevent（`draft_revisit_set`・`draft_revisit_cleared`・`draft_revisit_due`）で、actorはそのCLIを打ったrole（`draft_revisit_due`はsupervisor）。
   `show`は`revisit`（無ければnull）を出す。

@@ -15,6 +15,7 @@
 //! acceptance item, and a deletion of an item a child task holds, inside
 //! the writing transaction: the table's key does not compare a deletion's
 //! NULL child task.
+use super::sql_dialect::{JsonType, json_field};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -859,9 +860,13 @@ fn check_premise(
     if premise.manual == Some(false) {
         let joined: Option<i64> = conn
             .query_row(
-                "SELECT id FROM run_events WHERE task_id=?1 AND kind=?2
-                 AND json_extract(payload,'$.operation_id')=?3
-                 AND json_extract(payload,'$.origin')=?4 LIMIT 1",
+                &format!(
+                    "SELECT id FROM run_events WHERE task_id=?1 AND kind=?2
+                 AND {}=?3
+                 AND {}=?4 LIMIT 1",
+                    json_field("payload", "$.operation_id", JsonType::Integer),
+                    json_field("payload", "$.origin", JsonType::Text)
+                ),
                 params![
                     op.task_id,
                     EventKind::ReplanRequested.as_str(),
@@ -2008,10 +2013,11 @@ impl SqliteQueue {
             None => Vec::new(),
         };
         let mut resolutions = Vec::new();
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "SELECT id, created_at, payload FROM run_events WHERE task_id=?1 AND kind=?2
-             AND json_extract(payload,'$.operation_id')=?3 ORDER BY id",
-        )?;
+             AND {}=?3 ORDER BY id",
+            json_field("payload", "$.operation_id", JsonType::Integer)
+        ))?;
         let rows = statement.query_map(
             params![op.task_id, EventKind::ReplanResolved.as_str(), id],
             |r| {
@@ -2084,10 +2090,15 @@ impl SqliteQueue {
             let request = op.request_id.context("an ended request")?;
             let declined: Option<(bool, String)> = tx
                 .query_row(
-                    "SELECT COALESCE(json_extract(payload,'$.continue_run'), 0),
-                       COALESCE(json_extract(payload,'$.reason'), '')
+                    &format!(
+                        "SELECT COALESCE({}, 0),
+                       COALESCE({}, '')
                      FROM run_events WHERE kind='request_declined'
-                     AND json_extract(payload,'$.request_id')=?1 ORDER BY id DESC LIMIT 1",
+                     AND {}=?1 ORDER BY id DESC LIMIT 1",
+                        json_field("payload", "$.continue_run", JsonType::Boolean),
+                        json_field("payload", "$.reason", JsonType::Text),
+                        json_field("payload", "$.request_id", JsonType::Integer)
+                    ),
                     [request],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )

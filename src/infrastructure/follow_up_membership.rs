@@ -1,4 +1,5 @@
 //! Append-only membership decisions and transactional membership changes.
+use super::sql_dialect::{JsonType, json_field, json_field_spaced};
 use anyhow::{Result, anyhow, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -408,10 +409,15 @@ fn correction_of(conn: &Connection, ask: &Ask) -> Result<Option<(i64, GoalId)>> 
     };
     Ok(conn
         .query_row(
-            "SELECT json_extract(payload,'$.id'), json_extract(payload,'$.source_goal_id')
+            &format!(
+                "SELECT {}, {}
              FROM run_events WHERE kind=?1 AND task_id=?2
-               AND json_extract(payload,'$.correction_ask_id')=?3
+               AND {}=?3
              ORDER BY id DESC LIMIT 1",
+                json_field("payload", "$.id", JsonType::Integer),
+                json_field("payload", "$.source_goal_id", JsonType::Integer),
+                json_field("payload", "$.correction_ask_id", JsonType::Integer)
+            ),
             params![EventKind::FollowUpJudged.as_str(), task, ask.id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -449,14 +455,16 @@ pub(super) fn correction_answer_applies(conn: &Connection, ask: &Ask, text: &str
 /// took to apply when it was given (`runtime_delivers`), oldest first.
 pub(super) fn correction_answers(conn: &Connection) -> Result<Vec<Ask>> {
     let ids: Vec<AskId> = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT a.id FROM asks a WHERE a.kind=?1 AND a.answered_at IS NOT NULL
-                 AND a.closed_at IS NULL AND (SELECT json_extract(e.payload, '$.runtime_delivers')
+                 AND a.closed_at IS NULL AND (SELECT {}
                      FROM run_events e WHERE e.kind='ask_answered'
-                     AND json_extract(e.payload, '$.ask_id') = a.id
+                     AND {} = a.id
                      ORDER BY e.id DESC LIMIT 1) = 1
                  ORDER BY a.id",
-        )?
+            json_field_spaced("e.payload", "$.runtime_delivers", JsonType::Boolean),
+            json_field_spaced("e.payload", "$.ask_id", JsonType::Integer)
+        ))?
         .query_map([AskKind::CorrectGoal.as_str()], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     ids.into_iter().map(|id| read_ask(conn, id)).collect()
@@ -616,9 +624,9 @@ pub(super) fn decide_correction(
 }
 
 pub(super) fn goal_memberships(conn: &Connection, goal: GoalId) -> Result<Vec<Value>> {
-    let ids = conn.prepare("SELECT o.task_id FROM draft_origins o JOIN tasks t ON t.id=o.task_id
-        WHERE o.origin='follow_up' AND (json_extract(o.material,'$.source_goal_id')=?1 OR t.goal_id=?1
-        OR EXISTS(SELECT 1 FROM follow_up_judgements j WHERE j.task_id=o.task_id AND j.source_goal_id=?1)) ORDER BY o.task_id")?
+    let ids = conn.prepare(&format!("SELECT o.task_id FROM draft_origins o JOIN tasks t ON t.id=o.task_id
+        WHERE o.origin='follow_up' AND ({}=?1 OR t.goal_id=?1
+        OR EXISTS(SELECT 1 FROM follow_up_judgements j WHERE j.task_id=o.task_id AND j.source_goal_id=?1)) ORDER BY o.task_id", json_field("o.material", "$.source_goal_id", JsonType::Integer)))?
         .query_map([goal], |r| r.get::<_,TaskId>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     ids.into_iter()
         .map(|id| {
@@ -651,13 +659,13 @@ pub(super) fn source_follow_ups(conn: &Connection, goal: GoalId) -> Result<Vec<S
     let version = acceptance_version(conn, goal)?;
     let rows = conn
         .prepare(
-            "SELECT o.task_id, t.status, t.goal_id IS ?1, j.id, j.classification, j.acceptance_version
+            &format!("SELECT o.task_id, t.status, t.goal_id IS ?1, j.id, j.classification, j.acceptance_version
              FROM draft_origins o JOIN tasks t ON t.id = o.task_id
              LEFT JOIN follow_up_judgements j ON j.id =
                  (SELECT max(id) FROM follow_up_judgements WHERE task_id = o.task_id)
              WHERE o.origin = 'follow_up'
-               AND json_extract(o.material, '$.source_goal_id') = ?1
-             ORDER BY o.task_id",
+               AND {} = ?1
+             ORDER BY o.task_id", json_field_spaced("o.material", "$.source_goal_id", JsonType::Integer)),
         )?
         .query_map([goal], |r| {
             Ok((

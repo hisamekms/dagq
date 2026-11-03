@@ -2,6 +2,7 @@
 //! task with its landed commits' messages, follow-up origins and duplicate
 //! mark, asks the search index how strongly the task's title matches each
 //! other task, and leaves the scoring to [`crate::domain::related`].
+use super::sql_dialect::{JsonType, json_field_spaced};
 use crate::domain::{cancel_reason, event_kind};
 use std::collections::HashMap;
 
@@ -100,13 +101,14 @@ impl SqliteQueue {
         let follow_ups: Vec<(i64, String, i64)> = self
             .conn
             .prepare(&format!(
-                "SELECT CAST(json_extract(payload, '$.task_id') AS INTEGER), run_id, task_id
+                "SELECT CAST({task_id} AS INTEGER), run_id, task_id
                  FROM run_events
                  WHERE kind = '{}' AND run_id IS NOT NULL
                    AND task_id IS NOT NULL
                    AND json_type(payload, '$.task_id') = 'integer'
                  ORDER BY id",
-                event_kind::FOLLOW_UP_REGISTERED
+                event_kind::FOLLOW_UP_REGISTERED,
+                task_id = json_field_spaced("payload", "$.task_id", JsonType::Integer),
             ))?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
@@ -123,13 +125,16 @@ impl SqliteQueue {
             .prepare(&format!(
                 "SELECT e.task_id,
                         CASE WHEN json_type(e.payload, '$.duplicate_of') = 'integer'
-                             THEN json_extract(e.payload, '$.duplicate_of') END,
-                        json_extract(e.payload, '$.reason')
+                             THEN {duplicate_of} END,
+                        {reason}
                  FROM run_events e JOIN tasks t ON t.id = e.task_id
                  WHERE e.kind = '{}' AND t.status = 'canceled'
-                   AND json_extract(e.payload, '$.to') = 'canceled'
+                   AND {to} = 'canceled'
                  ORDER BY e.id",
-                event_kind::TASK_STATUS_CHANGED
+                event_kind::TASK_STATUS_CHANGED,
+                duplicate_of = json_field_spaced("e.payload", "$.duplicate_of", JsonType::Integer),
+                reason = json_field_spaced("e.payload", "$.reason", JsonType::Text),
+                to = json_field_spaced("e.payload", "$.to", JsonType::Text),
             ))?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;

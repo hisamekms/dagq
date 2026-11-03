@@ -1,0 +1,179 @@
+//! The SQL functions whose spelling differs between the dialects of the
+//! queue store (reading a field of a JSON column, the date and time
+//! functions) are called only from the dialect's functions
+//! (docs/design/persistence.md, "責務と境界"; ADR-t3982-1 decisions 3 and
+//! 4): a statement takes the expression from
+//! `crate::infrastructure::sql_dialect` instead of spelling it. Checked on
+//! the sources of `src/` as syntax: outside test code (see
+//! [`source`](super::source)) and outside [`DIALECT`], no string literal
+//! (byte strings and those inside a macro's tokens too) calls a function
+//! of [`FUNCTIONS`], read as SQLite reads it ([`sql::calls`]).
+//!
+//! What is not seen: SQL built at run time from pieces that split a name
+//! from its `(`, and the migrations (`migrations/`, not under `src/`),
+//! whose SQL stays the dialect's own. The other JSON functions
+//! (`json_each`, `json_set`, ...) are not checked.
+
+use super::source;
+use super::sql;
+use super::{children_dir, covers};
+use std::collections::BTreeSet;
+
+/// The module of the dialect's functions, whose SQL spells the functions.
+const DIALECT: &[&str] = &[
+    "src/infrastructure/sql_dialect.rs",
+    "src/infrastructure/sql_dialect/",
+];
+
+/// The functions spelled only in [`DIALECT`], in lower case.
+const FUNCTIONS: [&str; 4] = ["json_extract", "datetime", "strftime", "julianday"];
+
+/// Every failure of the files `rust` (paths from the repository root, with
+/// their text), one line each.
+fn check(rust: &[(String, String)]) -> Vec<String> {
+    let mut errors = BTreeSet::new();
+    let mut read = Vec::new();
+    let mut test_paths = Vec::new();
+    for (path, text) in rust {
+        match source::read(text) {
+            Ok(source) => {
+                let dir = children_dir(path);
+                for module in &source.test_modules {
+                    test_paths.push(format!("{dir}/{module}.rs"));
+                    test_paths.push(format!("{dir}/{module}/"));
+                }
+                read.push((path.as_str(), source));
+            }
+            Err(error) => {
+                errors.insert(format!("{path}: not read as Rust: {error}"));
+            }
+        }
+    }
+    read.retain(|(path, _)| {
+        !test_paths.iter().any(|test| covers(test, path))
+            && !DIALECT.iter().any(|dialect| covers(dialect, path))
+    });
+    for (path, source) in &read {
+        for literal in &source.literals {
+            let inner = literal.fns.last().map_or("-", String::as_str);
+            for function in sql::calls(&literal.text, &FUNCTIONS) {
+                errors.insert(format!(
+                    "{path}: SQL in {inner} calls {function}( outside the dialect's functions; take the expression from crate::infrastructure::sql_dialect"
+                ));
+            }
+        }
+    }
+    errors.into_iter().collect()
+}
+
+#[test]
+fn the_sql_of_src_takes_the_dialects_functions_from_sql_dialect() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rust = super::files(root, "src", "rs");
+    assert!(
+        rust.iter()
+            .any(|(path, _)| DIALECT.iter().any(|dialect| covers(dialect, path))),
+        "the dialect's module {} is gone",
+        DIALECT[0]
+    );
+    let errors = check(&rust);
+    assert!(
+        errors.is_empty(),
+        "SQL that spells a dialect's function outside sql_dialect (docs/design/persistence.md):\n{}",
+        errors.join("\n")
+    );
+}
+
+mod fixtures {
+    use super::*;
+
+    fn errors(files: &[(&str, &str)]) -> Vec<String> {
+        let rust: Vec<(String, String)> = files
+            .iter()
+            .map(|(path, text)| (path.to_string(), text.to_string()))
+            .collect();
+        check(&rust)
+    }
+
+    /// A call of each function, in the spellings a statement may give it.
+    const CALLS: [(&str, &str); 6] = [
+        ("json_extract(payload,'$.kind')", "json_extract"),
+        ("JSON_EXTRACT(payload, '$.kind')", "json_extract"),
+        ("datetime('now')", "datetime"),
+        ("strftime ('%s', created_at)", "strftime"),
+        ("julianday(created_at)", "julianday"),
+        ("\\\"julianday\\\"(created_at)", "julianday"),
+    ];
+
+    /// The forms SQL is written in: a literal, a raw literal, a byte string,
+    /// a format string and a literal inside a macro's tokens.
+    fn forms(call: &str) -> [String; 5] {
+        let raw = call.replace("\\\"", "\"");
+        [
+            format!("conn.query_row(\"SELECT {call} FROM t\", [], f)"),
+            format!("conn.query_row(r#\"SELECT {raw} FROM t\"#, [], f)"),
+            format!("conn.execute(b\"SELECT {call}\", [])"),
+            format!("conn.prepare(&format!(\"SELECT {{}}, {call}\", x))"),
+            format!("vec![\"SELECT {call}\"]"),
+        ]
+    }
+
+    #[test]
+    fn each_call_outside_the_dialect_fails() {
+        for (call, name) in CALLS {
+            for statement in forms(call) {
+                for (path, text) in [
+                    (
+                        "src/infrastructure/store.rs",
+                        format!("fn store(conn: &Connection) {{ let _ = {statement}; }}"),
+                    ),
+                    (
+                        "src/application/report.rs",
+                        format!("const SQL: &str = {{ {statement} }};"),
+                    ),
+                ] {
+                    let found = errors(&[(path, &text)]);
+                    assert_eq!(found.len(), 1, "{statement} in {path}: {found:?}");
+                    assert!(
+                        found[0].starts_with(&format!("{path}: SQL in ")),
+                        "{statement}: {found:?}"
+                    );
+                    assert!(
+                        found[0].contains(&format!(" calls {name}( ")),
+                        "{statement}: {found:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_call_in_the_dialect_or_in_test_code_passes() {
+        for (call, _) in CALLS {
+            for statement in forms(call) {
+                let used = format!("fn f(conn: &Connection) {{ let _ = {statement}; }}");
+                let tests = format!(
+                    "#[cfg(test)]\nmod tests {{ fn t() {{ let _ = {statement}; }} }}\nfn l() {{ #[cfg(test)] let _ = {statement}; }}\nfn b() {{ #[cfg(test)] {{ let _ = {statement}; }} }}\nfn s() {{ #[cfg(test)] println!(\"{{:?}}\", {statement}); }}\n#[cfg(test)]\nmod declared;"
+                );
+                let test_file = format!("#![cfg(test)]\n{used}");
+                let found = errors(&[
+                    ("src/infrastructure/sql_dialect.rs", &used),
+                    ("src/infrastructure/sql_dialect/sqlite.rs", &used),
+                    ("src/infrastructure/store.rs", &tests),
+                    ("src/infrastructure/store/declared.rs", &used),
+                    ("src/infrastructure/fixtures.rs", &test_file),
+                ]);
+                assert!(found.is_empty(), "{statement}: {found:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_calls_no_dialects_function_passes() {
+        let found = errors(&[(
+            "src/infrastructure/store.rs",
+            "/// Reads `json_extract(payload,'$.kind')`.\nfn f(conn: &Connection) {\n    // strftime('%s', x)\n    conn.query_row(&format!(\"SELECT {} FROM t\", json_field(\"payload\", \"$.kind\", JsonType::Text)), [], f);\n    conn.execute(\"SELECT json_each(payload), json_set(p, '$.a', 1), 'datetime(x)', created_at FROM t -- julianday(x)\", []);\n    let message = \"the strftime of a time\";\n}",
+        )]);
+        assert!(found.is_empty(), "{found:?}");
+    }
+}

@@ -4,6 +4,7 @@
 //! background wrapper's of a planner of the runtime's, ADR-t1433-2; the
 //! workspace UUID of a person's planner opened before ADR-t1394-1) and
 //! what its session wrapper records (pids, heartbeat, the agent's exit).
+use super::sql_dialect::{JsonType, json_field, json_field_spaced};
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, Row, params};
 
@@ -97,10 +98,11 @@ impl SqliteQueue {
             .conn
             .query_row(
                 &format!(
-                    "SELECT json_extract(e.payload,'$.planner_id') FROM run_events e,
+                    "SELECT {planner_id} FROM run_events e,
                      json_each(e.payload,'$.asks') j WHERE e.kind='{}' AND j.value=?1
                      ORDER BY e.id DESC LIMIT 1",
-                    event_kind::PLANNER_ANSWER_WAIT
+                    event_kind::PLANNER_ANSWER_WAIT,
+                    planner_id = json_field("e.payload", "$.planner_id", JsonType::Integer),
                 ),
                 [ask],
                 |r| r.get(0),
@@ -113,9 +115,10 @@ impl SqliteQueue {
         let notes = self
             .conn
             .prepare(&format!(
-                "SELECT id, coalesce(json_extract(payload,'$.text'), '') FROM run_events
+                "SELECT id, coalesce({text}, '') FROM run_events
                  WHERE kind='{}' AND actor_id=?1 ORDER BY id",
-                event_kind::OBSERVATION
+                event_kind::OBSERVATION,
+                text = json_field("payload", "$.text", JsonType::Text),
             ))?
             .query_map([&actor], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
@@ -311,12 +314,13 @@ pub(super) fn planner_turn_events_sql() -> String {
     format!(
         "SELECT * FROM run_events WHERE +run_id IS NULL
            AND kind IN ('{}','{}','{}','{}','{}')
-           AND json_extract(payload, '$.planner_id')=?1 ORDER BY id",
+           AND {planner_id}=?1 ORDER BY id",
         event_kind::TURN_REQUESTED,
         event_kind::TURN_STARTED,
         event_kind::TURN_FINISHED,
         event_kind::TURN_SESSION_IDENTIFIED,
         event_kind::PROVIDER_WAITING,
+        planner_id = json_field_spaced("payload", "$.planner_id", JsonType::Integer),
     )
 }
 

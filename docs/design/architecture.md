@@ -210,6 +210,8 @@ queue serviceはqueue DBを開く唯一のプロセスで（例外は[Queue serv
   migrationのtriggerが書く`search_index`・`landed_commits`は数えない。
 - queue DBを開く呼び出しの置き場（ADR-t3102-2決定8）は、`cargo test`が流すRustのtest（`src/context_boundaries/queue_opens.rs`）が当て、`src/`の本番のコードで表に無い呼び出しと、呼び出しの無い表の行で落ちる。
   開いてよい経路とtestの経路の区別は[Queue service](queue-service.md#dbを開く経路)。
+- 方言の違う式の断片の置き場（ADR-t3982-1）は、`cargo test`が流すRustのtest（`src/context_boundaries/dialect.rs`）が当て、`src/`の本番のコードの文字列のSQLが`src/infrastructure/sql_dialect.rs`の外で方言の違う関数を呼ぶと落ちる。
+  対象の関数と見ない部分はtestのdoc commentが持つ。
 - C5では、共有の部品のportは、どのcontextが使っても違反に数えない。
   `src/application/ports/<context>.rs`のportの所有と、`ports/`・`queue_reads/`・`compose/`の`<context>.rs`のcontextは、testがpathから導く。
 - 所有の表の書式と落ちる条件はtestのdoc commentが持つ。

@@ -2,6 +2,7 @@
 //! headless job (one unfinished at a time, queue-wide), the goals it may
 //! take, and the verdicts and `approve_goal` answers the supervisor
 //! applies, each in one transaction. Events go to the goal.
+use super::sql_dialect::{JsonType, json_field_spaced};
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::write_rules::{check_at_least, check_non_blank};
@@ -660,14 +661,16 @@ impl GoalReviewStore for SqliteQueue {
     fn goal_answers(&self) -> Result<Vec<Ask>> {
         let ids: Vec<AskId> = self
             .conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT a.id FROM asks a WHERE a.kind='approve_goal' AND a.answered_at IS NOT NULL
-                 AND a.closed_at IS NULL AND (SELECT json_extract(e.payload, '$.runtime_delivers')
+                 AND a.closed_at IS NULL AND (SELECT {}
                      FROM run_events e WHERE e.kind='ask_answered'
-                     AND json_extract(e.payload, '$.ask_id') = a.id
+                     AND {} = a.id
                      ORDER BY e.id DESC LIMIT 1) = 1
                  ORDER BY a.id",
-            )?
+                json_field_spaced("e.payload", "$.runtime_delivers", JsonType::Boolean),
+                json_field_spaced("e.payload", "$.ask_id", JsonType::Integer)
+            ))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         ids.into_iter().map(|id| read_ask(&self.conn, id)).collect()

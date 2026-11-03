@@ -7,7 +7,7 @@
 use crate::domain::EventKind;
 use crate::domain::event_kind;
 use crate::domain::sessions::{PLANNER, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED};
-use crate::infrastructure::sql_dialect::{TimeForm, time_value_spaced};
+use crate::infrastructure::sql_dialect::{JsonType, TimeForm, json_field, time_value_spaced};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -285,12 +285,17 @@ fn record_submitter(
     let span: Option<i64> = match planner {
         Some(planner) => conn
             .query_row(
-                "SELECT o.id FROM run_events o WHERE o.kind=?2
-                   AND json_extract(o.payload,'$.kind') IN (?3, ?4)
-                   AND json_extract(o.payload,'$.planner_id')=?1
+                &format!(
+                    "SELECT o.id FROM run_events o WHERE o.kind=?2
+                   AND {} IN (?3, ?4)
+                   AND {}=?1
                    AND NOT EXISTS (SELECT 1 FROM run_events c WHERE c.kind=?5
-                                   AND json_extract(c.payload,'$.opened_event_id')=+o.id)
+                                   AND {}=+o.id)
                  ORDER BY o.id DESC LIMIT 1",
+                    json_field("o.payload", "$.kind", JsonType::Text),
+                    json_field("o.payload", "$.planner_id", JsonType::Integer),
+                    json_field("c.payload", "$.opened_event_id", JsonType::Integer)
+                ),
                 params![
                     planner,
                     SESSION_OPENED,
@@ -499,11 +504,21 @@ fn reopened_into(
 ) -> Result<Option<serde_json::Value>> {
     let reopened: Option<(String, Option<ProposalId>)> = conn
         .query_row(
-            "SELECT json_extract(payload,'$.reason'), json_extract(payload,'$.reviewed_proposal_id')
+            &format!(
+                "SELECT {}, {}
              FROM run_events WHERE task_id=?1 AND kind=?3
-             AND json_extract(payload,'$.proposal_id')=?2 ORDER BY id DESC LIMIT 1",
+             AND {}=?2 ORDER BY id DESC LIMIT 1",
+                json_field("payload", "$.reason", JsonType::Text),
+                json_field("payload", "$.reviewed_proposal_id", JsonType::Integer),
+                json_field("payload", "$.proposal_id", JsonType::Integer)
+            ),
             params![task_id, id, event_kind::TASK_REOPENED],
-            |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    r.get(1)?,
+                ))
+            },
         )
         .optional()?;
     Ok(reopened.map(|(reason, reviewed)| reopened_material(&reason, id, reviewed)))

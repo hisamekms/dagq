@@ -7,6 +7,7 @@
 //! resolves the finding or opens it again. Opening a planner is one write
 //! transaction that re-checks the finding first, so two supervisors never
 //! open one for the same finding.
+use super::sql_dialect::{JsonType, json_field};
 use crate::domain::event_kind::{self, EventKind};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -36,9 +37,11 @@ fn targets() -> String {
     AND NOT EXISTS(SELECT 1 FROM asks a WHERE a.finding_id=f.id
         AND a.kind='planner_question' AND a.closed_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM run_events e WHERE e.kind='{}'
-        AND json_extract(e.payload,'$.finding_id')=f.id
-        AND json_extract(e.payload,'$.marked_at') IS f.propose_requested_at)",
-        event_kind::FINDING_PLANNER_EXHAUSTED
+        AND {finding_id}=f.id
+        AND {marked_at} IS f.propose_requested_at)",
+        event_kind::FINDING_PLANNER_EXHAUSTED,
+        finding_id = json_field("e.payload", "$.finding_id", JsonType::Integer),
+        marked_at = json_field("e.payload", "$.marked_at", JsonType::Integer),
     )
 }
 
@@ -307,10 +310,12 @@ impl SqliteQueue {
             .prepare(&format!(
                 "SELECT * FROM findings f WHERE f.status='open' AND f.propose_reason IS NOT NULL
                  AND EXISTS(SELECT 1 FROM run_events e WHERE e.kind='{}'
-                     AND json_extract(e.payload,'$.finding_id')=f.id
-                     AND json_extract(e.payload,'$.marked_at') IS f.propose_requested_at)
+                     AND {finding_id}=f.id
+                     AND {marked_at} IS f.propose_requested_at)
                  ORDER BY f.id",
-                event_kind::FINDING_PLANNER_EXHAUSTED
+                event_kind::FINDING_PLANNER_EXHAUSTED,
+                finding_id = json_field("e.payload", "$.finding_id", JsonType::Integer),
+                marked_at = json_field("e.payload", "$.marked_at", JsonType::Integer),
             ))?
             .query_map([], finding_row)?
             .collect::<rusqlite::Result<_>>()?)
@@ -333,9 +338,11 @@ impl SqliteQueue {
         Ok(self.conn.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
-             AND json_extract(payload,'$.ask_id')=?1
-             AND json_extract(payload,'$.workspace_id')=?2)",
-                event_kind::ASK_DELIVERED
+             AND {ask_id}=?1
+             AND {workspace_id}=?2)",
+                event_kind::ASK_DELIVERED,
+                ask_id = json_field("payload", "$.ask_id", JsonType::Integer),
+                workspace_id = json_field("payload", "$.workspace_id", JsonType::Text),
             ),
             params![ask, workspace],
             |r| r.get(0),
@@ -349,10 +356,13 @@ impl SqliteQueue {
     pub fn answer_claimed_at(&self, ask: AskId, workspace: &str) -> Result<Option<i64>> {
         Ok(self.conn.query_row(
             &format!(
-                "SELECT MAX(json_extract(payload,'$.claimed_at')) FROM run_events WHERE kind='{}'
-             AND json_extract(payload,'$.ask_id')=?1
-             AND json_extract(payload,'$.workspace_id')=?2",
-                event_kind::PLANNER_ANSWER_CLAIMED
+                "SELECT MAX({claimed_at}) FROM run_events WHERE kind='{}'
+             AND {ask_id}=?1
+             AND {workspace_id}=?2",
+                event_kind::PLANNER_ANSWER_CLAIMED,
+                claimed_at = json_field("payload", "$.claimed_at", JsonType::Integer),
+                ask_id = json_field("payload", "$.ask_id", JsonType::Integer),
+                workspace_id = json_field("payload", "$.workspace_id", JsonType::Text),
             ),
             params![ask, workspace],
             |r| r.get(0),
@@ -365,8 +375,10 @@ impl SqliteQueue {
         Ok(self.conn.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
-             AND json_extract(payload,'$.ask_id')=?1 AND json_extract(payload,'$.planner_id')=?2)",
-                event_kind::ASK_DELIVERY_FAILED
+             AND {ask_id}=?1 AND {planner_id}=?2)",
+                event_kind::ASK_DELIVERY_FAILED,
+                ask_id = json_field("payload", "$.ask_id", JsonType::Integer),
+                planner_id = json_field("payload", "$.planner_id", JsonType::Integer),
             ),
             params![ask, planner],
             |r| r.get(0),
@@ -502,9 +514,11 @@ pub(super) fn route_of(conn: &Connection, finding: FindingId) -> Result<PlannerA
     let exhausted: bool = conn.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
-         AND json_extract(payload,'$.finding_id')=?1
-         AND json_extract(payload,'$.marked_at') IS ?2)",
-            event_kind::FINDING_PLANNER_EXHAUSTED
+         AND {finding_id}=?1
+         AND {marked_at} IS ?2)",
+            event_kind::FINDING_PLANNER_EXHAUSTED,
+            finding_id = json_field("payload", "$.finding_id", JsonType::Integer),
+            marked_at = json_field("payload", "$.marked_at", JsonType::Integer),
         ),
         params![finding, current.propose_requested_at],
         |r| r.get(0),
@@ -704,8 +718,9 @@ fn record_from_ask(
         .query_row(
             &format!(
                 "SELECT id FROM run_events WHERE kind='{}'
-             AND json_extract(payload,'$.ask_id')=?1 ORDER BY id LIMIT 1",
-                event_kind::ASK_OPENED
+             AND {ask_id}=?1 ORDER BY id LIMIT 1",
+                event_kind::ASK_OPENED,
+                ask_id = json_field("payload", "$.ask_id", JsonType::Integer),
             ),
             [ask.id],
             |r| r.get(0),

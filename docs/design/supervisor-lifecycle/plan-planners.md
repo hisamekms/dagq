@@ -107,7 +107,7 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 1. **記録**: `request add`が人の言葉を記録し、中身は記録の後に変えない（`domain::plan_request`）。
    打てるのはinboxと`DAGQ_ROLE`の無い人だけである（`request.record`）。
    優先度はruntimeが依頼の値をgoalとtaskに付け、plannerは書き写さない（[ADR-t1975-1](../../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)）。
-2. **立てる**: 対象は`plan_requests.rs`の`TARGETS`、順と枠は`open_request_planners`が持つ。
+2. **立てる**: 対象は`plan_requests.rs`の`targets`、順と枠は`open_request_planners`が持つ。
    同じdraftに依頼と再検討のplannerを同時に立てない（[Draft planners](draft-planners.md#再検討の時刻)）。
 3. **受け渡しとprompt**: 人の言葉はファイルで渡し（`planner_handoff::hand_request_to_planner`）、初期promptは`prompt::request_planner_prompt`で、上げる基準は[ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)である。
 4. **結末**: submitがproposalを依頼に結び（`link_requests`）、却下の`request decline`は依頼のplanner自身だけが打てる。
@@ -131,7 +131,7 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 
 ## taskの再計画の依頼
 
-人の`replan request`は再計画の操作に結んだ依頼を記録し、操作が完全なsnapshotを持つまで立てる対象から外す（`plan_requests.rs`の`TARGETS`）。
+人の`replan request`は再計画の操作に結んだ依頼を記録し、操作が完全なsnapshotを持つまで立てる対象から外す（`plan_requests.rs`の`targets`）。
 進み方と残りの予定は[taskの再計画](../../plans/task-replanning.md)が持つ。
 
 - 約束: 操作が閉じても依頼を`open`のまま残さず、計画されない依頼のaskを人に残さない。

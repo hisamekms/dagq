@@ -4,6 +4,7 @@
 //! and the verdicts and `approve_plan` answers the supervisor applies, each
 //! in one transaction. Events go to the first task of the proposal, since
 //! an event needs a task or a goal.
+use super::sql_dialect::{JsonType, json_field, json_field_spaced};
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, LIVE_PLANNER_NOT_RAISED};
 use crate::domain::headless_job::{ReviewTakeover, review_owner_gone};
@@ -177,8 +178,9 @@ fn edited_during(conn: &Connection, job: &PlanReviewJob) -> Result<Vec<TaskId>> 
         .query_row(
             &format!(
                 "SELECT id FROM run_events WHERE task_id=?1 AND kind='{}'
-                 AND json_extract(payload,'$.plan_review_id')=?2",
-                event_kind::PLAN_REVIEW_STARTED
+                 AND {plan_review_id}=?2",
+                event_kind::PLAN_REVIEW_STARTED,
+                plan_review_id = json_field("payload", "$.plan_review_id", JsonType::Integer),
             ),
             params![job.anchor, job.id],
             |r| r.get(0),
@@ -425,8 +427,11 @@ fn follow_up_depth(conn: &Connection, task_id: TaskId) -> Result<i64> {
     while depth < 32 {
         let source: Option<Option<i64>> = conn
             .query_row(
-                "SELECT json_extract(material, '$.source_task_id') FROM draft_origins
+                &format!(
+                    "SELECT {} FROM draft_origins
                  WHERE task_id=?1 AND origin='follow_up'",
+                    json_field_spaced("material", "$.source_task_id", JsonType::Integer)
+                ),
                 [task],
                 |r| r.get(0),
             )
@@ -1415,8 +1420,11 @@ fn record_predictions(
     let session: Value = match &job.session_id {
         Some(session_id) => conn
             .query_row(
-                "SELECT payload FROM run_events WHERE kind=?1 AND json_extract(payload,'$.session_id')=?2
+                &format!(
+                    "SELECT payload FROM run_events WHERE kind=?1 AND {}=?2
                  ORDER BY id DESC LIMIT 1",
+                    json_field("payload", "$.session_id", JsonType::Text)
+                ),
                 params![SESSION_CLOSED, session_id],
                 |r| r.get::<_, String>(0),
             )

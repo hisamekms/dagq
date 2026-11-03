@@ -18,6 +18,7 @@
 //! `*_authorized` writes compare it right after the transaction opens and
 //! refuse without writing when it changed. Writers that are not authorized
 //! per command (the supervisor's landing, draft planners) skip the check.
+use super::sql_dialect::{JsonType, json_field};
 use crate::domain::claim_facts;
 use crate::domain::event_kind::{self, EventKind, RecordedKind};
 use crate::domain::task_replan::GuardedStep;
@@ -3346,15 +3347,15 @@ fn task_ready_at(conn: &Connection, task: TaskId) -> Result<Option<String>> {
             "SELECT * FROM run_events WHERE task_id=?1 AND kind IN ({own})
              UNION
              SELECT * FROM run_events WHERE kind='{status}' AND task_id IN (
-               SELECT json_extract(payload,'$.predecessor_id') FROM run_events
+               SELECT {predecessor_id} FROM run_events
                 WHERE task_id=?1 AND kind IN ('{added}','{removed}'))
              UNION
              SELECT * FROM run_events WHERE task_id IS NULL AND kind IN ({goals}) AND goal_id IN (
-               SELECT json_extract(payload,'$.goal_id') FROM run_events
+               SELECT {goal_id} FROM run_events
                 WHERE task_id=?1 AND kind IN ('{goal_added}','{goal_removed}','{created}')
-               UNION SELECT json_extract(payload,'$.from') FROM run_events
+               UNION SELECT {from} FROM run_events
                 WHERE task_id=?1 AND kind='{moved}'
-               UNION SELECT json_extract(payload,'$.to') FROM run_events
+               UNION SELECT {to} FROM run_events
                 WHERE task_id=?1 AND kind='{moved}')
              ORDER BY id",
             status = EventKind::TaskStatusChanged.as_str(),
@@ -3364,6 +3365,10 @@ fn task_ready_at(conn: &Connection, task: TaskId) -> Result<Option<String>> {
             goal_removed = EventKind::GoalDependencyRemoved.as_str(),
             created = EventKind::TaskCreated.as_str(),
             moved = EventKind::TaskGoalChanged.as_str(),
+            predecessor_id = json_field("payload", "$.predecessor_id", JsonType::Integer),
+            goal_id = json_field("payload", "$.goal_id", JsonType::Integer),
+            from = json_field("payload", "$.from", JsonType::Integer),
+            to = json_field("payload", "$.to", JsonType::Integer),
         ))?
         .query_map([task], event_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3610,8 +3615,9 @@ fn completed_before(conn: &Connection, task_id: TaskId, event_id: i64) -> Result
     Ok(conn.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind='{}'
-             AND json_extract(payload,'$.to')='completed' AND id<?2)",
-            event_kind::TASK_STATUS_CHANGED
+             AND {to}='completed' AND id<?2)",
+            event_kind::TASK_STATUS_CHANGED,
+            to = json_field("payload", "$.to", JsonType::Text),
         ),
         params![task_id, event_id],
         |r| r.get(0),
@@ -3625,8 +3631,9 @@ fn duplicates_of(conn: &Connection, task_id: TaskId) -> Result<BTreeMap<TaskId, 
         .prepare(&format!(
             "SELECT DISTINCT e.task_id FROM run_events e JOIN tasks t ON t.id=e.task_id
              WHERE e.kind='{}' AND t.status='canceled'
-             AND json_extract(e.payload,'$.duplicate_of')=?1 ORDER BY e.task_id",
-            event_kind::TASK_STATUS_CHANGED
+             AND {duplicate_of}=?1 ORDER BY e.task_id",
+            event_kind::TASK_STATUS_CHANGED,
+            duplicate_of = json_field("e.payload", "$.duplicate_of", JsonType::Integer),
         ))?
         .query_map([task_id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;

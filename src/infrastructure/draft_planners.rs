@@ -9,6 +9,7 @@
 //! each draft when the planner ended). Opening a planner is one write
 //! transaction that re-checks the drafts first, so two supervisors never
 //! open one for the same draft.
+use super::sql_dialect::{JsonType, json_field};
 use crate::domain::cancel_reason;
 use crate::domain::event_kind::{self, EventKind};
 use std::collections::{HashMap, HashSet};
@@ -61,7 +62,7 @@ fn targets(now: i64) -> String {
         "SELECT t.id FROM tasks t
     WHERE (EXISTS(SELECT 1 FROM draft_origins o WHERE o.task_id=t.id)
         OR EXISTS(SELECT 1 FROM draft_reopens r WHERE r.task_id=t.id
-            AND json_extract(r.material,'$.proposal_id')=t.proposal_id)
+            AND {proposal_id}=t.proposal_id)
         OR {due})
     AND t.status='draft' AND NOT EXISTS(SELECT 1 FROM proposals x
         WHERE x.id=t.proposal_id AND x.status!='canceled')
@@ -75,12 +76,12 @@ fn targets(now: i64) -> String {
     AND NOT EXISTS(SELECT 1 FROM draft_revisits v WHERE v.task_id=t.id
         AND v.opened_at IS NULL AND v.revisit_at>{now})
     AND NOT EXISTS(SELECT 1 FROM plan_requests q, json_each(q.refs) j WHERE q.status='open'
-        AND json_extract(j.value,'$.kind')='task' AND json_extract(j.value,'$.id')=t.id)
+        AND {kind}='task' AND {id}=t.id)
     AND ({person} OR NOT EXISTS(SELECT 1 FROM run_events e WHERE e.task_id=t.id
         AND e.kind='{exhausted}'))",
         person = revisit_due(now, Some("('user','inbox')")),
-        exhausted = event_kind::DRAFT_PLANNER_EXHAUSTED
-    )
+        exhausted = event_kind::DRAFT_PLANNER_EXHAUSTED, proposal_id = json_field("r.material", "$.proposal_id", JsonType::Integer), kind = json_field("j.value", "$.kind", JsonType::Text), id = json_field("j.value", "$.id", JsonType::Integer),
+)
 }
 
 /// Whether the draft `t` has a revisit time that came at `now` and no
@@ -99,8 +100,12 @@ fn revisit_due(now: i64, by: Option<&str>) -> String {
 /// opened for it meanwhile (ADR-t1540-1).
 fn named_by_open_request(conn: &Connection, task: TaskId) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM plan_requests q, json_each(q.refs) j WHERE q.status='open'
-         AND json_extract(j.value,'$.kind')='task' AND json_extract(j.value,'$.id')=?1)",
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM plan_requests q, json_each(q.refs) j WHERE q.status='open'
+         AND {}='task' AND {}=?1)",
+            json_field("j.value", "$.kind", JsonType::Text),
+            json_field("j.value", "$.id", JsonType::Integer)
+        ),
         [task],
         |r| r.get(0),
     )?)
@@ -691,9 +696,11 @@ impl SqliteQueue {
         let claimed: bool = tx.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
-             AND json_extract(payload,'$.ask_id')=?1
-             AND COALESCE(json_extract(payload,'$.claimed_at'), 0) > ?2)",
-                event_kind::PLANNER_ANSWER_CLAIMED
+             AND {ask_id}=?1
+             AND COALESCE({claimed_at}, 0) > ?2)",
+                event_kind::PLANNER_ANSWER_CLAIMED,
+                ask_id = json_field("payload", "$.ask_id", JsonType::Integer),
+                claimed_at = json_field("payload", "$.claimed_at", JsonType::Integer),
             ),
             params![id, now - PLANNER_ANSWER_CLAIM_SECS],
             |r| r.get(0),
@@ -1055,9 +1062,9 @@ pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> 
                             "SELECT EXISTS(SELECT 1 FROM asks a, run_events e, json_each(e.payload,'$.asks') j
                              WHERE a.task_id=?1 AND a.run_id IS NULL AND a.kind='planner_question'
                              AND a.closed_at IS NULL AND e.kind='{}'
-                             AND json_extract(e.payload,'$.planner_id')=?2 AND j.value=a.id)",
-                            event_kind::PLANNER_ANSWER_WAIT
-                        ),
+                             AND {planner_id}=?2 AND j.value=a.id)",
+                            event_kind::PLANNER_ANSWER_WAIT, planner_id = json_field("e.payload", "$.planner_id", JsonType::Integer),
+),
                         params![task_id, planner],
                         |r| r.get(0),
                     )?;
@@ -1180,13 +1187,16 @@ pub(super) fn task_origin(conn: &Connection, task: TaskId) -> Result<Option<Task
 /// proposed, by ID, with their status now (ADR-t807-1, ADR-t2352-1).
 pub(super) fn follow_up_drafts(conn: &Connection, task: TaskId) -> Result<Vec<FollowUpDraft>> {
     Ok(conn
-        .prepare(
-            "SELECT o.task_id, json_extract(o.material,'$.source_run_id'),
-                    json_extract(o.material,'$.index'), t.title, t.status
+        .prepare(&format!(
+            "SELECT o.task_id, {},
+                    {}, t.title, t.status
              FROM draft_origins o JOIN tasks t ON t.id=o.task_id
-             WHERE o.origin='follow_up' AND json_extract(o.material,'$.source_task_id')=?1
+             WHERE o.origin='follow_up' AND {}=?1
              ORDER BY o.task_id",
-        )?
+            json_field("o.material", "$.source_run_id", JsonType::Text),
+            json_field("o.material", "$.index", JsonType::Integer),
+            json_field("o.material", "$.source_task_id", JsonType::Integer)
+        ))?
         .query_map([task], |r| {
             Ok(FollowUpDraft {
                 task_id: r.get(0)?,
@@ -1311,8 +1321,11 @@ pub(super) fn draft_origin(
 ) -> Result<Option<(DraftOrigin, Value)>> {
     let reopened: Option<String> = conn
         .query_row(
-            "SELECT r.material FROM draft_reopens r JOIN tasks t ON t.id=r.task_id
-             WHERE r.task_id=?1 AND json_extract(r.material,'$.proposal_id')=t.proposal_id",
+            &format!(
+                "SELECT r.material FROM draft_reopens r JOIN tasks t ON t.id=r.task_id
+             WHERE r.task_id=?1 AND {}=t.proposal_id",
+                json_field("r.material", "$.proposal_id", JsonType::Integer)
+            ),
             [task],
             |r| r.get(0),
         )
@@ -1744,9 +1757,10 @@ pub(super) fn check_adoptions(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1
              AND kind IN ('{}','{}')
-             AND json_extract(payload,'$.by')='person')",
+             AND {by}='person')",
                 event_kind::FOLLOW_UP_ADOPTED,
-                event_kind::DRAFT_ADOPTED
+                event_kind::DRAFT_ADOPTED,
+                by = json_field("payload", "$.by", JsonType::Text),
             ),
             [task_id],
             |r| r.get(0),

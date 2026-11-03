@@ -6,6 +6,7 @@
 //! Registering re-checks the history, the tasks of the key not ended and
 //! the interval in one `BEGIN IMMEDIATE` transaction with the draft and its
 //! origin, so two supervisors across a handoff never register twice.
+use super::sql_dialect::{JsonType, json_field};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -27,9 +28,12 @@ use crate::domain::{
 fn last_registration(conn: &Connection, key: &str) -> Result<Option<(TaskId, i64)>> {
     Ok(conn
         .query_row(
-            "SELECT task_id, created_at FROM draft_origins
-             WHERE origin=?1 AND json_extract(material,'$.key')=?2
+            &format!(
+                "SELECT task_id, created_at FROM draft_origins
+             WHERE origin=?1 AND {}=?2
              ORDER BY created_at DESC, task_id DESC LIMIT 1",
+                json_field("material", "$.key", JsonType::Text)
+            ),
             params![DraftOrigin::Recurring.as_str(), key],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -42,12 +46,13 @@ fn last_registration(conn: &Connection, key: &str) -> Result<Option<(TaskId, i64
 /// has not ended ([`super::replan_apply::replacement_open`]).
 fn open_task(conn: &Connection, key: &str) -> Result<Option<TaskId>> {
     let tasks: Vec<(TaskId, TaskStatus)> = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT o.task_id, t.status FROM draft_origins o JOIN tasks t ON t.id=o.task_id
-             WHERE o.origin=?1 AND json_extract(o.material,'$.key')=?2
+             WHERE o.origin=?1 AND {}=?2
                AND t.status NOT IN ('completed','canceled')
              ORDER BY o.task_id",
-        )?
+            json_field("o.material", "$.key", JsonType::Text)
+        ))?
         .query_map(params![DraftOrigin::Recurring.as_str(), key], |r| {
             Ok((r.get(0)?, super::sqlite::enum_col(r, "status")?))
         })?

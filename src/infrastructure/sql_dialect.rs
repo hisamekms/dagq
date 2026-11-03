@@ -17,6 +17,10 @@
 //! `json_extract` returns the stored JSON type whatever the caller asks, so
 //! the SQLite text does not depend on [`JsonType`]. A dialect without that
 //! looseness reads the field as the named type.
+//!
+//! Outside test code, no SQL of `src/` but this module's spells
+//! `json_extract`, `datetime`, `strftime` or `julianday`: the boundary test
+//! `src/context_boundaries/dialect.rs` fails on one that does.
 
 /// What a JSON field is read as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,7 +191,7 @@ mod tests {
                 r#"json_extract(inputs_through, '$.events')"#,
             ),
             (
-                json_field_spaced("inputs_through", "$.supervisor", JsonType::Text),
+                json_field_spaced("inputs_through", "$.supervisor", JsonType::Integer),
                 r#"json_extract(inputs_through, '$.supervisor')"#,
             ),
             (
@@ -363,6 +367,10 @@ mod tests {
                 r#"json_extract(payload,'$.to')"#,
             ),
             (
+                json_field("payload", "$.to", JsonType::Integer),
+                r#"json_extract(payload,'$.to')"#,
+            ),
+            (
                 json_field("payload", "$.workspace_id", JsonType::Text),
                 r#"json_extract(payload,'$.workspace_id')"#,
             ),
@@ -393,6 +401,182 @@ mod tests {
             (
                 json_field("t.payload", "$.opened_event_id", JsonType::Integer),
                 r#"json_extract(t.payload,'$.opened_event_id')"#,
+            ),
+            (
+                json_field("d.material", "$.proposal_id", JsonType::Integer),
+                r#"json_extract(d.material,'$.proposal_id')"#,
+            ),
+            (
+                json_field_spaced("e.payload", "$.ask_id", JsonType::Integer),
+                r#"json_extract(e.payload, '$.ask_id')"#,
+            ),
+            (
+                json_field_spaced("e.payload", "$.duplicate_of", JsonType::Integer),
+                r#"json_extract(e.payload, '$.duplicate_of')"#,
+            ),
+            (
+                json_field_spaced("e.payload", "$.reason", JsonType::Text),
+                r#"json_extract(e.payload, '$.reason')"#,
+            ),
+            (
+                json_field_spaced("e.payload", "$.runtime_delivers", JsonType::Boolean),
+                r#"json_extract(e.payload, '$.runtime_delivers')"#,
+            ),
+            (
+                json_field_spaced("e.payload", "$.to", JsonType::Text),
+                r#"json_extract(e.payload, '$.to')"#,
+            ),
+            (
+                json_field("e.payload", "$.by", JsonType::Text),
+                r#"json_extract(e.payload,'$.by')"#,
+            ),
+            (
+                json_field("e.payload", "$.duplicate_of", JsonType::Integer),
+                r#"json_extract(e.payload,'$.duplicate_of')"#,
+            ),
+            (
+                json_field("e.payload", "$.finding_id", JsonType::Integer),
+                r#"json_extract(e.payload,'$.finding_id')"#,
+            ),
+            (
+                json_field("e.payload", "$.marked_at", JsonType::Integer),
+                r#"json_extract(e.payload,'$.marked_at')"#,
+            ),
+            (
+                json_field("e.payload", "$.replan_operation_id", JsonType::Integer),
+                r#"json_extract(e.payload,'$.replan_operation_id')"#,
+            ),
+            (
+                json_field("e.payload", "$.request_id", JsonType::Integer),
+                r#"json_extract(e.payload,'$.request_id')"#,
+            ),
+            (
+                json_field("j.value", "$.id", JsonType::Integer),
+                r#"json_extract(j.value,'$.id')"#,
+            ),
+            (
+                json_field("j.value", "$.kind", JsonType::Text),
+                r#"json_extract(j.value,'$.kind')"#,
+            ),
+            (
+                json_field_spaced("material", "$.source_task_id", JsonType::Integer),
+                r#"json_extract(material, '$.source_task_id')"#,
+            ),
+            (
+                json_field("material", "$.key", JsonType::Text),
+                r#"json_extract(material,'$.key')"#,
+            ),
+            (
+                json_field_spaced("o.material", "$.source_goal_id", JsonType::Integer),
+                r#"json_extract(o.material, '$.source_goal_id')"#,
+            ),
+            (
+                json_field("o.material", "$.index", JsonType::Integer),
+                r#"json_extract(o.material,'$.index')"#,
+            ),
+            (
+                json_field("o.material", "$.key", JsonType::Text),
+                r#"json_extract(o.material,'$.key')"#,
+            ),
+            (
+                json_field("o.material", "$.source_goal_id", JsonType::Integer),
+                r#"json_extract(o.material,'$.source_goal_id')"#,
+            ),
+            (
+                json_field("o.material", "$.source_run_id", JsonType::Text),
+                r#"json_extract(o.material,'$.source_run_id')"#,
+            ),
+            (
+                json_field("o.material", "$.source_task_id", JsonType::Integer),
+                r#"json_extract(o.material,'$.source_task_id')"#,
+            ),
+            (
+                json_field_spaced("payload", "$.planner_id", JsonType::Integer),
+                r#"json_extract(payload, '$.planner_id')"#,
+            ),
+            (
+                json_field_spaced("payload", "$.task_id", JsonType::Integer),
+                r#"json_extract(payload, '$.task_id')"#,
+            ),
+            (
+                json_field("payload", "$.ask_id", JsonType::Integer),
+                r#"json_extract(payload,'$.ask_id')"#,
+            ),
+            (
+                json_field("payload", "$.claimed_at", JsonType::Integer),
+                r#"json_extract(payload,'$.claimed_at')"#,
+            ),
+            (
+                json_field("payload", "$.continue_run", JsonType::Boolean),
+                r#"json_extract(payload,'$.continue_run')"#,
+            ),
+            (
+                json_field("payload", "$.correction_ask_id", JsonType::Integer),
+                r#"json_extract(payload,'$.correction_ask_id')"#,
+            ),
+            (
+                json_field("payload", "$.from", JsonType::Integer),
+                r#"json_extract(payload,'$.from')"#,
+            ),
+            (
+                json_field("payload", "$.goal_id", JsonType::Integer),
+                r#"json_extract(payload,'$.goal_id')"#,
+            ),
+            (
+                json_field("payload", "$.id", JsonType::Integer),
+                r#"json_extract(payload,'$.id')"#,
+            ),
+            (
+                json_field("payload", "$.marked_at", JsonType::Integer),
+                r#"json_extract(payload,'$.marked_at')"#,
+            ),
+            (
+                json_field("payload", "$.operation_id", JsonType::Integer),
+                r#"json_extract(payload,'$.operation_id')"#,
+            ),
+            (
+                json_field("payload", "$.origin", JsonType::Text),
+                r#"json_extract(payload,'$.origin')"#,
+            ),
+            (
+                json_field("payload", "$.plan_review_id", JsonType::Integer),
+                r#"json_extract(payload,'$.plan_review_id')"#,
+            ),
+            (
+                json_field("payload", "$.predecessor_id", JsonType::Integer),
+                r#"json_extract(payload,'$.predecessor_id')"#,
+            ),
+            (
+                json_field("payload", "$.request_id", JsonType::Integer),
+                r#"json_extract(payload,'$.request_id')"#,
+            ),
+            (
+                json_field("payload", "$.run_id", JsonType::Integer),
+                r#"json_extract(payload,'$.run_id')"#,
+            ),
+            (
+                json_field("payload", "$.source", JsonType::Text),
+                r#"json_extract(payload,'$.source')"#,
+            ),
+            (
+                json_field("payload", "$.source_goal_id", JsonType::Integer),
+                r#"json_extract(payload,'$.source_goal_id')"#,
+            ),
+            (
+                json_field("payload", "$.text", JsonType::Text),
+                r#"json_extract(payload,'$.text')"#,
+            ),
+            (
+                json_field("payload", "$.workflow", JsonType::Text),
+                r#"json_extract(payload,'$.workflow')"#,
+            ),
+            (
+                json_field_at("payload", "?3", JsonType::Text),
+                r#"json_extract(payload,?3)"#,
+            ),
+            (
+                json_field("r.material", "$.proposal_id", JsonType::Integer),
+                r#"json_extract(r.material,'$.proposal_id')"#,
             ),
             (time_value("?7", TimeForm::Ordinal), r#"julianday(?7)"#),
             (time_value("?8", TimeForm::Ordinal), r#"julianday(?8)"#),

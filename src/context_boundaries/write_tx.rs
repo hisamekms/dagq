@@ -40,7 +40,7 @@
 //! is not seen: SQL built at run time, and a test `cfg` inside a macro's
 //! tokens.
 
-use super::source::{self, is_test, item_attrs};
+use super::source::{self, expr_attrs, is_test, item_attrs};
 use super::sql::begins_transaction;
 use super::{children_dir, covers};
 use proc_macro2::{Delimiter, TokenTree};
@@ -420,51 +420,6 @@ fn qualified_owner(before: &[TokenTree]) -> Option<String> {
         }
     }
     None
-}
-
-/// The attributes of an expression (`#[cfg(test)] { .. }` and the like).
-fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
-    use syn::Expr;
-    match expr {
-        Expr::Array(e) => &e.attrs,
-        Expr::Assign(e) => &e.attrs,
-        Expr::Async(e) => &e.attrs,
-        Expr::Await(e) => &e.attrs,
-        Expr::Binary(e) => &e.attrs,
-        Expr::Block(e) => &e.attrs,
-        Expr::Break(e) => &e.attrs,
-        Expr::Call(e) => &e.attrs,
-        Expr::Cast(e) => &e.attrs,
-        Expr::Closure(e) => &e.attrs,
-        Expr::Const(e) => &e.attrs,
-        Expr::Continue(e) => &e.attrs,
-        Expr::Field(e) => &e.attrs,
-        Expr::ForLoop(e) => &e.attrs,
-        Expr::Group(e) => &e.attrs,
-        Expr::If(e) => &e.attrs,
-        Expr::Index(e) => &e.attrs,
-        Expr::Let(e) => &e.attrs,
-        Expr::Lit(e) => &e.attrs,
-        Expr::Loop(e) => &e.attrs,
-        Expr::Macro(e) => &e.attrs,
-        Expr::Match(e) => &e.attrs,
-        Expr::MethodCall(e) => &e.attrs,
-        Expr::Paren(e) => &e.attrs,
-        Expr::Path(e) => &e.attrs,
-        Expr::Range(e) => &e.attrs,
-        Expr::Reference(e) => &e.attrs,
-        Expr::Repeat(e) => &e.attrs,
-        Expr::Return(e) => &e.attrs,
-        Expr::Struct(e) => &e.attrs,
-        Expr::Try(e) => &e.attrs,
-        Expr::TryBlock(e) => &e.attrs,
-        Expr::Tuple(e) => &e.attrs,
-        Expr::Unary(e) => &e.attrs,
-        Expr::Unsafe(e) => &e.attrs,
-        Expr::While(e) => &e.attrs,
-        Expr::Yield(e) => &e.attrs,
-        _ => &[],
-    }
 }
 
 impl<'ast> Visit<'ast> for Reader {

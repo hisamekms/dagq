@@ -1,9 +1,11 @@
 //! A Rust source read as syntax for the boundary tests: its string
 //! literals outside test code with the fns they are in, its fns outside
 //! test code, and the files its `#[cfg(test)] mod name;` declares. Test code
-//! is an item (or a field, a variant, an arm, a `let`) under a `cfg` that
-//! requires `test` ([`is_test`]), and a file under `#![cfg(test)]`. Comments and attributes (doc comments too) are not read;
-//! the tokens of a macro are read for their string literals only.
+//! is an item (or a field, a variant, an arm, a `let`, an expression, a
+//! macro statement) under a `cfg` that requires `test` ([`is_test`]), and a
+//! file under `#![cfg(test)]`. Comments and attributes (doc comments too)
+//! are not read; the tokens of a macro are read for their string literals
+//! only.
 
 use proc_macro2::TokenTree;
 use std::collections::BTreeSet;
@@ -68,6 +70,51 @@ fn requires_test(meta: &Meta) -> bool {
             }
         }
         Meta::NameValue(_) => false,
+    }
+}
+
+/// The attributes of an expression (`#[cfg(test)] { .. }` and the like).
+pub(super) fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
+    use syn::Expr;
+    match expr {
+        Expr::Array(e) => &e.attrs,
+        Expr::Assign(e) => &e.attrs,
+        Expr::Async(e) => &e.attrs,
+        Expr::Await(e) => &e.attrs,
+        Expr::Binary(e) => &e.attrs,
+        Expr::Block(e) => &e.attrs,
+        Expr::Break(e) => &e.attrs,
+        Expr::Call(e) => &e.attrs,
+        Expr::Cast(e) => &e.attrs,
+        Expr::Closure(e) => &e.attrs,
+        Expr::Const(e) => &e.attrs,
+        Expr::Continue(e) => &e.attrs,
+        Expr::Field(e) => &e.attrs,
+        Expr::ForLoop(e) => &e.attrs,
+        Expr::Group(e) => &e.attrs,
+        Expr::If(e) => &e.attrs,
+        Expr::Index(e) => &e.attrs,
+        Expr::Let(e) => &e.attrs,
+        Expr::Lit(e) => &e.attrs,
+        Expr::Loop(e) => &e.attrs,
+        Expr::Macro(e) => &e.attrs,
+        Expr::Match(e) => &e.attrs,
+        Expr::MethodCall(e) => &e.attrs,
+        Expr::Paren(e) => &e.attrs,
+        Expr::Path(e) => &e.attrs,
+        Expr::Range(e) => &e.attrs,
+        Expr::Reference(e) => &e.attrs,
+        Expr::Repeat(e) => &e.attrs,
+        Expr::Return(e) => &e.attrs,
+        Expr::Struct(e) => &e.attrs,
+        Expr::Try(e) => &e.attrs,
+        Expr::TryBlock(e) => &e.attrs,
+        Expr::Tuple(e) => &e.attrs,
+        Expr::Unary(e) => &e.attrs,
+        Expr::Unsafe(e) => &e.attrs,
+        Expr::While(e) => &e.attrs,
+        Expr::Yield(e) => &e.attrs,
+        _ => &[],
     }
 }
 
@@ -215,6 +262,18 @@ impl<'ast> Visit<'ast> for Reader {
     fn visit_local(&mut self, local: &'ast syn::Local) {
         if !is_test(&local.attrs) {
             visit::visit_local(self, local);
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &'ast syn::Expr) {
+        if !is_test(expr_attrs(expr)) {
+            visit::visit_expr(self, expr);
+        }
+    }
+
+    fn visit_stmt_macro(&mut self, m: &'ast syn::StmtMacro) {
+        if !is_test(&m.attrs) {
+            visit::visit_stmt_macro(self, m);
         }
     }
 
