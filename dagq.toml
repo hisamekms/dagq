@@ -95,14 +95,15 @@ workers = true
 # docs/design/supervisor-lifecycle/review.md の「reviewのprovider」）。task ごとに名前と task の ID の hash で決定的に群を決め、
 # A（実装は task の provider の Claude、review は [roles.review]・[review.subagents.*] の設定のまま）と
 # B（実装 Codex・review Claude）を比べる。どちらの群も書いた provider と見る provider が違う（A でも Claude を名指す subagent は設定のまま Claude で動く）。
-# B の割合は人の指定の 10〜20% のうち小さく始める方の 10%。値は既定と同じでも、人の決めた値として書いておく。
+# B の割合は人の指示（request 225、2026-11-03「50%にしましょうか。壊れるリスクは少ないので」）で 50%
+# （B を有効にした 2026-11-03 から 50% の着地までは 10% で動いた）。
 # B の worker は上の [provider_fallback] workers = true に従い、Codex が控えに入れば Claude へ切り替わり、その run は provider の組の比べで
 # 切り替えた run として数えられる（ADR-t4005-1 の決定6・7 と、それを amends にする ADR-t4118-1）。
 # 群を広げる・止める・全面に入れ替えるのは kpi の群の比べの値を見て planner か人が別に決める。
 # supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
 # [worker.provider_trial] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 4006・4007 を含んでから足した。
 enabled = true
-treatment_percent = 10
+treatment_percent = 50
 treatment_worker = "codex"
 treatment_review = "claude"
 
