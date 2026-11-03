@@ -45,7 +45,7 @@ git grep -h -o -E '<式>' -- src | wc -l       # 出現の数（行の数と違�
 | JSON 関数 | `json_(extract\|valid\|each\|type\|set\|object\|group_array\|remove\|array\|insert\|replace\|patch\|tree)\(\|[^a-z_.]json\((\?\|')` | 190 行 / 27（出現 199） | 90 行 / 27（出現 104） | `->` / `->>`、`jsonb_array_elements`、`jsonb_typeof`、`jsonb_set`、`jsonb_build_object`、`jsonb_agg`、`::jsonb` の検証と cast | src の `json_extract` は方言の関数、ほかの JSON 関数（`json(...)` を含む）は決定4 が段1で切り出さない種類で Postgres の adapter の段が当てる、migrations は migration |
 | うち `json(...)` | `[^a-z_.]json\((\?\|')` | 3 行 / 2 | 0 | `?::jsonb`、`'...'::jsonb` | 決定4 が段1で切り出さない種類（ほかの JSON 関数）。Postgres の adapter の段で方言の関数か adapter の中 |
 | うち `json_extract` | `json_extract\(` | 150 行 / 17（出現 155） | 55 行 / 14（出現 56） | `(col::jsonb ->> 'key')` に読む型の cast | 方言の関数 |
-| CREATE TRIGGER | `CREATE (TEMP \|TEMPORARY )?TRIGGER` | 16 行 / 5（全て test と doc comment） | 47 行 / 8 | 下の「CREATE TRIGGER の内訳」 | migration（移し先は後の ADR） |
+| CREATE TRIGGER | `CREATE (TEMP \|TEMPORARY )?TRIGGER` | 16 行 / 5（全て test と doc comment） | 47 行 / 8 | 下の「CREATE TRIGGER の内訳」 | migration（移し先は ADR-t3986-1 決定6） |
 | REFERENCES | `REFERENCES ` | 2 行 / 2（test） | 99 行 / 29 | そのまま書ける（`FOREIGN KEY` は標準） | migration |
 | datetime/strftime と日時の文字列 | `datetime\(\|strftime\(\|julianday\(` | 16 行 / 3 | 30 行 / 16（出現 33） | `now()`・`to_char`・`extract(epoch from ...)`・`timestamptz` の算術 | src は方言の関数、migrations は migration |
 | 日時の列の比較 | `_at [<>]=? ?\?` | 22 行 / 8 | 0 | 比べる列は全て INTEGER（ミリ秒）の列なので `bigint` で同じ比較が書ける。TEXT の日時の列の比較は「型の緩さに頼る所」 | 共有の SQL |
@@ -132,15 +132,16 @@ git grep -h -o -E '<式>' -- src | wc -l       # 出現の数（行の数と違�
 
 ## CREATE TRIGGER の内訳
 
-migrations の 47 行は、名前で 15 本の trigger を作る（表を作り直す migration が同じ名前を作り直すため行が多い）。src の 16 行 / 5 ファイルは全て test の入力と schema の検査の doc comment で、本番の schema の trigger は migrations にだけある。内訳は `infrastructure/schema.rs` 10（migration の trigger を検査するコードの doc comment 1 と、その test の入力 9）、`infrastructure/runtime_store/coordination.rs` 2 と `infrastructure/runtime_store/ledger.rs` 2（test が書き込みを途中で失敗させる `CREATE TEMP TRIGGER`）、`infrastructure/sessions.rs` 1（test の失敗の注入）、`context_boundaries/sql.rs` 1（書き込みの判定の test の入力）。
+migrations の 47 行は、名前で 15 本（検索の索引 11 本・着地の commit の記録 1 本・記録の変更の禁止 2 本・受け入れ条件の版 1 本）の trigger を作る（表を作り直す migration が同じ名前を作り直すため行が多い）。src の 16 行 / 5 ファイルは全て test の入力と schema の検査の doc comment で、本番の schema の trigger は migrations にだけある。内訳は `infrastructure/schema.rs` 10（migration の trigger を検査するコードの doc comment 1 と、その test の入力 9）、`infrastructure/runtime_store/coordination.rs` 2 と `infrastructure/runtime_store/ledger.rs` 2（test が書き込みを途中で失敗させる `CREATE TEMP TRIGGER`）、`infrastructure/sessions.rs` 1（test の失敗の注入）、`context_boundaries/sql.rs` 1（書き込みの判定の test の入力）。
 
 | 分け | trigger | 行 / ファイル | PostgreSQL での候補 |
 | --- | --- | --- | --- |
-| 検索の索引の維持 | `search_task_*`（4）・`search_goal_*`（3）・`search_note_*`（2）・`search_run_integrated`・`search_commit_*`（2）の 12 本 | 44 行 / 7（`0026`・`0030`・`0032`・`0035`・`0036`・`0039`・`0050`） | `tsvector` の生成列、PL/pgSQL の trigger、または書き込みのコードが索引を書く |
-| 記録の変更の禁止 | `judgement_no_update`・`judgement_no_delete`（`RAISE(ABORT, ...)`） | 2 行 / 1（`0064`） | PL/pgSQL の trigger で `RAISE EXCEPTION`、または権限（UPDATE・DELETE を与えない） |
-| その他 | `goal_acceptance_version`（goal の受け入れ条件が変われば版を進める） | 1 行 / 1（`0064`） | PL/pgSQL の trigger、または書き込みの port が同じ transaction で版を進める |
+| 検索の索引の維持 | `search_task_*`（4）・`search_goal_*`（3）・`search_note_*`（2）・`search_commit_*`（2）の 11 本 | 37 行 / 7（`0026`・`0030`・`0032`・`0035`・`0036`・`0039`・`0050`） | 検索の port の書き込みが、元の行を書く transaction の中で索引の行を書く。索引の型は日本語の検索の Spike の結論に従う |
+| 着地の commit の記録 | `search_run_integrated`（`run_integrated` の event から `landed_commits` に `INSERT OR IGNORE` する）の 1 本 | 7 行 / 7（`0026`・`0030`・`0032`・`0035`・`0036`・`0039`・`0050`） | run の着地を書く adapter の書き込みが、同じ transaction で `landed_commits` に行を入れる |
+| 記録の変更の禁止 | `judgement_no_update`・`judgement_no_delete`（`RAISE(ABORT, ...)`） | 2 行 / 1（`0064`） | 所属の判断の port が追記だけを持つことを境界の test で確かめる。DB の権限で UPDATE・DELETE を与えないのは配置する側の選択 |
+| その他 | `goal_acceptance_version`（goal の受け入れ条件が変われば版を進める） | 1 行 / 1（`0064`） | 受け入れ条件を書く adapter の書き込みが同じ transaction で版を進める |
 
-どれに移すか（DB の trigger のまま方言ごとに書くか、書き込みのコードへ移すか）は ADR-t3982-1 が決めず、後の ADR が決める。
+移し先は [ADR-t3986-1](../adr/2026-11-03-t3986-1-write-leader-fencing-trigger-placement-postgres-migration-series-archive-local-import-and-store-tests.md) 決定6 と [書き込みの係の plan](team-version-write-leader.md#b-trigger-の移し先の対応) に従う。SQLite の trigger は残し、PostgreSQL には trigger を置かない。内訳の行数は 37 + 7 + 2 + 1 = 47 行で、ファイルは分けの間で重なるため全体では 8 ファイルになる。
 
 ## 型の緩さに頼る所
 
