@@ -321,6 +321,7 @@ mod tests {
             run_id: Some("r1".into()),
             before_landing: true,
             definition_commit: Some("head".into()),
+            launch: crate::domain::actor_model::AgentModel::default(),
         };
         (id, EventKind::AgentEvalRequested, request.record())
     }

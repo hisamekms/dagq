@@ -1602,6 +1602,14 @@ struct AgentEvalParams {
     set: Option<i64>,
     #[serde(default)]
     rerun: bool,
+    /// `--provider`, `--model`, `--effort`: a dev round's launch over the
+    /// agent's table, each sent only when given.
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 /// `agent_cases`' params: those of `dagq agent cases`.
@@ -2023,6 +2031,12 @@ fn run(
                 .into_iter()
                 .find(|split| split.as_str() == name)
                 .ok_or_else(|| BadParams(format!("agent_eval's split: unknown {name}")))?;
+            let provider = p
+                .provider
+                .as_deref()
+                .map(str::parse::<crate::domain::Provider>)
+                .transpose()
+                .map_err(|error| BadParams(format!("agent_eval's provider: {error}")))?;
             super::agent_eval::AgentEvals::new(&*store.0, actor, &StaticPolicy).request(
                 &super::agent_eval::EvalRequest {
                     agent: p.agent,
@@ -2031,6 +2045,11 @@ fn run(
                     cases: p.cases,
                     set: p.set,
                     rerun: p.rerun,
+                    launch: crate::domain::actor_model::AgentModel {
+                        provider,
+                        model: p.model,
+                        effort: p.effort,
+                    },
                 },
             )
         }
@@ -2962,6 +2981,12 @@ mod tests {
         }
         fn eval_events(&self) -> Result<Vec<RunEvent>> {
             Ok(Vec::new())
+        }
+        fn launch_settings(
+            &self,
+            _: &str,
+        ) -> Result<Option<crate::application::agent_eval::LaunchSettings>> {
+            Ok(None)
         }
     }
 

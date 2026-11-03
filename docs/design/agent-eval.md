@@ -103,7 +103,9 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   読み取りはworkerには自分のrunの分だけを見せる。
   capabilityの表は[Authorization](authorization.md)が持ち、要るcapabilityは`domain::authorization::eval_request_needs`が決める。
 - hold-outとproductionの周は集合の全体だけを流し、`--cases`は人の再実行の指定のときだけ受ける（[ADR-t2229-1](../adr/2026-10-21-t2229-1-held-out-rounds-run-their-case-set-whole.md)）。
-  記録に残った依頼も周の開始で拒む。
+  起動の組の上書きも受けず、記録に残った依頼も周の開始で拒む。
+- devの周は起動の組（provider・model・effort）をagentの`dagq.toml`の組の上に依頼で書け、依頼の時に検査する。
+  providerは`dagq.toml`がそのagentか役割に使うものに限り、設定に無い送り先は拒む。
 - queue側のproductionの集合を選ぶ周のケースの集合のdigestは、選んだ集合の全体のもの（作り直しで飛ばしたケースがあればその残り）になる。
   周は開始の時の集合（ラベルと人の決定）で採点し、引き取ったsupervisorも同じ時点までのeventで集合を読み直すので、開始の後の人の決定は引き継ぎの有無に依らずその周を変えず、次の周から効く。
 - productionの集合の作成の依頼（`agent cases`）と人の決定（`agent decide`）は人・inbox・plannerの`eval.cases`で、workerとsupervisorは`authorization_denied`になる。
@@ -150,13 +152,13 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 built-inの定義の変更には広げない（定義がdagqのsourceにあり、見るpathがdagqの開発の事情になるため）。
 
 - 対象: runの差分が`.dagq/agents/<name>/AGENT.md`を変えるrun（差分の取り方はreviewのagentの選び方と同じ`<base>...<head>`）。変えたagentごとに1周。
-  landing branchのcommitに`evals/dev.json`が無いagent（ケースがまだ無い）と、runが定義を消したagentは流さず、理由を`run_agent_eval_requested`の`skipped`に残す。
+  landing branchのcommitに`evals/dev.json`が無いagent（ケースがまだ無い）と、runが定義を消したagentは流さず、理由を記録に残す。
   定義を変えないrunは何も記録しない。
 - reviewのpassの後、衝突の事前判定の前に、supervisorが依頼を記録し（`before_landing`、定義のcommitはrunのhead）、周はlanding branchのcommitの`evals/dev.json`とpatchとprogramでrunの定義を測る。
   run branchのケースの追加・変更は使わない。
   依頼はheadごとに1回で、同じheadを引き継いだsupervisorは同じ周を待つ。
 - 待つ間と流す間、runはsessionを開いたまま自分のslotとleaseを持つ（e2eと同じくslotを放さない。差し戻しを生きているsessionに送るため、sessionを閉じる前に待つ）。
-  待ちの理由は`run_agent_eval_waiting`で、`status`の`progress`には工程`agent_eval`として出る。
+  待ちは`status`の`progress`に工程`agent_eval`として出る。
 - 行き先は全部の周の終わりで決め、`run_agent_eval_finished`に記録する。
   全部が`passed`なら衝突の事前判定へ進む。
   完了した周が閾値を下回れば、成績と失敗したケースのidとagentの理由をreviewの`revise`と同じ経路でsessionに差し戻し、runを通した自動の手直しの上限に1回と数える。
@@ -170,7 +172,7 @@ built-inの定義の変更には広げない（定義がdagqのsourceにあり�
 入口は依頼と読み取りが`application::agent_cases`の`AgentCaseSets`、作るのが`application::supervise::execution::agent_cases`、eventから集合を畳むのが`domain::agent_eval::production`（eventの種類と欄はそのdoc comment）。
 
 - 1集合ずつ、runのslotの外で、古い依頼から作る。
-  集合を作るsupervisorは1つで、取るのも居なくなった持ち主から引き取るのも1つの書き込みのtransaction（`agent_cases_taken`）。
+  集合を作るsupervisorは1つで、取るのも居なくなった持ち主から引き取るのも1つの書き込みのtransaction。
   ほかのsupervisorは持ち主が生きている間その集合に触らないので、2つが同じケースにjobを起動したりtreeを共有したりしない。
   引き取ったsupervisorは、前の持ち主のjobが引き継ぎで止められた後、ラベルの無いケースを付け直す。
 - 準備: landing branchのcommitの定義とケースの一覧から、規則コード・`k`・規則の文書のpathと、規則コードごとの規則の場所の対応を決め、期間の`review_started`（`subagents`がそのagentを選んだもの）と同じrunとattemptの`review_finished`（そのagentの判定）から、`<base>...<head>`の差分を内容のhashで集合のpatchに書く。
@@ -183,10 +185,9 @@ built-inの定義の変更には広げない（定義がdagqのsourceにあり�
   コードと場所の対応はケースを作る側がケースの一覧に書き、一覧の対応は改善する定義から作らない。
   一覧に無いコードだけ、定義の行のうちそのコードを名指す行のlinkの先（文書と節）を使い、定義の検査項目の文は使わない。
   対応はlanding branchのcommitから読むが、jobが読む規則の本文はケースのtree（reviewのbaseにその差分を当てたもの）の文書で、landing branchの文書ではない。
-  このため本文はそのreviewの時の規則で、差分が規則の文書を変えていれば変えた後の本文になる。
   providerが使えない間はjobを起動せず待ち、壁で止まったjobはproviderを控えてそのケースをやり直す。
-- 組み立て: 全てのケースのラベルのjobが終わったら（判定の無いjobと起動できなかったjobはラベルの無いケースとして理由を記録する）、ラベルの付いたケースだけで集合のファイルを作り、digestを`agent_cases_built`に記録する。
-  ラベルの無いケースと作り直せないケースは集合に入れず、`agent_cases_built`に理由を残す。
+- 組み立て: 全てのケースのラベルのjobが終わったら（判定の無いjobと起動できなかったjobはラベルの無いケースとして理由を記録する）、ラベルの付いたケースだけで集合のファイルを作り、digestを記録する。
+  ラベルの無いケースと作り直せないケースは集合に入れず理由を残す。
   ラベルと本番の判定が食い違うケースは`disputed`の候補で、1つの`decide`のask（最初の候補のreviewのtaskに付く）が人の決定（`agent decide`）を求める。
   決定はラベルになり`disputed`を外す。
 - 集合のファイル（queueのdirの`agent-cases/<set id>/`の`cases.json`と`patches/`）はeventとgitから作り直せるビューで、`agent eval --set`の周はこれを作り直してから読む。
@@ -209,7 +210,7 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   reviewのeventは、最も早いagentの期間の始まりと今から上限の時間前の早い方から先だけを読む。
   見張りの記録が無いagentの期間は遡りの上限（7日）前に始まり、`due`の依頼はその始まりを`--since`に持つ。
   件数が設定に達したか、間隔が過ぎて1件以上あれば`due`のfindingを記録する。
-  間隔が過ぎて1件も無ければfindingを作らず`agent_eval_watch_skipped`に理由と期間の終わりを記録する。
+  間隔が過ぎて1件も無ければfindingを作らず理由と期間の終わりを記録する。
   同じagentの見張りのfindingが開いている間は何も記録しない。
 - findingの段: どれも種類`agent_eval_watch_due`・対象queue・`--propose`付きで、subjectが段と対象を名指し、同じsubjectは状態に依らず1回だけ記録する（2つのsupervisorでも1つ）。
   `due`は期間と依頼する`agent cases`を、`holdout`はplannerが依頼した集合が作られて周が無いことと依頼する`agent eval --set`を、`refused`はplannerの集合の周が始まらなかった理由を持つ。
@@ -237,7 +238,7 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
 ## evalが本番と共有する起動経路
 
 - ケースごとの1回は、本番のrunのreviewのagentのjobと同じ経路で、測るagentの1本のjobだけを起動する。
-  経路はheadlessのjobの共通の経路（[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、1本のagentのjobの組み立て（`application::agent_job::build`、[Prompt](supervisor-lifecycle/prompt.md#agentのjobの上限)）、上の「道具の宣言」の変換、provider・model・effortも本番と同じ（evalに無い[runの群](supervisor-lifecycle/review.md#reviewのprovider)の上書きは除く）。
+  経路はheadlessのjobの共通の経路（[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、1本のagentのjobの組み立て（`application::agent_job::build`、[Prompt](supervisor-lifecycle/prompt.md#agentのjobの上限)）、上の「道具の宣言」の変換、provider・model・effortも本番と同じ（evalに無い[runの群](supervisor-lifecycle/review.md#reviewのprovider)の上書きと、devの依頼の組は除く）。
   eval専用の起動の組み立ては作らない。
 - 本番のagentのjobも同じ起動のコマンドと1つのverdictの読み取りを使う。
   ケースのjobは読める場所の欄（`AgentReads`）を持ち、本番のjobはその欄を空にする。
@@ -271,7 +272,7 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   ケースのpatchがscriptや設定を変えても、流れるのはcommitの中身である。
 - 選んだprogramは、先にケースの`base_commit`のtree（ケースのtreeと同じものを隠す）で設定の順に流し、0以外で終わったものはそのケースのtreeで流さない（古いbaseは今の規則に既に違反しうるが、本番のreviewのbaseのlanding branchはCIが通すため。[ADR-t2300-1](../adr/2026-10-21-t2300-1-eval-leaves-out-programs-a-cases-base-fails.md)）。
   baseで0のものだけをケースのtreeで流すので、ケースを止めるのは差分が足した違反だけである。
-  除いたprogramはケースごとに`agent_eval_case_checked`に名前を残し、同じ周の同じbaseでの結果は使い回す。
+  除いたprogramはケースごとに名前を残し、同じ周の同じbaseでの結果は使い回す。
 - built-inのprogramはケースに当てない（runの変更が足す行を着地の前に見るもので、ケースのpatchはそれに当たらない）。
 - programはケースの1回の枠の中でagentのjobの前に1本ずつ流し、周の同時数の上限を超えない。
   providerの費用には数えない。

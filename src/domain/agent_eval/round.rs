@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::Split;
+use crate::domain::actor_model::{AgentModel, ModelRole, RoleModels};
 use crate::domain::tokens::TokenUsage;
 use crate::domain::{DomainError, Provider};
 
@@ -225,8 +226,9 @@ impl Estimate {
 // and no rerun asked, a held-out round asked for a part of its cases
 // (ADR-t2229-1), a definition past the agent job's limit
 // (ADR-t1869-1), no definition in the landing branch's commit, one whose
-// declared tools are a mistake (ADR-t1728-2), or case lists that do not
-// read or name no case to run.
+// declared tools are a mistake (ADR-t1728-2), case lists that do not
+// read or name no case to run, or a held-out round asked with a launch
+// over the agent's table (`held_out_launch`, [`launch_refusal`]).
 string_enum!(RefusalReason {
     OverRunLimit => "over_run_limit",
     OverCostLimit => "over_cost_limit",
@@ -237,6 +239,7 @@ string_enum!(RefusalReason {
     DefinitionMissing => "definition_missing",
     DefinitionInvalid => "definition_invalid",
     CasesInvalid => "cases_invalid",
+    HeldOutLaunch => "held_out_launch",
 });
 
 /// A round not started and why.
@@ -463,6 +466,88 @@ pub fn subset_refusal(split: Split, subset: bool, rerun: bool) -> Option<Refusal
         .then(|| refuse(RefusalReason::HeldOutSubset, HELD_OUT_SUBSET.into(), None))
 }
 
+/// Why a held-out round is refused a launch of its own.
+pub const HELD_OUT_LAUNCH: &str = "a holdout or production round runs with the agent's table in dagq.toml and takes no --provider, --model or --effort; compare launches on dev";
+
+/// Refuse a round of `split` asked with a launch of its own (`requested`,
+/// `agent eval --provider/--model/--effort`) when the split is held out:
+/// only a dev round, run as often as asked, compares launches, so a
+/// hold-out's once ([`holdout_refusal`], whose key has no launch) is never
+/// spent on a launch `dagq.toml` does not give the agent.
+pub fn launch_refusal(split: Split, requested: &AgentModel) -> Option<Refusal> {
+    (held_out(split) && requested.written())
+        .then(|| refuse(RefusalReason::HeldOutLaunch, HELD_OUT_LAUNCH.into(), None))
+}
+
+/// What a dev round asked with `requested` writes of its runs' launch:
+/// each of the three `requested` writes over the agent's `table`, which
+/// gives the rest, the role giving what neither writes
+/// ([`crate::domain::actor_model::RoleModels::written_agent_launch`]).
+/// `table_provider` is the provider the table's launch starts on: a
+/// `requested` provider other than it drops the table's model, a name of
+/// the table's provider, for the role's or the provider's default there.
+pub fn requested_launch(
+    table: &AgentModel,
+    requested: &AgentModel,
+    table_provider: Provider,
+) -> AgentModel {
+    let moved = requested
+        .provider
+        .is_some_and(|provider| provider != table_provider);
+    AgentModel {
+        provider: requested.provider.or(table.provider),
+        model: requested
+            .model
+            .clone()
+            .or_else(|| (!moved).then(|| table.model.clone()).flatten()),
+        effort: requested.effort.clone().or_else(|| table.effort.clone()),
+    }
+}
+
+/// What a dev round asked with `requested` starts its runs with, as
+/// `dagq.toml` lets it: `roles` its `[roles.*]` and `table` what the
+/// agent's table writes. The provider `requested` names must be one of
+/// those `dagq.toml` gives the agent's job or `[roles.review]` (the one
+/// each starts on), so a request never sends the round's material to a
+/// provider the project's settings do not use for it. What `requested`
+/// writes goes over `table` ([`requested_launch`]), the rest inherited,
+/// and the result is checked against the provider it starts on as an
+/// agent's table is ([`AgentModel::check_on`]): a model of that provider's,
+/// an effort of the steps. A request that writes nothing is `table`.
+/// `Err` says why.
+pub fn check_requested_launch(
+    requested: &AgentModel,
+    roles: &RoleModels,
+    table: &AgentModel,
+) -> Result<AgentModel, String> {
+    if !requested.written() {
+        return Ok(table.clone());
+    }
+    let table_provider = roles
+        .written_agent_launch(ModelRole::Review, table)
+        .provider;
+    let role_provider = roles.provider(ModelRole::Review).0;
+    if let Some(provider) = requested.provider
+        && provider != table_provider
+        && provider != role_provider
+    {
+        return Err(format!(
+            "agent eval: provider {} is not one dagq.toml uses for the agent ({}) or [roles.review] ({})",
+            provider.as_str(),
+            table_provider.as_str(),
+            role_provider.as_str()
+        ));
+    }
+    let launch = requested_launch(table, requested, table_provider);
+    let provider = roles
+        .written_agent_launch(ModelRole::Review, &launch)
+        .provider;
+    launch
+        .check_on(provider, ModelRole::Review)
+        .map_err(|why| format!("agent eval: {why}"))?;
+    Ok(launch)
+}
+
 fn short(digest: &str) -> &str {
     &digest[..digest.len().min(12)]
 }
@@ -571,6 +656,169 @@ mod tests {
             cost_usd,
             ..TokenUsage::default()
         }
+    }
+
+    fn model(provider: Option<Provider>, model: Option<&str>, effort: Option<&str>) -> AgentModel {
+        AgentModel {
+            provider,
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+        }
+    }
+
+    /// What a dev round asks for goes over the agent's table one value at a
+    /// time, the rest the table's; another provider than the table's drops
+    /// the table's model, a name of its own provider's.
+    #[test]
+    fn a_requested_launch_writes_over_the_agents_table_what_it_names() {
+        let table = model(
+            Some(Provider::Claude),
+            Some("claude-haiku-5-5"),
+            Some("low"),
+        );
+        assert_eq!(
+            requested_launch(&table, &AgentModel::default(), Provider::Claude),
+            table
+        );
+        assert_eq!(
+            requested_launch(&table, &model(None, None, Some("high")), Provider::Claude),
+            model(
+                Some(Provider::Claude),
+                Some("claude-haiku-5-5"),
+                Some("high")
+            )
+        );
+        assert_eq!(
+            requested_launch(
+                &table,
+                &model(Some(Provider::Claude), Some("claude-sonnet-5-5"), None),
+                Provider::Claude
+            ),
+            model(
+                Some(Provider::Claude),
+                Some("claude-sonnet-5-5"),
+                Some("low")
+            )
+        );
+        assert_eq!(
+            requested_launch(
+                &table,
+                &model(Some(Provider::Codex), None, None),
+                Provider::Claude
+            ),
+            model(Some(Provider::Codex), None, Some("low"))
+        );
+        // A table that writes nothing: what is asked, the rest the role's.
+        assert_eq!(
+            requested_launch(
+                &AgentModel::default(),
+                &model(None, None, Some("max")),
+                Provider::Codex
+            ),
+            model(None, None, Some("max"))
+        );
+    }
+
+    /// Only a dev round takes a launch of its own; a held-out one asked
+    /// with none goes on. The launch is checked as an agent's table is.
+    #[test]
+    fn a_launch_is_refused_off_dev_and_checked_against_its_provider() {
+        let haiku = model(Some(Provider::Claude), Some("claude-haiku-5-5"), None);
+        assert!(launch_refusal(Split::Dev, &haiku).is_none());
+        for split in [Split::Holdout, Split::Production] {
+            let refused = launch_refusal(split, &haiku).unwrap();
+            assert_eq!(refused.reason, RefusalReason::HeldOutLaunch);
+            assert!(launch_refusal(split, &AgentModel::default()).is_none());
+        }
+        // `[roles.review]` on Codex, the agent's table on Claude.
+        let mut roles = RoleModels::default();
+        roles.entry(ModelRole::Review).provider = Some(Provider::Codex);
+        let table = model(
+            Some(Provider::Claude),
+            Some("claude-haiku-5-5"),
+            Some("low"),
+        );
+        assert_eq!(
+            check_requested_launch(&AgentModel::default(), &roles, &table),
+            Ok(table.clone())
+        );
+        // A model alone inherits the table's provider and is checked on it.
+        assert_eq!(
+            check_requested_launch(
+                &model(None, Some("claude-sonnet-5-5"), None),
+                &roles,
+                &table
+            ),
+            Ok(model(
+                Some(Provider::Claude),
+                Some("claude-sonnet-5-5"),
+                Some("low")
+            ))
+        );
+        // Without a table, the role's Codex.
+        assert_eq!(
+            check_requested_launch(
+                &model(None, Some("gpt-5.5"), Some("high")),
+                &roles,
+                &AgentModel::default()
+            ),
+            Ok(model(None, Some("gpt-5.5"), Some("high")))
+        );
+        assert_eq!(
+            check_requested_launch(&model(None, None, Some("xhigh")), &roles, &table),
+            Ok(model(
+                Some(Provider::Claude),
+                Some("claude-haiku-5-5"),
+                Some("xhigh")
+            ))
+        );
+        // The role's provider is one dagq.toml uses: the table's model is
+        // dropped there.
+        assert_eq!(
+            check_requested_launch(
+                &model(Some(Provider::Codex), Some("gpt-5.5"), None),
+                &roles,
+                &table
+            ),
+            Ok(model(Some(Provider::Codex), Some("gpt-5.5"), Some("low")))
+        );
+        for (wrong, why) in [
+            // A model that does not fit the provider it inherits.
+            (model(None, Some("gpt-5.5"), None), "not Claude's"),
+            (
+                model(Some(Provider::Claude), Some("gpt-5.5"), None),
+                "not Claude's",
+            ),
+            (
+                model(Some(Provider::Codex), Some("claude-haiku-5-5"), None),
+                "claude-haiku-5-5",
+            ),
+            (model(None, None, Some("huge")), "effort huge"),
+        ] {
+            let error = check_requested_launch(&wrong, &roles, &table).unwrap_err();
+            assert!(error.contains(why), "{wrong:?}: {error}");
+        }
+        // Both on Claude: Codex is a provider dagq.toml does not use for
+        // the agent's job, and is refused.
+        let claude_roles = RoleModels::default();
+        let error = check_requested_launch(
+            &model(Some(Provider::Codex), None, None),
+            &claude_roles,
+            &table,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("provider codex is not one dagq.toml uses"),
+            "{error}"
+        );
+        assert!(
+            check_requested_launch(
+                &model(Some(Provider::Claude), None, Some("high")),
+                &claude_roles,
+                &table
+            )
+            .is_ok()
+        );
     }
 
     #[test]

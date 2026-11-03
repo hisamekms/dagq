@@ -761,6 +761,7 @@ mod tests {
             run_id: None,
             before_landing: false,
             definition_commit: None,
+            launch: crate::domain::actor_model::AgentModel::default(),
         }
     }
 

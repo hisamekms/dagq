@@ -72,8 +72,8 @@ use crate::domain::agent_eval::record::{self, Round};
 use crate::domain::agent_eval::review::ReviewInput;
 use crate::domain::agent_eval::round::{
     ProviderCost, ProviderWait, Refusal, RefusalReason, RoundKey, case_set_digest,
-    definition_digest, estimate, holdout_refusal, launchable, may_start_next, next_round,
-    provider_wait, run_cost, subset_refusal,
+    check_requested_launch, definition_digest, estimate, holdout_refusal, launch_refusal,
+    launchable, may_start_next, next_round, provider_wait, run_cost, subset_refusal,
 };
 use crate::domain::agent_eval::{
     Case, CaseBase, EVALS_DIR, PATCH_DIR, PATCH_EXTENSION, Split, patch_hash, read_agent_cases,
@@ -505,9 +505,15 @@ impl Supervisor<'_> {
     /// elsewhere goes on with that provider's default
     /// ([`round_launch`]). `Err` says why the table cannot be
     /// read or is a mistake, which refuses a round that has not started.
+    ///
+    /// `requested` is the launch a dev round was asked with over the table
+    /// (`agent eval --provider/--model/--effort`,
+    /// [`crate::domain::agent_eval::round::check_requested_launch`]): its
+    /// provider one this `dagq.toml` uses for the agent or the role, its
+    /// model and effort ones that provider takes, else `Err`.
     fn eval_launch(
         &self,
-        agent: &str,
+        (agent, requested): (&str, &AgentModel),
         commit: &str,
         provider: Option<Provider>,
     ) -> std::result::Result<ActorLaunch, String> {
@@ -518,13 +524,9 @@ impl Supervisor<'_> {
             agent,
         )
         .map_err(|error| format!("{error:#}"))?;
-        round_launch(&self.role_models(ModelRole::Review), &written, provider)
-    }
-
-    /// The landing branch's `[roles.review]` launch, on `provider` when a
-    /// round started on it already (a round never moves).
-    fn role_eval_launch(&self, provider: Option<Provider>) -> ActorLaunch {
-        role_launch_on(&self.role_models(ModelRole::Review), provider)
+        let models = self.role_models(ModelRole::Review);
+        let asked = check_requested_launch(requested, &models, &written)?;
+        round_launch(&models, &asked, provider)
     }
 
     /// Read the agent's definition from `definition_commit`'s tree and its
@@ -729,9 +731,11 @@ impl Supervisor<'_> {
     /// moved (started or refused).
     fn start_round(&mut self, round: &Round, rounds: &[Round]) -> Result<bool> {
         let request = &round.request;
-        // The use case refuses a held-out part of cases unrecorded; one in
-        // the record all the same is refused here alike (ADR-t2229-1).
+        // The use case refuses a held-out part of cases, or a held-out
+        // round's launch of its own, unrecorded; one in the record all the
+        // same is refused here alike (ADR-t2229-1).
         if let Some(refusal) = subset_refusal(request.split, request.cases.is_some(), request.rerun)
+            .or_else(|| launch_refusal(request.split, &request.launch))
         {
             self.refuse_round(round.id, &request.agent, &refusal, None)?;
             return Ok(true);
@@ -739,7 +743,7 @@ impl Supervisor<'_> {
         // The landing branch's commit its cases, program reviews and the
         // agent's launch are read from.
         let commit = self.repository.main_head()?.into_string();
-        let launch = match self.eval_launch(&request.agent, &commit, None) {
+        let launch = match self.eval_launch((&request.agent, &request.launch), &commit, None) {
             Ok(launch) => launch,
             Err(why) => {
                 let refusal = refusal(RefusalReason::DefinitionInvalid, why);
@@ -1005,13 +1009,17 @@ impl Supervisor<'_> {
             id: round.id,
             agent: request.agent.clone(),
             provider: started.provider,
-            launch: self
-                .eval_launch(
-                    &request.agent,
+            launch: taken_up_launch(
+                &self.role_models(ModelRole::Review),
+                &request.launch,
+                round.launch.as_ref(),
+                self.eval_launch(
+                    (&request.agent, &request.launch),
                     started.cases_commit(),
                     Some(started.provider),
-                )
-                .unwrap_or_else(|_| self.role_eval_launch(Some(started.provider))),
+                ),
+                started.provider,
+            ),
             definition: snapshot.definition,
             tools: snapshot.tools,
             cases: snapshot.cases,
@@ -1891,6 +1899,33 @@ fn round_launch(
     })
 }
 
+/// What the runs left of a round taken up on `provider`, the one it
+/// started on, start with. A round asked with a launch of its own
+/// (`requested`) goes on with the model and effort its start recorded
+/// (`recorded`), which were checked against that provider when it started:
+/// what the roles or the agent's table say now does not drop them.
+/// Otherwise what `dagq.toml` gives now (`derived`, [`round_launch`]), or
+/// the role's on that provider when that cannot be read.
+fn taken_up_launch(
+    models: &RoleModels,
+    requested: &AgentModel,
+    recorded: Option<&record::Launch>,
+    derived: std::result::Result<ActorLaunch, String>,
+    provider: Provider,
+) -> ActorLaunch {
+    if requested.written()
+        && let Some(recorded) = recorded.filter(|launch| launch.provider == provider.as_str())
+    {
+        return ActorLaunch {
+            model: recorded.model.clone(),
+            effort: recorded.effort.clone(),
+            source: crate::domain::actor_model::LaunchSource::Subagent,
+            ..role_launch_on(models, Some(provider))
+        };
+    }
+    derived.unwrap_or_else(|_| role_launch_on(models, Some(provider)))
+}
+
 /// `[roles.review]`'s launch, on `provider` with that provider's default
 /// when it is another.
 fn role_launch_on(models: &RoleModels, provider: Option<Provider>) -> ActorLaunch {
@@ -1985,6 +2020,182 @@ mod tests {
             error.contains("model gpt-5.5-mini is not Claude's"),
             "{error}"
         );
+    }
+
+    /// A round asked with a launch of its own and taken up after
+    /// `[roles.review]` changed goes on with the model and effort its start
+    /// recorded, on the provider it started on, though what the request
+    /// writes no longer fits the roles read now; a round asked with none is
+    /// taken up as before.
+    #[test]
+    fn a_taken_up_round_keeps_the_launch_it_was_asked_and_started_with() {
+        let mut codex_roles = RoleModels::default();
+        codex_roles.entry(ModelRole::Review).provider = Some(Provider::Codex);
+        let asked = AgentModel {
+            model: Some("gpt-5.5-mini".to_owned()),
+            effort: Some("low".to_owned()),
+            ..AgentModel::default()
+        };
+        let table = AgentModel::default();
+        let derive = |models: &RoleModels, requested: &AgentModel, on: Option<Provider>| {
+            check_requested_launch(requested, models, &table)
+                .and_then(|written| round_launch(models, &written, on))
+        };
+        // It starts on the role's Codex with what it asks.
+        let started = derive(&codex_roles, &asked, None).unwrap();
+        assert_eq!(
+            (
+                started.provider,
+                started.model.as_deref(),
+                started.effort.as_deref()
+            ),
+            (Provider::Codex, Some("gpt-5.5-mini"), Some("low"))
+        );
+        let recorded = record::Launch {
+            provider: "codex".to_owned(),
+            model: started.model.clone(),
+            effort: started.effort.clone(),
+        };
+        // `[roles.review]` is on Claude now: the request no longer checks.
+        let claude_roles = RoleModels::default();
+        let derived = derive(&claude_roles, &asked, Some(Provider::Codex));
+        assert!(derived.is_err());
+        let taken_up = taken_up_launch(
+            &claude_roles,
+            &asked,
+            Some(&recorded),
+            derived,
+            Provider::Codex,
+        );
+        assert_eq!(
+            (
+                taken_up.provider,
+                taken_up.model.as_deref(),
+                taken_up.effort.as_deref()
+            ),
+            (Provider::Codex, Some("gpt-5.5-mini"), Some("low"))
+        );
+        // Asked with none, it is taken up as before: what dagq.toml gives
+        // now on the provider it started on.
+        let none = AgentModel::default();
+        let role_launch = record::Launch {
+            provider: "codex".to_owned(),
+            model: None,
+            effort: Some("medium".to_owned()),
+        };
+        let before = taken_up_launch(
+            &claude_roles,
+            &none,
+            Some(&role_launch),
+            derive(&claude_roles, &none, Some(Provider::Codex)),
+            Provider::Codex,
+        );
+        assert_eq!(
+            before,
+            round_launch(&claude_roles, &none, Some(Provider::Codex)).unwrap()
+        );
+    }
+
+    /// A dev round asked with a launch starts its runs with what it names
+    /// over the agent's table, the rest the table's or else the role's, on
+    /// a provider dagq.toml uses for the agent or the role, and
+    /// is estimated on the provider it names, with that provider's runs and
+    /// default; a round asked with none starts as the agent's job does.
+    #[test]
+    fn a_rounds_asked_launch_starts_its_runs_and_is_estimated_on_its_provider() {
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::Review).provider = Some(Provider::Codex);
+        models.entry(ModelRole::Review).effort = Some("high".to_owned());
+        let table = AgentModel {
+            provider: Some(Provider::Claude),
+            model: Some("claude-haiku-5-5".to_owned()),
+            effort: Some("low".to_owned()),
+        };
+        let started = |written: &AgentModel, asked: &AgentModel| {
+            let launch = round_launch(
+                &models,
+                &check_requested_launch(asked, &models, written).unwrap(),
+                None,
+            )
+            .unwrap();
+            (launch.provider, launch.model, launch.effort)
+        };
+        let claude = |model: &str, effort: &str| {
+            (
+                Provider::Claude,
+                Some(model.to_owned()),
+                Some(effort.to_owned()),
+            )
+        };
+        assert_eq!(
+            started(&table, &AgentModel::default()),
+            claude("claude-haiku-5-5", "low")
+        );
+        let effort = AgentModel {
+            effort: Some("medium".to_owned()),
+            ..AgentModel::default()
+        };
+        assert_eq!(
+            started(&table, &effort),
+            claude("claude-haiku-5-5", "medium")
+        );
+        let sonnet = AgentModel {
+            provider: Some(Provider::Claude),
+            model: Some("claude-sonnet-5-5".to_owned()),
+            effort: None,
+        };
+        assert_eq!(started(&table, &sonnet), claude("claude-sonnet-5-5", "low"));
+        // No table: the role's Codex and its effort, under what is asked.
+        assert_eq!(
+            started(&AgentModel::default(), &effort),
+            (Provider::Codex, None, Some("medium".to_owned()))
+        );
+        // A model alone takes the table's provider.
+        let sonnet_only = AgentModel {
+            provider: None,
+            ..sonnet.clone()
+        };
+        assert_eq!(
+            started(&table, &sonnet_only),
+            claude("claude-sonnet-5-5", "low")
+        );
+        // Claude is a provider dagq.toml uses for neither an agent with no
+        // table nor the role: refused, as the round's start refuses it.
+        assert!(check_requested_launch(&sonnet, &models, &AgentModel::default()).is_err());
+        // The table's Claude, asked on Codex: the table's model is dropped
+        // for the role's there, and its effort is kept.
+        let codex = AgentModel {
+            provider: Some(Provider::Codex),
+            ..AgentModel::default()
+        };
+        assert_eq!(
+            started(&table, &codex),
+            (Provider::Codex, None, Some("low".to_owned()))
+        );
+        // The estimate goes by the launch's provider: Codex's default, not
+        // Claude's recent runs.
+        let mut config = crate::domain::agent_eval::round::EvalConfig::default();
+        config.provider_mut(Provider::Codex).default_run_usd = Some(0.7);
+        let codex_prices = config.provider_mut(Provider::Codex);
+        codex_prices.input_usd_per_mtok = Some(1.0);
+        codex_prices.output_usd_per_mtok = Some(10.0);
+        let provider = round_launch(
+            &models,
+            &check_requested_launch(&codex, &models, &table).unwrap(),
+            None,
+        )
+        .unwrap()
+        .provider;
+        let estimated = estimate(
+            10,
+            provider,
+            &record::recent_costs(&[], "demo", provider, 5),
+            &config,
+        )
+        .unwrap();
+        assert!((estimated.per_run_usd - 0.7).abs() < 1e-9, "{estimated:?}");
+        let claude_estimate = estimate(10, Provider::Claude, &[], &config).unwrap();
+        assert!((claude_estimate.per_run_usd - 0.7).abs() > 1e-9);
     }
 
     /// The digest of a built-in's carried cases changes with the content

@@ -4612,6 +4612,12 @@ impl crate::application::agent_eval::EvalStore for ServiceSqlite {
     fn eval_events(&self) -> Result<Vec<RunEvent>> {
         crate::application::agent_eval::EvalStore::eval_events(&self.queue)
     }
+    fn launch_settings(
+        &self,
+        agent: &str,
+    ) -> Result<Option<crate::application::agent_eval::LaunchSettings>> {
+        crate::application::agent_eval::EvalStore::launch_settings(&self.queue, agent)
+    }
 }
 
 impl crate::application::commands::replans::ReplanStore for ServiceSqlite {

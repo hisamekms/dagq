@@ -226,6 +226,7 @@ impl Supervisor<'_> {
                 run_id: Some(run.id().to_string()),
                 before_landing: true,
                 definition_commit: Some(head.to_owned()),
+                launch: crate::domain::actor_model::AgentModel::default(),
             };
             let id = self
                 .queue

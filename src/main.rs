@@ -2082,6 +2082,21 @@ enum AgentCommand {
         /// the inbox's at a person's word.
         #[arg(long)]
         rerun: bool,
+        /// Dev only: the provider this round's runs start on, over the agent's
+        /// [review.subagents.<agent>] in dagq.toml (else the role's): only one dagq.toml uses
+        /// for that agent or for [roles.review]. What is not given comes from that table, then
+        /// [roles.review]; another provider than the table's drops the table's model. Holdout
+        /// and production run with the table and refuse it, so a hold-out's one run is never
+        /// spent on a launch dagq.toml does not give.
+        #[arg(long, value_parser = ["claude", "codex"])]
+        provider: Option<String>,
+        /// Dev only: the model, a name of the provider the round starts on (--provider, else the
+        /// one it inherits). Checked on the request as the agent's table is.
+        #[arg(long)]
+        model: Option<String>,
+        /// Dev only: the effort, one of the steps the providers take.
+        #[arg(long)]
+        effort: Option<String>,
     },
     /// Ask for a production set of the agent's cases: the supervisor makes one case of each
     /// production review in the period that selected the agent, has a job of another provider
@@ -4058,6 +4073,9 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
                 cases,
                 set,
                 rerun,
+                provider,
+                model,
+                effort,
             } => {
                 if set.is_some() && !cases.is_empty() {
                     bail!(dagq::application::agent_eval::SET_WITH_CASES);
@@ -4068,6 +4086,11 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
                 // field it does not know (ADR-t451-1 decision 1).
                 if let Some(set) = set {
                     params["set"] = json!(set);
+                }
+                for (key, value) in [("provider", provider), ("model", model), ("effort", effort)] {
+                    if let Some(value) = value {
+                        params[key] = json!(value);
+                    }
                 }
                 (UseCase::AgentEval, params)
             }
@@ -7091,6 +7114,45 @@ mod tests {
                         json!({"agent": null, "limit": 20, "by_launch": true}),
                     ),
                     (&["dagq", "agent", "result", "3"], json!({"id": 3})),
+                    (
+                        &["dagq", "agent", "eval", "demo"],
+                        json!({"agent": "demo", "split": "dev", "k": null, "cases": null,
+                               "rerun": false}),
+                    ),
+                    (
+                        &[
+                            "dagq",
+                            "agent",
+                            "eval",
+                            "demo",
+                            "--provider",
+                            "claude",
+                            "--model",
+                            "claude-haiku-5-5",
+                            "--effort",
+                            "low",
+                        ],
+                        json!({"agent": "demo", "split": "dev", "k": null, "cases": null,
+                               "rerun": false, "provider": "claude",
+                               "model": "claude-haiku-5-5", "effort": "low"}),
+                    ),
+                    (
+                        &[
+                            "dagq",
+                            "agent",
+                            "eval",
+                            "demo",
+                            "--model",
+                            "claude-sonnet-5-5",
+                        ],
+                        json!({"agent": "demo", "split": "dev", "k": null, "cases": null,
+                               "rerun": false, "model": "claude-sonnet-5-5"}),
+                    ),
+                    (
+                        &["dagq", "agent", "eval", "demo", "--effort", "high"],
+                        json!({"agent": "demo", "split": "dev", "k": null, "cases": null,
+                               "rerun": false, "effort": "high"}),
+                    ),
                 ] {
                     let cli = Cli::try_parse_from(argv).unwrap();
                     let (use_case, sent) = client_request(&cli.command).unwrap().unwrap();

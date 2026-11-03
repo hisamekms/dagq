@@ -3385,6 +3385,25 @@ pub fn load_role_models(root: &Path) -> Result<RoleModels> {
         .roles)
 }
 
+/// What the `dagq.toml` in `root` gives the review agent `agent`'s launch
+/// ([`crate::application::agent_eval::LaunchSettings`]): `[roles.*]` and
+/// what its `[review.subagents.<agent>]` writes; none of either without
+/// the file.
+pub fn load_eval_launch_settings(
+    root: &Path,
+    agent: &str,
+) -> Result<crate::application::agent_eval::LaunchSettings> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(crate::application::agent_eval::LaunchSettings::default());
+    };
+    let config = parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
+    Ok(crate::application::agent_eval::LaunchSettings {
+        table: config.review_agents().written_launch(agent),
+        roles: config.roles,
+    })
+}
+
 /// `[roles.inbox]` of the `dagq.toml` in `root` (ADR-t1181-1 decision 1),
 /// read alone: the file with every line outside that table blanked
 /// ([`inbox_table_only`]), parsed and checked as the whole file is. So a
@@ -4712,6 +4731,35 @@ mod tests {
     /// whether the provider the job starts on takes them is left to the
     /// review's reading ([`ReviewAgents::launch_problems`]), which checks
     /// them against the same file's `[roles.review]`.
+    /// What `agent eval` checks a requested launch against: the roles and
+    /// the agent's table of the checkout's `dagq.toml`, none without it.
+    #[test]
+    fn the_eval_launch_settings_are_the_roles_and_the_agents_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let none = load_eval_launch_settings(dir.path(), "design").unwrap();
+        assert_eq!(
+            (none.roles, none.table),
+            (
+                RoleModels::default(),
+                crate::domain::actor_model::AgentModel::default()
+            )
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[roles.review]\nprovider = \"codex\"\n\
+             [review.subagents.design]\npaths = [\"docs/**\"]\nprovider = \"claude\"\n\
+             model = \"claude-haiku-5-5\"\n",
+        )
+        .unwrap();
+        let read = load_eval_launch_settings(dir.path(), "design").unwrap();
+        assert_eq!(
+            read.roles.provider(ModelRole::Review).0,
+            crate::domain::Provider::Codex
+        );
+        assert_eq!(read.table.provider, Some(crate::domain::Provider::Claude));
+        assert_eq!(read.table.model.as_deref(), Some("claude-haiku-5-5"));
+    }
+
     #[test]
     fn parses_the_review_agents_model_and_effort() {
         let config = parse_config(

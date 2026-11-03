@@ -12,10 +12,13 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use super::commands::{DenialLog, Gate};
+use crate::domain::actor_model::{AgentModel, RoleModels};
 use crate::domain::agent_eval::programs;
 use crate::domain::agent_eval::record::{self, Request, Round};
 use crate::domain::agent_eval::review::{self, Metric, Metrics, ReviewOutcome, ReviewRun};
-use crate::domain::agent_eval::round::{held_out, subset_refusal};
+use crate::domain::agent_eval::round::{
+    check_requested_launch, held_out, launch_refusal, subset_refusal,
+};
 use crate::domain::agent_eval::{Case, Split};
 use crate::domain::authorization::eval_request_needs;
 use crate::domain::review_builtins;
@@ -27,6 +30,19 @@ pub trait EvalStore: DenialLog {
     fn record_eval_event(&self, kind: EventKind, payload: Value) -> Result<EventId>;
     /// Every event of the eval's kinds ([`record::KINDS`]), oldest first.
     fn eval_events(&self) -> Result<Vec<RunEvent>>;
+    /// What the `dagq.toml` of the repository the queue is bound to (its
+    /// main checkout) gives `agent`'s launch, which a request's launch is
+    /// checked against; `None` when the queue is bound to no repository
+    /// or its checkout is not found.
+    fn launch_settings(&self, agent: &str) -> Result<Option<LaunchSettings>>;
+}
+
+/// What `dagq.toml` gives a review agent's launch: `[roles.*]` and what
+/// the agent's `[review.subagents.<agent>]` writes.
+#[derive(Debug, Clone, Default)]
+pub struct LaunchSettings {
+    pub roles: RoleModels,
+    pub table: AgentModel,
 }
 
 /// The rounds the eval's events of `store` say, oldest first.
@@ -60,6 +76,13 @@ pub struct EvalRequest {
     /// `--rerun`: run a held-out set whose key ran already (a person's, or
     /// the inbox's at a person's word).
     pub rerun: bool,
+    /// `--provider`, `--model` and `--effort`: a dev round's launch over
+    /// the agent's table, the rest the table's or else the role's
+    /// ([`crate::domain::agent_eval::round::requested_launch`]); refused
+    /// for holdout and production, and for a provider `dagq.toml` does not
+    /// use for the agent or the role
+    /// ([`crate::domain::agent_eval::round::check_requested_launch`]).
+    pub launch: AgentModel,
 }
 
 impl EvalRequest {
@@ -134,8 +157,22 @@ impl<'a> AgentEvals<'a> {
         for need in eval_request_needs(held_out(split), request.rerun) {
             self.gate.authorize(self.store, need, &resource)?;
         }
-        if let Some(refused) = subset_refusal(split, request.cases.is_some(), request.rerun) {
+        if let Some(refused) = subset_refusal(split, request.cases.is_some(), request.rerun)
+            .or_else(|| launch_refusal(split, &request.launch))
+        {
             bail!(refused.detail);
+        }
+        if request.launch.written() {
+            let Some(settings) = self.store.launch_settings(&request.agent)? else {
+                bail!(
+                    "agent eval: no dagq.toml of the queue's repository to check --provider, --model and --effort against"
+                );
+            };
+            if let Err(why) =
+                check_requested_launch(&request.launch, &settings.roles, &settings.table)
+            {
+                bail!(why);
+            }
         }
         let actor = self.actor();
         let recorded = Request {
@@ -150,6 +187,7 @@ impl<'a> AgentEvals<'a> {
             run_id: actor.run_id().map(ToString::to_string),
             before_landing: false,
             definition_commit: None,
+            launch: request.launch.clone(),
         };
         let id = self
             .store
@@ -159,6 +197,7 @@ impl<'a> AgentEvals<'a> {
             "agent": recorded.agent,
             "split": recorded.split.as_str(),
             "set": recorded.set,
+            "requested_launch": requested_launch(&recorded),
             "status": "waiting",
         }))
     }
@@ -258,6 +297,7 @@ pub fn by_launch(rounds: &[&Round]) -> Value {
         let row = json!({
             "eval_id": round.id,
             "split": round.request.split.as_str(),
+            "requested_launch": requested_launch(&round.request),
             "outcome": finished["outcome"],
             "passed": finished["passed"],
             "scores": finished["scores"],
@@ -279,6 +319,17 @@ pub fn by_launch(rounds: &[&Round]) -> Value {
     )
 }
 
+/// The launch `request` asked for over the agent's table (`--provider`,
+/// `--model`, `--effort`), as its event records it; `null` when it asked
+/// for none. What the runs started with is the round's `launch`.
+fn requested_launch(request: &Request) -> Value {
+    request
+        .record()
+        .get("launch")
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
 /// A round in a list: its request, where it is, its launch, its result
 /// and what it used.
 fn summary(round: &Round) -> Value {
@@ -298,6 +349,7 @@ fn summary(round: &Round) -> Value {
         "passed": finished.map(|finished| &finished["passed"]),
         "scores": finished.map(|finished| &finished["scores"]),
         "spent_usd": round.spent_usd(),
+        "requested_launch": requested_launch(request),
         "launch": launch(round),
         "mixed_launch": round.mixed_launch(),
         "unknown_launch": round.unknown_launch(),
@@ -541,6 +593,7 @@ mod tests {
                     run_id: None,
                     before_landing: false,
                     definition_commit: None,
+                    launch: crate::domain::actor_model::AgentModel::default(),
                 }
                 .record(),
             ),
@@ -591,6 +644,9 @@ mod tests {
     #[derive(Default)]
     struct Store {
         events: std::sync::Mutex<Vec<Value>>,
+        /// What `dagq.toml` gives the agents' launch; none is a queue
+        /// bound to no repository.
+        settings: Option<LaunchSettings>,
     }
 
     impl DenialLog for Store {
@@ -608,6 +664,9 @@ mod tests {
         fn eval_events(&self) -> Result<Vec<RunEvent>> {
             Ok(Vec::new())
         }
+        fn launch_settings(&self, _: &str) -> Result<Option<LaunchSettings>> {
+            Ok(self.settings.clone())
+        }
     }
 
     fn eval(split: Split, cases: Option<Vec<String>>, set: Option<i64>) -> EvalRequest {
@@ -618,7 +677,186 @@ mod tests {
             cases,
             set,
             rerun: false,
+            launch: AgentModel::default(),
         }
+    }
+
+    /// A dev round asked with a launch over the agent's table records it
+    /// in its request, and the round's launch (what its start and runs
+    /// record) reads beside it in `agent results`, `--by-launch` and
+    /// `agent result`; a model alone inherits its provider. Holdout and
+    /// production asked with one, a launch the provider it starts on
+    /// cannot take, a provider `dagq.toml` uses for neither the agent nor
+    /// the role, and a queue with no `dagq.toml` are refused before
+    /// anything is recorded; the capabilities asked for
+    /// are those of the split, as without a launch.
+    #[test]
+    fn a_dev_round_takes_a_launch_of_its_own_and_a_held_out_one_is_refused() {
+        use crate::domain::StaticPolicy;
+        use crate::domain::actor::ActorRole;
+        use crate::domain::agent_eval::round::HELD_OUT_LAUNCH;
+        let haiku = AgentModel {
+            provider: Some(crate::domain::Provider::Claude),
+            model: Some("claude-haiku-5-5".into()),
+            effort: Some("low".into()),
+        };
+        // `[roles.review]` on Codex, the agent's table on Claude.
+        let mut roles = RoleModels::default();
+        roles
+            .entry(crate::domain::actor_model::ModelRole::Review)
+            .provider = Some(crate::domain::Provider::Codex);
+        let store = Store {
+            settings: Some(LaunchSettings {
+                roles,
+                table: haiku.clone(),
+            }),
+            ..Store::default()
+        };
+        let user = ActorContext::instance(ActorRole::User, "1");
+        let evals = AgentEvals::new(&store, &user, &StaticPolicy);
+        let with = |split: Split, set: Option<i64>, launch: &AgentModel| EvalRequest {
+            agent: "demo".into(),
+            launch: launch.clone(),
+            ..eval(split, None, set)
+        };
+        for (split, set) in [
+            (Split::Holdout, None),
+            (Split::Production, None),
+            (Split::Dev, Some(3)),
+        ] {
+            let error = evals.request(&with(split, set, &haiku)).unwrap_err();
+            assert_eq!(error.to_string(), HELD_OUT_LAUNCH);
+        }
+        let model = |provider: Option<crate::domain::Provider>, model: &str| AgentModel {
+            provider,
+            model: Some(model.into()),
+            effort: None,
+        };
+        for (wrong, why) in [
+            // A model alone inherits the table's Claude, which it does not fit.
+            (model(None, "gpt-5.5"), "not Claude's"),
+            (
+                model(Some(crate::domain::Provider::Claude), "gpt-5.5"),
+                "not Claude's",
+            ),
+            (
+                model(Some(crate::domain::Provider::Codex), "claude-haiku-5-5"),
+                "claude-haiku-5-5",
+            ),
+            (
+                AgentModel {
+                    effort: Some("huge".into()),
+                    ..AgentModel::default()
+                },
+                "effort huge",
+            ),
+        ] {
+            let error = evals.request(&with(Split::Dev, None, &wrong)).unwrap_err();
+            assert!(error.to_string().contains(why), "{wrong:?}: {error:#}");
+        }
+        // A provider dagq.toml uses for neither the agent nor the role, and
+        // a queue with no dagq.toml to check against, are refused.
+        let claude_only = Store {
+            settings: Some(LaunchSettings {
+                roles: RoleModels::default(),
+                table: haiku.clone(),
+            }),
+            ..Store::default()
+        };
+        let codex = AgentModel {
+            provider: Some(crate::domain::Provider::Codex),
+            ..AgentModel::default()
+        };
+        let error = AgentEvals::new(&claude_only, &user, &StaticPolicy)
+            .request(&with(Split::Dev, None, &codex))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("provider codex is not one dagq.toml uses"),
+            "{error:#}"
+        );
+        let unbound = Store::default();
+        let error = AgentEvals::new(&unbound, &user, &StaticPolicy)
+            .request(&with(Split::Dev, None, &haiku))
+            .unwrap_err();
+        assert!(error.to_string().contains("no dagq.toml"), "{error:#}");
+        assert!(claude_only.events.lock().unwrap().is_empty());
+        assert!(unbound.events.lock().unwrap().is_empty());
+        assert!(store.events.lock().unwrap().is_empty());
+        // A worker asks for its own run's dev with a launch, as without one;
+        // a held-out round stays a capability it is denied first.
+        let worker = ActorContext::worker(
+            &crate::domain::RunId::new("r1").unwrap(),
+            crate::domain::TaskId::new(1),
+        );
+        let worker_evals = AgentEvals::new(&store, &worker, &StaticPolicy);
+        let error = worker_evals
+            .request(&with(Split::Holdout, None, &haiku))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("eval.request_held_out"),
+            "{error:#}"
+        );
+        worker_evals
+            .request(&with(Split::Dev, None, &haiku))
+            .unwrap();
+        let asked = evals.request(&with(Split::Dev, None, &haiku)).unwrap();
+        let written = json!({"provider": "claude", "model": "claude-haiku-5-5", "effort": "low"});
+        assert_eq!(asked["requested_launch"], written);
+        let payloads = store.events.lock().unwrap().clone();
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[1]["launch"], written);
+        assert_eq!(Request::read(&payloads[1]).unwrap().launch, haiku);
+        // Without one, the request records no launch.
+        evals.request(&eval(Split::Dev, None, None)).unwrap();
+        assert!(store.events.lock().unwrap()[2].get("launch").is_none());
+        // A model alone is taken, its provider inherited, and recorded as
+        // asked; the role's Codex is a provider dagq.toml uses.
+        let sonnet = model(None, "claude-sonnet-5-5");
+        evals.request(&with(Split::Dev, None, &sonnet)).unwrap();
+        evals.request(&with(Split::Dev, None, &codex)).unwrap();
+        let recorded = store.events.lock().unwrap().clone();
+        assert_eq!(Request::read(&recorded[3]).unwrap().launch, sonnet);
+        assert_eq!(Request::read(&recorded[4]).unwrap().launch, codex);
+        // The round's start and runs record the launch it started with.
+        let launch: Written = Some((Some("claude-haiku-5-5"), Some("low")));
+        let mut events = round_events(
+            100,
+            launch,
+            &[
+                (
+                    "needs-d1",
+                    verdict("revise", &["D-1"], "adds notes.txt"),
+                    launch,
+                    Some(100),
+                ),
+                ("clean-one", verdict("pass", &[], "fine"), launch, Some(50)),
+            ],
+            false,
+        );
+        events[0].payload = payloads[1].clone();
+        let round = super::rounds(&Recorded(events.clone())).unwrap().remove(0);
+        let n = events.len();
+        events.push(RunEvent {
+            id: EventId::new(100 + i64::try_from(n).unwrap()),
+            kind: EventKind::AgentEvalFinished.into(),
+            payload: finished(&round, &cases(), None),
+            ..events[0].clone()
+        });
+        let store = Recorded(events);
+        let evals = AgentEvals::new(&store, &user, &StaticPolicy);
+        let listed = evals.list(Some("demo"), 20, true).unwrap();
+        assert_eq!(listed["evals"][0]["requested_launch"], written);
+        assert_eq!(listed["evals"][0]["launch"], written);
+        assert_eq!(listed["by_launch"][0]["launch"], written);
+        assert_eq!(
+            listed["by_launch"][0]["rounds"][0]["requested_launch"],
+            written
+        );
+        let shown = evals.show(100).unwrap();
+        assert_eq!(shown["request"]["launch"], written);
+        assert_eq!(shown["launch"], written);
     }
 
     /// A production set of the queue's side is chosen whole by `--set`,
@@ -926,6 +1164,9 @@ mod tests {
         fn eval_events(&self) -> Result<Vec<RunEvent>> {
             Ok(self.0.clone())
         }
+        fn launch_settings(&self, _: &str) -> Result<Option<LaunchSettings>> {
+            Ok(None)
+        }
     }
 
     /// A launch's `model` and `effort`; `None` records no launch's keys
@@ -962,6 +1203,7 @@ mod tests {
                     run_id: None,
                     before_landing: false,
                     definition_commit: None,
+                    launch: crate::domain::actor_model::AgentModel::default(),
                 }
                 .record(),
             ),

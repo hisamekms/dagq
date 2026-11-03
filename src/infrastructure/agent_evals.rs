@@ -8,7 +8,9 @@ use serde_json::Value;
 
 use crate::application::EventStore;
 use crate::application::agent_cases::CaseSetStore;
-use crate::application::agent_eval::EvalStore;
+use std::path::Path;
+
+use crate::application::agent_eval::{EvalStore, LaunchSettings};
 use crate::domain::agent_eval::production;
 use crate::domain::agent_eval::record::KINDS;
 use crate::domain::{EventId, EventKind, RunEvent};
@@ -26,6 +28,22 @@ impl EvalStore for SqliteQueue {
         let every = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
         EventStore::events_of_between(self, &kinds, EventId::new(0), upto, every)
     }
+
+    fn launch_settings(&self, agent: &str) -> Result<Option<LaunchSettings>> {
+        bound_launch_settings(self.repository_binding()?.as_deref(), agent)
+    }
+}
+
+/// What the `dagq.toml` in the main checkout of the repository whose Git
+/// common directory is `binding` gives `agent`'s launch; none for a queue
+/// bound to no repository or one whose checkout is not found.
+pub fn bound_launch_settings(binding: Option<&str>, agent: &str) -> Result<Option<LaunchSettings>> {
+    let Some(checkout) = binding.and_then(|common_dir| {
+        crate::infrastructure::adapters::main_checkout_from_files(Path::new(common_dir))
+    }) else {
+        return Ok(None);
+    };
+    crate::infrastructure::run_env::load_eval_launch_settings(&checkout, agent).map(Some)
 }
 
 impl CaseSetStore for SqliteQueue {

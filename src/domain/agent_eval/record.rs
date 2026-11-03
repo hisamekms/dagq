@@ -45,6 +45,7 @@ use serde_json::{Value, json};
 use super::Split;
 use super::programs::CaseCheck;
 use super::round::{RoundKey, RunCost, Waiting, held_out};
+use crate::domain::actor_model::AgentModel;
 use crate::domain::tokens::TokenUsage;
 use crate::domain::{EventKind, Provider, RecordedKind};
 
@@ -106,11 +107,18 @@ pub struct Request {
     /// the landing branch's cases. `None` reads the definition from the
     /// landing branch's commit, as the cases are.
     pub definition_commit: Option<String>,
+    /// `--provider`, `--model` and `--effort`: what a dev round's runs
+    /// start with over the agent's table in `dagq.toml`
+    /// ([`super::round::requested_launch`]); none written (the default)
+    /// starts them as the agent's review job does. Recorded as `launch`
+    /// only when written, and refused for a held-out round
+    /// ([`super::round::launch_refusal`]).
+    pub launch: AgentModel,
 }
 
 impl Request {
     pub fn record(&self) -> Value {
-        json!({
+        let mut value = json!({
             "agent": self.agent,
             "split": self.split.as_str(),
             "k": self.k,
@@ -122,7 +130,15 @@ impl Request {
             "run_id": self.run_id,
             "before_landing": self.before_landing,
             "definition_commit": self.definition_commit,
-        })
+        });
+        if self.launch.written() {
+            value["launch"] = json!({
+                "provider": self.launch.provider,
+                "model": self.launch.model,
+                "effort": self.launch.effort,
+            });
+        }
+        value
     }
 
     pub fn read(payload: &Value) -> Option<Self> {
@@ -146,7 +162,18 @@ impl Request {
             run_id: text("run_id"),
             before_landing: payload["before_landing"].as_bool().unwrap_or(false),
             definition_commit: text("definition_commit"),
+            launch: read_launch(&payload["launch"]),
         })
+    }
+}
+
+/// The launch a request's `launch` writes; none for a request without one.
+fn read_launch(value: &Value) -> AgentModel {
+    let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+    AgentModel {
+        provider: text("provider").and_then(|name| name.parse().ok()),
+        model: text("model"),
+        effort: text("effort"),
     }
 }
 
@@ -670,8 +697,36 @@ mod tests {
             run_id: None,
             before_landing: false,
             definition_commit: None,
+            launch: crate::domain::actor_model::AgentModel::default(),
         }
         .record()
+    }
+
+    /// A request's launch over the agent's table reads back as it was
+    /// written, each value alone; one that writes none records no `launch`
+    /// and reads as none, as an older request does.
+    #[test]
+    fn a_requests_launch_is_recorded_only_when_written_and_read_back() {
+        let plain = request("demo", Split::Dev);
+        assert!(plain.get("launch").is_none());
+        assert_eq!(Request::read(&plain).unwrap().launch, AgentModel::default());
+        for launch in [
+            AgentModel {
+                provider: Some(Provider::Codex),
+                model: Some("gpt-5.5".into()),
+                effort: Some("high".into()),
+            },
+            AgentModel {
+                effort: Some("low".into()),
+                ..AgentModel::default()
+            },
+        ] {
+            let mut asked = Request::read(&plain).unwrap();
+            asked.launch = launch.clone();
+            let recorded = asked.record();
+            assert_eq!(recorded["launch"]["effort"], json!(launch.effort));
+            assert_eq!(Request::read(&recorded).unwrap(), asked);
+        }
     }
 
     fn started(eval: i64, provider: &str, digest: &str) -> Value {
@@ -911,6 +966,7 @@ mod tests {
             run_id: Some("r1".into()),
             before_landing: false,
             definition_commit: Some("abc".into()),
+            launch: crate::domain::actor_model::AgentModel::default(),
         };
         assert_eq!(Request::read(&request.record()), Some(request));
     }
