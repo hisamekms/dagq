@@ -129,6 +129,20 @@ required_jobs = ["fmt / test / clippy / coverage", "linux build / test"]
 # scheduled_workflows を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 3807 を含んでから足した。
 scheduled_workflows = ["it-budget.yml"]
 
+# [[ci_watch.freshness]] は workflow の最新の成功した実行の時刻から古さを測り、上限の warn_before_hours 前に inbox へ attention を出して
+# workflow_dispatch で 1 回作り直させる（ADR-t3924-1、ci-watch.md の「成果物の古さ」。書式は infrastructure::ci_freshness_config の doc comment）。
+# it-coverage-map.yml は着地の検証が IT を絞る対応表（artifact it-coverage-map）を作る。10/30・10/31 の定時の実行が runner の brownout で
+# cancelled になり、表が 48 時間を超えて IT 全件に落ちたのに約 12 時間誰も気づかなかった（request 209、goal 244）。
+# max_age_hours は scripts/landing-it.py の古い表の境（STALE_TABLE_AGE）と同じ 48 で、超えると表に無い分を広げる IT が増え着地が遅くなる。
+# warn_before_hours の 12 は、日に 1 回の定時の実行が 1 回成功しなくても、上限の前に作り直しの 1 本（job の timeout は 150 分）が走り終わる幅。
+# 定時の周期を縮めたらこの幅の根拠も見直す。
+# workflow のファイル名を変えたらここも合わせる。
+# [[ci_watch.freshness]] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 3924 を含んでから足した。
+[[ci_watch.freshness]]
+workflow = "it-coverage-map.yml"
+max_age_hours = 48
+warn_before_hours = 12
+
 [landing_verification]
 # 着地の検証で、task の coverage の関門のコマンドを unit test 全件と影響範囲で絞った IT に置き換える（ADR-t1925-1、task 1927、goal 157 の段 3b）。
 # 置き換えと env の受け渡しは runtime（domain::landing_verification の doc comment）、IT の選び方・表の cache・閾値などの値は scripts/landing-it.sh と
