@@ -148,23 +148,19 @@ impl Supervisor<'_> {
             None => self.replan_inheritance(run, run_dir),
         }
     }
-    /// The decisions of a person on the earlier runs of `run`'s task that
-    /// never reached a session, from the run just before it when a retry
-    /// ended that one, and further back past each run whose session took no
-    /// prompt in (ADR-t4018-1, [`PreviousDecisions::of_runs`]); an answer
-    /// recorded before its event carried the text gets the ask's answer,
-    /// and one that cannot be read fails the prompt, and so the run's
-    /// provisioning, rather than start it without the decision.
-    /// Whether or not `run` carries a branch over.
+    /// The decisions of a person on the run of `run`'s task that ended
+    /// just before it, sent to its session or not, and further back past
+    /// each run whose session took no prompt in (ADR-t4018-1, ADR-t4027-1,
+    /// [`PreviousDecisions::of_runs`]), whether or not `run` carries a
+    /// branch over and whatever started it
+    /// ([`crate::domain::unapplied_decisions::ended_runs_before`]); an
+    /// answer recorded before its event carried the text gets the ask's
+    /// answer, a `stalled` ask's is judged again with its options, and one
+    /// that cannot be read fails the prompt, and so the run's provisioning,
+    /// rather than start it without the decision.
     fn previous_decisions(&mut self, run: &TaskRun) -> Result<Option<PreviousDecisions>> {
         let runs = self.queue.show(run.task_id())?.runs;
-        let earlier: Vec<&TaskRun> = runs
-            .iter()
-            .take_while(|other| other.id() != run.id())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+        let earlier = crate::domain::unapplied_decisions::ended_runs_before(&runs, run.id());
         let events = earlier
             .iter()
             .map(|earlier| self.queue.run_events(earlier.id()))
@@ -177,10 +173,13 @@ impl Supervisor<'_> {
         let queue = &self.queue;
         // An answer kept on its ask must be read: a run is not started
         // with a person's decision it could not read.
-        PreviousDecisions::of_runs(&pairs, &mut |ask| {
-            crate::application::prompt::kept_answer(
-                &queue.read_ask(crate::domain::AskId::new(ask))?,
-            )
+        PreviousDecisions::of_runs(&pairs, &mut |decision| {
+            let Some(id) = decision.ask_id else {
+                return Ok(true);
+            };
+            let ask = queue.read_ask(crate::domain::AskId::new(id))?;
+            let answer = crate::application::prompt::kept_answer(&ask)?;
+            Ok(complete_from_ask(decision, answer.as_deref(), &ask.options))
         })
     }
     /// What `run` inherits from `previous`, a retry that carried its branch

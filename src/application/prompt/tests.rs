@@ -8633,11 +8633,11 @@ fn previous_decisions(
     PreviousDecisions {
         run_id: RunId::new(RUN).unwrap(),
         task_id: TaskId::new(7),
-        retry: RetryEnd {
+        retry: Some(RetryEnd {
             inherit,
             by,
             reason: "the person sent it back in ask 1424".into(),
-        },
+        }),
         decisions: texts
             .iter()
             .enumerate()
@@ -8723,7 +8723,7 @@ fn a_retried_runs_prompt_carries_the_previous_runs_unapplied_decisions() {
         }
         assert!(
             text.contains(&format!(
-                "- ask 1424 (approve_landing, 2026-11-02T11:50:00Z, run {RUN})"
+                "- ask 1424 (approve_landing, 2026-11-02T11:50:00Z, run {RUN}, never sent to a session)"
             )),
             "{text}"
         );
@@ -8773,8 +8773,8 @@ fn a_retried_runs_prompt_carries_the_previous_runs_unapplied_decisions() {
         .unwrap()
         .text
     );
-    // A previous run whose decisions all reached its session, or that no
-    // retry ended, gives none.
+    // A previous run's decisions are handed over whether they reached its
+    // session or not, and whether a retry ended it or not.
     let event = |kind: &str, payload: serde_json::Value| crate::domain::RunEvent {
         id: crate::domain::EventId::new(0),
         task_id: None,
@@ -8792,18 +8792,140 @@ fn a_retried_runs_prompt_carries_the_previous_runs_unapplied_decisions() {
     let retried = event("triage_finished", json!({"action": "retry"}));
     let previous = run(7, RunStatus::Failed, None);
     assert!(PreviousDecisions::of(&previous, &[sent_back.clone(), retried.clone()]).is_some());
+    let delivered = PreviousDecisions::of(
+        &previous,
+        &[
+            sent_back.clone(),
+            event("resume_request_sent", json!({})),
+            retried,
+        ],
+    )
+    .unwrap();
+    assert!(delivered.decisions[0].delivered);
+    let bare = PreviousDecisions::of(&previous, std::slice::from_ref(&sent_back)).unwrap();
+    assert!(bare.retry.is_none());
+    assert_eq!(bare.decisions.len(), 1);
+    // A previous run with no decision and no job's reason gives none.
     assert!(
         PreviousDecisions::of(
             &previous,
-            &[
-                sent_back.clone(),
-                event("resume_request_sent", json!({})),
-                retried
-            ]
+            &[event("triage_finished", json!({"action": "retry"}))]
         )
         .is_none()
     );
-    assert!(PreviousDecisions::of(&previous, &[sent_back]).is_none());
+}
+
+/// The previous run's section holds every decision a person made on it,
+/// those sent to its session as well as those never sent, each with its
+/// ask id, its text and the mark of whether it was sent, the never sent
+/// first (ADR-t4027-1 widening ADR-t4018-1): read from the run's events, a
+/// `worker_question` answer delivered by `ask_delivered` and a `send_back`
+/// a resume's request carried come after a `decide` answer and a later
+/// `send_back` no session took. A previous run no retry ended (a person's
+/// bare `ready`) gets the same section. Without a decision there is none.
+#[test]
+fn the_previous_runs_section_holds_its_decisions_sent_or_not_the_unsent_first() {
+    let event = |kind: &str, payload: serde_json::Value| crate::domain::RunEvent {
+        id: crate::domain::EventId::new(0),
+        task_id: None,
+        goal_id: None,
+        run_id: Some(RunId::new(RUN).unwrap()),
+        kind: kind.into(),
+        payload,
+        created_at: "2026-11-02T11:50:00Z".into(),
+        actor: None,
+    };
+    let events = [
+        event(
+            "ask_opened",
+            json!({"ask_id": 1414, "kind": "worker_question"}),
+        ),
+        event(
+            "ask_answered",
+            json!({"ask_id": 1414, "kind": "worker_question", "answer": "use the second option", "authority": "person"}),
+        ),
+        event("ask_delivered", json!({"ask_id": 1414})),
+        event(
+            "landing_decided",
+            json!({"code": "sent_back", "ask_id": 1418, "reason": "drop the new flag"}),
+        ),
+        event("resume_request_sent", json!({})),
+        event("ask_opened", json!({"ask_id": 1420, "kind": "decide"})),
+        event(
+            "ask_answered",
+            json!({"ask_id": 1420, "kind": "decide", "answer": "retry: from the ADR", "authority": "person"}),
+        ),
+        event(
+            "landing_decided",
+            json!({"code": "sent_back", "ask_id": 1424, "reason": "keep the old flag"}),
+        ),
+    ];
+    let previous = run(7, RunStatus::Failed, None);
+    let decisions = PreviousDecisions::of(&previous, &events).unwrap();
+    assert!(decisions.retry.is_none());
+    let got: Vec<(Option<i64>, bool)> = decisions
+        .decisions
+        .iter()
+        .map(|d| (d.ask_id, d.delivered))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Some(1420), false),
+            (Some(1424), false),
+            (Some(1414), true),
+            (Some(1418), true),
+        ]
+    );
+    let verified = verified_task(7, "work", TaskStatus::InProgress, Vec::new());
+    let own_run = run(7, RunStatus::Claimed, None);
+    let fitted = prompt_after(
+        &verified,
+        &own_run,
+        None,
+        &[],
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        Some(&decisions),
+    )
+    .unwrap();
+    let text = &fitted.text;
+    assert!(
+        text.contains(&format!(
+            "Decisions a person made on run {RUN}, the previous run of this task (it ended, and this run starts a new session"
+        )),
+        "{text}"
+    );
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle} is not in\n{text}"))
+    };
+    let lines = [
+        format!(
+            "- ask 1420 (decide, 2026-11-02T11:50:00Z, run {RUN}, never sent to a session), the answer to the decide ask:\nretry: from the ADR\n"
+        ),
+        format!(
+            "- ask 1424 (approve_landing, 2026-11-02T11:50:00Z, run {RUN}, never sent to a session), the landing's send_back, its reason:\nkeep the old flag\n"
+        ),
+        format!(
+            "- ask 1414 (worker_question, 2026-11-02T11:50:00Z, run {RUN}, sent to the earlier session), the answer to the worker's question:\nuse the second option\n"
+        ),
+        format!(
+            "- ask 1418 (approve_landing, 2026-11-02T11:50:00Z, run {RUN}, sent to the earlier session), the landing's send_back, its reason:\ndrop the new flag\n"
+        ),
+    ];
+    let places: Vec<usize> = lines.iter().map(|line| at(line)).collect();
+    assert!(places.windows(2).all(|w| w[0] < w[1]), "{places:?}\n{text}");
+    assert!(
+        fitted.bytes.over_limit.is_none(),
+        "{:?}",
+        fitted.bytes.over_limit
+    );
+    // No decision and no job's reason: no section.
+    assert!(PreviousDecisions::of(&previous, &events[..1]).is_none());
 }
 
 /// The section of a person's decisions is never left out and holds to its
@@ -8830,7 +8952,23 @@ fn many_long_decisions_keep_the_section_within_its_limit_naming_how_to_read_them
             long.as_str(),
         )
     }));
-    let decisions = previous_decisions(RetriedBy::RecoveryJob, false, &texts);
+    let mut decisions = previous_decisions(RetriedBy::RecoveryJob, false, &texts);
+    // Those sent to the earlier session are held to the same limit and
+    // come after those never sent.
+    let sent: Vec<PersonDecision> = decisions
+        .decisions
+        .iter()
+        .skip(1)
+        .step_by(3)
+        .map(|d| PersonDecision {
+            delivered: true,
+            ..d.clone()
+        })
+        .collect();
+    decisions
+        .decisions
+        .retain(|d| (d.ask_id.unwrap() - 1425) % 3 != 0);
+    decisions.decisions.extend(sent);
     let fitted = prompt_after(
         &task,
         &own_run,
@@ -8873,6 +9011,11 @@ fn many_long_decisions_keep_the_section_within_its_limit_naming_how_to_read_them
         "{section}"
     );
     assert!(section.contains("- ask 1723 ("), "{section}");
+    // Those never sent fill the limit before any sent one.
+    assert!(
+        !section.contains("sent to the earlier session)"),
+        "{section}"
+    );
     assert!(
         section.contains("decisions left out by this section's limit: ask "),
         "{section}"
@@ -8892,7 +9035,8 @@ fn many_long_decisions_keep_the_section_within_its_limit_naming_how_to_read_them
 /// each run before it whose own prompt never reached a session: a run
 /// whose wrapper was launched but whose first turn did not succeed, or
 /// that failed before it started, passes them on; a run that took its
-/// prompt in, or that no retry ended, stops the search. An answer recorded
+/// prompt in stops the search, whether a retry ended any of them or not.
+/// An answer recorded
 /// before its event carried the text gets the ask's answer, and the
 /// command that prints it is the read of the asks.
 #[test]
@@ -8955,11 +9099,12 @@ fn decisions_pass_over_runs_whose_sessions_never_took_their_prompt_in() {
         ),
     ];
     let mut asked = Vec::new();
-    let mut answer_of = |ask: i64| {
-        asked.push(ask);
-        Ok(Some(
-            "retry: the first run's send_back still holds".to_owned(),
-        ))
+    let mut answer_of = |decision: &mut PersonDecision| {
+        asked.push(decision.ask_id.unwrap());
+        if decision.text.is_empty() {
+            decision.text = "retry: the first run's send_back still holds".to_owned();
+        }
+        Ok(true)
     };
     let decisions = PreviousDecisions::of_runs(
         &[(&n1, n1_events.as_slice()), (&n, n_events.as_slice())],
@@ -9010,11 +9155,13 @@ fn decisions_pass_over_runs_whose_sessions_never_took_their_prompt_in() {
         "{text}"
     );
     assert!(
-        text.contains("and earlier runs whose sessions never took them in"),
+        text.contains("and earlier runs whose sessions never took their prompts in"),
         "{text}"
     );
     assert!(
-        text.contains(&format!("- ask 1424 (approve_landing, , run {first})")),
+        text.contains(&format!(
+            "- ask 1424 (approve_landing, , run {first}, never sent to a session)"
+        )),
         "{text}"
     );
     // A launched wrapper alone passes them on too.
@@ -9024,7 +9171,7 @@ fn decisions_pass_over_runs_whose_sessions_never_took_their_prompt_in() {
     ];
     let passed = PreviousDecisions::of_runs(
         &[(&n1, launched_only.as_slice()), (&n, n_events.as_slice())],
-        &mut |_| Ok(None),
+        &mut |_| Ok(true),
     )
     .unwrap()
     .unwrap();
@@ -9039,7 +9186,7 @@ fn decisions_pass_over_runs_whose_sessions_never_took_their_prompt_in() {
     assert!(
         PreviousDecisions::of_runs(
             &[(&n1, took.as_slice()), (&n, n_events.as_slice())],
-            &mut |_| Ok(None)
+            &mut |_| Ok(true)
         )
         .unwrap()
         .is_none()
@@ -9048,7 +9195,7 @@ fn decisions_pass_over_runs_whose_sessions_never_took_their_prompt_in() {
     // that no run starts without it.
     let failed = PreviousDecisions::of_runs(
         &[(&n1, n1_events.as_slice()), (&n, n_events.as_slice())],
-        &mut |_| Err(anyhow::anyhow!("the queue could not be read")),
+        &mut |_: &mut PersonDecision| Err(anyhow::anyhow!("the queue could not be read")),
     )
     .unwrap_err();
     let failed = format!("{failed:#}");
@@ -9070,15 +9217,22 @@ fn decisions_pass_over_runs_whose_sessions_never_took_their_prompt_in() {
         none.contains("ask 1500 is answered but holds no answer"),
         "{none}"
     );
-    // A run no retry ended stops the search.
+    // A run no retry ended (started again by a person's bare `ready` or a
+    // hold's `retry_fresh`) passes them on as well: no retry is looked for.
     let ended = vec![event(second, "wrapper_launched", json!({}))];
+    let passed = PreviousDecisions::of_runs(
+        &[(&n1, ended.as_slice()), (&n, n_events.as_slice())],
+        &mut |_| Ok(true),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(passed.retry.is_none());
+    assert_eq!(passed.decisions[0].text, "keep the flag");
+    // The task's first run has no run before it.
     assert!(
-        PreviousDecisions::of_runs(
-            &[(&n1, ended.as_slice()), (&n, n_events.as_slice())],
-            &mut |_| Ok(None)
-        )
-        .unwrap()
-        .is_none()
+        PreviousDecisions::of_runs(&[], &mut |_| Ok(true))
+            .unwrap()
+            .is_none()
     );
 }
 

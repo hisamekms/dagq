@@ -21,6 +21,7 @@ mod already_satisfied;
 mod ci_freshness;
 mod fresh_session_decisions;
 mod main_log;
+mod previous_run_decisions;
 mod provider_trial;
 mod review_launch;
 mod task_release;

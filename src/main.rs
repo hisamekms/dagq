@@ -7605,11 +7605,11 @@ mod tests {
         let decisions = PreviousDecisions {
             run_id: RunId::new("00000000-0000-4000-8000-000000000001").unwrap(),
             task_id: TaskId::new(3976),
-            retry: RetryEnd {
+            retry: Some(RetryEnd {
                 inherit: true,
                 by: RetriedBy::RecoveryJob,
                 reason: String::new(),
-            },
+            }),
             decisions: Vec::new(),
         };
         for kind in [

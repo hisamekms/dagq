@@ -6,8 +6,8 @@ use super::*;
 use crate::domain::{
     local_checks::LocalChecks,
     unapplied_decisions::{
-        DecisionKind, PersonDecision, RetriedBy, RetryEnd, prompt_delivered, retry_end,
-        unapplied_decisions,
+        DecisionKind, PersonDecision, RetriedBy, RetryEnd, previous_run_decisions,
+        prompt_delivered, retry_end, undelivered_first,
     },
 };
 
@@ -318,17 +318,20 @@ impl Inheritance {
     }
 }
 
-/// A person's decisions on the earlier runs of the task that never reached
-/// a session (ADR-t4018-1), with the retry that ended the run just before
-/// this one: the prompt's section a worker must follow.
+/// A person's decisions on the run of the task just before this one, sent
+/// to its session or not (ADR-t4018-1, widened to the delivered ones by
+/// ADR-t4027-1), with the retry that ended that run if one did: the
+/// prompt's section a worker must follow.
 #[derive(Debug, Clone, Serialize)]
 pub struct PreviousDecisions {
     /// The run just before this one.
     pub run_id: RunId,
     pub task_id: TaskId,
-    /// The retry that ended it.
-    pub retry: RetryEnd,
-    /// Oldest first, each naming the run it was made on.
+    /// The retry that ended it; `None` when none did (this run was started
+    /// by a person's bare `ready` or a hold's `retry_fresh`).
+    pub retry: Option<RetryEnd>,
+    /// Those that never reached a session first, each part oldest first,
+    /// each naming the run it was made on.
     pub decisions: Vec<PersonDecision>,
 }
 
@@ -337,46 +340,48 @@ impl PreviousDecisions {
     /// with its `events` ([`Self::of_runs`] of that run alone, the answers
     /// recorded without their text left as they are).
     pub fn of(previous: &TaskRun, events: &[RunEvent]) -> Option<Self> {
-        Self::of_runs(&[(previous, events)], &mut |_| Ok(None))
+        Self::of_runs(&[(previous, events)], &mut |_| Ok(true))
             .ok()
             .flatten()
     }
 
-    /// The decisions to hand to the next run of a task, given its earlier
-    /// runs newest first with their events (`earlier`): from the run just
-    /// before it, when a retry (`retry` or `retry_inherit`, by anyone) ended
-    /// it, each decision of a person that never reached its session
-    /// ([`unapplied_decisions`]); and, while the run looked at took no
-    /// prompt into a session ([`prompt_delivered`]), so that its own prompt
-    /// carried them to nobody, those of the run before it too, as long as a
-    /// retry ended that one. An answer whose event holds no text gets the
-    /// ask's answer from `answer_of` (`None`: not looked up, and its text
-    /// stays unrecorded); a failure to read it is this function's, so that
-    /// no prompt goes without a text that is kept. `None` when there is no
-    /// decision and no recovery job's reason to hand over
-    /// ([`Self::job_reason`]).
+    /// The decisions to hand to the next run of a task, given the runs of
+    /// the task that ended before it, newest first, with their events
+    /// (`earlier`, as [`crate::domain::unapplied_decisions::ended_runs_before`]
+    /// finds them, so the first is the run just before it however it was
+    /// started): every decision of a person on that run, reached its
+    /// session or not ([`previous_run_decisions`]); and, while the run
+    /// looked at took no prompt into a session ([`prompt_delivered`]), so
+    /// that its own prompt carried them to nobody, those of the run before
+    /// it too. Those that never reached a session come first over all the
+    /// runs ([`undelivered_first`]), each part oldest first. `complete` is
+    /// given each answer whose event holds no text and each `stalled` ask's
+    /// instruction, to fill it from its ask and judge it again
+    /// ([`crate::domain::unapplied_decisions::complete_from_ask`]); `false`
+    /// drops it, and a failure to read the ask is this function's, so that
+    /// no prompt goes without a text that is kept. `None` for the task's
+    /// first run, and when there is no decision and no recovery job's
+    /// reason to hand over ([`Self::job_reason`]).
     pub fn of_runs(
         earlier: &[(&TaskRun, &[RunEvent])],
-        answer_of: &mut dyn FnMut(i64) -> Result<Option<String>>,
+        complete: &mut dyn FnMut(&mut PersonDecision) -> Result<bool>,
     ) -> Result<Option<Self>> {
-        let mut latest: Option<(&TaskRun, RetryEnd)> = None;
+        let Some((previous, previous_events)) = earlier.first() else {
+            return Ok(None);
+        };
         let mut decisions: Vec<PersonDecision> = Vec::new();
-        for (run, events) in earlier {
-            let Some(retry) = retry_end(events) else {
-                break;
-            };
-            if latest.is_none() {
-                latest = Some((run, retry));
-            }
-            let mut own = unapplied_decisions(events);
-            for decision in &mut own {
-                if decision.text.is_empty()
-                    && let Some(ask) = decision.ask_id
-                    && let Some(answer) = answer_of(ask)
+        for (_, events) in earlier {
+            let mut own = Vec::new();
+            for mut decision in previous_run_decisions(events) {
+                let needs_ask =
+                    decision.text.is_empty() || decision.kind == DecisionKind::StalledInstruction;
+                if let Some(ask) = decision.ask_id.filter(|_| needs_ask)
+                    && !complete(&mut decision)
                         .with_context(|| format!("the answer of ask {ask} could not be read"))?
                 {
-                    decision.text = answer.trim().to_owned();
+                    continue;
                 }
+                own.push(decision);
             }
             own.append(&mut decisions);
             decisions = own;
@@ -384,13 +389,11 @@ impl PreviousDecisions {
                 break;
             }
         }
-        let Some((run, retry)) = latest else {
-            return Ok(None);
-        };
+        undelivered_first(&mut decisions);
         let previous = Self {
-            run_id: run.id().clone(),
-            task_id: run.task_id(),
-            retry,
+            run_id: previous.id().clone(),
+            task_id: previous.task_id(),
+            retry: retry_end(previous_events),
             decisions,
         };
         Ok((!previous.decisions.is_empty() || previous.job_reason().is_some()).then_some(previous))
@@ -400,10 +403,9 @@ impl PreviousDecisions {
     /// which the prompt hands over with or without a person's decision (a
     /// retry that carried one over says it in the carried-over section).
     pub fn job_reason(&self) -> Option<&str> {
-        (matches!(self.retry.by, RetriedBy::RecoveryJob)
-            && !self.retry.inherit
-            && !self.retry.reason.is_empty())
-        .then_some(self.retry.reason.as_str())
+        let retry = self.retry.as_ref()?;
+        (matches!(retry.by, RetriedBy::RecoveryJob) && !retry.inherit && !retry.reason.is_empty())
+            .then_some(retry.reason.as_str())
     }
 
     /// How a worker reads the whole text of a decision cut or left out by
@@ -457,8 +459,8 @@ pub const ASKS_READ_COMMAND: &str = "dagq asks --all";
 
 /// The section on [`PreviousDecisions`]: never left out of the prompt and
 /// held to its own limit. Each text is cut past [`WORKER_DECISION_BYTES`];
-/// the lines are kept within [`WORKER_DECISIONS_BYTES`], the send_backs
-/// first and then the answers, the newest first; those left out are
+/// the lines are kept within [`WORKER_DECISIONS_BYTES`] in the order
+/// [`person_decision_lines`] keeps them (those never sent first); those left out are
 /// counted, named by their asks up to the note's limit, and readable all
 /// with the commands it names (each prints every decision of its kind of
 /// the task); a cut or a left-out line is said in `over_limit`. Without a
@@ -504,32 +506,32 @@ pub(super) fn decisions_section(fit: &mut Fit, previous: Option<&PreviousDecisio
 /// The lines of [`decisions_section`] on a person's decisions: its heading,
 /// the lines kept and the note of those left out.
 fn decision_lines(fit: &mut Fit, previous: &PreviousDecisions) -> String {
-    let retried = match &previous.retry.by {
-        RetriedBy::RuntimeOnConflicts => {
+    let ended = match previous.retry.as_ref().map(|retry| &retry.by) {
+        Some(RetriedBy::RuntimeOnConflicts) => {
             "the runtime retried it after its resumes were used up on conflicts".to_owned()
         }
-        RetriedBy::RecoveryJob => "the recovery job retried it".to_owned(),
-        RetriedBy::ByHand(by) => format!("{by} retried it by hand"),
-        RetriedBy::Answer => "a person's answer to the recovery's ask retried it".to_owned(),
+        Some(RetriedBy::RecoveryJob) => "the recovery job retried it".to_owned(),
+        Some(RetriedBy::ByHand(by)) => format!("{by} retried it by hand"),
+        Some(RetriedBy::Answer) => "a person's answer to the recovery's ask retried it".to_owned(),
+        None => "it ended".to_owned(),
     };
     let earlier = if previous
         .decisions
         .iter()
         .any(|d| d.run_id.as_ref().is_some_and(|run| *run != previous.run_id))
     {
-        " and earlier runs whose sessions never took them in"
+        " and earlier runs whose sessions never took their prompts in"
     } else {
         ""
     };
     let mut text = format!(
-        "Decisions a person made on run {run}, the previous run of this task{earlier}, that never reached its session ({retried}, and this run starts a new session). They are a person's decisions: follow each of them, over that run's receipt and its work where they differ:\n",
+        "Decisions a person made on run {run}, the previous run of this task{earlier} ({ended}, and this run starts a new session, so none of them is in your conversation, not even one sent to that run's session; those never sent to a session come first). They are a person's decisions: follow each of them, over that run's receipt and its work where they differ:\n",
         run = previous.run_id,
     );
     text.push_str(&person_decision_lines(
         fit,
         previous.task_id,
         &previous.decisions,
-        false,
     ));
     text
 }
@@ -542,22 +544,18 @@ fn ask_of(decision: &PersonDecision) -> String {
         .map_or_else(|| "an ask".to_owned(), |id| format!("ask {id}"))
 }
 
-/// The lines of a section of a person's `decisions` on `task` (oldest
-/// first), held to that section's own limit as ADR-t4018-1 decision 2 sets
+/// The lines of a section of a person's `decisions` on `task` (in the
+/// order given), held to that section's own limit as ADR-t4018-1 decision 2 sets
 /// it (ADR-t4027-1 holds the handoff's to the same): each text cut past
 /// [`WORKER_DECISION_BYTES`] naming its ask and its read; the lines kept
-/// within [`WORKER_DECISIONS_BYTES`], the send_backs first and then the
+/// within [`WORKER_DECISIONS_BYTES`], those that never reached a session
+/// before those that did, in each the send_backs first and then the
 /// answers, the newest first; those left out counted, named by their asks
 /// up to the note's limit, and readable all with the commands it names
 /// (each prints every decision of its kind of the task); a cut or a
-/// left-out line said in `over_limit`. With `delivered`, each line says
-/// whether a record shows it reached the session.
-fn person_decision_lines(
-    fit: &mut Fit,
-    task: TaskId,
-    decisions: &[PersonDecision],
-    delivered: bool,
-) -> String {
+/// left-out line said in `over_limit`. Each line says whether a record
+/// shows it reached a session.
+fn person_decision_lines(fit: &mut Fit, task: TaskId, decisions: &[PersonDecision]) -> String {
     let mut text = String::new();
     let lines: Vec<(String, bool)> = decisions
         .iter()
@@ -583,10 +581,10 @@ fn person_decision_lines(
                 .as_ref()
                 .map(|run| format!(", run {run}"))
                 .unwrap_or_default();
-            let reached = match (delivered, decision.delivered) {
-                (false, _) => "",
-                (true, true) => ", sent to the earlier session",
-                (true, false) => ", never sent to a session",
+            let reached = if decision.delivered {
+                ", sent to the earlier session"
+            } else {
+                ", never sent to a session"
             };
             (
                 format!(
@@ -598,12 +596,17 @@ fn person_decision_lines(
             )
         })
         .collect();
-    let newest = |kind_first: bool| {
-        (0..decisions.len())
-            .rev()
-            .filter(move |i| (decisions[*i].kind == DecisionKind::SendBack) == kind_first)
+    let newest = |delivered: bool, send_back: bool| {
+        (0..decisions.len()).rev().filter(move |i| {
+            decisions[*i].delivered == delivered
+                && (decisions[*i].kind == DecisionKind::SendBack) == send_back
+        })
     };
-    let order: Vec<usize> = newest(true).chain(newest(false)).collect();
+    let order: Vec<usize> = newest(false, true)
+        .chain(newest(false, false))
+        .chain(newest(true, true))
+        .chain(newest(true, false))
+        .collect();
     let (kept, left_out) = picked_lines(
         fit,
         "decisions",
@@ -1201,7 +1204,7 @@ fn handoff_decisions_section(
     let mut text = format!(
         "\n\nDecisions a person made on this run, which this new session did not see: they are a person's decisions, so follow each of them, over the work so far and the receipt where they differ.{request_note}\n"
     );
-    text.push_str(&person_decision_lines(fit, run.task_id(), &shown, true));
+    text.push_str(&person_decision_lines(fit, run.task_id(), &shown));
     fit.section("decisions", &text);
     text
 }
@@ -1648,8 +1651,8 @@ pub fn prompt(
     )
 }
 
-/// [`prompt`] of a run whose task's previous run a retry ended with
-/// `decisions` of a person that never reached its session: their section
+/// [`prompt`] of a run whose task's previous run holds `decisions` of a
+/// person, sent to its session or not ([`PreviousDecisions`]): their section
 /// ([`decisions_section`]) follows the declared paths, before the goal.
 #[allow(clippy::too_many_arguments)]
 pub fn prompt_after(
@@ -2005,11 +2008,11 @@ pub fn worker_template(provider: Provider) -> Result<String> {
     let decisions = PreviousDecisions {
         run_id: run.id().clone(),
         task_id: task.id(),
-        retry: RetryEnd {
+        retry: Some(RetryEnd {
             inherit: true,
             by: RetriedBy::RecoveryJob,
             reason: value("job reason"),
-        },
+        }),
         decisions: vec![PersonDecision {
             ask_id: Some(1),
             kind: DecisionKind::SendBack,

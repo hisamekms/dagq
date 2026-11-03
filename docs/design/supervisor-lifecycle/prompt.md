@@ -118,8 +118,8 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
   省いた依存元と切ったsummaryは着地のcommitのmessageをgitで読ませ、切ったgoalの記述はgoalのdocで読ませる（docが無いgoalは読む方法が無いと書く）。
   どこにも無いもの（兄弟task、taskの記述の切った残り、引き継いだrunのreceiptのsummaryと人か復旧jobが引き継いだ理由と復旧jobの`retry`の理由の切った残り）は読む方法が無いと書く。
   上限に当たらない入力では節は全文のまま載り、省いたことの注記は載らない。
-- 前のrunの届かなかった人の判断（[ADR-t4018-1](../../adr/2026-11-02-t4018-1-worker-prompt-carries-unapplied-person-decisions-of-the-previous-run.md)）: 入口は`domain::unapplied_decisions`と`PreviousDecisions`。
-  retry・retry_inheritで終わった前のrunにsessionへ送った記録の無い人の判断があれば、誰のretryでも、新しいrunのpromptが必ず従う判断として本文のまま入れる。
+- 前のrunの人の判断（[ADR-t4018-1](../../adr/2026-11-02-t4018-1-worker-prompt-carries-unapplied-person-decisions-of-the-previous-run.md)）: 入口は`domain::unapplied_decisions`と`PreviousDecisions`。
+  taskの直前に終わったrunの人の判断は、新しいrunがどう始まっても（誰のretryでも、素の`ready`やholdの解除でも）、sessionに届いたかを添えて全部、新しいrunのpromptが必ず従う判断として本文のまま入れる。
   落とし穴: `resume_started`も`wrapper_launched`も届いた印にならない（その後の起動や送信が失敗しうる）。
   この節は必須の節で、判断の数に依らず自分の上限に収め、切った本文と外した判断に限りaskのidと`dagq`の読むコマンドを名指す（上の読む範囲の例外）。
   同じ例外は新しいsessionの引き継ぎの人の判断の節にも当たる（ADR-t4027-1）。

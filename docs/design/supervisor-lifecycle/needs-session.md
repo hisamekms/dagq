@@ -185,7 +185,7 @@ holdの開いたtaskの`needs_session`のrunはresumeせず、使い切ったres
 再開の候補の列から外して`hold_deferred`に残し、resumeの開始・skip・使い切りの確定の中でもholdを確かめ直す。
 slotで工程が走っていたrunは、その工程の終わりで再計画と同じ保留を通って`needs_session`（`hold_parked`）になり、sessionとworktreeを残す（[非対話のworker](headless-worker.md#再計画の保留)）。
 保留の時にturnが始まっていなかった回答は、同じrunをresumeする解除（`task_hold::release_decision`が`Resume`を返すもの）に限り解除の後のresumeの依頼に載せ、保留より前の承認とreviewのpassは、そのresumeの後の着地に使わない。
-runを終えて新しいrunを始める解除（`release_decision`の`RetryInherit`・`RetryFresh`）では、届いていない答えは終えたrunに残り、新しいrunの依頼には載らない。
+runを終えて新しいrunを始める解除（`release_decision`の`RetryInherit`・`RetryFresh`）では、届いていない答えはresumeの依頼に載らず、そのうち人の判断は新しいrunのpromptの前のrunの判断の節に入る（[Prompt](prompt.md#workerのprompt)）。
 同じproviderで続く解除は印を外すだけで、次のpassが今のresumeの経路（`begin_resume`。大きなcontextからの新しいsessionの判定もそこで効く）で続ける。
 runを終える解除は2つに分かれる（`task_hold::ends_run`）。
 止まっていない待ちのrun（`needs_session`など）は、別のproviderを指定した解除か、sessionの無いrun（providerが会話を見つけないと言った後に、答えたturnも名指したsessionも途中で切れたturnも無い。wrapperの起動だけでは無いまま）の解除で終わり、sessionの無いことでrunを終えるのはこの場合に限る。

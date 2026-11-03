@@ -1,25 +1,24 @@
 //! A person's decisions on a run, with whether each reached its session:
 //! the `send_back` of its landing, the answers to its `worker_question` and
 //! `decide` asks (ADR-t4018-1), and the instructions answered to its
-//! `stalled` asks (ADR-t4027-1). A retry (`retry`, `retry_inherit`, by the
-//! runtime, the recovery job or a person's `ready --inherit`) would lose
-//! those that never reached the session ([`unapplied_decisions`]), since the
-//! next run starts a new session; a new session of the same run
-//! (`[fresh_session]`) would lose them all with the conversation
-//! ([`run_decisions`]). Whether one reached the session is judged by the
-//! records of sending it only: a `send_back` by a `resume_request_sent`
-//! after it (the resume's request went to the session), an answer by an
-//! `ask_delivered` naming its ask, a `stalled` ask's instruction by the
-//! `turn_requested` that names its ask ([`stalled_answer_what`]) or its
-//! `stall_resolved` (`answered_instruction`). A record that could not be
-//! written counts as not sent, so a decision is handed over twice rather
-//! than lost.
+//! `stalled` asks (ADR-t4027-1). The next run of its task starts a new
+//! session, however it was started, so it would lose them all
+//! ([`previous_run_decisions`] of the run [`ended_runs_before`] finds), and
+//! a new session of the same run (`[fresh_session]`) would lose them all
+//! with the conversation ([`run_decisions`]). Whether one reached the
+//! session is judged by the records of sending it only: a `send_back` by a
+//! `resume_request_sent` after it (the resume's request went to the
+//! session), an answer by an `ask_delivered` naming its ask, a `stalled`
+//! ask's instruction by the `turn_requested` that names its ask
+//! ([`stalled_answer_what`]) or its `stall_resolved`
+//! (`answered_instruction`). A record that could not be written counts as
+//! not sent, so a decision is handed over twice rather than lost.
 
 use serde::Serialize;
 
 use super::{
     EventKind, ReasonCode, RunEvent, RunId,
-    run::{AskOpened, restore_payload},
+    run::{AskOpened, TaskRun, restore_payload},
 };
 
 /// What kind of a person's decision it is.
@@ -151,14 +150,43 @@ const NO_INSTRUCTION: [&str; 3] = [
 ];
 
 /// The decisions of a person on the run of `events` (oldest first) that
-/// never reached its session, of the kinds a retry hands over
-/// (ADR-t4018-1: no `stalled` ask's instruction), in the order they were
-/// recorded ([`decisions`]).
-pub fn unapplied_decisions(events: &[RunEvent]) -> Vec<PersonDecision> {
+/// the next run of its task is handed: every one, reached its session or
+/// not, since the next run starts a new session and one sent to the earlier
+/// session is no more in its conversation than one never sent; those that
+/// never reached it first, each part in the order they were recorded
+/// ([`decisions`]), each with the mark of whether it reached it.
+pub fn previous_run_decisions(events: &[RunEvent]) -> Vec<PersonDecision> {
     let events: Vec<&RunEvent> = events.iter().collect();
-    decisions(&events)
-        .into_iter()
-        .filter(|d| !d.delivered && d.kind != DecisionKind::StalledInstruction)
+    let mut decisions = decisions(&events);
+    undelivered_first(&mut decisions);
+    decisions
+}
+
+/// `decisions` reordered so that those that never reached a session come
+/// first, each part keeping its order.
+pub fn undelivered_first(decisions: &mut [PersonDecision]) {
+    decisions.sort_by_key(|decision| decision.delivered);
+}
+
+/// The runs of a task that ended before `run`, the newest first, out of
+/// the task's `runs` in the order the queue lists them (oldest first): the
+/// first is the run just before `run`, the one whose person's decisions
+/// its prompt carries ([`previous_run_decisions`]). No record of a retry is
+/// read, so the run before is found the same however `run` was started: a
+/// `retry` or `retry_inherit` by the runtime, the recovery job or a
+/// person's `ready --inherit`, a person's bare `ready`, or the `retry_fresh`
+/// of a hold's release. A run still unfinished is no ended run and is
+/// skipped (a task has one at a time, so only `run` itself could be);
+/// those listed after `run` are left out. Empty for the task's first run.
+pub fn ended_runs_before<'r>(runs: &'r [TaskRun], run: &RunId) -> Vec<&'r TaskRun> {
+    let before = runs
+        .iter()
+        .position(|other| other.id() == run)
+        .unwrap_or(runs.len());
+    runs[..before]
+        .iter()
+        .filter(|other| !other.status().is_unfinished())
+        .rev()
         .collect()
 }
 
@@ -398,6 +426,15 @@ mod tests {
         }
     }
 
+    /// The decisions of [`previous_run_decisions`] that never reached the
+    /// session, of the kinds ADR-t4018-1 named first.
+    fn unapplied(events: &[RunEvent]) -> Vec<PersonDecision> {
+        previous_run_decisions(events)
+            .into_iter()
+            .filter(|d| !d.delivered && d.kind != DecisionKind::StalledInstruction)
+            .collect()
+    }
+
     fn sent_back(reason: &str) -> RunEvent {
         event(
             "landing_decided",
@@ -429,7 +466,7 @@ mod tests {
             event("triage_finished", json!({"action": "retry_inherit"})),
         ];
         assert_eq!(
-            unapplied_decisions(&events),
+            unapplied(&events),
             [PersonDecision {
                 ask_id: Some(1424),
                 kind: DecisionKind::SendBack,
@@ -452,7 +489,7 @@ mod tests {
             event("resume_finished", json!({"outcome": "failed"})),
             event("triage_finished", json!({"action": "retry_inherit"})),
         ];
-        let decisions = unapplied_decisions(&events);
+        let decisions = unapplied(&events);
         assert_eq!(decisions.len(), 1, "{decisions:?}");
         assert_eq!(decisions[0].text, "keep the old flag");
     }
@@ -466,10 +503,10 @@ mod tests {
             event("resume_started", json!({})),
             event("resume_request_sent", json!({"head": "abc"})),
         ];
-        assert!(unapplied_decisions(&events).is_empty());
+        assert!(unapplied(&events).is_empty());
         let mut later = events.to_vec();
         later.push(sent_back("second"));
-        let decisions = unapplied_decisions(&later);
+        let decisions = unapplied(&later);
         assert_eq!(decisions.len(), 1, "{decisions:?}");
         assert_eq!(decisions[0].text, "second");
     }
@@ -496,7 +533,7 @@ mod tests {
             asked(11, "approve_close"),
             answered(11, "approve_close", "close"),
         ];
-        let decisions = unapplied_decisions(&events);
+        let decisions = unapplied(&events);
         let got: Vec<(Option<i64>, DecisionKind, &str)> = decisions
             .iter()
             .map(|d| (d.ask_id, d.kind, d.text.as_str()))
@@ -570,7 +607,7 @@ mod tests {
                 json!({"ask_id": 7, "kind": "worker_question", "authority": "person"}),
             ),
         ];
-        let decisions = unapplied_decisions(&events);
+        let decisions = unapplied(&events);
         assert_eq!(decisions.len(), 1, "{decisions:?}");
         assert_eq!(decisions[0].text, "");
         assert!(!decisions[0].in_event);
@@ -812,19 +849,98 @@ mod tests {
         assert_eq!(answer[0].text, "yes");
     }
 
-    /// A retry hands over no `stalled` ask's instruction (ADR-t4018-1's
-    /// kinds), and none that was delivered.
+    /// The next run is handed every decision on the run before it, sent
+    /// to its session or not, with the mark of which, those never sent
+    /// first and each part in the order recorded: a `stalled` ask's
+    /// instruction too.
     #[test]
-    fn unapplied_decisions_keep_their_kinds() {
+    fn the_next_run_is_handed_every_decision_the_undelivered_first() {
         let mut events = stalled_answer(5, "go on").to_vec();
         events.extend([
             asked(7, "worker_question"),
             answered(7, "worker_question", "x"),
+            event("ask_delivered", json!({"ask_id": 7, "workspace_id": "w"})),
+            sent_back("keep the flag"),
+            asked(8, "decide"),
+            answered(8, "decide", "retry"),
         ]);
-        let decisions = unapplied_decisions(&events);
-        assert_eq!(decisions.len(), 1, "{decisions:?}");
-        assert_eq!(decisions[0].kind, DecisionKind::WorkerQuestion);
-        assert!(!decisions[0].delivered);
+        let got: Vec<(Option<i64>, DecisionKind, bool)> = previous_run_decisions(&events)
+            .iter()
+            .map(|d| (d.ask_id, d.kind, d.delivered))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (Some(5), DecisionKind::StalledInstruction, false),
+                (Some(1424), DecisionKind::SendBack, false),
+                (Some(8), DecisionKind::Decide, false),
+                (Some(7), DecisionKind::WorkerQuestion, true),
+            ]
+        );
+    }
+
+    /// A task's runs as the queue lists them: ids `a`, `b`, ... in turn,
+    /// each in its status.
+    fn task_runs(statuses: &[super::super::RunStatus]) -> Vec<TaskRun> {
+        statuses
+            .iter()
+            .enumerate()
+            .map(|(at, status)| {
+                TaskRun::restore(super::super::RunRecord {
+                    id: RunId::new(format!("run-{at}")).unwrap(),
+                    task_id: super::super::TaskId::new(7),
+                    status: *status,
+                    requested_provider: super::super::Provider::Claude,
+                    actual_provider: super::super::Provider::Claude,
+                    worker_mode: super::super::worker::WorkerMode::Headless,
+                    base_commit: super::super::CommitSha::parse(
+                        "0123456789abcdef0123456789abcdef01234567",
+                        "base commit",
+                    )
+                    .unwrap(),
+                    branch: None,
+                    worktree_path: None,
+                    workspace_id: None,
+                    receipt_path: None,
+                    log_path: None,
+                    result_commit: None,
+                    repo_path: None,
+                    run_dir: None,
+                    last_error: None,
+                    workspace_closed_at: None,
+                    created_at: format!("2026-11-0{}T00:00:00Z", at + 1),
+                })
+                .unwrap()
+            })
+            .collect()
+    }
+
+    /// The run before a new one is the task's run that ended just before
+    /// it, however the new run was started (a retry or `retry_inherit` by
+    /// the runtime, the recovery job or a person's `ready --inherit`, a
+    /// person's bare `ready`, a hold's `retry_fresh`): no record of a retry
+    /// is read, so the previous run's own end does not matter either. The
+    /// task's first run has none.
+    #[test]
+    fn the_run_before_is_the_one_that_ended_just_before_however_the_new_one_started() {
+        use super::super::RunStatus::{Claimed, Failed, Interrupted, Replaced, Succeeded};
+        for ended in [Failed, Interrupted, Succeeded, Replaced] {
+            let runs = task_runs(&[Failed, ended, Claimed]);
+            let found: Vec<&RunId> = ended_runs_before(&runs, runs[2].id())
+                .iter()
+                .map(|r| r.id())
+                .collect();
+            assert_eq!(found, [runs[1].id(), runs[0].id()], "{ended:?}");
+        }
+        let first = task_runs(&[Claimed]);
+        assert!(ended_runs_before(&first, first[0].id()).is_empty());
+        // Runs listed after it are no runs before it.
+        let runs = task_runs(&[Failed, Claimed, Failed]);
+        let found: Vec<&RunId> = ended_runs_before(&runs, runs[1].id())
+            .iter()
+            .map(|r| r.id())
+            .collect();
+        assert_eq!(found, [runs[0].id()]);
     }
 
     /// Only a turn that succeeded shows the prompt reached a session: a

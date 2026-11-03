@@ -326,7 +326,9 @@ fn decisions_pass_over_a_run_that_failed_before_its_session_took_them_in() {
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!("run {first}), the landing's send_back")),
+        prompt.contains(&format!(
+            "run {first}, never sent to a session), the landing's send_back"
+        )),
         "{prompt}"
     );
     assert!(
@@ -335,7 +337,7 @@ fn decisions_pass_over_a_run_that_failed_before_its_session_took_them_in() {
     );
     assert!(
         prompt.contains(&format!(
-            "run {second}), the answer to the decide ask:\n{ANSWER}\n"
+            "run {second}, never sent to a session), the answer to the decide ask:\n{ANSWER}\n"
         )),
         "{prompt}"
     );
