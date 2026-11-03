@@ -79,6 +79,7 @@ pub mod setup_review;
 pub(crate) mod sql_dialect;
 pub mod sql_ids;
 pub mod sqlite;
+pub mod startup_reads;
 mod stranded;
 mod task_holds;
 pub mod telemetry;

@@ -489,6 +489,21 @@ impl QueueService<'_> {
         peer: Peer,
         process: Option<u32>,
     ) -> ServiceResponse {
+        self.handle_noting_role(request, peer, process, &mut None)
+    }
+
+    /// [`Self::handle_from_process`], telling in `role` the role of the
+    /// principal the request was authenticated as (left `None` for a
+    /// request refused before, and for `hello`, which needs none): what a
+    /// record of the requests names its caller by, never what it is
+    /// answered by.
+    pub fn handle_noting_role(
+        &self,
+        request: &ServiceRequest,
+        peer: Peer,
+        process: Option<u32>,
+        role: &mut Option<ActorRole>,
+    ) -> ServiceResponse {
         if !answers(request.api_version) {
             return ServiceResponse::failure(
                 ServiceErrorCode::ApiVersionMismatch,
@@ -525,6 +540,7 @@ impl QueueService<'_> {
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
+        *role = Some(principal.role);
         // A repository queue answers only the repository it is bound to,
         // as the command line refused every command of another, and only
         // to a principal it knows.

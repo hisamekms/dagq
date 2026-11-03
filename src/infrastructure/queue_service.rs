@@ -3141,6 +3141,12 @@ accepts: schema {} to {}",
         migrated: migrated.map(serde_json::to_value).transpose()?,
     })?;
     info!(pid, socket = %socket.display(), "the queue service listens");
+    // What it answers in its first minutes, and its memory then.
+    let reads = Arc::new(super::startup_reads::StartupReads::open(
+        &queue_dir,
+        options.generators.clock.clone(),
+        Box::new(super::startup_reads::OwnMemory),
+    ));
     let backend = Arc::new(SqliteServiceBackend {
         db: options.db.clone(),
         queue_dir: queue_dir.clone(),
@@ -3166,6 +3172,7 @@ accepts: schema {} to {}",
         if options.stop.load(Ordering::SeqCst) {
             break "stopped";
         }
+        reads.tick();
         if checked.elapsed() >= QUEUE_CHECK {
             checked = Instant::now();
             if !options.db.is_file() {
@@ -3179,8 +3186,9 @@ accepts: schema {} to {}",
             Ok((stream, _)) => {
                 served += 1;
                 let backend = backend.clone();
+                let reads = reads.clone();
                 thread::spawn(move || {
-                    if let Err(error) = answer(stream, &*backend, pid) {
+                    if let Err(error) = answer(stream, &*backend, pid, &reads) {
                         warn!("a queue service connection failed: {error:#}");
                     }
                 });
@@ -3195,6 +3203,7 @@ accepts: schema {} to {}",
             }
         }
     };
+    reads.stopped(outcome);
     // The tokens asked to go as it stops go before the lock is let go, so a
     // supervisor that waits for the stop finds them gone.
     let revoked = backend
@@ -3254,8 +3263,14 @@ fn wait_for_connection(listener: &UnixListener, poll: Duration) {
     unsafe { libc::poll(&raw mut fd, 1, millis) };
 }
 
-/// Read one request from `stream`, answer it, and close.
-fn answer(stream: UnixStream, backend: &dyn ServiceBackend, pid: u32) -> Result<()> {
+/// Read one request from `stream`, answer it, and close; in the
+/// service's first minutes, record what it read in `reads`.
+fn answer(
+    stream: UnixStream,
+    backend: &dyn ServiceBackend,
+    pid: u32,
+    reads: &super::startup_reads::StartupReads,
+) -> Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
@@ -3263,19 +3278,46 @@ fn answer(stream: UnixStream, backend: &dyn ServiceBackend, pid: u32) -> Result<
     BufReader::new(stream.try_clone()?)
         .take(MAX_REQUEST_BYTES as u64 + 1)
         .read_until(b'\n', &mut line)?;
+    let out = answer_request(
+        &line,
+        &QueueService {
+            backend,
+            build: crate::VERSION,
+            pid,
+        },
+        (peer_of(&stream), peer_pid(&stream)),
+        reads,
+    )?;
+    (&stream).write_all(&out)?;
+    Ok(())
+}
+
+/// The answer's line to the request's `line` from `peer`, by `service`;
+/// recorded in `reads` while its window is open. The record never changes
+/// the answer.
+fn answer_request(
+    line: &[u8],
+    service: &QueueService<'_>,
+    (peer, process): (Peer, Option<u32>),
+    reads: &super::startup_reads::StartupReads,
+) -> Result<Vec<u8>> {
+    let began = reads.begin();
     let mut use_case = None;
+    let mut op = None;
+    let mut role = None;
     let response = if line.len() > MAX_REQUEST_BYTES {
         ServiceResponse::failure(ServiceErrorCode::BadRequest, "the request is too long")
     } else {
-        match serde_json::from_slice::<ServiceRequest>(&line) {
+        match serde_json::from_slice::<ServiceRequest>(line) {
             Ok(request) => {
                 use_case = Some(request.use_case);
-                QueueService {
-                    backend,
-                    build: crate::VERSION,
-                    pid,
+                if began.is_some() {
+                    op = super::startup_reads::Answered::op_of(
+                        request.use_case.as_str(),
+                        &request.params,
+                    );
                 }
-                .handle_from_process(&request, peer_of(&stream), peer_pid(&stream))
+                service.handle_noting_role(&request, peer, process, &mut role)
             }
             Err(error) => ServiceResponse::failure(
                 ServiceErrorCode::BadRequest,
@@ -3283,8 +3325,20 @@ fn answer(stream: UnixStream, backend: &dyn ServiceBackend, pid: u32) -> Result<
             ),
         }
     };
-    (&stream).write_all(&answer_line(&response, use_case)?)?;
-    Ok(())
+    let (out, built) = answer_line(&response, use_case)?;
+    if let Some(began) = began {
+        reads.answered(
+            began,
+            &super::startup_reads::Answered {
+                use_case: use_case.map(|use_case| use_case.as_str().to_owned()),
+                op,
+                role: role.map(|role| role.as_str().to_owned()),
+                bytes: built,
+                rows: super::startup_reads::Answered::rows_of(response.result.as_ref()),
+            },
+        );
+    }
+    Ok(out)
 }
 
 /// Whether the peer of `stream` runs as the service's own OS user, by the
@@ -3381,10 +3435,12 @@ fn peer_uid(stream: &UnixStream) -> Option<libc::uid_t> {
 
 /// `response` to `use_case` as the line the service writes, or, when that
 /// is longer than [`MAX_ANSWER_BYTES`], its `response_too_large` (a client
-/// would read only a part of it).
-fn answer_line(response: &ServiceResponse, use_case: Option<UseCase>) -> Result<Vec<u8>> {
+/// would read only a part of it); with the length of the line the service
+/// built, before one past the limit is swapped.
+fn answer_line(response: &ServiceResponse, use_case: Option<UseCase>) -> Result<(Vec<u8>, usize)> {
     let mut out = serde_json::to_vec(response)?;
     out.push(b'\n');
+    let built = out.len();
     if out.len() > MAX_ANSWER_BYTES {
         warn!(
             bytes = out.len(),
@@ -3393,7 +3449,7 @@ fn answer_line(response: &ServiceResponse, use_case: Option<UseCase>) -> Result<
         out = serde_json::to_vec(&ServiceResponse::too_large(use_case, out.len()))?;
         out.push(b'\n');
     }
-    Ok(out)
+    Ok((out, built))
 }
 
 /// The queue the service's use cases run on: a fresh connection to the
@@ -5635,23 +5691,159 @@ mod tests {
         assert_eq!(failure.code, "request_too_large", "{failure}");
     }
 
+    /// The record of the service's first requests never changes an
+    /// answer: a request is answered the same whether it is recorded, its
+    /// line cannot be written and the memory cannot be read, or the window
+    /// is over; a recorded one names its use case and the bytes of the
+    /// answer written, and past the window no line is written.
+    #[test]
+    fn the_record_of_the_first_requests_changes_no_answer() {
+        use super::super::startup_reads::{MemoryReading, ResidentMemory, StartupReads};
+        use std::io::{self, Write};
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("disk full"))
+            }
+        }
+        struct Memory(Option<u64>);
+        impl ResidentMemory for Memory {
+            fn read(&self) -> MemoryReading {
+                MemoryReading {
+                    resident: self.0,
+                    peak: self.0,
+                }
+            }
+        }
+        struct Still;
+        impl crate::application::Clock for Still {
+            fn system_time(&self) -> std::time::SystemTime {
+                std::time::UNIX_EPOCH + Duration::from_secs(1_000)
+            }
+            fn monotonic(&self) -> Instant {
+                static AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+                *AT.get_or_init(Instant::now)
+            }
+        }
+        let clock: Arc<dyn crate::application::Clock> = Arc::new(Still);
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SqliteServiceBackend {
+            db: dir.path().join("queue.db"),
+            queue_dir: dir.path().to_path_buf(),
+            generators: Generators {
+                clock: clock.clone(),
+                ids: Arc::new(super::super::clock::UuidGenerator),
+            },
+            reads: Arc::new(|_, _, _| bail!("no reads here")),
+            writes: Arc::new(|_, _, _| bail!("no writes here")),
+            detail: |_, _| Value::Null,
+            commands: Arc::new(|_, _, _| bail!("no commands here")),
+            at_stop: None,
+            stands_for: None,
+            doctor: None,
+        };
+        let service = QueueService {
+            backend: &backend,
+            build: "test-build",
+            pid: 7,
+        };
+        let hello = serde_json::to_vec(&ServiceRequest {
+            api_version: API_VERSION,
+            token: None,
+            env_role: None,
+            queue: None,
+            binding: None,
+            use_case: UseCase::Hello,
+            params: json!({}),
+        })
+        .unwrap();
+        let requests: [&[u8]; 2] = [&hello, b"not a request\n"];
+        let recorded = Buffer::default();
+        let records = [
+            StartupReads::new(
+                Some(Box::new(recorded.clone())),
+                clock.clone(),
+                Box::new(Memory(Some(5))),
+                Duration::from_secs(600),
+            ),
+            StartupReads::new(
+                Some(Box::new(Broken)),
+                clock.clone(),
+                Box::new(Memory(None)),
+                Duration::from_secs(600),
+            ),
+            StartupReads::new(None, clock.clone(), Box::new(Memory(None)), Duration::ZERO),
+        ];
+        for request in requests {
+            let answers: Vec<_> = records
+                .iter()
+                .map(|reads| answer_request(request, &service, (Peer::Other, None), reads).unwrap())
+                .collect();
+            assert!(answers.iter().all(|answer| *answer == answers[0]));
+        }
+        let lines: Vec<Value> = String::from_utf8(recorded.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let answered = answer_request(&hello, &service, (Peer::Other, None), &records[2]).unwrap();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[1]["use_case"], "hello");
+        assert_eq!(lines[1]["op"], Value::Null);
+        assert_eq!(lines[1]["role"], Value::Null);
+        assert_eq!(lines[1]["bytes"], answered.len());
+        assert_eq!(lines[1]["resident_after"], 5);
+        assert_eq!(lines[2]["use_case"], Value::Null);
+        // Past its window a record writes no line.
+        let over = Buffer::default();
+        let reads = StartupReads::new(
+            Some(Box::new(over.clone())),
+            clock,
+            Box::new(Memory(Some(5))),
+            Duration::ZERO,
+        );
+        answer_request(&hello, &service, (Peer::Other, None), &reads).unwrap();
+        let text = String::from_utf8(over.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert!(
+            text.lines().all(|line| !line.contains("\"request\"")),
+            "{text}"
+        );
+    }
+
     #[test]
     fn an_answer_past_the_limit_is_written_and_read_as_response_too_large() {
         // The service writes an answer within the limit as it is, and one
         // past it as its refusal, with its size and how to narrow the read.
         let small = ServiceResponse::success(json!({"events": []}));
-        let line = answer_line(&small, Some(UseCase::Events)).unwrap();
+        let (line, built) = answer_line(&small, Some(UseCase::Events)).unwrap();
+        assert_eq!(built, line.len());
         assert_eq!(
             line,
             [serde_json::to_vec(&small).unwrap(), b"\n".to_vec()].concat()
         );
         let large = ServiceResponse::success(json!("x".repeat(MAX_ANSWER_BYTES)));
-        let line = answer_line(&large, Some(UseCase::Events)).unwrap();
+        let (line, built) = answer_line(&large, Some(UseCase::Events)).unwrap();
         assert!(line.len() < MAX_ANSWER_BYTES);
         let refusal: ServiceResponse = serde_json::from_slice(&line).unwrap();
         let error = refusal.error.unwrap();
         assert_eq!(error.code, ServiceErrorCode::ResponseTooLarge);
         let size = serde_json::to_vec(&large).unwrap().len() + 1;
+        assert_eq!(built, size);
         assert!(
             error.message.contains(&format!("is {size} bytes")),
             "{}",

@@ -44,6 +44,27 @@ fn rows(store: &dyn LedgerQueue) -> Vec<LedgerRow> {
         .collect()
 }
 
+/// The lines of the queue service's record of its first requests
+/// (`logs/service-<time>-<pid>.jsonl` beside the queue at `db`).
+fn service_records(db: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_dir(db.parent().unwrap().join("logs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("service-") && name.ends_with(".jsonl"))
+        })
+        .flat_map(|path| {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Two passes at `now_ms` and an hour later, the second with `retain`.
 fn passes(store: &dyn LedgerQueue, now_ms: i64, retain: Retain) -> (Built, Built) {
     let mut builder = Builder::default();
@@ -70,8 +91,11 @@ fn passes(store: &dyn LedgerQueue, now_ms: i64, retain: Retain) -> (Built, Built
 /// queue's and the node's rows and removes the node rows and the steps past their retention as the
 /// same passes on the queue's own connection do, while this process
 /// refuses to open the queue. A write over a row another writer wrote
-/// since it was read writes nothing. Once the service stops, the pass fails
-/// as out of reach, still without opening the queue, and writes nothing.
+/// since it was read writes nothing. The service records each of these
+/// reads of its first minutes with the operation, the supervisor's role
+/// and the bytes of its answer, and its summary as it stops. Once the
+/// service stops, the pass fails as out of reach, still without opening
+/// the queue, and writes nothing.
 #[test]
 fn the_ledger_is_built_only_through_the_service_as_on_the_queues_own_connection() {
     let (fixture, repo, db) = fixture();
@@ -281,11 +305,41 @@ fn the_ledger_is_built_only_through_the_service_as_on_the_queues_own_connection(
         )
         .unwrap();
     assert_eq!(page.as_array().map(Vec::len), Some(1), "{page}");
+    // The service recorded the reads it forwarded, by their operation.
+    let page_read = service_records(&db)
+        .into_iter()
+        .rfind(|line| line["record"] == "request" && line["op"] == "ledger_rows")
+        .expect("the ledger's read of the rows is recorded");
+    assert_eq!(
+        (&page_read["use_case"], &page_read["role"]),
+        (
+            &serde_json::json!("supervisor"),
+            &serde_json::json!("supervisor")
+        ),
+        "{page_read}"
+    );
+    assert!(page_read["bytes"].as_u64().unwrap() > 0, "{page_read}");
+    assert_eq!(page_read["rows"], 1, "{page_read}");
     // What the supervisor does not send is refused on its side.
     let error = store.write_ledger_row(&over).unwrap_err();
     assert!(format!("{error:#}").contains("no operation"), "{error:#}");
 
     drop(served);
+    let summary = service_records(&db)
+        .into_iter()
+        .find(|line| line["record"] == "summary")
+        .expect("the service's stop writes the summary");
+    assert_eq!(summary["reason"], "stopped", "{summary}");
+    assert!(
+        summary["top_by_bytes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["op"]
+                .as_str()
+                .is_some_and(|op| op.starts_with("ledger_"))),
+        "{summary}"
+    );
     let mut builder = Builder::default();
     let lost = build_pass(
         &*store,

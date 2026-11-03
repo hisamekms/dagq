@@ -73,6 +73,10 @@ hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候
 - 対処:
   - OSのprocess（fseventsdなど）が候補のときは、人がhostでそのprocessを再起動する。fseventsdはlaunchdが起こし直すので`sudo killall fseventsd`で、それで直らなければOSを再起動する。再起動の前と後の`host/metrics`の`swap_used_mb`（と`vm.swapusage`）を比べ、下がればそれが原因と確かめ、下がらなければ次の候補を見る。
   - `dagq supervise`が大きいときは、数時間の`footprint`の推移を取り、増え続けるならinboxがrequestで修正を頼む。
+- queue serviceの起動の直後のピーク:
+  - serviceは起動から決まった間、受けた要求ごとの読みの量と自分のRSSをqueue dirの`logs/service-<UTC時刻>-<pid>.jsonl`に書き、間の終わりか止まったときに要約の行（`"record":"summary"`）を1行書く（項目と間の長さは`infrastructure::startup_reads`のmodule doc）。
+  - `jq -c 'select(.record == "summary") | {at, max_resident, max_resident_at, peak, top: [.top_by_bytes[] | {use_case, op, role, bytes, rows}]}' <queue dir>/logs/service-*.jsonl`で、起動ごとにRSSの最大とその時刻、bytesの多い上位の要求を読む。どの要求がピークの時刻に重なったかは、その時刻の前後の`"record":"request"`の行（`resident_before`・`resident_after`）で見る。
+  - ある着地の前と後を比べるときは、その着地を入れた自動更新の前の起動のfileと後の起動のfileの要約を並べ、`max_resident`と上位の要求の`op`・`bytes`の違いを見る。比べた結果は、その着地の目的のgoalかtaskのnoteに残す。
 
 ## containerのmachineの資源（`host.toml`）
 

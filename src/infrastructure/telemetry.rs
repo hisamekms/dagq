@@ -223,7 +223,7 @@ pub fn prune_logs(log_dir: &Path, now: SystemTime, retention: Duration) -> Vec<P
 /// `supervisor-<unix time>-<pid>.log`, or an update job's
 /// `update-<unix time>-<commit>.{log,build.log,e2e.log,json}` (no pid), or
 /// the e2e gate's log of an `install`, `install-<unix time>.e2e.log`.
-fn log_file_owner(name: &str) -> Option<Option<u32>> {
+pub(crate) fn log_file_owner(name: &str) -> Option<Option<u32>> {
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
     if let Some(stem) = name.strip_suffix(".jsonl") {
         let (rest, pid) = stem.rsplit_once('-')?;
@@ -484,7 +484,7 @@ pub fn timestamp(at: SystemTime) -> String {
 }
 
 /// `20260924T010203Z`, for file names.
-fn file_stamp(at: SystemTime) -> String {
+pub(crate) fn file_stamp(at: SystemTime) -> String {
     let (date, time) = civil(at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
     format!("{}T{}Z", date.replace('-', ""), time.replace(':', ""))
 }

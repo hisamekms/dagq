@@ -57,10 +57,12 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 1つの接続に1つの要求で、要求は1行のJSON、答えも1行のJSONで、答えた後に閉じる。
 上限を超える答え（`MAX_ANSWER_BYTES`）はserviceが`response_too_large`（ADR-t1233-5）、要求（`MAX_REQUEST_BYTES`）はsocketのclientが`request_too_large`で断る。
 supervisorはどちらでもpassを止めず、育つ読み取りは区切る。
-`events_of_between`はlimitが件数の上限`MAX_EVENTS_OF_BETWEEN`（2000件、根拠はdoc comment）を超えればstoreを読む前に`bad_request`で断り、supervisorはその件数以下のページで読む。
+`events_of_between`は件数の上限`MAX_EVENTS_OF_BETWEEN`を超えるlimitをstoreを読む前に`bad_request`で断る（ページの読みはdoc comment）。
 `infrastructure/agent_evals.rs`の全件の読みはSQLiteを直接読み、serviceの答えを作らないのでこの断りの対象外。
 transactionはserviceの中で完結し、クライアントとの往復で分けない（ADR-t1233-1決定3）。
 要求ごとにDBへの接続を開き、principalのactorで書く（eventの`actor`は呼び出し元のprincipal）。
+起動直後の要求ごとの読みとRSSの記録は`startup_reads::StartupReads`。
+記録は起動から決まった間だけ、書き込みの失敗もRSSの読めなさも答えと認可を変えない。
 
 ## API versionと互換
 
@@ -104,7 +106,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め（token�
 - 断り: 認証できない要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（tokenの値は書かない）に残す（理由は`QueueService::authenticate`のdoc comment）。
 - hostの呼び出し元に渡すenvはsocketのpathとtokenのfileのpathで、containerのrunにはsocketの代わりにbrokerのURLを渡す（[クライアントモード](#クライアントモード)、`domain::queue_service::CLIENT_ENV`）。
   envの名前の落とし穴は`CREDENTIAL_FILE_ENV`のdoc comment
-- host構成では同じユーザーのプロセスが他のrunのtokenのfileもDBも読めるので、tokenは誤りを止めるもので、security boundaryではない（ADR-t1233-4決定5、[Security](security.md#host実行は助言的advisory)）
+- hostではtokenは誤りを止めるもので、security boundaryではない（ADR-t1233-4決定5、[Security](security.md#host実行は助言的advisory)）
 
 ## ユースケース
 
