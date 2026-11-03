@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 
 use super::{
@@ -279,7 +279,7 @@ fn in_batches<T>(
         }
         let start = (index * ROWS_PER_TRANSACTION).min(items.len());
         let end = (start + ROWS_PER_TRANSACTION).min(items.len());
-        let tx = queue.write_tx(name, TransactionBehavior::Immediate)?;
+        let tx = queue.write_tx(name)?;
         write(&tx, &items[start..end], index + 1 == batches)?;
         tx.commit()?;
     }

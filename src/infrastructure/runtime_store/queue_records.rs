@@ -40,7 +40,7 @@ impl SqliteQueue {
         ) else {
             bail!("report_written needs a period and a label");
         };
-        let tx = self.write_tx("record_report_written", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_report_written")?;
         let recorded: bool = tx.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
@@ -75,7 +75,7 @@ impl SqliteQueue {
         payload: serde_json::Value,
         previous: Option<EventId>,
     ) -> Result<Option<EventId>> {
-        let tx = self.write_tx("forecast_snapshot", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("forecast_snapshot")?;
         let latest: Option<EventId> = tx.query_row(
             "SELECT MAX(id) FROM run_events WHERE kind=?1",
             [FORECAST_RECORDED],

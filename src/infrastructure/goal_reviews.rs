@@ -6,7 +6,7 @@ use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::write_rules::{check_at_least, check_non_blank};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -347,10 +347,7 @@ impl GoalReviewStore for SqliteQueue {
         let now = self.generators.clock.now();
         // Read transcripts before taking the write lock, as in begin/finish.
         let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None, false))?;
-        let tx = self.write_tx(
-            "interrupt_goal_reviews_for_handoff",
-            TransactionBehavior::Immediate,
-        )?;
+        let tx = self.write_tx("interrupt_goal_reviews_for_handoff")?;
         let unfinished: Vec<i64> = tx
             .prepare(
                 "SELECT id FROM goal_reviews WHERE supervisor_token=?1 AND finished_at IS NULL",
@@ -388,7 +385,7 @@ impl GoalReviewStore for SqliteQueue {
         let now = self.generators.clock.now();
         // The spans it closes read their transcripts first (task 543).
         let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None, true))?;
-        let tx = self.write_tx("begin_goal_review", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("begin_goal_review")?;
         type Unfinished = (i64, LeaseToken, Option<u32>, Option<i64>);
         let unfinished: Vec<Unfinished> = tx
             .prepare(
@@ -507,7 +504,7 @@ impl GoalReviewStore for SqliteQueue {
             &self.conn,
             sessions::Closing::GoalReviews(Some(job.id), false),
         )?;
-        let tx = self.write_tx("finish_goal_review", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("finish_goal_review")?;
         if !running(&tx, job, token)? {
             return Ok(GoalReviewApplied {
                 stale: true,
@@ -628,7 +625,7 @@ impl GoalReviewStore for SqliteQueue {
             &self.conn,
             sessions::Closing::GoalReviews(Some(job.id), false),
         )?;
-        let tx = self.write_tx("fail_goal_review", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("fail_goal_review")?;
         if !running(&tx, job, token)? {
             return Ok(());
         }
@@ -679,7 +676,7 @@ impl GoalReviewStore for SqliteQueue {
     fn decide_goal(&mut self, ask_id: AskId) -> Result<Option<GoalDecided>> {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
-        let tx = self.write_tx("decide_goal", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("decide_goal")?;
         let ask = read_ask(&tx, ask_id)?;
         ensure!(
             ask.kind == AskKind::ApproveGoal,
@@ -860,7 +857,7 @@ impl GoalReviewStore for SqliteQueue {
 
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<Value> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("rearm_goal_review", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("rearm_goal_review")?;
         let open: Option<bool> = tx
             .query_row(
                 "SELECT status='open' AND closed_at IS NULL FROM goals WHERE id=?1",

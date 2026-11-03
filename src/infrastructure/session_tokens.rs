@@ -12,7 +12,7 @@
 
 use crate::infrastructure::sql_dialect::{JsonType, json_field};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tracing::{debug, info};
@@ -149,13 +149,7 @@ fn prepare(conn: &Connection, span: OpenSpan, start: i64, at: i64, last: bool) -
 /// event each hour), so the next pass tries again. `false` when nothing was
 /// recorded.
 fn write(conn: &Connection, write_hold_warn: Duration, cut: &Cut) -> Result<bool> {
-    let tx = WriteTx::begin(
-        conn,
-        "session_tokens_cut",
-        TransactionBehavior::Immediate,
-        write_hold_warn,
-    )?
-    .recorded();
+    let tx = WriteTx::write(conn, "session_tokens_cut", write_hold_warn)?.recorded();
     let opened = cut.span.opened_event_id;
     let earlier = recorded_cuts(&tx, opened)?;
     let stale = if cut.last {

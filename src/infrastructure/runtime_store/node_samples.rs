@@ -90,7 +90,7 @@ impl NodeSampleStore for SqliteQueue {
     ) -> Result<bool> {
         // Immediate: the rows around are read in the write that admits the
         // sample, so another supervisor's sample comes before or after both.
-        let tx = self.write_tx("node_samples_record", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("node_samples_record")?;
         let (before, later): (Option<i64>, bool) = tx.query_row(
             "SELECT (SELECT max(unix) FROM node_samples WHERE node_id=?1 AND unix < ?2),
                     EXISTS(SELECT 1 FROM node_samples WHERE node_id=?1 AND unix > ?2)",

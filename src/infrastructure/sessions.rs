@@ -22,7 +22,7 @@ use crate::infrastructure::sql_dialect::{
 use std::cell::RefCell;
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tracing::{debug, info};
@@ -1776,13 +1776,7 @@ fn finalize_hook_intake(
     end: &str,
 ) -> Result<bool> {
     let _read = read_before(conn, Closing::Spans(&[(span.clone(), DEFERRED)]))?;
-    let tx = WriteTx::begin(
-        conn,
-        "finalize_hook_intake",
-        TransactionBehavior::Immediate,
-        write_hold_warn,
-    )?
-    .recorded();
+    let tx = WriteTx::write(conn, "finalize_hook_intake", write_hold_warn)?.recorded();
     // Another intake may have finished while this one read the transcript.
     let finished: bool =
         tx.query_row(&hook_intake_finished_sql(), [span.opened_event_id], |r| {
@@ -1844,13 +1838,7 @@ pub(super) fn record_open_turns(conn: &Connection, write_hold_warn: Duration) ->
                 continue;
             }
         };
-        let tx = WriteTx::begin(
-            conn,
-            "record_open_turns",
-            TransactionBehavior::Immediate,
-            write_hold_warn,
-        )?
-        .recorded();
+        let tx = WriteTx::write(conn, "record_open_turns", write_hold_warn)?.recorded();
         if span_closed(&tx, span.opened_event_id)? {
             continue;
         }
@@ -2079,13 +2067,7 @@ pub(super) fn record_hook(
             "skipped": "headless_planner",
         }));
     }
-    let tx = WriteTx::begin(
-        conn,
-        "record_hook",
-        TransactionBehavior::Immediate,
-        write_hold_warn,
-    )?
-    .recorded();
+    let tx = WriteTx::write(conn, "record_hook", write_hold_warn)?.recorded();
     let (task_id, context) = planner_context(&tx, hook)?;
     let open = open_hook_spans(&tx)?;
     let changes = hook_changes(hook, &open, &context);
@@ -2206,13 +2188,7 @@ pub(super) fn close_inferred_hook_spans(
     let closing: Vec<(OpenSpan, &'static str)> =
         spans.iter().map(|span| (span.clone(), INFERRED)).collect();
     let _read = read_before(conn, Closing::Spans(&closing))?;
-    let tx = WriteTx::begin(
-        conn,
-        "close_inferred_hook_spans",
-        TransactionBehavior::Immediate,
-        write_hold_warn,
-    )?
-    .recorded();
+    let tx = WriteTx::write(conn, "close_inferred_hook_spans", write_hold_warn)?.recorded();
     let now = now(&tx)?;
     let mut closed = 0;
     // Found outside the write lock; checked again under it one by one, so a
@@ -2416,7 +2392,7 @@ pub(super) mod tests {
     use crate::domain::LeaseToken;
     use crate::infrastructure::git_binary::git_executable;
     use crate::infrastructure::sqlite::WRITE_HOLD_WARN;
-    use rusqlite::Transaction;
+    use rusqlite::{Transaction, TransactionBehavior};
 
     thread_local! {
         /// The transcripts read on this thread.

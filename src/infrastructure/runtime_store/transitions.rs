@@ -66,10 +66,7 @@ impl SqliteQueue {
         trial: &WorkerTrial,
         routes: &[WorkerRoute],
     ) -> Result<ClaimOutcome> {
-        let tx = self.write_tx(
-            "claim_for_supervisor_holding",
-            TransactionBehavior::Immediate,
-        )?;
+        let tx = self.write_tx("claim_for_supervisor_holding")?;
         // The claim, its run and its first heartbeat share one time.
         let at = self.generators.clock.system_time();
         let outcome = claim_task(
@@ -119,7 +116,7 @@ impl SqliteQueue {
         reason: &Reason,
         session: Option<&Value>,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("abandon_run", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("abandon_run")?;
         let run = apply(
             &tx,
             refusals(&self.runs_dir, &self.generators),
@@ -145,7 +142,7 @@ impl SqliteQueue {
     }
 
     pub fn plan_run(&mut self, id: &RunId, token: &LeaseToken, plan: &RunPlan) -> Result<()> {
-        let tx = self.write_tx("plan_run", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("plan_run")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         apply(
             &tx,
@@ -166,7 +163,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         workspace: &str,
     ) -> Result<()> {
-        let tx = self.write_tx("workspace_created", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("workspace_created")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         apply(
             &tx,
@@ -192,7 +189,7 @@ impl SqliteQueue {
         message: &str,
         reason: &Reason,
     ) -> Result<()> {
-        let tx = self.write_tx("record_runtime_error", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_runtime_error")?;
         apply(
             &tx,
             refusals(&self.runs_dir, &self.generators),
@@ -217,7 +214,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         receipt: bool,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("finish_supervision", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("finish_supervision")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let code: i32 = tx.query_row(
             "SELECT exit_code FROM run_processes WHERE run_id=?1 AND role='wrapper' AND exited_at IS NOT NULL",
@@ -247,7 +244,7 @@ impl SqliteQueue {
         exit_code: i32,
         receipt: bool,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("finish_lost_session", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("finish_lost_session")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply_recorded(
             &tx,
@@ -266,7 +263,7 @@ impl SqliteQueue {
     /// `validating` under the same lease, and `supervision_finished` records
     /// `session_live: true` with no exit code.
     pub fn finish_supervision_live(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
-        let tx = self.write_tx("finish_supervision_live", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("finish_supervision_live")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply_recorded(
             &tx,
@@ -285,7 +282,7 @@ impl SqliteQueue {
     /// `revise` verdict (ADR-0027 decision 2); `revise_finished` is the
     /// record of why.
     pub fn restart_validation(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
-        let tx = self.write_tx("restart_validation", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("restart_validation")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply(
             &tx,
@@ -310,7 +307,7 @@ impl SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("decide_landing", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("decide_landing")?;
         let leased: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1)",
             [id],
@@ -343,7 +340,7 @@ impl SqliteQueue {
         token: Option<&LeaseToken>,
         payload: serde_json::Value,
     ) -> Result<(Task, TaskRun)> {
-        let tx = self.write_tx("close_satisfied", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("close_satisfied")?;
         let at = self.generators.clock.system_time();
         match token {
             Some(token) => renew_lease(&tx, id, token, unix_seconds(at))?,
@@ -404,7 +401,7 @@ impl SqliteQueue {
         payload: serde_json::Value,
         task: &TaskMove,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("decide_satisfied", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("decide_satisfied")?;
         ensure!(!run_leased(&tx, id)?, "run {id} is leased");
         let run = apply_recorded(
             &tx,
@@ -442,7 +439,7 @@ impl SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("park_live", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("park_live")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply_recorded(
             &tx,
@@ -479,7 +476,7 @@ impl SqliteQueue {
     ) -> Result<(crate::domain::task_replan::ReplanOperation, TaskRun)> {
         let now = self.generators.clock.now();
         let reason = step.reason.as_str();
-        let tx = self.write_tx("settle_replan", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("settle_replan")?;
         let parked = crate::infrastructure::replans::move_in(&tx, op, generation, step, now)?;
         let id = parked.run_id.clone();
         let run = match token {
@@ -563,7 +560,7 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("park_for_hold", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("park_for_hold")?;
         if !crate::infrastructure::task_holds::settle_open(&tx, hold, now)? {
             return Ok(None);
         }
@@ -626,7 +623,7 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("rest_fenced", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("rest_fenced")?;
         renew_lease(&tx, id, token, now)?;
         let task: crate::domain::TaskId =
             tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
@@ -714,7 +711,7 @@ impl SqliteQueue {
         id: &RunId,
         status: RunStatus,
     ) -> Result<bool> {
-        let tx = self.write_tx("settle_hold_at_rest", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("settle_hold_at_rest")?;
         let Some(stored) = stored_run(&tx, id)? else {
             return Ok(false);
         };
@@ -738,7 +735,7 @@ impl SqliteQueue {
         id: &RunId,
         token: &LeaseToken,
     ) -> Result<bool> {
-        let tx = self.write_tx("release_for_hold", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("release_for_hold")?;
         ensure!(
             tx.execute(
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
@@ -776,7 +773,7 @@ impl SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("park_e2e_failed", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("park_e2e_failed")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply_recorded(
             &tx,
@@ -800,7 +797,7 @@ impl SqliteQueue {
         worker: Worker,
         payload: Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("switch_provider", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("switch_provider")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         // Written from the typed worker: the column has no CHECK (ADR-t876-1).
         tx.execute(
@@ -829,7 +826,7 @@ impl SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
-        let tx = self.write_tx("park_rechecked", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("park_rechecked")?;
         let lease: Option<LeaseToken> = tx
             .query_row("SELECT token FROM run_leases WHERE run_id=?1", [id], |r| {
                 r.get(0)
@@ -877,7 +874,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         validation: &Validation,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("finish_validation", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("finish_validation")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let refusal = || "run is not validating under this supervisor".to_owned();
         let run = apply_recorded(
@@ -956,7 +953,7 @@ impl SqliteQueue {
     ) -> Result<()> {
         let kind = EventKind::RunE2eStarted;
         let _read = read_before(&self.conn, Closing::Event(id, kind, &payload))?;
-        let tx = self.write_tx("begin_e2e_with", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("begin_e2e_with")?;
         if refused_by_handoff {
             refuse_on_handoff(&tx, token)?;
         }
@@ -996,7 +993,7 @@ impl SqliteQueue {
             Some(SlotHolder::Supervisor { now }) => (None, Some(now)),
             None => (None, None),
         };
-        let tx = self.write_tx("begin_integration_then", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("begin_integration_then")?;
         if let Some(now) = registered_at {
             let heartbeat_at: Option<i64> = tx
                 .query_row(
@@ -1184,7 +1181,7 @@ impl SqliteQueue {
         mut detail: serde_json::Value,
     ) -> Result<TaskRun> {
         let revert_to: RunStatus = revert_to.parse()?;
-        let tx = self.write_tx("hand_over_integration", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("hand_over_integration")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply(
             &tx,
@@ -1210,7 +1207,7 @@ impl SqliteQueue {
         kind: EventKind,
         mut detail: serde_json::Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("leave_integration", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("leave_integration")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply(
             &tx,
@@ -1249,7 +1246,7 @@ impl SqliteQueue {
         landing: &Landing,
         common_dir: &str,
     ) -> Result<(Task, TaskRun)> {
-        let tx = self.write_tx("finish_integration", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("finish_integration")?;
         // The same landing sent again, its answer lost (ADR-t3102-3
         // decision 5): recorded once, and answered as it was.
         if let Some(landed) = stored_run(&tx, id)?
@@ -1320,7 +1317,7 @@ impl SqliteQueue {
         message: &str,
         reason: &Reason,
     ) -> Result<()> {
-        let tx = self.write_tx("record_cleanup_failure", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_cleanup_failure")?;
         apply(
             &tx,
             refusals(&self.runs_dir, &self.generators),
@@ -1348,7 +1345,7 @@ impl SqliteQueue {
     pub fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::WorkspaceClosed]))?;
-        let tx = self.write_tx("workspace_closed", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("workspace_closed")?;
         let now = self.generators.clock.now();
         renew_lease(&tx, id, token, now)?;
         let result = apply(
@@ -1379,7 +1376,7 @@ impl SqliteQueue {
         message: &str,
         reason: &Reason,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("cleanup_failed", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("cleanup_failed")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let result = apply(
             &tx,
@@ -1412,7 +1409,7 @@ impl SqliteQueue {
     ) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
         let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::WorkspaceClosed]))?;
-        let tx = self.write_tx("record_workspace_closed", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_workspace_closed")?;
         let now = self.generators.clock.now();
         if let Some(run) = stored_run(&tx, id)? {
             let from = run.status();

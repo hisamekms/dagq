@@ -344,7 +344,7 @@ impl LedgerStore for SqliteQueue {
         row: &LedgerRow,
         read: Option<&LedgerRow>,
     ) -> Result<Option<bool>> {
-        let tx = self.write_tx("ledger_row_over", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("ledger_row_over")?;
         if held_row(&tx, row.kind, &row.key)?.as_ref() != read {
             return Ok(None);
         }
@@ -375,7 +375,7 @@ impl LedgerStore for SqliteQueue {
         rows: &[(LedgerRow, Option<LedgerRow>)],
         marks: Option<&Marks>,
     ) -> Result<bool> {
-        let tx = self.write_tx("ledger_session_rows", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("ledger_session_rows")?;
         for (row, read) in rows {
             if held_row(&tx, row.kind, &row.key)?.as_ref() != read.as_ref() {
                 return Ok(false);

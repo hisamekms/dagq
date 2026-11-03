@@ -16,7 +16,7 @@
 //! the writing transaction: the table's key does not compare a deletion's
 //! NULL child task.
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
 use super::plan_requests::read_request;
@@ -65,7 +65,7 @@ impl SqliteQueue {
     ) -> Result<ReplanRecorded> {
         new.validate()?;
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_replan", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_replan")?;
         let (task_id, status): (TaskId, String) = tx
             .query_row(
                 "SELECT task_id, status FROM task_runs WHERE id=?1",
@@ -209,7 +209,7 @@ impl SqliteQueue {
         step: &ReplanMove,
     ) -> Result<ReplanOperation> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("move_replan", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("move_replan")?;
         let moved = move_in(&tx, id, generation, step, now)?;
         tx.commit()?;
         Ok(moved)
@@ -249,7 +249,7 @@ impl SqliteQueue {
             op.task_id
         );
         let now = self.generators.clock.now();
-        let tx = self.write_tx("ask_replan_diagnosis", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("ask_replan_diagnosis")?;
         if let Some(premise) = premise {
             let read = read_operation(&tx, id)?;
             check_premise(&tx, &read, ReplanStatus::Diagnosing, premise)?;
@@ -303,7 +303,7 @@ impl SqliteQueue {
     ) -> Result<ReplanOperation> {
         let mut payload = payload;
         let now = self.generators.clock.now();
-        let tx = self.write_tx("start_replan_diagnosis", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("start_replan_diagnosis")?;
         let running = running_diagnoses(&tx, gone)?;
         ensure!(
             running.is_empty(),
@@ -361,7 +361,7 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<ReplanOperation> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("fail_replan_diagnosis", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("fail_replan_diagnosis")?;
         let claimed = move_in(
             &tx,
             id,
@@ -415,7 +415,7 @@ impl SqliteQueue {
         id: ReplanId,
         mappings: &[task_replan::ConditionMapping],
     ) -> Result<ReplanOperation> {
-        let tx = self.write_tx("record_replan_mappings", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_replan_mappings")?;
         write_mappings(&tx, id, mappings)?;
         let op = read_operation(&tx, id)?;
         tx.commit()?;
@@ -1888,7 +1888,7 @@ impl SqliteQueue {
     ) -> Result<task_replan::ReplanResolved> {
         resolve.validate()?;
         let now = self.generators.clock.now();
-        let tx = self.write_tx("resolve_replan", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("resolve_replan")?;
         let op = read_operation(&tx, resolve.operation)?;
         let mut children = Vec::new();
         if let Some(proposal) = op.proposal_id {
@@ -2062,7 +2062,7 @@ impl SqliteQueue {
     /// person. The operations moved, oldest first.
     pub fn settle_replan_requests(&mut self) -> Result<Vec<ReplanOperation>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("settle_replan_requests", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("settle_replan_requests")?;
         let ended: Vec<(ReplanId, String)> = tx
             .prepare(
                 "SELECT o.id, r.status FROM replan_operations o

@@ -4,7 +4,10 @@
 //! recorded whatever it writes through. Checked on the sources of `src/` as
 //! syntax: outside test code (see [`source`](super::source)), nothing begins
 //! a rusqlite transaction but [`IMPLEMENTATION`] and the rows of
-//! [`EXCEPTIONS`].
+//! [`EXCEPTIONS`], and nothing but [`ENTRIES`] names rusqlite's
+//! `TransactionBehavior`: how a transaction begins (`BEGIN IMMEDIATE` or
+//! deferred) is chosen by the entry it begins at (`WriteTx::write` or
+//! `WriteTx::read`), not by its caller.
 //!
 //! What counts as a begin:
 //!
@@ -28,6 +31,10 @@
 //! and test code is also an expression or a macro statement under a `cfg`
 //! that requires `test`.
 //!
+//! A name of `TransactionBehavior` is any identifier so spelled (in a path,
+//! a type, a `use` and its `as`, or a macro's tokens); a name a `use` gives
+//! it with `as` is named by that `use` too.
+//!
 //! A begin is at the innermost fn around it (closures belong to their fn),
 //! named `Type::method` in an `impl` or a trait, `-` outside any fn. What
 //! is not seen: SQL built at run time, and a test `cfg` inside a macro's
@@ -40,8 +47,21 @@ use proc_macro2::{Delimiter, TokenTree};
 use std::collections::BTreeSet;
 use syn::visit::{self, Visit};
 
-/// The implementation of `WriteTx`, whose begin is the one way in.
+/// The implementation of `WriteTx`, whose private begin under its two
+/// entries (`WriteTx::write`, `WriteTx::read`) is the one way in.
 const IMPLEMENTATION: (&str, &str) = ("src/infrastructure/sqlite.rs", "WriteTx::begin");
+
+/// The file that implements the entries of `WriteTx`, and the places in
+/// it whose code may name `TransactionBehavior`: its `use` outside any fn
+/// (`-`), the two entries and the private begin under them.
+const ENTRIES: (&str, [&str; 4]) = (
+    "src/infrastructure/sqlite.rs",
+    ["-", "WriteTx::write", "WriteTx::read", "WriteTx::begin"],
+);
+
+/// The identifier of rusqlite's transaction behavior, which only
+/// [`ENTRIES`] names.
+const BEHAVIOR: &str = "TransactionBehavior";
 
 /// A fn other than [`IMPLEMENTATION`] that may begin a transaction
 /// directly, with why; the place itself carries the reason in a comment.
@@ -110,6 +130,14 @@ fn check(rust: &[(String, String)], exceptions: &[Exception]) -> Vec<String> {
     }
     let mut matched = BTreeSet::new();
     for (path, file) in &read {
+        let (entries, places) = ENTRIES;
+        for function in behavior_names(file) {
+            if *path != entries || !places.contains(&function.as_str()) {
+                errors.insert(format!(
+                    "{path}: names {BEHAVIOR} in {function}; begin at the entry that fits, WriteTx::write (SqliteQueue::write_tx) to write or WriteTx::read (SqliteQueue::read_tx) to read"
+                ));
+            }
+        }
         for begin in begins(file) {
             if (*path, begin.function.as_str()) == IMPLEMENTATION {
                 continue;
@@ -122,7 +150,7 @@ fn check(rust: &[(String, String)], exceptions: &[Exception]) -> Vec<String> {
                 continue;
             }
             errors.insert(format!(
-                "{path}: {} begins a transaction in {} outside WriteTx::begin; begin it as a WriteTx (SqliteQueue::write_tx), or add a row with its reason to write_tx::EXCEPTIONS",
+                "{path}: {} begins a transaction in {} outside WriteTx::begin; begin it at an entry of WriteTx (SqliteQueue::write_tx or read_tx), or add a row with its reason to write_tx::EXCEPTIONS",
                 begin.what, begin.function
             ));
         }
@@ -152,6 +180,17 @@ fn begins(file: &syn::File) -> BTreeSet<Begin> {
     reader.found
 }
 
+/// The fns of `file` whose code outside its test code names
+/// [`BEHAVIOR`].
+fn behavior_names(file: &syn::File) -> BTreeSet<String> {
+    let mut reader = Reader::default();
+    if is_test(&file.attrs) {
+        return reader.behaviors;
+    }
+    reader.visit_file(file);
+    reader.behaviors
+}
+
 /// The names a `use` gives `Transaction` and `Connection` with `as`.
 struct Uses<'a> {
     transactions: &'a mut BTreeSet<String>,
@@ -177,6 +216,8 @@ struct Reader {
     owners: Vec<String>,
     fns: Vec<String>,
     found: BTreeSet<Begin>,
+    /// The fns that name [`BEHAVIOR`].
+    behaviors: BTreeSet<String>,
 }
 
 impl Reader {
@@ -196,9 +237,20 @@ impl Reader {
         self.owners.pop();
     }
 
+    fn function(&self) -> String {
+        self.fns.last().cloned().unwrap_or_else(|| "-".to_owned())
+    }
+
     fn found(&mut self, what: String) {
-        let function = self.fns.last().cloned().unwrap_or_else(|| "-".to_owned());
+        let function = self.function();
         self.found.insert(Begin { function, what });
+    }
+
+    /// The identifier `name`, named in the code being read.
+    fn ident(&mut self, name: &str) {
+        if name == BEHAVIOR {
+            self.behaviors.insert(self.function());
+        }
     }
 
     /// A call of the method `method`, with `no_args` when it has none.
@@ -232,6 +284,9 @@ impl Reader {
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
         for (at, tree) in trees.iter().enumerate() {
             let next = |n: usize| trees.get(at + n);
+            if let TokenTree::Ident(name) = tree {
+                self.ident(&name.to_string());
+            }
             match tree {
                 TokenTree::Group(group) => self.tokens(group.stream()),
                 TokenTree::Punct(dot) if dot.as_char() == '.' => {
@@ -415,6 +470,10 @@ fn expr_attrs(expr: &syn::Expr) -> &[syn::Attribute] {
 impl<'ast> Visit<'ast> for Reader {
     fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
 
+    fn visit_ident(&mut self, ident: &'ast syn::Ident) {
+        self.ident(&ident.to_string());
+    }
+
     fn visit_item(&mut self, item: &'ast syn::Item) {
         if !is_test(item_attrs(item)) {
             visit::visit_item(self, item);
@@ -559,22 +618,19 @@ mod fixtures {
     /// name its error gives it.
     const BEGINS: [(&str, &str); 19] = [
         (
-            "conn.transaction_with_behavior(TransactionBehavior::Immediate)",
+            "conn.transaction_with_behavior(b)",
             ".transaction_with_behavior()",
         ),
         ("conn.transaction()", ".transaction()"),
         ("conn.unchecked_transaction()", ".unchecked_transaction()"),
         (
-            "rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)",
+            "rusqlite::Transaction::new_unchecked(conn, b)",
             "Transaction::new_unchecked",
         ),
-        (
-            "Transaction::new(conn, TransactionBehavior::Immediate)",
-            "Transaction::new",
-        ),
+        ("Transaction::new(conn, b)", "Transaction::new"),
         ("Tx::new_unchecked(conn, b)", "Tx::new_unchecked"),
         (
-            "rusqlite::Transaction::<'_>::new_unchecked(conn, TransactionBehavior::Immediate)",
+            "rusqlite::Transaction::<'_>::new_unchecked(conn, b)",
             "Transaction::new_unchecked",
         ),
         (
@@ -740,5 +796,78 @@ mod fixtures {
                 "write_tx::EXCEPTIONS: stale row src/infrastructure/store.rs gone (it begins no transaction any more); remove it",
             ]
         );
+    }
+
+    /// Each way code names the behavior: a path, a type, a `use` (and its
+    /// `as`), a macro's tokens; with the fn its error gives.
+    const BEHAVIOR_NAMES: [(&str, &str); 6] = [
+        (
+            "fn f(q: &Q) { q.write_tx(\"x\", rusqlite::TransactionBehavior::Immediate); }",
+            "f",
+        ),
+        (
+            "impl Store { fn g(&self, b: TransactionBehavior) {} }",
+            "Store::g",
+        ),
+        ("use rusqlite::{params, TransactionBehavior};", "-"),
+        ("use rusqlite::TransactionBehavior as Tb;", "-"),
+        (
+            "fn h() { let _ = vec![TransactionBehavior::Deferred]; }",
+            "h",
+        ),
+        (
+            "fn k() { let _ = format!(\"{:?}\", (TransactionBehavior::Exclusive,)); }",
+            "k",
+        ),
+    ];
+
+    #[test]
+    fn naming_the_behavior_outside_the_entries_fails() {
+        let outside = BEHAVIOR_NAMES.map(|(t, f)| ("src/infrastructure/store.rs", t, f));
+        // In the entries' file, a fn that is not an entry is outside too.
+        let other_fns = BEHAVIOR_NAMES
+            .into_iter()
+            .filter(|(_, f)| *f != "-")
+            .map(|(t, f)| ("src/infrastructure/sqlite.rs", t, f));
+        for (path, text, function) in outside.into_iter().chain(other_fns) {
+            let found = errors(&[(path, text)], &[]);
+            assert_eq!(
+                found,
+                [format!(
+                    "{path}: names TransactionBehavior in {function}; begin at the entry that fits, WriteTx::write (SqliteQueue::write_tx) to write or WriteTx::read (SqliteQueue::read_tx) to read"
+                )],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn naming_the_behavior_in_the_entries_or_in_test_code_passes() {
+        for (text, _) in BEHAVIOR_NAMES {
+            let tests = format!("#[cfg(test)]\nmod tests {{ {text} }}");
+            let found = errors(
+                &[
+                    ("src/infrastructure/store.rs", &tests),
+                    (
+                        "src/infrastructure/fixtures.rs",
+                        &format!("#![cfg(test)]\n{text}"),
+                    ),
+                ],
+                &[],
+            );
+            assert!(found.is_empty(), "{text}: {found:?}");
+        }
+        let entries = "use rusqlite::TransactionBehavior;\nuse rusqlite::TransactionBehavior as Tb;\nimpl<'c> WriteTx<'c> {\n    pub fn write(c: &'c Connection) -> Self { Self::begin(c, TransactionBehavior::Immediate) }\n    pub fn read(c: &'c Connection) -> Self { Self::begin(c, TransactionBehavior::Deferred) }\n    fn begin(c: &'c Connection, b: TransactionBehavior) -> Self { let _ = vec![TransactionBehavior::Immediate]; todo!() }\n}";
+        let found = errors(
+            &[
+                ("src/infrastructure/sqlite.rs", entries),
+                (
+                    "src/infrastructure/store.rs",
+                    "fn f(q: &Q) { q.write_tx(\"x\"); q.read_tx(\"y\"); let s = \"TransactionBehavior\"; }",
+                ),
+            ],
+            &[],
+        );
+        assert!(found.is_empty(), "{found:?}");
     }
 }

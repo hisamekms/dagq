@@ -221,7 +221,7 @@ impl SqliteQueue {
             ["user", "inbox", "planner"].contains(&role),
             "{role} may not judge follow_up membership"
         );
-        let tx = self.write_tx("judge_follow_up", rusqlite::TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("judge_follow_up")?;
         let origin: Option<(String, String)> = tx
             .query_row(
                 "SELECT origin,material FROM draft_origins WHERE task_id=?1",
@@ -479,10 +479,7 @@ pub(super) fn decide_correction(
     stamp: String,
     now: i64,
 ) -> Result<Option<Value>> {
-    let tx = queue.write_tx(
-        "decide_correction",
-        rusqlite::TransactionBehavior::Immediate,
-    )?;
+    let tx = queue.write_tx("decide_correction")?;
     let ask = read_ask(&tx, ask_id)?;
     ensure!(
         ask.kind == AskKind::CorrectGoal,

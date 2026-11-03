@@ -565,7 +565,7 @@ impl SessionStepStore for SqliteQueue {
         received_at: i64,
     ) -> Result<StepsRecorded> {
         session_step::check(steps)?;
-        let tx = self.write_tx("session_steps_record", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("session_steps_record")?;
         if of_another_target(&tx, session_id, target)? {
             return Err(StepError::SessionOfAnotherTarget.into());
         }
@@ -689,7 +689,7 @@ impl SessionStepStore for SqliteQueue {
                 planned += session.rows();
                 reach += 1;
             }
-            let tx = self.write_tx("session_steps_retention", TransactionBehavior::Immediate)?;
+            let tx = self.write_tx("session_steps_retention")?;
             let mut budget = ROWS_PER_TRANSACTION;
             let mut steps = 0;
             while budget > 0 && next < reach {
@@ -723,7 +723,7 @@ impl SessionResourceStore for SqliteQueue {
         received_at: i64,
     ) -> Result<StepsRecorded> {
         session_step::check_resources(samples)?;
-        let tx = self.write_tx("session_resources_record", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("session_resources_record")?;
         if of_another_target(&tx, session_id, target)? {
             return Err(StepError::SessionOfAnotherTarget.into());
         }
@@ -798,7 +798,7 @@ impl SessionOwners for SqliteQueue {
         session_id: &str,
         registered_at: i64,
     ) -> Result<()> {
-        let tx = self.write_tx("session_owner_register", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("session_owner_register")?;
         if of_another_target(&tx, session_id, target)? {
             return Err(StepError::SessionOfAnotherTarget.into());
         }
@@ -1199,13 +1199,7 @@ mod tests {
                 }),
             )
             .unwrap();
-            let tx = WriteTx::begin(
-                &conn,
-                "t",
-                TransactionBehavior::Immediate,
-                std::time::Duration::MAX,
-            )
-            .unwrap();
+            let tx = WriteTx::write(&conn, "t", std::time::Duration::MAX).unwrap();
             let session =
                 remove_session_rows(&tx, "s", BEFORE, ROWS_PER_TRANSACTION, &mut candidates)
                     .unwrap();

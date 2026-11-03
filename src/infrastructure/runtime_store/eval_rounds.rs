@@ -63,7 +63,7 @@ impl SqliteQueue {
         );
         crate::domain::check_event_target(kind, None, None)?;
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
-        let tx = self.write_tx("settle_eval_round", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("settle_eval_round")?;
         if any_of_round(
             &tx,
             eval_id,
@@ -109,7 +109,7 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let payload = json!({"eval_id": eval_id, "supervisor": token});
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
-        let tx = self.write_tx("take_up_eval_round", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("take_up_eval_round")?;
         if any_of_round(&tx, eval_id, &[EventKind::AgentEvalFinished])? {
             return Ok(false);
         }
@@ -179,7 +179,7 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let payload = json!({"set_id": set_id, "supervisor": token});
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
-        let tx = self.write_tx("take_case_set", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("take_case_set")?;
         let settled: bool = tx.query_row(
             &format!("SELECT EXISTS(SELECT 1 FROM run_events WHERE {})", of_set()),
             params![

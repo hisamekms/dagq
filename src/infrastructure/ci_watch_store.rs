@@ -7,7 +7,7 @@
 //! task fixes.
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -47,7 +47,7 @@ impl SqliteQueue {
     /// authorization, by `supervisor`.
     pub fn record_ci_check(&self, record: CiCheckRecord) -> Result<Option<CiCheckRecorded>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_ci_check", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_ci_check")?;
         let latest: Option<i64> = tx
             .query_row(
                 "SELECT id FROM run_events WHERE kind=?1
@@ -122,7 +122,7 @@ impl SqliteQueue {
         record: ScheduledCheckRecord,
     ) -> Result<Option<CiCheckRecorded>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_ci_scheduled_check", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_ci_scheduled_check")?;
         let latest: Option<i64> = tx
             .query_row(
                 "SELECT id FROM run_events WHERE kind=?1
@@ -180,7 +180,7 @@ impl SqliteQueue {
     /// once per latest success; a fresh record when the workflow's latest
     /// record is the stale one it `closes`.
     pub fn record_ci_freshness(&self, record: FreshnessRecord) -> Result<Option<EventId>> {
-        let tx = self.write_tx("record_ci_freshness", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_ci_freshness")?;
         let [stale, fresh] = FRESHNESS_KINDS;
         let latest = |workflow: Option<&str>| -> Result<Option<(i64, String)>> {
             Ok(tx

@@ -89,7 +89,7 @@ const _: () =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteTxTimes {
     /// When it is known to have had the write lock: when `BEGIN IMMEDIATE`
-    /// or `BEGIN EXCLUSIVE` returned, or when a deferred transaction's
+    /// returned, or when a deferred transaction's
     /// first write statement through [`WriteTx::execute`] returned, if the
     /// transaction had no lock just before it. That statement takes the
     /// lock and may wait in it for another writer, so its end is the first
@@ -104,11 +104,11 @@ pub struct WriteTxTimes {
     /// approximation also counts its reads and any wait for another writer
     /// before its first write. Also `None` for one that never had the lock.
     pub locked: Option<Duration>,
-    /// Whether it held the write lock: an immediate or exclusive one from
-    /// its `BEGIN`, read or not; a deferred one once a write statement took
+    /// Whether it held the write lock: a write one ([`WriteTx::write`]) from
+    /// its `BEGIN`, read or not; a read one ([`WriteTx::read`]) once a write statement took
     /// it, one that changed no row included (an `UPDATE` or `DELETE` of no
     /// row, an `INSERT ... ON CONFLICT DO NOTHING` takes it too). A
-    /// deferred one that only read did not.
+    /// read one that only read did not.
     pub wrote: bool,
     /// When its commit or rollback returned.
     pub ended: Duration,
@@ -251,8 +251,10 @@ pub fn held_long_payload(
 /// connections it writes through. A failure of that record is a WARN and
 /// changes nothing of the transaction's result.
 ///
-/// An immediate or exclusive one holds the lock from its `BEGIN`. A
-/// deferred one has it once a write statement took it: the first through
+/// It begins at one of two entries, [`WriteTx::write`] for a transaction
+/// that writes and [`WriteTx::read`] for one that reads; nothing else
+/// begins one (`context_boundaries::write_tx`). A write one holds the lock
+/// from its `BEGIN`. A read one has it once a write statement took it: the first through
 /// [`WriteTx::execute`] tells when, when no write before it took the lock;
 /// one through the transaction it derefs to, reported with
 /// [`WriteTx::wrote`] or not (then seen by the state of its transaction
@@ -271,10 +273,37 @@ pub struct WriteTx<'c> {
 }
 
 impl<'c> WriteTx<'c> {
-    /// Begin `name` on `conn` as `behavior`; an immediate one has the lock
-    /// when its `BEGIN` returns. It warns of a long hold and records none
-    /// until [`WriteTx::recorded`].
-    pub fn begin(
+    /// The write entry: begin `name` on `conn` as `BEGIN IMMEDIATE`, which
+    /// has the write lock when it returns, so a writer that loses the race
+    /// waits (or is told busy) at its `BEGIN` and not at its first write.
+    /// For every transaction that writes. It warns of a long hold and
+    /// records none until [`WriteTx::recorded`].
+    pub fn write(
+        conn: &'c Connection,
+        name: &'static str,
+        threshold: Duration,
+    ) -> rusqlite::Result<Self> {
+        Self::begin(conn, name, TransactionBehavior::Immediate, threshold)
+    }
+
+    /// The read entry: begin `name` on `conn` as a deferred transaction,
+    /// which takes no lock at its `BEGIN`, for reads that see one snapshot.
+    /// A write in it still takes the lock then, and is warned of and
+    /// recorded as one in a [`WriteTx::write`] is. It warns of a long hold
+    /// and records none until [`WriteTx::recorded`].
+    pub fn read(
+        conn: &'c Connection,
+        name: &'static str,
+        threshold: Duration,
+    ) -> rusqlite::Result<Self> {
+        Self::begin(conn, name, TransactionBehavior::Deferred, threshold)
+    }
+
+    /// Begin `name` on `conn` as `behavior`: the one place a queue DB
+    /// transaction begins, reached only through [`WriteTx::write`] and
+    /// [`WriteTx::read`]. An immediate one has the lock when its `BEGIN`
+    /// returns.
+    fn begin(
         conn: &'c Connection,
         name: &'static str,
         behavior: TransactionBehavior,
@@ -282,11 +311,8 @@ impl<'c> WriteTx<'c> {
     ) -> rusqlite::Result<Self> {
         let began = std::time::Instant::now();
         let tx = rusqlite::Transaction::new_unchecked(conn, behavior)?;
-        let locked = matches!(
-            behavior,
-            TransactionBehavior::Immediate | TransactionBehavior::Exclusive
-        )
-        .then(std::time::Instant::now);
+        let locked =
+            matches!(behavior, TransactionBehavior::Immediate).then(std::time::Instant::now);
         Ok(Self {
             tx: Some(tx),
             conn,
@@ -896,14 +922,18 @@ impl SqliteQueue {
         self
     }
 
-    /// A [`WriteTx`] named `name` on this connection, `behavior` as its
-    /// `BEGIN`, which records its long hold on this connection.
-    pub fn write_tx(
-        &self,
-        name: &'static str,
-        behavior: TransactionBehavior,
-    ) -> Result<WriteTx<'_>> {
-        Ok(WriteTx::begin(&self.conn, name, behavior, self.write_hold_warn)?.recorded())
+    /// A transaction that writes, named `name` on this connection
+    /// ([`WriteTx::write`], `BEGIN IMMEDIATE`), which records its long hold
+    /// on this connection.
+    pub fn write_tx(&self, name: &'static str) -> Result<WriteTx<'_>> {
+        Ok(WriteTx::write(&self.conn, name, self.write_hold_warn)?.recorded())
+    }
+
+    /// A transaction that reads one snapshot, named `name` on this
+    /// connection ([`WriteTx::read`], deferred), which records a long hold
+    /// of a write in it on this connection.
+    pub fn read_tx(&self, name: &'static str) -> Result<WriteTx<'_>> {
+        Ok(WriteTx::read(&self.conn, name, self.write_hold_warn)?.recorded())
     }
 
     pub fn generators(&self) -> &Generators {
@@ -1024,12 +1054,7 @@ impl SqliteQueue {
         // Warns of a long hold but records none: the queue's events are
         // written at the schema this transaction changes, which a rolled
         // back or an empty queue does not have.
-        let tx = WriteTx::begin(
-            &self.conn,
-            "schema_migrations",
-            TransactionBehavior::Immediate,
-            self.write_hold_warn,
-        )?;
+        let tx = WriteTx::write(&self.conn, "schema_migrations", self.write_hold_warn)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if from == 0 && version != 0 {
             // Another `init` created the queue first; the caller checks it.
@@ -1393,7 +1418,7 @@ impl SqliteQueue {
         action: TaskAction,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
-        let tx = self.write_tx("transition_authorized", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("transition_authorized")?;
         check_authorized(&tx, task_id, authorized)?;
         let result = transition_task(&tx, task_id, action, &self.generators.clock.timestamp())?;
         tx.commit()?;
@@ -1406,7 +1431,7 @@ impl SqliteQueue {
         cancel: &NewCancel,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
-        let tx = self.write_tx("cancel_authorized", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("cancel_authorized")?;
         check_authorized(&tx, task_id, authorized)?;
         let result = cancel_task(&tx, task_id, cancel, &self.generators.clock.timestamp())?;
         tx.commit()?;
@@ -1419,7 +1444,7 @@ impl SqliteQueue {
         predecessor_id: TaskId,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
-        let tx = self.write_tx("add_dependency_authorized", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("add_dependency_authorized")?;
         check_authorized(&tx, task_id, authorized)?;
         insert_dependency(
             &tx,
@@ -1437,10 +1462,7 @@ impl SqliteQueue {
         predecessor_id: TaskId,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
-        let tx = self.write_tx(
-            "remove_dependency_authorized",
-            TransactionBehavior::Immediate,
-        )?;
+        let tx = self.write_tx("remove_dependency_authorized")?;
         check_authorized(&tx, task_id, authorized)?;
         super::replans::check_task_step(&tx, task_id, GuardedStep::Dependency)?;
         super::replans::check_task_step(&tx, predecessor_id, GuardedStep::Dependency)?;
@@ -1471,10 +1493,7 @@ impl SqliteQueue {
         goal_id: GoalId,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
-        let tx = self.write_tx(
-            "add_goal_dependency_authorized",
-            TransactionBehavior::Immediate,
-        )?;
+        let tx = self.write_tx("add_goal_dependency_authorized")?;
         check_authorized(&tx, task_id, authorized)?;
         super::replans::check_task_step(&tx, task_id, GuardedStep::Dependency)?;
         insert_goal_dependency(&tx, task_id, goal_id, &self.generators.clock.timestamp())?;
@@ -1488,10 +1507,7 @@ impl SqliteQueue {
         goal_id: GoalId,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
-        let tx = self.write_tx(
-            "remove_goal_dependency_authorized",
-            TransactionBehavior::Immediate,
-        )?;
+        let tx = self.write_tx("remove_goal_dependency_authorized")?;
         check_authorized(&tx, task_id, authorized)?;
         super::replans::check_task_step(&tx, task_id, GuardedStep::Dependency)?;
         task::check_dependencies_editable(&read_task(&tx, task_id)?)?;
@@ -1521,7 +1537,7 @@ impl SqliteQueue {
         goal_id: Option<GoalId>,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
-        let tx = self.write_tx("set_goal_authorized", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("set_goal_authorized")?;
         check_authorized(&tx, task_id, authorized)?;
         super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
         let role = actor_role(&tx)?;
@@ -1546,7 +1562,7 @@ impl SqliteQueue {
     ) -> Result<Task> {
         // Checked before the task is read, so a bad glob is reported first.
         validate_path_globs(&paths)?;
-        let tx = self.write_tx("set_paths_authorized", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("set_paths_authorized")?;
         check_authorized(&tx, task_id, authorized)?;
         super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
         let task = read_task(&tx, task_id)?;
@@ -1580,7 +1596,7 @@ impl SqliteQueue {
         priority: Option<Priority>,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
-        let tx = self.write_tx("set_priority_authorized", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("set_priority_authorized")?;
         check_authorized(&tx, task_id, authorized)?;
         change_priority(
             &tx,
@@ -1609,7 +1625,7 @@ impl SqliteQueue {
         if let (Some(changes), Some(change)) = (&self.changes, &edit.change) {
             changes.check(change)?;
         }
-        let tx = self.write_tx("edit_task_authorized", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("edit_task_authorized")?;
         super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
         let old = read_task(&tx, task_id)?;
         task::check_status_authorized(&old, authorized)?;
@@ -1704,7 +1720,7 @@ impl TaskStore for SqliteQueue {
         if let (Some(changes), Some(change)) = (&self.changes, &new.change) {
             changes.check(change)?;
         }
-        let tx = self.write_tx("task_add", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("task_add")?;
         let creator = creator_of_actor(&tx)?;
         let result = insert_task(&tx, new, &self.generators.clock.timestamp(), creator)?;
         tx.commit()?;
@@ -1736,14 +1752,14 @@ impl TaskStore for SqliteQueue {
     }
 
     fn investigations(&mut self) -> Result<crate::domain::investigation::Investigations> {
-        let tx = self.write_tx("investigations", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("investigations")?;
         let investigations = super::investigations::refresh(&tx, self.generators.clock.now())?;
         tx.commit()?;
         Ok(investigations)
     }
 
     fn ready_at(&self, tasks: &[TaskId]) -> Result<std::collections::HashMap<TaskId, i64>> {
-        let tx = self.write_tx("ready_at", TransactionBehavior::Deferred)?;
+        let tx = self.read_tx("ready_at")?;
         let mut times = std::collections::HashMap::new();
         for task in tasks {
             if let Some(at) = task_ready_at(&tx, *task)?
@@ -1757,7 +1773,7 @@ impl TaskStore for SqliteQueue {
     }
 
     fn claim(&mut self, base_commit: &CommitSha) -> Result<ClaimOutcome> {
-        let tx = self.write_tx("task_claim", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("task_claim")?;
         let outcome = claim_task(
             &tx,
             &self.runs_dir,
@@ -1782,7 +1798,7 @@ impl TaskStore for SqliteQueue {
         if let Some(tags) = &self.goal_tags {
             tags.check(&new.tags)?;
         }
-        let tx = self.write_tx("add_goal", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("add_goal")?;
         // Its origin, and a request's priority attached as a person's
         // (ADR-t1975-1 decisions 2 and 5).
         let creator = creator_of_actor(&tx)?;
@@ -1836,7 +1852,7 @@ impl TaskStore for SqliteQueue {
         if let (Some(set), Some(tags)) = (&self.goal_tags, &edit.tags) {
             set.check(tags)?;
         }
-        let tx = self.write_tx("edit_goal", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("edit_goal")?;
         let old = read_goal(&tx, goal_id)?;
         // The event keeps the goal before the edit, which consumes it.
         let old_json = serde_json::to_value(&old)?;
@@ -1888,7 +1904,7 @@ impl TaskStore for SqliteQueue {
     }
 
     fn close_goal(&mut self, goal_id: GoalId, verdict: GoalVerdict) -> Result<Goal> {
-        let tx = self.write_tx("close_goal", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("close_goal")?;
         close_goal_in(
             &tx,
             goal_id,
@@ -1906,21 +1922,21 @@ impl TaskStore for SqliteQueue {
     }
 
     fn approve_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self.write_tx("approve_proposal", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("approve_proposal")?;
         let proposal = proposals::approve(&tx, proposal_id, &self.generators.clock.timestamp())?;
         tx.commit()?;
         Ok(proposal)
     }
 
     fn send_back_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self.write_tx("send_back_proposal", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("send_back_proposal")?;
         let proposal = proposals::send_back(&tx, proposal_id, &self.generators.clock.timestamp())?;
         tx.commit()?;
         Ok(proposal)
     }
 
     fn withdraw_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self.write_tx("withdraw_proposal", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("withdraw_proposal")?;
         let proposal = proposals::withdraw(
             &tx,
             proposal_id,
@@ -1932,7 +1948,7 @@ impl TaskStore for SqliteQueue {
     }
 
     fn ready_goal(&mut self, goal_id: GoalId) -> Result<Goal> {
-        let tx = self.write_tx("ready_goal", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("ready_goal")?;
         let draft = read_goal(&tx, goal_id)?;
         let from = draft.status();
         let opened = goal::ready(draft)?;
@@ -1957,7 +1973,7 @@ impl TaskStore for SqliteQueue {
 
     fn add_note(&mut self, note: NewNote) -> Result<RunEvent> {
         note.validate()?;
-        let tx = self.write_tx("add_note", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("add_note")?;
         let payload = note.payload();
         match &note.target {
             NoteTarget::Task(task_id) => {
@@ -2046,7 +2062,7 @@ impl TaskReads for SqliteQueue {
             format!(" WHERE {}", filters.join(" AND "))
         };
         // One read snapshot keeps the page, its count and its runs consistent.
-        let tx = self.write_tx("task_list", TransactionBehavior::Deferred)?;
+        let tx = self.read_tx("task_list")?;
         let total: i64 = tx.query_row(
             &format!("SELECT count(*) FROM tasks{matching}"),
             params_from_iter(&values),
@@ -2134,7 +2150,7 @@ impl TaskReads for SqliteQueue {
 
     fn show(&mut self, task_id: TaskId) -> Result<TaskDetail> {
         // One read snapshot keeps task status, run history and events consistent.
-        let tx = self.write_tx("task_show", TransactionBehavior::Deferred)?;
+        let tx = self.read_tx("task_show")?;
         let task = read_task(&tx, task_id)?;
         let dependencies = tx.prepare(
             "SELECT predecessor_id FROM task_dependencies WHERE task_id=?1 ORDER BY predecessor_id"
@@ -2192,7 +2208,7 @@ impl TaskReads for SqliteQueue {
     }
 
     fn candidates(&self) -> Result<Vec<Task>> {
-        let tx = self.write_tx("candidates", TransactionBehavior::Deferred)?;
+        let tx = self.read_tx("candidates")?;
         let order = claim_order(&tx)?;
         let mut ready = ready_tasks(&tx)?;
         ready.sort_by_key(|task| order.iter().position(|id| *id == task.id()));
@@ -2228,7 +2244,7 @@ impl TaskReads for SqliteQueue {
     }
 
     fn graph_input(&self) -> Result<GraphInput> {
-        let tx = self.write_tx("graph_input", TransactionBehavior::Deferred)?;
+        let tx = self.read_tx("graph_input")?;
         read_graph_input(&tx)
     }
 
@@ -2309,7 +2325,7 @@ impl TaskReads for SqliteQueue {
     }
 
     fn show_goal(&mut self, goal_id: GoalId) -> Result<GoalDetail> {
-        let tx = self.write_tx("show_goal", TransactionBehavior::Deferred)?;
+        let tx = self.read_tx("show_goal")?;
         let goal = read_goal(&tx, goal_id)?;
         let acceptance_version = super::follow_up_membership::acceptance_version(&tx, goal_id)?;
         let follow_up_memberships = super::follow_up_membership::goal_memberships(&tx, goal_id)?;
@@ -2348,17 +2364,17 @@ impl TaskReads for SqliteQueue {
     }
 
     fn show_proposal(&self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self.write_tx("show_proposal", TransactionBehavior::Deferred)?;
+        let tx = self.read_tx("show_proposal")?;
         proposals::read(&tx, proposal_id)
     }
 
     fn proposals(&self, all: bool) -> Result<Vec<Proposal>> {
-        let tx = self.write_tx("proposals", TransactionBehavior::Deferred)?;
+        let tx = self.read_tx("proposals")?;
         proposals::list(&tx, all)
     }
 
     fn lint_input(&self, tasks: &[TaskId]) -> Result<LintInput> {
-        let tx = self.write_tx("lint_input", TransactionBehavior::Deferred)?;
+        let tx = self.read_tx("lint_input")?;
         let mut input = read_lint_input(&tx, tasks)?;
         input.changes = self.changes.clone();
         input.title_prefixes = self.title_prefixes.clone();

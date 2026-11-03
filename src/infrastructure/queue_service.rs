@@ -4872,7 +4872,7 @@ impl ServiceQueue for ServiceSqlite {
     ) -> Result<Value> {
         let tx = self
             .queue
-            .write_tx("issuing", rusqlite::TransactionBehavior::Immediate)
+            .write_tx("issuing")
             .map_err(super::sqlite::tag_busy)?;
         let registrations = crate::application::SupervisorReads::supervisors(&self.queue);
         let result = registrations.and_then(|registrations| {

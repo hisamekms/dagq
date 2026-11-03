@@ -3,7 +3,7 @@
 //! `run_events`, so the change rides the cursor `status` and `watch` hand out.
 use crate::domain::event_kind::EventKind;
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
 use super::adapters::process_alive;
@@ -26,7 +26,7 @@ impl SqliteQueue {
     /// task nor a run: the observer's threshold that belongs to no task.
     pub fn ask(&mut self, ask: NewAsk) -> Result<AskOutcome> {
         ask.validate()?;
-        let tx = self.write_tx("ask_open", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("ask_open")?;
         let outcome = insert_ask(&tx, &ask)?;
         tx.commit()?;
         Ok(outcome)
@@ -41,7 +41,7 @@ impl SqliteQueue {
     /// without a run or job while the ask is open (task 377).
     pub fn hold(&mut self, hold: NewHold) -> Result<HoldOutcome> {
         hold.validate()?;
-        let tx = self.write_tx("ask_hold", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("ask_hold")?;
         let task_id: Option<TaskId> = match &hold.run_id {
             Some(run_id) => Some(
                 tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [run_id], |r| {
@@ -192,7 +192,7 @@ impl SqliteQueue {
         ensure!(!text.trim().is_empty(), "answer must not be blank");
         // Read before the transaction: the host's `[update]` is a file.
         let releases = self.release_updates_on();
-        let tx = self.write_tx("ask_answer", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("ask_answer")?;
         let ask = read_ask(&tx, id)?;
         ensure!(ask.is_open(), "ask {id} is not open");
         refuse_bare_action(&tx, &ask, text)?;
@@ -433,7 +433,7 @@ impl SqliteQueue {
     /// an ask in `run_events` (what `stats` pairs with `ask_opened`), so an
     /// ask is withdrawn by answering it.
     pub fn close_ask(&mut self, id: AskId) -> Result<Ask> {
-        let tx = self.write_tx("ask_close", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("ask_close")?;
         let ask = read_ask(&tx, id)?;
         ensure!(ask.closed_at.is_none(), "ask {id} is already closed");
         ensure!(
@@ -494,7 +494,7 @@ impl SqliteQueue {
         );
         let reason = AskReason::Scope;
         check_ask_kind(&kind, None, None, reason)?;
-        let tx = self.write_tx("open_update_ask", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("open_update_ask")?;
         // One sent again under its identity is the ask it opened.
         if let Some(record) = details
             .get(crate::domain::UPDATE_ASK_RECORD)
@@ -608,7 +608,7 @@ impl SqliteQueue {
         answer: &str,
         installed: &str,
     ) -> Result<Option<Ask>> {
-        let tx = self.write_tx("close_installed_update_ask", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("close_installed_update_ask")?;
         let ask = read_ask(&tx, id)?;
         if ask.kind != AskKind::UpdateFailed || !ask.is_open() {
             return Ok(None);
@@ -732,7 +732,7 @@ impl SqliteQueue {
     /// worker's terminal, and record `ask_delivered` in the same transaction.
     /// An ask someone closed meanwhile is left as it is.
     pub fn ask_delivered(&mut self, id: AskId, workspace_id: &str) -> Result<Ask> {
-        let tx = self.write_tx("ask_delivered", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("ask_delivered")?;
         let closed = deliver_ask_in(&tx, id, workspace_id, self.generators.clock.now())?;
         tx.commit()?;
         Ok(closed)
@@ -782,7 +782,7 @@ impl SqliteQueue {
     /// (`stall_resolved` of outcome `run_ended`, once): the run ended with
     /// no watch of its own to end them (the sweep).
     pub fn end_stalled_detections(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>> {
-        let tx = self.write_tx("end_stalled_detections", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("end_stalled_detections")?;
         let now = self.generators.clock.now();
         let closed = super::runtime_store::end_stalled_detections(&tx, run_id, answer, now)?;
         tx.commit()?;
@@ -804,7 +804,7 @@ impl SqliteQueue {
     /// its task's status, the way [`Self::close_stuck_exit_asks`] does. The
     /// asks closed, oldest first.
     pub fn close_ended_landing_asks(&mut self, task: Option<TaskId>) -> Result<Vec<Ask>> {
-        let tx = self.write_tx("close_ended_landing_asks", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("close_ended_landing_asks")?;
         let unclosed: Vec<(AskId, String, String)> = tx
             .prepare(
                 "SELECT a.id, r.status, t.status FROM asks a
@@ -836,7 +836,7 @@ impl SqliteQueue {
     /// nothing it asked, or an answer to it not delivered yet, still fits.
     /// Asks naming no run are left to their own closes.
     pub fn close_run_asks(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>> {
-        let tx = self.write_tx("close_run_asks", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("close_run_asks")?;
         let unclosed: Vec<Ask> = tx
             .prepare("SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id")?
             .query_map([run_id], ask_row)?
@@ -872,7 +872,7 @@ impl SqliteQueue {
     /// (ADR-0068 decision 4, ADR-t1311-1). An ask whose question that leaves
     /// as it was is not written. Returns the asks noted, oldest first.
     pub fn note_on_asks(&mut self, run_id: &RunId, note: &str, why: &str) -> Result<Vec<Ask>> {
-        let tx = self.write_tx("note_on_asks", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("note_on_asks")?;
         let unclosed: Vec<Ask> = tx
             .prepare("SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id")?
             .query_map([run_id], ask_row)?
@@ -910,7 +910,7 @@ impl SqliteQueue {
         subject: Option<&str>,
         answer: &str,
     ) -> Result<Vec<Ask>> {
-        let tx = self.write_tx("close_hold_asks", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("close_hold_asks")?;
         let unclosed: Vec<Ask> = tx
             .prepare(
                 "SELECT * FROM asks WHERE kind='queue_hold' AND reason_category=?1
@@ -964,7 +964,7 @@ impl SqliteQueue {
         kind: AskKind,
         answer: &str,
     ) -> Result<Vec<Ask>> {
-        let tx = self.write_tx("close_asks_of", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("close_asks_of")?;
         let now = self.generators.clock.now();
         let closed = close_asks_in(&tx, run_id, task_id, kind, answer, now)?;
         tx.commit()?;

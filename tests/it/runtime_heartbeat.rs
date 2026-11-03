@@ -8,7 +8,7 @@ use dagq::application::{NodeSampleStore, Queue, QueueOpener};
 use dagq::domain::host_metrics::{HOST_NODE, HostSample};
 use dagq::domain::{EventKind, LeaseToken};
 use dagq::infrastructure::sqlite::{SqliteQueue, WRITE_HOLD_WARN, WriteTx};
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, Transaction};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -405,30 +405,31 @@ fn a_write_tx_is_named_once_it_held_the_lock_and_not_when_it_only_read() {
         let tx: &Transaction<'_> = tx;
         tx.execute(sql, []).unwrap()
     };
-    let begin = |name, behavior| WriteTx::begin(&conn, name, behavior, Duration::ZERO).unwrap();
+    let begin_read = |name| WriteTx::read(&conn, name, Duration::ZERO).unwrap();
+    let begin_write = |name| WriteTx::write(&conn, name, Duration::ZERO).unwrap();
 
-    let tx = begin("deferred_read", TransactionBehavior::Deferred);
+    let tx = begin_read("deferred_read");
     read(&tx);
     tx.commit().unwrap();
-    let tx = begin("deferred_read_dropped", TransactionBehavior::Deferred);
+    let tx = begin_read("deferred_read_dropped");
     read(&tx);
     drop(tx);
-    let tx = begin("immediate_read", TransactionBehavior::Immediate);
+    let tx = begin_write("immediate_read");
     read(&tx);
     drop(tx);
-    let tx = begin("deferred_write", TransactionBehavior::Deferred);
+    let tx = begin_read("deferred_write");
     read(&tx);
     assert_eq!(tx.execute("INSERT INTO t VALUES (1),(2)", []).unwrap(), 2);
     tx.execute("INSERT INTO t VALUES (3)", []).unwrap();
     tx.commit().unwrap();
-    let tx = begin("deferred_update_none", TransactionBehavior::Deferred);
+    let tx = begin_read("deferred_update_none");
     read(&tx);
     assert_eq!(deref_write(&tx, "UPDATE t SET x = 10 WHERE x = 9"), 0);
     tx.commit().unwrap();
-    let tx = begin("deferred_delete_none", TransactionBehavior::Deferred);
+    let tx = begin_read("deferred_delete_none");
     assert_eq!(deref_write(&tx, "DELETE FROM t WHERE x = 9"), 0);
     drop(tx);
-    let tx = begin("deferred_insert_nothing", TransactionBehavior::Deferred);
+    let tx = begin_read("deferred_insert_nothing");
     assert_eq!(
         deref_write(&tx, "INSERT INTO t VALUES (0) ON CONFLICT DO NOTHING"),
         0
@@ -468,7 +469,7 @@ fn a_deferred_hold_taken_through_the_deref_is_named_after_a_later_counted_write(
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE t(x)").unwrap();
     let hold = |name| {
-        let tx = WriteTx::begin(&conn, name, TransactionBehavior::Deferred, threshold).unwrap();
+        let tx = WriteTx::read(&conn, name, threshold).unwrap();
         let deref: &Transaction<'_> = &tx;
         assert_eq!(
             deref.execute("UPDATE t SET x = 1 WHERE x = 9", []).unwrap(),
@@ -519,31 +520,23 @@ fn a_queue_s_deferred_hold_with_no_row_changed_is_recorded_as_an_event() {
         let tx: &Transaction<'_> = tx;
         tx.execute(sql, []).unwrap()
     };
-    let tx = queue
-        .write_tx("update_none", TransactionBehavior::Deferred)
-        .unwrap();
+    let tx = queue.read_tx("update_none").unwrap();
     assert_eq!(
         deref_write(&tx, "UPDATE tasks SET title = title WHERE id = -1"),
         0
     );
     tx.commit().unwrap();
-    let tx = queue
-        .write_tx("delete_none", TransactionBehavior::Deferred)
-        .unwrap();
+    let tx = queue.read_tx("delete_none").unwrap();
     assert_eq!(deref_write(&tx, "DELETE FROM tasks WHERE id = -1"), 0);
     drop(tx);
-    let tx = queue
-        .write_tx("read_only", TransactionBehavior::Deferred)
-        .unwrap();
+    let tx = queue.read_tx("read_only").unwrap();
     let _: i64 = tx
         .query_row("SELECT count(*) FROM tasks", [], |r| r.get(0))
         .unwrap();
     tx.commit().unwrap();
     // The same write within the default threshold.
     let quiet = SqliteQueue::open(&db).unwrap();
-    let tx = quiet
-        .write_tx("within", TransactionBehavior::Deferred)
-        .unwrap();
+    let tx = quiet.read_tx("within").unwrap();
     deref_write(&tx, "DELETE FROM tasks WHERE id = -1");
     tx.commit().unwrap();
 
@@ -687,9 +680,7 @@ fn a_finished_write_tx_rolls_back_and_its_long_hold_is_recorded() {
             .unwrap()
     };
     let before = floor();
-    let tx = queue
-        .write_tx("finished", TransactionBehavior::Deferred)
-        .unwrap();
+    let tx = queue.read_tx("finished").unwrap();
     let deref: &Transaction<'_> = &tx;
     assert_eq!(
         deref
@@ -714,13 +705,7 @@ fn a_write_tx_savepoint_rolls_back_only_its_own_writes() {
     let _test = common::test();
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE t(x)").unwrap();
-    let mut tx = WriteTx::begin(
-        &conn,
-        "savepoints",
-        TransactionBehavior::Immediate,
-        WRITE_HOLD_WARN,
-    )
-    .unwrap();
+    let mut tx = WriteTx::write(&conn, "savepoints", WRITE_HOLD_WARN).unwrap();
     tx.execute("INSERT INTO t VALUES (1)", []).unwrap();
     {
         let savepoint = tx.savepoint().unwrap();
@@ -746,18 +731,14 @@ fn a_deferred_write_tx_that_wrote_only_in_a_savepoint_is_recorded() {
         .unwrap()
         .with_write_hold_warn(Duration::ZERO);
     let write = "UPDATE tasks SET title = title WHERE id = -1";
-    let mut tx = queue
-        .write_tx("savepoint_committed", TransactionBehavior::Deferred)
-        .unwrap();
+    let mut tx = queue.read_tx("savepoint_committed").unwrap();
     {
         let savepoint = tx.savepoint().unwrap();
         savepoint.execute(write, []).unwrap();
         savepoint.commit().unwrap();
     }
     tx.commit().unwrap();
-    let mut tx = queue
-        .write_tx("savepoint_dropped", TransactionBehavior::Deferred)
-        .unwrap();
+    let mut tx = queue.read_tx("savepoint_dropped").unwrap();
     {
         let savepoint = tx.savepoint().unwrap();
         savepoint.execute(write, []).unwrap();
@@ -781,14 +762,9 @@ fn a_failed_record_of_a_long_hold_leaves_the_transaction_as_it_was() {
         tracing::subscriber::set_default(tracing_subscriber::registry().with(holds.clone()));
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE t(x)").unwrap();
-    let tx = WriteTx::begin(
-        &conn,
-        "unrecorded",
-        TransactionBehavior::Immediate,
-        Duration::ZERO,
-    )
-    .unwrap()
-    .recorded();
+    let tx = WriteTx::write(&conn, "unrecorded", Duration::ZERO)
+        .unwrap()
+        .recorded();
     tx.execute("INSERT INTO t VALUES (1)", []).unwrap();
     tx.commit().unwrap();
     assert_eq!(holds.named("unrecorded").len(), 1, "{:?}", holds.0);

@@ -7,7 +7,7 @@
 //! same request. A request's events are the queue's.
 use crate::domain::event_kind::EventKind;
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
 use super::{
@@ -164,7 +164,7 @@ impl SqliteQueue {
     ) -> Result<PlanRequest> {
         request.validate()?;
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_plan_request", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("record_plan_request")?;
         tx.execute(
             "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
                created_at, updated_at, priority) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7)",
@@ -272,7 +272,7 @@ impl SqliteQueue {
         continue_run: bool,
     ) -> Result<PlanRequest> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("decline_request_choosing", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("decline_request_choosing")?;
         let current = read_request(&tx, request)?;
         check_decline(&current, reason)?;
         anyhow::ensure!(
@@ -315,7 +315,7 @@ impl PlanRequestStore for SqliteQueue {
         answer: Option<AskId>,
     ) -> Result<RequestPlannerStart> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("open_request_planner", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("open_request_planner")?;
         let eligible = match answer {
             None => tx.query_row(
                 &format!("SELECT EXISTS({TARGETS} AND r.id=?1)"),

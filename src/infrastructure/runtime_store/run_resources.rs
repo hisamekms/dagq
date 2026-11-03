@@ -34,7 +34,7 @@ fn resource_row(row: &Row<'_>) -> rusqlite::Result<RunResource> {
 
 impl RunResourceStore for SqliteQueue {
     fn record_run_resource(&self, row: &RunResource) -> Result<i64> {
-        let tx = self.write_tx("run_resources_record", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("run_resources_record")?;
         tx.execute(
             "INSERT INTO run_resources(run_id,attachment,node_id,from_ms,until_ms,cpu_seconds,
                  cpu_limit,memory_max_bytes,throttled_seconds,cpu_pressure,load_average,is_last)

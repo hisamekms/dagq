@@ -232,9 +232,9 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
 - `BEGIN IMMEDIATE`で状態の変更・依存グラフの検証・claimを直列化する。
   ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#起動とheartbeat)）。
-- queue DBのtransactionはどれも名前付きの包み`WriteTx`（`infrastructure::sqlite`）で始まり、どのwriterがlockを握ったかを観測する。
-  書き込みと終わりの経路（`savepoint`・`finish`を含む）によらず、閾値を超えてwrite lockを握ればwarnし、queueのevent（`queue_write_held_long`）に記録する。
-  `WriteTx::begin`を通らない開始（SQLの`BEGIN`を含む）はtest（`src/context_boundaries/write_tx.rs`）が拒む。
+- queue DBのtransactionは包み`WriteTx`（`infrastructure::sqlite`）の書き込みの入口`write`（`BEGIN IMMEDIATE`）か読み取りの入口`read`（deferred）で始まる。
+  書き込みと終わりの経路によらず、閾値を超えてwrite lockを握ればwarnし、queueのevent（`queue_write_held_long`）に記録する。
+  入口の外の開始（SQLの`BEGIN`を含む）と`TransactionBehavior`の名指しはtest（`src/context_boundaries/write_tx.rs`）が拒む。
   見方と近似は`WriteTx`・`WriteTxTimes`、欄は`QUEUE_WRITE_HELD_LONG`のdoc commentが持つ。
   eventはlockを放した後に同じ接続で別に短く書き、その失敗は元のtransactionを変えない。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。

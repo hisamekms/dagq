@@ -61,7 +61,7 @@ impl SqliteQueue {
     /// `subject: "planner"`: once per planner, `false` when it was recorded
     /// before.
     pub fn planner_silent(&self, id: PlannerId, payload: Value) -> Result<bool> {
-        let tx = self.write_tx("planner_silent", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("planner_silent")?;
         let seen: bool = tx.query_row(
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
@@ -89,7 +89,7 @@ impl SqliteQueue {
     /// ([`crate::infrastructure::plan_requests::decline_after_planner`]):
     /// `false`, with nothing recorded, when the row was closed already.
     pub fn end_planner(&self, id: PlannerId, payload: &Value) -> Result<bool> {
-        let tx = self.write_tx("end_planner", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("end_planner")?;
         let now = self.generators.clock.now();
         let closed = tx.execute(
             "UPDATE planners SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
@@ -241,7 +241,7 @@ impl SessionRegistry for SqliteQueue {
         session: Option<&crate::domain::headless_job::JobSession>,
     ) -> Result<usize> {
         let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::ReviewFailed]))?;
-        let tx = self.write_tx("close_review_session", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("close_review_session")?;
         let ending = session.map(|session| {
             let mut ending = serde_json::json!({});
             session.record(&mut ending);

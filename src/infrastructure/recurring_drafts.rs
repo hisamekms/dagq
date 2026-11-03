@@ -7,7 +7,7 @@
 //! the interval in one `BEGIN IMMEDIATE` transaction with the draft and its
 //! origin, so two supervisors across a handoff never register twice.
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{
     draft_planners::insert_draft_origin,
@@ -77,7 +77,7 @@ impl SqliteQueue {
     pub fn register_recurring_draft(&mut self, item: &RecurringDraft) -> Result<RecurringOutcome> {
         let now = self.generators.clock.now();
         let timestamp = self.generators.clock.timestamp();
-        let tx = self.write_tx("register_recurring_draft", TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("register_recurring_draft")?;
         let open = open_task(&tx, &item.key)?;
         let last = last_registration(&tx, &item.key)?;
         if let Some(held) = held_back(now, item.interval_days, last.map(|(_, at)| at), open) {
