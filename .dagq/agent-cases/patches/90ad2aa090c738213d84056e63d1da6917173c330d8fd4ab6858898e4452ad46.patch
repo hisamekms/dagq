@@ -1,0 +1,13 @@
+diff --git a/docs/design/provider-lifecycle.md b/docs/design/provider-lifecycle.md
+index 36e48967e..f6ba31480 100644
+--- a/docs/design/provider-lifecycle.md
++++ b/docs/design/provider-lifecycle.md
+@@ -172,6 +172,8 @@ inboxの区間はproviderによらずhookが記録し、起動の記録（`inbox
+ 
+ workerのproviderはtaskが選び、経路は非対話だけ（ADR-t813-2決定1、[ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。
+ 流れは[非対話のworker](supervisor-lifecycle/headless-worker.md)が持つ。
++例外はproviderの組の試しのBの群で、taskのproviderを保ったままworkerの要求のproviderをBのworkerのproviderにしてclaimする（[ADR-t4005-1](../adr/2026-11-02-t4005-1-production-ab-of-worker-and-review-provider-pairs.md)）。
++claimの要求のworkerは`domain::provider_trial::ProviderTrial::requested`が、割り当て・試しの外・記録は[Worker model](supervisor-lifecycle/worker-model.md#限定の試しworkertrial)と`ProviderTrial::choose`が持つ。
+ 
+ - 入口: `domain::worker`・`WorkerAdapters`・`AgentProvider::turn_command`・`TurnReader`、文面は[Prompt](supervisor-lifecycle/prompt.md#経路とproviderごとの文面)。
+ - 実行ファイルの解決は[Provider executables](provider-executables.md)、`up`での固定は[運用](../development/operations.md)の「`up`のコマンド」。

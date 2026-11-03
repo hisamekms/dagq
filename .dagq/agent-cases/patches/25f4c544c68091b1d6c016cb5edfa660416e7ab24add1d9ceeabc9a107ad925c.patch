@@ -1,0 +1,14 @@
+diff --git a/tests/e2e.rs b/tests/e2e.rs
+index ae339958b..297f67598 100644
+--- a/tests/e2e.rs
++++ b/tests/e2e.rs
+@@ -174,7 +174,8 @@ fn status_when(env: &Env, condition: impl Fn(&Value) -> bool) -> Value {
+         if condition(&status) || Instant::now() >= deadline {
+             return status;
+         }
+-        thread::sleep(Duration::from_millis(200));
++        // The landing writes main before the run's status: look again soon.
++        thread::sleep(Duration::from_millis(100));
+     }
+ }
+ 

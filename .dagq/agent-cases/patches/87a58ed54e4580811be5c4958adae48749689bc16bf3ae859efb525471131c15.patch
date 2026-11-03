@@ -1,0 +1,64 @@
+diff --git a/docs/plans/claim-spacing.md b/docs/plans/claim-spacing.md
+index 5c1cac5bc..7e78acf00 100644
+--- a/docs/plans/claim-spacing.md
++++ b/docs/plans/claim-spacing.md
+@@ -221,3 +221,59 @@ output['last_hour'] = {
+     'last_load1': str(hour_loads[-1])}
+ print(json.dumps(output, ensure_ascii=False, indent=2))
+ ```
++
++## 間隔を広げた後の測定
++
++claimの間隔を広げた後の72時間と、その前の72時間のclaimの数と、claimの間の秒（`created_at`の昇順で直前のclaimとの差）の中央値と最大を、下のscriptで出した。
++scriptは各区間のrun_claimedを`dagq events --kind run_claimed --full --since <区間の始め> --until <区間の終わり> --after 0 --limit 100`から読み、返ったcursorを`--after`に渡して空のページまで読む。
++本文を`$TMPDIR/claim-gaps.py`に保存し、repository内で次のように流す（区間は`--since 2026-10-27T00:00:00Z --until 2026-10-30T00:00:00Z`と`--since 2026-10-30T00:00:00Z --until 2026-11-02T00:00:00Z`）。
++
++```sh
++python3 "$TMPDIR/claim-gaps.py" 2026-10-27T00:00:00Z 2026-10-30T00:00:00Z 2026-11-02T00:00:00Z
++```
++
++```python
++import json
++import subprocess
++import sys
++from datetime import datetime
++from statistics import median
++
++start, boundary, end = sys.argv[1:]
++
++def ts(value):
++    return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
++
++def claims(a, b):
++    result, cursor = [], 0
++    while True:
++        page = json.loads(subprocess.check_output(
++            ['dagq', 'events', '--kind', 'run_claimed', '--full', '--since', a,
++             '--until', b, '--after', str(cursor), '--limit', '100']))
++        if not page['events']:
++            break
++        result.extend(page['events'])
++        cursor = page['cursor']
++    return sorted(ts(event['created_at']) for event in result)
++
++for name, a, b in [('before', start, boundary), ('after', boundary, end)]:
++    times = claims(a, b)
++    gaps = [later - earlier for earlier, later in zip(times, times[1:])]
++    print(json.dumps({'period': name, 'claims': len(times),
++                      'median_gap_secs': round(median(gaps)),
++                      'max_gap_secs': round(max(gaps))}))
++```
++
++scriptを2026-11-02T09:10Z・09:40Z・10:10Zに3回流した。
++3回とも出力は同じだった。
++
++| 区間 | 回 | claimの数 | 間の中央値（秒） | 間の最大（秒） |
++|---|---|---|---|---|
++| 広げる前の72時間 | 1 | 412 | 38 | 4812 |
++| 広げる前の72時間 | 2 | 412 | 38 | 4812 |
++| 広げる前の72時間 | 3 | 412 | 38 | 4812 |
++| 広げた後の72時間 | 1 | 398 | 64 | 5107 |
++| 広げた後の72時間 | 2 | 398 | 64 | 5107 |
++| 広げた後の72時間 | 3 | 398 | 64 | 5107 |
++
++間の中央値は約1.7倍になり、claimの数はほぼ変わらない。

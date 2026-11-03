@@ -1,0 +1,27 @@
+diff --git a/tests/it/cli_version.rs b/tests/it/cli_version.rs
+index 41f5f7481..1d7768220 100644
+--- a/tests/it/cli_version.rs
++++ b/tests/it/cli_version.rs
+@@ -29,7 +29,8 @@ fn version_works_outside_a_repository_and_without_a_queue() {
+     );
+     assert_eq!(
+         String::from_utf8(output.stdout).unwrap().trim(),
+-        format!("{} {}", env!("CARGO_PKG_NAME"), dagq::VERSION)
++        format!("{} {}", env!("CARGO_PKG_NAME"), dagq::VERSION),
++        "--version prints the package name and the build identifier"
+     );
+ }
+ 
+@@ -62,7 +63,11 @@ fn version_is_the_build_identifier() {
+     )
+     .identifier;
+     let clean = |id: &str| id.strip_suffix(".dirty").unwrap_or(id).to_owned();
+-    assert_eq!(clean(dagq::VERSION), clean(&expected));
++    assert_eq!(
++        clean(dagq::VERSION),
++        clean(&expected),
++        "the build script embeds the identifier the same rule computes"
++    );
+ }
+ 
+ /// Runs `binary` (a copy of this one, as `claim` leaves a run's wrapper in

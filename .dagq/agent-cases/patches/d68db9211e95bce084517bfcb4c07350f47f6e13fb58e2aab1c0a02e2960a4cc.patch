@@ -1,0 +1,13 @@
+diff --git a/tests/common/mod.rs b/tests/common/mod.rs
+index c929290e2..f328e674e 100644
+--- a/tests/common/mod.rs
++++ b/tests/common/mod.rs
+@@ -252,7 +252,7 @@ pub fn within(limit: Duration, what: impl Into<String>) -> Waiting {
+     );
+     let test = thread::current()
+         .name()
+-        .unwrap_or("(on a thread the test started)")
++        .unwrap_or("(on an unnamed thread its test started)")
+         .to_owned();
+     Waiting(open_wait(test, what.into(), started, limit, deadline))
+ }

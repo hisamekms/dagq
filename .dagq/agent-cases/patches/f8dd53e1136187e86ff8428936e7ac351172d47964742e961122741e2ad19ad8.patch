@@ -1,0 +1,343 @@
+diff --git a/docs/design/measurement.md b/docs/design/measurement.md
+index 6c5a3d550..edc0bca27 100644
+--- a/docs/design/measurement.md
++++ b/docs/design/measurement.md
+@@ -190,7 +190,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
+ 
+ ## 台帳を作る係
+ 
+-何を書くかは`domain::ledger::builder`が決め（数値は定数）、`supervise::observation::ledger`が書く。
++何を書くかは`domain::ledger::builder`が決め、`supervise::observation::ledger`が書く。
+ 
+ - **周回**: supervisorの周回が間隔ごとに、drainとhandoffの間も、jobのthreadで動く（D7）。
+   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
+@@ -201,7 +201,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
+   session（記録と落とした印も）・queueの行・supervisorの一生・claimの前の待ちの帳簿はstoreの行を書き終えた位置で作り直せる（起動は未使用）。
+   周回は新しいeventが変えうる行と印の付いた行だけを畳み、作る領域は前からのevent数に比例しない。
+ - **書く行**: 終わったrun（`push_pending`と旧方式を含み途中は書かない）と全てのtask・session・queue・nodeの行。
+-  session行は他の行の後に1周分を塊ごとのtransactionで書き、全件を畳む係だけが最後の塊でWとR（カーソルごとに残った行の入力の前まで）の印も書き、無ければカーソル0から畳む。
++  session行は他の行の後に1周分を塊ごとのtransactionで書き、W以前から全件を畳む係だけが最後の塊でWとR（カーソルごとに残った行の入力の前まで）の印も書き、無ければカーソル0から畳む。
+ - **確定**（`final`）: run・taskは終わりから猶予の後で、`push_pending`には付けない。
+   runはtelemetryのtokenの失効と資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
+   session・queue・nodeの行は`domain::ledger::settle`が決める（終わりから猶予の後で、閉じていない行は確定しない）。
+diff --git a/src/application/supervise/observation/ledger.rs b/src/application/supervise/observation/ledger.rs
+index 1430b1f2b..9e1d31e1a 100644
+--- a/src/application/supervise/observation/ledger.rs
++++ b/src/application/supervise/observation/ledger.rs
+@@ -479,7 +479,8 @@ fn write_sessions(
+     if pending.rows.is_empty() {
+         match mark {
+             None => return Ok(written),
+-            // R alone moved: the session rows' mark as the store holds it.
++            // R alone moved: the session rows' mark as the store holds it
++            // (a builder gone on from R before W reads past W before it).
+             Some(marks) if builder.sessions_mark_written() == Some(marks.sessions) => {
+                 store.write_ledger_marks(&marks)?;
+                 builder.wrote_sessions_mark(marks);
+@@ -749,10 +750,12 @@ pub fn rows_written(store: &dyn LedgerQueue) -> Result<Option<Cursors>> {
+ /// those not settled at the cursor, so that what it keeps of the sessions
+ /// settled is their records' ids. The rows give the fold of every event
+ /// only when the store's session rows record every session event up to
+-/// the cursor: when the cursor is the position W the store's mark gives
+-/// ([`written_through`]) they are held at W
+-/// ([`SessionsHeld::written_at`]) and the builder writes the mark again
+-/// as it goes on; at any other cursor it writes none.
++/// the cursor: when the cursor is no later than the position W the
++/// store's mark gives ([`written_through`]), W itself or the R it went on
++/// from ([`Builder::go_on_from_rows`]), they are held as the fold of every
++/// session event up to it ([`SessionsHeld::within`]) and the builder
++/// writes the marks again once it has caught up; at a cursor past W, or
++/// with no W, it writes none.
+ #[cfg_attr(
+     not(test),
+     expect(
+@@ -763,12 +766,8 @@ pub fn rows_written(store: &dyn LedgerQueue) -> Result<Option<Cursors>> {
+ pub fn restore_sessions(store: &dyn LedgerQueue, builder: &mut Builder) -> Result<()> {
+     let heads = store.ledger_heads(LedgerKind::Session)?;
+     let anchors = store.ledger_session_anchors()?;
+-    let held =
+-        if written_through(store.sessions_written()?.as_ref(), &heads) == Some(builder.events) {
+-            SessionsHeld::written_at(&heads, &anchors, builder.events)
+-        } else {
+-            SessionsHeld::at(&heads, &anchors, builder.events)
+-        };
++    let w = written_through(store.sessions_written()?.as_ref(), &heads);
++    let held = SessionsHeld::within(&heads, &anchors, builder.events, w);
+     let mut records = Vec::new();
+     for key in &held.open {
+         if let Some(row) = store.ledger_row(LedgerKind::Session, key)? {
+diff --git a/src/application/supervise/observation/ledger/tests.rs b/src/application/supervise/observation/ledger/tests.rs
+index d0e3414bc..451da4916 100644
+--- a/src/application/supervise/observation/ledger/tests.rs
++++ b/src/application/supervise/observation/ledger/tests.rs
+@@ -4347,6 +4347,75 @@ fn a_builder_whose_marks_do_not_follow_every_input_leaves_r() {
+     assert_eq!(r_of(&memory), r);
+ }
+ 
++/// On a store a pass left task rows past [`WRITES_PER_PASS`] with R
++/// before W (R.events < W), a new builder going on from R
++/// ([`Builder::go_on_from_rows`]) with the session rows held there
++/// ([`restore_sessions`]) keeps the fold of every session event: it writes
++/// the session rows of every event (the session events between R and W
++/// read again give no round twice, and a late record after W is not
++/// missed) and, once caught up, moves W and R to its cursors. One whose
++/// rows are held past W writes no mark.
++#[test]
++fn going_on_from_r_before_w_writes_the_rows_of_every_event_and_moves_both_marks() {
++    let (log, position) = sessions_behind_tasks();
++    for upto in [position, position + 2, log.events.len()] {
++        let memory = Memory::default();
++        memory.events.replace(log.events[..upto].to_vec());
++        let built = pass(&memory, &mut Builder::default(), LATER);
++        assert_eq!(built.failure, None, "{upto}");
++        assert!(built.backlog > 0, "{upto}: the task rows lag");
++        let w = sessions_written_through(&memory).unwrap().unwrap();
++        assert_eq!(w, id_at(&log, upto), "{upto}");
++        let r = r_of(&memory);
++        assert!(r.events < w, "{upto}");
++        // Session events lie between R and W.
++        assert!(
++            log.events
++                .iter()
++                .any(|event| event.id > r.events && event.id <= w && event.task_id.is_none()),
++            "{upto}"
++        );
++
++        memory.events.replace(log.events.clone());
++        let mut builder = Builder::default();
++        builder.go_on_from_rows(r);
++        restore_sessions(&memory, &mut builder).unwrap();
++        assert_eq!(builder.events, r.events);
++        let built = drain(&memory, &mut builder, LATER + 1);
++        assert_eq!(built.failure, None, "{upto}");
++        assert!(
++            are_of_every_event(&rows_of_kind(&memory, LedgerKind::Session), &log),
++            "{upto}"
++        );
++        assert_eq!(
++            sessions_written_through(&memory).unwrap(),
++            Some(log.last()),
++            "{upto}"
++        );
++        assert_eq!(r_of(&memory), builder.cursors(), "{upto}");
++        assert_eq!(r_of(&memory).events, log.last(), "{upto}");
++    }
++
++    // Held past W: no mark moves.
++    let upto = position;
++    let memory = Memory::default();
++    memory.events.replace(log.events[..upto].to_vec());
++    pass(&memory, &mut Builder::default(), LATER);
++    let w = sessions_written_through(&memory).unwrap();
++    let r = r_of(&memory);
++    memory.events.replace(log.events.clone());
++    let mut past = Builder::default();
++    past.go_on_from_rows(Cursors {
++        events: id_at(&log, upto + 2),
++        ..r
++    });
++    restore_sessions(&memory, &mut past).unwrap();
++    let built = passes_to_drain(&memory, &mut past, LATER + 1);
++    assert_eq!(built.failure, None);
++    assert_eq!(sessions_written_through(&memory).unwrap(), w);
++    assert_eq!(r_of(&memory), r);
++}
++
+ /// The rows a fold of every input writes at `secs` ([`drain`] from the
+ /// cursors' start) of the events, node samples and windows of `memory`.
+ fn rows_of_every_input(memory: &Memory, secs: i64) -> BTreeMap<(LedgerKind, String), LedgerRow> {
+diff --git a/src/domain/ledger/builder.rs b/src/domain/ledger/builder.rs
+index d69601a88..876d62cc4 100644
+--- a/src/domain/ledger/builder.rs
++++ b/src/domain/ledger/builder.rs
+@@ -92,7 +92,8 @@
+ //!   mark of its position ([`super::session::written`]): a write that fails
+ //!   or a fold behind the stored row leaves its rows marked and no mark.
+ //!   Only a builder whose session book is the fold of every session event
+-//!   (from its cursors' start, or gone on from the mark) writes the mark,
++//!   (from its cursors' start, or gone on from a position no later than
++//!   the mark's, W or R) writes the mark,
+ //!   and only when no session row is left marked
+ //!   ([`Builder::sessions_mark`]), so that the store's session rows record
+ //!   every session event up to the position the mark gives (W,
+@@ -145,9 +146,11 @@
+ //!   settled and the rows settled as dropped in place of all [`Kept`]
+ //!   made of the session events up to that position
+ //!   ([`Builder::restore_sessions`]); a builder going on from there writes
+-//!   the rows of every event only when the store's session rows record
+-//!   every session event up to it, which the rows' heads do not say and
+-//!   the store's mark does (W, held at by [`SessionsHeld::written_at`]).
++//!   the rows of every event and the marks only when the store's session
++//!   rows record every session event up to it, which the rows' heads do
++//!   not say and the store's mark does: at any position no later than W,
++//!   W itself or the R before it a builder goes on from
++//!   ([`SessionsHeld::within`]).
+ //!   So is which queue row each is a
+ //!   record of ([`QueueBook`]: the findings, alerts and streams open, what
+ //!   the supervisors' lives reach, the landing slot's attempts and what
+@@ -903,9 +906,9 @@ pub struct Builder {
+     /// cursors' start ([`Self::sweep`]).
+     swept: bool,
+     /// Whether its session book and records are the fold of every session
+-    /// event up to its cursor: from its cursors' start, or gone on from the
+-    /// store's mark ([`SessionsHeld::written`]); not once made again from
+-    /// the rows' heads at a position not the mark's. Only then does it
++    /// event up to its cursor: from its cursors' start, or gone on from a
++    /// position no later than the store's mark ([`SessionsHeld::written`]);
++    /// not once made again from the rows' heads past it. Only then does it
+     /// write the mark ([`Self::sessions_mark`]).
+     sessions_whole: bool,
+     /// The last marks it wrote, or the session rows' it went on from.
+@@ -1679,10 +1682,12 @@ impl Builder {
+     /// the cursor is tracked and settles as the fold of every event's does,
+     /// and one folded by an older version is folded again ([`writes`]);
+     /// a builder with marks refuses a queue book
+-    /// ([`Self::restore_queue_rows`]), so that is taken first. Held at the
+-    /// store's mark ([`SessionsHeld::written_at`]) it keeps the fold of
+-    /// every session event and writes the mark again as it goes on; held
+-    /// at any other position it writes no mark ([`Self::sessions_mark`]).
++    /// ([`Self::restore_queue_rows`]), so that is taken first. Held at a
++    /// position no later than the store's mark W ([`SessionsHeld::written`],
++    /// W itself or the R it went on from, [`Self::go_on_from_rows`], taken
++    /// after it) it keeps the fold of every session event and writes the
++    /// marks again once it has caught up; held past W or with no W it
++    /// writes no mark ([`Self::sessions_mark`]).
+     pub fn restore_sessions(&mut self, held: SessionsHeld, records: Vec<RunEvent>) {
+         self.marks.extend(
+             held.open
+@@ -1741,8 +1746,8 @@ impl Builder {
+     /// The marks of its cursors a pass writes with its session rows: the
+     /// session rows' ([`SessionsWritten`], W) only while its session book
+     /// and records are the fold of every session event (from its cursors'
+-    /// start, or gone on from the store's mark, its cursor moved only as it
+-    /// read the events since) and no session row is left marked or to be
++    /// start, or gone on from a position no later than the store's mark W,
++    /// W or R, its cursor moved only as it read the events since) and no session row is left marked or to be
+     /// built (all it changed are written or the store holds them as
+     /// folded); with it the other rows' ([`RowsWritten`], R,
+     /// [`Self::rows_written`]) when it gives one. None when it wrote these
+@@ -1764,7 +1769,8 @@ impl Builder {
+         (self.marks_written != Some(marks)).then_some(marks)
+     }
+ 
+-    /// The session rows' mark it last wrote or went on from.
++    /// The session rows' mark it last wrote or the position it went on
++    /// from (W, or R before it, which the store's mark is not).
+     pub fn sessions_mark_written(&self) -> Option<SessionsWritten> {
+         self.marks_written.map(|marks| marks.sessions)
+     }
+@@ -1817,8 +1823,10 @@ impl Builder {
+     /// marks follow every input: every row an input up to it made dirty is
+     /// written, so none of them is marked. What it keeps of the inputs up
+     /// to there is made again from the store's rows apart, its session
+-    /// book too: it writes W and R again only once that book is the fold
+-    /// of every session event up to its cursor ([`Self::sessions_mark`]).
++    /// book too, taken after this at `from` ([`Self::restore_sessions`]):
++    /// it writes W and R again only once that book is the fold of every
++    /// session event up to its cursor ([`Self::sessions_mark`]), as one
++    /// made at `from` no later than W is.
+     pub fn go_on_from_rows(&mut self, from: Cursors) {
+         self.events = from.events;
+         self.samples = from.samples;
+diff --git a/src/domain/ledger/session.rs b/src/domain/ledger/session.rs
+index 58760b4fe..7d33d3fd0 100644
+--- a/src/domain/ledger/session.rs
++++ b/src/domain/ledger/session.rs
+@@ -251,10 +251,14 @@ pub fn anchors(rows: &[LedgerRow]) -> Vec<(String, RunEvent)> {
+ /// store has not written yet, or a record it has not written to a row,
+ /// is not in the heads, and a builder going on from `through` misses it.
+ /// Which `through` the store has written up to it does not find: the
+-/// store's mark does ([`written::written_through`], W), and the
+-/// rows held at W ([`Self::written_at`]) are the fold of every event.
+-/// Going on from W is safe whatever the store wrote after its mark: the
+-/// records after W are cut here, and the builder reads those events again.
++/// store's mark does ([`written::written_through`], W). The store's
++/// session rows record every session event up to W, so they record every
++/// one up to any position no later than W too, and the rows held at such
++/// a position ([`Self::within`], the R of the store's mark among them)
++/// are the fold of every event up to it; held past W they are not. Going
++/// on from such a position is safe whatever the store wrote after it: the
++/// records after it are cut here, and the builder reads those events
++/// again, each to the row and round the fold of every event gives it.
+ #[derive(Debug, Clone, Default, PartialEq, Eq)]
+ pub struct SessionsHeld {
+     pub through: EventId,
+@@ -264,9 +268,9 @@ pub struct SessionsHeld {
+     /// The keys of the rows not settled at `through` or folded by an
+     /// older version.
+     pub open: Vec<String>,
+-    /// Whether `through` is the store's mark (W): a builder that takes the
+-    /// rows held keeps the fold of every session event, and writes the
+-    /// mark again ([`super::builder::Builder::sessions_mark`]).
++    /// Whether `through` is no later than the store's mark (W): a builder
++    /// that takes the rows held keeps the fold of every session event, and
++    /// writes the mark again ([`super::builder::Builder::sessions_mark`]).
+     pub written: bool,
+ }
+ 
+@@ -314,17 +318,19 @@ impl SessionsHeld {
+         held
+     }
+ 
+-    /// The rows held at `written`, the position the store's mark gives
+-    /// ([`written::written_through`]), as [`Self::at`] holds them:
+-    /// those of the fold of every session event up to it.
+-    pub fn written_at(
++    /// The rows held at `through` as [`Self::at`] holds them, with `w` the
++    /// position the store's mark gives ([`written::written_through`]):
++    /// those of the fold of every session event up to `through` when it is
++    /// no later than W ([`Self::written`]), whether it is W or before it.
++    pub fn within(
+         heads: &[LedgerHead],
+         anchors: &[(String, RunEvent)],
+-        written: EventId,
++        through: EventId,
++        w: Option<EventId>,
+     ) -> Self {
+         Self {
+-            written: true,
+-            ..Self::at(heads, anchors, written)
++            written: w.is_some_and(|w| through <= w),
++            ..Self::at(heads, anchors, through)
+         }
+     }
+ 
+diff --git a/src/domain/ledger/session/tests.rs b/src/domain/ledger/session/tests.rs
+index c6df39b3d..2b60f89e7 100644
+--- a/src/domain/ledger/session/tests.rs
++++ b/src/domain/ledger/session/tests.rs
+@@ -192,3 +192,34 @@ fn a_row_settled_by_an_older_version_is_held_open() {
+     assert!(!held.settled.contains(&key.to_owned()));
+     assert_eq!(held.book, book_of(&log.events[..position]));
+ }
++
++/// The rows held at a position no later than the store's mark W are the
++/// fold of every session event up to it (W itself, or a position before
++/// it such as R), held as [`SessionsHeld::at`] holds them; past W, or with
++/// no W, they are not.
++#[test]
++fn the_rows_held_no_later_than_w_are_the_fold_of_every_event() {
++    let (log, position) = across();
++    let rows = session_rows(&log.events, BUILT);
++    let heads: Vec<LedgerHead> = rows.iter().map(LedgerHead::of).collect();
++    let anchors = anchors(&rows);
++    let w = log.events[position].id;
++    for (upto, whole) in [
++        (position - 1, true),
++        (position + 1, true),
++        (position + 2, false),
++    ] {
++        let through = log.events[upto - 1].id;
++        let held = SessionsHeld::within(&heads, &anchors, through, Some(w));
++        assert_eq!(held.written, whole, "{through:?}");
++        assert_eq!(held.book, book_of(&log.events[..upto]), "{through:?}");
++        assert_eq!(
++            held,
++            SessionsHeld {
++                written: whole,
++                ..SessionsHeld::at(&heads, &anchors, through)
++            }
++        );
++        assert!(!SessionsHeld::within(&heads, &anchors, through, None).written);
++    }
++}

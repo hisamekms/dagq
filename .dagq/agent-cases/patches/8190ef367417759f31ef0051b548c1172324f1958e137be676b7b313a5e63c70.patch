@@ -1,0 +1,54 @@
+diff --git a/dagq.toml b/dagq.toml
+index bc3faf238..54a9c0f6e 100644
+--- a/dagq.toml
++++ b/dagq.toml
+@@ -530,6 +530,21 @@ paths = ["docs/design/**", ".config/design-docs-allow.toml"]
+ script = "scripts/check-adr-numbers.sh"
+ paths = ["docs/adr/**"]
+ 
++# Codex で動く agent の eval の周の見積もりと金額への換算。Codex は金額を返さないので単価が無いと cost_unknown で拒まれ、
++# 同じ agent・provider の実績が無いうちは default_run_usd が無いとやはり拒まれる（domain::agent_eval::round の estimate）。
++# 対象の model は gpt-6.1-sol（queue の review_job_finished の model の欄で、2026-10-25〜11-01 の Codex の review の agent の job はどれもこれ）。
++# 単価は OpenAI の公開の価格の頁 https://developers.openai.com/api/docs/pricing の Standard の Short（272K 以下）の行（2026-11-02 に見た）:
++# input $2.00・cached input $0.10・output $10.00（1M token あたり）。272K を超える入力の Long の行（$4.00・$0.20・$15.00）と cache write の単価は使わない
++# （換算は cache_creation も cached input の単価で数える）。
++# default_run_usd は Claude の既定（Spike の実測の 1 回の 2 倍）に揃えた初回の 1 回の見込み: 2026-10-25〜11-01 の Codex の review の agent の job 80 件の
++# 中央値の目安 input 47,000・cache_read 150,000・output 1,200 token を上の単価で換算すると 0.094 + 0.015 + 0.012 = $0.121 で、その 2 倍の $0.242。
++# 実績が溜まれば見込みは recent_runs の実績の最大に替わる。model か公開の単価が変わったら、単価と default_run_usd を見直す。
++[eval.providers.codex]
++input_usd_per_mtok = 2.0
++cached_input_usd_per_mtok = 0.1
++output_usd_per_mtok = 10.0
++default_run_usd = 0.242
++
+ # Rust の版の引き上げ（人の決定 2026-09-26: rust-toolchain.toml と rust-version を同じ最新の stable に固定し、stable の release ごと＝6 週ごとに上げる。goal 46）。
+ # 42 日ごとに runtime が draft を 1 件登録し、runtime の planner が新しい stable の有無を確かめて採用（edit・submit）か cancel を決める。
+ # 前の draft か task が終わるまで次は登録されない。仕組みは ADR-0072、書式と期限は docs/design/supervisor-lifecycle/run-environment.md の「定期draft」。
+diff --git a/src/infrastructure/run_env.rs b/src/infrastructure/run_env.rs
+index 101d726fd..f9fe646a8 100644
+--- a/src/infrastructure/run_env.rs
++++ b/src/infrastructure/run_env.rs
+@@ -3958,6 +3958,23 @@ mod tests {
+         assert!(!config.telemetry.failed_tests);
+     }
+ 
++    /// This repository's `dagq.toml` prices Codex and gives it a first
++    /// run's estimate, so an eval round on Codex is estimated before any
++    /// run of the agent on Codex was measured instead of refused as
++    /// cost unknown.
++    #[test]
++    fn this_repositorys_dagq_toml_estimates_a_codex_round_without_a_measured_run() {
++        use crate::domain::Provider;
++        use crate::domain::agent_eval::round::{EstimateSource, estimate};
++        let config = parse_config(include_str!("../../dagq.toml")).unwrap().eval;
++        let prices = config.provider(Provider::Codex);
++        assert!(prices.converts(), "{prices:?}");
++        assert!(prices.cached_input_usd_per_mtok.is_some(), "{prices:?}");
++        let one = estimate(1, Provider::Codex, &[], &config).unwrap();
++        assert_eq!(one.per_run_source, EstimateSource::ProviderDefault);
++        assert_eq!(Some(one.per_run_usd), prices.default_run_usd);
++    }
++
+     #[test]
+     fn the_run_env_salt_is_made_once_and_kept_private() {
+         use std::os::unix::fs::PermissionsExt;

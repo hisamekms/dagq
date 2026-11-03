@@ -1,0 +1,28 @@
+diff --git a/docs/design/supervisor-lifecycle/validation.md b/docs/design/supervisor-lifecycle/validation.md
+index c28528d86..f200422ed 100644
+--- a/docs/design/supervisor-lifecycle/validation.md
++++ b/docs/design/supervisor-lifecycle/validation.md
+@@ -131,7 +131,7 @@ verifyが通ればreview jobが同じheadで主張を判定し、`high`のpass
+ 
+ [ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)で、着地の検証を軽くし、最終関門をCIにする。
+ 置き換えと材料の受け渡しはruntimeにあり、repositoryの`dagq.toml`が設定を持つときだけ働く。
+-validatingは今と同じく検証のコマンドを流さず、置き換えも`integrate`のrebase後の1回の検証の中で起きる（[`integrate`](integrate.md#検証のコマンド)）。
++validatingは検証のコマンドを流さず、置き換えも`integrate`のrebase後の1回の検証の中で起きる（[`integrate`](integrate.md#検証のコマンド)）。
+ 着地しない`already_satisfied`のrunでは、同じ置き換えが上の「already_satisfiedの検証」のsnapshotの検証の中で起きる。
+ 
+ - **置き換えの流れ**: 設定があるときだけ、runtimeはtaskの検証のコマンドのうち設定が名指すもの（coverageの関門）を、設定の着地の検証のコマンドに置き換えて流す。
+diff --git a/scripts/check-design-sentences.sh b/scripts/check-design-sentences.sh
+index 87de784e0..c19ae5a97 100644
+--- a/scripts/check-design-sentences.sh
++++ b/scripts/check-design-sentences.sh
+@@ -5,8 +5,8 @@
+ # another follows fails. Only the lines the diff from the base to the work
+ # tree adds or changes are checked, so the lines already there are not; the
+ # boundaries (frontmatter, fenced code blocks, inline code, table rows,
+-# headings, 「。」 inside brackets and quotes) are in that section, and this
+-# script only applies them. The sizes and line lengths are checked by
++# headings, 「。」 inside brackets and quotes, and 「。」 inside a link's text) are in
++# that section, and this script only applies them. The sizes and line lengths are checked by
+ # scripts/check-design-docs.sh.
+ #
+ # The tree checked is the git work tree of the cwd (`git rev-parse

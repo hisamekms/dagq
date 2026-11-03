@@ -1,0 +1,70 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index bce899e9d..8d2c8af64 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -96,7 +96,7 @@ jobs:
+   # runner as the Rust job, where the scripts are known to work.
+   docs:
+     name: docs / scripts checks
+-    runs-on: macos-15
++    runs-on: macos-26
+     steps:
+       - uses: actions/checkout@v4
+         with:
+@@ -206,7 +206,7 @@ jobs:
+     needs: changes
+     if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+     # Apple Silicon, the platform the runtime is developed and run on.
+-    runs-on: macos-15
++    runs-on: macos-26
+     steps:
+       - uses: actions/checkout@v4
+         with:
+@@ -244,7 +244,7 @@ jobs:
+       - name: Remove the target's tmp restored from the cache
+         run: rm -rf target/tmp target/llvm-cov-target/tmp
+ 
+-      # The macos-15 runner's disk can run out under cargo llvm-cov nextest
++      # The macos-26 runner's disk can run out under cargo llvm-cov nextest
+       # (the instrumented build, each test's copies of the runtime binary in
+       # the temporary directories, the profraw files): tests then fail with
+       # "No space left on device" or "database or disk is full". So before
+diff --git a/.github/workflows/it-coverage-map.yml b/.github/workflows/it-coverage-map.yml
+index b983fccb0..ebbadedfd 100644
+--- a/.github/workflows/it-coverage-map.yml
++++ b/.github/workflows/it-coverage-map.yml
+@@ -39,7 +39,7 @@ jobs:
+     name: file -> IT test map
+     # Apple Silicon, as ci.yml's checks job: the tests that only hold on
+     # macOS run here too.
+-    runs-on: macos-15
++    runs-on: macos-26
+     timeout-minutes: 150
+     steps:
+       - uses: actions/checkout@v4
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index d8abd7151..c7fac29b6 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -17,7 +17,7 @@ env:
+ jobs:
+   release:
+     name: Build and publish ${{ github.ref_name }}
+-    runs-on: macos-15
++    runs-on: macos-26
+     steps:
+       - uses: actions/checkout@v5
+         with:
+diff --git a/.github/workflows/stress.yml b/.github/workflows/stress.yml
+index d49bbb602..608540092 100644
+--- a/.github/workflows/stress.yml
++++ b/.github/workflows/stress.yml
+@@ -55,7 +55,7 @@ jobs:
+   stress:
+     name: stress recent tests
+     # The same runner as ci.yml: Apple Silicon, where the runtime runs.
+-    runs-on: macos-15
++    runs-on: macos-26
+     steps:
+       - uses: actions/checkout@v4
+         with:

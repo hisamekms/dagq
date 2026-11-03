@@ -1,0 +1,13 @@
+diff --git a/src/domain/local_gates.rs b/src/domain/local_gates.rs
+index b38d5c348..95581a2a2 100644
+--- a/src/domain/local_gates.rs
++++ b/src/domain/local_gates.rs
+@@ -1,7 +1,7 @@
+ //! The worker's local gates (ADR-t2589-1 decision 6): which of the checks
+ //! a project's `dagq.toml` declares as gates a run's diff requires. A gate
+ //! is required when a changed test is in its paths; one not required is
+-//! left out with the reason that no test it requires changed, which the
++//! left out with the reason that no test in its paths changed, which the
+ //! review takes from here rather than from the worker's evidence.
+ //!
+ //! A changed path is a test's when it matches the declared globs of the

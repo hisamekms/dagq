@@ -1,0 +1,12 @@
+diff --git a/plugins/claude-dagq/skills/dagq/reference/scope.md b/plugins/claude-dagq/skills/dagq/reference/scope.md
+index 79e1ce325..95bd26f35 100644
+--- a/plugins/claude-dagq/skills/dagq/reference/scope.md
++++ b/plugins/claude-dagq/skills/dagq/reference/scope.md
+@@ -1,6 +1,6 @@
+ # Paths and light verification
+ 
+-`integrate` runs a task's `--verify` commands once, serially, after its rebase, so a long check holds every landing behind it. Register a task with the checks its change needs, and declare with `--paths` what it may change (`"$DAGQ" add --help`).
++`integrate` runs a task's `--verify` commands once, serially, after its rebase, so a long check holds every landing behind it, and a failing one sends the run back to a session. Register a task with the checks its change needs, and declare with `--paths` what it may change (`"$DAGQ" add --help`).
+ 
+ ## Globs
+ 

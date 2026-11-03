@@ -1,0 +1,11 @@
+diff --git a/migrations/0094_task_runs_by_task_and_status.sql b/migrations/0094_task_runs_by_task_and_status.sql
+new file mode 100644
+index 000000000..c1c1ec43a
+--- /dev/null
++++ b/migrations/0094_task_runs_by_task_and_status.sql
+@@ -0,0 +1,5 @@
++-- dagq-schema: compatible
++-- The runs of a task in a status (the claim's look for a task's open run):
++-- without an index the read walks every run of the queue.
++CREATE INDEX IF NOT EXISTS task_runs_by_task_and_status
++  ON task_runs(task_id, status);
