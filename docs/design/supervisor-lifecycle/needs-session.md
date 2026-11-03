@@ -135,7 +135,7 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
    runの`result_commit`（着地するcommit（5）。無ければ、rebaseの途中でないworktreeのHEAD。登録の壊れたworktreeのrunは[triageの`retry`の前提](triage.md#triage-supervisor)と同じく読む）がbaseと違えば、それを`refs/dagq/runs/<run-id>`に向け（branchを消されても残るように）、1トランザクションで下と同じ確認と、衝突だけで止まっていることとtaskごとに1回までであることの再確認をしてrunを`failed`にし、taskを`in_progress`から`ready`に戻し（中身は変えないのでplan reviewにはかけない）、`auto_repaired`と`triage_finished`を記録する。
    askは開かない。
    残したresumeのwrapperはtriageと同じく止め、worktreeとbranchはtaskが`ready`なので残る。
-   次のrunのclaimでsupervisorは、前のrunのうち最も新しい引き継ぐretryで終わったrunがあれば（直前のrunが早くに失敗してtriageでretryされても引き継ぐ）、worker promptに引き継ぎの節（前のrunのreviewはpassしたが衝突で試行を使い切ったこと、commit（`refs/dagq/runs/<id>`とbranch）と、そのrun自身のcommitの範囲（headと新しいrunのbaseのmerge-baseから。途中までrebaseしたresumeがmainのcommitを下に積んでいても、それを含めない）、今のmain（新しいrunのbase）に載せ直して衝突を解き、検証を再実行して自分のheadでreceiptを書くこと、前のreceiptのpathとsummary）を足し、新しいrunに`run_inherited`を記録する。
+   次のrunのclaimでsupervisorは、前のrunのうち最も新しい引き継ぐretryで終わったrunがあれば（直前のrunが早くに失敗してtriageでretryされても引き継ぐ）、その引き継ぎを新しいrunのworker promptに持ち越し、`run_inherited`を記録する（節の中身と理由は`Inheritance`、復旧jobの`retry_inherit`は[Triage](triage.md#triage-supervisor)）。
    commitがbaseと同じ（載せ直すものが無い）か、refを作れなければ、次の「復旧jobに渡す」に進む。
    2回目の使い切りも復旧jobに渡す。
 
