@@ -66,8 +66,10 @@ pub fn recorded_floor(version: i64) -> Result<i64, crate::domain::DomainError> {
 /// Why `migration` may not be declared compatible: every statement that
 /// could break a binary unaware of it. Empty means the declaration holds.
 /// Allowed: `CREATE TABLE`, `CREATE VIRTUAL TABLE`, a non-unique `CREATE
-/// INDEX`, `ALTER TABLE ... ADD COLUMN` whose column is nullable or has a
-/// default, `INSERT` into a table the same migration creates, and an
+/// INDEX`, a `CREATE UNIQUE INDEX` on a table the same migration creates
+/// without `IF NOT EXISTS` (an older binary does not know the table, so the
+/// index refuses none of its writes; one on an existing table would),
+/// `ALTER TABLE ... ADD COLUMN` whose column is nullable or has a default, `INSERT` into a table the same migration creates, and an
 /// `AFTER` trigger whose body only inserts into, updates or deletes from
 /// tables the same migration creates (an older binary's write then only
 /// adds to what it does not read), and an `UPDATE` that only sets
@@ -80,6 +82,9 @@ pub fn recorded_floor(version: i64) -> Result<i64, crate::domain::DomainError> {
 pub fn compatibility_violations(migration: &str) -> Vec<String> {
     let text = without_comments(migration);
     let mut created = Vec::new();
+    // The tables created for certain: `IF NOT EXISTS` may leave a table
+    // that already existed, which a unique index would then constrain.
+    let mut new = Vec::new();
     let mut violations = Vec::new();
     for statement in statements(&text) {
         let words: Vec<String> = statement
@@ -91,14 +96,20 @@ pub fn compatibility_violations(migration: &str) -> Vec<String> {
         }
         let head: Vec<&str> = words.iter().map(String::as_str).collect();
         let ok = match head.as_slice() {
-            ["CREATE", "TABLE", "IF", "NOT", "EXISTS", name, ..]
-            | ["CREATE", "TABLE", name, ..]
-            | ["CREATE", "VIRTUAL", "TABLE", name, ..] => {
+            ["CREATE", "TABLE", "IF", "NOT", "EXISTS", name, ..] => {
                 created.push(table_name(name));
+                true
+            }
+            ["CREATE", "TABLE", name, ..] | ["CREATE", "VIRTUAL", "TABLE", name, ..] => {
+                created.push(table_name(name));
+                new.push(table_name(name));
                 true
             }
             ["CREATE", "TRIGGER", ..] => trigger_writes_only(&head, &created),
             ["CREATE", "INDEX", ..] => true,
+            ["CREATE", "UNIQUE", "INDEX", rest @ ..] => {
+                indexed_table(rest).is_some_and(|table| new.contains(&table))
+            }
             ["ALTER", "TABLE", _, "ADD", rest @ ..] => {
                 let definition = rest.strip_prefix(&["COLUMN"]).unwrap_or(rest).join(" ");
                 // An older binary's INSERT leaves the column out.
@@ -264,6 +275,13 @@ fn sets_only_null(words: &[&str]) -> bool {
             matches!(assignment.split_once('='), Some((column, "NULL"))
                 if !column.is_empty() && !column.contains(['(', '\'', '"']))
         })
+}
+
+/// The table a `CREATE UNIQUE INDEX` statement (upper-cased words after
+/// `INDEX`) indexes: the word after its `ON`.
+fn indexed_table(words: &[&str]) -> Option<String> {
+    let on = words.iter().position(|w| *w == "ON")?;
+    words.get(on + 1).map(|name| table_name(name))
 }
 
 /// A table name as a statement spells it, without its column list or quotes.
@@ -468,6 +486,29 @@ mod tests {
             INSERT INTO extra(note) VALUES ('seed');
             INSERT OR IGNORE INTO more(id) VALUES (1);";
         assert_eq!(compatibility_violations(sql), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_unique_index_is_compatible_only_on_a_table_the_migration_creates() {
+        let sql = "-- dagq-schema: compatible
+            CREATE TABLE one (singleton INTEGER PRIMARY KEY);
+            CREATE UNIQUE INDEX one_row ON one((1));
+            CREATE UNIQUE INDEX IF NOT EXISTS one_key ON \"one\" (singleton);";
+        assert_eq!(compatibility_violations(sql), Vec::<String>::new());
+        let sql = "CREATE TABLE one (singleton INTEGER PRIMARY KEY);
+            CREATE UNIQUE INDEX on_tasks ON tasks((1));
+            CREATE UNIQUE INDEX before_it ON later(x);
+            CREATE TABLE later (x INTEGER);
+            CREATE UNIQUE INDEX no_table;
+            CREATE TABLE IF NOT EXISTS tasks (x INTEGER);
+            CREATE UNIQUE INDEX maybe_existing ON tasks(title);";
+        let violations = compatibility_violations(sql);
+        assert_eq!(violations.len(), 4, "{violations:#?}");
+        assert!(
+            violations
+                .iter()
+                .all(|v| v.starts_with("CREATE UNIQUE INDEX"))
+        );
     }
 
     #[test]

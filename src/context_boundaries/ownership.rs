@@ -359,6 +359,7 @@ pub(super) const TABLES: &[Table] = &[
     table("asks", Shared), // an ask is opened and applied by the context of its kind
     table("run_events", Shared), // each context writes its own kinds (src/domain/event_kind.rs)
     table("event_records", Shared), // the identity of the result's record each event was written for
+    table("write_leader", Shared), // the write leader's row every write transaction will check first (ADR-t3986-1)
 ];
 
 #[rustfmt::skip]
@@ -400,6 +401,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/asks.rs", Shared), // AskStore
     store("src/infrastructure/runtime_store/ask_store.rs", Shared), // AskStore
     store("src/infrastructure/event_actor.rs", Shared), // EventStore
+    store("src/infrastructure/write_leader.rs", Shared), // WriteLeaderStore
 ];
 
 #[rustfmt::skip]
@@ -624,6 +626,7 @@ pub(super) const PORTS: &[Port] = &[
     port("Spawner", Public(All)),
     port("Spawned", Public(All)),
     port("AskStore", Public(All)),
+    port("WriteLeaderStore", Public(All)), // the write leader's row of the queue service
     port("EventStore", Public(All)),
     port("StateStore", Public(All)),
     port("Queue", Public(All)),

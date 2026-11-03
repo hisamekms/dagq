@@ -95,6 +95,15 @@ pub(crate) fn time_value_spaced(value: &str, form: TimeForm) -> String {
     time_expression(value, form, SPACED)
 }
 
+/// The SQL expression of the DB's clock now, in Unix milliseconds as an
+/// integer: read at the statement, not at the transaction's start, so a
+/// lease's end is judged by the DB's clock when the statement runs
+/// (ADR-t3986-1 decision 4). SQLite's `'now'` is the same everywhere in one
+/// statement.
+pub(crate) fn now_millis() -> String {
+    time_value("'now'", TimeForm::EpochMillis)
+}
+
 /// The SQL expression that reads, in `form`, the time the SQL expression
 /// `value` gives moved by the SQL expression `shift` (a bound parameter
 /// holding a SQLite modifier such as `-100 seconds`); only the tests move
@@ -130,6 +139,14 @@ fn time_expression(args: &str, form: TimeForm, sep: &str) -> String {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    #[test]
+    fn the_db_clock_now_is_sqlites_julian_day_in_milliseconds() {
+        assert_eq!(
+            now_millis(),
+            "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
+        );
+    }
 
     /// Every expression the queue store's statements spelled before they
     /// took it from here, each next to the call that now returns it: the

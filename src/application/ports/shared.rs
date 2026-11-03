@@ -358,6 +358,39 @@ impl fmt::Debug for Generators {
     }
 }
 
+/// The write leader's row of the queue (ADR-t3986-1 decisions 2 and 4): who
+/// may commit writes, and the generation that fences an older leader out.
+/// Every statement compares the lease's end with the DB's clock, never the
+/// process's, and none is a write of the store's other tables. Whether to
+/// try a takeover is [`crate::domain::write_leader::takeover`]'s.
+pub trait WriteLeaderStore {
+    /// The row as it stands and the DB's clock now, in Unix milliseconds,
+    /// read in one transaction.
+    fn write_leader(&self) -> Result<(crate::domain::write_leader::WriteLeader, i64)>;
+
+    /// Take the row over as `holder` for `lease` from the DB's clock now,
+    /// only when its lease ran out or was released, or whatever its lease
+    /// when `local_proof` holds (a SQLite store whose process holds the
+    /// service's lock file in the DB's directory; never for a store shared
+    /// by machines). Advances the generation by 1 and returns it, or `None`
+    /// with nothing changed when another leader's lease still runs.
+    fn take_write_leader(
+        &self,
+        holder: &str,
+        lease: Duration,
+        local_proof: bool,
+    ) -> Result<Option<i64>>;
+
+    /// Extend the lease to `lease` from the DB's clock now, only while the
+    /// row is `holder`'s at `generation`; whether it was.
+    fn renew_write_leader(&self, holder: &str, generation: i64, lease: Duration) -> Result<bool>;
+
+    /// Release the row (its lease's end to 0) so the next process takes it
+    /// over without waiting, only while it is `holder`'s at `generation`;
+    /// whether it was.
+    fn release_write_leader(&self, holder: &str, generation: i64) -> Result<bool>;
+}
+
 /// The questions the runtime and its sessions put to a person (ADR-0022).
 pub trait AskStore {
     /// Open the ask of the automatic update of `kind` (`update_failed`,

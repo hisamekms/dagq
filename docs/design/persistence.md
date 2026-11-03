@@ -50,7 +50,7 @@ related:
 SQLiteのDBはqueueの正本で、プロセス間の共有と再起動の後の復旧に使う。
 stdoutやsessionの画面は正本にしない。
 runtimeが状態を変えるのは、このDBへの書き込みトランザクションの中だけである。
-列・既定値・eventの欄の意味は定義のそばのdoc commentと`migrations/*.sql`のコメントが持つ（下の「表」）。
+列・既定値・eventの欄の意味は定義のそばのコメントが持つ（下の「表」）。
 
 ## 全体の流れ
 
@@ -69,7 +69,8 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 
 - 判断（遷移を許すか、どのeventを書くか、payloadの中身）はdomainが持ち、storeは読む・復元する・書く・同じトランザクションにまとめるだけを持つ（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)）。
 - 例外は全体のグラフが要る依存の循環の検出（再帰CTE）だけで、拒むかの判断はdomainが持つ。
-- 時刻とIDは`SqliteQueue`が持つ`Generators`（`Clock`と`IdGenerator`）から取り、SQLの`now`で作らない。
+- 時刻とIDは`SqliteQueue`の`Generators`から取り、SQLの`now`で作らない。
+  例外はDBの時計で判じる`write_leader`のleaseの期限（ADR-t3986-1決定4）。
 - schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`、場所は`src/infrastructure/location.rs`が持つ。
 - 方言の違う式の断片（JSONの欄の読み出しと日時の関数）は`src/infrastructure/sql_dialect.rs`の関数が返して文が埋め、外のSQLが書かないことをtest（`src/context_boundaries/dialect.rs`）が守る（ADR-t3982-1）。
 - runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く。
@@ -88,9 +89,10 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 
 ## 表
 
-表ごとの役割と列の意味は、その表を作る`migrations/*.sql`のコメントと、表を持つstoreと`src/domain/`の型のdoc commentが持つ。
+表ごとの役割と列の意味は、表を作るmigrationのコメントと表を持つstoreと`src/domain/`の型のdoc commentが持つ。
 `replan_plans`は置換計画をsubmitごとの版と承認の時の子の版で持ち、plan reviewと`ready`は最新の版だけを、適用は子の版も検査する。
-`replan_replacements`は適用した置換の子と子が引き継ぐ部分（`carry`）を持ち、goalは置換先を再置換も辿って待つ。
+`replan_replacements`は適用した置換の子と子が引き継ぐ部分を持ち、goalは置換先を再置換も辿って待つ。
+`write_leader`は書き込みの係の行で、定数の式の一意の索引が1行に限る。
 
 ## 集約の読み書き
 
@@ -237,7 +239,7 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
   入口の外の開始（SQLの`BEGIN`を含む）と`TransactionBehavior`の名指しはtest（`src/context_boundaries/write_tx.rs`）が拒む。
   見方と近似は`WriteTx`・`WriteTxTimes`、欄は`QUEUE_WRITE_HELD_LONG`のdoc commentが持つ。
   eventはlockを放した後に同じ接続で別に短く書き、その失敗は元のtransactionを変えない。
-- 挿入した行のIDは`insert_id`（transactionは`WriteTx::insert_id`）で取り、`last_insert_rowid`は内部の`insert_counted`だけが呼ぶ（[architecture](architecture.md) X4）。
+- 挿入した行のIDは`insert_id`で取り、`last_insert_rowid`は内部の`insert_counted`だけが呼ぶ（[architecture](architecture.md) X4）。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
   taskをcompletedかcanceledにするトランザクションは、開いたholdの行を閉じて`task_hold_ended`を書き、holdが残した結果を捨てる（`task_holds::end_with_task`）。
@@ -250,7 +252,6 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
 ### CHECK制約を使わない
 
 schemaが安定したと人が決めるまで、SQLiteのCHECK制約を使わない（[ADR-t876-1](../adr/2026-09-28-t876-1-no-sqlite-check-constraints-until-schema-is-stable.md)）。
-今のqueueにCHECKは1つも無い。
 
 - 対象はCHECKだけで、NOT NULL・UNIQUE・主キー・外部キー・DEFAULTはDBに残す。
 - 規則の置き場所: 値の一覧はdomainの型（`string_enum!`）、型で表せない規則は書き込みのportが書く前に検査し、破れていれば書かずにerrorにする（`src/domain/write_rules.rs`）。
