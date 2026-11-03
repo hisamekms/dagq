@@ -21,4 +21,5 @@ mod already_satisfied;
 mod main_log;
 mod provider_trial;
 mod review_launch;
+mod task_release;
 mod worker_trial;

@@ -66,6 +66,20 @@ pub(super) fn succeeded(run: &RunId, worktree: &Path, git: &FakeGit) -> Result<V
     }))
 }
 
+/// A worker's turn that ends with no receipt and no commit, as one that
+/// stops short of its task: what it gives ([`Value::Null`]) is written
+/// nowhere.
+pub(super) fn no_receipt(_: &RunId, _: &Path, _: &FakeGit) -> Result<Value> {
+    Ok(Value::Null)
+}
+
+/// A worker's turn that makes one commit on its worktree and ends with no
+/// receipt, as [`no_receipt`].
+pub(super) fn committed_no_receipt(_: &RunId, worktree: &Path, git: &FakeGit) -> Result<Value> {
+    git.commit_in(worktree)?;
+    Ok(Value::Null)
+}
+
 /// What a review job meets when its provider wants a login: it prints
 /// Claude's login message and ends with 1, giving no verdict. A test's
 /// script names it among the verdicts.
@@ -109,6 +123,9 @@ pub(super) struct FakeAgent {
     review_prompts: Mutex<Vec<String>>,
     /// What runs as the next review job starts, before it answers, once.
     on_review: Mutex<Option<super::host::Hook>>,
+    /// The session of each worker's turn, in order: `start <name>` for a
+    /// new one, `resume <name>` for one gone on.
+    turn_sessions: Mutex<Vec<String>>,
     /// What lets the next worker's turn end, once: the turn runs, its run
     /// holding its slot, until it says so.
     held_turn: Mutex<Option<mpsc::Receiver<()>>>,
@@ -132,6 +149,7 @@ impl FakeAgent {
             reviewed_in: Mutex::default(),
             review_prompts: Mutex::default(),
             on_review: Mutex::default(),
+            turn_sessions: Mutex::default(),
             held_turn: Mutex::default(),
         }
     }
@@ -169,6 +187,15 @@ impl FakeAgent {
             .held_turn
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(release);
+    }
+
+    /// The session of each worker's turn, in order: `start <name>` for a
+    /// new one, `resume <name>` for one gone on.
+    pub(super) fn turn_sessions(&self) -> Vec<String> {
+        self.turn_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The arguments of each review agent's job started, in order.
@@ -295,9 +322,14 @@ impl AgentProvider for FakeAgent {
         prompt: &str,
         session: TurnSession<'_>,
     ) -> Result<CommandSpec> {
-        let name = match session {
-            TurnSession::New(name) | TurnSession::Resume(name) => name,
+        let (name, how) = match session {
+            TurnSession::New(name) => (name, "start"),
+            TurnSession::Resume(name) => (name, "resume"),
         };
+        self.turn_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(format!("{how} {name}"));
         let mut command = CommandSpec::new(TURN);
         command
             .current_dir(target.cwd)
@@ -475,15 +507,22 @@ struct Turn {
 }
 
 impl Turn {
-    /// The turn's receipt written, if the script gives one: the line of
-    /// Claude's result, its output.
+    /// The turn's receipt written, if the script gives one other than
+    /// [`no_receipt`]'s; its output: the model's answer in the turn's
+    /// session, then the line of Claude's result.
     fn end(self) -> Result<String> {
         if let Some((receipt, worktree, path)) = self.receipt {
             let receipt = receipt(&self.run, &worktree, &self.git)?;
-            self.files.write(&path, receipt.to_string().as_bytes())?;
+            if !receipt.is_null() {
+                self.files.write(&path, receipt.to_string().as_bytes())?;
+            }
         }
         Ok(format!(
-            "{}\n",
+            "{}\n{}\n",
+            json!({
+                "type": "assistant", "session_id": self.session,
+                "message": {"model": "wiring-model", "content": [{"type": "text", "text": "done"}]},
+            }),
             json!({
                 "type": "result", "subtype": "success", "is_error": false,
                 "num_turns": 1, "duration_ms": 5, "total_cost_usd": 0.01,

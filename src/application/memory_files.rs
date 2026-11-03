@@ -20,6 +20,10 @@ pub struct MemoryFiles {
     read_limit: Option<u64>,
     /// The directories that are there ([`Self::put_dir`]); none else is.
     dirs: Mutex<std::collections::HashSet<PathBuf>>,
+    /// The milliseconds the files' `now` moved on since its start, one at
+    /// each write, when the files tick ([`Self::ticking`]); `None` keeps
+    /// one `now`.
+    ticks: Option<std::sync::atomic::AtomicU64>,
 }
 
 impl MemoryFiles {
@@ -27,6 +31,18 @@ impl MemoryFiles {
     pub fn bounded(limit: u64) -> Self {
         Self {
             read_limit: Some(limit),
+            ..Self::default()
+        }
+    }
+
+    /// Files whose `now` moves on a millisecond at each write, so that a
+    /// file written after another is newer than it, as a file system's
+    /// are: what a session's wrapper and the supervisor compare (a resumed
+    /// turn's receipt newer than its resume's start, an idle marker newer
+    /// than the receipt) when they run on these files together.
+    pub fn ticking() -> Self {
+        Self {
+            ticks: Some(std::sync::atomic::AtomicU64::new(0)),
             ..Self::default()
         }
     }
@@ -63,6 +79,9 @@ impl MemoryFiles {
     }
 }
 
+/// The files' `now` before any tick, after the Unix epoch.
+const START: Duration = Duration::from_secs(1_000_000);
+
 fn missing() -> io::Error {
     io::Error::from(io::ErrorKind::NotFound)
 }
@@ -76,7 +95,16 @@ impl RunFiles for MemoryFiles {
         Ok(())
     }
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
-        self.put(path, self.now(), &String::from_utf8_lossy(contents));
+        let stamp = match &self.ticks {
+            // The tick this write took, so that two writes at once each
+            // take one of their own.
+            Some(ticks) => {
+                let tick = ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                UNIX_EPOCH + START + Duration::from_millis(tick)
+            }
+            None => self.now(),
+        };
+        self.put(path, stamp, &String::from_utf8_lossy(contents));
         Ok(())
     }
     fn copy(&self, _: &Path, _: &Path) -> io::Result<()> {
@@ -225,6 +253,10 @@ impl RunFiles for MemoryFiles {
         Ok(())
     }
     fn now(&self) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(1_000_000)
+        let ticks = self
+            .ticks
+            .as_ref()
+            .map_or(0, |ticks| ticks.load(std::sync::atomic::Ordering::SeqCst));
+        UNIX_EPOCH + START + Duration::from_millis(ticks)
     }
 }

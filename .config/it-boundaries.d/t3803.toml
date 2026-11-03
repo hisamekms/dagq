@@ -297,13 +297,6 @@ reason = "review の attempt が code paths を run の branch や main checkout
 task = 3803
 
 [[boundary]]
-id = "held-run-released-resumes-its-session-and-lands"
-kind = "supervisorの配線"
-test = "runtime_task_release::a_held_run_released_on_its_provider_resumes_its_session_with_the_model_chosen"
-reason = "held の run を provider で release すると resume の入口から元の session で 1 度 resume して着地し、--model を resume の session に渡すことは、supervisor の配線を通してしか確かめられない。session を保つか替えるかの判断は domain::fresh_session::next_session の unit test"
-task = 3803
-
-[[boundary]]
 id = "release-keeps-the-carried-head-as-a-run-ref"
 kind = "Git"
 test = "runtime_task_release::a_release_whose_carried_head_cannot_be_kept_is_refused_and_changes_nothing"

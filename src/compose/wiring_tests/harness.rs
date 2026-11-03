@@ -129,13 +129,15 @@ pub(super) struct Wiring {
     codex: bool,
     /// `[provider_fallback] workers`; on by default.
     worker_fallback: bool,
+    /// `[fresh_session]`; no threshold by default.
+    fresh_session: crate::domain::fresh_session::FreshSessionConfig,
     pub(super) files: Arc<MemoryFiles>,
     pub(super) git: FakeGit,
     pub(super) agent: Arc<FakeAgent>,
     pub(super) verifier: Arc<FakeVerifier>,
     processes: Arc<FakeProcesses>,
     tokens: Arc<MemoryTokens>,
-    sessions: Arc<FakeSessions>,
+    pub(super) sessions: Arc<FakeSessions>,
 }
 
 impl Wiring {
@@ -154,7 +156,7 @@ impl Wiring {
         };
         // The supervisor is this process, as the queue service's peer is.
         let pid = std::process::id();
-        let files = Arc::new(MemoryFiles::default());
+        let files = Arc::new(MemoryFiles::ticking());
         let git = FakeGit::new(Path::new(CHECKOUT), files.clone());
         let agent = Arc::new(FakeAgent::new(&db, files.clone(), git.clone(), script));
         let processes = Arc::new(FakeProcesses::with(pid));
@@ -180,6 +182,7 @@ impl Wiring {
             pid,
             codex: false,
             worker_fallback: true,
+            fresh_session: Default::default(),
             files,
             git,
             agent,
@@ -200,6 +203,13 @@ impl Wiring {
     /// when its own cannot be used (`[provider_fallback] workers = false`).
     pub(super) fn without_worker_fallback(mut self) -> Self {
         self.worker_fallback = false;
+        self
+    }
+
+    /// The wiring whose `[fresh_session]` starts a new session for a
+    /// resume past `peak_context_above` tokens.
+    pub(super) fn with_fresh_session(mut self, peak_context_above: u64) -> Self {
+        self.fresh_session.peak_context_above = Some(peak_context_above);
         self
     }
 
@@ -389,6 +399,7 @@ impl Wiring {
                 pid: self.pid,
                 codex: self.codex,
                 worker_fallback: self.worker_fallback,
+                fresh_session: self.fresh_session,
                 generators: self.generators.clone(),
                 files: self.files.clone(),
                 git: self.git.clone(),
@@ -456,6 +467,7 @@ struct Parts {
     pid: u32,
     codex: bool,
     worker_fallback: bool,
+    fresh_session: crate::domain::fresh_session::FreshSessionConfig,
     generators: Generators,
     files: Arc<MemoryFiles>,
     git: FakeGit,
@@ -593,7 +605,10 @@ impl Parts {
             resources: None,
             layout,
         };
-        supervise::supervise(&ports, &settings(self.stop, self.worker_fallback))
+        supervise::supervise(
+            &ports,
+            &settings(self.stop, self.worker_fallback, self.fresh_session),
+        )
     }
 }
 
@@ -651,9 +666,14 @@ fn layout(db: &Path, pid: u32, workers: &WorkerAdapters<'_>) -> Layout {
 }
 
 /// A `--once` supervisor's loop of two slots, its waits the test's ticks,
-/// `[provider_fallback] workers` as `worker_fallback` says, every other
-/// setting the production's default; `stop` drains it.
-fn settings(stop: Arc<AtomicBool>, worker_fallback: bool) -> LoopSettings {
+/// `[provider_fallback] workers` as `worker_fallback` says,
+/// `[fresh_session]` as `fresh_session`, every other setting the
+/// production's default; `stop` drains it.
+fn settings(
+    stop: Arc<AtomicBool>,
+    worker_fallback: bool,
+    fresh_session: crate::domain::fresh_session::FreshSessionConfig,
+) -> LoopSettings {
     let slot_flags = SlotFlags {
         parallel: Some(2),
         max_waiting: None,
@@ -670,7 +690,7 @@ fn settings(stop: Arc<AtomicBool>, worker_fallback: bool) -> LoopSettings {
             workers: worker_fallback,
             ..Default::default()
         },
-        fresh_session: Default::default(),
+        fresh_session,
         review_jobs: Default::default(),
         once: true,
         stop,

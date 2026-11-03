@@ -57,6 +57,10 @@ pub(super) struct FakeSessions {
     pub(super) files: Arc<MemoryFiles>,
     pub(super) clock: Arc<dyn Clock>,
     wrappers: Mutex<Vec<Wrapper>>,
+    /// What lets the next wrapper started (not a resume's) go on to its
+    /// session, once: it waits, started and not yet registered, until it
+    /// says so or is dropped (by the test's deadline at the latest).
+    launch_gate: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
 impl FakeSessions {
@@ -76,7 +80,18 @@ impl FakeSessions {
             files,
             clock,
             wrappers: Mutex::default(),
+            launch_gate: Mutex::default(),
         }
+    }
+
+    /// Hold the next wrapper started for a run's first session before it
+    /// runs: it waits until `go` says so, as a wrapper slowed between its
+    /// launch and its first turn.
+    pub(super) fn hold_next_launch(&self, go: mpsc::Receiver<()>) {
+        *self
+            .launch_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(go);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Wrapper>> {
@@ -161,10 +176,21 @@ impl SessionWrappers for FakeSessions {
             self.files.clone(),
             self.clock.clone(),
         );
+        let gate = if resume {
+            None
+        } else {
+            self.launch_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        };
         let (returned, returns) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name(format!("wrapper {id}"))
             .spawn(move || {
+                if let Some(gate) = gate {
+                    let _ = gate.recv_timeout(super::harness::LIMIT);
+                }
                 let returned_value = wrap(
                     &db, &id, &token, resume, pid, &agent, &tokens, &processes, &files, &*clock,
                 );

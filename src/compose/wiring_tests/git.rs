@@ -63,6 +63,9 @@ struct State {
     /// The message of each commit of main's a test landed with one
     /// ([`FakeGit::land_with_message`]); any other has none.
     messages: HashMap<CommitSha, String>,
+    /// The refs written ([`Repository::update_ref`]), by name: the commit
+    /// each holds.
+    refs: HashMap<String, CommitSha>,
 }
 
 /// The repository in memory, its main checkout at `checkout`; clones share
@@ -96,6 +99,7 @@ impl FakeGit {
                 files: HashMap::new(),
                 changed: Vec::new(),
                 messages: HashMap::new(),
+                refs: HashMap::new(),
             })),
         }
     }
@@ -167,6 +171,11 @@ impl FakeGit {
             .expect("the worktree just read")
             .head = made.clone();
         Ok(made)
+    }
+
+    /// The head of the run's worktree at `worktree`.
+    pub(super) fn worktree_head(&self, worktree: &Path) -> Result<CommitSha> {
+        Ok(self.worktree(worktree)?.head)
     }
 
     /// The commit the scratch checkout at `path` holds, `None` when there
@@ -465,8 +474,16 @@ impl Repository for FakeGit {
         Ok(state.make(Some(parent)))
     }
 
-    fn update_ref(&self, _: &str, _: &str) -> Result<()> {
+    fn update_ref(&self, name: &str, value: &str) -> Result<()> {
+        let mut state = self.lock();
+        ensure!(state.known(value), "no commit {value}");
+        let value = CommitSha::parse(value, "commit")?;
+        state.refs.insert(name.to_owned(), value);
         Ok(())
+    }
+
+    fn ref_value(&self, name: &str) -> Result<Option<CommitSha>> {
+        Ok(self.lock().refs.get(name).cloned())
     }
 
     /// Main moves from `from` to `to`, a commit of its own: only from its
