@@ -88,6 +88,21 @@ max_investigations = 2
 # [provider_fallback] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1857 を含んでから足した。
 workers = false
 
+[worker.provider_trial]
+# 実装（worker）と review の provider の組の試し（request 216、ADR-t4005-1。振る舞いは docs/design/supervisor-lifecycle/worker-model.md の「限定の試し」と
+# docs/design/supervisor-lifecycle/review.md の「reviewのprovider」）。task ごとに名前と task の ID の hash で決定的に群を決め、
+# A（実装は task の provider の Claude、review は [roles.review]・[review.subagents.*] の設定のまま）と
+# B（実装 Codex・review Claude）を比べる。どちらの群も書いた provider と見る provider が違う（A でも Claude を名指す subagent は設定のまま Claude で動く）。
+# B の割合は人の指定の 10〜20% のうち小さく始める方の 10%。値は既定と同じでも、人の決めた値として書いておく。
+# B の worker は上の [provider_fallback] workers = false に従い、Codex が控えに入れば Claude へ切り替えず控えが解けるのを待つ。
+# 群を広げる・止める・全面に入れ替えるのは kpi の群の比べの値を見て planner か人が別に決める。
+# supervisor が各 pass で読み直すので、着地して main checkout に反映されれば up し直さずに効く。
+# [worker.provider_trial] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 4006・4007 を含んでから足した。
+enabled = true
+treatment_percent = 10
+treatment_worker = "codex"
+treatment_review = "claude"
+
 [ci_watch]
 # supervisor が main の CI（.github/workflows/ci.yml、name: CI）の結果を gh で定期的に確かめて event に記録し、赤になったら
 # 修正の finding を出し、既に落ちているテストの一覧を持つ（ADR-t1920-1、task 1921、goal 157 の段 1）。
