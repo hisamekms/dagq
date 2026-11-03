@@ -265,6 +265,16 @@ impl FakeAgent {
             .insert(agent.to_owned(), verdicts);
     }
 
+    /// The jobs of the review agent `agent` answer `answers` (each its
+    /// decision and reasons, with its recommendation and the like beside
+    /// them), one per job in order, the last one again for any after it.
+    pub(super) fn review_agent_answers(&self, agent: &str, answers: Vec<Value>) {
+        self.agent_verdicts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(agent.to_owned(), answers.into());
+    }
+
     /// The directory each review job was started in, in order.
     pub(super) fn reviewed_in(&self) -> Vec<PathBuf> {
         self.reviewed_in
@@ -409,11 +419,12 @@ impl FakeAgent {
             })
         };
         let said = said.unwrap_or_else(|| json!({"verdict": "pass", "reasons": []}));
-        format!(
-            "{}\n",
-            json!({"agent": agent, "status": "completed", "verdict": said["verdict"],
-                   "reasons": said["reasons"], "summary": format!("{agent} looked")})
-        )
+        let mut answer = json!({"agent": agent, "status": "completed",
+                                "summary": format!("{agent} looked")});
+        for (key, value) in said.as_object().into_iter().flatten() {
+            answer[key] = value.clone();
+        }
+        format!("{answer}\n")
     }
 }
 
@@ -422,10 +433,12 @@ impl AgentProvider for FakeAgent {
         Ok(())
     }
 
-    /// A short wait between the looks of a wrapper and of a job's watch:
-    /// the test's own.
+    /// The wait between the looks of a wrapper and of a job's watch: the
+    /// test's own, a tenth of the production's. Each look opens the queue,
+    /// so a shorter wait takes from the supervisor's passes the CPU they
+    /// need, and a test of many review rounds runs slower, not faster.
     fn wait_interval(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(10)
+        std::time::Duration::from_millis(100)
     }
 
     fn review_command(

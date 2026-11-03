@@ -128,11 +128,14 @@ pub(super) enum Outcome {
 /// named), its log written empty; the repository's `dagq.toml` is the
 /// defaults' but for its `[roles.<role>]` and `[worker.trial]`, which the
 /// checkout's `dagq.toml` a test sets gives ([`FakeVerifier::set_config`]), and the review's
-/// agents and programs, read from the text a review reads off the landing
-/// branch.
+/// agents, programs, code paths and revise limit, read from the text a
+/// review reads off the landing branch.
 pub(super) struct FakeVerifier {
     files: std::sync::Arc<MemoryFiles>,
     failing: Vec<String>,
+    /// Commands that fail the next time each runs, then pass
+    /// ([`FakeVerifier::fail_once`]).
+    failing_once: Mutex<Vec<String>>,
     ran: Mutex<Vec<(String, PathBuf)>>,
     config: Mutex<String>,
     /// Whether `dagq.toml` sets the verification to the container.
@@ -156,6 +159,7 @@ impl FakeVerifier {
                 .iter()
                 .map(|command| (*command).to_owned())
                 .collect(),
+            failing_once: Mutex::default(),
             ran: Mutex::default(),
             config: Mutex::default(),
             in_container: std::sync::atomic::AtomicBool::new(false),
@@ -189,6 +193,15 @@ impl FakeVerifier {
             .store(container, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// `command` fails the next time it runs and passes after, as a
+    /// landing's verification that a resumed session's fix makes pass.
+    pub(super) fn fail_once(&self, command: &str) {
+        self.failing_once
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(command.to_owned());
+    }
+
     /// Run `hook` as `command` starts, before it ends, once.
     pub(super) fn on_command(&self, command: &str, hook: Hook) {
         *self
@@ -206,6 +219,15 @@ impl FakeVerifier {
     }
 
     fn outcome(&self, command: &str) -> Outcome {
+        let mut once = self
+            .failing_once
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = once.iter().position(|failing| failing == command) {
+            once.remove(at);
+            return Outcome::Fails;
+        }
+        drop(once);
         if self.failing.iter().any(|failing| failing == command) {
             Outcome::Fails
         } else {
@@ -259,6 +281,17 @@ impl Verifier for FakeVerifier {
         text: &str,
     ) -> Result<crate::domain::review_programs::ReviewPrograms> {
         Ok(crate::infrastructure::run_env::parse_config(text)?.review_programs())
+    }
+
+    fn review_code_paths_in(
+        &self,
+        text: &str,
+    ) -> Result<Option<crate::domain::review_reason::CodePaths>> {
+        Ok(crate::infrastructure::run_env::parse_config(text)?.review_code)
+    }
+
+    fn review_revise_limit_in(&self, text: &str) -> Result<Option<crate::domain::ReviseLimit>> {
+        Ok(crate::infrastructure::run_env::parse_config(text)?.review_revise_limit)
     }
 
     /// No `[run.env]` program to check, or one (`RUSTC_WRAPPER`) that

@@ -29,7 +29,7 @@ use crate::{
 const REMOTE: &str = "origin";
 
 /// A worktree of the repository: its branch, the commit it started from
-/// (or was last rebased onto) and its head, a commit of its own when it
+/// (or was last rebased onto) and its head, the last commit of its own when
 /// made one.
 #[derive(Debug, Clone)]
 struct Worktree {
@@ -406,9 +406,10 @@ impl Repository for FakeGit {
         Ok(())
     }
 
-    /// The worktree's own commit, if it made one, made again on `onto`; a
-    /// worktree of none moves to `onto`. A commit holds no file, so no
-    /// rebase conflicts.
+    /// The worktree's own commits, as many as it made (a revise's turn
+    /// makes one more), made again one by one on `onto`; a worktree of
+    /// none moves to `onto`. A commit holds no file, so no rebase
+    /// conflicts.
     fn rebase(&self, worktree: &Path, onto: &str) -> Result<std::result::Result<(), String>> {
         let mut state = self.lock();
         ensure!(state.known(onto), "no commit {onto}");
@@ -420,17 +421,11 @@ impl Repository for FakeGit {
             )
         })?;
         let own = state.line(at.head.as_str()).len() - state.line(at.base.as_str()).len();
-        ensure!(
-            own <= 1,
-            "the wiring test's repository rebases one commit of a run's, not {own}"
-        );
-        let head = if own == 0 {
-            onto.clone()
-        } else if at.base == onto {
+        let head = if at.base == onto {
             // Already on `onto`: a no-op, as Git's.
             at.head.clone()
         } else {
-            state.make(Some(onto.clone()))
+            (0..own).fold(onto.clone(), |parent, _| state.make(Some(parent)))
         };
         let moved = state
             .worktrees

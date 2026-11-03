@@ -37,7 +37,9 @@ use crate::{
 /// How often a test's wrapper looks again for the record of its start: the
 /// test's own, shorter than the production's
 /// [`REGISTRATION_POLL`](crate::application::session::REGISTRATION_POLL).
-const REGISTRATION_POLL: Duration = Duration::from_millis(10);
+/// Each look opens the queue, so a much shorter wait takes from the
+/// supervisor's passes the CPU they need.
+const REGISTRATION_POLL: Duration = Duration::from_millis(50);
 
 /// A wrapper started on a thread: its handle and run directory, and its
 /// thread with the channel that says it returned.

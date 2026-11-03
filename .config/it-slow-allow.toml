@@ -1468,24 +1468,6 @@ name = "runtime_review_concern::a_high_send_back_revises_the_live_session"
 reason = "B 境界（SQLite・プロセス・supervisor の配線）: concern の確かな send_back を revise と同じ依頼として生きている session に返し、concern_decided の記録とその後の review までを実際の supervisor と worker の session で確かめる。適用の判断は domain::concern の unit test"
 task = 2599
 
-# 11.2〜12.5s (stress 60s under the host's load of other runs, task 2599)
-[[test]]
-name = "runtime_review_revise_limit::revises_are_counted_across_resumes_and_each_review_past_them_is_judged_by_its_codes"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 人の send_back の resume を 2 回挟んで、resume した session に run の 2 回目の revise が届き、上限の後の review がコードの指摘で approve_landing の ask に、その send_back の後の review が収束で着地と follow_up の draft になることを実際の supervisor・worker の session・queue で確かめる。数え方と収束の判断は domain::run::history・domain::review_reason の unit test"
-task = 2599
-
-# 9.7〜10.5s (stress 60s under the host's load of other runs, task 2599)
-[[test]]
-name = "runtime_review_revise_limit::a_review_past_the_limit_with_no_code_finding_lands_and_follows_up_its_reasons"
-reason = "B 境界（SQLite・Git・supervisor の配線）: 上限の後にコードの指摘の無い review が ask を開かずに pass と同じ道で着地し、残った理由が category つきの follow_up の draft として queue に入り、Integrator がその記録で着地させることを実際の supervisor で確かめる。収束と category の判断は domain::review_reason の unit test"
-task = 2599
-
-# 20.3〜22.7s (stress 60s under the host's load of other runs, task 2599)
-[[test]]
-name = "runtime_review_revise_limit::a_resume_after_a_rebase_conflict_or_a_failed_landing_verification_keeps_the_runs_count"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 実際の rebase の衝突と rebase 後の検証の失敗で integrate が止めた 2 本の run を supervisor が resume し、resume した session への revise が run を通した回数で数えられ、上限の後の review が approve_landing の ask になることを実際の supervisor・worker の session・queue で確かめる。数え方の判断は domain::run::history の unit test"
-task = 2599
-
 # 12.4〜19.3s (stress 5 under the host's load of other runs, task 2600)
 [[test]]
 name = "runtime_review_revise_limit::an_acceptance_unmet_off_the_code_paths_lands_whatever_the_runs_branch_says"
@@ -1914,12 +1896,6 @@ task = 3078
 name = "runtime_handoff::after_a_handoff_a_receipt_observed_while_draining_is_validated_by_the_next_process"
 reason = "B 境界（supervisor の配線・handoff・プロセス）: drain が観測した receipt の session が idle にならないまま着地が終わると validation を待たずに exec し、次の process が receipt_observed の記録から session を組み立て直して receipt を記録し直さずに validation・着地まで進める。判断は supervise::execution::handoff_slots の unit test"
 task = 3078
-
-# 13.4〜16.5s (stress 5 under the host's load of other runs, task 3033)
-[[test]]
-name = "runtime_review_revise_limit::the_landing_branchs_revise_limit_bounds_the_runs_revises_across_resumes"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: landing branch の commit の dagq.toml の revise_limit が review の試行ごとに読まれて記録され、run branch の値は効かず、人の send_back の resume を挟んで run を通したその回数の revise が session に届き、上限の後の review が ask と着地・follow_up の draft になることを実際の supervisor・worker の session・queue で確かめる。数え方と上限の判断は domain::run::history の unit test"
-task = 3033
 
 # 6.6〜7.7s (stress 5 under the host's load of other runs, task 3033)
 [[test]]
