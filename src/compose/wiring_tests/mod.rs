@@ -19,6 +19,7 @@ mod session;
 
 mod already_satisfied;
 mod ci_freshness;
+mod fresh_session_decisions;
 mod main_log;
 mod provider_trial;
 mod review_launch;

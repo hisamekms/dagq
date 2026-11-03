@@ -1,13 +1,19 @@
-//! A person's decisions on a run that never reached its session
-//! (ADR-t4018-1): the `send_back` of its landing and the answers to its
-//! `worker_question` and `decide` asks, which a retry (`retry`,
-//! `retry_inherit`, by the runtime, the recovery job or a person's
-//! `ready --inherit`) would otherwise lose, since the next run starts a new
-//! session. Whether one reached the session is judged by the records of
-//! sending it only: a `send_back` by a `resume_request_sent` after it (the
-//! resume's request went to the session), an answer by an `ask_delivered`
-//! naming its ask. A record that could not be written counts as not sent,
-//! so a decision is handed over twice rather than lost.
+//! A person's decisions on a run, with whether each reached its session:
+//! the `send_back` of its landing, the answers to its `worker_question` and
+//! `decide` asks (ADR-t4018-1), and the instructions answered to its
+//! `stalled` asks (ADR-t4027-1). A retry (`retry`, `retry_inherit`, by the
+//! runtime, the recovery job or a person's `ready --inherit`) would lose
+//! those that never reached the session ([`unapplied_decisions`]), since the
+//! next run starts a new session; a new session of the same run
+//! (`[fresh_session]`) would lose them all with the conversation
+//! ([`run_decisions`]). Whether one reached the session is judged by the
+//! records of sending it only: a `send_back` by a `resume_request_sent`
+//! after it (the resume's request went to the session), an answer by an
+//! `ask_delivered` naming its ask, a `stalled` ask's instruction by the
+//! `turn_requested` that names its ask ([`stalled_answer_what`]) or its
+//! `stall_resolved` (`answered_instruction`). A record that could not be
+//! written counts as not sent, so a decision is handed over twice rather
+//! than lost.
 
 use serde::Serialize;
 
@@ -27,6 +33,9 @@ pub enum DecisionKind {
     WorkerQuestion,
     /// The answer of a `decide` ask.
     Decide,
+    /// The answer of a `stalled` ask that is an instruction to the session
+    /// ([`stalled_answer_instructs`]): its next turn's prompt.
+    StalledInstruction,
 }
 
 impl DecisionKind {
@@ -36,6 +45,7 @@ impl DecisionKind {
             Self::SendBack => "approve_landing",
             Self::WorkerQuestion => "worker_question",
             Self::Decide => "decide",
+            Self::StalledInstruction => "stalled",
         }
     }
 
@@ -44,14 +54,16 @@ impl DecisionKind {
     pub const fn event_kind(self) -> EventKind {
         match self {
             Self::SendBack => EventKind::LandingDecided,
-            Self::WorkerQuestion | Self::Decide => EventKind::AskAnswered,
+            Self::WorkerQuestion | Self::Decide | Self::StalledInstruction => {
+                EventKind::AskAnswered
+            }
         }
     }
 }
 
-/// One decision of a person that never reached the run's session.
+/// One decision of a person on a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UnappliedDecision {
+pub struct PersonDecision {
     /// The ask it answered; `None` only for a `landing_decided` that names
     /// none.
     pub ask_id: Option<i64>,
@@ -67,22 +79,149 @@ pub struct UnappliedDecision {
     pub in_event: bool,
     /// The run it was made on (the event's run).
     pub run_id: Option<RunId>,
+    /// Whether a record shows it was sent to the run's session.
+    pub delivered: bool,
 }
 
+/// What the request carrying the answer of the `stalled` ask `ask` to a
+/// headless session is (its `turn_requested`'s `what`): it names the ask,
+/// so the request itself records that the answer was sent.
+pub fn stalled_answer_what(ask: impl std::fmt::Display) -> String {
+    format!("answer of the stalled ask {ask}")
+}
+
+/// The answer of a `stalled` ask that has the session stop.
+pub const STALLED_STOP: &str = "stop";
+
+/// The answer of a `stalled` ask for a person to step in, which a headless
+/// session cannot take.
+pub const STALLED_INTERVENE: &str = "intervene";
+
+/// Whether `answer` of a `stalled` ask is an instruction the session is
+/// sent as its next turn: not `wait` (or `propose`), `intervene` or `stop`,
+/// and no recovery job's option, labelled or not, of the ask's `options`
+/// (one that goes back to the job, [`super::recovery::passes_back`]). No
+/// event holds the options, so the events alone ([`run_decisions`]) tell a
+/// job's option only by its label; [`complete_from_ask`] judges it again
+/// with the ask's options.
+pub fn stalled_answer_instructs(answer: &str, options: &[String]) -> bool {
+    let answer = answer.trim();
+    !answer.is_empty()
+        && !super::stats::thresholds::answer_waits(answer)
+        && !answer.starts_with(STALLED_INTERVENE)
+        && answer != STALLED_STOP
+        && !super::recovery::passes_back(answer)
+        && !super::recovery::chosen_option(options, answer)
+            .is_some_and(|option| super::recovery::passes_back(option))
+}
+
+/// `decision` completed from its ask, which keeps the `answer` and the
+/// `options`: an answer whose event held no text gets the ask's, and a
+/// `stalled` ask's is judged again with its options
+/// ([`stalled_answer_instructs`]). `false` when it is no person's decision
+/// to hand over after all (a job's option answered without its label, or
+/// an old answer that was `wait`, `stop` or `intervene`).
+pub fn complete_from_ask(
+    decision: &mut PersonDecision,
+    answer: Option<&str>,
+    options: &[String],
+) -> bool {
+    if decision.text.is_empty()
+        && let Some(answer) = answer
+    {
+        decision.text = answer.trim().to_owned();
+    }
+    decision.kind != DecisionKind::StalledInstruction
+        || stalled_answer_instructs(&decision.text, options)
+}
+
+/// The outcome of `stall_resolved` for a `stalled` ask's instruction sent
+/// as the session's next turn.
+const ANSWERED_INSTRUCTION: &str = "answered_instruction";
+
+/// The outcomes of `stall_resolved` that say a `stalled` ask's answer was
+/// no instruction: `wait`, `stop` and a recovery job's option. Not
+/// `answered_intervene`, which is also recorded for an ask a person closed
+/// with any answer (a session taken over), so the answer's own text tells
+/// it.
+const NO_INSTRUCTION: [&str; 3] = [
+    "answered_wait",
+    "answered_stop",
+    super::recovery::ANSWERED_RECOVER,
+];
+
 /// The decisions of a person on the run of `events` (oldest first) that
-/// never reached its session, in the order they were recorded: each
-/// `landing_decided` with code `sent_back` that no later
-/// `resume_request_sent` follows (a `resume_started` alone does not count:
-/// the resume may fail before its request is sent), and each answer to a
-/// `worker_question` or `decide` ask of the run that no `ask_delivered`
-/// names. An answer the runtime gave to close an ask is no person's
-/// decision and is left out.
-pub fn unapplied_decisions(events: &[RunEvent]) -> Vec<UnappliedDecision> {
+/// never reached its session, of the kinds a retry hands over
+/// (ADR-t4018-1: no `stalled` ask's instruction), in the order they were
+/// recorded ([`decisions`]).
+pub fn unapplied_decisions(events: &[RunEvent]) -> Vec<PersonDecision> {
+    let events: Vec<&RunEvent> = events.iter().collect();
+    decisions(&events)
+        .into_iter()
+        .filter(|d| !d.delivered && d.kind != DecisionKind::StalledInstruction)
+        .collect()
+}
+
+/// Every decision of a person on `run` among `events` (oldest first),
+/// reached its session or not, in the order they were recorded
+/// ([`decisions`]); events of another run are left out.
+pub fn run_decisions(run: &RunId, events: &[RunEvent]) -> Vec<PersonDecision> {
+    let events: Vec<&RunEvent> = events
+        .iter()
+        .filter(|e| e.run_id.as_ref() == Some(run))
+        .collect();
+    decisions(&events)
+}
+
+/// The decisions of a person among `events` (oldest first), in the order
+/// they were recorded: each `landing_decided` with code `sent_back`,
+/// delivered when a later `resume_request_sent` follows (a
+/// `resume_started` alone does not count: the resume may fail before its
+/// request is sent); each answer to a `worker_question` or `decide` ask,
+/// delivered when an `ask_delivered` names it; and each answer to a
+/// `stalled` ask that is an instruction, delivered when a `turn_requested`
+/// names its ask ([`stalled_answer_what`]) or its `stall_resolved` is
+/// `answered_instruction` (the request is written before it, and a
+/// `turn_requested` that failed to be recorded is only warned of). A
+/// `stalled` ask's answer that its `stall_resolved` says was no instruction
+/// ([`NO_INSTRUCTION`]) is left out, as is one whose text is not an
+/// instruction ([`stalled_answer_instructs`] without the options); one
+/// whose event holds no text is kept for the caller to complete and judge
+/// with its ask ([`complete_from_ask`]). An answer the runtime gave to close an
+/// ask is no person's decision and is left out.
+fn decisions(events: &[&RunEvent]) -> Vec<PersonDecision> {
     let ask_id = |event: &RunEvent| event.payload["ask_id"].as_i64();
     let delivered = |id: i64| {
         events
             .iter()
             .any(|e| e.kind == EventKind::AskDelivered && ask_id(e) == Some(id))
+    };
+    // `Some(true)` when one of the ask's `stall_resolved` sent its answer,
+    // `Some(false)` when one says the answer was no instruction (and none
+    // sent it), `None` otherwise: a stall that ended (`run_ended`,
+    // `resolved_by_itself`) before the answer was sent did not send it.
+    let resolved = |id: i64| {
+        let outcomes: Vec<&serde_json::Value> = events
+            .iter()
+            .filter(|e| e.kind == EventKind::StallResolved && ask_id(e) == Some(id))
+            .map(|e| &e.payload["outcome"])
+            .collect();
+        if outcomes.iter().any(|o| **o == ANSWERED_INSTRUCTION) {
+            Some(true)
+        } else if outcomes
+            .iter()
+            .any(|o| NO_INSTRUCTION.iter().any(|n| **o == *n))
+        {
+            Some(false)
+        } else {
+            None
+        }
+    };
+    let requested = |id: i64| {
+        let what = stalled_answer_what(id);
+        events
+            .iter()
+            .any(|e| e.kind == EventKind::TurnRequested && e.payload["what"] == what.as_str())
     };
     let asked: Vec<(i64, DecisionKind)> = events
         .iter()
@@ -91,6 +230,7 @@ pub fn unapplied_decisions(events: &[RunEvent]) -> Vec<UnappliedDecision> {
             let kind = match restore_payload::<AskOpened>(&e.payload).kind {
                 Some("worker_question") => DecisionKind::WorkerQuestion,
                 Some("decide") => DecisionKind::Decide,
+                Some("stalled") => DecisionKind::StalledInstruction,
                 _ => return None,
             };
             Some((ask_id(e)?, kind))
@@ -106,14 +246,34 @@ pub fn unapplied_decisions(events: &[RunEvent]) -> Vec<UnappliedDecision> {
                 let sent = events[at + 1..]
                     .iter()
                     .any(|later| later.kind == EventKind::ResumeRequestSent);
-                (!sent).then(|| decision(event, ask_id(event), DecisionKind::SendBack, "reason"))
+                Some(decision(
+                    event,
+                    ask_id(event),
+                    (DecisionKind::SendBack, sent),
+                    "reason",
+                ))
             }
             Some(EventKind::AskAnswered) => {
                 let id = ask_id(event)?;
                 let (_, kind) = asked.iter().find(|(asked, _)| *asked == id)?;
                 let by_runtime = event.payload["runtime_closed"] == true
                     || event.payload["authority"] == "runtime";
-                (!by_runtime && !delivered(id)).then(|| decision(event, Some(id), *kind, "answer"))
+                if by_runtime {
+                    return None;
+                }
+                let sent = if *kind == DecisionKind::StalledInstruction {
+                    let resolved = resolved(id);
+                    let answer = text_of(&event.payload["answer"]);
+                    if resolved == Some(false)
+                        || (!answer.is_empty() && !stalled_answer_instructs(&answer, &[]))
+                    {
+                        return None;
+                    }
+                    resolved == Some(true) || requested(id)
+                } else {
+                    delivered(id)
+                };
+                Some(decision(event, Some(id), (*kind, sent), "answer"))
             }
             _ => None,
         })
@@ -124,17 +284,18 @@ pub fn unapplied_decisions(events: &[RunEvent]) -> Vec<UnappliedDecision> {
 fn decision(
     event: &RunEvent,
     ask_id: Option<i64>,
-    kind: DecisionKind,
+    (kind, delivered): (DecisionKind, bool),
     field: &str,
-) -> UnappliedDecision {
+) -> PersonDecision {
     let text = text_of(&event.payload[field]);
-    UnappliedDecision {
+    PersonDecision {
         ask_id,
         kind,
         at: event.created_at.clone(),
         in_event: !text.is_empty(),
         text,
         run_id: event.run_id.clone(),
+        delivered,
     }
 }
 
@@ -269,13 +430,14 @@ mod tests {
         ];
         assert_eq!(
             unapplied_decisions(&events),
-            [UnappliedDecision {
+            [PersonDecision {
                 ask_id: Some(1424),
                 kind: DecisionKind::SendBack,
                 at: "2026-11-02T11:50:00Z".into(),
                 text: "keep the old flag".into(),
                 in_event: true,
                 run_id: None,
+                delivered: false,
             }]
         );
     }
@@ -412,6 +574,257 @@ mod tests {
         assert_eq!(decisions.len(), 1, "{decisions:?}");
         assert_eq!(decisions[0].text, "");
         assert!(!decisions[0].in_event);
+    }
+
+    fn on(run: &str, mut event: RunEvent) -> RunEvent {
+        event.run_id = Some(RunId::new(run).unwrap());
+        event
+    }
+
+    fn stalled_answer(id: i64, answer: &str) -> [RunEvent; 2] {
+        [
+            asked(id, "stalled"),
+            event(
+                "ask_answered",
+                json!({"ask_id": id, "kind": "stalled", "answer": answer, "authority": "person"}),
+            ),
+        ]
+    }
+
+    fn turn_requested(what: &str) -> RunEvent {
+        event(
+            "turn_requested",
+            json!({"seq": 4, "what": what, "workspace_id": "w"}),
+        )
+    }
+
+    fn resolved(id: i64, outcome: &str) -> RunEvent {
+        event(
+            "stall_resolved",
+            json!({"ask_id": id, "outcome": outcome, "detection": "ask"}),
+        )
+    }
+
+    /// The decisions `run_decisions` returns for `events` of run `r`, as
+    /// (ask, kind, text, delivered).
+    fn of_run(events: Vec<RunEvent>) -> Vec<(Option<i64>, DecisionKind, String, bool)> {
+        let events: Vec<RunEvent> = events.into_iter().map(|e| on("r", e)).collect();
+        run_decisions(&RunId::new("r").unwrap(), &events)
+            .into_iter()
+            .map(|d| (d.ask_id, d.kind, d.text, d.delivered))
+            .collect()
+    }
+
+    /// Every decision of the run is returned, reached its session or not,
+    /// with the mark of the records 4018's judgement reads: a send_back a
+    /// resume's request followed and an answer an `ask_delivered` names are
+    /// delivered, the others are not; an ask with no answer gives nothing.
+    #[test]
+    fn a_runs_decisions_are_returned_delivered_or_not() {
+        let mut events = vec![
+            sent_back("first"),
+            event("resume_request_sent", json!({"head": "abc"})),
+            asked(7, "worker_question"),
+            answered(7, "worker_question", "use the second option"),
+            event("ask_delivered", json!({"ask_id": 7, "workspace_id": "w"})),
+            asked(8, "decide"),
+            answered(8, "decide", "retry: start from main"),
+            asked(9, "worker_question"),
+        ];
+        events.push(sent_back("second"));
+        assert_eq!(
+            of_run(events),
+            [
+                (Some(1424), DecisionKind::SendBack, "first".into(), true),
+                (
+                    Some(7),
+                    DecisionKind::WorkerQuestion,
+                    "use the second option".into(),
+                    true
+                ),
+                (
+                    Some(8),
+                    DecisionKind::Decide,
+                    "retry: start from main".into(),
+                    false
+                ),
+                (Some(1424), DecisionKind::SendBack, "second".into(), false),
+            ]
+        );
+    }
+
+    /// Another run's decisions and answers are not this run's.
+    #[test]
+    fn another_runs_decisions_are_left_out() {
+        let mut events: Vec<RunEvent> = [
+            asked(7, "worker_question"),
+            answered(7, "worker_question", "mine"),
+        ]
+        .into_iter()
+        .map(|e| on("r", e))
+        .collect();
+        events.extend(
+            [
+                sent_back("theirs"),
+                asked(8, "decide"),
+                answered(8, "decide", "theirs"),
+            ]
+            .into_iter()
+            .map(|e| on("other", e)),
+        );
+        let decisions = run_decisions(&RunId::new("r").unwrap(), &events);
+        assert_eq!(decisions.len(), 1, "{decisions:?}");
+        assert_eq!(decisions[0].text, "mine");
+    }
+
+    /// A `stalled` ask's instruction: (a) delivered by a `turn_requested`
+    /// naming its ask, or by its `answered_instruction` `stall_resolved`
+    /// alone; (b) not delivered with neither record; (c) not delivered by a
+    /// request or a `stall_resolved` of another ask; (d) `wait`, `stop`,
+    /// `intervene` and a recovery job's option are no decision.
+    #[test]
+    fn a_stalled_asks_instruction_is_delivered_by_its_own_request_or_resolution() {
+        let instruction = |id: i64, after: Vec<RunEvent>| {
+            let mut events = stalled_answer(id, "run the failing test alone").to_vec();
+            events.extend(after);
+            of_run(events)
+        };
+        let one = |delivered: bool| {
+            vec![(
+                Some(5),
+                DecisionKind::StalledInstruction,
+                "run the failing test alone".to_owned(),
+                delivered,
+            )]
+        };
+        // (a)
+        assert_eq!(
+            instruction(5, vec![turn_requested(&stalled_answer_what(5))]),
+            one(true)
+        );
+        assert_eq!(
+            instruction(5, vec![resolved(5, "answered_instruction")]),
+            one(true)
+        );
+        // (b)
+        assert_eq!(instruction(5, vec![]), one(false));
+        // (c)
+        assert_eq!(
+            instruction(
+                5,
+                vec![
+                    turn_requested(&stalled_answer_what(6)),
+                    turn_requested("revise"),
+                    resolved(6, "answered_instruction"),
+                ]
+            ),
+            one(false)
+        );
+        // (d)
+        for answer in ["wait", "stop", "intervene"] {
+            let mut events = stalled_answer(5, answer).to_vec();
+            events.push(resolved(5, "answered_wait"));
+            assert_eq!(of_run(events), [], "{answer}");
+            assert_eq!(of_run(stalled_answer(5, answer).to_vec()), [], "{answer}");
+        }
+        let recover = format!("rebase onto main{}", crate::domain::recovery::RECOVER_LABEL);
+        assert_eq!(of_run(stalled_answer(5, &recover).to_vec()), []);
+        let mut unlabelled = stalled_answer(5, "rebase onto main").to_vec();
+        unlabelled.push(resolved(5, "answered_recover"));
+        assert_eq!(of_run(unlabelled), []);
+        // A person who closed the ask with an instruction (a session taken
+        // over, recorded `answered_intervene`) did not send it.
+        assert_eq!(
+            instruction(5, vec![resolved(5, "answered_intervene")]),
+            one(false)
+        );
+        // A stall that ended before the answer was sent did not send it.
+        for ended in ["run_ended", "resolved_by_itself"] {
+            assert_eq!(
+                instruction(5, vec![resolved(5, ended)]),
+                one(false),
+                "{ended}"
+            );
+        }
+    }
+
+    /// The ask completes a decision: a job's option answered without its
+    /// label is no instruction even with no resolution recorded (only
+    /// `run_ended`), and an old answer whose event held no text gets the
+    /// ask's text, kept when it is an instruction and dropped when it was
+    /// `wait` or a job's option.
+    #[test]
+    fn the_ask_completes_and_judges_a_stalled_answer_again() {
+        let options = vec![
+            "wait".to_owned(),
+            "stop".to_owned(),
+            format!("look at the log{}", crate::domain::recovery::RECOVER_LABEL),
+        ];
+        let mut events = stalled_answer(5, "look at the log").to_vec();
+        events.push(resolved(5, "run_ended"));
+        let events: Vec<RunEvent> = events.into_iter().map(|e| on("r", e)).collect();
+        let mut decisions = run_decisions(&RunId::new("r").unwrap(), &events);
+        assert_eq!(decisions.len(), 1, "{decisions:?}");
+        assert!(!complete_from_ask(
+            &mut decisions[0],
+            Some("look at the log"),
+            &options
+        ));
+        let old = |answer: &str| {
+            let events: Vec<RunEvent> = [
+                asked(6, "stalled"),
+                event(
+                    "ask_answered",
+                    json!({"ask_id": 6, "kind": "stalled", "authority": "person"}),
+                ),
+            ]
+            .into_iter()
+            .map(|e| on("r", e))
+            .collect();
+            let mut decisions = run_decisions(&RunId::new("r").unwrap(), &events);
+            assert_eq!(decisions.len(), 1, "{decisions:?}");
+            assert_eq!(decisions[0].text, "");
+            let kept = complete_from_ask(&mut decisions[0], Some(answer), &options);
+            (kept, decisions.remove(0))
+        };
+        let (kept, decision) = old("run the failing test alone");
+        assert!(kept);
+        assert_eq!(decision.text, "run the failing test alone");
+        assert!(!decision.in_event);
+        assert!(!decision.delivered);
+        assert!(!old("wait").0);
+        assert!(!old("look at the log").0);
+        // Another kind's answer is filled and kept.
+        let mut answer = run_decisions(
+            &RunId::new("r").unwrap(),
+            &[
+                on("r", asked(7, "worker_question")),
+                on(
+                    "r",
+                    event(
+                        "ask_answered",
+                        json!({"ask_id": 7, "kind": "worker_question", "authority": "person"}),
+                    ),
+                ),
+            ],
+        );
+        assert!(complete_from_ask(&mut answer[0], Some(" yes "), &[]));
+        assert_eq!(answer[0].text, "yes");
+    }
+
+    /// A retry hands over no `stalled` ask's instruction (ADR-t4018-1's
+    /// kinds), and none that was delivered.
+    #[test]
+    fn unapplied_decisions_keep_their_kinds() {
+        let mut events = stalled_answer(5, "go on").to_vec();
+        events.extend([
+            asked(7, "worker_question"),
+            answered(7, "worker_question", "x"),
+        ]);
+        let decisions = unapplied_decisions(&events);
+        assert_eq!(decisions.len(), 1, "{decisions:?}");
+        assert_eq!(decisions[0].kind, DecisionKind::WorkerQuestion);
+        assert!(!decisions[0].delivered);
     }
 
     /// Only a turn that succeeded shows the prompt reached a session: a

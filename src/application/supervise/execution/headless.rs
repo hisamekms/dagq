@@ -187,10 +187,10 @@ pub(in crate::application::supervise) fn send_to_planner(
     Ok(())
 }
 
-/// What the request carrying the answer of the `stalled` ask `ask` is: it
-/// names the ask, so the request itself records that the answer was sent.
+/// What the request carrying the answer of the `stalled` ask `ask` is
+/// ([`crate::domain::unapplied_decisions::stalled_answer_what`]).
 pub(super) fn stalled_answer_what(ask: AskId) -> String {
-    format!("answer of the stalled ask {ask}")
+    crate::domain::unapplied_decisions::stalled_answer_what(ask)
 }
 
 /// Whether the exit of the headless session of `run` is requested and not

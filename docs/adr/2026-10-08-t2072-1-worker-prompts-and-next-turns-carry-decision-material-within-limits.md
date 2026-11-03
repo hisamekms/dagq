@@ -10,6 +10,7 @@ amends:
   - adr-t1566-1 decision 7
 amended_by:
   - adr-t4018-1
+  - adr-t4027-1
 owners:
   - hisamekms
 tags:

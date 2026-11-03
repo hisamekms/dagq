@@ -12,6 +12,7 @@ amends:
   - adr-t813-2 decision 4
 amended_by:
   - adr-t2852-1
+  - adr-t4027-1
 owners:
   - hisamekms
 tags:

@@ -207,10 +207,17 @@ ADR-t813-2決定2〜6と、切り替えを止める設定の[ADR-t1857-1](../adr
 
 ## 大きなcontextからの新しいsession
 
-[ADR-t2080-1](../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)、引き継ぎの中身は[ADR-t2852-1](../adr/2026-10-19-t2852-1-handoff-carries-local-check-records-resume-timeout-and-findings-once.md)。
+[ADR-t2080-1](../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)、引き継ぎの中身は[ADR-t2852-1](../adr/2026-10-19-t2852-1-handoff-carries-local-check-records-resume-timeout-and-findings-once.md)と[ADR-t4027-1](../adr/2026-11-03-t4027-1-handoff-to-a-new-session-carries-the-persons-decisions-on-the-run.md)。
 
 - 入口: 判定は`domain::fresh_session::next_session`、記録と依頼は`supervise::execution::session`、引き継ぎは`prompt::handoff_text`と`HandoffMaterial`、最初のturnとsessionの名前は`domain::turn`の`new_session_prompt`・`session_name`。
 - 約束: 新しいsessionは`provider_switched`と同じ区切りで、providerを変えない。
+- 約束: 引き継ぎは、そのrunで人が下した判断（`send_back`の理由・worker_questionとdecideの答え・stalledのaskへの指示の答え）を、前のsessionに届いたかを添えて必ず従う判断として本文のまま持つ（入口は`domain::unapplied_decisions::run_decisions`）。
+  送るはずだった依頼がそのものとして運ぶ`send_back`（そのresume）は重ねて書かず、同じ言葉を含むだけの依頼では省かない。
+  この節は全体の上限で外れない必須の節で、切るときだけaskのidと`dagq`の読むコマンドを名指す（[Prompt](supervisor-lifecycle/prompt.md#workerのprompt)の前のrunの判断の節と同じ扱い）。
+- 落とし穴: stalledの指示の答えが届いた印は、そのaskを名指す`turn_requested`か、同じaskの`answered_instruction`の`stall_resolved`（`turn_requested`の記録の失敗はwarnだけで依頼は書かれている）。
+  別のaskを名指す`turn_requested`は印にしない。
+- 落とし穴: `answered_intervene`は人が任意の答えでaskを閉じたときにも記録されるので、指示でない印にしない（答えの文で決める）。
+  復旧のjobの選択肢をラベルなしで答えたものはeventsだけでは見分けられず、askのoptionsで判じ直す（`complete_from_ask`）。
 
 ## Trust prompt
 

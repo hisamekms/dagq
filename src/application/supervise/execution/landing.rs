@@ -2006,6 +2006,7 @@ impl Supervisor<'_> {
             run,
             request,
             &run_dir.join(format!("revise-{attempt}-request.txt")),
+            None,
         )?;
         // The request names the file as where the cut findings are whole
         // (ADR-t2072-1).

@@ -2,7 +2,7 @@ use super::*;
 use crate::application::memory_files::MemoryFiles;
 use crate::application::review::{LANDING_ANSWERS_INTRO, PersonAnswer, PersonAnswers};
 use crate::domain::local_checks::LocalChecks;
-use crate::domain::unapplied_decisions::{DecisionKind, RetriedBy, RetryEnd, UnappliedDecision};
+use crate::domain::unapplied_decisions::{DecisionKind, PersonDecision, RetriedBy, RetryEnd};
 use crate::domain::worker::WorkerMode;
 use crate::domain::{
     EvidenceCheck, GoalRecord, GoalStatus, GoalVerdict, Provider, RunId, RunRecord, TaskRecord,
@@ -7234,9 +7234,169 @@ fn bare_handoff(request: &str) -> HandoffMaterial<'_> {
         known_failures: None,
         touched: &NO_NAMES,
         receipt_summary: None,
+        decisions: &[],
+        carried_send_back: None,
         request,
         request_file: None,
     }
+}
+
+/// A person's decision on the handoff's run: ask `1500 + n` of `kind`
+/// with `text`, `delivered` or not.
+fn run_decision(n: i64, kind: DecisionKind, text: &str, delivered: bool) -> PersonDecision {
+    PersonDecision {
+        ask_id: Some(1500 + n),
+        kind,
+        at: "2026-11-03T09:00:00Z".into(),
+        text: text.into(),
+        in_event: true,
+        run_id: Some(RunId::new(RUN).unwrap()),
+        delivered,
+    }
+}
+
+/// ADR-t4027-1: the handoff of a new session carries a person's decisions
+/// on the run whole, with their asks and whether each reached the earlier
+/// session, before the request; the send_back the request carries (its
+/// resume's, named by the caller) is not written twice, while a request
+/// that only holds the same words leaves it in; without a decision there
+/// is no such section.
+#[test]
+fn a_handoff_carries_the_persons_decisions_on_the_run() {
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let decisions = [
+        run_decision(0, DecisionKind::SendBack, "keep the old flag", true),
+        run_decision(
+            1,
+            DecisionKind::WorkerQuestion,
+            "use the second option",
+            true,
+        ),
+        run_decision(
+            2,
+            DecisionKind::StalledInstruction,
+            "run the failing test alone",
+            false,
+        ),
+        run_decision(3, DecisionKind::Decide, "retry: start from main", true),
+        run_decision(4, DecisionKind::SendBack, "name the flag in the ADR", false),
+    ];
+    let request = "dagq: the person sent the landing back: name the flag in the ADR";
+    let fitted = handoff_text(
+        &run,
+        &HandoffMaterial {
+            decisions: &decisions,
+            carried_send_back: Some("name the flag in the ADR"),
+            ..bare_handoff(request)
+        },
+    );
+    let text = &fitted.text;
+    let (before, section) = text
+        .split_once("Decisions a person made on this run")
+        .unwrap();
+    assert!(before.contains("Your local checks"), "{text}");
+    let section = section
+        .split_once("The earlier session would have been sent this next")
+        .unwrap()
+        .0;
+    for expected in [
+        "follow each of them",
+        "The latest send_back's reason is in the request below and is not repeated here.",
+        "- ask 1500 (approve_landing, 2026-11-03T09:00:00Z, run 00000000-0000-4000-8000-000000000001, sent to the earlier session), the landing's send_back, its reason:\nkeep the old flag\n",
+        "- ask 1501 (worker_question, ",
+        "use the second option\n",
+        "- ask 1502 (stalled, 2026-11-03T09:00:00Z, run 00000000-0000-4000-8000-000000000001, never sent to a session), the answer to the stalled ask, an instruction:\nrun the failing test alone\n",
+        "- ask 1503 (decide, ",
+        "retry: start from main\n",
+    ] {
+        assert!(section.contains(expected), "{expected}\n{section}");
+    }
+    assert!(!section.contains("ask 1504"), "{section}");
+    assert_eq!(
+        text.matches("name the flag in the ADR").count(),
+        1,
+        "{text}"
+    );
+    assert!(fitted.bytes.sections["decisions"] > 0);
+    assert_eq!(fitted.bytes.over_limit, None);
+    // A request that is no resume of that send_back but holds its words
+    // (a triage's instruction to the contrary): the person's decision is
+    // written all the same.
+    let triage = "dagq: the recovery job asks: Do not name the flag in the ADR";
+    let other = handoff_text(
+        &run,
+        &HandoffMaterial {
+            decisions: &decisions,
+            ..bare_handoff(triage)
+        },
+    )
+    .text;
+    assert!(
+        other.contains("- ask 1504 (approve_landing, ")
+            && other.contains("name the flag in the ADR\n"),
+        "{other}"
+    );
+    assert!(!other.contains("is not repeated here"), "{other}");
+    // A latest send_back a session already took is not the request's.
+    let mut taken = decisions.clone();
+    taken[4].delivered = true;
+    let taken = handoff_text(
+        &run,
+        &HandoffMaterial {
+            decisions: &taken,
+            carried_send_back: Some("name the flag in the ADR"),
+            ..bare_handoff(request)
+        },
+    )
+    .text;
+    assert!(taken.contains("- ask 1504 ("), "{taken}");
+    // No decision, or only the send_back the request carries: no section.
+    for decisions in [&[][..], &decisions[4..]] {
+        let none = handoff_text(
+            &run,
+            &HandoffMaterial {
+                decisions,
+                carried_send_back: Some("name the flag in the ADR"),
+                ..bare_handoff(request)
+            },
+        );
+        assert!(
+            !none.text.contains("Decisions a person made"),
+            "{}",
+            none.text
+        );
+        assert!(!none.bytes.sections.contains_key("decisions"));
+    }
+}
+
+/// ADR-t4027-1 as ADR-t4018-1 decision 2 holds the previous run's: a
+/// decision past its own limit is cut naming its ask and the read that
+/// prints it whole, the cut said in `over_limit`, and the section is not
+/// left out by the handoff's whole limit.
+#[test]
+fn a_long_decision_in_a_handoff_is_cut_naming_its_ask_and_read() {
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let long = format!("start {}", "判".repeat(5_000));
+    let decisions = [run_decision(0, DecisionKind::SendBack, &long, true)];
+    let fitted = handoff_text(
+        &run,
+        &HandoffMaterial {
+            decisions: &decisions,
+            ..bare_handoff("dagq: the review asks you to revise.")
+        },
+    );
+    assert!(fitted.text.contains("- ask 1500 (approve_landing, "));
+    assert!(fitted.text.contains("start 判"));
+    assert!(
+        fitted.text.contains(
+            "ask 1500: `dagq events --full --task 7 --kind landing_decided` prints its whole text"
+        ),
+        "{}",
+        fitted.text
+    );
+    let over = fitted.bytes.over_limit.as_deref().unwrap();
+    assert!(over.contains("decisions: 1 texts cut"), "{over}");
+    assert!(!over.contains("its middle was cut"), "{over}");
 }
 
 /// ADR-t2080-1 decision 2 as ADR-t2852-1 amends it: the handoff prompt
@@ -7632,6 +7792,9 @@ fn a_handoff_with_the_largest_material_stays_within_its_limits() {
         names.iter().map(|name| (name.as_str(), 1, None)).collect();
     let list = known(&others, &[]);
     let touched: BTreeSet<String> = (0..1000).map(|n| format!("t{n}")).collect();
+    let decisions: Vec<PersonDecision> = (0..300)
+        .map(|n| run_decision(n, DecisionKind::WorkerQuestion, &huge, n % 2 == 0))
+        .collect();
     let material = HandoffMaterial {
         peak_context: u64::MAX,
         threshold: u64::MAX - 1,
@@ -7644,11 +7807,38 @@ fn a_handoff_with_the_largest_material_stays_within_its_limits() {
         known_failures: Some(&list),
         touched: &touched,
         receipt_summary: Some(&huge),
+        decisions: &decisions,
+        carried_send_back: None,
         request: &huge,
         request_file: Some(request_file),
     };
     let fitted = handoff_text(&run, &material);
     assert!(fitted.text.len() <= HANDOFF_LIMIT - prompt_fit::LANGUAGE_ROOM);
+    // The decisions are never left out: their section is cut to its own
+    // limit, naming the asks and the read of the rest.
+    assert!(
+        fitted.text.contains("Decisions a person made on this run"),
+        "{}",
+        fitted.text
+    );
+    assert!(
+        fitted
+            .text
+            .contains("`dagq events --full --task 7 --kind ask_answered`"),
+    );
+    assert!(
+        fitted
+            .text
+            .contains("decisions left out by this section's limit: ask ")
+    );
+    assert!(
+        fitted
+            .bytes
+            .over_limit
+            .as_deref()
+            .unwrap_or_default()
+            .contains("decisions: "),
+    );
     assert_eq!(fitted.bytes.total, fitted.text.len());
     assert!(
         !fitted
@@ -7666,7 +7856,7 @@ fn a_handoff_with_the_largest_material_stays_within_its_limits() {
             .over_limit
             .as_deref()
             .unwrap()
-            .starts_with("request: ")
+            .contains("; request: ")
     );
     for (section, bytes, read) in [
         (
@@ -8451,13 +8641,14 @@ fn previous_decisions(
         decisions: texts
             .iter()
             .enumerate()
-            .map(|(at, (kind, text))| UnappliedDecision {
+            .map(|(at, (kind, text))| PersonDecision {
                 ask_id: Some(1424 + i64::try_from(at).unwrap()),
                 kind: *kind,
                 at: "2026-11-02T11:50:00Z".into(),
                 text: (*text).into(),
                 in_event: true,
                 run_id: Some(RunId::new(RUN).unwrap()),
+                delivered: false,
             })
             .collect(),
     }

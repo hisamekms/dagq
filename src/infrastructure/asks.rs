@@ -200,11 +200,15 @@ impl SqliteQueue {
         let mut payload =
             json!({"ask_id": id, "kind": ask.kind, "reason_category": ask.reason_category});
         write_answer(&tx, &ask, text, answerer, now, &mut payload)?;
-        // A person's decision on a run that its next run may have to be
-        // told when it never reached the run's session (ADR-t4018-1): its
-        // whole text, read off the events by
-        // `domain::unapplied_decisions` and by `events --full`.
-        if matches!(ask.kind, AskKind::WorkerQuestion | AskKind::Decide) && ask.run_id.is_some() {
+        // A person's decision on a run that its next run (ADR-t4018-1) or
+        // its next session (ADR-t4027-1) may have to be told: its whole
+        // text, read off the events by `domain::unapplied_decisions` and
+        // by `events --full`.
+        if matches!(
+            ask.kind,
+            AskKind::WorkerQuestion | AskKind::Decide | AskKind::Stalled
+        ) && ask.run_id.is_some()
+        {
             payload["answer"] = json!(text);
         }
         // A `propose` or `dismiss` answer the ask offered is applied to its

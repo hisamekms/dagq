@@ -6,7 +6,7 @@ use super::*;
 use crate::domain::{
     local_checks::LocalChecks,
     unapplied_decisions::{
-        DecisionKind, RetriedBy, RetryEnd, UnappliedDecision, prompt_delivered, retry_end,
+        DecisionKind, PersonDecision, RetriedBy, RetryEnd, prompt_delivered, retry_end,
         unapplied_decisions,
     },
 };
@@ -329,7 +329,7 @@ pub struct PreviousDecisions {
     /// The retry that ended it.
     pub retry: RetryEnd,
     /// Oldest first, each naming the run it was made on.
-    pub decisions: Vec<UnappliedDecision>,
+    pub decisions: Vec<PersonDecision>,
 }
 
 impl PreviousDecisions {
@@ -360,7 +360,7 @@ impl PreviousDecisions {
         answer_of: &mut dyn FnMut(i64) -> Result<Option<String>>,
     ) -> Result<Option<Self>> {
         let mut latest: Option<(&TaskRun, RetryEnd)> = None;
-        let mut decisions: Vec<UnappliedDecision> = Vec::new();
+        let mut decisions: Vec<PersonDecision> = Vec::new();
         for (run, events) in earlier {
             let Some(retry) = retry_end(events) else {
                 break;
@@ -411,21 +411,32 @@ impl PreviousDecisions {
     /// ADR-t4018-1 decision 2, the exception to ADR-t2072-1 decision 2 for
     /// this section only): the event of `kind` that holds it.
     pub fn read_command(&self, kind: crate::domain::EventKind) -> String {
-        format!(
-            "dagq events --full --task {} --kind {}",
-            self.task_id,
-            kind.as_str()
-        )
+        decision_read_command(self.task_id, kind)
     }
 
     /// [`Self::read_command`] of `decision`'s event, or, for an answer whose
     /// event holds no text, the asks with their answers.
-    pub fn read_command_of(&self, decision: &UnappliedDecision) -> String {
-        if decision.in_event {
-            self.read_command(decision.kind.event_kind())
-        } else {
-            ASKS_READ_COMMAND.to_owned()
-        }
+    pub fn read_command_of(&self, decision: &PersonDecision) -> String {
+        decision_read_of(self.task_id, decision)
+    }
+}
+
+/// How a worker reads the whole text of a person's decision on `task`
+/// that a section of a person's decisions cut or left out, with the
+/// worker's token (`queue.read`; the exception to ADR-t2072-1 decision 2
+/// that ADR-t4018-1 decision 2 makes and ADR-t4027-1 widens to the
+/// sections of a person's decisions): the events of `kind` that hold it.
+pub fn decision_read_command(task: TaskId, kind: crate::domain::EventKind) -> String {
+    format!("dagq events --full --task {task} --kind {}", kind.as_str())
+}
+
+/// [`decision_read_command`] of `decision`'s event, or, for an answer
+/// whose event holds no text, the asks with their answers.
+pub fn decision_read_of(task: TaskId, decision: &PersonDecision) -> String {
+    if decision.in_event {
+        decision_read_command(task, decision.kind.event_kind())
+    } else {
+        ASKS_READ_COMMAND.to_owned()
     }
 }
 
@@ -514,19 +525,47 @@ fn decision_lines(fit: &mut Fit, previous: &PreviousDecisions) -> String {
         "Decisions a person made on run {run}, the previous run of this task{earlier}, that never reached its session ({retried}, and this run starts a new session). They are a person's decisions: follow each of them, over that run's receipt and its work where they differ:\n",
         run = previous.run_id,
     );
-    let ask_of = |decision: &UnappliedDecision| {
-        decision
-            .ask_id
-            .map_or_else(|| "an ask".to_owned(), |id| format!("ask {id}"))
-    };
-    let lines: Vec<(String, bool)> = previous
-        .decisions
+    text.push_str(&person_decision_lines(
+        fit,
+        previous.task_id,
+        &previous.decisions,
+        false,
+    ));
+    text
+}
+
+/// The ask a decision answered, as a section of a person's decisions
+/// names it.
+fn ask_of(decision: &PersonDecision) -> String {
+    decision
+        .ask_id
+        .map_or_else(|| "an ask".to_owned(), |id| format!("ask {id}"))
+}
+
+/// The lines of a section of a person's `decisions` on `task` (oldest
+/// first), held to that section's own limit as ADR-t4018-1 decision 2 sets
+/// it (ADR-t4027-1 holds the handoff's to the same): each text cut past
+/// [`WORKER_DECISION_BYTES`] naming its ask and its read; the lines kept
+/// within [`WORKER_DECISIONS_BYTES`], the send_backs first and then the
+/// answers, the newest first; those left out counted, named by their asks
+/// up to the note's limit, and readable all with the commands it names
+/// (each prints every decision of its kind of the task); a cut or a
+/// left-out line said in `over_limit`. With `delivered`, each line says
+/// whether a record shows it reached the session.
+fn person_decision_lines(
+    fit: &mut Fit,
+    task: TaskId,
+    decisions: &[PersonDecision],
+    delivered: bool,
+) -> String {
+    let mut text = String::new();
+    let lines: Vec<(String, bool)> = decisions
         .iter()
         .map(|decision| {
             let ask = ask_of(decision);
             let read = format!(
                 "{ask}: `{}` prints its whole text",
-                previous.read_command_of(decision)
+                decision_read_of(task, decision)
             );
             let (body, cut) = if decision.text.is_empty() {
                 ("(no text recorded)".to_owned(), false)
@@ -537,15 +576,21 @@ fn decision_lines(fit: &mut Fit, previous: &PreviousDecisions) -> String {
                 DecisionKind::SendBack => "the landing's send_back, its reason",
                 DecisionKind::WorkerQuestion => "the answer to the worker's question",
                 DecisionKind::Decide => "the answer to the decide ask",
+                DecisionKind::StalledInstruction => "the answer to the stalled ask, an instruction",
             };
             let run = decision
                 .run_id
                 .as_ref()
                 .map(|run| format!(", run {run}"))
                 .unwrap_or_default();
+            let reached = match (delivered, decision.delivered) {
+                (false, _) => "",
+                (true, true) => ", sent to the earlier session",
+                (true, false) => ", never sent to a session",
+            };
             (
                 format!(
-                    "- {ask} ({kind}, {at}{run}), {what}:\n{body}\n",
+                    "- {ask} ({kind}, {at}{run}{reached}), {what}:\n{body}\n",
                     kind = decision.kind.ask_kind(),
                     at = decision.at,
                 ),
@@ -554,9 +599,9 @@ fn decision_lines(fit: &mut Fit, previous: &PreviousDecisions) -> String {
         })
         .collect();
     let newest = |kind_first: bool| {
-        (0..previous.decisions.len())
+        (0..decisions.len())
             .rev()
-            .filter(move |i| (previous.decisions[*i].kind == DecisionKind::SendBack) == kind_first)
+            .filter(move |i| (decisions[*i].kind == DecisionKind::SendBack) == kind_first)
     };
     let order: Vec<usize> = newest(true).chain(newest(false)).collect();
     let (kept, left_out) = picked_lines(
@@ -587,13 +632,10 @@ fn decision_lines(fit: &mut Fit, previous: &PreviousDecisions) -> String {
             left_out.len(),
             lines.len()
         ));
-        let ids: Vec<String> = left_out
-            .iter()
-            .map(|i| ask_of(&previous.decisions[*i]))
-            .collect();
+        let ids: Vec<String> = left_out.iter().map(|i| ask_of(&decisions[*i])).collect();
         let mut commands: Vec<String> = left_out
             .iter()
-            .map(|i| format!("`{}`", previous.read_command_of(&previous.decisions[*i])))
+            .map(|i| format!("`{}`", decision_read_of(task, &decisions[*i])))
             .collect();
         commands.sort();
         commands.dedup();
@@ -871,9 +913,9 @@ pub const PROVIDER_MESSAGE_BYTES: usize = 2_000;
 /// on the head's tree with how many others there are, the tests that fail already
 /// on the landing branch's CI in the files the run touches, how long the
 /// request may take, the summary of the receipt the worker wrote last,
-/// and the request the earlier session would have been sent next (a
-/// revise's, a resume's or a triage's instruction), which carries a
-/// review's findings once. No transcript of the conversation: the
+/// a person's decisions on the run (ADR-t4027-1), and the request the
+/// earlier session would have been sent next (a revise's, a resume's or a
+/// triage's instruction), which carries a review's findings once. No transcript of the conversation: the
 /// worktree and its commits hold the work. The task's prompt is the new
 /// session's first part, which the session wrapper puts before it
 /// ([`crate::domain::turn::new_session_prompt`]).
@@ -908,6 +950,14 @@ pub struct HandoffMaterial<'a> {
     /// The summary of the receipt the worker wrote last; `None` without
     /// one.
     pub receipt_summary: Option<&'a str>,
+    /// Every decision of a person on the run, oldest first, each saying
+    /// whether a record shows it reached the earlier session
+    /// ([`crate::domain::unapplied_decisions::run_decisions`]).
+    pub decisions: &'a [PersonDecision],
+    /// The reason of the person's send_back the request carries (the
+    /// resume of a send_back), as its `landing_decided` recorded it;
+    /// `None` for a request that carries none.
+    pub carried_send_back: Option<&'a str>,
     /// The request the earlier session would have been sent, built and
     /// held to its own limit, and the file that holds it whole if any.
     pub request: &'a str,
@@ -921,13 +971,15 @@ pub struct HandoffMaterial<'a> {
 /// the changes ([`HANDOFF_CHANGES_BYTES`]), the local checks' records
 /// ([`HANDOFF_CHECKS_BYTES`]), the tests that fail already on the landing
 /// branch's CI ([`KNOWN_FAILURES_LIMIT`]), the receipt's summary
-/// ([`HANDOFF_RECEIPT_BYTES`]), the request ([`HANDOFF_REQUEST_BYTES`]) and
-/// the notes of what was cut, with the language's room: the sections'
-/// limits take 77,500 bytes together, and the request's grows with the
-/// known failures' section of a resolution request
-/// ([`KNOWN_FAILURES_LIMIT`]). The new session's first turn is the task's
-/// prompt ([`WORKER_PROMPT_LIMIT`]) and this.
-pub const HANDOFF_LIMIT: usize = 82_000 + KNOWN_FAILURES_LIMIT;
+/// ([`HANDOFF_RECEIPT_BYTES`]), a person's decisions on the run (their
+/// lines' [`WORKER_DECISIONS_BYTES`] with their heading and note, under
+/// 7,000 bytes), the request ([`HANDOFF_REQUEST_BYTES`]) and the notes of
+/// what was cut, with the language's room: the sections' limits take
+/// 84,500 bytes together, and the request's grows with the known
+/// failures' section of a resolution request ([`KNOWN_FAILURES_LIMIT`]).
+/// The new session's first turn is the task's prompt
+/// ([`WORKER_PROMPT_LIMIT`]) and this.
+pub const HANDOFF_LIMIT: usize = 89_000 + KNOWN_FAILURES_LIMIT;
 
 /// The bytes of the commits' lines, the newest kept: about 100 lines of
 /// `git log --oneline`. The rest is in the worktree's `git log`.
@@ -1110,14 +1162,60 @@ fn touched_failures_section(
     text
 }
 
+/// The handoff's section on a person's `decisions` on `run` (ADR-t4027-1):
+/// never left out of the handoff ([`HANDOFF_LIMIT`] makes room for it) and
+/// held to its own limit as the previous run's decisions are
+/// ([`person_decision_lines`]), each saying whether it reached the earlier
+/// session. The send_back the request carries (`carried`, its reason) is
+/// not written twice: the latest send_back, when no session took it yet
+/// and its reason is that one. A request that only holds the same words
+/// carries no decision, so nothing else is left out. Empty without a
+/// decision.
+fn handoff_decisions_section(
+    fit: &mut Fit,
+    run: &TaskRun,
+    decisions: &[PersonDecision],
+    carried: Option<&str>,
+) -> String {
+    let latest_send_back = decisions
+        .iter()
+        .rposition(|d| d.kind == DecisionKind::SendBack)
+        .filter(|at| {
+            let send_back = &decisions[*at];
+            !send_back.delivered && carried.is_some_and(|reason| reason.trim() == send_back.text)
+        });
+    let shown: Vec<PersonDecision> = decisions
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| Some(*at) != latest_send_back)
+        .map(|(_, decision)| decision.clone())
+        .collect();
+    if shown.is_empty() {
+        return String::new();
+    }
+    let request_note = if latest_send_back.is_some() {
+        " The latest send_back's reason is in the request below and is not repeated here."
+    } else {
+        ""
+    };
+    let mut text = format!(
+        "\n\nDecisions a person made on this run, which this new session did not see: they are a person's decisions, so follow each of them, over the work so far and the receipt where they differ.{request_note}\n"
+    );
+    text.push_str(&person_decision_lines(fit, run.task_id(), &shown, true));
+    fit.section("decisions", &text);
+    text
+}
+
 /// The handoff prompt of a new session of `run`'s worker for a large
 /// context ([`HandoffMaterial`]), held to [`HANDOFF_LIMIT`]. Each part is
 /// one section cut to its bytes keeping its start, with the bytes left out
 /// and how to read the rest: the commits and the changes with git in the
 /// worktree, the local checks' records in their directory, the known
 /// failures and the request in their files, the receipt's summary in the
-/// receipt. The request is required material (a cut is said in
-/// `over_limit`); the fixed text is never cut. A review's findings are in
+/// receipt, a person's decisions on the run with `dagq events`
+/// ([`handoff_decisions_section`]). The request and the decisions are
+/// required material (a cut is said in `over_limit`); the fixed text is
+/// never cut. A review's findings are in
 /// the request alone (ADR-t2852-1).
 pub fn handoff_text(run: &TaskRun, material: &HandoffMaterial<'_>) -> FittedPrompt {
     let mut fit = Fit::new(HANDOFF_LIMIT);
@@ -1180,6 +1278,15 @@ pub fn handoff_text(run: &TaskRun, material: &HandoffMaterial<'_>) -> FittedProm
             or_none(&summary)
         ));
     }
+    text.push_str(
+        handoff_decisions_section(
+            &mut fit,
+            run,
+            material.decisions,
+            material.carried_send_back,
+        )
+        .trim_end_matches('\n'),
+    );
     let read = material.request_file.map_or_else(
         || NOT_READABLE.to_owned(),
         |path| format!("the whole of it is in {}", path.display()),
@@ -1903,13 +2010,14 @@ pub fn worker_template(provider: Provider) -> Result<String> {
             by: RetriedBy::RecoveryJob,
             reason: value("job reason"),
         },
-        decisions: vec![UnappliedDecision {
+        decisions: vec![PersonDecision {
             ask_id: Some(1),
             kind: DecisionKind::SendBack,
             at: value("at"),
             text: value("decision"),
             in_event: true,
             run_id: Some(run.id().clone()),
+            delivered: false,
         }],
     };
     let failure = KnownFailure {

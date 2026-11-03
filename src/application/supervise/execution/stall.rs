@@ -256,7 +256,7 @@ pub(super) const STALLED_OPTIONS: [&str; 2] = ["wait", "stop"];
 /// of `intervene` ([`headless_options`]): the supervisor has the session end
 /// (its exit request), and the run goes on as one that ended without a
 /// receipt.
-pub(super) const STOP_OPTION: &str = "stop";
+pub(super) const STOP_OPTION: &str = crate::domain::unapplied_decisions::STALLED_STOP;
 
 /// The options of a `stalled` ask: [`STALLED_OPTIONS`], then those of the
 /// recovery job's `note` that go back to it, each once (ADR-0047 decision
@@ -270,7 +270,7 @@ pub(super) fn stalled_options(note: Option<&Note>) -> (Vec<String>, SortedOption
 /// opened before that (the retired interactive session's, and headless ones
 /// opened before task 1179) offered it, and an `intervene` that still comes
 /// opens the ask again.
-const INTERVENE_OPTION: &str = "intervene";
+const INTERVENE_OPTION: &str = crate::domain::unapplied_decisions::STALLED_INTERVENE;
 
 /// Whether `answer` is `intervene` (or `intervene: <text>`).
 fn answered_intervene(answer: &str) -> bool {

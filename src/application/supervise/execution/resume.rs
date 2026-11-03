@@ -594,6 +594,7 @@ impl Supervisor<'_> {
             run,
             built,
             &run_dir.join(format!("resume-{attempt}-request.txt")),
+            (request.kind == ResumeKind::SentBack).then_some(request.reason.as_str()),
         )?;
         // What an adopter or the next process sends when it was not sent.
         self.files.write(

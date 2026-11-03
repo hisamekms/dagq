@@ -122,6 +122,7 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
   retry・retry_inheritで終わった前のrunにsessionへ送った記録の無い人の判断があれば、誰のretryでも、新しいrunのpromptが必ず従う判断として本文のまま入れる。
   落とし穴: `resume_started`も`wrapper_launched`も届いた印にならない（その後の起動や送信が失敗しうる）。
   この節は必須の節で、判断の数に依らず自分の上限に収め、切った本文と外した判断に限りaskのidと`dagq`の読むコマンドを名指す（上の読む範囲の例外）。
+  同じ例外は新しいsessionの引き継ぎの人の判断の節にも当たる（ADR-t4027-1）。
   復旧jobの`retry`の理由は判断が無くても渡し、askの答えが読めなければrunを始めない。
 - 記録: claimのprovisionが`PromptBytes`（言語の指示を含む）を、workerの最初のturnを始める`wrapper_launched`の`prompt_bytes`に記録する。
   providerの切り替えで書き直した`prompt.txt`は記録しない。

@@ -8,6 +8,9 @@ use crate::domain::EventKind;
 use crate::domain::e2e_quarantine;
 use crate::domain::fresh_session::{self, NextSession};
 use crate::domain::local_checks::LocalChecks;
+use crate::domain::unapplied_decisions::{
+    DecisionKind, PersonDecision, complete_from_ask, run_decisions,
+};
 
 /// The file in a run's directory that holds the whole list of the tests
 /// that fail already on the landing branch's CI its worker's prompt was
@@ -1246,13 +1249,16 @@ impl Supervisor<'_> {
     /// one, the handoff prompt ([`Self::handoff_prompt`]) that carries
     /// `request`, with why the session is new. `request_file` is where the
     /// handoff says the whole request is, written only when the handoff cut
-    /// it. The caller records the new session ([`Self::renew_session`])
-    /// before it writes the request.
+    /// it. `carried_send_back` is the reason of the person's send_back the
+    /// request carries (a send_back's resume), which the handoff does not
+    /// write twice. The caller records the new session
+    /// ([`Self::renew_session`]) before it writes the request.
     pub(super) fn session_request(
         &mut self,
         run: &TaskRun,
         request: FittedPrompt,
         request_file: &Path,
+        carried_send_back: Option<&str>,
     ) -> Result<(FittedPrompt, Option<(u64, u64)>)> {
         let NextSession::Fresh {
             peak_context,
@@ -1265,7 +1271,8 @@ impl Supervisor<'_> {
             ));
         };
         let fresh = (peak_context, threshold);
-        let handoff = self.handoff_prompt(run, fresh, (&request.text, request_file))?;
+        let handoff =
+            self.handoff_prompt(run, fresh, (&request.text, request_file), carried_send_back)?;
         if handoff.bytes.omitted.contains_key("request") {
             self.files.write(request_file, request.text.as_bytes())?;
         }
@@ -1290,6 +1297,7 @@ impl Supervisor<'_> {
         run: &TaskRun,
         (peak_context, threshold): (u64, u64),
         (request, request_file): (&str, &Path),
+        carried_send_back: Option<&str>,
     ) -> Result<FittedPrompt> {
         run.worktree_path().context("missing worktree")?;
         let unread = |what: &str, error: anyhow::Error| {
@@ -1351,6 +1359,7 @@ impl Supervisor<'_> {
             .receipt_path()
             .and_then(|path| self.files.read_to_string(Path::new(path)).ok())
             .and_then(|text| Receipt::parse(&text).ok());
+        let decisions = self.run_decisions(run)?;
         let prompt = handoff_text(
             run,
             &HandoffMaterial {
@@ -1365,11 +1374,40 @@ impl Supervisor<'_> {
                 known_failures: known.as_ref(),
                 touched: &touched,
                 receipt_summary: receipt.as_ref().map(Receipt::summary),
+                decisions: &decisions,
+                carried_send_back,
                 request,
                 request_file: Some(request_file),
             },
         );
         Ok(prompt.with_language(self.verifier.language().as_ref()))
+    }
+
+    /// Every decision of a person on `run`, each saying whether it reached
+    /// its session (ADR-t4027-1, [`run_decisions`]), for the handoff to a
+    /// new session of it, completed from its ask ([`complete_from_ask`]):
+    /// an answer recorded before its event carried the text gets the ask's
+    /// answer, and a `stalled` ask's is judged again with its options (a
+    /// job's option answered without its label is none). An ask that
+    /// cannot be read, or an answered one that keeps no answer, fails the
+    /// handoff, as a queue that cannot be read does, rather than hand over
+    /// without it.
+    fn run_decisions(&mut self, run: &TaskRun) -> Result<Vec<PersonDecision>> {
+        let events = self.queue.run_events(run.id())?;
+        let mut kept = Vec::new();
+        for mut decision in run_decisions(run.id(), &events) {
+            let needs_ask =
+                decision.text.is_empty() || decision.kind == DecisionKind::StalledInstruction;
+            if let Some(id) = decision.ask_id.filter(|_| needs_ask) {
+                let ask = self.queue.read_ask(crate::domain::AskId::new(id))?;
+                let answer = crate::application::prompt::kept_answer(&ask)?;
+                if !complete_from_ask(&mut decision, answer.as_deref(), &ask.options) {
+                    continue;
+                }
+            }
+            kept.push(decision);
+        }
+        Ok(kept)
     }
 
     /// Record that `run`'s worker goes on in a new session (ADR-t2080-1
