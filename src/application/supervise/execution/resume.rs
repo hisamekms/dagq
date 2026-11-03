@@ -4,7 +4,7 @@
 use super::*;
 use crate::application::run_git;
 use crate::domain::EventKind;
-use crate::domain::resume::SEND_BACK_NO_RESUME;
+use crate::domain::resume::{SEND_BACK_NO_RESUME, after_send_back_no_resume};
 use crate::domain::{
     ParkCause, RunEvent, Task, required_of,
     run::{RunWorkspace, run_workspaces},
@@ -1097,9 +1097,10 @@ pub(super) fn skips_resume(facts: &SkipFacts<'_>) -> bool {
 /// of `last_error`, the reason it was parked with. A `send_back` that
 /// resumed no session keeps its [`SEND_BACK_NO_RESUME`] first, before the
 /// count, so `status`, which shows the start, still says where the
-/// person's reason went however long it is.
+/// person's reason went however long it is; a `last_error` with its
+/// earlier words gets the current ones.
 fn exhausted_reason(resumed: &str, last_error: &str) -> String {
-    match last_error.strip_prefix(SEND_BACK_NO_RESUME) {
+    match after_send_back_no_resume(last_error) {
         Some(rest) => format!(
             "{SEND_BACK_NO_RESUME}; {resumed} and still needs a session: {}",
             tail(rest.strip_prefix(": ").unwrap_or(rest), 500)
@@ -2284,6 +2285,24 @@ mod tests {
         assert!(plain.starts_with("resumed 3 times (at most 3) and still needs a session: "));
         assert!(plain.ends_with("the end"));
         let sent_back = exhausted_reason(resumed, &format!("{SEND_BACK_NO_RESUME}: {long}"));
+        assert!(
+            sent_back.starts_with(&format!(
+                "{SEND_BACK_NO_RESUME}; resumed 3 times (at most 3) and still needs a session: x"
+            )),
+            "{sent_back}"
+        );
+        assert!(sent_back.ends_with("the end"), "{sent_back}");
+        assert!(sent_back.len() < SEND_BACK_NO_RESUME.len() + resumed.len() + 600);
+    }
+
+    /// A `last_error` an earlier binary wrote with the earlier words of
+    /// [`SEND_BACK_NO_RESUME`] still keeps first that no session resumed.
+    #[test]
+    fn a_used_up_reason_reads_a_send_back_with_no_resume_in_its_earlier_words() {
+        let resumed = "resumed 3 times (at most 3)";
+        let earlier = "the run's resumes are used up, so this send_back resumes no session; the reason goes to the run's recovery job and to the prompt of the next run (retry or retry_inherit)";
+        let long = format!("{}the end", "x".repeat(600));
+        let sent_back = exhausted_reason(resumed, &format!("{earlier}: {long}"));
         assert!(
             sent_back.starts_with(&format!(
                 "{SEND_BACK_NO_RESUME}; resumed 3 times (at most 3) and still needs a session: x"

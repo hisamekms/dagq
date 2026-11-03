@@ -595,7 +595,22 @@ impl ResumeCount {
 /// resumes, and where the reason goes instead. The `last_error` of the run
 /// whose resumes are then found used up keeps it first, so that `status`
 /// shows it however long the reason after it.
-pub const SEND_BACK_NO_RESUME: &str = "the run's resumes are used up, so this send_back resumes no session; the reason goes to the run's recovery job and to the prompt of the next run (retry or retry_inherit)";
+pub const SEND_BACK_NO_RESUME: &str = "the run's resumes are used up, so this send_back resumes no session; the reason goes to the run's recovery job and to the prompt of the next run of the task, however it starts (retry, retry_inherit, a person's ready or a hold's release)";
+
+/// The words [`SEND_BACK_NO_RESUME`] had before, which the `last_error` of a
+/// run parked by an earlier binary still starts with; read them as it.
+const EARLIER_SEND_BACK_NO_RESUME: &[&str] = &[
+    "the run's resumes are used up, so this send_back resumes no session; the reason goes to the run's recovery job and to the prompt of the next run (retry or retry_inherit)",
+];
+
+/// The rest of `last_error` after the words that say a person's
+/// `send_back` resumed no session ([`SEND_BACK_NO_RESUME`], or its earlier
+/// words), or `None` when it does not start with them.
+pub fn after_send_back_no_resume(last_error: &str) -> Option<&str> {
+    std::iter::once(SEND_BACK_NO_RESUME)
+        .chain(EARLIER_SEND_BACK_NO_RESUME.iter().copied())
+        .find_map(|words| last_error.strip_prefix(words))
+}
 
 /// Whether a person's `send_back` of the landing of the run with `events`
 /// so far would resume its session: the run as the `send_back` would park
@@ -800,6 +815,28 @@ mod tests {
 
     use super::*;
     use crate::domain::EventId;
+
+    #[test]
+    fn a_send_back_with_no_resume_names_every_way_the_next_run_starts() {
+        for start in [
+            "retry",
+            "retry_inherit",
+            "a person's ready",
+            "a hold's release",
+        ] {
+            assert!(SEND_BACK_NO_RESUME.contains(start), "{start}");
+        }
+        assert!(!SEND_BACK_NO_RESUME.contains("(retry or retry_inherit)"));
+    }
+
+    #[test]
+    fn the_words_of_a_send_back_with_no_resume_are_found_new_or_earlier() {
+        let now = format!("{SEND_BACK_NO_RESUME}: keep it");
+        assert_eq!(after_send_back_no_resume(&now), Some(": keep it"));
+        let earlier = format!("{}: keep it", EARLIER_SEND_BACK_NO_RESUME[0]);
+        assert_eq!(after_send_back_no_resume(&earlier), Some(": keep it"));
+        assert_eq!(after_send_back_no_resume("a test failed"), None);
+    }
 
     fn event(kind: &str, payload: Value) -> RunEvent {
         RunEvent {

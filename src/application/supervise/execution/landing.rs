@@ -3158,7 +3158,7 @@ fn send_back_option((with, carried): (&str, &str), resumes: bool) -> String {
         )
     } else {
         format!(
-            "send_back: this run has used up its resumes, so a send_back does not resume its session; the reason ({carried}, and yours when answered as `send_back: <your reason>`) goes to its recovery job and to the prompt of the next run (retry or retry_inherit)."
+            "send_back: this run has used up its resumes, so a send_back does not resume its session; the reason ({carried}, and yours when answered as `send_back: <your reason>`) goes to its recovery job and to the prompt of the next run of the task, however it starts (retry, retry_inherit, a person's ready or a hold's release)."
         )
     }
 }
@@ -4462,7 +4462,7 @@ mod tests {
         assert_eq!(
             ask(false),
             format!(
-                "{head}\nland: land it as it is. send_back: this run has used up its resumes, so a send_back does not resume its session; the reason (these reasons, and yours when answered as `send_back: <your reason>`) goes to its recovery job and to the prompt of the next run (retry or retry_inherit). cancel: fail the run and cancel the task."
+                "{head}\nland: land it as it is. send_back: this run has used up its resumes, so a send_back does not resume its session; the reason (these reasons, and yours when answered as `send_back: <your reason>`) goes to its recovery job and to the prompt of the next run of the task, however it starts (retry, retry_inherit, a person's ready or a hold's release). cancel: fail the run and cancel the task."
             )
         );
         let error = "the headless review exited with exit status: 3: broken";
@@ -4470,7 +4470,7 @@ mod tests {
         let failed = failed_review_question(&run(), 1, Some(1), error, false);
         assert!(
             failed.ends_with(
-                "\nReview the material by hand, then answer. land: land it as it is. send_back: this run has used up its resumes, so a send_back does not resume its session; the reason (this failure, and yours when answered as `send_back: <your reason>`) goes to its recovery job and to the prompt of the next run (retry or retry_inherit). cancel: fail the run and cancel the task. retry_review: run the review again on the same run and receipt (no change, no resume of the session)."
+                "\nReview the material by hand, then answer. land: land it as it is. send_back: this run has used up its resumes, so a send_back does not resume its session; the reason (this failure, and yours when answered as `send_back: <your reason>`) goes to its recovery job and to the prompt of the next run of the task, however it starts (retry, retry_inherit, a person's ready or a hold's release). cancel: fail the run and cancel the task. retry_review: run the review again on the same run and receipt (no change, no resume of the session)."
             ),
             "{failed}"
         );
