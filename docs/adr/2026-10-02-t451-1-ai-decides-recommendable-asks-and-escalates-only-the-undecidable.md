@@ -18,6 +18,7 @@ amends:
   - adr-0027 decision 1
   - adr-0027 decision 2
 amended_by:
+  - adr-t3988-1
   - adr-t2599-1
 owners:
   - hisamekms
