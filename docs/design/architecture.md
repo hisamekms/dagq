@@ -218,6 +218,7 @@ queue serviceはqueue DBを開く唯一のプロセスで（例外は[Queue serv
   対象の関数と見ない部分はtestのdoc commentが持つ。
 - X4は、`cargo test`が流すRustのtest（`src/context_boundaries/inserted_ids.rs`）が当て、`src/`の本番のコードで内部の関数の外の`last_insert_rowid`の使用で落ちる。
   公開する関数と内部の関数の分担は[Persistence](persistence.md#transactions-and-constraints)。
+- rusqliteを名指してよいmoduleの一覧は、`cargo test`が流すRustのtest（`src/context_boundaries/rusqlite_names.rs`）が当て、`src/`の本番のコードで一覧の外のmoduleが名指すと落ち、もう名指さない行でも落ちる。
 - C5では、共有の部品のportは、どのcontextが使っても違反に数えない。
   `src/application/ports/<context>.rs`のportの所有と、`ports/`・`queue_reads/`・`compose/`の`<context>.rs`のcontextは、testがpathから導く。
 - 所有の表の書式と落ちる条件はtestのdoc commentが持つ。

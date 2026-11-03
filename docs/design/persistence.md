@@ -68,10 +68,12 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 
 - 判断（遷移を許すか、どのeventを書くか、payloadの中身）はdomainが持ち、storeは読む・復元する・書く・同じトランザクションにまとめるだけを持つ（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)）。
 - 例外は全体のグラフが要る依存の循環の検出（再帰CTE）だけで、拒むかの判断はdomainが持つ。
+- 共有のSQLを流す入口は実行のport（`src/infrastructure/sql_exec/`）。
+- storeのmoduleはrusqliteでなく実行のportで共有のSQLを流し、rusqliteを名指してよいのは`src/context_boundaries/rusqlite_names.rs`の一覧のmoduleだけ。
 - 時刻とIDは`SqliteQueue`の`Generators`から取り、SQLの`now`で作らない。
   例外はDBの時計で判じる`write_leader`のleaseの期限（ADR-t3986-1決定4）。
 - schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`、場所は`src/infrastructure/location.rs`が持つ。
-- 方言の違う式の断片（JSONの欄の読み出しと日時の関数）は`src/infrastructure/sql_dialect.rs`の関数が返して文が埋め、外のSQLが書かないことをtest（`src/context_boundaries/dialect.rs`）が守る（ADR-t3982-1）。
+- 方言の違う式の断片（JSONの欄の読み出しと日時の関数）は`src/infrastructure/sql_dialect.rs`の関数が返して文が埋める（ADR-t3982-1）。
 - runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く。
 
 ## 不変条件
@@ -91,7 +93,6 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 表ごとの役割と列の意味は、表を作るmigrationのコメントと表を持つstoreと`src/domain/`の型のdoc commentが持つ。
 `replan_plans`は置換計画をsubmitごとの版と承認の時の子の版で持ち、plan reviewと`ready`は最新の版だけを、適用は子の版も検査する。
 `replan_replacements`は適用した置換の子と子が引き継ぐ部分を持ち、goalは置換先を再置換も辿って待つ。
-`write_leader`は書き込みの係の行で、定数の式の一意の索引が1行に限る。
 
 ## 集約の読み書き
 
@@ -238,7 +239,6 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#起動とheartbeat)）。
 - queue DBのtransactionは`WriteTx`（`infrastructure::sqlite`）の入口`write`（immediate）か`read`（deferred）で始まる。
   書き込みと終わりの経路によらず、閾値を超えてwrite lockを握ればwarnし、queueのevent（`queue_write_held_long`）に記録する。
-  入口の外の開始（SQLの`BEGIN`を含む）と`TransactionBehavior`の名指しはtest（`src/context_boundaries/write_tx.rs`）が拒む。
   eventはlockを放した後に同じ接続で別に短く書き、その失敗は元のtransactionを変えない。
 - 挿入した行のIDは`insert_id`で取り、`last_insert_rowid`は内部の`insert_counted`だけが呼ぶ（[architecture](architecture.md) X4）。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。

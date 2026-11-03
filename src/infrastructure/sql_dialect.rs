@@ -21,6 +21,20 @@
 //! Outside test code, no SQL of `src/` but this module's spells
 //! `json_extract`, `datetime`, `strftime` or `julianday`: the boundary test
 //! `src/context_boundaries/dialect.rs` fails on one that does.
+//!
+//! [`SqlDialect`] is the kind of dialect: a store module on the execution
+//! port (`super::sql_exec`) takes the expression from the method of the kind
+//! its transaction returns. A free function is the same expression in the
+//! SQLite kind, for the modules that are not on the port.
+
+/// The kind of dialect a statement runs in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqlDialect {
+    Sqlite,
+    /// Has no expressions yet, and no adapter returns it: asking it for one
+    /// panics rather than hand SQLite's text to another DB.
+    Postgres,
+}
 
 /// What a JSON field is read as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,21 +54,91 @@ pub(crate) enum JsonType {
 const TIGHT: &str = ",";
 const SPACED: &str = ", ";
 
-/// The SQL expression that reads the JSON field at the literal `path`
-/// (`$.kind`) of `column` (`payload`, `o.payload`) as `ty`.
+impl SqlDialect {
+    /// The SQL expression that reads the JSON field at the literal `path`
+    /// (`$.kind`) of `column` (`payload`, `o.payload`) as `ty`.
+    pub(crate) fn json_field(self, column: &str, path: &str, ty: JsonType) -> String {
+        self.json_expression(column, &path_literal(path), ty, TIGHT)
+    }
+
+    /// [`SqlDialect::json_field`] with a space after the comma between the
+    /// arguments.
+    pub(crate) fn json_field_spaced(self, column: &str, path: &str, ty: JsonType) -> String {
+        self.json_expression(column, &path_literal(path), ty, SPACED)
+    }
+
+    /// The SQL expression that reads the JSON field of `column` at the path
+    /// the SQL expression `path` (a bound parameter such as `?4`) gives, as
+    /// `ty`.
+    pub(crate) fn json_field_at(self, column: &str, path: &str, ty: JsonType) -> String {
+        self.json_expression(column, path, ty, TIGHT)
+    }
+
+    /// The SQL expression that reads the time the SQL expression `value`
+    /// gives (a column, a bound parameter, `'now'`) in `form`.
+    pub(crate) fn time_value(self, value: &str, form: TimeForm) -> String {
+        self.time_expression(value, form, TIGHT)
+    }
+
+    /// [`SqlDialect::time_value`] with a space after the comma between the
+    /// arguments.
+    pub(crate) fn time_value_spaced(self, value: &str, form: TimeForm) -> String {
+        self.time_expression(value, form, SPACED)
+    }
+
+    /// The SQL expression of the DB's clock now, in Unix milliseconds as an
+    /// integer: read at the statement, not at the transaction's start, so a
+    /// lease's end is judged by the DB's clock when the statement runs
+    /// (ADR-t3986-1 decision 4). SQLite's `'now'` is the same everywhere in
+    /// one statement.
+    pub(crate) fn now_millis(self) -> String {
+        self.time_value("'now'", TimeForm::EpochMillis)
+    }
+
+    fn json_expression(self, column: &str, path: &str, ty: JsonType, sep: &str) -> String {
+        match self {
+            Self::Sqlite => {
+                let _ = ty;
+                format!("json_extract({column}{sep}{path})")
+            }
+            Self::Postgres => no_postgres_expressions_yet(),
+        }
+    }
+
+    /// `args` is the function's arguments after the format (the value, and a
+    /// shift when there is one), already separated.
+    fn time_expression(self, args: &str, form: TimeForm, sep: &str) -> String {
+        match self {
+            Self::Sqlite => match form {
+                TimeForm::Text => format!("strftime('%Y-%m-%dT%H:%M:%fZ'{sep}{args})"),
+                TimeForm::EpochSeconds => format!("CAST(strftime('%s'{sep}{args}) AS INTEGER)"),
+                TimeForm::EpochMillis => {
+                    format!("CAST((julianday({args}) - 2440587.5) * 86400000 AS INTEGER)")
+                }
+                TimeForm::Ordinal => format!("julianday({args})"),
+            },
+            Self::Postgres => no_postgres_expressions_yet(),
+        }
+    }
+}
+
+fn no_postgres_expressions_yet() -> ! {
+    unreachable!("no adapter runs the Postgres dialect until it has its expressions")
+}
+
+/// [`SqlDialect::json_field`] in the SQLite kind.
 pub(crate) fn json_field(column: &str, path: &str, ty: JsonType) -> String {
-    json_expression(column, &path_literal(path), ty, TIGHT)
+    SqlDialect::Sqlite.json_field(column, path, ty)
 }
 
-/// [`json_field`] with a space after the comma between the arguments.
+/// [`SqlDialect::json_field_spaced`] in the SQLite kind.
 pub(crate) fn json_field_spaced(column: &str, path: &str, ty: JsonType) -> String {
-    json_expression(column, &path_literal(path), ty, SPACED)
+    SqlDialect::Sqlite.json_field_spaced(column, path, ty)
 }
 
-/// The SQL expression that reads the JSON field of `column` at the path the
-/// SQL expression `path` (a bound parameter such as `?4`) gives, as `ty`.
+/// [`SqlDialect::json_field_at`] in the SQLite kind.
 pub(crate) fn json_field_at(column: &str, path: &str, ty: JsonType) -> String {
-    json_expression(column, path, ty, TIGHT)
+    SqlDialect::Sqlite.json_field_at(column, path, ty)
 }
 
 fn path_literal(path: &str) -> String {
@@ -63,11 +147,6 @@ fn path_literal(path: &str) -> String {
         "a JSON path literal: {path}"
     );
     format!("'{path}'")
-}
-
-fn json_expression(column: &str, path: &str, ty: JsonType, sep: &str) -> String {
-    let _ = ty;
-    format!("json_extract({column}{sep}{path})")
 }
 
 /// The form a date and time value is read in.
@@ -84,24 +163,19 @@ pub(crate) enum TimeForm {
     Ordinal,
 }
 
-/// The SQL expression that reads the time the SQL expression `value` gives
-/// (a column, a bound parameter, `'now'`) in `form`.
+/// [`SqlDialect::time_value`] in the SQLite kind.
 pub(crate) fn time_value(value: &str, form: TimeForm) -> String {
-    time_expression(value, form, TIGHT)
+    SqlDialect::Sqlite.time_value(value, form)
 }
 
-/// [`time_value`] with a space after the comma between the arguments.
+/// [`SqlDialect::time_value_spaced`] in the SQLite kind.
 pub(crate) fn time_value_spaced(value: &str, form: TimeForm) -> String {
-    time_expression(value, form, SPACED)
+    SqlDialect::Sqlite.time_value_spaced(value, form)
 }
 
-/// The SQL expression of the DB's clock now, in Unix milliseconds as an
-/// integer: read at the statement, not at the transaction's start, so a
-/// lease's end is judged by the DB's clock when the statement runs
-/// (ADR-t3986-1 decision 4). SQLite's `'now'` is the same everywhere in one
-/// statement.
+/// [`SqlDialect::now_millis`] in the SQLite kind.
 pub(crate) fn now_millis() -> String {
-    time_value("'now'", TimeForm::EpochMillis)
+    SqlDialect::Sqlite.now_millis()
 }
 
 /// The SQL expression that reads, in `form`, the time the SQL expression
@@ -110,7 +184,7 @@ pub(crate) fn now_millis() -> String {
 /// the times they record.
 #[cfg(test)]
 pub(crate) fn time_value_shifted(value: &str, shift: &str, form: TimeForm) -> String {
-    time_expression(&format!("{value}{TIGHT}{shift}"), form, TIGHT)
+    SqlDialect::Sqlite.time_expression(&format!("{value}{TIGHT}{shift}"), form, TIGHT)
 }
 
 /// The SQL expression of the text the format the SQL expression `format` (a
@@ -122,23 +196,81 @@ pub(crate) fn formatted_time(format: &str, value: &str) -> String {
     format!("strftime({format}{SPACED}{value})")
 }
 
-/// `args` is the function's arguments after the format (the value, and a
-/// shift when there is one), already separated.
-fn time_expression(args: &str, form: TimeForm, sep: &str) -> String {
-    match form {
-        TimeForm::Text => format!("strftime('%Y-%m-%dT%H:%M:%fZ'{sep}{args})"),
-        TimeForm::EpochSeconds => format!("CAST(strftime('%s'{sep}{args}) AS INTEGER)"),
-        TimeForm::EpochMillis => {
-            format!("CAST((julianday({args}) - 2440587.5) * 86400000 AS INTEGER)")
-        }
-        TimeForm::Ordinal => format!("julianday({args})"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    /// The kind's form returns, character for character, what the SQLite
+    /// form returns, and the SQLite kind is what the statements spell.
+    #[test]
+    fn the_sqlite_kind_returns_the_text_of_the_sqlite_form() {
+        let kind = SqlDialect::Sqlite;
+        let ty = JsonType::Integer;
+        assert_eq!(
+            kind.json_field("o.payload", "$.kind", ty),
+            "json_extract(o.payload,'$.kind')"
+        );
+        assert_eq!(
+            kind.json_field_spaced("payload", "$.kind", ty),
+            "json_extract(payload, '$.kind')"
+        );
+        assert_eq!(
+            kind.json_field_at("payload", "?4", ty),
+            "json_extract(payload,?4)"
+        );
+        assert_eq!(
+            kind.json_field("o.payload", "$.kind", ty),
+            json_field("o.payload", "$.kind", ty)
+        );
+        assert_eq!(
+            kind.json_field_spaced("p", "$.k", ty),
+            json_field_spaced("p", "$.k", ty)
+        );
+        assert_eq!(
+            kind.json_field_at("p", "?1", ty),
+            json_field_at("p", "?1", ty)
+        );
+        for (form, tight, spaced) in [
+            (
+                TimeForm::Text,
+                "strftime('%Y-%m-%dT%H:%M:%fZ',at)",
+                "strftime('%Y-%m-%dT%H:%M:%fZ', at)",
+            ),
+            (
+                TimeForm::EpochSeconds,
+                "CAST(strftime('%s',at) AS INTEGER)",
+                "CAST(strftime('%s', at) AS INTEGER)",
+            ),
+            (
+                TimeForm::EpochMillis,
+                "CAST((julianday(at) - 2440587.5) * 86400000 AS INTEGER)",
+                "CAST((julianday(at) - 2440587.5) * 86400000 AS INTEGER)",
+            ),
+            (TimeForm::Ordinal, "julianday(at)", "julianday(at)"),
+        ] {
+            assert_eq!(kind.time_value("at", form), tight);
+            assert_eq!(kind.time_value_spaced("at", form), spaced);
+            assert_eq!(kind.time_value("at", form), time_value("at", form));
+            assert_eq!(
+                kind.time_value_spaced("at", form),
+                time_value_spaced("at", form)
+            );
+        }
+        assert_eq!(kind.now_millis(), now_millis());
+    }
+
+    #[test]
+    #[should_panic(expected = "Postgres")]
+    fn the_postgres_kind_has_no_json_expression_yet() {
+        SqlDialect::Postgres.json_field("p", "$.k", JsonType::Any);
+    }
+
+    #[test]
+    #[should_panic(expected = "Postgres")]
+    fn the_postgres_kind_has_no_time_expression_yet() {
+        SqlDialect::Postgres.time_value("at", TimeForm::Text);
+    }
 
     #[test]
     fn the_db_clock_now_is_sqlites_julian_day_in_milliseconds() {

@@ -1,10 +1,11 @@
 //! The actor each event records (ADR-t728-1 decision 4, task 730): every
 //! connection of a [`super::sqlite::SqliteQueue`] carries the actor its
 //! process acts as, and every `INSERT INTO run_events` writes it through the
-//! SQL functions this module registers (`dagq_actor_role()`,
-//! `dagq_actor_id()`, `dagq_requested_by()`), so no write site has to be
-//! handed the actor and none can leave it out: an insert on a connection
-//! without them fails. The actor is the process's ([`set_process_actor`],
+//! SQL functions the adapter registers on the connection from this state
+//! (`dagq_actor_role()`, `dagq_actor_id()`, `dagq_requested_by()`;
+//! [`super::sql_exec::sqlite::attach_event_actors`]), so no write site has
+//! to be handed the actor and none can leave it out: an insert on a
+//! connection without them fails. The actor is the process's ([`set_process_actor`],
 //! which `main` sets once from `DAGQ_ROLE`), the user when none was set, or
 //! the one a caller sets on the queue ([`EventActors::set`]); while the
 //! supervisor applies a headless job's verdict, the job's id is recorded as
@@ -12,9 +13,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use anyhow::Result;
-use rusqlite::{Connection, Row, functions::FunctionFlags};
-
+use super::sql_exec::{SqlResult, SqlRow};
 use crate::domain::{EventActor, actor::ActorContext};
 
 static PROCESS_ACTOR: OnceLock<ActorContext> = OnceLock::new();
@@ -57,33 +56,33 @@ struct State {
     requested_by: Option<String>,
 }
 
-/// The actor of one connection, shared with the SQL functions registered
-/// on it.
+/// The actor of one connection, shared with the SQL functions the adapter
+/// registers on it.
 #[derive(Debug, Clone)]
 pub(super) struct EventActors(Arc<Mutex<State>>);
 
 impl EventActors {
-    /// Register the actor functions on `conn`, writing as `actor`.
-    pub(super) fn attach(conn: &Connection, actor: ActorContext) -> Result<Self> {
-        let actors = Self(Arc::new(Mutex::new(State {
+    /// The state of a connection writing as `actor`.
+    pub(super) fn new(actor: ActorContext) -> Self {
+        Self(Arc::new(Mutex::new(State {
             actor,
             requested_by: None,
-        })));
-        // Not deterministic: the value changes with `set`.
-        let flags = FunctionFlags::SQLITE_UTF8;
-        let state = actors.0.clone();
-        conn.create_scalar_function("dagq_actor_role", 0, flags, move |_| {
-            Ok(lock(&state).actor.role().as_str().to_owned())
-        })?;
-        let state = actors.0.clone();
-        conn.create_scalar_function("dagq_actor_id", 0, flags, move |_| {
-            Ok(lock(&state).actor.actor_id().to_owned())
-        })?;
-        let state = actors.0.clone();
-        conn.create_scalar_function("dagq_requested_by", 0, flags, move |_| {
-            Ok(lock(&state).requested_by.clone())
-        })?;
-        Ok(actors)
+        })))
+    }
+
+    /// What `dagq_actor_role()` returns.
+    pub(super) fn role(&self) -> String {
+        lock(&self.0).actor.role().as_str().to_owned()
+    }
+
+    /// What `dagq_actor_id()` returns.
+    pub(super) fn actor_id(&self) -> String {
+        lock(&self.0).actor.actor_id().to_owned()
+    }
+
+    /// What `dagq_requested_by()` returns.
+    pub(super) fn requested_by(&self) -> Option<String> {
+        lock(&self.0).requested_by.clone()
     }
 
     pub(super) fn set(&self, actor: ActorContext) {
@@ -108,8 +107,8 @@ fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
 
 /// The actor of an event row; `None` for a row written before the queue
 /// recorded actors, or a query that did not select the columns.
-pub(super) fn event_actor(row: &Row<'_>) -> rusqlite::Result<Option<EventActor>> {
-    if row.as_ref().column_index("actor_role").is_err() {
+pub(super) fn event_actor(row: &SqlRow<'_>) -> SqlResult<Option<EventActor>> {
+    if !row.has_column("actor_role") {
         return Ok(None);
     }
     let role: Option<String> = row.get("actor_role")?;

@@ -11,8 +11,9 @@
 //!
 //! Unfenced starts are restricted to the leader's conditional mutations
 //! and schema migration. Direct queue-connection execute calls and calls
-//! passing that connection to helpers containing literal write SQL are
-//! rejected too. Aliases of the queue connection and dynamically assembled
+//! passing that connection to helpers containing literal write SQL or to
+//! `port_tx`, which would write on it as a transaction of the execution
+//! port, are rejected too. Aliases of the queue connection and dynamically assembled
 //! SQL require review; the existing begin/behavior checks still apply.
 //!
 //! What counts as a begin:
@@ -172,7 +173,10 @@ fn check(rust: &[(String, String)], exceptions: &[Exception]) -> Vec<String> {
         let mut reader = Reader::default();
         reader.visit_file(file);
         for call in reader.raw_calls {
-            if SQL_METHODS.contains(&call.what.as_str()) || writers.contains(&call.what) {
+            if SQL_METHODS.contains(&call.what.as_str())
+                || writers.contains(&call.what)
+                || call.what == "port_tx"
+            {
                 errors.insert(format!(
                     "{path}: raw connection write {} in {}; use a named write transaction",
                     call.what, call.function
@@ -948,6 +952,23 @@ fn bypassing_the_fence_is_rejected() {
     assert!(
         errors.iter().any(|e| e.contains("bypasses fencing")),
         "{errors:?}"
+    );
+}
+
+#[test]
+fn the_queue_connection_is_not_a_transaction_of_the_execution_port() {
+    let rust = [(
+        "src/infrastructure/rogue.rs".into(),
+        "impl Q { fn bypass(&self) { port_tx(&self.conn).execute(\"UPDATE tasks SET title='x'\", &[]); } }
+        fn unmoved(conn: &Connection) { read(&port_tx(conn)); }"
+            .into(),
+    )];
+    let errors = check(&rust, &[]);
+    assert_eq!(
+        errors,
+        [
+            "src/infrastructure/rogue.rs: raw connection write port_tx in Q::bypass; use a named write transaction"
+        ],
     );
 }
 

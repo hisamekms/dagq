@@ -290,6 +290,191 @@ impl<'ast> Visit<'ast> for Reader {
     }
 }
 
+/// The files of `rust` (paths from the repository root, with their text)
+/// that are production code, parsed: without those a `#[cfg(test)] mod name;`
+/// of another declares. A file that does not parse is an error line.
+pub(super) fn production_files(
+    rust: &[(String, String)],
+) -> (Vec<(&str, syn::File)>, std::collections::BTreeSet<String>) {
+    let mut errors = BTreeSet::new();
+    let mut read = Vec::new();
+    let mut test_paths = Vec::new();
+    for (path, text) in rust {
+        let parsed = syn::parse_file(text).and_then(|file| Ok((self::read(text)?, file)));
+        match parsed {
+            Ok((source, file)) => {
+                let dir = super::children_dir(path);
+                for module in &source.test_modules {
+                    test_paths.push(format!("{dir}/{module}.rs"));
+                    test_paths.push(format!("{dir}/{module}/"));
+                }
+                read.push((path.as_str(), file));
+            }
+            Err(error) => {
+                errors.insert(format!("{path}: not read as Rust: {error}"));
+            }
+        }
+    }
+    read.retain(|(path, _)| !test_paths.iter().any(|test| super::covers(test, path)));
+    (read, errors)
+}
+
+/// The fns of `file` that use the identifier `name` outside its test code:
+/// in a path (called or not), a `use`, a type or a macro's tokens. Comments
+/// and attributes (doc comments too) are not read. A use is at the innermost
+/// fn around it (closures belong to their fn), named `Type::method` in an
+/// `impl` or a trait, `-` outside any fn.
+pub(super) fn name_uses(file: &syn::File, name: &str) -> BTreeSet<String> {
+    let mut reader = NameReader {
+        name,
+        owners: Vec::new(),
+        fns: Vec::new(),
+        found: BTreeSet::new(),
+    };
+    if !is_test(&file.attrs) {
+        reader.visit_file(file);
+    }
+    reader.found
+}
+
+struct NameReader<'n> {
+    name: &'n str,
+    /// The self type of each `impl` (or the trait) around, innermost last.
+    owners: Vec<String>,
+    fns: Vec<String>,
+    found: BTreeSet<String>,
+}
+
+impl NameReader<'_> {
+    fn in_fn(&mut self, name: &syn::Ident, method: bool, walk: impl FnOnce(&mut Self)) {
+        let name = match self.owners.last() {
+            Some(owner) if method => format!("{owner}::{name}"),
+            _ => name.to_string(),
+        };
+        self.fns.push(name);
+        walk(self);
+        self.fns.pop();
+    }
+
+    fn in_owner(&mut self, owner: String, walk: impl FnOnce(&mut Self)) {
+        self.owners.push(owner);
+        walk(self);
+        self.owners.pop();
+    }
+
+    fn found(&mut self) {
+        let function = self.fns.last().cloned().unwrap_or_else(|| "-".to_owned());
+        self.found.insert(function);
+    }
+
+    /// The tokens of a macro, which syn does not parse, in its groups too.
+    fn tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        for tree in tokens {
+            match tree {
+                TokenTree::Group(group) => self.tokens(group.stream()),
+                TokenTree::Ident(ident) if ident == self.name => self.found(),
+                _ => {}
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for NameReader<'_> {
+    fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
+
+    fn visit_ident(&mut self, ident: &'ast proc_macro2::Ident) {
+        if ident == self.name {
+            self.found();
+        }
+    }
+
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !is_test(item_attrs(item)) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+        let owner = match &*i.self_ty {
+            syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        };
+        self.in_owner(owner.unwrap_or_else(|| "_".to_owned()), |r| {
+            visit::visit_item_impl(r, i)
+        });
+    }
+
+    fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
+        self.in_owner(t.ident.to_string(), |r| visit::visit_item_trait(r, t));
+    }
+
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        self.in_fn(&f.sig.ident, false, |r| visit::visit_item_fn(r, f));
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        let attrs = match item {
+            syn::ImplItem::Const(i) => &i.attrs,
+            syn::ImplItem::Fn(i) => &i.attrs,
+            syn::ImplItem::Type(i) => &i.attrs,
+            syn::ImplItem::Macro(i) => &i.attrs,
+            _ => return visit::visit_impl_item(self, item),
+        };
+        if !is_test(attrs) {
+            visit::visit_impl_item(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        self.in_fn(&f.sig.ident, true, |r| visit::visit_impl_item_fn(r, f));
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        let attrs = match item {
+            syn::TraitItem::Const(i) => &i.attrs,
+            syn::TraitItem::Fn(i) => &i.attrs,
+            syn::TraitItem::Type(i) => &i.attrs,
+            syn::TraitItem::Macro(i) => &i.attrs,
+            _ => return visit::visit_trait_item(self, item),
+        };
+        if !is_test(attrs) {
+            visit::visit_trait_item(self, item);
+        }
+    }
+
+    fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+        self.in_fn(&f.sig.ident, true, |r| visit::visit_trait_item_fn(r, f));
+    }
+
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        if !is_test(&arm.attrs) {
+            visit::visit_arm(self, arm);
+        }
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if !is_test(&local.attrs) {
+            visit::visit_local(self, local);
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &'ast syn::Expr) {
+        if !is_test(expr_attrs(expr)) {
+            visit::visit_expr(self, expr);
+        }
+    }
+
+    fn visit_stmt_macro(&mut self, m: &'ast syn::StmtMacro) {
+        if !is_test(&m.attrs) {
+            visit::visit_stmt_macro(self, m);
+        }
+    }
+
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        self.tokens(m.tokens.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

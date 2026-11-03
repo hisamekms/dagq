@@ -18,9 +18,17 @@
 //! `*_authorized` writes compare it right after the transaction opens and
 //! refuse without writing when it changed. Writers that are not authorized
 //! per command (the supervisor's landing, draft planners) skip the check.
+//!
+//! The row helpers other store modules share live in [`super::store_rows`]
+//! on the execution port; those of the same name here take rusqlite's types
+//! for a module that has not moved to it, and only hand on to them.
 use super::sql_dialect::{JsonType, json_field};
+use super::sql_exec::sqlite::{
+    attach_event_actors, is_contention, native_error, port_tx, with_row,
+};
+use super::store_rows::{self, ready_conditions, select_tasks};
 use crate::domain::claim_facts;
-use crate::domain::event_kind::{self, EventKind, RecordedKind};
+use crate::domain::event_kind::{self, EventKind};
 use crate::domain::task_replan::GuardedStep;
 use std::{
     collections::BTreeMap,
@@ -32,7 +40,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior, params, params_from_iter,
-    types::{Type, Value},
+    types::Value,
 };
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -45,14 +53,14 @@ use crate::{
     },
     domain::{
         ChangeSet, ClaimOutcome, CommitSha, DomainError, EventId, Goal, GoalDetail, GoalEdit,
-        GoalId, GoalPredecessor, GoalRecord, GoalSummary, GoalTask, GoalVerdict, LintInput,
-        LintNode, NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND,
-        PlannerOrigin, Predecessor, Priority, Proposal, ProposalId, RequestId, RunEvent, RunId,
-        RunRecord, Submission, TagSet, Task, TaskAction, TaskAuthorization, TaskChange, TaskDetail,
-        TaskEdit, TaskId, TaskRecord, TaskRun, TaskStatus, TaskStatusCounts, TitlePrefixes,
+        GoalId, GoalPredecessor, GoalSummary, GoalTask, GoalVerdict, LintInput, LintNode, NewGoal,
+        NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND, PlannerOrigin,
+        Predecessor, Priority, Proposal, ProposalId, RequestId, RunEvent, RunId, Submission,
+        TagSet, Task, TaskAction, TaskAuthorization, TaskChange, TaskDetail, TaskEdit, TaskId,
+        TaskRun, TaskStatus, TaskStatusCounts, TitlePrefixes,
         actor::{ActorContext, ActorRole},
         authorization::{PriorityHolder, check_priority_change},
-        cancel_reason::{self, CancelRecord, NewCancel},
+        cancel_reason::{CancelRecord, NewCancel},
         goal,
         plan_request::{
             CreatingPlanner, Creator, PriorityBy, RecordedOrigin, creation_origin,
@@ -67,13 +75,14 @@ use crate::{
     },
     infrastructure::{
         clock,
-        event_actor::{EventActors, event_actor, process_actor},
+        event_actor::{EventActors, process_actor},
         location::runs_dir,
         proposals,
         schema::{self, BINARY_SCHEMA, MIGRATIONS},
     },
 };
 
+pub(super) use super::store_rows::{RecordedCancel, replan_guarding};
 pub use super::write_leader::WriteIdentity;
 
 const APPLICATION_ID: i64 = 0x43545131;
@@ -372,6 +381,20 @@ impl<'c> WriteTx<'c> {
         self.written(|tx| insert_counted(tx, sql, params))
     }
 
+    /// Run the insert `sql` as [`WriteTx::execute`] does and return the ID
+    /// of the row it inserted, or `None` when it inserted none
+    /// ([`insert_id_if_inserted`]).
+    pub fn insert_id_if_inserted<P: rusqlite::Params>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> rusqlite::Result<Option<i64>> {
+        self.written(|tx| {
+            let (rows, id) = insert_counted(tx, sql, params)?;
+            Ok((rows, (rows > 0).then_some(id)))
+        })
+    }
+
     /// Run the write `write`, which returns the rows it changed and its
     /// result, and count those rows; see [`WriteTx::execute`].
     fn written<T>(
@@ -457,6 +480,12 @@ impl<'c> WriteTx<'c> {
         })
     }
 
+    /// The rows it counted, for a test of what writes through it.
+    #[cfg(test)]
+    pub(super) fn rows_written(&self) -> usize {
+        self.rows.get()
+    }
+
     fn inner(&self) -> &rusqlite::Transaction<'c> {
         self.tx
             .as_ref()
@@ -466,7 +495,9 @@ impl<'c> WriteTx<'c> {
 
 /// Run the insert `sql` on `conn` and return the ID of the row it inserted:
 /// the one way the store reads a new row's ID (ADR-t3982-1 decision 4; in
-/// a transaction, [`WriteTx::insert_id`]). SQLite gives it as the
+/// a transaction, [`WriteTx::insert_id`]; on the execution port,
+/// [`super::sql_exec::SqlWrite::insert_id`]). This form takes rusqlite's
+/// parameters, for a module that has not moved to the port. SQLite gives it as the
 /// connection's last inserted rowid, read right after the statement, so an
 /// insert that inserts no row (`INSERT .. SELECT .. WHERE NOT EXISTS`)
 /// returns the ID of the connection's insert before it; such a caller
@@ -492,7 +523,7 @@ pub(super) fn insert_id_if_inserted<P: rusqlite::Params>(
 /// The rows the insert `sql` changed and the last inserted rowid after it:
 /// the only call of `last_insert_rowid` outside test code
 /// (`context_boundaries::inserted_ids`).
-fn insert_counted<P: rusqlite::Params>(
+pub(super) fn insert_counted<P: rusqlite::Params>(
     conn: &Connection,
     sql: &str,
     params: P,
@@ -559,62 +590,6 @@ impl Drop for WriteTx<'_> {
         }
     }
 }
-/// The start of a query of tasks aliased `t`, each with the priority of its
-/// goal as `goal_priority`, which [`task_row`] reads to resolve what a task
-/// without a priority of its own inherits (ADR-t1639-1 decision 2).
-macro_rules! select_tasks {
-    () => {
-        "SELECT t.*, (SELECT g.priority FROM goals g WHERE g.id = t.goal_id) AS goal_priority,
-         (SELECT g.priority_by FROM goals g WHERE g.id = t.goal_id) AS goal_priority_by
-         FROM tasks t"
-    };
-}
-/// The statuses of a replanning operation that guard its task
-/// ([`crate::domain::task_replan::ReplanStatus::guards`]), as a list of
-/// SQL strings: the ready query and the guard's read name the same ones.
-macro_rules! replan_guarding {
-    () => {
-        "'pause_requested','quiescing','snapshotting','parked','planning','reviewing',
-         'awaiting_answer','applying','blocked'"
-    };
-}
-pub(super) use replan_guarding;
-/// The conditions of a claimable task `t` but its hold: `ready`, its
-/// predecessors completed, its goal dependencies all closed as achieved
-/// (ADR-0038), no unfinished run of it, its goal, if any, not a draft
-/// (ADR-0024 decision 5), and no replanning operation guarding it
-/// (ADR-t1521-2).
-macro_rules! ready_conditions {
-    () => {
-        concat!(
-            "
-    WHERE t.status = 'ready'
-      AND NOT EXISTS (
-        SELECT 1 FROM goals g WHERE g.id = t.goal_id AND g.status = 'draft'
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM task_dependencies d JOIN tasks p ON p.id = d.predecessor_id
-        WHERE d.task_id = t.id AND p.status <> 'completed'
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM task_goal_dependencies gd JOIN goals g ON g.id = gd.goal_id
-        WHERE gd.task_id = t.id
-          AND NOT (g.closed_at IS NOT NULL AND g.verdict = 'achieved')
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM task_runs r WHERE r.task_id = t.id
-          AND r.status IN ('claimed','starting','running','validating','awaiting_integration',
-                           'integrating','needs_session')
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM replan_operations o WHERE o.task_id = t.id
-          AND o.status IN (",
-            replan_guarding!(),
-            ")
-      )"
-        )
-    };
-}
 /// The ready tasks ([`ready_conditions`]) that no open hold keeps
 /// (ADR-t1879-1).
 /// In ID order: the claim order (ADR-0040 decision 4) needs the whole
@@ -628,15 +603,6 @@ const READY_QUERY: &str = concat!(
       )
     ORDER BY t.id"
 );
-/// The tasks that would be ready but for their open hold, each with the
-/// hold's ID, in ID order.
-const HELD_READY_QUERY: &str = concat!(
-    "SELECT t.id, h.id FROM tasks t
-     JOIN task_holds h ON h.task_id = t.id AND h.released_at IS NULL",
-    ready_conditions!(),
-    " ORDER BY t.id"
-);
-
 /// The repository's rules a planning command holds the queue to
 /// ([`SqliteQueue::hold_planning_to`]): each `Some` sets that rule (to
 /// none with `Some(None)`), each `None` leaves it as it is.
@@ -1107,7 +1073,7 @@ impl SqliteQueue {
         // Canonical, like the paths `supervise` plans under, so a relative or
         // symlinked `--db` still names the queue's real `runs/`.
         let db = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let actors = EventActors::attach(&conn, process_actor())?;
+        let actors = attach_event_actors(&conn, process_actor())?;
         let write_identity = has_table(&conn, "write_leader")?
             .then(|| WriteIdentity::read(&conn))
             .transpose()?;
@@ -2601,13 +2567,10 @@ pub(crate) fn tag_busy(error: anyhow::Error) -> anyhow::Error {
     let busy = error.chain().any(|cause| {
         cause
             .downcast_ref::<rusqlite::Error>()
-            .and_then(rusqlite::Error::sqlite_error_code)
-            .is_some_and(|code| {
-                matches!(
-                    code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                )
-            })
+            .is_some_and(is_contention)
+            || cause
+                .downcast_ref::<super::sql_exec::SqlError>()
+                .is_some_and(super::sql_exec::SqlError::is_contention)
     });
     if busy {
         error.context(crate::application::QueueBusy)
@@ -2788,9 +2751,7 @@ fn request_priority(
 }
 
 pub(super) fn read_goal(conn: &Connection, goal_id: GoalId) -> Result<Goal> {
-    conn.query_row("SELECT * FROM goals WHERE id=?1", [goal_id], goal_row)
-        .optional()?
-        .with_context(|| format!("goal {goal_id} does not exist"))
+    store_rows::read_goal(&port_tx(conn), goal_id).map_err(native_error)
 }
 
 /// The goals a task depends on, ascending.
@@ -3018,18 +2979,8 @@ pub(super) fn goal_event_id(
     Ok(id)
 }
 
-/// The tasks that would be claimable but for their open hold, each with
-/// the guard of its hold, in ID order.
 pub(super) fn held_claims(conn: &Connection) -> Result<Vec<crate::domain::task_hold::HoldGuard>> {
-    Ok(conn
-        .prepare(HELD_READY_QUERY)?
-        .query_map([], |r| {
-            Ok(crate::domain::task_hold::HoldGuard {
-                task: r.get(0)?,
-                hold: r.get(1)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?)
+    store_rows::held_claims(&port_tx(conn)).map_err(native_error)
 }
 
 /// The claimable tasks, in ID order.
@@ -3728,57 +3679,8 @@ pub(super) fn duplicate_target(conn: &Connection, task_id: TaskId) -> Result<Opt
     Ok(cancel_of(conn, task_id)?.and_then(|cancel| cancel.duplicate_of))
 }
 
-/// What the latest cancel of `task_id` recorded, while that event canceled
-/// it: the task it names and its reason, read as
-/// [`cancel_reason::Recorded::reason`] reads one recorded before reasons,
-/// with whether the task it names was completed before it.
 pub(super) fn cancel_of(conn: &Connection, task_id: TaskId) -> Result<Option<RecordedCancel>> {
-    let latest: Option<(i64, String)> = conn
-        .query_row(
-            &format!(
-                "SELECT id, payload FROM run_events WHERE task_id=?1 AND kind='{}'
-                 ORDER BY id DESC LIMIT 1",
-                event_kind::TASK_STATUS_CHANGED
-            ),
-            [task_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((event_id, payload)) = latest else {
-        return Ok(None);
-    };
-    let cancel = cancel_reason::Recorded::of(&serde_json::from_str(&payload)?);
-    if !cancel.canceled() {
-        return Ok(None);
-    }
-    let target_completed = match cancel.duplicate_of {
-        Some(target) => completed_before(conn, target, event_id)?,
-        None => false,
-    };
-    Ok(Some(RecordedCancel {
-        duplicate_of: cancel.duplicate_of,
-        reason: cancel.reason(target_completed),
-    }))
-}
-
-/// What a task's latest cancel recorded (see [`cancel_of`]).
-pub(super) struct RecordedCancel {
-    pub(super) duplicate_of: Option<TaskId>,
-    pub(super) reason: Option<String>,
-}
-
-/// Whether `task_id` was completed by an event before `event_id`.
-fn completed_before(conn: &Connection, task_id: TaskId, event_id: i64) -> Result<bool> {
-    Ok(conn.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind='{}'
-             AND {to}='completed' AND id<?2)",
-            event_kind::TASK_STATUS_CHANGED,
-            to = json_field("payload", "$.to", JsonType::Text),
-        ),
-        params![task_id, event_id],
-        |r| r.get(0),
-    )?)
+    store_rows::cancel_of(&port_tx(conn), task_id).map_err(native_error)
 }
 
 /// The canceled tasks whose latest cancel names `task_id`, ascending, each
@@ -3908,13 +3810,7 @@ fn has_unfinished_run(conn: &Connection, task_id: TaskId) -> Result<bool> {
 }
 
 pub(super) fn read_task(conn: &Connection, task_id: TaskId) -> Result<Task> {
-    conn.query_row(
-        concat!(select_tasks!(), " WHERE t.id=?1"),
-        [task_id],
-        task_row,
-    )
-    .optional()?
-    .with_context(|| format!("task {task_id} does not exist"))
+    store_rows::read_task(&port_tx(conn), task_id).map_err(native_error)
 }
 
 pub(super) fn insert_dependency(
@@ -4120,184 +4016,47 @@ pub(super) fn event_id(
     Ok(id)
 }
 
-/// Column `name` read as the domain's enum `T`: a stored value that is not
-/// one of `T`'s is a conversion error of `rusqlite` with
-/// [`DomainError::UnknownValue`] as its cause, never a default.
 pub(super) fn enum_col<T: FromStr<Err = DomainError>>(
     row: &Row<'_>,
     name: &str,
 ) -> rusqlite::Result<T> {
-    let value: String = row.get(name)?;
-    value.parse().map_err(|error: DomainError| {
-        rusqlite::Error::FromSqlConversionFailure(
-            row.as_ref().column_index(name).unwrap_or(0),
-            Type::Text,
-            Box::new(error),
-        )
-    })
+    with_row(row, |row| store_rows::enum_col(row, name))
 }
 
 pub(super) fn json_col<T: DeserializeOwned>(row: &Row<'_>, name: &str) -> rusqlite::Result<T> {
-    let value: String = row.get(name)?;
-    serde_json::from_str(&value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            row.as_ref().column_index(name).unwrap_or(0),
-            Type::Text,
-            Box::new(error),
-        )
-    })
+    with_row(row, |row| store_rows::json_col(row, name))
 }
 
 fn task_row(row: &Row<'_>) -> rusqlite::Result<Task> {
-    Ok(Task::restore(TaskRecord {
-        id: row.get("id")?,
-        title: row.get("title")?,
-        description: row.get("description")?,
-        acceptance: row.get("acceptance")?,
-        verification_commands: json_col(row, "verification_commands")?,
-        required_evidence: json_col(row, "required_evidence")?,
-        paths: json_col(row, "paths")?,
-        // NULL inherits the goal's (ADR-t1639-1 decision 2).
-        priority: optional_priority_col(row, "priority")?,
-        goal_priority: optional_priority_col(row, "goal_priority")?,
-        // Any label reads as written (ADR-t980-1), whatever set dagq.toml
-        // names now; a value that is not a label reads as none, so the task
-        // still restores and the queue keeps claiming.
-        change: row
-            .get::<_, Option<String>>("change")?
-            .and_then(|change| change.parse().ok()),
-        // Any value but 0 is declared (ADR-t1632-1); the column has no CHECK.
-        wait_for_build: row.get::<_, i64>("wait_for_build")? != 0,
-        // A class this binary does not know reads as `implementation`
-        // (ADR-t1487-1); the column has no CHECK.
-        execution_class: row
-            .get::<_, String>("execution_class")?
-            .parse()
-            .unwrap_or_default(),
-        // NULL is the provider's default (Claude, headless: ADR-t1340-1): a
-        // task that names no mode, and one from before the worker existed;
-        // the columns' CHECK keeps any other value out.
-        worker: Worker::resolve(
-            optional_enum_col(row, "worker_provider")?,
-            optional_enum_col(row, "worker_mode")?,
-        )
-        .map_err(restore_error)?,
-        named_mode: optional_enum_col(row, "worker_mode")?,
-        status: enum_col(row, "status")?,
-        goal_id: row.get("goal_id")?,
-        context: row.get("context")?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-    })
-    .map_err(restore_error)?
-    .with_record(
-        optional_enum_col(row, "priority_by")?,
-        optional_enum_col(row, "goal_priority_by")?,
-        origin_cols(row)?,
-    ))
+    with_row(row, store_rows::task_row)
 }
 
-/// The origin a goal or task row records (ADR-t1975-1 decision 5).
-fn origin_cols(row: &Row<'_>) -> rusqlite::Result<RecordedOrigin> {
-    Ok(RecordedOrigin {
-        origin: enum_col(row, "origin")?,
-        kind: optional_enum_col(row, "origin_kind")?,
-        request_id: row.get("origin_request_id")?,
-    })
-}
-
-/// A nullable priority column, stored as `low`=0 … `interrupt`=4.
 fn optional_priority_col(row: &Row<'_>, name: &str) -> rusqlite::Result<Option<Priority>> {
-    row.get::<_, Option<i64>>(name)?
-        .map(Priority::from_i64)
-        .transpose()
-        .map_err(restore_error)
+    with_row(row, |row| store_rows::optional_priority_col(row, name))
 }
 
-/// A nullable column of a [`string_enum!`] type.
 pub(super) fn optional_enum_col<T: std::str::FromStr<Err = DomainError>>(
     row: &Row<'_>,
     name: &str,
 ) -> rusqlite::Result<Option<T>> {
-    match row.get::<_, Option<String>>(name)? {
-        Some(_) => enum_col(row, name).map(Some),
-        None => Ok(None),
-    }
+    with_row(row, |row| store_rows::optional_enum_col(row, name))
 }
 
 fn goal_row(row: &Row<'_>) -> rusqlite::Result<Goal> {
-    let verdict: Option<String> = row.get("verdict")?;
-    Ok(Goal::restore(GoalRecord {
-        id: row.get("id")?,
-        title: row.get("title")?,
-        description: row.get("description")?,
-        acceptance: row.get("acceptance")?,
-        constraints: row.get("constraints")?,
-        doc: row.get("doc")?,
-        priority: Priority::from_i64(row.get("priority")?).map_err(restore_error)?,
-        tags: serde_json::from_str(&row.get::<_, String>("tags")?).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-        })?,
-        status: enum_col(row, "status")?,
-        closed_at: row.get("closed_at")?,
-        verdict: verdict
-            .map(|_| enum_col::<GoalVerdict>(row, "verdict"))
-            .transpose()?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-    })
-    .map_err(restore_error)?
-    .with_record(enum_col(row, "priority_by")?, origin_cols(row)?))
+    with_row(row, store_rows::goal_row)
 }
 
-/// A stored row the domain refuses to restore, reported like a column that
-/// does not convert, with the domain's message as the cause.
-fn restore_error(error: DomainError) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(0, Type::Null, Box::new(error))
-}
-
-/// Reads a run with its queue-local paths resolved under `runs_dir`.
 pub(super) fn run_row(runs_dir: &Path) -> impl Fn(&Row<'_>) -> rusqlite::Result<TaskRun> + '_ {
-    move |row| Ok(stored_run_row(row)?.relocated(runs_dir))
+    let read = store_rows::run_row(runs_dir);
+    move |row| with_row(row, &read)
 }
 
-/// Reads a run as stored, paths included: what a command starts from
-/// before the store saves its result.
 pub(super) fn stored_run_row(row: &Row<'_>) -> rusqlite::Result<TaskRun> {
-    TaskRun::restore(RunRecord {
-        id: row.get("id")?,
-        task_id: row.get("task_id")?,
-        status: enum_col(row, "status")?,
-        requested_provider: enum_col(row, "requested_provider")?,
-        actual_provider: enum_col(row, "actual_provider")?,
-        worker_mode: optional_enum_col(row, "worker_mode")?.unwrap_or(WorkerMode::Interactive),
-        base_commit: row.get("base_commit")?,
-        branch: row.get("branch")?,
-        worktree_path: row.get("worktree_path")?,
-        workspace_id: row.get("workspace_id")?,
-        receipt_path: row.get("receipt_path")?,
-        log_path: row.get("log_path")?,
-        result_commit: row.get("result_commit")?,
-        repo_path: row.get("repo_path")?,
-        run_dir: row.get("run_dir")?,
-        last_error: row.get("last_error")?,
-        workspace_closed_at: row.get("workspace_closed_at")?,
-        created_at: row.get("created_at")?,
-    })
-    .map_err(restore_error)
+    with_row(row, store_rows::stored_run_row)
 }
 
 pub(super) fn event_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
-    Ok(RunEvent {
-        id: row.get("id")?,
-        task_id: row.get("task_id")?,
-        goal_id: row.get("goal_id")?,
-        run_id: row.get("run_id")?,
-        kind: RecordedKind::from_name(&row.get::<_, String>("kind")?),
-        payload: json_col(row, "payload")?,
-        created_at: row.get("created_at")?,
-        actor: event_actor(row)?,
-    })
+    with_row(row, store_rows::event_row)
 }
 
 /// Move the task to `goal_id`, or out of any goal, as `by` moves it
