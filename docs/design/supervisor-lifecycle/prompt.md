@@ -48,7 +48,7 @@ claim ──> prompt::prompt ──> prompt.txt（1回だけ書く）
             ├─ Goal / Context / Predecessor tasks / Sibling tasks（常に4節）
             ├─ 受け入れ条件の対応づけ → 文書の照合 → receiptの契約
             └─ 最後の段落（非対話のturn、providerの1行）＋言語の指示
-claim ──> 指示の版のhash ──> run_claimed（下の「workerが読んだ指示の版」）
+claim ──> 指示の版のhash ──> run_claimed
 
 runの途中 ──> resume・revise・促し・askの答え・復旧jobの指示 ──> 次のturnのprompt
                  └─ 節ごとの上限 → turn_requestedのprompt_bytes
@@ -179,12 +179,14 @@ reviewの側は[Review](review.md#文書の照合)が持つ（`REVIEW_DOCS_CHECK
 
 ### workerが読んだ指示の版
 
-claimのたびに、supervisorはworkerが読む指示の内容のhashを3つ求め、runのproviderの値を`run_claimed`に別々のキーで記録する（`domain::instructions`）。
+claimのたびに、supervisorはrunのproviderのworkerが読む指示のhashを3つ、`run_claimed`に別々のキーで記録する。
 
-- promptの雛形: taskとrunの値の代わりにplaceholderを入れたworkerのpromptで、providerごとに1つある（`worker_template`）。
-  対象にしないものは`worker_template`のdoc commentが持つ。
-- plugin: ClaudeのworkerがClaude Codeから読むdagqのpluginのファイルの内容（`infrastructure::adapters::worker_plugin_hash`）。
-- repositoryの指示の文書: runのbaseのcommitでのその内容（`domain::instructions::REPOSITORY_INSTRUCTIONS`）。
+- 入口: 対象と求め方は`domain::instructions`のmoduleと各箇条の名前のdoc commentが持つ。
+- promptの雛形: taskの値を入れる前のworkerのprompt（`worker_template`）。
+- plugin: Claudeのworkerが読むdagqのplugin（`worker_plugin_hash`）。
+- repositoryの指示の文書: runのbaseでの内容（`REPOSITORY_INSTRUCTIONS`）。
+- 約束: 各hashは読む指示の内容だけで決まり、taskの値・commitのid・時刻によらず、同じ内容のrunは同じ版として比べられる。
+  求められないhashは不明の値になり、claimは止まらない。
 
 ### subagent review
 
