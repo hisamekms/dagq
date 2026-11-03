@@ -139,6 +139,9 @@ pub(super) struct FakeVerifier {
     in_container: std::sync::atomic::AtomicBool,
     /// What runs as the command it names starts, once.
     on_command: Mutex<Option<(String, Hook)>>,
+    /// Whether the program `[run.env]` names (`RUSTC_WRAPPER`) cannot be
+    /// executed; every program resolves by default.
+    program_missing: std::sync::atomic::AtomicBool,
 }
 
 /// What a fake does once, at a point of the test's choosing.
@@ -157,7 +160,16 @@ impl FakeVerifier {
             config: Mutex::default(),
             in_container: std::sync::atomic::AtomicBool::new(false),
             on_command: Mutex::default(),
+            program_missing: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// The program `[run.env]` names cannot be executed from now on when
+    /// `missing`, wherever it is looked up from (main's checkout or a run's
+    /// directory), and resolves again otherwise.
+    pub(super) fn set_program_missing(&self, missing: bool) {
+        self.program_missing
+            .store(missing, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The checkout's `dagq.toml` is `text` from now on.
@@ -249,8 +261,25 @@ impl Verifier for FakeVerifier {
         Ok(crate::infrastructure::run_env::parse_config(text)?.review_programs())
     }
 
+    /// No `[run.env]` program to check, or one (`RUSTC_WRAPPER`) that
+    /// resolves unless the test made it missing
+    /// ([`FakeVerifier::set_program_missing`]).
     fn run_env_programs(&self, _: Option<&Path>) -> Result<RunEnvCheck> {
-        Ok(RunEnvCheck::default())
+        if !self
+            .program_missing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(RunEnvCheck::default());
+        }
+        Ok(RunEnvCheck {
+            config: true,
+            path: "/wiring/bin".into(),
+            programs: vec![crate::domain::run_env::RunEnvProgram {
+                variable: "RUSTC_WRAPPER".into(),
+                value: "/wiring/bin/sccache".into(),
+                resolved: None,
+            }],
+        })
     }
 
     fn run_env_table(&self) -> Result<Option<Vec<(String, String)>>> {

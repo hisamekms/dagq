@@ -349,7 +349,8 @@ fn a_resume_waits_then_works_again() {
 }
 
 /// The wait for an `approve_landing` answer is a person's and holds no
-/// slot: it is `ask` under today's names.
+/// slot: it is `ask` under today's names, and the row names no
+/// `landing_queue_via`.
 #[test]
 fn an_approve_landing_ask_is_a_persons_wait() {
     let mut log = Log::default();
@@ -378,6 +379,9 @@ fn an_approve_landing_ask_is_a_persons_wait() {
             .unwrap()],
         3000
     );
+    // A run's ledger row does not split the wait for the slot by what
+    // queued the run to land.
+    assert!(land.landing_queue_via.is_empty(), "{land:?}");
 }
 
 /// An `already_satisfied` claim (ADR-t1818-1) holds a worker slot only

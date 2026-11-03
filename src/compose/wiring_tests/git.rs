@@ -66,6 +66,9 @@ struct State {
     /// The refs written ([`Repository::update_ref`]), by name: the commit
     /// each holds.
     refs: HashMap<String, CommitSha>,
+    /// The paths the next merge of a run's head with a main other than the
+    /// one named conflicts on, once ([`FakeGit::conflict_once_main_moves`]).
+    conflict_next_merge: Option<(Vec<String>, CommitSha)>,
 }
 
 /// The repository in memory, its main checkout at `checkout`; clones share
@@ -100,6 +103,7 @@ impl FakeGit {
                 changed: Vec::new(),
                 messages: HashMap::new(),
                 refs: HashMap::new(),
+                conflict_next_merge: None,
             })),
         }
     }
@@ -133,6 +137,15 @@ impl FakeGit {
     /// Main's head on its remote, `None` before the first push.
     pub(super) fn pushed(&self) -> Option<CommitSha> {
         self.lock().pushed.clone()
+    }
+
+    /// The next merge of a run's head with main (the landing recheck's),
+    /// once main moved past its head now, conflicts on `paths`, once.
+    pub(super) fn conflict_once_main_moves(&self, paths: &[&str]) {
+        let mut state = self.lock();
+        let now = state.main.last().cloned().expect("main has a head");
+        state.conflict_next_merge =
+            Some((paths.iter().map(|path| (*path).to_owned()).collect(), now));
     }
 
     /// Main moved on by a commit of someone else's, as a landing elsewhere
@@ -577,6 +590,21 @@ impl Repository for FakeGit {
 
     fn merge_conflicts(&self, _: &str, _: &str) -> Result<Vec<String>> {
         Ok(Vec::new())
+    }
+
+    /// The conflict a test asked for, once main moved
+    /// ([`FakeGit::conflict_once_main_moves`]); otherwise no tree is merged,
+    /// as a repository that cannot (the landing recheck cannot judge the
+    /// run).
+    fn merged_tree(&self, main: &str, _: &str) -> Result<std::result::Result<String, Vec<String>>> {
+        let mut state = self.lock();
+        match state.conflict_next_merge.take() {
+            Some((paths, before)) if before.as_str() != main => Ok(Err(paths)),
+            unmoved => {
+                state.conflict_next_merge = unmoved;
+                bail!("the wiring test's repository merges no tree")
+            }
+        }
     }
 
     fn checkout_scratch(&self, path: &Path, commit: &str) -> Result<()> {

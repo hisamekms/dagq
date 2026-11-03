@@ -162,6 +162,10 @@ pub(super) struct FakeAgent {
     started: Mutex<Vec<String>>,
     /// The arguments of each review agent's job it started, in order.
     agent_jobs: Mutex<Vec<Vec<String>>>,
+    /// The verdicts of the jobs of a review agent, by its name, one per job
+    /// in order (the last one again for any after it); an agent without
+    /// any passes.
+    agent_verdicts: Mutex<std::collections::HashMap<String, VecDeque<Value>>>,
     /// The directory each review job was started in, in order.
     reviewed_in: Mutex<Vec<PathBuf>>,
     /// The prompt of each review job, in order.
@@ -204,6 +208,7 @@ impl FakeAgent {
             verdicts: Mutex::new(script.verdicts.into()),
             started: Mutex::default(),
             agent_jobs: Mutex::default(),
+            agent_verdicts: Mutex::default(),
             reviewed_in: Mutex::default(),
             review_prompts: Mutex::default(),
             on_review: Mutex::default(),
@@ -244,6 +249,20 @@ impl FakeAgent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// The jobs of the review agent `agent` answer `verdicts` (each its
+    /// decision and reasons), one per job in order, the last one again for
+    /// any after it.
+    pub(super) fn review_agent_says(&self, agent: &str, verdicts: &[(&str, &[&str])]) {
+        let verdicts = verdicts
+            .iter()
+            .map(|(decision, reasons)| json!({"verdict": decision, "reasons": reasons}))
+            .collect();
+        self.agent_verdicts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(agent.to_owned(), verdicts);
     }
 
     /// The directory each review job was started in, in order.
@@ -367,18 +386,33 @@ impl FakeAgent {
         })
     }
 
-    /// A review agent's job answering `prompt`: a built-in one passes, as
-    /// it finds nothing in a change of no file.
-    fn agent_job(prompt: &str) -> String {
+    /// A review agent's job answering `prompt`: the agent's next verdict
+    /// the test gave ([`FakeAgent::review_agent_says`]), or else a pass, as
+    /// a built-in one finds nothing in a change of no file.
+    fn agent_job(&self, prompt: &str) -> String {
         let agent = prompt
             .lines()
             .find_map(|line| line.strip_prefix("You are the review agent `"))
             .and_then(|rest| rest.split('`').next())
             .unwrap_or("unnamed");
+        let said = {
+            let mut verdicts = self
+                .agent_verdicts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            verdicts.get_mut(agent).and_then(|said| {
+                if said.len() > 1 {
+                    said.pop_front()
+                } else {
+                    said.front().cloned()
+                }
+            })
+        };
+        let said = said.unwrap_or_else(|| json!({"verdict": "pass", "reasons": []}));
         format!(
             "{}\n",
-            json!({"agent": agent, "status": "completed", "verdict": "pass",
-                   "reasons": [], "summary": format!("{agent} looked")})
+            json!({"agent": agent, "status": "completed", "verdict": said["verdict"],
+                   "reasons": said["reasons"], "summary": format!("{agent} looked")})
         )
     }
 }
@@ -614,7 +648,7 @@ impl Spawner for FakeAgent {
                             .map(|arg| arg.to_string_lossy().into_owned())
                             .collect(),
                     );
-                Self::agent_job(command.get_stdin().unwrap_or_default())
+                self.agent_job(command.get_stdin().unwrap_or_default())
             }
             RECOVERY => {
                 let [verdict] = args.as_slice() else {

@@ -619,20 +619,6 @@ reason = "request と turn の終わりの間に run を adopt した supervisor
 task = 3803
 
 [[boundary]]
-id = "approved-landing-lands-by-approval-order"
-kind = "supervisorの配線"
-test = "runtime_landing_answers::approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once"
-reason = "approve_landing の land の答えを supervisor が適用して ask を閉じ、run.env の program が欠ける間は着地を待たせ、見つかれば別の supervisor が承認の古い順に review も ask もせず一度ずつ着地させることは、実の supervisor と landing の配線でしか確かめられない。どの答えをどう適用するかは supervise::execution::landing::landing_answer_to_apply の unit test"
-task = 3803
-
-[[boundary]]
-id = "draining-supervisor-applies-landing-answers"
-kind = "supervisorの配線"
-test = "runtime_landing_answers::a_draining_supervisor_applies_the_landing_answers_and_starts_no_new_work"
-reason = "stop のために drain する supervisor が誰も lease しない run の land・send_back・cancel・retry_review の答えを適用して ask を閉じ、claim も resume も review も着地も新しく始めないことは、走る supervisor の drain の配線でしか確かめられない。drain で着地を始めるかは supervise::execution::landing::drain_starts_approved_landing の unit test"
-task = 3803
-
-[[boundary]]
 id = "queue-hold-answer-applied-by-every-supervisor"
 kind = "supervisorの配線"
 test = "runtime_queue_hold_shared::cancel_affected_gives_up_the_held_runs_of_every_supervisor"

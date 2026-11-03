@@ -87,12 +87,6 @@ name = "runtime_disk::no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is
 reason = "B 境界（守る境界）: ディスクが足りない間 claim せず inbox に一度だけ知らせることを、supervisor の pass と SQLite の ask の配線で確かめる"
 task = 3745
 
-# 18.332s
-[[test]]
-name = "runtime_landing_answers::approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once"
-reason = "B 境界（守る境界）: 承認された run が着地の slot を待ち古い承認から一度ずつ着地することを、supervisor・Git・SQLite の配線で確かめる"
-task = 3745
-
 # 20.627s
 [[test]]
 name = "runtime_recheck::no_recheck_starts_while_another_supervisor_holds_the_recheck_lock"

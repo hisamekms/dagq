@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize},
         mpsc,
     },
     time::{Duration, Instant, SystemTime},
@@ -131,6 +131,14 @@ pub(super) struct Wiring {
     worker_fallback: bool,
     /// `[fresh_session]`; no threshold by default.
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
+    /// The slots (`--parallel`) of the supervisors started from now on;
+    /// two by default.
+    parallel: Arc<AtomicUsize>,
+    /// The passes of the loop of the supervisor that runs, counted.
+    passes: Arc<AtomicU64>,
+    /// Where the supervisor pauses for the test ([`supervise::Ports::pauses`]);
+    /// nowhere by default.
+    pauses: Option<supervise::Pauses>,
     pub(super) files: Arc<MemoryFiles>,
     pub(super) git: FakeGit,
     pub(super) agent: Arc<FakeAgent>,
@@ -185,6 +193,9 @@ impl Wiring {
             codex: false,
             worker_fallback: true,
             fresh_session: Default::default(),
+            parallel: Arc::new(AtomicUsize::new(2)),
+            passes: Arc::new(AtomicU64::new(0)),
+            pauses: None,
             files,
             git,
             agent,
@@ -220,6 +231,31 @@ impl Wiring {
     pub(super) fn with_fresh_session(mut self, peak_context_above: u64) -> Self {
         self.fresh_session.peak_context_above = Some(peak_context_above);
         self
+    }
+
+    /// The wiring whose supervisors have `parallel` slots.
+    pub(super) fn with_parallel(self, parallel: usize) -> Self {
+        self.set_parallel(parallel);
+        self
+    }
+
+    /// The supervisors started from now on have `parallel` slots.
+    pub(super) fn set_parallel(&self, parallel: usize) {
+        self.parallel
+            .store(parallel, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The wiring whose supervisor calls `pauses` at each point a test may
+    /// pause it.
+    pub(super) fn with_pauses(mut self, pauses: supervise::Pauses) -> Self {
+        self.pauses = Some(pauses);
+        self
+    }
+
+    /// How many passes the loops of this test's supervisors have gone, all
+    /// told.
+    pub(super) fn passes(&self) -> u64 {
+        self.passes.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// `provider` held for its usage limit, as a supervisor records it,
@@ -487,6 +523,9 @@ impl Wiring {
                 codex: self.codex,
                 worker_fallback: self.worker_fallback,
                 fresh_session: self.fresh_session,
+                parallel: self.parallel.load(std::sync::atomic::Ordering::SeqCst),
+                passes: self.passes.clone(),
+                pauses: self.pauses.clone(),
                 generators: self.generators.clone(),
                 files: self.files.clone(),
                 git: self.git.clone(),
@@ -561,6 +600,9 @@ struct Parts {
     codex: bool,
     worker_fallback: bool,
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
+    parallel: usize,
+    passes: Arc<AtomicU64>,
+    pauses: Option<supervise::Pauses>,
     generators: Generators,
     files: Arc<MemoryFiles>,
     git: FakeGit,
@@ -665,7 +707,7 @@ impl Parts {
             telemetry_tokens: &*self.tokens,
             telemetry_sinks: Arc::new(Nothing),
             end,
-            pauses: None,
+            pauses: self.pauses,
             files: self.files.clone() as Arc<dyn RunFiles>,
             processes: self.processes.clone(),
             generators: self.generators.clone(),
@@ -701,7 +743,13 @@ impl Parts {
         };
         supervise::supervise(
             &ports,
-            &settings(self.stop, self.worker_fallback, self.fresh_session),
+            &settings(
+                self.stop,
+                self.worker_fallback,
+                self.fresh_session,
+                self.parallel,
+                self.passes,
+            ),
         )
     }
 }
@@ -759,17 +807,19 @@ fn layout(db: &Path, pid: u32, workers: &WorkerAdapters<'_>) -> Layout {
     }
 }
 
-/// A `--once` supervisor's loop of two slots, its waits the test's ticks,
+/// A `--once` supervisor's loop of `parallel` slots, its waits the test's ticks,
 /// `[provider_fallback] workers` as `worker_fallback` says,
-/// `[fresh_session]` as `fresh_session`, every other setting the
-/// production's default; `stop` drains it.
+/// `[fresh_session]` as `fresh_session`, its passes counted in `passes`,
+/// every other setting the production's default; `stop` drains it.
 fn settings(
     stop: Arc<AtomicBool>,
     worker_fallback: bool,
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
+    parallel: usize,
+    passes: Arc<AtomicU64>,
 ) -> LoopSettings {
     let slot_flags = SlotFlags {
-        parallel: Some(2),
+        parallel: Some(parallel),
         max_waiting: None,
         runtime_planners: None,
         claim_spacing: None,
@@ -815,7 +865,7 @@ fn settings(
         owner: None,
         owner_gone_grace: supervise::OWNER_GONE_GRACE,
         lease_lost_grace: supervise::LEASE_LOST_GRACE,
-        passes: Arc::new(AtomicU64::new(0)),
+        passes,
     }
 }
 
