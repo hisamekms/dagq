@@ -32,7 +32,9 @@ use std::{env, fs, path::Path};
 
 use super::run_env::{parse_positive, parse_string, strip_comment};
 use crate::domain::{
-    TaskChange, areas,
+    TaskChange,
+    agent_eval::round::ProviderCost,
+    areas,
     kpi::{KpiSettings, Stat, Target},
 };
 
@@ -183,6 +185,23 @@ impl KpiTables {
         self.close()?;
         Ok(self.seen_any.then_some(self.settings))
     }
+}
+
+/// The repository's `[kpi]` settings with its Codex prices, `[eval.providers.codex]`
+/// of the same `dagq.toml` (ADR-t4005-1 decision 8): the prices are set
+/// once, for the eval and `kpi`'s cost of a Codex Execution alike. Prices
+/// that do not convert (no input or output price) leave `settings` as
+/// they are; ones that do give settings even to a file without `[kpi]`.
+pub fn with_codex_prices(
+    settings: Option<KpiSettings>,
+    prices: ProviderCost,
+) -> Option<KpiSettings> {
+    if !prices.converts() {
+        return settings;
+    }
+    let mut settings = settings.unwrap_or_default();
+    settings.codex_prices = Some(prices);
+    Some(settings)
 }
 
 /// The KPI a target table names: `"phase.work"` (optionally followed by
@@ -397,5 +416,43 @@ mod tests {
         assert_eq!(landings[0].min, Some(3.0));
         assert_eq!(settings.targets.len(), 2);
         assert!(host_wide_file().is_some_and(|path| path.ends_with("dagq/host.toml")));
+    }
+
+    /// The Codex prices of `[eval.providers.codex]` reach the KPIs'
+    /// settings, a file without `[kpi]` too; prices that do not convert
+    /// leave them out; the host's settings keep the repository's.
+    #[test]
+    fn the_codex_prices_of_the_eval_reach_the_kpi_settings() {
+        use crate::domain::kpi::KpiConfig;
+        use crate::infrastructure::run_env::{CONFIG_FILE_NAME, load_kpi_settings};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(
+            &file,
+            "[eval.providers.codex]\ninput_usd_per_mtok = 2.0\ncached_input_usd_per_mtok = 0.1\noutput_usd_per_mtok = 10.0\n",
+        )
+        .unwrap();
+        let settings = load_kpi_settings(dir.path()).unwrap().unwrap();
+        let prices = settings.codex_prices.unwrap();
+        assert_eq!(prices.usd(1_000_000, 1_000_000, 100_000), Some(3.1));
+        let host = KpiSettings {
+            min_samples: Some(2),
+            ..KpiSettings::default()
+        };
+        let config = KpiConfig::merge(Some(&settings), Some(&host));
+        assert_eq!(config.codex_prices, Some(prices));
+        assert_eq!(KpiConfig::merge(Some(&host), None).codex_prices, None);
+        fs::write(
+            &file,
+            "[kpi]\nmin_samples = 4\n[eval.providers.codex]\ndefault_run_usd = 0.3\n",
+        )
+        .unwrap();
+        let settings = load_kpi_settings(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            (settings.min_samples, settings.codex_prices),
+            (Some(4), None)
+        );
+        fs::write(&file, "[eval.providers.codex]\ndefault_run_usd = 0.3\n").unwrap();
+        assert_eq!(load_kpi_settings(dir.path()).unwrap(), None);
     }
 }

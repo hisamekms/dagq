@@ -2996,15 +2996,20 @@ pub fn load_conflict_config(root: &Path) -> Result<Option<ConflictConfig>> {
     ))
 }
 
-/// `[kpi]` of the `dagq.toml` in `root` (ADR-0051 decision 17), `None`
-/// when there is no file or no `[kpi]` table.
+/// `[kpi]` of the `dagq.toml` in `root` (ADR-0051 decision 17), with the
+/// Codex prices of its `[eval.providers.codex]`
+/// ([`crate::infrastructure::kpi_config::with_codex_prices`]); `None` when
+/// there is no file, or neither a `[kpi]` table nor prices that convert.
 pub fn load_kpi_settings(root: &Path) -> Result<Option<KpiSettings>> {
     let path = root.join(CONFIG_FILE_NAME);
     Ok(match read_config(&path)? {
         Some(text) => {
-            parse_config(&text)
-                .with_context(|| format!("parse {}", path.display()))?
-                .kpi
+            let config =
+                parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
+            crate::infrastructure::kpi_config::with_codex_prices(
+                config.kpi,
+                config.eval.provider(crate::domain::Provider::Codex),
+            )
         }
         None => None,
     })

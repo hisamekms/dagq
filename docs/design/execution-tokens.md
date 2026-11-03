@@ -118,5 +118,8 @@ stats / kpi
 - 窓に入れるのは窓の中で終わったExecutionと区切りの時刻が窓の中の区切りで、eventを書いた時刻ではない。
 - actorはsupervisorが起動した区間のkindで、区切りは区間のkind。
 - 記録の形より前の記録と区間が閉じたときのトークン数は混ぜず、記録の始まりと窓のうち記録のある分は`stats`の出力が示す。
+- 費用はClaudeは記録の`cost_usd`、Codexは`dagq.toml`の`[eval.providers.codex]`の単価で換算し、単価が無ければ値でなく理由を出す（[ADR-t4005-1](../adr/2026-11-02-t4005-1-production-ab-of-worker-and-review-provider-pairs.md)決定8、入口は`domain::kpi::pair`）。
+  単価はevalと同じ1か所に置き、換算は`ProviderCost::usd`を共有する。
+- Codexのsessionの終わりはトークン数を持たないので、Codexのトークン数と費用はExecutionの記録だけから読む。
 - 落とし穴: `kpi`のactor以外の層は全体の記録の範囲で判定するので、始まりの遅いactorの記録より前の分は欠けたまま値になる。
 - 落とし穴: jobの終わりのeventがproviderを持たず、トークン数も数えられなかったjobは、providerが`unknown`になる。

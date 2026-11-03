@@ -13,7 +13,9 @@
 //! derives for it, and no rule is written twice. Each stratum also gives
 //! the runs' time and slot time by blocker, holds and attempt with the
 //! unattributed time, and the `unattributed_ratio` KPI
-//! ([`UNATTRIBUTED_RATIO`]), from the run rows.
+//! ([`UNATTRIBUTED_RATIO`]), from the run rows. The groups of a trial are
+//! compared by [`trial`]'s set, and the provider pair's, assigned and as
+//! they ran, by [`pair`]'s too.
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
@@ -34,6 +36,7 @@ pub mod candidates;
 pub mod compare;
 pub mod config;
 pub mod observe;
+pub mod pair;
 pub mod push;
 pub mod report;
 pub mod trial;
@@ -578,6 +581,11 @@ pub struct KpiInput<'a> {
     /// ([`super::ledger::window::LedgerWindow::post_landing_book`]), for
     /// the late quality of [`trial`]; none leaves it out.
     pub post_landing: Option<&'a super::ledger::post_landing::PostLandingBook>,
+    /// The Executions the window's run and session rows keep
+    /// ([`super::ledger::window::LedgerWindow::executions`]), for a run's
+    /// tokens and cost per side in the provider pair's set ([`pair`]);
+    /// none leaves that set's tokens and cost without samples.
+    pub executions: Option<&'a [super::stats::executions::Execution]>,
 }
 
 /// One KPI over one stratum of one window: how many samples, and the value

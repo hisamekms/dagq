@@ -207,6 +207,7 @@ fn report_with_host(
             ledger: None,
             rows: &[],
             post_landing: None,
+            executions: None,
         },
         &KpiQuery {
             period,

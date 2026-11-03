@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{
-    ALL, Axis, Derived, KpiInput, Kpis, Measure, RunLayers, UNKNOWN, float, round3, trial,
+    ALL, Axis, Derived, KpiInput, Kpis, Measure, RunLayers, UNKNOWN, float, pair, round3, trial,
 };
 use crate::domain::{
     DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskChange, TaskId,
@@ -220,6 +220,15 @@ pub(super) struct Context<'a> {
     /// The layers of each claimed run `stats` does not derive (one still
     /// in flight), for the same.
     open: HashMap<RunId, OpenRun>,
+    /// Each run row's use of providers it could not use, as the ledger's
+    /// read gives it ([`ledger::read::LedgerValues::provider_use`]), for
+    /// the provider pair's set ([`pair`]).
+    uses: HashMap<String, ledger::provider_use::ProviderUse>,
+    /// The Executions the rows keep ([`KpiInput::executions`]) by their
+    /// run, for the same.
+    executions: HashMap<RunId, Vec<&'a stats::executions::Execution>>,
+    /// The Codex prices ([`super::KpiConfig::codex_prices`]).
+    codex_prices: Option<crate::domain::agent_eval::round::ProviderCost>,
 }
 
 /// A claimed run still in flight, as its layers read: its row's
@@ -497,7 +506,19 @@ impl<'a> Context<'a> {
             post_landing: input.post_landing,
             runs: HashMap::new(),
             open: HashMap::new(),
+            uses: HashMap::new(),
+            executions: HashMap::new(),
+            codex_prices: input.config.codex_prices,
         };
+        for execution in input.executions.unwrap_or_default() {
+            if let Some(run) = &execution.run_id {
+                context
+                    .executions
+                    .entry(run.clone())
+                    .or_default()
+                    .push(execution);
+            }
+        }
         context.forecast = score::score(events, &context.marks);
         let everything = context.stats(None, None);
         let rows: HashMap<&str, ledger::read::LedgerValues> = input
@@ -505,6 +526,10 @@ impl<'a> Context<'a> {
             .iter()
             .filter(|row| row.kind == LedgerKind::Run)
             .map(|row| (row.key.as_str(), ledger::read::read(row)))
+            .collect();
+        context.uses = rows
+            .iter()
+            .filter_map(|(run, values)| Some(((*run).to_owned(), values.provider_use.clone()?)))
             .collect();
         context.layers = everything
             .runs
@@ -907,6 +932,18 @@ impl<'a> Context<'a> {
             }
             for axis in axes {
                 for value in self.axis_values(run, axis) {
+                    // The provider pair's group as the run ran
+                    // ([`pair::ran_as_assigned`]), next to the assigned.
+                    if axis.as_str() == crate::domain::provider_trial::GROUP
+                        && value != UNKNOWN
+                        && pair::ran_as_assigned(
+                            &self.run_layers(run),
+                            self.uses.get(run.run_id.as_str()),
+                        )
+                    {
+                        let key = format!("{}{}={value}", pair::RAN, axis.as_str());
+                        groups.entry(key).or_default().push(run);
+                    }
                     let key = format!("{}={value}", axis.as_str());
                     groups.entry(key).or_default().push(run);
                 }
@@ -915,7 +952,15 @@ impl<'a> Context<'a> {
         let mut landings: BTreeMap<&str, usize> = BTreeMap::new();
         let mut by_tags: BTreeMap<String, Breakdown> = BTreeMap::new();
         let mut arrivals: BTreeMap<String, trial::PostLandingArrival> = BTreeMap::new();
+        let mut pairs = pair::PairDetails::new();
         for (stratum, runs) in &groups {
+            if pair::is_pair_stratum(stratum) {
+                let (pair_kpis, detail) = self.pair_kpis(runs);
+                for (name, measure) in pair_kpis {
+                    put(name, stratum, measure);
+                }
+                pairs.insert(stratum.clone(), detail);
+            }
             for (name, measure) in self.run_kpis(runs) {
                 if name == "landings" {
                     landings.insert(stratum, measure.n);
@@ -1293,6 +1338,9 @@ impl<'a> Context<'a> {
                 }
             }
         }
+        if !pairs.is_empty() {
+            details.insert("provider_pair", json(&pairs));
+        }
         if !arrivals.is_empty() {
             details.insert("post_landing", json(&arrivals));
         }
@@ -1540,6 +1588,33 @@ impl<'a> Context<'a> {
             })
             .collect();
         trial::kpis(&landed, self.post_landing, end)
+    }
+
+    /// [`pair::kpis`] of all `runs` (the stratum's finished runs, landed
+    /// or not).
+    fn pair_kpis(&self, runs: &[&RunStats]) -> (Vec<(&'static str, Measure)>, pair::PairDetail) {
+        let finished: Vec<(&RunStats, RunLayers)> = runs
+            .iter()
+            .map(|run| (*run, self.run_layers(run)))
+            .collect();
+        let none = Vec::new();
+        let runs: Vec<pair::PairRun<'_>> = finished
+            .iter()
+            .map(|(run, layers)| pair::PairRun {
+                layers,
+                uses: self.uses.get(run.run_id.as_str()),
+                executions: self.executions.get(&run.run_id).unwrap_or(&none),
+            })
+            .collect();
+        pair::kpis(&runs, self.codex_prices.as_ref())
+    }
+
+    /// The layers of `run`: its row's, else its claim's ([`Self::layers`]).
+    fn run_layers(&self, run: &RunStats) -> RunLayers {
+        self.layers
+            .get(&run.run_id)
+            .cloned()
+            .unwrap_or_else(|| self.claim_layers(run))
     }
 
     /// The breakdown by tags of `runs`' ledger rows (a run without a row

@@ -28,6 +28,12 @@ impl Usd {
     pub(super) const fn plus(self, other: Self) -> Self {
         Self(self.0 + other.0)
     }
+
+    /// The dollars.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn dollars(self) -> f64 {
+        self.0 as f64 / 1e6
+    }
 }
 
 impl Serialize for Usd {

@@ -27,7 +27,8 @@ pub struct Host {
 /// main's history the supervisor recorded, the supervisors' lives of
 /// their own records, each window's host load of the node rows, and the
 /// reverts and CI failures after the landings the window's common read
-/// matches to the runs ([`LedgerWindow::post_landing_book`]).
+/// matches to the runs ([`LedgerWindow::post_landing_book`]), and the
+/// Executions its rows keep ([`LedgerWindow::executions`]).
 pub fn kpi(
     queue: &(impl LedgerStore + ?Sized),
     now: i64,
@@ -68,6 +69,7 @@ pub fn of_window(
     let rows: Vec<&crate::domain::ledger::LedgerRow> =
         window.of(crate::domain::ledger::LedgerKind::Run).collect();
     let post_landing = window.post_landing_book();
+    let executions = window.executions();
     derive(
         &KpiInput {
             events: &events,
@@ -85,6 +87,7 @@ pub fn of_window(
             ledger: Some(&ledger),
             rows: &rows,
             post_landing: Some(&post_landing),
+            executions: Some(&executions),
         },
         query,
     )
@@ -205,5 +208,105 @@ mod tests {
         assert_eq!(kpis["post_landing.reverts"]["all"].value, Some(1.0));
         assert_eq!(kpis["run_duration"]["all"].n, 1);
         assert_eq!(kpis["run_duration_without_human"]["all"].n, 1);
+    }
+
+    /// From the ledger's window to the provider pair's set: a treatment
+    /// run claimed on Codex whose review ran on Claude as its group planned
+    /// is in its group as assigned and as it ran, with its worker's tokens
+    /// from its Codex turn's records and its review's cost as recorded.
+    #[test]
+    fn the_window_gives_the_pair_groups_tokens_and_cost() {
+        let mut log = Log::default();
+        let run = run_id(1);
+        log.landed(1, &run, 0);
+        for event in &mut log.events {
+            if event.kind.as_str() == "run_claimed" {
+                let pair = json!({"pair_group": "treatment", "pair_trial": "provider-pair",
+                    "pair_worker": "codex", "pair_review": "claude"});
+                event.payload = json!({"provider": "codex", "requested_provider": "codex",
+                    "attributes": pair});
+            }
+        }
+        let tokens = |output: i64, usd: Option<f64>| {
+            json!({"input": 0, "output": output, "cache_read": 0, "cache_creation": 0,
+                   "cost_usd": usd})
+        };
+        log.add(Some(1), Some(&run), "turn_started", json!({"turn": 1}), 20)
+            .add(
+                Some(1),
+                Some(&run),
+                "turn_finished",
+                json!({"turn": 1, "provider": "codex", "tokens": tokens(1_000_000, None),
+                       "tokens_source": "token_usage_record", "tokens_by_model": []}),
+                300,
+            )
+            .add(
+                Some(1),
+                Some(&run),
+                "review_job_started",
+                json!({"attempt": 1, "agent": null, "launch": {"provider": "claude"}}),
+                610,
+            )
+            .add(
+                Some(1),
+                Some(&run),
+                "review_job_finished",
+                json!({"attempt": 1, "agent": null, "provider": "claude",
+                       "tokens": tokens(100, Some(0.25)), "tokens_source": "model_usage",
+                       "tokens_by_model": []}),
+                650,
+            );
+        log.events.sort_by_key(|event| event.created_at.clone());
+        for (index, event) in log.events.iter_mut().enumerate() {
+            event.id = crate::domain::EventId::new(i64::try_from(index).unwrap() + 1);
+        }
+        let now_ms = ms(2000);
+        let window = select(
+            build(&log.events, now_ms, "2030-01-01T00:00:00.000Z"),
+            &WindowQuery {
+                until: Some(Cursor::Time(now_ms)),
+                now_ms,
+                ..WindowQuery::default()
+            },
+        );
+        let config = KpiConfig {
+            codex_prices: Some(crate::domain::agent_eval::round::ProviderCost {
+                input_usd_per_mtok: Some(2.0),
+                output_usd_per_mtok: Some(10.0),
+                ..Default::default()
+            }),
+            ..KpiConfig::default()
+        };
+        let kpi = of_window(
+            &window,
+            now_ms / 1000,
+            Host {
+                utc_offset_secs: 0,
+                cores: None,
+                rust_toolchain: false,
+            },
+            &config,
+            None,
+            &KpiQuery {
+                since: Some(Cursor::Time(ms(-1))),
+                until: Some(Cursor::Time(now_ms)),
+                by: vec!["pair_group".parse().unwrap()],
+                ..KpiQuery::default()
+            },
+        )
+        .unwrap();
+        let kpis = &kpi.periods[0].window.kpis;
+        use crate::domain::kpi::pair;
+        for stratum in ["pair_group=treatment", "ran:pair_group=treatment"] {
+            assert_eq!(kpis["landings"][stratum].value, Some(1.0), "{stratum}");
+            assert_eq!(kpis[pair::WORKER_TOKENS][stratum].value, Some(1_000_000.0));
+            assert_eq!(kpis[pair::WORKER_COST][stratum].value, Some(10.0));
+            assert_eq!(kpis[pair::REVIEW_COST][stratum].value, Some(0.25));
+            assert_eq!(kpis[pair::LIMIT_WAITS][stratum].value, Some(0.0));
+        }
+        assert_eq!(
+            kpis[pair::SWITCHED_REVIEW]["pair_group=treatment"].value,
+            Some(0.0)
+        );
     }
 }

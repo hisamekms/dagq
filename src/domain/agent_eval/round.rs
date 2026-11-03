@@ -80,15 +80,24 @@ impl ProviderCost {
 
     /// The dollars of `tokens` at these prices; `None` without them.
     pub fn convert(&self, tokens: &TokenUsage) -> Option<f64> {
-        let input = self.input_usd_per_mtok?;
-        let output = self.output_usd_per_mtok?;
-        let cached = self.cached_input_usd_per_mtok.unwrap_or(input);
-        let mtok = |count: i64, price: f64| count.max(0) as f64 / 1_000_000.0 * price;
-        Some(
-            mtok(tokens.input, input)
-                + mtok(tokens.cache_read + tokens.cache_creation, cached)
-                + mtok(tokens.output, output),
+        self.usd(
+            tokens.input,
+            tokens.cache_read + tokens.cache_creation,
+            tokens.output,
         )
+    }
+
+    /// The dollars of `input` tokens without the cache, `cached` input
+    /// tokens (read from or written to the cache) and `output` tokens at
+    /// these prices; `None` without them. [`Self::convert`] and `kpi`'s
+    /// cost of a Codex Execution
+    /// ([`crate::domain::kpi::pair`]) convert by it.
+    pub fn usd(&self, input: i64, cached: i64, output: i64) -> Option<f64> {
+        let input_price = self.input_usd_per_mtok?;
+        let output_price = self.output_usd_per_mtok?;
+        let cached_price = self.cached_input_usd_per_mtok.unwrap_or(input_price);
+        let mtok = |count: i64, price: f64| count.max(0) as f64 / 1_000_000.0 * price;
+        Some(mtok(input, input_price) + mtok(cached, cached_price) + mtok(output, output_price))
     }
 }
 

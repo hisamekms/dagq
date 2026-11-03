@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::{ALL, ConfigReport, Kpis, Measure};
+use crate::domain::agent_eval::round::ProviderCost;
 
 pub const DEFAULT_MIN_SAMPLES: usize = 5;
 pub const DEFAULT_BREACH_PERIODS: usize = 3;
@@ -82,6 +83,10 @@ pub struct KpiSettings {
     pub breach_weeks: Option<usize>,
     pub max_improvement_proposals: Option<usize>,
     pub targets: Vec<Target>,
+    /// The repository's Codex prices, `[eval.providers.codex]` of its
+    /// `dagq.toml` (ADR-t4005-1 decision 8): the one place they are set,
+    /// which the eval reads too. `host.toml` sets none.
+    pub codex_prices: Option<ProviderCost>,
 }
 
 impl KpiSettings {
@@ -121,6 +126,11 @@ pub struct KpiConfig {
     pub max_improvement_proposals: usize,
     pub targets: Vec<SourcedTarget>,
     pub sources: BTreeMap<&'static str, &'static str>,
+    /// The prices a Codex Execution's tokens are turned into dollars at
+    /// ([`super::pair`]): the repository's [`KpiSettings::codex_prices`]
+    /// when they convert ([`ProviderCost::converts`]); none leaves Codex's
+    /// cost without a value and with its reason.
+    pub codex_prices: Option<ProviderCost>,
 }
 
 impl Default for KpiConfig {
@@ -179,6 +189,9 @@ impl KpiConfig {
             max_improvement_proposals,
             targets,
             sources,
+            codex_prices: repository
+                .and_then(|settings| settings.codex_prices)
+                .filter(ProviderCost::converts),
         }
     }
 

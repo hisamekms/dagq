@@ -278,6 +278,7 @@ fn compares_two_explicit_windows() {
             ledger: None,
             rows: &[],
             post_landing: None,
+            executions: None,
         },
         &KpiQuery {
             compare: Some(backwards),

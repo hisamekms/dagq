@@ -165,3 +165,242 @@ fn a_codex_run_is_not_counted_as_a_claude_model() {
     assert_eq!(landings("provider=claude"), Some(1.0));
     assert_eq!(landings("provider=codex"), Some(2.0));
 }
+
+/// The provider pair trial's groups (ADR-t4005-1 decision 7): every run in
+/// its assigned group (`pair_group=`), and in `ran:pair_group=` only a run
+/// whose worker stayed on its assigned provider and none of whose review's
+/// jobs moved off their planned provider. A control run whose review ran
+/// on Codex and Claude as configured, with no fallback, ran as assigned; one
+/// whose review job fell back, a treatment whose worker moved and one whose
+/// row has no record did not, and each group counts its switched runs (the
+/// worker's and the review's apart) and the hits of the usage limit.
+#[test]
+fn the_pair_groups_compare_as_assigned_and_as_they_ran() {
+    use crate::domain::ledger::provider_use::{ProviderUse, Waits};
+    use std::collections::BTreeMap;
+    let mut queue = Queue::default();
+    let uses = |switches: &[(&str, i64)], waits: Option<(i64, i64)>| ProviderUse {
+        worker_waits: Some(
+            waits
+                .map(|(count, millis)| {
+                    BTreeMap::from([(
+                        "usage_limit".to_owned(),
+                        Waits {
+                            count,
+                            millis,
+                            open: 0,
+                        },
+                    )])
+                })
+                .unwrap_or_default(),
+        ),
+        review_switches: Some(
+            switches
+                .iter()
+                .map(|(reason, count)| ((*reason).to_owned(), *count))
+                .collect(),
+        ),
+    };
+    // (group, assigned worker, worker's end, its use of providers, sent back)
+    let runs = [
+        // A, its review mixed as configured: ran as assigned.
+        (
+            ("control", "claude", "claude"),
+            Some(uses(&[], None)),
+            false,
+        ),
+        // A, a review job fell back for the usage limit.
+        (
+            ("control", "claude", "claude"),
+            Some(uses(&[("usage_limit", 1)], None)),
+            true,
+        ),
+        // B, waited twice for Codex's limit: ran as assigned.
+        (
+            ("treatment", "codex", "codex"),
+            Some(uses(&[], Some((2, 300_000)))),
+            false,
+        ),
+        // B, its worker moved to Claude.
+        (
+            ("treatment", "codex", "claude"),
+            Some(uses(&[], None)),
+            false,
+        ),
+        // B, from a row without the record.
+        (("treatment", "codex", "codex"), None, false),
+    ];
+    for (index, (pair, used, revise)) in runs.into_iter().enumerate() {
+        let index = index as i64;
+        let mut run = Run::new(20 + index, None, MONDAY + HOUR * (index + 1), 100);
+        run.revise = revise;
+        let landed = queue.run(&run);
+        queue.rows.push(pair_row(&run, landed, pair, used));
+    }
+    let query = KpiQuery {
+        last: 1,
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        by: vec!["pair_group".parse().unwrap()],
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY + HOUR, &KpiConfig::default(), &query);
+    let period = &result.periods[0];
+    let value = |name: &str, stratum: &str| measure(period, name, stratum).value;
+    assert_eq!(value("landings", "pair_group=control"), Some(2.0));
+    assert_eq!(value("landings", "ran:pair_group=control"), Some(1.0));
+    assert_eq!(value("landings", "pair_group=treatment"), Some(3.0));
+    assert_eq!(value("landings", "ran:pair_group=treatment"), Some(1.0));
+    // The run KPIs and the trial's set in both.
+    assert_eq!(value("first_pass_rate", "pair_group=control"), Some(0.5));
+    assert_eq!(
+        value("first_pass_rate", "ran:pair_group=control"),
+        Some(1.0)
+    );
+    assert_eq!(
+        value("revises_per_landing", "pair_group=control"),
+        Some(0.5)
+    );
+    let ran = measure(period, "run_duration", "ran:pair_group=treatment");
+    assert_eq!((ran.n, ran.median), (1, Some(200.0)));
+    // The switched runs per group, the worker's and the review's apart.
+    assert_eq!(
+        value(pair::SWITCHED_WORKER, "pair_group=treatment"),
+        Some(1.0)
+    );
+    assert_eq!(
+        value(pair::SWITCHED_REVIEW, "pair_group=treatment"),
+        Some(0.0)
+    );
+    assert_eq!(
+        value(pair::SWITCHED_WORKER, "pair_group=control"),
+        Some(0.0)
+    );
+    assert_eq!(
+        value(pair::SWITCHED_REVIEW, "pair_group=control"),
+        Some(1.0)
+    );
+    assert_eq!(
+        value(pair::SWITCHED_REVIEW, "ran:pair_group=control"),
+        Some(0.0)
+    );
+    // The usage limit: B's waits and their time, A's review job's switch;
+    // the row without the record is no sample.
+    let waits = measure(period, pair::LIMIT_WAITS, "pair_group=treatment");
+    assert_eq!((waits.n, waits.value), (2, Some(2.0)));
+    let waited = measure(period, pair::LIMIT_WAIT, "pair_group=treatment");
+    assert_eq!((waited.n, waited.max), (2, Some(300.0)));
+    let switches = measure(period, pair::LIMIT_SWITCHES, "pair_group=control");
+    assert_eq!((switches.n, switches.value), (2, Some(1.0)));
+    let details = &period.window.details["provider_pair"];
+    assert_eq!(details["pair_group=treatment"]["unrecorded"], 1);
+    assert_eq!(details["pair_group=treatment"]["runs"], 3);
+    assert_eq!(details["ran:pair_group=control"]["runs"], 1);
+    // Without `--by pair_group`, neither the groups nor the set.
+    let plain = queue.kpi(
+        MONDAY + DAY + HOUR,
+        &KpiConfig::default(),
+        &KpiQuery {
+            by: Vec::new(),
+            ..query
+        },
+    );
+    let window = &plain.periods[0].window;
+    assert!(window.kpis.keys().all(|name| !name.starts_with("pair.")));
+    assert!(
+        window.kpis["landings"]
+            .keys()
+            .all(|stratum| !stratum.contains("pair_group"))
+    );
+    assert!(!window.details.contains_key("provider_pair"));
+}
+
+/// A run that did not land is a cost of its group too: a treatment run
+/// that used Codex tokens, waited for the usage limit, had a review job
+/// fall back and its worker move to Claude, and then failed, counts its
+/// tokens, cost, waits and switches in its assigned group, next to a
+/// landed run of the group; the landings' set stays the landed run's.
+#[test]
+fn a_run_that_failed_counts_its_tokens_waits_and_switches_in_its_group() {
+    use crate::domain::agent_eval::round::ProviderCost;
+    use crate::domain::ledger::provider_use::{ProviderUse, Waits};
+    use std::collections::BTreeMap;
+    let mut queue = Queue::default();
+    let landed_run = Run::new(30, None, MONDAY + HOUR, 100);
+    let landed = queue.run(&landed_run);
+    queue.rows.push(pair_row(
+        &landed_run,
+        landed,
+        ("treatment", "codex", "codex"),
+        Some(ProviderUse {
+            worker_waits: Some(BTreeMap::new()),
+            review_switches: Some(BTreeMap::new()),
+        }),
+    ));
+    let mut failed = Run::new(31, None, MONDAY + 2 * HOUR, 100);
+    failed.failed = true;
+    let ended = queue.run(&failed);
+    let id = run_id(&failed);
+    queue.push(
+        Some(31),
+        Some(id.as_str()),
+        "turn_finished",
+        json!({"provider": "codex", "tokens": {"input": 0, "output": 1_000_000, "cache_read": 0,
+               "cache_creation": 0}, "tokens_source": "token_usage_record", "tokens_by_model": []}),
+        failed.claimed + 50,
+    );
+    queue.rows.push(pair_row(
+        &failed,
+        ended,
+        ("treatment", "codex", "claude"),
+        Some(ProviderUse {
+            worker_waits: Some(BTreeMap::from([(
+                "usage_limit".to_owned(),
+                Waits {
+                    count: 1,
+                    millis: 60_000,
+                    open: 0,
+                },
+            )])),
+            review_switches: Some(BTreeMap::from([("usage_limit".to_owned(), 1)])),
+        }),
+    ));
+    let config = KpiConfig {
+        codex_prices: Some(ProviderCost {
+            input_usd_per_mtok: Some(2.0),
+            output_usd_per_mtok: Some(10.0),
+            ..ProviderCost::default()
+        }),
+        ..KpiConfig::default()
+    };
+    let query = KpiQuery {
+        last: 1,
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        by: vec!["pair_group".parse().unwrap()],
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY + HOUR, &config, &query);
+    let period = &result.periods[0];
+    let value = |name: &str| {
+        let measure = measure(period, name, "pair_group=treatment");
+        (measure.n, measure.value)
+    };
+    assert_eq!(value("landings"), (1, Some(1.0)));
+    assert_eq!(value(pair::WORKER_TOKENS), (1, Some(1_000_000.0)));
+    assert_eq!(value(pair::WORKER_COST), (1, Some(10.0)));
+    assert_eq!(value(pair::LIMIT_WAITS), (2, Some(1.0)));
+    assert_eq!(value(pair::LIMIT_SWITCHES), (2, Some(1.0)));
+    assert_eq!(value(pair::SWITCHED_WORKER).1, Some(1.0));
+    assert_eq!(value(pair::SWITCHED_REVIEW).1, Some(1.0));
+    let waited = measure(period, pair::LIMIT_WAIT, "pair_group=treatment");
+    assert_eq!((waited.n, waited.max), (2, Some(60.0)));
+    let details = &period.window.details["provider_pair"]["pair_group=treatment"];
+    assert_eq!(details["runs"], 2);
+    assert_eq!(details["worker"]["without_tokens"], 1);
+    // The landings' set is the landed run's.
+    assert_eq!(measure(period, "run_duration", "pair_group=treatment").n, 1);
+    // The secondary holds only the landed run, which ran as assigned.
+    assert_eq!(
+        period.window.details["provider_pair"]["ran:pair_group=treatment"]["runs"],
+        1
+    );
+}

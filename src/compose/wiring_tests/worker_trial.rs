@@ -151,6 +151,7 @@ fn a_claim_under_the_trial_records_its_group_and_candidate() {
             ledger: None,
             rows: &[],
             post_landing: None,
+            executions: None,
         },
         &KpiQuery {
             last: 1,

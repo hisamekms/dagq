@@ -283,6 +283,8 @@ impl Queue {
         self.sort();
         let rows: Vec<&crate::domain::ledger::LedgerRow> = self.rows.iter().collect();
         let post_landing = crate::domain::ledger::post_landing::fold(&self.events, now * 1000);
+        // What the run rows keep: every Execution the events recorded.
+        let executions = crate::domain::stats::executions::executions(&self.events);
         kpi(
             &KpiInput {
                 events: &self.events,
@@ -300,6 +302,7 @@ impl Queue {
                 ledger: None,
                 rows: &rows,
                 post_landing: Some(&post_landing),
+                executions: Some(&executions),
             },
             query,
         )
@@ -336,4 +339,50 @@ fn run_id(run: &Run) -> RunId {
         run.task, run.claimed
     ))
     .unwrap()
+}
+
+/// The ledger row of `run` (landed at `landed`, unix seconds) of the
+/// provider pair trial: claimed in `group` with its worker assigned
+/// `assigned`, its worker ending on `ran_on`, and its use of providers it
+/// could not use `uses` (none: an older fold's row without its record).
+fn pair_row(
+    run: &Run,
+    landed: i64,
+    (group, assigned, ran_on): (&str, &str, &str),
+    uses: Option<crate::domain::ledger::provider_use::ProviderUse>,
+) -> crate::domain::ledger::LedgerRow {
+    let interval = crate::domain::ledger::fold::Interval {
+        phase: "work".into(),
+        blocker: Some(crate::domain::run_phase::Blocker::Ai),
+        holds: Some(crate::domain::run_phase::Holds::WorkerSlot),
+        attempt: None,
+        start: run.claimed * 1000,
+        end: landed * 1000,
+        cause: None,
+        blocked_by: None,
+        run_id: None,
+    };
+    let mut row = crate::domain::ledger::testkit::run_row(
+        run_id(run).as_str(),
+        Some(TaskId::new(run.task)),
+        vec![interval],
+    );
+    row.attributes = json!({
+        crate::domain::provider_trial::GROUP: group,
+        crate::domain::provider_trial::TRIAL: "provider-pair",
+        crate::domain::provider_trial::WORKER: assigned,
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    row.after_claim = Some(crate::domain::after_claim::AfterClaim {
+        last_provider: Some(ran_on.to_owned()),
+        on_codex: ran_on == "codex",
+        codex_model: None,
+    });
+    if let Some(uses) = uses {
+        row.detail[crate::domain::ledger::provider_use::DETAIL_KEY] =
+            serde_json::to_value(uses).unwrap();
+    }
+    row
 }

@@ -250,9 +250,9 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
   キーと元の欄の対応は同じmoduleの表`KEYS`だけが持ち、新しいキーはそこに足す。
 - キーは`^[a-z][a-z0-9_.]{0,63}$`、値は256 byte、1つのrunに64キーまで（値と数は予定）。
 - 予約名（派生の軸。属性のキーにしない）は`claim_facts::RESERVED`が持ち、kpiが派生の規則で作る。
-- 読み取りの優先: 層のキーが予約名なら派生の値、それ以外は属性の値、無ければ`unknown`。
 - [指示の版](supervisor-lifecycle/prompt.md#workerが読んだ指示の版)も属性のキーで、`kpi --by`で層になる。
-- 群の比べは`--by group`で読み、組は`domain::kpi::trial`のdoc comment。
+- 群の比べは`--by group`・`--by pair_group`で読み、組は`kpi::trial`・`kpi::pair`のdoc comment。
+  providerの組は割り当てた群と`ran:`の動いた組の両方に出る。
 
 ## 送る口
 

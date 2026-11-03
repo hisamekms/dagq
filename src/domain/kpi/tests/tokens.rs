@@ -199,3 +199,168 @@ fn compare_puts_the_tokens_of_both_sides_side_by_side() {
     let json = serde_json::to_value(&compare.before).unwrap();
     assert_eq!(json["token_coverage"], "full");
 }
+
+/// The provider pair's tokens and cost per run (ADR-t4005-1 decision 8):
+/// the worker's turns and the review's jobs of each landed run summed
+/// apart, from the Executions the rows keep (a Codex one's from its
+/// `token_usage_record`s); a Claude Execution's dollars as recorded, a
+/// Codex one's at the repository's Codex prices; a run without tokens is
+/// out of the sum and counted. Without the prices, a side with a Codex
+/// Execution has no cost and its reason. A Codex session's close, which
+/// records no tokens, is not read.
+#[test]
+fn the_pair_groups_sum_each_runs_worker_and_review_tokens_and_cost() {
+    use crate::domain::agent_eval::round::ProviderCost;
+    use crate::domain::ledger::provider_use::ProviderUse;
+    let mut queue = Queue::default();
+    let counts = |input: i64, cached: i64, output: i64, usd: Option<f64>| {
+        let mut counts = json!({"input": input, "output": output, "cache_read": cached,
+                                "cache_creation": 0});
+        if let Some(usd) = usd {
+            counts["cost_usd"] = json!(usd);
+        }
+        counts
+    };
+    let recorded = ProviderUse {
+        worker_waits: Some(Default::default()),
+        review_switches: Some(Default::default()),
+    };
+    // A: Claude writes ($0.5), Codex reviews (2M input, 1M cached, 100k
+    // output: $4 + $0.1 + $1 at the prices below).
+    let control = Run::new(1, None, MONDAY + HOUR, 100);
+    let landed = queue.run(&control);
+    let id = run_id(&control);
+    queue.push(
+        Some(1),
+        Some(id.as_str()),
+        "turn_finished",
+        json!({"provider": "claude", "tokens": counts(1000, 0, 100, Some(0.5)),
+               "tokens_source": "model_usage", "tokens_by_model": []}),
+        control.claimed + 50,
+    );
+    queue.push(
+        Some(1),
+        Some(id.as_str()),
+        "review_job_finished",
+        json!({"provider": "codex", "tokens": counts(2_000_000, 1_000_000, 100_000, None),
+               "tokens_source": "token_usage_record", "tokens_by_model": []}),
+        control.claimed + 150,
+    );
+    queue.rows.push(pair_row(
+        &control,
+        landed,
+        ("control", "claude", "claude"),
+        Some(recorded.clone()),
+    ));
+    // B: Codex writes (1M output: $10), Claude reviews ($0.25); its
+    // session's close names no tokens and is not read.
+    let treatment = Run::new(2, None, MONDAY + 2 * HOUR, 100);
+    let landed = queue.run(&treatment);
+    let id = run_id(&treatment);
+    queue.push(
+        Some(2),
+        Some(id.as_str()),
+        "turn_finished",
+        json!({"provider": "codex", "tokens": counts(0, 0, 1_000_000, None),
+               "tokens_source": "token_usage_record", "tokens_by_model": []}),
+        treatment.claimed + 50,
+    );
+    queue.push(
+        Some(2),
+        Some(id.as_str()),
+        "session_closed",
+        json!({"kind": "worker", "reason": "transcript_not_claude", "tokens": null,
+               "effort": null}),
+        treatment.claimed + 60,
+    );
+    queue.push(
+        Some(2),
+        Some(id.as_str()),
+        "review_job_finished",
+        json!({"provider": "claude", "tokens": counts(400, 0, 40, Some(0.25)),
+               "tokens_source": "model_usage", "tokens_by_model": []}),
+        treatment.claimed + 150,
+    );
+    queue.rows.push(pair_row(
+        &treatment,
+        landed,
+        ("treatment", "codex", "codex"),
+        Some(recorded.clone()),
+    ));
+    // A run of A with no Execution recorded.
+    let bare = Run::new(3, None, MONDAY + 3 * HOUR, 100);
+    let landed = queue.run(&bare);
+    queue.rows.push(pair_row(
+        &bare,
+        landed,
+        ("control", "claude", "claude"),
+        Some(recorded),
+    ));
+    let query = KpiQuery {
+        last: 1,
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        by: vec!["pair_group".parse().unwrap()],
+        ..KpiQuery::default()
+    };
+    let priced = KpiConfig {
+        codex_prices: Some(ProviderCost {
+            input_usd_per_mtok: Some(2.0),
+            cached_input_usd_per_mtok: Some(0.1),
+            output_usd_per_mtok: Some(10.0),
+            default_run_usd: None,
+        }),
+        ..KpiConfig::default()
+    };
+    let result = queue.kpi(MONDAY + DAY + HOUR, &priced, &query);
+    let period = &result.periods[0];
+    let value = |name: &str, stratum: &str| {
+        let measure = measure(period, name, stratum);
+        (measure.n, measure.value)
+    };
+    for stratum in ["pair_group=control", "ran:pair_group=control"] {
+        assert_eq!(value(pair::WORKER_TOKENS, stratum), (1, Some(1100.0)));
+        assert_eq!(value(pair::REVIEW_TOKENS, stratum), (1, Some(3_100_000.0)));
+        assert_eq!(value(pair::WORKER_COST, stratum), (1, Some(0.5)));
+        assert_eq!(value(pair::REVIEW_COST, stratum), (1, Some(5.1)));
+    }
+    assert_eq!(
+        value(pair::WORKER_TOKENS, "pair_group=treatment"),
+        (1, Some(1_000_000.0))
+    );
+    assert_eq!(
+        value(pair::WORKER_COST, "pair_group=treatment"),
+        (1, Some(10.0))
+    );
+    assert_eq!(
+        value(pair::REVIEW_COST, "pair_group=treatment"),
+        (1, Some(0.25))
+    );
+    let details = &period.window.details["provider_pair"]["pair_group=control"];
+    assert_eq!(details["worker"]["with_tokens"], 1);
+    assert_eq!(details["worker"]["without_tokens"], 1);
+    assert!(details["review"].get("cost_reason").is_none());
+
+    // Without the prices: Codex's side has no cost and says why; Claude's
+    // keeps its own.
+    let result = queue.kpi(MONDAY + DAY + HOUR, &KpiConfig::default(), &query);
+    let period = &result.periods[0];
+    let cost = |name: &str, stratum: &str| measure(period, name, stratum).value;
+    assert_eq!(cost(pair::REVIEW_COST, "pair_group=control"), None);
+    assert_eq!(cost(pair::WORKER_COST, "pair_group=control"), Some(0.5));
+    assert_eq!(cost(pair::WORKER_COST, "pair_group=treatment"), None);
+    assert_eq!(cost(pair::REVIEW_COST, "pair_group=treatment"), Some(0.25));
+    let details = &period.window.details["provider_pair"];
+    assert_eq!(
+        details["pair_group=control"]["review"]["cost_reason"],
+        pair::NO_PRICES
+    );
+    assert_eq!(
+        details["pair_group=treatment"]["worker"]["cost_reason"],
+        pair::NO_PRICES
+    );
+    // The tokens stay.
+    assert_eq!(
+        measure(period, pair::REVIEW_TOKENS, "pair_group=control").value,
+        Some(3_100_000.0)
+    );
+}
