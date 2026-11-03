@@ -463,7 +463,7 @@ impl Supervisor<'_> {
             && let Some(ask) = self.unclosed_landing_ask_after(events, anchor)?
         {
             info!(run_id = %run.id(), ask_id = %ask.id, "run {} waits for a person in ask {}, opened before the supervisor stopped; it is not asked again", run.id(), ask.id);
-            then = AfterExit::Rest { close: true };
+            then = after_exit_waiting(then, Some(&ask));
         }
         let mut watch = ExitWatch::new(session, then);
         // Never a second exit request after the anchor (task 959).
@@ -490,29 +490,8 @@ impl Supervisor<'_> {
             return Ok(None);
         };
         let after = |kind: EventKind| events.iter().any(|e| e.id > started.id && e.kind == kind);
-        if !after(EventKind::ReviewFailed) {
+        if let Some(failed) = adopted_failed_review(run.status(), events, started, &ask) {
             let attempt = restore::<AttemptOf>(&started.payload).attempt.unwrap_or(1);
-            // The failure is in the ask's first line (`open_failed_review_ask`),
-            // and a `send_back` names it to the resumed session.
-            let error = ask
-                .question
-                .lines()
-                .next()
-                .and_then(|line| line.split_once("): "))
-                .map_or_else(
-                    || format!("review {attempt} failed and ask {} was opened for it before the supervisor stopped", ask.id),
-                    |(_, error)| error.to_owned(),
-                );
-            let failed = json!({
-                "code": ReasonCode::JobFailed,
-                "attempt": attempt,
-                "error": error,
-                "status": run.status().as_str(),
-                "ask_id": ask.id,
-                // Filled in by the adopter, not recorded when the review
-                // failed (`adopted_review_failed`).
-                "adopted": true,
-            });
             // Its agent's Execution, read from the output it left.
             let failed = adopted_review_failed(failed, events, started.id, || {
                 let launch = crate::domain::actor_model::ActorLaunch::recorded(
@@ -551,11 +530,7 @@ impl Supervisor<'_> {
         events: &[crate::domain::RunEvent],
         anchor: &crate::domain::RunEvent,
     ) -> Result<Option<crate::domain::Ask>> {
-        let Some(ask_id) = landing_ask_after(events, anchor.id) else {
-            return Ok(None);
-        };
-        let ask = self.queue.read_ask(ask_id)?;
-        Ok(ask.closed_at.is_none().then_some(ask))
+        unclosed_landing_ask(events, anchor.id, |id| self.queue.read_ask(id))
     }
     /// Whether a lease no longer has a working process behind it: its pid
     /// is dead or its heartbeat is older than `HEARTBEAT_TIMEOUT_SECS`.
@@ -1317,6 +1292,77 @@ fn landing_ask_after(events: &[RunEvent], anchor: EventId) -> Option<AskId> {
         })
         .and_then(|opened| opened.ask_id)
         .map(AskId::new)
+}
+
+/// The last `approve_landing` ask the supervisor opened after event
+/// `anchor` ([`landing_ask_after`]), read by `read`, if nobody closed it
+/// since: the ask of the step the anchor led to, open or answered, which
+/// an adopter waits for; one closed (its answer applied) is not waited
+/// for.
+fn unclosed_landing_ask(
+    events: &[RunEvent],
+    anchor: EventId,
+    read: impl FnOnce(AskId) -> Result<crate::domain::Ask>,
+) -> Result<Option<crate::domain::Ask>> {
+    let Some(ask_id) = landing_ask_after(events, anchor) else {
+        return Ok(None);
+    };
+    let ask = read(ask_id)?;
+    Ok(ask.closed_at.is_none().then_some(ask))
+}
+
+/// What an adopted run does after its exit, `then`, once the ask `waited`
+/// it would open was opened before the supervisor died
+/// ([`unclosed_landing_ask`]): it rests, its session closed, for that ask
+/// rather than asking again, which would close it as stale and lose an
+/// answer given while no supervisor ran (task 425). Any other step, or
+/// none opened, goes on as `then`.
+fn after_exit_waiting(then: AfterExit, waited: Option<&crate::domain::Ask>) -> AfterExit {
+    match (then, waited) {
+        (AfterExit::Ask { .. }, Some(_)) => AfterExit::Rest { close: true },
+        (then, _) => then,
+    }
+}
+
+/// The `review_failed` an adopter records for the review `started` (of a
+/// run in `status`) whose failure's `approve_landing` ask `ask` was opened
+/// before the supervisor died (task 424): its attempt, the failure read
+/// from the ask's first line (`open_failed_review_ask`), the ask and
+/// `adopted`. `None` when a `review_failed` was recorded after `started`
+/// already, by a supervisor that died before giving the lease back.
+fn adopted_failed_review(
+    status: RunStatus,
+    events: &[RunEvent],
+    started: &RunEvent,
+    ask: &crate::domain::Ask,
+) -> Option<Value> {
+    if events
+        .iter()
+        .any(|e| e.id > started.id && e.kind == EventKind::ReviewFailed)
+    {
+        return None;
+    }
+    let attempt = restore::<AttemptOf>(&started.payload).attempt.unwrap_or(1);
+    // A `send_back` names the failure to the resumed session.
+    let error = ask
+        .question
+        .lines()
+        .next()
+        .and_then(|line| line.split_once("): "))
+        .map_or_else(
+            || format!("review {attempt} failed and ask {} was opened for it before the supervisor stopped", ask.id),
+            |(_, error)| error.to_owned(),
+        );
+    Some(json!({
+        "code": ReasonCode::JobFailed,
+        "attempt": attempt,
+        "error": error,
+        "status": status.as_str(),
+        "ask_id": ask.id,
+        // Filled in by the adopter, not recorded when the review failed
+        // (`adopted_review_failed`).
+        "adopted": true,
+    }))
 }
 
 /// The number of the last turn request recorded before event `anchor`.
@@ -2296,6 +2342,167 @@ mod tests {
         ];
         assert_eq!(last_request_before(&requests, EventId::new(3)), Some(2));
         assert_eq!(last_request_before(&requests, EventId::new(1)), None);
+    }
+
+    /// An `approve_landing` ask of a failed review, opened by the supervisor
+    /// before it died: `question` its text, answered with `answer`, closed
+    /// when `closed`.
+    fn failed_review_ask(question: &str, answer: Option<&str>, closed: bool) -> crate::domain::Ask {
+        serde_json::from_value(json!({
+            "id": 5, "kind": "approve_landing", "task_id": null, "run_id": "r",
+            "question": question, "options": ["land", "send_back", "cancel"],
+            "answer": answer, "asked_by": "supervisor", "reason_category": "scope",
+            "created_at": 1, "answered_at": answer.map(|_| 2),
+            "closed_at": closed.then_some(3),
+        }))
+        .unwrap()
+    }
+
+    /// Task 424 and task 592: the adopter of a run whose failed review's
+    /// `approve_landing` ask the dead supervisor opened waits for that ask,
+    /// open or answered, and is not reviewed again; once it was closed (its
+    /// answer applied) there is nothing to wait for and the run is reviewed
+    /// again. What it records is the `review_failed` of the review the ask
+    /// follows (its attempt, the review retried before it included, and
+    /// the failure of the ask's first line), once: not when the dead
+    /// supervisor recorded it already.
+    #[test]
+    fn an_adopter_waits_for_the_failed_reviews_ask_and_records_its_failure_once() {
+        let question = "The supervisor's headless review of run r (task 1) failed and gave no verdict (review 1): exit status 3\nReview material: r/review.md";
+        let started = |id, attempt| {
+            event(
+                id,
+                event_kind::REVIEW_STARTED,
+                json!({"attempt": attempt, "workspace_id": null, "session_live": false}),
+            )
+        };
+        let opened = event(
+            3,
+            event_kind::ASK_OPENED,
+            json!({"kind": "approve_landing", "asked_by": "supervisor", "ask_id": 5}),
+        );
+        let events = [started(2, 1), opened.clone()];
+        for answer in [None, Some("cancel")] {
+            let waited = unclosed_landing_ask(&events, EventId::new(2), |_| {
+                Ok(failed_review_ask(question, answer, false))
+            })
+            .unwrap()
+            .expect("the open or answered ask is waited for");
+            assert_eq!(waited.answer.as_deref(), answer);
+            let failed =
+                adopted_failed_review(RunStatus::AwaitingIntegration, &events, &events[0], &waited)
+                    .expect("its review_failed is recorded");
+            assert_eq!(
+                failed,
+                json!({"code": "job_failed", "attempt": 1, "error": "exit status 3",
+                       "status": "awaiting_integration", "ask_id": 5, "adopted": true})
+            );
+        }
+        // Closed: reviewed again.
+        assert!(
+            unclosed_landing_ask(&events, EventId::new(2), |_| Ok(failed_review_ask(
+                question,
+                Some("land"),
+                true
+            )))
+            .unwrap()
+            .is_none()
+        );
+        // No ask after the review's start: nothing to wait for, and the
+        // queue is not read.
+        assert!(
+            unclosed_landing_ask(&events, EventId::new(3), |_| panic!("no ask to read"))
+                .unwrap()
+                .is_none()
+        );
+        // The second review, after one retried for an unreadable verdict.
+        let retried = [
+            started(1, 1),
+            event(2, event_kind::REVIEW_RETRIED, json!({"attempt": 1})),
+            started(3, 2),
+            event(4, event_kind::ASK_OPENED, opened.payload.clone()),
+        ];
+        let ask = failed_review_ask(&question.replace("(review 1)", "(review 2)"), None, false);
+        let failed =
+            adopted_failed_review(RunStatus::AwaitingIntegration, &retried, &retried[2], &ask)
+                .unwrap();
+        assert_eq!(failed["attempt"], 2);
+        assert_eq!(failed["error"], "exit status 3");
+        // Recorded by the dead supervisor already: not again.
+        let recorded = [
+            started(2, 1),
+            opened.clone(),
+            event(
+                4,
+                event_kind::REVIEW_FAILED,
+                json!({"attempt": 1, "ask_id": 5}),
+            ),
+        ];
+        let ask = failed_review_ask(question, None, false);
+        assert!(
+            adopted_failed_review(
+                RunStatus::AwaitingIntegration,
+                &recorded,
+                &recorded[0],
+                &ask
+            )
+            .is_none()
+        );
+        // A question that does not name the failure names the review and
+        // the ask.
+        let unnamed = failed_review_ask("the review failed", None, false);
+        let failed = adopted_failed_review(
+            RunStatus::AwaitingIntegration,
+            &events,
+            &events[0],
+            &unnamed,
+        )
+        .unwrap();
+        assert_eq!(
+            failed["error"],
+            "review 1 failed and ask 5 was opened for it before the supervisor stopped"
+        );
+    }
+
+    /// Task 425: the adopter of a run whose `concern` the dead supervisor
+    /// asked about rests for that ask, open or answered, after the exit,
+    /// rather than asking again; without such an ask, or after any other
+    /// step, it goes on as the verdict says.
+    #[test]
+    fn an_adopter_rests_for_the_concerns_ask_the_dead_supervisor_opened() {
+        let ask = || AfterExit::Ask {
+            decision: ReviewDecision::Concern,
+            reasons: vec!["out of scope".into()],
+            summary: "scope".into(),
+            why: None,
+            recommendation: None,
+            confidence: None,
+            reason_category: None,
+            requested_by: None,
+            sent_back: None,
+        };
+        let opened = failed_review_ask(
+            "The supervisor's review of run r (task 1) returned concern: scope",
+            None,
+            false,
+        );
+        assert!(matches!(
+            after_exit_waiting(ask(), Some(&opened)),
+            AfterExit::Rest { close: true }
+        ));
+        let answered = failed_review_ask("concern", Some("cancel"), false);
+        assert!(matches!(
+            after_exit_waiting(ask(), Some(&answered)),
+            AfterExit::Rest { close: true }
+        ));
+        assert!(matches!(
+            after_exit_waiting(ask(), None),
+            AfterExit::Ask { .. }
+        ));
+        assert!(matches!(
+            after_exit_waiting(AfterExit::Land, Some(&opened)),
+            AfterExit::Land
+        ));
     }
 
     /// Task 1558: the verdict an adopter reads back is the domain's

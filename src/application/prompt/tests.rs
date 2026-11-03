@@ -4594,6 +4594,45 @@ fn binary_facts_of_a_build_without_a_commit_cannot_tell_what_it_holds() {
     assert_eq!(facts.replacements.len(), 1);
 }
 
+/// What a build that cannot tell whether it holds a dependency's landing
+/// gives the recovery job: `held: null` with its `why`, in the run
+/// directory's file (the facts' JSON) and in the prompt.
+#[test]
+fn a_build_that_cannot_tell_what_it_holds_says_so_in_the_file_and_the_prompt() {
+    let run = run(7, RunStatus::Failed, None);
+    let events = vec![binary_event(10, Some(RUN), "run_claimed", json!({}))];
+    let landings = vec![(TaskId::new(1), Some("aaa".to_owned()))];
+    let holds = |_: &str, _: &str| -> Result<bool> { panic!("nothing to ask git") };
+    let binary = binary_facts("0.1.0", &run, &events, (&[], 0), &landings, &holds);
+    let file = serde_json::to_value(&binary).unwrap();
+    assert!(file["dependencies"][0]["held"].is_null(), "{file}");
+    assert!(file["dependencies"][0]["why"].is_string(), "{file}");
+    let task = task(7, "work", TaskStatus::InProgress);
+    let facts = json!({"alert": "failed"});
+    let fitted = recovery_prompt(
+        &task,
+        &run,
+        1,
+        &RecoveryMaterial {
+            alert: RecoveryAlert::Failed,
+            ended: Some("Last error of the run: ...".into()),
+            facts: &facts,
+            workspace: "ws",
+            screen: "",
+            processes: Ok(Vec::new()),
+            git_status: "",
+            head: SHA,
+            receipt_commit: None,
+            history: &[],
+            allowed: &crate::domain::recovery::ENDED_ACTIONS,
+            binary: &binary,
+        },
+    )
+    .unwrap();
+    assert!(fitted.text.contains("\"held\":null"), "{}", fitted.text);
+    assert!(fitted.text.contains("names no commit"), "{}", fitted.text);
+}
+
 /// The recovery prompt carries the binary's facts right after the
 /// alert's, counted in their own sections, and tells a job that may
 /// retry that a run the binary failed is retried once the build holds

@@ -25,5 +25,6 @@ mod previous_run_decisions;
 mod provider_trial;
 mod review_launch;
 mod task_release;
+mod triage;
 mod unapplied_decisions;
 mod worker_trial;

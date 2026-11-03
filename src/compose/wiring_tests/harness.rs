@@ -437,6 +437,21 @@ impl Wiring {
         self.supervise(false, Some(&mut act))
     }
 
+    /// [`Self::supervise_once_while`] whose `act` is also given what asks
+    /// the supervisor to stop (it drains, as at a stop request), and whose
+    /// outcome may name the errors of its runs (a lease another process
+    /// took), which the caller checks.
+    pub(super) fn supervise_once_while_stoppable(
+        &self,
+        mut act: impl FnMut(&mut SqliteQueue, &dyn Fn()) -> bool,
+    ) -> Value {
+        let stop = Arc::new(AtomicBool::new(false));
+        let asks_stop = stop.clone();
+        let ask_stop = move || asks_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut acting = |queue: &mut SqliteQueue| act(queue, &ask_stop);
+        self.supervise_with(stop, Some(&mut acting))
+    }
+
     /// [`Self::supervise_reporting`] whose outcome must name no error.
     fn supervise(
         &self,
@@ -451,9 +466,18 @@ impl Wiring {
     fn supervise_reporting(
         &self,
         stopped: bool,
+        act: Option<&mut dyn FnMut(&mut SqliteQueue) -> bool>,
+    ) -> Value {
+        self.supervise_with(Arc::new(AtomicBool::new(stopped)), act)
+    }
+
+    /// [`Self::supervise_reporting`] whose supervisor drains once `stop`
+    /// is set.
+    fn supervise_with(
+        &self,
+        stop: Arc<AtomicBool>,
         mut act: Option<&mut dyn FnMut(&mut SqliteQueue) -> bool>,
     ) -> Value {
-        let stop = Arc::new(AtomicBool::new(stopped));
         let (returned, returns) = mpsc::channel();
         let supervisor = {
             let parts = Parts {

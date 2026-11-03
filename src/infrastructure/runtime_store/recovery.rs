@@ -4,6 +4,7 @@
 use super::*;
 use crate::application::KeptOutcome;
 use crate::domain::cancel_reason::NewCancel;
+use crate::domain::recovery::TriageAnswer;
 use crate::domain::replan_snapshot::RestoreStart;
 use crate::domain::task_hold::{
     self, DiscardReason, Disposition, HoldGuard, KeptSource, ProgressVersion,
@@ -2075,6 +2076,17 @@ fn apply_kept(
 /// ([`crate::domain::telemetry::run_ended`]), so the wrapper of its resume
 /// would number its sessions from the first seq again.
 fn ensure_revivable(conn: &Connection, id: &RunId) -> Result<()> {
+    ensure!(
+        revivable(conn, id)?,
+        "run {id} is no longer the latest run of a task that goes on"
+    );
+    Ok(())
+}
+
+/// Whether recovery may still bring run `id` back under its own ID
+/// ([`crate::domain::telemetry::run_revivable`]), read in the caller's
+/// transaction ([`ensure_revivable`]).
+fn revivable(conn: &Connection, id: &RunId) -> Result<bool> {
     let (latest, task): (Option<RunId>, Option<String>) = conn.query_row(
         "SELECT (SELECT id FROM task_runs WHERE task_id=r.task_id ORDER BY rowid DESC LIMIT 1),
                 (SELECT status FROM tasks WHERE id=r.task_id)
@@ -2085,16 +2097,17 @@ fn ensure_revivable(conn: &Connection, id: &RunId) -> Result<()> {
     let task = task
         .map(|status| status.parse::<crate::domain::TaskStatus>())
         .transpose()?;
-    ensure!(
-        crate::domain::telemetry::run_revivable(id, latest.as_ref(), task),
-        "run {id} is no longer the latest run of a task that goes on"
-    );
-    Ok(())
+    Ok(crate::domain::telemetry::run_revivable(
+        id,
+        latest.as_ref(),
+        task,
+    ))
 }
 
 /// Run `id`, `failed` or `interrupted`, its task's latest run, with no
 /// lease but a stale one, which goes (so its holder cannot renew it and
-/// write after this, ADR-0039 decision 7).
+/// write after this, ADR-0039 decision 7); refused as
+/// [`crate::domain::recovery::triage_answer_refusal`] says.
 fn unleased_latest_triageable(conn: &Connection, now: i64, id: &RunId) -> Result<TaskRun> {
     let lease = conn
         .query_row(
@@ -2103,28 +2116,26 @@ fn unleased_latest_triageable(conn: &Connection, now: i64, id: &RunId) -> Result
             lease_row,
         )
         .optional()?;
-    ensure!(
-        lease.is_none_or(|lease| lease_is_stale(&lease, now)),
-        "run {id} is leased"
-    );
+    let leased = lease.is_some_and(|lease| !lease_is_stale(&lease, now));
+    let run = if leased { None } else { stored_run(conn, id)? };
+    let latest: Option<RunId> = match &run {
+        Some(run) => Some(conn.query_row(
+            "SELECT id FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            [run.task_id()],
+            |r| r.get(0),
+        )?),
+        None => None,
+    };
+    if let Some(why) = crate::domain::recovery::triage_answer_refusal(
+        id,
+        leased,
+        run.as_ref().map(|run| (run.task_id(), run.status())),
+        latest.as_ref(),
+    ) {
+        bail!(why);
+    }
     conn.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
-    let run = stored_run(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
-    ensure!(
-        run::check_triageable(&run).is_ok(),
-        "run {id} is {}, not failed or interrupted",
-        run.status().as_str()
-    );
-    let latest: RunId = conn.query_row(
-        "SELECT id FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
-        [run.task_id()],
-        |r| r.get(0),
-    )?;
-    ensure!(
-        latest == *id,
-        "run {id} is no longer the latest run of task {}",
-        run.task_id()
-    );
-    Ok(run)
+    run.with_context(|| format!("run {id} does not exist"))
 }
 
 /// Apply the answer of a triage's `decide` ask to its `failed` or
@@ -2133,8 +2144,10 @@ fn unleased_latest_triageable(conn: &Connection, now: i64, id: &RunId) -> Result
 /// ask closed meanwhile, by another supervisor or a person, is refused,
 /// and so is a run whose task is held, ADR-t1879-1): `retry` makes the
 /// task `ready`, `resume` the run `needs_session` with `reason` as
-/// `last_error` (refused once its task ended, [`ensure_revivable`]),
-/// `cancel` cancels the task. Recorded as `triage_decided`
+/// `last_error` (refused once its task ended, [`revivable`]), `cancel`
+/// cancels the task; which run takes an answer and what it does are
+/// [`crate::domain::recovery::triage_answer_refusal`] and
+/// [`crate::domain::recovery::triage_answer`]. Recorded as `triage_decided`
 /// (`ask_id`, `answer`, `reason`, `status`), and an answer a hold kept as
 /// `hold_result_applied`.
 fn decide_triage_in(
@@ -2154,10 +2167,19 @@ fn decide_triage_in(
         params![ask_id, id],
         |r| r.get(0),
     )?;
-    ensure!(
-        pending,
-        "ask {ask_id} is not an answered, unclosed ask of run {id}"
-    );
+    let options: Vec<String> = if pending {
+        let options: String =
+            conn.query_row("SELECT options FROM asks WHERE id=?1", [ask_id], |r| {
+                r.get(0)
+            })?;
+        serde_json::from_str(&options)?
+    } else {
+        Vec::new()
+    };
+    let revivable = pending && answer == "resume" && revivable(conn, id)?;
+    let action =
+        crate::domain::recovery::triage_answer(id, ask_id, pending, answer, &options, revivable)
+            .map_err(anyhow::Error::msg)?;
     // The answer a hold kept, applied here after its release before a
     // pass settled it, is settled as applied: neither the task's end
     // below nor that pass discards it.
@@ -2170,8 +2192,8 @@ fn decide_triage_in(
         )?;
     }
     let timestamp = refusals.generators.clock.timestamp();
-    match answer {
-        "retry" => {
+    match action {
+        TriageAnswer::Retry => {
             crate::infrastructure::sqlite::transition_task(
                 conn,
                 run.task_id(),
@@ -2179,8 +2201,7 @@ fn decide_triage_in(
                 &timestamp,
             )?;
         }
-        "resume" => {
-            ensure_revivable(conn, id)?;
+        TriageAnswer::Resume => {
             apply(
                 conn,
                 refusals,
@@ -2190,7 +2211,7 @@ fn decide_triage_in(
                 |run| run::resume_after_triage(run, reason.to_owned()),
             )?;
         }
-        "cancel" => {
+        TriageAnswer::Cancel => {
             crate::infrastructure::sqlite::cancel_task(
                 conn,
                 run.task_id(),
@@ -2201,17 +2222,7 @@ fn decide_triage_in(
         // Another option the ask offered is the recovery job's own: it
         // goes back to the job, whose next round reads the answer
         // (ADR-0047 decision 40). Nothing moves here.
-        other => {
-            let options: String =
-                conn.query_row("SELECT options FROM asks WHERE id=?1", [ask_id], |r| {
-                    r.get(0)
-                })?;
-            let options: Vec<String> = serde_json::from_str(&options)?;
-            ensure!(
-                options.iter().any(|option| option == other),
-                "{other:?} is not an answer the recovery applies"
-            );
-        }
+        TriageAnswer::Recover => {}
     }
     conn.execute(
         "UPDATE asks SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",

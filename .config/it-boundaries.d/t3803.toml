@@ -332,13 +332,6 @@ reason = "headless の worker の session wrapper の process が turn の strea
 task = 3803
 
 [[boundary]]
-id = "recovery-job-retries-a-failed-run-and-it-lands"
-kind = "supervisorの配線"
-test = "runtime_triage::a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands"
-reason = "失敗した run を復旧 job が受け、commit の無い run の retry を適用して auto_repaired と triage_finished を記録し、round の終わりに残った wrapper を止めて次の run が着地することは、supervisor の配線を通してしか確かめられない。verdict を適用するかの判断は domain::recovery の unit test"
-task = 3803
-
-[[boundary]]
 id = "retry-inherit-carries-the-run-branch-over"
 kind = "Git"
 test = "runtime_triage::retry_inherit_carries_the_branch_over_once_and_a_failed_job_is_recovered_by_hand"

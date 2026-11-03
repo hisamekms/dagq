@@ -80,6 +80,41 @@ pub(super) fn committed_no_receipt(_: &RunId, worktree: &Path, git: &FakeGit) ->
     Ok(Value::Null)
 }
 
+/// What a worker's turn does whose session dies before its receipt: one
+/// commit on its worktree, then its process ends with 7 on Claude's error
+/// result, writing no receipt, so that its session ends.
+pub(super) fn committed_and_died(_: &RunId, worktree: &Path, git: &FakeGit) -> Result<Value> {
+    git.commit_in(worktree)?;
+    Ok(died())
+}
+
+/// What a worker's turn does whose session dies before it did anything:
+/// its process ends with 7 on Claude's error result, writing no receipt.
+pub(super) fn died_at_once(_: &RunId, _: &Path, _: &FakeGit) -> Result<Value> {
+    Ok(died())
+}
+
+/// The receipt that stands for a turn's process dying ([`committed_and_died`]).
+fn died() -> Value {
+    json!({"wiring_session_dies": 7})
+}
+
+/// The receipt of a worker that made no commit in its turn and wrote
+/// `succeeded` naming its worktree's head: on the base, validation fails
+/// it as `commit_mismatch`; after an earlier turn's commit, it names that.
+pub(super) fn succeeded_at_the_head(run: &RunId, worktree: &Path, git: &FakeGit) -> Result<Value> {
+    let head = crate::application::Repository::head(git, worktree)?;
+    Ok(json!({
+        "run_id": run,
+        "result": "succeeded",
+        "commit": head,
+        "tests": {"status": "passed", "evidence_or_reason": "test -f seed.txt"},
+        "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
+        "subagent_review": {"status": "not_applicable", "evidence_or_reason": "no change"},
+        "summary": "the base meets it",
+    }))
+}
+
 /// What a review job meets when its provider wants a login: it prints
 /// Claude's login message and ends with 1, giving no verdict. A test's
 /// script names it among the verdicts.
@@ -90,6 +125,13 @@ pub(super) fn login_wall() -> Value {
 /// A review's verdict `decision` with `summary`.
 pub(super) fn verdict(decision: &str, summary: &str) -> Value {
     json!({"verdict": decision, "reasons": [], "summary": summary})
+}
+
+/// A recovery job's verdict `repair` of high confidence with the one
+/// `action` and `diagnosis`.
+pub(super) fn repair(action: Value, diagnosis: &str) -> Value {
+    json!({"verdict": "repair", "confidence": "high",
+           "diagnosis": diagnosis, "actions": [action]})
 }
 
 /// What the agent is told to do: the receipt of each worker's turn in
@@ -107,6 +149,7 @@ const TURN: &str = "wiring-worker-turn";
 const REVIEW: &str = "wiring-review";
 const AGENT_JOB: &str = "wiring-agent-job";
 const JOB: &str = "wiring-job";
+const RECOVERY: &str = "wiring-recovery-job";
 
 /// The agent: its script, and what it started, by program, in order.
 pub(super) struct FakeAgent {
@@ -128,9 +171,22 @@ pub(super) struct FakeAgent {
     /// The session of each worker's turn, in order: `start <name>` for a
     /// new one, `resume <name>` for one gone on.
     turn_sessions: Mutex<Vec<String>>,
+    /// The model and effort each worker's turn was started with, in order.
+    turn_models: Mutex<Vec<(String, String)>>,
+    /// The prompt each worker's turn was given, in order.
+    turn_prompts: Mutex<Vec<String>>,
     /// What lets the next worker's turn end, once: the turn runs, its run
     /// holding its slot, until it says so.
     held_turn: Mutex<Option<mpsc::Receiver<()>>>,
+    /// The verdict of each recovery job in order, before the script's;
+    /// without one left, a job answers the script's next verdict.
+    recoveries: Mutex<VecDeque<Value>>,
+    /// The prompt of each recovery job and the directory it ran in, in
+    /// order.
+    recovery_prompts: Mutex<Vec<(String, PathBuf)>>,
+    /// What lets each next recovery job end, in order: its process runs
+    /// until it says so.
+    held_recovery: Mutex<VecDeque<mpsc::Receiver<()>>>,
 }
 
 impl FakeAgent {
@@ -152,8 +208,42 @@ impl FakeAgent {
             review_prompts: Mutex::default(),
             on_review: Mutex::default(),
             turn_sessions: Mutex::default(),
+            turn_models: Mutex::default(),
+            turn_prompts: Mutex::default(),
             held_turn: Mutex::default(),
+            recoveries: Mutex::default(),
+            recovery_prompts: Mutex::default(),
+            held_recovery: Mutex::default(),
         }
+    }
+
+    /// Hold the next recovery job not held yet: its process starts and
+    /// runs until `release` says so or is dropped (by the test's deadline
+    /// at the latest); only then does it print its verdict and end. A
+    /// signal ends it at once.
+    pub(super) fn hold_next_recovery(&self, release: mpsc::Receiver<()>) {
+        self.held_recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(release);
+    }
+
+    /// The agent whose next recovery jobs answer `verdicts`, one per job
+    /// in order, before the script's verdicts.
+    pub(super) fn recovering(&self, verdicts: Vec<Value>) {
+        *self
+            .recoveries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = verdicts.into();
+    }
+
+    /// The prompt of each recovery job and the directory it ran in, in
+    /// order.
+    pub(super) fn recovery_prompts(&self) -> Vec<(String, PathBuf)> {
+        self.recovery_prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The directory each review job was started in, in order.
@@ -195,6 +285,22 @@ impl FakeAgent {
     /// new one, `resume <name>` for one gone on.
     pub(super) fn turn_sessions(&self) -> Vec<String> {
         self.turn_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The model and effort each worker's turn was started with, in order.
+    pub(super) fn turn_models(&self) -> Vec<(String, String)> {
+        self.turn_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The prompt each worker's turn was given, in order.
+    pub(super) fn turn_prompts(&self) -> Vec<String> {
+        self.turn_prompts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -304,11 +410,24 @@ impl AgentProvider for FakeAgent {
         Ok(command)
     }
 
-    /// A headless job's (the recovery job's): it answers the script's
-    /// next verdict, as a review does.
-    fn headless_command(&self, cwd: &Path, _: &str, _: JobAccess) -> Result<CommandSpec> {
-        let mut command = CommandSpec::new(JOB);
+    /// A headless job's (the recovery job's): it answers the next verdict
+    /// the test gave [`FakeAgent::recovering`], or else the script's next
+    /// verdict, as a review does; its prompt and directory are recorded.
+    fn headless_command(&self, cwd: &Path, prompt: &str, _: JobAccess) -> Result<CommandSpec> {
+        self.recovery_prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((prompt.to_owned(), cwd.to_owned()));
+        let recovery = self
+            .recoveries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front();
+        let mut command = CommandSpec::new(if recovery.is_some() { RECOVERY } else { JOB });
         command.current_dir(cwd);
+        if let Some(verdict) = recovery {
+            command.arg(verdict.to_string());
+        }
         Ok(command)
     }
 
@@ -319,10 +438,17 @@ impl AgentProvider for FakeAgent {
     }
 
     /// Claude's own arguments of a launch's model and effort, on a review
-    /// agent's job only: the other programs take no option.
+    /// agent's job only: the other programs take no option; a worker's
+    /// turn's model and effort are recorded.
     fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
         if command.get_program() == AGENT_JOB {
             self.claude.select_model(command, model, effort);
+        }
+        if command.get_program() == TURN {
+            self.turn_models
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((model.to_owned(), effort.to_owned()));
         }
     }
 
@@ -431,6 +557,10 @@ impl Spawner for FakeAgent {
                 let [run_dir, session] = args.as_slice() else {
                     bail!("a worker's turn names its run directory and session");
                 };
+                self.turn_prompts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(command.get_stdin().unwrap_or_default().to_owned());
                 let turn = self.turn(run_dir, &session.to_string_lossy())?;
                 let held = self
                     .held_turn
@@ -443,11 +573,13 @@ impl Spawner for FakeAgent {
                     return Ok(Box::new(Held {
                         pid: self.record_start(program),
                         release,
-                        end: Some(Box::new(move || outputs.write(&files, &turn.end()?))),
+                        end: Some(Box::new(move || outputs.write(&files, &turn.end()?.0))),
                         ended: false,
                     }));
                 }
-                turn.end()?
+                let (stdout, ended) = turn.end()?;
+                code = ended;
+                stdout
             }
             REVIEW => {
                 if let Some(cwd) = command.get_current_dir() {
@@ -484,6 +616,28 @@ impl Spawner for FakeAgent {
                     );
                 Self::agent_job(command.get_stdin().unwrap_or_default())
             }
+            RECOVERY => {
+                let [verdict] = args.as_slice() else {
+                    bail!("a recovery job names its verdict");
+                };
+                let stdout = format!("{}\n", verdict.to_string_lossy());
+                let held = self
+                    .held_recovery
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop_front();
+                if let Some(release) = held {
+                    let outputs = Outputs::of(&streams);
+                    let files = self.files.clone();
+                    return Ok(Box::new(Held {
+                        pid: self.record_start(program),
+                        release,
+                        end: Some(Box::new(move || outputs.write(&files, &stdout))),
+                        ended: false,
+                    }));
+                }
+                stdout
+            }
             other => bail!("the wiring test's agent starts no {other}"),
         };
         Outputs::of(&streams).write(&self.files, &stdout)?;
@@ -519,28 +673,40 @@ struct Turn {
 
 impl Turn {
     /// The turn's receipt written, if the script gives one other than
-    /// [`no_receipt`]'s; its output: the model's answer in the turn's
-    /// session, then the line of Claude's result.
-    fn end(self) -> Result<String> {
+    /// [`no_receipt`]'s; its output (the model's answer in the turn's
+    /// session, then the line of Claude's result) and the code its process
+    /// ends with (Claude's error result and 7 when the script's turn dies).
+    fn end(self) -> Result<(String, i32)> {
         if let Some((receipt, worktree, path)) = self.receipt {
             let receipt = receipt(&self.run, &worktree, &self.git)?;
+            if let Some(code) = receipt["wiring_session_dies"].as_i64() {
+                let result = json!({
+                    "type": "result", "subtype": "error_during_execution", "is_error": true,
+                    "num_turns": 1, "duration_ms": 5, "session_id": self.session,
+                    "usage": {"input_tokens": 7, "output_tokens": 3},
+                });
+                return Ok((format!("{result}\n"), i32::try_from(code)?));
+            }
             if !receipt.is_null() {
                 self.files.write(&path, receipt.to_string().as_bytes())?;
             }
         }
-        Ok(format!(
-            "{}\n{}\n",
-            json!({
-                "type": "assistant", "session_id": self.session,
-                "message": {"model": "wiring-model", "content": [{"type": "text", "text": "done"}]},
-            }),
-            json!({
-                "type": "result", "subtype": "success", "is_error": false,
-                "num_turns": 1, "duration_ms": 5, "total_cost_usd": 0.01,
-                "session_id": self.session, "result": "done",
-                "usage": {"input_tokens": 7, "output_tokens": 3},
-                "permission_denials": [],
-            })
+        Ok((
+            format!(
+                "{}\n{}\n",
+                json!({
+                    "type": "assistant", "session_id": self.session,
+                    "message": {"model": "wiring-model", "content": [{"type": "text", "text": "done"}]},
+                }),
+                json!({
+                    "type": "result", "subtype": "success", "is_error": false,
+                    "num_turns": 1, "duration_ms": 5, "total_cost_usd": 0.01,
+                    "session_id": self.session, "result": "done",
+                    "usage": {"input_tokens": 7, "output_tokens": 3},
+                    "permission_denials": [],
+                })
+            ),
+            0,
         ))
     }
 }
@@ -582,7 +748,8 @@ impl Outputs {
     }
 }
 
-/// A worker's turn held in its process ([`FakeAgent::hold_next_turn`]):
+/// A worker's turn or a recovery job held in its process
+/// ([`FakeAgent::hold_next_turn`], [`FakeAgent::hold_next_recovery`]):
 /// running until its release, then writing what it ends with; it ends at
 /// the look after that, so that its wrapper reads its output first.
 struct Held {

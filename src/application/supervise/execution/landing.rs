@@ -1971,12 +1971,11 @@ impl Supervisor<'_> {
             let revises = (history.revise_attempts(), history.revise_limit());
             return self.past_revise_limit(run, session, verdict, job, sent_back, revises);
         };
-        let Some(live) = session
-            .clone()
-            .filter(|_| session_alive(self, run.id()).unwrap_or(false))
-        else {
-            let why = "the session had ended, so nobody could revise the run".to_owned();
-            return Ok(ask(why, verdict, session));
+        let live = match revise_session(session.clone(), || {
+            session_alive(self, run.id()).unwrap_or(false)
+        }) {
+            Ok(live) => live,
+            Err(why) => return Ok(ask(why, verdict, session)),
         };
         let task = self.queue.show(run.task_id())?.task;
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
@@ -3690,6 +3689,19 @@ pub(super) fn concern_escalation(
     }
 }
 
+/// The session a revise goes to: `session` while it is `alive`, or why a
+/// person is asked about the run instead (the adopted run whose wrapper
+/// died, the session that ended after its receipt), a revise of a run
+/// never given up for want of a session.
+fn revise_session(
+    session: Option<SessionRef>,
+    alive: impl FnOnce() -> bool,
+) -> std::result::Result<SessionRef, String> {
+    session
+        .filter(|_| alive())
+        .ok_or_else(|| "the session had ended, so nobody could revise the run".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3734,6 +3746,27 @@ mod tests {
                        "recommendation": recommendation, "confidence": confidence,
                        "reason_category": null}),
         )
+    }
+
+    /// A `revise` goes to the session only while it lives: an adopted run
+    /// whose wrapper died, or one without a session, asks a person why
+    /// nobody could revise it, and is not given up.
+    #[test]
+    fn a_revise_without_a_live_session_asks_a_person() {
+        let session = || {
+            Some(SessionRef {
+                workspace: "background:1".into(),
+                resume: None,
+            })
+        };
+        let live = revise_session(session(), || true).unwrap();
+        assert_eq!(live.workspace, "background:1");
+        let why = "the session had ended, so nobody could revise the run";
+        assert_eq!(revise_session(session(), || false).unwrap_err(), why);
+        assert_eq!(
+            revise_session(None, || panic!("no session to look at")).unwrap_err(),
+            why
+        );
     }
 
     /// A review is judged past the revise limit once, and a judgment of

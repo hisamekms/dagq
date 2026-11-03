@@ -532,18 +532,6 @@ name = "runtime_sweep::ended_runs_lose_their_build_outputs_and_canceled_tasks_th
 reason = "B 境界（守る境界）: filesystem and git worktree removal"
 task = 1707
 
-# 6.127s, class D
-[[test]]
-name = "runtime_triage::a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited"
-reason = "D 移し替えの予定（判断を unit test へ、goal 119 か 120）: round limit decision"
-task = 1707
-
-# 5.510s, class B
-[[test]]
-name = "runtime_triage::a_triage_whose_lease_moved_is_triaged_again_only_after_its_slot_is_dropped"
-reason = "B 境界（守る境界）: lease race between supervisors"
-task = 1707
-
 # 11.141s, class B
 [[test]]
 name = "runtime_waiting_stages::a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped"
@@ -1665,12 +1653,6 @@ task = 2394
 name = "runtime_sccache::failed_restarts_in_one_supervisor_keep_retrying_but_notify_once_per_fault"
 reason = "B 境界（守る境界）: the supervisor's wiring to the sccache server process: restarts retried by one supervisor and their attention recorded once per fault in SQLite"
 task = 3251
-
-# 7.884s in task 2394's stress, whose change to it was the type of its kind comparisons
-[[test]]
-name = "runtime_triage::the_recovery_job_reads_the_supervisors_build_and_the_dependencies_it_holds"
-reason = "B 境界（守る境界）: recovery: the recovery job's process reads the supervisor's build and the dependencies' landed commits from Git and SQLite"
-task = 2394
 
 # 7.706s in task 2394's stress, whose change to it was the type of its kind comparisons
 [[test]]

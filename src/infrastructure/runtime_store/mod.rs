@@ -715,6 +715,248 @@ mod tests {
         assert!(lease_is_stale(&lease(u32::MAX, T), T));
     }
 
+    /// The unix second the queue of [`failed_run`] stops at.
+    const STOPPED: i64 = 1_900_000_000;
+
+    /// A queue whose clock is stopped at [`STOPPED`], with one task in
+    /// progress whose one run failed, and an answered `decide` ask of that
+    /// run's triage (`retry`, `resume`, `cancel`) answered `answer`.
+    fn failed_run(
+        dir: &std::path::Path,
+        answer: &str,
+    ) -> (
+        SqliteQueue,
+        crate::domain::TaskId,
+        RunId,
+        crate::domain::Ask,
+    ) {
+        use crate::application::TaskStore;
+        use crate::domain::NewTask;
+        /// The queue's clock stopped at one time: what the lease's
+        /// freshness is judged against does not move while the test runs.
+        struct Stopped(std::time::Instant);
+        impl crate::application::Clock for Stopped {
+            fn system_time(&self) -> std::time::SystemTime {
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(STOPPED.unsigned_abs())
+            }
+            fn monotonic(&self) -> std::time::Instant {
+                self.0
+            }
+        }
+        let mut queue = SqliteQueue::init(dir.join("q.db"))
+            .unwrap()
+            .with_generators(crate::application::Generators {
+                clock: std::sync::Arc::new(Stopped(std::time::Instant::now())),
+                ..crate::infrastructure::clock::system()
+            });
+        assert_eq!(queue.generators.clock.now(), STOPPED);
+        let task = queue
+            .add(NewTask {
+                title: "t".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                verification_commands: Vec::new(),
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                dependencies: Vec::new(),
+                goal_dependencies: Vec::new(),
+                priority: Default::default(),
+                goal_id: None,
+                context: String::new(),
+                change: None,
+                provider: None,
+                worker_mode: None,
+                wait_for_build: false,
+                execution_class: Default::default(),
+            })
+            .unwrap()
+            .id();
+        let run = RunId::new("11111111-1111-4111-8111-111111111111").unwrap();
+        queue
+            .conn
+            .execute_batch(&format!(
+                "UPDATE tasks SET status='in_progress' WHERE id={task};
+                 INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit,worktree_path,workspace_id,run_dir)
+                 VALUES ('{run}',{task},'failed','claude','claude','0000000000000000000000000000000000000000','/wt','W','/run');"
+            ))
+            .unwrap();
+        let ask = decide_ask(&mut queue, &run, answer);
+        (queue, task, run, ask)
+    }
+
+    /// A `decide` ask of `run`'s triage, answered `answer`.
+    fn decide_ask(queue: &mut SqliteQueue, run: &RunId, answer: &str) -> crate::domain::Ask {
+        use crate::domain::{AskKind, AskReason, NewAsk};
+        let ask = queue
+            .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
+                topics: Vec::new(),
+                kind: AskKind::Decide,
+                task_id: None,
+                run_id: Some(run.clone()),
+                question: "what now?".into(),
+                options: vec!["retry".into(), "resume".into(), "cancel".into()],
+                asked_by: "supervisor".into(),
+                reason_category: AskReason::RecoveryFailed,
+                finding_id: None,
+                request_id: None,
+            })
+            .unwrap()
+            .ask;
+        queue.answer(ask.id, answer).unwrap();
+        ask
+    }
+
+    /// The answer of a triage's ask, applied by the queue in one
+    /// transaction, by what its SQL reads: an answer refused after the
+    /// transaction wrote (a `resume` of a run whose task ended, refused
+    /// once the stale lease of the run went) moves nothing, the lease
+    /// included; the task's latest run is the one inserted last, so a run
+    /// with a later one takes no answer; `resume` parks the run for a
+    /// session with the reason, takes the stale lease away and closes the
+    /// ask, which leaves the answers to apply, and the ask it closed is not
+    /// applied again. Which answers are refused is
+    /// `domain::recovery::triage_answer_refusal`'s, `triage_answer`'s and
+    /// `domain::telemetry::run_revivable`'s, whose unit tests hold the
+    /// cases.
+    #[test]
+    fn a_refused_triage_answer_moves_nothing_and_a_resume_parks_the_run() {
+        use crate::application::TaskReads;
+        use crate::domain::{RunStatus, TaskStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut queue, task, run, ask) = failed_run(dir.path(), "resume");
+        assert_eq!(queue.triage_answers().unwrap()[0].id, ask.id);
+        queue
+            .conn
+            .execute(
+                "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,'stalled',?2,?3)",
+                rusqlite::params![
+                    run,
+                    std::process::id(),
+                    STOPPED - HEARTBEAT_TIMEOUT_SECS - 1
+                ],
+            )
+            .unwrap();
+        let set_task = |queue: &SqliteQueue, status: TaskStatus| {
+            queue
+                .conn
+                .execute(
+                    "UPDATE tasks SET status=?1 WHERE id=?2",
+                    rusqlite::params![status.as_str(), task.as_i64()],
+                )
+                .unwrap();
+        };
+        set_task(&queue, TaskStatus::Canceled);
+        let error = queue
+            .decide_triage(&run, ask.id, "resume", "fix the test")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no longer the latest run"), "{error}");
+        assert_eq!(queue.run(&run).unwrap().status(), RunStatus::Failed);
+        assert_eq!(
+            queue.show(task).unwrap().task.status(),
+            TaskStatus::Canceled
+        );
+        assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
+        assert!(queue.run_lease(&run).unwrap().is_some());
+        // The task goes on again but has a later run, inserted after this
+        // one: refused, nothing moves.
+        set_task(&queue, TaskStatus::InProgress);
+        queue
+            .conn
+            .execute_batch(&format!(
+                "CREATE TEMP TABLE later AS SELECT * FROM task_runs WHERE id='{run}';
+                 UPDATE later SET id='later', status='claimed', branch=NULL,
+                   worktree_path=NULL, workspace_id=NULL;
+                 INSERT INTO task_runs SELECT * FROM later;"
+            ))
+            .unwrap();
+        let error = queue
+            .decide_triage(&run, ask.id, "resume", "fix the test")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            format!("run {run} is no longer the latest run of task {task}")
+        );
+        assert_eq!(queue.run(&run).unwrap().status(), RunStatus::Failed);
+        assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
+        // The run its task's latest again: the same answer is applied.
+        queue
+            .conn
+            .execute("DELETE FROM task_runs WHERE id='later'", [])
+            .unwrap();
+        let parked = queue
+            .decide_triage(&run, ask.id, "resume", "fix the test")
+            .unwrap();
+        assert_eq!(parked.status(), RunStatus::NeedsSession);
+        assert_eq!(parked.last_error(), Some("fix the test"));
+        assert!(queue.run_lease(&run).unwrap().is_none());
+        assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+        assert!(queue.triage_answers().unwrap().is_empty());
+        // The ask it closed is not applied again, the run failed once more.
+        queue
+            .conn
+            .execute("UPDATE task_runs SET status='failed' WHERE id=?1", [&run])
+            .unwrap();
+        let closed = queue
+            .decide_triage(&run, ask.id, "retry", "x")
+            .unwrap_err()
+            .to_string();
+        assert!(closed.contains("not an answered, unclosed ask"), "{closed}");
+        assert_eq!(queue.run(&run).unwrap().status(), RunStatus::Failed);
+        assert_eq!(
+            queue.show(task).unwrap().task.status(),
+            TaskStatus::InProgress
+        );
+    }
+
+    /// A person's answer to a triage's ask is refused while a lease that is
+    /// not stale holds the run; a stale one (a stalled supervisor's) goes
+    /// with the answer in its transaction, so that its holder, woken up,
+    /// cannot write after the decision (ADR-0039 decision 7).
+    #[test]
+    fn a_triage_answer_takes_the_stale_lease_of_its_run_away() {
+        use crate::application::TaskReads;
+        use crate::domain::TaskStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut queue, task, run, ask) = failed_run(dir.path(), "retry");
+        queue
+            .conn
+            .execute(
+                "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,'stalled',?2,?3)",
+                rusqlite::params![run, std::process::id(), STOPPED],
+            )
+            .unwrap();
+        let leased = queue
+            .decide_triage(&run, ask.id, "retry", "x")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(leased, format!("run {run} is leased"));
+        queue
+            .conn
+            .execute(
+                "UPDATE run_leases SET heartbeat_at=?1",
+                [STOPPED - HEARTBEAT_TIMEOUT_SECS - 1],
+            )
+            .unwrap();
+        queue.decide_triage(&run, ask.id, "retry", "x").unwrap();
+        assert_eq!(queue.show(task).unwrap().task.status(), TaskStatus::Ready);
+        assert!(queue.run_lease(&run).unwrap().is_none());
+        let late = queue
+            .finish_triage(
+                &run,
+                &LeaseToken::new("stalled"),
+                &crate::application::TriageAction::Retry,
+                serde_json::json!({}),
+                Vec::new(),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(late.contains("run lease is missing"), "{late}");
+    }
+
     /// A lease written for a registered supervisor records the
     /// registration's pid, not that of the process writing it (the queue
     /// service); a token with no registration records the writer's own.

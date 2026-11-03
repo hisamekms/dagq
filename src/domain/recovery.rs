@@ -966,9 +966,157 @@ pub fn run_processes<'a>(
         .collect()
 }
 
+/// What a person's answer to a triage's `decide` ask does to its run, as
+/// the queue applies it ([`triage_answer`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriageAnswer {
+    /// The task is `ready` again.
+    Retry,
+    /// The run waits for a session, the answer's reason as its last error.
+    Resume,
+    /// The task is canceled.
+    Cancel,
+    /// One of the recovery job's own options: it goes back to the job,
+    /// whose next round reads it, and nothing moves.
+    Recover,
+}
+
+/// Why run `id` takes no answer to its triage's ask, by what the queue
+/// reads of it in the transaction that would apply one: a lease that is
+/// not stale holds it (`leased`), it is not there (`run` none) or not
+/// `failed` or `interrupted` (`run` its task and status), or its task has
+/// a later run (`latest`, the task's latest run). `None` when it takes
+/// one.
+pub fn triage_answer_refusal(
+    id: &RunId,
+    leased: bool,
+    run: Option<(TaskId, RunStatus)>,
+    latest: Option<&RunId>,
+) -> Option<String> {
+    if leased {
+        return Some(format!("run {id} is leased"));
+    }
+    let Some((task, status)) = run else {
+        return Some(format!("run {id} does not exist"));
+    };
+    if !matches!(status, RunStatus::Failed | RunStatus::Interrupted) {
+        return Some(format!(
+            "run {id} is {}, not failed or interrupted",
+            status.as_str()
+        ));
+    }
+    if latest != Some(id) {
+        return Some(format!(
+            "run {id} is no longer the latest run of task {task}"
+        ));
+    }
+    None
+}
+
+/// What `answer` to ask `ask` of run `id` does, the ask `pending` when it
+/// is answered and not closed, with its `options`, and the run
+/// `revivable` when recovery may still bring it back
+/// ([`super::telemetry::run_revivable`]): `retry`, `resume` (refused once
+/// the run is not revivable) and `cancel`, or one of the ask's other
+/// options, the recovery job's; any other answer, or an ask closed
+/// already (by another supervisor or a person), is refused with why.
+pub fn triage_answer(
+    id: &RunId,
+    ask: AskId,
+    pending: bool,
+    answer: &str,
+    options: &[String],
+    revivable: bool,
+) -> Result<TriageAnswer, String> {
+    if !pending {
+        return Err(format!(
+            "ask {ask} is not an answered, unclosed ask of run {id}"
+        ));
+    }
+    match answer {
+        "retry" => Ok(TriageAnswer::Retry),
+        "resume" if revivable => Ok(TriageAnswer::Resume),
+        "resume" => Err(format!(
+            "run {id} is no longer the latest run of a task that goes on"
+        )),
+        "cancel" => Ok(TriageAnswer::Cancel),
+        other if options.iter().any(|option| option == other) => Ok(TriageAnswer::Recover),
+        other => Err(format!("{other:?} is not an answer the recovery applies")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A person's answer to a triage's ask is taken only for a run nobody
+    /// leases (a stale lease does not count), that is `failed` or
+    /// `interrupted` and is still its task's latest run.
+    #[test]
+    fn a_triage_answer_is_taken_only_for_an_unleased_failed_latest_run() {
+        let id = RunId::new("11111111-1111-4111-8111-111111111111").unwrap();
+        let later = RunId::new("21111111-1111-4111-8111-111111111111").unwrap();
+        let task = TaskId::new(1);
+        for status in [RunStatus::Failed, RunStatus::Interrupted] {
+            assert_eq!(
+                triage_answer_refusal(&id, false, Some((task, status)), Some(&id)),
+                None
+            );
+        }
+        assert_eq!(
+            triage_answer_refusal(&id, true, Some((task, RunStatus::Failed)), Some(&id)).unwrap(),
+            format!("run {id} is leased")
+        );
+        assert_eq!(
+            triage_answer_refusal(&id, false, None, None).unwrap(),
+            format!("run {id} does not exist")
+        );
+        let not_failed =
+            triage_answer_refusal(&id, false, Some((task, RunStatus::NeedsSession)), Some(&id))
+                .unwrap();
+        assert!(
+            not_failed.contains("is needs_session, not failed or interrupted"),
+            "{not_failed}"
+        );
+        assert_eq!(
+            triage_answer_refusal(&id, false, Some((task, RunStatus::Failed)), Some(&later))
+                .unwrap(),
+            format!("run {id} is no longer the latest run of task 1")
+        );
+    }
+
+    /// `retry`, `resume` and `cancel` are the runtime's; another of the
+    /// ask's options goes back to the recovery job; anything else, a
+    /// `resume` of a run recovery may no longer bring back (its task ended
+    /// or has a later run) and an ask that is not answered and open are
+    /// refused.
+    #[test]
+    fn a_triage_answer_retries_resumes_cancels_or_goes_back_to_the_job() {
+        let id = RunId::new("11111111-1111-4111-8111-111111111111").unwrap();
+        let ask = AskId::new(7);
+        let options: Vec<String> = ["retry", "resume", "cancel", "try again"]
+            .map(String::from)
+            .to_vec();
+        let answer = |pending, answer, revivable| {
+            triage_answer(&id, ask, pending, answer, &options, revivable)
+        };
+        assert_eq!(answer(true, "retry", false), Ok(TriageAnswer::Retry));
+        assert_eq!(answer(true, "resume", true), Ok(TriageAnswer::Resume));
+        assert_eq!(answer(true, "cancel", false), Ok(TriageAnswer::Cancel));
+        assert_eq!(answer(true, "try again", false), Ok(TriageAnswer::Recover));
+        assert_eq!(
+            answer(true, "resume", false).unwrap_err(),
+            format!("run {id} is no longer the latest run of a task that goes on")
+        );
+        assert_eq!(
+            answer(true, "land", true).unwrap_err(),
+            "\"land\" is not an answer the recovery applies"
+        );
+        assert_eq!(
+            answer(false, "retry", true).unwrap_err(),
+            format!("ask 7 is not an answered, unclosed ask of run {id}")
+        );
+    }
 
     #[test]
     fn a_run_a_release_ended_is_no_failure_toward_the_retry_limit() {
