@@ -4,6 +4,7 @@
 use super::*;
 use crate::application::run_git;
 use crate::domain::EventKind;
+use crate::domain::resume::SEND_BACK_NO_RESUME;
 use crate::domain::{
     ParkCause, RunEvent, Task, required_of,
     run::{RunWorkspace, run_workspaces},
@@ -393,11 +394,7 @@ impl Supervisor<'_> {
             return Ok(());
         }
         let last_error = run.last_error().map(str::to_owned).unwrap_or_default();
-        let resumed = resumed_text(resumes, self.resume.config);
-        let reason = format!(
-            "{resumed} and still needs a session: {}",
-            tail(&last_error, 500)
-        );
+        let reason = exhausted_reason(&resumed_text(resumes, self.resume.config), &last_error);
         if inherits_on_exhaustion(&self.queue.run_events(run.id())?, &detail.events) {
             match self.inherited_head(run) {
                 Ok(Some(head)) => return self.retry_inheriting(run, head, &reason),
@@ -1094,6 +1091,25 @@ pub(super) fn skips_resume(facts: &SkipFacts<'_>) -> bool {
 /// hold's release, which no limit fences (ADR-t2664-1), and the
 /// provider-only ones against [`PROVIDER_ONLY_RESUME_LIMIT`]
 /// (ADR-t3255-1).
+/// Why a run whose resumes are used up ends (its `last_error` and its
+/// recovery's reason): `resumed` ([`resumed_text`]) and the last 500 bytes
+/// of `last_error`, the reason it was parked with. A `send_back` that
+/// resumed no session keeps its [`SEND_BACK_NO_RESUME`] first, before the
+/// count, so `status`, which shows the start, still says where the
+/// person's reason went however long it is.
+fn exhausted_reason(resumed: &str, last_error: &str) -> String {
+    match last_error.strip_prefix(SEND_BACK_NO_RESUME) {
+        Some(rest) => format!(
+            "{SEND_BACK_NO_RESUME}; {resumed} and still needs a session: {}",
+            tail(rest.strip_prefix(": ").unwrap_or(rest), 500)
+        ),
+        None => format!(
+            "{resumed} and still needs a session: {}",
+            tail(last_error, 500)
+        ),
+    }
+}
+
 fn resumed_text(resumes: ResumeCount, config: ResumeConfig) -> String {
     let limit = config.conflict_only_limit;
     let mut killed = if resumes.kill_only == 0 {
@@ -2250,6 +2266,31 @@ mod tests {
         assert_eq!(outcome(&bare, true), ResumeOutcome::Unresolved);
         assert_eq!(outcome(&bare, false), ResumeOutcome::Resolved);
         assert_eq!(outcome(&full, true), ResumeOutcome::Resolved);
+    }
+
+    /// A used-up run's reason keeps the end of what parked it; that of a
+    /// `send_back` that resumed no session keeps its saying first, however
+    /// long the reason after it, and the end of that reason.
+    #[test]
+    fn a_used_up_reason_keeps_first_that_a_send_back_resumed_no_session() {
+        let resumed = "resumed 3 times (at most 3)";
+        let long = format!("{}the end", "x".repeat(600));
+        assert_eq!(
+            exhausted_reason(resumed, "a test failed"),
+            "resumed 3 times (at most 3) and still needs a session: a test failed"
+        );
+        let plain = exhausted_reason(resumed, &long);
+        assert!(plain.starts_with("resumed 3 times (at most 3) and still needs a session: "));
+        assert!(plain.ends_with("the end"));
+        let sent_back = exhausted_reason(resumed, &format!("{SEND_BACK_NO_RESUME}: {long}"));
+        assert!(
+            sent_back.starts_with(&format!(
+                "{SEND_BACK_NO_RESUME}; resumed 3 times (at most 3) and still needs a session: x"
+            )),
+            "{sent_back}"
+        );
+        assert!(sent_back.ends_with("the end"), "{sent_back}");
+        assert!(sent_back.len() < SEND_BACK_NO_RESUME.len() + resumed.len() + 600);
     }
 
     /// The used-up reason and ask say how the run was resumed: the counted

@@ -174,11 +174,39 @@ fn a_send_back_to_a_run_with_no_resume_left_reaches_the_next_runs_prompt() {
         },
     );
     let (task, first, ask) = sent_back(&wiring, crate::domain::MAX_RESUME_ATTEMPTS);
+    // Asked while resumes were left, the ask offered to resume the session.
+    let asked = wiring.queue().asks(Default::default()).unwrap();
+    let question = &asked
+        .iter()
+        .find(|a| a.id.as_i64() == ask)
+        .unwrap()
+        .question;
+    assert!(
+        question.contains("send_back: resume the session with these reasons"),
+        "{question}"
+    );
     wiring.supervise_once();
     let detail = wiring.queue().show(task).unwrap();
     assert!(
         payloads(&detail, "resume_started").len() == crate::domain::MAX_RESUME_ATTEMPTS,
         "no resume started after the send_back"
+    );
+    // Answered with the resumes used up since the ask, the send_back
+    // records that no session resumes and where its reason goes.
+    let decided = payloads(&detail, "landing_decided");
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert_eq!(decided[0]["resumes"], false, "{}", decided[0]);
+    assert_eq!(
+        decided[0]["carried_to"],
+        json!(["recovery_job", "next_run_prompt"]),
+        "{}",
+        decided[0]
+    );
+    let reason = decided[0]["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("the run's resumes are used up, so this send_back resumes no session; the reason goes to the run's recovery job and to the prompt of the next run")
+            && reason.contains(REASON),
+        "{reason}"
     );
     assert_handed_over(&wiring, task, &first, ask);
 }
@@ -199,6 +227,20 @@ fn a_send_back_whose_resume_failed_before_its_request_reaches_the_next_runs_prom
     let (task, first, ask) = sent_back(&wiring, crate::domain::MAX_RESUME_ATTEMPTS - 1);
     wiring.fail_resume_launches();
     let outcome = wiring.supervise_once_reporting();
+    // A resume was left as the answer was applied: no mark of a send_back
+    // that resumes no session.
+    let detail = wiring.queue().show(task).unwrap();
+    let decided = payloads(&detail, "landing_decided");
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert!(decided[0].get("resumes").is_none(), "{}", decided[0]);
+    assert!(
+        !decided[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("resumes no session"),
+        "{}",
+        decided[0]
+    );
     let errors = outcome["errors"].as_array().unwrap();
     assert_eq!(errors.len(), 1, "{outcome}");
     assert!(
@@ -356,6 +398,54 @@ fn printed_by(queue: &SqliteQueue, command: &str) -> Value {
         },
     )
     .unwrap()
+}
+
+/// (iv) A long `send_back` reason to a run with no resume left: once the
+/// run is found used up and its recovery job leaves it to a person (the
+/// job gave no verdict it could read), `status` still says the send_back
+/// resumed no session and where its reason went, and the run's
+/// `last_error` keeps the end of the reason.
+#[test]
+fn a_long_send_back_to_a_run_with_no_resume_left_stays_visible_in_status() {
+    let wiring = Wiring::new(
+        "a_long_send_back_to_a_run_with_no_resume_left_stays_visible_in_status",
+        Script {
+            receipts: vec![succeeded],
+            verdicts: vec![
+                json!({"verdict": "concern", "reasons": ["a person looks"], "summary": "a person looks"}),
+                json!({"verdict": "unreadable"}),
+            ],
+        },
+    );
+    let reason = format!(
+        "{}the reason ends here",
+        "keep the old flag, as the earlier answer of ask 1420 said. ".repeat(20)
+    );
+    assert!(reason.len() > 1000);
+    let (task, first, _) = sent_back_with(&wiring, crate::domain::MAX_RESUME_ATTEMPTS, &reason);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    let kinds: Vec<&str> = detail.events.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(detail.runs.len(), 1, "{kinds:?}");
+    assert_eq!(detail.runs[0].status(), RunStatus::Failed, "{kinds:?}");
+    let last_error = detail.runs[0].last_error().unwrap();
+    assert!(
+        last_error.starts_with(crate::domain::resume::SEND_BACK_NO_RESUME)
+            && last_error.ends_with("the reason ends here; the review's findings: a person looks"),
+        "{last_error}"
+    );
+    let status = wiring.status();
+    let shown = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["run_id"] == json!(first) && entry["last_error"].is_string())
+        .unwrap_or_else(|| panic!("run {first} shows no last_error in the attention: {status}"));
+    let text = shown["last_error"].as_str().unwrap();
+    assert!(
+        text.starts_with(crate::domain::resume::SEND_BACK_NO_RESUME),
+        "{text}"
+    );
 }
 
 /// A person's `send_back` reason and answer to the run's worker_question,

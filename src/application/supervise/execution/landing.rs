@@ -29,6 +29,7 @@ use crate::domain::concern::{
 };
 use crate::domain::headless_job::{JobKind, JobSession, JobStop};
 use crate::domain::provider_trial::{self, RunPair};
+use crate::domain::resume::{SEND_BACK_NO_RESUME, send_back_resumes};
 use crate::domain::review_jobs::{self, JobMiss, ReviewJobId};
 use crate::domain::review_programs::{
     self as programs, AfterFailure, ProgramOutcome, ProgramsStep,
@@ -2469,6 +2470,7 @@ impl Supervisor<'_> {
             summary,
             why,
             (recommendation, confidence),
+            self.send_back_resumes(run)?,
         );
         self.ask_approve_landing(
             run,
@@ -2491,7 +2493,8 @@ impl Supervisor<'_> {
         output: Option<usize>,
         error: &str,
     ) -> Result<AskId> {
-        let question = failed_review_question(run, attempt, output, error);
+        let question =
+            failed_review_question(run, attempt, output, error, self.send_back_resumes(run)?);
         self.ask_approve_landing(
             run,
             question,
@@ -2499,6 +2502,15 @@ impl Supervisor<'_> {
             (None, None),
             AskReason::Scope,
         )
+    }
+    /// Whether a person's `send_back` of `run`'s landing would resume its
+    /// session as its events stand ([`send_back_resumes`]): its ask says
+    /// where the reason goes when it would not.
+    fn send_back_resumes(&self, run: &TaskRun) -> Result<bool> {
+        Ok(send_back_resumes(
+            &self.queue.run_events(run.id())?,
+            self.resume.config,
+        ))
     }
     /// Open an `approve_landing` ask of `run` offering `options` (a failed
     /// review's offer `retry_review` too, ADR-t2521-1), carrying the review
@@ -2872,7 +2884,12 @@ impl Supervisor<'_> {
     /// `run` taken as `action` ([`LandingAnswer::accepted`]). The
     /// `landing_decided` of a `send_back` records the answer as
     /// `send_back` and the person's reason, when given, as
-    /// `person_reason`.
+    /// `person_reason`. A `send_back` of a run whose resumes are used up as
+    /// it is answered ([`send_back_resumes`]), however many it used since
+    /// the ask, resumes no session: its `landing_decided` records
+    /// `resumes: false` and `carried_to` (its recovery job and the next
+    /// run's prompt), and its reason, the run's `last_error`, starts by
+    /// saying so.
     pub(super) fn apply_landing_answer(
         &mut self,
         run: &TaskRun,
@@ -2904,11 +2921,19 @@ impl Supervisor<'_> {
             }
             LandingAnswer::SendBack(person_reason) => {
                 let reasons = latest_review_reasons(&*self.queue, run.id())?;
+                let resumes = self.send_back_resumes(run)?;
                 let reason = sent_back_reason(ask_id, person_reason.as_deref(), &reasons);
                 let mut payload = json!({"ask_id": ask_id, "answer": "send_back"});
                 if let Some(person_reason) = person_reason {
                     payload["person_reason"] = json!(person_reason);
                 }
+                let reason = if resumes {
+                    reason
+                } else {
+                    payload["resumes"] = json!(false);
+                    payload["carried_to"] = json!(SEND_BACK_CARRIED_TO);
+                    format!("{SEND_BACK_NO_RESUME}: {reason}")
+                };
                 self.queue.decide_landing(
                     run.id(),
                     RunStatus::NeedsSession,
@@ -2916,7 +2941,11 @@ impl Supervisor<'_> {
                     Reason::new(ReasonCode::SentBack).on(payload),
                 )?;
                 self.queue.close_ask(ask_id)?;
-                info!(run_id = %run.id(), "run {} was sent back by ask {ask_id}; it waits for a resume", run.id());
+                if resumes {
+                    info!(run_id = %run.id(), "run {} was sent back by ask {ask_id}; it waits for a resume", run.id());
+                } else {
+                    info!(run_id = %run.id(), "run {} was sent back by ask {ask_id} with its resumes used up; the reason goes to its recovery job and the next run's prompt", run.id());
+                }
             }
             LandingAnswer::Cancel => {
                 let reason = canceled_reason(ask_id);
@@ -3110,6 +3139,26 @@ fn sent_back_reason(ask_id: AskId, person_reason: Option<&str>, reasons: &[Strin
             "a person sent the run back in ask {ask_id}: {person_reason}; the review's findings: {findings}"
         ),
         None => format!("the review's findings were sent back by ask {ask_id}: {findings}"),
+    }
+}
+
+/// `landing_decided`'s `carried_to` of a `send_back` that resumes no
+/// session ([`SEND_BACK_NO_RESUME`]).
+const SEND_BACK_CARRIED_TO: [&str; 2] = ["recovery_job", "next_run_prompt"];
+
+/// The `send_back` option of an `approve_landing` ask: resuming the session
+/// `with` the review's findings when it `resumes` ([`send_back_resumes`]),
+/// else saying that it resumes none and the reason (`carried`, the
+/// findings) goes to the recovery job and the next run's prompt.
+fn send_back_option((with, carried): (&str, &str), resumes: bool) -> String {
+    if resumes {
+        format!(
+            "send_back: resume the session with {with} (answer `send_back: <your reason>` to add yours)."
+        )
+    } else {
+        format!(
+            "send_back: this run has used up its resumes, so a send_back does not resume its session; the reason ({carried}, and yours when answered as `send_back: <your reason>`) goes to its recovery job and to the prompt of the next run (retry or retry_inherit)."
+        )
     }
 }
 
@@ -3399,6 +3448,7 @@ fn landing_question(
     summary: &str,
     why: Option<&str>,
     (recommendation, confidence): (Option<LandingRecommendation>, Option<AskConfidence>),
+    resumes: bool,
 ) -> String {
     let mut question = format!(
         "The supervisor's review of run {} (task {}) returned {}{}: {summary}",
@@ -3420,9 +3470,10 @@ fn landing_question(
             confidence.map_or("no", AskConfidence::as_str)
         ));
     }
-    question.push_str(
-        "\nland: land it as it is. send_back: resume the session with these reasons (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task.",
-    );
+    question.push_str(&format!(
+        "\nland: land it as it is. {} cancel: fail the run and cancel the task.",
+        send_back_option(("these reasons", "these reasons"), resumes)
+    ));
     question
 }
 
@@ -3445,6 +3496,7 @@ fn failed_review_question(
     attempt: usize,
     output: Option<usize>,
     error: &str,
+    resumes: bool,
 ) -> String {
     let mut question = format!(
         "The supervisor's headless review of run {} (task {}) failed and gave no verdict (review {attempt}): {error}",
@@ -3470,9 +3522,10 @@ fn failed_review_question(
             None => {}
         }
     }
-    question.push_str(
-        "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task. retry_review: run the review again on the same run and receipt (no change, no resume of the session).",
-    );
+    question.push_str(&format!(
+        "\nReview the material by hand, then answer. land: land it as it is. {} cancel: fail the run and cancel the task. retry_review: run the review again on the same run and receipt (no change, no resume of the session).",
+        send_back_option(("this failure as the reason", "this failure"), resumes)
+    ));
     question
 }
 
@@ -3893,7 +3946,7 @@ mod tests {
     fn a_failed_review_that_ran_names_its_own_output() {
         let error = "the headless review exited with exit status: 3: broken";
         assert_eq!(
-            failed_review_question(&run(), 1, Some(1), error),
+            failed_review_question(&run(), 1, Some(1), error, true),
             format!(
                 "The supervisor's headless review of run r1 (task 1) failed and gave no verdict (review 1): {error}\
                  \nReview material: {DIR}/review.md\
@@ -3909,7 +3962,7 @@ mod tests {
     fn a_review_that_could_not_start_names_no_output_of_its_own() {
         let error =
             "the headless review could not start: the test reviewer cannot start this review";
-        let first = failed_review_question(&run(), 1, None, error);
+        let first = failed_review_question(&run(), 1, None, error, true);
         assert_eq!(
             first,
             format!(
@@ -3918,7 +3971,7 @@ mod tests {
             )
         );
         assert!(!first.contains("Review output"), "{first}");
-        let retry = failed_review_question(&run(), 2, Some(1), error);
+        let retry = failed_review_question(&run(), 2, Some(1), error, true);
         assert_eq!(
             retry,
             format!(
@@ -3935,7 +3988,7 @@ mod tests {
     fn a_review_no_agent_ran_says_to_review_it_manually() {
         let error = format!("{REVIEW_PROVIDER_DISABLED}; no provider is left");
         assert_eq!(
-            failed_review_question(&run(), 1, None, &error),
+            failed_review_question(&run(), 1, None, &error, true),
             format!(
                 "{error}. No review agent ran for run r1 (task 1); review it manually.\
                  \nReview material: {DIR}/review.md{FAILED_TAIL}"
@@ -4208,6 +4261,7 @@ mod tests {
                 "not yet",
                 Some(&why),
                 (None, None),
+                true,
             ),
             format!(
                 "The supervisor's review of run r1 (task 1) returned revise ({why}): not yet\
@@ -4277,6 +4331,7 @@ mod tests {
                     &verdict.summary,
                     got.as_deref(),
                     (verdict.recommendation, verdict.confidence),
+                    true,
                 ),
                 format!(
                     "The supervisor's review of run r1 (task 1) returned concern ({why}): judged\
@@ -4340,6 +4395,7 @@ mod tests {
             &verdict.summary,
             why.as_deref(),
             (verdict.recommendation, verdict.confidence),
+            true,
         );
         assert!(
             question.starts_with(
@@ -4368,6 +4424,7 @@ mod tests {
             &verdict.summary,
             why.as_deref(),
             (verdict.recommendation, verdict.confidence),
+            true,
         );
         assert_eq!(
             question,
@@ -4377,6 +4434,45 @@ mod tests {
             )
         );
         assert!(!question.contains("recommends"), "{question}");
+    }
+
+    /// The ask of a run a `send_back` would not resume says so, and that
+    /// the reason goes to the recovery job and the next run's prompt; the
+    /// ask of one it would resume keeps its text.
+    #[test]
+    fn a_landing_ask_of_a_run_with_no_resume_left_says_where_a_send_back_goes() {
+        let verdict = concern(None, None);
+        let ask = |resumes| {
+            landing_question(
+                &run(),
+                ReviewDecision::Concern,
+                &verdict.reasons,
+                &verdict.summary,
+                None,
+                (None, None),
+                resumes,
+            )
+        };
+        let head = format!(
+            "The supervisor's review of run r1 (task 1) returned concern: judged\
+             \n- a finding\nReview material: {DIR}/review.md"
+        );
+        assert_eq!(ask(true), format!("{head}{LANDING_TAIL}"));
+        assert_eq!(
+            ask(false),
+            format!(
+                "{head}\nland: land it as it is. send_back: this run has used up its resumes, so a send_back does not resume its session; the reason (these reasons, and yours when answered as `send_back: <your reason>`) goes to its recovery job and to the prompt of the next run (retry or retry_inherit). cancel: fail the run and cancel the task."
+            )
+        );
+        let error = "the headless review exited with exit status: 3: broken";
+        assert!(failed_review_question(&run(), 1, Some(1), error, true).ends_with(FAILED_TAIL));
+        let failed = failed_review_question(&run(), 1, Some(1), error, false);
+        assert!(
+            failed.ends_with(
+                "\nReview the material by hand, then answer. land: land it as it is. send_back: this run has used up its resumes, so a send_back does not resume its session; the reason (this failure, and yours when answered as `send_back: <your reason>`) goes to its recovery job and to the prompt of the next run (retry or retry_inherit). cancel: fail the run and cancel the task. retry_review: run the review again on the same run and receipt (no change, no resume of the session)."
+            ),
+            "{failed}"
+        );
     }
 
     /// A review whose own `revise` was lighter than a subagent's `concern`
@@ -4975,6 +5071,7 @@ mod tests {
                 &combined.summary,
                 Some(why),
                 (combined.recommendation, combined.confidence),
+                true,
             )
         };
         for (fields, said, reason) in [

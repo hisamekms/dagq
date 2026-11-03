@@ -590,6 +590,32 @@ impl ResumeCount {
     }
 }
 
+/// What the reason (the run's `last_error`) of a person's `send_back` that
+/// resumes no session ([`send_back_resumes`]) starts with: no session
+/// resumes, and where the reason goes instead. The `last_error` of the run
+/// whose resumes are then found used up keeps it first, so that `status`
+/// shows it however long the reason after it.
+pub const SEND_BACK_NO_RESUME: &str = "the run's resumes are used up, so this send_back resumes no session; the reason goes to the run's recovery job and to the prompt of the next run (retry or retry_inherit)";
+
+/// Whether a person's `send_back` of the landing of the run with `events`
+/// so far would resume its session: the run as the `send_back` would park
+/// it (`landing_decided` with `sent_back`, neither a conflict's nor a
+/// hold's park) is not [`ResumeCount::exhausted`] under `config`. A run
+/// with any limit used up but the conflict-only one (its counted, kill-only
+/// or provider-only resumes) is not resumed, and the reason goes to its
+/// recovery job and the next run's prompt instead; one whose conflict-only
+/// resumes alone are used up still is (ADR-t2946-1). The limits and how
+/// they count are those of the resume.
+pub fn send_back_resumes(events: &[RunEvent], config: ResumeConfig) -> bool {
+    let parked = ResumeCount {
+        parked_for_send_back: true,
+        parked_for_conflict: false,
+        parked_for_hold: false,
+        ..ResumeCount::of(events)
+    };
+    !parked.exhausted(config)
+}
+
 /// How the next resume of a run starts, from its events so far
 /// ([`resume_start_plan`]).
 #[derive(Debug, Clone, PartialEq)]
@@ -1061,6 +1087,53 @@ mod tests {
             ..Default::default()
         };
         assert!(kills.exhausted(ResumeConfig::default()));
+    }
+
+    /// Whether a `send_back` would resume the run, judged before it parks
+    /// the run: not with its counted resumes used up; yes with only its
+    /// conflict-only ones used up (ADR-t2946-1), even while a conflict
+    /// parked it last; yes with resumes left, and under a raised limit.
+    #[test]
+    fn a_send_back_resumes_the_run_only_while_counted_resumes_are_left() {
+        let config = ResumeConfig::default();
+        // Resumes left.
+        let mut events = vec![event("evidence_missing", json!({})), resume(), pass()];
+        assert!(send_back_resumes(&events, config));
+        // The counted resumes used up.
+        let mut used_up = events.clone();
+        for _ in 1..MAX_RESUME_ATTEMPTS {
+            used_up.extend([event("evidence_missing", json!({})), resume()]);
+        }
+        assert_eq!(ResumeCount::of(&used_up).counted, MAX_RESUME_ATTEMPTS);
+        assert!(!send_back_resumes(&used_up, config));
+        // Only the conflict-only ones used up: the send_back resumes it,
+        // and the run as it is now (parked for the conflict) is used up.
+        events = vec![pass()];
+        for _ in 0..CONFLICT_ONLY_RESUME_LIMIT {
+            events.extend([conflict(), resume()]);
+        }
+        assert!(send_back_resumes(&events, config));
+        let mut parked = events.clone();
+        parked.push(conflict());
+        assert!(ResumeCount::of(&parked).exhausted(config));
+        assert!(send_back_resumes(&parked, config));
+        // The kill-only limit is not the send_back's to pass, though
+        // counted resumes are left.
+        let mut kills = vec![pass()];
+        for _ in 0..KILL_ONLY_RESUME_LIMIT {
+            kills.extend([killed(), triage_resume(), resume()]);
+        }
+        let count = ResumeCount::of(&kills);
+        assert_eq!(count.kill_only, KILL_ONLY_RESUME_LIMIT);
+        assert!(count.left() > 0);
+        assert!(!send_back_resumes(&kills, config));
+        // The conflict-only limit does not decide it either way.
+        assert!(send_back_resumes(
+            &events,
+            ResumeConfig {
+                conflict_only_limit: 100
+            }
+        ));
     }
 
     #[test]

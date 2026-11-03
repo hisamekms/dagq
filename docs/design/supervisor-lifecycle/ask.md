@@ -54,6 +54,8 @@ related:
   回答した者・選んだ選択肢と、`approve_plan`と`approve_landing`の`<option>: <理由>`の形の答えが名指す選択肢の残し方は、`Ask`の欄のdoc commentと`domain::reasoned_option`が持つ。
   その2つのkindでsupervisorは`send_back: <理由>`を`send_back`として適用し人の理由を差し戻し先に渡す（`approve_plan`は`PlanAnswer`、`approve_landing`は`LandingAnswer`）。
   `approve_landing`の`send_back`（理由なしも理由付きも）は、runの最新の`review_finished`のverdictとsubagentの判断から、askの問いが示したのと同じ指摘（routeを決めたsubagentの指摘はagent名つき。親のverdictがpassで親の理由が無くても）をreviewの指摘として人の理由の後に続けてresumeに渡す。
+  `send_back`でparkしても試行を使い切っているrun（[試行の数え方](needs-session.md)。判定は`domain::resume::send_back_resumes`）の`approve_landing`のaskは、`send_back`の選択肢の説明に、sessionを再開せず理由が復旧jobと次のrun（retry・retry_inherit）のpromptに渡ることを書く。
+  答えを適用するときも同じ判定をし直し（askの後に試行を使い切ったrunを含む）、sessionを再開しないことと理由の行き先を`status`と`events`で読めるようにする（入口は`apply_landing_answer`）。
   `approve_landing`ではほかの選択肢も`<option>: <理由>`を選択肢そのものとして適用し（`land: <理由>`は`land`、`cancel: <理由>`は`cancel`。理由は答えの記録に残る）、`ask_answered`の`runtime_delivers`は、runが`awaiting_integration`で答えが`land` / `send_back` / `cancel`（理由付きを含む）、またはreviewが失敗してverdictの無いaskへの`retry_review`（理由付きを含む）のときtrueになる（選択肢に無い頭の答え・理由だけの文と、verdictから開いたaskへの`retry_review`などはfalseのままinboxが読む。受け付けの判断は適用と`status`の表示と同じ1つ。[Review](review.md#review-supervisor)の6、[ADR-t2521-1](../../adr/2026-10-17-t2521-1-retry-review-answer-reviews-a-failed-review-again-on-the-same-run.md)）。
   runがlanding recheckのparkやresumeで`awaiting_integration`を離れている間に受け付ける答えが来たときは`runtime_delivers`はfalseだが、askは閉じずに残り、validationの後にrunが`awaiting_integration`に戻った回でsupervisorが適用する。
   runtimeが自分で閉じる回答（`runtime_closed: true`の`ask_answered`と、supervisorの取り下げ）は`answered_by: runtime`。
