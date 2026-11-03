@@ -61,7 +61,9 @@
 # touched, a changed helper is broad (its users hold more than the broad
 # entries' share of the IT by #[test] count, as mod.rs and the shared
 # fixtures do) or a file under tests/common is no helper's .rs, or the table
-# cannot be had or read or is older than the age limit.
+# cannot be had or read or is older than the age limit, or the table's commit
+# is not in this repository (whatever the table's age), or the table is old
+# and the files changed on main after its commit cannot be had.
 # The threshold, the common files, the ages and the share that makes an
 # entry or a helper broad are written once, at the top of
 # scripts/landing-it.py, with their grounds in
