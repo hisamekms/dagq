@@ -138,6 +138,7 @@ validationを通ったrun（awaiting_integration）
   - 起動先のproviderが受けない値は、表を読むときもjobを起動するとき（その間に`[roles.review]`が変わったとき）も設定の誤りで、reviewは通らない（`ReviewAgents::launch_problems`・`RoleModels::checked_agent_launch`）。
   - 別のproviderへ切り替えたjobには書いた`model`と`effort`を渡さず、切り替え先で`[roles.review]`が与える値で起動する（`RoleModels::moved_agent_launch`）。
   - agentのevalの1回も本番のjobと同じ組で起動するが、共有するのは群の上書きの前の設定で、evalはrunの群を持たないので群に従わない。
+    例外はdevの周の依頼で、書いた項目だけを上書きし、書かない項目は同じ組を継ぐ（providerを変えたときのmodelは除く、[依頼と認可](../agent-eval.md#依頼と認可)）。
 - **誤り**: 必須の検査が分からないときは空にせず、起動せずにreviewの失敗にする。
 
 ## プログラムのreview<a id="プログラムのreview"></a>
