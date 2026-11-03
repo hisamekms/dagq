@@ -17,7 +17,7 @@ impl HeadlessJobStore for SqliteQueue {
         check_non_blank("headless job kind", job.kind)?;
         let now = self.generators.clock.now();
         let tx = self.write_tx("record_headless_job")?;
-        tx.execute(
+        let id = tx.insert_id(
             "INSERT INTO headless_jobs(kind, label, run_id, proposal_id, goal_id, attempt, pid,
                                        process_start, supervisor_token, started_at, provider, stdout)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -39,7 +39,6 @@ impl HeadlessJobStore for SqliteQueue {
                     .map(|path| path.to_string_lossy().into_owned())
             ],
         )?;
-        let id = tx.last_insert_rowid();
         tx.commit()?;
         Ok(id)
     }

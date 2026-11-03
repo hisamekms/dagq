@@ -28,9 +28,10 @@
 //! and C7 for the records of the ports and of the modules of
 //! `src/application/`, are checked by [`modules`] with the same table.
 //! That every transaction of the queue DB begins as a `WriteTx` is checked
-//! by [`write_tx`], and that the SQL spells the functions whose spelling
+//! by [`write_tx`], that the SQL spells the functions whose spelling
 //! differs between the dialects only in the dialect's functions by
-//! [`dialect`].
+//! [`dialect`], and that only the adapter's insert reads the ID of an
+//! inserted row by [`inserted_ids`].
 //!
 //! This is test code of the library (a `#[cfg(test)]` module of
 //! `src/lib.rs`, run by `cargo test --lib`), outside the library's layers,
@@ -38,6 +39,7 @@
 
 mod dialect;
 mod fixtures;
+mod inserted_ids;
 mod module_fixtures;
 mod modules;
 mod ownership;

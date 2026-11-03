@@ -199,7 +199,8 @@ pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<F
             .optional()?;
     let outcome = match existing {
         None => {
-            tx.execute(
+            let id = super::sqlite::insert_id(
+                tx,
                 "INSERT INTO findings(kind,target,task_id,run_id,goal_id,subject,summary,detail,
                        impact,first_seen_at,last_seen_at,occurrences,evidence,status,
                        propose_reason,propose_requested_at,recorded_by,updated_at)
@@ -221,7 +222,7 @@ pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<F
                     new.by,
                 ],
             )?;
-            let created = read_finding(tx, FindingId::new(tx.last_insert_rowid()))?;
+            let created = read_finding(tx, FindingId::new(id))?;
             finding_event(
                 tx,
                 &created,

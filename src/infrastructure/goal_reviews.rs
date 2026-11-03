@@ -425,12 +425,11 @@ impl GoalReviewStore for SqliteQueue {
         )? as usize;
         check_at_least("goal review attempt", attempt as i64, 1)?;
         let gaps = gaps_in_a_row(&tx, goal)?;
-        tx.execute(
+        let id = tx.insert_id(
             "INSERT INTO goal_reviews(goal_id, attempt, supervisor_token, fingerprint, started_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![goal, attempt as i64, token, fingerprint, now],
         )?;
-        let id = tx.last_insert_rowid();
         let dir = goal_reviews_dir.join(id.to_string());
         let dir_text = dir.to_str().context("goal review directory is not UTF-8")?;
         tx.execute(

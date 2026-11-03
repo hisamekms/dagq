@@ -110,7 +110,7 @@ impl SqliteQueue {
                     evidence: new.evidence.clone(),
                     ..task_replan::Diagnosis::default()
                 };
-                tx.execute(
+                let id = tx.insert_id(
                     "INSERT INTO replan_operations(task_id, run_id, goal_id, origin, status,
                        generation, reason, conditions, task_version, goal_acceptance_version,
                        diagnosis, requested_by, requested_by_id, created_at, updated_at)
@@ -130,7 +130,7 @@ impl SqliteQueue {
                         now,
                     ],
                 )?;
-                (ReplanId::new(tx.last_insert_rowid()), true)
+                (ReplanId::new(id), true)
             }
         };
         let mut op = read_operation(&tx, id)?;
@@ -1160,7 +1160,8 @@ fn record_request(
     ];
     refs.extend(op.goal_id.map(RequestRef::Goal));
     refs.extend(new.evidence.iter().copied().map(RequestRef::Event));
-    conn.execute(
+    let id = crate::domain::RequestId::new(super::sqlite::insert_id(
+        conn,
         "INSERT INTO plan_requests(text, refs, requested_by, requested_by_id, status,
            created_at, updated_at, replan_operation_id) VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?5, ?6)",
         params![
@@ -1171,8 +1172,7 @@ fn record_request(
             now,
             op.id
         ],
-    )?;
-    let id = crate::domain::RequestId::new(conn.last_insert_rowid());
+    )?);
     record_queue_event_in(
         conn,
         EventKind::RequestRecorded,

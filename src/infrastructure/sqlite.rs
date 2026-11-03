@@ -339,13 +339,28 @@ impl<'c> WriteTx<'c> {
     /// from its end; one that already had it (a write through the
     /// transaction it derefs to took it) had it from a time not known.
     pub fn execute<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+        self.written(|tx| tx.execute(sql, params).map(|rows| (rows, rows)))
+    }
+
+    /// Run the insert `sql` as [`WriteTx::execute`] does and return the ID
+    /// of the row it inserted ([`insert_id`]).
+    pub fn insert_id<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<i64> {
+        self.written(|tx| insert_counted(tx, sql, params))
+    }
+
+    /// Run the write `write`, which returns the rows it changed and its
+    /// result, and count those rows; see [`WriteTx::execute`].
+    fn written<T>(
+        &self,
+        write: impl FnOnce(&rusqlite::Transaction<'c>) -> rusqlite::Result<(usize, T)>,
+    ) -> rusqlite::Result<T> {
         let unlocked = self.locked.get().is_none() && !self.holds_write_lock();
-        let rows = self.inner().execute(sql, params)?;
+        let (rows, result) = write(self.inner())?;
         if unlocked {
             self.locked.set(Some(std::time::Instant::now()));
         }
         self.counted(rows);
-        Ok(rows)
+        Ok(result)
     }
 
     /// A write statement run on the transaction this derefs to returned,
@@ -423,6 +438,43 @@ impl<'c> WriteTx<'c> {
             .as_ref()
             .expect("a write transaction is open until it ends")
     }
+}
+
+/// Run the insert `sql` on `conn` and return the ID of the row it inserted:
+/// the one way the store reads a new row's ID (ADR-t3982-1 decision 4; in
+/// a transaction, [`WriteTx::insert_id`]). SQLite gives it as the
+/// connection's last inserted rowid, read right after the statement, so an
+/// insert that inserts no row (`INSERT .. SELECT .. WHERE NOT EXISTS`)
+/// returns the ID of the connection's insert before it; such a caller
+/// checks the rows changed first ([`insert_id_if_inserted`]).
+pub(super) fn insert_id<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> rusqlite::Result<i64> {
+    insert_counted(conn, sql, params).map(|(_, id)| id)
+}
+
+/// Run the insert `sql` on `conn` and return the ID of the row it
+/// inserted, or `None` when it inserted none.
+pub(super) fn insert_id_if_inserted<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> rusqlite::Result<Option<i64>> {
+    insert_counted(conn, sql, params).map(|(rows, id)| (rows > 0).then_some(id))
+}
+
+/// The rows the insert `sql` changed and the last inserted rowid after it:
+/// the only call of `last_insert_rowid` outside test code
+/// (`context_boundaries::inserted_ids`).
+fn insert_counted<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> rusqlite::Result<(usize, i64)> {
+    let rows = conn.execute(sql, params)?;
+    Ok((rows, conn.last_insert_rowid()))
 }
 
 impl<'c> std::ops::Deref for WriteTx<'c> {
@@ -1976,10 +2028,10 @@ impl TaskStore for SqliteQueue {
         note.validate()?;
         let tx = self.write_tx("add_note")?;
         let payload = note.payload();
-        match &note.target {
+        let id = match &note.target {
             NoteTarget::Task(task_id) => {
                 read_task(&tx, *task_id)?;
-                event(&tx, *task_id, None, EventKind::Observation, payload)?;
+                event_id(&tx, *task_id, None, EventKind::Observation, payload)?
             }
             NoteTarget::Run(run_id) => {
                 let task_id: TaskId = tx
@@ -1988,18 +2040,14 @@ impl TaskStore for SqliteQueue {
                     })
                     .optional()?
                     .with_context(|| format!("run {run_id} does not exist"))?;
-                event(&tx, task_id, Some(run_id), EventKind::Observation, payload)?;
+                event_id(&tx, task_id, Some(run_id), EventKind::Observation, payload)?
             }
             NoteTarget::Goal(goal_id) => {
                 read_goal(&tx, *goal_id)?;
-                goal_event(&tx, *goal_id, EventKind::Observation, payload)?;
+                goal_event_id(&tx, *goal_id, EventKind::Observation, payload)?
             }
-        }
-        let result = tx.query_row(
-            "SELECT * FROM run_events WHERE id=?1",
-            [tx.last_insert_rowid()],
-            event_row,
-        )?;
+        };
+        let result = tx.query_row("SELECT * FROM run_events WHERE id=?1", [id], event_row)?;
         tx.commit()?;
         Ok(result)
     }
@@ -2846,19 +2894,25 @@ pub(super) fn goal_event(
     kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<()> {
-    conn.execute(
+    goal_event_id(conn, goal_id, kind, payload).map(drop)
+}
+
+/// [`goal_event`], returning the ID of the event it inserted.
+pub(super) fn goal_event_id(
+    conn: &Connection,
+    goal_id: GoalId,
+    kind: EventKind,
+    payload: serde_json::Value,
+) -> Result<EventId> {
+    let id = EventId::new(insert_id(
+        conn,
         "INSERT INTO run_events(goal_id,kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![goal_id, kind.as_str(), serde_json::to_string(&payload)?],
-    )?;
+    )?);
     // The goal review's session span this event starts or ends (ADR-0048).
-    super::sessions::follow_goal(
-        conn,
-        EventId::new(conn.last_insert_rowid()),
-        goal_id,
-        kind,
-        &payload,
-    )
+    super::sessions::follow_goal(conn, id, goal_id, kind, &payload)?;
+    Ok(id)
 }
 
 /// The tasks that would be claimable but for their open hold, each with
@@ -3869,19 +3923,13 @@ pub(super) fn record_queue_event_in(
     payload: &serde_json::Value,
 ) -> Result<()> {
     crate::domain::check_event_target(kind, None, None)?;
-    conn.execute(
+    let id = insert_id(
+        conn,
         "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![kind.as_str(), serde_json::to_string(payload)?],
     )?;
-    super::sessions::follow(
-        conn,
-        EventId::new(conn.last_insert_rowid()),
-        None,
-        None,
-        kind,
-        payload,
-    )
+    super::sessions::follow(conn, EventId::new(id), None, None, kind, payload)
 }
 
 /// Give the task a priority of its own, or with none take its goal's again
@@ -3942,7 +3990,19 @@ pub(super) fn event(
     kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<()> {
-    conn.execute(
+    event_id(conn, task_id, run_id, kind, payload).map(drop)
+}
+
+/// [`event`], returning the ID of the event it inserted.
+pub(super) fn event_id(
+    conn: &Connection,
+    task_id: TaskId,
+    run_id: Option<&RunId>,
+    kind: EventKind,
+    payload: serde_json::Value,
+) -> Result<EventId> {
+    let id = EventId::new(insert_id(
+        conn,
         "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,?4,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![
@@ -3951,16 +4011,10 @@ pub(super) fn event(
             kind.as_str(),
             serde_json::to_string(&payload)?
         ],
-    )?;
+    )?);
     // The Claude session spans this event starts or ends (ADR-0048).
-    super::sessions::follow(
-        conn,
-        EventId::new(conn.last_insert_rowid()),
-        Some(task_id),
-        run_id,
-        kind,
-        &payload,
-    )
+    super::sessions::follow(conn, id, Some(task_id), run_id, kind, &payload)?;
+    Ok(id)
 }
 
 /// Column `name` read as the domain's enum `T`: a stored value that is not
@@ -4778,5 +4832,61 @@ mod write_hold_tests {
     #[test]
     fn the_threshold_is_under_the_busy_timeout() {
         assert!(WRITE_HOLD_WARN < crate::application::QUEUE_BUSY_TIMEOUT);
+    }
+}
+
+#[cfg(test)]
+mod inserted_id_tests {
+    use super::*;
+
+    fn table() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT UNIQUE)")
+            .unwrap();
+        conn
+    }
+
+    /// SQLite's insert returns the row's ID as rusqlite's
+    /// `last_insert_rowid` gives it right after the statement.
+    #[test]
+    fn an_insert_returns_the_id_rusqlite_gives_the_inserted_row() {
+        let conn = table();
+        conn.execute("INSERT INTO t(id, v) VALUES (41, 'a')", [])
+            .unwrap();
+        let id = insert_id(&conn, "INSERT INTO t(v) VALUES (?1)", ["b"]).unwrap();
+        assert_eq!(id, 42);
+        assert_eq!(id, conn.last_insert_rowid());
+        let v: String = conn
+            .query_row("SELECT v FROM t WHERE id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, "b");
+    }
+
+    /// An insert that inserts no row has no ID; one that does has its own.
+    #[test]
+    fn an_insert_that_inserts_no_row_has_no_id() {
+        let conn = table();
+        let sql = "INSERT INTO t(v) SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM t WHERE v=?1)";
+        assert_eq!(insert_id_if_inserted(&conn, sql, ["a"]).unwrap(), Some(1));
+        assert_eq!(insert_id_if_inserted(&conn, sql, ["a"]).unwrap(), None);
+        assert_eq!(insert_id_if_inserted(&conn, sql, ["b"]).unwrap(), Some(2));
+    }
+
+    /// In a transaction, the insert returns the ID as outside one and is
+    /// counted as a write of the transaction, as `execute` is.
+    #[test]
+    fn a_transaction_s_insert_returns_the_id_and_counts_its_row() {
+        let conn = table();
+        let tx = WriteTx::read(&conn, "insert_id_test", Duration::from_secs(60)).unwrap();
+        let id = tx.insert_id("INSERT INTO t(v) VALUES (?1)", ["a"]).unwrap();
+        assert_eq!(id, tx.last_insert_rowid());
+        assert!(tx.wrote.get());
+        assert_eq!(tx.rows.get(), 1);
+        assert!(tx.locked.get().is_some());
+        tx.commit().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM t WHERE id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

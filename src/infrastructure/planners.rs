@@ -162,11 +162,11 @@ impl SqliteQueue {
         origin: PlannerOrigin,
         proposal: Option<ProposalId>,
     ) -> Result<PlannerSession> {
-        self.conn.execute(
+        self.planner(PlannerId::new(super::sqlite::insert_id(
+            &self.conn,
             "INSERT INTO planners(origin, proposal_id, created_at) VALUES (?1, ?2, ?3)",
             params![origin.as_str(), proposal, self.generators.clock.now()],
-        )?;
-        self.planner(PlannerId::new(self.conn.last_insert_rowid()))
+        )?))
     }
 
     /// The UUID of the workspace cmux opened for the planner.

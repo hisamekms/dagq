@@ -109,7 +109,7 @@ impl SqliteQueue {
                 let affected: Vec<String> = entry.into_iter().collect();
                 let kind = AskKind::QueueHold;
                 check_ask_kind(&kind, None, None, hold.reason_category)?;
-                tx.execute(
+                let id = AskId::new(tx.insert_id(
                     "INSERT INTO asks(kind,question,options,asked_by,reason_category,subject,affected)
                      VALUES (?7,?1,?2,?3,?4,?5,?6)",
                     params![
@@ -121,8 +121,7 @@ impl SqliteQueue {
                         serde_json::to_string(&affected)?,
                         kind.as_str(),
                     ],
-                )?;
-                let id = AskId::new(tx.last_insert_rowid());
+                )?);
                 ask_event(
                     &tx,
                     None,
@@ -578,7 +577,7 @@ impl SqliteQueue {
             )?;
             ask_event(&tx, None, None, EventKind::AskAnswered, payload)?;
         }
-        tx.execute(
+        let id = AskId::new(tx.insert_id(
             "INSERT INTO asks(kind,question,options,asked_by,reason_category,subject)
              VALUES (?5,?1,?2,?3,?4,?6)",
             params![
@@ -589,8 +588,7 @@ impl SqliteQueue {
                 kind.as_str(),
                 subject
             ],
-        )?;
-        let id = AskId::new(tx.last_insert_rowid());
+        )?);
         let mut payload = json!({
             "ask_id": id,
             "kind": kind,
@@ -1204,7 +1202,8 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
     // one open ask per subject, so questions about two requests, both
     // about no task, run or finding, do not collide (ADR-t1394-1).
     let request_subject = ask.request_id.map(request_ask_subject);
-    tx.execute(
+    let id = AskId::new(super::sqlite::insert_id(
+        tx,
         "INSERT INTO asks(kind,task_id,run_id,question,options,asked_by,reason_category,finding_id,topics,recommendation,confidence,request_id,subject)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
@@ -1222,8 +1221,7 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
             ask.request_id,
             request_subject
         ],
-    )?;
-    let id = AskId::new(tx.last_insert_rowid());
+    )?);
     let mut payload = json!({
         "ask_id": id,
         "kind": ask.kind,

@@ -280,12 +280,12 @@ impl SqliteQueue {
 
 /// Insert a queue event of the watch.
 fn insert(conn: &Connection, kind: EventKind, payload: &Value) -> Result<EventId> {
-    conn.execute(
+    Ok(EventId::new(super::sqlite::insert_id(
+        conn,
         "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![kind.as_str(), serde_json::to_string(payload)?],
-    )?;
-    Ok(EventId::new(conn.last_insert_rowid()))
+    )?))
 }
 
 /// Record `finding` (matched and updated as `finding record` does); one

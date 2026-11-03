@@ -2093,8 +2093,14 @@ pub(super) fn record_hook(
                 closed.push(span.opened_event_id);
             }
             SpanChange::Open(payload) => {
-                insert_at(&tx, task_id, None, EventKind::SessionOpened, &payload, &now)?;
-                opened = Some(EventId::new(tx.last_insert_rowid()));
+                opened = Some(insert_at(
+                    &tx,
+                    task_id,
+                    None,
+                    EventKind::SessionOpened,
+                    &payload,
+                    &now,
+                )?);
             }
         }
     }
@@ -2369,10 +2375,11 @@ pub(super) fn insert_at(
     kind: EventKind,
     payload: &Value,
     created_at: &str,
-) -> Result<()> {
+) -> Result<EventId> {
     crate::domain::check_event_target(kind, task_id, None)?;
     crate::domain::write_rules::check_run_has_task(task_id, run_id)?;
-    conn.execute(
+    let id = super::sqlite::insert_id(
+        conn,
         "INSERT INTO run_events(task_id,run_id,kind,payload,created_at,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,?4,?5,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![
@@ -2383,7 +2390,7 @@ pub(super) fn insert_at(
             created_at
         ],
     )?;
-    Ok(())
+    Ok(EventId::new(id))
 }
 
 #[cfg(test)]

@@ -606,12 +606,11 @@ impl PlanReviewStore for SqliteQueue {
             |r| r.get::<_, i64>(0),
         )? as usize;
         check_at_least("plan review attempt", attempt as i64, 1)?;
-        tx.execute(
+        let id = tx.insert_id(
             "INSERT INTO plan_reviews(proposal_id, attempt, supervisor_token, started_at)
              VALUES (?1, ?2, ?3, ?4)",
             params![proposal_id, attempt as i64, token, now],
         )?;
-        let id = tx.last_insert_rowid();
         let dir = plan_reviews_dir.join(id.to_string());
         let dir_text = dir.to_str().context("plan review directory is not UTF-8")?;
         tx.execute(

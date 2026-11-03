@@ -540,11 +540,10 @@ impl SqliteQueue {
             tx.commit()?;
             return Ok(DraftPlannerStart::Exhausted { drafts: exhausted });
         }
-        tx.execute(
+        let planner = PlannerId::new(tx.insert_id(
             "INSERT INTO planners(origin, draft_task_id, created_at) VALUES (?1, ?2, ?3)",
             params![PlannerOrigin::Runtime.as_str(), members[0].0, now],
-        )?;
-        let planner = PlannerId::new(tx.last_insert_rowid());
+        )?);
         for revisit in &revisits {
             let taken = members.iter().any(|(id, _)| *id == revisit.task_id);
             use_revisit(&tx, revisit, taken.then_some(planner), now)?;

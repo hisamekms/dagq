@@ -172,7 +172,7 @@ impl SqliteQueue {
         request.validate()?;
         let now = self.generators.clock.now();
         let tx = self.write_tx("record_plan_request")?;
-        tx.execute(
+        let id = RequestId::new(tx.insert_id(
             "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
                created_at, updated_at, priority) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7)",
             params![
@@ -184,8 +184,7 @@ impl SqliteQueue {
                 now,
                 request.priority.map(Priority::as_i64)
             ],
-        )?;
-        let id = RequestId::new(tx.last_insert_rowid());
+        )?);
         record_queue_event_in(
             &tx,
             EventKind::RequestRecorded,
@@ -371,11 +370,10 @@ impl PlanRequestStore for SqliteQueue {
                 return Ok(RequestPlannerStart::Exhausted { attempts });
             }
         };
-        tx.execute(
+        let planner = PlannerId::new(tx.insert_id(
             "INSERT INTO planners(origin, request_id, created_at) VALUES (?1, ?2, ?3)",
             params![PlannerOrigin::Runtime.as_str(), request, now],
-        )?;
-        let planner = PlannerId::new(tx.last_insert_rowid());
+        )?);
         super::replans::planner_opened(&tx, request, planner, now)?;
         record_queue_event_in(
             &tx,
@@ -481,7 +479,8 @@ pub(super) fn record_spike_request(
         return Ok(None);
     };
     let refs = spike_request_refs(task, goal);
-    let inserted = conn.execute(
+    let inserted = super::sqlite::insert_id_if_inserted(
+        conn,
         "INSERT INTO plan_requests(text, refs, requested_by, requested_by_id, status,
            created_at, updated_at, spike_task_id) SELECT ?1, ?2, ?3, ?3, 'open', ?4, ?4, ?5
          WHERE NOT EXISTS(SELECT 1 FROM plan_requests WHERE spike_task_id=?5)",
@@ -493,10 +492,9 @@ pub(super) fn record_spike_request(
             task
         ],
     )?;
-    if inserted == 0 {
+    let Some(id) = inserted.map(RequestId::new) else {
         return Ok(None);
-    }
-    let id = RequestId::new(conn.last_insert_rowid());
+    };
     record_queue_event_in(
         conn,
         EventKind::RequestRecorded,
@@ -685,7 +683,8 @@ pub(super) fn renew_declined(
     now: i64,
 ) -> Result<RequestId> {
     let old = read_request(conn, ended)?;
-    conn.execute(
+    let id = RequestId::new(super::sqlite::insert_id(
+        conn,
         "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
            created_at, updated_at, priority, replan_operation_id)
          VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7, ?8)",
@@ -699,8 +698,7 @@ pub(super) fn renew_declined(
             old.priority.map(Priority::as_i64),
             op
         ],
-    )?;
-    let id = RequestId::new(conn.last_insert_rowid());
+    )?);
     record_queue_event_in(
         conn,
         EventKind::RequestRecorded,

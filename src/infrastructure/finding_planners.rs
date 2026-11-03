@@ -193,11 +193,10 @@ impl SqliteQueue {
             tx.commit()?;
             return Ok(FindingPlannerStart::Exhausted { attempts: opened });
         }
-        tx.execute(
+        let planner = PlannerId::new(tx.insert_id(
             "INSERT INTO planners(origin, finding_id, created_at) VALUES (?1, ?2, ?3)",
             params![PlannerOrigin::Runtime.as_str(), finding, now],
-        )?;
-        let planner = PlannerId::new(tx.last_insert_rowid());
+        )?);
         let attempt = opened + 1;
         finding_event(
             &tx,

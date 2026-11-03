@@ -50,7 +50,7 @@ related:
 SQLiteのDBはqueueの正本で、プロセス間の共有と再起動の後の復旧に使う。
 stdoutやsessionの画面は正本にしない。
 runtimeが状態を変えるのは、このDBへの書き込みトランザクションの中だけである。
-列・既定値・eventの欄の意味は定義のそばのdoc comment（主に`src/infrastructure/`のstoreと`src/domain/`の型）と`migrations/*.sql`のコメントが持つ。
+列・既定値・eventの欄の意味は定義のそばのdoc commentと`migrations/*.sql`のコメントが持つ（下の「表」）。
 
 ## 全体の流れ
 
@@ -116,7 +116,7 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 
 - openは回答もcloseも無い行で、部分UNIQUE index `asks_open`が同じaskのopenな行を1件に限る。
   同じaskを開こうとすると既存の行を返して何も書かない。
-- 登録・回答・close・運んだ印は、それぞれ行とevent（`ask_opened`・`ask_answered`・`ask_closed`・`ask_delivered`）を1トランザクションで書くので、`watch`のcursorに乗る。
+- 登録・回答・close・運んだ印は、それぞれ行とeventを1トランザクションで書くので、`watch`のcursorに乗る。
 - askを終えるeventは`ask_answered`だけで、`stats`はそれで未回答を判定する。
   未回答のaskはcloseできない。
 - runtimeが自分で書く回答の`answered_by`は`runtime`で、権限の出どころは`answer_authority`が別に持つ（[Authorization](authorization.md)）。
@@ -169,7 +169,7 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)、[ADR-0039](../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)）。
 入口は`src/infrastructure/runtime_store/coordination.rs`と`transitions.rs`、`recovery.rs`。
 
-- leaseは実行中のrunの所有で、実行の記録と揮発する所有権を混ぜないよう`task_runs`の列にせず別の表にする（ADR-0007）。
+- leaseは実行中のrunの所有で、実行の記録と揮発する所有権を混ぜないよう`task_runs`の列にせず別の表にする。
 - claimはrun・`supervisor_token`・lease行を1トランザクションで作り、所有者のないclaimed runを作らない。
 - runを変える書き込みは同じトランザクションで自分のlease行のheartbeatを更新し（`renew_lease`）、0行なら何も書かずに拒む。
   heartbeatの古さは拒む理由にしない（hostのsleepの後も、引き継がれるまでは自分のもの）。
@@ -237,11 +237,12 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
   入口の外の開始（SQLの`BEGIN`を含む）と`TransactionBehavior`の名指しはtest（`src/context_boundaries/write_tx.rs`）が拒む。
   見方と近似は`WriteTx`・`WriteTxTimes`、欄は`QUEUE_WRITE_HELD_LONG`のdoc commentが持つ。
   eventはlockを放した後に同じ接続で別に短く書き、その失敗は元のtransactionを変えない。
+- 挿入した行のIDは`insert_id`（transactionは`WriteTx::insert_id`）で取り、`last_insert_rowid`は内部の`insert_counted`だけが呼ぶ（[architecture](architecture.md) X4）。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
   taskをcompletedかcanceledにするトランザクションは、開いたholdの行を閉じて`task_hold_ended`を書き、holdが残した結果を捨てる（`task_holds::end_with_task`）。
   終わったtaskに開いたまま残った行は、supervisorのpassが同じ形で閉じ、taskは変えない。
-- 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒み、循環はトランザクションの中の再帰CTEで見つける。
+- 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒む。
 - NULLになる列を含む主キーはSQLiteではその行の一意を保たないので、その一意は書く関数がトランザクションの中で読んでから検査する（再計画の条件の対応の削除の行は`replans.rs`の`write_mappings`）。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。
 - contextをまたぐトランザクションは`src/context_boundaries/ownership.rs`の所有の表のものだけ（[architecture](architecture.md)のX1）。

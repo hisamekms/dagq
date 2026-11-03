@@ -84,15 +84,14 @@ impl SqliteQueue {
         if latest != previous {
             return Ok(None);
         }
-        tx.execute(
+        let id = EventId::new(tx.insert_id(
             "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
              VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
             params![
                 EventKind::ForecastRecorded.as_str(),
                 serde_json::to_string(&payload)?
             ],
-        )?;
-        let id = EventId::new(tx.last_insert_rowid());
+        )?);
         tx.commit()?;
         Ok(Some(id))
     }

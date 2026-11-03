@@ -187,6 +187,8 @@ queue serviceはqueue DBを開く唯一のプロセスで（例外は[Queue serv
 - **X3** 所有の表のtransactionの中で、他のcontextの状態を変えるのは、そのcontextのinfrastructureが公開する関数（`infrastructure::sqlite::transition_task`など）を通す。
   SQLの文を書き写さない。
   検査: 全体のreview。
+- **X4** 挿入した行のIDは、storeのadapterの挿入の関数（`infrastructure::sqlite`の`insert_id`・`WriteTx::insert_id`）から取り、SQLiteの`last_insert_rowid`はその下の内部の関数だけが呼ぶ（ADR-t3982-1決定4）。
+  検査: Rustのtest（`src/context_boundaries/inserted_ids.rs`）。
 
 ### 検査の範囲
 
@@ -212,6 +214,8 @@ queue serviceはqueue DBを開く唯一のプロセスで（例外は[Queue serv
   開いてよい経路とtestの経路の区別は[Queue service](queue-service.md#dbを開く経路)。
 - 方言の違う式の断片の置き場（ADR-t3982-1）は、`cargo test`が流すRustのtest（`src/context_boundaries/dialect.rs`）が当て、`src/`の本番のコードの文字列のSQLが`src/infrastructure/sql_dialect.rs`の外で方言の違う関数を呼ぶと落ちる。
   対象の関数と見ない部分はtestのdoc commentが持つ。
+- X4は、`cargo test`が流すRustのtest（`src/context_boundaries/inserted_ids.rs`）が当て、`src/`の本番のコードで内部の関数の外の`last_insert_rowid`の使用で落ちる。
+  公開する関数と内部の関数の分担は[Persistence](persistence.md#transactions-and-constraints)。
 - C5では、共有の部品のportは、どのcontextが使っても違反に数えない。
   `src/application/ports/<context>.rs`のportの所有と、`ports/`・`queue_reads/`・`compose/`の`<context>.rs`のcontextは、testがpathから導く。
 - 所有の表の書式と落ちる条件はtestのdoc commentが持つ。

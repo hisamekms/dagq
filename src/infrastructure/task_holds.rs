@@ -76,7 +76,7 @@ impl SqliteQueue {
             HoldTarget::Run(run) => Some(run.clone()),
             HoldTarget::Task(_) => None,
         };
-        tx.execute(
+        let id = HoldId::new(tx.insert_id(
             "INSERT INTO task_holds(task_id, run_id, reason, until, by_role, by_id,
                created_at, settled_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -90,8 +90,7 @@ impl SqliteQueue {
                 now,
                 (state == HoldState::Held).then_some(now),
             ],
-        )?;
-        let id = HoldId::new(tx.last_insert_rowid());
+        )?);
         event(
             &tx,
             task_id,

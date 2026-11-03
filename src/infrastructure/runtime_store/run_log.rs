@@ -1360,12 +1360,12 @@ impl EventStore for SqliteQueue {
 /// Insert an event of the queue itself in the open transaction `tx`, with
 /// the session span it opens or closes; its id.
 pub(super) fn queue_event(tx: &Connection, kind: EventKind, payload: &Value) -> Result<EventId> {
-    tx.execute(
+    let id = EventId::new(crate::infrastructure::sqlite::insert_id(
+        tx,
         "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![kind.as_str(), serde_json::to_string(payload)?],
-    )?;
-    let id = EventId::new(tx.last_insert_rowid());
+    )?);
     // The observer's session span (ADR-0048).
     crate::infrastructure::sessions::follow(tx, id, None, None, kind, payload)?;
     Ok(id)
