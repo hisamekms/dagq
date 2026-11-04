@@ -1,18 +1,23 @@
-# The map documents under docs/design whose layers are fixed, for
+# Items of the map documents under docs/design whose layers are fixed, for
 # scripts/check-design-docs.sh: each named document is held to the tight
 # budget of a map document (20480 bytes without the frontmatter) instead of
 # the map budget. The budgets, how they were chosen and how this list is kept
 # are in docs/development/documents.md, section "design" ("形と予算").
-# Each item names one map document:
+# The list is the items of this file and of every
+# .config/design-docs-tight.d/*.toml together. Each item names one map document:
 #
 # [[doc]]
 # path = "docs/design/x.md"
 #
-# The change that fixes a document's layers adds its item. An item may be
-# added but not removed nor its path changed (the check compares this list
-# with the base's): the item of a deleted document goes with it, and a renamed
-# document's item takes the new path in the same change. A document in
-# .config/design-docs-allow.toml or a concept document is not named here.
+# The change that fixes a document's layers adds its item in the task's file
+# .config/design-docs-tight.d/t<task ID>.toml, not here, so that two tasks
+# adding items change no file in common. An item may be added but not removed
+# nor its path changed (the check compares the list with the base's, and moving
+# an item between the two places removes nothing): the item of a deleted
+# document goes with it, and a renamed document's item takes the new path in
+# the same change. One path in two items, here or there, is an error. A document
+# in .config/design-docs-allow.toml or a concept document is not named in the
+# list.
 
 [[doc]]
 path = "docs/design/measurement.md"

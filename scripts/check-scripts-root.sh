@@ -53,6 +53,7 @@ check-agents-md-size agents_md_too_big
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
 check-design-docs design_doc_tight_too_big
+check-design-docs design_doc_tight_item_file_too_big
 check-design-docs design_doc_tight_item_removed
 check-design-sentences design_doc_two_sentences_on_a_line
 check-design-identifiers design_doc_row_of_identifiers
@@ -100,6 +101,13 @@ violate_design_doc_too_big() {
 violate_design_doc_tight_too_big() {
   awk 'BEGIN { print "# fixture"; for (i = 1; i <= 300; i++) print "padding line for check-scripts-root, over the tight budget of a design document" }' >docs/design/zz-scripts-root-tight.md &&
     printf '\n[[doc]]\npath = "docs/design/zz-scripts-root-tight.md"\n' >>.config/design-docs-tight.toml
+}
+
+# The same, with the item in a file of the tight list's directory.
+violate_design_doc_tight_item_file_too_big() {
+  awk 'BEGIN { print "# fixture"; for (i = 1; i <= 300; i++) print "padding line for check-scripts-root, over the tight budget of a design document" }' >docs/design/zz-scripts-root-tight.md &&
+    mkdir -p .config/design-docs-tight.d &&
+    printf '[[doc]]\npath = "docs/design/zz-scripts-root-tight.md"\n' >.config/design-docs-tight.d/t1.toml
 }
 
 # The script compares the tight list with the base's (the merge base with

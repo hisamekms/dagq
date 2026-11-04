@@ -10,8 +10,13 @@
 # A document over a budget today is named in the allow list
 # (.config/design-docs-allow.toml) with the value it has, which is then its
 # limit, so it may shrink but not grow. A map document whose layers are fixed
-# is named in the tight list (.config/design-docs-tight.toml), which gives it
-# the tight budget of a map document instead of the map budget. Checks:
+# is named in the tight list, which gives it the tight budget of a map document
+# instead of the map budget. The tight list is the items of
+# .config/design-docs-tight.toml and of every .config/design-docs-tight.d/*.toml
+# together; a missing file or directory reads as empty. A new item goes in the
+# file of the task that adds it, .config/design-docs-tight.d/t<task ID>.toml, so
+# that two tasks adding items change no file in common. One path in two items,
+# in one file or in two, makes the list unreadable (exit 2). Checks:
 #
 # (i)   the tree: a document over a budget fails unless its item allows the
 #       value; an item of a document that does not exist, and an item's value
@@ -27,8 +32,11 @@
 #       from the list fails while its document exists (an item may be added
 #       but not removed, nor its path changed); when its document is gone it
 #       may go, but when git finds the document renamed (`git diff -M` from
-#       the base to the work tree) the new path must be in the list. Skipped
-#       when the base has no tight list.
+#       the base to the work tree) the new path must be in the list. The
+#       comparison is of the two lists as wholes, so moving an item between the
+#       file and the directory removes nothing. A path twice in the base's list
+#       is one item there, so the change that takes one of them out can pass.
+#       Skipped when the base has neither the file nor an item file.
 #
 # The tree checked is the git work tree of the cwd (`git rev-parse
 # --show-toplevel`), so a copy of the script run elsewhere with the cwd in a
@@ -69,6 +77,7 @@ task_limit=0
 concept_docs="docs/design/overview.md docs/design/supervisor-lifecycle.md"
 allow_path=.config/design-docs-allow.toml
 tight_path=.config/design-docs-tight.toml
+tight_dir=.config/design-docs-tight.d
 
 usage() {
   echo "$me: $1" >&2
@@ -77,15 +86,17 @@ usage() {
 }
 
 # measure <mode> <allow> <base-allow or ""> <tight> <base-tight or "">
-# <renames> <sizes>, with the documents as the remaining arguments. mode is
-# check or print; renames has a line "old<TAB>new" for each document git finds
-# renamed from the base.
+# <tight-dir> <base-tight-dir> <renames> <sizes>, with the files under the two
+# directories and the documents as the remaining arguments. mode is check or
+# print; renames has a line "old<TAB>new" for each document git finds renamed
+# from the base.
 measure() {
-  mode=$1 allowf=$2 basef=$3 tightf=$4 tbasef=$5 renamesf=$6 sizesf=$7
-  shift 7
+  mode=$1 allowf=$2 basef=$3 tightf=$4 tbasef=$5 tightd=$6 tbased=$7 renamesf=$8 sizesf=$9
+  shift 9
   LC_ALL=C awk -v me="$me" -v mode="$mode" -v allowf="$allowf" -v basef="$basef" \
-    -v tightf="$tightf" -v tbasef="$tbasef" -v renamesf="$renamesf" \
-    -v sizesf="$sizesf" -v allowname="$allow_path" -v tightname="$tight_path" \
+    -v tightf="$tightf" -v tbasef="$tbasef" -v tightd="$tightd/" -v tbased="$tbased/" \
+    -v renamesf="$renamesf" -v sizesf="$sizesf" -v allowname="$allow_path" \
+    -v tightname="$tight_path" -v tightdname="$tight_dir" \
     -v concept="$concept_docs" -v map_limit="$map_limit" -v tight_limit="$tight_limit" \
     -v concept_limit="$concept_limit" -v line_limit="$line_limit" -v task_limit="$task_limit" '
 function perr(msg, nr) { printf "%s: %s:%d: %s\n", me, lname, (nr == "" ? FNR : nr), msg > "/dev/stderr"; malformed = 1 }
@@ -96,8 +107,12 @@ function close_item(w) {
   initem = 0
   if (ipath == "") { perr("an item has no path", inr); return }
   if (w !~ /^t/ && !ikeys) { perr("item " ipath " has no size, line or tasks", inr); return }
-  if ((w, ipath) in listed) { perr("item " ipath " is listed twice", inr); return }
+  if ((w, ipath) in listed) {
+    if (w != "tbase") perr("item " ipath " is listed twice, also in " from[w, ipath], inr)
+    return
+  }
   listed[w, ipath] = 1
+  from[w, ipath] = lname
   if (w == "head") hpaths[++nh] = ipath
   else if (w == "thead") tpaths[++nt] = ipath
   else if (w == "tbase") tbpaths[++ntb] = ipath
@@ -229,6 +244,8 @@ FILENAME != lastf {
   else if (FILENAME == basef) { aw = "base"; lname = "the base " allowname }
   else if (FILENAME == tightf) { aw = "thead"; lname = tightname }
   else if (FILENAME == tbasef) { aw = "tbase"; lname = "the base " tightname }
+  else if (index(FILENAME, tightd) == 1) { aw = "thead"; lname = tightdname "/" substr(FILENAME, length(tightd) + 1) }
+  else if (index(FILENAME, tbased) == 1) { aw = "tbase"; lname = "the base " tightdname "/" substr(FILENAME, length(tbased) + 1) }
 }
 aw != "" { allow_line(aw); next }
 FILENAME == renamesf { split($0, a, "\t"); renamed[a[1]] = a[2]; next }
@@ -262,7 +279,7 @@ END {
       printf "\n[[doc]]\npath = \"%s\"\n", d
     }
     if (d in isconcept) { sb = concept_limit; budget_name = "the budget" }
-    else if (mode == "check" && (("thead", d) in listed) && !(("head", d) in listed)) { sb = tight_limit; budget_name = "the tight budget of its item in " tightname }
+    else if (mode == "check" && (("thead", d) in listed) && !(("head", d) in listed)) { sb = tight_limit; budget_name = "the tight budget of its item in " from["thead", d] }
     else { sb = map_limit; budget_name = "the budget" }
     check_metric(d, "size", size[d], sb, "bytes")
     check_metric(d, "line", maxline[d] + 0, line_limit, "bytes")
@@ -271,17 +288,20 @@ END {
   if (mode == "print") exit 0
   for (i = 1; i <= nh; i++)
     if (!(hpaths[i] in isdoc)) fail(hpaths[i] ": in " allowname " but not a document under docs/design; remove its item")
+  tightnames = tightname " or " tightdname "/*.toml"
   for (i = 1; i <= nt; i++) {
     p = tpaths[i]
-    if (!(p in isdoc)) fail(p ": in " tightname " but not a document under docs/design; remove its item, or if the document was renamed, replace its path with the new one")
-    else if (p in isconcept) fail(p ": in " tightname " but a concept document; the tight budget is for map documents only")
-    if (("head", p) in listed) fail(p ": in both " allowname " and " tightname "; a document in the allow list may not be in the tight list")
+    tn = from["thead", p]
+    if (!(p in isdoc)) fail(p ": in " tn " but not a document under docs/design; remove its item, or if the document was renamed, replace its path with the new one")
+    else if (p in isconcept) fail(p ": in " tn " but a concept document; the tight budget is for map documents only")
+    if (("head", p) in listed) fail(p ": in both " allowname " and " tn "; a document in the allow list may not be in the tight list")
   }
   for (i = 1; i <= ntb; i++) {
     p = tbpaths[i]
     if (("thead", p) in listed) continue
-    if (p in isdoc) fail(p ": in the base " tightname " but not in " tightname "; an item may be added but not removed, nor its path changed while the document exists")
-    else if ((p in renamed) && !(("thead", renamed[p]) in listed)) fail(p ": in the base " tightname " and renamed to " renamed[p] "; replace its path in " tightname " with " renamed[p])
+    tn = from["tbase", p]
+    if (p in isdoc) fail(p ": in " tn " but not in " tightnames "; an item may be added but not removed, nor its path changed while the document exists")
+    else if ((p in renamed) && !(("thead", renamed[p]) in listed)) fail(p ": in " tn " and renamed to " renamed[p] "; put " renamed[p] " in its place in " tightnames)
   }
   if (basef != "") {
     for (i = 1; i <= nh; i++) {
@@ -305,7 +325,7 @@ END {
     print "  the budgets and details: docs/development/documents.md, section design" > "/dev/stderr"
     exit 1
   }
-  printf "%s: %d documents under docs/design, %d in %s, %d in %s: ok\n", me, nd, nh, allowname, nt, tightname
+  printf "%s: %d documents under docs/design, %d in %s, %d in %s and %s: ok\n", me, nd, nh, allowname, nt, tightname, tightdname
 }' "$allowf" ${basef:+"$basef"} "$tightf" ${tbasef:+"$tbasef"} "$renamesf" "$sizesf" "$@"
 }
 
@@ -321,6 +341,10 @@ run() {
   trap 'rm -rf "$work"' EXIT
   if [ -f "$allow_path" ]; then cp "$allow_path" "$work/allow"; else : >"$work/allow"; fi
   if [ -f "$tight_path" ]; then cp "$tight_path" "$work/tight"; else : >"$work/tight"; fi
+  mkdir "$work/tight.d" "$work/tbase.d"
+  for f in "$tight_dir"/*.toml; do
+    if [ -f "$f" ]; then cp "$f" "$work/tight.d/"; fi
+  done
   : >"$work/renames"
 
   basef="" tbasef=""
@@ -350,10 +374,20 @@ run() {
     if [ -n "$base" ] && git cat-file -e "$base:$tight_path" 2>/dev/null; then
       git show "$base:$tight_path" >"$work/tbase" || exit 2
       tbasef=$work/tbase
+    fi
+    if [ -n "$base" ]; then
+      git ls-tree -z --name-only "$base" -- "$tight_dir/" | tr '\000' '\n' >"$work/tbase.list"
+      while IFS= read -r f; do
+        case "$f" in
+          *.toml) git show "$base:$f" >"$work/tbase.d/$(basename "$f")" || exit 2 ;;
+        esac
+      done <"$work/tbase.list"
+    fi
+    if [ -n "$tbasef" ] || [ -n "$(ls -A "$work/tbase.d")" ]; then
       git -c core.quotePath=false diff -M --name-status "$base" -- docs/design >"$work/diff" || exit 2
       awk -F '\t' '$1 ~ /^R/ { print $2 "\t" $3 }' "$work/diff" >"$work/renames"
     elif [ -n "$base" ]; then
-      echo "$me: the base $base has no $tight_path: the tight list is not compared with a base"
+      echo "$me: the base $base has no $tight_path or $tight_dir/*.toml: the tight list is not compared with a base"
     fi
   fi
 
@@ -362,17 +396,18 @@ run() {
   while IFS= read -r doc; do
     printf '%s\t%s\n' "$doc" "$(wc -c <"$doc" | tr -d '[:space:]')" >>"$work/sizes"
   done <"$work/docs"
+  find "$work/tight.d" "$work/tbase.d" -type f | LC_ALL=C sort >"$work/items"
   # One path per line, so a path with a blank stays one argument.
   oldifs=$IFS
   IFS='
 '
   set -f
   # shellcheck disable=SC2046
-  set -- $(cat "$work/docs")
+  set -- $(cat "$work/items" "$work/docs")
   set +f
   IFS=$oldifs
   set +e
-  measure "$mode" "$work/allow" "$basef" "$work/tight" "$tbasef" "$work/renames" "$work/sizes" "$@"
+  measure "$mode" "$work/allow" "$basef" "$work/tight" "$tbasef" "$work/tight.d" "$work/tbase.d" "$work/renames" "$work/sizes" "$@"
   status=$?
   set -e
   exit "$status"
@@ -602,7 +637,7 @@ EOF
   tight() { cat >"$r/.config/design-docs-tight.toml"; }
   printf '# fixture\n[[doc]]\npath = "docs/design/tight.md"  # fixed\n' | tight
   check tight_at_its_budget 0
-  has tight_counted "1 in .config/design-docs-tight.toml: ok"
+  has tight_counted "1 in .config/design-docs-tight.toml and .config/design-docs-tight.d: ok"
   pad "$r/$d/tight.md" 20481
   check tight_one_byte_over 1
   has tight_over "$d/tight.md: 20481 bytes without the frontmatter, over the tight budget of its item in .config/design-docs-tight.toml of 20480 bytes"
@@ -620,6 +655,44 @@ EOF
   check tight_item_with_a_size 2
   printf '[[doc]]\n' | tight
   check tight_item_without_a_path 2
+
+  # (iii) The items of .config/design-docs-tight.d.
+  fresh
+  tightd() { mkdir -p "$r/.config/design-docs-tight.d" && cat >"$r/.config/design-docs-tight.d/$1"; }
+  : >"$r/$d/tight.md" && pad "$r/$d/tight.md" 20481
+  : >"$r/$d/other.md" && pad "$r/$d/other.md" 100
+  mkdir "$r/.config/design-docs-tight.d"
+  check tightd_no_item_file 0
+  has tightd_nothing_counted "0 in .config/design-docs-tight.toml and .config/design-docs-tight.d: ok"
+  printf '[[doc]]\npath = "docs/design/tight.md"\n' | tightd t1.toml
+  check tightd_one_byte_over 1
+  has tightd_over "$d/tight.md: 20481 bytes without the frontmatter, over the tight budget of its item in .config/design-docs-tight.d/t1.toml of 20480 bytes"
+  : >"$r/$d/tight.md" && pad "$r/$d/tight.md" 20480
+  printf 'not a list\n' | tightd notes.txt
+  check tightd_at_its_budget 0
+  has tightd_counted "1 in .config/design-docs-tight.toml and .config/design-docs-tight.d: ok"
+  printf '[[doc]]\npath = "docs/design/other.md"\n' | tight
+  check tightd_with_the_file 0
+  has tightd_both_counted "2 in .config/design-docs-tight.toml and .config/design-docs-tight.d: ok"
+  printf '[[doc]]\npath = "docs/design/tight.md"\n' | tight
+  check tightd_same_path_as_the_file 2
+  has tightd_twice "item docs/design/tight.md is listed twice, also in .config/design-docs-tight"
+  : | tight
+  printf '[[doc]]\npath = "docs/design/tight.md"\n' | tightd t2.toml
+  check tightd_same_path_in_two_files 2
+  has tightd_twice_names_the_other "also in .config/design-docs-tight.d/t1.toml"
+  rm "$r/.config/design-docs-tight.d/t2.toml"
+  : >"$r/$d/big.md" && pad "$r/$d/big.md" 40000
+  : >"$r/$d/overview.md" && pad "$r/$d/overview.md" 100
+  printf '[[doc]]\npath = "docs/design/big.md"\nsize = 40000\n' | allow
+  printf '[[doc]]\npath = "docs/design/big.md"\n\n[[doc]]\npath = "docs/design/overview.md"\n\n[[doc]]\npath = "docs/design/gone.md"\n' | tightd t1.toml
+  check tightd_items_not_allowed 1
+  has tightd_and_allow "docs/design/big.md: in both .config/design-docs-allow.toml and .config/design-docs-tight.d/t1.toml"
+  has tightd_concept "docs/design/overview.md: in .config/design-docs-tight.d/t1.toml but a concept document"
+  has tightd_gone "docs/design/gone.md: in .config/design-docs-tight.d/t1.toml but not a document under docs/design"
+  printf '[[doc]]\npath = "docs/design/tight.md"\nsize = 100\n' | tightd t1.toml
+  check tightd_item_with_a_size 2
+  has tightd_malformed ".config/design-docs-tight.d/t1.toml:3: unknown key size"
 
   # (iv) The tight list against the base's.
   fresh
@@ -653,6 +726,60 @@ EOF
   has tight_renamed_removed "docs/design/a.md: in the base .config/design-docs-tight.toml and renamed to docs/design/renamed.md"
   printf '[[doc]]\npath = "docs/design/renamed.md"\n' | tight
   check tight_renamed_and_replaced 0 --base "$base"
+
+  # (iv) The items of .config/design-docs-tight.d against the base's.
+  fresh
+  : >"$r/$d/a.md" && pad "$r/$d/a.md" 100
+  : >"$r/$d/b.md" && pad "$r/$d/b.md" 200
+  printf '[[doc]]\npath = "docs/design/a.md"\n' | tightd t1.toml
+  check tightd_no_base_list_skips_the_comparison 0
+  has tightd_skipped "has no .config/design-docs-tight.toml or .config/design-docs-tight.d/*.toml"
+  : >"$r/.config/design-docs-tight.d/t1.toml"
+  g add -A && g commit -q -m 'no items yet'
+  g rm -q .config/design-docs-tight.d/t1.toml && g commit -q -m 'no directory in the base'
+  base=$(g rev-parse HEAD)
+  check tightd_base_has_no_directory_and_tree_neither 0 --base "$base"
+  printf '[[doc]]\npath = "docs/design/a.md"\n' | tightd t1.toml
+  check tightd_base_has_no_directory 0 --base "$base"
+  g add -A && g commit -q -m 'tight item file'
+  base=$(g rev-parse HEAD)
+  check tightd_same_as_the_base 0 --base "$base"
+  printf '[[doc]]\npath = "docs/design/b.md"\n' | tightd t2.toml
+  check tightd_item_added 0 --base "$base"
+  rm "$r/.config/design-docs-tight.d/t1.toml"
+  check tightd_item_removed 1 --base "$base"
+  has tightd_removed "docs/design/a.md: in the base .config/design-docs-tight.d/t1.toml but not in .config/design-docs-tight.toml or .config/design-docs-tight.d/*.toml"
+  printf '[[doc]]\npath = "docs/design/a.md"\n' | tight
+  check tightd_item_moved_to_the_file 0 --base "$base"
+  : | tight
+  g reset -q --hard "$base"
+  rm -f "$r/.config/design-docs-tight.d/t2.toml"
+  git -C "$r" rm -qf "$d/a.md"
+  : >"$r/.config/design-docs-tight.d/t1.toml"
+  check tightd_item_of_a_removed_document 0 --base "$base"
+  g reset -q --hard "$base"
+  g mv "$d/a.md" "$d/renamed.md"
+  g commit -q -m rename
+  : >"$r/.config/design-docs-tight.d/t1.toml"
+  check tightd_renamed_and_removed 1 --base "$base"
+  has tightd_renamed_removed "docs/design/a.md: in the base .config/design-docs-tight.d/t1.toml and renamed to docs/design/renamed.md"
+  printf '[[doc]]\npath = "docs/design/renamed.md"\n' | tight
+  check tightd_renamed_and_replaced_in_the_file 0 --base "$base"
+  # An item of the file moved to the directory, and a path twice in the base.
+  fresh
+  : >"$r/$d/a.md" && pad "$r/$d/a.md" 100
+  printf '[[doc]]\npath = "docs/design/a.md"\n' | tight
+  g add -A && g commit -q -m 'tight list'
+  base=$(g rev-parse HEAD)
+  : | tight
+  printf '[[doc]]\npath = "docs/design/a.md"\n' | tightd t1.toml
+  check tight_item_moved_to_the_directory 0 --base "$base"
+  printf '[[doc]]\npath = "docs/design/a.md"\n' | tight
+  g add -A && g commit -q -m 'the same path twice'
+  base=$(g rev-parse HEAD)
+  check tightd_twice_in_the_tree_and_the_base 2 --base "$base"
+  : | tight
+  check tightd_twice_in_the_base_only 0 --base "$base"
 
   # An item of a gone document with no document left, and a path with a blank.
   fresh
@@ -688,7 +815,7 @@ esac
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) [ $# -ge 2 ] || usage "--base needs a revision"; base=$2; shift 2 ;;
-    -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,64p' "$0"; exit 0 ;;
     *) usage "unknown argument: $1" ;;
   esac
 done
