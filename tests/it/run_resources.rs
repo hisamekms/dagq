@@ -12,11 +12,12 @@ use crate::runtime_support;
 
 use dagq::application::supervise::{Retain, Track, build_pass, measure_pass};
 use dagq::application::{ExecutionEnvironment, LedgerStore, RunResourceStore};
-use dagq::domain::environment::{EnvKind, Resources, RunChildren, RunResource};
+use dagq::domain::environment::{EnvKind, Resources, RunChildren, RunProcesses, RunResource};
 use dagq::domain::host_metrics::HOST_NODE;
 use dagq::domain::ledger::{LedgerKind, builder::Builder};
 use dagq::domain::{ClaimOutcome, EventKind, LeaseToken, RunId};
 use dagq::infrastructure::environment::HostEnvironment;
+use dagq::infrastructure::process_read::read_process;
 use dagq::infrastructure::runtime_store::RunPlan;
 use runtime_support::*;
 use std::collections::BTreeMap;
@@ -297,22 +298,27 @@ fn a_pass_measures_the_runs_of_the_slots_and_closes_those_no_one_measures() {
     );
 }
 
-/// What `ps` reads of `pid` in the column `column`.
-fn ps_of(pid: u32, column: &str) -> String {
-    let ps = std::process::Command::new("ps")
-        .args(["-o", &format!("{column}="), "-p", &pid.to_string()])
-        .output()
+/// The CPU seconds the host's measure reads `pid` to have spent since it
+/// started, whatever it read before; `None` when it finds no such process.
+fn cpu_measured(host: &HostEnvironment, run: &RunId, pid: u32) -> Option<f64> {
+    let measured = host
+        .measure_runs(&[RunProcesses {
+            run: run.clone(),
+            pids: vec![pid],
+            window_secs: 3_600.0,
+        }])
         .unwrap();
-    String::from_utf8_lossy(&ps.stdout).trim().to_owned()
+    host.forget_run(run);
+    measured.first()?.1.cpu_seconds
 }
 
 /// A process of another tree than this test's: a shell's background
 /// subshell left by the shell (its parent) as it exits, which spends CPU
-/// until `ps` reads some (Linux's `time` has whole seconds, macOS's
-/// hundredths), then idles; its pid. It spins and idles in `dir`, and ends
+/// until the host's measure of `run` reads some (Linux's `time` has whole
+/// seconds, macOS's hundredths), then idles; its pid. It spins and idles in `dir`, and ends
 /// once `dir` or this test's process is gone, whether the test passed,
 /// failed or timed out.
-fn orphan_that_spent_cpu(dir: &std::path::Path) -> u32 {
+fn orphan_that_spent_cpu(dir: &std::path::Path, run: &RunId) -> u32 {
     let stop = dir.join("stop");
     let idle = dir.join("idle");
     let script = format!(
@@ -333,25 +339,26 @@ fn orphan_that_spent_cpu(dir: &std::path::Path) -> u32 {
         .trim()
         .parse()
         .unwrap();
-    // Until `ps` reads CPU it spent, then until it idles.
+    // Until the measure reads CPU it spent, then until it idles.
     let _waiting = crate::common::within(crate::common::STEP_LIMIT, "the orphan to spend its CPU");
+    let host = HostEnvironment::new();
     loop {
-        let time = ps_of(pid, "time");
-        assert!(!time.is_empty(), "the orphan ended before it spent CPU");
-        if time.bytes().any(|c| matches!(c, b'1'..=b'9')) {
+        let cpu = cpu_measured(&host, run, pid);
+        assert!(cpu.is_some(), "the orphan ended before it spent CPU");
+        if cpu.is_some_and(|cpu| cpu > 0.0) {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
     std::fs::write(&stop, "").unwrap();
     while !idle.exists() {
         assert!(
-            !ps_of(pid, "time").is_empty(),
+            read_process(pid).is_some(),
             "the orphan ended before it idled"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let parent: u32 = ps_of(pid, "ppid").parse().unwrap();
+    let parent = read_process(pid).expect("the orphan idles").ppid;
     assert_ne!(parent, std::process::id(), "it is not under this test");
     pid
 }
@@ -382,7 +389,7 @@ fn a_runs_process_in_another_tree_is_measured_and_folded_as_the_runs() {
     // window only from that measure on.
     attach(&queue, &run, &host);
     let spin = tempfile::tempdir().unwrap();
-    let orphan = orphan_that_spent_cpu(spin.path());
+    let orphan = orphan_that_spent_cpu(spin.path(), &run);
 
     let pass = measure_pass(
         &queue,

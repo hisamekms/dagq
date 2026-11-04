@@ -45,9 +45,13 @@ fn files_holding(dir: &Path, needle: &str) -> Vec<PathBuf> {
 }
 
 /// Shell lines that write the process's environment and command line to
-/// `<dir>/<name>.env` and `<dir>/<name>.args`.
+/// `<dir>/<name>.env` and `<dir>/<name>.args`. The stub `claude` keeps its
+/// arguments in `$ARGS` before it reads them; a job's `/bin/sh -c` has what
+/// was added after its script in `$0` and `$*`.
 fn dump(dir: &str, name: &str) -> String {
-    format!(r#"env > "{dir}/{name}.env"; ps -o args= -p $$ > "{dir}/{name}.args"; "#)
+    format!(
+        r#"env > "{dir}/{name}.env"; printf '%s %s\n' "$0" "${{ARGS-$*}}" > "{dir}/{name}.args"; "#
+    )
 }
 
 /// The names of the queue database a process could be given: as the test

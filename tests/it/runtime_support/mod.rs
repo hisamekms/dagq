@@ -26,6 +26,7 @@ use dagq::domain::background_wrapper::{BackgroundHandle, HeadlessWrapper};
 pub use dagq::domain::background_wrapper::{StopRoute, WrapperStop};
 pub use dagq::domain::headless_job::JobAccess;
 use dagq::infrastructure::background::BackgroundWrappers;
+use dagq::infrastructure::process_read::{read_process, start_in_local_zone};
 pub use dagq::{
     VERSION,
     application::{
@@ -416,12 +417,7 @@ impl Spawned for Stub {
 
 /// Whether `pid` runs: neither gone nor a zombie.
 pub fn running(pid: u32) -> bool {
-    let out = Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .bounded_output()
-        .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+    read_process(pid).is_some_and(|process| !process.zombie)
 }
 
 /// A directory outside the test's temporary ones, such as a run's
@@ -1860,12 +1856,7 @@ pub fn orphan_run(repo: &Path, db: &Path, token: &str, wrapper: u32, agent: u32)
 
 /// The start of `pid`'s process as the runtime reads it.
 pub fn process_start(pid: u32) -> String {
-    let out = Command::new("ps")
-        .env("LC_ALL", "C")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .bounded_output()
-        .unwrap();
-    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    start_in_local_zone(pid).unwrap_or_default()
 }
 
 /// Start `script` under `sh` as a process whose parent is gone, the way a

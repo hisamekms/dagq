@@ -37,8 +37,7 @@ printf 'DAGQ_ROLE=%s\\nDAGQ_QUEUE=%s\\nDAGQ_ACTOR_ID=%s\\nDAGQ_SESSION_KIND=%s\\
 \"$DAGQ_ROLE\" \"$DAGQ_QUEUE\" \"$DAGQ_ACTOR_ID\" \"$DAGQ_SESSION_KIND\" > \"$0.env\"\n\
 pwd > \"$0.cwd\"\n\
 printf '%s' \"$DAGQ_SERVICE_CREDENTIAL_FILE\" > \"$0.credential\"\n\
-printf '%s' \"$$\" > \"$0.pid\"\n\
-TZ=UTC0 LC_ALL=C ps -o lstart= -p $$ | sed 's/^ *//; s/ *$//' | tr -d '\\n' > \"$0.start\"\n",
+printf '%s' \"$$\" > \"$0.pid\"\n",
     );
     stub
 }
@@ -94,6 +93,13 @@ fn started(stub: &Path, suffix: &str) -> Option<String> {
 /// `dagq --db <queue> inbox --repo <repo> --claude <stub> <args>` from a
 /// directory outside the repository, with `env` as the caller's actor.
 fn inbox(fixture: &Fixture, stub: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+    inbox_command(fixture, stub, env, args)
+        .bounded_output()
+        .unwrap()
+}
+
+/// The command of [`inbox`], not started.
+fn inbox_command(fixture: &Fixture, stub: &Path, env: &[(&str, &str)], args: &[&str]) -> Command {
     let elsewhere = fixture._dir.path().join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
@@ -109,9 +115,8 @@ fn inbox(fixture: &Fixture, stub: &Path, env: &[(&str, &str)], args: &[&str]) ->
         .arg(&fixture.repo)
         .arg("--claude")
         .arg(stub)
-        .args(args)
-        .bounded_output()
-        .unwrap()
+        .args(args);
+    command
 }
 
 fn error_of(output: &Output) -> String {
@@ -149,13 +154,28 @@ fn dagq_inbox_starts_the_inbox_agent_in_this_terminal_and_records_its_open() {
     let plugin_dir = fixture.options.plugin_dir.clone().unwrap();
     // A zone in the person's shell other than the service's changes
     // nothing of the session its token is bound to.
-    let output = inbox(
+    let mut command = inbox_command(
         &fixture,
         &stub,
         &[("TZ", "Pacific/Kiritimati")],
         &["--plugin-dir", plugin_dir.to_str().unwrap()],
     );
+    let (agent, agent_start, output) = {
+        let _waiting = common::within(common::STEP_LIMIT, "`dagq inbox` to exit");
+        let child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The agent takes the place of `dagq inbox`, with its pid and its
+        // start, and an exit leaves both to read until this test waits for it.
+        let agent = child.id();
+        let start = dagq::infrastructure::process_read::start_in_utc(agent).unwrap();
+        (agent, start, child.wait_with_output().unwrap())
+    };
     assert!(output.status.success(), "{output:?}");
+    assert_eq!(started(&stub, "pid").unwrap(), agent.to_string());
 
     // The agent, in the place of `dagq inbox`, was given the file of a
     // token for the inbox of its own process (ADR-t3102-1 decisions 2 and
@@ -179,8 +199,8 @@ fn dagq_inbox_starts_the_inbox_agent_in_this_terminal_and_records_its_open() {
         principal,
         dagq::domain::queue_service::Principal::inbox(
             dagq::domain::queue_service::SessionProcess {
-                pid: started(&stub, "pid").unwrap().parse().unwrap(),
-                start: started(&stub, "start").unwrap(),
+                pid: agent,
+                start: agent_start,
             }
         )
     );

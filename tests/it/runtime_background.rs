@@ -673,11 +673,5 @@ impl Drop for TurnGuard {
 
 /// Whether `pid` is a zombie nobody has reaped yet: gone for this purpose.
 fn zombie(pid: u32) -> bool {
-    let stat = Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&stat.stdout)
-        .trim()
-        .starts_with('Z')
+    dagq::infrastructure::process_read::read_process(pid).is_some_and(|process| process.zombie)
 }

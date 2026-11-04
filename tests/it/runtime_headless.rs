@@ -856,14 +856,8 @@ esac"#
     assert_eq!(agents[0].pid, second, "turn 1 was {first}");
     assert_ne!(first, second);
     // The helper is the turn's child, as an MCP server is Claude's.
-    let parent = Command::new("ps")
-        .args(["-o", "ppid=", "-p", &pid("helper.pid").to_string()])
-        .bounded_output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&parent.stdout).trim(),
-        second.to_string()
-    );
+    let helper = dagq::infrastructure::process_read::read_process(pid("helper.pid"));
+    assert_eq!(helper.expect("the helper runs").ppid, second);
     // Several samples (one a second) past the threshold with the quiet
     // helper alive. The threshold is a second, well past the moment
     // between a turn's start and its registration as the agent.

@@ -254,13 +254,12 @@ fn a_detached_wrapper_and_its_turn_outlive_a_killed_supervisor() {
     child.0.wait().unwrap();
     assert!(running(&wrapper), "the wrapper outlives its supervisor");
     assert!(running(&turn), "the turn outlives its supervisor");
-    let parent = Command::new("ps")
-        .args(["-o", "ppid=", "-p", &wrapper.pid.to_string()])
-        .output()
-        .unwrap();
+    let parent = dagq::infrastructure::process_read::read_process(wrapper.pid)
+        .expect("the wrapper runs")
+        .ppid;
     assert_ne!(
-        String::from_utf8_lossy(&parent.stdout).trim(),
-        child.0.id().to_string(),
+        parent,
+        child.0.id(),
         "the wrapper was no child of the supervisor"
     );
     let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]));

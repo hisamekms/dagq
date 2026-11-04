@@ -282,6 +282,7 @@ impl Spawned for LocalChild {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::process_read::read_process;
     use std::fs;
 
     #[test]
@@ -424,13 +425,17 @@ mod tests {
         );
     }
 
+    /// Whether `pid` has ended with its parent not having waited for it.
+    fn zombie(pid: u32) -> bool {
+        read_process(pid).is_some_and(|process| process.zombie)
+    }
+
     #[test]
     fn a_new_session_child_leads_its_own_session() {
         let dir = tempfile::tempdir().unwrap();
         let (out, err) = (dir.path().join("out"), dir.path().join("err"));
         let mut spec = CommandSpec::new("/bin/sh");
-        spec.args(["-c", "ps -o sess= -o pgid= -p $$"])
-            .new_session();
+        spec.args(["-c", "exec sleep 30"]).new_session();
         let mut child = LocalSpawner
             .spawn(
                 &spec,
@@ -441,11 +446,19 @@ mod tests {
             )
             .unwrap();
         let pid = child.id();
-        assert!(child.wait().unwrap().success);
-        // The child is the leader of its process group (setsid(2) made it).
-        let fields = fs::read_to_string(&out).unwrap();
-        let pgid = fields.split_whitespace().last().unwrap();
-        assert_eq!(pgid, pid.to_string(), "{fields}");
+        // SAFETY: getsid(2) and getpgid(2) take no pointer.
+        let (session, group) = unsafe {
+            (
+                libc::getsid(pid as libc::pid_t),
+                libc::getpgid(pid as libc::pid_t),
+            )
+        };
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // The child leads its session and its process group (setsid(2) made
+        // it).
+        assert_eq!(session, pid as libc::pid_t);
+        assert_eq!(group, pid as libc::pid_t);
     }
 
     #[test]
@@ -481,14 +494,7 @@ mod tests {
         let started = std::time::Instant::now();
         // SAFETY: kill(2) with signal 0 only checks the pid.
         while unsafe { libc::kill(grandchild, 0) } == 0 {
-            let stat = std::process::Command::new("ps")
-                .args(["-o", "stat=", "-p", &grandchild.to_string()])
-                .output()
-                .unwrap();
-            if String::from_utf8_lossy(&stat.stdout)
-                .trim()
-                .starts_with('Z')
-            {
+            if zombie(grandchild as u32) {
                 break;
             }
             assert!(started.elapsed() < std::time::Duration::from_secs(10));
@@ -512,17 +518,10 @@ mod tests {
         let mut spec = CommandSpec::new("/bin/sh");
         spec.args(["-c", "exit 3"]).new_session();
         let mut child = LocalSpawner.spawn(&spec, Streams::Null).unwrap();
-        let pid = child.id().to_string();
+        let pid = child.id();
         let started = std::time::Instant::now();
         loop {
-            let stat = std::process::Command::new("ps")
-                .args(["-o", "stat=", "-p", &pid])
-                .output()
-                .unwrap();
-            if String::from_utf8_lossy(&stat.stdout)
-                .trim()
-                .starts_with('Z')
-            {
+            if zombie(pid) {
                 break;
             }
             assert!(started.elapsed() < std::time::Duration::from_secs(10));

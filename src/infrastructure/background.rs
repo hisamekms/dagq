@@ -211,6 +211,7 @@ mod tests {
     use super::*;
     use crate::application::naming::shell_quote;
     use crate::infrastructure::adapters::SystemProcesses;
+    use crate::infrastructure::process_read::read_process;
     use std::{fs, os::unix::fs::symlink, sync::mpsc};
 
     /// A run directory under a queue's `runs/` in `root`, where the worker
@@ -319,12 +320,7 @@ mod tests {
 
     fn running(pid: u32) -> bool {
         // A zombie of nobody's is gone for this purpose.
-        let stat = Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        let stat = String::from_utf8_lossy(&stat.stdout);
-        !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+        read_process(pid).is_some_and(|process| !process.zombie)
     }
 
     /// A wrapper is started detached, with the environment it is given and
@@ -340,7 +336,7 @@ mod tests {
         let handle = wrappers
             .launch(
                 dir.path(),
-                &sh("echo \"$DAGQ_ROLE ${CMUX_WORKSPACE_ID:-none} $(basename \"$PWD\")\"; ps -o ppid= -p $$; exec sleep 30"),
+                &sh("echo \"$DAGQ_ROLE ${CMUX_WORKSPACE_ID:-none} $(basename \"$PWD\")\"; exec sleep 30"),
                 &[("DAGQ_ROLE".into(), "worker".into())],
                 &log,
             )
@@ -351,12 +347,15 @@ mod tests {
         let mut text = String::new();
         wait_for("the log", || {
             text = fs::read_to_string(&log).unwrap_or_default();
-            text.lines().count() >= 2
+            !text.is_empty()
         });
-        let mut lines = text.lines();
-        assert_eq!(lines.next(), Some(format!("worker none {name}").as_str()));
+        assert_eq!(
+            text.lines().next(),
+            Some(format!("worker none {name}").as_str())
+        );
         // Not this process's child: init's, once the shell exited.
-        assert_ne!(lines.next().unwrap().trim(), std::process::id().to_string());
+        let parent = read_process(handle.pid).expect("the wrapper runs").ppid;
+        assert_ne!(parent, std::process::id());
         wrappers.stop(&handle).unwrap();
         assert!(!wrappers.alive(&handle));
         // Stopping one that is gone is nothing.

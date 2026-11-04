@@ -722,6 +722,27 @@ fn what_is_no_read_use_case_is_refused_on_the_service_s_side() {
     assert_eq!(anonymous["error"]["code"], "unauthenticated");
 }
 
+/// What `ps -o lstart=` prints of `pid` in the C locale, in the zone `tz`
+/// when one is named; `None` only when `ps` cannot start, as in a sandbox
+/// that refuses its exec.
+fn ps_lstart_if_runnable(pid: u32, tz: Option<&str>) -> Option<String> {
+    let mut command = std::process::Command::new("ps");
+    command
+        .env("LC_ALL", "C")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(tz) = tz {
+        command.env("TZ", tz);
+    }
+    let _waiting = crate::common::within(crate::common::STEP_LIMIT, "`ps` to exit");
+    let output = command.spawn().ok()?.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let printed = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    assert!(!printed.is_empty(), "`ps` printed nothing of {pid}");
+    Some(printed)
+}
+
 /// ADR-t1404-1 decisions 2 and 10, ADR-t1433-1: `stats`' `workspace_mismatch`
 /// judges a running run's background wrapper by its handle's pid and the
 /// start it recorded alone, without cmux, on the command line (whose
@@ -733,7 +754,11 @@ fn stats_judges_a_background_wrapper_by_its_pid_and_start_on_both_paths() {
     use dagq::{
         application::ProcessControl,
         domain::{EventKind, background_wrapper::BackgroundHandle},
-        infrastructure::{adapters::SystemProcesses, sqlite::SqliteQueue},
+        infrastructure::{
+            adapters::{SystemProcesses, session_start},
+            process_read::read_process,
+            sqlite::SqliteQueue,
+        },
     };
     let queue = queue();
     // The wrapper's stand-in is killed when the test ends, however it ends.
@@ -746,6 +771,14 @@ fn stats_judges_a_background_wrapper_by_its_pid_and_start_on_both_paths() {
     );
     let pid = wrapper.child().id();
     let start_identity = SystemProcesses.start_identity(pid).unwrap();
+    // A stored handle or session that reads otherwise than `ps` printed it
+    // is a live process read as dead.
+    if let Some(printed) = ps_lstart_if_runnable(pid, None) {
+        assert_eq!(start_identity, printed);
+    }
+    if let Some(printed) = ps_lstart_if_runnable(pid, Some("UTC0")) {
+        assert_eq!(session_start(pid).unwrap(), printed);
+    }
     let handle = BackgroundHandle::new(pid, &start_identity).to_string();
     let recorded = SqliteQueue::open(&queue.db).unwrap();
     let run = queue.run.id();
@@ -800,7 +833,16 @@ fn stats_judges_a_background_wrapper_by_its_pid_and_start_on_both_paths() {
         json!({"status": "wrappers", "judged": 1, "unjudged": 0})
     );
     wrapper.child().kill().unwrap();
+    {
+        let _waiting = crate::common::within(crate::common::STEP_LIMIT, "the child to be a zombie");
+        while !read_process(pid).is_some_and(|process| process.zombie) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    // Ended and not waited for, it still reads as it started.
+    assert_eq!(SystemProcesses.start_identity(pid), Some(start_identity));
     wrapper.child().wait().unwrap();
+    assert_eq!(SystemProcesses.start_identity(pid), None);
     // A supervisor's next observation sees the wrapper gone.
     crate::common::ledger::observe_again(&queue.db);
     let expected = vec![json!({
