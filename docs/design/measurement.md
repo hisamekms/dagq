@@ -142,6 +142,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - runは終わりから猶予の後で、telemetryのtokenの失効と資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
 - storeのsession行の印（W）は、その位置までの全てのsessionのeventをsession行が記録していることを約束し、係が続きから読む前提になる。
   印を書くのは、全てのsessionのeventを畳んだ係だけにする。
+- pushの要約はstoreのrun・task行から位置を指定して作り直せ、その位置までの全件のbuildと同じになる（起動は未使用）。
 - 読めない・書けない周回は印を残して次に任せ、runとtaskの結果を変えない。
 
 ## 共通の読み取り関数

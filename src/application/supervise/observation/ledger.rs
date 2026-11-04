@@ -34,11 +34,13 @@
 //! the `Supervisor`.
 
 use std::collections::BTreeSet;
+use std::collections::btree_map::Entry;
 
 use super::*;
 use crate::application::LedgerQueue;
 use crate::domain::EventFilter;
 use crate::domain::host_metrics::{local_day, oldest_kept_day};
+use crate::domain::ledger::builder::pushes::{self, PushesHeld};
 use crate::domain::ledger::builder::{
     Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, RESOURCES_PER_READ, RunResources,
     RunSteps, SESSION_BYTES_PER_WRITE, SESSION_ROWS_PER_WRITE, STEPS_PER_READ, Target,
@@ -233,12 +235,14 @@ fn build_pass_bounded(
 }
 
 /// One pass's reads, folds and writes. A builder that has not swept
-/// ([`Builder::sweeps_pages`]: a new process's, from its cursors' start)
-/// builds and sweeps the session and queue rows each page of events
-/// changed as it reads it ([`sweep_page`]), so that it keeps of the rows
-/// the store holds settled no more than a page's events; every pass folds
-/// those rows a share of [`CHECKS_PER_PASS`] at a time, and of the rows
-/// marked only those it takes.
+/// ([`Builder::sweeps_pages`]: a new process's catching up, from its
+/// cursors' start) builds and sweeps the session and queue rows each page
+/// of events changed as it reads it ([`sweep_page`]), so that it keeps of
+/// the rows the store holds settled no more than a page's events: their
+/// records dropped, a later event that changes one gives them back from
+/// the store's row first ([`restore`]). Every pass folds those rows a
+/// share of [`CHECKS_PER_PASS`] at a time, and of the rows marked only
+/// those it takes.
 fn pass(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
@@ -855,6 +859,161 @@ pub fn restore_sessions(store: &dyn LedgerQueue, builder: &mut Builder) -> Resul
     }
     builder.restore_sessions(held, records);
     Ok(())
+}
+
+/// Make `builder` go on from the summaries of the pushes the run and task
+/// rows `store` holds as they were at its cursor ([`PushesHeld::at`],
+/// [`Builder::restore_pushes`]), with a pass at `now_ms`. It reads the
+/// push records of the run rows
+/// ([`crate::application::LedgerStore::ledger_push_records`]) and the
+/// pushes of no run, of the task rows and of the queue rows of a push alone
+/// only ([`crate::application::LedgerStore::ledger_runless_pushes`]),
+/// and the events of the runs whose rows do not record every event of
+/// theirs up to the cursor: those a task row names that have no row
+/// ([`crate::application::LedgerStore::ledger_runs_without_row`]: on their
+/// way where the rows were written, whatever their tasks), those a legacy
+/// task claimed that have none, whom no row names
+/// ([`crate::application::LedgerStore::ledger_legacy_runs_without_row`]),
+/// and those with an event up to it after the inputs of their rows
+/// ([`crate::application::LedgerStore::ledger_runs_past_their_rows`]: they
+/// went on their way since their row was written, from a pending push,
+/// closed or not). Their events stand for their rows wherever they are
+/// folded; another run is read of its row's records only. The pushes of all
+/// of them are folded first, so that whether a run or task had ended and
+/// settled at the cursor is folded on every push up to it. Whether a run
+/// read whole that reads a push was settled at the cursor is its fold up to
+/// it ([`PushesHeld::events_settled`]). It reads the heads of the rows not
+/// settled at the cursor and of the legacy ones, whose mark the store keeps
+/// as first written, and of the other readers among them their rows cut to
+/// it (a task's, with its runs' rows or the events of those read whole) to
+/// fold whether they were settled at it, a row written before the push that
+/// closed its pending push being behind though it records every event of
+/// its run ([`PushesHeld::settled_folded`]), a legacy task's runs by its
+/// claims ([`crate::application::LedgerStore::ledger_runs_claimed`]); of a run whose
+/// settling it folds, the windows of its resources up to the builder's
+/// cursor of them, not what its row holds of them; and by id only the
+/// pushes the readers not settled read. Of the events it reads the runs'
+/// above and the pushes by id, and their number grows with the runs and
+/// tasks not settled where the rows were written, not with those settled;
+/// of a settled run's row it reads the push records, and whether it has an
+/// event after them, no other record.
+///
+/// It holds only when the store's rows are those a build of every event
+/// wrote at a position at or after the builder's cursors (each of them,
+/// the one of the runs' windows too; none written late): which position
+/// the rows record every input up to they do not say, and finding it is
+/// for the caller, not for this.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
+    )
+)]
+pub fn restore_pushes(store: &dyn LedgerQueue, builder: &mut Builder, now_ms: i64) -> Result<()> {
+    let (through, resources) = (builder.events, builder.resources);
+    let now_ms = builder.folds_at(now_ms);
+    let heads = store.ledger_heads_open_at(through, resources)?;
+    let mut open: BTreeSet<Target> = heads.iter().filter_map(pushes::target_of).collect();
+    let mut records = store.ledger_push_records()?;
+    records.extend(store.ledger_runless_pushes()?);
+    let mut runs = store.ledger_runs_without_row()?;
+    runs.extend(store.ledger_legacy_runs_without_row()?);
+    runs.extend(store.ledger_runs_past_their_rows(through)?);
+    let mut whole: BTreeMap<RunId, Vec<RunEvent>> = BTreeMap::new();
+    for run in runs {
+        if let Entry::Vacant(entry) = whole.entry(run) {
+            let events = store.ledger_run_events(entry.key())?;
+            records.extend(events.iter().cloned());
+            entry.insert(events);
+        }
+    }
+    let mut held = PushesHeld::at(records, through);
+    let readers = held.readers();
+    for (run, events) in &whole {
+        let target = Target::Run(run.to_string());
+        if !readers.contains(&target) {
+            continue;
+        }
+        let windows = windows_until(store, run, resources)?;
+        if held.events_settled(run.as_str(), events, &windows, now_ms) {
+            open.remove(&target);
+        } else {
+            open.insert(target);
+        }
+    }
+    for head in &heads {
+        let Some(target) = pushes::target_of(head).filter(|target| readers.contains(target)) else {
+            continue;
+        };
+        let windows = match &target {
+            Target::Run(run) => match RunId::new(run) {
+                // Folded on its events above.
+                Ok(run) if whole.contains_key(&run) => continue,
+                Ok(run) => windows_until(store, &run, resources)?,
+                Err(_) => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let Some(row) = store.ledger_row(head.kind, &head.key)? else {
+            continue;
+        };
+        let events = run_and_task_records(store, &row, &whole)?;
+        if held.settled_folded(&row, events, &windows, now_ms) {
+            open.remove(&target);
+        }
+    }
+    held.settle(&open);
+    let pushes = read_by_id(store, &held.to_read())?;
+    builder.restore_pushes(held, pushes);
+    Ok(())
+}
+
+/// The windows of `run`'s resources measured from outside up to the cursor
+/// `resources`: those a build up to that cursor had read.
+fn windows_until(
+    store: &dyn LedgerQueue,
+    run: &RunId,
+    resources: i64,
+) -> Result<Vec<crate::domain::environment::RunResource>> {
+    Ok(store
+        .run_resources(run)?
+        .into_iter()
+        .filter(|window| window.id <= resources)
+        .collect())
+}
+
+/// The records of the run or task row `row`, and of a task's its runs'
+/// (their rows' records, or the events of those read whole, `whole`, in
+/// their stead): those it names, or those its claims name for a legacy row,
+/// which keeps the runs it named as first written.
+fn run_and_task_records(
+    store: &dyn LedgerQueue,
+    row: &LedgerRow,
+    whole: &BTreeMap<RunId, Vec<RunEvent>>,
+) -> Result<Vec<RunEvent>> {
+    let mut events = row.records.clone();
+    if row.kind == LedgerKind::Task {
+        let runs: Vec<String> = match row.task_id.filter(|_| row.is_legacy()) {
+            Some(task) => store
+                .ledger_runs_claimed(task)?
+                .iter()
+                .map(|run| run.as_str().to_owned())
+                .collect(),
+            None => pushes::task_runs(row),
+        };
+        for run in runs {
+            match RunId::new(&run).ok().and_then(|id| whole.get(&id)) {
+                Some(read) => events.extend(read.iter().cloned()),
+                None => {
+                    if let Some(run) = store.ledger_row(LedgerKind::Run, &run)? {
+                        events.extend(run.records);
+                    }
+                }
+            }
+        }
+    }
+    Ok(events)
 }
 
 /// The events of `ids`, each read by its id.

@@ -1248,3 +1248,164 @@ fn the_reads_of_a_cut_to_a_position_cross_as_the_queues_own() {
     let event: crate::domain::RunEvent = serde_json::from_value(answer.result.unwrap()).unwrap();
     assert_eq!(event.id, EventId::new(first + 2));
 }
+
+/// What makes the summaries of the pushes again reads the pushes of no run
+/// through the service by their own operation, which answers as the
+/// queue's own adapter does: those of the task rows and of the queue rows
+/// of a push alone, cut, a page after a push at a time, and no other queue
+/// row (one whose records no longer parse leaves the read as it is).
+#[test]
+fn the_pushes_of_no_run_cross_as_the_queues_own_and_no_other_queue_row() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::{self, LedgerKind};
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let direct = SqliteQueue::open(&backend.db).unwrap();
+    let (mut log, now) = ledger::testkit::pushes_across(1);
+    let pushed = json!({"remote": "origin", "branch": "late", "commit": "c"});
+    log.add(Some(2), None, "push_finished", pushed.clone(), now)
+        .add(None, None, "push_finished", pushed, now + 1);
+    for row in ledger::build(&log.events, ledger::testkit::ms(now + 2), "t") {
+        direct.write_ledger_row(&row).unwrap();
+    }
+    let expected = direct.ledger_runless_pushes().unwrap();
+    assert_eq!(expected.len(), 2);
+    let others = direct
+        .conn
+        .execute(
+            "UPDATE ledger_rows SET records='[{\"id\":1}]'
+              WHERE kind='queue' AND (subject_kind IS NULL OR subject_kind<>'push_finished')",
+            [],
+        )
+        .unwrap();
+    assert!(others > 0);
+    assert!(direct.ledger_rows(LedgerKind::Queue).is_err());
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    assert_eq!(queue.ledger_runless_pushes().unwrap(), expected);
+    let ops = std::mem::take(&mut *service.ops.lock().unwrap());
+    assert_eq!(ops, ["ledger_runless_pushes"]);
+    let answer = call(
+        &service.backend,
+        &service.token,
+        "ledger_runless_pushes",
+        json!([expected[0].id, 1]),
+    );
+    let page: Vec<crate::domain::RunEvent> =
+        serde_json::from_value(answer.result.unwrap()).unwrap();
+    assert_eq!(page, expected[1..]);
+}
+
+/// What makes the summaries of the pushes again reads the runs a legacy
+/// task claimed with no row and the runs past their rows through the
+/// service by their own operations: their ids alone cross, as the queue's
+/// own adapter gives them.
+#[test]
+fn the_runs_the_summaries_of_the_pushes_read_whole_cross_as_the_queues_own() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::{self, LedgerKind};
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let direct = SqliteQueue::open(&backend.db).unwrap();
+    let (old, later) = (ledger::testkit::run_id(1), ledger::testkit::run_id(2));
+    let mut log = ledger::testkit::Log::default();
+    log.legacy(1, &old, 0);
+    let rows = ledger::build(&log.events, ledger::testkit::ms(2000), "t");
+    for row in rows
+        .iter()
+        .filter(|row| matches!(row.kind, LedgerKind::Task | LedgerKind::Run))
+    {
+        direct.write_ledger_row(row).unwrap();
+    }
+    log.add(Some(1), Some(&later), "run_claimed", json!({}), 2000);
+    direct
+        .conn
+        .pragma_update(None, "foreign_keys", false)
+        .unwrap();
+    for event in &log.events {
+        direct
+            .conn
+            .execute(
+                "INSERT INTO run_events(id, task_id, run_id, kind, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    event.id.as_i64() + 1_000_000,
+                    event.task_id.map(|task| task.as_i64()),
+                    event.run_id.as_ref().map(|run| run.as_str()),
+                    event.kind.as_str(),
+                    event.payload.to_string()
+                ],
+            )
+            .unwrap();
+    }
+    let expected = [crate::domain::RunId::new(&later).unwrap()];
+    assert_eq!(direct.ledger_legacy_runs_without_row().unwrap(), expected);
+    let task = crate::domain::TaskId::new(1);
+    let claimed = direct.ledger_runs_claimed(task).unwrap();
+    assert_eq!(claimed.len(), 2);
+    let (through, past) = (
+        EventId::new(log.last().as_i64() + 1_000_000),
+        [crate::domain::RunId::new(&old).unwrap()],
+    );
+    assert_eq!(direct.ledger_runs_past_their_rows(through).unwrap(), past);
+    let records = direct.ledger_push_records().unwrap();
+    assert_eq!(records.len(), 1);
+    let heads = direct.ledger_heads_open_at(through, 0).unwrap();
+    assert_eq!(heads.len(), 2);
+    assert!(direct.ledger_runs_without_row().unwrap().is_empty());
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    assert_eq!(queue.ledger_legacy_runs_without_row().unwrap(), expected);
+    assert_eq!(queue.ledger_runs_claimed(task).unwrap(), claimed);
+    assert_eq!(queue.ledger_runs_past_their_rows(through).unwrap(), past);
+    assert_eq!(queue.ledger_push_records().unwrap(), records);
+    assert_eq!(queue.ledger_heads_open_at(through, 0).unwrap(), heads);
+    assert!(queue.ledger_runs_without_row().unwrap().is_empty());
+    let ops = std::mem::take(&mut *service.ops.lock().unwrap());
+    assert_eq!(
+        ops,
+        [
+            "ledger_legacy_runs_without_row",
+            "ledger_runs_claimed",
+            "ledger_runs_past_their_rows",
+            "ledger_push_records",
+            "ledger_heads_open_at",
+            "ledger_heads_open_at",
+            "ledger_runs_without_row",
+        ]
+    );
+    let page = |args: Value| {
+        let answer = call(
+            &service.backend,
+            &service.token,
+            "ledger_heads_open_at",
+            args,
+        );
+        let heads: Vec<ledger::LedgerHead> =
+            serde_json::from_value(answer.result.unwrap()).unwrap();
+        heads.into_iter().map(|head| head.key).collect::<Vec<_>>()
+    };
+    assert_eq!(page(json!(["task", through, 0, null, 1])), ["1"]);
+    assert!(page(json!(["task", through, 0, "1", 1])).is_empty());
+    assert_eq!(page(json!(["run", through, 0, null, 1])), [old.as_str()]);
+}

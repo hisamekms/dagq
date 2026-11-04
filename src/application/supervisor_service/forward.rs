@@ -3350,6 +3350,79 @@ impl LedgerStore for SupervisorQueue {
             Ok((read, rows, last))
         })
     }
+    // In pages after the last push of the page before, a page past the
+    // answer's limit asked again at a quarter of its size: the service
+    // picks the rows by their kinds and subjects, as the queue's own store
+    // does, and sends the pushes alone, cut.
+    fn ledger_runless_pushes(&self) -> Result<Vec<RunEvent>> {
+        self.ledger_pages(LEDGER_PUSHES_PAGE, |after, page| {
+            let after = after.map(str::parse::<i64>).transpose()?.map(EventId::new);
+            let read: Vec<RunEvent> = self.remote(
+                "ledger_runless_pushes",
+                vec![to_value(after)?, to_value(page)?],
+            )?;
+            let pushes = read.len();
+            let last = read.last().map(|push| push.id.as_i64().to_string());
+            Ok((read, pushes, last))
+        })
+    }
+    // As the pushes of no run, a page after the last record of the page
+    // before: the service picks the records out of the run rows and sends
+    // them alone, cut, and no run row crosses.
+    fn ledger_push_records(&self) -> Result<Vec<RunEvent>> {
+        self.ledger_pages(LEDGER_PUSHES_PAGE, |after, page| {
+            let after = after.map(str::parse::<i64>).transpose()?.map(EventId::new);
+            let read: Vec<RunEvent> = self.remote(
+                "ledger_push_records",
+                vec![to_value(after)?, to_value(page)?],
+            )?;
+            let records = read.len();
+            let last = read.last().map(|record| record.id.as_i64().to_string());
+            Ok((read, records, last))
+        })
+    }
+    // Each kind's heads in pages after the last key of the page before: the
+    // service picks the rows, and only the ids of their records cross.
+    fn ledger_heads_open_at(
+        &self,
+        through: EventId,
+        resources: i64,
+    ) -> Result<Vec<crate::domain::ledger::LedgerHead>> {
+        let mut heads = Vec::new();
+        for kind in [
+            crate::domain::ledger::LedgerKind::Run,
+            crate::domain::ledger::LedgerKind::Task,
+        ] {
+            heads.extend(self.ledger_pages(LEDGER_HEADS_PAGE, |after, page| {
+                let read: Vec<crate::domain::ledger::LedgerHead> = self.remote(
+                    "ledger_heads_open_at",
+                    vec![
+                        to_value(kind)?,
+                        to_value(through)?,
+                        to_value(resources)?,
+                        to_value(after)?,
+                        to_value(page)?,
+                    ],
+                )?;
+                let keys = read.len();
+                let last = read.last().map(|head| head.key.clone());
+                Ok((read, keys, last))
+            })?);
+        }
+        Ok(heads)
+    }
+    fn ledger_runs_without_row(&self) -> Result<Vec<RunId>> {
+        self.remote("ledger_runs_without_row", vec![])
+    }
+    fn ledger_legacy_runs_without_row(&self) -> Result<Vec<RunId>> {
+        self.remote("ledger_legacy_runs_without_row", vec![])
+    }
+    fn ledger_runs_claimed(&self, task: crate::domain::TaskId) -> Result<Vec<RunId>> {
+        self.remote("ledger_runs_claimed", vec![to_value(task)?])
+    }
+    fn ledger_runs_past_their_rows(&self, through: EventId) -> Result<Vec<RunId>> {
+        self.remote("ledger_runs_past_their_rows", vec![to_value(through)?])
+    }
     fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
         self.remote("remove_node_rows", vec![to_value(before_day)?])
     }
@@ -3371,6 +3444,10 @@ const LEDGER_WAIT_ROWS_PAGE: usize = 500;
 /// How many stops a read asks for at a time, a quarter of it for a page
 /// past the answer's limit.
 const LEDGER_STOPS_PAGE: usize = 1_000;
+
+/// How many push records a read asks for at a time, a quarter of it for a
+/// page past the answer's limit: a record crosses cut.
+const LEDGER_PUSHES_PAGE: usize = 1_000;
 
 /// How many queue rows of waits settled a read asks for at a time, a
 /// quarter of it for a page past the answer's limit: a row comes with no

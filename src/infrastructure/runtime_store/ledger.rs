@@ -306,6 +306,51 @@ fn last_event_naming_supervisor_sql() -> String {
     )
 }
 
+impl SqliteQueue {
+    /// The heads of the rows of `kind` (`?1` of `params`) that `filter`
+    /// (SQL over the row `r`) keeps, by key, each with whether its row is
+    /// legacy: the ids of their records come from SQLite's JSON functions
+    /// over the stored array, and no record is parsed.
+    fn heads_where(
+        &self,
+        kind: LedgerKind,
+        filter: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<(LedgerHead, bool)>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v, r.legacy,
+                    (SELECT COALESCE(json_group_array({id}), '[]')
+                       FROM json_each(r.records) j) AS ids
+               FROM ledger_rows r WHERE r.kind=?1 AND {filter} ORDER BY r.key",
+            id = json_field_spaced("j.value", "$.id", JsonType::Integer),
+        ))?;
+        let rows = statement.query_map(params, |r| {
+            let key: String = r.get("key")?;
+            let inputs_from: i64 = r.get("inputs_from")?;
+            let inputs_through: String = r.get("inputs_through")?;
+            let is_final: bool = r.get("final")?;
+            let ledger_v: i64 = r.get("ledger_v")?;
+            let legacy: bool = r.get("legacy")?;
+            let ids: String = r.get("ids")?;
+            Ok((|| {
+                let mut records: Vec<i64> = serde_json::from_str(&ids)?;
+                records.sort_unstable();
+                let head = LedgerHead {
+                    kind,
+                    key,
+                    inputs_from: EventId::new(inputs_from),
+                    inputs_through: serde_json::from_str(&inputs_through)?,
+                    is_final,
+                    ledger_v: u32::try_from(ledger_v)?,
+                    records: records.into_iter().map(EventId::new).collect(),
+                };
+                Ok((head, legacy))
+            })())
+        })?;
+        rows.map(|row| row?).collect()
+    }
+}
+
 impl LedgerStore for SqliteQueue {
     fn ledger_run_events(
         &self,
@@ -457,35 +502,210 @@ impl LedgerStore for SqliteQueue {
     /// The ids of the records come from SQLite's JSON functions over the
     /// stored array: no record is parsed here.
     fn ledger_heads(&self, kind: LedgerKind) -> Result<Vec<LedgerHead>> {
+        Ok(self
+            .heads_where(kind, "1", params![kind.as_str()])?
+            .into_iter()
+            .map(|(head, _)| head)
+            .collect())
+    }
+
+    /// SQLite picks the push records out of the stored arrays of the run
+    /// rows: no other record is parsed.
+    fn ledger_push_records(&self) -> Result<Vec<crate::domain::RunEvent>> {
+        use crate::domain::EventKind;
+        let kind = json_field_spaced("j.value", "$.kind", JsonType::Text);
         let mut statement = self.conn.prepare(&format!(
-            "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v,
-                    (SELECT COALESCE(json_group_array({}), '[]')
-                       FROM json_each(r.records) j) AS ids
-               FROM ledger_rows r WHERE r.kind=?1 ORDER BY r.key",
-            json_field_spaced("j.value", "$.id", JsonType::Integer),
+            "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+              WHERE r.kind=?1
+                AND ({kind}=?2
+                     OR ({kind} IN (?3, ?4)
+                         AND EXISTS (SELECT 1 FROM json_each(r.records) f
+                                      WHERE {failed}=?3)))
+              ORDER BY {id}",
+            failed = json_field_spaced("f.value", "$.kind", JsonType::Text),
+            id = json_field_spaced("j.value", "$.id", JsonType::Integer),
         ))?;
-        let rows = statement.query_map([kind.as_str()], |r| {
-            let key: String = r.get("key")?;
-            let inputs_from: i64 = r.get("inputs_from")?;
-            let inputs_through: String = r.get("inputs_through")?;
-            let is_final: bool = r.get("final")?;
-            let ledger_v: i64 = r.get("ledger_v")?;
-            let ids: String = r.get("ids")?;
-            Ok((|| {
-                let mut records: Vec<i64> = serde_json::from_str(&ids)?;
-                records.sort_unstable();
-                Ok(LedgerHead {
+        let rows = statement.query_map(
+            params![
+                LedgerKind::Run.as_str(),
+                EventKind::PushFinished.as_str(),
+                EventKind::PushFailed.as_str(),
+                EventKind::RunPhaseChanged.as_str(),
+            ],
+            |r| r.get::<_, String>(0),
+        )?;
+        rows.map(|row| {
+            let event: crate::domain::RunEvent = serde_json::from_str(&row?)?;
+            Ok(crate::domain::ledger::builder::pushes::cut(&event))
+        })
+        .collect()
+    }
+
+    /// SQLite picks by their columns the run and task rows that may not be
+    /// settled at `through` and the cursor `resources`, and gives their
+    /// heads as [`Self::ledger_heads`] does: no record is parsed.
+    fn ledger_heads_open_at(&self, through: EventId, resources: i64) -> Result<Vec<LedgerHead>> {
+        use crate::domain::ledger::builder::pushes::settled_at;
+        let open = format!(
+            "(r.final=0 OR r.legacy=1 OR r.ledger_v<>?2
+                     OR {events}>?3
+                     OR COALESCE({supervisor}, 0)>?3
+                     OR COALESCE({windows}, 0)>?4
+                     OR json_array_length(COALESCE({life_ended}, '[]'))>0)",
+            events = json_field_spaced("r.inputs_through", "$.events", JsonType::Integer),
+            supervisor = json_field_spaced("r.inputs_through", "$.supervisor", JsonType::Integer),
+            windows = json_field_spaced("r.inputs_through", "$.resources", JsonType::Integer),
+            life_ended = json_field_spaced("r.inputs_through", "$.life_ended", JsonType::Any),
+        );
+        let mut heads = Vec::new();
+        for kind in [LedgerKind::Run, LedgerKind::Task] {
+            heads.extend(
+                self.heads_where(
                     kind,
-                    key,
-                    inputs_from: EventId::new(inputs_from),
-                    inputs_through: serde_json::from_str(&inputs_through)?,
-                    is_final,
-                    ledger_v: u32::try_from(ledger_v)?,
-                    records: records.into_iter().map(EventId::new).collect(),
-                })
-            })())
-        })?;
-        rows.map(|row| row?).collect()
+                    &open,
+                    params![
+                        kind.as_str(),
+                        crate::domain::ledger::LEDGER_V,
+                        through.as_i64(),
+                        resources
+                    ],
+                )?
+                .into_iter()
+                .filter(|(head, legacy)| !settled_at(head, *legacy, through, resources))
+                .map(|(head, _)| head),
+            );
+        }
+        Ok(heads)
+    }
+
+    /// SQLite picks the runs out of the task rows' details and a legacy
+    /// row's values, and keeps those with no run row: no record is read.
+    fn ledger_runs_without_row(&self) -> Result<Vec<crate::domain::RunId>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT j.value
+               FROM ledger_rows t, json_each(t.detail, '$.runs') j
+              WHERE t.kind=?1 AND j.type='text'
+                AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?2 AND r.key=j.value)
+             UNION
+             SELECT j.value
+               FROM ledger_rows t, json_each(COALESCE(t.legacy_values, '{}'), '$.runs') j
+              WHERE t.kind=?1 AND j.type='text'
+                AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?2 AND r.key=j.value)
+              ORDER BY 1",
+        )?;
+        let rows = statement.query_map(
+            params![LedgerKind::Task.as_str(), LedgerKind::Run.as_str()],
+            |r| r.get::<_, String>(0),
+        )?;
+        rows.filter_map(|run| match run {
+            Ok(run) => crate::domain::RunId::new(&run).ok().map(Ok),
+            Err(error) => Some(Err(error.into())),
+        })
+        .collect()
+    }
+
+    /// SQLite walks the events of the legacy task rows' tasks by the index
+    /// on their task and keeps the runs of their claims with no run row:
+    /// no payload is read.
+    fn ledger_legacy_runs_without_row(&self) -> Result<Vec<crate::domain::RunId>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT e.run_id
+               FROM ledger_rows t
+               JOIN run_events e ON e.task_id=t.task_id
+              WHERE t.kind=?1 AND t.legacy=1 AND e.kind=?2 AND e.run_id IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?3 AND r.key=e.run_id)
+              ORDER BY 1",
+        )?;
+        let rows = statement.query_map(
+            params![
+                LedgerKind::Task.as_str(),
+                crate::domain::EventKind::RunClaimed.as_str(),
+                LedgerKind::Run.as_str(),
+            ],
+            |r| r.get::<_, String>(0),
+        )?;
+        rows.filter_map(|run| match run {
+            Ok(run) => crate::domain::RunId::new(&run).ok().map(Ok),
+            Err(error) => Some(Err(error.into())),
+        })
+        .collect()
+    }
+
+    /// SQLite walks the claims of the task by the index on its task: no
+    /// payload is read.
+    fn ledger_runs_claimed(
+        &self,
+        task: crate::domain::TaskId,
+    ) -> Result<Vec<crate::domain::RunId>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT run_id FROM run_events
+              WHERE task_id=?1 AND kind=?2 AND run_id IS NOT NULL
+              ORDER BY 1",
+        )?;
+        let rows = statement.query_map(
+            params![task.as_i64(), crate::domain::EventKind::RunClaimed.as_str()],
+            |r| r.get::<_, String>(0),
+        )?;
+        rows.filter_map(|run| match run {
+            Ok(run) => crate::domain::RunId::new(&run).ok().map(Ok),
+            Err(error) => Some(Err(error.into())),
+        })
+        .collect()
+    }
+
+    /// SQLite looks each run row's next event after its inputs up in the
+    /// index on the run: no record and no event is read.
+    fn ledger_runs_past_their_rows(&self, through: EventId) -> Result<Vec<crate::domain::RunId>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT r.key FROM ledger_rows r
+              WHERE r.kind=?1
+                AND EXISTS (SELECT 1 FROM run_events e
+                             WHERE e.run_id=r.key AND e.id>{inputs} AND e.id<=?2)
+              ORDER BY r.key",
+            inputs = json_field_spaced("r.inputs_through", "$.events", JsonType::Integer),
+        ))?;
+        let rows = statement
+            .query_map(params![LedgerKind::Run.as_str(), through.as_i64()], |r| {
+                r.get::<_, String>(0)
+            })?;
+        rows.filter_map(|run| match run {
+            Ok(run) => crate::domain::RunId::new(&run).ok().map(Ok),
+            Err(error) => Some(Err(error.into())),
+        })
+        .collect()
+    }
+
+    /// SQLite picks the pushes of no run out of the task rows' records and
+    /// out of the queue rows of a push alone (by their subject's kind): only
+    /// those are parsed.
+    fn ledger_runless_pushes(&self) -> Result<Vec<crate::domain::RunEvent>> {
+        use crate::domain::EventKind;
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+              WHERE (r.kind=?1 OR (r.kind=?2 AND r.subject_kind=?3))
+                AND {kind}=?3
+                AND {run} IS NULL
+              ORDER BY {id}",
+            kind = json_field_spaced("j.value", "$.kind", JsonType::Text),
+            run = json_field_spaced("j.value", "$.run_id", JsonType::Any),
+            id = json_field_spaced("j.value", "$.id", JsonType::Integer),
+        ))?;
+        let rows = statement.query_map(
+            params![
+                LedgerKind::Task.as_str(),
+                LedgerKind::Queue.as_str(),
+                EventKind::PushFinished.as_str(),
+            ],
+            |r| r.get::<_, String>(0),
+        )?;
+        let mut pushes: Vec<crate::domain::RunEvent> = rows
+            .map(|row| {
+                let event: crate::domain::RunEvent = serde_json::from_str(&row?)?;
+                Ok(crate::domain::ledger::builder::pushes::cut(&event))
+            })
+            .collect::<Result<_>>()?;
+        pushes.dedup_by_key(|event| event.id);
+        Ok(pushes)
     }
 
     /// Its columns and the ids of its records (SQLite's JSON functions over
@@ -1681,5 +1901,305 @@ mod tests {
                 ..marks
             })
         );
+    }
+
+    /// The push records, the heads of the rows not settled at a position
+    /// and the runs a task names with no row read back what the rows read
+    /// whole give by the port's rule: SQLite picks them out of the stored
+    /// rows.
+    #[test]
+    fn the_push_records_and_open_heads_read_what_the_rows_whole_give() {
+        use crate::domain::ledger::builder::pushes::{cut, is_push_record, settled_at};
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let (log, now) = ledger::testkit::pushes_across(2);
+        let rows: Vec<LedgerRow> = ledger::build(&log.events, ledger::testkit::ms(now), "t")
+            .into_iter()
+            .map(|mut row| {
+                row.is_final = row
+                    .ended_at
+                    .is_some_and(|end| end < ledger::testkit::ms(now - 900));
+                row
+            })
+            .collect();
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        let of = |kind: LedgerKind| rows.iter().filter(move |row| row.kind == kind);
+        let mut records: Vec<RunEvent> = of(LedgerKind::Run)
+            .flat_map(|row| {
+                let failed = row
+                    .records
+                    .iter()
+                    .any(|e| e.kind == crate::domain::EventKind::PushFailed);
+                row.records.iter().filter(move |event| {
+                    is_push_record(event)
+                        && (failed || event.kind == crate::domain::EventKind::PushFinished)
+                })
+            })
+            .map(cut)
+            .collect();
+        records.sort_by_key(|event| event.id);
+        assert!(
+            records
+                .iter()
+                .any(|e| e.kind == crate::domain::EventKind::PushFinished)
+        );
+        assert!(
+            records
+                .iter()
+                .any(|e| e.kind == crate::domain::EventKind::RunPhaseChanged)
+        );
+        assert_eq!(queue.ledger_push_records().unwrap(), records);
+        for at in [EventId::new(40), log.last()] {
+            let open: Vec<LedgerHead> = [LedgerKind::Run, LedgerKind::Task]
+                .into_iter()
+                .flat_map(|kind| {
+                    let mut heads: Vec<LedgerHead> = of(kind).map(LedgerHead::of).collect();
+                    heads.sort_by(|a, b| a.key.cmp(&b.key));
+                    heads
+                })
+                .filter(|head| !settled_at(head, false, at, 0))
+                .collect();
+            assert!(!open.is_empty());
+            assert_eq!(queue.ledger_heads_open_at(at, 0).unwrap(), open);
+        }
+        let open = queue.ledger_heads_open_at(log.last(), 0).unwrap().len();
+        assert!(open < of(LedgerKind::Run).count() + of(LedgerKind::Task).count());
+        // A settled run row that folded a window after the cursor of the
+        // windows is open at it, and not at that window.
+        let settled = of(LedgerKind::Run)
+            .find(|row| settled_at(&LedgerHead::of(row), false, log.last(), 0))
+            .unwrap()
+            .key
+            .clone();
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET inputs_through=json_set(inputs_through, '$.resources', 5)
+                  WHERE kind='run' AND key=?1",
+                [&settled],
+            )
+            .unwrap();
+        let opens = |cursor: i64| {
+            queue
+                .ledger_heads_open_at(log.last(), cursor)
+                .unwrap()
+                .iter()
+                .any(|head| head.kind == LedgerKind::Run && head.key == settled)
+        };
+        assert!(opens(4) && !opens(5));
+        // Rows of a run on its way are not written: take run 5's out.
+        let on_its_way = crate::domain::RunId::new(ledger::testkit::run_id(5)).unwrap();
+        queue
+            .conn
+            .execute(
+                "DELETE FROM ledger_rows WHERE kind='run' AND key=?1",
+                [on_its_way.as_str()],
+            )
+            .unwrap();
+        assert_eq!(queue.ledger_runs_without_row().unwrap(), [on_its_way]);
+    }
+
+    /// Of the runs of a legacy task with no row, its row's values name
+    /// those of its claims up to its first write, its claims name those
+    /// since too; a run with a row is neither, and neither is a run of a
+    /// task whose row is not legacy (its row names those it has).
+    #[test]
+    fn the_runs_of_a_legacy_task_with_no_row_are_read_of_its_values_and_its_claims() {
+        use crate::domain::ledger::testkit::{Log, run_id};
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let (old, named, written, claimed, of_today) =
+            (run_id(1), run_id(2), run_id(3), run_id(4), run_id(5));
+        let claim = serde_json::json!({"provider": "claude"});
+        let mut log = Log::default();
+        log.legacy(1, &old, 0)
+            .add(Some(1), Some(&named), "run_claimed", claim.clone(), 2000);
+        let first = ledger::build(&log.events, ledger::testkit::ms(2000), "t");
+        let rows =
+            |of: &[LedgerRow], key: &str| of.iter().find(|row| row.key == key).unwrap().clone();
+        queue.write_ledger_row(&rows(&first, "1")).unwrap();
+        queue.write_ledger_row(&rows(&first, &old)).unwrap();
+        log.add(Some(1), Some(&written), "run_claimed", claim.clone(), 3000)
+            .add(Some(1), Some(&claimed), "run_claimed", claim.clone(), 3000)
+            .add(Some(2), Some(&of_today), "run_claimed", claim, 3000);
+        let later = ledger::build(&log.events, ledger::testkit::ms(3000), "t");
+        for key in ["1", "2", written.as_str()] {
+            queue.write_ledger_row(&rows(&later, key)).unwrap();
+        }
+        let task = queue.ledger_row(LedgerKind::Task, "1").unwrap().unwrap();
+        assert_eq!(
+            ledger::builder::pushes::task_runs(&task),
+            [old.as_str(), named.as_str()]
+        );
+        queue
+            .conn
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        for event in &log.events {
+            queue
+                .conn
+                .execute(
+                    "INSERT INTO run_events(id, task_id, run_id, kind, payload)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        event.id.as_i64(),
+                        event.task_id.map(|task| task.as_i64()),
+                        event.run_id.as_ref().map(|run| run.as_str()),
+                        event.kind.as_str(),
+                        event.payload.to_string()
+                    ],
+                )
+                .unwrap();
+        }
+        let ids = |runs: &[&String]| -> Vec<RunId> {
+            runs.iter().map(|run| RunId::new(*run).unwrap()).collect()
+        };
+        assert_eq!(
+            queue.ledger_runs_without_row().unwrap(),
+            ids(&[&named, &of_today])
+        );
+        assert_eq!(
+            queue.ledger_legacy_runs_without_row().unwrap(),
+            ids(&[&named, &claimed])
+        );
+        // The claims of a task name its runs, with a row or not.
+        assert_eq!(
+            queue.ledger_runs_claimed(TaskId::new(1)).unwrap(),
+            ids(&[&old, &named, &written, &claimed])
+        );
+    }
+
+    /// A run with an event up to a position after the inputs of its row is
+    /// past its row, up to that position and not before it; one whose row
+    /// holds its events, or with no row, is not.
+    #[test]
+    fn the_runs_past_their_rows_have_an_event_up_to_the_position_after_their_inputs() {
+        use crate::domain::ledger::testkit::{Log, run_id};
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let (went_on, holds, no_row) = (run_id(1), run_id(2), run_id(3));
+        let mut log = Log::default();
+        log.landed(1, &went_on, 0).landed(2, &holds, 0);
+        for row in ledger::build(&log.events, ledger::testkit::ms(2000), "t") {
+            if row.kind == LedgerKind::Run {
+                queue.write_ledger_row(&row).unwrap();
+            }
+        }
+        let written = log.last();
+        log.add(
+            Some(3),
+            Some(&no_row),
+            "run_claimed",
+            serde_json::json!({}),
+            2000,
+        )
+        .add(
+            Some(1),
+            Some(&went_on),
+            "note_added",
+            serde_json::json!({}),
+            2000,
+        );
+        queue
+            .conn
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        for event in &log.events {
+            queue
+                .conn
+                .execute(
+                    "INSERT INTO run_events(id, task_id, run_id, kind, payload)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        event.id.as_i64(),
+                        event.task_id.map(|task| task.as_i64()),
+                        event.run_id.as_ref().map(|run| run.as_str()),
+                        event.kind.as_str(),
+                        event.payload.to_string()
+                    ],
+                )
+                .unwrap();
+        }
+        let before = EventId::new(log.last().as_i64() - 1);
+        assert!(before > written);
+        assert!(
+            queue
+                .ledger_runs_past_their_rows(before)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            queue.ledger_runs_past_their_rows(log.last()).unwrap(),
+            [RunId::new(&went_on).unwrap()]
+        );
+    }
+
+    /// The store keeps a legacy row's mark as first written, so its head is
+    /// read as not settled at a position whatever that mark, at today's
+    /// version too; a settled row of today's form is not.
+    #[test]
+    fn a_legacy_row_is_open_at_a_position_whatever_its_mark() {
+        use crate::domain::ledger::testkit::{Log, ms, run_id};
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let (old, today) = (run_id(1), run_id(2));
+        let mut log = Log::default();
+        log.legacy(1, &old, 0).landed(2, &today, 0);
+        let rows: Vec<LedgerRow> = ledger::build(&log.events, ms(100_000), "t")
+            .into_iter()
+            .filter(|row| matches!(row.kind, LedgerKind::Run | LedgerKind::Task))
+            .map(|mut row| {
+                row.is_final = true;
+                row
+            })
+            .collect();
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        let legacy: Vec<LedgerHead> = [LedgerKind::Run, LedgerKind::Task]
+            .into_iter()
+            .flat_map(|kind| rows.iter().filter(move |row| row.kind == kind))
+            .filter(|row| row.is_legacy() && row.ledger_v == ledger::LEDGER_V)
+            .map(LedgerHead::of)
+            .collect();
+        assert_eq!(
+            legacy
+                .iter()
+                .map(|head| head.key.as_str())
+                .collect::<Vec<_>>(),
+            [old.as_str(), "1"]
+        );
+        assert_eq!(queue.ledger_heads_open_at(log.last(), 0).unwrap(), legacy);
+    }
+
+    /// The pushes of no run SQLite picks out of the task rows and the queue
+    /// rows of a push alone are those the rows' records whole give.
+    #[test]
+    fn the_runless_pushes_read_what_the_rows_whole_give() {
+        use crate::domain::ledger::builder::pushes::cut;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let (mut log, now) = ledger::testkit::pushes_across(1);
+        let pushed = serde_json::json!({"remote": "origin", "branch": "late", "commit": "c"});
+        log.add(Some(2), None, "push_finished", pushed.clone(), now)
+            .add(None, None, "push_finished", pushed, now + 1);
+        let rows = ledger::build(&log.events, ledger::testkit::ms(now + 2), "t");
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        let mut expected: Vec<RunEvent> = rows
+            .iter()
+            .filter(|row| matches!(row.kind, LedgerKind::Task | LedgerKind::Queue))
+            .flat_map(|row| row.records.iter())
+            .filter(|event| {
+                event.kind == crate::domain::EventKind::PushFinished && event.run_id.is_none()
+            })
+            .map(cut)
+            .collect();
+        expected.sort_by_key(|event| event.id);
+        assert_eq!(expected.len(), 2);
+        assert_eq!(queue.ledger_runless_pushes().unwrap(), expected);
     }
 }

@@ -286,7 +286,7 @@ fn opened_for(
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes by those who read this; the connection a
 /// request runs on goes by the wider [`needs::only_reads`].
-const READ_OPS: [&str; 90] = [
+const READ_OPS: [&str; 97] = [
     "diagnosis_owners",
     "candidates",
     "build_waits",
@@ -374,6 +374,13 @@ const READ_OPS: [&str; 90] = [
     "ledger_wait_rows",
     "ledger_supervisor_stops",
     "ledger_settled_waits",
+    "ledger_runless_pushes",
+    "ledger_legacy_runs_without_row",
+    "ledger_runs_claimed",
+    "ledger_runs_past_their_rows",
+    "ledger_push_records",
+    "ledger_heads_open_at",
+    "ledger_runs_without_row",
     "ledger_sessions_written",
     "run_events_after",
     "task_events_after",
@@ -919,7 +926,7 @@ const RUN_RESOURCE_OPS: [&str; 4] = [
 /// folds): the supervisor principal's only, refused to a landing's
 /// integrator by the policy and to a control-side command whatever its
 /// principal holds ([`control::answer`]), as [`RUN_RESOURCE_OPS`].
-const LEDGER_OPS: [&str; 25] = [
+const LEDGER_OPS: [&str; 32] = [
     "ledger_row",
     "ledger_rows",
     "ledger_row_part",
@@ -932,6 +939,13 @@ const LEDGER_OPS: [&str; 25] = [
     "ledger_wait_rows",
     "ledger_supervisor_stops",
     "ledger_settled_waits",
+    "ledger_runless_pushes",
+    "ledger_legacy_runs_without_row",
+    "ledger_runs_claimed",
+    "ledger_runs_past_their_rows",
+    "ledger_push_records",
+    "ledger_heads_open_at",
+    "ledger_runs_without_row",
     "write_ledger_row_over",
     "stage_ledger_row",
     "write_staged_ledger_row_over",

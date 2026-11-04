@@ -831,3 +831,132 @@ pub(crate) fn two_late_log() -> Log {
         .add(None, None, "mark_added", json!({"mark": "n"}), 30);
     log
 }
+
+impl Log {
+    /// The push of `run` of `task` to `branch` failed at `secs`: pending.
+    pub(crate) fn push_failed_to(
+        &mut self,
+        task: i64,
+        run: &str,
+        branch: &str,
+        secs: i64,
+    ) -> &mut Self {
+        self.add(
+            Some(task),
+            Some(run),
+            "push_failed",
+            json!({"remote": "origin", "branch": branch, "error": "x"}),
+            secs,
+        )
+        .phase(task, run, secs, Phase::PushPending, "push_failed")
+    }
+
+    /// The push of `run` of `task` to `branch` finished at `secs`, the run
+    /// and the task ended with it.
+    pub(crate) fn pushed_to(&mut self, task: i64, run: &str, branch: &str, secs: i64) -> &mut Self {
+        self.add(
+            Some(task),
+            Some(run),
+            "push_finished",
+            json!({"remote": "origin", "branch": branch, "commit": "c"}),
+            secs,
+        )
+        .phase(task, run, secs, Phase::Ended, "pushed")
+        .completed(task, secs)
+    }
+
+    /// `task` completed at `secs`.
+    pub(crate) fn completed(&mut self, task: i64, secs: i64) -> &mut Self {
+        self.add(
+            Some(task),
+            None,
+            "task_status_changed",
+            json!({"from": "in_progress", "to": "completed"}),
+            secs,
+        )
+    }
+}
+
+/// The pushes the summaries of what builds the ledger follow
+/// (`builder::pushes`), after `settled` runs whose failed push the next
+/// run's push closed long before (they and their tasks settle), and the
+/// time (seconds) of a pass after which only the last push's are not
+/// settled. Run 1 (task 1) fails its push and completes; run 3 (task 3)
+/// fails one to another branch, which no push closes; run 2's landing
+/// (task 2) closes run 1's; run 4 (task 4) fails one to another branch,
+/// its task is canceled, and it lands again and fails again, pending again
+/// (on its way meanwhile, its row that of its first pending push and its
+/// task ended); run 7 (task 7) fails one to a branch and goes back to its
+/// landing (its row that of the pending push), before run 6's push to that
+/// branch, which closes it not; run 5 (task 5) fails one to a
+/// branch, which run 6's push (task 6) closes at the end, within the grace
+/// of the pass.
+pub(crate) fn pushes_across(settled: usize) -> (Log, i64) {
+    pushes_across_with(settled, 0)
+}
+
+/// [`pushes_across`] after `of_open_task` runs of task 90, which does not
+/// end, each ended without a landing long before the pass (settled).
+pub(crate) fn pushes_across_with(settled: usize, of_open_task: usize) -> (Log, i64) {
+    let mut log = Log::default();
+    let id =
+        |n: usize, side: u8| format!("{n:08x}-{side}{side}{side}{side}-4333-8333-333333333333");
+    let mut base = 0;
+    for k in 0..of_open_task {
+        let run = id(k, 5);
+        log.worked(90, &run, base)
+            .phase(90, &run, base + 700, Phase::Ended, "failed");
+        base += 1000;
+    }
+    for k in 0..settled {
+        let task = 100 + 2 * i64::try_from(k).unwrap();
+        let (failed, closing) = (id(k, 3), id(k, 4));
+        log.worked(task, &failed, base)
+            .integrated(task, &failed, base + 700)
+            .push_failed(task, &failed, base + 910)
+            .completed(task, base + 910)
+            .landed(task + 1, &closing, base + 1000);
+        base += 2000;
+    }
+    let (a, b, c, d, e, f, g) = (
+        run_id(1),
+        run_id(2),
+        run_id(3),
+        run_id(4),
+        run_id(5),
+        run_id(6),
+        run_id(7),
+    );
+    log.worked(1, &a, base)
+        .integrated(1, &a, base + 700)
+        .push_failed(1, &a, base + 910)
+        .completed(1, base + 910)
+        .worked(3, &c, base)
+        .integrated(3, &c, base + 1000)
+        .push_failed_to(3, &c, "other", base + 1210)
+        .worked(4, &d, base)
+        .integrated(4, &d, base + 1300)
+        .push_failed_to(4, &d, "next", base + 1510)
+        .landed(2, &b, base + 2000)
+        .add(
+            Some(4),
+            None,
+            "task_status_changed",
+            json!({"from": "in_progress", "to": "canceled"}),
+            base + 2500,
+        )
+        .phase(4, &d, base + 3000, Phase::Landing, "x")
+        .push_failed_to(4, &d, "next", base + 3100)
+        .worked(7, &g, base + 2200)
+        .integrated(7, &g, base + 2900)
+        .push_failed_to(7, &g, "late", base + 3150)
+        .phase(7, &g, base + 3170, Phase::Landing, "x")
+        .worked(5, &e, base + 3200)
+        .integrated(5, &e, base + 3900)
+        .push_failed_to(5, &e, "late", base + 4110)
+        .completed(5, base + 4110)
+        .worked(6, &f, base + 4200)
+        .integrated(6, &f, base + 4900)
+        .pushed_to(6, &f, "late", base + 5130);
+    (log, base + 5130 + 300)
+}

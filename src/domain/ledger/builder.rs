@@ -169,9 +169,13 @@
 //!   task that starts before them reads the waits settled over its time
 //!   from the store's queue rows as it is folded, not their records, and
 //!   keeps none of them ([`Builder::waits_to_read`],
-//!   [`Inputs::read_waits`]). The rest of it is not
-//!   made from the rows yet, so a new process still starts at its cursors'
-//!   start and takes none of them.
+//!   [`Inputs::read_waits`]). So are the summaries of the pushes, at a
+//!   position: of the run rows' pushes, failed pushes and phases, the
+//!   pushes of no run, and the events of the runs on their way (with no
+//!   row) and of those whose row does not record them all, cut to it, with
+//!   the pushes the rows and the runs not settled at it read by id
+//!   ([`pushes::PushesHeld::at`], [`Builder::restore_pushes`]). A new
+//!   process still starts at its cursors' start and takes none of them.
 //! - **What a pass makes**: each event is read into [`Kept`] once as it
 //!   comes in (the supervisors' lives, the waits before a claim, the
 //!   landing slot's attempts, which session or queue row it is a record
@@ -209,6 +213,7 @@ use crate::domain::session_step::{SessionResource, SessionStep};
 use crate::domain::stats::timestamp_millis;
 use crate::domain::supervisor_life::{Lives, supervisor_of};
 use crate::domain::{EventId, RunEvent, TaskId};
+use pushes::PushesHeld;
 
 /// How often the supervisor's pass builds the ledger.
 pub const INTERVAL_SECS: u64 = 60;
@@ -336,7 +341,21 @@ struct WaitsMoved {
 /// last failed push of each run that failed one went ([`PushedTo`], for a
 /// later `push_pending` of it), the runs waiting on a push, and the push
 /// that closed each run's last pending push. They are as many as the runs
-/// that failed a push, and stay while the process does.
+/// that failed a push, and stay while the process does. They and the
+/// readers of each push kept are a fold of the runs' own records and the
+/// pushes, so they are made again from the run rows the store holds as of
+/// a position ([`PushesHeld::at`]), and a settled run a later event
+/// reaches reads back the push that closed it by id as here.
+///
+/// Of what it keeps, which session row each session event is a record of
+/// (with the records and marks it dropped), which queue row each event is,
+/// the supervisors' lives and the waits before a claim, and the summaries
+/// of the pushes are made again from the rows the store holds
+/// ([`Builder::restore_sessions`], [`Builder::restore_queue_rows`],
+/// [`Builder::restore_pre_claim`], [`Builder::restore_pushes`]): the last
+/// four as of any position no later than the one the rows were written at,
+/// cut there by a read the position decides. A new process takes none of
+/// them yet: it starts at its cursors' start.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Kept {
     /// The last event read.
@@ -704,6 +723,48 @@ impl Kept {
                 .map(|key| (LedgerKind::Session, key)),
         );
         self.session_rows = held.book;
+    }
+
+    /// Take the summaries of the pushes `held` made again from the store's
+    /// rows ([`PushesHeld::at`]) in place of those it made of the events up
+    /// to the same position, and as the pushes kept those of `pushes` (read
+    /// by id, [`PushesHeld::to_read`]) that a run or task not settled reads.
+    /// A push not among `pushes` is not kept: the fold of a reader of it
+    /// reads it by id ([`Builder::pushes_to_read`]).
+    fn restore_pushes(&mut self, held: PushesHeld, pushes: Vec<RunEvent>) {
+        let mut pushes: Vec<RunEvent> = pushes
+            .into_iter()
+            .filter(|push| held.push_readers.contains_key(&push.id))
+            .collect();
+        pushes.sort_by_key(|push| push.id);
+        pushes.dedup_by_key(|push| push.id);
+        let old: usize = self.pushes.iter().map(event_heap_bytes).sum();
+        let new: usize = pushes.iter().map(event_heap_bytes).sum();
+        self.event_heap = self.event_heap - old + new;
+        self.pushes = pushes;
+        self.waiting_push = held.waiting_push;
+        self.failed_push = held.failed_push;
+        self.closing = held.closing;
+        self.push_readers = held.push_readers;
+    }
+
+    /// The summaries of the pushes it holds, as [`PushesHeld::at`] makes
+    /// them again at its last event read.
+    pub fn pushes_held(&self) -> PushesHeld {
+        PushesHeld {
+            through: self.last,
+            waiting_push: self.waiting_push.clone(),
+            failed_push: self.failed_push.clone(),
+            closing: self.closing.clone(),
+            push_readers: self.push_readers.clone(),
+            closings: Vec::new(),
+        }
+    }
+
+    /// The ids of the pushes it keeps.
+    #[cfg(test)]
+    pub(crate) fn pushes_kept(&self) -> Vec<EventId> {
+        self.pushes.iter().map(|push| push.id).collect()
     }
 
     /// For the measurement of what a supervisor keeps after its start
@@ -1837,6 +1898,33 @@ impl Builder {
         self.rows_through = from;
     }
 
+    /// Take the summaries of the pushes the store's rows hold as they were
+    /// at [`Self::events`] (`held`, [`PushesHeld::at`] of that event and
+    /// [`PushesHeld::settle`]) in place of those it made of the events up
+    /// to it, the pushes a run or task not settled reads among `pushes`
+    /// (read by id, [`PushesHeld::to_read`]), and as the runs left pending
+    /// on their push those waiting on one, which a later push marks: a
+    /// later event of a settled run reads back by id the push that closed
+    /// its pending push ([`Self::pushes_to_read`]) as the fold of every
+    /// event does. The rest of [`Kept`] it does not touch.
+    ///
+    /// It holds only when the rows `held` was made of are those a build of
+    /// every event wrote up to a position at or after [`Self::events`]
+    /// (none written late, every run with a row once it ended or waits on
+    /// its push): which position the store's rows record every event up to
+    /// they do not say, and it is for the caller to find, not for this. A
+    /// new process does not call it yet: it starts at its cursors' start.
+    pub fn restore_pushes(&mut self, held: PushesHeld, pushes: Vec<RunEvent>) {
+        self.pending_pushes = held.pending();
+        Arc::make_mut(&mut self.kept).restore_pushes(held, pushes);
+    }
+
+    /// The runs it left pending on their push, each with its task.
+    #[cfg(test)]
+    pub(crate) const fn pending_pushes(&self) -> &BTreeMap<String, Option<TaskId>> {
+        &self.pending_pushes
+    }
+
     /// The rows of `rows` (those [`Self::rows_to_build`] names) whose
     /// records [`Kept`] dropped: before they are folded, each is given its
     /// records back ([`Self::restore`]).
@@ -2494,6 +2582,8 @@ pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option
 pub const fn hour(start: i64) -> (i64, i64) {
     (start, start + BUCKET_SECS - 1)
 }
+
+pub mod pushes;
 
 #[cfg(test)]
 mod tests;

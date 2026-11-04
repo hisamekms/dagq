@@ -219,6 +219,22 @@ pub struct LedgerWindow {
     filters: Filters,
 }
 
+/// The runs the task row `row` names ([`super::fold::TaskLife::runs`]),
+/// in the order it names them; none for another kind.
+pub fn runs_named(row: &LedgerRow) -> Vec<String> {
+    if row.kind != LedgerKind::Task {
+        return Vec::new();
+    }
+    row.detail
+        .get("runs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The runs on their way among `rows`: those a task row not ended names
 /// ([`super::fold::TaskLife::runs`]) with no run row among `rows`, as the
 /// builder writes a run's row only once its life ended. Each once, in
@@ -231,17 +247,10 @@ pub fn runs_on_their_way(rows: &[LedgerRow]) -> Vec<RunId> {
         .collect();
     let mut seen = BTreeSet::new();
     rows.iter()
-        .filter(|row| row.kind == LedgerKind::Task && row.ended_at.is_none())
-        .flat_map(|row| {
-            row.detail
-                .get("runs")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_str)
-        })
-        .filter(|run| !written.contains(run) && seen.insert(*run))
-        .filter_map(|run| RunId::new(run).ok())
+        .filter(|row| row.ended_at.is_none())
+        .flat_map(runs_named)
+        .filter(|run| !written.contains(run.as_str()) && seen.insert(run.clone()))
+        .filter_map(|run| RunId::new(&run).ok())
         .collect()
 }
 

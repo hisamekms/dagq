@@ -372,6 +372,114 @@ pub trait LedgerStore {
             .take(limit)
             .collect())
     }
+    /// Of the run rows, the records the summaries of the pushes are made
+    /// again from ([`crate::domain::ledger::builder::pushes::PushesHeld::at`]),
+    /// each cut to what they read of it
+    /// ([`crate::domain::ledger::builder::pushes::cut`]), ascending id:
+    /// every `push_finished`, and of the rows that record a `push_failed`
+    /// (no other waits on a push) their `push_failed` and
+    /// `run_phase_changed`.
+    fn ledger_push_records(&self) -> Result<Vec<RunEvent>> {
+        use crate::domain::ledger::builder::pushes::{cut, is_push_record};
+        let mut records: Vec<RunEvent> = self
+            .ledger_rows(LedgerKind::Run)?
+            .into_iter()
+            .flat_map(|row| {
+                let failed = row
+                    .records
+                    .iter()
+                    .any(|event| event.kind == EventKind::PushFailed);
+                row.records.into_iter().filter(move |event| {
+                    is_push_record(event) && (failed || event.kind == EventKind::PushFinished)
+                })
+            })
+            .map(|event| cut(&event))
+            .collect();
+        records.sort_by_key(|event| event.id);
+        Ok(records)
+    }
+    /// The heads of the run and task rows not settled at `through` and the
+    /// cursor `resources` of the runs' windows measured from outside
+    /// ([`crate::domain::ledger::builder::pushes::settled_at`], a legacy
+    /// row whatever its mark): those whose folds read the pushes kept at
+    /// that position on.
+    fn ledger_heads_open_at(
+        &self,
+        through: EventId,
+        resources: i64,
+    ) -> Result<Vec<crate::domain::ledger::LedgerHead>> {
+        use crate::domain::ledger::LedgerHead;
+        use crate::domain::ledger::builder::pushes::settled_at;
+        let mut rows = self.ledger_rows(LedgerKind::Run)?;
+        rows.extend(self.ledger_rows(LedgerKind::Task)?);
+        Ok(rows
+            .iter()
+            .filter(|row| !settled_at(&LedgerHead::of(row), row.is_legacy(), through, resources))
+            .map(LedgerHead::of)
+            .collect())
+    }
+    /// The runs a task row names
+    /// ([`crate::domain::ledger::builder::pushes::task_runs`], a legacy
+    /// row's too) that have no run row of their own, each once, ascending:
+    /// those on their way, as the builder writes a run's row only once it
+    /// ended or waits on its push. No record is read.
+    fn ledger_runs_without_row(&self) -> Result<Vec<RunId>> {
+        let written: std::collections::BTreeSet<String> = self
+            .ledger_heads(LedgerKind::Run)?
+            .into_iter()
+            .map(|head| head.key)
+            .collect();
+        let named: std::collections::BTreeSet<RunId> = self
+            .ledger_rows(LedgerKind::Task)?
+            .iter()
+            .flat_map(crate::domain::ledger::builder::pushes::task_runs)
+            .filter(|run| !written.contains(run))
+            .filter_map(|run| RunId::new(&run).ok())
+            .collect();
+        Ok(named.into_iter().collect())
+    }
+    /// The runs a `run_claimed` of the task of a legacy task row names that
+    /// have no run row of their own, each once, ascending: a legacy row
+    /// keeps the runs it named as first written, so that a run claimed
+    /// since is named by no row ([`Self::ledger_runs_without_row`]). Of the
+    /// events it reads the claims of those tasks only.
+    fn ledger_legacy_runs_without_row(&self) -> Result<Vec<RunId>>;
+    /// The runs a `run_claimed` of `task` names, each once, ascending: those
+    /// a fold of that task reads, which a legacy row of it, keeping the runs
+    /// it named as first written, may not name. Of the events it reads the
+    /// claims of that task only.
+    fn ledger_runs_claimed(&self, task: crate::domain::TaskId) -> Result<Vec<RunId>>;
+    /// The runs with a row of their own and an event up to `through` after
+    /// the inputs of that row, each once, ascending: those that went on
+    /// their way since their row was written, as the builder writes no row
+    /// of a run on its way, or whose row is behind. It reads whether such
+    /// an event is there, not the event.
+    fn ledger_runs_past_their_rows(&self, through: EventId) -> Result<Vec<RunId>>;
+    /// The pushes of no run the store's rows record, of the task rows and
+    /// of the queue rows of a push alone (their subject a `push_finished`,
+    /// [`crate::domain::ledger::owner::owner`]) only, each cut to what the
+    /// summaries of the pushes read of it
+    /// ([`crate::domain::ledger::builder::pushes::cut`]), ascending id. Of
+    /// the queue rows it reads the heads ([`Self::ledger_queue_heads`]) and
+    /// by key only those of a push alone, no other queue row.
+    fn ledger_runless_pushes(&self) -> Result<Vec<RunEvent>> {
+        use crate::domain::ledger::builder::pushes::cut;
+        let mut rows = self.ledger_rows(LedgerKind::Task)?;
+        for head in self.ledger_queue_heads()? {
+            if head.subject_kind == EventKind::PushFinished.as_str() {
+                rows.extend(self.ledger_row(LedgerKind::Queue, &head.head.key)?);
+            }
+        }
+        let mut pushes: Vec<RunEvent> = rows
+            .into_iter()
+            .flat_map(|row| row.records)
+            .filter(|event| event.kind == EventKind::PushFinished && event.run_id.is_none())
+            .map(|event| cut(&event))
+            .collect();
+        pushes.sort_by_key(|event| event.id);
+        pushes.dedup_by_key(|event| event.id);
+        Ok(pushes)
+    }
     /// The retention of the node rows, by the same local day as
     /// [`NodeSampleStore::remove_node_samples`]: drop from each the samples
     /// of a day before `before_day` and remove a row left with none

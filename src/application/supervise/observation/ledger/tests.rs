@@ -14,7 +14,9 @@ use crate::domain::ledger::session::written::{
     Cursors, Marks, RowsWritten, SessionsWritten, written_through,
 };
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
-use crate::domain::ledger::testkit::{Log, T0, ms, queue_across, run_id, sessions_across};
+use crate::domain::ledger::testkit::{
+    Log, T0, ms, pushes_across, queue_across, run_id, sessions_across,
+};
 use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node, provider_use};
 use crate::domain::pre_claim::PreClaimBook;
 use crate::domain::session_step::{
@@ -48,6 +50,17 @@ struct Memory {
     writes: Cell<usize>,
     read: Cell<usize>,
     read_all: Cell<usize>,
+    /// The runs whose events were read whole, and the events read one by
+    /// one by id, in order.
+    runs_read: RefCell<Vec<RunId>>,
+    read_one: RefCell<Vec<RunEvent>>,
+    /// The keys of the queue rows whose records were read, and the runs
+    /// whose windows of resources were read, in order.
+    queue_read: RefCell<Vec<String>>,
+    resources_read: RefCell<Vec<RunId>>,
+    /// The other reads of the events, the rows, the steps, the samples and
+    /// the resources, by name.
+    other_reads: RefCell<Vec<&'static str>>,
     /// The queue rows of waits given to make the books again and to fold
     /// a task over the waits settled ([`LedgerStore::ledger_wait_rows`],
     /// [`LedgerStore::ledger_settled_waits`]).
@@ -120,6 +133,20 @@ impl Memory {
         memory
     }
 
+    /// Forget the reads [`assert_reads_allowed`] looks at.
+    fn forget_reads(&self) {
+        self.runs_read.borrow_mut().clear();
+        self.read_one.borrow_mut().clear();
+        self.queue_read.borrow_mut().clear();
+        self.resources_read.borrow_mut().clear();
+        self.other_reads.borrow_mut().clear();
+    }
+
+    /// Note the read `name`, none of those [`assert_reads_allowed`] allows.
+    fn other_read(&self, name: &'static str) {
+        self.other_reads.borrow_mut().push(name);
+    }
+
     fn row(&self, kind: LedgerKind, key: &str) -> LedgerRow {
         self.rows.borrow()[&(kind, key.to_owned())].clone()
     }
@@ -152,6 +179,7 @@ impl EventStore for Memory {
         unreachable!()
     }
     fn all_events(&self) -> Result<Vec<RunEvent>> {
+        self.other_read("all_events");
         self.read_all.set(self.read_all.get() + 1);
         Ok(self.read(|_| true))
     }
@@ -159,9 +187,11 @@ impl EventStore for Memory {
         unreachable!()
     }
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
+        self.runs_read.borrow_mut().push(id.clone());
         Ok(self.read(|event| event.run_id.as_ref() == Some(id)))
     }
     fn task_events(&self, task: TaskId) -> Result<Vec<RunEvent>> {
+        self.other_read("task_events");
         Ok(self.read(|event| event.task_id == Some(task)))
     }
     fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
@@ -228,6 +258,12 @@ impl EventStore for Memory {
             .cloned()
             .collect();
         self.read.set(self.read.get() + read.len());
+        if after.as_i64() + 1 != upto.as_i64() {
+            self.other_read("events_between");
+        }
+        if after.as_i64() + 1 == upto.as_i64() {
+            self.read_one.borrow_mut().extend(read.iter().cloned());
+        }
         Ok(read)
     }
 }
@@ -241,7 +277,49 @@ impl LedgerStore for Memory {
         });
         Ok(events)
     }
+    fn ledger_legacy_runs_without_row(&self) -> Result<Vec<RunId>> {
+        let rows = self.rows.borrow();
+        let legacy: BTreeSet<TaskId> = rows
+            .values()
+            .filter(|row| row.kind == LedgerKind::Task && row.is_legacy())
+            .filter_map(|row| row.task_id)
+            .collect();
+        let runs: BTreeSet<RunId> = self
+            .read(|event| {
+                event.kind == EventKind::RunClaimed
+                    && event.task_id.is_some_and(|task| legacy.contains(&task))
+            })
+            .into_iter()
+            .filter_map(|event| event.run_id)
+            .filter(|run| !rows.contains_key(&(LedgerKind::Run, run.to_string())))
+            .collect();
+        Ok(runs.into_iter().collect())
+    }
+    fn ledger_runs_claimed(&self, task: TaskId) -> Result<Vec<RunId>> {
+        let runs: BTreeSet<RunId> = self
+            .read(|event| event.kind == EventKind::RunClaimed && event.task_id == Some(task))
+            .into_iter()
+            .filter_map(|event| event.run_id)
+            .collect();
+        Ok(runs.into_iter().collect())
+    }
+    fn ledger_runs_past_their_rows(&self, through: EventId) -> Result<Vec<RunId>> {
+        let rows = self.rows.borrow();
+        let runs: BTreeSet<RunId> = self
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| event.id <= through)
+            .filter_map(|event| {
+                let run = event.run_id.as_ref()?;
+                let row = rows.get(&(LedgerKind::Run, run.to_string()))?;
+                (event.id > row.inputs_through.events).then(|| run.clone())
+            })
+            .collect();
+        Ok(runs.into_iter().collect())
+    }
     fn ledger_tasks_open_since_at(&self, at: EventId) -> Result<pre_claim::rows::Since> {
+        self.other_read("ledger_tasks_open_since_at");
         self.count_cut(|reads| reads.since_at += 1);
         let rows: Vec<LedgerRow> = self
             .ledger_rows(LedgerKind::Task)?
@@ -259,6 +337,7 @@ impl LedgerStore for Memory {
         supervisor: &str,
         upto: EventId,
     ) -> Result<Option<RunEvent>> {
+        self.other_read("last_event_naming_supervisor");
         self.count_cut(|reads| reads.naming += 1);
         Ok(self
             .events
@@ -377,6 +456,9 @@ impl LedgerStore for Memory {
             "the stored row does not parse"
         );
         let held = self.rows.borrow().get(&row).cloned();
+        if kind == LedgerKind::Queue && held.is_some() {
+            self.queue_read.borrow_mut().push(key.to_owned());
+        }
         self.count_cut(|reads| {
             reads.rows += 1;
             reads.row_events += held.as_ref().map_or(0, |row| row.records.len());
@@ -384,15 +466,35 @@ impl LedgerStore for Memory {
         Ok(held)
     }
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>> {
-        Ok(self
+        if matches!(kind, LedgerKind::Session | LedgerKind::Node) {
+            self.other_read("ledger_rows");
+        }
+        let rows: Vec<LedgerRow> = self
             .rows
             .borrow()
             .values()
             .filter(|row| row.kind == kind)
             .cloned()
+            .collect();
+        if kind == LedgerKind::Queue {
+            self.queue_read
+                .borrow_mut()
+                .extend(rows.iter().map(|row| row.key.clone()));
+        }
+        Ok(rows)
+    }
+    /// As SQLite gives them: no row's records read, so no key counted.
+    fn ledger_queue_heads(&self) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        Ok(self
+            .rows
+            .borrow()
+            .values()
+            .filter(|row| row.kind == LedgerKind::Queue)
+            .map(crate::domain::ledger::queue::QueueHead::of)
             .collect())
     }
     fn ledger_wait_rows(&self, since: pre_claim::rows::Since) -> Result<Vec<LedgerRow>> {
+        self.other_read("ledger_wait_rows");
         let rows: Vec<LedgerRow> = self
             .ledger_rows(LedgerKind::Queue)?
             .into_iter()
@@ -407,6 +509,7 @@ impl LedgerStore for Memory {
         from: pre_claim::rows::Since,
         until_ms: i64,
     ) -> Result<Vec<LedgerRow>> {
+        self.other_read("ledger_settled_waits");
         if self.no_settled_waits.get() {
             return Ok(Vec::new());
         }
@@ -466,6 +569,7 @@ impl NodeSampleStore for Memory {
         unreachable!()
     }
     fn node_samples(&self, node: &str, from: i64, until: i64) -> Result<Vec<NodeSample>> {
+        self.other_read("node_samples");
         Ok(self
             .samples
             .borrow()
@@ -475,6 +579,7 @@ impl NodeSampleStore for Memory {
             .collect())
     }
     fn node_samples_after(&self, after: i64) -> Result<Vec<NodeSample>> {
+        self.other_read("node_samples_after");
         Ok(self
             .samples
             .borrow()
@@ -515,6 +620,7 @@ impl SessionStepStore for Memory {
         unreachable!()
     }
     fn steps_after(&self, after: i64, limit: usize) -> Result<Vec<SessionStep>> {
+        self.other_read("steps_after");
         let between = self.before_steps.borrow_mut().take();
         if let Some(between) = between {
             between(self);
@@ -529,6 +635,7 @@ impl SessionStepStore for Memory {
             .collect())
     }
     fn target_steps(&self, target: &StepTarget) -> Result<Vec<SessionStep>> {
+        self.other_read("target_steps");
         let between = self.between.borrow_mut().take();
         if let Some(between) = between {
             between(self);
@@ -616,6 +723,7 @@ impl SessionResourceStore for Memory {
         })
     }
     fn target_resources(&self, target: &StepTarget) -> Result<Vec<SessionResource>> {
+        self.other_read("target_resources");
         Ok(self
             .inside
             .borrow()
@@ -625,6 +733,7 @@ impl SessionResourceStore for Memory {
             .collect())
     }
     fn resources_after(&self, after: i64, limit: usize) -> Result<Vec<SessionResource>> {
+        self.other_read("resources_after");
         Ok(self
             .inside
             .borrow()
@@ -644,6 +753,7 @@ impl RunResourceStore for Memory {
         Ok(id)
     }
     fn run_resources(&self, run: &RunId) -> Result<Vec<RunResource>> {
+        self.resources_read.borrow_mut().push(run.clone());
         Ok(self
             .run_resources
             .borrow()
@@ -2775,6 +2885,7 @@ fn a_run_measured_from_inside_only_folds_its_executors_samples() {
 }
 
 mod pages;
+mod pushes_mixed;
 mod queue_waits;
 mod stream_waits;
 mod waits;
@@ -3290,6 +3401,15 @@ impl LedgerStore for HeldRows<'_> {
     fn ledger_run_events(&self, _: &RunId) -> Result<Vec<RunEvent>> {
         unreachable!("no run's events here")
     }
+    fn ledger_legacy_runs_without_row(&self) -> Result<Vec<RunId>> {
+        unreachable!("no claims here")
+    }
+    fn ledger_runs_claimed(&self, _: TaskId) -> Result<Vec<RunId>> {
+        unreachable!("no claims here")
+    }
+    fn ledger_runs_past_their_rows(&self, _: EventId) -> Result<Vec<RunId>> {
+        unreachable!("no run's events here")
+    }
     fn last_event_naming_supervisor(&self, _: &str, _: EventId) -> Result<Option<RunEvent>> {
         unreachable!("no event naming a supervisor here")
     }
@@ -3309,8 +3429,12 @@ impl LedgerStore for HeldRows<'_> {
     fn sessions_written(&self) -> Result<Option<SessionsWritten>> {
         unreachable!("no mark here")
     }
-    fn ledger_row(&self, _: LedgerKind, _: &str) -> Result<Option<LedgerRow>> {
-        unreachable!("no row by key here")
+    fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
+        Ok(self
+            .0
+            .iter()
+            .find(|row| row.kind == kind && row.key == key)
+            .cloned())
     }
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>> {
         Ok(self
@@ -3372,6 +3496,71 @@ impl WaitRowsService {
                     .collect();
                 (serde_json::to_value(&read)?, read.len())
             }
+            "ledger_push_records" | "ledger_runless_pushes" => {
+                let after: Option<EventId> = serde_json::from_value(arg(0))?;
+                let page: usize = serde_json::from_value(arg(1))?;
+                let read: Vec<RunEvent> = if op == "ledger_push_records" {
+                    store.ledger_push_records()?
+                } else {
+                    store.ledger_runless_pushes()?
+                }
+                .into_iter()
+                .filter(|push| after.is_none_or(|after| push.id > after))
+                .take(page)
+                .collect();
+                (serde_json::to_value(&read)?, read.len())
+            }
+            "ledger_heads_open_at" => {
+                let kind: LedgerKind = serde_json::from_value(arg(0))?;
+                let after: Option<String> = serde_json::from_value(arg(3))?;
+                let page: usize = serde_json::from_value(arg(4))?;
+                let read: Vec<crate::domain::ledger::LedgerHead> = store
+                    .ledger_heads_open_at(
+                        serde_json::from_value(arg(1))?,
+                        serde_json::from_value(arg(2))?,
+                    )?
+                    .into_iter()
+                    .filter(|head| head.kind == kind)
+                    .filter(|head| after.as_ref().is_none_or(|after| head.key > *after))
+                    .take(page)
+                    .collect();
+                (serde_json::to_value(&read)?, read.len())
+            }
+            "ledger_runs_without_row" => {
+                let read = store.ledger_runs_without_row()?;
+                (serde_json::to_value(&read)?, read.len())
+            }
+            "ledger_legacy_runs_without_row" | "ledger_runs_past_their_rows" => {
+                let memory = Memory::default();
+                memory.events.replace(self.events.clone());
+                memory.rows.replace(
+                    self.rows
+                        .iter()
+                        .map(|row| ((row.kind, row.key.clone()), row.clone()))
+                        .collect(),
+                );
+                let read = if op == "ledger_runs_past_their_rows" {
+                    memory.ledger_runs_past_their_rows(serde_json::from_value(arg(0))?)?
+                } else {
+                    memory.ledger_legacy_runs_without_row()?
+                };
+                (serde_json::to_value(&read)?, read.len())
+            }
+            "ledger_row" => {
+                let key: String = serde_json::from_value(arg(1))?;
+                let read = store.ledger_row(serde_json::from_value(arg(0))?, &key)?;
+                (serde_json::to_value(&read)?, 1)
+            }
+            "run_events" => {
+                let run: RunId = serde_json::from_value(arg(0))?;
+                let read: Vec<&RunEvent> = self
+                    .events
+                    .iter()
+                    .filter(|event| event.run_id.as_ref() == Some(&run))
+                    .collect();
+                (serde_json::to_value(&read)?, read.len())
+            }
+            "run_resources" => (json!([]), 0),
             op => panic!("{op} is not read here"),
         })
     }
@@ -4820,4 +5009,1017 @@ fn the_ports_start_of_the_tasks_for_a_position_is_no_later_than_the_one_there() 
             expected
         );
     }
+}
+
+/// The id of the `push_failed` at `at` (the event just before it).
+fn run_failed(log: &Log, at: usize) -> crate::domain::EventId {
+    log.events[at - 1].id
+}
+
+/// The runs with no row in `store` that a task row names, or that a claim
+/// of the task of a legacy task row names (its row keeps the runs it named
+/// as first written): on their way where the rows were written, whose
+/// events the summaries of the pushes read whatever their tasks.
+fn rowless_in(store: &Memory) -> BTreeSet<String> {
+    let rows = store.rows.borrow();
+    let task_rows = || rows.values().filter(|row| row.kind == LedgerKind::Task);
+    let legacy: BTreeSet<TaskId> = task_rows()
+        .filter(|row| row.is_legacy())
+        .filter_map(|row| row.task_id)
+        .collect();
+    let claimed: Vec<String> = store
+        .events
+        .borrow()
+        .iter()
+        .filter(|event| {
+            event.kind == EventKind::RunClaimed
+                && event.task_id.is_some_and(|task| legacy.contains(&task))
+        })
+        .filter_map(|event| event.run_id.as_ref().map(ToString::to_string))
+        .collect();
+    task_rows()
+        .flat_map(crate::domain::ledger::builder::pushes::task_runs)
+        .chain(claimed)
+        .filter(|run| !rows.contains_key(&(LedgerKind::Run, run.clone())))
+        .collect()
+}
+
+/// Whether `row` is a queue row of a push alone (its subject a
+/// `push_finished`): the queue rows the summaries of the pushes read.
+fn a_push_alone(row: &LedgerRow) -> bool {
+    row.kind == LedgerKind::Queue
+        && row
+            .subject
+            .as_ref()
+            .is_some_and(|subject| subject.kind == EventKind::PushFinished.as_str())
+}
+
+/// That making the summaries of the pushes again on `store` for the
+/// cursors of `builder` read only what the rows allow (`what`: where):
+/// the events whole of the runs with no row a task row or a legacy task's
+/// claim names ([`rowless_in`]) and of those with an event up to the cursor
+/// after the inputs of their rows; of the queue rows only those of a push
+/// alone; the windows of resources only of those runs and of those whose
+/// row is not settled at the cursors ([`pushes::settled_at`]): their
+/// settling is folded; by id only pushes; and nothing else
+/// ([`Memory::other_read`]).
+#[track_caller]
+fn assert_reads_allowed(store: &Memory, builder: &Builder, what: &str) {
+    use crate::domain::ledger::LedgerHead;
+    use crate::domain::ledger::builder::pushes;
+    let mut allowed = rowless_in(store);
+    let rows = store.rows.borrow();
+    allowed.extend(
+        store
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| event.id <= builder.events)
+            .filter_map(|event| {
+                let run = event.run_id.as_ref()?.to_string();
+                rows.get(&(LedgerKind::Run, run.clone()))
+                    .filter(|row| event.id > row.inputs_through.events)
+                    .map(|_| run)
+            }),
+    );
+    for run in store.runs_read.borrow().iter() {
+        assert!(
+            allowed.contains(run.as_str()),
+            "{what}: the events of {run} read"
+        );
+    }
+    for event in store.read_one.borrow().iter() {
+        assert_eq!(
+            event.kind,
+            EventKind::PushFinished,
+            "{what}: {} read by id",
+            event.id
+        );
+    }
+    assert_eq!(*store.other_reads.borrow(), [] as [&str; 0], "{what}");
+    for key in store.queue_read.borrow().iter() {
+        assert!(
+            rows.get(&(LedgerKind::Queue, key.clone()))
+                .is_some_and(a_push_alone),
+            "{what}: the queue row {key} read"
+        );
+    }
+    for run in store.resources_read.borrow().iter() {
+        let open = rows
+            .get(&(LedgerKind::Run, run.to_string()))
+            .is_some_and(|row| {
+                !pushes::settled_at(
+                    &LedgerHead::of(row),
+                    row.is_legacy(),
+                    builder.events,
+                    builder.resources,
+                )
+            });
+        assert!(
+            open || allowed.contains(run.as_str()),
+            "{what}: the windows of {run} read"
+        );
+    }
+}
+
+/// The check of what making the summaries of the pushes again reads allows
+/// no more than the rows do: the reads the making does pass it, and the
+/// events whole of a run whose row was settled, the queue rows of a
+/// subject other than a push, the windows of a run whose row was settled,
+/// a task's events, every event, a range of events and the session rows
+/// each fail it.
+#[test]
+fn a_read_outside_those_the_rows_allow_fails_the_check_of_the_reads() {
+    use crate::domain::ledger::LedgerHead;
+    use crate::domain::ledger::builder::pushes::settled_at;
+    let (log, now) = pushes_across(2);
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    drain(&memory, &mut builder, now);
+    pass(&memory, &mut builder, now);
+    let mut made = builder.clone();
+    memory.forget_reads();
+    restore_pushes(&memory, &mut made, ms(now)).unwrap();
+    assert_reads_allowed(&memory, &made, "made again");
+    let settled = memory
+        .rows
+        .borrow()
+        .values()
+        .find(|row| {
+            row.kind == LedgerKind::Run
+                && settled_at(&LedgerHead::of(row), false, made.events, made.resources)
+        })
+        .map(|row| RunId::new(&row.key).unwrap())
+        .unwrap();
+    assert!(
+        memory
+            .rows
+            .borrow()
+            .values()
+            .any(|row| row.kind == LedgerKind::Queue && !a_push_alone(row))
+    );
+    let fails = |read: &dyn Fn()| {
+        memory.forget_reads();
+        read();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_reads_allowed(&memory, &made, "outside");
+        }))
+        .is_err()
+    };
+    assert!(fails(&|| {
+        memory.ledger_run_events(&settled).unwrap();
+    }));
+    assert!(fails(&|| {
+        memory.ledger_rows(LedgerKind::Queue).unwrap();
+    }));
+    assert!(fails(&|| {
+        memory.run_resources(&settled).unwrap();
+    }));
+    assert!(fails(&|| {
+        memory.task_events(TaskId::new(1)).unwrap();
+    }));
+    assert!(fails(&|| {
+        memory.all_events().unwrap();
+    }));
+    assert!(fails(&|| {
+        memory
+            .events_between(
+                crate::domain::EventId::new(0),
+                made.events,
+                &EventFilter::default(),
+                10,
+            )
+            .unwrap();
+    }));
+    assert!(fails(&|| {
+        memory.ledger_rows(LedgerKind::Session).unwrap();
+    }));
+}
+
+/// Made again through the queue service, as the supervisor's store does,
+/// the summaries of the pushes are those of the store read directly, and no
+/// run or task row crosses whole but the readers' not settled: the reads
+/// the store picks from the rows are its own operations. With a few runs
+/// settled or many, as many rows, runs' events and windows cross; only the
+/// push records and the settled pushes' ids grow.
+#[test]
+fn the_pushes_made_again_through_the_service_cross_no_row_of_a_settled_run() {
+    let received = |settled: usize| {
+        let (log, now) = pushes_across(settled);
+        let memory = Memory::of(&log);
+        let mut builder = Builder::default();
+        drain(&memory, &mut builder, now);
+        pass(&memory, &mut builder, now);
+        let service = WaitRowsService::of(&memory);
+        let mut made = builder.clone();
+        restore_pushes(&through(service.clone()), &mut made, ms(now)).unwrap();
+        let mut direct = builder.clone();
+        restore_pushes(&memory, &mut direct, ms(now)).unwrap();
+        assert_eq!(pushes_of(&made), pushes_of(&direct));
+        assert_eq!(pushes_of(&made).0, pushes_of(&builder).0);
+        let ops = service.received.lock().unwrap().clone();
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for (op, _) in ops.iter().filter(|(op, _)| op != "ledger_push_records") {
+            *counts.entry(op.clone()).or_default() += 1;
+        }
+        counts
+    };
+    let (few, many) = (received(3), received(60));
+    assert_eq!(few, many);
+    for op in few.keys() {
+        assert!(
+            [
+                "ledger_heads_open_at",
+                "ledger_runless_pushes",
+                "ledger_runs_without_row",
+                "ledger_legacy_runs_without_row",
+                "ledger_runs_past_their_rows",
+                "ledger_row",
+                "run_events",
+                "run_resources",
+                "events_between",
+            ]
+            .contains(&op.as_str()),
+            "{op}"
+        );
+    }
+}
+
+/// The summaries of the pushes `builder` holds, its pushes kept and the
+/// runs it left pending on their push.
+fn pushes_of(
+    builder: &Builder,
+) -> (
+    crate::domain::ledger::builder::pushes::PushesHeld,
+    Vec<crate::domain::EventId>,
+    BTreeMap<String, Option<TaskId>>,
+) {
+    (
+        builder.kept().pushes_held(),
+        builder.kept().pushes_kept(),
+        builder.pending_pushes().clone(),
+    )
+}
+
+/// The summaries of the pushes made again from the run and task rows a
+/// build of every event wrote up to a position P, as they were at any
+/// position at or before it, are those of a build of every event up to
+/// that position: runs pending whose push no push closed, one pending
+/// again after it moved on, closing pushes of runs settled (as many before
+/// as kept), and of the runs and tasks not settled the pushes they read.
+/// At a run's `push_failed` before its `push_pending` it is not pending
+/// yet but its failed push is, whether P has no row of it (on its way,
+/// read of its events) or its row; so is one that went on its way from a
+/// pending push, whose row is of that push; and one on its way with no row
+/// whose task had ended (canceled) at the position, read of its events
+/// too. A builder that forgets them holds none.
+#[test]
+fn the_pushes_made_again_from_the_rows_at_a_position_are_those_of_every_event_up_to_it() {
+    let (log, now) = pushes_across(2);
+    let end = Memory::of(&log);
+    drain(&end, &mut Builder::default(), now);
+    // The rows as passes write them while the events come in.
+    let (going, mut going_builder) = (Memory::default(), Builder::default());
+    let (mut on_its_way, mut readers_open, mut stale_with_task_ended) = (0, 0, 0);
+    let mut rowless_of_ended_task = 0;
+    for at in 0..=log.events.len() {
+        going.events.replace(log.events[..at].to_vec());
+        drain(&going, &mut going_builder, now);
+        let memory = Memory::default();
+        memory.events.replace(log.events[..at].to_vec());
+        let mut whole = Builder::default();
+        drain(&memory, &mut whole, now);
+        let every = pushes_of(&whole);
+        readers_open += usize::from(!every.1.is_empty());
+        let expected = every.clone();
+        if at > 0 && log.events[at - 1].kind == EventKind::PushFailed {
+            let run = log.events[at - 1].run_id.clone().unwrap();
+            assert!(expected.0.failed(run.as_str()));
+            assert!(!expected.2.contains_key(run.as_str()));
+            let stale = going.ledger_row(LedgerKind::Run, run.as_str()).unwrap();
+            on_its_way += usize::from(stale.is_none());
+            // Run 4's row is that of its first pending push, its task ended.
+            if let Some(stale) = stale {
+                assert_eq!(run.as_str(), run_id(4));
+                assert!(
+                    stale.ended_at.is_none()
+                        && stale.records.last().unwrap().id < run_failed(&log, at)
+                );
+                assert!(going.row(LedgerKind::Task, "4").ended_at.is_some());
+                stale_with_task_ended += 1;
+            }
+            // Run 7 is on its way at the end: no row.
+            assert_eq!(
+                end.ledger_row(LedgerKind::Run, run.as_str())
+                    .unwrap()
+                    .is_some(),
+                run.as_str() != run_id(7)
+            );
+        }
+        for (rows, name) in [
+            (&memory, "P = at"),
+            (&going, "P = at, written as it came"),
+            (&end, "P = end"),
+        ] {
+            let mut restored = whole.clone();
+            restored.restore_pushes(PushesHeld::default(), Vec::new());
+            if expected.0.through.as_i64() > 0 && !expected.2.is_empty() {
+                assert_ne!(pushes_of(&restored), expected, "{name} at {at}");
+            }
+            rows.forget_reads();
+            restore_pushes(rows, &mut restored, ms(now)).unwrap();
+            assert_reads_allowed(rows, &restored, &format!("{name} at {at}"));
+            // Run 4 on its way with no row, its task canceled at the
+            // position: read too, as every event folds it.
+            let d = run_id(4);
+            if rowless_in(rows).contains(&d)
+                && log.events[..at]
+                    .iter()
+                    .any(|event| event.run_id.as_ref().map(RunId::as_str) == Some(d.as_str()))
+                && crate::domain::ledger::build(&log.events[..at], ms(now), "")
+                    .iter()
+                    .any(|row| {
+                        row.kind == LedgerKind::Task && row.key == "4" && row.ended_at.is_some()
+                    })
+            {
+                assert!(rows.runs_read.borrow().iter().any(|run| run.as_str() == d));
+                rowless_of_ended_task += 1;
+            }
+            let made = pushes_of(&restored);
+            assert_eq!(
+                (&made.0, &made.1),
+                (&expected.0, &expected.1),
+                "{name} at {at}"
+            );
+            // The runs waiting on a push; one that went on its way from a
+            // pending push stays among the whole build's until it is
+            // tracked again, and a later push marks it for nothing.
+            assert!(
+                made.2
+                    .iter()
+                    .all(|(run, task)| expected.2.get(run) == Some(task))
+            );
+        }
+    }
+    // Every run's failure but run 4's second, after its row of its first
+    // pending push was written: that row records none of its later events.
+    assert_eq!(on_its_way, 2 + 5);
+    // Run 7's row, written as the events came, is of its pending push: the
+    // rows' records alone say run 6's push closed it, which went back to
+    // its landing before; the build of every event says not, and so do the
+    // summaries made again, which read its events (past its row).
+    let g = run_id(7);
+    assert!(crate::domain::ledger::builder::pending_push(
+        &going.row(LedgerKind::Run, &g)
+    ));
+    let rows_alone = PushesHeld::at(going.ledger_push_records().unwrap(), log.last());
+    assert!(rows_alone.closed(&g));
+    let mut whole = Builder::default();
+    drain(&end, &mut whole, now);
+    assert!(!whole.kept().pushes_held().closed(&g));
+    assert_eq!(stale_with_task_ended, 1);
+    assert!(readers_open > 0);
+    // Run 4 went on its way from its pending push after its task was
+    // canceled: at those positions of the rows built up to each, it has no
+    // row there.
+    assert!(rowless_of_ended_task > 0);
+}
+
+/// A builder that goes on from the summaries of the pushes made again from
+/// the rows reads back by id, for a later event of a settled run whose
+/// pending push another run's push closed, the push the build of every
+/// event reads, and writes the run and task rows it writes; one that
+/// forgot them reads none and writes others (the run pending on its push).
+#[test]
+fn a_builder_going_on_from_the_pushes_made_again_reads_a_settled_runs_push_as_every_event() {
+    let (mut log, now) = pushes_across(2);
+    let position = log.events.len();
+    let settled = [run_id(1), "00000000-3333-4333-8333-333333333333".to_owned()];
+    log.add(
+        Some(1),
+        Some(&settled[0]),
+        "note_added",
+        json!({}),
+        now + 10,
+    )
+    .add(
+        Some(100),
+        Some(&settled[1]),
+        "note_added",
+        json!({}),
+        now + 10,
+    );
+    let going_on = |made: bool| {
+        let memory = Memory::default();
+        memory.events.replace(log.events[..position].to_vec());
+        let mut builder = Builder::default();
+        drain(&memory, &mut builder, now);
+        if made {
+            builder.restore_pushes(PushesHeld::default(), Vec::new());
+            restore_pushes(&memory, &mut builder, ms(now)).unwrap();
+        }
+        memory.events.replace(log.events.clone());
+        let read: Vec<Vec<crate::domain::EventId>> = settled
+            .iter()
+            .map(|run| {
+                let events = memory
+                    .read(|event| event.run_id.as_ref().map(RunId::as_str) == Some(run.as_str()));
+                builder.pushes_to_read(&events)
+            })
+            .collect();
+        drain(&memory, &mut builder, now + 20);
+        let rows: BTreeMap<_, _> = memory
+            .rows
+            .into_inner()
+            .into_iter()
+            .filter(|((kind, _), _)| matches!(kind, LedgerKind::Run | LedgerKind::Task))
+            .collect();
+        (read, rows)
+    };
+    // The build of every event, the one going on from the summaries made
+    // again, and one that forgot them.
+    let whole = going_on(false);
+    assert!(whole.0.iter().all(|read| read.len() == 1), "{:?}", whole.0);
+    let made = going_on(true);
+    assert_eq!(made.0, whole.0);
+    assert_eq!(made.1, whole.1);
+    let forgot = {
+        let memory = Memory::default();
+        memory.events.replace(log.events[..position].to_vec());
+        let mut builder = Builder::default();
+        drain(&memory, &mut builder, now);
+        builder.restore_pushes(PushesHeld::default(), Vec::new());
+        memory.events.replace(log.events.clone());
+        passes_to_drain(&memory, &mut builder, now + 20);
+        memory.row(LedgerKind::Run, &settled[0])
+    };
+    assert!(forgot.ended_at.is_none());
+    assert_ne!(
+        Some(&forgot),
+        whole.1.get(&(LedgerKind::Run, settled[0].clone()))
+    );
+}
+
+/// What making the summaries of the pushes again reads of the events (the
+/// runs on their way and the pushes kept, by id) is as much whether few or
+/// many runs whose pending push a push closed settled before, though the
+/// summaries hold more of them; no read of every event.
+#[test]
+fn the_pushes_made_again_read_as_many_events_however_many_runs_settled() {
+    let read_making_them = |settled: usize, of_open_task: usize| {
+        let (log, now) = crate::domain::ledger::testkit::pushes_across_with(settled, of_open_task);
+        let memory = Memory::of(&log);
+        let mut builder = Builder::default();
+        drain(&memory, &mut builder, now);
+        // Its due drops the pushes of the rows the last pass settled.
+        pass(&memory, &mut builder, now);
+        if of_open_task > 0 {
+            // Task 90 is not settled; its runs are.
+            let open = memory
+                .ledger_heads_open_at(builder.events, builder.resources)
+                .unwrap();
+            assert!(
+                open.iter()
+                    .any(|head| head.kind == LedgerKind::Task && head.key == "90")
+            );
+            let task = memory.row(LedgerKind::Task, "90");
+            assert_eq!(
+                crate::domain::ledger::window::runs_named(&task).len(),
+                of_open_task
+            );
+        }
+        memory.read.set(0);
+        memory.read_all.set(0);
+        memory.forget_reads();
+        let mut made = builder.clone();
+        restore_pushes(&memory, &mut made, ms(now)).unwrap();
+        assert_reads_allowed(
+            &memory,
+            &made,
+            &format!("{settled} and {of_open_task} settled"),
+        );
+        assert_eq!(pushes_of(&made).0, pushes_of(&builder).0);
+        (
+            (memory.read.get(), memory.read_all.get()),
+            builder.kept().pushes_kept().len(),
+            builder.kept().size().push_runs,
+        )
+    };
+    // More runs settled whose pending push a push closed, each of its own
+    // task, and more runs settled of a task not settled.
+    let (few, many) = (read_making_them(3, 0), read_making_them(60, 0));
+    assert_eq!(few.0, many.0);
+    assert_eq!(few.0.1, 0);
+    assert_eq!(few.1, 1);
+    assert_eq!(many.1, few.1);
+    assert!(many.2 > few.2);
+    let (few_of_task, many_of_task) = (read_making_them(0, 3), read_making_them(0, 60));
+    assert_eq!(few_of_task.0, many_of_task.0);
+    assert_eq!(few_of_task.0, read_making_them(0, 0).0);
+}
+
+/// A reader on its way with no row (a run whose pending push another run's
+/// push closed and that went back to its landing) reads the push on, as in
+/// the build of every event, which writes no row of it and so never
+/// settles it; so does it when its task was canceled and settled, its
+/// events read as well.
+#[test]
+fn a_reader_on_its_way_with_no_row_reads_its_push_on_as_every_event() {
+    for canceled in [false, true] {
+        let (a, b) = (run_id(1), run_id(2));
+        let mut log = Log::default();
+        log.worked(1, &a, 0)
+            .integrated(1, &a, 700)
+            .push_failed(1, &a, 910)
+            .landed(2, &b, 1000)
+            .phase(1, &a, 2000, crate::domain::run_phase::Phase::Landing, "x");
+        if canceled {
+            log.add(
+                Some(1),
+                None,
+                "task_status_changed",
+                json!({"from": "in_progress", "to": "canceled"}),
+                2000,
+            );
+        }
+        let now = 2000 + SETTLE_GRACE_MS / 1000 + 100;
+        let memory = Memory::of(&log);
+        let mut whole = Builder::default();
+        drain(&memory, &mut whole, now);
+        pass(&memory, &mut whole, now);
+        assert!(memory.ledger_row(LedgerKind::Run, &a).unwrap().is_none());
+        assert_eq!(memory.row(LedgerKind::Task, "1").is_final, canceled);
+        let every = pushes_of(&whole);
+        assert_eq!(every.1.len(), 1, "canceled {canceled}");
+        let mut made = whole.clone();
+        made.restore_pushes(PushesHeld::default(), Vec::new());
+        memory.forget_reads();
+        restore_pushes(&memory, &mut made, ms(now)).unwrap();
+        assert_reads_allowed(&memory, &made, &format!("canceled {canceled}"));
+        let restored = pushes_of(&made);
+        assert_eq!(*memory.runs_read.borrow(), [RunId::new(&a).unwrap()]);
+        assert!(every.0.failed(&a), "canceled {canceled}");
+        assert_eq!(
+            (&restored.0, &restored.1),
+            (&every.0, &every.1),
+            "canceled {canceled}"
+        );
+    }
+}
+
+/// A task that completed while its landed run's push was pending has not
+/// ended (the push has no end), though its own records alone say it
+/// completed: at every position, against the rows a build of every event
+/// wrote at the end (the run on its way back to its landing, with no row),
+/// the run is read once and its failed push and its wait on it are made
+/// again as every event makes them.
+#[test]
+fn a_task_completed_while_its_rowless_runs_push_is_pending_had_not_ended() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.worked(1, &a, 0)
+        .integrated(1, &a, 700)
+        .push_failed(1, &a, 910)
+        .completed(1, 920)
+        .phase(1, &a, 2000, crate::domain::run_phase::Phase::Landing, "x");
+    let now = 2000 + SETTLE_GRACE_MS / 1000 + 100;
+    let end = Memory::of(&log);
+    drain(&end, &mut Builder::default(), now);
+    assert!(end.ledger_row(LedgerKind::Run, &a).unwrap().is_none());
+    assert!(end.row(LedgerKind::Task, "1").ended_at.is_none());
+    let mut completed_and_waiting = 0;
+    for at in 0..=log.events.len() {
+        let upto = &log.events[..at];
+        let memory = Memory::default();
+        memory.events.replace(upto.to_vec());
+        let mut whole = Builder::default();
+        drain(&memory, &mut whole, now);
+        let every = pushes_of(&whole);
+        let completed = upto
+            .iter()
+            .any(|event| event.kind == EventKind::TaskStatusChanged);
+        if completed && every.2.contains_key(a.as_str()) {
+            assert!(every.0.failed(&a), "at {at}");
+            completed_and_waiting += 1;
+        }
+        let mut made = whole.clone();
+        made.restore_pushes(PushesHeld::default(), Vec::new());
+        end.forget_reads();
+        restore_pushes(&end, &mut made, ms(now)).unwrap();
+        assert_reads_allowed(&end, &made, &format!("at {at}"));
+        if upto.iter().any(|event| event.run_id.is_some()) {
+            assert_eq!(
+                *end.runs_read.borrow(),
+                [RunId::new(&a).unwrap()],
+                "at {at}"
+            );
+        }
+        let made = pushes_of(&made);
+        assert_eq!(made, every, "at {at}");
+    }
+    // After the completion and before the run went back to its landing.
+    assert_eq!(completed_and_waiting, 1);
+}
+
+/// A push of a run with no row where the rows were written (stopped
+/// between its push and its end) closes the pending push of another task's
+/// run, whose task had completed: at a position after that push the run
+/// and its task had ended and, past the grace, settled, though the run
+/// went back to its landing later (no row either) and its task has not
+/// ended where the rows were written. At every position the summaries made
+/// again from the rows written at the end fold that push first, so they
+/// are those of every event up to it, its readers settled.
+#[test]
+fn a_push_of_a_run_with_no_row_settles_another_tasks_run_as_every_event() {
+    let (a, b) = (run_id(1), run_id(2));
+    let settled_by = 1000 + SETTLE_GRACE_MS / 1000 + 10;
+    let mut log = Log::default();
+    log.worked(1, &a, 0)
+        .integrated(1, &a, 700)
+        .push_failed(1, &a, 910)
+        .completed(1, 920)
+        .worked(2, &b, 0)
+        .integrated(2, &b, 800)
+        .add(
+            Some(2),
+            Some(&b),
+            "push_finished",
+            json!({"remote": "origin", "branch": "main", "commit": "c"}),
+            1000,
+        )
+        .phase(
+            1,
+            &a,
+            settled_by + 50,
+            crate::domain::run_phase::Phase::Landing,
+            "x",
+        );
+    let now = settled_by + 100;
+    let end = Memory::of(&log);
+    drain(&end, &mut Builder::default(), now);
+    assert!(end.ledger_row(LedgerKind::Run, &a).unwrap().is_none());
+    assert!(end.ledger_row(LedgerKind::Run, &b).unwrap().is_none());
+    assert!(end.row(LedgerKind::Task, "1").ended_at.is_none());
+    let mut closed_and_settled = 0;
+    for at in 0..=log.events.len() {
+        let upto = &log.events[..at];
+        let memory = Memory::default();
+        memory.events.replace(upto.to_vec());
+        let mut whole = Builder::default();
+        drain(&memory, &mut whole, now);
+        let every = pushes_of(&whole);
+        if every.0.closed(&a) && every.1.is_empty() {
+            closed_and_settled += 1;
+        }
+        let mut made = whole.clone();
+        made.restore_pushes(PushesHeld::default(), Vec::new());
+        end.forget_reads();
+        restore_pushes(&end, &mut made, ms(now)).unwrap();
+        assert_reads_allowed(&end, &made, &format!("at {at}"));
+        let made = pushes_of(&made);
+        assert_eq!((&made.0, &made.1), (&every.0, &every.1), "at {at}");
+        assert!(
+            made.2
+                .iter()
+                .all(|(run, task)| every.2.get(run) == Some(task)),
+            "at {at}"
+        );
+    }
+    // After the push and before the run went back to its landing.
+    assert_eq!(closed_and_settled, 1);
+}
+
+/// A run whose row was written waiting on its push goes on its way after
+/// another run's push closed that pending push, and its task, completed,
+/// gets a note after that: the task's row written at the end reaches past
+/// every earlier position, and whether it had ended there is folded on the
+/// run's events up to it, not on that row of the run's pending push, which
+/// with the closing push says the run and the task ended. At every
+/// position, against the rows of a pass after the pending push and one at
+/// the end, and against those of a build up to the position or to the
+/// end alone, the summaries made again are those of every event up to it,
+/// the task reading the push on once the run went on its way.
+#[test]
+fn a_task_whose_run_went_on_its_way_from_a_closed_pending_push_had_not_ended_as_every_event() {
+    let (a, b) = (run_id(1), run_id(2));
+    let mut log = Log::default();
+    log.worked(1, &a, 0)
+        .integrated(1, &a, 700)
+        .push_failed(1, &a, 910)
+        .completed(1, 920);
+    let pending = log.events.len();
+    log.landed(2, &b, 1000)
+        .phase(1, &a, 1950, crate::domain::run_phase::Phase::Landing, "x");
+    let back = log.events.len();
+    log.add(Some(1), None, "note_added", json!({}), 1960);
+    let now = 1960 + SETTLE_GRACE_MS / 1000 + 100;
+    let two_passes = Memory::default();
+    let mut builder = Builder::default();
+    two_passes.events.replace(log.events[..pending].to_vec());
+    drain(&two_passes, &mut builder, now);
+    two_passes.events.replace(log.events.clone());
+    drain(&two_passes, &mut builder, now);
+    assert!(crate::domain::ledger::builder::pending_push(
+        &two_passes.row(LedgerKind::Run, &a)
+    ));
+    let task = two_passes.row(LedgerKind::Task, "1");
+    assert!(task.ended_at.is_none());
+    assert!(task.inputs_through.events > log.events[back - 1].id);
+    let end = Memory::of(&log);
+    drain(&end, &mut Builder::default(), now);
+    let task = Target::Task(TaskId::new(1));
+    let mut read_by_task = 0;
+    for at in 0..=log.events.len() {
+        let memory = Memory::default();
+        memory.events.replace(log.events[..at].to_vec());
+        let mut whole = Builder::default();
+        drain(&memory, &mut whole, now);
+        let every = pushes_of(&whole);
+        if at >= back {
+            assert!(every.0.readers().contains(&task), "at {at}");
+            read_by_task += 1;
+        }
+        for (rows, name) in [
+            (&two_passes, "two passes"),
+            (&memory, "P = at"),
+            (&end, "P = end"),
+        ] {
+            assert_made_again_as(rows, &whole, &every, now, &format!("{name} at {at}"));
+        }
+    }
+    assert_eq!(read_by_task, 2);
+}
+
+/// That the summaries of the pushes made again on `store` for the cursors
+/// of `whole` are `every`, those of `whole`, reading only what is allowed
+/// (`what`: where).
+#[track_caller]
+fn assert_made_again_as(
+    store: &Memory,
+    whole: &Builder,
+    every: &(
+        PushesHeld,
+        Vec<crate::domain::EventId>,
+        BTreeMap<String, Option<TaskId>>,
+    ),
+    now: i64,
+    what: &str,
+) {
+    let mut made = whole.clone();
+    made.restore_pushes(PushesHeld::default(), Vec::new());
+    store.forget_reads();
+    restore_pushes(store, &mut made, ms(now)).unwrap();
+    assert_reads_allowed(store, &made, what);
+    let made = pushes_of(&made);
+    assert_eq!((&made.0, &made.1), (&every.0, &every.1), "{what}");
+    assert!(
+        made.2
+            .iter()
+            .all(|(run, task)| every.2.get(run) == Some(task)),
+        "{what}"
+    );
+}
+
+/// A run whose pending push another run's push closed ended and, with no
+/// environment attached by then, settled at a position after that push;
+/// an attachment of it after the position, whose last window no store
+/// holds, makes its row written at the end wait on its resources (not
+/// settled). Made again at every position, whether it had settled is that
+/// of its events up to the position and its windows up to the builder's
+/// cursor of them, not the row's wait: the summaries are those of every
+/// event up to it, the push it read dropped once it and its task settled.
+#[test]
+fn a_run_attached_after_the_position_had_settled_there_as_every_event() {
+    let (a, b) = (run_id(1), run_id(2));
+    let settled_by = 1930 + SETTLE_GRACE_MS / 1000 + 10;
+    let mut log = Log::default();
+    log.worked(1, &a, 0)
+        .integrated(1, &a, 700)
+        .push_failed(1, &a, 910)
+        .completed(1, 920)
+        .landed(2, &b, 1000);
+    attach(&mut log, &a, settled_by + 50);
+    let now = settled_by + 100;
+    let end = Memory::of(&log);
+    drain(&end, &mut Builder::default(), now);
+    let row = end.row(LedgerKind::Run, &a);
+    assert!(crate::domain::ledger::builder::resources_pending(&row) && !row.is_final);
+    let mut settled_there = 0;
+    for at in 0..=log.events.len() {
+        let memory = Memory::default();
+        memory.events.replace(log.events[..at].to_vec());
+        let mut whole = Builder::default();
+        drain(&memory, &mut whole, now);
+        let every = pushes_of(&whole);
+        settled_there += usize::from(every.0.closed(&a) && every.1.is_empty());
+        assert_made_again_as(&end, &whole, &every, now, &format!("at {at}"));
+    }
+    assert!(settled_there > 0);
+}
+
+/// A run attached to the host whose pending push another run's push closed
+/// ended at a position, its settling waiting on the supervisor's last
+/// measure of it: a build whose cursor of the windows has not reached that
+/// window holds the push the run read, one whose cursor has drops it. The
+/// rows written at the end, past that window (the run's row settled), give
+/// the same at every position for either cursor of the builder made again,
+/// which reads the run's windows up to its cursor.
+#[test]
+fn a_run_settled_by_a_window_after_the_cursor_had_not_settled_there_as_every_event() {
+    let (a, b) = (run_id(1), run_id(2));
+    let mut log = Log::default();
+    log.worked(1, &a, 0);
+    let attachment = attach(&mut log, &a, 100);
+    log.integrated(1, &a, 700)
+        .push_failed(1, &a, 910)
+        .completed(1, 920)
+        .landed(2, &b, 1000);
+    let now = 1930 + SETTLE_GRACE_MS / 1000 + 100;
+    let window = |memory: &Memory| measured(memory, &a, attachment, (100, 1930), Some(1.0), true);
+    let end = Memory::of(&log);
+    window(&end);
+    drain(&end, &mut Builder::default(), now);
+    let row = end.row(LedgerKind::Run, &a);
+    assert!(row.is_final && row.inputs_through.resources == Some(1));
+    let (mut held_short, mut dropped_past) = (0, 0);
+    for with_window in [false, true] {
+        for at in 0..=log.events.len() {
+            let memory = Memory::default();
+            memory.events.replace(log.events[..at].to_vec());
+            if with_window {
+                window(&memory);
+            }
+            let mut whole = Builder::default();
+            drain(&memory, &mut whole, now);
+            assert_eq!(whole.resources, i64::from(with_window));
+            let every = pushes_of(&whole);
+            if every.0.closed(&a) {
+                if with_window {
+                    dropped_past += usize::from(every.1.is_empty());
+                } else {
+                    held_short += usize::from(!every.1.is_empty());
+                }
+            }
+            let what = format!("at {at}, the window read {with_window}");
+            assert_made_again_as(&end, &whole, &every, now, &what);
+        }
+    }
+    assert!(held_short > 0 && dropped_past > 0);
+}
+
+/// A push of no run (a record of its task's row, or of the queue's with no
+/// task) that closes a run's pending push is followed as in the build of
+/// every event: at every position, whether the rows are built up to it or
+/// to the end, the summaries made again are those of every event up to it,
+/// and a later event of the run, settled, reads that push back by id as
+/// that build does and writes the rows it writes.
+#[test]
+fn a_push_of_no_run_closes_a_pending_push_as_every_event() {
+    for task in [Some(2), None] {
+        let (a, c) = (run_id(1), run_id(3));
+        let mut log = Log::default();
+        log.worked(1, &a, 0)
+            .integrated(1, &a, 700)
+            .push_failed_to(1, &a, "late", 910)
+            .completed(1, 910)
+            .worked(3, &c, 0)
+            .integrated(3, &c, 800)
+            .push_failed_to(3, &c, "other", 950)
+            .add(
+                task,
+                None,
+                "push_finished",
+                json!({"remote": "origin", "branch": "late", "commit": "c"}),
+                1000,
+            );
+        let now = 1000 + SETTLE_GRACE_MS / 1000 + 100;
+        let what = format!("task {task:?}");
+        let end = Memory::of(&log);
+        drain(&end, &mut Builder::default(), now);
+        let push = log.last();
+        assert!(
+            end.ledger_runless_pushes()
+                .unwrap()
+                .iter()
+                .any(|event| event.id == push)
+        );
+        let mut closed = 0;
+        for at in 0..=log.events.len() {
+            let memory = Memory::default();
+            memory.events.replace(log.events[..at].to_vec());
+            let mut whole = Builder::default();
+            drain(&memory, &mut whole, now);
+            let expected = pushes_of(&whole);
+            closed += usize::from(expected.0.closed(&a));
+            assert!(!expected.0.closed(&c));
+            for (rows, name) in [(&memory, "P = at"), (&end, "P = end")] {
+                let mut restored = whole.clone();
+                restored.restore_pushes(PushesHeld::default(), Vec::new());
+                rows.forget_reads();
+                restore_pushes(rows, &mut restored, ms(now)).unwrap();
+                let where_ = format!("{what}, {name} at {at}");
+                assert_reads_allowed(rows, &restored, &where_);
+                let made = pushes_of(&restored);
+                assert_eq!((&made.0, &made.1), (&expected.0, &expected.1), "{where_}");
+            }
+        }
+        assert_eq!(closed, 1, "{what}");
+        // The port's own read of the pushes of no run reads by key the
+        // queue row of that push alone, and no other queue row.
+        end.forget_reads();
+        assert!(
+            end.ledger_runless_pushes()
+                .unwrap()
+                .iter()
+                .any(|event| event.id == push)
+        );
+        assert_eq!(
+            !end.queue_read.borrow().is_empty(),
+            task.is_none(),
+            "{what}"
+        );
+        assert_reads_allowed(&end, &Builder::default(), &what);
+        // A later event of run 1, settled.
+        let position = log.events.len();
+        log.add(Some(1), Some(&a), "note_added", json!({}), now + 10);
+        let going_on = |made: bool| {
+            let memory = Memory::default();
+            memory.events.replace(log.events[..position].to_vec());
+            let mut builder = Builder::default();
+            drain(&memory, &mut builder, now);
+            pass(&memory, &mut builder, now);
+            if made {
+                builder.restore_pushes(PushesHeld::default(), Vec::new());
+                restore_pushes(&memory, &mut builder, ms(now)).unwrap();
+            }
+            memory.events.replace(log.events.clone());
+            let events =
+                memory.read(|event| event.run_id.as_ref().map(RunId::as_str) == Some(a.as_str()));
+            let read = builder.pushes_to_read(&events);
+            drain(&memory, &mut builder, now + 20);
+            let rows: BTreeMap<_, _> = memory
+                .rows
+                .into_inner()
+                .into_iter()
+                .filter(|((kind, _), _)| matches!(kind, LedgerKind::Run | LedgerKind::Task))
+                .collect();
+            (read, rows)
+        };
+        let whole = going_on(false);
+        assert_eq!(whole.0, [push], "{what}");
+        let made = going_on(true);
+        assert_eq!(made.0, whole.0, "{what}");
+        assert_eq!(made.1, whole.1, "{what}");
+    }
+}
+
+/// A run and a task settled at the position whose rows an input after it
+/// reaches (a late note of run 1 and task 1, written at P) are settled as
+/// the build of every event up to the position has them, by their folds
+/// up to it: the push that closed run 1's pending push is not kept, and
+/// the late note reads it back by id as that build does and writes its
+/// rows.
+#[test]
+fn readers_settled_at_the_position_that_a_later_input_reaches_are_settled_as_every_event() {
+    let (mut log, now) = pushes_across(2);
+    let position = log.events.len();
+    let run = run_id(1);
+    log.add(Some(1), Some(&run), "note_added", json!({}), now + 10);
+    let later = Memory::of(&log);
+    drain(&later, &mut Builder::default(), now + 20);
+    for target in [
+        (LedgerKind::Run, run.clone()),
+        (LedgerKind::Task, "1".to_owned()),
+    ] {
+        let row = later.row(target.0, &target.1);
+        assert!(row.is_final && row.inputs_through.events > log.events[position - 1].id);
+    }
+    let going_on = |made: bool| {
+        let memory = Memory::default();
+        memory.events.replace(log.events[..position].to_vec());
+        let mut builder = Builder::default();
+        drain(&memory, &mut builder, now);
+        if made {
+            builder.restore_pushes(PushesHeld::default(), Vec::new());
+            restore_pushes(&later, &mut builder, ms(now)).unwrap();
+        }
+        let held = pushes_of(&builder);
+        memory.events.replace(log.events.clone());
+        let events = memory.read(|event| event.run_id.as_ref().map(RunId::as_str) == Some(&run));
+        let read = builder.pushes_to_read(&events);
+        drain(&memory, &mut builder, now + 20);
+        let rows: BTreeMap<_, _> = memory
+            .rows
+            .into_inner()
+            .into_iter()
+            .filter(|((kind, _), _)| matches!(kind, LedgerKind::Run | LedgerKind::Task))
+            .collect();
+        ((held.0, held.1), read, rows)
+    };
+    let whole = going_on(false);
+    assert_eq!(whole.1.len(), 1);
+    let made = going_on(true);
+    assert_eq!(made.0, whole.0);
+    assert_eq!(made.1, whole.1);
+    assert_eq!(made.2, whole.2);
 }

@@ -204,6 +204,13 @@ pub(super) const READS: &[&str] = &[
     "ledger_wait_rows",
     "ledger_supervisor_stops",
     "ledger_settled_waits",
+    "ledger_runless_pushes",
+    "ledger_legacy_runs_without_row",
+    "ledger_runs_claimed",
+    "ledger_runs_past_their_rows",
+    "ledger_push_records",
+    "ledger_heads_open_at",
+    "ledger_runs_without_row",
     "ledger_sessions_written",
     "run_events_after",
     "task_events_after",
@@ -664,6 +671,26 @@ mod tests {
             assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
             assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
             assert!(super::super::reads_only(op), "{op}");
+        }
+    }
+
+    /// The reads the summaries of the pushes are made again from are a
+    /// supervisor's reads of the ledger, as the reads its other books are
+    /// made again by.
+    #[test]
+    fn the_reads_the_summaries_of_the_pushes_are_made_of_are_the_supervisors() {
+        for op in [
+            "ledger_runless_pushes",
+            "ledger_legacy_runs_without_row",
+            "ledger_runs_claimed",
+            "ledger_runs_past_their_rows",
+            "ledger_push_records",
+            "ledger_heads_open_at",
+            "ledger_runs_without_row",
+        ] {
+            assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead));
+            assert!(super::super::LEDGER_OPS.contains(&op));
+            assert!(super::super::reads_only(op));
         }
     }
 

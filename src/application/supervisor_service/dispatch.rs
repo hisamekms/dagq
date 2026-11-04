@@ -2563,6 +2563,73 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 ),
             )
         }
+        // A page of the pushes of no run the rows record, cut: at most
+        // `page` after the id `after` (none: from the first), the rows
+        // picked by their kinds and subjects, no other record read or sent.
+        "ledger_runless_pushes" => {
+            let (after, page): (Option<EventId>, usize) = read(op, args)?;
+            answer(LedgerStore::ledger_runless_pushes(&*store).map(|pushes| {
+                pushes
+                    .into_iter()
+                    .filter(|push| after.is_none_or(|after| push.id > after))
+                    .take(page)
+                    .collect::<Vec<_>>()
+            }))
+        }
+        // A page of the push records of the run rows, cut: at most `page`
+        // after the id `after` (none: from the first), no other record read
+        // or sent.
+        "ledger_push_records" => {
+            let (after, page): (Option<EventId>, usize) = read(op, args)?;
+            answer(LedgerStore::ledger_push_records(&*store).map(|records| {
+                records
+                    .into_iter()
+                    .filter(|record| after.is_none_or(|after| record.id > after))
+                    .take(page)
+                    .collect::<Vec<_>>()
+            }))
+        }
+        // A page of the heads of the rows of `kind` not settled at a
+        // position: at most `page` after the key `after` (none: from the
+        // first), no record's body read or sent.
+        "ledger_heads_open_at" => {
+            let (kind, through, resources, after, page): (
+                crate::domain::ledger::LedgerKind,
+                EventId,
+                i64,
+                Option<String>,
+                usize,
+            ) = read(op, args)?;
+            answer(
+                LedgerStore::ledger_heads_open_at(&*store, through, resources).map(|heads| {
+                    heads
+                        .into_iter()
+                        .filter(|head| head.kind == kind)
+                        .filter(|head| after.as_ref().is_none_or(|after| head.key > *after))
+                        .take(page)
+                        .collect::<Vec<_>>()
+                }),
+            )
+        }
+        // The runs a task row names with no run row, ids only.
+        "ledger_runs_without_row" => answer(LedgerStore::ledger_runs_without_row(&*store)),
+        // The runs the claims of the legacy task rows' tasks name with no
+        // run row, ids only: their claims are read here, none crosses.
+        "ledger_legacy_runs_without_row" => {
+            answer(LedgerStore::ledger_legacy_runs_without_row(&*store))
+        }
+        // The runs the claims of a task name, ids only: its claims are read
+        // here, none crosses.
+        "ledger_runs_claimed" => {
+            let (task,): (crate::domain::TaskId,) = read(op, args)?;
+            answer(LedgerStore::ledger_runs_claimed(&*store, task))
+        }
+        // The runs with an event up to the position `through` after the
+        // inputs of their rows, ids only: no event is read.
+        "ledger_runs_past_their_rows" => {
+            let (through,): (EventId,) = read(op, args)?;
+            answer(LedgerStore::ledger_runs_past_their_rows(&*store, through))
+        }
         // A page of a run's or a task's events after the event `after`: the
         // read of a history past one answer whole.
         "run_events_after" => {
