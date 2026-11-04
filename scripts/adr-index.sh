@@ -2,11 +2,11 @@
 # Generate the ADR index docs/adr/INDEX.md from the frontmatter of the ADRs
 # under docs/adr/ (ADR-t1967-1). The index is not committed (.gitignore); the
 # frontmatter fields (id, title, status, accepted_on, superseded_by,
-# superseded_on, deprecated_on) are the source of record.
+# superseded_on, deprecated_on, amended_by) are the source of record.
 #
 # Two tables are written:
 #
-# - Accepted ADRs (status: accepted): ADR, Title, accepted_on.
+# - Accepted ADRs (status: accepted): ADR, Title, accepted_on, amended_by.
 # - Superseded and deprecated ADRs: ADR, Status, superseded_by,
 #   superseded_on / deprecated_on (superseded_by is empty for deprecated).
 #
@@ -62,9 +62,9 @@ fi
 tmp=$(mktemp "${TMPDIR:-/tmp}/adr-index.XXXXXX")
 trap 'rm -f "$tmp" "$tmp".*' EXIT
 
-# One awk pass reads the frontmatter of every ADR (a single-line scalar per
-# field, surrounding quotes removed) and prints one tab-separated line per ADR:
-# sort key, id, file name, status, title, accepted_on, superseded_by, date.
+# One awk pass reads scalar fields (surrounding quotes removed) and amended_by
+# (a block or inline list, in frontmatter order), printing a tab-separated line:
+# sort key, id, file name, status, title, accepted_on, superseded_by, date, amended_by.
 # An ADR lacking a field the index needs goes to stderr and fails the run.
 set --
 for f in docs/adr/*.md; do
@@ -84,6 +84,10 @@ awk '
     if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
     return v
   }
+  function add_amendment(v) {
+    v = val("x:" v, "x")
+    if (v != "") f["amended_by"] = f["amended_by"] (f["amended_by"] == "" ? "" : ",") v
+  }
   function flush(   st, key, n, p, date, sup) {
     if (file == "") return
     st = f["status"]
@@ -102,14 +106,33 @@ awk '
         } else key = "0 " f["id"]
         name = file; sub(/.*\//, "", name)
         title = f["title"]; gsub(/\|/, "\\|", title)
-        print key "\t" f["id"] "\t" name "\t" st "\t" title "\t" f["accepted_on"] "\t" sup "\t" date
+        print key "\t" f["id"] "\t" name "\t" st "\t" title "\t" f["accepted_on"] "\t" sup "\t" date "\t" f["amended_by"]
       }
     }
     file = ""; delete f
   }
-  FNR == 1 { flush(); file = FILENAME; infm = ($0 == "---"); next }
+  FNR == 1 { flush(); file = FILENAME; infm = ($0 == "---"); amendments = 0; next }
   !infm { next }
   $0 == "---" { infm = 0; next }
+  /^[^[:space:]][^:]*:/ { amendments = 0 }
+  /^amended_by:/ {
+    if (!("amended_by" in f)) {
+      f["amended_by"] = ""
+      v = val($0, "amended_by")
+      if (v == "") amendments = 1
+      else if (v ~ /^\[.*\]$/) {
+        v = substr(v, 2, length(v) - 2)
+        count = split(v, ids, ",")
+        for (j = 1; j <= count; j++) add_amendment(ids[j])
+      }
+    }
+    next
+  }
+  amendments && /^[[:space:]]+-[[:space:]]+/ {
+    v = $0; sub(/^[[:space:]]+-[[:space:]]+/, "", v)
+    add_amendment(v)
+    next
+  }
   {
     for (i = 1; i <= nk; i++) if (index($0, keys[i] ":") == 1) { if (!(keys[i] in f)) f[keys[i]] = val($0, keys[i]); break }
   }
@@ -134,11 +157,17 @@ awk -F '\t' '
     print ""
     print "## 有効なADR"
     print ""
-    print "| ADR | Title | accepted_on |"
-    print "| --- | --- | --- |"
+    print "| ADR | Title | accepted_on | amended_by |"
+    print "| --- | --- | --- | --- |"
     for (i = 1; i <= n; i++) {
       split(row[i], c, "\t")
-      if (c[4] == "accepted") print "| " link(c[2]) " | " c[5] " | " c[6] " |"
+      if (c[4] == "accepted") {
+        amendments = ""
+        count = split(c[9], ids, ",")
+        for (j = 1; j <= count; j++)
+          amendments = amendments (j == 1 ? "" : ", ") link(ids[j])
+        print "| " link(c[2]) " | " c[5] " | " c[6] " | " amendments " |"
+      }
     }
     print ""
     print "## 置き換え・廃止されたADR"
