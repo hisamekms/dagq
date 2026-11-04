@@ -1,4 +1,5 @@
 use crate::infrastructure::git_binary::git_executable;
+use crate::infrastructure::process_read::{read_process, start_in_local_zone, start_in_utc};
 
 mod ref_transaction;
 mod run_clones;
@@ -29,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 pub use crate::application::{
@@ -285,17 +286,7 @@ impl ProcessControl for SystemProcesses {
     }
 
     fn start_identity(&self, pid: u32) -> Option<String> {
-        // `lstart` is the start to the second, in the C locale so two reads
-        // print it alike; `ps` fails for a pid that runs nothing.
-        let start = output(Command::new("ps").env("LC_ALL", "C").args([
-            "-o",
-            "lstart=",
-            "-p",
-            &pid.to_string(),
-        ]))
-        .ok()?;
-        let start = start.trim();
-        (!start.is_empty()).then(|| start.to_owned())
+        start_in_local_zone(pid)
     }
 
     fn started_at(&self, pid: u32) -> Option<i64> {
@@ -327,32 +318,18 @@ impl ProcessControl for SystemProcesses {
     }
 }
 
-/// When the process `pid` started, as `ps` prints its `lstart` in the C
-/// locale and in UTC (`TZ=UTC0`), so the person's shell, the queue service
-/// under launchd and the supervisor read the same text whatever zone their
-/// environments name; `None` when `ps` finds no such process.
+/// When the process `pid` started, in the text of [`start_in_utc`], so the
+/// person's shell, the queue service under launchd and the supervisor read
+/// the same text whatever zone their environments name; `None` when `pid`
+/// runs nothing.
 pub fn session_start(pid: u32) -> Option<String> {
-    let start = output(
-        Command::new("ps")
-            .env("LC_ALL", "C")
-            .env("TZ", "UTC0")
-            .args(["-o", "lstart=", "-p", &pid.to_string()]),
-    )
-    .ok()?;
-    let start = start.trim();
-    (!start.is_empty()).then(|| start.to_owned())
+    start_in_utc(pid)
 }
 
-/// When the process `pid` started, in unix seconds on the system clock:
-/// the time before `ps` runs less the age `ps -o etime=` prints, so up to
-/// a second late (the age is whole seconds) and early by however long `ps`
-/// took to start on a loaded host. `None` when `ps` finds no such process
-/// or its output does not read.
+/// When the process `pid` started, in unix seconds on the system clock;
+/// `None` when `pid` runs nothing.
 pub fn process_started_at(pid: u32) -> Option<i64> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let age = output(Command::new("ps").args(["-o", "etime=", "-p", &pid.to_string()])).ok()?;
-    let age = i64::try_from(parse_etime(age.trim())?).ok()?;
-    Some(i64::try_from(now).ok()? - age)
+    Some(read_process(pid)?.started_secs)
 }
 
 /// This user's processes as one `ps` lists them, with their parents, ages
@@ -4891,6 +4868,7 @@ pub const PRINT_MODE_DENIED_TOOLS: [&str; 2] = ["ScheduleWakeup", "CronCreate"];
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
     /// The main worktree of a common directory is the directory it is the
     /// `.git` of; a common directory with another name has none.
     #[test]

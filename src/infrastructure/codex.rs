@@ -123,9 +123,9 @@ pub fn codex_at_entry(path: &Path) -> Result<PathBuf> {
 
 /// The project rules the runtime puts in a Codex run's worktree (ADR-t813-3
 /// decision 5): `pkill` and `killall` are forbidden, with why. The sandbox
-/// is the main defence (a process outside it can be neither listed nor
-/// signalled); the rules only answer a plain `pkill` with the reason, as
-/// `sh -c 'pkill …'` goes round them.
+/// is the main defence (a process outside it cannot be signalled, and
+/// `pkill` cannot list by user); the rules only answer a plain `pkill` with
+/// the reason, as `sh -c 'pkill …'` goes round them.
 pub const RULES_PATH: &str = ".codex/rules/dagq-deny.rules";
 
 /// The content of [`RULES_PATH`].

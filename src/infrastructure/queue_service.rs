@@ -5225,18 +5225,9 @@ fn serves(pid: u32, db: &Path) -> bool {
 
 /// Whether `pid` runs a `dagq` command line holding `command` for `db` now.
 pub(crate) fn runs_for(pid: u32, command_words: &str, db: &Path) -> bool {
-    let Ok(output) = crate::infrastructure::adapters::unpiped_output(Command::new("ps").args([
-        "-o",
-        "command=",
-        "-p",
-        &pid.to_string(),
-    ])) else {
-        return false;
-    };
-    let command = String::from_utf8_lossy(&output.stdout);
-    output.status.success()
-        && command.contains(command_words)
-        && command.contains(&*db.to_string_lossy())
+    crate::infrastructure::process_read::read_command(pid).is_some_and(|command| {
+        command.contains(command_words) && command.contains(&*db.to_string_lossy())
+    })
 }
 
 /// Look with `look` until a service answers, up to `timeout`

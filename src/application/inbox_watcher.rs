@@ -114,9 +114,9 @@ impl WatcherRecord {
 pub const PROCESS_START_LEAD_SECS: i64 = 60;
 
 /// Seconds a watch's process may seem to have started after its record's
-/// `started_at`: the system gives the process's age to the second, and it
-/// is read a moment after the time it is subtracted from. A process started
-/// later than this runs under a pid reused after the watch ended.
+/// `started_at`: the system gives the start to the second, and on Linux from
+/// a boot time that may move by a second. A process started later than this
+/// runs under a pid reused after the watch ended.
 pub const PROCESS_START_LAG_SECS: i64 = 5;
 
 /// What runs under a record's pid, as the system says at the judgment.

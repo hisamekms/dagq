@@ -938,7 +938,7 @@ pub fn local_time(unix: i64, utc_offset_secs: i64) -> String {
 }
 
 /// The civil date of a day count (Howard Hinnant's days-to-civil).
-const fn civil(days: i64) -> (i64, i64, i64) {
+pub(crate) const fn civil(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

@@ -173,10 +173,10 @@ ActorExecutorのspecもhostでは記録と整合の検査だけで、プロセ�
 
 ### Codexのworkerのsandbox
 
-Codexの非対話のworkerはworkspace-writeのsandbox（macOSはseatbelt）で動き、書いてよい場所（runのworktree・Gitのrun branchのrefとobjects・run dir・cargoのregistry）の外への書き込みと、sandboxの外のプロセスの一覧とsignalをOSが止める（[ADR-t813-3](../adr/2026-09-28-t813-3-codex-worker-permissions.md)、設定は[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）。
-ADR-t728-1決定6の言う「同じcapabilityの模型の上に足す強制」の最初のものだが、隔離ではない: 同じユーザーとして動き、読むことは広く（他のrunのworktreeや人の設定も）でき、networkは開いている。
+Codexの非対話のworkerはworkspace-writeのsandbox（macOSはseatbelt）で動き、書いてよい場所（runのworktree・Gitのrun branchのrefとobjects・run dir・cargoのregistry）の外への書き込みと、sandboxの外のプロセスへのsignalをOSが止める（[ADR-t813-3](../adr/2026-09-28-t813-3-codex-worker-permissions.md)、設定は[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)）。
+macOSの実測で、setuidの`/bin/ps`の起動は止まるが同じユーザーのプロセスを読むAPIは通り、dagqはこれで読む（`infrastructure::process_read`）。
+ADR-t728-1決定6の強制の最初のものだが、隔離ではない: 同じユーザーとして動き、読むことは広く（他のrunのworktreeや人の設定も）でき、networkは開いている。
 そこでenforcementはこれを`advisory`とも隔離の`sandbox`とも別の`confined`とする（決定7）。
-Claudeのworker（対話・非対話）は`advisory`のままで、permissionの仕組みとsettingsのdenyに頼る。
 
 ## reviewのpassとIntegrator
 

@@ -95,8 +95,8 @@ pub fn is_background(id: &str) -> bool {
     id.starts_with(HANDLE_PREFIX)
 }
 
-/// A system's start time (`ps -o lstart=`, with its runs of spaces) as one
-/// word.
+/// A system's start time (the text of `ps -o lstart=`, with its runs of
+/// spaces) as one word.
 pub fn start_token(start: &str) -> String {
     start.split_whitespace().collect::<Vec<_>>().join("_")
 }
