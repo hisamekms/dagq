@@ -16,6 +16,10 @@
 //! `stats` ([`judge`]); the alerts' starts and ends are not used for the
 //! values. An input holds only discrete times (when a marker was written,
 //! when a task started), never a length that grows with the time.
+//!
+//! The streams are not added together. When no stream stands for the
+//! queue at the end of a window, [`Missing`] says why; `supervisor_alive`
+//! is read only to tell those reasons apart.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

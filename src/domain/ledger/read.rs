@@ -33,6 +33,8 @@ pub struct LedgerValues {
     pub work: Option<i64>,
     pub validate: Option<i64>,
     pub wait_to_land: Option<i64>,
+    /// A legacy row's is the split its frozen values hold, as they were
+    /// written (none when they hold none, as a legacy row written now does).
     pub land_phases: Option<LandPhases>,
     pub startup: Option<i64>,
     /// The time and the slot time, per blocker, holds and attempt, and the

@@ -13,3 +13,6 @@
 # with the base's): the item of a deleted document goes with it, and a renamed
 # document's item takes the new path in the same change. A document in
 # .config/design-docs-allow.toml or a concept document is not named here.
+
+[[doc]]
+path = "docs/design/measurement.md"

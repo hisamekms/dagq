@@ -1871,6 +1871,13 @@ pub fn workspace_check(events: &[RunEvent], runs: &[LiveRun]) -> WorkspaceCheck 
 /// The alerts about runs still in flight (ADR-0043 decision 5), judged at
 /// `now` (unix seconds) on `live`, the `running_outlier` threshold of each
 /// run from the work medians of `tracks` ([`outlier_thresholds_of`]).
+/// The idle without a receipt, as the supervisor's stall watch, does not
+/// count a marker followed by `provider_waiting`, by a `worker_question`
+/// not closed yet or an `answer_prompt`, by a resume's or a revise's
+/// session that ended, or by a wait for a container's memory: it is timed
+/// from the next turn's marker (a question already closed, from its
+/// close; [`judge_running_alerts`] decides). The inputs and the workspace check read
+/// the session the run opened last ([`LiveRun`]).
 fn running_alerts(
     events: &[RunEvent],
     tracks: &[Track],

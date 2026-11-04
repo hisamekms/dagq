@@ -28,6 +28,10 @@
 //! `ledger_build_failed` for the run of failures, so a reader of the
 //! events sees the ledger fall behind. A run's or a task's outcome never
 //! depends on it.
+//!
+//! The builder's state is 観測と分析's ([`super::ObservationState`]), put
+//! together in `compose::observation`, and is not added to the body of
+//! the `Supervisor`.
 
 use std::collections::BTreeSet;
 

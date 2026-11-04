@@ -217,7 +217,9 @@ fn at(event: &RunEvent) -> Option<i64> {
 
 /// Fold one run's `events` (ascending id). `pushes` are the queue's
 /// `push_finished` (any run's, ascending id): a later one to the same
-/// remote and branch closes the run's `push_pending`. `None` for a run
+/// remote and branch closes the run's `push_pending`. A last record of
+/// `ended` closes the run; any other is folded up to now with no end (not
+/// settled). `None` for a run
 /// that finished with no `run_phase_changed`: a run from before the
 /// switch, which is never folded into intervals (ADR-t1662-1 decision
 /// 18). A run still on its way with none yet (its first record comes

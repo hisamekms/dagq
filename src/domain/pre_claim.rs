@@ -8,6 +8,22 @@
 //! make of them stay as they are, and the holds and deferrals end by the
 //! rules `stats` reads them by ([`claim_hold::hold_spans`],
 //! [`claim_defer::deferral_spans`]).
+//!
+//! - **Slots full**: a supervisor's fill pass looks at its own slots at its
+//!   start and its end, and records `slots_full_started` when every slot of
+//!   a class ([`SlotClass`], an interval of its own per class) is full and
+//!   `slots_full_ended` when one is free. The slots are the supervisor's,
+//!   so another supervisor neither records nor closes its intervals, nor
+//!   does another one's `supervisor_started`. An exec handoff goes on with
+//!   the same token and reads the intervals it left open back from its own
+//!   records. An interval whose supervisor stopped without its end closes
+//!   at the end of that supervisor's life.
+//! - **A hold on the claims** stops the claims of every supervisor of the
+//!   queue, so a task's fold reads it as the queue's wait whichever
+//!   supervisor recorded it.
+//! - **A task's hold** while it is ready, from `task_held` until the same
+//!   hold closes, is not laid over the time ready but is the phase `held`
+//!   (tagged as a run's `held`).
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};

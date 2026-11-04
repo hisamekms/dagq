@@ -5,7 +5,70 @@
 //! claim to the end of its push without gaps. Statistics count by a
 //! phase's tags, not by its name: [`Phase::tags`] is next to the phases,
 //! and its exhaustive `match` stops a phase added without tags from
-//! compiling.
+//! compiling; the supervisor's own phases map onto these by an exhaustive
+//! `match` too. A later phase stays in the attempt before it until the
+//! next revise or resume.
+//!
+//! Who records which phase:
+//!
+//! - **The supervisor**: its moves go through the operations of the
+//!   modules of its phases (`supervise::execution::stages`). A run in a
+//!   slot reads its phase from the slot's phase, a wait outside the slot
+//!   or the landing turn; a run out of a slot reads it from its status,
+//!   and from its events for a `validating` run whose `already_satisfied`
+//!   claim rests and for an `awaiting_integration` run (landing queue,
+//!   taken up again, or a person's answer) ([`Phase::resting`]). The same
+//!   phase in the same attempt is not recorded again, and a process that
+//!   first sees a run reads its records back to go on with its attempt.
+//!   The supervisor's landing records through its slot.
+//! - **A person's `integrate`**: its `Integrator` records `landing` once it
+//!   takes the integration slot, and the phase of the status the run went
+//!   back to when it gave the slot back before main moved
+//!   ([`Phase::after_landing`]).
+//! - **The store**: `push` in the transaction of `run_integrated`; the
+//!   phase of the status (`ended` for `interrupted`, `landing_queue` for a
+//!   landing given up, `returning` for one reviewed again) in that of
+//!   `run_recovered`, by `recover` and by the recovery of a run left
+//!   alone; `held` for an unfinished run a hold took effect on: a
+//!   `task_held` that took effect at once, the settle in a lease's
+//!   release, recovery or save, `hold_parked`, and a supervisor pass that
+//!   settles the hold of a run at rest. While a run in `held` not released
+//!   rests unfinished, the recovery, a lease's release and the
+//!   `Integrator`'s giving back of its slot record no phase of its status
+//!   (a final status they do), and the `task_released` of the release
+//!   closes it with the phase it rests in.
+//! - **The push's outcome**: recorded where the outcome is,
+//!   `push_finished` (with `already_delivered`) or `push_skipped` ends the
+//!   run, `push_failed` leaves it `push_pending` ([`Phase::after_push`]).
+//!   The fold closes `push_pending` with a later `push_finished` to the
+//!   same remote and branch; a `git push` a person types records nothing,
+//!   so the run stays `push_pending` until the next `push_finished`. A run
+//!   that does not land ends with `ended`, and a `failed` run a recovery
+//!   job moves goes on to its next phase. A task ends at `completed` (at
+//!   the end of its landed run's push) or `canceled`.
+//!
+//! Waits inside a phase:
+//!
+//! - **A task's hold**: from `task_held` until its wait is recorded the run
+//!   stays in its running phase; from that record until the hold closes it
+//!   is [`Phase::Held`].
+//! - **A container's memory wait**: from the run's
+//!   `container_memory_waiting` to its `container_memory_wait_ended`, before
+//!   `turn_started` in a turn and before the first `verification_command`
+//!   in a verification; it changes no phase.
+//! - **An `already_satisfied` claim**: the check of main's snapshot is a
+//!   phase of its own holding a worker slot, apart from `validating`; its
+//!   waits for a slot or a container and for the answer are phases out of
+//!   the slots ([`Phase::ClaimHeld`], [`Phase::ClaimAnswer`]).
+//! - **The landing queue**: a `landing_queue` record names the run that
+//!   holds the landing slot then (`blocked_by`, [`PhaseChange::blocked_by`])
+//!   and is recorded again when that run changes.
+//!
+//! `holds` follows how the supervisor counts its slots: a run waiting only
+//! for its landing turn and one waiting for a person's answer are out of
+//! the slots, and a `waiting` answer that keeps its slot holds a worker
+//! slot. Time no record covers is read as unattributed, whose share of the
+//! run's time a KPI watches.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

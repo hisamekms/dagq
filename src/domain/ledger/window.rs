@@ -5,7 +5,8 @@
 //! `--goal`, `--change`, `--area`, and returns the [`LedgerWindow`] the
 //! statistics are made of. A row is matched by its range of input ids
 //! (`inputs_from` to `inputs_through`) and its times (`started_at`,
-//! `ended_at`; one not ended reaches the window's end). The filters
+//! `ended_at`; one not ended reaches the window's end); a bound that is an
+//! event id is matched by the ids, never crossed by a time. The filters
 //! choose among the rows of a task, a goal or a run; the folds that carry
 //! state into a window (the attributes, the findings, main's history, the
 //! judgments of now, the reverts and CI's failures after the landings)

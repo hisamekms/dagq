@@ -5,6 +5,15 @@
 //! its `supervisor`, `supervisor_alive` at least every
 //! [`SUPERVISOR_ALIVE_INTERVAL_SECS`]). The registrations and their
 //! heartbeats are state, which the measurement does not read.
+//!
+//! Every path that removes a registration (a supervisor's own stop, `up`,
+//! `down` and the prune of the live supervisors) records the same token's
+//! `supervisor_stopped` in the same transaction; when that record fails
+//! the row stays for the next prune. A supervisor that writes its
+//! heartbeat records `supervisor_alive` too; a failure to record it is
+//! warned of and does not stop the heartbeat. A life read as silent is
+//! folded again at the `last_heartbeat_at` of a prune's later
+//! `supervisor_stopped`.
 
 use crate::domain::EventKind;
 use std::collections::HashMap;

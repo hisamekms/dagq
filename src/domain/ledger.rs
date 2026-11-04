@@ -245,6 +245,9 @@ fn name(value: impl Serialize) -> String {
 /// and legacy, its times and sums, its records) and what its kind adds
 /// (`detail`, `subject`). The columns of `ledger_rows` are its fields,
 /// and its JSON is all of it, as it crosses the queue service.
+///
+/// Planned and not here yet: a run's row is to carry its task's `change`,
+/// its `area` and its `nature` (ADR-t1662-1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerRow {
     /// `run`, `task`, `session`, `queue` or `node`.
@@ -401,7 +404,8 @@ impl LedgerHead {
 /// ends unsettled in `push_pending` once a later push arrives (another
 /// run's push closes it). A legacy row is built again by the same rules
 /// (it has no intervals, so no pending push): its records follow, its
-/// frozen values stay as the store keeps them.
+/// frozen values stay as the store keeps them. A settled row (`final`) is
+/// built again by the same rules too: its mark keeps no later input out.
 pub fn rebuilds(
     existing: Option<&LedgerRow>,
     last_event: EventId,
@@ -426,7 +430,9 @@ pub fn rebuilds(
 /// The row of the run `run` from its `events` (ascending id), the queue's
 /// `push_finished` (`pushes`) and `now_ms`, built at `built_at`: folded
 /// when it has `run_phase_changed`, else a legacy row of what `stats`
-/// makes of it.
+/// makes of it. A run's row holds its intervals and their sums, its
+/// claim's attributes and its facts after the claim, its providers' holds
+/// and switches, and its sessions, jobs, Executions and steps.
 pub fn run_row(
     run: &str,
     events: &[RunEvent],

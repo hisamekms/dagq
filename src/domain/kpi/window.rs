@@ -3,6 +3,12 @@
 //! change, the run's areas and the attributes of the claim, and the KPIs no run carries (asks,
 //! attentions, backend failures, load, verification commands, slots,
 //! findings, sessions of the other kinds) over the whole window.
+//!
+//! The names of the phases (ADR-t1662-1, which amends ADR-0051 decision
+//! 1): `phase.<phase>` and `land_phase.<phase>` are made under the same
+//! names for one period, and then give way to the values per tag and
+//! `phase.first_commit`; a host's `[kpi.targets."phase.startup"]` is read
+//! as `phase.first_commit`.
 use crate::domain::EventKind;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
