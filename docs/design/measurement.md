@@ -183,7 +183,8 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
 - 予約名（派生の軸。属性のキーにしない）は`claim_facts::RESERVED`が持ち、kpiが派生の規則で作る。
 - [指示の版](supervisor-lifecycle/prompt.md#workerが読んだ指示の版)も属性のキーで、`kpi --by`で層になる。
 - 群の比べは`--by group`・`--by pair_group`で読み、組は`kpi::trial`・`kpi::pair`のdoc comment。
-  providerの組は割り当てた群と`ran:`の動いた組の両方に出る。
+  providerの組は割り当てどおりに動いた組を主に、切り替えたrunを割り当てた群ごとの別の層に、割り当てた群を副に出す。
+  判定できないrunは副だけに含め、群ごとに件数を見せ、切り替えたrunの数には入れない。
 
 ## 送る口
 
