@@ -49,9 +49,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
+use self::write_line::WriteLine;
 use super::dialogue::DialogueQueue;
 use super::queue_binary;
-use super::sqlite::SqliteQueue;
+use super::sqlite::{SqliteQueue, WriteConnection};
 use crate::application::actor_executor::ExecutorEvents;
 use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
@@ -59,7 +60,7 @@ use crate::application::queue_commands::QueueCommand;
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
     Admin, Issued, Peer, QueueService, QueueServiceControl, Replaced, ServiceAccess,
-    ServiceBackend, ServiceProbe, ServiceQueue, TelemetryTokens,
+    ServiceBackend, ServiceProbe, ServiceQueue, TelemetryTokens, on_write_line,
 };
 use crate::application::session::{AgentStart, ReasonParams, SessionOp, WrapperStore};
 use crate::application::{
@@ -108,6 +109,13 @@ pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the service looks whether its queue is still there.
 const QUEUE_CHECK: Duration = Duration::from_secs(2);
+/// How long a service that stops waits for its write line to answer what it
+/// took: a write that takes longer is left behind, as a process's exit
+/// leaves it.
+const LINE_STOP_WAIT: Duration = Duration::from_secs(2);
+/// How long a request off the write line waits for its record's turn
+/// ([`on_line`]): past it the request answers, its record still in the line.
+const LINE_RECORD_WAIT: Duration = Duration::from_secs(5);
 
 /// `<queue dir>/service`.
 pub fn service_dir(queue_dir: &Path) -> PathBuf {
@@ -1366,7 +1374,8 @@ impl TelemetryTokens for SqliteServiceBackend {
         target: &StepTarget,
         session_id: &str,
     ) -> Result<()> {
-        SessionOwners::register_session(&SqliteQueue::open(db)?, target, session_id, unix_now_ms())
+        let queue = write_queue(self.write_line.as_ref(), db)?;
+        SessionOwners::register_session(&queue, target, session_id, unix_now_ms())
     }
 
     fn kept_steps(&self, db: &Path) -> Result<Vec<KeptStepsFile>> {
@@ -3158,13 +3167,25 @@ accepts: schema {} to {}",
         at_stop: Some(AtStop::default()),
         stands_for: None,
         doctor: Some(options.doctor.clone()),
+        write_line: Some(Arc::new(ServiceWriteLine::start(&options.db)?)),
     });
-    match crate::application::queue_service::revoke_ended_sign_ins(&*backend) {
-        Ok(revoked) if !revoked.is_empty() => {
-            info!("revoked the tokens of supervisors whose registration ended: {revoked:?}");
+    let starting = backend.clone();
+    let swept = on_line(backend.write_line.as_ref(), move || {
+        // The identity the line keeps is the one of the service's start.
+        if let Some(line) = &starting.write_line {
+            let _ = line.queue();
         }
-        Ok(_) => {}
-        Err(error) => warn!("the supervisors' tokens could not be swept: {error:#}"),
+        match crate::application::queue_service::revoke_ended_sign_ins(&*starting) {
+            Ok(revoked) if !revoked.is_empty() => {
+                info!("revoked the tokens of supervisors whose registration ended: {revoked:?}");
+            }
+            Ok(_) => {}
+            Err(error) => warn!("the supervisors' tokens could not be swept: {error:#}"),
+        }
+        Ok(())
+    });
+    if let Err(error) = swept {
+        warn!("the supervisors' tokens could not be swept: {error:#}");
     }
     let mut served = 0u64;
     let mut checked = Instant::now();
@@ -3188,7 +3209,7 @@ accepts: schema {} to {}",
                 let backend = backend.clone();
                 let reads = reads.clone();
                 thread::spawn(move || {
-                    if let Err(error) = answer(stream, &*backend, pid, &reads) {
+                    if let Err(error) = answer(stream, &backend, pid, &reads) {
                         warn!("a queue service connection failed: {error:#}");
                     }
                 });
@@ -3204,6 +3225,9 @@ accepts: schema {} to {}",
         }
     };
     reads.stopped(outcome);
+    if let Some(line) = &backend.write_line {
+        line.line.finish(LINE_STOP_WAIT);
+    }
     // The tokens asked to go as it stops go before the lock is let go, so a
     // supervisor that waits for the stop finds them gone.
     let revoked = backend
@@ -3267,7 +3291,7 @@ fn wait_for_connection(listener: &UnixListener, poll: Duration) {
 /// service's first minutes, record what it read in `reads`.
 fn answer(
     stream: UnixStream,
-    backend: &dyn ServiceBackend,
+    backend: &Arc<SqliteServiceBackend>,
     pid: u32,
     reads: &super::startup_reads::StartupReads,
 ) -> Result<()> {
@@ -3280,11 +3304,8 @@ fn answer(
         .read_until(b'\n', &mut line)?;
     let out = answer_request(
         &line,
-        &QueueService {
-            backend,
-            build: crate::VERSION,
-            pid,
-        },
+        backend,
+        pid,
         (peer_of(&stream), peer_pid(&stream)),
         reads,
     )?;
@@ -3292,12 +3313,13 @@ fn answer(
     Ok(())
 }
 
-/// The answer's line to the request's `line` from `peer`, by `service`;
-/// recorded in `reads` while its window is open. The record never changes
-/// the answer.
+/// The answer's line to the request's `line` from `peer`, by the service of
+/// `backend`; recorded in `reads` while its window is open. The record never
+/// changes the answer.
 fn answer_request(
     line: &[u8],
-    service: &QueueService<'_>,
+    backend: &Arc<SqliteServiceBackend>,
+    pid: u32,
     (peer, process): (Peer, Option<u32>),
     reads: &super::startup_reads::StartupReads,
 ) -> Result<Vec<u8>> {
@@ -3317,7 +3339,9 @@ fn answer_request(
                         &request.params,
                     );
                 }
-                service.handle_noting_role(&request, peer, process, &mut role)
+                let handled = handled(backend, pid, request, peer, process)?;
+                role = handled.role;
+                handled.response
             }
             Err(error) => ServiceResponse::failure(
                 ServiceErrorCode::BadRequest,
@@ -3339,6 +3363,38 @@ fn answer_request(
         );
     }
     Ok(out)
+}
+
+/// The answer to `request` from `peer`: on the write line when the service
+/// has one and the request goes on it ([`on_write_line`]), which it waits
+/// for, and on this thread otherwise, so a read never waits for the line.
+/// An error when the line gave no answer (it stopped, or the work panicked):
+/// the connection closes unanswered, which a caller reads as maybe done and
+/// sends again, where an answer of `failed` would be final.
+fn handled(
+    backend: &Arc<SqliteServiceBackend>,
+    pid: u32,
+    request: ServiceRequest,
+    peer: Peer,
+    process: Option<u32>,
+) -> Result<LineAnswer> {
+    let handle = move |backend: &SqliteServiceBackend, request: &ServiceRequest| {
+        let mut role = None;
+        let response = QueueService {
+            backend,
+            build: crate::VERSION,
+            pid,
+        }
+        .handle_noting_role(request, peer, process, &mut role);
+        LineAnswer { response, role }
+    };
+    match &backend.write_line {
+        Some(line) if on_write_line(request.use_case, &request.params) => {
+            let on = backend.clone();
+            line.line.run(move || handle(&on, &request))
+        }
+        _ => Ok(handle(backend, &request)),
+    }
 }
 
 /// Whether the peer of `stream` runs as the service's own OS user, by the
@@ -3452,8 +3508,113 @@ fn answer_line(response: &ServiceResponse, use_case: Option<UseCase>) -> Result<
     Ok((out, built))
 }
 
-/// The queue the service's use cases run on: a fresh connection to the
-/// DB per request, written as the request's principal.
+/// What the write line answers: the request's response and the role it was
+/// authenticated as (see [`QueueService::handle_noting_role`]).
+#[derive(Clone)]
+struct LineAnswer {
+    response: ServiceResponse,
+    role: Option<ActorRole>,
+}
+
+/// A write the fence refused ([`crate::application::NotLeader`]): the line
+/// gives the same answer to what waits behind it.
+fn refused_as_not_leader(answer: &LineAnswer) -> bool {
+    answer
+        .response
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == ServiceErrorCode::NotLeader)
+}
+
+/// The service's writes in one line ([`WriteLine`]) on one connection
+/// ([`WriteConnection`], ADR-t3986-1 decision 1). Which requests go on it is
+/// [`on_write_line`]; the records a request of another thread makes (the
+/// refusal of a read, an unauthenticated request) go on it through
+/// [`on_line`], so a record is there when its request answers, unless the
+/// line is too full for that. A `migrate` runs on the line's thread on a
+/// connection of its own, which its copy and its checks hold apart.
+pub struct ServiceWriteLine {
+    line: WriteLine<LineAnswer>,
+    connection: WriteConnection,
+    /// [`LINE_RECORD_WAIT`], unless a test lowers it.
+    record_wait: Duration,
+}
+
+impl ServiceWriteLine {
+    fn start(db: &Path) -> Result<Self> {
+        Ok(Self {
+            line: WriteLine::start(refused_as_not_leader)?,
+            connection: SqliteQueue::write_connection(db),
+            record_wait: LINE_RECORD_WAIT,
+        })
+    }
+
+    /// The queue on the line's connection, for the line's thread alone: no
+    /// other thread may write beside it.
+    fn queue(&self) -> Result<SqliteQueue> {
+        ensure!(
+            self.line.here(),
+            "a write of the queue service off its write line"
+        );
+        self.connection.lend()
+    }
+}
+
+/// A queue that writes, for `line`'s thread, or of its own for a backend
+/// with no line.
+fn write_queue(line: Option<&Arc<ServiceWriteLine>>, db: &Path) -> Result<SqliteQueue> {
+    match line {
+        Some(line) => line.queue(),
+        None => SqliteQueue::open(db),
+    }
+}
+
+/// Run `write`, which uses [`write_queue`], on `line`: here on its thread or
+/// with no line, and otherwise in its turn, waiting up to the line's
+/// [`ServiceWriteLine::record_wait`]. Past that it goes on in the line and
+/// this answers done, as a read does not wait for a line that is stuck; a
+/// record that fails then, or that a refusal ahead of it ends unwritten, is
+/// logged.
+fn on_line(
+    line: Option<&Arc<ServiceWriteLine>>,
+    write: impl FnOnce() -> Result<()> + Send + 'static,
+) -> Result<()> {
+    use std::sync::mpsc::RecvTimeoutError;
+    let Some(line) = line.filter(|line| !line.line.here()) else {
+        return write();
+    };
+    let answered = line.line.enqueue(move || {
+        let wrote = write();
+        if let Err(error) = &wrote {
+            warn!("a record on the queue service's write line failed: {error:#}");
+        }
+        LineAnswer {
+            response: crate::application::queue_service::respond(wrote.map(|()| Value::Null)),
+            role: None,
+        }
+    })?;
+    let answer = match answered.recv_timeout(line.record_wait) {
+        Ok(answer) => answer,
+        Err(RecvTimeoutError::Timeout) => {
+            warn!("the queue service's write line is full: a record waits in it after its request");
+            return Ok(());
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            bail!("the queue service's write line dropped a record")
+        }
+    };
+    match answer.response.error {
+        Some(error) if error.code == ServiceErrorCode::NotLeader => {
+            Err(crate::application::NotLeader.into())
+        }
+        Some(error) => Err(anyhow!(error.message)),
+        None => Ok(()),
+    }
+}
+
+/// The queue the service's use cases run on: to write, the write line's
+/// connection when the service has one, written as the request's principal;
+/// to read, a fresh connection per request.
 pub struct SqliteServiceBackend {
     pub db: PathBuf,
     pub queue_dir: PathBuf,
@@ -3475,6 +3636,10 @@ pub struct SqliteServiceBackend {
     /// backend of a process that is no service's (a test's in-process one),
     /// which makes none.
     pub doctor: Option<ServiceDoctor>,
+    /// The line the service's writes go on; `None` for a backend no service
+    /// runs (a supervisor's or a test's in-process one), each of whose
+    /// callers opens its own connection on its own thread.
+    pub write_line: Option<Arc<ServiceWriteLine>>,
 }
 
 /// The keys ([`Principal::credential_key`]) of the tokens a service
@@ -3504,21 +3669,35 @@ impl AtStop {
 
 impl SqliteServiceBackend {
     /// `queue`, a read-only one, for a read as `actor`, whose refusals of
-    /// the policy are recorded on a connection that writes.
+    /// the policy are recorded on the connection that writes.
     fn reading(&self, queue: SqliteQueue, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
+        let (line, db, generators, reader) = (
+            self.write_line.clone(),
+            self.db.clone(),
+            self.generators.clone(),
+            actor.clone(),
+        );
+        let denials = Arc::new(move |payload: Value| {
+            let (writing, db, generators, reader) =
+                (line.clone(), db.clone(), generators.clone(), reader.clone());
+            on_line(line.as_ref(), move || {
+                let queue = write_queue(writing.as_ref(), &db)?
+                    .with_generators(generators)
+                    .with_actor(reader);
+                EventStore::record_queue_event(&queue, EventKind::AuthorizationDenied, payload)
+                    .map(drop)
+            })
+        });
         Ok(Box::new(ServiceSqlite {
             queue: queue
                 .with_generators(self.generators.clone())
-                .with_actor(actor.clone()),
+                .with_actor(actor.clone())
+                .with_denial_log(denials),
             db: self.db.clone(),
             reads: self.reads.clone(),
             writes: self.writes.clone(),
             detail: self.detail,
             commands: self.commands.clone(),
-            denials: Some(DenialWriter {
-                generators: self.generators.clone(),
-                actor: actor.clone(),
-            }),
         }))
     }
 
@@ -3590,13 +3769,14 @@ migrate's request: schema {} to {}",
                         &serde_json::to_vec(&record)?,
                     )?;
                 }
-                let missing = SqliteQueue::open(&self.db)?.missing_commit_messages()?;
+                let missing =
+                    write_queue(self.write_line.as_ref(), &self.db)?.missing_commit_messages()?;
                 let mut value = serde_json::to_value(report)?;
                 value["commit_messages_missing"] = serde_json::to_value(missing)?;
                 Ok(value)
             }
             Admin::CommitMessages(messages) => {
-                let mut queue = SqliteQueue::open(&self.db)?
+                let mut queue = write_queue(self.write_line.as_ref(), &self.db)?
                     .with_generators(self.generators.clone())
                     .with_actor(actor.clone());
                 let mut filled = 0;
@@ -3606,7 +3786,7 @@ migrate's request: schema {} to {}",
                 Ok(json!({"filled": filled}))
             }
             Admin::Init { binding } => {
-                let mut queue = SqliteQueue::open(&self.db)?
+                let mut queue = write_queue(self.write_line.as_ref(), &self.db)?
                     .with_generators(self.generators.clone())
                     .with_actor(actor.clone());
                 if let Some(binding) = binding {
@@ -3702,7 +3882,7 @@ migrate's request: schema {} to {}",
     }
 
     fn open(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
-        let queue = SqliteQueue::open(&self.db)?
+        let queue = write_queue(self.write_line.as_ref(), &self.db)?
             .with_generators(self.generators.clone())
             .with_actor(actor.clone());
         Ok(Box::new(ServiceSqlite {
@@ -3712,7 +3892,6 @@ migrate's request: schema {} to {}",
             writes: self.writes.clone(),
             detail: self.detail,
             commands: self.commands.clone(),
-            denials: None,
         }))
     }
 
@@ -3725,11 +3904,16 @@ migrate's request: schema {} to {}",
     }
 
     fn record_unauthenticated(&self, payload: Value) -> Result<()> {
-        let queue = SqliteQueue::open(&self.db)?
-            .with_generators(self.generators.clone())
-            .with_actor(Self::own_actor());
-        EventStore::record_queue_event(&queue, EventKind::QueueServiceUnauthenticated, payload)
-            .map(drop)
+        let line = self.write_line.clone();
+        let db = self.db.clone();
+        let generators = self.generators.clone();
+        on_line(self.write_line.as_ref(), move || {
+            let queue = write_queue(line.as_ref(), &db)?
+                .with_generators(generators)
+                .with_actor(Self::own_actor());
+            EventStore::record_queue_event(&queue, EventKind::QueueServiceUnauthenticated, payload)
+                .map(drop)
+        })
     }
 
     fn now_ms(&self) -> i64 {
@@ -4082,6 +4266,7 @@ impl InProcessCaller {
                 at_stop: None,
                 stands_for: None,
                 doctor: None,
+                write_line: None,
             }),
             queue_dir,
             Arc::new(read_token),
@@ -4422,6 +4607,7 @@ impl InProcessControlCaller {
                 at_stop: None,
                 stands_for: executable.map(Path::to_path_buf),
                 doctor: None,
+                write_line: None,
             },
             control,
         }
@@ -4493,16 +4679,6 @@ struct ServiceSqlite {
     writes: ServiceWrites,
     detail: ServiceDetail,
     commands: ServiceCommands,
-    /// For a queue opened for a read: what records a refusal of the policy
-    /// on a connection of its own that writes, since the read's does not.
-    denials: Option<DenialWriter>,
-}
-
-/// What opens the queue to record a read's refusal: the service's
-/// generators and the reader as its actor.
-struct DenialWriter {
-    generators: Generators,
-    actor: ActorContext,
 }
 
 /// What the issue's transaction reads of `queue` for a token held already
@@ -4645,19 +4821,7 @@ impl ServiceSqlite {
 
 impl DenialLog for ServiceSqlite {
     fn record_denial(&self, payload: Value) -> Result<()> {
-        match &self.denials {
-            Some(writer) => {
-                let queue = SqliteQueue::open(&self.db)?
-                    .with_generators(writer.generators.clone())
-                    .with_actor(writer.actor.clone());
-                EventStore::record_queue_event(&queue, EventKind::AuthorizationDenied, payload)
-                    .map(drop)
-            }
-            None => {
-                EventStore::record_queue_event(&self.queue, EventKind::AuthorizationDenied, payload)
-                    .map(drop)
-            }
-        }
+        DenialLog::record_denial(&self.queue, payload)
     }
 }
 
@@ -5449,8 +5613,13 @@ again once it ends"
     }
 }
 
+mod write_line;
+
 #[cfg(test)]
 mod supervisor_tests;
+
+#[cfg(test)]
+mod write_line_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5755,12 +5924,9 @@ mod tests {
             at_stop: None,
             stands_for: None,
             doctor: None,
+            write_line: None,
         };
-        let service = QueueService {
-            backend: &backend,
-            build: "test-build",
-            pid: 7,
-        };
+        let backend = Arc::new(backend);
         let hello = serde_json::to_vec(&ServiceRequest {
             api_version: API_VERSION,
             token: None,
@@ -5791,7 +5957,9 @@ mod tests {
         for request in requests {
             let answers: Vec<_> = records
                 .iter()
-                .map(|reads| answer_request(request, &service, (Peer::Other, None), reads).unwrap())
+                .map(|reads| {
+                    answer_request(request, &backend, 7, (Peer::Other, None), reads).unwrap()
+                })
                 .collect();
             assert!(answers.iter().all(|answer| *answer == answers[0]));
         }
@@ -5800,7 +5968,8 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        let answered = answer_request(&hello, &service, (Peer::Other, None), &records[2]).unwrap();
+        let answered =
+            answer_request(&hello, &backend, 7, (Peer::Other, None), &records[2]).unwrap();
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert_eq!(lines[1]["use_case"], "hello");
         assert_eq!(lines[1]["op"], Value::Null);
@@ -5816,7 +5985,7 @@ mod tests {
             Box::new(Memory(Some(5))),
             Duration::ZERO,
         );
-        answer_request(&hello, &service, (Peer::Other, None), &reads).unwrap();
+        answer_request(&hello, &backend, 7, (Peer::Other, None), &reads).unwrap();
         let text = String::from_utf8(over.0.lock().unwrap().clone()).unwrap();
         assert_eq!(text.lines().count(), 2, "{text}");
         assert!(

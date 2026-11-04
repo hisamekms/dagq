@@ -42,7 +42,8 @@ use syn::{Attribute, Meta};
 const DEFINER: &str = "src/infrastructure/sqlite.rs";
 
 /// The associated fns of `SqliteQueue` that open the DB at a path.
-const OPENS: [&str; 11] = [
+const OPENS: [&str; 12] = [
+    "write_connection",
     "init",
     "create",
     "open",
@@ -117,11 +118,6 @@ pub(super) const OPENERS: &[Opener] = &[
         Why::Service,
     ),
     row(
-        "src/infrastructure/queue_service.rs",
-        "SqliteServiceBackend::register_telemetry_session",
-        Why::Service,
-    ),
-    row(
         "src/infrastructure/runtime_store/mod.rs",
         "SqliteOpener::connect",
         Why::Opener,
@@ -144,11 +140,6 @@ pub(super) const OPENERS: &[Opener] = &[
     ),
     row(
         "src/infrastructure/queue_service.rs",
-        "SqliteServiceBackend::open",
-        Why::Service,
-    ),
-    row(
-        "src/infrastructure/queue_service.rs",
         "SqliteServiceBackend::open_read",
         Why::Service,
     ),
@@ -159,12 +150,12 @@ pub(super) const OPENERS: &[Opener] = &[
     ),
     row(
         "src/infrastructure/queue_service.rs",
-        "SqliteServiceBackend::record_unauthenticated",
+        "write_queue",
         Why::Service,
     ),
     row(
         "src/infrastructure/queue_service.rs",
-        "ServiceSqlite::record_denial",
+        "ServiceWriteLine::start",
         Why::Service,
     ),
 ];

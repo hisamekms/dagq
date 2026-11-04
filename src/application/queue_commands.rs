@@ -592,8 +592,10 @@ impl QueueCommand {
     }
 
     /// Whether the command only reads the queue, so the queue service runs
-    /// it on a read-only connection: the screens, the logs, `report` and
-    /// `graph --out` (which write files, but no queue state). Only the
+    /// it on a read-only connection: the screens, the logs, the read that comes
+    /// before a command's write (`release`, a replan's resolve, `ready
+    /// --inherit`), `report` and `graph --out` (which write files, but no
+    /// queue state). Only the
     /// service's choice of a use case's connection reads this.
     pub fn reads_only(&self) -> bool {
         matches!(
@@ -601,7 +603,12 @@ impl QueueCommand {
             Self::RunScreen(_)
                 | Self::RunSend(_)
                 | Self::RunLog(_)
+                | Self::PlannerScreen(_)
+                | Self::PlannerSend(_)
                 | Self::PlannerLog(_)
+                | Self::ReleaseRead(_)
+                | Self::ReplanResolveRead(_)
+                | Self::ReadyInheritRead(_)
                 | Self::Report(_)
                 | Self::ReportInputs(_)
                 | Self::GraphExport(_)

@@ -14,8 +14,9 @@ use crate::domain::authorization::Capability as C;
 use crate::domain::{AskKind, NewAsk, PlannerOrigin, Submission, TaskAction};
 use serde_json::Value;
 
-/// The operations that only read the queue, the tokens' principals and the
-/// telemetry's targets.
+/// The operations a read of the queue is all the policy asks of: they read
+/// the queue, the tokens' principals and the telemetry's targets, but for
+/// [`READS_THAT_WRITE`].
 pub(super) const READS: &[&str] = &[
     "candidates",
     "build_waits",
@@ -365,6 +366,33 @@ const SUPERVISE: &[&str] = &[
 ];
 
 /// The operations of one capability other than `scheduler.supervise`.
+/// The operations of [`READS`] that write all the same: a refresh of what
+/// is derived, and a planner's mark for the answer it waits for.
+const READS_THAT_WRITE: [&str; 3] = [
+    "investigations",
+    "planner_answer_wait",
+    "planner_answer_undelivered",
+];
+
+/// The operations the policy asks more than a read of ([`SUPERVISE`],
+/// [`OTHERS`]) that use no write entry of the queue all the same.
+pub(super) const OTHERS_THAT_READ: [&str; 6] = [
+    "answer_request",
+    "ask_delivery_failed",
+    "assert_repository",
+    "open_hook_session_spans",
+    "planner_handover",
+    "release_updates_on",
+];
+
+/// Whether `op` uses no write entry of the queue ([`READS`] and
+/// [`OTHERS_THAT_READ`], without [`READS_THAT_WRITE`]), whatever the policy
+/// asks of it: the service runs it on a read-only connection, where a write
+/// would fail, off its write line, where it would wait.
+pub(super) fn only_reads(op: &str) -> bool {
+    (READS.contains(&op) && !READS_THAT_WRITE.contains(&op)) || OTHERS_THAT_READ.contains(&op)
+}
+
 /// The operations the landing's integrator alone sends, with its token
 /// ([`super::integrator`]): the landing's end on `main` and its run's
 /// `run_integrated` are never a supervisor's own records (ADR-t728-2,
@@ -648,6 +676,28 @@ mod tests {
             assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
             assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
             assert!(super::super::reads_only(op), "{op}");
+        }
+    }
+
+    /// The read judgement of a request is wider than the one that tells
+    /// what an unanswered request left undone, and every operation either
+    /// names exists; those that write stay out of it.
+    #[test]
+    fn what_only_reads_covers_the_reads_and_not_what_writes() {
+        for op in super::super::READ_OPS {
+            assert!(only_reads(op), "{op}");
+        }
+        for op in READS_THAT_WRITE {
+            assert!(READS.contains(&op), "{op}");
+            assert!(!only_reads(op), "{op}");
+        }
+        for op in OTHERS_THAT_READ {
+            assert!(supervisor_needs(op, &[]).is_ok(), "{op}");
+            assert!(!READS.contains(&op), "{op}");
+            assert!(only_reads(op), "{op}");
+        }
+        for op in ["workspace_created", "record_queue_event", "issue_token"] {
+            assert!(!only_reads(op), "{op}");
         }
     }
 

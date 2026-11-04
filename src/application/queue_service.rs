@@ -190,14 +190,15 @@ pub trait ServiceBackend: Send + Sync {
     /// The principal `token` was issued for; `None` for a token the
     /// control side did not issue or has revoked.
     fn principal(&self, token: &str) -> Result<Option<Principal>>;
-    /// The queue, written as `actor`.
+    /// The queue, written as `actor`. A service with a write line answers
+    /// this on the line's thread alone ([`on_write_line`]).
     fn open(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>>;
     /// The queue for a read as `actor` (ADR-0045 decision 18), on a
     /// read-only connection: a queue older than the service's build is not
     /// read, nor copied and migrated in memory, and the refusal points to
     /// `dagq migrate` (ADR-t3102-2 decision 4). Nothing of the read writes
-    /// to the queue; a refusal of the policy is recorded all the same, on a
-    /// connection of its own that writes.
+    /// to the queue; a refusal of the policy is recorded all the same, on
+    /// the connection that writes.
     fn open_read(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
         self.open(actor)
     }
@@ -430,7 +431,7 @@ struct OwnDenials<'a> {
 
 impl DenialLog for OwnDenials<'_> {
     fn record_denial(&self, payload: Value) -> Result<()> {
-        self.backend.open(self.actor)?.record_denial(payload)
+        self.backend.open_read(self.actor)?.record_denial(payload)
     }
 }
 
@@ -565,7 +566,10 @@ impl QueueService<'_> {
             }
         }
         let actor = principal.actor();
+        // Each of these opens the queue itself: what the token was read on
+        // goes first, as a service has one connection to write on.
         if request.use_case == UseCase::Control {
+            drop(checked);
             return respond(super::supervisor_service::control::answer(
                 self.backend,
                 &principal,
@@ -573,7 +577,8 @@ impl QueueService<'_> {
                 process,
             ));
         }
-        if connection == Connection::Supervisor {
+        if request.use_case == UseCase::Supervisor {
+            drop(checked);
             return respond(super::supervisor_service::answer(
                 self.backend,
                 &principal,
@@ -582,6 +587,7 @@ impl QueueService<'_> {
             ));
         }
         if request.use_case == UseCase::IssueToken {
+            drop(checked);
             return respond(issue_token_of(
                 self.backend,
                 &principal,
@@ -590,6 +596,7 @@ impl QueueService<'_> {
             ));
         }
         if request.use_case == UseCase::RevokeToken {
+            drop(checked);
             return respond(revoke_token_of(self.backend, &principal, &request.params));
         }
         // The queue's administration runs on the DB itself, which may be
@@ -600,7 +607,10 @@ impl QueueService<'_> {
             &request.params,
             request.binding.as_deref(),
         ) {
-            Ok(Some(admin)) => return respond(admin_of(self.backend, &actor, &admin)),
+            Ok(Some(admin)) => {
+                drop(checked);
+                return respond(admin_of(self.backend, &actor, &admin));
+            }
             Ok(None) => {}
             Err(error) => return respond(Err(error)),
         }
@@ -731,6 +741,9 @@ impl QueueService<'_> {
             match queue.run_status(run) {
                 Ok(Some(status)) if run_holds_token(status) => {}
                 Ok(_) => {
+                    // The refusal's record writes on the service's one
+                    // connection.
+                    drop(queue);
                     return Err(refuse(
                         "run_ended",
                         "the token's run has ended or is not in the queue",
@@ -750,6 +763,7 @@ impl QueueService<'_> {
                     )
                     .is_none() => {}
                 Ok(_) => {
+                    drop(queue);
                     return Err(refuse(
                         "target_ended",
                         "the token's target has ended or is not in the queue",
@@ -770,8 +784,8 @@ impl QueueService<'_> {
 /// The connection a use case runs on (ADR-0045 decision 18): a read
 /// (`show`, the proposals', the evals' and the case sets' and the whole
 /// queue's reads) on a read-only one, a watch's look on the live queue
-/// read-only, the supervisor's requests apart, and the rest on one that
-/// writes.
+/// read-only, the supervisor's and the control steps' that write apart, and
+/// the rest on one that writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Connection {
     Supervisor,
@@ -780,9 +794,34 @@ enum Connection {
     Watch,
 }
 
+/// Whether the service runs `use_case` with `params` on its one write line
+/// ([`crate::infrastructure::queue_service`]'s `ServiceWriteLine`), each
+/// whole request in turn on the line's thread, instead of on the thread of
+/// its connection: every request that opens the queue to write
+/// ([`connection`], which is told by the operations' own read judgements).
+/// `hello` opens nothing.
+pub fn on_write_line(use_case: UseCase, params: &Value) -> bool {
+    use_case != UseCase::Hello
+        && matches!(
+            connection(use_case, params),
+            Connection::Supervisor | Connection::Write
+        )
+}
+
 fn connection(use_case: UseCase, params: &Value) -> Connection {
     match use_case {
+        UseCase::Supervisor | UseCase::Control
+            if super::supervisor_service::request_reads_only(use_case, params) =>
+        {
+            Connection::Read
+        }
         UseCase::Supervisor | UseCase::Control => Connection::Supervisor,
+        UseCase::SessionRun
+            if serde_json::from_value::<super::session::SessionOp>(params.clone())
+                .is_ok_and(|op| op.reads_only()) =>
+        {
+            Connection::Read
+        }
         UseCase::WatchPoll => Connection::Watch,
         UseCase::Show
         | UseCase::ProposalList
@@ -793,6 +832,15 @@ fn connection(use_case: UseCase, params: &Value) -> Connection {
         | UseCase::AgentSet
         | UseCase::BrokerRunStatus
         | UseCase::BrokerBinding => Connection::Read,
+        // The two administrations that only read, of which `doctor` runs
+        // the bound checkout's programs and may take long.
+        _ if matches!(
+            Admin::parse(use_case, params, None),
+            Ok(Some(Admin::SchemaFacts | Admin::Doctor { .. }))
+        ) =>
+        {
+            Connection::Read
+        }
         _ if matches!(QueueRead::parse(use_case, params), Ok(Some(_))) => Connection::Read,
         _ if matches!(QueueCommand::parse(use_case, params), Ok(Some(command)) if command.reads_only()) => {
             Connection::Read
@@ -806,7 +854,7 @@ fn connection(use_case: UseCase, params: &Value) -> Connection {
 /// a fenced write as retryable `not_leader`, and any other failure as `failed`, with its
 /// [`crate::domain::queue_service::FailureKind`] when the caller
 /// tells it apart.
-fn respond(result: Result<Value>) -> ServiceResponse {
+pub fn respond(result: Result<Value>) -> ServiceResponse {
     match result {
         Ok(value) => ServiceResponse::success(value),
         Err(error) => match error.downcast_ref::<AuthorizationError>() {
@@ -4437,6 +4485,83 @@ mod tests {
     /// ADR-0045 decision 18: the reads and a watch's look open the queue
     /// read-only, the supervisor's requests are answered apart, and the
     /// rest open it to write.
+    /// What opens the queue to write goes on the service's write line; what
+    /// reads does not, an operation of the supervisor's, a control step and
+    /// a session wrapper included, nor what opens nothing.
+    #[test]
+    fn what_opens_the_queue_to_write_goes_on_the_write_line_and_nothing_else() {
+        let run = crate::domain::RunId::new("11111111-1111-4111-8111-111111111111").unwrap();
+        let control =
+            |op: &str| json!({"control": {"command": "integrate", "pid": 1}, "call": {"op": op}});
+        let heartbeat = serde_json::to_value(super::super::session::SessionOp::HeartbeatWrapper {
+            run: run.clone(),
+            pid: 1,
+        })
+        .unwrap();
+        let run_events =
+            serde_json::to_value(super::super::session::SessionOp::RunEvents { run: run.clone() })
+                .unwrap();
+        let machine_user_run =
+            serde_json::to_value(super::super::session::SessionOp::MachineUserRun {
+                owner: StepTarget::run(&run),
+                run: "r".to_owned(),
+            })
+            .unwrap();
+        for (use_case, params) in [
+            (UseCase::Note, json!({})),
+            (UseCase::Supervisor, json!({})),
+            (UseCase::Supervisor, json!({"op": "workspace_created"})),
+            (UseCase::Supervisor, json!({"op": "an op of no table"})),
+            // Asked of the policy as reads, and they write.
+            (UseCase::Supervisor, json!({"op": "investigations"})),
+            (UseCase::Supervisor, json!({"op": "planner_answer_wait"})),
+            (UseCase::Control, control("planner_answer_undelivered")),
+            (UseCase::Control, json!({})),
+            (UseCase::Control, control("begin_landing")),
+            (UseCase::SessionRun, heartbeat),
+            (UseCase::IssueToken, json!({})),
+            (UseCase::RevokeToken, json!({})),
+            (UseCase::AskClose, json!({"id": 1})),
+            (UseCase::Migrate, json!({})),
+            (UseCase::Init, json!({})),
+            (UseCase::CommitMessages, json!({"messages": []})),
+        ] {
+            assert!(on_write_line(use_case, &params), "{use_case:?} {params}");
+        }
+        for (use_case, params) in [
+            (UseCase::Hello, json!({})),
+            (UseCase::Show, json!({})),
+            (UseCase::ProposalList, json!({})),
+            (UseCase::WatchPoll, json!({})),
+            (UseCase::BrokerBinding, json!({})),
+            (UseCase::Doctor, json!({"full": true})),
+            (UseCase::Migrate, json!({"check": true})),
+            (UseCase::Supervisor, json!({"op": "active_runs"})),
+            (UseCase::Supervisor, json!({"op": "job_read"})),
+            (UseCase::Supervisor, json!({"op": "ci_watch_events"})),
+            // Asked of the policy as more than reads, and they read.
+            (UseCase::Supervisor, json!({"op": "assert_repository"})),
+            (UseCase::Supervisor, json!({"op": "planner_handover"})),
+            (UseCase::Control, control("job_read")),
+            (UseCase::SessionRun, machine_user_run),
+            (UseCase::Control, control("run")),
+            (
+                UseCase::Control,
+                control(super::super::supervisor_service::control::CONTROL_QUEUE),
+            ),
+            (UseCase::SessionRun, run_events),
+            (UseCase::ReleaseRead, json!({"target": "1"})),
+            (
+                UseCase::ReplanResolveRead,
+                json!({"id": 1, "generation": 1, "resolution": crate::domain::task_replan::ReplanResolution::Withdraw, "reason": "r"}),
+            ),
+            (UseCase::ReadyInheritRead, json!({"id": 1, "reason": "r"})),
+            (UseCase::PlannerScreen, json!({"planner": 1})),
+        ] {
+            assert!(!on_write_line(use_case, &params), "{use_case:?} {params}");
+        }
+    }
+
     #[test]
     fn reads_and_a_watch_s_look_open_the_queue_read_only() {
         for (use_case, params) in [

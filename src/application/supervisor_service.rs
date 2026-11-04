@@ -239,9 +239,53 @@ pub(crate) fn reads_only(op: &str) -> bool {
     READ_OPS.contains(&op)
 }
 
+/// Whether the request of `use_case` with `params` (the supervisor's, or a
+/// control step, which also asks where its queue is) only reads the queue
+/// ([`needs::only_reads`]): the service answers it on a read-only connection,
+/// off its write line. Read from the raw params, so it is known before they
+/// are checked; ones that do not read are refused on the connection that
+/// writes.
+pub(crate) fn request_reads_only(use_case: UseCase, params: &Value) -> bool {
+    let op = match use_case {
+        UseCase::Supervisor => params.get("op"),
+        UseCase::Control => params.get("call").and_then(|call| call.get("op")),
+        _ => None,
+    };
+    op.and_then(Value::as_str).is_some_and(|op| {
+        needs::only_reads(op) || (use_case == UseCase::Control && op == control::CONTROL_QUEUE)
+    })
+}
+
+/// Every operation [`request_reads_only`] sends to a read-only connection.
+#[cfg(test)]
+pub(crate) fn ops_that_only_read() -> Vec<&'static str> {
+    needs::READS
+        .iter()
+        .copied()
+        .filter(|op| needs::only_reads(op))
+        .chain(needs::OTHERS_THAT_READ)
+        .collect()
+}
+
+/// The queue for the request of `use_case` with `params` as `actor`, on the
+/// connection [`request_reads_only`] says.
+fn opened_for(
+    backend: &dyn ServiceBackend,
+    actor: &ActorContext,
+    use_case: UseCase,
+    params: &Value,
+) -> Result<Box<dyn ServiceQueue>> {
+    if request_reads_only(use_case, params) {
+        backend.open_read(actor)
+    } else {
+        backend.open(actor)
+    }
+}
+
 /// The operations of [`dispatch`] that only read the queue: one the
 /// service did not answer did nothing ([`undone`]). An operation not here
-/// is taken as one that writes.
+/// is taken as one that writes by those who read this; the connection a
+/// request runs on goes by the wider [`needs::only_reads`].
 const READ_OPS: [&str; 90] = [
     "diagnosis_owners",
     "candidates",
@@ -952,7 +996,7 @@ pub fn answer(
         (Some(registration), ActorRole::Supervisor) => Some(registration.clone()),
         _ => None,
     };
-    let mut queue = backend.open(&actor)?;
+    let mut queue = opened_for(backend, &actor, UseCase::Supervisor, params)?;
     super::queue_service::authorize_supervisor(&mut *queue, &actor, registration.is_some())?;
     let registration = registration.expect("authorized above");
     let params: SupervisorParams = serde_json::from_value(params.clone())
@@ -1334,7 +1378,7 @@ fn integrator(
     let (Some(run), Some(lease)) = (principal.landing_run(), principal.registration.clone()) else {
         return Err(BadOperation(format!("{} lands no run", principal.actor_id)).into());
     };
-    let mut queue = backend.open(&actor)?;
+    let mut queue = opened_for(backend, &actor, UseCase::Supervisor, params)?;
     super::queue_service::authorize_integrator(&mut *queue, &actor, &run)?;
     let params: SupervisorParams = serde_json::from_value(params.clone())
         .map_err(|error| BadOperation(format!("the params of supervisor do not read: {error}")))?;

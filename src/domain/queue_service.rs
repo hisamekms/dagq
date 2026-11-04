@@ -219,6 +219,8 @@ pub const MAX_ANSWER_BYTES: usize = MAX_REQUEST_BYTES * 16;
 /// each event about 8 KiB of [`MAX_ANSWER_BYTES`], above the largest the
 /// log holds many of (a review's start or end, about 5 KB); a page of
 /// larger ones past the answer is asked again at half its size.
+/// `infrastructure/agent_evals.rs`'s read of them all goes to SQLite itself
+/// and makes no answer of the service's, so this does not limit it.
 pub const MAX_EVENTS_OF_BETWEEN: usize = 2000;
 
 /// Why an `events_of_between` of `limit` events is refused, if it is: a

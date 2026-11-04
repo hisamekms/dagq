@@ -5,14 +5,13 @@
 //! ask notifies nobody here: the inbox's watch tells the person
 //! (ADR-t1433-1 decision 2).
 
-use crate::domain::EventKind;
 use anyhow::Result;
 use serde_json::Value;
 
 use super::sqlite::SqliteQueue;
 use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
-use crate::application::{EventStore, TaskStore, marks};
+use crate::application::{TaskStore, marks};
 use crate::domain::{
     Answerer, Ask, AskId, Finding, FindingId, FindingOutcome, FindingStatus, NewAsk, NewFinding,
     NewNote, PlannerId, RequestId, RunEvent,
@@ -25,8 +24,7 @@ pub struct DialogueQueue<'a> {
 
 impl DenialLog for DialogueQueue<'_> {
     fn record_denial(&self, payload: Value) -> Result<()> {
-        EventStore::record_queue_event(&*self.queue, EventKind::AuthorizationDenied, payload)
-            .map(drop)
+        DenialLog::record_denial(&*self.queue, payload)
     }
 }
 

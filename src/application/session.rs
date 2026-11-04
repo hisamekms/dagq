@@ -587,6 +587,21 @@ impl SessionOp {
         }
     }
 
+    /// Whether it only reads the queue: the service answers it on a read-only
+    /// connection, off its write line.
+    pub fn reads_only(&self) -> bool {
+        matches!(
+            self,
+            Self::Run { .. }
+                | Self::RunEvents { .. }
+                | Self::TurnFence { .. }
+                | Self::Planner { .. }
+                | Self::PlannerTurnEvents { .. }
+                | Self::RepositoryBinding
+                | Self::MachineUserRun { .. }
+        )
+    }
+
     /// What the policy is asked for the operation: a read of the queue,
     /// `session.run` on the run or the planner of the session's lifecycle
     /// (and of the read of a user of the dagq machine its turn's container

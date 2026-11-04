@@ -6,7 +6,7 @@ use super::*;
 use crate::application::TaskStore;
 use crate::domain::{EventId, NewTask};
 
-const RUN: &str = "11111111-1111-4111-8111-111111111111";
+pub(super) const RUN: &str = "11111111-1111-4111-8111-111111111111";
 
 /// A queue with one task claimed as run [`RUN`], starting, under the lease `token`,
 /// and the backend of its service.
@@ -16,7 +16,7 @@ fn claimed(token: &LeaseToken) -> (tempfile::TempDir, SqliteServiceBackend) {
 
 /// [`claimed`], the task added and the service's times taken from
 /// `generators`.
-fn claimed_with(
+pub(super) fn claimed_with(
     token: &LeaseToken,
     generators: crate::application::Generators,
 ) -> (tempfile::TempDir, SqliteServiceBackend) {
@@ -104,12 +104,13 @@ fn claimed_at_with(
         at_stop: None,
         stands_for: None,
         doctor: None,
+        write_line: None,
     };
     (backend, queue)
 }
 
 /// A token of `principal`'s for the queue of `backend`.
-fn token_of(backend: &SqliteServiceBackend, principal: &Principal) -> String {
+pub(super) fn token_of(backend: &SqliteServiceBackend, principal: &Principal) -> String {
     let issued = issue(&backend.queue_dir, principal, 0).unwrap();
     read_token(&issued.file).unwrap()
 }

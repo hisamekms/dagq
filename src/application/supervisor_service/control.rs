@@ -49,7 +49,9 @@ use super::resend::{Resend, Resending, Waits};
 use super::{BEGIN_LANDING, BadOperation, END_LANDING, NotOwnLease, ServiceCaller, read, reply};
 use crate::application::{Generators, RunReads, RunRecovery, SupervisorReads};
 use crate::domain::authorization::Capability;
-use crate::domain::queue_service::{ControlCall, ControlCommand, ControlParams, Principal};
+use crate::domain::queue_service::{
+    ControlCall, ControlCommand, ControlParams, Principal, UseCase,
+};
 use crate::domain::session_step::StepTarget;
 use crate::domain::{CommitSha, EventKind, LeaseToken, RunId, RunStatus, TaskId};
 
@@ -313,10 +315,9 @@ pub fn answer(
     process: Option<u32>,
 ) -> Result<Value> {
     let actor = principal.actor();
-    let params: ControlParams = serde_json::from_value(params.clone())
+    let ControlParams { control, call } = serde_json::from_value(params.clone())
         .map_err(|error| BadOperation(format!("{UNREAD_PARAMS}: {error}")))?;
-    let ControlParams { control, call } = params;
-    let mut queue = backend.open(&actor)?;
+    let mut queue = super::opened_for(backend, &actor, UseCase::Control, params)?;
     super::super::queue_service::authorize_operation(&mut *queue, &actor, &operation(&control)?)?;
     let op = call.op.as_str();
     // The runs' resources and the host's load samples are the supervisor's

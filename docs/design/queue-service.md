@@ -58,11 +58,12 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 上限を超える答え（`MAX_ANSWER_BYTES`）はserviceが`response_too_large`（ADR-t1233-5）、要求（`MAX_REQUEST_BYTES`）はsocketのclientが`request_too_large`で断る。
 supervisorはどちらでもpassを止めず、育つ読み取りは区切る。
 `events_of_between`は件数の上限`MAX_EVENTS_OF_BETWEEN`を超えるlimitをstoreを読む前に`bad_request`で断る（ページの読みはdoc comment）。
-`infrastructure/agent_evals.rs`の全件の読みはSQLiteを直接読み、serviceの答えを作らないのでこの断りの対象外。
 transactionはserviceの中で完結し、クライアントとの往復で分けない（ADR-t1233-1決定3）。
-要求ごとにDBへの接続を開き、principalのactorで書く（eventの`actor`は呼び出し元のprincipal）。
+書き込みの列への入口は`on_write_line`と`ServiceWriteLine`。
+serviceの書き込みは1本の列で1つずつ確定し、読み取りは列を待たない。
+列がnot_leaderを受けたらその要求と列の残りに同じ答えを返す。
+書き込みはprincipalのactorで書く（eventの`actor`は呼び出し元のprincipal）。
 起動直後の要求ごとの読みとRSSの記録は`startup_reads::StartupReads`。
-記録は起動から決まった間だけ、書き込みの失敗もRSSの読めなさも答えと認可を変えない。
 
 ## API versionと互換
 

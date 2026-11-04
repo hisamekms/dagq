@@ -34,6 +34,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -615,8 +616,171 @@ pub struct PlanningRules {
     pub replacement: Option<Option<crate::domain::replan_plan::ReplacementPlan>>,
 }
 
+/// The connection of a [`SqliteQueue`]: its own, closed with it, or the one
+/// a [`WriteConnection`] lent it, which goes back when the queue goes.
+pub(super) struct QueueConnection {
+    conn: Option<Connection>,
+    lent_by: Option<(Arc<Mutex<WriteSlot>>, FileId)>,
+}
+
+impl std::ops::Deref for QueueConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        self.conn
+            .as_ref()
+            .expect("a queue's connection until it drops")
+    }
+}
+
+impl std::ops::DerefMut for QueueConnection {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.conn
+            .as_mut()
+            .expect("a queue's connection until it drops")
+    }
+}
+
+impl Drop for QueueConnection {
+    fn drop(&mut self) {
+        if let (Some(conn), Some((slot, file))) = (self.conn.take(), self.lent_by.take()) {
+            *slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                WriteSlot::Idle(Box::new(IdleWrite { conn, file }));
+        }
+    }
+}
+
+/// The device and inode of the queue's DB: what tells a connection still on
+/// the queue's file from one left on a file that was replaced.
+type FileId = (u64, u64);
+
+fn file_id(db: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let file = std::fs::metadata(db).ok()?;
+    Some((file.dev(), file.ino()))
+}
+
+/// The bytes of WAL a checkpoint leaves behind the write connection: it stays
+/// open, so no last close removes a WAL a long read let grow.
+const WRITE_WAL_LIMIT: i64 = 64 * 1024 * 1024;
+
+/// The write connection between two of the write line's requests.
+struct IdleWrite {
+    conn: Connection,
+    file: FileId,
+}
+
+/// Where the write connection is.
+#[derive(Default)]
+enum WriteSlot {
+    /// Not opened yet.
+    #[default]
+    Empty,
+    Idle(Box<IdleWrite>),
+    Lent,
+}
+
+/// The one connection the queue service's write line writes on, lent to one
+/// request at a time ([`SqliteQueue::write_connection`]). Each loan is a
+/// fresh [`SqliteQueue`] (the rules and the actor of a request do not reach
+/// the next), held to the same check as [`SqliteQueue::open`], so a queue a
+/// `migrate` is still to bring up is refused as it was. A DB file that was
+/// replaced, or a connection a request left in a transaction, is opened
+/// again. A loan while another is out is refused: there is one connection,
+/// and a request hands back what it holds before it opens the queue again.
+///
+/// The [`WriteIdentity`] of the first open is kept for all later loans on
+/// that file and never read again: that is what lets the fence of
+/// [`WriteTx::write`] refuse this service's writes once another takes the
+/// row over.
+pub struct WriteConnection {
+    db: PathBuf,
+    slot: Arc<Mutex<WriteSlot>>,
+    identity: Mutex<Option<(FileId, WriteIdentity)>>,
+}
+
+impl WriteConnection {
+    /// The queue on the write connection, until it is dropped.
+    pub fn lend(&self) -> Result<SqliteQueue> {
+        ensure_not_refused(&self.db)?;
+        let file = file_id(&self.db);
+        let idle = {
+            let mut slot = self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ensure!(
+                !matches!(*slot, WriteSlot::Lent),
+                "the queue's write connection is out on another loan"
+            );
+            match std::mem::replace(&mut *slot, WriteSlot::Lent) {
+                WriteSlot::Idle(idle) => Some(*idle),
+                _ => None,
+            }
+        };
+        // What fails from here leaves no connection out.
+        let back = NotLent(&self.slot);
+        let idle = idle.filter(|idle| Some(idle.file) == file && idle.conn.is_autocommit());
+        let conn = match idle {
+            Some(idle) => idle.conn,
+            None => {
+                let conn = SqliteQueue::open_connection(
+                    &self.db,
+                    OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                conn.pragma_update(None, "journal_size_limit", WRITE_WAL_LIMIT)?;
+                conn
+            }
+        };
+        let file = file.context("the queue's DB was gone as its connection opened")?;
+        let mut queue = SqliteQueue::on(
+            QueueConnection {
+                conn: Some(conn),
+                lent_by: Some((self.slot.clone(), file)),
+            },
+            &self.db,
+        )?;
+        queue
+            .state()?
+            .context("queue is not initialized; use init first")?
+            .check_opens()?;
+        let mut kept = self
+            .identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match (&*kept, &queue.write_identity) {
+            (Some((on, identity)), _) if *on == file => {
+                queue.write_identity = Some(identity.clone());
+            }
+            (_, Some(identity)) => *kept = Some((file, identity.clone())),
+            (_, None) => {}
+        }
+        drop(kept);
+        std::mem::forget(back);
+        Ok(queue)
+    }
+}
+
+/// A loan that did not come to be: its slot is free again, unless the queue
+/// it did make took its connection back there first.
+struct NotLent<'a>(&'a Mutex<WriteSlot>);
+
+impl Drop for NotLent<'_> {
+    fn drop(&mut self) {
+        let mut slot = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*slot, WriteSlot::Lent) {
+            *slot = WriteSlot::Empty;
+        }
+    }
+}
+
 pub struct SqliteQueue {
-    pub(super) conn: Connection,
+    pub(super) conn: QueueConnection,
     /// The opening service's identity; never reread by an ordinary write.
     /// None only while opening a schema predating the leader table.
     pub(super) write_identity: Option<WriteIdentity>,
@@ -651,7 +815,13 @@ pub struct SqliteQueue {
     /// How long a [`WriteTx`] of this connection may hold the write lock
     /// before it warns; [`WRITE_HOLD_WARN`] unless a test lowers it.
     pub(super) write_hold_warn: Duration,
+    /// Where a refusal of the policy is recorded instead of on this
+    /// connection ([`Self::with_denial_log`]).
+    pub(super) denial_log: Option<DenialRecorder>,
 }
+
+/// What records a refusal of the policy, given its event's payload.
+pub type DenialRecorder = Arc<dyn Fn(serde_json::Value) -> Result<()> + Send + Sync>;
 
 impl SqliteQueue {
     /// `user_version` a fully migrated queue reports.
@@ -725,6 +895,16 @@ impl SqliteQueue {
             .context("queue is not initialized; use init first")?
             .check_opens()?;
         Ok(queue)
+    }
+
+    /// The write connection of the queue at `path`, which opens at its
+    /// first loan ([`WriteConnection::lend`]).
+    pub fn write_connection(path: impl AsRef<Path>) -> WriteConnection {
+        WriteConnection {
+            db: path.as_ref().to_path_buf(),
+            slot: Arc::default(),
+            identity: Mutex::new(None),
+        }
     }
 
     /// Opens the live queue read-only for polling (`watch`): older schemas
@@ -979,6 +1159,13 @@ impl SqliteQueue {
         self
     }
 
+    /// Record the refusals of the policy with `log`: for a read-only
+    /// connection, which cannot write them.
+    pub fn with_denial_log(mut self, log: DenialRecorder) -> Self {
+        self.denial_log = Some(log);
+        self
+    }
+
     /// Use the identity acquired by the service that opens this store.
     /// Startup owns takeover; ordinary writes retain this value even after
     /// another service advances the generation.
@@ -1062,6 +1249,17 @@ impl SqliteQueue {
     }
 
     fn connect_with(path: &Path, flags: OpenFlags) -> Result<Self> {
+        Self::on(
+            QueueConnection {
+                conn: Some(Self::open_connection(path, flags)?),
+                lent_by: None,
+            },
+            path,
+        )
+    }
+
+    /// A connection to the queue at `path`, set up as every queue's is.
+    fn open_connection(path: &Path, flags: OpenFlags) -> Result<Connection> {
         ensure_not_refused(path)?;
         let conn = Connection::open_with_flags(path, flags)
             .with_context(|| format!("open queue at {} (use init to create it)", path.display()))?;
@@ -1070,6 +1268,11 @@ impl SqliteQueue {
         // The `worktime.jsonl` lines of the session closes written through
         // it follow its commits (task 1334).
         super::sessions::watch_commits(&conn)?;
+        Ok(conn)
+    }
+
+    /// The queue at `path` on `conn`, with the actor of this process.
+    fn on(conn: QueueConnection, path: &Path) -> Result<Self> {
         // Canonical, like the paths `supervise` plans under, so a relative or
         // symlinked `--db` still names the queue's real `runs/`.
         let db = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
@@ -1089,6 +1292,7 @@ impl SqliteQueue {
             max_spike_cycles: None,
             replacement: None,
             write_hold_warn: WRITE_HOLD_WARN,
+            denial_log: None,
         })
     }
 

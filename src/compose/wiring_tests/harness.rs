@@ -431,6 +431,7 @@ impl Wiring {
                     at_stop: None,
                     stands_for: None,
                     doctor: None,
+                    write_line: None,
                 },
                 tokens: self.tokens.clone(),
                 processes: self.processes.clone(),
