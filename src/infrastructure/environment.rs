@@ -3,20 +3,23 @@
 //! ([`HOST_NODE`], as its NodeSampleStore rows), with no image, its cores
 //! and its memory as the limits and its architecture. It measures a run
 //! from outside by the processes the run registered and every process
-//! under them, read from `ps`, and the node from the host's load's
-//! sample, with the CPU pressure of `/proc/pressure/cpu` where the host
-//! has it (Linux). It adds no wait to a run.
+//! under them, read from the OS itself ([`measure_processes`]), and the node
+//! from the host's load's sample, with the CPU pressure of
+//! `/proc/pressure/cpu` where the host has it (Linux). It adds no wait to a
+//! run.
 
 use std::{collections::BTreeMap, path::Path, sync::Mutex, time::Duration};
 
 use anyhow::{Context, Result};
 
 use super::host_metrics::tool;
+use super::process_read::measure_processes;
+use super::queue_service::unix_now;
 use crate::application::ExecutionEnvironment;
 use crate::domain::RunId;
 use crate::domain::environment::{
-    EnvKind, EnvironmentAttached, EnvironmentWait, ProcessMeter, Resources, RunProcesses,
-    cpu_pressure, host_node_resources, processes,
+    EnvKind, EnvironmentAttached, EnvironmentWait, Process, ProcessMeter, Resources, RunProcesses,
+    cpu_pressure, host_node_resources,
 };
 use crate::domain::host_metrics::{HOST_NODE, HostSample, darwin_memory, linux_memory};
 
@@ -24,8 +27,8 @@ use crate::domain::host_metrics::{HOST_NODE, HostSample, darwin_memory, linux_me
 pub struct HostEnvironment {
     cores: Option<f64>,
     memory_bytes: Option<i64>,
-    /// `ps -A -o pid=,ppid=,etime=,time=,rss=`.
-    ps: Box<dyn Fn() -> Option<String> + Send + Sync>,
+    /// The processes now, or why they did not list.
+    processes: Box<dyn Fn() -> Result<Vec<Process>> + Send + Sync>,
     /// The CPU pressure now, where the host has it.
     pressure: Box<dyn Fn() -> Option<f64> + Send + Sync>,
     /// What each run's measure keeps between its windows.
@@ -33,27 +36,32 @@ pub struct HostEnvironment {
 }
 
 impl HostEnvironment {
-    /// This host: its cores, its memory, its `ps` and its PSI.
+    /// This host: its cores, its memory, its processes and its PSI.
     pub fn new() -> Self {
         #[allow(clippy::cast_precision_loss)]
         let cores = std::thread::available_parallelism()
             .ok()
             .map(|cores| cores.get() as f64);
-        Self::with(cores, memory_bytes(), ps, pressure)
+        Self::with(
+            cores,
+            memory_bytes(),
+            || measure_processes(unix_now()),
+            pressure,
+        )
     }
 
-    /// A host of `cores` and `memory_bytes`, read through `ps` and
-    /// `pressure`: the tests'.
+    /// A host of `cores` and `memory_bytes`, read through `processes`
+    /// and `pressure`: the tests'.
     pub fn with(
         cores: Option<f64>,
         memory_bytes: Option<i64>,
-        ps: impl Fn() -> Option<String> + Send + Sync + 'static,
+        processes: impl Fn() -> Result<Vec<Process>> + Send + Sync + 'static,
         pressure: impl Fn() -> Option<f64> + Send + Sync + 'static,
     ) -> Self {
         Self {
             cores,
             memory_bytes,
-            ps: Box::new(ps),
+            processes: Box::new(processes),
             pressure: Box::new(pressure),
             meters: Mutex::new(BTreeMap::new()),
         }
@@ -79,10 +87,6 @@ fn memory_bytes() -> Option<i64> {
     };
     #[allow(clippy::cast_possible_truncation)]
     memory.total_mb.map(|mb| (mb * 1_048_576.0).round() as i64)
-}
-
-fn ps() -> Option<String> {
-    tool("ps", &["-A", "-o", "pid=,ppid=,etime=,time=,rss="])
 }
 
 fn pressure() -> Option<f64> {
@@ -113,7 +117,7 @@ impl ExecutionEnvironment for HostEnvironment {
         if runs.is_empty() {
             return Ok(Vec::new());
         }
-        let listed = processes(&(self.ps)().context("ps could not list the processes")?);
+        let listed = (self.processes)().context("the processes could not be listed")?;
         let mut meters = self
             .meters
             .lock()

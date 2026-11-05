@@ -77,7 +77,7 @@ fn port(db: &Path, take: fn(i64) -> HostSample, retention_days: u32) -> HostMetr
         environment: Arc::new(HostEnvironment::with(
             Some(8.0),
             Some(1 << 34),
-            || None,
+            || Err(anyhow::anyhow!("no list")),
             || None,
         )),
     }

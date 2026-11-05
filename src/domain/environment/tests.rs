@@ -264,30 +264,6 @@ fn an_attachment_reads_back_from_its_payload() {
     );
 }
 
-/// `ps`'s times read as seconds on macOS and Linux, and a line it cannot
-/// read is left out.
-#[test]
-fn ps_reads_each_process_with_its_cpu_seconds_and_memory() {
-    let listed = processes(
-        "  1     0  3-00:00:00   0:01.50   100\n\
-         20     1     05:00    1:02:03    10\n\
-         21    20     00:07  2-00:00:01    1\n\
-         22    20     00:07  125:00.25     4\n\
-         bad line\n",
-    );
-    assert_eq!(
-        listed,
-        [
-            process(1, 0, 259_200.0, 1.5, 102_400),
-            process(20, 1, 300.0, 3723.0, 10_240),
-            process(21, 20, 7.0, 172_801.0, 1024),
-            process(22, 20, 7.0, 7500.25, 4096),
-        ]
-    );
-    assert_eq!(cpu_time("1:2:3:4"), None);
-    assert_eq!(cpu_time("x"), None);
-}
-
 fn process(pid: u32, ppid: u32, elapsed_secs: f64, cpu_seconds: f64, rss_bytes: i64) -> Process {
     Process {
         pid,

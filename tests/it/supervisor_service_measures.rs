@@ -87,7 +87,7 @@ fn the_hosts_load_is_recorded_and_read_only_through_the_service() {
         environment: Arc::new(HostEnvironment::with(
             Some(8.0),
             Some(1 << 34),
-            || None,
+            || Err(anyhow::anyhow!("no list")),
             || None,
         )),
     };
@@ -556,7 +556,7 @@ fn a_file_past_the_requests_limit_is_imported_in_parts_and_one_stopped_adds_the_
         environment: Arc::new(HostEnvironment::with(
             Some(8.0),
             Some(1 << 34),
-            || None,
+            || Err(anyhow::anyhow!("no list")),
             || None,
         )),
     };

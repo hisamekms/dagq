@@ -27,12 +27,18 @@
 //! follow the parents through it and judge a run by the list: it shows as
 //! `ps` shows such a process, by its name in parentheses (brackets on Linux).
 //!
+//! The measure of a run ([`measure_processes`]) reads less of each process
+//! and needs its resident memory too, so it is a read of its own: a process
+//! whose CPU time or memory do not read (one that ended on the way, and on
+//! macOS another user's) is left out. macOS answers neither for a zombie,
+//! which stays with none of either, as `ps` shows it.
+//!
 //! What the system calls return is read by functions without side effects,
 //! on every platform, so that the tests of either format run on both.
 
 use anyhow::{Context as _, Result};
 
-use crate::domain::{host_metrics::civil, recovery::ProcessInfo};
+use crate::domain::{environment::Process, host_metrics::civil, recovery::ProcessInfo};
 
 /// What the OS says of one process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +69,18 @@ pub fn read_command(pid: u32) -> Option<String> {
 /// read. An error when the OS gives no list of pids.
 pub fn list_user_processes(now_secs: i64) -> Result<Vec<ProcessInfo>> {
     list_from_os(now_secs)
+}
+
+/// The processes that read now, each with its parent, age, CPU time and
+/// resident memory. An error when the OS gives no list of them.
+///
+/// The age is in whole seconds and at most a second past the true one, which
+/// [`crate::domain::environment::ProcessMeter`]'s slack relies on: macOS counts
+/// it from the unix second `now_secs`, and Linux from the boot clock as `ps`
+/// does, since a start told in unix seconds also holds the fraction of the
+/// boot time ([`age_from_uptime`]).
+pub fn measure_processes(now_secs: i64) -> Result<Vec<Process>> {
+    measure_from_os(now_secs)
 }
 
 /// When `pid` started, in the zone of this process's environment: what
@@ -144,25 +162,42 @@ pub fn process_from_kinfo(kinfo: &[u8]) -> Option<ProcessRead> {
 /// command name is in parentheses and may hold spaces and parentheses
 /// itself, so the fields after it are read from the last `)`.
 pub fn process_from_proc(stat: &str, proc_stat: &str, ticks_per_sec: u64) -> Option<ProcessRead> {
-    /// Where the start is among the fields after the command name: it is
-    /// field 22 of proc(5), and those fields begin at field 3.
-    const STARTTIME: usize = 22 - 3;
-    let (head, tail) = stat.rsplit_once(')')?;
-    let pid = head.split_whitespace().next()?.parse().ok()?;
-    let fields: Vec<&str> = tail.split_whitespace().collect();
-    let ticks = fields.get(STARTTIME)?.parse::<u64>().ok()?;
+    let fields = proc_fields(stat)?;
     let boot = proc_stat
         .lines()
         .find_map(|line| line.strip_prefix("btime "))?
         .trim()
         .parse::<i64>()
         .ok()?;
-    let since_boot = ticks.checked_div(ticks_per_sec)?;
+    let since_boot = fields.start_ticks.checked_div(ticks_per_sec)?;
     Some(ProcessRead {
-        pid,
-        ppid: fields.get(1)?.parse().ok()?,
+        pid: fields.pid,
+        ppid: fields.ppid,
         started_secs: boot + i64::try_from(since_boot).ok()?,
+        zombie: fields.zombie,
+    })
+}
+
+/// What a `/proc/<pid>/stat` line says of its process by itself; the start is
+/// in clock ticks since the boot.
+struct ProcFields {
+    pid: u32,
+    ppid: u32,
+    zombie: bool,
+    start_ticks: u64,
+}
+
+fn proc_fields(stat: &str) -> Option<ProcFields> {
+    /// Where the start is among the fields after the command name: it is
+    /// field 22 of proc(5), and those fields begin at field 3.
+    const STARTTIME: usize = 22 - 3;
+    let (head, tail) = stat.rsplit_once(')')?;
+    let fields: Vec<&str> = tail.split_whitespace().collect();
+    Some(ProcFields {
+        pid: head.split_whitespace().next()?.parse().ok()?,
+        ppid: fields.get(1)?.parse().ok()?,
         zombie: zombie_on_linux(fields.first()?.chars().next()?),
+        start_ticks: fields.get(STARTTIME)?.parse().ok()?,
     })
 }
 
@@ -342,6 +377,92 @@ pub fn proc_stat_cpu_ticks(stat: &str) -> Option<u64> {
     user.checked_add(system)
 }
 
+/// Clock ticks in milliseconds; `None` for a clock of no use.
+pub fn cpu_ms_from_ticks(ticks: u64, ticks_per_sec: u64) -> Option<u64> {
+    ticks.checked_mul(1000)?.checked_div(ticks_per_sec)
+}
+
+/// The resident memory in the text of `/proc/<pid>/statm`, whose second field
+/// counts it in pages.
+pub fn rss_bytes_from_statm(statm: &str, page_bytes: u64) -> Option<i64> {
+    let pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    i64::try_from(pages.checked_mul(page_bytes)?).ok()
+}
+
+/// What macOS's `proc_taskinfo` says of a process's use: `pti_total_user`,
+/// `pti_total_system`, in the units [`cpu_ms_from_mach`] takes, and
+/// `pti_resident_size`, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachUsage {
+    pub user: u64,
+    pub system: u64,
+    pub resident_bytes: u64,
+}
+
+/// The process to measure from what `sysctl(KERN_PROC_PID)` wrote and its
+/// task info, with the Mach clock's `numer` and `denom`. `None` when either
+/// does not read. macOS answers no task info for a zombie, which uses no more
+/// CPU and holds no memory, and it stays so that the run it ended in is still
+/// measured until it is reaped.
+pub fn measured_from_kinfo(
+    kinfo: &[u8],
+    usage: Option<MachUsage>,
+    (numer, denom): (u32, u32),
+    now_secs: i64,
+) -> Option<Process> {
+    let read = process_from_kinfo(kinfo)?;
+    let age_secs = elapsed_secs(now_secs, read.started_secs);
+    if read.zombie {
+        return Some(measured(read.pid, read.ppid, age_secs, 0, 0));
+    }
+    let usage = usage?;
+    let cpu_ms = cpu_ms_from_mach(usage.user, usage.system, numer, denom)?;
+    let rss_bytes = i64::try_from(usage.resident_bytes).ok()?;
+    Some(measured(read.pid, read.ppid, age_secs, cpu_ms, rss_bytes))
+}
+
+/// How old a process that started `start_ticks` after the boot is, by the
+/// text of `/proc/uptime`, in seconds: the whole seconds of each subtracted,
+/// as `ps` writes `etime`; none for a start after the uptime was read.
+pub fn age_from_uptime(uptime: &str, start_ticks: u64, ticks_per_sec: u64) -> Option<u64> {
+    let up = uptime.split_whitespace().next()?.split('.').next()?;
+    let up = up.parse::<u64>().ok()?;
+    Some(up.saturating_sub(start_ticks.checked_div(ticks_per_sec)?))
+}
+
+/// The process to measure from `/proc`: the text of `/proc/<pid>/stat`,
+/// `/proc/<pid>/statm` and `/proc/uptime`. `None` when any of them does not
+/// read.
+pub fn measured_from_proc(
+    stat: &str,
+    statm: &str,
+    uptime: &str,
+    (ticks_per_sec, page_bytes): (u64, u64),
+) -> Option<Process> {
+    let fields = proc_fields(stat)?;
+    let age_secs = age_from_uptime(uptime, fields.start_ticks, ticks_per_sec)?;
+    let cpu_ms = cpu_ms_from_ticks(proc_stat_cpu_ticks(stat)?, ticks_per_sec)?;
+    let rss_bytes = rss_bytes_from_statm(statm, page_bytes)?;
+    Some(measured(
+        fields.pid,
+        fields.ppid,
+        age_secs,
+        cpu_ms,
+        rss_bytes,
+    ))
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn measured(pid: u32, ppid: u32, age_secs: u64, cpu_ms: u64, rss_bytes: i64) -> Process {
+    Process {
+        pid,
+        ppid,
+        elapsed_secs: age_secs as f64,
+        cpu_seconds: cpu_ms as f64 / 1000.0,
+        rss_bytes,
+    }
+}
+
 fn joined_command<'a>(words: impl Iterator<Item = &'a [u8]>) -> Option<String> {
     let command = words
         .map(String::from_utf8_lossy)
@@ -458,9 +579,10 @@ fn mach_timebase() -> (u32, u32) {
     (timebase.numer, timebase.denom)
 }
 
-/// The CPU time of `pid`; `None` when it does not read, as for a zombie.
+/// The task info of `pid`; `None` when it does not read, as for a zombie or
+/// another user's process.
 #[cfg(target_os = "macos")]
-fn cpu_ms_from_os(pid: libc::c_int, (numer, denom): (u32, u32)) -> Option<u64> {
+fn usage_from_os(pid: libc::c_int) -> Option<MachUsage> {
     let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
     let size = libc::c_int::try_from(size_of::<libc::proc_taskinfo>()).ok()?;
     // SAFETY: the buffer is valid for `size` during the call, which writes
@@ -479,7 +601,11 @@ fn cpu_ms_from_os(pid: libc::c_int, (numer, denom): (u32, u32)) -> Option<u64> {
     }
     // SAFETY: the call filled the whole struct, of integers.
     let info = unsafe { info.assume_init() };
-    cpu_ms_from_mach(info.pti_total_user, info.pti_total_system, numer, denom)
+    Some(MachUsage {
+        user: info.pti_total_user,
+        system: info.pti_total_system,
+        resident_bytes: info.pti_resident_size,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -496,8 +622,23 @@ fn list_from_os(now_secs: i64) -> Result<Vec<ProcessInfo>> {
                 return None;
             }
             let procargs = procargs_from_os(pid);
-            let cpu_ms = cpu_ms_from_os(pid, timebase);
+            let cpu_ms = usage_from_os(pid).and_then(|usage| {
+                cpu_ms_from_mach(usage.user, usage.system, timebase.0, timebase.1)
+            });
             listed_from_kinfo(&kinfo, procargs.as_deref(), cpu_ms, now_secs)
+        })
+        .collect())
+}
+
+#[cfg(target_os = "macos")]
+fn measure_from_os(now_secs: i64) -> Result<Vec<Process>> {
+    let timebase = mach_timebase();
+    Ok(all_pids()?
+        .into_iter()
+        .filter_map(|pid| {
+            let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+            let kinfo = sysctl_bytes(&mut mib, KINFO_PROC_SIZE)?;
+            measured_from_kinfo(&kinfo, usage_from_os(pid), timebase, now_secs)
         })
         .collect())
 }
@@ -547,19 +688,40 @@ fn list_from_os(now_secs: i64) -> Result<Vec<ProcessInfo>> {
     Ok(with_proc_cpu_time(listed, ticks_per_sec))
 }
 
+#[cfg(not(target_os = "macos"))]
+fn measure_from_os(_now_secs: i64) -> Result<Vec<Process>> {
+    // SAFETY: sysconf(3) has no memory effects.
+    let ticks_per_sec = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })?;
+    // SAFETY: sysconf(3) has no memory effects.
+    let page_bytes = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })?;
+    let uptime = std::fs::read_to_string("/proc/uptime").context("reading /proc/uptime")?;
+    Ok(std::fs::read_dir("/proc")
+        .context("reading /proc")?
+        .filter_map(|entry| {
+            let pid: u32 = entry.ok()?.file_name().to_str()?.parse().ok()?;
+            // Bytes, not text: a command name need not be UTF-8.
+            let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+            let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
+            measured_from_proc(
+                &String::from_utf8_lossy(&stat),
+                &statm,
+                &uptime,
+                (ticks_per_sec, page_bytes),
+            )
+        })
+        .collect())
+}
+
 /// `processes` with the CPU time `/proc/<pid>/stat` holds in clock ticks; a
 /// process whose file does not read has none.
 #[cfg(not(target_os = "macos"))]
 fn with_proc_cpu_time(mut processes: Vec<ProcessInfo>, ticks_per_sec: u64) -> Vec<ProcessInfo> {
-    if ticks_per_sec == 0 {
-        return processes;
-    }
     for process in &mut processes {
         let ticks = std::fs::read(format!("/proc/{}/stat", process.pid))
             .ok()
             .and_then(|stat| proc_stat_cpu_ticks(&String::from_utf8_lossy(&stat)));
-        if let Some(ticks) = ticks {
-            process.cpu_ms = Some(ticks * 1000 / ticks_per_sec);
+        if let Some(cpu_ms) = ticks.and_then(|ticks| cpu_ms_from_ticks(ticks, ticks_per_sec)) {
+            process.cpu_ms = Some(cpu_ms);
         }
     }
     processes
@@ -847,5 +1009,156 @@ mod tests {
         assert!(first.command.starts_with(&first_argument), "{first:?}");
         let second = own();
         assert!(second.cpu_ms.unwrap() >= first.cpu_ms.unwrap());
+    }
+
+    #[test]
+    fn a_macos_process_is_measured_in_seconds_and_bytes() {
+        let usage = MachUsage {
+            user: 18_000_000,
+            system: 12_000_000,
+            resident_bytes: 4096 * 1024,
+        };
+        let kinfo = kinfo_of(8, 7, 501, b"sleep", 2);
+        assert_eq!(
+            measured_from_kinfo(&kinfo, Some(usage), (125, 3), NOV_4 + 65),
+            Some(Process {
+                pid: 8,
+                ppid: 7,
+                elapsed_secs: 65.0,
+                cpu_seconds: 1.25,
+                rss_bytes: 4096 * 1024,
+            })
+        );
+    }
+
+    #[test]
+    fn a_macos_process_that_does_not_read_is_left_out_but_a_zombie_counts_as_none() {
+        let usage = MachUsage {
+            user: 1,
+            system: 1,
+            resident_bytes: 1,
+        };
+        let running = kinfo_of(8, 7, 501, b"sleep", 2);
+        assert_eq!(measured_from_kinfo(&running, None, (1, 1), NOV_4), None);
+        assert_eq!(measured_from_kinfo(&[], Some(usage), (1, 1), NOV_4), None);
+        assert_eq!(
+            measured_from_kinfo(&running, Some(usage), (1, 0), NOV_4),
+            None
+        );
+        assert_eq!(
+            measured_from_kinfo(
+                &running,
+                Some(MachUsage {
+                    resident_bytes: u64::MAX,
+                    ..usage
+                }),
+                (1, 1),
+                NOV_4
+            ),
+            None
+        );
+        let zombie = kinfo_of(8, 7, 501, b"sleep", 5);
+        assert_eq!(
+            measured_from_kinfo(&zombie, None, (1, 1), NOV_4 + 5),
+            Some(Process {
+                pid: 8,
+                ppid: 7,
+                elapsed_secs: 5.0,
+                cpu_seconds: 0.0,
+                rss_bytes: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn a_linux_process_is_measured_in_seconds_and_bytes() {
+        let stat =
+            "4242 (a) b) S 17 4242 4242 0 -1 4194304 1 0 0 0 150 25 0 0 20 0 1 0 123456 1000 10 1";
+        let measured = measured_from_proc(
+            stat,
+            "2000 300 100 1 0 50 0\n",
+            "1300.99 8000.50\n",
+            (100, 4096),
+        );
+        assert_eq!(
+            measured,
+            Some(Process {
+                pid: 4242,
+                ppid: 17,
+                elapsed_secs: 66.0,
+                cpu_seconds: 1.75,
+                rss_bytes: 300 * 4096,
+            })
+        );
+    }
+
+    #[test]
+    fn a_linux_process_that_does_not_read_is_left_out() {
+        let stat = proc_text("sleep", 'S');
+        let statm = "2000 300 100 1 0 50 0";
+        let uptime = "1300.99 8000.50";
+        let read =
+            |stat: &str, statm: &str, ticks| measured_from_proc(stat, statm, uptime, (ticks, 4096));
+        assert!(read(&stat, statm, 100).is_some());
+        assert_eq!(read("", statm, 100), None);
+        assert_eq!(read("4242 (sleep) S 17", statm, 100), None);
+        assert_eq!(read(&stat, "", 100), None);
+        assert_eq!(read(&stat, "2000", 100), None);
+        assert_eq!(read(&stat, statm, 0), None);
+        assert_eq!(measured_from_proc(&stat, statm, "", (100, 4096)), None);
+        assert_eq!(measured_from_proc(&stat, statm, "x y", (100, 4096)), None);
+        assert_eq!(rss_bytes_from_statm("1 2", u64::MAX), None);
+        assert_eq!(cpu_ms_from_ticks(u64::MAX, 100), None);
+        assert_eq!(cpu_ms_from_ticks(7, 100), Some(70));
+    }
+
+    /// The meter takes an age past the window and its second of slack for a
+    /// process older than the window, so a process that has just started must
+    /// not read as older than that, whatever fraction its start has.
+    #[test]
+    fn a_linux_age_is_never_more_than_a_second_past_the_true_one() {
+        for (uptime_ms, start_ticks) in [
+            (124_100_u64, 12_399_u64),
+            (124_000, 12_399),
+            (124_990, 12_300),
+            (125_000, 12_400),
+            (1_300_990, 123_456),
+        ] {
+            let uptime = format!("{}.{:03} 8000.50", uptime_ms / 1000, uptime_ms % 1000);
+            let age = age_from_uptime(&uptime, start_ticks, 100).unwrap();
+            assert!(
+                age * 1000 <= uptime_ms - start_ticks * 10 + 1000,
+                "{age} at {uptime} of a start at {start_ticks}"
+            );
+        }
+        assert_eq!(age_from_uptime("124.10 1.0", 12_399, 100), Some(1));
+        // A start read after the uptime has no age yet.
+        assert_eq!(age_from_uptime("123.10 1.0", 12_399, 100), Some(0));
+        // An uptime without a fraction reads too.
+        assert_eq!(age_from_uptime("124 1", 12_300, 100), Some(1));
+        assert_eq!(age_from_uptime("124.10 1.0", 12_399, 0), None);
+        assert_eq!(age_from_uptime("", 12_399, 100), None);
+    }
+
+    #[test]
+    fn the_measure_holds_this_process_with_its_memory_and_a_cpu_time_that_does_not_fall() {
+        let pid = std::process::id();
+        let now = read_process(pid).unwrap().started_secs + 65;
+        let own = || {
+            measure_processes(now)
+                .unwrap()
+                .into_iter()
+                .find(|process| process.pid == pid)
+                .unwrap()
+        };
+        let first = own();
+        assert_eq!(first.ppid, std::os::unix::process::parent_id());
+        // Linux counts the age from the boot clock, not from the value given.
+        if cfg!(target_os = "macos") {
+            assert_eq!(first.elapsed_secs, 65.0);
+        }
+        assert!(first.rss_bytes > 0, "{first:?}");
+        let second = own();
+        assert!(second.cpu_seconds >= first.cpu_seconds);
     }
 }

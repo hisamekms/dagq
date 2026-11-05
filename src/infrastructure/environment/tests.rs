@@ -2,7 +2,7 @@ use super::conformance::{self, Fixture};
 use super::*;
 use std::sync::Arc;
 
-/// A process of the fixture's `ps`.
+/// A process of the fixture's list.
 #[derive(Debug, Clone, Copy)]
 struct Listed {
     ppid: u32,
@@ -13,26 +13,23 @@ struct Listed {
 
 type Table = Arc<Mutex<BTreeMap<u32, Listed>>>;
 
-/// `ps -A -o pid=,ppid=,etime=,time=,rss=`'s text of `table`.
-fn listing(table: &Table) -> String {
+/// What the host reads of `table`, the age in whole seconds as the OS has it.
+fn listing(table: &Table) -> Vec<Process> {
     table
         .lock()
         .unwrap()
         .iter()
-        .map(|(pid, process)| {
-            let clock = |secs: f64| format!("{}:{:05.2}", (secs / 60.0).floor(), secs % 60.0);
-            format!(
-                "{pid:>5} {:>5} {:>8} {:>10} {:>8}\n",
-                process.ppid,
-                clock(process.elapsed_secs.floor()),
-                clock(process.cpu_seconds),
-                process.rss_bytes / 1024
-            )
+        .map(|(pid, process)| Process {
+            pid: *pid,
+            ppid: process.ppid,
+            elapsed_secs: process.elapsed_secs.floor(),
+            cpu_seconds: process.cpu_seconds,
+            rss_bytes: process.rss_bytes,
         })
         .collect()
 }
 
-/// A host of 8 cores, 16 GiB and a CPU pressure of 0.5, whose `ps` lists
+/// A host of 8 cores, 16 GiB and a CPU pressure of 0.5, whose list holds
 /// the fixture's processes.
 struct HostFixture {
     table: Table,
@@ -47,7 +44,7 @@ impl HostFixture {
             host: HostEnvironment::with(
                 Some(8.0),
                 Some(1 << 34),
-                move || Some(listing(&listed)),
+                move || Ok(listing(&listed)),
                 || Some(0.5),
             ),
             table,
@@ -135,7 +132,7 @@ fn the_host_names_itself_with_every_item_of_its_attachment() {
 }
 
 /// A run of processes that started before its window (one adopted from
-/// another supervisor) counts them from its first measure, and `ps` that
+/// another supervisor) counts them from its first measure, and a list that
 /// fails fails the measure.
 #[test]
 fn a_run_of_processes_older_than_its_window_counts_them_from_its_first_measure() {
@@ -160,7 +157,8 @@ fn a_run_of_processes_older_than_its_window_counts_them_from_its_first_measure()
         .measure_runs(std::slice::from_ref(&asked))
         .unwrap();
     assert_eq!(next[0].1.cpu_seconds, Some(4.5));
-    let failing = HostEnvironment::with(Some(8.0), None, || None, || None);
+    let failing =
+        HostEnvironment::with(Some(8.0), None, || Err(anyhow::anyhow!("no list")), || None);
     assert!(failing.measure_runs(&[asked]).is_err());
 }
 

@@ -8,7 +8,8 @@
 //! ([`RunResource`]) and the fold of the windows into the intervals of the
 //! run's row ([`fold`]), the waits an environment adds
 //! ([`EnvironmentWait`], intervals of `blocker: infra`), and what the
-//! host's implementation reads of `ps` ([`processes`], [`ProcessMeter`]).
+//! host's implementation makes of the processes it reads ([`Process`],
+//! [`ProcessMeter`]).
 //! Pure: what measures is the port's adapter.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -575,7 +576,7 @@ impl Drop for RunChild {
     }
 }
 
-/// One process of `ps`: its pid, its parent, how long ago it started and
+/// One process as the host reads it: its pid, its parent, how long ago it started and
 /// the CPU it spent since (seconds), and its resident memory (bytes).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Process {
@@ -584,51 +585,6 @@ pub struct Process {
     pub elapsed_secs: f64,
     pub cpu_seconds: f64,
     pub rss_bytes: i64,
-}
-
-/// The processes of `ps -A -o pid=,ppid=,etime=,time=,rss=` (`rss` in KiB,
-/// `etime` and `time` as `[[dd-]hh:]mm:ss[.ff]`, macOS's minutes past 59
-/// too); a line it cannot read is left out.
-pub fn processes(ps: &str) -> Vec<Process> {
-    ps.lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse().ok()?;
-            let ppid = fields.next()?.parse().ok()?;
-            let elapsed_secs = cpu_time(fields.next()?)?;
-            let cpu_seconds = cpu_time(fields.next()?)?;
-            let rss_kib: i64 = fields.next()?.parse().ok()?;
-            Some(Process {
-                pid,
-                ppid,
-                elapsed_secs,
-                cpu_seconds,
-                rss_bytes: rss_kib.saturating_mul(1024),
-            })
-        })
-        .collect()
-}
-
-/// The seconds of a `ps` `time` or `etime`: `[[dd-]hh:]mm:ss[.ff]`.
-fn cpu_time(text: &str) -> Option<f64> {
-    let (days, clock) = match text.split_once('-') {
-        Some((days, clock)) => (days.parse::<f64>().ok()?, clock),
-        None => (0.0, text),
-    };
-    let mut seconds = 0.0;
-    let mut unit = 1.0;
-    for part in clock.rsplit(':') {
-        let value: f64 = part.parse().ok()?;
-        if !value.is_finite() || value < 0.0 {
-            return None;
-        }
-        seconds += value * unit;
-        unit *= 60.0;
-        if unit > 3_600.0 * 60.0 {
-            return None;
-        }
-    }
-    Some(days * 86_400.0 + seconds)
 }
 
 /// The pids of `roots` and of every process under them.
@@ -655,8 +611,8 @@ pub fn tree(processes: &[Process], roots: &[u32]) -> BTreeSet<u32> {
 /// What the host's measure of one run keeps between its windows: the CPU
 /// each process of the run's tree had spent at the last one, so a window
 /// counts only what was spent since. A process gone between two windows
-/// takes with it what it spent since the last (`ps` reads the living
-/// only), and a pid whose CPU went down is another process. A process
+/// takes with it what it spent since the last (only the living read),
+/// and a pid whose CPU went down is another process. A process
 /// first seen that started before the window (a run adopted from another
 /// supervisor, measured again after its measure was lost) counts from its
 /// first measure, so what an earlier window may have counted is not
@@ -686,7 +642,7 @@ impl ProcessMeter {
         let mut rss = 0;
         let mut seen = BTreeMap::new();
         for process in processes.iter().filter(|p| pids.contains(&p.pid)) {
-            // A second of slack for `etime`'s whole seconds.
+            // A second of slack for the age's whole seconds.
             let started_before = process.elapsed_secs > window_secs + 1.0;
             let before = match self.seen.get(&process.pid).copied() {
                 Some(before) if before <= process.cpu_seconds => before,

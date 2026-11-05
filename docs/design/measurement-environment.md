@@ -25,7 +25,9 @@ runが動く環境と、runとnodeの資源の記録で、[計測](measurement.m
 - portは`application::ports`の`ExecutionEnvironment`で、環境を名乗る・runとnodeの資源を外から測る・外から測れるか・環境が足す待ちを返す。
 - 今のアダプタはhostだけ（`infrastructure::environment::HostEnvironment`）。
   containerやk8sのアダプタは同じportに差し込み、hostと同じ適合test一式（下の「適合test」）を通す。
-- hostは、runが登録したプロセス（wrapperとagent）とその下の全てのプロセスを`ps`で外から測る。
+- hostは、runが登録したプロセス（wrapperとagent）とその下の全てのプロセスをOSから直接読んで外から測る（`infrastructure::process_read`）。
+  `ps`は起動しないので、Codexのworkerのsandboxの中でも測れる。
+  読めないプロセス（途中で終わったもの、macOSでは他のユーザーのもの）は飛ばして残りを測り、一覧そのものが読めない周回は測れない周回になる。
 - supervisorがrunのためにworkerの木の外で起こすプロセス（reviewと復旧のheadless job、着地の検証とrunを入れたrecheckのコマンド）も、動いている間はそのrunのもの（`domain::environment::RunChildren`）として、その下のプロセスごと同じ窓に数える。
   main自身のrecheckはどのrunのものでもない。
   2つの測りの間に始まって終わったプロセスは見えず、数えない。
