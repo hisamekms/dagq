@@ -248,6 +248,20 @@ fn wait_rows_sql(after: bool) -> String {
     )
 }
 
+/// The read of the queue rows' heads (the kind `?1`), their columns and the
+/// ids of their records, by key, with `filter` on the rows and `limit`.
+fn queue_heads_sql(filter: &str, limit: &str) -> String {
+    format!(
+        "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v,
+                (SELECT COALESCE(json_group_array({id}), '[]')
+                   FROM json_each(r.records) j) AS ids,
+                r.task_id, r.subject_kind, r.subject_id, r.started_at, r.ended_at,
+                r.outcome, r.detail
+           FROM ledger_rows r WHERE r.kind=?1 {filter} ORDER BY r.key {limit}",
+        id = json_field_spaced("j.value", "$.id", JsonType::Integer),
+    )
+}
+
 /// The read of the stops (`?2`) of the queue rows, each with its row's key
 /// and its index among the row's records, at most `?5`: with `after` (the
 /// key `?3` and the index `?4`) the key's range from it on the primary key,
@@ -268,6 +282,54 @@ fn stops_after_sql(after: bool) -> String {
 }
 
 impl SqliteQueue {
+    /// The queue heads a read of [`queue_heads_sql`] gives.
+    fn queue_heads(
+        &self,
+        sql: &str,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        let mut statement = self.conn.prepare(sql)?;
+        let kind = LedgerKind::Queue;
+        let rows = statement.query_map(params, |r| {
+            let key: String = r.get("key")?;
+            let inputs_from: i64 = r.get("inputs_from")?;
+            let inputs_through: String = r.get("inputs_through")?;
+            let is_final: bool = r.get("final")?;
+            let ledger_v: i64 = r.get("ledger_v")?;
+            let ids: String = r.get("ids")?;
+            let task_id: Option<i64> = r.get("task_id")?;
+            let subject_kind: Option<String> = r.get("subject_kind")?;
+            let subject_id: Option<String> = r.get("subject_id")?;
+            let started_at: Option<i64> = r.get("started_at")?;
+            let ended_at: Option<i64> = r.get("ended_at")?;
+            let outcome: Option<String> = r.get("outcome")?;
+            let detail: String = r.get("detail")?;
+            Ok((|| {
+                let mut records: Vec<i64> = serde_json::from_str(&ids)?;
+                records.sort_unstable();
+                Ok(crate::domain::ledger::queue::QueueHead {
+                    head: LedgerHead {
+                        kind,
+                        key,
+                        inputs_from: EventId::new(inputs_from),
+                        inputs_through: serde_json::from_str(&inputs_through)?,
+                        is_final,
+                        ledger_v: u32::try_from(ledger_v)?,
+                        records: records.into_iter().map(EventId::new).collect(),
+                    },
+                    task_id: task_id.map(crate::domain::TaskId::new),
+                    subject_kind: subject_kind.unwrap_or_default(),
+                    subject_id: subject_id.unwrap_or_default(),
+                    started_at,
+                    ended_at,
+                    outcome,
+                    detail: serde_json::from_str(&detail)?,
+                })
+            })())
+        })?;
+        rows.map(|row| row?).collect()
+    }
+
     /// The rows [`crate::domain::pre_claim::rows::holds`] keeps for `since`,
     /// picked by their columns, at most `limit` after the key `after`
     /// (`None`: from the first), by key, each with no records.
@@ -756,54 +818,48 @@ impl LedgerStore for SqliteQueue {
     /// Its columns and the ids of its records (SQLite's JSON functions over
     /// the stored array): no record is parsed here.
     fn ledger_queue_heads(&self) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v,
-                    (SELECT COALESCE(json_group_array({}), '[]')
-                       FROM json_each(r.records) j) AS ids,
-                    r.task_id, r.subject_kind, r.subject_id, r.started_at, r.ended_at,
-                    r.outcome, r.detail
-               FROM ledger_rows r WHERE r.kind=?1 ORDER BY r.key",
-            json_field_spaced("j.value", "$.id", JsonType::Integer),
-        ))?;
-        let kind = LedgerKind::Queue;
-        let rows = statement.query_map([kind.as_str()], |r| {
-            let key: String = r.get("key")?;
-            let inputs_from: i64 = r.get("inputs_from")?;
-            let inputs_through: String = r.get("inputs_through")?;
-            let is_final: bool = r.get("final")?;
-            let ledger_v: i64 = r.get("ledger_v")?;
-            let ids: String = r.get("ids")?;
-            let task_id: Option<i64> = r.get("task_id")?;
-            let subject_kind: Option<String> = r.get("subject_kind")?;
-            let subject_id: Option<String> = r.get("subject_id")?;
-            let started_at: Option<i64> = r.get("started_at")?;
-            let ended_at: Option<i64> = r.get("ended_at")?;
-            let outcome: Option<String> = r.get("outcome")?;
-            let detail: String = r.get("detail")?;
-            Ok((|| {
-                let mut records: Vec<i64> = serde_json::from_str(&ids)?;
-                records.sort_unstable();
-                Ok(crate::domain::ledger::queue::QueueHead {
-                    head: LedgerHead {
-                        kind,
-                        key,
-                        inputs_from: EventId::new(inputs_from),
-                        inputs_through: serde_json::from_str(&inputs_through)?,
-                        is_final,
-                        ledger_v: u32::try_from(ledger_v)?,
-                        records: records.into_iter().map(EventId::new).collect(),
-                    },
-                    task_id: task_id.map(crate::domain::TaskId::new),
-                    subject_kind: subject_kind.unwrap_or_default(),
-                    subject_id: subject_id.unwrap_or_default(),
-                    started_at,
-                    ended_at,
-                    outcome,
-                    detail: serde_json::from_str(&detail)?,
-                })
-            })())
-        })?;
-        rows.map(|row| row?).collect()
+        self.queue_heads(
+            &queue_heads_sql("", ""),
+            params![LedgerKind::Queue.as_str()],
+        )
+    }
+
+    /// SQLite picks the rows by their columns
+    /// ([`crate::domain::ledger::queue::QueueHead::forgotten_at`]; a row's
+    /// `inputs_through` is at least its last record, [`LedgerRow::own`], so
+    /// the columns tell that none of its records is past `at`), and from
+    /// the key `after` on by the primary key: it gives no head of the rest
+    /// and parses no record's ids of them.
+    fn ledger_queue_heads_at_after(
+        &self,
+        at: EventId,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        let from = if after.is_some() {
+            "r.key > ?3"
+        } else {
+            "?3 IS NULL"
+        };
+        let filter = format!(
+            "AND {from} AND NOT (r.final=1 AND {events}<=?2 AND COALESCE({supervisor}, 0)<=?2
+               AND ((r.subject_kind='live_alert_stream' AND COALESCE(r.outcome, '')='replaced')
+                    OR (r.subject_kind='live_alert' AND r.ended_at IS NOT NULL)
+                    OR COALESCE(r.subject_kind, '') NOT IN
+                       ('live_alert_stream', 'live_alert', 'finding', 'landing_slot',
+                        'slots_full', 'claim_hold', 'claim_deferral', 'landing_hold')))",
+            events = json_field_spaced("r.inputs_through", "$.events", JsonType::Integer),
+            supervisor = json_field_spaced("r.inputs_through", "$.supervisor", JsonType::Integer),
+        );
+        self.queue_heads(
+            &queue_heads_sql(&filter, "LIMIT ?4"),
+            params![
+                LedgerKind::Queue.as_str(),
+                at.as_i64(),
+                after,
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            ],
+        )
     }
 
     /// Only the anchors of each session row are parsed: SQLite picks the
@@ -1244,6 +1300,168 @@ mod tests {
         let held = heads.iter().find(|head| head.head.key == "4").unwrap();
         assert_eq!(held.head.records, [EventId::new(4), EventId::new(17)]);
         assert_eq!(held.subject_kind, "finding");
+    }
+
+    /// The heads at a position SQLite picks by the rows' columns are those
+    /// [`ledger::queue::QueueHead::forgotten_at`] leaves of the heads of
+    /// every row, at every position, and a page of them goes from a key on.
+    #[test]
+    fn the_queue_heads_at_a_position_are_those_not_forgotten_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let log = ledger::testkit::forgotten_log(2);
+        let rows = ledger::testkit::built_and_settled(&log.events, ledger::testkit::ms(100_000));
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        // A settled row its supervisor's life read past later positions.
+        let reached = rows
+            .iter()
+            .find(|row| {
+                row.is_final
+                    && row.kind == LedgerKind::Queue
+                    && row.subject.as_ref().is_some_and(|s| s.kind == "mark_added")
+            })
+            .unwrap();
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET inputs_through=json_set(inputs_through, '$.supervisor', ?1)
+                  WHERE kind='queue' AND key=?2",
+                rusqlite::params![log.last().as_i64(), reached.key],
+            )
+            .unwrap();
+        // A settled stream of no outcome is read, a settled row of no
+        // subject is not.
+        let stream = rows
+            .iter()
+            .find(|row| {
+                row.kind == LedgerKind::Queue
+                    && row.key != reached.key
+                    && row
+                        .subject
+                        .as_ref()
+                        .is_some_and(|s| s.kind == "live_alert_stream")
+            })
+            .unwrap();
+        let bare = rows
+            .iter()
+            .rfind(|row| {
+                row.is_final
+                    && row.kind == LedgerKind::Queue
+                    && row.key != reached.key
+                    && row.subject.as_ref().is_some_and(|s| s.kind == "mark_added")
+            })
+            .unwrap();
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET final=1, outcome=NULL WHERE kind='queue' AND key=?1",
+                [&stream.key],
+            )
+            .unwrap();
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET subject_kind=NULL WHERE kind='queue' AND key=?1",
+                [&bare.key],
+            )
+            .unwrap();
+        let every = queue.ledger_queue_heads().unwrap();
+        let held = queue.ledger_queue_heads_at(log.last()).unwrap();
+        assert!(held.iter().any(|head| head.head.key == stream.key));
+        assert!(!held.iter().any(|head| head.head.key == bare.key));
+        let mut fewest = every.len();
+        for at in log.events.iter().map(|event| event.id) {
+            let expected: Vec<ledger::queue::QueueHead> = every
+                .iter()
+                .filter(|head| !head.forgotten_at(at))
+                .cloned()
+                .collect();
+            assert_eq!(queue.ledger_queue_heads_at(at).unwrap(), expected, "{at}");
+            fewest = fewest.min(expected.len());
+        }
+        assert!(fewest < every.len());
+        let at = log.last();
+        let all = queue.ledger_queue_heads_at(at).unwrap();
+        let is_reached = |head: &ledger::queue::QueueHead| head.head.key == reached.key;
+        assert!(!all.iter().any(is_reached));
+        let before = EventId::new(at.as_i64() - 1);
+        assert!(
+            queue
+                .ledger_queue_heads_at(before)
+                .unwrap()
+                .iter()
+                .any(is_reached)
+        );
+        let first = queue.ledger_queue_heads_at_after(at, None, 2).unwrap();
+        assert_eq!(first, all[..2]);
+        let next = queue
+            .ledger_queue_heads_at_after(at, Some(&first[1].head.key), 3)
+            .unwrap();
+        assert_eq!(next, all[2..5]);
+    }
+
+    /// Through the SQLite adapter, a builder's rows of a history and the
+    /// same with more settled rows of each kind a start forgets: the heads a
+    /// start takes at the position it goes on from are as many, and so is
+    /// what it keeps of the queue's rows; the heads of every row are not.
+    #[test]
+    fn a_start_on_the_store_takes_as_many_queue_heads_however_many_rows_it_forgets() {
+        use crate::application::supervise::{Retain, build_pass, start_builder};
+        use crate::domain::ledger::builder::Builder;
+        let taken = |fill: usize| {
+            let dir = tempfile::tempdir().unwrap();
+            let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+            let log = ledger::testkit::forgotten_log(fill);
+            queue
+                .conn
+                .pragma_update(None, "foreign_keys", false)
+                .unwrap();
+            for event in &log.events {
+                queue
+                    .conn
+                    .execute(
+                        "INSERT INTO run_events(id, task_id, run_id, kind, payload, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        rusqlite::params![
+                            event.id.as_i64(),
+                            event.task_id.map(|task| task.as_i64()),
+                            event.run_id.as_ref().map(|run| run.as_str()),
+                            event.kind.as_str(),
+                            event.payload.to_string(),
+                            event.created_at,
+                        ],
+                    )
+                    .unwrap();
+            }
+            let now = ledger::testkit::ms(100_000);
+            let mut builder = Builder::default();
+            for _ in 0..50 {
+                let built = build_pass(
+                    &queue,
+                    &mut builder,
+                    (now, "2030-01-01T00:00:00.000Z"),
+                    Retain::default(),
+                    None,
+                );
+                assert_eq!(built.failure, None);
+                if built.backlog == 0 {
+                    break;
+                }
+            }
+            let started = start_builder(&queue, now).unwrap();
+            assert_eq!(started.events, log.last());
+            (
+                queue.ledger_queue_heads_at(log.last()).unwrap().len(),
+                queue.ledger_queue_heads().unwrap().len(),
+                started.kept().size().queue_rows,
+            )
+        };
+        let (few, many) = (taken(2), taken(40));
+        assert_eq!(few.0, many.0);
+        assert_eq!(few.2, many.2);
+        assert_eq!(many.1 - few.1, 38 * 3);
     }
 
     /// The rows the waits and lives are made again from, the stops and the

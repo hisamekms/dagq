@@ -2542,6 +2542,18 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 page,
             ))
         }
+        // A page of the queue rows' heads what is made again at a position
+        // reads: at most `page` after the key `after` (none: from the
+        // first), picked by their columns, no record's body read or sent.
+        "ledger_queue_heads_at" => {
+            let (at, after, page): (EventId, Option<String>, usize) = read(op, args)?;
+            answer(LedgerStore::ledger_queue_heads_at_after(
+                &*store,
+                at,
+                after.as_deref(),
+                page,
+            ))
+        }
         // A page of the stops the queue rows record, at most `page` after
         // the place `after` (a row's key and a record's index; none: from
         // the first), each with its place: no other record read or sent.

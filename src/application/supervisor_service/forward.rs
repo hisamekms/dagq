@@ -3219,6 +3219,31 @@ impl LedgerStore for SupervisorQueue {
             Ok((read, keys, last))
         })
     }
+    // In pages after the last key of the page before: the service picks the
+    // rows, so the heads of those left out neither cross nor are read.
+    fn ledger_queue_heads_at(
+        &self,
+        at: EventId,
+    ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        self.ledger_pages(LEDGER_HEADS_PAGE, |after, page| {
+            let read = self.ledger_queue_heads_at_after(at, after, page)?;
+            let heads = read.len();
+            let last = read.last().map(|head| head.head.key.clone());
+            Ok((read, heads, last))
+        })
+    }
+    // One page asked for, as the service picks it.
+    fn ledger_queue_heads_at_after(
+        &self,
+        at: EventId,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        self.remote(
+            "ledger_queue_heads_at",
+            vec![to_value(at)?, to_value(after)?, to_value(limit)?],
+        )
+    }
     // A page of rows' anchors at a time, every anchor of a row in one
     // page, after the last row of the page before: no other record is
     // read.

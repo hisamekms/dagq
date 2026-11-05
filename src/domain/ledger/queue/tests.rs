@@ -1051,3 +1051,63 @@ fn the_queue_book_takes_only_the_queue_rows_of_its_keys() {
             .all(|key| key.parse::<i64>().is_ok() && key != "99")
     );
 }
+
+/// A head is left out only settled, of nothing past the position, and of
+/// one event of its own, a stream replaced or an alert ended; the rest are
+/// read whatever they are.
+#[test]
+fn a_head_is_forgotten_only_of_a_row_settled_and_closed_with_nothing_past_the_position() {
+    let at = EventId::new(10);
+    let of = |kind: &str, outcome: Option<&str>, ended: Option<i64>| {
+        let mut row = LedgerRow::new(LedgerKind::Queue, "5".into(), None, "b");
+        row.is_final = true;
+        row.inputs_through.events = EventId::new(5);
+        row.outcome = outcome.map(str::to_owned);
+        row.ended_at = ended;
+        row.subject = Some(Subject {
+            kind: kind.to_owned(),
+            ..Subject::default()
+        });
+        QueueHead::of(&row)
+    };
+    for (head, forgotten) in [
+        (of("mark_added", None, Some(1)), true),
+        (of("", None, None), true),
+        (of("live_alert_stream", Some("replaced"), Some(1)), true),
+        (of("live_alert", Some("ended"), Some(1)), true),
+        (of("live_alert_stream", None, None), false),
+        (
+            of(
+                "live_alert_stream",
+                Some(claim_hold::ENDED_SUPERVISOR_GONE),
+                Some(1),
+            ),
+            false,
+        ),
+        (of("live_alert", None, None), false),
+        (of("finding", Some("resolved"), Some(1)), false),
+        (of("landing_slot", Some("landed"), Some(1)), false),
+        (of("slots_full", Some(ENDED_FREED), Some(1)), false),
+        (of("claim_hold", Some("x"), Some(1)), false),
+        (of("claim_deferral", Some("x"), Some(1)), false),
+        (of("landing_hold", Some("x"), Some(1)), false),
+    ] {
+        assert_eq!(head.forgotten_at(at), forgotten, "{head:?}");
+    }
+    let closed = of("mark_added", None, Some(1));
+    let changed = |change: fn(&mut QueueHead)| {
+        let mut head = closed.clone();
+        change(&mut head);
+        head.forgotten_at(at)
+    };
+    assert!(!changed(|head| head.head.is_final = false));
+    assert!(!changed(|head| head.head.kind = LedgerKind::Session));
+    assert!(!changed(
+        |head| head.head.inputs_through.events = EventId::new(11)
+    ));
+    assert!(!changed(
+        |head| head.head.inputs_through.supervisor = Some(EventId::new(11))
+    ));
+    assert!(!changed(|head| head.head.records = vec![EventId::new(11)]));
+    assert!(changed(|head| head.head.records = vec![EventId::new(10)]));
+}

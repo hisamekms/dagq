@@ -204,6 +204,7 @@ pub(super) const READS: &[&str] = &[
     "ledger_latest_event_ms",
     "ledger_runs_classified_otherwise",
     "last_event_naming_supervisor",
+    "ledger_queue_heads_at",
     "ledger_wait_rows",
     "ledger_supervisor_stops",
     "ledger_settled_waits",
@@ -708,6 +709,7 @@ mod tests {
             "ledger_older_rows",
             "ledger_latest_event_ms",
             "ledger_runs_classified_otherwise",
+            "ledger_queue_heads_at",
         ] {
             assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
             assert!(super::super::LEDGER_OPS.contains(&op), "{op}");

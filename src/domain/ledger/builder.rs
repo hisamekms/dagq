@@ -174,7 +174,11 @@
 //!   the supervisors' lives reach, the landing slot's attempts and what
 //!   each read up to), from the queue rows' heads with their times,
 //!   outcomes and details ([`QueueBook::from_heads`]), less those settled
-//!   that no later event reaches; taking it ([`Builder::restore_queue_rows`])
+//!   that no later event reaches: the store gives no head of those of them
+//!   nothing else made at the position reads, so that a new process does
+//!   not hold one for each
+//!   ([`crate::application::LedgerStore::ledger_queue_heads_at`]). Taking
+//!   it ([`Builder::restore_queue_rows`])
 //!   keeps none of the queue's events, each row's coming back from the
 //!   store's before it is folded. So are the supervisors' lives and the
 //!   waits before a claim ([`Lives`], [`PreClaimBook`]), from the queue

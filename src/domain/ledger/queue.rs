@@ -30,7 +30,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{LedgerHead, LedgerKind, LedgerRow, Subject, findings};
@@ -50,7 +50,7 @@ use crate::domain::{
 /// the ids of its records and not the records), its task, its subject's
 /// kind and id, its times, its outcome and its detail. The store reads
 /// it of the rows it holds without their records.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueHead {
     pub head: LedgerHead,
     pub task_id: Option<TaskId>,
@@ -75,6 +75,34 @@ impl QueueHead {
             ended_at: row.ended_at,
             outcome: row.outcome.clone(),
             detail: row.detail.clone(),
+        }
+    }
+
+    /// Whether nothing made again at the position `at` reads this row, so
+    /// that the store need not give its head
+    /// ([`crate::application::LedgerStore::ledger_queue_heads_at`]): it is
+    /// settled, nothing of it is past `at` ([`cut::past`], so a cut leaves
+    /// it as written), and it is one event of its own, a stream its next
+    /// baseline replaced or an alert ended. [`QueueBook::from_heads`]
+    /// forgets such a row whatever else it is given ([`QueueBook::closed`]:
+    /// no life holds any of them), and it is none of what the books of the
+    /// waits and the lives ([`crate::domain::pre_claim::rows::holds_at`])
+    /// or a cut ([`cut::Needs`]) read. A landing slot's row (its attempt),
+    /// a finding's and a wait's are read whatever they are: a wait the book
+    /// forgets is one the books of the waits are made of.
+    pub fn forgotten_at(&self, at: EventId) -> bool {
+        if self.head.kind != LedgerKind::Queue
+            || !self.head.is_final
+            || cut::past(self, at)
+            || self.subject_kind == "landing_slot"
+        {
+            return false;
+        }
+        match of_kind(&self.subject_kind) {
+            Of::Event => true,
+            Of::Stream => self.outcome.as_deref() == Some("replaced"),
+            Of::Alert => self.ended_at.is_some(),
+            Of::Finding | Of::Interval(_) => false,
         }
     }
 
@@ -413,7 +441,9 @@ impl QueueBook {
     /// one reading up to its row's `inputs_through`, and the last open.
     /// What a row read past its records (an end of no record of its own, a
     /// reach) stays an input of it, as its row read it. A row of another
-    /// kind or a key of no event id is not one of its rows.
+    /// kind or a key of no event id is not one of its rows. `heads` may
+    /// lack the rows of [`QueueHead::forgotten_at`] the position of `last`,
+    /// which it would forget: the book is the same.
     pub fn from_heads(heads: &[QueueHead], pre_claim: &PreClaimBook, last: EventId) -> Self {
         let mut heads: Vec<(EventId, &QueueHead)> = heads
             .iter()

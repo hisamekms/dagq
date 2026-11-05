@@ -101,6 +101,9 @@ struct Memory {
     /// The reads besides the rows' heads a cut of the queue rows to a
     /// position makes ([`books_at`]).
     cut_reads: Cell<CutReads>,
+    /// How many heads [`LedgerStore::ledger_queue_heads_at`] gave at most
+    /// at once.
+    heads_given: Cell<usize>,
     /// Each read of an input after a cursor (not by id): which cursor, the
     /// position it read after, and how many it gave.
     scans: RefCell<Vec<(&'static str, i64, usize)>>,
@@ -512,6 +515,15 @@ impl LedgerStore for Memory {
             .filter(|row| row.kind == LedgerKind::Queue)
             .map(crate::domain::ledger::queue::QueueHead::of)
             .collect())
+    }
+    fn ledger_queue_heads_at(
+        &self,
+        at: EventId,
+    ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        let heads = self.ledger_queue_heads_at_after(at, None, usize::MAX)?;
+        self.heads_given
+            .set(self.heads_given.get().max(heads.len()));
+        Ok(heads)
     }
     fn ledger_wait_rows(&self, since: pre_claim::rows::Since) -> Result<Vec<LedgerRow>> {
         self.other_read("ledger_wait_rows");
@@ -3504,6 +3516,15 @@ impl WaitRowsService {
             "ledger_wait_rows" => {
                 let after: Option<String> = serde_json::from_value(arg(1))?;
                 let read = store.ledger_wait_rows_after(
+                    serde_json::from_value(arg(0))?,
+                    after.as_deref(),
+                    serde_json::from_value(arg(2))?,
+                )?;
+                (serde_json::to_value(&read)?, read.len())
+            }
+            "ledger_queue_heads_at" => {
+                let after: Option<String> = serde_json::from_value(arg(1))?;
+                let read = store.ledger_queue_heads_at_after(
                     serde_json::from_value(arg(0))?,
                     after.as_deref(),
                     serde_json::from_value(arg(2))?,

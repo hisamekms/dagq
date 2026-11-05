@@ -805,6 +805,30 @@ pub(crate) fn cut_log(fill: usize) -> Log {
     log
 }
 
+/// [`queue_across`]'s history and then `fill` of each kind of queue row
+/// [`super::queue::QueueHead::forgotten_at`] leaves out once settled: a
+/// mark, a stream its next baseline replaced and an alert ended, of a
+/// supervisor of their own, and a last mark to end on.
+pub(crate) fn forgotten_log(fill: usize) -> Log {
+    let alert = json!({"supervisor": "f", "judgment": "slots", "kind": "idle"});
+    let (mut log, _) = queue_across();
+    for n in 0..fill {
+        let secs = 100 + i64::try_from(n).unwrap_or_default();
+        log.add(None, None, "mark_added", json!({"mark": "f"}), secs)
+            .add(
+                None,
+                None,
+                "live_alert_baseline",
+                json!({"supervisor": "f", "version": 1}),
+                secs,
+            )
+            .add(None, None, "live_alert_started", alert.clone(), secs)
+            .add(None, None, "live_alert_ended", alert.clone(), secs);
+    }
+    log.add(None, None, "mark_added", json!({"mark": "end"}), 100 + 100);
+    log
+}
+
 /// The ids of the events of `log` that are not fillers: the positions
 /// cuts are compared at, the same in a small and a large history.
 pub(crate) fn base_ats(log: &Log) -> Vec<EventId> {

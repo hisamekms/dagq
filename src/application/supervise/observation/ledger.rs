@@ -732,7 +732,9 @@ pub fn books_at(
     books_of_heads(store, &store.ledger_queue_heads()?, at, closed_to)
 }
 
-/// [`books_at`] of `heads`, the queue rows' heads the store holds.
+/// [`books_at`] of `heads`, the queue rows' heads the store holds, of which
+/// those it forgets anyway at `at` may be left out
+/// ([`crate::domain::ledger::queue::QueueHead::forgotten_at`]).
 fn books_of_heads(
     store: &dyn LedgerQueue,
     heads: &[QueueHead],
@@ -1032,7 +1034,7 @@ pub fn start_builder(store: &dyn LedgerQueue, now_ms: i64) -> Result<Builder> {
         builder.read_up_to(at);
     }
     let now_ms = builder.folds_at(now_ms);
-    let heads = store.ledger_queue_heads()?;
+    let heads = store.ledger_queue_heads_at(r.events)?;
     let (queue, lives, pre_claim) = books_of_heads(store, &heads, r.events, now_ms)?;
     builder.restore_pre_claim(lives, pre_claim);
     // Taken while nothing is marked.

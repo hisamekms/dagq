@@ -1410,3 +1410,53 @@ fn the_runs_the_summaries_of_the_pushes_read_whole_cross_as_the_queues_own() {
     assert!(page(json!(["task", through, 0, "1", 1])).is_empty());
     assert_eq!(page(json!(["run", through, 0, null, 1])), [old.as_str()]);
 }
+
+/// The heads a new process takes at a position cross a page at a time as
+/// the queue's own adapter gives them, and those left out are in no page.
+#[test]
+fn the_queue_heads_at_a_position_cross_in_pages_as_the_queues_own() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger;
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let direct = SqliteQueue::open(&backend.db).unwrap();
+    let log = ledger::testkit::forgotten_log(2);
+    let rows = ledger::testkit::built_and_settled(&log.events, ledger::testkit::ms(100_000));
+    for row in &rows {
+        direct.write_ledger_row(row).unwrap();
+    }
+    let at = log.last();
+    let heads = direct.ledger_queue_heads_at(at).unwrap();
+    assert!(heads.len() >= 2);
+    assert!(heads.len() < direct.ledger_queue_heads().unwrap().len());
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    assert_eq!(queue.ledger_queue_heads_at(at).unwrap(), heads);
+    assert_eq!(
+        std::mem::take(&mut *service.ops.lock().unwrap()),
+        ["ledger_queue_heads_at"]
+    );
+    let page = |args: Value| {
+        let answer = call(
+            &service.backend,
+            &service.token,
+            "ledger_queue_heads_at",
+            args,
+        );
+        let page: Vec<ledger::queue::QueueHead> =
+            serde_json::from_value(answer.result.unwrap()).unwrap();
+        page
+    };
+    assert_eq!(page(json!([at, null, 1])), heads[..1]);
+    assert_eq!(page(json!([at, heads[0].head.key, 1])), heads[1..2]);
+}

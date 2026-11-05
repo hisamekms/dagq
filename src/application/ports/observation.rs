@@ -238,6 +238,34 @@ pub trait LedgerStore {
             .map(crate::domain::ledger::queue::QueueHead::of)
             .collect())
     }
+    /// The heads ([`Self::ledger_queue_heads`]) of the queue rows what is
+    /// made again at the position `at` reads
+    /// ([`crate::domain::ledger::queue::QueueHead::forgotten_at`] leaves
+    /// out the rest), so that what a new process holds of them at once
+    /// does not grow with the rows settled that it forgets anyway.
+    fn ledger_queue_heads_at(
+        &self,
+        at: EventId,
+    ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        self.ledger_queue_heads_at_after(at, None, usize::MAX)
+    }
+    /// At most `limit` of [`Self::ledger_queue_heads_at`] after the key
+    /// `after` (`None`: from the first), by key: a page of them.
+    fn ledger_queue_heads_at_after(
+        &self,
+        at: EventId,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        let mut heads = self.ledger_queue_heads()?;
+        heads.retain(|head| !head.forgotten_at(at));
+        heads.sort_by(|a, b| a.head.key.cmp(&b.head.key));
+        Ok(heads
+            .into_iter()
+            .filter(|head| after.is_none_or(|after| head.head.key.as_str() > after))
+            .take(limit)
+            .collect())
+    }
     /// Of the session rows, the records a session book is made again by,
     /// each with its row's key ([`crate::domain::ledger::session::anchors`]):
     /// each row's first and every `session_closed`, not the rest.

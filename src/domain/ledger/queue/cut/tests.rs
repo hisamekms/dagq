@@ -519,3 +519,68 @@ fn a_stream_and_a_finding_cut_read_their_records_bodies() {
     assert_eq!(head(&unread, "2").detail["version"], Value::from(3));
     assert_eq!(head(&unread, "4").outcome.as_deref(), Some("resolved"));
 }
+
+/// Leaving out the heads of [`QueueHead::forgotten_at`] a position changes
+/// nothing made there, for each kind left out: the reads a cut names, the
+/// rows the books of the waits and the lives are made of, and the queue
+/// book, at every position of every history, folded soon after it and past
+/// every silence.
+#[test]
+fn the_heads_forgotten_at_a_position_change_nothing_made_there() {
+    let mut cases = histories();
+    let events = crate::domain::ledger::testkit::forgotten_log(3).events;
+    let last = timestamp_millis(&events.last().unwrap().created_at).unwrap();
+    cases.push((
+        "forgotten",
+        events,
+        vec![last + 1_000, last + 10 * SILENT_AFTER_MS],
+    ));
+    let mut left_out: BTreeMap<String, usize> = BTreeMap::new();
+    for (name, events, nows) in cases {
+        for now in nows {
+            let rows = built_and_settled(&events, now);
+            let heads = heads_of(&rows);
+            for at in events.iter().map(|event| event.id) {
+                let (kept, gone): (Vec<QueueHead>, Vec<QueueHead>) = heads
+                    .iter()
+                    .cloned()
+                    .partition(|head| !head.forgotten_at(at));
+                for head in &gone {
+                    let kind = if head.subject_kind.starts_with("live_alert") {
+                        head.subject_kind.as_str()
+                    } else {
+                        "one event"
+                    };
+                    *left_out.entry(kind.to_owned()).or_default() += 1;
+                }
+                let needs = Needs::of(&heads, at);
+                assert_eq!(Needs::of(&kept, at), needs, "{name} {at}");
+                let earliest = Since {
+                    ms: i64::MIN,
+                    id: EventId::new(0),
+                };
+                for head in &gone {
+                    assert!(!holds_at(&head.row(), earliest, at), "{name} {at}");
+                }
+                let made = made_at(&rows, &events, at, now);
+                let (reads, last) = read(&needs, &rows, &events, at);
+                let lives = lives_at(&last, &stops_of(&rows), at);
+                let cut = Cut {
+                    at,
+                    now_ms: now,
+                    lives: &lives,
+                    reads: &reads,
+                };
+                assert_eq!(
+                    QueueBook::from_heads_at(&kept, &made.pre_claim, &cut),
+                    made.queue,
+                    "{name} {at}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        left_out.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["live_alert", "live_alert_stream", "one event"]
+    );
+}

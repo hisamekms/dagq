@@ -8,7 +8,7 @@ use crate::domain::command_rules::{
     CommandClassifier, CommandRule, TelemetrySettings, effective_rules,
 };
 use crate::domain::command_shape::{DigestKey, Subcommands, shape_value_with};
-use crate::domain::ledger::testkit::{queue_across, two_late_log, waits_across};
+use crate::domain::ledger::testkit::{forgotten_log, queue_across, two_late_log, waits_across};
 use crate::domain::session_step::ResourceSample;
 use crate::domain::toolchain::Toolchains;
 
@@ -978,4 +978,59 @@ fn a_start_whose_read_fails_gives_no_builder() {
         .unwrap();
     memory.broken.replace(Some(open));
     assert!(start_builder(&memory, ms(LATER)).is_err());
+}
+
+/// A start takes as many queue heads at once however many settled rows of
+/// each kind it forgets the store holds, and takes them.
+#[test]
+fn a_start_takes_as_many_queue_heads_however_many_rows_it_forgets() {
+    let taken = |fill: usize| {
+        let log = forgotten_log(fill);
+        let memory = Memory::of(&log);
+        drain(&memory, &mut Builder::default(), LATER);
+        assert_eq!(r_of(&memory).events, log.last());
+        let builder = start_builder(&memory, ms(LATER)).unwrap();
+        assert_eq!(builder.events, log.last());
+        let whole = memory.ledger_queue_heads().unwrap().len();
+        (
+            memory.heads_given.get(),
+            whole,
+            builder.kept().size().queue_rows,
+        )
+    };
+    let (few, many) = (taken(2), taken(40));
+    assert!(few.0 > 0);
+    assert_eq!(few.0, many.0);
+    assert_eq!(few.2, many.2);
+    assert_eq!(many.1 - few.1, 38 * 3);
+}
+
+/// The books made at any position of the heads left out at it are those of
+/// every head ([`books_at`]), the rows written at every position or later;
+/// and a builder started on them writes the rows of every event: for the
+/// rows of each kind left out.
+#[test]
+fn the_books_and_rows_of_a_start_are_those_of_every_head() {
+    let log = forgotten_log(3);
+    let whole = Memory::of(&log);
+    drain(&whole, &mut Builder::default(), LATER);
+    let every = whole.rows.borrow().clone();
+    let mut left_out = 0;
+    for at in log.events.iter().map(|event| event.id) {
+        let heads = whole.ledger_queue_heads_at(at).unwrap();
+        left_out = left_out.max(whole.ledger_queue_heads().unwrap().len() - heads.len());
+        assert_eq!(
+            books_of_heads(&whole, &heads, at, ms(LATER)).unwrap(),
+            books_at(&whole, at, ms(LATER)).unwrap(),
+            "{at}"
+        );
+    }
+    assert!(left_out >= 3 * 3);
+    for upto in 1..=log.events.len() {
+        let memory = drained_store(&log, &[], upto, LATER);
+        let from_start = from_the_start_on(&memory, &log, LATER);
+        let rows = started_and_drained(&memory, &log, LATER);
+        assert_eq!(differing(&rows, &from_start), Vec::new(), "{upto}");
+        assert_eq!(differing_from_whole(&rows, &every), Vec::new(), "{upto}");
+    }
 }
