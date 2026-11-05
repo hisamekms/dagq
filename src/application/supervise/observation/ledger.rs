@@ -15,10 +15,12 @@
 //! the whole EventStore. Nothing of the runtime's control waits for it or
 //! reads it, and a landing does not build a row. A settled row a later
 //! event reaches, whose records the builder dropped, gets them back from
-//! the row the store holds before it is folded. A new builder's first pass
-//! sweeps the rows a page at a time as it reads the events ([`pass`]), so
-//! that its catch-up holds a page's events and the rows open, not every
-//! event. The log says how much the
+//! the row the store holds before it is folded. A new process's builder
+//! starts where the store's marks say ([`start_builder`]): from the
+//! position R with every book made again from the rows, or from its
+//! cursors' start. Its first pass sweeps the rows a page at a time as it
+//! reads the events ([`pass`]), so that its catch-up holds a page's events
+//! and the rows open, not every event. The log says how much the
 //! builder keeps ([`KeptSize`]) after the first pass, then hourly or when
 //! its bytes change by half ([`logs_kept`]).
 //!
@@ -47,10 +49,10 @@ use crate::domain::ledger::builder::{
     WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
 };
 use crate::domain::ledger::queue::{QueueBook, QueueHead, cut};
+use crate::domain::ledger::session::SessionsHeld;
 use crate::domain::ledger::session::written::{
     Cursors, Marks, rows_written_through, written_through,
 };
-use crate::domain::ledger::session::{SessionBook, SessionsHeld};
 use crate::domain::ledger::{LedgerKind, LedgerRow};
 use crate::domain::pre_claim::{self, PreClaimBook};
 use crate::domain::session_step::{self, StepTarget};
@@ -235,8 +237,8 @@ fn build_pass_bounded(
 }
 
 /// One pass's reads, folds and writes. A builder that has not swept
-/// ([`Builder::sweeps_pages`]: a new process's catching up, from its
-/// cursors' start) builds and sweeps the session and queue rows each page
+/// ([`Builder::sweeps_pages`]: a new process's catching up) builds and
+/// sweeps the session and queue rows each page
 /// of events changed as it reads it ([`sweep_page`]), so that it keeps of
 /// the rows the store holds settled no more than a page's events: their
 /// records dropped, a later event that changes one gives them back from
@@ -287,8 +289,11 @@ fn pass(
     // Rules of another version classify the runs held settled again.
     let rules = classifier.map(|classifier| classifier.rules().version());
     if builder.rules_moved(rules.as_deref()) {
-        let rows = store.ledger_rows(LedgerKind::Run)?;
-        builder.mark_rules(rules.as_deref(), &rows);
+        let runs = match &rules {
+            Some(version) => store.ledger_runs_classified_otherwise(version)?,
+            None => Vec::new(),
+        };
+        builder.mark_rules(rules.as_deref(), runs);
     }
     // What it read came by then.
     let now_ms = builder.folds_at(now_ms);
@@ -584,7 +589,7 @@ fn sweep_page(store: &dyn LedgerQueue, builder: &mut Builder, at: (i64, &str)) -
 /// store, so that a read that fails leaves every mark; then with `sweeps`
 /// sweep those still marked: those the store holds settled and up to date
 /// are settled now, past [`CHECKS_PER_PASS`], so that the records [`Kept`]
-/// read of every event from its cursors' start (a new process's) do not
+/// read of every event from its cursors' start do not
 /// wait for the marks of every run and task before them.
 ///
 /// [`Kept`]: crate::domain::ledger::builder::Kept
@@ -651,15 +656,11 @@ fn restore(
 /// the EventStore and no other record of theirs, so that a builder going on
 /// from the store's rows ([`Builder::restore_session_rows`]) does not read
 /// the events of the sessions settled to know their rows and rounds.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
-    )
-)]
-pub fn session_book(store: &dyn LedgerQueue) -> Result<SessionBook> {
-    Ok(SessionBook::from_heads(
+#[cfg(test)]
+pub fn session_book(
+    store: &dyn LedgerQueue,
+) -> Result<crate::domain::ledger::session::SessionBook> {
+    Ok(crate::domain::ledger::session::SessionBook::from_heads(
         &store.ledger_heads(LedgerKind::Session)?,
         &store.ledger_session_anchors()?,
     ))
@@ -673,13 +674,7 @@ pub fn session_book(store: &dyn LedgerQueue) -> Result<SessionBook> {
 /// ([`Builder::restore_queue_rows`]) does not read the events of the queue
 /// rows settled to know their findings, alerts, streams, waits and landing
 /// slots.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
-    )
-)]
+#[cfg(test)]
 pub fn queue_book(store: &dyn LedgerQueue, builder: &Builder) -> Result<QueueBook> {
     Ok(QueueBook::from_heads(
         &store.ledger_queue_heads()?,
@@ -696,13 +691,7 @@ pub fn queue_book(store: &dyn LedgerQueue, builder: &Builder) -> Result<QueueBoo
 /// ([`pre_claim::rows::living`]), so that a builder going on from the
 /// store's rows ([`Builder::restore_pre_claim`]) reads no event of a wait
 /// or a life settled.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
-    )
-)]
+#[cfg(test)]
 pub fn pre_claim_books(store: &dyn LedgerQueue, closed_to: i64) -> Result<(Lives, PreClaimBook)> {
     let since = store.ledger_tasks_open_since()?;
     let rows = store.ledger_wait_rows(since)?;
@@ -734,20 +723,23 @@ pub fn pre_claim_books(store: &dyn LedgerQueue, closed_to: i64) -> Result<(Lives
 /// would not, each ended before the exact one (and some may have ended
 /// after the bound). A landing slot's attempt ended by `at` reads up to
 /// its row's through until the events after `at` are read again.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
-    )
-)]
+#[cfg(test)]
 pub fn books_at(
     store: &dyn LedgerQueue,
     at: EventId,
     closed_to: i64,
 ) -> Result<(QueueBook, Lives, PreClaimBook)> {
-    let heads = store.ledger_queue_heads()?;
-    let needs = cut::Needs::of(&heads, at);
+    books_of_heads(store, &store.ledger_queue_heads()?, at, closed_to)
+}
+
+/// [`books_at`] of `heads`, the queue rows' heads the store holds.
+fn books_of_heads(
+    store: &dyn LedgerQueue,
+    heads: &[QueueHead],
+    at: EventId,
+    closed_to: i64,
+) -> Result<(QueueBook, Lives, PreClaimBook)> {
+    let needs = cut::Needs::of(heads, at);
     let since = store.ledger_tasks_open_since_at(at)?;
     let stops = store.ledger_supervisor_stops()?;
     let mut last = Vec::new();
@@ -776,7 +768,7 @@ pub fn books_at(
     book.held_from(since);
     let cut_lives = cut::lives_at(&last, &stops, at);
     let queue = QueueBook::from_heads_at(
-        &heads,
+        heads,
         &book,
         &cut::Cut {
             at,
@@ -794,13 +786,7 @@ pub fn books_at(
 /// builder then does not go on from the rows, and folds the session
 /// events from its cursors' start (cursor 0), whose first pass's writes
 /// fill what the rows lack and write the mark.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
-    )
-)]
+#[cfg(test)]
 pub fn sessions_written_through(store: &dyn LedgerQueue) -> Result<Option<EventId>> {
     Ok(written_through(
         store.sessions_written()?.as_ref(),
@@ -813,13 +799,6 @@ pub fn sessions_written_through(store: &dyn LedgerQueue) -> Result<Option<EventI
 /// rows' heads ([`rows_written_through`]): its events no later than W
 /// ([`sessions_written_through`]). `None` for a store with no mark or with
 /// the session rows' alone: a builder then folds from its cursors' start.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
-    )
-)]
 pub fn rows_written(store: &dyn LedgerQueue) -> Result<Option<Cursors>> {
     Ok(rows_written_through(
         store.ledger_marks()?.as_ref(),
@@ -839,13 +818,6 @@ pub fn rows_written(store: &dyn LedgerQueue) -> Result<Option<Cursors>> {
 /// session event up to it ([`SessionsHeld::within`]) and the builder
 /// writes the marks again once it has caught up; at a cursor past W, or
 /// with no W, it writes none.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
-    )
-)]
 pub fn restore_sessions(store: &dyn LedgerQueue, builder: &mut Builder) -> Result<()> {
     let heads = store.ledger_heads(LedgerKind::Session)?;
     let anchors = store.ledger_session_anchors()?;
@@ -903,13 +875,6 @@ pub fn restore_sessions(store: &dyn LedgerQueue, builder: &mut Builder) -> Resul
 /// the one of the runs' windows too; none written late): which position
 /// the rows record every input up to they do not say, and finding it is
 /// for the caller, not for this.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "a builder's start goes on from the store's rows once every book of Kept is made again from them"
-    )
-)]
 pub fn restore_pushes(store: &dyn LedgerQueue, builder: &mut Builder, now_ms: i64) -> Result<()> {
     let (through, resources) = (builder.events, builder.resources);
     let now_ms = builder.folds_at(now_ms);
@@ -1024,6 +989,78 @@ fn read_by_id(store: &dyn LedgerQueue, ids: &[EventId]) -> Result<Vec<RunEvent>>
         read.extend(store.events_between(before, *id, &EventFilter::default(), 1)?);
     }
     Ok(read)
+}
+
+/// The builder of a new process on `store`, at `now_ms`. Where the store's
+/// marks give the position R ([`rows_written`]) and it holds no row folded
+/// by an older version ([`crate::application::LedgerStore::ledger_older_rows`]),
+/// it goes on from R: its cursors at R, each its own
+/// ([`Builder::go_on_from_rows`]), and every book of [`Kept`] made again
+/// from the rows as they were at R's events, the one position they all
+/// share ([`books_of_heads`], [`restore_sessions`], [`restore_pushes`]).
+/// R is no later than W, so the session rows hold every input up to it; a
+/// book made at any later position would read the events after R twice.
+/// The rows the store holds not settled are marked (session rows by
+/// [`restore_sessions`]): their grace, the waits they read and a time past
+/// a silence fold them again with no input, as a builder from its cursors'
+/// start finds them. Rows settled with no input after R are not looked at:
+/// they are the fold of every input as they are. So it reads the inputs
+/// after R only; the rows a mark left unwritten are among what those inputs
+/// mark ([`Builder::rows_written`]). Besides the heads, what it reads by
+/// target bears on the rows not settled and the lives open only
+/// ([`cut::Needs`], [`restore_pushes`]).
+///
+/// With no R (a store with no mark, or W alone), or with a row older than
+/// this version, it starts at its cursors' start, as [`Builder::default`]:
+/// it reads every input, and its writes fill what the rows lack and write
+/// the marks. An R next to older rows moved on rows of this version alone,
+/// and those of no input after it would stay old.
+///
+/// A read that fails gives no builder: the next pass starts again.
+///
+/// [`Kept`]: crate::domain::ledger::builder::Kept
+pub fn start_builder(store: &dyn LedgerQueue, now_ms: i64) -> Result<Builder> {
+    let mut builder = Builder::default();
+    let Some(r) = rows_written(store)? else {
+        return Ok(builder);
+    };
+    if store.ledger_older_rows()? {
+        return Ok(builder);
+    }
+    builder.go_on_from_rows(r);
+    if let Some(at) = store.ledger_latest_event_ms(r.events)? {
+        builder.read_up_to(at);
+    }
+    let now_ms = builder.folds_at(now_ms);
+    let heads = store.ledger_queue_heads()?;
+    let (queue, lives, pre_claim) = books_of_heads(store, &heads, r.events, now_ms)?;
+    builder.restore_pre_claim(lives, pre_claim);
+    // Taken while nothing is marked.
+    builder.restore_queue_rows(queue);
+    restore_sessions(store, &mut builder)?;
+    restore_pushes(store, &mut builder, now_ms)?;
+    for head in store.ledger_heads_open_at(r.events, r.resources)? {
+        if let Some(target) = pushes::target_of(&head).filter(|_| !head.is_final) {
+            builder.keep(target);
+        }
+    }
+    for head in heads.iter().map(|head| &head.head) {
+        if !head.is_final {
+            builder.keep(Target::Row(LedgerKind::Queue, head.key.clone()));
+        }
+    }
+    for head in store.ledger_heads(LedgerKind::Node)? {
+        if let Some(target) = node_target(&head.key).filter(|_| !head.is_final) {
+            builder.keep(target);
+        }
+    }
+    Ok(builder)
+}
+
+/// The mark of the node row of `key` ([`crate::domain::ledger::node::key`]).
+fn node_target(key: &str) -> Option<Target> {
+    let (node, start) = key.rsplit_once('/')?;
+    Some(Target::Node(node.to_owned(), start.parse().ok()?))
 }
 
 /// How many times a pass folds a target whose row another writer wrote
@@ -1178,12 +1215,44 @@ fn fold_and_write(
     Ok(true)
 }
 
-/// The builder, the pass running now and how the last ones went.
+/// One pass of [`LedgerWatch`] on `store` as it opened: the builder it held,
+/// started on the store when it holds none ([`start_builder`]). A store that
+/// did not open gives back the builder as it was, and a start that failed
+/// gives none, so that the next pass starts it again: neither falls to a
+/// builder from its cursors' start. The builder to hold, and what it did.
+fn pass_of_watch(
+    store: Result<&dyn LedgerQueue, &anyhow::Error>,
+    builder: Option<Builder>,
+    at: (i64, &str),
+    retain: Retain,
+    classifier: Option<&crate::domain::command_rules::CommandClassifier>,
+) -> (Option<Builder>, Built) {
+    let failed = |what: &str, error: &anyhow::Error| Built {
+        failure: Some(format!("{what}: {error:#}")),
+        ..Built::default()
+    };
+    let store = match store {
+        Ok(store) => store,
+        Err(error) => return (builder, failed("open the queue", error)),
+    };
+    let mut builder = match builder {
+        Some(builder) => builder,
+        None => match start_builder(store, at.0) {
+            Ok(builder) => builder,
+            Err(error) => return (None, failed("start the builder", &error)),
+        },
+    };
+    let built = build_pass(store, &mut builder, at, retain, classifier);
+    (Some(builder), built)
+}
+
+/// The builder (none before the first pass that started one), the pass
+/// running now and how the last ones went.
 #[derive(Default)]
 pub(in crate::application::supervise) struct LedgerWatch {
     /// The builder while no pass runs (a pass takes it and gives it back).
     builder: Option<Builder>,
-    job: Option<thread::JoinHandle<(Builder, Built)>>,
+    job: Option<thread::JoinHandle<(Option<Builder>, Built)>>,
     started: Option<Instant>,
     /// The failed passes in a row, and whether that run was recorded.
     failing: u32,
@@ -1232,23 +1301,21 @@ impl LedgerWatch {
         let today = local_day(now, (port.utc_offset)(now));
         let retain = Retain::due(now, today, self.retained, port.retention_days);
         self.retaining = retain.any().then_some(today);
-        let mut builder = self.builder.take().unwrap_or_default();
+        let builder = self.builder.take();
         self.job = Some(spawn_traced(move || {
             let classifier = (port.classifier)();
-            let built = match port.store.open() {
-                Ok(store) => build_pass(
-                    &*store,
-                    &mut builder,
-                    (now * 1000, &built_at),
-                    retain,
-                    classifier.as_ref(),
-                ),
-                Err(error) => Built {
-                    failure: Some(format!("open the queue: {error:#}")),
-                    ..Built::default()
-                },
+            let opened = port.store.open();
+            let store = match &opened {
+                Ok(store) => Ok(&**store as &dyn LedgerQueue),
+                Err(error) => Err(error),
             };
-            (builder, built)
+            pass_of_watch(
+                store,
+                builder,
+                (now * 1000, &built_at),
+                retain,
+                classifier.as_ref(),
+            )
         }));
     }
 
@@ -1269,10 +1336,14 @@ impl LedgerWatch {
         }
     }
 
-    fn reap(&mut self, env: &mut ObservationEnv<'_>, job: thread::JoinHandle<(Builder, Built)>) {
+    fn reap(
+        &mut self,
+        env: &mut ObservationEnv<'_>,
+        job: thread::JoinHandle<(Option<Builder>, Built)>,
+    ) {
         let failure = match job.join() {
             Ok((builder, built)) => {
-                self.builder = Some(builder);
+                self.builder = builder;
                 let at = env.generators.clock.monotonic();
                 // A failed pass's size is not the builder's.
                 if built.failure.is_none()
@@ -1318,8 +1389,8 @@ impl LedgerWatch {
                 }
                 built.failure
             }
-            // The builder is lost with the thread: the next starts at the
-            // cursors' start and catches up.
+            // The builder is lost with the thread: the next starts anew
+            // and catches up ([`start_builder`]).
             Err(_) => Some("the ledger's pass panicked".to_owned()),
         };
         let retaining = self.retaining.take();

@@ -261,7 +261,7 @@ fn pushes_of_run(seeded: &mut Seeded, task: i64, run: &str) -> Vec<Step> {
 /// pushes, its notes and cancel, and pushes of no run) taken one at a time
 /// from an actor picked at random, the time moving a little or, now and
 /// then, past the grace of settling.
-fn mixed(seed: u64) -> (Log, i64) {
+pub(super) fn mixed(seed: u64) -> (Log, i64) {
     let mut seeded = Seeded(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let mut going_on = Seeded(seed.wrapping_mul(0xA24B_AED4_963E_E407) | 1);
     let mut log = Log::default();

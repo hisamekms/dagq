@@ -2497,6 +2497,20 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
         // The start of the task rows not settled: one aggregate, no row
         // read or sent.
         "ledger_tasks_open_since" => answer(LedgerStore::ledger_tasks_open_since(&*store)),
+        // Whether a row is older than this version: one answer, no row sent.
+        "ledger_older_rows" => answer(LedgerStore::ledger_older_rows(&*store)),
+        // The latest time of the events up to an id: one aggregate.
+        "ledger_latest_event_ms" => {
+            let (through,): (EventId,) = read(op, args)?;
+            answer(LedgerStore::ledger_latest_event_ms(&*store, through))
+        }
+        // The keys of the runs other rules classified, no row sent.
+        "ledger_runs_classified_otherwise" => {
+            let (version,): (String,) = read(op, args)?;
+            answer(LedgerStore::ledger_runs_classified_otherwise(
+                &*store, &version,
+            ))
+        }
         // The same for the position `at`: one aggregate, no row read or sent.
         "ledger_tasks_open_since_at" => {
             let (at,): (EventId,) = read(op, args)?;

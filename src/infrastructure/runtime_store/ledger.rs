@@ -653,6 +653,51 @@ impl LedgerStore for SqliteQueue {
         .collect()
     }
 
+    /// SQLite stops at the first such row; none is parsed.
+    fn ledger_older_rows(&self) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ledger_rows
+                            WHERE kind IN (?1, ?2, ?3, ?4, ?5)
+                              AND legacy=0 AND ledger_v<?6)",
+            params![
+                LedgerKind::Run.as_str(),
+                LedgerKind::Task.as_str(),
+                LedgerKind::Session.as_str(),
+                LedgerKind::Queue.as_str(),
+                LedgerKind::Node.as_str(),
+                crate::domain::ledger::LEDGER_V,
+            ],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// SQLite gives the largest time of the column, whose text sorts as
+    /// its time ([`crate::domain::stats::timestamp_millis`] reads it).
+    fn ledger_latest_event_ms(&self, through: EventId) -> Result<Option<i64>> {
+        let latest: Option<String> = self.conn.query_row(
+            "SELECT MAX(created_at) FROM run_events WHERE id<=?1",
+            params![through.as_i64()],
+            |r| r.get(0),
+        )?;
+        Ok(latest.and_then(|at| crate::domain::stats::timestamp_millis(&at)))
+    }
+
+    /// SQLite picks the keys by the rules in each run row's detail: no
+    /// row is parsed.
+    fn ledger_runs_classified_otherwise(&self, version: &str) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT key FROM ledger_rows
+              WHERE kind=?1 AND json_type(detail, '$.steps') IS NOT NULL
+                AND {rules} IS NOT ?2
+              ORDER BY key",
+            rules = json_field_spaced("detail", "$.steps.fold.classes.rules", JsonType::Text),
+        ))?;
+        let keys = statement
+            .query_map(params![LedgerKind::Run.as_str(), version], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(keys)
+    }
+
     /// SQLite looks each run row's next event after its inputs up in the
     /// index on the run: no record and no event is read.
     fn ledger_runs_past_their_rows(&self, through: EventId) -> Result<Vec<crate::domain::RunId>> {
@@ -2134,6 +2179,110 @@ mod tests {
             queue.ledger_runs_past_their_rows(log.last()).unwrap(),
             [RunId::new(&went_on).unwrap()]
         );
+    }
+
+    /// SQLite says what the rows whole say of the rows older than this
+    /// version, a legacy one's version aside, and of the runs other rules
+    /// classified: a run with no steps is of neither. It gives the latest
+    /// time of the events up to a position, by their ids.
+    #[test]
+    fn the_older_rows_and_the_runs_of_other_rules_read_what_the_rows_whole_give() {
+        use crate::domain::ledger::steps::DETAIL_KEY;
+        use crate::domain::ledger::testkit::{Log, run_id};
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        for (id, at) in [
+            (1, "2030-01-01T00:00:10.000Z"),
+            (2, "2030-01-01T00:00:05.000Z"),
+            (3, "2030-01-01T00:00:20.000Z"),
+        ] {
+            queue
+                .conn
+                .execute(
+                    "INSERT INTO run_events(id, kind, payload, created_at)
+                     VALUES (?1, 'mark_added', '{}', ?2)",
+                    params![id, at],
+                )
+                .unwrap();
+        }
+        let ms_of = |at: &str| crate::domain::stats::timestamp_millis(at);
+        for (through, at) in [
+            (0, None),
+            (1, ms_of("2030-01-01T00:00:10.000Z")),
+            (2, ms_of("2030-01-01T00:00:10.000Z")),
+            (3, ms_of("2030-01-01T00:00:20.000Z")),
+        ] {
+            assert_eq!(
+                queue.ledger_latest_event_ms(EventId::new(through)).unwrap(),
+                at,
+                "{through}"
+            );
+        }
+        let (a, b, c, old) = (run_id(1), run_id(2), run_id(3), run_id(4));
+        let mut log = Log::default();
+        log.landed(1, &a, 0)
+            .landed(2, &b, 100)
+            .landed(3, &c, 200)
+            .legacy(4, &old, 300);
+        let rows = ledger::build(&log.events, ledger::testkit::ms(4000), "t");
+        let classified = |rules: Option<&str>| serde_json::json!({DETAIL_KEY: {"fold": {"classes": {"rules": rules}}}});
+        for mut row in rows {
+            if row.key == a {
+                row.detail = classified(Some("one"));
+            } else if row.key == b {
+                row.detail = classified(Some("two"));
+            }
+            queue.write_ledger_row(&row).unwrap();
+        }
+        let whole = |version: &str| {
+            let mut runs = Vec::new();
+            for row in queue.ledger_rows(LedgerKind::Run).unwrap() {
+                if row.detail.get(DETAIL_KEY).is_some()
+                    && ledger::steps::rules_of(&row.detail) != Some(version)
+                {
+                    runs.push(row.key);
+                }
+            }
+            runs
+        };
+        for version in ["one", "two", "three"] {
+            assert_eq!(
+                queue.ledger_runs_classified_otherwise(version).unwrap(),
+                whole(version),
+                "{version}"
+            );
+        }
+        assert_eq!(queue.ledger_runs_classified_otherwise("one").unwrap(), [b]);
+
+        assert!(!queue.ledger_older_rows().unwrap());
+        // A legacy row keeps the version it was first written at.
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET ledger_v=?1 WHERE legacy=1",
+                params![ledger::LEDGER_V - 1],
+            )
+            .unwrap();
+        assert!(!queue.ledger_older_rows().unwrap());
+        // No marks' row is one.
+        queue
+            .write_ledger_marks(&written::Marks {
+                sessions: SessionsWritten {
+                    through: EventId::new(1),
+                    ledger_v: ledger::LEDGER_V - 1,
+                },
+                rows: None,
+            })
+            .unwrap();
+        assert!(!queue.ledger_older_rows().unwrap());
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET ledger_v=?1 WHERE key=?2",
+                params![ledger::LEDGER_V - 1, a],
+            )
+            .unwrap();
+        assert!(queue.ledger_older_rows().unwrap());
     }
 
     /// The store keeps a legacy row's mark as first written, so its head is

@@ -14,8 +14,25 @@
 //!   resources its run only, and one of a target of no run nothing. A `push_finished`
 //!   marks the runs this builder left pending on their push and their tasks
 //!   (another run's push may close them). No row is scanned to find a dirty
-//!   one. A builder starts with its cursors at 0, so a new process marks
-//!   every run and task, those before the switch too, and catches up.
+//!   one.
+//! - **Where a new process starts**
+//!   ([`crate::application::supervise::start_builder`]): where the store's
+//!   marks give the position R and it holds no row of an older
+//!   [`LEDGER_V`] (a legacy row aside), at R. R is the one position of its
+//!   start: each cursor takes R's, and every book of [`Kept`] is made again
+//!   from the rows as they were at it (below, "What a pass reads"), so that
+//!   no input after it is in a book twice, nor the rows' marks of what it
+//!   lacks missed: an input after R marks what the store lacks of it. The
+//!   rows not settled are marked with no input, for what comes with time
+//!   (a grace, a silence), and [`Self::rules_moved`] goes as for any
+//!   builder. With no R, or next to an older row, it starts with its
+//!   cursors at 0: it marks every run and task, those before the switch
+//!   too, and catches up, and its writes fill what the rows lack and write
+//!   the marks. Two kinds of read follow. The scan of an input after a
+//!   cursor reads after R only. A read by target (a push by id, the last
+//!   event of a life open, the events of a run or task it folds) may reach
+//!   before R, of what a scan after R marked, the rows not settled and the
+//!   lives open, the runs the rules mark, and the pushes those rows name.
 //! - **Which are written**: a run whose life ended (its push finished or
 //!   was skipped, it ended without a landing, it was canceled), one pending
 //!   on its push, and a legacy run; every task from its `task_created`
@@ -131,8 +148,9 @@
 //!   the store holds ([`Builder::to_restore`]), a settled run or task its
 //!   push by id ([`Builder::pushes_to_read`]), and of a queue row no later
 //!   event reaches it forgets what assigns it too ([`QueueBook::closed`]).
-//!   A new process's first pass builds and sweeps the session and queue
-//!   rows each page of events changed as it reads it
+//!   A new process's first pass, from R or from its cursors' start, builds
+//!   and sweeps the session and queue rows each page of events changed as
+//!   it reads it
 //!   ([`Builder::sweeps_pages`], [`Builder::sweep`]) and drops those of the
 //!   rows the store holds settled before it reads the next page, so that
 //!   neither what it keeps after its catch-up nor its peak during it grows
@@ -175,7 +193,7 @@
 //!   row) and of those whose row does not record them all, cut to it, with
 //!   the pushes the rows and the runs not settled at it read by id
 //!   ([`pushes::PushesHeld::at`], [`Builder::restore_pushes`]). A new
-//!   process still starts at its cursors' start and takes none of them.
+//!   process takes them all at R, or none at its cursors' start.
 //! - **What a pass makes**: each event is read into [`Kept`] once as it
 //!   comes in (the supervisors' lives, the waits before a claim, the
 //!   landing slot's attempts, which session or queue row it is a record
@@ -239,8 +257,8 @@ pub const SESSION_BYTES_PER_WRITE: usize = 32 << 20;
 /// already holds up to date is looked at and not written).
 pub const CHECKS_PER_PASS: usize = 2_000;
 
-/// How many events after the cursor a pass reads at a time: a new process
-/// reads every event once, a page at a time.
+/// How many events after the cursor a pass reads at a time: a builder from
+/// its cursors' start reads every event once, a page at a time.
 pub const EVENTS_PER_READ: usize = 5_000;
 
 /// How many steps after the step cursor a pass reads at a time.
@@ -308,7 +326,7 @@ struct WaitsMoved {
 ///   the row the store holds, which owns exactly them
 ///   ([`Builder::restore`]), so its fold is that of every event. A row not
 ///   settled keeps its events: its grace or a later event folds it again.
-///   A builder that starts at its cursors' start (a new process) reads
+///   A builder that starts at its cursors' start reads
 ///   every event and marks every row behind the marks of every run and
 ///   task; so that it does not keep every settled row's events for the
 ///   passes those marks take, nor every event it read until it builds the
@@ -354,8 +372,9 @@ struct WaitsMoved {
 /// ([`Builder::restore_sessions`], [`Builder::restore_queue_rows`],
 /// [`Builder::restore_pre_claim`], [`Builder::restore_pushes`]): the last
 /// four as of any position no later than the one the rows were written at,
-/// cut there by a read the position decides. A new process takes none of
-/// them yet: it starts at its cursors' start.
+/// cut there by a read the position decides. A new process takes all of
+/// them at R, or none at its cursors' start
+/// ([`crate::application::supervise::start_builder`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Kept {
     /// The last event read.
@@ -1256,27 +1275,23 @@ impl Builder {
 
     /// Whether the rules that classify the runs' command steps now are of
     /// another `version` (none without rules) than those it last marked
-    /// the runs by ([`Self::mark_rules`]): a pass then reads the run rows
-    /// the store holds, a new builder's first pass too.
+    /// the runs by ([`Self::mark_rules`]): a pass then asks the store which
+    /// runs others classified, a new builder's first pass too.
     pub fn rules_moved(&self, version: Option<&str>) -> bool {
         self.rules.as_deref() != version
     }
 
-    /// Mark each run of `rows`, the run rows the store holds, whose steps
-    /// were folded and not classified by the rules of `version`: so a run
-    /// that settled long ago is classified again when only the rules
-    /// change, with no input of it come in. Without rules it marks none
-    /// (no rule read leaves the classes as they were).
-    pub fn mark_rules(&mut self, version: Option<&str>, rows: &[LedgerRow]) {
-        if let Some(version) = version {
-            for row in rows {
-                if row.kind == LedgerKind::Run
-                    && row.detail.get(steps::DETAIL_KEY).is_some()
-                    && steps::rules_of(&row.detail) != Some(version)
-                {
-                    self.marks.insert(Target::Run(row.key.clone()));
-                }
-            }
+    /// Mark the runs `runs`, those the store holds whose steps were folded
+    /// and not classified by the rules of `version`
+    /// ([`crate::application::LedgerStore::ledger_runs_classified_otherwise`]):
+    /// so a run that settled long ago is classified again when only the
+    /// rules change, with no input of it come in. Without rules it marks
+    /// none (no rule read leaves the classes as they were). Such a mark
+    /// holds no position ([`Self::rows_written`]): the rules read again on
+    /// a later start mark the run again until its row is written.
+    pub fn mark_rules(&mut self, version: Option<&str>, runs: Vec<String>) {
+        if version.is_some() {
+            self.marks.extend(runs.into_iter().map(Target::Run));
         }
         self.rules = version.map(str::to_owned);
     }
@@ -1398,8 +1413,7 @@ impl Builder {
 
     /// Whether a pass sweeps, as it reads each page of events, the session
     /// and queue rows that page changed ([`Self::page_rows`]): until a pass
-    /// swept ([`Self::swept`]), so that a builder from its cursors' start
-    /// (a new process) keeps of the rows the store holds settled no more
+    /// swept ([`Self::swept`]), so that a new process's builder keeps of the rows the store holds settled no more
     /// than a page's events before it reads the next page.
     pub const fn sweeps_pages(&self) -> bool {
         !self.swept
@@ -1898,6 +1912,15 @@ impl Builder {
         self.rows_through = from;
     }
 
+    /// Note `at`, the latest time of an event up to the position it goes on
+    /// from ([`Self::go_on_from_rows`]), as the latest read, as it is for
+    /// one that read up to there: a pass folds at no earlier time
+    /// ([`Self::folds_at`]), and a move of a wait timed before it is out of
+    /// its order ([`Self::mark_events`]).
+    pub fn read_up_to(&mut self, at: i64) {
+        self.read_ms = self.read_ms.max(at);
+    }
+
     /// Take the summaries of the pushes the store's rows hold as they were
     /// at [`Self::events`] (`held`, [`PushesHeld::at`] of that event and
     /// [`PushesHeld::settle`]) in place of those it made of the events up
@@ -1912,8 +1935,8 @@ impl Builder {
     /// every event wrote up to a position at or after [`Self::events`]
     /// (none written late, every run with a row once it ended or waits on
     /// its push): which position the store's rows record every event up to
-    /// they do not say, and it is for the caller to find, not for this. A
-    /// new process does not call it yet: it starts at its cursors' start.
+    /// they do not say, and it is for the caller to find
+    /// ([`crate::application::supervise::start_builder`]), not for this.
     pub fn restore_pushes(&mut self, held: PushesHeld, pushes: Vec<RunEvent>) {
         self.pending_pushes = held.pending();
         Arc::make_mut(&mut self.kept).restore_pushes(held, pushes);

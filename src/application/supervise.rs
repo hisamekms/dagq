@@ -116,7 +116,9 @@ use self::observation::ObservationState;
 pub use self::observation::agent_watch::AGENT_WATCH_CHECK;
 pub use self::observation::ci_watch::{CiSourceMaker, CiWatchFile, CiWatchPort};
 pub use self::observation::forecast::{FORECAST_CHECK, ForecastPort};
-pub use self::observation::ledger::{Built, FAILING_PASSES, LedgerPort, Retain, build_pass};
+pub use self::observation::ledger::{
+    Built, FAILING_PASSES, LedgerPort, Retain, build_pass, start_builder,
+};
 pub use self::observation::main_log::look_at_main;
 use self::observation::observer;
 pub use self::observation::report::ReportPort;

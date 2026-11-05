@@ -200,6 +200,9 @@ pub(super) const READS: &[&str] = &[
     "ledger_session_anchors",
     "ledger_tasks_open_since",
     "ledger_tasks_open_since_at",
+    "ledger_older_rows",
+    "ledger_latest_event_ms",
+    "ledger_runs_classified_otherwise",
     "last_event_naming_supervisor",
     "ledger_wait_rows",
     "ledger_supervisor_stops",
@@ -699,7 +702,13 @@ mod tests {
     /// waits and lives again by.
     #[test]
     fn the_reads_of_a_cut_to_a_position_are_the_supervisors_reads() {
-        for op in ["ledger_tasks_open_since_at", "last_event_naming_supervisor"] {
+        for op in [
+            "ledger_tasks_open_since_at",
+            "last_event_naming_supervisor",
+            "ledger_older_rows",
+            "ledger_latest_event_ms",
+            "ledger_runs_classified_otherwise",
+        ] {
             assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
             assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
             assert!(super::super::reads_only(op), "{op}");

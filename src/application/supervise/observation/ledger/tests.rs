@@ -101,6 +101,11 @@ struct Memory {
     /// The reads besides the rows' heads a cut of the queue rows to a
     /// position makes ([`books_at`]).
     cut_reads: Cell<CutReads>,
+    /// Each read of an input after a cursor (not by id): which cursor, the
+    /// position it read after, and how many it gave.
+    scans: RefCell<Vec<(&'static str, i64, usize)>>,
+    /// The keys of the rows written, in order.
+    written_keys: RefCell<Vec<(LedgerKind, String)>>,
 }
 
 /// How many times each read a cut of the queue rows makes was called, and
@@ -258,6 +263,11 @@ impl EventStore for Memory {
             .cloned()
             .collect();
         self.read.set(self.read.get() + read.len());
+        if limit != 1 {
+            self.scans
+                .borrow_mut()
+                .push(("events", after.as_i64(), read.len()));
+        }
         if after.as_i64() + 1 != upto.as_i64() {
             self.other_read("events_between");
         }
@@ -269,6 +279,15 @@ impl EventStore for Memory {
 }
 
 impl LedgerStore for Memory {
+    fn ledger_latest_event_ms(&self, through: EventId) -> Result<Option<i64>> {
+        Ok(self
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| event.id <= through)
+            .filter_map(|event| crate::domain::stats::timestamp_millis(&event.created_at))
+            .max())
+    }
     fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
         let events = EventStore::run_events(self, run)?;
         self.count_cut(|reads| {
@@ -356,6 +375,7 @@ impl LedgerStore for Memory {
         self.writes.set(self.writes.get() + 1);
         let mut rows = self.rows.borrow_mut();
         let key = (row.kind, row.key.clone());
+        self.written_keys.borrow_mut().push(key.clone());
         let written = match rows.get(&key).filter(|stored| stored.is_legacy()) {
             Some(stored) => LedgerRow {
                 records: row.records.clone(),
@@ -580,13 +600,15 @@ impl NodeSampleStore for Memory {
     }
     fn node_samples_after(&self, after: i64) -> Result<Vec<NodeSample>> {
         self.other_read("node_samples_after");
-        Ok(self
+        let read: Vec<NodeSample> = self
             .samples
             .borrow()
             .iter()
             .filter(|s| s.id > after)
             .cloned()
-            .collect())
+            .collect();
+        self.scans.borrow_mut().push(("samples", after, read.len()));
+        Ok(read)
     }
 }
 
@@ -625,14 +647,16 @@ impl SessionStepStore for Memory {
         if let Some(between) = between {
             between(self);
         }
-        Ok(self
+        let read: Vec<SessionStep> = self
             .steps
             .borrow()
             .iter()
             .filter(|step| step.id > after)
             .take(limit)
             .cloned()
-            .collect())
+            .collect();
+        self.scans.borrow_mut().push(("steps", after, read.len()));
+        Ok(read)
     }
     fn target_steps(&self, target: &StepTarget) -> Result<Vec<SessionStep>> {
         self.other_read("target_steps");
@@ -734,14 +758,18 @@ impl SessionResourceStore for Memory {
     }
     fn resources_after(&self, after: i64, limit: usize) -> Result<Vec<SessionResource>> {
         self.other_read("resources_after");
-        Ok(self
+        let read: Vec<SessionResource> = self
             .inside
             .borrow()
             .iter()
             .filter(|sample| sample.id > after)
             .take(limit)
             .cloned()
-            .collect())
+            .collect();
+        self.scans
+            .borrow_mut()
+            .push(("inside_resources", after, read.len()));
+        Ok(read)
     }
 }
 
@@ -763,14 +791,18 @@ impl RunResourceStore for Memory {
             .collect())
     }
     fn run_resources_after(&self, after: i64, limit: usize) -> Result<Vec<RunResource>> {
-        Ok(self
+        let read: Vec<RunResource> = self
             .run_resources
             .borrow()
             .iter()
             .filter(|window| window.id > after)
             .take(limit)
             .cloned()
-            .collect())
+            .collect();
+        self.scans
+            .borrow_mut()
+            .push(("resources", after, read.len()));
+        Ok(read)
     }
     fn open_attachments(&self) -> Result<Vec<(RunId, i64)>> {
         unreachable!("the ledger does not close attachments")
@@ -2887,6 +2919,7 @@ fn a_run_measured_from_inside_only_folds_its_executors_samples() {
 mod pages;
 mod pushes_mixed;
 mod queue_waits;
+mod start;
 mod stream_waits;
 mod waits;
 
@@ -3398,6 +3431,9 @@ struct WaitRowsService {
 struct HeldRows<'a>(&'a [LedgerRow]);
 
 impl LedgerStore for HeldRows<'_> {
+    fn ledger_latest_event_ms(&self, _: EventId) -> Result<Option<i64>> {
+        unreachable!("no start here")
+    }
     fn ledger_run_events(&self, _: &RunId) -> Result<Vec<RunEvent>> {
         unreachable!("no run's events here")
     }

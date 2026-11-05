@@ -140,9 +140,11 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 
 - 着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - runは終わりから猶予の後で、telemetryのtokenの失効と資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
-- storeのsession行の印（W）は、その位置までの全てのsessionのeventをsession行が記録していることを約束し、係が続きから読む前提になる。
-  印を書くのは、全てのsessionのeventを畳んだ係だけにする。
-- pushの要約はstoreのrun・task行から位置を指定して作り直せ、その位置までの全件のbuildと同じになる（起動は未使用）。
+- storeの印は、その位置までの全入力を行が記録する約束で、Wはsession行、Rはほかの行のカーソルごとの位置。
+- 起動（`start_builder`）は、Rがあり古い版の行（旧方式を除く）が無ければ、Rだけを位置に全帳簿とpushの要約をその時点の行から作り直して続ける。
+  Rより先で作り直すと入力が二重に入る。
+  他はカーソル0から全件をbuildし、書き込みが印を書く。
+- 増分の走査はRより後だけを読み、対象別・id指定の読みはRより前に及ぶが確定済みの履歴に比例しない（`builder`のdoc）。
 - 読めない・書けない周回は印を残して次に任せ、runとtaskの結果を変えない。
 
 ## 共通の読み取り関数

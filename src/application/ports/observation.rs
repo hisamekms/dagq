@@ -418,6 +418,46 @@ pub trait LedgerStore {
             .map(LedgerHead::of)
             .collect())
     }
+    /// Whether the store holds a row folded by an older
+    /// [`crate::domain::ledger::LEDGER_V`], a legacy one aside (the store
+    /// keeps the version a legacy row was first written at, and no fold
+    /// moves it): a new builder then folds from its cursors' start
+    /// ([`crate::application::supervise::start_builder`]). No row is read.
+    fn ledger_older_rows(&self) -> Result<bool> {
+        for kind in LedgerKind::ALL {
+            if self
+                .ledger_rows(kind)?
+                .iter()
+                .any(|row| !row.is_legacy() && row.ledger_v < crate::domain::ledger::LEDGER_V)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    /// The latest time (unix ms) of an event up to `through`, an aggregate
+    /// of the EventStore (no event is read out of it); none with none.
+    /// A builder going on from `through` folds at no earlier time, and
+    /// tells a move of a wait timed before an event read before it, as one
+    /// that read them all ([`crate::domain::ledger::builder::Builder::read_up_to`]).
+    fn ledger_latest_event_ms(&self, through: EventId) -> Result<Option<i64>>;
+    /// The keys of the run rows whose steps were folded and not classified
+    /// by the rules of `version`
+    /// ([`crate::domain::ledger::builder::Builder::mark_rules`]): those
+    /// rules alone fold again. No row is read, as many keys however many
+    /// runs those rules classified.
+    fn ledger_runs_classified_otherwise(&self, version: &str) -> Result<Vec<String>> {
+        use crate::domain::ledger::steps;
+        Ok(self
+            .ledger_rows(LedgerKind::Run)?
+            .into_iter()
+            .filter(|row| {
+                row.detail.get(steps::DETAIL_KEY).is_some()
+                    && steps::rules_of(&row.detail) != Some(version)
+            })
+            .map(|row| row.key)
+            .collect())
+    }
     /// The runs a task row names
     /// ([`crate::domain::ledger::builder::pushes::task_runs`], a legacy
     /// row's too) that have no run row of their own, each once, ascending:
