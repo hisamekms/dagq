@@ -231,3 +231,99 @@ Linux でだけ方式が壊れる箇所は見つからなかった。要る変�
   - `show-env --sh` に直す。
 - cfg のファイルの検出は `#[cfg]` と `cfg!` と `target_vendor` を含め、今の 8 ファイルとする。
 - 周期は 1 時間ごとでよい（保守でも 26 分）。入れた後の初回の数本で job ごとの build・IT・export の秒と disk の空きを記録し、この見積もりと比べる。1 job が 30 分を超えたら N を増やすより先に build の cache を直す（N を増やしても縮むのは IT と export の分だけ）。
+
+## task 3879 の着地の後の確認
+
+問いは「task 3879 の着地 commit を含む main の commit で、ci.yml の『linux build / test』job が、`cli_version::auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back` を含めて Linux だけの失敗なく通るか」。
+
+判定は **holds**。ただし、判定の範囲の外（後の 34 本）に Linux だけの失敗が 4 件ある（下の「判定の範囲の後の run（補足）」）。
+
+### 環境
+
+- task 3879 の着地 commit: `85f0c4e9c3a780824908d1d98ba3d82665b623c6`（2026-11-02T21:29:40Z）。その commit 自身の ci.yml の run 41528848805 は cancelled で、job が無い。
+- 読んだ時刻: 2026-11-05T20:23Z（UTC）前後。この run の base は `0598dcf80`。開始の時点で対象が 3 本を超えていたので、待っていない。
+- 道具の版（job の log から）: cargo-nextest 0.9.150（d225b1daf 2026-10-26）を対象の 10 本すべてで確かめた。runner は ubuntu-24.04。gh 2.103.3（この run の host）。
+- nextest の設定（`.config/nextest.toml`）: retries は 1。CI の JUnit では、2 回目で通った test も flaky で失敗の扱いになり、`failure` と `flakyFailure` を持つ。2 回とも落ちた test は `failure` と `rerunFailure` を持つ。
+- 調べた経路: この run の worker（Claude、headless）から gh で読んだ。`dagq search` は打てたが、`dagq ci failures` はこの run の経路で権限により拒まれたので、CI の失敗との対応は `dagq search` で調べた。
+
+### 打ったコマンド
+
+状態を変えるコマンドは打っていない（`gh workflow run`・`gh run rerun`・`git push`・branch の作成なし）。
+
+```sh
+git log --grep "Dagq-Task: 3879" --format='%H %cI %s'
+git fetch origin main                                            # 手元の origin/main の更新だけ
+gh run list --workflow ci.yml --branch main --event push --limit 100 \
+  --json databaseId,headSha,status,conclusion,createdAt
+git merge-base --is-ancestor 85f0c4e9c3a780824908d1d98ba3d82665b623c6 <head_sha>
+gh run view <id> --json jobs                                     # job の結論と時刻
+gh run view --job <job id> --log                                 # nextest の版と runner の image
+gh api repos/hisamekms/dagq/actions/runs/<id>/artifacts          # artifact の有無と期限
+gh run download <id> -n nextest-junit-linux -D <tmp>/<id>/linux
+gh run download <id> -n nextest-junit-macos -D <tmp>/<id>/macos
+dagq search the_spike_limit_defers_a_spike                       # 下の 4 本も同じ形で
+```
+
+JUnit の集計は、`$TMPDIR` に置いた使い捨ての python（`xml.etree` で testcase の子の要素を読む）で行った。
+
+### 対象の run
+
+対象は、`head_sha` が着地 commit を祖先に持つ push の run のうち、linux build / test が success か failure で完了したものの、古い方から 10 本である。途中の cancelled の run（job が無い）と、41589597163（linux build / test が skipped）は数えていない。時刻は UTC。「対象の test」は `cli_version::auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back` である。macOS の結論は同じ run の job『fmt / test / clippy / coverage』の結論である。
+
+| run | head_sha | run の時刻 | linux build / test の時刻 | Linux の結論 | macOS の結論 | 対象の test（Linux、retry の有無） | Linux だけの failed / flaky | 両 OS で落ちた test |
+|---|---|---|---|---|---|---|---|---|
+| 41533298296 | `adde2578c2bf510a8fbc999a6efe84d83f0f4644` | 11-02 21:59 | 11-02 22:45〜23:14 | success | success | passed、retry なし | 無い | 無い |
+| 41540468881 | `773abf86d7410fe9a2cb28802abfa4b4c601138d` | 11-02 22:49 | 11-02 23:56〜00:25 | success | success | passed、retry なし | 無い | 無い |
+| 41551493994 | `1aa44a1fbd610956cf40df3785487a491eaa6f03` | 11-03 00:15 | 11-03 01:04〜01:34 | success | success | passed、retry なし | 無い | 無い |
+| 41562256414 | `1f2d8341a65a9a46ea498c176fcf21d588297647` | 11-03 01:49 | 11-03 02:10〜02:38 | failure | failure | passed、retry なし | 無い | 下の 4 本 |
+| 41566167085 | `2dc2ec0329abb15b630da0f7a023f12dda9a36fa` | 11-03 02:26 | 11-03 03:12〜03:42 | failure | failure | passed、retry なし | 無い | 下の 4 本 |
+| 41576691392 | `f29be15f83e72c4fdf47f67d9bbd109d8f26b1cd` | 11-03 04:11 | 11-03 04:15〜04:44 | failure | failure | passed、retry なし | 無い | 下の 4 本 |
+| 41580153816 | `687f5e7861c59901d1a016bfd98cb19f6f3fdb42` | 11-03 04:47 | 11-03 05:14〜05:40 | failure | failure | passed、retry なし | 無い | 下の 4 本 |
+| 41590923283 | `e91a56c75e0143a664bf935e58c071d25640bf99` | 11-03 06:36 | 11-03 06:36〜07:00 | failure | failure | passed、retry なし | 無い | 下の 4 本 |
+| 41596229525 | `fbb5f4d6674ae4512745dc7e733c2e4961a55e23` | 11-03 07:25 | 11-03 07:37〜08:04 | failure | failure | passed、retry なし | 無い | 下の 4 本 |
+| 41604256757 | `d9e7b3eaf375d381c94268ea2271c4d5e6c5d75f` | 11-03 08:34 | 11-03 08:40〜09:10 | failure | failure | passed、retry なし | 無い | 下の 4 本 |
+
+両 OS で落ちた 4 本は次のとおり。どれも同じ run の Linux と macOS の両方で 2 回とも落ちたので、Linux だけの失敗ではない。この 4 本は task 4076 が直す。
+
+- `actor_model::jobs_with_a_role_table_are_given_its_model_and_effort`
+- `actor_model::jobs_without_a_role_table_start_as_before`
+- `review_subagents::an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_came_from`
+- `runtime_review::a_passing_review_exits_the_live_session_and_lands_it`
+
+JUnit の testcase は、10 本とも同じ run の Linux と macOS で同じ数（5,888〜5,949）である。4 本が落ちても残りは流れている。10 本の Linux の JUnit に `flakyFailure` は無い。
+
+### 判定
+
+**holds**。成功の条件に当てはめた根拠は次のとおり。
+
+- 対象の run は 10 本（3 本以上）で、artifact はすべて読めた。
+- (i) 対象の test は 10 本とも passed で、testcase に `failure`・`rerunFailure`・`flakyFailure` の子が無い（retry なし）。
+- (ii) 10 本とも、Linux の failed か flaky は上の 4 本だけで、いずれも同じ run の macOS でも落ちた。Linux だけの failed か flaky は 0 本である。
+
+task 3879 の前は、直前の 29 本で対象の test が 3 回（10%）落ちていた。10 本で 0 回という結果は、この割合なら偶然でも約 35% で起きるので、10 本だけでは直りの強い証拠ではない。下の補足の 34 本でも 0 回で、合わせて 44 本で 0 回である（10% のままなら約 1%）。
+
+### 判定の範囲の後の run（補足）
+
+判定の 10 本は 11-03 09:10 までで、この run の時点より 2 日半古い。そこで、判定には入れず、同じ方法で後の run を読んだ。読んだのは、41614815009（11-03 09:54）から 42090533878（11-05 19:05）までの、linux build / test が完了した 34 本である（skipped の 3 本は除く）。
+
+対象の test は 34 本とも passed だった。上の 4 本は 34 本とも両方の OS で落ちた（41850367787 は macOS の artifact が無く、Linux だけを読んだ）。ほかに、Linux だけで落ちた test が 4 本、1 回ずつあった。
+
+| run | head_sha | 時刻 | test | Linux の結果 | 同じ run の macOS | queue の対応 |
+|---|---|---|---|---|---|---|
+| 41748544812 | `2ee4e6de1` | 11-04 00:40 | `runtime_claim_class::the_spike_limit_defers_a_spike_and_gives_its_slot_to_an_implementation` | flaky（2 回目で通る） | passed | task 4186（ready） |
+| 41771136549 | `67190bcc6` | 11-04 04:06 | `runtime_queue_hold_shared::cancel_affected_gives_up_the_held_runs_of_every_supervisor` | flaky（2 回目で通る） | passed | task 4191（ready） |
+| 41949236669 | `f5bb9f280` | 11-05 01:32 | `runtime_handoff::review_verdicts::verdicts_kept_by_a_supervisor_that_stopped_are_applied_by_one_running_beside_it` | flaky（2 回目で通る） | passed | task 4265（ready） |
+| 42090533878 | `a0f2ed9ce` | 11-05 19:05 | `runtime_headless::recovery_stops_a_headless_turns_orphan_outside_its_group_by_worktree` | failed（2 回とも `tests/it/runtime_headless.rs:1196` で panic） | passed | task 4288（draft） |
+
+queue の状態は、この run の `dagq search` の時点の値である。`runtime_headless` の 1 本は、完了した run のうち最新の 1 本で出た。次の run 42096862747（`e4bdae32a`）の linux build / test は読んだ時点でまだ走っていて、続けて落ちるかは分からない。
+
+34 本のうち 4 本（約 12%）で Linux だけの失敗が出たので、task 3925 の根拠の「ほかの test は全部 Linux で通った」は、今の main ではそのまま言えない。
+
+### 後続への推奨（task 3879 の着地の後）
+
+- description の条件どおり、3926・3927 は submit してよい。context には、この節と対象の run の id（41533298296〜41604256757 の 10 本）を書く。task 3879 の直しは対象の test に効いているので、これに関わる直しの task は先に要らない。
+- submit の前に、planner が補足の 4 本を見て決める。推奨は次のとおり。
+  - flaky の 3 本（task 4186・4191・4265）は、3926 の依存にしない。1 回ずつ、2 回目で通っていて、ready の task が既にある。
+  - `runtime_headless` の 1 本（task 4288、draft）は、submit の前に後の run で続くかを読む。続くなら 4288 を submit して 3926 をそれに依存させる。1 回だけなら依存にしない。
+  - 両 OS で落ちる 4 本（task 4076）は Linux に固有の問題ではないので、3926 の依存にしない。
+- 3926 の job でも、`scripts/it-coverage-map.sh` の今の振る舞い（落ちた test も表に記録して表を作る）を保つ。Linux で 1 本も落ちない回を前提にすると、表が作れない回が出るからである。初回の数本では、Linux で failed・flaky の test を合わせて見る（上の「後続への推奨」の初回の記録と同じ）。
