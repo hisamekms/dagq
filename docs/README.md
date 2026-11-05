@@ -10,7 +10,7 @@ tags:
 
 # Documentation guide
 
-dagqの文書は、決定、現在の設計、このrepositoryの開発の規則、実装計画と測定を分けて管理する。タスクの経過と状態はdagqのキュー（`dagq show ID`のrun履歴とreceipt）が持つ。repo rootの[AGENTS.md](../AGENTS.md)はこのrepositoryの開発の短い案内で、規則の本文は`development/`などの正本を指す（移し終えるまではAGENTS.mdが持つ規則もある）。
+dagqの文書は、決定、現在の設計、このrepositoryの開発の規則、実装計画と測定、配置する人向けの案内を分けて管理する。タスクの経過と状態はdagqのキュー（`dagq show ID`のrun履歴とreceipt）が持つ。repo rootの[AGENTS.md](../AGENTS.md)はこのrepositoryの開発の短い案内で、規則の本文は`development/`などの正本を指す（移し終えるまではAGENTS.mdが持つ規則もある）。
 
 ## 文書の種類
 
@@ -18,6 +18,7 @@ dagqの文書は、決定、現在の設計、このrepositoryの開発の規則
 - `design/`: 現在の実装がどうなっているか。コードを読む前のショートカットとして保守する。
 - `development/`: このrepositoryの開発の今の規則（plannerのverify・paths・evidence・changeの選び方、workerのtestの範囲、testの制約、文書の規則など）。書き換えてよく、経緯はADRとplansに残す。AGENTS.md・plugin・reviewのsubagent定義は規則の本文を写さず、ここを参照する（[ADR-t1453-2](adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)）。
 - `plans/`: これから何を作るか。ステップの順序と完了条件を持つ（更新と状態の規則は[文書の規則](development/documents.md)の「plans」）。
+- `deploy/`: チームの版の制御側を配置する人が、releaseと同じ版で読む文書。今の実装の地図ではなく、IaCを置かない（入口は[deploy/README.md](deploy/README.md)、規則は[文書の規則](development/documents.md)の「deploy」）。
 
 人の判断の残し方は[文書の規則](development/documents.md)の「判断の記録」。
 

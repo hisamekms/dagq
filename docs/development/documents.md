@@ -1,7 +1,7 @@
 ---
 id: development-documents
 type: development
-title: このrepositoryの文書の規則（判断の記録・ADR・design・plans・frontmatter・workerの文書の照合・AGENTS.md・commit）
+title: このrepositoryの文書の規則（判断の記録・ADR・design・plans・deploy・frontmatter・workerの文書の照合・AGENTS.md・commit）
 status: current
 created: 2026-10-03
 owners:
@@ -18,13 +18,14 @@ related:
   - adr-t1942-1
   - adr-t1942-2
   - adr-t2352-1
+  - adr-t3990-5
   - docs-frontmatter
   - development-task-registration
 ---
 
 # このrepositoryの文書の規則
 
-`docs/`の文書とcommitを書く・変えるときの今の規則。読むのは、ADR・design・plansを書くかcommitするworker（AGENTS.mdの「### worker」から辿る）、ADRを書くtaskを登録するplannerとそれを見るplan review（[taskの登録](task-registration.md)の「ADRを書くtask」から辿る）、人。ADRの書き方の規則はこの文書が正本で、[文書の案内](../README.md)・[ADRの案内](../adr/README.md)・[frontmatter仕様](../frontmatter.md)はここを指す。frontmatterの欄・ADRの状態の意味・注記の書式はfrontmatter仕様、経緯はADR（[ADR-t598-1](../adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)ほか）が持つ。
+`docs/`の文書とcommitを書く・変えるときの今の規則。読むのは、ADR・design・plans・deployを書くかcommitするworker（AGENTS.mdの「### worker」から辿る）、ADRを書くtaskを登録するplannerとそれを見るplan review（[taskの登録](task-registration.md)の「ADRを書くtask」から辿る）、人。ADRの書き方の規則はこの文書が正本で、[文書の案内](../README.md)・[ADRの案内](../adr/README.md)・[frontmatter仕様](../frontmatter.md)はここを指す。frontmatterの欄・ADRの状態の意味・注記の書式はfrontmatter仕様、経緯はADR（[ADR-t598-1](../adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)ほか）が持つ。
 
 ## 判断の記録
 
@@ -208,11 +209,20 @@ CIとrunのreviewのプログラムが流し、[taskの登録](task-registration
 - 計画は実際の依存関係と完了条件に合わせて更新する。
 - 進行中の計画は`active`、完了した計画は`completed`に更新し、消さずに履歴として残す（状態の値は[frontmatter仕様](../frontmatter.md)の「Type-specific fields」）。
 
+## deploy
+
+`docs/deploy/`は、チームの版の制御側を配置する人に配る文書を置く（[ADR-t3990-5](../adr/2026-11-04-t3990-5-team-version-deploy-documents-and-reference-configurations-without-iac.md)決定1・2）。
+frontmatterは`type: deploy`で、idは`deploy-<slug>`、状態の値は[frontmatter仕様](../frontmatter.md)の「Type-specific fields」が持つ。
+
+- `docs/design/`と違い、読むのはこのrepositoryを開発する人とagentではなく配置する人で、配置するreleaseと同じtagの版を読む。
+- 今の実装の地図ではない。配置する側が守ること、配られる部品の使い方、参考の構成を書き、コードの入口と内部の仕組みはdesignに任せる。
+- TerraformやCloudFormationなどの特定の配置のIaCを置かない。参考の構成は文と図と要る値の表で書く。
+
 ## frontmatter
 
 frontmatterは[frontmatter仕様](../frontmatter.md)に従う。
 
-ADR以外の文書（design・development・plans、`docs/README.md`・`docs/frontmatter.md`・`docs/adr/README.md`も）のfrontmatterは`updated`と`last_verified`を持たない。文書を変えるtaskがこの行を書き換えると、同じ文書を変える2つのtaskが内容が重ならなくてもこの行で衝突するためで、経緯は[ADR-t1964-1](../adr/2026-10-07-t1964-1-non-adr-docs-drop-updated-and-last-verified.md)。いつ・どのtaskが変えたかは`git log -- <path>`で辿る。
+ADR以外の文書（design・development・plans・deploy、`docs/README.md`・`docs/frontmatter.md`・`docs/adr/README.md`も）のfrontmatterは`updated`と`last_verified`を持たない。文書を変えるtaskがこの行を書き換えると、同じ文書を変える2つのtaskが内容が重ならなくてもこの行で衝突するためで、経緯は[ADR-t1964-1](../adr/2026-10-07-t1964-1-non-adr-docs-drop-updated-and-last-verified.md)。いつ・どのtaskが変えたかは`git log -- <path>`で辿る。
 
 `created`とADRの`updated`の行は`YYYY-MM-DD`の日付だけを書き、行末にどのtaskが何を変えたかのコメント（`# task N`など）を書かない。どのtaskが変えたかはgitの履歴（着地のcommitの`Dagq-Task` trailer）が持つ。既存の文書（ADRも含む。決定と本文に触れないのでappend-onlyに当たらない）の日付の行にコメントがあれば、日付の値を変えずにコメントだけを消してよい。経緯は[ADR-t1854-1](../adr/2026-10-07-t1854-1-frontmatter-date-lines-hold-only-the-date.md)。`scripts/check-frontmatter-dates.sh`はfrontmatterの日付の行（frontmatter仕様が持たせるもの）にコメントがあれば、ファイルと行を出して落ちる検査で、CIとrunのプログラムのreview（`dagq.toml`の`[review.programs]`に挙げたとき）が実行する（docsを変えるtaskのverifyへの足し方は[taskの登録](task-registration.md)の「推奨の組み合わせ」）。
 
