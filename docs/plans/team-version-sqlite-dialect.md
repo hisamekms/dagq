@@ -37,7 +37,7 @@ git grep -h -o -E '<式>' -- src | wc -l       # 出現の数（行の数と違�
 
 ## 一覧
 
-扱う層の語は ADR-t3982-1 の語で、共有の SQL（両方の adapter が同じ文を流す）・方言の関数（共有の SQL に埋める断片を adapter ごとに返す）・adapter の中（adapter ごとに別の文やコードを持つ）・migration（schema の系列が持ち、Postgres の系列は後の ADR）の 4 つ。
+扱う層の語は ADR-t3982-1 の語で、共有の SQL（両方の adapter が同じ文を流す）・方言の関数（共有の SQL に埋める断片を adapter ごとに返す）・adapter の中（adapter ごとに別の文やコードを持つ）・migration（schema の系列が持ち、Postgres の系列は [ADR-t3986-1](../adr/2026-11-03-t3986-1-write-leader-fencing-trigger-placement-postgres-migration-series-archive-local-import-and-store-tests.md) 決定7）の 4 つ。
 
 | 種類 | grep の式 | src | migrations | PostgreSQL での候補 | 扱う層 |
 | --- | --- | --- | --- | --- | --- |
