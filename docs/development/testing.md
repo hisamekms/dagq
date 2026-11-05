@@ -77,7 +77,9 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
 - issueから直すtaskを登録するのはplanner。ただし`dagq.toml`に`[ci_watch]`を書いたrepositoryでは、supervisorの見張りが同じmainの失敗を`ci_failure`のfindingにして修正taskを作るので、plannerとinboxは`ci-failure`のissueからtaskを登録しない（見張りが止まっている間も。[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)決定8、[CI watch](../design/supervisor-lifecycle/ci-watch.md)）。issueは人に届く知らせとして残る。
 - `it-budget.yml`は毎晩と手動でmainの`dagq::it`だけをCIのrunnerで流し、JUnitから本数とtestごとの秒の和を求め、`.config/it-budget.toml`の予算を超えれば落ちる（比べるのは`scripts/check-it-budget.sh`、本数・秒・予算・超えた分・秒の上位のmoduleはjobのsummaryと成果物`it-budget`）。予算は今の値を超えないための天井で、着地の検証にも`ci.yml`の関門にも足さず、超えても着地は止まらない。
   - 超過の経路: `dagq.toml`の`[ci_watch]`の`scheduled_workflows`がこのworkflowを宣言しているので、mainの定時と手動の実行の失敗をCIの見張りが`ci_failure`と別の種類のfindingにし、runtimeのplannerが直すtaskを作る（[ADR-t3807-1](../adr/2026-10-31-t3807-1-ci-watch-reads-declared-scheduled-workflows-and-files-their-failures-as-findings.md)、[CI watch](../design/supervisor-lifecycle/ci-watch.md)の「定時のworkflow」）。
-  - 秒はCIのrunnerの秒で、本番の関門とは並列度が違い同じtestの秒が違う。予算の値を変えるのは、予算のファイルのコメントの見直しの条件か、ITを減らして天井を下げるとき（目標は[ITの分類](../plans/it-reduction.md)の「予算と目標」）。
+  - 秒はCIのrunnerの秒で、本番の関門とは並列度が違い同じtestの秒が違う。
+  - 秒だけの超過も本数の超過と同じく超過で、findingを受けたplannerが直すtaskを作る。plannerは成果物の秒の上位のmoduleと過去の夜の秒を読み、遅くなったtestやmoduleを特定できればそれを直すtaskにする。特定できずCIのrunnerの揺れと判断したときだけ、直近の夜の5回の秒の最大に約1割の余裕を付けた値へ`secs`を置き直すtaskにする（`decided`と`basis`も直す）。
+  - 本数の値はITを減らして天井を下げるときだけ変え、秒の値を下げるのもITを減らした後に行う（目標は[ITの分類](../plans/it-reduction.md)の「予算と目標」）。
 - integration testのfixtureのtemplate（`tests/common/template.rs`）は`CARGO_TARGET_TMPDIR`（`target`の`tmp`）に作られる。CIで`target/`をcacheするjobは、cacheの復元の直後と保存の前にそのdirを消す（cacheの後始末がファイルだけを消して中身の無いtemplateを残し、testを落とすため）。jobを足すときも同じstepを置く。
 
 ## 判断と境界のtest
