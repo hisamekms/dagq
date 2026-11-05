@@ -20,6 +20,10 @@
  },
  "filter": "kind(test) - binary(e2e)",
  "generated_at": "2026-10-06T18:00:00Z",
+ "platform": "linux",
+ "platform_gated_files": [
+  "src/infrastructure/launchd.rs"
+ ],
  "run_url": null,
  "tests": {
   "dagq-broker::serve::serve::starts_and_stops": {

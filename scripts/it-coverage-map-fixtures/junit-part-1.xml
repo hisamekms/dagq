@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="2" skipped="0" failures="1" errors="0" time="4.000">
+    <testsuite name="dagq::it" tests="2" skipped="0" errors="0" failures="1">
+        <testcase name="runtime_claim::claims_the_ready_task" classname="dagq::it" time="1.2345"/>
+        <testcase name="cli_read::reads_the_status" classname="dagq::it" time="2.5">
+            <failure type="test failure">assertion failed</failure>
+            <rerunFailure type="test failure" time="2.4">assertion failed</rerunFailure>
+        </testcase>
+    </testsuite>
+</testsuites>

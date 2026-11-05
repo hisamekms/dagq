@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="1" skipped="0" failures="0" errors="0" time="1.000">
+    <testsuite name="dagq-broker::serve" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="serve::starts_and_stops" classname="dagq-broker::serve" time="0.75">
+            <failure message="test passed on attempt 2/2 but is configured to fail when flaky" type="flaky failure"/>
+            <flakyFailure type="test failure" time="0.7">timed out</flakyFailure>
+        </testcase>
+    </testsuite>
+</testsuites>

@@ -3,16 +3,25 @@ name: IT coverage map
 # The map from the repository's files to the integration tests that run them,
 # with each test's time, the commit and the time it was built
 # (scripts/it-coverage-map.sh, whose top comment has the table's format, the
-# artifact and the time this job is expected to take; goal 157, stage 2). The
-# landing's narrowed IT reads the latest artifact with gh run download. A
-# separate workflow from ci.yml, so ci.yml's runs, concurrency and the
-# ci-failure issue (keyed on the workflow name CI) stay as they are.
+# artifacts and the time these jobs are expected to take). The landing's
+# narrowed IT reads the latest artifact with gh run download. A separate
+# workflow from ci.yml, so ci.yml's runs, concurrency and the ci-failure issue
+# (keyed on the workflow name CI) stay as they are.
+#
+# Built on Linux, in parallel jobs: a public repository's Linux runners are
+# free and no macOS slot is used, so the table can be rebuilt every hour and
+# fewer tests are "not in the table" at a landing. What only macOS runs is
+# missing from the table: a test reaching a file only through a macOS branch is
+# not tied to it. The table records its OS and the files with an OS condition,
+# and scripts/landing-it.py widens the IT when such a file changes; ci.yml's
+# macOS job stays the final gate (ADR-t3926-1).
 on:
   schedule:
-    # Once a day, 19:00 UTC (04:00 JST), after stress.yml's 18:00 UTC.
-    - cron: "0 19 * * *"
+    # Every hour, away from the top of the hour when GitHub's scheduler is busiest.
+    - cron: "23 * * * *"
+  # The supervisor's rebuild of an old table ([[ci_watch.freshness]] in dagq.toml).
   workflow_dispatch:
-  # The first table right after this job or its script lands, and a new one
+  # The first table right after these jobs or their script land, and a new one
   # whenever they change.
   push:
     branches: [main]
@@ -23,24 +32,31 @@ on:
       - scripts/it-coverage-map-fixtures/**
 
 concurrency:
-  # Only the latest table of a ref matters: a newer run supersedes an older
-  # one (a manual run on another branch does not cancel main's).
+  # One run of a ref at a time: a running one is left to finish and only the
+  # next one waits, so that a slow run still ends in a table (a manual run on
+  # another branch does not wait for main's).
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # The number of partitions: the same as the k of the matrix below.
+  PARTITIONS: 8
 
 jobs:
-  map:
-    name: file -> IT test map
-    # Apple Silicon, as ci.yml's checks job: the tests that only hold on
-    # macOS run here too.
-    runs-on: macos-26
-    timeout-minutes: 150
+  partition:
+    name: IT partition ${{ matrix.k }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      # The merge names every partition that is missing, and a rerun of the
+      # failed ones can complete the run.
+      fail-fast: false
+      matrix:
+        k: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v4
 
@@ -59,20 +75,70 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
 
+      # The instrumented build's own cache, one for every partition and apart
+      # from the plain one of ci.yml's linux job. One job saves it: all the
+      # jobs build the same thing.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: it-coverage-instrumented
+          save-if: ${{ matrix.k == 1 }}
 
       # The fixture templates under the tests' CARGO_TARGET_TMPDIR that a
       # restored cache can leave empty (the same step as ci.yml's).
       - name: Remove the target's tmp restored from the cache
         run: rm -rf target/tmp target/llvm-cov-target/tmp
 
+      # Ends with the part, failed and flaky tests included (their status is in
+      # it); fails only when the build does or no JUnit file comes out. Puts
+      # the seconds and the free disk in the job summary.
+      - name: Run the partition and export its coverage
+        run: sh scripts/it-coverage-map.sh --partition "${{ matrix.k }}/$PARTITIONS" "$RUNNER_TEMP/it-coverage-map-part-${{ matrix.k }}.json"
+
+      - name: Upload the part
+        uses: actions/upload-artifact@v4
+        with:
+          name: it-coverage-map-part-${{ matrix.k }}
+          path: ${{ runner.temp }}/it-coverage-map-part-${{ matrix.k }}.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+      # Keep the per-test profiles and exports and the templates out of the
+      # saved cache.
+      - name: Remove the work directory and the target's tmp before the cache is saved
+        if: always()
+        run: rm -rf target/it-coverage target/tmp target/llvm-cov-target/tmp
+
+  map:
+    # [ci_watch] and the landing read the workflow's latest success, so this
+    # name and the artifact's stay.
+    name: file -> IT test map
+    needs: partition
+    # Also after a failed partition: the merge says what is missing and fails,
+    # rather than the job being skipped.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # The commit's tree: the table lists its files with an OS condition.
+      - uses: actions/checkout@v4
+
       - name: Self-test
         run: sh scripts/it-coverage-map.sh --self-test
 
-      - name: Build the map
+      - name: Download the parts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: it-coverage-map-part-*
+          path: ${{ runner.temp }}/parts
+          merge-multiple: true
+
+      # Fails, and so uploads no table, when a part is missing, the commits or
+      # the tests disagree. Failed and flaky tests alone do not fail it.
+      - name: Merge the parts into the map
         env:
           IT_COVERAGE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: sh scripts/it-coverage-map.sh --run "$RUNNER_TEMP/it-coverage-map.json"
+        run: sh scripts/it-coverage-map.sh --merge "$PARTITIONS" "$RUNNER_TEMP/parts" "$RUNNER_TEMP/it-coverage-map.json"
 
       - name: Upload the map
         uses: actions/upload-artifact@v4
@@ -80,10 +146,4 @@ jobs:
           name: it-coverage-map
           path: ${{ runner.temp }}/it-coverage-map.json
           if-no-files-found: error
-          retention-days: 30
-
-      # Keep the per-test profiles and exports and the templates out of the
-      # saved cache.
-      - name: Remove the work directory and the target's tmp before the cache is saved
-        if: always()
-        run: rm -rf target/it-coverage target/tmp target/llvm-cov-target/tmp
+          retention-days: 3

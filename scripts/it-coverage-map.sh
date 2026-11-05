@@ -1,14 +1,22 @@
 #!/bin/sh
 # The map from the repository's files to the integration tests that run them
-# (goal 157, stage 2, "method B"): CI's nightly job
-# (.github/workflows/it-coverage-map.yml) runs every test of the integration
-# test binaries with coverage, one profile per test, and writes for each
-# repository file the tests whose run covered at least one of its lines, with
-# each test's time. The landing's narrowed IT (stage 3b) and the measurement
-# on past landings (stage 3a) read the latest table with gh run download.
+# (goal 157, stage 2, "method B"): CI's hourly Linux jobs
+# (.github/workflows/it-coverage-map.yml) run every test of the integration
+# test binaries with coverage, one profile per test, split into partitions
+# whose results one last job merges. The table has for each repository file
+# the tests whose run covered at least one of its lines, with each test's
+# time. The landing's narrowed IT (stage 3b) and the measurement on past
+# landings (stage 3a) read the latest table with gh run download.
+#
+# A table built on Linux lacks what only macOS runs: a test that only reaches a
+# line through a macOS branch is not tied to that file. The table therefore
+# records the OS it was built on and the files with an OS condition
+# (ADR-t3926-1); the macOS job of ci.yml stays the final gate for that code.
 # The record is listed in docs/design/measurement.md, section "SSOTとビュー".
 #
 # Usage: sh scripts/it-coverage-map.sh --run OUT.json
+#        sh scripts/it-coverage-map.sh --partition K/N OUT.json
+#        sh scripts/it-coverage-map.sh --merge N PARTS_DIR OUT.json
 #        sh scripts/it-coverage-map.sh --runner BINARY [ARGS...]
 #        sh scripts/it-coverage-map.sh --self-test
 #   --run OUT.json  build the workspace with coverage (cargo llvm-cov
@@ -17,6 +25,21 @@
 #                   cargo-nextest, the llvm-tools-preview component and
 #                   python3. The work directory is $IT_COVERAGE_WORK (default
 #                   target/it-coverage), removed at the start.
+#   --partition K/N OUT.json
+#                   the same build, then only partition K of N (nextest's
+#                   hash:K/N, the same split on every machine): run it, export
+#                   each test's coverage and write the partition's part (below)
+#                   to OUT.json. Needs what --run needs. The seconds of the
+#                   build, the tests and the export and the free disk go to
+#                   stderr and to $GITHUB_STEP_SUMMARY when it is set.
+#   --merge N PARTS_DIR OUT.json
+#                   merge the N parts (every *.json of PARTS_DIR) into the table
+#                   for the commit checked out here. Needs python3 and git, no
+#                   Rust tool. It writes no table when a part is missing, when
+#                   the parts disagree on N, the commit, the OS or the listed
+#                   tests, when a part's commit is not the one checked out, when
+#                   no test of a part has coverage, or when the tests that ran
+#                   are not the listed tests.
 #   --runner        the target runner nextest calls for each test binary
 #                   (CARGO_TARGET_<TRIPLE>_RUNNER, set by --run): in the run
 #                   phase it points LLVM_PROFILE_FILE at the test's own
@@ -24,8 +47,10 @@
 #   --self-test     check that the table is assembled from the fixtures under
 #                   scripts/it-coverage-map-fixtures/ (a nextest list, a JUnit
 #                   file and per-test llvm-cov export JSON) as expected.json
-#                   says, and the runner's choice of directory with a fake
-#                   test binary. Needs only sh and python3.
+#                   says, merging parts, finding the files with an OS
+#                   condition in a commit, the runner's choice of directory
+#                   with a fake test binary, and --partition and --merge with a
+#                   fake cargo. Needs only sh, python3 and git.
 #
 # Which tests: the nextest filterset "kind(test) - binary(e2e)" over the
 # workspace (--workspace), i.e. the integration test binaries: tests/it
@@ -41,7 +66,8 @@
 # the test binary and the non-test binaries of the nextest list) give the
 # files with a covered line. The tests run in $IT_COVERAGE_PARTITIONS
 # (default 8) hash partitions, each exported (and its profraw files removed)
-# before the next, so the profraw files of one partition at most are on disk.
+# before the next, so the profraw files of one partition at most are on disk;
+# --partition runs one of them, so each CI job holds only its own.
 # The nextest profile it-coverage (.config/nextest.toml) writes the JUnit file.
 #
 # Limits: a process a test spawns with a cleared environment does not get
@@ -58,6 +84,9 @@
 #    "generated_at": "2026-10-06T18:42:10Z",   # UTC, when the table was written
 #    "run_url": "https://github.com/.../actions/runs/N" or null,
 #    "filter": "kind(test) - binary(e2e)",
+#    "platform": "linux",               # the OS it was built on (linux, macos)
+#    "platform_gated_files": ["src/infrastructure/launchd.rs", ...],
+#                                       # below: code that differs by OS
 #    "tests": {
 #     "dagq::it::runtime_claim::claims_the_ready_task": {
 #      "binary_id": "dagq::it",         # nextest's binary id
@@ -84,30 +113,48 @@
 # repository (src/, tests/, ...) outside target/ that a test covered
 # at least one line of; each list is sorted. A file no test covers is absent.
 # A failed test keeps the files it covered. Coverage is per file, not per
-# line or function.
+# line or function. "platform_gated_files" has, sorted, the .rs files under src/
+# and crates/ in the tree of "commit" with a #[cfg(...)], #![cfg(...)] or
+# cfg!(...) (over several lines too) that names target_os or
+# target_vendor = "apple"; comments and string literals do not count.
+#
+# A part (JSON, --partition's OUT.json; the artifact
+# it-coverage-map-part-K's it-coverage-map-part-K.json, kept 1 day): what the
+# merge needs of a job, with no path of its machine:
+#   {
+#    "version": 1,
+#    "commit": "<full SHA>",
+#    "platform": "linux",
+#    "partition": {"index": 1, "count": 8},
+#    "listed": [["dagq::it", "runtime_claim::x"], ...],  # every partition's
+#    "results": [["dagq::it", "runtime_claim::x", 1.234, "passed"], ...],
+#    "covered": [["dagq::it", "runtime_claim::x", ["src/app/claim.rs", ...]], ...]
+#   }
 #
 # Where: the GitHub Actions artifact "it-coverage-map" (the one file
 # it-coverage-map.json) of the workflow "IT coverage map"
-# (.github/workflows/it-coverage-map.yml), kept 30 days. It runs daily at
-# 19:00 UTC, on workflow_dispatch, and on a push to main that changes the
-# workflow, this script, it-coverage-map.py or the fixtures. The latest:
+# (.github/workflows/it-coverage-map.yml), kept 3 days. The workflow's on: has
+# when it runs. The latest:
 #   gh run list --workflow it-coverage-map.yml --branch main --status success \
 #     --limit 1 --json databaseId --jq '.[0].databaseId'
 #   gh run download <id> --name it-coverage-map
 #
-# Time (an estimate, not yet measured): the build with coverage 10-20 min,
-# the tests about as long as CI's cargo llvm-cov nextest step (the IT take
-# about 3,000 s of test time, on the runner's 3 CPUs 20-30 min), the export
-# 10-25 min (about 1,100 tests, 1-3 s each, as many at once as CPUs), plus
-# each of the 8 partitions waiting for its slowest test: about 45-75 min in
-# all. The job's timeout-minutes is 150. The first runs' times
-# replace this estimate.
+# Time (an estimate from the Spike docs/plans/it-coverage-map-linux-spike.md,
+# not yet measured): with 8 partitions on the runner's 4 CPUs, one job about
+# 17 min (24 min when the cache of the instrumented dependencies misses and the
+# tests are slower), the merge about 2 min, a whole run 19-26 min. The build is
+# the floor: more partitions shorten only the tests and the export. The job
+# summaries of the first runs replace this estimate.
 #
-# Exit status: 0 when the table is written (failed tests included: they are
-# in "tests" with status failed), 1 when the self-test fails or the table
-# cannot be built (also when no test got coverage: a build without coverage
-# or a broken runner), 2 on a usage error. The repository's path must have no
-# spaces (the runner's command and the --junit options are split on them).
+# Exit status: --run: 0 when the table is written (failed tests included: they
+# are in "tests" with status failed), 1 when the table cannot be built (also
+# when no test got coverage: a build without coverage or a broken runner).
+# --partition: 0 when the part is written (failed and flaky tests included), not
+# 0 when the build fails or nextest wrote no JUnit file. --merge: 0 when the
+# table is written, failed and flaky tests included (status failed, flaky); 1
+# for the disagreements above. --self-test: 1 when it fails. 2 on a usage error.
+# The repository's path must have no spaces (the runner's command and the
+# --junit options are split on them).
 set -eu
 
 me=it-coverage-map
@@ -118,7 +165,7 @@ filter='kind(test) - binary(e2e)'
 
 usage() {
   echo "$me: $1" >&2
-  echo "usage: sh scripts/it-coverage-map.sh --run OUT.json | --runner BINARY [ARGS...] | --self-test" >&2
+  echo "usage: sh scripts/it-coverage-map.sh --run OUT.json | --partition K/N OUT.json | --merge N PARTS_DIR OUT.json | --runner BINARY [ARGS...] | --self-test" >&2
   exit 2
 }
 
@@ -150,14 +197,13 @@ runner() {
   exec "$@"
 }
 
-run() {
-  out=$1
+# instrument: the empty work directory and the environment of the instrumented
+# build, in the repository's root. Sets root, commit and work.
+instrument() {
   root=$(git rev-parse --show-toplevel)
   commit=$(git -C "$root" rev-parse HEAD)
   work=${IT_COVERAGE_WORK:-$root/target/it-coverage}
   case $work in /*) ;; *) work=$(pwd)/$work ;; esac
-  partitions=${IT_COVERAGE_PARTITIONS:-8}
-  case $partitions in '' | *[!0-9]* | 0) usage "IT_COVERAGE_PARTITIONS is not a positive number: $partitions" ;; esac
   rm -rf "$work"
   mkdir -p "$work/tests" "$work/other"
   cd "$root"
@@ -168,7 +214,7 @@ run() {
   # built before without coverage would be reused: clean the workspace's
   # artifacts (not the dependencies') first, as cargo-llvm-cov's README says.
   # (Captured first: eval of a failed substitution would hide the failure.)
-  envs=$(cargo llvm-cov show-env --export-prefix)
+  envs=$(cargo llvm-cov show-env --sh)
   eval "$envs"
   cargo llvm-cov clean --workspace
   LLVM_PROFILE_FILE=$work/other/%p-%1m.profraw
@@ -178,6 +224,13 @@ run() {
   IT_COVERAGE_TESTS_DIR=$work/tests
   IT_COVERAGE_OTHER_DIR=$work/other
   export IT_COVERAGE_TESTS_DIR IT_COVERAGE_OTHER_DIR
+}
+
+run() {
+  out=$1
+  partitions=${IT_COVERAGE_PARTITIONS:-8}
+  case $partitions in '' | *[!0-9]* | 0) usage "IT_COVERAGE_PARTITIONS is not a positive number: $partitions" ;; esac
+  instrument
 
   cargo nextest list --locked --workspace --message-format json -E "$filter" > "$work/list.json"
   target=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["rust-build-meta"]["target-directory"])' < "$work/list.json")
@@ -202,7 +255,66 @@ run() {
     ${IT_COVERAGE_RUN_URL:+--run-url "$IT_COVERAGE_RUN_URL"}
 }
 
+free_disk() {
+  df -h "$root" | awk 'END { print $4 }'
+}
+
+# partition K N OUT: one partition's tests and its part. nextest's list builds
+# the test binaries, so its time is the build's and its failure ends the job.
+partition() {
+  k=$1
+  n=$2
+  out=$3
+  instrument
+  disk_start=$(free_disk)
+  t0=$(date +%s)
+  cargo nextest list --locked --workspace --message-format json -E "$filter" > "$work/list.json"
+  t1=$(date +%s)
+  disk_built=$(free_disk)
+  target=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["rust-build-meta"]["target-directory"])' < "$work/list.json")
+  # A failed test fails nextest; the part still records it (status failed). If
+  # nextest stops short, the tests it did not reach fail the merge.
+  cargo nextest run --locked --workspace --profile it-coverage \
+    --partition "hash:$k/$n" -E "$filter" || echo "$me: partition $k/$n: nextest exited $?" >&2
+  t2=$(date +%s)
+  disk_tested=$(free_disk)
+  if [ ! -f "$target/nextest/it-coverage/junit.xml" ]; then
+    echo "$me: partition $k/$n: nextest wrote no JUnit file" >&2
+    exit 1
+  fi
+  python3 "$py" export --tests-dir "$work/tests" --list "$work/list.json"
+  t3=$(date +%s)
+  python3 "$py" part --tests-dir "$work/tests" --list "$work/list.json" \
+    --junit "$target/nextest/it-coverage/junit.xml" --root "$root" \
+    --commit "$commit" --index "$k" --count "$n" --out "$out"
+  report=$(cat <<EOF
+## IT coverage partition $k/$n
+
+| phase | seconds | free disk after |
+|---|---|---|
+| start | | $disk_start |
+| build | $((t1 - t0)) | $disk_built |
+| IT | $((t2 - t1)) | $disk_tested |
+| export | $((t3 - t2)) | $(free_disk) |
+EOF
+  )
+  printf '%s\n' "$report" >&2
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    printf '%s\n' "$report" >> "$GITHUB_STEP_SUMMARY"
+  fi
+}
+
+merge() {
+  root=$(git rev-parse --show-toplevel)
+  python3 "$py" merge --parts-dir "$2" --count "$1" --root "$root" \
+    --commit "$(git -C "$root" rev-parse HEAD)" --out "$3" \
+    ${IT_COVERAGE_RUN_URL:+--run-url "$IT_COVERAGE_RUN_URL"}
+}
+
 self_test() {
+  # A hook or a landing may run this with GIT_DIR set; the throwaway
+  # repositories below must not touch that one.
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
   python3 "$py" self-test "$here/it-coverage-map-fixtures" || {
     echo "$me: self-test: FAILED (the table)" >&2
     exit 1
@@ -238,7 +350,96 @@ mod_a::one"
     echo "$me: self-test: FAILED (the runner)" >&2
     exit 1
   fi
+  self_test_modes
+  if [ "$fail" -ne 0 ]; then
+    echo "$me: self-test: FAILED (--partition and --merge)" >&2
+    exit 1
+  fi
   echo "$me: self-test: ok"
+}
+
+# self_test_modes: --partition and --merge end to end in a throwaway repository
+# with a fake cargo and rustc: partition 1 has a failed test, partition 2 a flaky
+# one, and nextest exits 100 for both. Uses $tmp and check from self_test.
+self_test_modes() {
+  fx=$here/it-coverage-map-fixtures
+  repo=$tmp/repo
+  mkdir -p "$repo/src" "$tmp/bin" "$tmp/parts"
+  printf '#[cfg(target_os = "macos")]\nfn f() {}\n' > "$repo/src/gated.rs"
+  git -C "$repo" init -q
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=self-test -c user.email=self-test@example.invalid \
+    -c core.hooksPath=/dev/null commit -q -m fixture
+  sed "s|/work/dagq|$repo|g" "$fx/list.json" > "$tmp/list.json"
+  python3 - "$tmp/list.json" <<'EOF'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    listing = json.load(f)
+del listing["rust-suites"]["dagq::it"]["testcases"]["cli_read::did_not_run"]
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(listing, f)
+EOF
+  printf '#!/bin/sh\necho "host: x86_64-unknown-linux-gnu"\n' > "$tmp/bin/rustc"
+  cat > "$tmp/bin/cargo" <<EOF
+#!/bin/sh
+# The fake's calls: llvm-cov show-env|clean, nextest list|run.
+case "\$1 \$2" in
+  "llvm-cov show-env") [ "\$3" = --sh ] || exit 9; echo 'export FAKE_COVERAGE=1' ;;
+  "llvm-cov clean") ;;
+  "nextest list")
+    [ -z "\${FAKE_BUILD_FAILS:-}" ] || exit 101
+    cat "$tmp/list.json" ;;
+  "nextest run")
+    case "\$*" in
+      *hash:1/2*) k=1; dirs="it/claims-the-ready-task it/reads-the-status" ;;
+      *hash:2/2*) k=2; dirs="broker-serve/starts-and-stops" ;;
+      *) exit 9 ;;
+    esac
+    for d in \$dirs; do
+      mkdir -p "\$IT_COVERAGE_TESTS_DIR/\$d"
+      cp "$fx/tests/\$d/test.txt" "$fx/tests/\$d/binary.txt" "\$IT_COVERAGE_TESTS_DIR/\$d/"
+      sed "s|/work/dagq|$repo|g" "$fx/tests/\$d/export.json" > "\$IT_COVERAGE_TESTS_DIR/\$d/export.json"
+    done
+    mkdir -p "$repo/target/nextest/it-coverage"
+    cp "$fx/junit-part-\$k.xml" "$repo/target/nextest/it-coverage/junit.xml"
+    exit 100 ;;
+  *) exit 9 ;;
+esac
+EOF
+  chmod +x "$tmp/bin/cargo" "$tmp/bin/rustc"
+  in_repo() {
+    (cd "$repo" && PATH=$tmp/bin:$PATH IT_COVERAGE_WORK=$tmp/work LLVM_COV=unused LLVM_PROFDATA=unused "$@")
+  }
+  status=0
+  in_repo env GITHUB_STEP_SUMMARY="$tmp/summary.md" sh "$script" --partition 1/2 "$tmp/parts/1.json" 2> "$tmp/err" || status=$?
+  check "--partition exit status with a failed test" "$status" 0
+  grep -q '^| IT | [0-9]* | ' "$tmp/summary.md" 2> /dev/null || {
+    echo "$me: self-test: no job summary: $(cat "$tmp/err")" >&2
+    fail=1
+  }
+  status=0
+  in_repo env FAKE_BUILD_FAILS=1 sh "$script" --partition 2/2 "$tmp/parts/broken.json" 2> /dev/null || status=$?
+  check "--partition exit status with a failed build" "$status" 101
+  check "--partition part with a failed build" "$(ls "$tmp/parts" | grep -c broken || :)" 0
+  status=0
+  in_repo sh "$script" --merge 2 "$tmp/parts" "$tmp/missing.json" 2> /dev/null || status=$?
+  check "--merge exit status with a missing part" "$status" 1
+  check "--merge table with a missing part" "$(ls "$tmp" | grep -c missing.json || :)" 0
+  status=0
+  in_repo sh "$script" --partition 2/2 "$tmp/parts/2.json" 2> "$tmp/err" || status=$?
+  check "--partition exit status with a flaky test" "$status" 0
+  status=0
+  in_repo sh "$script" --merge 2 "$tmp/parts" "$tmp/map.json" 2> "$tmp/err" || status=$?
+  check "--merge exit status with a failed test" "$status" 0
+  got=$(python3 - "$tmp/map.json" <<'EOF' 2> /dev/null || :
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    t = json.load(f)
+print(t["platform_gated_files"], sorted(v["status"] for v in t["tests"].values()),
+      len(t["files"]))
+EOF
+  )
+  check "--merge table" "$got" "['src/gated.rs'] ['failed', 'flaky', 'passed'] 5"
 }
 
 [ $# -ge 1 ] || usage "no mode"
@@ -247,6 +448,20 @@ case $1 in
     [ $# -eq 2 ] || usage "--run needs OUT.json"
     case $2 in /*) out=$2 ;; *) out=$(pwd)/$2 ;; esac
     run "$out"
+    ;;
+  --partition)
+    [ $# -eq 3 ] || usage "--partition needs K/N and OUT.json"
+    case $2 in *[!0-9/]* | */*/*) usage "--partition: not K/N: $2" ;; [1-9]*/[1-9]*) ;; *) usage "--partition: not K/N: $2" ;; esac
+    k=${2%%/*}
+    n=${2#*/}
+    { [ "$k" -ge 1 ] && [ "$k" -le "$n" ]; } || usage "--partition: not K/N with 1 <= K <= N: $2"
+    case $3 in /*) out=$3 ;; *) out=$(pwd)/$3 ;; esac
+    partition "$k" "$n" "$out"
+    ;;
+  --merge)
+    [ $# -eq 4 ] || usage "--merge needs N, PARTS_DIR and OUT.json"
+    case $2 in '' | *[!0-9]* | 0) usage "--merge: N is not a positive number: $2" ;; esac
+    merge "$2" "$3" "$4"
     ;;
   --runner)
     shift
