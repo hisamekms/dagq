@@ -172,6 +172,8 @@ pub(super) struct FakeAgent {
     review_prompts: Mutex<Vec<String>>,
     /// What runs as the next review job starts, before it answers, once.
     on_review: Mutex<Option<super::host::Hook>>,
+    /// What runs as the next worker turn starts, once.
+    on_turn: Mutex<Option<super::host::Hook>>,
     /// The session of each worker's turn, in order: `start <name>` for a
     /// new one, `resume <name>` for one gone on.
     turn_sessions: Mutex<Vec<String>>,
@@ -212,6 +214,7 @@ impl FakeAgent {
             reviewed_in: Mutex::default(),
             review_prompts: Mutex::default(),
             on_review: Mutex::default(),
+            on_turn: Mutex::default(),
             turn_sessions: Mutex::default(),
             turn_models: Mutex::default(),
             turn_prompts: Mutex::default(),
@@ -295,6 +298,14 @@ impl FakeAgent {
     pub(super) fn on_review(&self, hook: super::host::Hook) {
         *self
             .on_review
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Run `hook` as the next worker turn starts, before writing its receipt.
+    pub(super) fn on_next_turn(&self, hook: super::host::Hook) {
+        *self
+            .on_turn
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
@@ -608,6 +619,14 @@ impl Spawner for FakeAgent {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(command.get_stdin().unwrap_or_default().to_owned());
+                let hook = self
+                    .on_turn
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
                 let turn = self.turn(run_dir, &session.to_string_lossy())?;
                 let held = self
                     .held_turn
@@ -644,7 +663,22 @@ impl Spawner for FakeAgent {
                     hook();
                 }
                 let verdict = self.next_verdict()?;
-                if verdict == login_wall() {
+                if verdict["wiring_start_failed"] == true {
+                    bail!("the test reviewer cannot start this review");
+                }
+                if let Some(exit_code) = verdict["wiring_exit"].as_i64() {
+                    code = i32::try_from(exit_code)?;
+                    if let Streams::Files { stdout, stderr } = streams {
+                        let message = verdict["wiring_error"].as_str().unwrap_or("broken");
+                        self.files.write(stderr, message.as_bytes())?;
+                        self.files.write(stdout, b"")?;
+                        return Ok(Box::new(Ended {
+                            pid: self.record_start(program),
+                            exit: exit(code),
+                        }));
+                    }
+                    "broken".to_owned()
+                } else if verdict == login_wall() {
                     code = 1;
                     "Invalid API key · Please run /login\n".to_owned()
                 } else {

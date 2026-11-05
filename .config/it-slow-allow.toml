@@ -840,12 +840,6 @@ name = "runtime_resume::an_unapproved_run_resolved_by_an_earlier_resume_is_valid
 reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: session の無い resume の後の validation と review の流れを実際の supervisor で確かめる"
 task = 1903
 
-# 6.4s
-[[test]]
-name = "runtime_review::a_review_that_exits_non_zero_once_is_reviewed_again_and_lands"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 非 0 で終わった review の job が同じ review の中で 1 回やり直されて着地することを実際のプロセスで確かめる。やり直しの判断は domain::review_jobs の unit test"
-task = 1903
-
 # 5.9s
 [[test]]
 name = "runtime_review::a_timed_out_review_job_runs_once_more_then_fails"
@@ -863,12 +857,6 @@ task = 1903
 name = "review_subagents::the_real_claude_review_jobs_keep_their_limits"
 reason = "B 境界（プロセス）: 実 Claude Code の process が dagq の全体の review と agent の job の argv では worktree の settings と agents を読まず、settings の deny と宣言した道具に限られることを、それぞれの対照との実の呼び出しで確かめる。argv の組み立ては infrastructure::adapters の unit test"
 task = 2251
-
-# 6.0s
-[[test]]
-name = "runtime_review::a_review_past_the_revise_limit_that_does_not_pass_asks_a_person_and_land_lands_it"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 生きている session に run を通した上限まで revise を返した後の、コードの指摘を持つ review の send_back が、終了の依頼と close の後に approve_landing の ask になり、その land の答えで着地することを実際の supervisor と worker の session で確かめる。上限と収束の判断は domain::run::history・domain::review_reason と supervise::landing の unit test"
-task = 2599
 
 # 5.3s
 [[test]]
@@ -1302,12 +1290,6 @@ name = "review_follow_ups::a_revise_with_follow_ups_records_them_once_across_the
 reason = "B 境界（SQLite・supervisor の配線）: revise の follow_ups が差し戻しの理由にならず、同じ run の次の回の review が同じ文書を返しても queue の draft が増えないことを、実際の revise の往復で確かめる。重複の判断は domain::follow_up の unit test"
 task = 2352
 
-# 5.120s (stress 5 on the worker's host)
-[[test]]
-name = "runtime_review::a_passing_review_exits_the_live_session_and_lands_it"
-reason = "B 境界（プロセス・supervisor の配線）: pass の review が生きている session を終わらせて着地するまでの event の順と、review の prompt に載る verdict の形を実際の supervisor で確かめる"
-task = 2352
-
 # about 10s (stress 5 under the host's load of other runs, task 2424)
 [[test]]
 name = "verification_container::a_waiting_run_in_a_container_whose_recheck_container_does_not_start_is_not_judged"
@@ -1440,12 +1422,6 @@ name = "runtime_verify_retry::a_failure_of_the_code_is_resumed_as_before"
 reason = "境界（プロセス）: integrate retries a killed command and resumes on the code's failure"
 task = 2273
 
-# 6.202s under load (task 2521)
-[[test]]
-name = "runtime_review::a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person"
-reason = "境界（supervisorの配線）: a failed review closes the session and opens its approve_landing ask with its options through SQLite"
-task = 2521
-
 [[test]]
 name = "cli_version::a_supervisor_stops_by_itself_once_its_owner_is_gone"
 reason = "B 境界（守る境界）: プロセス。実バイナリのsupervisorがSIGKILLされたownerを見て自分でdrainし登録を消すこと（判断はsupervise::handoffのunit test）"
@@ -1455,12 +1431,6 @@ task = 1808
 name = "cli_version::a_supervisor_handed_over_by_an_exec_keeps_its_owner"
 reason = "B 境界（守る境界）: プロセス。installの引き継ぎのexecがownerのenvを保ち、exec後のsupervisorもownerで止まること"
 task = 1808
-
-# 7.7〜8.6s (stress 60s under the host's load of other runs, task 2599)
-[[test]]
-name = "runtime_review::a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: revise の依頼を生きている session の次の turn に書き、書き直した receipt を validation と 2 回目の review に通して着地するまでの event の順と依頼の文面を実際の supervisor と worker の session で確かめる。依頼の文面は prompt の unit test"
-task = 2599
 
 # 7.3〜8.8s (stress 60s under the host's load of other runs, task 2599)
 [[test]]
@@ -1678,12 +1648,6 @@ name = "runtime_integrate::conflict_free_run_lands_as_one_squash_commit_and_rele
 reason = "B 境界（守る境界）: the landing's wiring to Git: a run lands as one squash commit on main and its dependents are released in SQLite"
 task = 2394
 
-# 5.206s in task 2394's stress, whose change to it was the type of its kind comparisons
-[[test]]
-name = "runtime_review::integrate_by_hand_closes_the_landing_and_blocked_asks_of_the_run"
-reason = "B 境界（守る境界）: a person's `integrate` lands a reviewed run through Git and closes its asks in SQLite"
-task = 2394
-
 # 5.991s in task 2394's stress, whose change to it was the type of its kind comparisons
 [[test]]
 name = "plan_review::a_plan_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_closed"
@@ -1700,18 +1664,6 @@ task = 2394
 [[test]]
 name = "runtime_handoff::a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on"
 reason = "B 境界（守る境界）: adopt across processes: the supervisor process that continues a handoff takes the run over under the same token while the session runs"
-task = 2394
-
-# 4.795s, near the threshold, in task 2394's stress, whose change to it was the type of its kind comparisons
-[[test]]
-name = "runtime_review::a_failed_review_span_ends_with_its_job_not_with_the_exit"
-reason = "B 境界（守る境界）: the supervisor's wiring of the review job processes and the span and ask it records in SQLite when a run of the job cannot start"
-task = 2394
-
-# 4.703s, near the threshold, in task 2394's stress, whose change to it was the type of its kind comparisons
-[[test]]
-name = "runtime_review::the_default_test_reviewer_skips_retry_but_still_asks_after_its_job"
-reason = "B 境界（守る境界）: the supervisor's wiring of the review job process and the landing ask it opens in SQLite after the job"
 task = 2394
 
 # 4.597s, near the threshold, in task 2394's stress, whose change to it was the type of its kind comparisons

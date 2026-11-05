@@ -1207,6 +1207,13 @@ pub fn review_program_host(
 mod tests {
     use super::*;
 
+    /// Production retries a review it could not read; the wiring tests turn
+    /// the retry off through their own settings.
+    #[test]
+    fn the_options_retry_an_unreadable_review_by_default() {
+        assert!(SuperviseOptions::new(4, true).retry_unreadable_review);
+    }
+
     /// A supervisor watches the end of a review's job (and of every job its
     /// passes reap) once per pass, pausing the `tick` its options give
     /// between two passes: the production's is a second, and one a caller

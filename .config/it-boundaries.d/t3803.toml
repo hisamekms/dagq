@@ -682,13 +682,6 @@ reason = "report が supervisor の PATH の d2 と TALA を実の process と�
 task = 3803
 
 [[boundary]]
-id = "passing-review-exits-live-session-and-lands"
-kind = "supervisorの配線"
-test = "runtime_review::a_passing_review_exits_the_live_session_and_lands_it"
-reason = "session が開いたまま受けた receipt を review し、pass で session に exit を求めて閉じてから着地させることは、実の supervisor の review と session の配線でしか確かめられない。verdict から次の手を選ぶ判断は supervise::execution::landing の unit test"
-task = 3803
-
-[[boundary]]
 id = "review-job-stopped-at-timeout"
 kind = "プロセス"
 test = "runtime_review::a_timed_out_review_job_runs_once_more_then_fails"

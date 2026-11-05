@@ -235,35 +235,3 @@ fn a_retry_inherits_the_raised_step() {
             .is_none()
     );
 }
-
-/// The one revise of `runtime_review`'s revise test switched the live
-/// session from Opus medium to high before the request, and `stats`
-/// counts it.
-pub(crate) fn assert_raised_by_revise(requested: &Value, backend: &TestWorkspace, db: &Path) {
-    assert_eq!(session(requested), opus("high"), "{requested}");
-    assert_eq!(
-        requested["escalated_from"],
-        json!({"model": "claude-opus-5-5", "effort": "medium"})
-    );
-    assert_eq!(requested["escalation_reason"], "revise");
-    assert_eq!(revise_efforts(backend), ["/effort high"]);
-    {
-        let escalations = &stats_full(db)["escalations"];
-        assert_eq!(escalations["count"], 1, "{escalations}");
-        assert_eq!(escalations["revises"], 1);
-        assert_eq!(escalations["by_reason"], json!({"revise": 1}));
-    }
-    // `db` is read only by the block above while it is stopped.
-    let _ = db;
-}
-
-/// Each of three revises raised the live session a step up to the top:
-/// high, then xhigh, where the third stays.
-pub(crate) fn assert_revises_raised(detail: &dagq::domain::TaskDetail, backend: &TestWorkspace) {
-    let efforts: Vec<&Value> = payloads(detail, "revise_requested")
-        .iter()
-        .map(|p| &p["effort"])
-        .collect();
-    assert_eq!(efforts, [&json!("high"), &json!("xhigh")]);
-    assert_eq!(revise_efforts(backend), ["/effort high", "/effort xhigh"]);
-}

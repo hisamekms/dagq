@@ -129,6 +129,7 @@ pub(super) struct Wiring {
     codex: bool,
     /// `[provider_fallback] workers`; on by default.
     worker_fallback: bool,
+    retry_review: bool,
     /// `[fresh_session]`; no threshold by default.
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
     /// The slots (`--parallel`) of the supervisors started from now on;
@@ -192,6 +193,7 @@ impl Wiring {
             pid,
             codex: false,
             worker_fallback: true,
+            retry_review: false,
             fresh_session: Default::default(),
             parallel: Arc::new(AtomicUsize::new(2)),
             passes: Arc::new(AtomicU64::new(0)),
@@ -204,6 +206,58 @@ impl Wiring {
             sessions,
             ci_watch: None,
         }
+    }
+
+    /// Retry a review job that gives no readable verdict once, as production does.
+    pub(super) fn with_review_retry(mut self) -> Self {
+        self.retry_review = true;
+        self
+    }
+
+    /// A person's integrate on this wiring's ports, including the approval,
+    /// the landing and the closing of asks; no external command runs.
+    pub(super) fn integrate(&self, task: TaskId) {
+        use crate::application::integrate::{IntegrateTarget, Integration, Integrator};
+        let mut queue = self.queue();
+        let mut ctx = Integration {
+            queue: &mut queue,
+            repository: &self.git,
+            verifier: &*self.verifier,
+            container: &Nothing,
+            remote: Some(&self.git),
+            files: &*self.files,
+            common_dir: "/wiring/repo/.git",
+            clock: &*self.generators.clock,
+            ids: &*self.generators.ids,
+            processes: &*self.processes,
+            pid: self.pid,
+            load_average: || None,
+            disk: None,
+            retry_disk: None,
+            sccache: None,
+            verification_tokens: &MemoryVerificationTokens::default(),
+            verification_containers: &Nothing,
+            heavy_turn: None,
+            steps: None,
+            handing_off: None,
+            programs: None,
+            build: crate::VERSION,
+        };
+        let integrator = Integrator::of_process(self.pid);
+        let request = integrator
+            .approve(
+                &mut ctx,
+                &ActorContext::user(),
+                IntegrateTarget::Task(task),
+                Path::new(CHECKOUT),
+            )
+            .expect("approve the landing")
+            .expect("a run awaits integration");
+        let outcome = integrator.land(&mut ctx, &request).expect("land the run");
+        assert_eq!(
+            serde_json::to_value(outcome).unwrap()["outcome"],
+            "integrated"
+        );
     }
 
     /// The wiring whose supervisor watches the CI through `port`.
@@ -524,6 +578,7 @@ impl Wiring {
                 pid: self.pid,
                 codex: self.codex,
                 worker_fallback: self.worker_fallback,
+                retry_review: self.retry_review,
                 fresh_session: self.fresh_session,
                 parallel: self.parallel.load(std::sync::atomic::Ordering::SeqCst),
                 passes: self.passes.clone(),
@@ -601,6 +656,7 @@ struct Parts {
     pid: u32,
     codex: bool,
     worker_fallback: bool,
+    retry_review: bool,
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
     parallel: usize,
     passes: Arc<AtomicU64>,
@@ -745,13 +801,16 @@ impl Parts {
         };
         supervise::supervise(
             &ports,
-            &settings(
-                self.stop,
-                self.worker_fallback,
-                self.fresh_session,
-                self.parallel,
-                self.passes,
-            ),
+            &LoopSettings {
+                retry_unreadable_review: self.retry_review,
+                ..settings(
+                    self.stop,
+                    self.worker_fallback,
+                    self.fresh_session,
+                    self.parallel,
+                    self.passes,
+                )
+            },
         )
     }
 }
