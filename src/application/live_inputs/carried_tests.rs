@@ -33,6 +33,9 @@ struct EventLog {
     /// How many reads of the newest id answer the one before it, as if
     /// the newest came after them.
     behind: Cell<usize>,
+    /// How many kinds and how many events each read of `events_of_between`
+    /// asked for.
+    work_reads: RefCell<Vec<(usize, usize)>>,
 }
 
 impl EventLog {
@@ -45,6 +48,7 @@ impl EventLog {
             answered_ids: RefCell::new(HashSet::new()),
             pages: Cell::new(0),
             behind: Cell::new(0),
+            work_reads: RefCell::new(Vec::new()),
         }
     }
 
@@ -181,12 +185,19 @@ impl EventStore for EventLog {
         upto: EventId,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
-        let page = self
-            .of_kinds(kinds)
-            .into_iter()
-            .filter(|event| event.id > after && event.id <= upto)
+        self.work_reads.borrow_mut().push((kinds.len(), limit));
+        let events = self.events.borrow();
+        // In id order: a read walks on from where the last one ended, as
+        // the queue's index does.
+        let from = events.partition_point(|event| event.id <= after);
+        let page = events[from..]
+            .iter()
+            .take_while(|event| event.id <= upto)
+            .filter(|event| kinds.contains(&event.kind.as_str()))
             .take(limit)
+            .cloned()
             .collect();
+        drop(events);
         Ok(self.answered(page))
     }
     fn events_between(
@@ -707,4 +718,50 @@ fn a_first_pass_reads_again_past_events_that_came_while_it_read() {
     assert_eq!(seeded(0), newest);
     assert_eq!(seeded(SEED_ATTEMPTS - 1), newest);
     assert_eq!(seeded(SEED_ATTEMPTS), EventId::new(0));
+}
+
+/// The first pass reads the work events in pages of
+/// [`WORK_EVENTS_PER_READ`], a run's claim and its landing falling in
+/// different pages, and the history is that of the same events read at once
+/// and judges as the whole history: the deferrals' read answers each run's
+/// claim too, and it counts once.
+#[test]
+fn a_first_pass_folds_the_work_events_page_by_page() {
+    let finished = 2 * WORK_EVENTS_PER_READ + 7;
+    let (runs, all) = ended_queue(finished, finished + 1);
+    let goals = goals(&runs);
+    let (whole_inputs, whole) = judged(&runs, &all, |live| outlier_thresholds(&all, &goals, live));
+    assert!(!whole_inputs.outliers.is_empty());
+    let log = EventLog::new(runs.clone(), all.clone());
+    let mut seeded = LiveHistory::default();
+    seed_history(&log, &mut seeded).unwrap();
+    let reads = log.work_reads.borrow().clone();
+    let work_kinds = first_pass_reads().work.len();
+    let work_reads = reads
+        .iter()
+        .filter(|(kinds, _)| *kinds == work_kinds)
+        .count();
+    assert!(work_reads > 2, "{reads:?}");
+    assert!(
+        reads.iter().all(
+            |read| *read == (work_kinds, WORK_EVENTS_PER_READ) || *read == (1, EVENTS_PER_READ)
+        ),
+        "{reads:?}"
+    );
+    let kinds: Vec<&str> = first_pass_reads()
+        .kinds()
+        .into_iter()
+        .map(EventKind::as_str)
+        .collect();
+    let mut at_once = LiveHistory::seeded(all.last().unwrap().id, log.of_kinds(&kinds));
+    for run in at_once.unsettled() {
+        at_once.refold(&run, &log.run_events(&run).unwrap());
+    }
+    assert_eq!(seeded, at_once);
+    let (_, carried) = carried_events(&log, &mut seeded).unwrap();
+    let (inputs, judgments) = judged(&runs, &carried, |live| {
+        seeded.outlier_thresholds(&goals, live)
+    });
+    assert_eq!(inputs, whole_inputs);
+    assert_eq!(judgments.keys(), whole.keys());
 }

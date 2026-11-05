@@ -15,6 +15,23 @@ use super::super::{
 /// How many events one read of the events past the cursor asks for.
 pub const EVENTS_PER_READ: usize = 5_000;
 
+/// How many events one read of the first pass's work kinds
+/// ([`FirstPassReads::work`]) asks for. Each page is folded and let go
+/// before the next is read ([`SeededFold`]), so what those reads hold is a
+/// page at any size of the history. A read holds more than a page for a
+/// while: `events_of_between` reads this many of each kind before it sorts
+/// and cuts them, so a read holds up to one limit per kind. To hold as much
+/// on a small queue as on a large one, the limit stays under what the
+/// smaller queue of `examples/supervisor_startup_memory.rs` holds of each
+/// kind, about 58: at this limit both read 150 events at once of the three
+/// kinds they hold, and the pages do not differ between them, only what
+/// grows with the runs and the tasks (the example asserts that the limit stays
+/// under). The work events
+/// of production are three of each run, some tens of thousands, so a
+/// process's first pass makes some hundreds of these reads, each down the
+/// index of its kind; a pass of a process comes once per exec.
+pub const WORK_EVENTS_PER_READ: usize = 50;
+
 /// What the first pass of a process reads to fold the events up to its
 /// cursor into a [`LiveHistory`] without reading every event
 /// ([`LiveHistory::seeded`]): each part of the history is decided by the
@@ -34,9 +51,10 @@ pub struct FirstPassReads {
     /// Per task, its newest event of one of them: the task's deferral is
     /// open when it is a `claim_deferred`.
     pub deferrals: [EventKind; 3],
-    /// Every event of them: each run's work clock, all but whether a run
-    /// that neither landed nor closed as satisfied finished, which any
-    /// event's `status` says ([`LiveHistory::unsettled`]).
+    /// Every event of them, [`WORK_EVENTS_PER_READ`] at a time and folded
+    /// page by page: each run's work clock, all but whether a run that
+    /// neither landed nor closed as satisfied finished, which any event's
+    /// `status` says ([`LiveHistory::unsettled`]).
     pub work: [EventKind; 4],
 }
 
@@ -75,6 +93,67 @@ pub const fn first_pass_reads() -> FirstPassReads {
             EventKind::RunSatisfiedClosed,
             EventKind::RunIntegrated,
         ],
+    }
+}
+
+/// [`LiveHistory::seeded`] with pages of events besides the events it is
+/// given whole, so that no one holds the pages' events together: each page
+/// folds into the history with the events given whole that come before its
+/// end, in the order of their ids, and each event once, as one fold of them
+/// all. An event in both (a `run_claimed` is the newest of its task's
+/// deferral kinds and a work event too) folds into its run's work clock
+/// once, and an event given whole with a run (of whatever kind) has its
+/// run's work clock as it has in the fold of every event.
+#[derive(Debug)]
+pub struct SeededFold {
+    upto: EventId,
+    /// The events given whole not folded yet, the next one last.
+    whole: Vec<RunEvent>,
+    history: LiveHistory,
+}
+
+impl SeededFold {
+    /// A fold up to `upto` of `whole`, in no order and not once each;
+    /// those past `upto` are not folded.
+    #[must_use]
+    pub fn new(upto: EventId, mut whole: Vec<RunEvent>) -> Self {
+        whole.retain(|event| event.id <= upto);
+        whole.sort_by_key(|event| std::cmp::Reverse(event.id));
+        Self {
+            upto,
+            whole,
+            history: LiveHistory::default(),
+        }
+    }
+
+    /// Fold `page` (ascending id, past the pages before it) and the events
+    /// given whole that come before each of its events; those past
+    /// `upto` are not folded.
+    pub fn page(&mut self, page: &[RunEvent]) {
+        let upto = self.upto;
+        for event in page.iter().filter(|event| event.id <= upto) {
+            self.whole_through(event.id);
+            self.history.mark(std::slice::from_ref(event));
+        }
+    }
+
+    /// The history: the events given whole that no page passed folded too.
+    #[must_use]
+    pub fn finish(mut self) -> LiveHistory {
+        self.whole_through(self.upto);
+        self.history.reach(self.upto);
+        self.history
+    }
+
+    /// Fold the events given whole up to `id`. An event already folded is
+    /// passed over by [`LiveHistory::mark`], which is what folds one in both
+    /// once.
+    fn whole_through(&mut self, id: EventId) {
+        while self.whole.last().is_some_and(|event| event.id <= id) {
+            if let Some(event) = self.whole.pop() {
+                self.history.mark(std::slice::from_ref(&event));
+            }
+        }
     }
 }
 
@@ -119,14 +198,8 @@ impl LiveHistory {
     /// [`Self::unsettled`] names, whose own events [`Self::refold`] folds.
     /// The events need not be in order nor once; those past `upto` are not
     /// folded.
-    pub fn seeded(upto: EventId, mut events: Vec<RunEvent>) -> Self {
-        events.retain(|event| event.id <= upto);
-        events.sort_by_key(|event| event.id);
-        events.dedup_by_key(|event| event.id);
-        let mut history = Self::default();
-        history.mark(&events);
-        history.reach(upto);
-        history
+    pub fn seeded(upto: EventId, events: Vec<RunEvent>) -> Self {
+        SeededFold::new(upto, events).finish()
     }
 
     /// The runs whose work the history measured and whose finish it did
@@ -367,5 +440,82 @@ mod tests {
         assert_eq!(seeded.unsettled(), std::slice::from_ref(&run));
         seeded.refold(&run, &all);
         assert_eq!(seeded, whole);
+    }
+
+    /// A run's claim in the events given whole and in a page, and its
+    /// receipt in the next page: its clock is measured from the first fold
+    /// of its claim, the claim counts once, and the fold is that of every
+    /// event, whichever page each event falls in.
+    #[test]
+    fn a_fold_by_pages_is_the_fold_of_every_event() {
+        let run = |id: i64, kind: &str, run: &str, at: i64| RunEvent {
+            run_id: Some(RunId::new(run).unwrap()),
+            created_at: crate::domain::marks::utc_text(at * 1000),
+            ..event(id, kind, json!({}))
+        };
+        let (first, second) = (
+            "3aa21145-c873-4cec-aee3-ee7f07f52e4a",
+            "4bb21145-c873-4cec-aee3-ee7f07f52e4a",
+        );
+        let claim = run(2, "run_claimed", first, 100);
+        // A later claim of the run: only the first starts the clock.
+        let again = run(4, "run_claimed", first, 300);
+        let all = [
+            event(1, "claim_deferred", json!({})),
+            claim.clone(),
+            event(3, "claim_held", json!({"supervisor": "a"})),
+            again.clone(),
+            run(5, "receipt_observed", first, 500),
+            // A run only an event given whole names: it has a work clock
+            // in the fold of every event.
+            run(6, "stall_nudged", second, 600),
+            run(7, "run_integrated", first, 700),
+            event(8, "stall_config_loaded", json!({})),
+        ];
+        let mut whole = LiveHistory::default();
+        whole.mark(&all);
+        whole.reach(EventId::new(9));
+        let given = || {
+            vec![
+                all[7].clone(),
+                all[5].clone(),
+                all[0].clone(),
+                all[2].clone(),
+                claim.clone(),
+                claim.clone(),
+                event(10, "claim_resumed", json!({})),
+            ]
+        };
+        let pages = [
+            vec![claim.clone(), again.clone()],
+            vec![all[4].clone(), all[6].clone()],
+        ];
+        // The pages cut at every place, and none; the pages' last event is
+        // past the event given whole or short of it.
+        for cut in 0..=4 {
+            let work = [
+                pages.concat()[..cut].to_vec(),
+                pages.concat()[cut..].to_vec(),
+            ];
+            let mut fold = SeededFold::new(EventId::new(9), given());
+            for page in &work {
+                fold.page(page);
+            }
+            let folded = fold.finish();
+            assert_eq!(folded, whole, "cut at {cut}");
+            assert_eq!(folded.upto(), EventId::new(9));
+        }
+        // The same events all given whole.
+        let mut every = given();
+        every.extend(pages.concat());
+        assert_eq!(LiveHistory::seeded(EventId::new(9), every), whole);
+        // A page's event past where the fold ends is not folded.
+        let mut fold = SeededFold::new(EventId::new(6), Vec::new());
+        fold.page(&pages.concat());
+        let cut = fold.finish();
+        let mut short = LiveHistory::default();
+        short.mark(&[claim, again, all[4].clone()]);
+        short.reach(EventId::new(6));
+        assert_eq!(cut, short);
     }
 }

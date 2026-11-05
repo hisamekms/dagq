@@ -20,7 +20,10 @@ use super::{
 };
 use crate::domain::{
     EventKind, GoalStatus, RunId, RunStatus, SupervisorPulse, TaskRun, TaskStatus,
-    live_alerts::{EVENTS_PER_READ, LiveHistory, LiveInputs, first_pass_reads},
+    live_alerts::{
+        EVENTS_PER_READ, LiveHistory, LiveInputs, SeededFold, WORK_EVENTS_PER_READ,
+        first_pass_reads,
+    },
     stall::{BackgroundTask, IDLE_LOG, StallConfig, background_first_seen},
     stats::{LiveRun, SlotSnapshot, outlier_thresholds},
 };
@@ -111,7 +114,12 @@ fn seed_history(queue: &(impl RunLog + ?Sized), history: &mut LiveHistory) -> Re
 /// The history up to the queue's newest event from the reads
 /// [`first_pass_reads`] names and the whole events of the runs it leaves
 /// unsettled ([`LiveHistory::unsettled`]); `None` when a read of the newest
-/// events found one past the newest the pass started at.
+/// events found one past the newest the pass started at. The work events
+/// are folded page by page and let go ([`SeededFold`]), so they hold a page
+/// at any size of the history. What the deferrals' read answers is one event
+/// of each task, held until the fold passes it: it grows with the tasks, by
+/// design, 0.9 KB of each in the example's queue and 1.2 KB while they are read
+/// (`CAP_FIRST_PASS_PEAK` of `examples/supervisor_startup_memory.rs`).
 fn seeded_history(queue: &(impl RunLog + ?Sized)) -> Result<Option<LiveHistory>> {
     let upto = queue.latest_event_id()?;
     let reads = first_pass_reads();
@@ -125,43 +133,51 @@ fn seeded_history(queue: &(impl RunLog + ?Sized)) -> Result<Option<LiveHistory>>
     if newest.iter().any(|event| event.id > upto) {
         return Ok(None);
     }
-    let mut events = newest;
+    let mut whole = newest;
     if let Some(held) = hold.filter(|held| reads.opens_hold(held)) {
-        events.extend(events_of_kinds(queue, &[reads.hold_ends], held.id, upto)?);
+        each_page_of_kinds(
+            queue,
+            &[reads.hold_ends],
+            (held.id, upto),
+            EVENTS_PER_READ,
+            |page| whole.extend(page),
+        )?;
     }
-    events.extend(events_of_kinds(
+    let mut fold = SeededFold::new(upto, whole);
+    each_page_of_kinds(
         queue,
         &reads.work,
-        crate::domain::EventId::new(0),
-        upto,
-    )?);
-    let mut history = LiveHistory::seeded(upto, events);
+        (crate::domain::EventId::new(0), upto),
+        WORK_EVENTS_PER_READ,
+        |page| fold.page(&page),
+    )?;
+    let mut history = fold.finish();
     for run in history.unsettled() {
         history.refold(&run, &queue.run_events(&run)?);
     }
     Ok(Some(history))
 }
 
-/// The events of one of `kinds` with `after < id <= upto`,
-/// [`EVENTS_PER_READ`] at a time.
-fn events_of_kinds(
+/// Hand `each` the events of one of `kinds` in `(after, upto]`, `limit` at a
+/// time, oldest first, letting each page go before reading the next.
+fn each_page_of_kinds(
     queue: &(impl RunLog + ?Sized),
     kinds: &[EventKind],
-    mut after: crate::domain::EventId,
-    upto: crate::domain::EventId,
-) -> Result<Vec<crate::domain::RunEvent>> {
+    (mut after, upto): (crate::domain::EventId, crate::domain::EventId),
+    limit: usize,
+    mut each: impl FnMut(Vec<crate::domain::RunEvent>),
+) -> Result<()> {
     let kinds: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
-    let mut events = Vec::new();
     loop {
-        let page = queue.events_of_between(&kinds, after, upto, EVENTS_PER_READ)?;
+        let page = queue.events_of_between(&kinds, after, upto, limit)?;
         let Some(last) = page.last() else {
-            return Ok(events);
+            return Ok(());
         };
         after = last.id;
-        let full = page.len() >= EVENTS_PER_READ;
-        events.extend(page);
+        let full = page.len() >= limit;
+        each(page);
         if !full {
-            return Ok(events);
+            return Ok(());
         }
     }
 }
@@ -172,7 +188,10 @@ fn events_of_kinds(
 /// whole history does ([`LiveHistory::events`]). Each run not finished has
 /// its work clock folded again from its own events ([`LiveHistory::refold`]).
 /// Only a first pass that [`seed_history`] left at no event reads every
-/// event, a page at a time.
+/// event, a page at a time. Every run's row is answered and held for the
+/// pass ([`live_runs`] takes each one's position in that list): it grows
+/// with the runs, by design, 1.3 KB of each in the example's queue
+/// (`CAP_FIRST_PASS_PEAK` of `examples/supervisor_startup_memory.rs`).
 fn carried_events(
     queue: &(impl RunLog + ?Sized),
     history: &mut LiveHistory,

@@ -3,7 +3,8 @@
 //!
 //! `prepare <dir> <events> [<pad>]` lays down a queue at `<dir>/queue.db` of about
 //! `<events>` events settled (finished runs and tasks, closed sessions,
-//! supervisors' lives and their queue events) and a few open ones, then
+//! supervisors' lives and their queue events) and a few open ones, with the
+//! rows of the finished runs and of their tasks, then
 //! builds its ledger as a supervisor before the restart did, so that the
 //! store holds the rows settled and the marks of where they are written;
 //! `<pad>` adds a text of that many bytes to every payload. `measure <dir>`
@@ -16,7 +17,8 @@
 //! catch-up (`build_pass` until no mark waits). It says after each stage the
 //! bytes and allocations in use and the peak, of the way from the cursors'
 //! start what each part held, and of the way from the marks how many of
-//! each it read ([`Reads`]), counted out of the stages.
+//! each it read ([`Reads`]), counted out of the stages. Before those it says
+//! what each read of that first pass holds ([`first_pass_by_reads`]).
 //!
 //! Run with `cargo run --release --example supervisor_startup_memory --
 //! prepare "$TMPDIR/q20k" 20000` and then `... -- measure "$TMPDIR/q20k"`.
@@ -28,7 +30,8 @@
 //! catch-up nor its peak grows with the settled events: from the cursors'
 //! start by [`within`], from the marks by [`within_cap`], where it also
 //! asserts that the start went on from R: docs/design/measurement.md
-//! "台帳を作る係".
+//! "台帳を作る係". The peak of the first pass of the judgments of now is
+//! judged by itself ([`CAP_FIRST_PASS_PEAK`]), as the ledger's peaks hide it.
 //!
 //! An allocator that counts for the whole process is set here only: the
 //! library's tests count per thread, and neither they nor the integration
@@ -48,7 +51,9 @@ use dagq::domain::EventFilter;
 use dagq::domain::ledger::LedgerKind;
 use dagq::domain::ledger::builder::{Builder, EVENTS_PER_READ, Inputs, Part};
 use dagq::domain::ledger::session::written::{Cursors, rows_written_through};
-use dagq::domain::live_alerts::{LiveHistory, judge};
+use dagq::domain::live_alerts::{
+    LiveHistory, SeededFold, WORK_EVENTS_PER_READ, first_pass_reads, judge,
+};
 use dagq::domain::marks::utc_text;
 use dagq::infrastructure::adapters::{ClaudeCode, SystemProcesses};
 use dagq::infrastructure::run_files::LocalRunFiles;
@@ -170,6 +175,8 @@ impl Report {
 struct Writer<'a> {
     db: &'a Connection,
     insert: rusqlite::Statement<'a>,
+    insert_task: rusqlite::Statement<'a>,
+    insert_run: rusqlite::Statement<'a>,
     at: i64,
     events: usize,
     payload_bytes: usize,
@@ -221,6 +228,33 @@ impl Writer<'_> {
     fn queue(&mut self, kind: &'static str, payload: &Value) {
         self.push("queue", None, None, kind, payload);
     }
+
+    /// The rows of the finished `run` of `task`, its paths and commits as
+    /// long as production's: what the first pass of the judgments of now
+    /// reads of every run and every task.
+    fn rows(&mut self, task: i64, run: &str) {
+        self.insert_task
+            .execute(params![
+                task,
+                format!("chore: task {task} of the synthetic queue"),
+                task / RUNS_PER_GOAL + 1
+            ])
+            .unwrap();
+        let dir = format!("/Users/someone/.local/share/dagq/77067154921b9014/runs/{run}");
+        self.insert_run
+            .execute(params![
+                run,
+                task,
+                format!("dagq/{run}"),
+                format!("{dir}/worktree-{run}"),
+                "background:4242:Sat_Oct_3_10:00:01_2026",
+                format!("{dir}/receipt.json"),
+                format!("{dir}/session.log"),
+                "/Users/someone/ghq/github.com/someone/dagq",
+                dir,
+            ])
+            .unwrap();
+    }
 }
 
 fn run_id(n: i64) -> String {
@@ -232,6 +266,7 @@ fn run_id(n: i64) -> String {
 fn finished_run(w: &mut Writer<'_>, task: i64, supervisor: &str) {
     let run = run_id(task);
     let run = run.as_str();
+    w.rows(task, run);
     w.push(
         "task",
         Some(task),
@@ -331,6 +366,8 @@ fn finished_run(w: &mut Writer<'_>, task: i64, supervisor: &str) {
 /// with the 30 of the run and its task, 71 % of the events are the
 /// queue's (the share of `queue_rows` in the production builder's log).
 const QUEUE_EVENTS_PER_RUN: usize = 74;
+/// How many tasks one goal of the tasks' rows holds.
+const RUNS_PER_GOAL: i64 = 40;
 /// How many finished runs one supervisor's life holds (an exec each).
 const RUNS_PER_LIFE: i64 = 40;
 /// How many finished runs one planner session comes with.
@@ -468,8 +505,9 @@ fn lay_down(dir: &Path, target: usize, pad: usize, after_secs: i64, says: bool) 
     let path = dir.join("queue.db");
     drop(SqliteQueue::init(&path).unwrap());
     let mut db = Connection::open(&path).unwrap();
-    // The synthetic events name tasks, goals and runs the queue has no row
-    // of; the folds read the events only.
+    // The synthetic events name goals, and the open runs and their tasks,
+    // the queue has no row of: the folds read the events only, and a row of
+    // a run working would have the first pass read its run directory.
     db.execute_batch(
         "PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = ON; PRAGMA synchronous = OFF;",
     )
@@ -481,6 +519,24 @@ fn lay_down(dir: &Path, target: usize, pad: usize, after_secs: i64, says: bool) 
             .prepare(
                 "INSERT INTO run_events(task_id, run_id, kind, payload, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .unwrap(),
+        insert_task: tx
+            .prepare(
+                "INSERT INTO tasks(id, title, description, acceptance, verification_commands,
+                                   status, goal_id)
+                 VALUES (?1, ?2, '', '', '[]', 'completed', ?3)",
+            )
+            .unwrap(),
+        insert_run: tx
+            .prepare(
+                "INSERT INTO task_runs(id, task_id, status, requested_provider, actual_provider,
+                                       base_commit, branch, worktree_path, workspace_id,
+                                       receipt_path, log_path, result_commit, repo_path, run_dir,
+                                       worker_mode)
+                 VALUES (?1, ?2, 'integrated', 'claude', 'claude',
+                         '0e918c82759ed3b44ed2a5464c5afb4eecc83397', ?3, ?4, ?5, ?6, ?7,
+                         'f07a3d7e4a7e0b1c2d3e4f5061728394a5b6c7d8', ?8, ?9, 'headless')",
             )
             .unwrap(),
         at: T0,
@@ -588,9 +644,82 @@ fn print_parts(owner: &str, parts: impl FnOnce(&mut dyn FnMut(&'static str, &dyn
     });
 }
 
+/// The first pass of the judgments of now read by read, in its order and
+/// holding what it holds at each, on the reads [`first_pass_reads`] names:
+/// the bytes and allocations in use after each read and the peak during it,
+/// and last the pass itself to compare. The run directories, the slots and
+/// the reads of the runs not finished are left out: the rows hold no run
+/// working, and those reads do not grow with the settled events.
+fn first_pass_by_reads(queue: &SqliteQueue, now_ms: i64) {
+    println!("## the first pass of the judgments of now, read by read");
+    println!();
+    println!("| read | in use bytes | allocations | peak bytes | peak allocations |");
+    println!("| --- | --- | --- | --- | --- |");
+    let base = in_use();
+    reset_peak();
+    let said = |read: &str| {
+        let (bytes, count) = in_use();
+        println!(
+            "| {read} | {} | {} | {} | {} |",
+            bytes.saturating_sub(base.0),
+            count.saturating_sub(base.1),
+            PEAK.load(Ordering::Relaxed).saturating_sub(base.0),
+            PEAK_COUNT.load(Ordering::Relaxed).saturating_sub(base.1)
+        );
+        reset_peak();
+    };
+    let reads = first_pass_reads();
+    let upto = queue.latest_event_id().unwrap();
+    let mut whole = Vec::new();
+    for kind in reads.hold.into_iter().chain([reads.stall]) {
+        whole.extend(queue.latest_event_of(kind.as_str()).unwrap());
+    }
+    said("the newest of the hold and of the thresholds");
+    whole.extend(
+        queue
+            .latest_task_events(&reads.deferrals.map(|kind| kind.as_str()))
+            .unwrap(),
+    );
+    said("latest_task_events");
+    let kinds = reads.work.map(|kind| kind.as_str());
+    let mut fold = SeededFold::new(upto, whole);
+    let mut after = dagq::domain::EventId::new(0);
+    loop {
+        let page = queue
+            .events_of_between(&kinds, after, upto, WORK_EVENTS_PER_READ)
+            .unwrap();
+        fold.page(&page);
+        let Some(last) = page.last() else { break };
+        after = last.id;
+    }
+    said("the work kinds' events, folded");
+    let mut history = fold.finish();
+    for run in history.unsettled() {
+        history.refold(&run, &queue.run_events(&run).unwrap());
+    }
+    said("the unsettled runs' events refolded: the history");
+    let all = queue.all_runs().unwrap();
+    said(&format!("all_runs ({} runs)", all.len()));
+    let goals = queue.task_goals().unwrap();
+    said(&format!("task_goals ({} tasks)", goals.len()));
+    let outliers = history.outlier_thresholds(&goals, &[]);
+    std::hint::black_box(&outliers);
+    said("outlier_thresholds");
+    drop((all, goals, outliers));
+    said("all_runs and task_goals let go");
+    drop(history);
+    said("the history dropped");
+    let history = first_live_pass(queue, now_ms);
+    said("the pass itself, its history kept");
+    drop(history);
+    reset_peak();
+    println!();
+}
+
 fn measure(dir: &Path) {
     let now_ms = now_ms(dir);
     let queue = SqliteQueue::open(dir.join("queue.db")).unwrap();
+    first_pass_by_reads(&queue, now_ms);
     println!("## the start from the marks (start_builder)");
     println!();
     println!("| stage | in use MiB | allocations | peak MiB | peak allocations | s |");
@@ -744,8 +873,12 @@ fn measure(dir: &Path) {
 
 /// How many events the smaller queue of `check` holds, about: a page
 /// ([`EVENTS_PER_READ`]) and more, so that both queues are read in more
-/// than one page, and small enough that `check` takes some tens of seconds
-/// in the dev profile.
+/// than one page where a read takes every event (the ledger's, from the
+/// cursors' start), and small enough that `check` takes some tens of seconds
+/// in the dev profile. The work kinds of the first pass of the judgments of
+/// now come to some 175 and 700 events of the two queues, within one such
+/// page; they are read by [`WORK_EVENTS_PER_READ`], which `check` asserts
+/// each of them exceeds on the smaller queue.
 const CHECK_SMALL: usize = 6_000;
 
 /// How long after its last event the queues of `check` are read: past the
@@ -876,6 +1009,8 @@ impl Reads {
 struct GoneOn {
     /// The position R the marks gave.
     r: i64,
+    /// The peak during the first pass of the judgments of now.
+    first_pass_peak: usize,
     /// (a) The peak during the call of `start_builder`.
     start_peak: usize,
     /// (b) The peak after that call up to the end of the catch-up.
@@ -889,8 +1024,10 @@ struct GoneOn {
 impl GoneOn {
     fn print(&self, latest: i64) {
         println!(
-            "R {} of {latest} events; (a) start_builder peak {} bytes ({:.2} MiB); (b) catch-up peak {} bytes ({:.2} MiB); (c) kept {} bytes ({:.2} MiB); {} passes",
+            "R {} of {latest} events; first pass peak {} bytes ({:.2} MiB); (a) start_builder peak {} bytes ({:.2} MiB); (b) catch-up peak {} bytes ({:.2} MiB); (c) kept {} bytes ({:.2} MiB); {} passes",
             self.r,
+            self.first_pass_peak,
+            mib(self.first_pass_peak),
             self.start_peak,
             mib(self.start_peak),
             self.catch_up_peak,
@@ -937,6 +1074,7 @@ fn go_on(queue: &SqliteQueue, now_ms: i64, said: &dyn Fn(&str, Instant)) -> Gone
 
     let started = Instant::now();
     let history = first_live_pass(queue, now_ms);
+    let first_pass_peak = peak();
     said("first pass of the judgments of now", started);
     reset_peak();
 
@@ -959,6 +1097,7 @@ fn go_on(queue: &SqliteQueue, now_ms: i64, said: &dyn Fn(&str, Instant)) -> Gone
     said("after every holder dropped", started);
     GoneOn {
         r: r.events.as_i64(),
+        first_pass_peak,
         start_peak,
         catch_up_peak,
         kept,
@@ -979,6 +1118,27 @@ const CAP_CATCH_UP_PEAK: usize = 128 * 1024 * 1024;
 /// (c) What may stay in use after the catch-up over the same history.
 const CAP_KEPT: usize = 64 * 1024 * 1024;
 
+/// What the peak of the first pass of the judgments of now, over the bytes
+/// in use before it, may reach over the same history ([`within_cap`]). Of the
+/// measure on 100,000 and 400,000 settled events
+/// (docs/plans/supervisor-startup-memory-spike.md "判定の観測の最初の pass の
+/// 内訳と直し"), its peak comes to 16.0 bytes of each settled event, 1.7 KB of
+/// each run of about 104 events: 2.3 what stays after the pass (the work
+/// clocks), and what the pass holds for itself at that moment, 12.3 of every
+/// run's row (`all_runs`), 0.5 of every task's goal (`task_goals`) and 0.8 of
+/// the medians (`outlier_thresholds`). That is 16.8 MiB of [`CAP_EVENTS`]; the
+/// cap is 1.9 times it. `latest_task_events` holds 11.0 bytes of each earlier
+/// in the pass, gone before those reads, so it adds nothing to the peak. The
+/// 15 bytes of each event [`within_cap`] says, which count the ledger's too,
+/// are not this cap's ground.
+///
+/// `check`'s two queues show less than the slope, 8.8 bytes of each event more
+/// (0.15 MiB, within 0.53 MiB): the smaller queue's peak is a read of the work
+/// kinds over the deferrals' events, not those reads of every row. Holding
+/// every work event instead peaked at 51.9 bytes of each and came to 0.88 MiB
+/// more, past the 0.53 MiB.
+const CAP_FIRST_PASS_PEAK: usize = 32 * 1024 * 1024;
+
 /// Whether `large` exceeds `small` by no more than `cap` scaled to the
 /// `more_events` settled events that are all that differs of the two
 /// queues: `large - small <= cap * more_events / CAP_EVENTS`, the judgment
@@ -987,7 +1147,9 @@ const CAP_KEPT: usize = 64 * 1024 * 1024;
 /// growth of the start's. No ratio of `small` is allowed: the 20 % of
 /// [`within`] would let a slope through unseen, and the difference reads
 /// directly as what [`CAP_EVENTS`] would come to. What differs by where the
-/// live life falls in each queue is made the same by [`OPEN_LIFE_RUNS`].
+/// live life falls in each queue is made the same by [`OPEN_LIFE_RUNS`]. The
+/// first pass of the judgments of now is judged the same way by
+/// [`CAP_FIRST_PASS_PEAK`], on either way a start goes.
 ///
 /// A cap holds the growth by design and that growth is not taken off
 /// besides: the waits, the landing slot's attempts, the summaries of the
@@ -1006,12 +1168,35 @@ fn within(large: usize, small: usize, slack: usize) -> bool {
     large as f64 <= small as f64 * CHECK_RATIO + slack as f64
 }
 
+/// Each work kind the queue at `dir` holds exceeds [`WORK_EVENTS_PER_READ`]:
+/// a read holds that many of each kind on it as on a larger queue, so what
+/// differs between the two is not the pages.
+fn assert_work_exceeds_a_read(dir: &Path) {
+    let db = Connection::open(dir.join("queue.db")).unwrap();
+    for kind in ["run_claimed", "receipt_observed", "run_integrated"] {
+        let events: i64 = db
+            .query_row(
+                "SELECT count(*) FROM run_events WHERE kind = ?1",
+                [kind],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            usize::try_from(events).unwrap() > WORK_EVENTS_PER_READ,
+            "{events} {kind} events of the smaller queue, a read takes {WORK_EVENTS_PER_READ} of each kind",
+        );
+    }
+}
+
 fn check() {
     let root =
         std::env::temp_dir().join(format!("supervisor-startup-check-{}", std::process::id()));
     let restarted = |target: usize| {
         let dir = root.join(target.to_string());
         let events = lay_down(&dir, target, 0, CHECK_AFTER_SECS, false);
+        if target == CHECK_SMALL {
+            assert_work_exceeds_a_read(&dir);
+        }
         // On the store as the earlier supervisor left it.
         let now_ms = now_ms(&dir);
         let queue = SqliteQueue::open(dir.join("queue.db")).unwrap();
@@ -1033,6 +1218,12 @@ fn check() {
     assert!(small.passes > 0 && large.passes > 0);
     let more_events = large.events - small.events;
     for (what, large_bytes, small_bytes, cap) in [
+        (
+            "the peak of the first pass of the judgments of now",
+            large_on.first_pass_peak,
+            small_on.first_pass_peak,
+            CAP_FIRST_PASS_PEAK,
+        ),
         (
             "(a) the peak of the call of start_builder",
             large_on.start_peak,
