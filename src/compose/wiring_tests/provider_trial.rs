@@ -178,7 +178,7 @@ fn a_treatment_task_is_claimed_on_codex_and_records_its_pair() {
     assert!(
         strata
             .iter()
-            .any(|stratum| stratum == "pair_group=treatment"),
+            .any(|stratum| stratum == "assigned:pair_group=treatment"),
         "{strata:?}"
     );
 }

@@ -687,7 +687,9 @@ impl<'a> Context<'a> {
     }
 
     /// Build only observed intersections. Multi-area runs contribute once to
-    /// each matching area; an unavailable axis yields no cross stratum.
+    /// each matching area; an unavailable axis yields no cross stratum. The
+    /// provider pair's group crosses by the strata it splits into
+    /// ([`Self::axis_strata`]), so that its names keep their meaning here.
     fn cross_keys(&self, run: &RunStats) -> Vec<String> {
         if self.cross.len() < 2 {
             return Vec::new();
@@ -698,16 +700,22 @@ impl<'a> Context<'a> {
             values.retain(|value| allowed.is_empty() || allowed.contains(value));
             values.sort_unstable();
             values.dedup();
+            let segments: Vec<String> = values
+                .iter()
+                .flat_map(|value| {
+                    let escaped = value
+                        .replace('%', "%25")
+                        .replace('|', "%7C")
+                        .replace('=', "%3D");
+                    self.axis_strata(&run.run_id, axis, &escaped)
+                })
+                .collect();
             keys = keys
                 .into_iter()
                 .flat_map(|key| {
-                    values.iter().map(move |value| {
-                        let escaped = value
-                            .replace('%', "%25")
-                            .replace('|', "%7C")
-                            .replace('=', "%3D");
+                    segments.iter().map(move |segment| {
                         let separator = if key == "cross:" { "" } else { "|" };
-                        format!("{key}{separator}{}={escaped}", axis.as_str())
+                        format!("{key}{separator}{segment}")
                     })
                 })
                 .collect();
@@ -751,6 +759,24 @@ impl<'a> Context<'a> {
                 axis,
             )],
             None => vec![UNKNOWN.to_owned()],
+        }
+    }
+
+    /// The strata of the run `run_id` for its `value` of `axis`: `axis=value`,
+    /// but for a group of the provider pair trial the strata [`pair::strata`]
+    /// puts it in.
+    fn axis_strata(&self, run_id: &RunId, axis: &Axis, value: &str) -> Vec<String> {
+        let stratum = format!("{}={value}", axis.as_str());
+        if axis.as_str() != crate::domain::provider_trial::GROUP || value == UNKNOWN {
+            return vec![stratum];
+        }
+        let layers = self.runs.get(run_id).map_or_else(
+            || self.open.get(run_id).map(|open| open.layers.clone()),
+            |run| Some(self.run_layers(run)),
+        );
+        match layers {
+            Some(layers) => pair::strata(&stratum, &layers, self.uses.get(run_id.as_str())),
+            None => vec![stratum],
         }
     }
 
@@ -938,20 +964,9 @@ impl<'a> Context<'a> {
             }
             for axis in axes {
                 for value in self.axis_values(run, axis) {
-                    // The provider pair's group as the run ran
-                    // ([`pair::ran_as_assigned`]), next to the assigned.
-                    if axis.as_str() == crate::domain::provider_trial::GROUP
-                        && value != UNKNOWN
-                        && pair::ran_as_assigned(
-                            &self.run_layers(run),
-                            self.uses.get(run.run_id.as_str()),
-                        )
-                    {
-                        let key = format!("{}{}={value}", pair::RAN, axis.as_str());
+                    for key in self.axis_strata(&run.run_id, axis, &value) {
                         groups.entry(key).or_default().push(run);
                     }
-                    let key = format!("{}={value}", axis.as_str());
-                    groups.entry(key).or_default().push(run);
                 }
             }
         }
@@ -1650,7 +1665,8 @@ impl<'a> Context<'a> {
     /// with no areas, one not landed, under `area=unknown`), and in the
     /// run's other `--by` layers (its claim's `group=`, `effort=`, ..., as
     /// the run KPIs read them, a run still in flight by its row's or first
-    /// claim's recorded attributes; `unknown` for a run with no claim), and
+    /// claim's recorded attributes; `unknown` for a run with no claim, and
+    /// the provider pair's group split as [`Self::axis_strata`] does), and
     /// those strata's landings are their own; the others' are `all`'s.
     /// Returns the coverage.
     fn token_kpis(
@@ -1699,12 +1715,9 @@ impl<'a> Context<'a> {
             // ...): the axes the tokens split by their own rule keep it.
             if let Some(run) = execution.run_id.as_ref() {
                 for axis in axes.iter().filter(|axis| own_layer(axis)) {
-                    let values = self.run_axis_values(run, axis);
-                    whole.extend(
-                        values
-                            .into_iter()
-                            .map(|value| format!("{}={value}", axis.as_str())),
-                    );
+                    for value in self.run_axis_values(run, axis) {
+                        whole.extend(self.axis_strata(run, axis, &value));
+                    }
                 }
             }
             for stratum in whole {
@@ -1752,7 +1765,7 @@ impl<'a> Context<'a> {
                 || stratum.starts_with("area=")
                 || axes.iter().any(|axis| {
                     own_layer(axis)
-                        && stratum
+                        && pair::without_prefix(stratum)
                             .strip_prefix(axis.as_str())
                             .is_some_and(|rest| rest.starts_with('='))
                 }) {

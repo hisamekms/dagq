@@ -1,22 +1,36 @@
 //! The set the provider pair trial's groups are compared by (ADR-t4005-1
-//! decisions 7 and 8). The groups are the claim's attribute
-//! [`provider_trial::GROUP`], an attribute's layer like any other: `--by
-//! pair_group` splits the runs into `pair_group=<group>`, the assigned
-//! group (the primary: a run counts in its group whatever it switched to).
-//! With it, each run that ran as it was assigned ([`ran_as_assigned`]) is
-//! also in `ran:pair_group=<group>` (the secondary). Both get every run
-//! KPI, [`super::trial`]'s set (revises, the time with and without a
-//! person's answers, the reverts and CI failures after the landings, over
-//! the stratum's landed runs) and this one's, over all the stratum's
-//! finished runs (landed, failed or interrupted alike: what a run that did
-//! not land used and waited for is a cost of its group too):
+//! decision 8, ADR-t4118-1 for the strata). The groups are the claim's
+//! attribute [`provider_trial::GROUP`], and `--by pair_group` splits the runs
+//! of a group into three strata ([`strata`], [`Standing`]):
+//!
+//! - The primary, `pair_group=<group>` ([`PRIMARY`] is its empty prefix): the
+//!   runs that ran as their group assigned them ([`ran_as_assigned`]).
+//! - The switched, `switched:pair_group=<group>` ([`SWITCHED`]): the runs the
+//!   records show moved, the worker or a review job, even if the other side
+//!   is unknown. They stay in their assigned group: one that moved on both
+//!   sides ran as the other group's pair and is still not in its primary.
+//! - The secondary, `assigned:pair_group=<group>` ([`ASSIGNED`]): every run of
+//!   the group, those two and the runs that cannot be judged (intention to
+//!   treat).
+//!
+//! A run that cannot be judged has an unknown side and no switch known on the
+//! other: it is in the secondary alone, counted in no switched run and by its
+//! group in [`PairDetail::unrecorded`]. A run with no group stays in
+//! `pair_group=unknown`, the attribute's layer like any other's.
+//!
+//! All get every run KPI, [`super::trial`]'s set (revises, the time with and
+//! without a person's answers, the reverts and CI failures after the
+//! landings, over the stratum's landed runs) and this one's, over all the
+//! stratum's finished runs (landed, failed or interrupted alike: what a run
+//! that did not land used and waited for is a cost of its group too):
 //!
 //! - [`SWITCHED_WORKER`] and [`SWITCHED_REVIEW`]: the runs whose worker
 //!   ended on another provider than its claim assigned it
 //!   ([`provider_trial::WORKER`] against the facts after the claim), and
 //!   those with a review job that moved off its planned provider (the
-//!   ledger row's [`ProviderUse::review_switches`]). A secondary stratum
-//!   holds neither, so they are 0 there.
+//!   ledger row's [`ProviderUse::review_switches`]). A run that moved on
+//!   both sides is in both counts. The primary holds neither, so they are 0
+//!   there.
 //! - [`WORKER_TOKENS`] and [`REVIEW_TOKENS`]: per run, the tokens of its
 //!   worker's turns (the actors of the run's own sessions) and of its
 //!   review's jobs (the `review` actor), from the Executions its ledger row
@@ -58,8 +72,12 @@ use crate::domain::{
     stats::executions::Execution,
 };
 
-/// The prefix of a secondary stratum: `ran:pair_group=<group>`.
-pub const RAN: &str = "ran:";
+/// The prefix of a primary stratum: none, `pair_group=<group>`.
+pub const PRIMARY: &str = "";
+/// The prefix of a stratum of switched runs: `switched:pair_group=<group>`.
+pub const SWITCHED: &str = "switched:";
+/// The prefix of a secondary stratum: `assigned:pair_group=<group>`.
+pub const ASSIGNED: &str = "assigned:";
 
 pub const SWITCHED_WORKER: &str = "pair.switched_runs.worker";
 pub const SWITCHED_REVIEW: &str = "pair.switched_runs.review";
@@ -79,12 +97,18 @@ pub const NO_COST: &str = "no_cost";
 /// The reason of a wait or a switch for a usage limit.
 const USAGE_LIMIT: &str = "usage_limit";
 
-/// Whether `stratum` is one this set is computed for: a group of the
-/// provider pair trial, assigned or as it ran.
-pub fn is_pair_stratum(stratum: &str) -> bool {
+/// `stratum` without the prefix of a switched or secondary stratum.
+pub fn without_prefix(stratum: &str) -> &str {
     stratum
-        .strip_prefix(RAN)
+        .strip_prefix(SWITCHED)
+        .or_else(|| stratum.strip_prefix(ASSIGNED))
         .unwrap_or(stratum)
+}
+
+/// Whether `stratum` is one this set is computed for: a group of the
+/// provider pair trial, in any of its three strata.
+pub fn is_pair_stratum(stratum: &str) -> bool {
+    without_prefix(stratum)
         .strip_prefix(provider_trial::GROUP)
         .is_some_and(|rest| rest.starts_with('='))
 }
@@ -118,6 +142,40 @@ pub fn ran_as_assigned(layers: &RunLayers, uses: Option<&ProviderUse>) -> bool {
     worker_switched(layers) == Some(false) && review_switched(uses) == Some(false)
 }
 
+/// What the records say of a run against its assigned pair (ADR-t4118-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// It ran as assigned ([`ran_as_assigned`]).
+    AsAssigned,
+    /// Its worker or a review job moved, whatever the other side did.
+    Switched,
+    /// A side is unknown and no switch is known on the other.
+    Unjudged,
+}
+
+/// The [`Standing`] of a run.
+pub fn standing(layers: &RunLayers, uses: Option<&ProviderUse>) -> Standing {
+    if worker_switched(layers) == Some(true) || review_switched(uses) == Some(true) {
+        Standing::Switched
+    } else if ran_as_assigned(layers, uses) {
+        Standing::AsAssigned
+    } else {
+        Standing::Unjudged
+    }
+}
+
+/// The strata of a run of the group whose stratum is `group`
+/// (`pair_group=<group>`): the secondary, and the primary or the switched
+/// by its [`standing`].
+pub fn strata(group: &str, layers: &RunLayers, uses: Option<&ProviderUse>) -> Vec<String> {
+    let assigned = format!("{ASSIGNED}{group}");
+    match standing(layers, uses) {
+        Standing::AsAssigned => vec![format!("{PRIMARY}{group}"), assigned],
+        Standing::Switched => vec![format!("{SWITCHED}{group}"), assigned],
+        Standing::Unjudged => vec![assigned],
+    }
+}
+
 /// One finished run of a stratum.
 pub struct PairRun<'a> {
     pub layers: &'a RunLayers,
@@ -133,7 +191,8 @@ pub struct PairRun<'a> {
 pub struct PairDetail {
     /// The finished runs.
     pub runs: usize,
-    /// Of them, those whose row has no record of the use of providers.
+    /// Of them, those that cannot be judged ([`Standing::Unjudged`]). Only
+    /// a secondary stratum holds any of a group: its count is the group's.
     pub unrecorded: usize,
     pub worker: SideDetail,
     pub review: SideDetail,
@@ -215,7 +274,10 @@ pub fn kpis(
 ) -> (Vec<(&'static str, Measure)>, PairDetail) {
     let mut detail = PairDetail {
         runs: runs.len(),
-        unrecorded: runs.iter().filter(|run| run.uses.is_none()).count(),
+        unrecorded: runs
+            .iter()
+            .filter(|run| standing(run.layers, run.uses) == Standing::Unjudged)
+            .count(),
         ..PairDetail::default()
     };
     let switched_worker = runs

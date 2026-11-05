@@ -297,7 +297,7 @@ mod tests {
         .unwrap();
         let kpis = &kpi.periods[0].window.kpis;
         use crate::domain::kpi::pair;
-        for stratum in ["pair_group=treatment", "ran:pair_group=treatment"] {
+        for stratum in ["pair_group=treatment", "assigned:pair_group=treatment"] {
             assert_eq!(kpis["landings"][stratum].value, Some(1.0), "{stratum}");
             assert_eq!(kpis[pair::WORKER_TOKENS][stratum].value, Some(1_000_000.0));
             assert_eq!(kpis[pair::WORKER_COST][stratum].value, Some(10.0));

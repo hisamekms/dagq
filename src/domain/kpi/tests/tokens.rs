@@ -317,7 +317,7 @@ fn the_pair_groups_sum_each_runs_worker_and_review_tokens_and_cost() {
         let measure = measure(period, name, stratum);
         (measure.n, measure.value)
     };
-    for stratum in ["pair_group=control", "ran:pair_group=control"] {
+    for stratum in ["pair_group=control", "assigned:pair_group=control"] {
         assert_eq!(value(pair::WORKER_TOKENS, stratum), (1, Some(1100.0)));
         assert_eq!(value(pair::REVIEW_TOKENS, stratum), (1, Some(3_100_000.0)));
         assert_eq!(value(pair::WORKER_COST, stratum), (1, Some(0.5)));
@@ -363,4 +363,93 @@ fn the_pair_groups_sum_each_runs_worker_and_review_tokens_and_cost() {
         measure(period, pair::REVIEW_TOKENS, "pair_group=control").value,
         Some(3_100_000.0)
     );
+}
+
+/// The tokens of the Executions follow the provider pair's strata as the run
+/// KPIs do, so each stratum's tokens per landing are over its own runs and
+/// landings: a run that ran as assigned, one whose worker moved, one that
+/// cannot be judged and one still in flight, of which nothing is judged yet.
+#[test]
+fn the_tokens_per_landing_of_the_pair_groups_are_over_each_strata_runs() {
+    let mut queue = Queue::default();
+    // The records begin before the window, which they cover whole.
+    queue.queue_event(
+        "observe_finished",
+        json!({"outcome": "succeeded", "tokens": tokens(1, 0), "tokens_source": "model_usage",
+               "tokens_by_model": []}),
+        MONDAY - DAY,
+    );
+    let recorded = crate::domain::ledger::provider_use::ProviderUse {
+        worker_waits: Some(Default::default()),
+        review_switches: Some(Default::default()),
+    };
+    let runs = [
+        ("codex", Some(recorded.clone()), 100),
+        ("claude", Some(recorded), 20),
+        ("codex", None, 3),
+    ];
+    for (index, (ran_on, uses, input)) in runs.into_iter().enumerate() {
+        let task = index as i64 + 1;
+        let run = Run::new(task, None, MONDAY + HOUR * task, 100);
+        let landed = queue.run(&run);
+        let id = run_id(&run);
+        queue.push(
+            Some(task),
+            Some(id.as_str()),
+            "turn_finished",
+            json!({"provider": ran_on, "tokens": tokens(input, 0),
+                   "tokens_source": "token_usage_record", "tokens_by_model": []}),
+            run.claimed + 50,
+        );
+        queue
+            .rows
+            .push(pair_row(&run, landed, ("treatment", "codex", ran_on), uses));
+    }
+    let claimed = MONDAY + 10 * HOUR;
+    let flying = format!("{:08x}-0000-4000-8000-{:012x}", 9, claimed);
+    queue.changes.insert(TaskId::new(9), None);
+    queue.goals.insert(TaskId::new(9), None);
+    let attributes = json!({
+        crate::domain::provider_trial::GROUP: "treatment",
+        crate::domain::provider_trial::WORKER: "codex",
+    });
+    queue.push(
+        Some(9),
+        Some(flying.as_str()),
+        "run_claimed",
+        json!({ crate::domain::claim_facts::ATTRIBUTES: attributes }),
+        claimed,
+    );
+    queue.push(
+        Some(9),
+        Some(flying.as_str()),
+        "turn_finished",
+        json!({"provider": "codex", "tokens": tokens(900, 0),
+               "tokens_source": "token_usage_record", "tokens_by_model": []}),
+        claimed + 50,
+    );
+    let query = KpiQuery {
+        last: 1,
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        by: vec!["pair_group".parse().unwrap()],
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY + HOUR, &KpiConfig::default(), &query);
+    let period = &result.periods[0];
+    for (stratum, total, per_landing) in [
+        ("pair_group=treatment", 100.0, 100.0),
+        ("switched:pair_group=treatment", 20.0, 20.0),
+        ("assigned:pair_group=treatment", 1023.0, 341.0),
+    ] {
+        assert_eq!(
+            measure(period, "tokens", stratum).value,
+            Some(total),
+            "{stratum}"
+        );
+        assert_eq!(
+            measure(period, "tokens_per_landing", stratum).value,
+            Some(per_landing),
+            "{stratum}"
+        );
+    }
 }
