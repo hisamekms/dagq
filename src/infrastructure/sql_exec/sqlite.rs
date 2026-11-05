@@ -12,8 +12,12 @@
 //! row helper through [`with_row`], back to rusqlite's errors. A `Connection`
 //! is also a [`SqlRead`] as it is: the read connection needs no wrapper.
 //!
-//! The actor functions are here because registering a function is the
-//! driver's call; the state they read is [`super::super::event_actor`]'s.
+//! The actor and event body functions are here because registering a function
+//! is the driver's call; the state the actor functions read is
+//! [`super::super::event_actor`]'s, and what the body function returns is
+//! [`super::super::event_bodies`]'s.
+
+use std::sync::Arc;
 
 use rusqlite::{
     Connection, Row,
@@ -26,9 +30,11 @@ use super::{
     RowValues, SqlDialect, SqlError, SqlRead, SqlResult, SqlRow, SqlValue, SqlWrite,
     TransactionEntries, ValueKind,
 };
+use crate::application::EventBodies;
 use crate::domain::actor::ActorContext;
 use crate::infrastructure::{
     event_actor::EventActors,
+    event_bodies::event_body_for_row,
     sqlite::{SqliteQueue, WriteTx, insert_counted},
 };
 
@@ -322,6 +328,25 @@ pub(in crate::infrastructure) fn attach_event_actors(
         Ok(state.requested_by())
     })?;
     Ok(actors)
+}
+
+/// Register `dagq_event_body()` on `conn`, handing the new events' bodies to
+/// `bodies`. A failed put fails the INSERT that calls it.
+pub(in crate::infrastructure) fn attach_event_bodies(
+    conn: &Connection,
+    bodies: Arc<dyn EventBodies>,
+) -> anyhow::Result<()> {
+    // Not deterministic: each large write has a fresh key.
+    conn.create_scalar_function(
+        "dagq_event_body",
+        1,
+        FunctionFlags::SQLITE_UTF8,
+        move |ctx| {
+            event_body_for_row(bodies.as_ref(), ctx.get(0)?)
+                .map_err(|error| rusqlite::Error::UserFunctionError(error.into()))
+        },
+    )?;
+    Ok(())
 }
 
 impl TransactionEntries for SqliteQueue {

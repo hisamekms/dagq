@@ -16,6 +16,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+use super::event_bodies::set_event_body_field;
 use super::findings::{record_in, set_status_in};
 use super::sqlite::{SqliteQueue, event_row};
 use crate::domain::ci_watch::freshness::{FRESHNESS_KINDS, FreshnessRecord};
@@ -117,16 +118,9 @@ impl SqliteQueue {
             Some(mut finding) => {
                 finding.evidence = std::iter::once(checked).chain(red).collect();
                 let id = record_marked(&tx, &finding, now)?;
-                tx.execute(
-                    "UPDATE run_events SET payload=json_set(payload,'$.finding_id',?2) WHERE id=?1",
-                    params![checked, id],
-                )?;
+                set_event_body_field(&tx, checked, "finding_id", &json!(id))?;
                 if let Some(red) = red {
-                    tx.execute(
-                        "UPDATE run_events SET payload=json_set(payload,'$.finding_ids',json_array(?2))
-                         WHERE id=?1",
-                        params![red, id],
-                    )?;
+                    set_event_body_field(&tx, red, "finding_ids", &json!([id]))?;
                 }
                 Some(id)
             }
@@ -173,10 +167,7 @@ impl SqliteQueue {
             Some(mut finding) => {
                 finding.evidence = vec![checked];
                 let id = record_marked(&tx, &finding, now)?;
-                tx.execute(
-                    "UPDATE run_events SET payload=json_set(payload,'$.finding_id',?2) WHERE id=?1",
-                    params![checked, id],
-                )?;
+                set_event_body_field(&tx, checked, "finding_id", &json!(id))?;
                 Some(id)
             }
             None => None,
@@ -299,7 +290,7 @@ fn insert(conn: &Connection, kind: EventKind, payload: &Value) -> Result<EventId
     Ok(EventId::new(super::sqlite::insert_id(
         conn,
         "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
-         VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+         VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![kind.as_str(), serde_json::to_string(payload)?],
     )?))
 }

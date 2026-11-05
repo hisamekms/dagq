@@ -76,17 +76,23 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 - 方言の違う式の断片（JSONの欄の読み出しと日時の関数）は`src/infrastructure/sql_dialect.rs`の関数が返して文が埋める（ADR-t3982-1）。
 - runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く。
 
+## 大きなeventの本文
+
+本文を鍵で置き・読み・消すapplicationのportはstoreのtransactionに加わらない。
+閾値を超えたeventの本文だけを行を書く前に渡すので、行の鍵は保存済みの本文だけを指し、rollbackで孤児が残りうる。
+後から足す欄も同じ判定を通る。
+鍵を持つ行に足す欄は失われ、鍵を読み戻す経路も無い。
+
+ローカルの既定のadapterは本文をそのまま列に残し、行・schema・読める値を変えない。
+runのファイル・台帳の行・古いeventは通さない。
+
 ## 不変条件
 
-- 状態を変える操作は`BEGIN IMMEDIATE`で直列化し、判定と書き込みとeventを1つのトランザクションに入れる。
 - taskごとに未完了のrunは1つ、`integrated`のrunは1つ、queue全体で`integrating`のrunは1つ（部分UNIQUE index）。
 - taskごとに開いた再計画の操作は高々1つで、保護しない操作はtaskの最新のrunにあり、保護する操作は保留したrunに残る（indexでなく書き込みのtransactionが守る）。
   開く書き込みはtaskに開いた操作が無いときだけ足し、保護しない状態から開いたまま進める書き込みはtaskにほかの開いた操作があれば拒む。
   claimと最新のrunへの依頼は前のrunに開いた保護しない操作を新しいrunへ引き継ぎ（`replan_carried`）、重なった保護しない操作だけを閉じ、保護する操作は閉じずに元のrunに残して、どのrunへの依頼もそれに合流させる（`task_replan::carry`）。
-- `recover`を除き、runの状態を変える書き込みは、そのrunのlease行が自分のtokenのときだけ通る。
 - eventと所属の判断は追記だけで、eventは知らないkindも落とさずに読む。
-- DBにCHECK制約は無く、規則はdomainの型と書き込みのportが持つ（下の「CHECK制約を使わない」）。
-- バイナリは、queueの下限（`schema_floor`）より古ければ開かず、queueより古いschemaしか知らなくても下限以上なら知らない表と列に触れずに動く。
 
 ## 表
 

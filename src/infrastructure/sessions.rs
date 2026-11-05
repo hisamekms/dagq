@@ -28,7 +28,9 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 use super::{
+    event_bodies::set_event_body_field,
     run_env,
+    sql_exec::sqlite::port_tx,
     sqlite::{WriteTx, event_row, json_col},
     transcripts::ClaudeTranscripts,
 };
@@ -855,10 +857,7 @@ fn write_changes(
     if kind == EventKind::SessionExited {
         for (key, value) in [("work_breakdown", exited.work), ("tokens", exited.tokens)] {
             if let Some(value) = value {
-                conn.execute(
-                    "UPDATE run_events SET payload=json_set(payload,?3,json(?2)) WHERE id=?1",
-                    params![event_id, serde_json::to_string(&value)?, format!("$.{key}")],
-                )?;
+                set_event_body_field(&port_tx(conn), event_id, key, &value)?;
             }
         }
     }
@@ -2419,7 +2418,7 @@ pub(super) fn insert_at(
     let id = super::sqlite::insert_id(
         conn,
         "INSERT INTO run_events(task_id,run_id,kind,payload,created_at,actor_role,actor_id,requested_by)
-         VALUES (?1,?2,?3,?4,?5,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+         VALUES (?1,?2,?3,dagq_event_body(?4),?5,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![
             task_id,
             run_id,

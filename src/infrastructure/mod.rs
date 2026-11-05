@@ -27,6 +27,7 @@ pub mod draft_planners;
 pub mod e2e_gate;
 pub mod environment;
 pub mod event_actor;
+pub mod event_bodies;
 mod finding_planners;
 mod findings;
 mod follow_up_membership;

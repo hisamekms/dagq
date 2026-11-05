@@ -24,7 +24,7 @@
 //! for a module that has not moved to it, and only hand on to them.
 use super::sql_dialect::{JsonType, json_field};
 use super::sql_exec::sqlite::{
-    attach_event_actors, is_contention, native_error, port_tx, with_row,
+    attach_event_actors, attach_event_bodies, is_contention, native_error, port_tx, with_row,
 };
 use super::store_rows::{self, ready_conditions, select_tasks};
 use crate::domain::claim_facts;
@@ -824,6 +824,16 @@ pub struct SqliteQueue {
 pub type DenialRecorder = Arc<dyn Fn(serde_json::Value) -> Result<()> + Send + Sync>;
 
 impl SqliteQueue {
+    /// Select the independent body store used by new event writes on this
+    /// connection. Existing events and run files are never passed to it.
+    pub fn with_event_bodies(
+        self,
+        bodies: std::sync::Arc<dyn crate::application::EventBodies>,
+    ) -> Result<Self> {
+        attach_event_bodies(&self.conn, bodies)?;
+        Ok(self)
+    }
+
     /// `user_version` a fully migrated queue reports.
     pub const SCHEMA_VERSION: i64 = BINARY_SCHEMA;
 
@@ -1277,6 +1287,10 @@ impl SqliteQueue {
         // symlinked `--db` still names the queue's real `runs/`.
         let db = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let actors = attach_event_actors(&conn, process_actor())?;
+        attach_event_bodies(
+            &conn,
+            std::sync::Arc::new(super::event_bodies::InlineEventBodies),
+        )?;
         let write_identity = has_table(&conn, "write_leader")?
             .then(|| WriteIdentity::read(&conn))
             .transpose()?;
@@ -3175,7 +3189,7 @@ pub(super) fn goal_event_id(
     let id = EventId::new(insert_id(
         conn,
         "INSERT INTO run_events(goal_id,kind,payload,actor_role,actor_id,requested_by)
-         VALUES (?1,?2,?3,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+         VALUES (?1,?2,dagq_event_body(?3),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![goal_id, kind.as_str(), serde_json::to_string(&payload)?],
     )?);
     // The goal review's session span this event starts or ends (ADR-0048).
@@ -4129,7 +4143,7 @@ pub(super) fn record_queue_event_in(
     let id = insert_id(
         conn,
         "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
-         VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+         VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![kind.as_str(), serde_json::to_string(payload)?],
     )?;
     super::sessions::follow(conn, EventId::new(id), None, None, kind, payload)
@@ -4207,7 +4221,7 @@ pub(super) fn event_id(
     let id = EventId::new(insert_id(
         conn,
         "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
-         VALUES (?1,?2,?3,?4,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+         VALUES (?1,?2,?3,dagq_event_body(?4),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![
             task_id,
             run_id,

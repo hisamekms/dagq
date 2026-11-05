@@ -150,7 +150,7 @@ impl SqliteQueue {
         }
         tx.execute(
             "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
-             VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+             VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
             params![kind.as_str(), serde_json::to_string(&payload)?],
         )?;
         tx.commit()?;
@@ -173,7 +173,7 @@ impl SqliteQueue {
         if record {
             tx.execute(
                 "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
-             VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+             VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
                 params![
                     EventKind::KpiPushAbandoned.as_str(),
                     serde_json::to_string(&payload)?

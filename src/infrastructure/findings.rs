@@ -408,7 +408,7 @@ pub(super) fn finding_event(
     crate::domain::write_rules::check_run_has_task(finding.task_id, finding.run_id.as_ref())?;
     conn.execute(
         "INSERT INTO run_events(task_id,run_id,goal_id,kind,payload,actor_role,actor_id,requested_by)
-         VALUES (?1,?2,?3,?4,?5,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+         VALUES (?1,?2,?3,?4,dagq_event_body(?5),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![
             finding.task_id,
             finding.run_id,

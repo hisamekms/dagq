@@ -388,6 +388,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/runtime_store/eval_rounds.rs", Execution),
     store("src/infrastructure/sessions.rs", Execution), // the spans of the sessions
     store("src/infrastructure/session_tokens.rs", Execution),
+    store("src/infrastructure/event_bodies.rs", Execution), // adds a field to a recorded event's body
     store("src/infrastructure/findings.rs", Observation),
     store("src/infrastructure/ci_watch_store.rs", Observation),
     store("src/infrastructure/kpi_push.rs", Observation),
@@ -629,6 +630,7 @@ pub(super) const PORTS: &[Port] = &[
     port("AskStore", Public(All)),
     port("WriteLeaderStore", Public(All)), // the write leader's row of the queue service
     port("EventStore", Public(All)),
+    port("EventBodies", Public(All)), // independent storage of large event bodies
     port("StateStore", Public(All)),
     port("Queue", Public(All)),
 ];

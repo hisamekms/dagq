@@ -1383,7 +1383,7 @@ pub(super) fn queue_event(tx: &Connection, kind: EventKind, payload: &Value) -> 
     let id = EventId::new(crate::infrastructure::sqlite::insert_id(
         tx,
         "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
-         VALUES (?1,?2,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+         VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![kind.as_str(), serde_json::to_string(payload)?],
     )?);
     // The observer's session span (ADR-0048).

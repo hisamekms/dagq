@@ -1325,7 +1325,7 @@ fn ask_event(
     check_run_has_task(task_id, run_id)?;
     conn.execute(
         "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
-         VALUES (?1,?2,?3,?4,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+         VALUES (?1,?2,?3,dagq_event_body(?4),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         params![
             task_id,
             run_id,

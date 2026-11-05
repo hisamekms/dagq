@@ -816,3 +816,77 @@ pub trait Queue:
 }
 
 impl<T: StateStore + EventStore + QueueRecords + InboxWatchLog + EvalRounds + ?Sized> Queue for T {}
+
+/// Serialized event bodies larger than 64 KiB go through [`EventBodies`].
+/// Measure UTF-8 bytes, including JSON escaping, rather than characters.
+pub const EVENT_BODY_THRESHOLD: usize = 64 * 1024;
+
+/// Where a completed put left the body. `Stored` is returned only after the
+/// body is readable by its key; `Inline` asks the caller to keep its bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyPlacement {
+    Inline,
+    Stored,
+}
+
+/// A body store separate from queue records. No method accepts a store
+/// transaction. Put must finish before a row references its key; a rolled
+/// back row may leave an orphan, which can be deleted later. Keys are opaque
+/// and unique per put. The local adapter declines storage with `Inline`.
+pub trait EventBodies: Send + Sync {
+    fn put(&self, key: &str, body: &str) -> Result<BodyPlacement>;
+    fn read(&self, key: &str) -> Result<Option<String>>;
+    fn delete(&self, key: &str) -> Result<()>;
+}
+
+/// Whether a new serialized event body needs the independent body port.
+pub fn is_large_event_body(body: &str) -> bool {
+    body.len() > EVENT_BODY_THRESHOLD
+}
+
+/// The row's JSON text after a successful put: unchanged inline bytes or an
+/// opaque JSON string containing the completed body's key. External adapters
+/// must arrange their read path to resolve that key, and the field a later
+/// write sets on the event, which on that string changes nothing and is lost,
+/// to reach the stored body; local rows retain their JSON.
+pub fn event_body_row(body: String, key: &str, placement: BodyPlacement) -> String {
+    match placement {
+        BodyPlacement::Inline => body,
+        BodyPlacement::Stored => serde_json::Value::String(key.to_owned()).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod event_body_tests {
+    use super::*;
+
+    #[test]
+    fn threshold_counts_serialized_bytes_and_excludes_the_limit() {
+        for size in [0, EVENT_BODY_THRESHOLD - 1, EVENT_BODY_THRESHOLD] {
+            assert!(!is_large_event_body(&"x".repeat(size)));
+        }
+        assert!(is_large_event_body(&"x".repeat(EVENT_BODY_THRESHOLD + 1)));
+        assert!(is_large_event_body(
+            &"あ".repeat(EVENT_BODY_THRESHOLD / 3 + 1)
+        ));
+    }
+
+    #[test]
+    fn row_uses_the_key_only_when_put_completed_storage() {
+        let body = "{ \"body\": \"unchanged bytes\" }";
+        let key = "opaque/\"key";
+        assert_eq!(
+            event_body_row(body.into(), key, BodyPlacement::Inline),
+            body
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&event_body_row(
+                body.into(),
+                key,
+                BodyPlacement::Stored
+            ))
+            .unwrap(),
+            serde_json::Value::String(key.into())
+        );
+    }
+}
