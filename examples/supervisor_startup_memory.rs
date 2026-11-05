@@ -24,8 +24,9 @@
 //! keeps after the catch-up nor its peak during it grows with the settled
 //! events ([`within`]): docs/design/measurement.md "台帳を作る係".
 //!
-//! A counting global allocator is set here only: neither the library's
-//! tests nor the integration tests carry it (it would count every other
+//! An allocator that counts for the whole process is set here only: the
+//! library's tests count per thread, and neither they nor the integration
+//! tests carry this one (it would count every other
 //! test's allocations, and the integration tests' boundaries are kept in
 //! their register).
 

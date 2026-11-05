@@ -215,6 +215,8 @@ pub struct LedgerWindow {
     /// group is taken only with its mark, which may come after the
     /// window).
     records: Vec<RunEvent>,
+    /// Which of [`Self::records`] are up to [`Self::end`].
+    held: Held,
     /// The filters, as the counts of the tokens read them.
     filters: Filters,
 }
@@ -340,6 +342,7 @@ pub fn select(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
         since_event: matches!(query.since, Some(Cursor::Event(_))),
         host_from_ms,
         rows: Vec::new(),
+        held: Held::of(&all, end),
         records: all,
         filters: Filters::default(),
     };
@@ -352,6 +355,37 @@ pub fn select(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
     window.rows = chosen;
     window.filters = filters;
     window
+}
+
+/// The records up to a window's end, for [`LedgerWindow::events`] to lend.
+/// Every read of `stats`, `kpi` and `report` folds them, some more than
+/// once, so they are worked out once, and the payloads are not copied for
+/// them unless the slice they must be has no other way to be contiguous.
+#[derive(Debug, Clone)]
+enum Held {
+    /// The first of the records: all of them when the end drops none.
+    First(usize),
+    /// A record past the end stands before one within it (a later id of an
+    /// earlier time), so they are no run of the records: one copy of them,
+    /// held with the window.
+    Picked(Vec<RunEvent>),
+}
+
+impl Held {
+    fn of(records: &[RunEvent], end: WindowEnd) -> Self {
+        let first = records.iter().take_while(|event| end.holds(event)).count();
+        if records[first..].iter().any(|event| end.holds(event)) {
+            Self::Picked(
+                records
+                    .iter()
+                    .filter(|event| end.holds(event))
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            Self::First(first)
+        }
+    }
 }
 
 /// The filters of a window, resolved on its attributes and areas.
@@ -385,7 +419,7 @@ impl Filters {
         if let Some(map) = &query.areas {
             let events = window.events();
             let changed = window.main_log().changed;
-            for (run, areas) in run_areas(map, &events, &changed) {
+            for (run, areas) in run_areas(map, events, &changed) {
                 let task = events
                     .iter()
                     .find(|event| event.run_id.as_ref() == Some(&run))
@@ -596,13 +630,13 @@ impl LedgerWindow {
     /// The events up to the window's end ([`Self::end`]), ascending id:
     /// every row's records, whatever the filters, so that today's functions
     /// of `stats`, `kpi` and `report` read from the rows what they read of
-    /// the EventStore.
-    pub fn events(&self) -> Vec<RunEvent> {
-        self.records
-            .iter()
-            .filter(|event| self.end.holds(event))
-            .cloned()
-            .collect()
+    /// the EventStore. Lent, however often it is asked: a read holds no
+    /// more copies of the payloads for it ([`Held`]).
+    pub fn events(&self) -> &[RunEvent] {
+        match &self.held {
+            Held::First(count) => &self.records[..*count],
+            Held::Picked(events) => events,
+        }
     }
 
     /// The window's end in unix seconds.
@@ -653,27 +687,27 @@ impl LedgerWindow {
     /// commits, the paths and the reach recorded by then, a later
     /// recovery or reach not among them.
     pub fn main_log(&self) -> MainLog {
-        fold_main_log(&self.events())
+        fold_main_log(self.events())
     }
 
     /// Main's history for the window, as `conflict_hotspots` spans it, or
     /// why it has none (`記録が無い`).
     pub fn main_history(&self) -> History {
         let events = self.events();
-        fold_main_log(&events).history_for(&events, self.after, self.upto)
+        fold_main_log(events).history_for(events, self.after, self.upto)
     }
 
     /// Whether main's history covers the window's times.
     pub fn main_covers(&self) -> Result<(), MainMissing> {
         let events = self.events();
-        fold_main_log(&events).covers(&events, self.start_ms, Some(self.end_ms))
+        fold_main_log(events).covers(events, self.start_ms, Some(self.end_ms))
     }
 
     /// The reverts and CI's failures after the landings, matched to their
     /// runs as the records give them at the window's end: every row's,
     /// whatever the filters ([`post_landing::fold`]).
     pub fn post_landing_book(&self) -> post_landing::PostLandingBook {
-        post_landing::fold(&self.events(), self.end_ms)
+        post_landing::fold(self.events(), self.end_ms)
     }
 
     /// What befell each of the window's runs (its chosen run rows, by the

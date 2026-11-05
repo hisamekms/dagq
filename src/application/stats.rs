@@ -148,7 +148,7 @@ pub fn of_window(
         .unwrap_or_default();
     let live = LiveSnapshot {
         runs: Vec::new(),
-        config: stall_config(&events, sources.config_file)?,
+        config: stall_config(events, sources.config_file)?,
         history: window.main_history(),
         conflicts: conflict_config((sources.conflicts_file)()?),
         draft_origins: attributes
@@ -159,7 +159,7 @@ pub fn of_window(
         judged: Some(window.judgments()),
         ledger: Some(window.run_times()),
     };
-    let mut stats = aggregate(&events, &goals, now, SlotSnapshot::default(), query, &live);
+    let mut stats = aggregate(events, &goals, now, SlotSnapshot::default(), query, &live);
     if let Some(known) = &attributes {
         let titles = known.task_titles();
         for run in &mut stats.runs {
@@ -171,7 +171,7 @@ pub fn of_window(
     }
     let areas = sources
         .areas
-        .map(|map| run_areas(map, &events, &window.main_log().changed));
+        .map(|map| run_areas(map, events, &window.main_log().changed));
     with_areas(&mut stats, areas.as_ref());
     if !sources.counts_checks {
         without_cargo_measures(&mut stats);

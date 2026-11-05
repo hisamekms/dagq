@@ -54,7 +54,7 @@ pub fn of_window(
     query: &KpiQuery,
 ) -> Result<Kpi> {
     let events = window.events();
-    let run_areas = areas.map(|map| run_areas(map, &events, &window.main_log().changed));
+    let run_areas = areas.map(|map| run_areas(map, events, &window.main_log().changed));
     let (goals, changes, draft_origins) = match window.attributes() {
         Folded::Attributes(known) => (
             known.task_goals(),
@@ -63,7 +63,7 @@ pub fn of_window(
         ),
         Folded::BeforeBaseline => Default::default(),
     };
-    let heartbeats = crate::domain::supervisor_life::heartbeats(&events, now);
+    let heartbeats = crate::domain::supervisor_life::heartbeats(events, now);
     let ledger = window.run_times();
     let read = |from: i64, until: i64| window.host_between(from * 1000 - 1000, until * 1000);
     let rows: Vec<&crate::domain::ledger::LedgerRow> =
@@ -72,7 +72,7 @@ pub fn of_window(
     let executions = window.executions();
     derive(
         &KpiInput {
-            events: &events,
+            events,
             goals: &goals,
             changes: &changes,
             areas: run_areas.as_ref(),
@@ -208,6 +208,112 @@ mod tests {
         assert_eq!(kpis["post_landing.reverts"]["all"].value, Some(1.0));
         assert_eq!(kpis["run_duration"]["all"].n, 1);
         assert_eq!(kpis["run_duration_without_human"]["all"].n, 1);
+    }
+
+    /// `kpi` of a window whose end drops events answers as of a queue that
+    /// holds only the events up to that end: what is past it reaches no
+    /// answer, whichever way the window lends what is within it.
+    #[test]
+    fn the_window_answers_of_the_events_up_to_its_end() {
+        let mut upto = Log::default();
+        upto.landed(1, &run_id(1), 0);
+        let until = ms(1500);
+        let mut more = upto.events.clone();
+        let mut past = Log::default();
+        past.landed(2, &run_id(2), 2000);
+        for mut event in past.events {
+            event.id = crate::domain::EventId::new(i64::try_from(more.len()).unwrap() + 1);
+            more.push(event);
+        }
+        // What the store's rows hold at the time of the read, read `until`.
+        let now_ms = ms(4000);
+        let answer = |events: &[crate::domain::RunEvent]| {
+            let window = select(
+                build(events, now_ms, "2030-01-01T00:00:00.000Z"),
+                &WindowQuery {
+                    until: Some(Cursor::Time(until)),
+                    now_ms,
+                    ..WindowQuery::default()
+                },
+            );
+            assert_eq!(window.events(), upto.events);
+            let kpi = of_window(
+                &window,
+                now_ms / 1000,
+                Host {
+                    utc_offset_secs: 0,
+                    cores: None,
+                    rust_toolchain: false,
+                },
+                &KpiConfig::default(),
+                None,
+                &KpiQuery {
+                    since: Some(Cursor::Time(ms(-1))),
+                    until: Some(Cursor::Time(until)),
+                    ..KpiQuery::default()
+                },
+            )
+            .unwrap();
+            let landed = kpi.periods[0].window.kpis["run_duration"]["all"].n;
+            (landed, serde_json::to_value(kpi).unwrap())
+        };
+        let within = answer(&upto.events);
+        assert_eq!(answer(&more), within);
+        // The one landing within the end is what it answers of.
+        assert_eq!(within.0, 1);
+    }
+
+    /// `kpi` of a window folds its events more than once and holds no copy
+    /// of their payloads for that.
+    #[test]
+    fn the_window_gives_the_kpis_with_no_copy_of_the_payloads() {
+        const PAD: usize = 16 * 1024;
+        let mut log = Log::default();
+        log.landed(1, &run_id(1), 0);
+        for at in 0..150 {
+            log.add(
+                None,
+                None,
+                "main_observed",
+                json!({"head": "c", "at": T0 + at, "since": T0 - 1, "pad": "x".repeat(PAD)}),
+                at,
+            );
+        }
+        log.events.sort_by_key(|event| event.created_at.clone());
+        for (index, event) in log.events.iter_mut().enumerate() {
+            event.id = crate::domain::EventId::new(i64::try_from(index).unwrap() + 1);
+        }
+        let now_ms = ms(2000);
+        let window = select(
+            build(&log.events, now_ms, "2030-01-01T00:00:00.000Z"),
+            &WindowQuery {
+                until: Some(Cursor::Time(now_ms)),
+                now_ms,
+                ..WindowQuery::default()
+            },
+        );
+        let query = KpiQuery {
+            since: Some(Cursor::Time(ms(-1))),
+            until: Some(Cursor::Time(now_ms)),
+            ..KpiQuery::default()
+        };
+        let peak = crate::domain::ledger::allocation_count::peak_of(|| {
+            of_window(
+                &window,
+                now_ms / 1000,
+                Host {
+                    utc_offset_secs: 0,
+                    cores: None,
+                    rust_toolchain: false,
+                },
+                &KpiConfig::default(),
+                None,
+                &query,
+            )
+            .unwrap()
+        });
+        let payloads = 150 * PAD;
+        assert!(peak < payloads, "{peak} of {payloads}");
     }
 
     /// From the ledger's window to the provider pair's set: a treatment

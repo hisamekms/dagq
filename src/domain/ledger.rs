@@ -14,6 +14,8 @@
 //! decision of the runtime reads it.
 
 use crate::domain::EventKind;
+#[cfg(test)]
+pub(crate) mod allocation_count;
 pub mod attributes;
 mod baseline;
 pub mod breakdown;

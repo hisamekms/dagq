@@ -2587,9 +2587,9 @@ fn a_task_not_ended_has_a_row_whose_records_give_the_drafts_and_its_asks() {
     let repairs = |events: &[RunEvent]| auto_repairs::auto_repairs(events, after, upto, |_| true);
     let routes =
         |events: &[RunEvent]| planner_routes::planner_routes(events, after, upto, |_| true, None);
-    assert_eq!(flow(&from_rows), flow(all));
-    assert_eq!(repairs(&from_rows), repairs(all));
-    assert_eq!(routes(&from_rows), routes(all));
+    assert_eq!(flow(from_rows), flow(all));
+    assert_eq!(repairs(from_rows), repairs(all));
+    assert_eq!(routes(from_rows), routes(all));
     let flow = flow(all);
     assert_eq!(
         (flow.all.registered, flow.all.adopted, flow.all.backlog),

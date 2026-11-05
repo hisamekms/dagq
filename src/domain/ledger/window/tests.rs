@@ -2,6 +2,7 @@ use crate::domain::EventKind;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::domain::ledger::allocation_count::peak_of;
 use crate::domain::ledger::{
     LEDGER_V, build,
     settle::{SETTLE_GRACE_MS, life_input, settlement},
@@ -754,6 +755,190 @@ fn an_event_cursor_ends_the_folds_at_its_event() {
     assert_eq!(until(mark).events().last().unwrap().id, mark);
 }
 
+/// A queue with a landing and main's record of its commit, then the same
+/// again later: enough that main's log and the book differ by where a
+/// window ends.
+fn two_landings() -> Log {
+    let mut log = Log::default();
+    for (minute, sha) in [(10, "c1"), (40, "c2")] {
+        log.push(
+            minute,
+            (Some(1), None, true),
+            "run_integrated",
+            json!({"result_commit": sha}),
+        );
+        log.queue(
+            minute + 1,
+            "main_commits_recorded",
+            json!({"after": null, "commits": [{"sha": sha, "at": (T0 + minute * MIN) / 1000,
+                   "changes": [{"path": sha}]}]}),
+        );
+        log.queue(
+            minute + 2,
+            "main_observed",
+            json!({"head": sha, "at": (T0 + (minute + 2) * MIN) / 1000, "since": T0 / 1000 - 1}),
+        );
+    }
+    log
+}
+
+fn until_cursor(log: &Log, cursor: Option<Cursor>) -> LedgerWindow {
+    until_cursor_at(log, cursor, T0 + 60 * MIN)
+}
+
+fn until_cursor_at(log: &Log, cursor: Option<Cursor>, now_ms: i64) -> LedgerWindow {
+    select(
+        build(&log.events, now_ms, BUILT),
+        &WindowQuery {
+            until: cursor,
+            now_ms,
+            ..WindowQuery::default()
+        },
+    )
+}
+
+/// `events()` is the window's own records, not a copy: all of them when the
+/// end drops none, and the first of them when it drops the later ones, so
+/// that `main_log()`, `post_landing_book()` and the others that fold it
+/// add no copy of the payloads however many of them a read calls.
+#[test]
+fn the_events_are_lent_from_the_records_and_not_copied() {
+    let log = two_landings();
+    let whole = until_cursor(&log, None);
+    assert_eq!(whole.events(), log.events);
+    assert!(std::ptr::eq(whole.events(), whole.records.as_slice()));
+    assert!(std::ptr::eq(whole.events(), whole.events()));
+
+    let cut = until_cursor(&log, Some(Cursor::Time(T0 + 20 * MIN)));
+    assert_eq!(cut.events(), &log.events[..3]);
+    assert_eq!(cut.records.len(), log.events.len());
+    assert!(std::ptr::eq(cut.events(), &cut.records[..3]));
+    assert!(std::ptr::eq(
+        &raw const cut.events()[0].payload,
+        &raw const cut.records[0].payload
+    ));
+}
+
+/// The reads of a window allocate what they answer, not a copy of the
+/// payloads, whichever way the window holds what is up to its end: all its
+/// records, the first of them, or the one copy it keeps of them when a
+/// record past the end stands before one within it. A copy of the records,
+/// which the count must see, is the measure.
+#[test]
+fn the_reads_of_a_window_allocate_no_copy_of_the_payloads() {
+    const COUNT: i64 = 150;
+    const PAD: usize = 16 * 1024;
+    let pad = "x".repeat(PAD);
+    let mut log = Log::default();
+    for index in 0..COUNT / 3 {
+        let sha = format!("c{index}");
+        let minute = index * 3;
+        log.push(
+            minute,
+            (Some(1), None, true),
+            "run_integrated",
+            json!({"result_commit": sha, "pad": pad}),
+        );
+        log.queue(
+            minute + 1,
+            "main_commits_recorded",
+            json!({"after": null, "pad": pad, "commits":
+                   [{"sha": sha, "at": (T0 + minute * MIN) / 1000, "changes": [{"path": sha}]}]}),
+        );
+        log.queue(
+            minute + 2,
+            "main_observed",
+            json!({"head": sha, "at": (T0 + (minute + 2) * MIN) / 1000,
+                   "since": T0 / 1000 - 1, "pad": pad}),
+        );
+    }
+    let mut out_of_order = Log {
+        events: log.events.clone(),
+    };
+    out_of_order.events[1].created_at = utc_text(T0 + (COUNT + 1) * MIN);
+    let half = Some(Cursor::Time(T0 + COUNT / 2 * MIN));
+    let payloads = usize::try_from(COUNT).unwrap() * PAD;
+    let limit = payloads / 10;
+    for (name, log, until) in [
+        ("whole", &log, None),
+        ("cut", &log, half),
+        ("out of order", &out_of_order, half),
+    ] {
+        let window = until_cursor_at(log, until, T0 + (COUNT + 2) * MIN);
+        assert!(window.events().len() > 1, "{name}");
+        assert_eq!(peak_of(|| window.events().len()), 0, "{name}");
+        for (read, peak) in [
+            ("main_log", peak_of(|| window.main_log())),
+            ("main_history", peak_of(|| window.main_history())),
+            ("main_covers", peak_of(|| window.main_covers())),
+            ("post_landing_book", peak_of(|| window.post_landing_book())),
+        ] {
+            assert!(peak < limit, "{name} {read}: {peak} of {limit}");
+        }
+        assert!(peak_of(|| window.records.clone()) >= payloads, "{name}");
+    }
+}
+
+/// A window whose end drops events answers from what is up to its end, as
+/// the folds answer of those events alone: by a time, by an event, and by
+/// a time when a record past it stands before one within it (a later id of
+/// an earlier time), whose events are copied once and are still in id's
+/// order.
+#[test]
+fn an_end_that_drops_events_answers_of_the_events_up_to_it() {
+    let log = two_landings();
+    let mut out_of_order = two_landings();
+    // Past the cut below, before the record of the first landing's main.
+    out_of_order.events[1].created_at = utc_text(T0 + 50 * MIN);
+    for (log, until, kept) in [
+        (&log, Cursor::Time(T0 + 20 * MIN), vec![1, 2, 3]),
+        (&log, Cursor::Event(EventId::new(4)), vec![1, 2, 3, 4]),
+        (&out_of_order, Cursor::Time(T0 + 20 * MIN), vec![1, 3]),
+    ] {
+        let window = until_cursor(log, Some(until));
+        let expected: Vec<RunEvent> = log
+            .events
+            .iter()
+            .filter(|event| kept.contains(&event.id.as_i64()))
+            .cloned()
+            .collect();
+        assert_eq!(window.events(), expected, "{until:?}");
+        // What each read gave when it folded its own copy of them.
+        assert_eq!(
+            window.main_log().history.commits,
+            fold_main_log(&expected).history.commits,
+            "{until:?}"
+        );
+        assert_eq!(
+            window.main_log().changed,
+            fold_main_log(&expected).changed,
+            "{until:?}"
+        );
+        assert_eq!(
+            window.main_covers(),
+            fold_main_log(&expected).covers(&expected, window.start_ms, Some(window.end_ms)),
+            "{until:?}"
+        );
+        assert_eq!(
+            window.main_history(),
+            fold_main_log(&expected).history_for(&expected, window.after, window.upto),
+            "{until:?}"
+        );
+        assert_eq!(
+            window.post_landing_book(),
+            post_landing::fold(&expected, window.end_ms),
+            "{until:?}"
+        );
+    }
+    // The second landing is not in the window that ends before it.
+    let cut = until_cursor(&log, Some(Cursor::Time(T0 + 20 * MIN)));
+    assert_eq!(cut.main_log().changed.len(), 1);
+    assert_ne!(
+        cut.post_landing_book(),
+        until_cursor(&log, None).post_landing_book()
+    );
+}
+
 /// The ledger's Executions give what the events give across a day's end:
 /// a session open over midnight counts each turn on the day it ended, and
 /// a turn whose record has no context (before it was recorded) and one
@@ -1341,7 +1526,7 @@ fn stats_of_a_windows_events_is_stats_of_every_event() {
         ))
         .unwrap();
         let after = serde_json::to_value(stats(
-            &window.events(),
+            window.events(),
             &goals,
             now,
             SlotSnapshot::default(),
@@ -1353,7 +1538,7 @@ fn stats_of_a_windows_events_is_stats_of_every_event() {
     }
     // The whole window holds each part of the log.
     let whole = serde_json::to_value(stats(
-        &select(
+        select(
             rows,
             &WindowQuery {
                 now_ms,
@@ -1497,7 +1682,7 @@ fn todays_names_are_the_rows_and_a_legacy_run_without_one_is_missing() {
         ..LiveSnapshot::default()
     };
     let report = serde_json::to_value(stats(
-        &window.events(),
+        window.events(),
         &HashMap::new(),
         now_ms / 1000,
         SlotSnapshot::default(),
