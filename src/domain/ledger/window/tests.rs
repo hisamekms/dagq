@@ -819,6 +819,38 @@ fn the_events_are_lent_from_the_records_and_not_copied() {
     ));
 }
 
+/// The prototypes that hold the records once give the window of no filter
+/// that [`select`] gives: the same events and the same reads.
+#[test]
+fn the_prototypes_that_hold_the_records_once_read_as_select_reads() {
+    let log = two_landings();
+    let query = WindowQuery {
+        now_ms: T0 + 60 * MIN,
+        ..WindowQuery::default()
+    };
+    let rows = build(&log.events, query.now_ms, BUILT);
+    let selected = select(rows.clone(), &query);
+    let mut taken = Vec::new();
+    let mut stripped = rows.clone();
+    for row in &mut stripped {
+        taken.append(&mut row.records);
+    }
+    taken.reverse();
+    for window in [
+        select_moving_records(rows, &query),
+        select_of_records(taken, stripped, &query),
+    ] {
+        assert_eq!(window.events(), selected.events());
+        assert_eq!(window.upto, selected.upto);
+        assert_eq!(window.end_ms, selected.end_ms);
+        assert_eq!(window.main_log().changed, selected.main_log().changed);
+        assert_eq!(window.host(), selected.host());
+        assert_eq!(window.executions(), selected.executions());
+        assert_eq!(window.rows.len(), selected.rows.len());
+        assert!(window.rows.iter().all(|row| row.records.is_empty()));
+    }
+}
+
 /// The reads of a window allocate what they answer, not a copy of the
 /// payloads, whichever way the window holds what is up to its end: all its
 /// records, the first of them, or the one copy it keeps of them when a

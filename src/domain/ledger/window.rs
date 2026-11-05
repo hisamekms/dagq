@@ -297,6 +297,47 @@ fn cursor_ms(cursor: Cursor, events: &[RunEvent]) -> Option<i64> {
 /// its start, then those of the filters.
 pub fn select(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
     let all = records(&rows);
+    of_records(all, rows, query)
+}
+
+/// [`select`] that moves the records out of `rows` instead of copying them,
+/// so that a window holds them once: a window of no filter only, whose rows
+/// are not chosen by their records. The first prototype of
+/// docs/plans/kpi-read-memory-spike.md, measured by
+/// `examples/kpi_read_memory.rs` and called by nothing in the runtime.
+#[doc(hidden)]
+pub fn select_moving_records(mut rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
+    if query.goal_id.is_some() || query.change.is_some() || query.area.is_some() {
+        return select(rows, query);
+    }
+    let mut all: Vec<RunEvent> = Vec::with_capacity(rows.iter().map(|row| row.records.len()).sum());
+    for row in &mut rows {
+        all.append(&mut row.records);
+        row.records = Vec::new();
+    }
+    all.sort_by_key(|event| event.id);
+    all.dedup_by_key(|event| event.id);
+    of_records(all, rows, query)
+}
+
+/// [`select`] of rows whose records the caller took out as it read them:
+/// `all` holds them, in any order and each at least once. A window of no
+/// filter only, as [`select_moving_records`]. The second prototype of
+/// docs/plans/kpi-read-memory-spike.md (`read_lean` of
+/// `examples/kpi_read_memory.rs`), called by nothing in the runtime.
+#[doc(hidden)]
+pub fn select_of_records(
+    mut all: Vec<RunEvent>,
+    rows: Vec<LedgerRow>,
+    query: &WindowQuery,
+) -> LedgerWindow {
+    all.sort_by_key(|event| event.id);
+    all.dedup_by_key(|event| event.id);
+    of_records(all, rows, query)
+}
+
+/// The window `query` asks of `rows`, `all` their records (ascending id).
+fn of_records(all: Vec<RunEvent>, rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
     let since = query.since.map(|cursor| cursor.event_id(&all));
     let until = query.until.map(|cursor| cursor.event_id(&all));
     let latest = all.last().map_or(EventId::new(0), |event| event.id);
