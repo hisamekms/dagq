@@ -92,9 +92,12 @@ runtimeの自動修正が直さなかったものをjobが状況を読んで許�
 - 適用は`recovery::apply_live`で、high confidenceのrepairの全操作の前提を確かめてから適用し、1つでも崩れればverdict全体を拒んでescalateする。
 - 操作ごとの前提は`check_live`のdoc commentが持つ。
   落とし穴は、どの操作も画面・入力欄・画面から推定したidleを前提にしないことと、止めるのはrunのプロセスだけでwrapperとagent自身は止めないことである。
+- jobの失敗の原因の判定は、操作を適用できたかと独立にrunの記録に残す（[ADR-t4163-1](../../adr/2026-11-05-t4163-1-environment-caused-failures-are-judged-by-the-recovery-job-and-kept-in-their-own-stratum.md)の決定1）。
+- 判定の入口は`domain::recovery::FailureCause`で、runごとの畳みは`domain::ledger::failure_cause`が持つ。
 
 ### escalate
 
+- jobのverdictの失敗の原因の判定は、escalateでも上の「適用」のとおりrunの記録に残す。
 - `escalate`、`confidence: low`の`repair`、前提の崩れた`repair`、試行の使い切りは、inbox宛てのそのalertのaskにする（決定40のkind）。
   使い切りはjobを起動しないので、行き先（下の「Codexで動かす」）が待つあいだも待たずにaskにする（`domain::recovery::round_start`）。
 - askの選択肢の組み立ては`recovery::ask_options`が持ち、askはそのkindのものに、jobの選択肢のうち残るものを足すので、人はjobの見立てと元のaskの答えの両方から選べる。

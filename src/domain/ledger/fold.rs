@@ -17,11 +17,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::failure_cause;
 use super::provider_use::ProviderUse;
 use crate::domain::after_claim::{AfterClaim, AfterClaimTrack};
 use crate::domain::claim_facts::ATTRIBUTES;
 use crate::domain::claim_hold;
 use crate::domain::pre_claim::{IntervalKind, PreClaimInterval};
+use crate::domain::recovery::FailureCause;
 use crate::domain::run::payload::typed;
 use crate::domain::run_phase::{Attempt, Blocker, Holds, PUSHED, Phase};
 use crate::domain::stats::timestamp_millis;
@@ -167,6 +169,8 @@ pub struct RunLife {
     /// off their planned provider, a wait still open cut at its end (or at
     /// its last interval's end while it goes on).
     pub provider_use: ProviderUse,
+    /// What its recovery jobs judged caused its failure.
+    pub failure_cause: FailureCause,
     /// The last event folded in: the run's own, or the push that closed it.
     pub inputs_through: EventId,
 }
@@ -270,6 +274,7 @@ pub fn fold_run(events: &[RunEvent], pushes: &[RunEvent], now_ms: i64) -> Option
         attributes,
         after_claim: after_claim.facts(),
         provider_use: ProviderUse::default(),
+        failure_cause: failure_cause::of(events),
         inputs_through: events
             .iter()
             .map(|event| event.id)

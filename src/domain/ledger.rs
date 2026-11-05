@@ -21,6 +21,7 @@ mod baseline;
 pub mod breakdown;
 pub mod builder;
 pub mod compare;
+pub mod failure_cause;
 pub mod findings;
 pub mod fold;
 pub mod node;
@@ -55,7 +56,13 @@ use super::{EventId, RunEvent, TaskId};
 
 /// The version of the fold: raised when what a row holds or how it is
 /// folded changes, so every row is built again (a legacy row's frozen
-/// values aside, which the store keeps).
+/// values aside, which the store keeps). Not raised for a change that reads
+/// no other value from the inputs that already exist: building every row
+/// again would give the same values. A row of such a change without its
+/// key reads as the fold of its events would, and an input that holds the
+/// new value arrives after the change, so its row is built again by
+/// [`rebuilds`] (`failure_cause`, whose events from before it hold none,
+/// is one; `provider_use`, read from events that already held it, was not).
 pub const LEDGER_V: u32 = 7;
 
 /// The kind of a row. The store keeps every kind in one table by this
@@ -284,7 +291,9 @@ pub struct LedgerRow {
     pub after_claim: Option<AfterClaim>,
     /// What else the kind folds: a run's milestones, the run that closed
     /// its pending push, its use of providers it could not use
-    /// ([`provider_use::DETAIL_KEY`], a legacy run's too) and its session steps
+    /// ([`provider_use::DETAIL_KEY`], a legacy run's too), what its recovery
+    /// jobs judged caused its failure ([`failure_cause::DETAIL_KEY`], a
+    /// legacy run's too) and its session steps
     /// ([`steps::DETAIL_KEY`]), a
     /// task's ready time (and while ready now, since when:
     /// [`fold::READY_SINCE`]), runs and overlays, a
@@ -475,6 +484,7 @@ fn fill_run(row: &mut LedgerRow, life: RunLife) {
         "milestones": life.milestones,
         "closed_by": life.closed_by,
         (provider_use::DETAIL_KEY): life.provider_use,
+        (failure_cause::DETAIL_KEY): life.failure_cause,
     });
 }
 
@@ -501,6 +511,7 @@ fn fill_legacy_run(row: &mut LedgerRow, events: &[RunEvent]) {
         .unwrap_or(0);
     row.detail = json!({
         (provider_use::DETAIL_KEY): provider_use::ProviderUse::of(events, last),
+        (failure_cause::DETAIL_KEY): failure_cause::of(events),
     });
     let Some(run) = run else {
         row.legacy = Some(json!({}));

@@ -2937,6 +2937,60 @@ fn a_headless_recovery_job_is_never_offered_a_dialog() {
     assert!(interactive.contains("Last turns of the headless session"));
 }
 
+/// The recovery job's schema names `failure_cause` with its three values
+/// and the rule to judge it by (ADR-t4163-1 decision 1), which names what
+/// the environment refused in no particular form: no kind of sandbox, no
+/// command (decision 5).
+#[test]
+fn a_recovery_job_is_told_how_to_judge_the_failures_cause() {
+    let task = task(7, "work", TaskStatus::InProgress);
+    let facts = json!({});
+    let binary = no_binary();
+    let prompt = recovery_prompt(
+        &task,
+        &run_on(Provider::Codex, WorkerMode::Headless),
+        1,
+        &RecoveryMaterial {
+            alert: RecoveryAlert::Stalled,
+            ended: None,
+            facts: &facts,
+            workspace: "ws",
+            screen: "turns",
+            processes: Ok(Vec::new()),
+            git_status: "",
+            head: SHA,
+            receipt_commit: None,
+            history: &[],
+            allowed: &["wait"],
+            binary: &binary,
+        },
+    )
+    .unwrap()
+    .text;
+    assert!(
+        prompt.contains(r#""failure_cause": "environment" | "task" | "unknown""#),
+        "{prompt}"
+    );
+    let rule = prompt
+        .lines()
+        .find(|line| line.starts_with("failure_cause says"))
+        .expect("the rule");
+    for says in [
+        "environment only when a refusal by the execution environment, outside the code and the task, stopped a verification the task needs",
+        "When you are not sure, do not say environment",
+        "whichever provider it ran on",
+    ] {
+        assert!(rule.contains(says), "{says}: {rule}");
+    }
+    let words: Vec<String> = rule
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .collect();
+    for never in ["sandbox", "seatbelt", "landlock", "ps", "top"] {
+        assert!(!words.iter().any(|word| word == never), "{never}: {rule}");
+    }
+}
+
 /// The `dagq <command> ...` spans in backquotes of `text`, without
 /// `dagq`.
 fn dagq_commands(text: &str) -> Vec<&str> {

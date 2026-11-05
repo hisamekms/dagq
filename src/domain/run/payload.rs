@@ -416,6 +416,11 @@ pub struct RecoveryRecord<'a> {
     /// The repairs a `recovery_finished` applied.
     #[serde(default, borrow, deserialize_with = "typed")]
     applied: Option<Vec<Lenient<&'a str>>>,
+    /// What a `recovery_finished`'s job judged caused the failure, as
+    /// [`crate::domain::recovery::FailureCause::read`] reads it; none on
+    /// one with no verdict and one from before it was recorded.
+    #[serde(default, borrow, deserialize_with = "typed")]
+    pub failure_cause: Option<&'a str>,
 }
 
 impl RecoveryRecord<'_> {

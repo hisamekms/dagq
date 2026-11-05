@@ -1,11 +1,13 @@
 use serde_json::json;
 
+use super::failure_cause;
 use super::fold::{self, DEPENDENCY_WAIT, PLAN_REVIEW, READY, RunLife, TaskFold, UNATTRIBUTED};
 use super::provider_use;
 use super::read::{LedgerValues, read};
 use super::*;
 use crate::domain::marks::utc_text;
 use crate::domain::pre_claim::{IntervalKind, SlotClass};
+use crate::domain::recovery::FailureCause;
 use crate::domain::run_phase::{Attempt, AttemptKind, Holds, Phase, PhaseChange};
 use crate::domain::{RunId, stats};
 
@@ -1392,6 +1394,141 @@ fn a_wait_no_start_ends_is_cut_at_the_runs_end_and_open() {
             open: 1
         }
     );
+}
+
+/// A `recovery_finished` judging `cause`.
+fn judged<'a>(log: &'a mut Log, secs: i64, cause: &str) -> &'a mut Log {
+    log.at(
+        secs,
+        "recovery_finished",
+        json!({"alert": "failed", "attempt": 1, "failure_cause": cause}),
+    )
+}
+
+/// A run's rounds fold to the environment when any round judged it so,
+/// whatever came after (ADR-t4163-1 decision 2), else to the task when any
+/// round judged it so, else unknown; the order of the events does not
+/// matter, and a value nobody knows and a record that names none are no
+/// judgement.
+#[test]
+fn a_runs_rounds_fold_to_its_failure_cause_in_any_order() {
+    use FailureCause::{Environment, Task, Unknown};
+    for (rounds, cause) in [
+        (vec![], Unknown),
+        (vec![Unknown], Unknown),
+        (vec![Task], Task),
+        (vec![Unknown, Task, Unknown], Task),
+        (vec![Environment], Environment),
+        (vec![Environment, Task], Environment),
+        (vec![Environment, Unknown], Environment),
+        (vec![Task, Environment, Unknown], Environment),
+    ] {
+        let mut reversed = rounds.clone();
+        reversed.reverse();
+        assert_eq!(
+            failure_cause::of_rounds(rounds.clone()),
+            cause,
+            "{rounds:?}"
+        );
+        assert_eq!(failure_cause::of_rounds(reversed), cause, "{rounds:?}");
+    }
+
+    let mut log = Log::default();
+    log.at(1, "recovery_finished", json!({"alert": "failed"}))
+        .at(2, "recovery_finished", json!({"failure_cause": null}))
+        .at(3, "recovery_finished", json!({"failure_cause": 3}));
+    judged(&mut log, 4, "weather");
+    // Another event's field is no round's.
+    log.at(
+        5,
+        "triage_finished",
+        json!({"failure_cause": "environment"}),
+    );
+    assert_eq!(failure_cause::of(&log.of(A)), Unknown);
+    judged(&mut log, 6, "task");
+    assert_eq!(failure_cause::of(&log.of(A)), Task);
+    judged(&mut log, 7, "environment");
+    judged(&mut log, 8, "task");
+    judged(&mut log, 9, "unknown");
+    let mut events = log.of(A);
+    assert_eq!(failure_cause::of(&events), Environment);
+    events.reverse();
+    assert_eq!(failure_cause::of(&events), Environment);
+}
+
+/// A run's row holds its failure cause beside its intervals: unknown for a
+/// run with no `recovery_finished` and for one whose events name none, the
+/// environment for one judged so even if it was resumed and landed after,
+/// the intervals being those of the same run without it; a legacy run's too.
+#[test]
+fn a_runs_row_folds_its_failure_cause_and_keeps_it_through_a_later_landing() {
+    let plain = run_row(A, &waited_and_landed(false).of(A), &[], ms(5000), "built");
+    assert_eq!(read(&plain).failure_cause, FailureCause::Unknown);
+
+    let mut old = waited_and_landed(false);
+    old.at(
+        1300,
+        "recovery_finished",
+        json!({"alert": "failed", "attempt": 1}),
+    );
+    let old = run_row(A, &old.of(A), &[], ms(5000), "built");
+    assert_eq!(read(&old).failure_cause, FailureCause::Unknown);
+
+    // Judged, then a later round says otherwise, and the run lands.
+    let mut log = Log::default();
+    log.claim(0).first(2, Phase::Worker);
+    judged(&mut log, 3, "environment");
+    judged(&mut log, 4, "task");
+    log.at(5, "run_resumed", json!({})).first(6, Phase::Worker);
+    judged(&mut log, 7, "unknown");
+    landed(&mut log, 1000);
+    let row = run_row(A, &log.of(A), &[], ms(5000), "built");
+    let values = read(&row);
+    assert!(values.landed);
+    assert_eq!(values.failure_cause, FailureCause::Environment);
+    assert_eq!(row.detail[failure_cause::DETAIL_KEY], "environment");
+
+    let mut task_only = Log::default();
+    task_only.claim(0).first(2, Phase::Worker);
+    judged(&mut task_only, 3, "task");
+    judged(&mut task_only, 4, "unknown");
+    let row = run_row(A, &task_only.of(A), &[], ms(5000), "built");
+    assert_eq!(read(&row).failure_cause, FailureCause::Task);
+
+    let mut legacy = legacy_events();
+    judged(&mut legacy, 100, "environment");
+    let row = run_row(A, &legacy.of(A), &[], ms(5000), "built");
+    assert!(row.is_legacy());
+    assert_eq!(read(&row).failure_cause, FailureCause::Environment);
+}
+
+/// A row written before the key reads unknown at this [`LEDGER_V`] and is
+/// not built again over the same events, which hold no judgement anyway; a
+/// `recovery_finished` that arrives after builds it again with its value, a
+/// legacy row too.
+#[test]
+fn a_row_without_the_failure_cause_reads_unknown_until_a_later_event_brings_one() {
+    for mut log in [waited_and_landed(false), legacy_events()] {
+        let mut stored = run_row(A, &log.of(A), &[], ms(5000), "built");
+        stored
+            .detail
+            .as_object_mut()
+            .unwrap()
+            .remove(failure_cause::DETAIL_KEY);
+        assert_eq!(read(&stored).failure_cause, FailureCause::Unknown);
+        assert!(!rebuilds(Some(&stored), stored.inputs_through.events, None));
+        let same = run_row(A, &log.of(A), &[], ms(5000), "built");
+        assert_eq!(read(&same).failure_cause, FailureCause::Unknown);
+        assert!(!builder::writes(Some(&stored), &same));
+
+        judged(&mut log, 4000, "environment");
+        let events = log.of(A);
+        let last = events.last().unwrap().id;
+        assert!(rebuilds(Some(&stored), last, None));
+        let built = run_row(A, &events, &[], ms(5000), "built");
+        assert!(builder::writes(Some(&stored), &built));
+        assert_eq!(read(&built).failure_cause, FailureCause::Environment);
+    }
 }
 
 /// A row of an older fold has no record of the providers and reads none;

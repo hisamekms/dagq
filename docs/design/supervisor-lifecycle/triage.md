@@ -78,6 +78,7 @@ related:
    - `send_instruction`、`stop_processes`、`answer_known_dialog`、`close_and_proceed` はどの worker にも当てはまらず、ほかの生存 session 専用の操作も終わった run には当てはまらないので、前提の崩れとして扱う。
    適用したら`finish_triage`が遷移と`triage_finished`、`auto_repaired`（`wait`には書かない）、`recovery_finished`を1トランザクションで記録する。
    適用する前にleaseをまだ持っているかを確かめ、失っていれば（止まっていた間に別のsupervisorが引き継いだ）何も書かずにそのrunを手放す。
+   失敗の原因の判定は適用の成否と独立にrunに残す（[入口](background-recovery-job.md#適用)）。
 6. **escalate**: `escalate`、`confidence: low`の`repair`、前提の崩れた`repair`（操作が1つでない、許されない操作を含む）、alertの回数の使い切りは、`kind: decide`のaskをrunに作る（`asked_by: supervisor`）。
    optionsは`retry` / `resume` / `cancel`（resumeを使い切ったrunは`retry` / `cancel`）に、jobの`options`のうち復旧jobに渡し直すものを足し、runの`integrate`の検証が落ちたことがあるrun（`integration_deferred`の`code: verification_failed`）では最後に`edit the task's --verify, then retry_inherit`をruntimeが足したもの（使い切りのaskにも足す）。
    jobのoptionは種類を宣言し、`domain::recovery::sort_job_options`が[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)の決定1で分ける（規則の順・種類・語の一覧・印はその関数と定数のdoc comment）。

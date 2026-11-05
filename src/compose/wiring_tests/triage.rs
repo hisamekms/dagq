@@ -80,10 +80,9 @@ fn a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands() {
             verdicts: vec![verdict("pass", "meets the acceptance")],
         },
     );
-    wiring.agent.recovering(vec![repair(
-        json!({"action": "retry"}),
-        "the session died on its own",
-    )]);
+    let mut judged = repair(json!({"action": "retry"}), "the session died on its own");
+    judged["failure_cause"] = json!("environment");
+    wiring.agent.recovering(vec![judged]);
     let base = wiring.git.main();
     let task = wiring.ready_task(&[]);
     wiring.supervise_once();
@@ -127,6 +126,7 @@ fn a_failed_run_without_commits_is_retried_by_its_recovery_job_and_lands() {
     let recovered = run_payloads(&detail, first, "recovery_finished");
     assert_eq!(recovered[0]["applied"], json!(["retry"]));
     assert_eq!(recovered[0]["escalated"], false);
+    assert_eq!(recovered[0]["failure_cause"], "environment");
     // No ask was opened, closed ones included.
     let all = crate::application::AskQuery {
         all: true,
@@ -285,6 +285,7 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
             {"kind": "recover", "text": "ask the planner to split it"},
         ],
         "reason_category": "discard",
+        "failure_cause": "environment",
     })]);
     let task = wiring.ready_task(&[]);
     wiring.supervise_once();
@@ -311,6 +312,8 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
     let recovered = payloads(&detail, "recovery_finished");
     assert_eq!(recovered[0]["escalated"], true);
     assert_eq!(recovered[0]["reason_category"], "discard");
+    // The repair was refused; the job's judgement stays.
+    assert_eq!(recovered[0]["failure_cause"], "environment");
     let ask = triage_ask(&wiring, &finished[0]);
     assert_eq!(recovered[0]["ask_id"], json!(ask.id));
     assert_eq!(ask.kind, AskKind::Decide);
@@ -365,6 +368,7 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
         "confidence": "high",
         "diagnosis": "the acceptance cannot be met",
         "question": "Is task 1 still wanted?",
+        "failure_cause": "task",
     })]);
     let task = wiring.ready_task(&[]);
     wiring.supervise_once();
@@ -375,6 +379,10 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
     let run = detail.runs[0].clone();
     assert_eq!(run.status(), RunStatus::Failed, "{kinds:?}");
     assert_eq!(detail.task.status(), TaskStatus::InProgress);
+    assert_eq!(
+        payloads(&detail, "recovery_finished")[0]["failure_cause"],
+        "task"
+    );
     let finished = payloads(&detail, "triage_finished");
     assert_eq!(finished[0]["action"], "ask", "{kinds:?}");
     assert_eq!(finished[0]["status"], "failed");

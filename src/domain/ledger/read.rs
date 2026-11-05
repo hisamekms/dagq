@@ -9,10 +9,12 @@
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use super::failure_cause;
 use super::fold::{Interval, Milestones};
 use super::provider_use::ProviderUse;
 use super::{LedgerKind, LedgerRow, Totals};
 use crate::domain::after_claim::AfterClaim;
+use crate::domain::recovery::FailureCause;
 use crate::domain::stats::landing::{LandPhases, PHASES};
 use crate::domain::stats::ledger_times::RowTimes;
 
@@ -50,6 +52,11 @@ pub struct LedgerValues {
     /// wrote, a task), and each part none when the run's events hold none,
     /// which is not a run that used none (an empty map).
     pub provider_use: Option<ProviderUse>,
+    /// What a run's recovery jobs judged caused its failure
+    /// ([`failure_cause`]), a legacy run's too. Unknown when the row holds
+    /// none (one an older fold wrote, a task), which does not say the
+    /// environment was not the cause.
+    pub failure_cause: FailureCause,
 }
 
 /// Read `row`.
@@ -70,6 +77,7 @@ pub fn read(row: &LedgerRow) -> LedgerValues {
         provider_use: (row.kind == LedgerKind::Run)
             .then(|| ProviderUse::of_detail(&row.detail))
             .flatten(),
+        failure_cause: failure_cause::of_detail(&row.detail),
     };
     if let Some(legacy) = &row.legacy {
         values.landed = row.kind == LedgerKind::Run && row.outcome.as_deref() == Some("integrated");

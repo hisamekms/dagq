@@ -815,6 +815,7 @@ impl Supervisor<'_> {
             "verdict": verdict.verdict,
             "confidence": verdict.confidence,
             "diagnosis": verdict.diagnosis,
+            "failure_cause": verdict.failure_cause,
             "applied": [name],
             "escalated": false,
             "recheck_at": match &action {

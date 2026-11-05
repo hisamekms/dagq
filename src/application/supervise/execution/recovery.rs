@@ -235,6 +235,8 @@ impl Escalation {
     /// opened, `None` when an open ask of the run already has a person
     /// looking (`outcome: already_asked`); `extra` adds to it. A failed job
     /// escalated to its ask adds `outcome: job_failed` and the `error`.
+    /// `failure_cause` is the verdict's, refused or not (ADR-t4163-1
+    /// decision 1), and null with no verdict, which reads as unknown.
     pub(super) fn finished(
         &self,
         alert: RecoveryAlert,
@@ -250,6 +252,7 @@ impl Escalation {
             "verdict": verdict.map(|v| v.verdict),
             "confidence": verdict.map(|v| v.confidence),
             "diagnosis": verdict.map(|v| v.diagnosis.clone()),
+            "failure_cause": verdict.map(|v| v.failure_cause),
             "applied": [],
             "escalated": ask_id.is_some(),
             "why": note.why,
@@ -1550,6 +1553,54 @@ fn check_live(
     Ok(Ok(()))
 }
 
+/// A live job's round as its `recovery_finished` records it.
+struct LiveRound {
+    alert: RecoveryAlert,
+    reason: Option<&'static str>,
+    attempt: usize,
+    marker_at_ms: Option<i64>,
+    duration_secs: u64,
+}
+
+impl LiveRound {
+    /// What every such record says of a `verdict` that was not escalated,
+    /// its `failure_cause` whatever was applied (ADR-t4163-1 decision 1).
+    fn finished(&self, verdict: &RecoveryVerdict, applied: &[&str]) -> Value {
+        json!({
+            "alert": self.alert,
+            "reason": self.reason,
+            "attempt": self.attempt,
+            "verdict": verdict.verdict,
+            "confidence": verdict.confidence,
+            "diagnosis": verdict.diagnosis,
+            "failure_cause": verdict.failure_cause,
+            "applied": applied,
+            "escalated": false,
+            "marker_at_ms": self.marker_at_ms,
+            "duration_secs": self.duration_secs,
+        })
+    }
+
+    /// The record of a `verdict` kept for its held task, applying nothing.
+    fn held(&self, verdict: &RecoveryVerdict) -> Value {
+        let mut finished = self.finished(verdict, &[]);
+        finished["held"] = json!(true);
+        finished
+    }
+
+    /// The record of a `verdict` whose repairs `applied` were applied.
+    fn repaired(
+        &self,
+        verdict: &RecoveryVerdict,
+        applied: &[&str],
+        recheck_at_ms: Option<i64>,
+    ) -> Value {
+        let mut finished = self.finished(verdict, applied);
+        finished["recheck_at_ms"] = json!(recheck_at_ms);
+        finished
+    }
+}
+
 /// Apply a verdict to a live session: a `repair` of high confidence whose
 /// every action holds now, each recorded as `auto_repaired`, and
 /// `recovery_finished`; otherwise the escalation.
@@ -1583,7 +1634,13 @@ fn apply_live_verdict(
     verdict: RecoveryVerdict,
     end: &JobEnd,
 ) -> Result<std::result::Result<Applied, Escalation>> {
-    let duration_secs = job.job.elapsed().as_secs();
+    let round = LiveRound {
+        alert: job.alert,
+        reason: job.reason,
+        attempt: job.attempt,
+        marker_at_ms: job.marker.map(millis),
+        duration_secs: job.job.elapsed().as_secs(),
+    };
     if !verdict.applies() {
         return Ok(Err(Escalation::Verdict(verdict)));
     }
@@ -1598,19 +1655,7 @@ fn apply_live_verdict(
                "actions": verdict.actions.iter().map(RecoveryAction::name).collect::<Vec<_>>(),
                "alert": job.alert, "attempt": job.attempt}),
     )? {
-        let mut finished = json!({
-            "alert": job.alert,
-            "reason": job.reason,
-            "attempt": job.attempt,
-            "verdict": verdict.verdict,
-            "confidence": verdict.confidence,
-            "diagnosis": verdict.diagnosis,
-            "applied": [],
-            "held": true,
-            "escalated": false,
-            "marker_at_ms": job.marker.map(millis),
-            "duration_secs": duration_secs,
-        });
+        let mut finished = round.held(&verdict);
         end.record(&mut finished);
         sv.queue
             .record_runtime_event(run.id(), EventKind::RecoveryFinished, finished)?;
@@ -1703,19 +1748,7 @@ fn apply_live_verdict(
         }
         applied.names.push(action.name());
     }
-    let mut finished = json!({
-        "alert": job.alert,
-        "reason": job.reason,
-        "attempt": job.attempt,
-        "verdict": verdict.verdict,
-        "confidence": verdict.confidence,
-        "diagnosis": verdict.diagnosis,
-        "applied": applied.names,
-        "escalated": false,
-        "marker_at_ms": job.marker.map(millis),
-        "recheck_at_ms": recheck_at,
-        "duration_secs": duration_secs,
-    });
+    let mut finished = round.repaired(&verdict, &applied.names, recheck_at);
     end.record(&mut finished);
     sv.queue
         .record_runtime_event(run.id(), EventKind::RecoveryFinished, finished)?;
@@ -2081,7 +2114,7 @@ mod tests {
                 finished,
                 json!({
                     "alert": alert, "attempt": 2, "verdict": null, "confidence": null,
-                    "diagnosis": null, "applied": [], "escalated": true, "why": note.why,
+                    "diagnosis": null, "failure_cause": null, "applied": [], "escalated": true, "why": note.why,
                     "reason_category": "recovery_failed", "ask_id": 7,
                     "outcome": "job_failed", "error": error, "marker_at_ms": 5,
                 })
@@ -2124,6 +2157,7 @@ mod tests {
         assert_eq!(finished["verdict"], "escalate");
         assert_eq!(finished["applied"], json!([]));
         assert!(finished.get("outcome").is_none(), "{finished}");
+        assert_eq!(finished["failure_cause"], "unknown");
 
         let low = Escalation::Verdict(verdict(json!({
             "verdict": "repair", "confidence": "low", "diagnosis": "maybe the machine slept",
@@ -2140,10 +2174,17 @@ mod tests {
                 "actions": [{"action": "retry"}],
                 "options": ["retry anyway", " ", {"kind": "recover", "text": "retry anyway "}],
                 "reason_category": "discard",
+                "failure_cause": "environment",
             })),
             "its branch holds commits of its own".to_owned(),
         );
         let note = refused.note(&run, alert, 1);
+        // The judgement stays, though its repair was refused (ADR-t4163-1
+        // decision 1).
+        assert_eq!(
+            refused.finished(alert, 1, &note, Some(AskId::new(3)), json!({}))["failure_cause"],
+            "environment"
+        );
         assert_eq!(
             note.why,
             "the runtime did not apply the recovery job's repair: its branch holds commits of its own"
@@ -2183,6 +2224,45 @@ mod tests {
         );
         assert_eq!(note.text, "Why a person: recovery_failed");
         assert!(used_up.requester(&run, alert, 3).is_none());
+        // No job's verdict, no judgement.
+        assert!(used_up.finished(alert, 3, &note, None, json!({}))["failure_cause"].is_null());
+    }
+
+    /// A live job's `recovery_finished` keeps the job's judgement whether
+    /// its repair was applied or its verdict kept for a held task, which
+    /// applies nothing (ADR-t4163-1 decision 1).
+    #[test]
+    fn a_live_jobs_end_keeps_its_failure_cause_applied_or_held() {
+        let round = LiveRound {
+            alert: RecoveryAlert::Stalled,
+            reason: Some("turn_without_receipt"),
+            attempt: 2,
+            marker_at_ms: Some(5),
+            duration_secs: 9,
+        };
+        let judged = verdict(json!({
+            "verdict": "repair", "confidence": "high", "diagnosis": "refused",
+            "actions": [{"action": "resume"}], "failure_cause": "environment",
+        }));
+        assert_eq!(
+            round.repaired(&judged, &["resume"], Some(7)),
+            json!({
+                "alert": "stalled", "reason": "turn_without_receipt", "attempt": 2,
+                "verdict": "repair", "confidence": "high", "diagnosis": "refused",
+                "failure_cause": "environment", "applied": ["resume"],
+                "escalated": false, "marker_at_ms": 5, "recheck_at_ms": 7,
+                "duration_secs": 9,
+            })
+        );
+        assert_eq!(
+            round.held(&judged),
+            json!({
+                "alert": "stalled", "reason": "turn_without_receipt", "attempt": 2,
+                "verdict": "repair", "confidence": "high", "diagnosis": "refused",
+                "failure_cause": "environment", "applied": [], "held": true,
+                "escalated": false, "marker_at_ms": 5, "duration_secs": 9,
+            })
+        );
     }
 
     /// A live alert's ask offers `wait` and `stop`, then the job's own
@@ -2300,6 +2380,8 @@ mod tests {
             assert!(unmeasured["tokens"].is_null(), "{unmeasured}");
             assert!(unmeasured.get("tokens_source").is_some(), "{unmeasured}");
             assert_eq!(unmeasured["tokens_reason"], "tokens_not_read");
+            // A stopped job printed no verdict: it judged nothing.
+            assert!(unmeasured.get("failure_cause").is_none(), "{unmeasured}");
         }
     }
 

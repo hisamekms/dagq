@@ -164,6 +164,7 @@ stats・kpi・reportの全ての欄は、行を窓と絞り込みで選んで返
 - 属性とfinding: 基準のeventより前の窓は「基準より前」。
 - providerの控えと切り替え: 記録より前は「記録なし」、旧方式も畳む。
 - Executionのcontext: 記録が無い（欄の無い前の記録）と未計測（nullと理由）を分ける。
+- 失敗の原因の判定: 判定の記録の無いrunは不明で、環境が原因でないとは断定しない（ADR-t4163-1決定4）。
 - token: Executionの終わった時刻（対話は区切りの時刻）で日に振り分け、actor × provider × modelで足す（[Execution tokens](execution-tokens.md)）。
 
 ## 並走の比較と照合

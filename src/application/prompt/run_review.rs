@@ -1135,10 +1135,11 @@ pub fn recovery_prompt(
          Allowed actions:\n{actions}\n\
          Not allowed, ever: cancelling the task, retrying a run that has commits, editing the task, landing without review, writing to main, pushing, deleting branches or worktrees, touching anything outside this run's worktree and workspace, writing the queue database, typing into the session (a headless session takes no keys; an instruction goes as its next turn). If the repair needs any of these, escalate.\n\n\
          Answer with one JSON object and nothing else, matching this schema:\n\
-         {{\"verdict\": \"repair\" | \"escalate\", \"confidence\": \"high\" | \"low\", \"diagnosis\": string, \"actions\": [action, ...], \"question\": string, \"options\": [{{\"kind\": string, \"text\": string}}, ...], \"reason_category\": \"recovery_failed\" | \"discard\" | \"scope\"}}\n\
+         {{\"verdict\": \"repair\" | \"escalate\", \"confidence\": \"high\" | \"low\", \"diagnosis\": string, \"actions\": [action, ...], \"question\": string, \"options\": [{{\"kind\": string, \"text\": string}}, ...], \"reason_category\": \"recovery_failed\" | \"discard\" | \"scope\", \"failure_cause\": \"environment\" | \"task\" | \"unknown\"}}\n\
          diagnosis says what you found in one or two sentences. repair needs at least one action and is applied only with confidence high; with confidence low, or with escalate, a person is asked, with your actions as the recommendation, question as the question and options added to theirs as the rule below says.\n\
          {options_rule}\
-         reason_category says why a person is needed: recovery_failed when you cannot repair it or are not sure, discard when the work would be thrown away, scope when it needs a permission you do not have.\n",
+         reason_category says why a person is needed: recovery_failed when you cannot repair it or are not sure, discard when the work would be thrown away, scope when it needs a permission you do not have.\n\
+         failure_cause says what caused the failure you looked at, and is kept whatever becomes of your verdict: environment only when a refusal by the execution environment, outside the code and the task, stopped a verification the task needs; task when the code, the acceptance criteria or a transient test failure caused it; unknown otherwise (a provider's usage limit is not environment). When you are not sure, do not say environment. The same rule holds for every run, whichever provider it ran on.\n",
         run_id = run.id(),
         task_id = task.id(),
         state = match &material.ended {

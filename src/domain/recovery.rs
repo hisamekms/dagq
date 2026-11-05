@@ -434,6 +434,50 @@ impl BareActionAnswer<'_> {
     }
 }
 
+/// What a recovery job judges caused the failure it looked at
+/// (ADR-t4163-1 decision 1), the job's own reading: the runtime carries and
+/// counts it and never derives it. Spelled `environment`, `task` and
+/// `unknown` wherever it is written: the verdict's and `recovery_finished`'s
+/// `failure_cause`, and a run row's detail
+/// ([`super::ledger::failure_cause::DETAIL_KEY`]).
+///
+/// Ordered by what it names, unknown first, so that a run's rounds fold to
+/// the greatest ([`super::ledger::failure_cause::of_rounds`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCause {
+    /// No judgement: none was recorded, or the job could not tell. This
+    /// does not say the environment was not the cause (decision 4).
+    #[default]
+    Unknown,
+    /// The code, the acceptance criteria or a transient test failure.
+    Task,
+    /// A refusal by the execution environment, outside the code and the
+    /// task, stopped a verification the task needs.
+    Environment,
+}
+
+impl FailureCause {
+    /// The cause `text` spells; a value none of them spells and no value
+    /// are unknown, so a job's or a record's odd value is no failure.
+    pub fn read(text: Option<&str>) -> Self {
+        match text {
+            Some("environment") => Self::Environment,
+            Some("task") => Self::Task,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// [`Self::read`] for a verdict's field of any JSON type.
+    fn deserialize_lenient<'de, D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(Self::read(value.as_str()))
+    }
+}
+
 /// What the recovery job prints on stdout: one JSON object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -449,6 +493,10 @@ pub struct RecoveryVerdict {
     pub options: Vec<JobOption>,
     #[serde(default)]
     pub reason_category: Option<AskReason>,
+    /// `failure_cause`: the field is known, but its value is read leniently
+    /// ([`FailureCause::read`]): missing or unknown, the job still answered.
+    #[serde(default, deserialize_with = "FailureCause::deserialize_lenient")]
+    pub failure_cause: FailureCause,
 }
 
 impl RecoveryVerdict {
@@ -1185,6 +1233,52 @@ mod tests {
             }
         }
         all
+    }
+
+    /// A verdict's `failure_cause` reads as one of its three values, and a
+    /// missing, unknown or odd one reads as unknown without failing the job;
+    /// a field nobody knows is still refused.
+    #[test]
+    fn a_verdicts_failure_cause_reads_and_an_odd_one_is_unknown() {
+        assert_eq!(
+            FailureCause::read(Some("environment")),
+            FailureCause::Environment
+        );
+        assert_eq!(FailureCause::read(Some("task")), FailureCause::Task);
+        assert_eq!(FailureCause::read(Some("unknown")), FailureCause::Unknown);
+        assert_eq!(
+            FailureCause::read(Some("Environment")),
+            FailureCause::Unknown
+        );
+        assert_eq!(FailureCause::read(Some("sandbox")), FailureCause::Unknown);
+        assert_eq!(FailureCause::read(None), FailureCause::Unknown);
+
+        let parse = |extra: &str| {
+            RecoveryVerdict::parse(&format!(
+                r#"{{"verdict":"escalate","confidence":"high","diagnosis":"x"{extra}}}"#
+            ))
+        };
+        for (field, cause) in [
+            ("", FailureCause::Unknown),
+            (
+                r#","failure_cause":"environment""#,
+                FailureCause::Environment,
+            ),
+            (r#","failure_cause":"task""#, FailureCause::Task),
+            (r#","failure_cause":"unknown""#, FailureCause::Unknown),
+            (r#","failure_cause":"weather""#, FailureCause::Unknown),
+            (r#","failure_cause":null"#, FailureCause::Unknown),
+            (r#","failure_cause":3"#, FailureCause::Unknown),
+            (r#","failure_cause":{"a":1}"#, FailureCause::Unknown),
+        ] {
+            assert_eq!(parse(field).unwrap().failure_cause, cause, "{field}");
+        }
+        assert!(parse(r#","force":true"#).is_err());
+        // Written as it is spelled.
+        assert_eq!(
+            serde_json::to_value(FailureCause::Environment).unwrap(),
+            "environment"
+        );
     }
 
     /// A job's option is a bare string (no kind) or `{kind, text}`, and
