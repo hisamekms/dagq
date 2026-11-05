@@ -385,8 +385,10 @@ fn the_tokens_per_landing_of_the_pair_groups_are_over_each_strata_runs() {
     };
     let runs = [
         ("codex", Some(recorded.clone()), 100),
-        ("claude", Some(recorded), 20),
+        ("claude", Some(recorded.clone()), 20),
         ("codex", None, 3),
+        // The environment caused this one's failure.
+        ("codex", Some(recorded), 5000),
     ];
     for (index, (ran_on, uses, input)) in runs.into_iter().enumerate() {
         let task = index as i64 + 1;
@@ -401,9 +403,11 @@ fn the_tokens_per_landing_of_the_pair_groups_are_over_each_strata_runs() {
                    "tokens_source": "token_usage_record", "tokens_by_model": []}),
             run.claimed + 50,
         );
-        queue
-            .rows
-            .push(pair_row(&run, landed, ("treatment", "codex", ran_on), uses));
+        let mut row = pair_row(&run, landed, ("treatment", "codex", ran_on), uses);
+        if task == 4 {
+            row.detail[crate::domain::ledger::failure_cause::DETAIL_KEY] = json!("environment");
+        }
+        queue.rows.push(row);
     }
     let claimed = MONDAY + 10 * HOUR;
     let flying = format!("{:08x}-0000-4000-8000-{:012x}", 9, claimed);
@@ -439,7 +443,8 @@ fn the_tokens_per_landing_of_the_pair_groups_are_over_each_strata_runs() {
     for (stratum, total, per_landing) in [
         ("pair_group=treatment", 100.0, 100.0),
         ("switched:pair_group=treatment", 20.0, 20.0),
-        ("assigned:pair_group=treatment", 1023.0, 341.0),
+        ("environment:pair_group=treatment", 5000.0, 5000.0),
+        ("assigned:pair_group=treatment", 6023.0, 1505.75),
     ] {
         assert_eq!(
             measure(period, "tokens", stratum).value,

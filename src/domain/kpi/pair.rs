@@ -1,22 +1,43 @@
 //! The set the provider pair trial's groups are compared by (ADR-t4005-1
-//! decision 8, ADR-t4118-1 for the strata). The groups are the claim's
-//! attribute [`provider_trial::GROUP`], and `--by pair_group` splits the runs
-//! of a group into three strata ([`strata`], [`Standing`]):
+//! decision 8, ADR-t4118-1 and ADR-t4163-1 for the strata). The groups are the
+//! claim's attribute [`provider_trial::GROUP`], and `--by pair_group` splits
+//! the runs of a group into four strata ([`strata`], [`Standing`]):
 //!
 //! - The primary, `pair_group=<group>` ([`PRIMARY`] is its empty prefix): the
-//!   runs that ran as their group assigned them ([`ran_as_assigned`]).
+//!   runs that ran as their group assigned them ([`ran_as_assigned`]) and
+//!   whose failure was not judged the environment's.
 //! - The switched, `switched:pair_group=<group>` ([`SWITCHED`]): the runs the
 //!   records show moved, the worker or a review job, even if the other side
 //!   is unknown. They stay in their assigned group: one that moved on both
 //!   sides ran as the other group's pair and is still not in its primary.
+//! - The environment's, `environment:pair_group=<group>` ([`ENVIRONMENT`]):
+//!   the runs a recovery job judged the environment caused the failure of
+//!   ([`FailureCause::Environment`], the ledger row's). A run with any other
+//!   cause, or none recorded, stays where the rest of this says.
 //! - The secondary, `assigned:pair_group=<group>` ([`ASSIGNED`]): every run of
-//!   the group, those two and the runs that cannot be judged (intention to
+//!   the group, all of those and the runs that cannot be judged (intention to
 //!   treat).
 //!
 //! A run that cannot be judged has an unknown side and no switch known on the
-//! other: it is in the secondary alone, counted in no switched run and by its
-//! group in [`PairDetail::unrecorded`]. A run with no group stays in
-//! `pair_group=unknown`, the attribute's layer like any other's.
+//! other: it is in the secondary alone unless it is the environment's, counted
+//! in no switched run and by its group in [`PairDetail::unrecorded`]. A run
+//! with no group stays in `pair_group=unknown`, the attribute's layer like any
+//! other's.
+//!
+//! The environment's cause is an axis apart from the switch: it takes a run
+//! out of the primary and adds the environment's stratum, and leaves the rest
+//! as it was. So a run the environment caused that ran as assigned is in the
+//! environment's and the secondary, one that switched in the environment's,
+//! the switched and the secondary, and one that cannot be judged in the
+//! environment's and the secondary. The environment's and the switched overlap,
+//! and a run that cannot be judged and is not the environment's is in neither,
+//! so the counts of the strata need not add up to the secondary's.
+//!
+//! Read a group's switched runs and those that cannot be judged in its
+//! secondary, which holds them all: an environment's stratum's same items count
+//! only the runs in it. The share of switched runs is over the secondary's runs
+//! less its [`PairDetail::unrecorded`], the runs of the group that can be
+//! judged, which the environment's stratum does not change.
 //!
 //! All get every run KPI, [`super::trial`]'s set (revises, the time with and
 //! without a person's answers, the reverts and CI failures after the
@@ -68,6 +89,7 @@ use crate::domain::{
     agent_eval::round::ProviderCost,
     ledger::provider_use::ProviderUse,
     provider_trial,
+    recovery::FailureCause,
     sessions::{REVIEW, RUN_SESSION},
     stats::executions::Execution,
 };
@@ -76,6 +98,9 @@ use crate::domain::{
 pub const PRIMARY: &str = "";
 /// The prefix of a stratum of switched runs: `switched:pair_group=<group>`.
 pub const SWITCHED: &str = "switched:";
+/// The prefix of a stratum of the runs the environment caused the failure
+/// of: `environment:pair_group=<group>`.
+pub const ENVIRONMENT: &str = "environment:";
 /// The prefix of a secondary stratum: `assigned:pair_group=<group>`.
 pub const ASSIGNED: &str = "assigned:";
 
@@ -97,16 +122,18 @@ pub const NO_COST: &str = "no_cost";
 /// The reason of a wait or a switch for a usage limit.
 const USAGE_LIMIT: &str = "usage_limit";
 
-/// `stratum` without the prefix of a switched or secondary stratum.
+/// `stratum` without the prefix of a switched, environment's or secondary
+/// stratum.
 pub fn without_prefix(stratum: &str) -> &str {
     stratum
         .strip_prefix(SWITCHED)
+        .or_else(|| stratum.strip_prefix(ENVIRONMENT))
         .or_else(|| stratum.strip_prefix(ASSIGNED))
         .unwrap_or(stratum)
 }
 
 /// Whether `stratum` is one this set is computed for: a group of the
-/// provider pair trial, in any of its three strata.
+/// provider pair trial, in any of its strata.
 pub fn is_pair_stratum(stratum: &str) -> bool {
     without_prefix(stratum)
         .strip_prefix(provider_trial::GROUP)
@@ -165,15 +192,27 @@ pub fn standing(layers: &RunLayers, uses: Option<&ProviderUse>) -> Standing {
 }
 
 /// The strata of a run of the group whose stratum is `group`
-/// (`pair_group=<group>`): the secondary, and the primary or the switched
-/// by its [`standing`].
-pub fn strata(group: &str, layers: &RunLayers, uses: Option<&ProviderUse>) -> Vec<String> {
-    let assigned = format!("{ASSIGNED}{group}");
-    match standing(layers, uses) {
-        Standing::AsAssigned => vec![format!("{PRIMARY}{group}"), assigned],
-        Standing::Switched => vec![format!("{SWITCHED}{group}"), assigned],
-        Standing::Unjudged => vec![assigned],
+/// (`pair_group=<group>`), by its [`standing`] and its failure's `cause`: the
+/// secondary, the switched when it switched, and the environment's in place
+/// of the primary when the environment caused its failure.
+pub fn strata(
+    group: &str,
+    layers: &RunLayers,
+    uses: Option<&ProviderUse>,
+    cause: FailureCause,
+) -> Vec<String> {
+    let standing = standing(layers, uses);
+    let environment = cause == FailureCause::Environment;
+    let mut strata = vec![format!("{ASSIGNED}{group}")];
+    if standing == Standing::Switched {
+        strata.push(format!("{SWITCHED}{group}"));
     }
+    if environment {
+        strata.push(format!("{ENVIRONMENT}{group}"));
+    } else if standing == Standing::AsAssigned {
+        strata.push(format!("{PRIMARY}{group}"));
+    }
+    strata
 }
 
 /// One finished run of a stratum.
@@ -191,8 +230,9 @@ pub struct PairRun<'a> {
 pub struct PairDetail {
     /// The finished runs.
     pub runs: usize,
-    /// Of them, those that cannot be judged ([`Standing::Unjudged`]). Only
-    /// a secondary stratum holds any of a group: its count is the group's.
+    /// Of them, those that cannot be judged ([`Standing::Unjudged`]). A
+    /// secondary stratum's count is the group's; an environment's stratum
+    /// holds those of them it has too; the others hold none.
     pub unrecorded: usize,
     pub worker: SideDetail,
     pub review: SideDetail,

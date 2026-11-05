@@ -28,6 +28,7 @@ use crate::domain::{
     ledger::{self, LedgerKind, LedgerRow, breakdown::Breakdown},
     marks::{self, Mark},
     plan_quality::plan_quality,
+    recovery::FailureCause,
     satisfied,
     stats::{
         self, Cursor, LiveSnapshot, RunStats, SlotSnapshot, StatsQuery,
@@ -230,6 +231,10 @@ pub(super) struct Context<'a> {
     /// read gives it ([`ledger::read::LedgerValues::provider_use`]), for
     /// the provider pair's set ([`pair`]).
     uses: HashMap<String, ledger::provider_use::ProviderUse>,
+    /// What each run row says caused its failure, as the ledger's read gives
+    /// it ([`ledger::read::LedgerValues::failure_cause`]), for the provider
+    /// pair's strata ([`pair::strata`]).
+    failure_causes: HashMap<String, FailureCause>,
     /// The Executions the rows keep ([`KpiInput::executions`]) by their
     /// run, for the same.
     executions: HashMap<RunId, Vec<&'a stats::executions::Execution>>,
@@ -513,6 +518,7 @@ impl<'a> Context<'a> {
             runs: HashMap::new(),
             open: HashMap::new(),
             uses: HashMap::new(),
+            failure_causes: HashMap::new(),
             executions: HashMap::new(),
             codex_prices: input.config.codex_prices,
         };
@@ -536,6 +542,10 @@ impl<'a> Context<'a> {
         context.uses = rows
             .iter()
             .filter_map(|(run, values)| Some(((*run).to_owned(), values.provider_use.clone()?)))
+            .collect();
+        context.failure_causes = rows
+            .iter()
+            .map(|(run, values)| ((*run).to_owned(), values.failure_cause))
             .collect();
         context.layers = everything
             .runs
@@ -775,7 +785,15 @@ impl<'a> Context<'a> {
             |run| Some(self.run_layers(run)),
         );
         match layers {
-            Some(layers) => pair::strata(&stratum, &layers, self.uses.get(run_id.as_str())),
+            Some(layers) => pair::strata(
+                &stratum,
+                &layers,
+                self.uses.get(run_id.as_str()),
+                self.failure_causes
+                    .get(run_id.as_str())
+                    .copied()
+                    .unwrap_or_default(),
+            ),
             None => vec![stratum],
         }
     }

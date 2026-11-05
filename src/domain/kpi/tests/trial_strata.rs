@@ -387,9 +387,256 @@ fn the_pair_groups_split_into_the_primary_the_switched_and_the_assigned() {
     assert!(!window.details.contains_key("provider_pair"));
 }
 
+/// The strata of a run by its standing and its failure's cause (ADR-t4163-1
+/// decision 3 and 4): the environment's takes it out of the primary only, a
+/// run with any other cause stays where its standing puts it, and each stratum
+/// is a pair stratum.
+#[test]
+fn a_runs_strata_follow_its_standing_and_its_failure_cause() {
+    use crate::domain::after_claim::AfterClaim;
+    use crate::domain::ledger::provider_use::ProviderUse;
+    use crate::domain::recovery::FailureCause::{Environment, Task, Unknown};
+    use std::collections::BTreeMap;
+    let layers = |ran_on: &str| RunLayers {
+        attributes: json!({ crate::domain::provider_trial::WORKER: "codex" })
+            .as_object()
+            .cloned()
+            .unwrap(),
+        after_claim: AfterClaim {
+            last_provider: Some(ran_on.to_owned()),
+            on_codex: ran_on == "codex",
+            codex_model: None,
+        },
+    };
+    let recorded = ProviderUse {
+        worker_waits: Some(BTreeMap::new()),
+        review_switches: Some(BTreeMap::new()),
+    };
+    const GROUP: &str = "pair_group=treatment";
+    const P: &str = "pair_group=treatment";
+    const S: &str = "switched:pair_group=treatment";
+    const E: &str = "environment:pair_group=treatment";
+    const A: &str = "assigned:pair_group=treatment";
+    for (ran_on, uses, cause, expected) in [
+        ("codex", Some(&recorded), Unknown, vec![P, A]),
+        ("codex", Some(&recorded), Task, vec![P, A]),
+        ("codex", Some(&recorded), Environment, vec![E, A]),
+        ("claude", Some(&recorded), Unknown, vec![S, A]),
+        ("claude", Some(&recorded), Task, vec![S, A]),
+        ("claude", Some(&recorded), Environment, vec![E, S, A]),
+        ("codex", None, Unknown, vec![A]),
+        ("codex", None, Task, vec![A]),
+        ("codex", None, Environment, vec![E, A]),
+    ] {
+        let mut strata = pair::strata(GROUP, &layers(ran_on), uses, cause);
+        strata.sort_unstable();
+        let mut expected: Vec<String> = expected.into_iter().map(str::to_owned).collect();
+        expected.sort_unstable();
+        assert_eq!(strata, expected, "{ran_on} {uses:?} {cause:?}");
+        assert!(strata.iter().all(|stratum| pair::is_pair_stratum(stratum)));
+        assert!(
+            strata
+                .iter()
+                .all(|stratum| pair::without_prefix(stratum) == GROUP)
+        );
+    }
+    assert!(!pair::is_pair_stratum("environment:group=treatment"));
+}
+
+/// A provider pair queue with runs of every standing and failure cause
+/// (ADR-t4163-1), the causes written only when `judged`.
+fn a_queue_of_failure_causes(judged: bool) -> Queue {
+    use crate::domain::ledger::{failure_cause, provider_use::ProviderUse};
+    use std::collections::BTreeMap;
+    let mut queue = Queue::default();
+    let recorded = ProviderUse {
+        worker_waits: Some(BTreeMap::new()),
+        review_switches: Some(BTreeMap::new()),
+    };
+    let review_moved = ProviderUse {
+        worker_waits: Some(BTreeMap::new()),
+        review_switches: Some(BTreeMap::from([("usage_limit".to_owned(), 1)])),
+    };
+    // (group, the worker's end, its use, its cause, the end known, failed)
+    let runs = [
+        // Ran as assigned, no judgement and the task's: the primary.
+        ("treatment", "codex", Some(&recorded), None, true, false),
+        (
+            "treatment",
+            "codex",
+            Some(&recorded),
+            Some("task"),
+            true,
+            false,
+        ),
+        // Ran as assigned, the environment's, landed and failed.
+        (
+            "treatment",
+            "codex",
+            Some(&recorded),
+            Some("environment"),
+            true,
+            false,
+        ),
+        (
+            "treatment",
+            "codex",
+            Some(&recorded),
+            Some("environment"),
+            true,
+            true,
+        ),
+        // Switched and the environment's, on the worker and on the review.
+        (
+            "treatment",
+            "claude",
+            Some(&recorded),
+            Some("environment"),
+            true,
+            false,
+        ),
+        (
+            "treatment",
+            "codex",
+            Some(&review_moved),
+            Some("environment"),
+            false,
+            false,
+        ),
+        // Cannot be judged and the environment's.
+        ("treatment", "codex", None, Some("environment"), true, false),
+        // Switched and cannot be judged, with no judgement: as they were.
+        ("treatment", "claude", Some(&recorded), None, true, false),
+        ("treatment", "codex", None, None, true, false),
+        // The other group: one of each.
+        (
+            "control",
+            "claude",
+            Some(&recorded),
+            Some("environment"),
+            true,
+            false,
+        ),
+        ("control", "claude", Some(&recorded), None, true, false),
+    ];
+    let assigned = |group: &str| {
+        if group == "treatment" {
+            "codex"
+        } else {
+            "claude"
+        }
+    };
+    for (index, (group, ran_on, uses, cause, end_known, failed)) in runs.into_iter().enumerate() {
+        let index = index as i64;
+        let mut run = Run::new(40 + index, None, MONDAY + HOUR * (index + 1), 100);
+        run.failed = failed;
+        let ended = queue.run(&run);
+        let mut row = pair_row(&run, ended, (group, assigned(group), ran_on), uses.cloned());
+        if !end_known {
+            row.after_claim.as_mut().unwrap().last_provider = None;
+        }
+        if let Some(cause) = cause.filter(|_| judged) {
+            row.detail[failure_cause::DETAIL_KEY] = json!(cause);
+        }
+        queue.rows.push(row);
+    }
+    queue
+}
+
+/// ADR-t4163-1 decision 3: a run the environment caused leaves the primary for
+/// its own stratum and stays in the rest; the group's switched runs, those that
+/// cannot be judged and the share's denominator do not move; the strata's counts
+/// need not add up to the secondary's.
+#[test]
+fn a_run_the_environment_caused_leaves_the_primary_for_its_own_stratum() {
+    let query = KpiQuery {
+        last: 1,
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        by: vec!["pair_group".parse().unwrap()],
+        ..KpiQuery::default()
+    };
+    let now = MONDAY + DAY + HOUR;
+    let result = a_queue_of_failure_causes(true).kpi(now, &KpiConfig::default(), &query);
+    let period = &result.periods[0];
+    let details = &period.window.details["provider_pair"];
+    let value = |name: &str, stratum: &str| measure(period, name, stratum).value;
+    // (stratum, runs, of them cannot be judged, landings, switched worker and
+    // review)
+    for (stratum, runs, unrecorded, landings, worker, review) in [
+        ("pair_group=treatment", 2, 0, 2.0, 0.0, 0.0),
+        ("switched:pair_group=treatment", 3, 0, 3.0, 2.0, 1.0),
+        ("environment:pair_group=treatment", 5, 1, 4.0, 1.0, 1.0),
+        ("assigned:pair_group=treatment", 9, 2, 8.0, 2.0, 1.0),
+        ("pair_group=control", 1, 0, 1.0, 0.0, 0.0),
+        ("environment:pair_group=control", 1, 0, 1.0, 0.0, 0.0),
+        ("assigned:pair_group=control", 2, 0, 2.0, 0.0, 0.0),
+    ] {
+        assert_eq!(details[stratum]["runs"], runs, "{stratum}");
+        assert_eq!(details[stratum]["unrecorded"], unrecorded, "{stratum}");
+        assert_eq!(value("landings", stratum), Some(landings), "{stratum}");
+        assert_eq!(
+            value(pair::SWITCHED_WORKER, stratum),
+            Some(worker),
+            "{stratum}"
+        );
+        assert_eq!(
+            value(pair::SWITCHED_REVIEW, stratum),
+            Some(review),
+            "{stratum}"
+        );
+    }
+    // The same items as the primary.
+    for (name, strata) in &period.window.kpis {
+        if strata.contains_key("pair_group=treatment") {
+            assert!(
+                strata.contains_key("environment:pair_group=treatment"),
+                "{name}"
+            );
+        }
+    }
+    // The strata overlap, and the sum is not the secondary's.
+    let runs = |stratum: &str| details[stratum]["runs"].as_i64().unwrap();
+    assert_ne!(
+        runs("pair_group=treatment")
+            + runs("switched:pair_group=treatment")
+            + runs("environment:pair_group=treatment"),
+        runs("assigned:pair_group=treatment")
+    );
+    // Without the judgements nothing else moves: the same runs in the group,
+    // the same count of those that cannot be judged, so the same denominator.
+    let unjudged = a_queue_of_failure_causes(false).kpi(now, &KpiConfig::default(), &query);
+    let before = &unjudged.periods[0];
+    let plain = &before.window.details["provider_pair"];
+    assert!(plain.get("environment:pair_group=treatment").is_none());
+    assert_eq!(plain["pair_group=treatment"]["runs"], 4);
+    for stratum in [
+        "switched:pair_group=treatment",
+        "assigned:pair_group=treatment",
+        "assigned:pair_group=control",
+    ] {
+        assert_eq!(plain[stratum], details[stratum], "{stratum}");
+    }
+    let denominator = |of: &Value| {
+        let group = &of["assigned:pair_group=treatment"];
+        group["runs"].as_i64().unwrap() - group["unrecorded"].as_i64().unwrap()
+    };
+    assert_eq!(denominator(details), 7);
+    assert_eq!(denominator(plain), denominator(details));
+    for name in [pair::SWITCHED_WORKER, pair::SWITCHED_REVIEW] {
+        assert_eq!(
+            measure(before, name, "assigned:pair_group=treatment").value,
+            value(name, "assigned:pair_group=treatment"),
+            "{name}"
+        );
+    }
+    // A layer that is not the provider pair's is the same.
+    let other = |result: &Kpi| result.periods[0].window.kpis["landings"][ALL].value;
+    assert_eq!(other(&result), other(&unjudged));
+}
+
 /// `--cross` keeps the meaning of the provider pair's strata: crossed by the
 /// change, the primary's name holds only the run that ran as assigned, next
-/// to the switched and the assigned.
+/// to the switched, the environment's and the assigned.
 #[test]
 fn the_pair_groups_cross_by_the_same_strata() {
     use crate::domain::ledger::provider_use::ProviderUse;
@@ -400,17 +647,20 @@ fn the_pair_groups_cross_by_the_same_strata() {
     };
     let runs = [
         ("codex", Some(recorded.clone())),
-        ("claude", Some(recorded)),
+        ("claude", Some(recorded.clone())),
         ("codex", None),
+        ("codex", Some(recorded)),
     ];
     for (index, (ran_on, uses)) in runs.into_iter().enumerate() {
         let task = index as i64 + 1;
         let change = Some("fix".parse::<TaskChange>().unwrap());
         let run = Run::new(task, change, MONDAY + HOUR * task, 100);
         let landed = queue.run(&run);
-        queue
-            .rows
-            .push(pair_row(&run, landed, ("treatment", "codex", ran_on), uses));
+        let mut row = pair_row(&run, landed, ("treatment", "codex", ran_on), uses);
+        if task == 4 {
+            row.detail[crate::domain::ledger::failure_cause::DETAIL_KEY] = json!("environment");
+        }
+        queue.rows.push(row);
     }
     let query = KpiQuery {
         last: 1,
@@ -424,7 +674,8 @@ fn the_pair_groups_cross_by_the_same_strata() {
     for (stratum, landings) in [
         ("cross:change=fix|pair_group=treatment", 1.0),
         ("cross:change=fix|switched:pair_group=treatment", 1.0),
-        ("cross:change=fix|assigned:pair_group=treatment", 3.0),
+        ("cross:change=fix|assigned:pair_group=treatment", 4.0),
+        ("cross:change=fix|environment:pair_group=treatment", 1.0),
     ] {
         assert_eq!(
             measure(period, "landings", stratum).value,
