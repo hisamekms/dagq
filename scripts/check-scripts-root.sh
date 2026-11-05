@@ -63,6 +63,7 @@ check-doc-links doc_broken_link
 check-doc-links doc_link_to_removed_design
 check-doc-frontmatter doc_frontmatter_missing_key
 check-doc-frontmatter doc_frontmatter_updated_line
+check-doc-frontmatter doc_frontmatter_unknown_type
 check-plugin-version plugin_version_mismatch
 check-commit-messages commit_message_prefix
 check-local-gates local_gates_declaration_drift
@@ -167,6 +168,10 @@ violate_doc_frontmatter_missing_key() {
 
 violate_doc_frontmatter_updated_line() {
   printf -- '---\nid: zz-scripts-root-updated\ntype: design\ntitle: fixture\nstatus: current\ncreated: 2026-10-07\nupdated: 2026-10-07\n---\n\n# fixture\n' >docs/design/zz-scripts-root-updated.md
+}
+
+violate_doc_frontmatter_unknown_type() {
+  printf -- '---\nid: zz-scripts-root-unknown-type\ntype: zz-no-such-type\ntitle: fixture\nstatus: current\ncreated: 2026-10-07\n---\n\n# fixture\n' >docs/zz-scripts-root-unknown-type.md
 }
 
 # plugin.json's version no longer matches Cargo.toml's.

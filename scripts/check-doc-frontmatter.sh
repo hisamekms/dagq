@@ -5,8 +5,8 @@
 #   "---";
 # - the required keys id, type, title, status and created are there with a
 #   value;
-# - type is design, plan or development (adr only for the ADRs), and status
-#   is one of the allowed values of that type ("Type-specific fields");
+# - type is design, plan, development or deploy (adr only for the ADRs), and
+#   status is one of the allowed values of that type ("Type-specific fields");
 # - id is lowercase kebab-case, and no two checked documents share one.
 # - no updated or last_verified line is in the frontmatter: ADR-t1964-1
 #   takes them out of the documents other than the ADRs, so a line of either
@@ -84,8 +84,8 @@ done | awk '
     if ("type" in val && t != "") {
       if (t == "design") allowed = " draft current deprecated superseded "
       else if (t == "plan") allowed = " proposed active blocked completed archived "
-      else if (t == "development") allowed = " current deprecated "
-      else { allowed = ""; report("type " t " is not design, plan or development") }
+      else if (t == "development" || t == "deploy") allowed = " current deprecated "
+      else { allowed = ""; report("type " t " is not design, plan, development or deploy") }
       if (allowed != "" && ("status" in val) && val["status"] != "" && index(allowed, " " val["status"] " ") == 0)
         report("status " val["status"] " is not allowed for type " t " (allowed:" allowed ")")
     }
