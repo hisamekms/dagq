@@ -121,6 +121,7 @@ supervisorは`[worker.trial]`と同じpassで読み（読めなければ両方�
 止めるのは`[worker.trial]`を無効に戻すこと。
 守る指標の差が大きく超えたときに止める判定も人とplannerが行い、自動では止めない（[ADR-t3957-1](../../adr/2026-11-02-t3957-1-production-ab-of-worker-and-runtime-planner-model-and-effort.md)決定6）。
 providerの組の試しは、割り当てどおりに動いた組を主に、切り替えたrunを割り当てた群ごとの別の層に、判定できないrunも含む割り当てた群を副に読む（[ADR-t4118-1](../../adr/2026-11-04-t4118-1-provider-pair-primary-and-switched-strata.md)）。
-判定できないrunは副だけに含め、群ごとに件数を見せ、切り替えたrunの数には入れない。
-主の品質の差、切り替えの多さで主のBの件数が溜まらないこと、workerを待たせるrepositoryの控えの待ちを見て、止める・広げる判定を人とplannerが行う。
+環境が原因のrunは、切り替えの判定と別の軸で主から外し、割り当てた群ごとの別の層に読み、副には残す（[ADR-t4163-1](../../adr/2026-11-05-t4163-1-environment-caused-failures-are-judged-by-the-recovery-job-and-kept-in-their-own-stratum.md)）。
+切り替えを判定できないrunは、環境が原因なら環境の層にも入るほかは副だけに含め、群ごとに件数を見せ、切り替えたrunの数には入れない。
+主の品質の差、切り替えの多さやBの環境が原因のrunの多さで主のBの件数が溜まらないこと、workerを待たせるrepositoryの控えの待ちを見て、止める・広げる判定を人とplannerが行う。
 層の判定と集計の入口は`kpi::pair`のdoc comment。
