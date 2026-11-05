@@ -910,6 +910,76 @@ fn heads_held(events: &[RunEvent], now: i64, settled: bool) -> Vec<QueueHead> {
         .collect()
 }
 
+/// A stream whose row the store holds settled and ended is the fold of its
+/// life's end as it is: the first close of a book made again does not name
+/// it for a fold, so that a start holds the records of no such row for each
+/// life of its history. One not settled, or settled with no end, is named,
+/// and an event naming the supervisor has a settled one read again, as the
+/// fold of every event does.
+#[test]
+fn a_stream_settled_and_ended_is_not_closed_again_until_an_event_names_its_supervisor() {
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "live_alert_baseline",
+        json!({"supervisor": "s1", "version": 1}),
+        0,
+    )
+    .add(
+        None,
+        None,
+        "supervisor_stopped",
+        json!({"supervisor": "s1"}),
+        1,
+    );
+    let now = ms(40);
+    let start = log.events[0].id;
+    let last = log.events.last().unwrap().id;
+    let mut lives = Lives::default();
+    log.events.iter().for_each(|event| lives.add(event));
+    let (_, pre_claim) = books_of(&log);
+    let book_of = |settled: bool, ended: bool| {
+        let heads: Vec<QueueHead> = heads_held(&log.events, now, settled)
+            .into_iter()
+            .map(|mut head| {
+                assert!(head.ended_at.is_some(), "{}", head.head.key);
+                if !ended {
+                    head.ended_at = None;
+                }
+                head
+            })
+            .collect();
+        QueueBook::from_heads(&heads, &pre_claim, last)
+    };
+
+    assert_eq!(book_of(false, true).close_lives(&lives, now), vec![start]);
+    assert_eq!(book_of(true, false).close_lives(&lives, now), vec![start]);
+    let mut settled = book_of(true, true);
+    assert_eq!(settled.close_lives(&lives, now), Vec::new());
+
+    let mut named = log.clone();
+    named.add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s1"}),
+        2,
+    );
+    named.add(
+        None,
+        None,
+        "supervisor_stopped",
+        json!({"supervisor": "s1"}),
+        3,
+    );
+    for event in &named.events[log.events.len()..] {
+        lives.add(event);
+        settled.add(event, false, Moved::default(), &mut BTreeSet::new());
+    }
+    assert_eq!(settled.close_lives(&lives, now), vec![start]);
+}
+
 /// The book made again from the rows the store holds of the events up to a
 /// position, settled or not, goes on with the rest as the book of every
 /// event: each event after it changes the same rows, and the rows are the

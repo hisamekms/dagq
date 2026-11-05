@@ -5,24 +5,30 @@
 //! `<events>` events settled (finished runs and tasks, closed sessions,
 //! supervisors' lives and their queue events) and a few open ones, then
 //! builds its ledger as a supervisor before the restart did, so that the
-//! store holds the rows settled; `<pad>` adds a text of that many bytes to
-//! every payload. `measure <dir>` is the restarted
-//! supervisor: the first pass of the judgments of now
-//! (`carried_live_inputs` on a new `LiveHistory`) and the ledger's catch-up
-//! (`build_pass` from its cursors' start until no mark waits), on the same
-//! ports the supervisor uses (`SqliteQueue`), and says after each stage the
-//! bytes and allocations in use and the peak, then what each part held.
+//! store holds the rows settled and the marks of where they are written;
+//! `<pad>` adds a text of that many bytes to every payload. `measure <dir>`
+//! is the restarted supervisor on the same ports the supervisor uses
+//! (`SqliteQueue`), along both ways a start goes: from the marks
+//! (`start_builder`, what a store with the position R and no older row
+//! starts on, [`go_on`]) and from its cursors' start (what any other store
+//! starts on). Each is the first pass of the judgments of now
+//! (`carried_live_inputs` on a new `LiveHistory`) and then the ledger's
+//! catch-up (`build_pass` until no mark waits). It says after each stage the
+//! bytes and allocations in use and the peak, of the way from the cursors'
+//! start what each part held, and of the way from the marks how many of
+//! each it read ([`Reads`]), counted out of the stages.
 //!
 //! Run with `cargo run --release --example supervisor_startup_memory --
 //! prepare "$TMPDIR/q20k" 20000` and then `... -- measure "$TMPDIR/q20k"`.
 //!
 //! `check` lays down two queues under the temporary directory that differ
 //! only in how many settled events they hold ([`CHECK_SMALL`], and four
-//! times as many), restarts a supervisor on each as `measure` does but
-//! with the ledger's passes only (`build_pass` from a new builder's
-//! cursors' start until no mark waits), and asserts that neither what it
-//! keeps after the catch-up nor its peak during it grows with the settled
-//! events ([`within`]): docs/design/measurement.md "台帳を作る係".
+//! times as many), restarts a supervisor on each along both ways as
+//! `measure` does, and asserts that neither what it keeps after the
+//! catch-up nor its peak grows with the settled events: from the cursors'
+//! start by [`within`], from the marks by [`within_cap`], where it also
+//! asserts that the start went on from R: docs/design/measurement.md
+//! "台帳を作る係".
 //!
 //! An allocator that counts for the whole process is set here only: the
 //! library's tests count per thread, and neither they nor the integration
@@ -35,10 +41,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use dagq::application::LedgerStore;
 use dagq::application::live_inputs::{LiveSources, carried_live_inputs};
-use dagq::application::supervise::{Retain, build_pass};
+use dagq::application::supervise::{Retain, build_pass, start_builder};
 use dagq::domain::EventFilter;
+use dagq::domain::ledger::LedgerKind;
 use dagq::domain::ledger::builder::{Builder, EVENTS_PER_READ, Inputs, Part};
+use dagq::domain::ledger::session::written::{Cursors, rows_written_through};
 use dagq::domain::live_alerts::{LiveHistory, judge};
 use dagq::domain::marks::utc_text;
 use dagq::infrastructure::adapters::{ClaudeCode, SystemProcesses};
@@ -328,6 +337,15 @@ const RUNS_PER_LIFE: i64 = 40;
 const RUNS_PER_SESSION: i64 = 5;
 /// The runs left open at the end, of every size.
 const OPEN_RUNS: i64 = 4;
+/// The finished runs of the last life, which no stop ends, of every size: so
+/// that two queues differ in their settled events only and what that life's
+/// rows hold (settled by silence or not, by the time they are read at) comes
+/// to as much in each. A multiple of
+/// [`RUNS_PER_SESSION`], so that it holds as many sessions wherever it falls.
+const OPEN_LIFE_RUNS: i64 = 10;
+/// The events of a finished run and of the queue as a whole with it, the
+/// sessions aside.
+const EVENTS_PER_RUN: usize = 30 + QUEUE_EVENTS_PER_RUN;
 
 /// The events of the queue as a whole that come with one finished run:
 /// heartbeats, main's observations and the stream of the judgments of
@@ -382,6 +400,62 @@ fn supervisor(life: i64) -> String {
     format!("{life:032x}")
 }
 
+/// The events of a new supervisor's life, the last one's stop first if
+/// there is one: the life it starts is `life` then.
+fn next_life(w: &mut Writer<'_>, life: &mut i64, version: &mut i64) {
+    if *life > 0 {
+        let before = supervisor(*life);
+        w.queue(
+            "supervisor_stopped",
+            &json!({"supervisor": before, "last_heartbeat_at": w.at}),
+        );
+    }
+    *life += 1;
+    let now = supervisor(*life);
+    w.queue(
+        "supervisor_started",
+        &json!({"supervisor": now, "pid": 2522}),
+    );
+    w.queue(
+        "stall_config_loaded",
+        &json!({"supervisor": now, "stall": {"worker_secs": 3600}}),
+    );
+    *version += 1;
+    w.queue(
+        "live_alert_baseline",
+        &json!({"supervisor": now, "version": *version}),
+    );
+}
+
+/// The next finished run in the life of `life`, with its queue events and,
+/// of every [`RUNS_PER_SESSION`]th, a session around it.
+fn next_run(w: &mut Writer<'_>, task: &mut i64, life: i64, version: &mut i64) {
+    *task += 1;
+    let task = *task;
+    let now = supervisor(life);
+    let opened = (task % RUNS_PER_SESSION == 0).then(|| {
+        w.push(
+            "session",
+            None,
+            None,
+            "session_opened",
+            &json!({"kind": "runtime_planner", "planner_id": task, "supervisor": now}),
+        );
+        w.db.last_insert_rowid()
+    });
+    finished_run(w, task, &now);
+    queue_events(w, &now, task, version);
+    if let Some(opened) = opened {
+        w.push(
+            "session",
+            None,
+            None,
+            "session_closed",
+            &json!({"kind": "runtime_planner", "planner_id": task, "opened_event_id": opened}),
+        );
+    }
+}
+
 fn prepare(dir: &Path, target: usize, pad: usize) {
     lay_down(dir, target, pad, 2 * 86_400, true);
 }
@@ -419,54 +493,16 @@ fn lay_down(dir: &Path, target: usize, pad: usize, after_secs: i64, says: bool) 
     let mut task = 0;
     let mut version = 0;
     let mut life = 0;
-    while w.events < target {
-        task += 1;
-        if (task - 1) % RUNS_PER_LIFE == 0 {
-            if life > 0 {
-                let before = supervisor(life);
-                w.queue(
-                    "supervisor_stopped",
-                    &json!({"supervisor": before, "last_heartbeat_at": w.at}),
-                );
-            }
-            life += 1;
-            let now = supervisor(life);
-            w.queue(
-                "supervisor_started",
-                &json!({"supervisor": now, "pid": 2522}),
-            );
-            w.queue(
-                "stall_config_loaded",
-                &json!({"supervisor": now, "stall": {"worker_secs": 3600}}),
-            );
-            version += 1;
-            w.queue(
-                "live_alert_baseline",
-                &json!({"supervisor": now, "version": version}),
-            );
+    let open_life_events = OPEN_LIFE_RUNS as usize * EVENTS_PER_RUN;
+    while w.events + open_life_events < target {
+        if task % RUNS_PER_LIFE == 0 {
+            next_life(&mut w, &mut life, &mut version);
         }
-        let now = supervisor(life);
-        let opened = (task % RUNS_PER_SESSION == 0).then(|| {
-            w.push(
-                "session",
-                None,
-                None,
-                "session_opened",
-                &json!({"kind": "runtime_planner", "planner_id": task, "supervisor": now}),
-            );
-            w.db.last_insert_rowid()
-        });
-        finished_run(&mut w, task, &now);
-        queue_events(&mut w, &now, task, &mut version);
-        if let Some(opened) = opened {
-            w.push(
-                "session",
-                None,
-                None,
-                "session_closed",
-                &json!({"kind": "runtime_planner", "planner_id": task, "opened_event_id": opened}),
-            );
-        }
+        next_run(&mut w, &mut task, life, &mut version);
+    }
+    next_life(&mut w, &mut life, &mut version);
+    for _ in 0..OPEN_LIFE_RUNS {
+        next_run(&mut w, &mut task, life, &mut version);
     }
     // The open rows: the live supervisor's life and runs still working.
     let now = supervisor(life);
@@ -555,6 +591,20 @@ fn print_parts(owner: &str, parts: impl FnOnce(&mut dyn FnMut(&'static str, &dyn
 fn measure(dir: &Path) {
     let now_ms = now_ms(dir);
     let queue = SqliteQueue::open(dir.join("queue.db")).unwrap();
+    println!("## the start from the marks (start_builder)");
+    println!();
+    println!("| stage | in use MiB | allocations | peak MiB | peak allocations | s |");
+    println!("| --- | --- | --- | --- | --- | --- |");
+    let gone_on = {
+        let base = in_use();
+        let report = Report { base };
+        go_on(&queue, now_ms, &|name, started| report.stage(name, started))
+    };
+    println!();
+    gone_on.print(queue.latest_event_id().unwrap().as_i64());
+    println!();
+    println!("## the start from the cursors' start");
+    println!();
     let base = in_use();
     reset_peak();
     let report = Report { base };
@@ -719,8 +769,8 @@ const CHECK_AFTER_SECS: i64 = 8 * 86_400;
 /// "結果"), about 4 MiB here, and the peak that held the events and the
 /// folds of every row 3.2 KB of each, about 55 MiB, past
 /// [`CHECK_PEAK_SLACK`]; the peak of a page read and its folds was about
-/// 12 MiB of either queue, and grew by 1.3 MiB. The 20 % covers where the
-/// live supervisor's life, whose rows are open, falls in each queue.
+/// 12 MiB of either queue, and grew by 1.3 MiB. The 20 % is this
+/// judgment's own margin; the start from the marks has [`within_cap`].
 const CHECK_RATIO: f64 = 1.2;
 const CHECK_KEPT_SLACK: usize = 1024 * 1024;
 const CHECK_PEAK_SLACK: usize = 4 * 1024 * 1024;
@@ -788,6 +838,168 @@ fn restart(dir: &Path, events: usize) -> Restart {
     }
 }
 
+/// How many of each the start from the marks reads, and what the store
+/// holds of them: read out of the stages, on the store as the start finds
+/// it, so that their allocations count in no stage.
+struct Reads {
+    /// The queue rows the store holds, and the heads of those the start reads.
+    queue_rows: usize,
+    queue_heads: usize,
+    session_heads: usize,
+    node_heads: usize,
+    /// The run and task rows not settled at R.
+    open_heads: usize,
+    /// The records of the summaries of the pushes, those of no run with them.
+    push_records: usize,
+}
+
+impl Reads {
+    fn of(queue: &SqliteQueue, r: &Cursors) -> Self {
+        Self {
+            queue_rows: queue.ledger_queue_heads().unwrap().len(),
+            queue_heads: queue.ledger_queue_heads_at(r.events).unwrap().len(),
+            session_heads: queue.ledger_heads(LedgerKind::Session).unwrap().len(),
+            node_heads: queue.ledger_heads(LedgerKind::Node).unwrap().len(),
+            open_heads: queue
+                .ledger_heads_open_at(r.events, r.resources)
+                .unwrap()
+                .len(),
+            push_records: queue.ledger_push_records().unwrap().len()
+                + queue.ledger_runless_pushes().unwrap().len(),
+        }
+    }
+}
+
+/// What a restarted supervisor held that started from the marks, over the
+/// bytes in use before its first pass of the judgments of now.
+struct GoneOn {
+    /// The position R the marks gave.
+    r: i64,
+    /// (a) The peak during the call of `start_builder`.
+    start_peak: usize,
+    /// (b) The peak after that call up to the end of the catch-up.
+    catch_up_peak: usize,
+    /// (c) The bytes in use after the catch-up.
+    kept: usize,
+    passes: usize,
+    reads: Reads,
+}
+
+impl GoneOn {
+    fn print(&self, latest: i64) {
+        println!(
+            "R {} of {latest} events; (a) start_builder peak {} bytes ({:.2} MiB); (b) catch-up peak {} bytes ({:.2} MiB); (c) kept {} bytes ({:.2} MiB); {} passes",
+            self.r,
+            self.start_peak,
+            mib(self.start_peak),
+            self.catch_up_peak,
+            mib(self.catch_up_peak),
+            self.kept,
+            mib(self.kept),
+            self.passes
+        );
+        let reads = &self.reads;
+        println!(
+            "read: store queue rows {}, queue heads {}, session heads {}, node heads {}, open run and task heads {}, push records {}",
+            reads.queue_rows,
+            reads.queue_heads,
+            reads.session_heads,
+            reads.node_heads,
+            reads.open_heads,
+            reads.push_records
+        );
+    }
+}
+
+/// Restart a supervisor on `queue` by the way a store with marks starts:
+/// the first pass of the judgments of now, then `start_builder` and the
+/// passes until no mark waits. `said` is told each stage's end; it may print
+/// and reset the peak. Panics unless the start went on from R, that is
+/// unless the marks give R, the store holds no older row and the builder's
+/// cursors stand at R: a start from the cursors' start is not what this
+/// measures.
+fn go_on(queue: &SqliteQueue, now_ms: i64, said: &dyn Fn(&str, Instant)) -> GoneOn {
+    let r = rows_written_through(
+        queue.ledger_marks().unwrap().as_ref(),
+        &queue.ledger_heads(LedgerKind::Session).unwrap(),
+    )
+    .expect("the marks give no R: the earlier supervisor's build wrote none");
+    assert!(r.events.as_i64() > 0, "R is at the cursors' start");
+    assert!(
+        !queue.ledger_older_rows().unwrap(),
+        "the store holds a row older than this version"
+    );
+    let reads = Reads::of(queue, &r);
+    let base = in_use().0;
+    reset_peak();
+    let peak = || PEAK.load(Ordering::Relaxed).saturating_sub(base);
+
+    let started = Instant::now();
+    let history = first_live_pass(queue, now_ms);
+    said("first pass of the judgments of now", started);
+    reset_peak();
+
+    let started = Instant::now();
+    let mut builder = start_builder(queue, now_ms).unwrap();
+    let start_peak = peak();
+    let from = builder.events;
+    said("(a) after the call of start_builder", started);
+    assert_eq!(from, r.events, "the start did not go on from R");
+    reset_peak();
+
+    let started = Instant::now();
+    let passes = catch_up(queue, &mut builder, now_ms);
+    let catch_up_peak = peak();
+    let kept = in_use().0.saturating_sub(base);
+    said("(b)(c) after the catch-up", started);
+
+    let started = Instant::now();
+    drop((builder, history));
+    said("after every holder dropped", started);
+    GoneOn {
+        r: r.events.as_i64(),
+        start_peak,
+        catch_up_peak,
+        kept,
+        passes,
+        reads,
+    }
+}
+
+/// The history the caps of the start from the marks are the extrapolation
+/// to, in events: production's in goal 241.
+const CAP_EVENTS: usize = 1_100_000;
+/// (a) What the call of `start_builder` may peak at over a history of
+/// [`CAP_EVENTS`] ([`within_cap`]).
+const CAP_START_PEAK: usize = 128 * 1024 * 1024;
+/// (b) What the peak after that call up to the end of the catch-up may
+/// reach over the same history.
+const CAP_CATCH_UP_PEAK: usize = 128 * 1024 * 1024;
+/// (c) What may stay in use after the catch-up over the same history.
+const CAP_KEPT: usize = 64 * 1024 * 1024;
+
+/// Whether `large` exceeds `small` by no more than `cap` scaled to the
+/// `more_events` settled events that are all that differs of the two
+/// queues: `large - small <= cap * more_events / CAP_EVENTS`, the judgment
+/// of the start from the marks. Three quantities are judged each on its
+/// own so that the page reads' peak of the catch-up (about 12 MiB) hides no
+/// growth of the start's. No ratio of `small` is allowed: the 20 % of
+/// [`within`] would let a slope through unseen, and the difference reads
+/// directly as what [`CAP_EVENTS`] would come to. What differs by where the
+/// live life falls in each queue is made the same by [`OPEN_LIFE_RUNS`].
+///
+/// A cap holds the growth by design and that growth is not taken off
+/// besides: the waits, the landing slot's attempts, the summaries of the
+/// pushes and the judgments' work clock keep about 15 bytes of each settled
+/// event ([`CHECK_RATIO`]), about 16 MiB of [`CAP_EVENTS`]. [`CAP_KEPT`] is
+/// four times that; [`CAP_START_PEAK`] and [`CAP_CATCH_UP_PEAK`] are eight
+/// times, for what the start's reads hold for a while too (the rows' heads
+/// and the records of the pushes). A growth past them is what to fix, not a
+/// cap to widen. They come to about 1 to 2 % of production's 6.2 GB.
+fn within_cap(large: usize, small: usize, cap: usize, more_events: usize) -> bool {
+    large.saturating_sub(small) as f64 <= cap as f64 * more_events as f64 / CAP_EVENTS as f64
+}
+
 /// Whether `large` is within [`CHECK_RATIO`] of `small` and `slack`.
 fn within(large: usize, small: usize, slack: usize) -> bool {
     large as f64 <= small as f64 * CHECK_RATIO + slack as f64
@@ -799,10 +1011,17 @@ fn check() {
     let restarted = |target: usize| {
         let dir = root.join(target.to_string());
         let events = lay_down(&dir, target, 0, CHECK_AFTER_SECS, false);
-        restart(&dir, events)
+        // On the store as the earlier supervisor left it.
+        let now_ms = now_ms(&dir);
+        let queue = SqliteQueue::open(dir.join("queue.db")).unwrap();
+        let gone_on = go_on(&queue, now_ms, &|_, _| ());
+        print!("{events} events from the marks: ");
+        gone_on.print(queue.latest_event_id().unwrap().as_i64());
+        drop(queue);
+        (restart(&dir, events), gone_on)
     };
-    let small = restarted(CHECK_SMALL);
-    let large = restarted(4 * small.events);
+    let (small, small_on) = restarted(CHECK_SMALL);
+    let (large, large_on) = restarted(4 * small.events);
     std::fs::remove_dir_all(&root).unwrap();
     assert!(
         large.events >= 4 * small.events,
@@ -811,6 +1030,41 @@ fn check() {
         small.events
     );
     assert!(small.passes > 0 && large.passes > 0);
+    let more_events = large.events - small.events;
+    for (what, large_bytes, small_bytes, cap) in [
+        (
+            "(a) the peak of the call of start_builder",
+            large_on.start_peak,
+            small_on.start_peak,
+            CAP_START_PEAK,
+        ),
+        (
+            "(b) the peak after start_builder up to the end of the catch-up",
+            large_on.catch_up_peak,
+            small_on.catch_up_peak,
+            CAP_CATCH_UP_PEAK,
+        ),
+        (
+            "(c) kept after the catch-up from the marks",
+            large_on.kept,
+            small_on.kept,
+            CAP_KEPT,
+        ),
+    ] {
+        println!(
+            "{what}: {:.2} MiB more of {more_events} events more, within {:.2} MiB",
+            mib(large_bytes.saturating_sub(small_bytes)),
+            cap as f64 * more_events as f64 / CAP_EVENTS as f64 / (1024.0 * 1024.0),
+        );
+        assert!(
+            within_cap(large_bytes, small_bytes, cap, more_events),
+            "{what} grows with the settled events: {:.2} MiB of {} events, {:.2} MiB of {}",
+            mib(large_bytes),
+            large.events,
+            mib(small_bytes),
+            small.events
+        );
+    }
     assert!(
         within(large.kept, small.kept, CHECK_KEPT_SLACK),
         "kept after the catch-up grows with the settled events: {:.2} MiB of {} events, {:.2} MiB of {}",

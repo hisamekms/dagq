@@ -34,6 +34,7 @@
 //! naming each supervisor by `at` (`LedgerStore::last_event_naming_supervisor`)
 //! and the stops by `at`.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 
 use serde_json::json;
@@ -218,6 +219,15 @@ impl Cut<'_> {
     /// after it are none, those of nothing past it as written, the rest cut
     /// by their kind (the module's doc), settled none of them.
     pub fn heads(&self, heads: &[QueueHead]) -> Vec<QueueHead> {
+        self.heads_held(heads)
+            .into_iter()
+            .map(Cow::into_owned)
+            .collect()
+    }
+
+    /// [`Self::heads`], those of nothing past it borrowed: a start holds
+    /// the heads it read, and no second copy of what each holds on the heap.
+    pub(super) fn heads_held<'h>(&self, heads: &'h [QueueHead]) -> Vec<Cow<'h, QueueHead>> {
         let slots = slot_keys(heads);
         heads
             .iter()
@@ -227,15 +237,15 @@ impl Cut<'_> {
 
     /// The row of `head` at the position, `slots` the keys of the landing
     /// slot's rows; none for one that starts after it.
-    fn head(&self, head: &QueueHead, slots: &[EventId]) -> Option<QueueHead> {
+    fn head<'h>(&self, head: &'h QueueHead, slots: &[EventId]) -> Option<Cow<'h, QueueHead>> {
         let Some(key) = key_of(head) else {
-            return Some(head.clone());
+            return Some(Cow::Borrowed(head));
         };
         if key > self.at {
             return None;
         }
         if !past(head, self.at) {
-            return Some(head.clone());
+            return Some(Cow::Borrowed(head));
         }
         let mut cut = head.clone();
         cut.head.is_final = false;
@@ -252,7 +262,7 @@ impl Cut<'_> {
             kind if is_wait(kind) => self.wait(head, key, kind == SLOTS_FULL, &mut cut),
             _ => {}
         }
-        Some(cut)
+        Some(Cow::Owned(cut))
     }
 
     /// A wait or a hold: as written when an event of its own ended it by

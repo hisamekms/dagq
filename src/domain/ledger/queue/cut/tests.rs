@@ -289,6 +289,14 @@ fn the_books_of_the_rows_cut_to_a_position_are_those_of_the_rows_written_there()
                     }
                 }
                 queue.throughs = there.throughs.clone();
+                // A cut row is settled no more, so the next close may fold
+                // again a stream the rows written there hold settled and
+                // ended: its row comes out the same.
+                assert!(
+                    queue.stream_named.is_superset(&there.stream_named),
+                    "{name} {now} {at}"
+                );
+                queue.stream_named.clone_from(&there.stream_named);
                 assert_eq!(queue, there, "{name} {now} {at}");
 
                 // (b) the waits.

@@ -437,7 +437,9 @@ impl QueueBook {
     /// the one of its id. A supervisor's life reaches its open stream, its
     /// slots full not freed and the holds its stop ended (by the waits'
     /// details), and the next close reads the ends of the supervisors with
-    /// a stream open. The landing slot's rows are the attempts, each ended
+    /// a stream open whose row is not settled and ended, so that a start
+    /// folds no such row again, whose records it would hold for that pass
+    /// one for each life of the history. The landing slot's rows are the attempts, each ended
     /// one reading up to its row's `inputs_through`, and the last open.
     /// What a row read past its records (an end of no record of its own, a
     /// reach) stays an input of it, as its row read it. A row of another
@@ -445,8 +447,16 @@ impl QueueBook {
     /// lack the rows of [`QueueHead::forgotten_at`] the position of `last`,
     /// which it would forget: the book is the same.
     pub fn from_heads(heads: &[QueueHead], pre_claim: &PreClaimBook, last: EventId) -> Self {
+        Self::of_heads(heads.iter(), pre_claim, last)
+    }
+
+    /// [`Self::from_heads`] of `heads` wherever they are held.
+    fn of_heads<'h>(
+        heads: impl Iterator<Item = &'h QueueHead>,
+        pre_claim: &PreClaimBook,
+        last: EventId,
+    ) -> Self {
         let mut heads: Vec<(EventId, &QueueHead)> = heads
-            .iter()
             .filter(|head| head.head.kind == LedgerKind::Queue)
             .filter_map(|head| Some((EventId::new(head.head.key.parse().ok()?), head)))
             .collect();
@@ -493,6 +503,12 @@ impl QueueBook {
                         row.outcome.clone_from(&head.outcome);
                     } else {
                         book.streams.insert(head.subject_id.clone(), id);
+                        // Settled and ended, it is the fold of its life's end
+                        // as it is: the next close need not find that end
+                        // again. An event naming the supervisor has it read.
+                        if !(head.head.is_final && head.ended_at.is_some()) {
+                            book.stream_named.insert(head.subject_id.clone());
+                        }
                     }
                 }
                 Of::Alert | Of::Finding | Of::Event => {
@@ -524,7 +540,6 @@ impl QueueBook {
             .collect();
         for (supervisor, start) in streams {
             book.hold(&supervisor, start);
-            book.stream_named.insert(supervisor);
         }
         book.attempts = Attempts::from_parts(attempts, open);
         for id in settled {
@@ -547,7 +562,12 @@ impl QueueBook {
         pre_claim: &PreClaimBook,
         cut: &cut::Cut<'_>,
     ) -> Self {
-        Self::from_heads(&cut.heads(heads), pre_claim, cut.at)
+        let held = cut.heads_held(heads);
+        Self::of_heads(
+            held.iter().map(std::convert::AsRef::as_ref),
+            pre_claim,
+            cut.at,
+        )
     }
 
     /// Take the landing slot's row `head` of the attempt `start` began as
