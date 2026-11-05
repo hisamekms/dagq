@@ -28,9 +28,14 @@ use crate::domain::queue_service::UseCase;
 ///
 /// Left out: `stats_inputs`, which reads no ledger and returns the checkout
 /// and the latest event's id. Left out too: the writes and the light reads
-/// (`hello`, `service_status`, `status`...), which are short, and every
-/// operation of a supervisor (`supervisor`, `control`), so that no pass of a
+/// (`hello`, `service_status`, `status`...), which are short, and the
+/// operations of a supervisor (`supervisor`, `control`), so that no pass of a
 /// supervisor ever waits here and a refusal never stops one.
+///
+/// A job's read is the one operation of theirs that counts, as the use case
+/// it computes ([`crate::application::queue_reads::JobRead::use_case`]): it
+/// reads the same rows as that use case, and the process of the job asks for
+/// it, not a pass of a supervisor ([`JOB_READ_TRIES`]).
 pub const fn is_heavy_read(use_case: UseCase) -> bool {
     matches!(
         use_case,
@@ -56,6 +61,27 @@ pub const MAX_HEAVY_READS: usize = 2;
 /// read has to fit in too, so that a client gets a refusal rather than a
 /// timeout), and long enough to outlast a short read.
 pub const HEAVY_READ_WAIT: Duration = Duration::from_secs(60);
+
+/// How many times a job asks for its read
+/// ([`crate::application::supervisor_service::SupervisorQueue::job_read`])
+/// when the service answers that it is busy, before the job takes the refusal
+/// as the read's failure.
+///
+/// A job asks again rather than fail, as a place comes back when a read of
+/// minutes ends, so a refusal is the usual thing when two run: as a failure
+/// it would end an observation at its `stats`, and give the agent of an
+/// observation or of a throughput review a `kpi` of only an error, to work
+/// from in a session it is paid for. Only the job's own process waits: it
+/// holds no pass of a supervisor and no memory of the service. It pauses in
+/// no way of its own, as each try is already a wait of [`HEAVY_READ_WAIT`] on
+/// the service's side.
+///
+/// Ten, so ten minutes: what it waits for is the end of another's read, and
+/// `kpi` was seen to take over seven. A job that gets none in that time fails
+/// its read as it would on any other refusal. This bounds the wait for a
+/// place, not the read: each try's answer has to come within the wait of the
+/// job's caller, and a read past that is no answer, which is not asked again.
+pub const JOB_READ_TRIES: u32 = 10;
 
 /// How often a waiting request looks at its clock when no place is freed.
 /// A freed place wakes it at once.
@@ -303,6 +329,27 @@ pub(crate) mod tests {
         ] {
             assert!(!is_heavy_read(other), "{other:?}");
         }
+    }
+
+    /// A job's reads count as the use case they compute: the ledger's do,
+    /// the one that reads no ledger does not.
+    #[test]
+    fn a_job_s_reads_of_the_ledger_are_heavy_and_its_stats_inputs_is_not() {
+        use crate::application::queue_reads::JobRead;
+        for read in [
+            JobRead::Kpi {
+                query: crate::domain::kpi::KpiQuery::default(),
+                git: None,
+            },
+            JobRead::ObserverKpi { git: None },
+            JobRead::Stats {
+                query: crate::domain::stats::StatsQuery::default(),
+                git: None,
+            },
+        ] {
+            assert!(is_heavy_read(read.use_case()), "{read:?}");
+        }
+        assert!(!is_heavy_read(JobRead::StatsInputs.use_case()));
     }
 
     /// The places go up to the limit, and one given back is free again; a

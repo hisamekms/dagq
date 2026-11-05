@@ -103,6 +103,19 @@ pub enum JobRead {
     StatsInputs,
 }
 
+impl JobRead {
+    /// The use case that reads what this reads, which the limit of the heavy
+    /// reads counts it as ([`crate::application::heavy_reads::is_heavy_read`])
+    /// and a refusal names: the observer's KPI input is two reads of `kpi`.
+    pub const fn use_case(&self) -> UseCase {
+        match self {
+            Self::Stats { .. } => UseCase::Stats,
+            Self::Kpi { .. } | Self::ObserverKpi { .. } => UseCase::Kpi,
+            Self::StatsInputs => UseCase::StatsInputs,
+        }
+    }
+}
+
 /// `service status`' read: no option.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]

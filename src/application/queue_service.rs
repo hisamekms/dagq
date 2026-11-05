@@ -596,6 +596,7 @@ impl QueueService<'_> {
                 &principal,
                 &request.params,
                 process,
+                notes,
             ));
         }
         if request.use_case == UseCase::Supervisor {
@@ -605,6 +606,7 @@ impl QueueService<'_> {
                 &principal,
                 &request.params,
                 process,
+                notes,
             ));
         }
         if request.use_case == UseCase::IssueToken {
@@ -1910,7 +1912,7 @@ fn authorize_as(
 
 /// A place among `heavy_reads` in `notes` for `use_case`, when it is a heavy
 /// read of a service that limits them; the refusal when it gets none.
-fn take_place(
+pub(super) fn take_place(
     heavy_reads: Option<&HeavyReads>,
     use_case: UseCase,
     notes: &mut RequestNotes,
@@ -6048,6 +6050,7 @@ mod tests {
 
     use super::super::heavy_reads::HeavyReadNote as Note;
     use super::super::heavy_reads::tests::{STEP, TestClock};
+    use super::super::queue_reads::JobRead;
 
     /// `request` as the user on `backend`: its answer and its notes.
     fn as_user(backend: &Backend, request: &ServiceRequest) -> (ServiceResponse, RequestNotes) {
@@ -6232,6 +6235,164 @@ mod tests {
         );
         assert_eq!(code(&denied), Some(ServiceErrorCode::AuthorizationDenied));
         assert_eq!(notes.heavy_read, None);
+    }
+
+    /// The request of the job's `read` as a supervisor's job sends it, and
+    /// as a person's `observe` sends it.
+    fn job_read_requests(read: &JobRead) -> [ServiceRequest; 2] {
+        [
+            request(
+                Some("supervisor"),
+                UseCase::Supervisor,
+                json!({"op": "job_read", "args": [read]}),
+            ),
+            request(
+                None,
+                UseCase::Control,
+                json!({
+                    "control": {"command": "observe", "pid": 1},
+                    "call": {"op": "job_read", "args": [read]},
+                }),
+            ),
+        ]
+    }
+
+    /// The job's reads of the ledger and the use case each is counted as.
+    fn job_reads_of_the_ledger() -> [(JobRead, UseCase); 3] {
+        [
+            (
+                JobRead::Kpi {
+                    query: crate::domain::kpi::KpiQuery::default(),
+                    git: None,
+                },
+                UseCase::Kpi,
+            ),
+            (JobRead::ObserverKpi { git: None }, UseCase::Kpi),
+            (
+                JobRead::Stats {
+                    query: crate::domain::stats::StatsQuery::default(),
+                    git: None,
+                },
+                UseCase::Stats,
+            ),
+        ]
+    }
+
+    /// With the places taken, a job's read of the ledger waits without
+    /// reading, on the connection that only reads, and reads once a place is
+    /// given back, its notes keeping the place.
+    #[test]
+    fn a_job_s_read_of_the_ledger_waits_for_a_place_and_reads_once_one_is_free() {
+        struct PastTheWait<'a>(&'a TestClock);
+        impl Drop for PastTheWait<'_> {
+            fn drop(&mut self) {
+                self.0.advance(Duration::from_secs(3_600));
+            }
+        }
+        for (read, _) in job_reads_of_the_ledger() {
+            for job in job_read_requests(&read) {
+                let clock = TestClock::still();
+                let backend = Backend {
+                    heavy_reads: Some(HeavyReads::new(1, Duration::from_secs(60), clock.clone())),
+                    ..backend(RunStatus::Running)
+                };
+                let reads = backend.heavy_reads.as_ref().unwrap();
+                let running = reads.admit(UseCase::Stats, &mut None).unwrap();
+                let (response, notes) = std::thread::scope(|scope| {
+                    let thread = scope.spawn(|| as_user(&backend, &job));
+                    let past = PastTheWait(&clock);
+                    assert!(reads.await_waiting(1, STEP), "{read:?}");
+                    assert_eq!(backend.reading.entered(), 0, "{read:?} read while it waits");
+                    clock.advance(Duration::from_secs(5));
+                    drop(running);
+                    let answered = thread.join().unwrap();
+                    drop(past);
+                    answered
+                });
+                assert!(response.ok, "{read:?}: {response:?}");
+                assert_eq!(backend.reading.entered(), 1, "{read:?}");
+                assert_eq!(
+                    notes.heavy_read,
+                    Some(Note {
+                        waited_ms: 5_000,
+                        refused: false
+                    })
+                );
+                assert_eq!(*backend.opened.lock().unwrap(), ["read"], "{read:?}");
+                assert!(notes.place.is_some(), "{read:?}");
+            }
+        }
+    }
+
+    /// One that gets no place in the time it may wait is refused as `busy`,
+    /// naming the use case it computes, and reads nothing.
+    #[test]
+    fn a_job_s_read_of_the_ledger_that_gets_no_place_is_refused_as_busy_and_reads_nothing() {
+        let wait = Duration::from_secs(60);
+        let backend = Backend {
+            heavy_reads: Some(HeavyReads::new(1, wait, TestClock::stepping(wait))),
+            ..backend(RunStatus::Running)
+        };
+        let reads = backend.heavy_reads.as_ref().unwrap();
+        let _running = reads.admit(UseCase::Stats, &mut None).unwrap();
+        for (read, counted_as) in job_reads_of_the_ledger() {
+            for job in job_read_requests(&read) {
+                let (response, notes) = as_user(&backend, &job);
+                assert_eq!(
+                    code(&response),
+                    Some(ServiceErrorCode::Busy),
+                    "{read:?}: {response:?}"
+                );
+                let message = &response.error.unwrap().message;
+                assert!(message.contains(counted_as.as_str()), "{message}");
+                assert_eq!(
+                    notes.heavy_read,
+                    Some(Note {
+                        waited_ms: 60_000,
+                        refused: true
+                    })
+                );
+            }
+        }
+        assert_eq!(backend.reading.entered(), 0);
+    }
+
+    /// With no place free, the job's `stats_inputs`, which reads no ledger,
+    /// is answered at once and notes no wait; and a request the policy
+    /// refuses is told so, asking for no place.
+    #[test]
+    fn a_job_s_read_of_no_ledger_and_a_refused_one_take_no_place() {
+        let backend = Backend {
+            // A request that asked for a place would be refused at once.
+            heavy_reads: Some(HeavyReads::new(0, Duration::ZERO, TestClock::still())),
+            ..backend(RunStatus::Running)
+        };
+        for job in job_read_requests(&JobRead::StatsInputs) {
+            let (response, notes) = as_user(&backend, &job);
+            assert!(response.ok, "{response:?}");
+            assert_eq!(notes.heavy_read, None);
+        }
+        assert_eq!(backend.reading.entered(), 2);
+        let (read, _) = &job_reads_of_the_ledger()[0];
+        for job in job_read_requests(read) {
+            let denied = ServiceRequest {
+                token: Some("telemetry".to_owned()),
+                ..job
+            };
+            let mut notes = RequestNotes::default();
+            let response = QueueService {
+                backend: &backend,
+                build: "b",
+                pid: 1,
+            }
+            .handle_noting(&denied, Peer::Other, None, &mut notes);
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{response:?}"
+            );
+            assert_eq!(notes.heavy_read, None);
+        }
     }
 }
 

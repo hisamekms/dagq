@@ -3120,3 +3120,114 @@ fn the_wait_rows_and_stops_past_the_answers_limit_are_read_in_pages() {
     assert_eq!(pages[0], 500);
     assert!(pages[1..].iter().all(|page| *page == 125), "{pages:?}");
 }
+
+/// A service that answers a job's read as `busy` `busy` times, then with
+/// `then`, counting the times it is asked.
+struct BusyReads {
+    busy: u32,
+    then: fn() -> Result<Value>,
+    asked: std::sync::atomic::AtomicU32,
+}
+
+impl BusyReads {
+    fn asked(&self) -> u32 {
+        self.asked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ServiceCaller for BusyReads {
+    fn call(&self, _: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(params["op"], "job_read");
+        let asked = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if asked < self.busy {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::Busy,
+                ..failed(None)
+            }));
+        }
+        (self.then)()
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// What the job's read of `service` answers.
+fn job_read_of(service: Arc<BusyReads>) -> Result<Value> {
+    SupervisorQueues::new(service, ActorContext::instance(ActorRole::Supervisor, 7))
+        .queue()
+        .job_read(&crate::application::queue_reads::JobRead::ObserverKpi { git: None })
+}
+
+/// A job whose read found no place asks again, and gets its answer when one
+/// comes: the refusal is no failure of the job.
+#[test]
+fn a_job_asks_again_when_its_read_is_refused_as_busy() {
+    let service = Arc::new(BusyReads {
+        busy: crate::application::heavy_reads::JOB_READ_TRIES - 1,
+        then: || Ok(serde_json::json!("read")),
+        asked: Default::default(),
+    });
+    assert_eq!(
+        job_read_of(service.clone()).unwrap(),
+        serde_json::json!("read")
+    );
+    assert_eq!(
+        service.asked(),
+        crate::application::heavy_reads::JOB_READ_TRIES
+    );
+}
+
+/// Its asking has a limit, and past it the read fails as the refusal it met.
+#[test]
+fn a_job_gives_up_its_read_after_its_tries_as_the_refusal() {
+    let service = Arc::new(BusyReads {
+        busy: u32::MAX,
+        then: || unreachable!("always busy"),
+        asked: Default::default(),
+    });
+    let error = job_read_of(service.clone()).unwrap_err();
+    assert!(Refused::busy(&error), "{error:#}");
+    assert!(
+        format!("{error:#}").contains(&format!(
+            "asked {} times",
+            crate::application::heavy_reads::JOB_READ_TRIES
+        )),
+        "{error:#}"
+    );
+    assert_eq!(
+        service.asked(),
+        crate::application::heavy_reads::JOB_READ_TRIES
+    );
+}
+
+/// Only that refusal is asked again: a busy queue's lock, a service out of
+/// reach and another failure are the read's failure at once.
+#[test]
+fn a_job_does_not_ask_again_on_another_failure() {
+    for then in [
+        || Err(service_error(&failed(Some(FailureKind::QueueBusy)))),
+        || Err(ServiceUnreachable::not_done("down").into()),
+        || Err(service_error(&failed(None))),
+    ] {
+        let then: fn() -> Result<Value> = then;
+        let service = Arc::new(BusyReads {
+            busy: 0,
+            then,
+            asked: Default::default(),
+        });
+        assert!(job_read_of(service.clone()).is_err());
+        assert_eq!(service.asked(), 1);
+    }
+}

@@ -57,7 +57,7 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 1つの接続に1つの要求で、要求は1行のJSON、答えも1行のJSONで、答えた後に閉じる。
 上限を超える答え（`MAX_ANSWER_BYTES`）はserviceが`response_too_large`（ADR-t1233-5）、要求（`MAX_REQUEST_BYTES`）はsocketのclientが`request_too_large`で断る。
 supervisorはどちらでもpassを止めず、育つ読み取りは区切る。
-重い読みは同時に走る数に上限があり、空かなければ混んでいると分かる答えで何も読まずに拒み、書き込みとsupervisorの転送は数えない。
+重い読み（jobの読みも）は同時の数に上限があり、空かないと混んでいると答えて何も読まずに拒み、書き込みとsupervisorの周期の転送は数えない。
 transactionはserviceの中で完結し、クライアントとの往復で分けない（ADR-t1233-1決定3）。
 書き込みの列への入口は`on_write_line`と`ServiceWriteLine`。
 serviceの書き込みは1本の列で1つずつ確定し、読み取りは列を待たない。

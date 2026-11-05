@@ -307,12 +307,14 @@ fn own_hold(command: ControlCommand, args: &[Value]) -> bool {
 
 /// Answer the step `params` of the control-side command of `principal` on
 /// `backend` (see the module's documentation), sent from the process
-/// `process` when the connection tells it.
+/// `process` when the connection tells it. `notes` takes what a job's read
+/// met among the heavy reads ([`super::jobs`]).
 pub fn answer(
     backend: &dyn ServiceBackend,
     principal: &Principal,
     params: &Value,
     process: Option<u32>,
+    notes: &mut super::super::queue_service::RequestNotes,
 ) -> Result<Value> {
     let actor = principal.actor();
     let ControlParams { control, call } = serde_json::from_value(params.clone())
@@ -492,7 +494,7 @@ pub fn answer(
             return reply(store.approve_integration(&run, payload, &held));
         }
         "job_read" | "record_finding" => {
-            return super::jobs(&mut *queue, &call);
+            return super::jobs(&mut *queue, backend, &call, notes);
         }
         _ => {}
     }

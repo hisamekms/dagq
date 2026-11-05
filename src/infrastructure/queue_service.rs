@@ -4133,10 +4133,14 @@ impl SocketCaller {
     /// process `pid`, started as its own
     /// ([`crate::domain::queue_service::SUPERVISOR_REGISTRATION_ENV`]): it
     /// calls with the token that supervisor signed in with, which stays
-    /// that supervisor's to revoke.
+    /// that supervisor's to revoke. It waits for an answer as a client-mode
+    /// `dagq` does ([`CLIENT_TIMEOUT`]), not as the supervisor: no pass of a
+    /// supervisor waits on it, and its reads of the whole queue have the wait
+    /// for a place among the heavy reads to fit in as well as the read.
     pub fn adopt(db: &Path, registration: &LeaseToken, pid: u32) -> Result<Self> {
         let caller = Self {
             adopted: true,
+            timeout: CLIENT_TIMEOUT,
             ..Self::new(db)
         };
         let key = Principal::supervisor(registration, pid).credential_key();
@@ -4509,6 +4513,11 @@ fn control_answer(response: ServiceResponse) -> Result<Value> {
                 Err(anyhow::anyhow!(error.message))
             }
         }
+        // A job's read tells this refusal from the others, as a supervisor's
+        // caller does.
+        (_, _, Some(error)) if error.code == ServiceErrorCode::Busy => Err(
+            crate::application::supervisor_service::service_error(&error),
+        ),
         // A service of a build before the command reads none of its steps.
         (_, _, Some(error))
             if error.code == ServiceErrorCode::BadRequest
@@ -6128,8 +6137,10 @@ mod tests {
         assert_eq!(of(&lines[3]), (Value::Null, json!(false)));
     }
 
-    /// A supervisor's operations forwarded to the queue take no place: they
-    /// are answered with none free, `job_read` too, and note no wait.
+    /// A supervisor's operations forwarded to the queue take no place: its
+    /// pass's reads, its heartbeats and its records, and a job's `stats_inputs`
+    /// and finding, are answered with none free and note no wait. A job's read
+    /// of the ledger is what does take one.
     #[test]
     fn a_supervisor_s_forwarded_operation_takes_no_place() {
         use crate::application::heavy_reads::{HeavyReads, tests::TestClock};
@@ -6146,7 +6157,10 @@ mod tests {
         for (op, args) in [
             ("ledger_heads", json!(["session", null, 10])),
             ("ledger_session_anchors", json!([null, 10])),
-            ("job_read", json!([{"kind": "stats_inputs"}])),
+            ("active_runs", json!([])),
+            ("heartbeat", json!(["owner"])),
+            ("heartbeat_leases", json!(["owner"])),
+            ("job_read", json!(["StatsInputs"])),
             (
                 "workspace_created",
                 json!([supervisor_tests::RUN, "owner", "ws-1"]),
@@ -6173,10 +6187,57 @@ mod tests {
                 "{op}: {response:?}"
             );
             assert_eq!(notes.heavy_read, None, "{op}");
-            if op != "job_read" {
-                assert!(response.ok, "{op}: {response:?}");
-            }
+            assert!(response.ok, "{op}: {response:?}");
         }
+        let mut notes = RequestNotes::default();
+        let response = service.handle_noting(
+            &ServiceRequest {
+                api_version: API_VERSION,
+                token: Some(token.clone()),
+                env_role: None,
+                queue: None,
+                binding: None,
+                use_case: UseCase::Supervisor,
+                params: json!({"op": "job_read", "args": [{"ObserverKpi": {"git": null}}]}),
+            },
+            Peer::Other,
+            None,
+            &mut notes,
+        );
+        assert_eq!(
+            response.error.map(|error| error.code),
+            Some(ServiceErrorCode::Busy)
+        );
+    }
+
+    /// A job's caller waits as long as a client-mode `dagq`, so the wait for
+    /// a place leaves it most of its wait for the read
+    /// ([`the_wait_for_a_place_leaves_most_of_a_client_s_wait_to_the_read`]).
+    #[test]
+    fn a_job_s_caller_waits_as_a_client_does() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let db = dir.path().join("queue.db");
+        let registration = LeaseToken::new("owner");
+        let key = Principal::supervisor(&registration, 7).credential_key();
+        let file = credential_path(&queue_dir_of(&db), &key);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "token").unwrap();
+        let caller = SocketCaller::adopt(&db, &registration, 7).unwrap();
+        assert_eq!(caller.timeout, CLIENT_TIMEOUT);
+    }
+
+    /// A job tells the refusal of its read from the others, through a
+    /// supervisor's caller and through a control-side command's.
+    #[test]
+    fn a_job_can_tell_the_refusal_of_its_read() {
+        use crate::application::supervisor_service::Refused;
+        let busy = ServiceResponse::failure(ServiceErrorCode::Busy, "no place".to_owned());
+        assert!(Refused::busy(
+            &supervisor_answer(UseCase::Supervisor, busy.clone()).unwrap_err()
+        ));
+        assert!(Refused::busy(&control_answer(busy).unwrap_err()));
+        let other = ServiceResponse::failure(ServiceErrorCode::BadRequest, "no".to_owned());
+        assert!(!Refused::busy(&control_answer(other).unwrap_err()));
     }
 
     /// The time a request waits for a place leaves most of a client's wait

@@ -481,6 +481,14 @@ impl Refused {
             refused.code == crate::domain::queue_service::ServiceErrorCode::BadRequest
         })
     }
+
+    /// Whether `error` is the service's refusal of a heavy read that got no
+    /// place (`busy`), which read nothing.
+    pub fn busy(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<Self>().is_some_and(|refused| {
+            refused.code == crate::domain::queue_service::ServiceErrorCode::Busy
+        })
+    }
 }
 
 /// Whether `error` is the service's refusal of an answer past its limit
@@ -631,9 +639,22 @@ pub struct SupervisorQueue {
 
 impl SupervisorQueue {
     /// A read of the whole queue of a job the supervisor started, as the
-    /// command of its name computes it on the service's side.
+    /// command of its name computes it on the service's side. Asked again
+    /// while the service answers that it is busy, up to
+    /// [`super::heavy_reads::JOB_READ_TRIES`] times in all (why is there).
     pub fn job_read(&self, read: &super::queue_reads::JobRead) -> Result<Value> {
-        self.remote("job_read", vec![to_value(read)?])
+        let mut tries = 1;
+        loop {
+            match self.remote("job_read", vec![to_value(read)?]) {
+                Err(error) if Refused::busy(&error) => {
+                    if tries >= super::heavy_reads::JOB_READ_TRIES {
+                        return Err(error.context(format!("the job asked {tries} times")));
+                    }
+                    tries += 1;
+                }
+                answered => return answered,
+            }
+        }
     }
 
     /// Record `finding` as the supervisor's (a throughput review's): its id.
@@ -974,13 +995,23 @@ const LEDGER_OPS: [&str; 35] = [
 /// finding.
 const JOB_OPS: [&str; 2] = ["job_read", "record_finding"];
 
-/// The job operations ([`JOB_OPS`]) of `params` on `queue`.
-fn jobs(queue: &mut dyn ServiceQueue, params: &SupervisorParams) -> Result<Value> {
+/// The job operations ([`JOB_OPS`]) of `params` on `queue`. A read takes a
+/// place among the backend's heavy reads as the use case it computes, when
+/// it is one, and a refusal reads nothing: the principal is authorized by
+/// now, and a request on a connection of its own waits for itself alone. The
+/// place and what it met go in `notes`.
+fn jobs(
+    queue: &mut dyn ServiceQueue,
+    backend: &dyn ServiceBackend,
+    params: &SupervisorParams,
+    notes: &mut super::queue_service::RequestNotes,
+) -> Result<Value> {
     let op = params.op.as_str();
     let args = Value::Array(params.args.clone());
     match op {
         "job_read" => {
             let (read,): (super::queue_reads::JobRead,) = read(op, args)?;
+            super::queue_service::take_place(backend.heavy_reads(), read.use_case(), notes)?;
             queue.read(&super::queue_reads::QueueRead::Job(read))
         }
         "record_finding" => {
@@ -1001,12 +1032,14 @@ fn jobs(queue: &mut dyn ServiceQueue, params: &SupervisorParams) -> Result<Value
 /// queue written as the principal's actor, or as the actor the request
 /// names when it is one of the control side's (the landing's integrator),
 /// with the request's `requested_by`. `process` is the one that asked,
-/// which a token it asks for is kept with ([`tokens`]).
+/// which a token it asks for is kept with ([`tokens`]). `notes` takes what
+/// a job's read met among the heavy reads ([`jobs`]).
 pub fn answer(
     backend: &dyn ServiceBackend,
     principal: &Principal,
     params: &Value,
     process: Option<u32>,
+    notes: &mut super::queue_service::RequestNotes,
 ) -> Result<Value> {
     if principal.role == ActorRole::Integrator {
         return integrator(backend, principal, params);
@@ -1045,7 +1078,7 @@ pub fn answer(
         );
     }
     if JOB_OPS.contains(&params.op.as_str()) {
-        return jobs(&mut *queue, &params);
+        return jobs(&mut *queue, backend, &params, notes);
     }
     // The landing's events are the integrator principal's own: a
     // supervisor writes as no other actor.
