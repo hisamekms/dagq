@@ -345,6 +345,137 @@
           "note": "measurement.md「共通の読み取り関数」の既にある地図の箇条（doc commentへの入口と約束）の並びに、stats・kpi・reportが同じ窓なら食い違わないという複数の読み手にまたがる約束を1本足しただけ。既にある列挙への1本の追記を何でも DL-1 で拾う誤りを測る陰性（(B) も拾わない形）"
         }
       }
+    },
+    {
+      "id": "neg-authority-tables-row",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "317135ec9913e7325a82f3126ceb427b72d1af58",
+      "patch": "6decd18d11024dd6d8f4850768a3eedfc74451db2e288f23aee84aadd1f7ea9a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "authorization.md の Policy の表と security.md の actor × capability の表の observer の行に finding.dismiss を足した。documents.md「権限の表を写す文書」が名指す表の行は、capability の名前を 7 個並べていても DL-2 にしない陰性"
+        }
+      }
+    },
+    {
+      "id": "pos-field-row-outside-authority-tables",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "317135ec9913e7325a82f3126ceb427b72d1af58",
+      "patch": "081510969f9d79c23213bfffd3c87f2b1a30d213e0ce45c927f7b9d47ec3f411",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "DL-2"
+          ],
+          "acceptable_codes": [
+            "DL-5"
+          ],
+          "note": "provider-executables.md の入口の表に、入口でなく記録の欄の名前を 7 個並べた行を足した（(A) の閾値の下）。権限の表の除外を他の表へ広げる誤りを測る陽性"
+        }
+      }
+    },
+    {
+      "id": "neg-compat-old-records",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "317135ec9913e7325a82f3126ceb427b72d1af58",
+      "patch": "1f204f0e78326cdca998f3a181247baa8d716136402b41ed83ec7691c7cc16f3",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "commands.md に、前の binary が書いた行を今も閉じた行として読むので古い queue の読み手が失敗しないという、今も効く互換の約束を足した。「前の」「古い」の語で DL-4 にしない陰性"
+        }
+      }
+    },
+    {
+      "id": "neg-compat-kept-argument",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "317135ec9913e7325a82f3126ceb427b72d1af58",
+      "patch": "0d18f831da4a68934f5a81e65186675410ff51ab4c90c591feaa54d791f84804",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "handoff.md に、前の binary の command line が持つ --cmux を受け付けて無視し続けるという、残している引数の約束を足した。今のコードの外の読み手が頼るので地図で、DL-4 にしない陰性"
+        }
+      }
+    },
+    {
+      "id": "pos-history-without-numbers",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "317135ec9913e7325a82f3126ceb427b72d1af58",
+      "patch": "6b8793a89f3dbdc3467f17c4db580ae0b64c7fffd942fda50ab0c0fedcdd2aca",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "DL-4"
+          ],
+          "note": "commands.md に、stats の集計を以前は status でも流していて変えたという、今は効いていない変遷を足した。番号が無くても DL-4 で、互換の除外を広げる誤りを測る陽性"
+        }
+      }
+    },
+    {
+      "id": "pos-user-steps-in-design",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "317135ec9913e7325a82f3126ceb427b72d1af58",
+      "patch": "ed9ba1397465206822a9b436a67ee78d45cec0386933b2570169858d306abf14",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "DL-1"
+          ],
+          "acceptable_codes": [
+            "DL-5"
+          ],
+          "note": "release-update.md に利用者が打つ手順を番号つきで足した。コードに移す先が無くても DL-1 で、置き場は docs/development/ か plugin の skill、design には入口の 1 行を残す"
+        }
+      }
+    },
+    {
+      "id": "neg-user-steps-entry-line",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (this session)",
+      "base_commit": "317135ec9913e7325a82f3126ceb427b72d1af58",
+      "patch": "f3df57fecce679d1a100ab8d8b0d18966c0f61d4df50c86aa7f98dbb17406b59",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "release-update.md に、利用者の手順の置き場の skill を指す入口の 1 行だけを足した。手順そのものでないので違反にしない陰性"
+        }
+      }
     }
   ]
 }

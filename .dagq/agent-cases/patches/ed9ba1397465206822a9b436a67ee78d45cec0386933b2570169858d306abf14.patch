@@ -1,0 +1,20 @@
+diff --git a/docs/design/supervisor-lifecycle/release-update.md b/docs/design/supervisor-lifecycle/release-update.md
+index 7c864a6d0..0345f3ba3 100644
+--- a/docs/design/supervisor-lifecycle/release-update.md
++++ b/docs/design/supervisor-lifecycle/release-update.md
+@@ -35,6 +35,15 @@ dagqのソースのrepositoryの`-dev`のビルドは[Auto-update](auto-update.m
+ - `"auto"`はaskを開かずに入れ替える（非互換のmigrationは除く）。
+ - 効いている値・読んだファイル・既定にした値の警告は`doctor`の`release_update`に出る。
+ 
++## 手で版を上げる手順
++
++利用者は次の順に打つ。
++
++1. `dagq down --wait`で止める。
++2. `cargo install dagq --locked`で新しい版を入れる。
++3. `dagq migrate --check`で確認し、要れば`dagq migrate`を打つ。
++4. `dagq up`で起動し直し、`dagq doctor`で版を確かめる。
++
+ ## 検知
+ 
+ - 読むのはcrates.ioのsparse indexのdagqのファイルで、yankedとpre-releaseを除いた最大のversion（SemVerの順）が最新。

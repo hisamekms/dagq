@@ -1,0 +1,26 @@
+diff --git a/docs/design/authorization.md b/docs/design/authorization.md
+index 287437ba2..df028e740 100644
+--- a/docs/design/authorization.md
++++ b/docs/design/authorization.md
+@@ -120,7 +120,7 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
+ | recovery-job | 読み取り・`triage.submit` | `triage.submit`は自分のrunだけ |
+ | plan-review-job・goal-review-job・throughput-review-job | 読み取りだけ | throughput-review-jobは[スループットの見直し](supervisor-lifecycle/throughput-review.md)（ADR-t996-1） |
+ | setup-review-job | 読み取りだけ | なし（[setup-review](supervisor-lifecycle/setup-review.md)） |
+-| observer | 読み取り・`queue.watch`・`ci.read`・`finding.record`・`finding.resolve`・`finding.ask`・`eval.read` | `finding.resolve`と`finding.ask`はfindingだけ |
++| observer | 読み取り・`queue.watch`・`ci.read`・`finding.record`・`finding.resolve`・`finding.dismiss`・`finding.ask`・`eval.read` | findingの操作はfindingだけ |
+ | supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply`・`token.issue`・`queue_broker.record` | なし。`queue.admin`は自動更新の確認のため（下の`auto-update`）。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
+ | wrapper | 読み取り・`session.run`・`session.record` | 自分のrunかplanner（tokenのprincipalのactor id）だけ（ADR-t3102-1決定4） |
+ | integrator | 読み取り・`landing.land`・`landing.push` | なし |
+diff --git a/docs/design/security.md b/docs/design/security.md
+index dfe447d64..3ca509b46 100644
+--- a/docs/design/security.md
++++ b/docs/design/security.md
+@@ -68,7 +68,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
+ | review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — |
+ | recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — |
+ | plan-review-job・goal-review-job・throughput-review-job・setup-review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — |
+-| observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ recordとresolve（dismissは—） | — / —・— / — / — | — | — | — | — | — | — |
++| observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ record・resolve・dismiss | — / —・— / — / — | — | — | — | — | — | — |
+ | supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / — / —（保留と置換は○） | ○（recordは—） | ○（setup-reviewは—） | ○ | ○ | — | — |
+ | wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | △ 自分のrunかplannerだけ | — | — | — | — | — |
+ | integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | ○ | — |

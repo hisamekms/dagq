@@ -1,0 +1,9 @@
+diff --git a/docs/design/supervisor-lifecycle/handoff.md b/docs/design/supervisor-lifecycle/handoff.md
+index bbc7dff6e..ae74d51ff 100644
+--- a/docs/design/supervisor-lifecycle/handoff.md
++++ b/docs/design/supervisor-lifecycle/handoff.md
+@@ -87,3 +87,4 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）
+ - 走っているrunのwrapperはclaim時の`runner`（前のbinaryのコピー）で動き続ける。互換の範囲のschemaならそのまま動く。
+ - **run の review job と復旧 job**: `tick(true)`は組み立て直せるslotを進めないので、run の review job（`Review`）と復旧job（`Recovery`）は、引き継ぎを待つあいだに終わってもverdictを回収されず、`prepare_handoff`で止められて次のプロセスでやり直す（reviewはleaseを保ってreviewし直し、復旧jobはleaseを返して取り直す）。
+   plan review / goal reviewと違って回収しないのは、verdictの適用がslotを着地や`/exit`へ進めて引き継ぎの待ちを延ばしうるため。
++- 前のbinaryのcommand lineが持つ`--cmux`は受け付けて無視し続けるので、launchdのplistと引き継ぎのargvは書き直さなくても起動できる。

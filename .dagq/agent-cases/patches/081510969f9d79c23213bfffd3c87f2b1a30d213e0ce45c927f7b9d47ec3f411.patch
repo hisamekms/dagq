@@ -1,0 +1,12 @@
+diff --git a/docs/design/provider-executables.md b/docs/design/provider-executables.md
+index ae103e7d0..384679b98 100644
+--- a/docs/design/provider-executables.md
++++ b/docs/design/provider-executables.md
+@@ -24,6 +24,7 @@ providerは自分の更新で`versions/<version>`の実体を入れ替え、古
+ | 起動するpathの解決 | `adapters::provider_executable_on` |
+ | 入口の解決し直し | `adapters::provider_at_entry` |
+ | 起動の時点の解決し直し | `AgentProvider::relocated_executable` |
++| 記録の欄 | `provider`・`model`・`effort`・`executable`・`entry`・`from`・`to` |
+ 
+ 約束と落とし穴:
+ 
