@@ -3224,9 +3224,10 @@ impl LedgerStore for SupervisorQueue {
     fn ledger_queue_heads_at(
         &self,
         at: EventId,
+        since: crate::domain::pre_claim::rows::Since,
     ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
         self.ledger_pages(LEDGER_HEADS_PAGE, |after, page| {
-            let read = self.ledger_queue_heads_at_after(at, after, page)?;
+            let read = self.ledger_queue_heads_at_after(at, since, after, page)?;
             let heads = read.len();
             let last = read.last().map(|head| head.head.key.clone());
             Ok((read, heads, last))
@@ -3236,12 +3237,18 @@ impl LedgerStore for SupervisorQueue {
     fn ledger_queue_heads_at_after(
         &self,
         at: EventId,
+        since: crate::domain::pre_claim::rows::Since,
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
         self.remote(
             "ledger_queue_heads_at",
-            vec![to_value(at)?, to_value(after)?, to_value(limit)?],
+            vec![
+                to_value(at)?,
+                to_value(since)?,
+                to_value(after)?,
+                to_value(limit)?,
+            ],
         )
     }
     // A page of rows' anchors at a time, every anchor of a row in one

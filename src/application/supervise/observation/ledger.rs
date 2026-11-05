@@ -727,20 +727,22 @@ pub fn books_at(
     at: EventId,
     closed_to: i64,
 ) -> Result<(QueueBook, Lives, PreClaimBook)> {
-    books_of_heads(store, &store.ledger_queue_heads()?, at, closed_to)
+    let since = store.ledger_tasks_open_since_at(at)?;
+    books_of_heads(store, &store.ledger_queue_heads()?, since, at, closed_to)
 }
 
 /// [`books_at`] of `heads`, the queue rows' heads the store holds, of which
-/// those it forgets anyway at `at` may be left out
+/// those it forgets anyway at `at` and `since` (the position's
+/// [`pre_claim::rows::Since`]) may be left out
 /// ([`crate::domain::ledger::queue::QueueHead::forgotten_at`]).
 fn books_of_heads(
     store: &dyn LedgerQueue,
     heads: &[QueueHead],
+    since: pre_claim::rows::Since,
     at: EventId,
     closed_to: i64,
 ) -> Result<(QueueBook, Lives, PreClaimBook)> {
     let needs = cut::Needs::of(heads, at);
-    let since = store.ledger_tasks_open_since_at(at)?;
     let stops = store.ledger_supervisor_stops()?;
     let mut last = Vec::new();
     for supervisor in &needs.supervisors {
@@ -1039,8 +1041,9 @@ pub fn start_builder(store: &dyn LedgerQueue, now_ms: i64) -> Result<Builder> {
     builder.go_on_from_rows(r);
     builder.read_up_to(read_ms);
     let now_ms = builder.folds_at(now_ms);
-    let heads = store.ledger_queue_heads_at(r.events)?;
-    let (queue, lives, pre_claim) = books_of_heads(store, &heads, r.events, now_ms)?;
+    let since = store.ledger_tasks_open_since_at(r.events)?;
+    let heads = store.ledger_queue_heads_at(r.events, since)?;
+    let (queue, lives, pre_claim) = books_of_heads(store, &heads, since, r.events, now_ms)?;
     builder.restore_pre_claim(lives, pre_claim);
     // Taken while nothing is marked.
     builder.restore_queue_rows(queue);

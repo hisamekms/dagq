@@ -1140,6 +1140,10 @@ fn a_head_is_forgotten_only_of_a_row_settled_and_closed_with_nothing_past_the_po
         });
         QueueHead::of(&row)
     };
+    let held_all = Since {
+        ms: i64::MIN,
+        id: EventId::new(0),
+    };
     for (head, forgotten) in [
         (of("mark_added", None, Some(1)), true),
         (of("", None, None), true),
@@ -1162,13 +1166,13 @@ fn a_head_is_forgotten_only_of_a_row_settled_and_closed_with_nothing_past_the_po
         (of("claim_deferral", Some("x"), Some(1)), false),
         (of("landing_hold", Some("x"), Some(1)), false),
     ] {
-        assert_eq!(head.forgotten_at(at), forgotten, "{head:?}");
+        assert_eq!(head.forgotten_at(at, held_all), forgotten, "{head:?}");
     }
     let closed = of("mark_added", None, Some(1));
     let changed = |change: fn(&mut QueueHead)| {
         let mut head = closed.clone();
         change(&mut head);
-        head.forgotten_at(at)
+        head.forgotten_at(at, held_all)
     };
     assert!(!changed(|head| head.head.is_final = false));
     assert!(!changed(|head| head.head.kind = LedgerKind::Session));
@@ -1180,4 +1184,162 @@ fn a_head_is_forgotten_only_of_a_row_settled_and_closed_with_nothing_past_the_po
     ));
     assert!(!changed(|head| head.head.records = vec![EventId::new(11)]));
     assert!(changed(|head| head.head.records = vec![EventId::new(10)]));
+}
+
+/// A wait is left out by the [`Since`] of its position only settled, of
+/// nothing past the position, ended before it by time and by id, and held
+/// by no life; the rest are read as before.
+#[test]
+fn a_wait_is_forgotten_only_settled_before_the_since_and_held_by_no_life() {
+    let at = EventId::new(10);
+    let wait = |kind: &str, end: &str| {
+        let mut row = LedgerRow::new(LedgerKind::Queue, "5".into(), None, "b");
+        row.is_final = true;
+        row.inputs_through.events = EventId::new(6);
+        row.outcome = Some(end.to_owned());
+        row.ended_at = Some(100);
+        row.detail = json!({"interval": {"end": end, "supervisor": "s", "ended_by": "s"}});
+        row.subject = Some(Subject {
+            kind: kind.to_owned(),
+            ..Subject::default()
+        });
+        QueueHead::of(&row)
+    };
+    let since = Since {
+        ms: 200,
+        id: EventId::new(7),
+    };
+    let ended = [
+        wait("slots_full", ENDED_FREED),
+        wait("claim_hold", "resumed"),
+        wait("claim_deferral", "claimed"),
+        wait("landing_hold", "resumed"),
+    ];
+    for head in &ended {
+        assert!(head.forgotten_at(at, since), "{head:?}");
+        let kept = |change: fn(&mut QueueHead)| {
+            let mut head = head.clone();
+            change(&mut head);
+            !head.forgotten_at(at, since)
+        };
+        assert!(kept(|head| head.head.is_final = false), "not settled");
+        assert!(kept(|head| head.ended_at = None), "open");
+        assert!(
+            kept(|head| head.outcome = Some(claim_hold::ENDED_SUPERVISOR_GONE.into())),
+            "ended by a life"
+        );
+        assert!(
+            kept(|head| head.head.inputs_through.events = EventId::new(11)),
+            "read past the position"
+        );
+        assert!(
+            kept(|head| head.head.inputs_through.supervisor = Some(EventId::new(11))),
+            "read past the position by a life"
+        );
+        assert!(kept(|head| head.ended_at = Some(200)), "ended at the time");
+        assert!(
+            kept(|head| head.head.inputs_through.events = EventId::new(7)),
+            "ended by the event"
+        );
+    }
+    // What a life holds by the detail, though the outcome says otherwise.
+    assert!(!wait("slots_full", "other").forgotten_at(at, since));
+    let mut stopped = wait("claim_hold", claim_hold::ENDED_SUPERVISOR_GONE);
+    stopped.outcome = Some("resumed".into());
+    assert!(!stopped.forgotten_at(at, since));
+}
+
+/// A book held from a [`Since`] past the waits drops the settled one of each
+/// kind an event ended, though it does not hold them, and keeps the other
+/// waits as before (open, not settled, those a life reaches). A book of no
+/// [`Since`] drops as it did: a wait it holds an event ended, and none it
+/// does not hold.
+#[test]
+fn a_book_held_from_a_since_drops_the_waits_it_left_out_and_no_other() {
+    let log = crate::domain::ledger::testkit::settled_waits_log(1);
+    let rows = crate::domain::ledger::testkit::built_and_settled(&log.events, ms(100_000));
+    let heads: Vec<QueueHead> = rows
+        .iter()
+        .filter(|row| row.kind == LedgerKind::Queue)
+        .map(QueueHead::of)
+        .collect();
+    let settled_waits: Vec<&QueueHead> = heads
+        .iter()
+        .filter(|head| {
+            head.head.is_final
+                && head.ended_at.is_some()
+                && head.outcome.as_deref() != Some(claim_hold::ENDED_SUPERVISOR_GONE)
+                && wait_life_of(head).is_none()
+                && matches!(of_kind(&head.subject_kind), Of::Interval(_))
+        })
+        .collect();
+    let kinds: BTreeSet<&str> = settled_waits
+        .iter()
+        .map(|head| head.subject_kind.as_str())
+        .collect();
+    assert_eq!(
+        kinds.into_iter().collect::<Vec<_>>(),
+        ["claim_deferral", "claim_hold", "landing_hold", "slots_full"]
+    );
+    let has = |book: &QueueBook, head: &QueueHead| book.records_of(&head.head.key).is_some();
+
+    // No Since: an empty book drops none of them, and the book of every
+    // event every one.
+    let none = QueueBook::from_heads(&heads, &PreClaimBook::default(), log.last());
+    let every = QueueBook::from_heads(&heads, &PreClaimBook::of(&log.events), log.last());
+    for head in &settled_waits {
+        assert!(has(&none, head), "{head:?}");
+        assert!(!has(&every, head), "{head:?}");
+    }
+
+    // Held from a Since past them: it drops them though it does not hold
+    // them, and what it holds or what a life reaches as before.
+    let mut held = PreClaimBook::default();
+    held.held_from(Since::NONE);
+    let book = QueueBook::from_heads(&heads, &held, log.last());
+    for head in &settled_waits {
+        assert!(!has(&book, head), "{head:?}");
+        assert!(!book.closed(&head.head.key, &held), "no row: {head:?}");
+    }
+    let wait_heads = heads
+        .iter()
+        .filter(|head| matches!(of_kind(&head.subject_kind), Of::Interval(_)));
+    for head in wait_heads {
+        let dropped = settled_waits
+            .iter()
+            .any(|settled| settled.head.key == head.head.key);
+        assert_eq!(has(&book, head), !dropped, "{head:?}");
+    }
+
+    // A wait the book holds is not left out, nor a hold on the landings,
+    // which it does not count among its waits; and a book of no Since
+    // leaves out none.
+    let mut of_every = PreClaimBook::of(&log.events);
+    let none_left_out = |book: &PreClaimBook, head: &QueueHead| {
+        !book.left_out(EventId::new(head.head.key.parse().unwrap()))
+    };
+    for head in &settled_waits {
+        assert!(none_left_out(&of_every, head), "{head:?}");
+    }
+    of_every.held_from(Since::NONE);
+    for head in &settled_waits {
+        assert!(none_left_out(&of_every, head), "{head:?}");
+        assert!(!none_left_out(&held, head), "{head:?}");
+    }
+    let mut landing = Log::default();
+    landing.add(None, None, "landing_held", json!({"supervisor": "s"}), 1);
+    let start = landing.last();
+    let mut open = PreClaimBook::of(&landing.events);
+    assert!(!open.left_out(start));
+    open.held_from(Since::NONE);
+    assert!(!open.holds(start));
+    assert!(!open.left_out(start));
+    assert!(!PreClaimBook::default().left_out(start));
+}
+
+fn wait_life_of(head: &QueueHead) -> Option<&str> {
+    match of_kind(&head.subject_kind) {
+        Of::Interval(started) => wait_life(started, &head.detail["interval"]),
+        _ => None,
+    }
 }

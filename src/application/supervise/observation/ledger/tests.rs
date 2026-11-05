@@ -510,8 +510,9 @@ impl LedgerStore for Memory {
     fn ledger_queue_heads_at(
         &self,
         at: EventId,
+        since: pre_claim::rows::Since,
     ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
-        let heads = self.ledger_queue_heads_at_after(at, None, usize::MAX)?;
+        let heads = self.ledger_queue_heads_at_after(at, since, None, usize::MAX)?;
         self.heads_given
             .set(self.heads_given.get().max(heads.len()));
         Ok(heads)
@@ -3511,11 +3512,12 @@ impl WaitRowsService {
                 (serde_json::to_value(&read)?, read.len())
             }
             "ledger_queue_heads_at" => {
-                let after: Option<String> = serde_json::from_value(arg(1))?;
+                let after: Option<String> = serde_json::from_value(arg(2))?;
                 let read = store.ledger_queue_heads_at_after(
                     serde_json::from_value(arg(0))?,
+                    serde_json::from_value(arg(1))?,
                     after.as_deref(),
-                    serde_json::from_value(arg(2))?,
+                    serde_json::from_value(arg(3))?,
                 )?;
                 (serde_json::to_value(&read)?, read.len())
             }

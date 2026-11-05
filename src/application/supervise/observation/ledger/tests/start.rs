@@ -8,7 +8,9 @@ use crate::domain::command_rules::{
     CommandClassifier, CommandRule, TelemetrySettings, effective_rules,
 };
 use crate::domain::command_shape::{DigestKey, Subcommands, shape_value_with};
-use crate::domain::ledger::testkit::{forgotten_log, queue_across, two_late_log, waits_across};
+use crate::domain::ledger::testkit::{
+    forgotten_log, queue_across, settled_waits_log, two_late_log, waits_across,
+};
 use crate::domain::session_step::ResourceSample;
 use crate::domain::toolchain::Toolchains;
 
@@ -1035,10 +1037,11 @@ fn the_books_and_rows_of_a_start_are_those_of_every_head() {
     let every = whole.rows.borrow().clone();
     let mut left_out = 0;
     for at in log.events.iter().map(|event| event.id) {
-        let heads = whole.ledger_queue_heads_at(at).unwrap();
+        let since = whole.ledger_tasks_open_since_at(at).unwrap();
+        let heads = whole.ledger_queue_heads_at(at, since).unwrap();
         left_out = left_out.max(whole.ledger_queue_heads().unwrap().len() - heads.len());
         assert_eq!(
-            books_of_heads(&whole, &heads, at, ms(LATER)).unwrap(),
+            books_of_heads(&whole, &heads, since, at, ms(LATER)).unwrap(),
             books_at(&whole, at, ms(LATER)).unwrap(),
             "{at}"
         );
@@ -1051,4 +1054,152 @@ fn the_books_and_rows_of_a_start_are_those_of_every_head() {
         assert_eq!(differing(&rows, &from_start), Vec::new(), "{upto}");
         assert_eq!(differing_from_whole(&rows, &every), Vec::new(), "{upto}");
     }
+}
+
+/// [`settled_waits_log`], the store drained and its task rows settled: the
+/// store whose position's [`pre_claim::rows::Since`] is past the waits an
+/// event ended.
+fn with_tasks_settled(memory: &Memory) {
+    for ((kind, _), row) in memory.rows.borrow_mut().iter_mut() {
+        if *kind == LedgerKind::Task {
+            row.is_final = true;
+        }
+    }
+}
+
+/// A start takes as many queue heads at once and keeps as many queue rows
+/// and rows dropped, however many waits settled, an event's end before the
+/// tasks not settled, the store holds.
+#[test]
+fn a_start_takes_as_many_queue_heads_however_many_waits_settled() {
+    let taken = |fill: usize| {
+        let log = settled_waits_log(fill);
+        let memory = Memory::of(&log);
+        drain(&memory, &mut Builder::default(), LATER);
+        with_tasks_settled(&memory);
+        let builder = start_builder(&memory, ms(LATER)).unwrap();
+        assert_eq!(builder.events, log.last());
+        let size = builder.kept().size();
+        (
+            (
+                memory.heads_given.get(),
+                size.queue_rows,
+                size.dropped_rows,
+                builder.kept().pre_claim().waits(),
+            ),
+            memory.ledger_queue_heads().unwrap().len(),
+        )
+    };
+    let (few, many) = (taken(2), taken(40));
+    assert!(few.0.0 > 0);
+    assert_eq!(few.0, many.0);
+    assert_eq!(many.1 - few.1, 38 * 4);
+}
+
+/// The books made at any position of the heads with the waits left out are
+/// those of every head, for each kind of wait left out, whether the task
+/// rows settled or not.
+#[test]
+fn the_books_of_a_start_with_the_waits_left_out_are_those_of_every_head() {
+    let log = settled_waits_log(3);
+    for settled in [false, true] {
+        let whole = Memory::of(&log);
+        drain(&whole, &mut Builder::default(), LATER);
+        if settled {
+            with_tasks_settled(&whole);
+        }
+        let mut left_out = BTreeSet::new();
+        let every = whole.ledger_queue_heads().unwrap();
+        for at in log.events.iter().map(|event| event.id) {
+            let since = whole.ledger_tasks_open_since_at(at).unwrap();
+            let heads = whole.ledger_queue_heads_at(at, since).unwrap();
+            for head in &every {
+                if !heads.iter().any(|kept| kept.head.key == head.head.key) {
+                    left_out.insert(head.subject_kind.clone());
+                }
+            }
+            assert_eq!(
+                books_of_heads(&whole, &heads, since, at, ms(LATER)).unwrap(),
+                books_at(&whole, at, ms(LATER)).unwrap(),
+                "{settled} {at}"
+            );
+        }
+        if settled {
+            for kind in ["slots_full", "claim_hold", "claim_deferral", "landing_hold"] {
+                assert!(left_out.contains(kind), "{kind}");
+            }
+        }
+    }
+}
+
+/// A builder started with the waits left out, a settled task of a time ready
+/// over them folded again by a later event, writes its row as the fold of
+/// every event: it reads the waits settled from the store's rows, and writes
+/// them over nothing, the queue rows being those of that fold too.
+#[test]
+fn a_started_builder_folds_a_task_over_the_waits_left_out_as_every_event() {
+    let mut log = Log::default();
+    log.add(
+        Some(77),
+        None,
+        "task_created",
+        json!({"status": "draft"}),
+        50,
+    )
+    .add(
+        Some(77),
+        None,
+        "task_status_changed",
+        json!({"from": "draft", "to": "ready"}),
+        60,
+    );
+    for event in settled_waits_log(3).events {
+        let secs = crate::domain::stats::timestamp_millis(&event.created_at).unwrap() / 1000 - T0;
+        log.add(
+            event.task_id.map(|task| task.as_i64()),
+            event.run_id.as_ref().map(RunId::as_str),
+            event.kind.as_str(),
+            event.payload,
+            secs + 100,
+        );
+    }
+    let position = log.events.len();
+    log.add(
+        Some(77),
+        None,
+        "task_status_changed",
+        json!({"from": "ready", "to": "cancelled"}),
+        400,
+    );
+    let task = (LedgerKind::Task, "77".to_owned());
+
+    let every = {
+        let whole = Memory::of(&log);
+        drain(&whole, &mut Builder::default(), LATER);
+        whole.rows.into_inner()
+    };
+    let going_on = |bare: bool| {
+        let memory = drained_store(&log, &[], position, LATER);
+        with_tasks_settled(&memory);
+        memory.no_settled_waits.set(bare);
+        let rows = started_and_drained(&memory, &log, LATER);
+        (rows, memory.heads_given.get())
+    };
+    let (rows, given) = going_on(false);
+    assert!(given > 0);
+    let stored = |rows: &Rows| {
+        let mut row = rows[&task].clone();
+        row.is_final = every[&task].is_final;
+        row
+    };
+    assert_eq!(stored(&rows), every[&task]);
+    let queue = |rows: &Rows| -> Rows {
+        rows.iter()
+            .filter(|((kind, _), _)| *kind == LedgerKind::Queue)
+            .map(|(key, row)| (key.clone(), row.clone()))
+            .collect()
+    };
+    assert_eq!(differing(&queue(&rows), &queue(&every)), Vec::new());
+    // The waits left out bear on the row: with no read of them it differs.
+    assert_ne!(stored(&going_on(true).0), every[&task]);
 }

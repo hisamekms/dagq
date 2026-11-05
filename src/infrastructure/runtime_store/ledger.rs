@@ -832,12 +832,14 @@ impl LedgerStore for SqliteQueue {
     /// SQLite picks the rows by their columns
     /// ([`crate::domain::ledger::queue::QueueHead::forgotten_at`]; a row's
     /// `inputs_through` is at least its last record, [`LedgerRow::own`], so
-    /// the columns tell that none of its records is past `at`), and from
+    /// the columns tell that none of its records is past `at`, and a
+    /// wait's `outcome` and `detail` tell what no life holds), and from
     /// the key `after` on by the primary key: it gives no head of the rest
     /// and parses no record's ids of them.
     fn ledger_queue_heads_at_after(
         &self,
         at: EventId,
+        since: Since,
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
@@ -850,11 +852,22 @@ impl LedgerStore for SqliteQueue {
             "AND {from} AND NOT (r.final=1 AND {events}<=?2 AND COALESCE({supervisor}, 0)<=?2
                AND ((r.subject_kind='live_alert_stream' AND COALESCE(r.outcome, '')='replaced')
                     OR (r.subject_kind='live_alert' AND r.ended_at IS NOT NULL)
+                    OR (r.subject_kind IN ('slots_full', 'claim_hold', 'claim_deferral',
+                                           'landing_hold')
+                        AND r.ended_at IS NOT NULL AND r.ended_at < ?5 AND {events} < ?6
+                        AND COALESCE(r.outcome, '') <> ?7
+                        AND CASE r.subject_kind
+                              WHEN 'slots_full' THEN COALESCE({end}, '') = ?8
+                                   OR json_type(r.detail, '$.interval.supervisor') IS NOT 'text'
+                              ELSE COALESCE({end}, '') <> ?7
+                                   OR json_type(r.detail, '$.interval.ended_by') IS NOT 'text'
+                            END)
                     OR COALESCE(r.subject_kind, '') NOT IN
                        ('live_alert_stream', 'live_alert', 'finding', 'landing_slot',
                         'slots_full', 'claim_hold', 'claim_deferral', 'landing_hold')))",
             events = json_field_spaced("r.inputs_through", "$.events", JsonType::Integer),
             supervisor = json_field_spaced("r.inputs_through", "$.supervisor", JsonType::Integer),
+            end = json_field_spaced("r.detail", "$.interval.end", JsonType::Text),
         );
         self.queue_heads(
             &queue_heads_sql(&filter, "LIMIT ?4"),
@@ -863,6 +876,10 @@ impl LedgerStore for SqliteQueue {
                 at.as_i64(),
                 after,
                 i64::try_from(limit).unwrap_or(i64::MAX),
+                since.ms,
+                since.id.as_i64(),
+                crate::domain::claim_hold::ENDED_SUPERVISOR_GONE,
+                crate::domain::pre_claim::ENDED_FREED,
             ],
         )
     }
@@ -1373,38 +1390,230 @@ mod tests {
             )
             .unwrap();
         let every = queue.ledger_queue_heads().unwrap();
-        let held = queue.ledger_queue_heads_at(log.last()).unwrap();
+        let earliest = Since {
+            ms: i64::MIN,
+            id: EventId::new(0),
+        };
+        let held = queue.ledger_queue_heads_at(log.last(), earliest).unwrap();
         assert!(held.iter().any(|head| head.head.key == stream.key));
         assert!(!held.iter().any(|head| head.head.key == bare.key));
         let mut fewest = every.len();
         for at in log.events.iter().map(|event| event.id) {
             let expected: Vec<ledger::queue::QueueHead> = every
                 .iter()
-                .filter(|head| !head.forgotten_at(at))
+                .filter(|head| !head.forgotten_at(at, earliest))
                 .cloned()
                 .collect();
-            assert_eq!(queue.ledger_queue_heads_at(at).unwrap(), expected, "{at}");
+            assert_eq!(
+                queue.ledger_queue_heads_at(at, earliest).unwrap(),
+                expected,
+                "{at}"
+            );
             fewest = fewest.min(expected.len());
         }
         assert!(fewest < every.len());
         let at = log.last();
-        let all = queue.ledger_queue_heads_at(at).unwrap();
+        let all = queue.ledger_queue_heads_at(at, earliest).unwrap();
         let is_reached = |head: &ledger::queue::QueueHead| head.head.key == reached.key;
         assert!(!all.iter().any(is_reached));
         let before = EventId::new(at.as_i64() - 1);
         assert!(
             queue
-                .ledger_queue_heads_at(before)
+                .ledger_queue_heads_at(before, earliest)
                 .unwrap()
                 .iter()
                 .any(is_reached)
         );
-        let first = queue.ledger_queue_heads_at_after(at, None, 2).unwrap();
+        let first = queue
+            .ledger_queue_heads_at_after(at, earliest, None, 2)
+            .unwrap();
         assert_eq!(first, all[..2]);
         let next = queue
-            .ledger_queue_heads_at_after(at, Some(&first[1].head.key), 3)
+            .ledger_queue_heads_at_after(at, earliest, Some(&first[1].head.key), 3)
             .unwrap();
         assert_eq!(next, all[2..5]);
+    }
+
+    /// The waits settled SQLite leaves out at a position, for a [`Since`],
+    /// are those [`ledger::queue::QueueHead::forgotten_at`] does, at every
+    /// position and several [`Since`]s: the waits of each kind ended before
+    /// it, and none open, not settled, ended by a life, reached by a life or
+    /// ended from it on, which rows edited to say so show.
+    #[test]
+    fn the_waits_at_a_position_and_a_since_are_those_not_forgotten_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let log = ledger::testkit::settled_waits_log(6);
+        let rows = ledger::testkit::built_and_settled(&log.events, ledger::testkit::ms(100_000));
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        let waits = |kind: &str| -> Vec<String> {
+            rows.iter()
+                .filter(|row| {
+                    row.is_final
+                        && row.kind == LedgerKind::Queue
+                        && row.subject.as_ref().is_some_and(|s| s.kind == kind)
+                        && row.detail["interval"]["supervisor"] == "f"
+                })
+                .map(|row| row.key.clone())
+                .collect()
+        };
+        let (full, hold, deferral, landing) = (
+            waits("slots_full"),
+            waits("claim_hold"),
+            waits("claim_deferral"),
+            waits("landing_hold"),
+        );
+        let edit = |sql: &str, key: &str| {
+            let changed = queue
+                .conn
+                .execute(
+                    &format!("UPDATE ledger_rows SET {sql} WHERE kind='queue' AND key=?1"),
+                    [key],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "{sql} {key}");
+        };
+        let gone = crate::domain::claim_hold::ENDED_SUPERVISOR_GONE;
+        // Not settled, open though settled, and ended by a life.
+        edit("final=0", &hold[1]);
+        edit("ended_at=NULL", &landing[1]);
+        edit(&format!("outcome='{gone}'"), &deferral[1]);
+        // Reached by a life by what the detail says: a slots full not
+        // freed, and a stop's end. Then those of no one to reach them.
+        let detail = |interval: Value| json!({ "interval": interval }).to_string();
+        edit(
+            &format!(
+                "detail='{}'",
+                detail(json!({"end": "other", "supervisor": "f"}))
+            ),
+            &full[1],
+        );
+        edit(
+            &format!("detail='{}'", detail(json!({"end": gone, "ended_by": "f"}))),
+            &hold[2],
+        );
+        edit(&format!("detail='{}'", detail(json!({"end": 5}))), &full[2]);
+        edit(
+            &format!("detail='{}'", detail(json!({"end": gone}))),
+            &hold[3],
+        );
+        edit("detail='{}'", &deferral[2]);
+        edit(
+            &format!(
+                "detail='{}'",
+                detail(json!({"end": "other", "supervisor": 5}))
+            ),
+            &full[3],
+        );
+        edit(
+            &format!("detail='{}'", detail(json!({"end": gone, "ended_by": 5}))),
+            &deferral[3],
+        );
+        let every = queue.ledger_queue_heads().unwrap();
+        let of_key = |key: &String| every.iter().find(|head| &head.head.key == key).unwrap();
+        let end_of = |key: &String| of_key(key).ended_at.unwrap();
+        let events_of = |key: &String| of_key(key).head.inputs_through.events;
+        let at = log.last();
+        let before = Since {
+            ms: i64::MIN,
+            id: EventId::new(0),
+        };
+        // By its time, and by its event: a wait ended at the Since is kept.
+        let by_time = Since {
+            ms: end_of(&full[0]),
+            ..Since::NONE
+        };
+        let by_id = Since {
+            ms: i64::MAX,
+            id: events_of(&landing[0]),
+        };
+        let exact = queue.ledger_tasks_open_since().unwrap();
+        for (since, name) in [
+            (Since::NONE, "none"),
+            (before, "before"),
+            (by_time, "time"),
+            (by_id, "id"),
+            (exact, "exact"),
+        ] {
+            for at in log.events.iter().map(|event| event.id) {
+                let expected: Vec<ledger::queue::QueueHead> = every
+                    .iter()
+                    .filter(|head| !head.forgotten_at(at, since))
+                    .cloned()
+                    .collect();
+                assert_eq!(
+                    queue.ledger_queue_heads_at(at, since).unwrap(),
+                    expected,
+                    "{name} {at}"
+                );
+            }
+        }
+        let gives = |since: Since, key: &String| {
+            queue
+                .ledger_queue_heads_at(at, since)
+                .unwrap()
+                .iter()
+                .any(|head| &head.head.key == key)
+        };
+        for key in [&full[0], &hold[0], &deferral[0], &landing[0]] {
+            assert!(!gives(Since::NONE, key), "{key}");
+            assert!(gives(before, key), "{key}");
+        }
+        // Whatever the Since.
+        for key in [&hold[1], &landing[1], &deferral[1], &full[1], &hold[2]] {
+            assert!(gives(Since::NONE, key), "{key}");
+        }
+        // No one to reach them.
+        for key in [&full[2], &hold[3], &deferral[2], &full[3], &deferral[3]] {
+            assert!(!gives(Since::NONE, key), "{key}");
+        }
+        assert!(gives(by_time, &full[0]));
+        assert!(!gives(by_id, &full[0]));
+        assert!(gives(by_id, &landing[0]));
+    }
+
+    /// The events of `log` in `queue`, and the rows a builder from its
+    /// cursors' start drains of them at `now`.
+    fn drained_on_the_store(queue: &SqliteQueue, log: &ledger::testkit::Log, now: i64) {
+        use crate::application::supervise::{Retain, build_pass};
+        use crate::domain::ledger::builder::Builder;
+        queue
+            .conn
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        for event in &log.events {
+            queue
+                .conn
+                .execute(
+                    "INSERT INTO run_events(id, task_id, run_id, kind, payload, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        event.id.as_i64(),
+                        event.task_id.map(|task| task.as_i64()),
+                        event.run_id.as_ref().map(|run| run.as_str()),
+                        event.kind.as_str(),
+                        event.payload.to_string(),
+                        event.created_at,
+                    ],
+                )
+                .unwrap();
+        }
+        let mut builder = Builder::default();
+        for _ in 0..50 {
+            let built = build_pass(
+                queue,
+                &mut builder,
+                (now, "2030-01-01T00:00:00.000Z"),
+                Retain::default(),
+                None,
+            );
+            assert_eq!(built.failure, None);
+            if built.backlog == 0 {
+                break;
+            }
+        }
     }
 
     /// Through the SQLite adapter, a builder's rows of a history and the
@@ -1413,52 +1622,21 @@ mod tests {
     /// what it keeps of the queue's rows; the heads of every row are not.
     #[test]
     fn a_start_on_the_store_takes_as_many_queue_heads_however_many_rows_it_forgets() {
-        use crate::application::supervise::{Retain, build_pass, start_builder};
-        use crate::domain::ledger::builder::Builder;
+        use crate::application::supervise::start_builder;
         let taken = |fill: usize| {
             let dir = tempfile::tempdir().unwrap();
             let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
             let log = ledger::testkit::forgotten_log(fill);
-            queue
-                .conn
-                .pragma_update(None, "foreign_keys", false)
-                .unwrap();
-            for event in &log.events {
-                queue
-                    .conn
-                    .execute(
-                        "INSERT INTO run_events(id, task_id, run_id, kind, payload, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        rusqlite::params![
-                            event.id.as_i64(),
-                            event.task_id.map(|task| task.as_i64()),
-                            event.run_id.as_ref().map(|run| run.as_str()),
-                            event.kind.as_str(),
-                            event.payload.to_string(),
-                            event.created_at,
-                        ],
-                    )
-                    .unwrap();
-            }
             let now = ledger::testkit::ms(100_000);
-            let mut builder = Builder::default();
-            for _ in 0..50 {
-                let built = build_pass(
-                    &queue,
-                    &mut builder,
-                    (now, "2030-01-01T00:00:00.000Z"),
-                    Retain::default(),
-                    None,
-                );
-                assert_eq!(built.failure, None);
-                if built.backlog == 0 {
-                    break;
-                }
-            }
+            drained_on_the_store(&queue, &log, now);
             let started = start_builder(&queue, now).unwrap();
             assert_eq!(started.events, log.last());
+            let since = queue.ledger_tasks_open_since_at(log.last()).unwrap();
             (
-                queue.ledger_queue_heads_at(log.last()).unwrap().len(),
+                queue
+                    .ledger_queue_heads_at(log.last(), since)
+                    .unwrap()
+                    .len(),
                 queue.ledger_queue_heads().unwrap().len(),
                 started.kept().size().queue_rows,
             )
@@ -1467,6 +1645,46 @@ mod tests {
         assert_eq!(few.0, many.0);
         assert_eq!(few.2, many.2);
         assert_eq!(many.1 - few.1, 38 * 3);
+    }
+
+    /// Through the SQLite adapter, a builder's rows of a history and the
+    /// same with more waits settled that an event ended, every task row
+    /// settled: the heads a start receives at the position it goes on from
+    /// are as many, and so is what it keeps of the queue's rows and of the
+    /// rows dropped, and its waits; the heads of every row are not.
+    #[test]
+    fn a_start_on_the_store_keeps_as_much_however_many_waits_settled() {
+        let taken = |fill: usize| {
+            let dir = tempfile::tempdir().unwrap();
+            let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+            let log = ledger::testkit::settled_waits_log(fill);
+            let now = ledger::testkit::ms(100_000);
+            drained_on_the_store(&queue, &log, now);
+            queue
+                .conn
+                .execute("UPDATE ledger_rows SET final=1 WHERE kind='task'", [])
+                .unwrap();
+            let started = crate::application::supervise::start_builder(&queue, now).unwrap();
+            assert_eq!(started.events, log.last());
+            let since = queue.ledger_tasks_open_since_at(log.last()).unwrap();
+            assert_eq!(since, Since::NONE);
+            let size = started.kept().size();
+            (
+                (
+                    queue
+                        .ledger_queue_heads_at(log.last(), since)
+                        .unwrap()
+                        .len(),
+                    size.queue_rows,
+                    size.dropped_rows,
+                    started.kept().pre_claim().waits(),
+                ),
+                queue.ledger_queue_heads().unwrap().len(),
+            )
+        };
+        let (few, many) = (taken(2), taken(40));
+        assert_eq!(few.0, many.0);
+        assert_eq!(many.1 - few.1, 38 * 4);
     }
 
     /// The rows the waits and lives are made again from, the stops and the

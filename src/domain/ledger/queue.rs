@@ -37,7 +37,10 @@ use super::{LedgerHead, LedgerKind, LedgerRow, Subject, findings};
 use crate::domain::{
     EventId, EventKind, RunEvent, RunId, TaskId, claim_hold,
     live_alerts::{self, AlertKey, StreamRecord},
-    pre_claim::{ENDED_FREED, IntervalKind, Moved, PreClaimBook, PreClaimInterval, Started},
+    pre_claim::{
+        ENDED_FREED, IntervalKind, Moved, PreClaimBook, PreClaimInterval, Started,
+        rows::{Since, holds_at},
+    },
     stats::{
         landing_utilization::{Attempt, Attempts},
         timestamp_millis,
@@ -83,14 +86,17 @@ impl QueueHead {
     /// ([`crate::application::LedgerStore::ledger_queue_heads_at`]): it is
     /// settled, nothing of it is past `at` ([`cut::past`], so a cut leaves
     /// it as written), and it is one event of its own, a stream its next
-    /// baseline replaced or an alert ended. [`QueueBook::from_heads`]
-    /// forgets such a row whatever else it is given ([`QueueBook::closed`]:
-    /// no life holds any of them), and it is none of what the books of the
-    /// waits and the lives ([`crate::domain::pre_claim::rows::holds_at`])
-    /// or a cut ([`cut::Needs`]) read. A landing slot's row (its attempt),
-    /// a finding's and a wait's are read whatever they are: a wait the book
-    /// forgets is one the books of the waits are made of.
-    pub fn forgotten_at(&self, at: EventId) -> bool {
+    /// baseline replaced, an alert ended, or a wait no life holds
+    /// ([`wait_life`]) that the books of the waits made for `since` (that
+    /// of the position,
+    /// [`crate::application::LedgerStore::ledger_tasks_open_since_at`]) are
+    /// not made of ([`holds_at`]). A book given waits made for the same
+    /// `since` forgets such a row whatever else it is given
+    /// ([`QueueBook::closed`]), and it is none of what the books of the
+    /// waits and the lives or a cut ([`cut::Needs`]) read. A landing slot's
+    /// row (its attempt), a finding's and any other wait are read whatever
+    /// they are.
+    pub fn forgotten_at(&self, at: EventId, since: Since) -> bool {
         if self.head.kind != LedgerKind::Queue
             || !self.head.is_final
             || cut::past(self, at)
@@ -102,7 +108,11 @@ impl QueueHead {
             Of::Event => true,
             Of::Stream => self.outcome.as_deref() == Some("replaced"),
             Of::Alert => self.ended_at.is_some(),
-            Of::Finding | Of::Interval(_) => false,
+            Of::Finding => false,
+            Of::Interval(started) => {
+                wait_life(started, &self.detail["interval"]).is_none()
+                    && !holds_at(&self.row(), since, at)
+            }
         }
     }
 
@@ -141,6 +151,20 @@ fn of_kind(kind: &str) -> Of {
         "live_alert" => Of::Alert,
         "finding" => Of::Finding,
         _ => Of::Event,
+    }
+}
+
+/// The supervisor whose life reaches the wait `interval` (its row's detail)
+/// as [`QueueBook::interval`] left it, when one does: a slots full's, unless
+/// its `slots_full_ended` freed it, and that of the stop that ended a hold
+/// or a deferral.
+fn wait_life(started: Started, interval: &Value) -> Option<&str> {
+    let text = |key: &str| interval.get(key).and_then(Value::as_str);
+    match started {
+        Started::PreClaim(IntervalKind::SlotsFull) => {
+            (text("end") != Some(ENDED_FREED)).then(|| text("supervisor"))?
+        }
+        _ => (text("end") == Some(claim_hold::ENDED_SUPERVISOR_GONE)).then(|| text("ended_by"))?,
     }
 }
 
@@ -444,8 +468,9 @@ impl QueueBook {
     /// What a row read past its records (an end of no record of its own, a
     /// reach) stays an input of it, as its row read it. A row of another
     /// kind or a key of no event id is not one of its rows. `heads` may
-    /// lack the rows of [`QueueHead::forgotten_at`] the position of `last`,
-    /// which it would forget: the book is the same.
+    /// lack the rows of [`QueueHead::forgotten_at`] the position of `last`
+    /// and the [`Since`] `pre_claim` is held from, which it would forget:
+    /// the book is the same.
     pub fn from_heads(heads: &[QueueHead], pre_claim: &PreClaimBook, last: EventId) -> Self {
         Self::of_heads(heads.iter(), pre_claim, last)
     }
@@ -612,19 +637,9 @@ impl QueueBook {
     }
 
     /// Note the wait `start` began among those a supervisor's life reaches
-    /// as [`Self::interval`] left it, by `interval` (its row's detail): a
-    /// slots full its supervisor's, unless its `slots_full_ended` freed
-    /// it, and a hold or a deferral a supervisor's stop ended that
-    /// supervisor's.
+    /// ([`wait_life`]), by `interval` (its row's detail).
     fn hold_interval(&mut self, start: EventId, started: Started, interval: &Value) {
-        let text = |key: &str| interval.get(key).and_then(Value::as_str);
-        let supervisor = match started {
-            Started::PreClaim(IntervalKind::SlotsFull) => {
-                (text("end") != Some(ENDED_FREED)).then(|| text("supervisor"))
-            }
-            _ => (text("end") == Some(claim_hold::ENDED_SUPERVISOR_GONE)).then(|| text("ended_by")),
-        };
-        if let Some(supervisor) = supervisor.flatten() {
+        if let Some(supervisor) = wait_life(started, interval) {
             self.hold(supervisor, start);
         }
     }
@@ -911,7 +926,9 @@ impl QueueBook {
     /// records back: no supervisor's life reaches it, and it is one event
     /// of its own, a stream its next baseline replaced, an alert ended, or
     /// a wait or hold an event of its own ended (`pre_claim`, of the same
-    /// events: one a supervisor's life ended may open again). An open
+    /// events: one a supervisor's life ended may open again) or that
+    /// `pre_claim` says it left out ([`PreClaimBook::left_out`]: no event
+    /// moves a wait it does not hold, and no row of it is written). An open
     /// interval, stream or alert, a finding (any later record of it is
     /// its), a landing slot's (an event timed before its end reaches it)
     /// and a key of no row are not.
@@ -930,7 +947,7 @@ impl QueueBook {
             Of::Stream => self.streams.get(&row.about) != Some(&id),
             Of::Alert => row.ended_at.is_some(),
             Of::Finding => false,
-            Of::Interval(_) => pre_claim.ended_by_event(id),
+            Of::Interval(_) => pre_claim.ended_by_event(id) || pre_claim.left_out(id),
         }
     }
 

@@ -398,6 +398,15 @@ impl PreClaimBook {
         self.closed.contains_key(&start) || self.open.contains_key(&start)
     }
 
+    /// Whether it says it holds the waits from [`Self::held`] on and holds
+    /// neither a wait nor a hold on the landings started by `start`: one an
+    /// event ended before then, which the rows it was made of left out, or
+    /// one of a row it could not read a wait from; either way no event moves
+    /// it and it gives no row. A book of every event it read leaves none out.
+    pub fn left_out(&self, start: EventId) -> bool {
+        self.held.is_some() && !self.holds(start) && !self.landings.contains_key(&start)
+    }
+
     /// The book of `events` (ascending id).
     pub fn of(events: &[RunEvent]) -> Self {
         let mut book = Self::default();

@@ -2538,13 +2538,20 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             ))
         }
         // A page of the queue rows' heads what is made again at a position
-        // reads: at most `page` after the key `after` (none: from the
-        // first), picked by their columns, no record's body read or sent.
+        // for `since` reads: at most `page` after the key `after` (none:
+        // from the first), picked by their columns, no record's body read
+        // or sent.
         "ledger_queue_heads_at" => {
-            let (at, after, page): (EventId, Option<String>, usize) = read(op, args)?;
+            let (at, since, after, page): (
+                EventId,
+                crate::domain::pre_claim::rows::Since,
+                Option<String>,
+                usize,
+            ) = read(op, args)?;
             answer(LedgerStore::ledger_queue_heads_at_after(
                 &*store,
                 at,
+                since,
                 after.as_deref(),
                 page,
             ))

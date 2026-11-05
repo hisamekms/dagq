@@ -528,11 +528,12 @@ fn a_stream_and_a_finding_cut_read_their_records_bodies() {
     assert_eq!(head(&unread, "4").outcome.as_deref(), Some("resolved"));
 }
 
-/// Leaving out the heads of [`QueueHead::forgotten_at`] a position changes
-/// nothing made there, for each kind left out: the reads a cut names, the
-/// rows the books of the waits and the lives are made of, and the queue
-/// book, at every position of every history, folded soon after it and past
-/// every silence.
+/// Leaving out the heads of [`QueueHead::forgotten_at`] a position and its
+/// [`Since`] change nothing made there, for each kind left out: the reads a
+/// cut names, the rows the books of the waits and the lives are made of, and
+/// the queue book, at every position of every history, folded soon after it
+/// and past every silence, whether the task rows settled or not (all
+/// settled, the waits before the position are left out).
 #[test]
 fn the_heads_forgotten_at_a_position_change_nothing_made_there() {
     let mut cases = histories();
@@ -543,18 +544,28 @@ fn the_heads_forgotten_at_a_position_change_nothing_made_there() {
         events,
         vec![last + 1_000, last + 10 * SILENT_AFTER_MS],
     ));
+    let events = crate::domain::ledger::testkit::settled_waits_log(2).events;
+    let last = timestamp_millis(&events.last().unwrap().created_at).unwrap();
+    cases.push((
+        "settled waits",
+        events,
+        vec![last + 1_000, last + 10 * SILENT_AFTER_MS],
+    ));
     let mut left_out: BTreeMap<String, usize> = BTreeMap::new();
     for (name, events, nows) in cases {
-        for now in nows {
-            let rows = built_and_settled(&events, now);
+        for (now, settled) in nows.iter().flat_map(|now| [(*now, false), (*now, true)]) {
+            let rows = tasks_settled(built_and_settled(&events, now), settled);
             let heads = heads_of(&rows);
             for at in events.iter().map(|event| event.id) {
+                let since = since_at(&rows, at);
                 let (kept, gone): (Vec<QueueHead>, Vec<QueueHead>) = heads
                     .iter()
                     .cloned()
-                    .partition(|head| !head.forgotten_at(at));
+                    .partition(|head| !head.forgotten_at(at, since));
                 for head in &gone {
-                    let kind = if head.subject_kind.starts_with("live_alert") {
+                    let kind = if head.subject_kind.starts_with("live_alert")
+                        || is_wait(&head.subject_kind)
+                    {
                         head.subject_kind.as_str()
                     } else {
                         "one event"
@@ -568,7 +579,14 @@ fn the_heads_forgotten_at_a_position_change_nothing_made_there() {
                     id: EventId::new(0),
                 };
                 for head in &gone {
-                    assert!(!holds_at(&head.row(), earliest, at), "{name} {at}");
+                    // Of the waits, those not made for this position's
+                    // Since; of the rest, none whatever the Since.
+                    let of = if is_wait(&head.subject_kind) {
+                        since
+                    } else {
+                        earliest
+                    };
+                    assert!(!holds_at(&head.row(), of, at), "{name} {at}");
                 }
                 let made = made_at(&rows, &events, at, now);
                 let (reads, last) = read(&needs, &rows, &events, at);
@@ -589,6 +607,14 @@ fn the_heads_forgotten_at_a_position_change_nothing_made_there() {
     }
     assert_eq!(
         left_out.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["live_alert", "live_alert_stream", "one event"]
+        [
+            "claim_deferral",
+            "claim_hold",
+            "landing_hold",
+            "live_alert",
+            "live_alert_stream",
+            "one event",
+            "slots_full"
+        ]
     );
 }

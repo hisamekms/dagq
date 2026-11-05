@@ -1438,13 +1438,22 @@ fn the_queue_heads_at_a_position_cross_in_pages_as_the_queues_own() {
     let owner = LeaseToken::new("owner");
     let (_dir, backend) = claimed_with(&owner, fixed_time());
     let direct = SqliteQueue::open(&backend.db).unwrap();
-    let log = ledger::testkit::forgotten_log(2);
+    let log = ledger::testkit::settled_waits_log(2);
     let rows = ledger::testkit::built_and_settled(&log.events, ledger::testkit::ms(100_000));
     for row in &rows {
         direct.write_ledger_row(row).unwrap();
     }
     let at = log.last();
-    let heads = direct.ledger_queue_heads_at(at).unwrap();
+    // The waits settled are left out for the Since after them, not for the
+    // one before them: the Since crosses.
+    let since = crate::domain::pre_claim::rows::Since::NONE;
+    let earliest = crate::domain::pre_claim::rows::Since {
+        ms: i64::MIN,
+        id: crate::domain::EventId::new(0),
+    };
+    let heads = direct.ledger_queue_heads_at(at, since).unwrap();
+    let held = direct.ledger_queue_heads_at(at, earliest).unwrap();
+    assert!(heads.len() < held.len());
     assert!(heads.len() >= 2);
     assert!(heads.len() < direct.ledger_queue_heads().unwrap().len());
     let token = token_of(&backend, &Principal::supervisor(&owner, 7));
@@ -1458,11 +1467,12 @@ fn the_queue_heads_at_a_position_cross_in_pages_as_the_queues_own() {
         crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
     )
     .queue();
-    assert_eq!(queue.ledger_queue_heads_at(at).unwrap(), heads);
+    assert_eq!(queue.ledger_queue_heads_at(at, since).unwrap(), heads);
     assert_eq!(
         std::mem::take(&mut *service.ops.lock().unwrap()),
         ["ledger_queue_heads_at"]
     );
+    assert_eq!(queue.ledger_queue_heads_at(at, earliest).unwrap(), held);
     let page = |args: Value| {
         let answer = call(
             &service.backend,
@@ -1474,6 +1484,6 @@ fn the_queue_heads_at_a_position_cross_in_pages_as_the_queues_own() {
             serde_json::from_value(answer.result.unwrap()).unwrap();
         page
     };
-    assert_eq!(page(json!([at, null, 1])), heads[..1]);
-    assert_eq!(page(json!([at, heads[0].head.key, 1])), heads[1..2]);
+    assert_eq!(page(json!([at, since, null, 1])), heads[..1]);
+    assert_eq!(page(json!([at, since, heads[0].head.key, 1])), heads[1..2]);
 }

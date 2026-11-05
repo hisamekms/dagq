@@ -855,9 +855,10 @@ struct Reads {
 
 impl Reads {
     fn of(queue: &SqliteQueue, r: &Cursors) -> Self {
+        let since = queue.ledger_tasks_open_since_at(r.events).unwrap();
         Self {
             queue_rows: queue.ledger_queue_heads().unwrap().len(),
-            queue_heads: queue.ledger_queue_heads_at(r.events).unwrap().len(),
+            queue_heads: queue.ledger_queue_heads_at(r.events, since).unwrap().len(),
             session_heads: queue.ledger_heads(LedgerKind::Session).unwrap().len(),
             node_heads: queue.ledger_heads(LedgerKind::Node).unwrap().len(),
             open_heads: queue

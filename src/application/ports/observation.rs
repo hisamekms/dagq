@@ -239,26 +239,29 @@ pub trait LedgerStore {
             .collect())
     }
     /// The heads ([`Self::ledger_queue_heads`]) of the queue rows what is
-    /// made again at the position `at` reads
+    /// made again at the position `at` for `since` (that position's,
+    /// [`Self::ledger_tasks_open_since_at`]) reads
     /// ([`crate::domain::ledger::queue::QueueHead::forgotten_at`] leaves
     /// out the rest), so that what a new process holds of them at once
     /// does not grow with the rows settled that it forgets anyway.
     fn ledger_queue_heads_at(
         &self,
         at: EventId,
+        since: crate::domain::pre_claim::rows::Since,
     ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
-        self.ledger_queue_heads_at_after(at, None, usize::MAX)
+        self.ledger_queue_heads_at_after(at, since, None, usize::MAX)
     }
     /// At most `limit` of [`Self::ledger_queue_heads_at`] after the key
     /// `after` (`None`: from the first), by key: a page of them.
     fn ledger_queue_heads_at_after(
         &self,
         at: EventId,
+        since: crate::domain::pre_claim::rows::Since,
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
         let mut heads = self.ledger_queue_heads()?;
-        heads.retain(|head| !head.forgotten_at(at));
+        heads.retain(|head| !head.forgotten_at(at, since));
         heads.sort_by(|a, b| a.head.key.cmp(&b.head.key));
         Ok(heads
             .into_iter()
