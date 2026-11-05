@@ -234,13 +234,11 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
 - 名前付き入口`WriteTx::write`から`write_leader::fence`を呼ぶ。
 - 全部の書き込みのtransactionは最初の文で係と世代を確かめ、0行なら何も書かずに`not_leader`で拒む（期限は条件に入れない）。
 
-- `BEGIN IMMEDIATE`で状態の変更・依存グラフの検証・claimを直列化する。
-  ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
+- ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#起動とheartbeat)）。
 - queue DBのtransactionは`WriteTx`（`infrastructure::sqlite`）の入口`write`（immediate）か`read`（deferred）で始まる。
   書き込みと終わりの経路によらず、閾値を超えてwrite lockを握ればwarnし、queueのevent（`queue_write_held_long`）に記録する。
   eventはlockを放した後に同じ接続で別に短く書き、その失敗は元のtransactionを変えない。
-- 挿入した行のIDは`insert_id`で取り、`last_insert_rowid`は内部の`insert_counted`だけが呼ぶ（[architecture](architecture.md) X4）。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
   taskをcompletedかcanceledにするトランザクションは、開いたholdの行を閉じて`task_hold_ended`を書き、holdが残した結果を捨てる（`task_holds::end_with_task`）。
@@ -286,6 +284,9 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
   付け替えは明示の`rebind`だけが行う（[ADR-0020](../adr/0020-rebind-queue-to-a-moved-repository.md)、[コマンドをまたぐ約束](supervisor-lifecycle/commands.md)）。
 - queueのディレクトリは丸ごと移せる: runのpathは開いた場所から解決し直し、worktreeのGitの管理情報は`integrate`が直す（[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。
 - `logs/`の書式と消す時期は`infrastructure::telemetry`、`planners/`・`plan-reviews/`・`observer/`・`backups/`は`[retention]`（ADR-t697-1）。
+- storeの選択の入口は`compose::refuse_unusable_store`で、どのコマンドもqueueを開く前に通る。
+- storeの種類と接続先は配置ごとの設定から読み`dagq.toml`から読まない。
+- 既定はSQLiteで、使えないstoreを選ぶとSQLiteに落ちずに誤りで止まる。
 
 ## Database setup and migrations
 

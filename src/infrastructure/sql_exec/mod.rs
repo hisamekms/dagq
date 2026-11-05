@@ -269,6 +269,28 @@ pub trait SqlWrite: SqlRead {
     fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>>;
 }
 
+/// The named entries of a store's transactions (ADR-t3982-1 decision 2): the
+/// one way a transaction begins, whichever the adapter. A write entry fences
+/// the caller as its first statement and fails with
+/// [`crate::application::NotLeader`] when the caller is not the leader. How a
+/// transaction begins is the adapter's and no caller's to choose.
+pub trait TransactionEntries {
+    /// The transaction of a write entry.
+    type Write<'store>
+    where
+        Self: 'store;
+    /// The transaction of a read entry, which reads one snapshot.
+    type Read<'store>
+    where
+        Self: 'store;
+
+    /// Begin the write transaction `name`.
+    fn write_entry(&self, name: &'static str) -> anyhow::Result<Self::Write<'_>>;
+
+    /// Begin the read transaction `name`.
+    fn read_entry(&self, name: &'static str) -> anyhow::Result<Self::Read<'_>>;
+}
+
 /// The arguments of a statement of the port, each bound as its
 /// [`ToSqlValue`]: what `rusqlite::params!` is to rusqlite's.
 macro_rules! sql_params {

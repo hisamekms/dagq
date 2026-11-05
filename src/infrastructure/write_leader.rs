@@ -26,18 +26,18 @@ pub struct WriteIdentity {
     pub generation: i64,
 }
 
+/// The identity's columns of the row, in the order of [`WriteIdentity`].
+pub(super) const IDENTITY_SQL: &str =
+    "SELECT holder, generation FROM write_leader WHERE singleton = 1";
+
 impl WriteIdentity {
     pub(super) fn read(conn: &rusqlite::Connection) -> Result<Self> {
-        Ok(conn.query_row(
-            "SELECT holder, generation FROM write_leader WHERE singleton = 1",
-            [],
-            |r| {
-                Ok(Self {
-                    holder: r.get(0)?,
-                    generation: r.get(1)?,
-                })
-            },
-        )?)
+        Ok(conn.query_row(IDENTITY_SQL, [], |r| {
+            Ok(Self {
+                holder: r.get(0)?,
+                generation: r.get(1)?,
+            })
+        })?)
     }
 }
 
@@ -98,8 +98,9 @@ fn take_sql(now: &str) -> String {
 const TAKEN_SQL: &str = "SELECT generation FROM write_leader WHERE singleton = 1";
 
 /// Extend the lease of `?1` at generation `?2` to `?3` milliseconds from
-/// now; the same update every write transaction will start with.
-fn renew_sql(now: &str) -> String {
+/// now; the same update every write transaction starts with, on either
+/// store.
+pub(super) fn renew_sql(now: &str) -> String {
     format!(
         "UPDATE write_leader SET lease_until_ms = {now} + ?3 \
          WHERE singleton = 1 AND (holder = ?1 OR (holder IS NULL AND ?1 IS NULL)) AND generation = ?2",
@@ -110,7 +111,7 @@ fn renew_sql(now: &str) -> String {
 const RELEASE_SQL: &str = "UPDATE write_leader SET lease_until_ms = 0 \
      WHERE singleton = 1 AND holder = ?1 AND generation = ?2";
 
-fn millis(lease: Duration) -> Result<i64> {
+pub(super) fn millis(lease: Duration) -> Result<i64> {
     i64::try_from(lease.as_millis()).context("a write leader's lease too long to record")
 }
 

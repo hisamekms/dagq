@@ -23,12 +23,13 @@ use rusqlite::{
 };
 
 use super::{
-    RowValues, SqlDialect, SqlError, SqlRead, SqlResult, SqlRow, SqlValue, SqlWrite, ValueKind,
+    RowValues, SqlDialect, SqlError, SqlRead, SqlResult, SqlRow, SqlValue, SqlWrite,
+    TransactionEntries, ValueKind,
 };
 use crate::domain::actor::ActorContext;
 use crate::infrastructure::{
     event_actor::EventActors,
-    sqlite::{WriteTx, insert_counted},
+    sqlite::{SqliteQueue, WriteTx, insert_counted},
 };
 
 impl rusqlite::ToSql for SqlValue {
@@ -323,6 +324,19 @@ pub(in crate::infrastructure) fn attach_event_actors(
     Ok(actors)
 }
 
+impl TransactionEntries for SqliteQueue {
+    type Write<'store> = WriteTx<'store>;
+    type Read<'store> = WriteTx<'store>;
+
+    fn write_entry(&self, name: &'static str) -> anyhow::Result<WriteTx<'_>> {
+        self.write_tx(name)
+    }
+
+    fn read_entry(&self, name: &'static str) -> anyhow::Result<WriteTx<'_>> {
+        self.read_tx(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -331,7 +345,7 @@ mod tests {
 
     use super::*;
     use crate::infrastructure::sql_exec::{OptionalRow, sql_params};
-    use crate::infrastructure::sqlite::{SqliteQueue, WriteIdentity};
+    use crate::infrastructure::sqlite::WriteIdentity;
 
     /// A connection to the test's own memdb.
     fn memdb(name: &str) -> (String, Connection) {
@@ -518,7 +532,7 @@ mod tests {
     /// The entries hand a transaction of the port: the write entry's has
     /// passed the fence and writes through it (counted, in the transaction),
     /// and the read entry's reads the same store. A stale identity never
-    /// gets one.
+    /// gets one. The trait's entries are these entries.
     #[test]
     fn the_entries_hand_a_transaction_of_the_port() {
         let uri = format!("file:/sql-exec-entries-{}?vfs=memdb", uuid::Uuid::new_v4());
@@ -543,6 +557,14 @@ mod tests {
         assert_eq!(read, generation);
         assert_eq!(SqlRead::dialect(&reader), SqlDialect::Sqlite);
         drop(reader);
+        let reader = queue.read_entry("sql_exec_read_entry").unwrap();
+        assert_eq!(SqlRead::dialect(&reader), SqlDialect::Sqlite);
+        drop(reader);
+        queue
+            .write_entry("sql_exec_write_entry")
+            .unwrap()
+            .commit()
+            .unwrap();
 
         let stale = WriteIdentity {
             holder: Some("gone".to_owned()),

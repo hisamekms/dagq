@@ -5831,7 +5831,7 @@ fn takes_option(binary: &str, option: &str) -> bool {
 fn run(mut arguments: Vec<OsString>) -> Result<Value> {
     dagq::infrastructure::event_actor::set_process_command(command_path(&arguments));
     loop {
-        let value = execute(Cli::parse_from(&arguments))?;
+        let value = execute_on_usable_store(Cli::parse_from(&arguments), |name| env::var_os(name))?;
         if value["outcome"] != "handoff" {
             return Ok(value);
         }
@@ -5861,6 +5861,13 @@ fn run(mut arguments: Vec<OsString>) -> Result<Value> {
             "supervisor {token} could not exec {binary}: {error}; it goes on with this binary"
         );
     }
+}
+
+/// Run the command unless the deployment's setting `env` chose a store this
+/// build cannot use.
+fn execute_on_usable_store(cli: Cli, env: impl Fn(&str) -> Option<OsString>) -> Result<Value> {
+    dagq::compose::refuse_unusable_store(env)?;
+    execute(cli)
 }
 
 use dagq::view::RAW_STDOUT;
@@ -6745,6 +6752,41 @@ mod tests {
                 .map(|(use_case, _)| use_case),
             Some(UseCase::ReadyInherit)
         );
+    }
+
+    /// The refusal comes before the command: the queue of `--db` stays
+    /// unopened and is not created, whichever build this is.
+    #[test]
+    fn a_store_this_build_cannot_use_stops_the_command_before_it_opens_a_queue() {
+        // The parser's frames need more than a test thread's stack.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let dir = tempfile::tempdir().unwrap();
+                let db = dir.path().join("q.db");
+                let cli = Cli::try_parse_from([
+                    OsString::from("dagq"),
+                    OsString::from("--db"),
+                    db.clone().into_os_string(),
+                    OsString::from("init"),
+                ])
+                .unwrap();
+                let error = execute_on_usable_store(cli, |name| {
+                    (name == dagq::domain::store_setting::STORE_KIND_ENV)
+                        .then(|| OsString::from("postgres"))
+                })
+                .unwrap_err();
+                assert!(
+                    error
+                        .downcast_ref::<dagq::domain::store_setting::StoreRefusal>()
+                        .is_some(),
+                    "{error:#}"
+                );
+                assert!(!db.exists());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// A `dagq` with no service's address sends a host role's command to

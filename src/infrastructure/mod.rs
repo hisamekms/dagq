@@ -50,6 +50,7 @@ mod plan_reviews;
 mod planners;
 mod planning;
 pub mod podman_machine;
+pub mod postgres;
 pub mod process;
 pub mod process_read;
 mod proposals;

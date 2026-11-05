@@ -1,4 +1,4 @@
-//! The SQLite dialect's fragments of the queue store's SQL (ADR-t3982-1).
+//! The dialects' fragments of the queue store's SQL (ADR-t3982-1).
 //!
 //! Where the dialects differ only in one expression (reading a field of a
 //! JSON column, a date and time function), a statement of the store takes
@@ -18,6 +18,12 @@
 //! the SQLite text does not depend on [`JsonType`]. A dialect without that
 //! looseness reads the field as the named type.
 //!
+//! The Postgres dialect casts what it reads (`::jsonb`, `::text::timestamptz`),
+//! so its text holds whichever type the column has and a bound parameter is
+//! bound as text. It ignores the `_spaced` difference, which only keeps
+//! SQLite's text the same to the character. It asks for PostgreSQL 16 or
+//! later (`pg_input_is_valid`).
+//!
 //! Outside test code, no SQL of `src/` but this module's spells
 //! `json_extract`, `datetime`, `strftime` or `julianday`: the boundary test
 //! `src/context_boundaries/dialect.rs` fails on one that does.
@@ -31,8 +37,6 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SqlDialect {
     Sqlite,
-    /// Has no expressions yet, and no adapter returns it: asking it for one
-    /// panics rather than hand SQLite's text to another DB.
     Postgres,
 }
 
@@ -43,10 +47,12 @@ pub(crate) enum JsonType {
     Text,
     /// A JSON integer (an ID, a count, a mark).
     Integer,
-    /// A JSON boolean, compared with `1` or used as a condition.
+    /// A JSON boolean as `0` or `1`, compared with `1` or used as a condition.
+    /// Postgres takes no integer as a condition: there a statement compares it.
     Boolean,
     /// The field whatever its JSON type: whether it is there, or its value
-    /// handed back as it is stored.
+    /// handed back as it is stored (in Postgres, as text). A JSON `null` is
+    /// SQL `NULL`.
     Any,
 }
 
@@ -90,7 +96,9 @@ impl SqlDialect {
     /// integer: read at the statement, not at the transaction's start, so a
     /// lease's end is judged by the DB's clock when the statement runs
     /// (ADR-t3986-1 decision 4). SQLite's `'now'` is the same everywhere in
-    /// one statement.
+    /// one statement. Postgres's is read when the expression is, after the
+    /// statement's wait for a row, so a lease extended by a writer that queued
+    /// on the leader's row runs from when it got the row.
     pub(crate) fn now_millis(self) -> String {
         self.time_value("'now'", TimeForm::EpochMillis)
     }
@@ -101,7 +109,7 @@ impl SqlDialect {
                 let _ = ty;
                 format!("json_extract({column}{sep}{path})")
             }
-            Self::Postgres => no_postgres_expressions_yet(),
+            Self::Postgres => postgres_json(column, path, ty),
         }
     }
 
@@ -117,13 +125,48 @@ impl SqlDialect {
                 }
                 TimeForm::Ordinal => format!("julianday({args})"),
             },
-            Self::Postgres => no_postgres_expressions_yet(),
+            Self::Postgres => postgres_time(args, form),
         }
     }
 }
 
-fn no_postgres_expressions_yet() -> ! {
-    unreachable!("no adapter runs the Postgres dialect until it has its expressions")
+/// The field at the path `path` gives (a literal or a bound parameter, in
+/// the `$.a.b` form both dialects read) as text, cast to `ty`. A field that
+/// is not there and a JSON `null` both read as `NULL`, as in SQLite.
+fn postgres_json(column: &str, path: &str, ty: JsonType) -> String {
+    let text =
+        format!("(jsonb_path_query_first(({column})::jsonb, ({path})::text::jsonpath) #>> '{{}}')");
+    match ty {
+        JsonType::Text | JsonType::Any => text,
+        JsonType::Integer => format!("{text}::BIGINT"),
+        JsonType::Boolean => format!("{text}::BOOLEAN::INTEGER"),
+    }
+}
+
+/// The time `value` gives in `form`. `'now'` is the clock as the statement
+/// runs: the Postgres text `'now'` would be the transaction's start, and
+/// `statement_timestamp()` the time before a wait for a row. Only the
+/// [`TimeForm::Ordinal`] promises `NULL` for what is not a time, since a cast
+/// of one fails in Postgres where SQLite returns `NULL`.
+fn postgres_time(value: &str, form: TimeForm) -> String {
+    let now = value == "'now'";
+    let instant = if now {
+        "clock_timestamp()".to_owned()
+    } else {
+        format!("({value})::text::timestamptz")
+    };
+    match form {
+        TimeForm::Text => {
+            format!("to_char({instant} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')")
+        }
+        TimeForm::EpochSeconds => format!("FLOOR(EXTRACT(EPOCH FROM {instant}))::BIGINT"),
+        TimeForm::EpochMillis => format!("FLOOR(EXTRACT(EPOCH FROM {instant}) * 1000)::BIGINT"),
+        TimeForm::Ordinal if now => format!("EXTRACT(EPOCH FROM {instant})::DOUBLE PRECISION"),
+        TimeForm::Ordinal => format!(
+            "CASE WHEN pg_input_is_valid(({value})::text, 'timestamptz') \
+             THEN EXTRACT(EPOCH FROM {instant})::DOUBLE PRECISION END"
+        ),
+    }
 }
 
 /// [`SqlDialect::json_field`] in the SQLite kind.
@@ -261,15 +304,69 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Postgres")]
-    fn the_postgres_kind_has_no_json_expression_yet() {
-        SqlDialect::Postgres.json_field("p", "$.k", JsonType::Any);
+    fn the_postgres_kind_reads_a_json_field_as_the_named_type() {
+        let kind = SqlDialect::Postgres;
+        let text = "(jsonb_path_query_first((o.payload)::jsonb, \
+                    ('$.a.b')::text::jsonpath) #>> '{}')";
+        for (ty, expected) in [
+            (JsonType::Text, text.to_owned()),
+            (JsonType::Any, text.to_owned()),
+            (JsonType::Integer, format!("{text}::BIGINT")),
+            (JsonType::Boolean, format!("{text}::BOOLEAN::INTEGER")),
+        ] {
+            assert_eq!(kind.json_field("o.payload", "$.a.b", ty), expected);
+            assert_eq!(kind.json_field_spaced("o.payload", "$.a.b", ty), expected);
+        }
+        assert_eq!(
+            kind.json_field_at("c.payload", "?4", JsonType::Any),
+            "(jsonb_path_query_first((c.payload)::jsonb, (?4)::text::jsonpath) #>> '{}')"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Postgres")]
-    fn the_postgres_kind_has_no_time_expression_yet() {
-        SqlDialect::Postgres.time_value("at", TimeForm::Text);
+    fn the_postgres_kind_reads_a_time_in_the_named_form() {
+        let kind = SqlDialect::Postgres;
+        let at = "(created_at)::text::timestamptz";
+        for (form, expected) in [
+            (
+                TimeForm::Text,
+                format!("to_char({at} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')"),
+            ),
+            (
+                TimeForm::EpochSeconds,
+                format!("FLOOR(EXTRACT(EPOCH FROM {at}))::BIGINT"),
+            ),
+            (
+                TimeForm::EpochMillis,
+                format!("FLOOR(EXTRACT(EPOCH FROM {at}) * 1000)::BIGINT"),
+            ),
+            (
+                TimeForm::Ordinal,
+                format!(
+                    "CASE WHEN pg_input_is_valid((created_at)::text, 'timestamptz') \
+                     THEN EXTRACT(EPOCH FROM {at})::DOUBLE PRECISION END"
+                ),
+            ),
+        ] {
+            assert_eq!(kind.time_value("created_at", form), expected);
+            assert_eq!(kind.time_value_spaced("created_at", form), expected);
+        }
+    }
+
+    /// The DB's clock as the statement runs: `now()`, `'now'` and
+    /// `statement_timestamp()` are fixed before a writer queues on the
+    /// leader's row, so its lease could already have ended when it commits.
+    #[test]
+    fn the_postgres_clock_now_is_read_as_the_statement_runs_in_milliseconds() {
+        let kind = SqlDialect::Postgres;
+        assert_eq!(
+            kind.now_millis(),
+            "FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT"
+        );
+        assert_eq!(
+            kind.time_value("'now'", TimeForm::Ordinal),
+            "EXTRACT(EPOCH FROM clock_timestamp())::DOUBLE PRECISION"
+        );
     }
 
     #[test]

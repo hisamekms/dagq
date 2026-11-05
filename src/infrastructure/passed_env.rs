@@ -17,6 +17,7 @@ const CREDENTIAL_NAMES: &[&str] = &[
     "SSH_ASKPASS",
     "GIT_ASKPASS",
     "SUDO_ASKPASS",
+    crate::domain::store_setting::STORE_CONNECTION_ENV,
 ];
 
 /// Whether `name` names a credential, which no narrowed environment is

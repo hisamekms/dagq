@@ -22,6 +22,8 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 getrandom = "0.4"
 libc = "0.2"
+# The Postgres store's driver, behind the feature `postgres` (ADR-t3986-1).
+postgres = { version = "0.19", optional = true }
 rusqlite = { version = "0.40", features = ["backup", "bundled", "functions", "hooks", "modern_sqlite"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
@@ -44,6 +46,9 @@ disallowed_macros = "allow"
 # dev-dependency on this package below.
 [features]
 test-paths = []
+# The Postgres store's adapter (src/infrastructure/postgres/client.rs): not in
+# a default build, so a local SQLite queue compiles none of its driver.
+postgres = ["dep:postgres"]
 
 [dev-dependencies]
 dagq = { path = ".", features = ["test-paths"] }
