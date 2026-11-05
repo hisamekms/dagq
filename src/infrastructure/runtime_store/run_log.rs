@@ -1,6 +1,9 @@
 //! Runs and events as read, and events recorded outside a transition
 //! ([`RunReads`], [`EventStore`]), and the records of the inbox's watcher
 //! ([`InboxWatchLog`], host運用's).
+//!
+//! The reads of the queue's own events by kind (no run, task or goal) name
+//! `events_by_kind`, why: [`crate::infrastructure::kpi_push`].
 
 use super::*;
 use crate::infrastructure::sql_dialect::{
@@ -15,13 +18,48 @@ const EVENTS_OF_KIND_BETWEEN_SQL: &str =
 
 /// The rows of [`SqliteQueue::installs_after`]: the queue's events of kind
 /// `?1` past id `?2` that installed more than the plugin.
-fn installs_after_sql() -> String {
+pub(super) fn installs_after_sql() -> String {
     format!(
-        "FROM run_events
+        "FROM run_events INDEXED BY events_by_kind
      WHERE kind = ?1 AND id > ?2
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
      AND NOT COALESCE({}, 0)",
         json_field_spaced("payload", "$.plugin_only", JsonType::Boolean)
+    )
+}
+
+/// The queue's events of the kinds `?1` (a JSON array), newest first, at
+/// most `?2`.
+pub(super) const UPDATE_EVENTS_SQL: &str = "SELECT * FROM run_events INDEXED BY events_by_kind
+     WHERE kind IN (SELECT value FROM json_each(?1))
+     AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
+     ORDER BY id DESC LIMIT ?2";
+
+/// The newest of the queue's events of the kind `?1`.
+pub(super) const LATEST_QUEUE_EVENT_SQL: &str = "SELECT * FROM run_events INDEXED BY events_by_kind
+     WHERE kind=?1 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
+     ORDER BY id DESC LIMIT 1";
+
+/// Whether an event of the kind `?1` with the `absent_since` `?2` and the
+/// `attempt` `?3` is there.
+pub(super) fn inbox_nudged_sql() -> String {
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM run_events INDEXED BY events_by_kind
+         WHERE kind=?1 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
+         AND {} IS ?2
+         AND {} IS ?3)",
+        json_field("payload", "$.absent_since", JsonType::Integer),
+        json_field("payload", "$.attempt", JsonType::Integer),
+    )
+}
+
+/// The kind and `at` of the latest event of the kinds `?1` and `?2`.
+pub(super) fn latest_inbox_watcher_change_sql() -> String {
+    format!(
+        "SELECT kind, {} FROM run_events INDEXED BY events_by_kind
+         WHERE kind IN (?1, ?2) AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
+         ORDER BY id DESC LIMIT 1",
+        json_field("payload", "$.at", JsonType::Integer),
     )
 }
 
@@ -32,12 +70,7 @@ impl SqliteQueue {
     pub fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
         Ok(crate::domain::in_job_order(
             self.conn
-                .prepare(
-                    "SELECT * FROM run_events
-                 WHERE kind IN (SELECT value FROM json_each(?1))
-                 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-                 ORDER BY id DESC LIMIT ?2",
-                )?
+                .prepare(UPDATE_EVENTS_SQL)?
                 .query_map(
                     params![
                         serde_json::to_string(
@@ -296,14 +329,7 @@ impl SqliteQueue {
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("claim_inbox_nudge")?;
         let claimed: bool = tx.query_row(
-            &format!(
-                "SELECT EXISTS(SELECT 1 FROM run_events
-             WHERE kind=?1 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-             AND {} IS ?2
-             AND {} IS ?3)",
-                json_field("payload", "$.absent_since", JsonType::Integer),
-                json_field("payload", "$.attempt", JsonType::Integer),
-            ),
+            &inbox_nudged_sql(),
             params![
                 kind.as_str(),
                 payload["absent_since"].as_i64(),
@@ -343,12 +369,7 @@ impl SqliteQueue {
         let tx = self.write_tx("record_inbox_watcher_change")?;
         let latest: Option<(String, Option<i64>)> = tx
             .query_row(
-                &format!(
-                    "SELECT kind, {} FROM run_events
-                 WHERE kind IN (?1, ?2) AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-                 ORDER BY id DESC LIMIT 1",
-                    json_field("payload", "$.at", JsonType::Integer),
-                ),
+                &latest_inbox_watcher_change_sql(),
                 params![
                     EventKind::InboxWatcherAbsent.as_str(),
                     EventKind::InboxWatcherReturned.as_str()
@@ -439,13 +460,7 @@ impl SqliteQueue {
         for kind in kinds {
             let event = self
                 .conn
-                .query_row(
-                    "SELECT * FROM run_events
-                     WHERE kind=?1 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-                     ORDER BY id DESC LIMIT 1",
-                    [kind],
-                    event_row,
-                )
+                .query_row(LATEST_QUEUE_EVENT_SQL, [kind], event_row)
                 .optional()?;
             if let Some(event) = event
                 && latest.as_ref().is_none_or(|latest| latest.id < event.id)

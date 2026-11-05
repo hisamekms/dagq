@@ -4,6 +4,10 @@
 //! supervisors on one queue only one starts a round, and a running round
 //! changes hands only from an owner that is gone. A production set of an
 //! agent's cases is taken the same way (`agent_cases_taken`).
+//!
+//! These events have no run, task or goal and the write lock is held while
+//! they are read, so every read names `events_by_kind` (why:
+//! [`crate::infrastructure::kpi_push`]).
 
 use super::run_log::queue_event;
 use super::*;
@@ -34,15 +38,50 @@ fn kinds(kinds: &[EventKind]) -> Result<String> {
     )?)
 }
 
+/// Whether an event matching `of` ([`of_round`] or [`of_set`]) is there.
+fn any_of_sql(of: &str) -> String {
+    format!("SELECT EXISTS(SELECT 1 FROM run_events INDEXED BY events_by_kind WHERE {of})")
+}
+
+/// The supervisor the latest event matching `of` ([`of_round`] or
+/// [`of_set`]) names.
+fn latest_owner_sql(of: &str) -> String {
+    format!(
+        "SELECT {} FROM run_events INDEXED BY events_by_kind
+         WHERE {of} ORDER BY id DESC LIMIT 1",
+        supervisor()
+    )
+}
+
+/// Whether an event of the round `?1` of the kinds `?2` is there.
+pub(super) fn any_of_round_sql() -> String {
+    any_of_sql(&of_round())
+}
+
+/// The supervisor of the latest event of the round `?1` of the kinds `?2`.
+pub(super) fn round_owner_sql() -> String {
+    latest_owner_sql(&of_round())
+}
+
+/// Whether a round started (kind `?1`) and has not finished (kind `?2`).
+pub(super) fn another_round_runs_sql() -> String {
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM run_events s INDEXED BY events_by_kind
+         WHERE s.kind = ?1 AND s.run_id IS NULL AND s.task_id IS NULL AND s.goal_id IS NULL
+         AND NOT EXISTS(SELECT 1 FROM run_events f INDEXED BY events_by_kind
+             WHERE f.kind = ?2 AND f.run_id IS NULL
+             AND {} = {}))",
+        json_field("f.payload", "$.eval_id", JsonType::Integer),
+        json_field("s.payload", "$.eval_id", JsonType::Integer),
+    )
+}
+
 fn any_of_round(tx: &Connection, eval_id: i64, of: &[EventKind]) -> Result<bool> {
-    Ok(tx.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE {})",
-            of_round()
-        ),
-        params![eval_id, kinds(of)?],
-        |r| r.get(0),
-    )?)
+    Ok(
+        tx.query_row(&any_of_round_sql(), params![eval_id, kinds(of)?], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 impl SqliteQueue {
@@ -73,15 +112,7 @@ impl SqliteQueue {
         }
         if kind == EventKind::AgentEvalStarted {
             let another_runs: bool = tx.query_row(
-                &format!(
-                    "SELECT EXISTS(SELECT 1 FROM run_events s
-                 WHERE s.kind = ?1 AND s.run_id IS NULL AND s.task_id IS NULL AND s.goal_id IS NULL
-                 AND NOT EXISTS(SELECT 1 FROM run_events f
-                     WHERE f.kind = ?2 AND f.run_id IS NULL
-                     AND {} = {}))",
-                    json_field("f.payload", "$.eval_id", JsonType::Integer),
-                    json_field("s.payload", "$.eval_id", JsonType::Integer),
-                ),
+                &another_round_runs_sql(),
                 params![
                     EventKind::AgentEvalStarted.as_str(),
                     EventKind::AgentEvalFinished.as_str()
@@ -117,12 +148,7 @@ impl SqliteQueue {
         // started.
         let owner: Option<Option<String>> = tx
             .query_row(
-                &format!(
-                    "SELECT {} FROM run_events
-                     WHERE {} ORDER BY id DESC LIMIT 1",
-                    supervisor(),
-                    of_round()
-                ),
+                &round_owner_sql(),
                 params![
                     eval_id,
                     kinds(&[EventKind::AgentEvalStarted, EventKind::AgentEvalTakenUp])?
@@ -166,6 +192,17 @@ fn of_set() -> String {
     )
 }
 
+/// Whether an event of the production set `?1` of the kinds `?2` is there.
+pub(super) fn any_of_set_sql() -> String {
+    any_of_sql(&of_set())
+}
+
+/// The supervisor of the latest event of the production set `?1` of the
+/// kinds `?2`.
+pub(super) fn set_owner_sql() -> String {
+    latest_owner_sql(&of_set())
+}
+
 impl SqliteQueue {
     /// [`EvalRounds::take_case_set`].
     pub fn take_case_set(
@@ -181,7 +218,7 @@ impl SqliteQueue {
         let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("take_case_set")?;
         let settled: bool = tx.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM run_events WHERE {})", of_set()),
+            &any_of_set_sql(),
             params![
                 set_id,
                 kinds(&[EventKind::AgentCasesBuilt, EventKind::AgentCasesRefused])?
@@ -189,16 +226,9 @@ impl SqliteQueue {
             |r| r.get(0),
         )?;
         let owner: Option<Option<String>> = tx
-            .query_row(
-                &format!(
-                    "SELECT {} FROM run_events
-                     WHERE {} ORDER BY id DESC LIMIT 1",
-                    supervisor(),
-                    of_set()
-                ),
-                params![set_id, kinds(&[kind])?],
-                |r| r.get(0),
-            )
+            .query_row(&set_owner_sql(), params![set_id, kinds(&[kind])?], |r| {
+                r.get(0)
+            })
             .optional()?;
         let owner = owner.flatten();
         let registration: Option<(Option<i64>, u32)> = match &owner {

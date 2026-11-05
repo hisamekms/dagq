@@ -66,6 +66,8 @@ mod eval_rounds;
 mod ledger;
 mod node_samples;
 mod planning_records;
+#[cfg(test)]
+mod queue_event_read_plan_tests;
 mod queue_records;
 mod recovery;
 mod run_log;

@@ -5,6 +5,10 @@
 //! the records of how old the declared workflows' latest successes are,
 //! kept unique per workflow and success, and the `ci_failure` findings a
 //! task fixes.
+//!
+//! The watch's events have no run, task or goal and most reads hold the
+//! write lock, so every read names `events_by_kind` (why:
+//! [`super::kpi_push`]).
 
 use super::sql_dialect::{JsonType, json_field};
 use anyhow::Result;
@@ -19,20 +23,63 @@ use crate::domain::ci_watch::scheduled::{CI_SCHEDULED_CHECKED, ScheduledCheckRec
 use crate::domain::ci_watch::{CI_CHECKED, CI_WATCH_KINDS, CiCheckRecord, CiCheckRecorded};
 use crate::domain::{EventId, EventKind, FindingId, FindingStatus, NewFinding, RunEvent, TaskId};
 
+/// The events of the kind `?1`, oldest first.
+pub(super) const EVENTS_OF_KIND_SQL: &str = "SELECT * FROM run_events INDEXED BY events_by_kind
+     WHERE kind=?1 AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL ORDER BY id";
+
+/// The id of the latest event of the kind `?1`.
+pub(super) const LATEST_OF_KIND_SQL: &str = "SELECT id FROM run_events INDEXED BY events_by_kind
+     WHERE kind=?1 AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
+     ORDER BY id DESC LIMIT 1";
+
+/// The `ci_workflow_stale` (`?1`) and `ci_workflow_fresh` (`?2`) events,
+/// oldest first.
+pub(super) const FRESHNESS_EVENTS_SQL: &str = "SELECT * FROM run_events INDEXED BY events_by_kind
+     WHERE kind IN (?1,?2) AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL ORDER BY id";
+
+/// Every event of the watch, oldest first.
+pub(super) fn watch_events_sql() -> String {
+    let kinds = CI_WATCH_KINDS
+        .iter()
+        .map(|kind| format!("'{kind}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "SELECT * FROM run_events INDEXED BY events_by_kind WHERE kind IN ({kinds})
+         AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL ORDER BY id"
+    )
+}
+
+/// The latest freshness record (kinds `?1`, `?2`) of the workflow `?3`.
+pub(super) fn latest_freshness_sql() -> String {
+    format!(
+        "SELECT id, kind FROM run_events INDEXED BY events_by_kind WHERE kind IN (?1,?2)
+         AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
+         AND {}=?3
+         ORDER BY id DESC LIMIT 1",
+        json_field("payload", "$.workflow", JsonType::Text)
+    )
+}
+
+/// Whether a record of the kind `?1` of the workflow `?2` and its run `?3`
+/// is there.
+pub(super) fn freshness_there_sql() -> String {
+    format!(
+        "SELECT EXISTS(SELECT 1 FROM run_events INDEXED BY events_by_kind WHERE kind=?1
+         AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
+         AND {}=?2
+         AND {} IS ?3)",
+        json_field("payload", "$.workflow", JsonType::Text),
+        json_field("payload", "$.run_id", JsonType::Integer)
+    )
+}
+
 impl SqliteQueue {
     /// Every event of the watch, oldest first.
     pub fn ci_watch_events(&self) -> Result<Vec<RunEvent>> {
-        let kinds = CI_WATCH_KINDS
-            .iter()
-            .map(|kind| format!("'{kind}'"))
-            .collect::<Vec<_>>()
-            .join(",");
         Ok(self
             .conn
-            .prepare(&format!(
-                "SELECT * FROM run_events WHERE kind IN ({kinds})
-                 AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL ORDER BY id"
-            ))?
+            .prepare(&watch_events_sql())?
             .query_map([], event_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -50,13 +97,7 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let tx = self.write_tx("record_ci_check")?;
         let latest: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM run_events WHERE kind=?1
-                 AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
-                 ORDER BY id DESC LIMIT 1",
-                [CI_CHECKED],
-                |r| r.get(0),
-            )
+            .query_row(LATEST_OF_KIND_SQL, [CI_CHECKED], |r| r.get(0))
             .optional()?;
         if latest != record.previous {
             return Ok(None);
@@ -104,10 +145,7 @@ impl SqliteQueue {
     pub fn ci_scheduled_events(&self) -> Result<Vec<RunEvent>> {
         Ok(self
             .conn
-            .prepare(
-                "SELECT * FROM run_events WHERE kind=?1
-                 AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL ORDER BY id",
-            )?
+            .prepare(EVENTS_OF_KIND_SQL)?
             .query_map([CI_SCHEDULED_CHECKED], event_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -125,13 +163,7 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let tx = self.write_tx("record_ci_scheduled_check")?;
         let latest: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM run_events WHERE kind=?1
-                 AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
-                 ORDER BY id DESC LIMIT 1",
-                [CI_SCHEDULED_CHECKED],
-                |r| r.get(0),
-            )
+            .query_row(LATEST_OF_KIND_SQL, [CI_SCHEDULED_CHECKED], |r| r.get(0))
             .optional()?;
         if latest != record.previous {
             return Ok(None);
@@ -164,10 +196,7 @@ impl SqliteQueue {
         let [stale, fresh] = FRESHNESS_KINDS.map(EventKind::as_str);
         Ok(self
             .conn
-            .prepare(
-                "SELECT * FROM run_events WHERE kind IN (?1,?2)
-                 AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL ORDER BY id",
-            )?
+            .prepare(FRESHNESS_EVENTS_SQL)?
             .query_map([stale, fresh], event_row)?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -186,13 +215,7 @@ impl SqliteQueue {
         let latest = |workflow: Option<&str>| -> Result<Option<(i64, String)>> {
             Ok(tx
                 .query_row(
-                    &format!(
-                        "SELECT id, kind FROM run_events WHERE kind IN (?1,?2)
-                     AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
-                     AND {}=?3
-                     ORDER BY id DESC LIMIT 1",
-                        json_field("payload", "$.workflow", JsonType::Text)
-                    ),
+                    &latest_freshness_sql(),
                     params![stale.as_str(), fresh.as_str(), workflow],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
@@ -205,14 +228,7 @@ impl SqliteQueue {
                     return Ok(None);
                 }
                 let there: bool = tx.query_row(
-                    &format!(
-                        "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
-                       AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
-                       AND {}=?2
-                       AND {} IS ?3)",
-                        json_field("payload", "$.workflow", JsonType::Text),
-                        json_field("payload", "$.run_id", JsonType::Integer)
-                    ),
+                    &freshness_there_sql(),
                     params![stale.as_str(), workflow, payload["run_id"].as_i64()],
                     |r| r.get(0),
                 )?;

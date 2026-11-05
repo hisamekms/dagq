@@ -2250,15 +2250,24 @@ fn queue_open_spans(conn: &Connection, kind: EventKind) -> Result<Option<Vec<Ope
     };
     open_spans(
         conn,
-        &format!(
-            "o.task_id IS NULL AND o.goal_id IS NULL AND {}=?1",
-            json_field("o.payload", "$.kind", JsonType::Text),
-        ),
-        "c.task_id IS NULL AND c.goal_id IS NULL",
+        &queue_opened_condition(),
+        QUEUE_CLOSED_CONDITION,
         params![span_kind],
     )
     .map(Some)
 }
+
+/// Which `session_opened` [`queue_open_spans`] reads: those of the queue
+/// and of the job kind `?1`.
+fn queue_opened_condition() -> String {
+    format!(
+        "o.task_id IS NULL AND o.goal_id IS NULL AND {}=?1",
+        json_field("o.payload", "$.kind", JsonType::Text),
+    )
+}
+
+/// Which `session_closed` close a span of [`queue_open_spans`].
+const QUEUE_CLOSED_CONDITION: &str = "c.task_id IS NULL AND c.goal_id IS NULL";
 
 /// The `session_opened` events matching `opened` that no `session_closed`
 /// matching `closed` names, oldest first. Both conditions share `params`.
@@ -2552,6 +2561,21 @@ pub(super) mod tests {
                 "{plan:#?}"
             );
         }
+        // The queue's spans have no goal: the outer read goes by the kind of
+        // `session_opened`, not every event without a goal.
+        let spans = uses(&open_spans_sql(
+            &queue_opened_condition(),
+            QUEUE_CLOSED_CONDITION,
+        ));
+        let outer = spans
+            .iter()
+            .take_while(|step| !step.contains("CORRELATED"))
+            .collect::<Vec<_>>();
+        assert!(
+            outer.iter().any(|step| step.contains("events_by_kind"))
+                && !outer.iter().any(|step| step.contains("events_by_goal")),
+            "{spans:#?}"
+        );
         // closed_value joins the `session_opened` by its key and walks the
         // run's `session_closed` by the kind, never the whole table.
         let plan = plan(conn, &closed_value_sql());
