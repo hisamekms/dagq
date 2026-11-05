@@ -330,13 +330,15 @@ mod tests {
         );
     }
 
+    /// Only what a sandbox lets through is sure: it refuses `ps` and, on
+    /// macOS, `sysctl`, whose columns stay empty there. Reading `ps`'s text
+    /// is the domain's `processes_are_split_by_kind`.
     #[test]
-    fn a_sample_of_this_host_has_the_load_and_the_processes() {
+    fn a_sample_of_this_host_has_the_load_and_the_used_memory() {
         let sample = sample(1_790_000_000, &Toolchains::this_repository());
         assert_eq!(sample.unix, 1_790_000_000);
         assert!(sample.values.contains_key("load1"), "{sample:?}");
-        assert!(sample.values.contains_key("cpu_total"), "{sample:?}");
-        assert!(sample.values.contains_key("mem_total_mb"), "{sample:?}");
+        assert!(sample.values.contains_key("mem_used_mb"), "{sample:?}");
         assert_eq!(tool("/nonexistent/tool", &[]), None);
     }
 

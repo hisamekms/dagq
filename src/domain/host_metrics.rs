@@ -1040,6 +1040,13 @@ garbage line
         assert_eq!(usage[2].rss_mb, 400.0);
         assert_eq!(usage[3].cpu, 4.0);
         assert_eq!(usage[4].cpu, 5.5);
+        // The sample's columns: the total is the sum of the kinds, and no
+        // `ps` leaves them all empty.
+        let sample = HostSample::new(1).with_processes(Some(&usage));
+        assert_eq!(sample.values["cpu_total"], 201.0);
+        assert_eq!(sample.values["cpu_cargo"], 21.5);
+        assert_eq!(sample.values["rss_claude_mb"], 400.0);
+        assert!(HostSample::new(1).with_processes(None).values.is_empty());
         assert_eq!(processes("nothing here\n", &rust), None);
         assert_eq!(PROCESS_KINDS[process_kind("claude", &rust)], "claude");
         assert_eq!(PROCESS_KINDS[process_kind("dagq.previous", &rust)], "dagq");

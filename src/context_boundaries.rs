@@ -32,7 +32,8 @@
 //! differs between the dialects only in the dialect's functions by
 //! [`dialect`], that only the adapter's insert reads the ID of an
 //! inserted row by [`inserted_ids`], and that only the modules still bound
-//! to it name rusqlite by [`rusqlite_names`].
+//! to it name rusqlite by [`rusqlite_names`], and that `ps` and `top` start
+//! only where a sandbox's refusal stops nothing by [`setuid_tools`].
 //!
 //! This is test code of the library (a `#[cfg(test)]` module of
 //! `src/lib.rs`, run by `cargo test --lib`), outside the library's layers,
@@ -47,6 +48,7 @@ mod ownership;
 mod port_fixtures;
 mod queue_opens;
 mod rusqlite_names;
+mod setuid_tools;
 mod source;
 mod sql;
 mod write_tx;

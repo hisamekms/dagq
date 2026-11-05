@@ -1,11 +1,12 @@
 //! A Rust source read as syntax for the boundary tests: its string
-//! literals outside test code with the fns they are in, its fns outside
-//! test code, and the files its `#[cfg(test)] mod name;` declares. Test code
-//! is an item (or a field, a variant, an arm, a `let`, an expression, a
-//! macro statement) under a `cfg` that requires `test` ([`is_test`]), and a
-//! file under `#![cfg(test)]`. Comments and attributes (doc comments too)
-//! are not read; the tokens of a macro are read for their string literals
-//! only.
+//! literals outside test code with the fns they are in, its calls whose
+//! first argument is a string literal, its fns outside test code, and the
+//! files its `#[cfg(test)] mod name;` declares. Test code is an item (or a
+//! field, a variant, an arm, a `let`, an expression, a macro statement)
+//! under a `cfg` that requires `test` ([`is_test`]), and a file under
+//! `#![cfg(test)]`; [`read_with_tests`] reads it too. Comments and
+//! attributes (doc comments too) are not read; the tokens of a macro are
+//! read for their string literals and those calls only.
 
 use proc_macro2::TokenTree;
 use std::collections::BTreeSet;
@@ -20,9 +21,20 @@ pub(super) struct Literal {
     pub(super) fns: Vec<String>,
 }
 
+/// A call `path::to::name("first", ..)` and the fns around it, as
+/// [`Literal`]. A method call, and a first argument that is anything but a
+/// string literal (a variable, a constant, `&"text"`), is no such call.
+#[derive(Debug)]
+pub(super) struct StringCall {
+    pub(super) path: Vec<String>,
+    pub(super) first: String,
+    pub(super) fns: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Source {
     pub(super) literals: Vec<Literal>,
+    pub(super) calls: Vec<StringCall>,
     /// The names of the fns of production code, methods and trait methods
     /// included.
     pub(super) fns: BTreeSet<String>,
@@ -37,6 +49,17 @@ pub(super) fn read(text: &str) -> syn::Result<Source> {
     if !is_test(&file.attrs) {
         reader.visit_file(&file);
     }
+    Ok(reader.source)
+}
+
+/// [`read`], with the test code read as any other code.
+pub(super) fn read_with_tests(text: &str) -> syn::Result<Source> {
+    let file = syn::parse_file(text)?;
+    let mut reader = Reader {
+        with_tests: true,
+        ..Reader::default()
+    };
+    reader.visit_file(&file);
     Ok(reader.source)
 }
 
@@ -145,9 +168,14 @@ struct Reader {
     source: Source,
     fns: Vec<String>,
     modules: Vec<String>,
+    with_tests: bool,
 }
 
 impl Reader {
+    fn skips(&self, attrs: &[Attribute]) -> bool {
+        !self.with_tests && is_test(attrs)
+    }
+
     fn in_fn(&mut self, name: &syn::Ident, walk: impl FnOnce(&mut Self)) {
         self.source.fns.insert(name.to_string());
         self.fns.push(name.to_string());
@@ -162,19 +190,62 @@ impl Reader {
         });
     }
 
-    /// The string literals of a macro's tokens, which syn does not parse.
+    fn call(&mut self, path: Vec<String>, first: String) {
+        self.source.calls.push(StringCall {
+            path,
+            first,
+            fns: self.fns.clone(),
+        });
+    }
+
+    /// The string literals of a macro's tokens, which syn does not parse,
+    /// and the calls among them: a path of identifiers joined by `::` right
+    /// before parentheses that begin with a string literal. The name after
+    /// a `.` is a method's, and a `:` alone ends a path (a field's name).
     fn tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        let mut path: Vec<String> = Vec::new();
+        let mut colons = 0;
+        let mut after_dot = false;
         for tree in tokens {
             match tree {
-                TokenTree::Literal(literal) => match Lit::new(literal) {
-                    Lit::Str(s) => self.literal(s.value()),
-                    Lit::ByteStr(s) => {
-                        self.literal(String::from_utf8_lossy(&s.value()).into_owned())
+                TokenTree::Literal(literal) => {
+                    path.clear();
+                    (colons, after_dot) = (0, false);
+                    match Lit::new(literal) {
+                        Lit::Str(s) => self.literal(s.value()),
+                        Lit::ByteStr(s) => {
+                            self.literal(String::from_utf8_lossy(&s.value()).into_owned())
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
-                TokenTree::Group(group) => self.tokens(group.stream()),
-                _ => {}
+                }
+                TokenTree::Group(group) => {
+                    if group.delimiter() == proc_macro2::Delimiter::Parenthesis
+                        && colons == 0
+                        && !path.is_empty()
+                        && let Some(TokenTree::Literal(literal)) = group.stream().into_iter().next()
+                        && let Lit::Str(first) = Lit::new(literal)
+                    {
+                        self.call(std::mem::take(&mut path), first.value());
+                    }
+                    path.clear();
+                    (colons, after_dot) = (0, false);
+                    self.tokens(group.stream());
+                }
+                TokenTree::Ident(ident) => {
+                    if after_dot || colons != 2 {
+                        path.clear();
+                    }
+                    if !after_dot {
+                        path.push(ident.to_string());
+                    }
+                    (colons, after_dot) = (0, false);
+                }
+                TokenTree::Punct(punct) if punct.as_char() == ':' => colons += 1,
+                TokenTree::Punct(punct) => {
+                    path.clear();
+                    (colons, after_dot) = (0, punct.as_char() == '.');
+                }
             }
         }
     }
@@ -192,7 +263,9 @@ impl<'ast> Visit<'ast> for Reader {
                 path.push(m.ident.to_string());
                 self.source.test_modules.push(path.join("/"));
             }
-            return;
+            if !self.with_tests {
+                return;
+            }
         }
         visit::visit_item(self, item);
     }
@@ -215,7 +288,7 @@ impl<'ast> Visit<'ast> for Reader {
             syn::ImplItem::Macro(i) => &i.attrs,
             _ => return visit::visit_impl_item(self, item),
         };
-        if !is_test(attrs) {
+        if !self.skips(attrs) {
             visit::visit_impl_item(self, item);
         }
     }
@@ -232,7 +305,7 @@ impl<'ast> Visit<'ast> for Reader {
             syn::TraitItem::Macro(i) => &i.attrs,
             _ => return visit::visit_trait_item(self, item),
         };
-        if !is_test(attrs) {
+        if !self.skips(attrs) {
             visit::visit_trait_item(self, item);
         }
     }
@@ -242,39 +315,50 @@ impl<'ast> Visit<'ast> for Reader {
     }
 
     fn visit_field(&mut self, f: &'ast syn::Field) {
-        if !is_test(&f.attrs) {
+        if !self.skips(&f.attrs) {
             visit::visit_field(self, f);
         }
     }
 
     fn visit_variant(&mut self, v: &'ast syn::Variant) {
-        if !is_test(&v.attrs) {
+        if !self.skips(&v.attrs) {
             visit::visit_variant(self, v);
         }
     }
 
     fn visit_arm(&mut self, arm: &'ast syn::Arm) {
-        if !is_test(&arm.attrs) {
+        if !self.skips(&arm.attrs) {
             visit::visit_arm(self, arm);
         }
     }
 
     fn visit_local(&mut self, local: &'ast syn::Local) {
-        if !is_test(&local.attrs) {
+        if !self.skips(&local.attrs) {
             visit::visit_local(self, local);
         }
     }
 
     fn visit_expr(&mut self, expr: &'ast syn::Expr) {
-        if !is_test(expr_attrs(expr)) {
+        if !self.skips(expr_attrs(expr)) {
             visit::visit_expr(self, expr);
         }
     }
 
     fn visit_stmt_macro(&mut self, m: &'ast syn::StmtMacro) {
-        if !is_test(&m.attrs) {
+        if !self.skips(&m.attrs) {
             visit::visit_stmt_macro(self, m);
         }
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(function) = &*call.func
+            && let Some(syn::Expr::Lit(first)) = call.args.first()
+            && let Lit::Str(first) = &first.lit
+        {
+            let path = function.path.segments.iter();
+            self.call(path.map(|s| s.ident.to_string()).collect(), first.value());
+        }
+        visit::visit_expr_call(self, call);
     }
 
     fn visit_lit_str(&mut self, s: &'ast syn::LitStr) {
@@ -547,6 +631,37 @@ fn arms(x: u8) {
             ]
         );
         assert_eq!(source.test_modules, ["helpers", "inner/deeper"]);
+    }
+
+    #[test]
+    fn with_tests_the_test_code_is_read_and_its_calls_are_kept() {
+        let text = r##"
+#![cfg(test)]
+fn outer() { std::process::Other::new("a"); name(variable, "b"); value.method("c"); }
+#[cfg(test)]
+mod tests {
+    fn t() {
+        assert!(path::to::call("d", x).is_ok());
+        vec![other(1, "e"), Other::new(variable)];
+    }
+}
+"##;
+        assert!(read(text).unwrap().calls.is_empty());
+        let source = read_with_tests(text).unwrap();
+        let calls: Vec<(String, &str, &str)> = source
+            .calls
+            .iter()
+            .map(|c| (c.path.join("::"), c.first.as_str(), c.fns[0].as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("std::process::Other::new".to_owned(), "a", "outer"),
+                ("path::to::call".to_owned(), "d", "t"),
+            ]
+        );
+        let test_literals: Vec<&str> = source.literals.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(test_literals, ["a", "b", "c", "d", "e"]);
     }
 
     #[test]

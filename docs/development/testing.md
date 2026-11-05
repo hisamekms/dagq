@@ -61,7 +61,8 @@ testは`src/lib.rs`のunit testと`tests/it`・`tests/e2e.rs`・`tests/plugin.rs
 
 testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通さない）の両方で通す（下の「CI」）。
 
-- まず移植できる形に書く: `ps`・`lsof`・`sed`の出力と引数の違い、`/private/tmp`などのpath、inodeの再利用、時刻の精度（Gitは秒単位で比べることがある）に頼らない。stat dataを変えるならmtimeを秒単位で動かす（`File::set_modified`）。
+- まず移植できる形に書く: `lsof`・`sed`の出力と引数の違い、`/private/tmp`などのpath、inodeの再利用、時刻の精度（Gitは秒単位で比べることがある）に頼らない。stat dataを変えるならmtimeを秒単位で動かす（`File::set_modified`）。
+- testも本番のコードも`ps`の起動に頼らない。Codexのsandboxはsetuidの`/bin/ps`のexecを拒むので、processは`src/infrastructure/process_read.rs`で読む。sandboxの外のworker・関門・CIでは逆戻りが見えないので、Rustのtestの境界の検査（`src/context_boundaries/setuid_tools.rs`）が`src/`と`tests/`の`ps`と`top`の起動を落とす。許すのはhostでしか流れず読めなくても動きを止めないmoduleと、保存済みの識別子と本物の`ps`の文字列を比べるhelper 1つ（sandboxがspawnを拒めば比べだけを飛ばす）で、一覧と理由と見ない形は検査の定数とdoc commentが持つ。
 - macOSにしか無い機能（launchdなど）を使うtestだけを`#[cfg(target_os = "macos")]`で分け、直前のコメントに理由（何がmacOSにしか無いか）を書く。分けたtestの一覧は持たず、`#[cfg(target_os = "macos")]`の付いたtestとその直前のコメントが一覧になる。Linuxで消すのはtestだけで、runtimeの機能は消さない（Linuxで使えない機能は分かるerrorにし、それを`#[cfg(not(target_os = "macos"))]`のtestで確かめる）。
 - hostのworker（macOS）はLinuxのtestを流せないので、Linuxの結果は着地後のmainのCIの`linux`のjobのsummaryで読む。Linuxで新しく落ちたtestは、summaryから読んで移植できる形に直すか、上のとおりmacOSに固有として分ける。
 - `dagq.toml`がverificationをcontainerにしたとき、着地の検証はLinuxのcontainerで流れ、macOSに固有のtestはbuildされず流れない。hostで流し直すことはせず（workerのコードをcontainerの外で走らせるため）、mainのCIの`checks`（macOS）だけが流し、落ちればCIの見張りが修正のtaskにする（[ADR-t2182-1](../adr/2026-10-14-t2182-1-macos-specific-tests-are-left-to-the-ci-macos-job-not-the-container-verification.md)）。
