@@ -1,0 +1,18 @@
+key,value
+commit,ea279b4118737cef3385be4a1441e4ef8c663994
+commits,2226
+adrs,330
+sqlite,3.53.1
+postgres,"PostgreSQL 18.6 on aarch64-apple-darwin27.2.0, compiled by Apple clang version 15.0.0 (clang-1500.3.9.4), 64-bit"
+pg_trgm,1.6
+pg_bigm,1.2
+provider,c
+lc_collate,en_US.UTF-8
+lc_ctype,en_US.UTF-8
+datlocale,
+encoding,UTF8
+show_trgm,"{0xa6b0a9,0x090e17,0x14619d,0x23ea46,0x35efc4,osW}"
+show_bigm,"{の検,地の,検証,着地,""証 "","" 着""}"
+word_similarity_sample,0.6666667
+bigm_similarity_sample,0.33333334
+ilike_sample,t

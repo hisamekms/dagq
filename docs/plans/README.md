@@ -84,3 +84,4 @@ tags:
 - [2026-09-26以降の本番のaskのkindごとの件数と、answerが推奨・見立てどおりだった割合](ask-outcomes-2026-09-26.md)（goal 42、task 451）
 - [ADR-t451-1の実装の着地の前後の、askのkindごとの件数・人の答え待ち・AIが決めた件数と、AIが決めたlandの後の手直し](ask-outcomes-after-adr-t451-1.md)（goal 34、task 1321。後の期間を7日にした再測定は goal 142、task 1805）
 - [goal 3 の受け入れ条件 (6) の証拠（全タスク着地後の main の CI と TOTAL 行、60d992ca 後の回帰テストの差分、e2e の根拠）](goal-3-acceptance-ci.md)（goal 3、task 2135）
+- [PostgreSQL の pg_trgm・pg_bigm で dagq search と related の検索の手がかりが今の FTS5 trigram と同じ結果を返せるかの実測（does_not_hold、順位が揃わない）](team-version-search-spike.md)（goal 250、task 3991）

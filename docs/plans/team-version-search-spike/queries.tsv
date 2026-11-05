@@ -1,0 +1,46 @@
+short_ja	着地
+short_ja	検証
+short_ja	競合
+short_ja	重複
+short_ja	依存
+short_ja	人
+short_ja	着地 検証
+short_ja	着地 integrate
+short_ja	検証 worktree
+short_ja	重複 related
+long_ja	全文検索
+long_ja	受け入れ条件
+long_ja	差し戻し
+long_ja	書き込み
+long_ja	自動更新
+long_ja	重複の判定
+long_ja	人の判断
+identifier	related_docs
+identifier	bm25
+identifier	plan_review
+identifier	approve_landing
+identifier	worker_question
+identifier	SEARCH_WEIGHT
+identifier	trigram
+identifier	BM25
+identifier	"queue service"
+path	src/infrastructure/search.rs
+path	docs/adr
+path	src/domain/related.rs
+path	migrations/0026_search.sql
+path	docs/design/persistence.md
+path	tests/it/runtime_claim.rs
+path	.dagq/agents
+path	DOCS/ADR
+or_not	全文検索 OR trigram
+or_not	自動更新 NOT 着地の検証
+or_not	supervisor NOT worker
+or_not	(integrate OR 着地の) AND 検証の
+or_not	related_docs OR title_matches
+or_not	docs/adr NOT src/domain
+or_not_reject	着地 OR 検証
+or_not_reject	着地 NOT worktree
+or_not_reject	(着地)
+or_not_reject	trigram OR
+symbol	_
+symbol	%

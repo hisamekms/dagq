@@ -1,0 +1,33 @@
+== A1: doc ILIKE '%着地%'
+ Bitmap Heap Scan on search_docs (actual rows=623.00 loops=1)
+   Rows Removed by Index Recheck: 1933
+   Heap Blocks: exact=327
+   ->  Bitmap Index Scan on search_docs_doc_trgm (actual rows=2556.00 loops=1)
+ Execution Time: 142.135 ms
+== A2: lower(doc) LIKE likequery('着地')
+ Bitmap Heap Scan on search_docs (actual rows=623.00 loops=1)
+   Heap Blocks: exact=221
+   ->  Bitmap Index Scan on search_docs_doc_bigm (actual rows=623.00 loops=1)
+ Execution Time: 0.400 ms
+== A1: doc ILIKE '%全文検索%'
+ Bitmap Heap Scan on search_docs (actual rows=5.00 loops=1)
+   Heap Blocks: exact=4
+   ->  Bitmap Index Scan on search_docs_doc_trgm (actual rows=5.00 loops=1)
+ Execution Time: 0.763 ms
+== A2: lower(doc) LIKE likequery('全文検索')
+ Bitmap Heap Scan on search_docs (actual rows=5.00 loops=1)
+   Heap Blocks: exact=4
+   ->  Bitmap Index Scan on search_docs_doc_bigm (actual rows=5.00 loops=1)
+ Execution Time: 0.761 ms
+== A1: doc ILIKE '%docs/adr%'
+ Bitmap Heap Scan on search_docs (actual rows=265.00 loops=1)
+   Rows Removed by Index Recheck: 954
+   Heap Blocks: exact=307
+   ->  Bitmap Index Scan on search_docs_doc_trgm (actual rows=1219.00 loops=1)
+ Execution Time: 59.648 ms
+== A2: lower(doc) LIKE likequery('docs/adr')
+ Bitmap Heap Scan on search_docs (actual rows=265.00 loops=1)
+   Rows Removed by Index Recheck: 452
+   Heap Blocks: exact=256
+   ->  Bitmap Index Scan on search_docs_doc_bigm (actual rows=717.00 loops=1)
+ Execution Time: 38.810 ms

@@ -1,0 +1,44 @@
+plan_review: word_similarity distribution among matching rows
+   s   | count 
+-------+-------
+ 1.000 |   160
+ 0.917 |     8
+(2 rows)
+
+自動更新
+   s   | count 
+-------+-------
+ 1.000 |    18
+ 0.800 |    42
+ 0.600 |     1
+ 0.400 |    21
+(4 rows)
+
+plan_review: bigm top rows length vs bm25-agnostic
+ rowid | len |   s    
+-------+-----+--------
+  1184 | 761 | 0.0405
+  2456 | 650 | 0.0392
+  1684 | 848 | 0.0377
+  1352 | 950 | 0.0367
+  1752 | 636 | 0.0359
+(5 rows)
+
+ avg_len 
+---------
+    5661
+(1 row)
+
+time of one ranking of all task rows by a title
+ count |    max    
+-------+-----------
+  2226 | 0.9655172
+(1 row)
+
+Time: 1442.441 ms (00:01.442)
+ count |    max    
+-------+-----------
+  2226 | 0.1764706
+(1 row)
+
+Time: 670.215 ms
