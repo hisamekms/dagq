@@ -75,15 +75,21 @@ fn the_mark_reads_back_as_written() {
     );
 }
 
+/// The time read up to the R of [`rows_at`].
+const READ_MS: i64 = 1_900_000_000_000;
+
 /// R at `events` and the other cursors at 7, by this version.
 fn rows_at(events: i64) -> RowsWritten {
-    RowsWritten::at(Cursors {
-        events: EventId::new(events),
-        samples: 7,
-        steps: 7,
-        resources: 7,
-        inside_resources: 7,
-    })
+    RowsWritten::at(
+        Cursors {
+            events: EventId::new(events),
+            samples: 7,
+            steps: 7,
+            resources: 7,
+            inside_resources: 7,
+        },
+        READ_MS,
+    )
 }
 
 /// A store with no mark, or with the session rows' mark alone, gives no
@@ -154,4 +160,77 @@ fn the_marks_and_the_session_rows_mark_read_as_each_other() {
             ..marks
         }
     );
+}
+
+/// A builder goes on from an R whose mark holds the time read up to its
+/// position: as the mark gives it, the lowest time (no event read) too. An
+/// R that holds none, or whose events W cuts (the time it holds is of a
+/// later position), gives a builder none, though it is R.
+#[test]
+fn a_builder_goes_on_only_from_an_r_that_holds_the_time_read_at_its_position() {
+    let heads = heads();
+    let alone = Marks {
+        sessions: SessionsWritten::at(EventId::new(5)),
+        rows: None,
+    };
+    assert_eq!(rows_to_go_on_from(None, &heads), None);
+    assert_eq!(rows_to_go_on_from(Some(&alone), &heads), None);
+    let held = Marks {
+        rows: Some(rows_at(4)),
+        ..alone
+    };
+    assert_eq!(
+        rows_to_go_on_from(Some(&held), &heads),
+        Some((rows_at(4).through, READ_MS))
+    );
+    let at_w = Marks {
+        rows: Some(rows_at(5)),
+        ..alone
+    };
+    assert_eq!(
+        rows_to_go_on_from(Some(&at_w), &heads),
+        Some((rows_at(5).through, READ_MS))
+    );
+    let none_read = Marks {
+        rows: Some(RowsWritten::at(rows_at(4).through, i64::MIN)),
+        ..alone
+    };
+    assert_eq!(
+        rows_to_go_on_from(Some(&none_read), &heads),
+        Some((rows_at(4).through, i64::MIN))
+    );
+    let no_time = Marks {
+        rows: Some(RowsWritten {
+            read_ms: None,
+            ..rows_at(4)
+        }),
+        ..alone
+    };
+    assert!(rows_written_through(Some(&no_time), &heads).is_some());
+    assert_eq!(rows_to_go_on_from(Some(&no_time), &heads), None);
+    let cut = Marks {
+        rows: Some(rows_at(9)),
+        ..alone
+    };
+    assert!(rows_written_through(Some(&cut), &heads).is_some());
+    assert_eq!(rows_to_go_on_from(Some(&cut), &heads), None);
+}
+
+/// The time crosses in the marks, and an R of no time (written before it
+/// was held) reads as one, written with no such field.
+#[test]
+fn the_time_read_crosses_with_r_and_an_r_with_none_reads_as_none() {
+    let marks = Marks {
+        sessions: SessionsWritten::at(EventId::new(5)),
+        rows: Some(RowsWritten::at(rows_at(4).through, i64::MIN)),
+    };
+    let text = serde_json::to_string(&marks).unwrap();
+    assert_eq!(serde_json::from_str::<Marks>(&text).unwrap(), marks);
+    let none = RowsWritten {
+        read_ms: None,
+        ..rows_at(4)
+    };
+    let text = serde_json::to_string(&none).unwrap();
+    assert!(!text.contains("read_ms"), "{text}");
+    assert_eq!(serde_json::from_str::<RowsWritten>(&text).unwrap(), none);
 }

@@ -80,17 +80,21 @@ fn write_mark(conn: &rusqlite::Connection, mark: &SessionsWritten) -> Result<()>
 /// Write `mark` on `conn` as the one row of its kind
 /// ([`written::ROWS_KIND`]): its positions as the `events`,
 /// `node_samples`, `steps`, `resources` and `inside_resources` of its
-/// `inputs_through`, its version as its `ledger_v`, nothing else. No
-/// reader of the rows of a [`LedgerKind`] reads it.
+/// `inputs_through` with its `read_ms` ([`MarkThrough`]), its version as its
+/// `ledger_v`, nothing else. No reader of the rows of a [`LedgerKind`]
+/// reads it.
 fn write_rows_mark(conn: &rusqlite::Connection, mark: &RowsWritten) -> Result<()> {
-    let through = text(&InputsThrough {
-        events: mark.through.events,
-        supervisor: None,
-        life_ended: Vec::new(),
-        node_samples: Some(mark.through.samples),
-        steps: Some(mark.through.steps),
-        resources: Some(mark.through.resources),
-        inside_resources: Some(mark.through.inside_resources),
+    let through = text(&MarkThrough {
+        positions: InputsThrough {
+            events: mark.through.events,
+            supervisor: None,
+            life_ended: Vec::new(),
+            node_samples: Some(mark.through.samples),
+            steps: Some(mark.through.steps),
+            resources: Some(mark.through.resources),
+            inside_resources: Some(mark.through.inside_resources),
+        },
+        read_ms: mark.read_ms,
     })?;
     conn.execute(
         "INSERT INTO ledger_rows(kind, key, ledger_v, built_at, inputs_through)
@@ -102,13 +106,25 @@ fn write_rows_mark(conn: &rusqlite::Connection, mark: &RowsWritten) -> Result<()
     Ok(())
 }
 
+/// The text of the `inputs_through` of the mark R's row: the positions of
+/// [`InputsThrough`], and beside them the latest time read up to R's events
+/// ([`RowsWritten::read_ms`]), this row's alone: a row of another kind has
+/// no such field, and a reader of [`InputsThrough`] alone skips it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MarkThrough {
+    #[serde(flatten)]
+    positions: InputsThrough,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    read_ms: Option<i64>,
+}
+
 /// The marks of each of `kinds` (key [`written::KEY`]) `conn` holds, read
-/// in one statement: each kind with its version and the positions its
+/// in one statement: each kind with its version and what its
 /// `inputs_through` holds.
 fn read_marks(
     conn: &rusqlite::Connection,
     kinds: [&str; 2],
-) -> Result<Vec<(String, u32, InputsThrough)>> {
+) -> Result<Vec<(String, u32, MarkThrough)>> {
     let mut statement = conn.prepare_cached(
         "SELECT kind, ledger_v, inputs_through FROM ledger_rows
          WHERE kind IN (?1, ?2) AND key=?3",
@@ -127,7 +143,7 @@ fn read_marks(
             Ok((
                 kind,
                 u32::try_from(ledger_v)?,
-                serde_json::from_str::<InputsThrough>(&through)?,
+                serde_json::from_str::<MarkThrough>(&through)?,
             ))
         })
         .collect()
@@ -510,9 +526,8 @@ impl LedgerStore for SqliteQueue {
     /// with the session rows' mark or before it.
     fn ledger_marks(&self) -> Result<Option<Marks>> {
         let (mut sessions, mut rows) = (None, None);
-        for (kind, ledger_v, through) in
-            read_marks(&self.conn, [written::KIND, written::ROWS_KIND])?
-        {
+        for (kind, ledger_v, mark) in read_marks(&self.conn, [written::KIND, written::ROWS_KIND])? {
+            let through = mark.positions;
             if kind == written::KIND {
                 sessions = Some(SessionsWritten {
                     through: through.events,
@@ -528,6 +543,7 @@ impl LedgerStore for SqliteQueue {
                         inside_resources: through.inside_resources.unwrap_or_default(),
                     },
                     ledger_v,
+                    read_ms: mark.read_ms,
                 });
             }
         }
@@ -731,17 +747,6 @@ impl LedgerStore for SqliteQueue {
             ],
             |r| r.get(0),
         )?)
-    }
-
-    /// SQLite gives the largest time of the column, whose text sorts as
-    /// its time ([`crate::domain::stats::timestamp_millis`] reads it).
-    fn ledger_latest_event_ms(&self, through: EventId) -> Result<Option<i64>> {
-        let latest: Option<String> = self.conn.query_row(
-            "SELECT MAX(created_at) FROM run_events WHERE id<=?1",
-            params![through.as_i64()],
-            |r| r.get(0),
-        )?;
-        Ok(latest.and_then(|at| crate::domain::stats::timestamp_millis(&at)))
     }
 
     /// SQLite picks the keys by the rules in each run row's detail: no
@@ -2099,13 +2104,16 @@ mod tests {
             sessions().into_iter().map(|row| (row, None)).collect();
         let marks = Marks {
             sessions: SessionsWritten::at(EventId::new(7)),
-            rows: Some(RowsWritten::at(Cursors {
-                events: EventId::new(5),
-                samples: 2,
-                steps: 3,
-                resources: 4,
-                inside_resources: 6,
-            })),
+            rows: Some(RowsWritten::at(
+                Cursors {
+                    events: EventId::new(5),
+                    samples: 2,
+                    steps: 3,
+                    resources: 4,
+                    inside_resources: 6,
+                },
+                1_900_000_000_000,
+            )),
         };
         queue
             .conn
@@ -2164,6 +2172,110 @@ mod tests {
                 ..marks
             })
         );
+    }
+
+    /// R's time read reads back as written: the lowest too (no event read),
+    /// and none as none, a mark of no such field. It stays beside the
+    /// positions of its row alone: a reader of [`InputsThrough`] skips it,
+    /// and a write that fails part way keeps the mark as it was.
+    #[test]
+    fn the_time_read_goes_with_r_in_its_row_alone() {
+        use crate::domain::ledger::session::written::{
+            Cursors, Marks, RowsWritten, SessionsWritten,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let cursors = Cursors {
+            events: EventId::new(5),
+            samples: 2,
+            steps: 3,
+            resources: 4,
+            inside_resources: 6,
+        };
+        let marks_of = |rows: RowsWritten| Marks {
+            sessions: SessionsWritten::at(EventId::new(7)),
+            rows: Some(rows),
+        };
+        let held = marks_of(RowsWritten::at(cursors, 1_900_000_000_000));
+        let batch: Vec<(LedgerRow, Option<LedgerRow>)> =
+            sessions().into_iter().map(|row| (row, None)).collect();
+        assert!(
+            queue
+                .write_session_rows_marked(&batch, Some(&held))
+                .unwrap()
+        );
+        assert_eq!(queue.ledger_marks().unwrap(), Some(held));
+        let text = |kind: &str| -> String {
+            queue
+                .conn
+                .query_row(
+                    "SELECT inputs_through FROM ledger_rows WHERE kind=?1 LIMIT 1",
+                    [kind],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let of_r = text(written::ROWS_KIND);
+        assert!(of_r.contains("read_ms"), "{of_r}");
+        let positions: InputsThrough = serde_json::from_str(&of_r).unwrap();
+        assert_eq!(positions.events, cursors.events);
+        assert_eq!(positions.inside_resources, Some(6));
+        for kind in [written::KIND, "session"] {
+            assert!(!text(kind).contains("read_ms"), "{kind}");
+        }
+        for kind in LedgerKind::ALL {
+            let rows = queue.ledger_rows(kind).unwrap();
+            assert!(rows.iter().all(|row| row.key != written::KEY), "{kind:?}");
+        }
+        let window = queue
+            .ledger_window(&ledger::window::WindowQuery::default())
+            .unwrap();
+        assert!(!format!("{window:?}").contains("read_ms"));
+
+        // A write of the rows and the marks that fails as it writes R.
+        queue
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER part_way BEFORE INSERT ON ledger_rows
+                   WHEN NEW.kind = 'rows_written'
+                 BEGIN SELECT RAISE(ABORT, 'part way'); END;",
+            )
+            .unwrap();
+        let later = marks_of(RowsWritten::at(cursors, 1_900_000_000_001));
+        let over: Vec<(LedgerRow, Option<LedgerRow>)> = batch
+            .iter()
+            .map(|(row, _)| {
+                let mut changed = row.clone();
+                changed.built_at = "2031-01-01T00:00:00.000Z".into();
+                (changed, Some(row.clone()))
+            })
+            .collect();
+        let error = queue
+            .write_session_rows_marked(&over, Some(&later))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("part way"), "{error:#}");
+        assert_eq!(queue.ledger_marks().unwrap(), Some(held));
+        assert!(
+            queue
+                .ledger_rows(LedgerKind::Session)
+                .unwrap()
+                .iter()
+                .all(|row| !row.built_at.starts_with("2031"))
+        );
+        queue.conn.execute_batch("DROP TRIGGER part_way").unwrap();
+
+        for rows in [
+            RowsWritten::at(cursors, i64::MIN),
+            RowsWritten {
+                read_ms: None,
+                ..RowsWritten::at(cursors, 0)
+            },
+        ] {
+            let marks = marks_of(rows);
+            queue.write_ledger_marks(&marks).unwrap();
+            assert_eq!(queue.ledger_marks().unwrap(), Some(marks));
+        }
+        assert!(!text(written::ROWS_KIND).contains("read_ms"));
     }
 
     /// The push records, the heads of the rows not settled at a position
@@ -2401,41 +2513,13 @@ mod tests {
 
     /// SQLite says what the rows whole say of the rows older than this
     /// version, a legacy one's version aside, and of the runs other rules
-    /// classified: a run with no steps is of neither. It gives the latest
-    /// time of the events up to a position, by their ids.
+    /// classified: a run with no steps is of neither.
     #[test]
     fn the_older_rows_and_the_runs_of_other_rules_read_what_the_rows_whole_give() {
         use crate::domain::ledger::steps::DETAIL_KEY;
         use crate::domain::ledger::testkit::{Log, run_id};
         let dir = tempfile::tempdir().unwrap();
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        for (id, at) in [
-            (1, "2030-01-01T00:00:10.000Z"),
-            (2, "2030-01-01T00:00:05.000Z"),
-            (3, "2030-01-01T00:00:20.000Z"),
-        ] {
-            queue
-                .conn
-                .execute(
-                    "INSERT INTO run_events(id, kind, payload, created_at)
-                     VALUES (?1, 'mark_added', '{}', ?2)",
-                    params![id, at],
-                )
-                .unwrap();
-        }
-        let ms_of = |at: &str| crate::domain::stats::timestamp_millis(at);
-        for (through, at) in [
-            (0, None),
-            (1, ms_of("2030-01-01T00:00:10.000Z")),
-            (2, ms_of("2030-01-01T00:00:10.000Z")),
-            (3, ms_of("2030-01-01T00:00:20.000Z")),
-        ] {
-            assert_eq!(
-                queue.ledger_latest_event_ms(EventId::new(through)).unwrap(),
-                at,
-                "{through}"
-            );
-        }
         let (a, b, c, old) = (run_id(1), run_id(2), run_id(3), run_id(4));
         let mut log = Log::default();
         log.landed(1, &a, 0)

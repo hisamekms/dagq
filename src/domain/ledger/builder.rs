@@ -23,12 +23,17 @@
 //!   from the rows as they were at it (below, "What a pass reads"), so that
 //!   no input after it is in a book twice, nor the rows' marks of what it
 //!   lacks missed: an input after R marks what the store lacks of it. The
-//!   rows not settled are marked with no input, for what comes with time
-//!   (a grace, a silence), and [`Self::rules_moved`] goes as for any
-//!   builder. With no R, or next to an older row, it starts with its
-//!   cursors at 0: it marks every run and task, those before the switch
+//!   latest time of an event read up to R comes back from the mark R, which
+//!   holds it as it was at R ([`RowsWritten`]), reading no event: events in
+//!   the order of their ids need not be in the order of their times, so the
+//!   event at R does not say it. The rows not settled are marked with no
+//!   input, for what comes with time (a grace, a silence), and
+//!   [`Self::rules_moved`] goes as for any builder. With no R, with an R
+//!   that does not hold that time at its position (one written before it
+//!   did, or whose events W cuts), or next to an older row, it starts with
+//!   its cursors at 0: it marks every run and task, those before the switch
 //!   too, and catches up, and its writes fill what the rows lack and write
-//!   the marks. Two kinds of read follow. The scan of an input after a
+//!   the marks, R with its time. Two kinds of read follow. The scan of an input after a
 //!   cursor reads after R only. A read by target (a push by id, the last
 //!   event of a life open, the events of a run or task it folds) may reach
 //!   before R, of what a scan after R marked, the rows not settled and the
@@ -937,8 +942,11 @@ impl Kept {
 pub struct Builder {
     /// The last EventStore event read.
     pub events: EventId,
-    /// The latest time (unix ms) of an event read: a pass folds at no
-    /// earlier time ([`Self::folds_at`]).
+    /// The latest time (unix ms) of an event read, or that the mark R it
+    /// went on from holds of those up to R ([`Self::read_up_to`]): a pass
+    /// folds at no earlier time ([`Self::folds_at`]). It only rises as the
+    /// events are read, and a position held back keeps its value
+    /// ([`ReadTo`]), which goes in R ([`Self::rows_mark`]).
     read_ms: i64,
     /// The last NodeSampleStore id read.
     pub samples: i64,
@@ -957,7 +965,7 @@ pub struct Builder {
     /// looked at: set by an event of theirs, one that changed one of them
     /// or one naming a supervisor (whose life may end their intervals),
     /// and taken by [`Self::mark_rows`].
-    rows_after: Option<EventId>,
+    rows_after: Option<ReadTo>,
     /// Rows ended and not settled, by when their grace is over (unix ms).
     unsettled: BTreeMap<Target, i64>,
     /// The runs left pending on their push, each with its task.
@@ -1017,12 +1025,25 @@ pub struct Builder {
     rows_through: Cursors,
 }
 
+/// A position in the events with the latest time read up to it
+/// ([`Builder::read_ms`]): that time cannot be told from the event at the
+/// position (events in the order of their ids need not be in the order of
+/// their times), so what holds a position back holds it too, and R takes
+/// the earliest ([`Builder::rows_mark`]). A builder holds few of them, one
+/// for each mark at most. It rises with the position, so the order of the
+/// events is the order of both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReadTo {
+    event: EventId,
+    read_ms: i64,
+}
+
 /// Where the inputs that made a mark start, each cursor's position before
 /// the first of them ([`Builder::dirtied`]); none for a cursor no input
 /// of which made it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Dirtied {
-    events: Option<EventId>,
+    events: Option<ReadTo>,
     samples: Option<i64>,
     steps: Option<i64>,
     resources: Option<i64>,
@@ -1030,7 +1051,7 @@ struct Dirtied {
 }
 
 impl Dirtied {
-    const fn events(before: EventId) -> Self {
+    const fn events(before: ReadTo) -> Self {
         Self {
             events: Some(before),
             samples: None,
@@ -1055,10 +1076,14 @@ impl Dirtied {
         self.inside_resources = earlier(self.inside_resources, other.inside_resources);
     }
 
-    /// Cut each position of `at` back to this one's.
-    fn cut(&self, at: &mut Cursors) {
-        if let Some(events) = self.events {
-            at.events = at.events.min(events);
+    /// Cut each position of `at` back to this one's, and `read_ms` with
+    /// its events: the time read up to the position it cuts them to.
+    fn cut(&self, at: &mut Cursors, read_ms: &mut i64) {
+        if let Some(events) = self.events
+            && events.event < at.events
+        {
+            at.events = events.event;
+            *read_ms = events.read_ms;
         }
         if let Some(samples) = self.samples {
             at.samples = at.samples.min(samples);
@@ -1127,6 +1152,14 @@ impl Default for Builder {
 }
 
 impl Builder {
+    /// Its cursor over the events with the latest time read up to it.
+    const fn read_to(&self) -> ReadTo {
+        ReadTo {
+            event: self.events,
+            read_ms: self.read_ms,
+        }
+    }
+
     /// Mark what the events `new` (ascending id, after [`Self::events`])
     /// are inputs of, keep what the folds of the queue as a whole read of
     /// them, and move the cursor past them. One that starts or ends a wait
@@ -1137,7 +1170,7 @@ impl Builder {
     pub fn mark_events(&mut self, new: &[RunEvent]) {
         let folds_on = self.sessions_through == self.events;
         let rows_follow = self.rows_through.events == self.events;
-        let start = Dirtied::events(self.events);
+        let start = Dirtied::events(self.read_to());
         let kept = Arc::make_mut(&mut self.kept);
         let mut waits = WaitsMoved::default();
         // A move of a wait timed before an event read before it.
@@ -1149,7 +1182,11 @@ impl Builder {
             waits.reopened |= moved.reopened;
             out_of_order |= moved.started_or_ended
                 && timestamp_millis(&event.created_at).is_some_and(|at| at < self.read_ms);
-            let before = Dirtied::events(self.events);
+            let read_to = ReadTo {
+                event: self.events,
+                read_ms: self.read_ms,
+            };
+            let before = Dirtied::events(read_to);
             if let Some(run) = &event.run_id {
                 let run = Target::Run(run.to_string());
                 mark_dirtied(&mut self.marks, &mut self.dirtied, run, before);
@@ -1165,7 +1202,7 @@ impl Builder {
                 || !touched.is_empty()
                 || supervisor_of(event).is_some()
             {
-                self.rows_after.get_or_insert(self.events);
+                self.rows_after.get_or_insert(read_to);
             }
             self.touched.append(&mut touched);
             if event.kind == EventKind::PushFinished {
@@ -1391,7 +1428,7 @@ impl Builder {
     /// [`Self::page_rows`]): what [`Self::mark_rows`] does before it marks,
     /// so that a pass may fold and mark those rows a share at a time
     /// ([`Self::mark_rows_after`]).
-    pub fn take_rows_after(&mut self) -> Option<EventId> {
+    pub fn take_rows_after(&mut self) -> Option<ReadTo> {
         self.touched.clear();
         self.rows_after.take()
     }
@@ -1400,14 +1437,14 @@ impl Builder {
     /// after `after` ([`Self::take_rows_after`]).
     pub fn mark_rows_after(
         &mut self,
-        after: Option<EventId>,
+        after: Option<ReadTo>,
         rows: &BTreeMap<(LedgerKind, String), LedgerRow>,
     ) {
         let Some(after) = after else {
             return;
         };
         for ((kind, key), row) in rows {
-            if row.inputs_through.last() > after {
+            if row.inputs_through.last() > after.event {
                 let target = Target::Row(*kind, key.clone());
                 let at = Dirtied::events(after);
                 mark_dirtied(&mut self.marks, &mut self.dirtied, target, at);
@@ -1844,7 +1881,7 @@ impl Builder {
         }
         let marks = Marks {
             sessions: SessionsWritten::at(self.events),
-            rows: self.rows_written().map(RowsWritten::at),
+            rows: self.rows_mark(),
         };
         (self.marks_written != Some(marks)).then_some(marks)
     }
@@ -1883,7 +1920,18 @@ impl Builder {
     /// leaves the inputs before it unmarked. With no mark left and no new
     /// input, it is its cursors.
     pub fn rows_written(&self) -> Option<Cursors> {
+        self.rows_mark().map(|mark| mark.through)
+    }
+
+    /// The mark of the position [`Self::rows_written`] gives, with the
+    /// latest time of an event read up to its events: the value it had
+    /// there, that of the earliest position it was cut back to, as it only
+    /// rises with the position (the event at R does not say it). So a
+    /// builder going on from the mark reads no event for it
+    /// ([`Self::read_up_to`]).
+    fn rows_mark(&self) -> Option<RowsWritten> {
         let mut at = self.cursors();
+        let mut read_ms = self.read_ms;
         if self.rows_through != at {
             return None;
         }
@@ -1892,10 +1940,10 @@ impl Builder {
                 continue;
             }
             if let Some(dirtied) = self.dirtied.get(target) {
-                dirtied.cut(&mut at);
+                dirtied.cut(&mut at, &mut read_ms);
             }
         }
-        Some(at)
+        Some(RowsWritten::at(at, read_ms))
     }
 
     /// Set its cursors at `from`, the R the store's mark gives
@@ -1917,10 +1965,11 @@ impl Builder {
     }
 
     /// Note `at`, the latest time of an event up to the position it goes on
-    /// from ([`Self::go_on_from_rows`]), as the latest read, as it is for
-    /// one that read up to there: a pass folds at no earlier time
-    /// ([`Self::folds_at`]), and a move of a wait timed before it is out of
-    /// its order ([`Self::mark_events`]).
+    /// from ([`Self::go_on_from_rows`]) as the mark R holds it
+    /// ([`RowsWritten`]), as the latest read, as it is for one that read up
+    /// to there: a pass folds at no earlier time ([`Self::folds_at`]), and
+    /// a move of a wait timed before it is out of its order
+    /// ([`Self::mark_events`]).
     pub fn read_up_to(&mut self, at: i64) {
         self.read_ms = self.read_ms.max(at);
     }

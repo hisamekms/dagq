@@ -293,7 +293,7 @@ fn a_task_folded_as_it_became_ready_follows_the_waits_after() {
 /// The row of `task` that [`crate::domain::ledger::build`] folds of `log`
 /// at `secs` after [`T0`], settled as a pass then settles it
 /// ([`crate::domain::ledger::builder::run_settles`]).
-fn whole(log: &Log, task: i64, secs: i64) -> LedgerRow {
+pub(super) fn whole(log: &Log, task: i64, secs: i64) -> LedgerRow {
     let mut row = crate::domain::ledger::build(&log.events, ms(secs), BUILT)
         .into_iter()
         .find(|row| row.kind == LedgerKind::Task && row.key == task.to_string())

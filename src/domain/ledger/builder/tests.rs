@@ -1277,3 +1277,61 @@ fn a_row_written_and_marked_again_by_its_grace_holds_no_position() {
     assert!(builder.marked());
     assert_eq!(builder.rows_written(), Some(builder.cursors()));
 }
+
+/// R holds the latest time read up to the position a mark left cuts it
+/// back to: not its cursor's, nor the time of the event at it. With no mark
+/// left it holds its cursor's.
+#[test]
+fn r_holds_the_time_read_at_the_position_it_is_cut_back_to() {
+    let mut log = Log::default();
+    log.add(Some(1), None, "task_created", json!({}), 200)
+        .add(Some(2), None, "task_created", json!({}), 50)
+        .add(Some(3), None, "task_created", json!({}), 300);
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events);
+    builder.take(usize::MAX);
+    builder.keep(Target::Task(TaskId::new(3)));
+    let mark = builder.sessions_mark().unwrap().rows.unwrap();
+    assert_eq!(mark.through.events, log.events[1].id);
+    assert_eq!(mark.read_ms, Some(ms(200)));
+
+    builder.take(usize::MAX);
+    builder.due(ms(300));
+    let mark = builder.sessions_mark().unwrap().rows.unwrap();
+    assert_eq!(mark.through.events, log.last());
+    assert_eq!(mark.read_ms, Some(ms(300)));
+}
+
+/// A queue row's mark, made as the rows are named, holds the time read at
+/// the event its input starts after: an event of no run or task, the one
+/// after an event timed before an earlier one.
+#[test]
+fn a_rows_mark_holds_the_time_read_at_the_event_before_its_input() {
+    let mut log = Log::default();
+    log.add(Some(1), None, "task_created", json!({}), 200)
+        .add(Some(2), None, "task_created", json!({}), 50)
+        .add(
+            None,
+            None,
+            "slots_full_started",
+            json!({"supervisor": "s", "class": "heavy"}),
+            100,
+        )
+        .add(Some(3), None, "task_created", json!({}), 300);
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events);
+    let keys = builder.rows_to_build(builder.kept());
+    let inputs = Inputs::of(builder.kept(), ms(300), BUILT, &keys);
+    builder.mark_rows(&inputs.rows);
+    drop(inputs);
+    let tasks: Vec<Target> = (1..=3)
+        .map(|task| Target::Task(TaskId::new(task)))
+        .collect();
+    for task in &tasks {
+        builder.marks.remove(task);
+        builder.dirtied.remove(task);
+    }
+    let mark = builder.sessions_mark().unwrap().rows.unwrap();
+    assert_eq!(mark.through.events, log.events[1].id);
+    assert_eq!(mark.read_ms, Some(ms(200)));
+}

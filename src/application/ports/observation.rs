@@ -463,12 +463,6 @@ pub trait LedgerStore {
         }
         Ok(false)
     }
-    /// The latest time (unix ms) of an event up to `through`, an aggregate
-    /// of the EventStore (no event is read out of it); none with none.
-    /// A builder going on from `through` folds at no earlier time, and
-    /// tells a move of a wait timed before an event read before it, as one
-    /// that read them all ([`crate::domain::ledger::builder::Builder::read_up_to`]).
-    fn ledger_latest_event_ms(&self, through: EventId) -> Result<Option<i64>>;
     /// The keys of the run rows whose steps were folded and not classified
     /// by the rules of `version`
     /// ([`crate::domain::ledger::builder::Builder::mark_rules`]): those

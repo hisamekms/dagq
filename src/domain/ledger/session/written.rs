@@ -28,7 +28,10 @@
 //! those rows to later passes past its bound of writes, so their heads do
 //! not say it either. It is written with W in the same transaction
 //! ([`Marks`]), its events no later than W, and a store with W alone gives
-//! none ([`rows_written_through`]).
+//! none ([`rows_written_through`]). R holds the latest time of an event read
+//! up to its events, as a builder going on from it needs it and no event
+//! says it; a mark that does not hold it for its position gives a builder
+//! nothing to go on from ([`rows_to_go_on_from`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -111,18 +114,30 @@ pub struct Cursors {
 /// ([`crate::domain::ledger::builder::Builder::sessions_mark`]). A mark
 /// that comes due with time (a row's grace over, a supervisor's silence)
 /// holds no position: the rows not settled the store holds give it back.
+///
+/// `read_ms` is the latest time (unix ms) of an event read up to
+/// `through.events`, as the builder that wrote the mark held it at that
+/// position ([`crate::domain::ledger::builder::Builder::folds_at`]; the
+/// lowest `i64` with no event read). Events in the order of their ids need
+/// not be in the order of their times, so the event at the position does
+/// not say it, and every event up to it would. None in a mark written
+/// before it was held: [`rows_to_go_on_from`] gives no position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowsWritten {
     pub through: Cursors,
     pub ledger_v: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_ms: Option<i64>,
 }
 
 impl RowsWritten {
-    /// The mark of `through` by this [`LEDGER_V`].
-    pub const fn at(through: Cursors) -> Self {
+    /// The mark of `through` by this [`LEDGER_V`], `read_ms` the latest
+    /// time of an event read up to its events.
+    pub const fn at(through: Cursors, read_ms: i64) -> Self {
         Self {
             through,
             ledger_v: LEDGER_V,
+            read_ms: Some(read_ms),
         }
     }
 }
@@ -157,6 +172,20 @@ pub fn rows_written_through(marks: Option<&Marks>, heads: &[LedgerHead]) -> Opti
         events: rows.through.events.min(w),
         ..rows.through
     })
+}
+
+/// The position R a builder goes on from, with the latest time of an event
+/// read up to its events: R ([`rows_written_through`]) when its mark holds
+/// that time for that position. `None` otherwise, as for no R, when the
+/// mark holds none (written before it did) or when W cut its events back
+/// (the time it holds is of a later position). No event is read to find it
+/// and no lower value is taken for it, so a builder then folds from its
+/// cursors' start, and its writes write a mark that holds it. Pure.
+pub fn rows_to_go_on_from(marks: Option<&Marks>, heads: &[LedgerHead]) -> Option<(Cursors, i64)> {
+    let r = rows_written_through(marks, heads)?;
+    let rows = marks?.rows?;
+    let read_ms = rows.read_ms?;
+    (r.events == rows.through.events).then_some((r, read_ms))
 }
 
 #[cfg(test)]

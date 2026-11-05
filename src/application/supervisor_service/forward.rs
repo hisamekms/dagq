@@ -3267,10 +3267,6 @@ impl LedgerStore for SupervisorQueue {
     fn ledger_older_rows(&self) -> Result<bool> {
         self.remote("ledger_older_rows", vec![])
     }
-    // One aggregate the service computes: no event crosses.
-    fn ledger_latest_event_ms(&self, through: EventId) -> Result<Option<i64>> {
-        self.remote("ledger_latest_event_ms", vec![to_value(through)?])
-    }
     // The keys the service picks: no row crosses.
     fn ledger_runs_classified_otherwise(&self, version: &str) -> Result<Vec<String>> {
         self.remote("ledger_runs_classified_otherwise", vec![to_value(version)?])

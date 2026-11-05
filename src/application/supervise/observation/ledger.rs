@@ -44,15 +44,13 @@ use crate::domain::EventFilter;
 use crate::domain::host_metrics::{local_day, oldest_kept_day};
 use crate::domain::ledger::builder::pushes::{self, PushesHeld};
 use crate::domain::ledger::builder::{
-    Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, RESOURCES_PER_READ, RunResources,
-    RunSteps, SESSION_BYTES_PER_WRITE, SESSION_ROWS_PER_WRITE, STEPS_PER_READ, Target,
-    WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
+    Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, RESOURCES_PER_READ, ReadTo,
+    RunResources, RunSteps, SESSION_BYTES_PER_WRITE, SESSION_ROWS_PER_WRITE, STEPS_PER_READ,
+    Target, WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
 };
 use crate::domain::ledger::queue::{QueueBook, QueueHead, cut};
 use crate::domain::ledger::session::SessionsHeld;
-use crate::domain::ledger::session::written::{
-    Cursors, Marks, rows_written_through, written_through,
-};
+use crate::domain::ledger::session::written::{Marks, rows_to_go_on_from, written_through};
 use crate::domain::ledger::{LedgerKind, LedgerRow};
 use crate::domain::pre_claim::{self, PreClaimBook};
 use crate::domain::session_step::{self, StepTarget};
@@ -598,7 +596,7 @@ fn fold_rows(
     builder: &mut Builder,
     (now_ms, built_at): (i64, &str),
     rows: &BTreeSet<(LedgerKind, String)>,
-    after: Option<EventId>,
+    after: Option<ReadTo>,
     sweeps: bool,
 ) -> Result<()> {
     let rows: Vec<&(LedgerKind, String)> = rows.iter().collect();
@@ -801,11 +799,16 @@ pub fn sessions_written_through(store: &dyn LedgerQueue) -> Result<Option<EventI
 /// rows' heads ([`rows_written_through`]): its events no later than W
 /// ([`sessions_written_through`]). `None` for a store with no mark or with
 /// the session rows' alone: a builder then folds from its cursors' start.
-pub fn rows_written(store: &dyn LedgerQueue) -> Result<Option<Cursors>> {
-    Ok(rows_written_through(
-        store.ledger_marks()?.as_ref(),
-        &store.ledger_heads(LedgerKind::Session)?,
-    ))
+#[cfg(test)]
+pub fn rows_written(
+    store: &dyn LedgerQueue,
+) -> Result<Option<crate::domain::ledger::session::written::Cursors>> {
+    Ok(
+        crate::domain::ledger::session::written::rows_written_through(
+            store.ledger_marks()?.as_ref(),
+            &store.ledger_heads(LedgerKind::Session)?,
+        ),
+    )
 }
 
 /// Make `builder` go on from the session rows `store` holds as they were
@@ -994,7 +997,7 @@ fn read_by_id(store: &dyn LedgerQueue, ids: &[EventId]) -> Result<Vec<RunEvent>>
 }
 
 /// The builder of a new process on `store`, at `now_ms`. Where the store's
-/// marks give the position R ([`rows_written`]) and it holds no row folded
+/// marks give the position R ([`rows_to_go_on_from`]) and it holds no row folded
 /// by an older version ([`crate::application::LedgerStore::ledger_older_rows`]),
 /// it goes on from R: its cursors at R, each its own
 /// ([`Builder::go_on_from_rows`]), and every book of [`Kept`] made again
@@ -1008,14 +1011,17 @@ fn read_by_id(store: &dyn LedgerQueue, ids: &[EventId]) -> Result<Vec<RunEvent>>
 /// start finds them. Rows settled with no input after R are not looked at:
 /// they are the fold of every input as they are. So it reads the inputs
 /// after R only; the rows a mark left unwritten are among what those inputs
-/// mark ([`Builder::rows_written`]). Besides the heads, what it reads by
+/// mark ([`Builder::rows_written`]). The latest time of an event read up
+/// to R it takes from the mark ([`rows_to_go_on_from`],
+/// [`Builder::read_up_to`]), reading no event. Besides the heads, what it reads by
 /// target bears on the rows not settled and the lives open only
 /// ([`cut::Needs`], [`restore_pushes`]).
 ///
-/// With no R (a store with no mark, or W alone), or with a row older than
-/// this version, it starts at its cursors' start, as [`Builder::default`]:
-/// it reads every input, and its writes fill what the rows lack and write
-/// the marks. An R next to older rows moved on rows of this version alone,
+/// With no R (a store with no mark, or W alone), with an R that does not
+/// hold that time at its position, or with a row older than this version,
+/// it starts at its cursors' start, as [`Builder::default`]: it reads every
+/// input, and its writes fill what the rows lack and write the marks, R
+/// with its time. An R next to older rows moved on rows of this version alone,
 /// and those of no input after it would stay old.
 ///
 /// A read that fails gives no builder: the next pass starts again.
@@ -1023,16 +1029,15 @@ fn read_by_id(store: &dyn LedgerQueue, ids: &[EventId]) -> Result<Vec<RunEvent>>
 /// [`Kept`]: crate::domain::ledger::builder::Kept
 pub fn start_builder(store: &dyn LedgerQueue, now_ms: i64) -> Result<Builder> {
     let mut builder = Builder::default();
-    let Some(r) = rows_written(store)? else {
+    let heads = store.ledger_heads(LedgerKind::Session)?;
+    let Some((r, read_ms)) = rows_to_go_on_from(store.ledger_marks()?.as_ref(), &heads) else {
         return Ok(builder);
     };
     if store.ledger_older_rows()? {
         return Ok(builder);
     }
     builder.go_on_from_rows(r);
-    if let Some(at) = store.ledger_latest_event_ms(r.events)? {
-        builder.read_up_to(at);
-    }
+    builder.read_up_to(read_ms);
     let now_ms = builder.folds_at(now_ms);
     let heads = store.ledger_queue_heads_at(r.events)?;
     let (queue, lives, pre_claim) = books_of_heads(store, &heads, r.events, now_ms)?;

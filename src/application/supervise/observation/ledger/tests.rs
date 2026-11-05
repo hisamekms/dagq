@@ -282,15 +282,6 @@ impl EventStore for Memory {
 }
 
 impl LedgerStore for Memory {
-    fn ledger_latest_event_ms(&self, through: EventId) -> Result<Option<i64>> {
-        Ok(self
-            .events
-            .borrow()
-            .iter()
-            .filter(|event| event.id <= through)
-            .filter_map(|event| crate::domain::stats::timestamp_millis(&event.created_at))
-            .max())
-    }
     fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
         let events = EventStore::run_events(self, run)?;
         self.count_cut(|reads| {
@@ -3443,9 +3434,6 @@ struct WaitRowsService {
 struct HeldRows<'a>(&'a [LedgerRow]);
 
 impl LedgerStore for HeldRows<'_> {
-    fn ledger_latest_event_ms(&self, _: EventId) -> Result<Option<i64>> {
-        unreachable!("no start here")
-    }
     fn ledger_run_events(&self, _: &RunId) -> Result<Vec<RunEvent>> {
         unreachable!("no run's events here")
     }

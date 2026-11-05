@@ -12,7 +12,23 @@ use crate::domain::ledger::testkit::{forgotten_log, queue_across, two_late_log, 
 use crate::domain::session_step::ResourceSample;
 use crate::domain::toolchain::Toolchains;
 
+mod time_read;
+
 type Rows = BTreeMap<(LedgerKind, String), LedgerRow>;
+
+/// The latest time of an event read up to the event `at` of `log`, as the
+/// build of every event holds it there.
+fn read_ms_at(log: &Log, at: EventId) -> i64 {
+    let mut builder = Builder::default();
+    let read: Vec<RunEvent> = log
+        .events
+        .iter()
+        .filter(|event| event.id <= at)
+        .cloned()
+        .collect();
+    builder.mark_events(&read);
+    builder.folds_at(i64::MIN)
+}
 
 /// A store of the events of `log` up to `upto`, the node samples `samples`,
 /// and the rows a builder from its cursors' start drains there at `secs`.
@@ -834,7 +850,9 @@ fn replayed_slots(
     assert_eq!(stored.len(), 2);
     let mut r = r_of(&memory);
     r.events = EventId::new(r_at);
-    memory.rows_mark.replace(Some(RowsWritten::at(r)));
+    memory
+        .rows_mark
+        .replace(Some(RowsWritten::at(r, read_ms_at(&log, r.events))));
     assert_eq!(
         rows_written(&memory).unwrap().unwrap().events,
         EventId::new(r_at)

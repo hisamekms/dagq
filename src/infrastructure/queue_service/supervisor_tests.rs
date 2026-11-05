@@ -1079,13 +1079,16 @@ fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
         })
     );
     let r = |events: i64| {
-        RowsWritten::at(Cursors {
-            events: crate::domain::EventId::new(events),
-            samples: 2,
-            steps: 3,
-            resources: 4,
-            inside_resources: 5,
-        })
+        RowsWritten::at(
+            Cursors {
+                events: crate::domain::EventId::new(events),
+                samples: 2,
+                steps: 3,
+                resources: 4,
+                inside_resources: 5,
+            },
+            1_900_000_000_000,
+        )
     };
     let marks = Marks {
         sessions: SessionsWritten::at(crate::domain::EventId::new(8)),
@@ -1119,10 +1122,13 @@ fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
     // The marks alone, R moved with W as it was.
     let moved = Marks {
         rows: Some(r(9).through).map(|through| {
-            RowsWritten::at(Cursors {
-                samples: 6,
-                ..through
-            })
+            RowsWritten::at(
+                Cursors {
+                    samples: 6,
+                    ..through
+                },
+                i64::MIN,
+            )
         }),
         ..later
     };
@@ -1132,6 +1138,17 @@ fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
         direct.ledger_rows(LedgerKind::Session).unwrap().len(),
         rows.len()
     );
+    // An R that holds no time crosses as none.
+    let no_time = Marks {
+        rows: moved.rows.map(|rows| RowsWritten {
+            read_ms: None,
+            ..rows
+        }),
+        ..moved
+    };
+    queue.write_ledger_marks(&no_time).unwrap();
+    assert_eq!(queue.ledger_marks().unwrap(), Some(no_time));
+    assert_eq!(direct.ledger_marks().unwrap(), Some(no_time));
 }
 
 /// What builds the ledger cuts its rows to a position by reads the start
