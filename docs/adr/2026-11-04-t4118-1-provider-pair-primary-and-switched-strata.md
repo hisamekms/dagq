@@ -10,6 +10,8 @@ amends:
   - adr-t4005-1 decision 6
   - adr-t4005-1 decision 7
   - adr-t4005-1 decision 10
+amended_by:
+  - adr-t4163-1
 owners:
   - hisamekms
 tags:

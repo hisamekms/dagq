@@ -184,7 +184,9 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
 - [指示の版](supervisor-lifecycle/prompt.md#workerが読んだ指示の版)も属性のキーで、`kpi --by`で層になる。
 - 群の比べは`--by group`・`--by pair_group`で読み、組は`kpi::trial`・`kpi::pair`のdoc comment。
   providerの組は割り当てどおりに動いた組を主に、切り替えたrunを割り当てた群ごとの別の層に、割り当てた群を副に出す。
-  判定できないrunは副だけに含め、群ごとに件数を見せ、切り替えたrunの数には入れない。
+  判定できないrunは、環境が原因のrunの層を除いて副だけに含め、群ごとに件数を見せ、切り替えたrunの数には入れない。
+  復旧jobが環境が原因と判定してrunの記録に残したrunは、主から外して割り当てた群ごとの別の層に同じ項目で並べ、副には残す（ADR-t4163-1）。
+  判定の無いrunは不明として今の層のままにする。
 
 ## 送る口
 
