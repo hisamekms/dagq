@@ -1783,7 +1783,7 @@ impl JobState {
 }
 
 /// A process of the host as [`may_have_asked`] takes it: its command line
-/// (`ps`'s `command`, its arguments), and when it started (unix seconds,
+/// (its arguments), and when it started (unix seconds,
 /// `None` when that cannot be read).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostProcess {

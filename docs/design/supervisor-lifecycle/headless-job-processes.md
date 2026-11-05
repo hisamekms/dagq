@@ -53,13 +53,13 @@ observerの子プロセスはここに記録せず、時間切れとsupervisor�
   agentは走ったので、書くときに出力を読み、`headless_job_stopped`をExecution（[Executionのトークン数](../execution-tokens.md#記録の形)）と共に下の引き継ぎと同じ置き場に記録する。
   止めた側の書く終わりのeventがExecutionを持つjob（見張りが止めた復旧のjob、timeout）は`HeadlessJob::stop`で止め、これを書かない。
   `program`のjobはagentが動かずExecutionでないので、止めても積まず、行の`stopped`だけで終わる。
-- timeoutの停止（`HeadlessJob::stop`）は、killの前に`ProcessControl::descendants`（`ps`の親子の連なり）でjobの子孫を集め、jobをSIGKILLしてwaitした後、子孫もSIGKILLする。
+- timeoutの停止（`HeadlessJob::stop`）は、killの前に`ProcessControl::descendants`（OSから読む一覧の親子の連なり）でjobの子孫を集め、jobをSIGKILLしてwaitした後、子孫もSIGKILLする。
   jobのBashとその子がjobより長く残らない。
   jobのSIGKILLは`Spawned::kill_group`で、自分のprocess groupを持つ`program`のjobはgroupごと止まる（ADR-t1895-2決定4）。
   groupを持たない`agent`のjobはjobのprocessだけで、子孫は上の一覧で止める。
-- この`ps`の一覧はstdoutをbytesで受けて読む（`user_ps_listing`）。
-  hostのどれか1つのprocessのcommandにUTF-8でないbyteがあっても一覧全体は失敗せず、その行もpid・ppidのまま残り（commandのそのbyteだけが置換文字になる）、子孫の連なりが切れない。
-  行を飛ばさないのは、飛ばすとその下の子孫が停止と孤児の検出から漏れるため。
+- この一覧はOSから読む（`infrastructure::process_read`）。
+  hostのどれか1つのprocessのcommandにUTF-8でないbyteがあるか引数を読めなくても一覧全体は失敗せず、そのprocessもpid・ppidのまま残り（読めないcommandは名前になる）、子孫の連なりが切れない。
+  processを飛ばさないのは、飛ばすとその下の子孫が停止と孤児の検出から漏れるため。
 - runのreviewのagentのjobは、答えの無い終わり（起動の失敗・非0のexit・timeout・読めない答え）をjobごとに同じ入力で1回だけやり直す（`domain::review_jobs::runs_again`）。
   evalのjobは`JobKind::retries`で決め、非0のexitだけを1回やり直し、`program`のjobの非0のexitは検査の結果なのでやり直さない。
 

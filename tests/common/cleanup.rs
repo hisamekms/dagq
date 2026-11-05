@@ -4,12 +4,10 @@
 //! `TempDir` could drop (a SIGTERM or SIGKILL of nextest's timeout or of a
 //! cancelled check), and a removal that outlasts a late write into the
 //! directory.
-use super::Bounded;
 use std::{
     collections::HashSet,
     env, fs, io,
     path::{Path, PathBuf},
-    process::Command,
     sync::{LazyLock, Mutex, PoisonError},
     thread,
     time::{Duration, Instant},
@@ -276,26 +274,20 @@ fn pid_alive(pid: u32) -> bool {
 /// Terminate the processes an abandoned directory started: those whose
 /// program is in it (the runner copy), the stub agent (`/bin/sh
 /// <dir>/claude-stub`), and a `dagq` binary given its queue or stub
-/// (`--db`, `--claude`), like the temporary queue's supervisor. `ps` joins
+/// (`--db`, `--claude`), like the temporary queue's supervisor. The list joins
 /// argv with spaces, so only these shapes are matched: a word of some other
 /// process's arguments, like a Claude prompt that quotes such a path, never
 /// makes it a target.
 fn kill_processes_inside(inside: &dyn Fn(&str) -> bool) {
-    let Ok(output) = Command::new("ps")
-        .args(["-axww", "-o", "pid=,command="])
-        .bounded_output()
-    else {
-        eprintln!("fixture sweep: ps failed; left processes alone");
+    let Ok(processes) = dagq::infrastructure::adapters::user_processes() else {
+        eprintln!("fixture sweep: the processes did not list; left them alone");
         return;
     };
     let me = std::process::id();
     let mut victims = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut words = line.split_whitespace();
-        let Some(pid) = words.next().and_then(|pid| pid.parse::<u32>().ok()) else {
-            continue;
-        };
-        let argv: Vec<&str> = words.collect();
+    for process in &processes {
+        let pid = process.pid;
+        let argv: Vec<&str> = process.command.split_whitespace().collect();
         let program = argv.first().is_some_and(|word| inside(word));
         let stub = argv.first() == Some(&"/bin/sh")
             && argv

@@ -186,7 +186,7 @@ pub trait ToolchainProfile: Sync {
     fn junit_test_name(&self) -> Option<JunitTestName>;
 
     /// The kind of a process of the tool's by its command (`command`, a
-    /// path or a name as `ps` gives it, `name` its last part), counted in
+    /// path or a name as the host's process table gives it, `name` its last part), counted in
     /// the host's load; `None` for a process not the tool's.
     fn process_kind(&self, command: &str, name: &str) -> Option<ToolProcess>;
 

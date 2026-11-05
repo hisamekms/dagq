@@ -1478,29 +1478,26 @@ pub fn print_queue_events(db: &Path) {
 /// so that a stub that stopped making progress shows where it is.
 fn print_stub_processes(db: &Path) {
     use std::io::Write as _;
-    let groups: Vec<String> = stubs()
-        .get(db)
-        .cloned()
-        .flatten()
-        .unwrap_or_default()
-        .iter()
-        .map(u32::to_string)
-        .collect();
-    // `ps` returns at once; the bounded output would wait on the limit
-    // this runs past.
-    let listed = Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,pgid=,stat=,etime=,command="])
-        .output();
-    let text = match listed {
-        Ok(out) => {
-            let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|line| {
-                    line.split_whitespace()
-                        .nth(2)
-                        .is_some_and(|pgid| groups.iter().any(|g| g == pgid))
+    let groups = stubs().get(db).cloned().flatten().unwrap_or_default();
+    let text = match dagq::infrastructure::adapters::user_processes() {
+        Ok(listed) => {
+            let lines: Vec<String> = listed
+                .iter()
+                .filter_map(|process| {
+                    // SAFETY: getpgid takes a pid, not a pointer.
+                    let group = unsafe { libc::getpgid(process.pid as libc::pid_t) };
+                    // macOS answers no group for a zombie: one is shown
+                    // whichever group it was in.
+                    let zombie = read_process(process.pid).is_some_and(|read| read.zombie);
+                    let member = u32::try_from(group).is_ok_and(|group| groups.contains(&group));
+                    (member || zombie).then(|| {
+                        let line = format!(
+                            "  {} {} {group} {}s zombie={zombie} {}",
+                            process.pid, process.ppid, process.elapsed_secs, process.command,
+                        );
+                        line.chars().take(300).collect()
+                    })
                 })
-                .map(|line| format!("  {}", line.chars().take(300).collect::<String>()))
                 .collect();
             format!(
                 "the processes of the stub groups {groups:?}:\n{}\n",

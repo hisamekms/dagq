@@ -4742,7 +4742,7 @@ impl crate::application::queue_service::IssueFacts for IssueQueue<'_> {
 
 /// This user's processes as
 /// [`crate::domain::queue_service::may_have_asked`] takes them, from one
-/// `ps` listing: their command lines and when they started, from their
+/// listing: their command lines and when they started, from their
 /// ages; `None` when they cannot be listed.
 fn host_processes() -> Option<Vec<crate::domain::queue_service::HostProcess>> {
     let listed = match super::adapters::user_processes() {

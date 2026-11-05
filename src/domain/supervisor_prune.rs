@@ -7,7 +7,7 @@ use super::{HEARTBEAT_TIMEOUT_SECS, SupervisorRegistration, recovery::ProcessInf
 
 /// How much later than its registration's `started_at` a process at the
 /// registered pid may seem to have started and still be the one that
-/// registered: `ps` prints the age to the second.
+/// registered: the age is read to the second.
 const PID_START_SLACK_SECS: i64 = 5;
 
 /// Whether the registration's last heartbeat is older than

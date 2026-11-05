@@ -186,7 +186,7 @@ extern "C" fn stop_groups(signal: libc::c_int) {
 /// SIGTERM (ADR-t1404-1 decision 3; the supervisor kills what is left with
 /// SIGKILL after a grace, the turns' groups included, which this handler
 /// cannot see). Only the wrapper installs it. It stops the groups alone: listing a
-/// turn's descendants (`ps`) is not async-signal-safe, so a command the
+/// turn's descendants is not async-signal-safe, so a command the
 /// turn runs in a group of its own is left to `stop_processes`.
 pub fn stop_groups_on_exit_signals() {
     for signal in [libc::SIGHUP, libc::SIGTERM, libc::SIGINT] {

@@ -907,7 +907,7 @@ pub struct ProcessInfo {
     pub command: String,
     /// The working directory; `None` when it could not be read.
     pub cwd: Option<String>,
-    /// The CPU time it used so far (user and system, `ps`'s `time`), in
+    /// The CPU time it used so far (user and system), in
     /// milliseconds; `None` when it could not be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_ms: Option<u64>,

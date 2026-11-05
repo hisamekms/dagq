@@ -20,19 +20,11 @@ use runtime_support::*;
 
 /// The processes whose parent is `pid`.
 fn children(pid: u32) -> Vec<u32> {
-    let out = Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid="])
-        .bounded_output()
-        .unwrap();
-    String::from_utf8(out.stdout)
+    dagq::infrastructure::adapters::user_processes()
         .unwrap()
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let child: u32 = fields.next()?.parse().ok()?;
-            let parent: u32 = fields.next()?.parse().ok()?;
-            (parent == pid).then_some(child)
-        })
+        .into_iter()
+        .filter(|process| process.ppid == pid)
+        .map(|process| process.pid)
         .collect()
 }
 

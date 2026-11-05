@@ -277,12 +277,7 @@ impl ProcessControl for SystemProcesses {
     }
 
     fn list(&self) -> Result<Vec<ProcessInfo>> {
-        let processes = parse_ps(&user_ps_listing()?);
-        // Linux's `ps` prints CPU time in whole seconds, too coarse to see a
-        // process make progress between two samples: read the clock ticks.
-        #[cfg(target_os = "linux")]
-        let processes = with_proc_cpu_time(processes);
-        Ok(with_working_directories(processes, process_cwd))
+        Ok(with_working_directories(user_processes()?, process_cwd))
     }
 
     fn start_identity(&self, pid: u32) -> Option<String> {
@@ -298,9 +293,9 @@ impl ProcessControl for SystemProcesses {
     }
 
     fn executables(&self) -> Result<Vec<ProcessExecutable>> {
-        // One `ps` for the pids and parents, then one cheap read per pid
+        // One list for the pids and parents, then one cheap read per pid
         // for its executable (task 1590); no working directories.
-        Ok(parse_ps(&user_ps_listing()?)
+        Ok(user_processes()?
             .into_iter()
             .map(|p| ProcessExecutable {
                 pid: p.pid,
@@ -312,8 +307,8 @@ impl ProcessControl for SystemProcesses {
 
     fn descendants(&self, pid: u32) -> Vec<u32> {
         // Only the parents are needed: no working directories.
-        user_ps_listing()
-            .map(|listing| crate::domain::headless_job::descendants(&parse_ps(&listing), pid))
+        user_processes()
+            .map(|listed| crate::domain::headless_job::descendants(&listed, pid))
             .unwrap_or_default()
     }
 }
@@ -332,50 +327,11 @@ pub fn process_started_at(pid: u32) -> Option<i64> {
     Some(read_process(pid)?.started_secs)
 }
 
-/// This user's processes as one `ps` lists them, with their parents, ages
-/// and command lines, and no working directory read.
+/// This user's processes at the time now, with their parents, ages and
+/// command lines, and no working directory read
+/// ([`crate::infrastructure::process_read::list_user_processes`]).
 pub fn user_processes() -> Result<Vec<ProcessInfo>> {
-    Ok(parse_ps(&user_ps_listing()?))
-}
-
-/// `ps -U <uid> -o pid=,ppid=,etime=,time=,command=` for this user's
-/// processes, as the bytes `ps` printed: a command line need not be UTF-8
-/// (task 1794), so [`parse_ps`] reads them, not [`output`].
-fn user_ps_listing() -> Result<Vec<u8>> {
-    // SAFETY: getuid(2) has no failure and no memory effects.
-    let uid = unsafe { libc::getuid() }.to_string();
-    let mut command = Command::new("ps");
-    command.args(["-U", &uid, "-o", "pid=,ppid=,etime=,time=,command="]);
-    let (status, stdout, stderr) = capture_bytes(&mut command, OUTPUT_TIMEOUT)?;
-    ensure!(status.success(), "\"ps\" failed ({status}): {stderr}");
-    Ok(stdout)
-}
-
-/// The lines of `ps -o pid=,ppid=,etime=,time=,command=`; a line that does
-/// not read is skipped. The listing is read lossily (task 1794): a command
-/// with bytes that are not UTF-8 keeps its process, pid and parent, with
-/// U+FFFD in place of those bytes, so one process's name neither fails the
-/// whole list nor cuts a descendant out of the parent chain.
-fn parse_ps(listing: &[u8]) -> Vec<ProcessInfo> {
-    String::from_utf8_lossy(listing)
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse().ok()?;
-            let ppid = fields.next()?.parse().ok()?;
-            let elapsed_secs = parse_etime(fields.next()?)?;
-            let cpu_ms = parse_cpu_time(fields.next()?);
-            let command = fields.collect::<Vec<_>>().join(" ");
-            Some(ProcessInfo {
-                pid,
-                ppid,
-                elapsed_secs,
-                command,
-                cwd: None,
-                cpu_ms,
-            })
-        })
-        .collect()
+    crate::infrastructure::process_read::list_user_processes(super::queue_service::unix_now())
 }
 
 /// `ps`'s `etime`, `[[dd-]hh:]mm:ss`, in seconds.
@@ -389,55 +345,6 @@ pub(crate) fn parse_etime(text: &str) -> Option<u64> {
         secs = secs * 60 + part.parse::<u64>().ok()?;
     }
     Some(days * 86_400 + secs)
-}
-
-/// `ps`'s `time`, `[dd-][hh:]mm:ss[.ff]` (macOS prints hundredths, Linux
-/// whole seconds), in milliseconds.
-fn parse_cpu_time(text: &str) -> Option<u64> {
-    let (clock, fraction) = match text.split_once('.') {
-        Some((clock, fraction)) => (clock, fraction),
-        None => (text, ""),
-    };
-    let secs = parse_etime(clock)?;
-    let digits: String = fraction.chars().take(3).collect();
-    let millis = if digits.is_empty() {
-        0
-    } else {
-        digits.parse::<u64>().ok()? * 10u64.pow(3 - u32::try_from(digits.len()).ok()?)
-    };
-    Some(secs * 1000 + millis)
-}
-
-/// `processes` with the CPU time `/proc/<pid>/stat` holds in clock ticks
-/// (Linux); a process whose file does not read keeps what `ps` printed.
-#[cfg(target_os = "linux")]
-fn with_proc_cpu_time(mut processes: Vec<ProcessInfo>) -> Vec<ProcessInfo> {
-    // SAFETY: sysconf(3) has no memory effects.
-    let ticks_per_sec = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).unwrap_or(0);
-    if ticks_per_sec == 0 {
-        return processes;
-    }
-    for process in &mut processes {
-        let ticks = fs::read_to_string(format!("/proc/{}/stat", process.pid))
-            .ok()
-            .and_then(|stat| proc_stat_cpu_ticks(&stat));
-        if let Some(ticks) = ticks {
-            process.cpu_ms = Some(ticks * 1000 / ticks_per_sec);
-        }
-    }
-    processes
-}
-
-/// `utime + stime` of a `/proc/<pid>/stat` line, in clock ticks: the 14th
-/// and 15th fields, counted after the `)` that ends the command (which may
-/// hold spaces and parentheses itself).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn proc_stat_cpu_ticks(stat: &str) -> Option<u64> {
-    let (_, rest) = stat.rsplit_once(')')?;
-    let mut fields = rest.split_whitespace().skip(11);
-    let user = fields.next()?.parse::<u64>().ok()?;
-    let system = fields.next()?.parse::<u64>().ok()?;
-    user.checked_add(system)
 }
 
 /// `processes` with the working directories `read_cwd` reads, one pid at
@@ -5142,53 +5049,12 @@ mod tests {
     }
 
     #[test]
-    fn ps_listings_are_read() {
+    fn ages_as_ps_prints_them_are_read() {
         assert_eq!(parse_etime("05"), Some(5));
         assert_eq!(parse_etime("01:05"), Some(65));
         assert_eq!(parse_etime("02:01:05"), Some(7265));
         assert_eq!(parse_etime("3-02:01:05"), Some(3 * 86_400 + 7265));
         assert_eq!(parse_etime("x"), None);
-        assert_eq!(parse_cpu_time("0:00.01"), Some(10));
-        assert_eq!(
-            parse_cpu_time("562:29.18"),
-            Some((562 * 60 + 29) * 1000 + 180)
-        );
-        assert_eq!(parse_cpu_time("01:02:03"), Some(3_723_000));
-        assert_eq!(parse_cpu_time("1-00:00:01"), Some(86_401_000));
-        assert_eq!(parse_cpu_time("0:01.5"), Some(1500));
-        assert_eq!(parse_cpu_time("x"), None);
-        // Linux's /proc/<pid>/stat: utime 7 and stime 5 after a command
-        // that holds a space and a ")".
-        assert_eq!(
-            proc_stat_cpu_ticks("42 (a b) c) S 1 42 42 0 -1 4194304 90 0 0 0 7 5 0 0 20 0 1 0"),
-            Some(12)
-        );
-        assert_eq!(proc_stat_cpu_ticks("42 (x) S 1 2"), None);
-        assert_eq!(proc_stat_cpu_ticks("no command"), None);
-        let processes = parse_ps(
-            b"  1     0  3-00:00:00 12:00.50 /sbin/launchd\n 42  1 01:05 bad sleep 600 --x\nbad line\n",
-        );
-        assert_eq!(processes.len(), 2);
-        assert_eq!(processes[0].cpu_ms, Some(720_500));
-        assert_eq!(processes[1].pid, 42);
-        assert_eq!(processes[1].ppid, 1);
-        assert_eq!(processes[1].elapsed_secs, 65);
-        assert_eq!(processes[1].cpu_ms, None);
-        assert_eq!(processes[1].command, "sleep 600 --x");
-        // Task 1794: a byte that is not UTF-8 in one command keeps that
-        // process and every other line.
-        let processes = parse_ps(
-            b"  7  1 00:05 0:00.01 a\n  8  7 00:05 0:00.01 b\xff c\n  9  8 00:05 0:00.01 d\n",
-        );
-        assert_eq!(
-            processes
-                .iter()
-                .map(|p| (p.pid, p.ppid))
-                .collect::<Vec<_>>(),
-            [(7, 1), (8, 7), (9, 8)]
-        );
-        assert_eq!(processes[1].command, "b\u{fffd} c");
-        assert_eq!(processes[2].command, "d");
     }
 
     /// Task 1581: the directories are read one pid at a time, once for
@@ -5197,8 +5063,16 @@ mod tests {
     /// was read, and its process stays listed with no `cwd`.
     #[test]
     fn each_listed_pid_is_read_once_and_one_unread_stays_listed_without_a_cwd() {
-        let processes =
-            parse_ps(b"  7  1 00:05 0:00.01 a\n  8  7 00:05 0:00.01 b\n  9  7 00:05 0:00.01 c\n");
+        let processes: Vec<ProcessInfo> = [(7, 1), (8, 7), (9, 7)]
+            .map(|(pid, ppid)| ProcessInfo {
+                pid,
+                ppid,
+                elapsed_secs: 5,
+                command: "a".to_owned(),
+                cwd: None,
+                cpu_ms: None,
+            })
+            .into();
         let mut reads = Vec::new();
         let read = |pid: u32| {
             reads.push(pid);

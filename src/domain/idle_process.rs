@@ -1,6 +1,6 @@
 //! Processes of a run that stay alive without making progress (task 469):
 //! the `idle_process` alert of the recovery job (ADR-0047 decision 39).
-//! The supervisor samples the CPU time (`ps`'s `time`) of the run's
+//! The supervisor samples the CPU time of the run's
 //! processes ([`super::recovery::run_processes`]) and feeds each sample to
 //! a [`CpuWatch`]; a process whose CPU time, together with that of its
 //! descendants, has grown by almost nothing for `[stall].idle_process_secs`
