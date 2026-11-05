@@ -1,9 +1,9 @@
 //! The one read of the ledger by a window (ADR-t1662-1 decisions 12 and
 //! 18, ADR-t1662-2 D1, docs/design/measurement.md "共通の読み取り関数"):
-//! [`select`] takes the rows of every kind and `stats`' window (`--since`
-//! / `--until`, an event id or a time, counted to the window's end) and
-//! `--goal`, `--change`, `--area`, and returns the [`LedgerWindow`] the
-//! statistics are made of. A row is matched by its range of input ids
+//! [`WindowRows`] takes the rows of every kind as they are read and `stats`'
+//! window (`--since` / `--until`, an event id or a time, counted to the
+//! window's end) and `--goal`, `--change`, `--area`, and returns the
+//! [`LedgerWindow`] the statistics are made of. A row is matched by its range of input ids
 //! (`inputs_from` to `inputs_through`) and its times (`started_at`,
 //! `ended_at`; one not ended reaches the window's end); a bound that is an
 //! event id is matched by the ids, never crossed by a time. The filters
@@ -25,7 +25,7 @@
 //! The store holds no row of a run on its way (its row is written once
 //! its life ended); [`runs_on_their_way`] names those its task rows not
 //! ended give, and their rows are folded at the read by the same fold
-//! ([`run_on_its_way`]) before [`select`] takes them.
+//! ([`run_on_its_way`]) before [`WindowRows`] takes them.
 //!
 //! # Where each value comes from
 //!
@@ -33,7 +33,10 @@
 //! ([`super::session`]), `queue` ([`super::queue`]) and `node`
 //! ([`super::node`], whose items its doc lists); "records" is the
 //! events a row owns ([`super::owner`]), which [`LedgerWindow::events`]
-//! gives back for today's functions. The time each is recorded, and what
+//! gives back for today's functions. A window holds them once, in its own
+//! list, none on its rows. "Queue rows" below are the store's: a window keeps
+//! none of them, so what it gives of one comes of its records alone
+//! ([`WindowRows`]). The time each is recorded, and what
 //! is missing when, follow measurement.md "欠測と集約の契約": the judgments
 //! of now are taken from the one stream with the latest successful
 //! observation within the grace (streams never added up) and are missing
@@ -208,9 +211,11 @@ pub struct LedgerWindow {
     /// reads it: `--since`'s time, else the first event of the window,
     /// else its end.
     host_from_ms: i64,
-    /// The rows in the window the filters chose, by their first input.
+    /// The rows in the window the filters chose, by their first input, as
+    /// [`WindowRows`] leaves them: of no queue row and no records.
     pub rows: Vec<LedgerRow>,
-    /// Every row's records, the window and the filters aside: what the
+    /// Every row's records, each once and only here, the window and the
+    /// filters aside: what the
     /// folds that carry state read, each to [`Self::end`] (a baseline's
     /// group is taken only with its mark, which may come after the
     /// window).
@@ -268,17 +273,6 @@ pub fn run_on_its_way(run: &RunId, events: &[RunEvent], now_ms: i64) -> Option<L
 /// store holds.
 pub const ON_ITS_WAY: &str = "folded at the read";
 
-/// The events of `rows`' records, ascending id, each once.
-fn records(rows: &[LedgerRow]) -> Vec<RunEvent> {
-    let mut events: Vec<RunEvent> = rows
-        .iter()
-        .flat_map(|row| row.records.iter().cloned())
-        .collect();
-    events.sort_by_key(|event| event.id);
-    events.dedup_by_key(|event| event.id);
-    events
-}
-
 /// The time a cursor stands for among `events`: its own, or its event's.
 fn cursor_ms(cursor: Cursor, events: &[RunEvent]) -> Option<i64> {
     match cursor {
@@ -290,54 +284,154 @@ fn cursor_ms(cursor: Cursor, events: &[RunEvent]) -> Option<i64> {
     }
 }
 
-/// The window `query` asks of `rows` (every kind's): the cursors and the
-/// times resolved as `stats` resolves them (a `--since` past `--until`
-/// leaves nothing),
-/// the rows with an input by the window's end that have not ended before
-/// its start, then those of the filters.
-pub fn select(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
-    let all = records(&rows);
-    of_records(all, rows, query)
+/// How many rows [`WindowRows::take_pages`] asks for at a time: what a read
+/// holds of a row's text and values beyond what the window keeps of it.
+pub const ROWS_PER_PAGE: usize = 50;
+
+/// The room [`WindowRows::new`] leaves past the events it is told of, for
+/// those recorded while the read goes on (about an hour of a queue's), so
+/// that they do not double the list of all the records.
+const EVENTS_DURING_A_READ: usize = 1024;
+
+/// The goals the records of the rows that are neither a run's nor a task's
+/// name, by each row's kind and key: what [`Filters::goals_of`] reads once
+/// the records have left the rows.
+type RecordGoals = HashMap<(LedgerKind, String), BTreeSet<GoalId>>;
+
+/// The goals `row`'s records name, for [`RecordGoals`].
+fn record_goals(row: &LedgerRow) -> BTreeSet<GoalId> {
+    row.records
+        .iter()
+        .filter_map(|event| event.goal_id)
+        .collect()
 }
 
-/// [`select`] that moves the records out of `rows` instead of copying them,
-/// so that a window holds them once: a window of no filter only, whose rows
-/// are not chosen by their records. The first prototype of
-/// docs/plans/kpi-read-memory-spike.md, measured by
-/// `examples/kpi_read_memory.rs` and called by nothing in the runtime.
-#[doc(hidden)]
-pub fn select_moving_records(mut rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
-    if query.goal_id.is_some() || query.change.is_some() || query.area.is_some() {
-        return select(rows, query);
+/// The rows of a window as they are read, each folded to what the window
+/// answers with as it comes, so that a read holds its rows once and a page
+/// of them at most in full: a row's records move to the window's, a queue
+/// row is dropped (nothing of a window reads one but its records) and a run
+/// row loses its steps ([`super::steps::DETAIL_KEY`], which only what
+/// rebuilds a row reads). A row's records are read for its goals before
+/// they move, under a filter of a goal only.
+#[derive(Debug)]
+pub struct WindowRows {
+    picks_goals: bool,
+    records: Vec<RunEvent>,
+    rows: Vec<LedgerRow>,
+    goals: RecordGoals,
+}
+
+impl WindowRows {
+    /// A read for `query`, with room for `events` records and those recorded
+    /// during it (more are taken too, by growing the list).
+    pub fn new(query: &WindowQuery, events: usize) -> Self {
+        Self {
+            picks_goals: query.goal_id.is_some(),
+            records: Vec::with_capacity(events.saturating_add(EVENTS_DURING_A_READ)),
+            rows: Vec::new(),
+            goals: RecordGoals::new(),
+        }
     }
-    let mut all: Vec<RunEvent> = Vec::with_capacity(rows.iter().map(|row| row.records.len()).sum());
-    for row in &mut rows {
-        all.append(&mut row.records);
+
+    /// Take `row`, folded to what the window keeps of it.
+    pub fn take(&mut self, mut row: LedgerRow) {
+        if self.picks_goals && row.kind == LedgerKind::Session {
+            self.goals
+                .insert((row.kind, row.key.clone()), record_goals(&row));
+        }
+        self.records.append(&mut row.records);
         row.records = Vec::new();
+        match row.kind {
+            LedgerKind::Queue => return,
+            LedgerKind::Run => {
+                if let Some(detail) = row.detail.as_object_mut() {
+                    detail.remove(super::steps::DETAIL_KEY);
+                }
+            }
+            _ => {}
+        }
+        self.rows.push(row);
     }
+
+    /// Take every row `page` gives, asked for [`ROWS_PER_PAGE`] at a time
+    /// after the last key it gave (`None`: from the first), by key: a page
+    /// may hold fewer with more after it, so only an empty page ends them.
+    pub fn take_pages<E>(
+        &mut self,
+        mut page: impl FnMut(Option<&str>, usize) -> Result<Vec<LedgerRow>, E>,
+    ) -> Result<(), E> {
+        let mut after: Option<String> = None;
+        loop {
+            let rows = page(after.as_deref(), ROWS_PER_PAGE)?;
+            let Some(last) = rows.last() else {
+                return Ok(());
+            };
+            after = Some(last.key.clone());
+            for row in rows {
+                self.take(row);
+            }
+        }
+    }
+
+    /// The runs on their way among the rows taken ([`runs_on_their_way`]).
+    pub fn runs_on_their_way(&self) -> Vec<RunId> {
+        runs_on_their_way(&self.rows)
+    }
+
+    /// The window `query` asks of the rows taken: the cursors and the times
+    /// resolved as `stats` resolves them (a `--since` past `--until` leaves
+    /// nothing), the rows with an input by the window's end that have not
+    /// ended before its start, then those of the filters.
+    pub fn into_window(mut self, query: &WindowQuery) -> LedgerWindow {
+        self.rows.shrink_to_fit();
+        self.records.shrink_to_fit();
+        self.records.sort_by_key(|event| event.id);
+        self.records.dedup_by_key(|event| event.id);
+        of_records(self.records, self.rows, &self.goals, query)
+    }
+}
+
+/// The window `query` asks of `rows` (every kind's), read all at once: the
+/// tests' way to [`WindowRows`], which the runtime reads by pages
+/// ([`crate::application::LedgerStore::ledger_window`]).
+#[cfg(test)]
+pub(crate) fn select(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
+    let events = rows.iter().map(|row| row.records.len()).sum();
+    let mut read = WindowRows::new(query, events);
+    for row in rows {
+        read.take(row);
+    }
+    read.into_window(query)
+}
+
+/// The window [`select`] gives, in the form that keeps all it is given:
+/// every row with its records and its steps, the queue's too, and a copy of
+/// the records in the window's. What the tests hold the folded window's
+/// answers to.
+#[cfg(test)]
+pub(crate) fn select_holding_every_row(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
+    let mut all: Vec<RunEvent> = rows
+        .iter()
+        .flat_map(|row| row.records.iter().cloned())
+        .collect();
     all.sort_by_key(|event| event.id);
     all.dedup_by_key(|event| event.id);
-    of_records(all, rows, query)
+    let goals = rows
+        .iter()
+        .filter(|row| !matches!(row.kind, LedgerKind::Run | LedgerKind::Task))
+        .map(|row| ((row.kind, row.key.clone()), record_goals(row)))
+        .collect();
+    of_records(all, rows, &goals, query)
 }
 
-/// [`select`] of rows whose records the caller took out as it read them:
-/// `all` holds them, in any order and each at least once. A window of no
-/// filter only, as [`select_moving_records`]. The second prototype of
-/// docs/plans/kpi-read-memory-spike.md (`read_lean` of
-/// `examples/kpi_read_memory.rs`), called by nothing in the runtime.
-#[doc(hidden)]
-pub fn select_of_records(
-    mut all: Vec<RunEvent>,
+/// The window `query` asks of `rows`, `all` their records (ascending id) and
+/// `goals` the goals those records name.
+fn of_records(
+    all: Vec<RunEvent>,
     rows: Vec<LedgerRow>,
+    goals: &RecordGoals,
     query: &WindowQuery,
 ) -> LedgerWindow {
-    all.sort_by_key(|event| event.id);
-    all.dedup_by_key(|event| event.id);
-    of_records(all, rows, query)
-}
-
-/// The window `query` asks of `rows`, `all` their records (ascending id).
-fn of_records(all: Vec<RunEvent>, rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
     let since = query.since.map(|cursor| cursor.event_id(&all));
     let until = query.until.map(|cursor| cursor.event_id(&all));
     let latest = all.last().map_or(EventId::new(0), |event| event.id);
@@ -390,7 +484,7 @@ fn of_records(all: Vec<RunEvent>, rows: Vec<LedgerRow>, query: &WindowQuery) -> 
     let filters = Filters::of(&window, query);
     let mut chosen: Vec<LedgerRow> = rows
         .into_iter()
-        .filter(|row| window.overlaps(row) && filters.keeps(row))
+        .filter(|row| window.overlaps(row) && filters.keeps(row, goals))
         .collect();
     chosen.sort_by_key(|row| (row.inputs_from, row.kind));
     window.rows = chosen;
@@ -480,9 +574,9 @@ impl Filters {
         filters
     }
 
-    /// The goals a row is of: its task's, else those its records name (a
-    /// goal review's, a plan review's goals).
-    fn goals_of(&self, row: &LedgerRow) -> BTreeSet<GoalId> {
+    /// The goals a row is of: its task's, else those its records named as
+    /// they were read (`of_records`; a goal review's, a plan review's goals).
+    fn goals_of(&self, row: &LedgerRow, of_records: &RecordGoals) -> BTreeSet<GoalId> {
         let mut goals: BTreeSet<GoalId> = BTreeSet::new();
         if let Some(goal) = row
             .task_id
@@ -491,7 +585,9 @@ impl Filters {
             goals.insert(goal);
         }
         if row.kind != LedgerKind::Run && row.kind != LedgerKind::Task {
-            goals.extend(row.records.iter().filter_map(|event| event.goal_id));
+            if let Some(named) = of_records.get(&(row.kind, row.key.clone())) {
+                goals.extend(named.iter().copied());
+            }
             goals.extend(
                 row.detail["items"]["goal_ids"]
                     .as_array()
@@ -544,13 +640,13 @@ impl Filters {
         true
     }
 
-    fn keeps(&self, row: &LedgerRow) -> bool {
+    fn keeps(&self, row: &LedgerRow, goals: &RecordGoals) -> bool {
         // The host's load is the queue's, whatever is filtered.
         if row.kind == LedgerKind::Node {
             return true;
         }
         if let Some(goal) = self.goal_id
-            && !self.goals_of(row).contains(&goal)
+            && !self.goals_of(row, goals).contains(&goal)
         {
             return false;
         }

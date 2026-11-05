@@ -567,24 +567,34 @@ pub trait LedgerStore {
         supervisor: &str,
         upto: EventId,
     ) -> Result<Option<RunEvent>>;
-    /// The window `query` asks of the rows of every kind
-    /// ([`crate::domain::ledger::window::select`]): the one entry the
-    /// statistics read the ledger by. The rows of the runs on their way
-    /// (of a task not ended, with no row of their own) are folded at
-    /// `query`'s now from their events by the one fold
-    /// ([`crate::domain::ledger::window::run_on_its_way`]), so that a
-    /// window holds what a run not ended recorded too.
+    /// About how many events the rows hold, for a read to make room for
+    /// their records at once; a guess that is only a size (none: 0).
+    fn ledger_events_expected(&self) -> Result<usize> {
+        Ok(0)
+    }
+    /// The window `query` asks of the rows of every kind: the one entry
+    /// the statistics read the ledger by. The rows are read by pages and
+    /// folded one by one to what the window keeps of them
+    /// ([`crate::domain::ledger::window::WindowRows`]), so that a read holds
+    /// no row's records twice, no queue row and no run row's steps.
+    /// The rows of the runs on their way (of a task not ended, with no row
+    /// of their own) are folded at `query`'s now from their events by the
+    /// one fold ([`crate::domain::ledger::window::run_on_its_way`]) and
+    /// taken the same way, so that a window holds what a run not ended
+    /// recorded too.
     fn ledger_window(&self, query: &WindowQuery) -> Result<LedgerWindow> {
-        use crate::domain::ledger::window::{run_on_its_way, runs_on_their_way};
-        let mut rows = Vec::new();
+        use crate::domain::ledger::window::{WindowRows, run_on_its_way};
+        let mut read = WindowRows::new(query, self.ledger_events_expected()?);
         for kind in LedgerKind::ALL {
-            rows.extend(self.ledger_rows(kind)?);
+            read.take_pages(|after, limit| self.ledger_rows_after(kind, after, limit))?;
         }
-        for run in runs_on_their_way(&rows) {
+        for run in read.runs_on_their_way() {
             let events = self.ledger_run_events(&run)?;
-            rows.extend(run_on_its_way(&run, &events, query.now_ms));
+            if let Some(row) = run_on_its_way(&run, &events, query.now_ms) {
+                read.take(row);
+            }
         }
-        Ok(crate::domain::ledger::window::select(rows, query))
+        Ok(read.into_window(query))
     }
 }
 

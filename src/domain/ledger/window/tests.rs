@@ -6,6 +6,7 @@ use crate::domain::ledger::allocation_count::peak_of;
 use crate::domain::ledger::{
     LEDGER_V, build,
     settle::{SETTLE_GRACE_MS, life_input, settlement},
+    steps,
 };
 use crate::domain::marks::utc_text;
 use crate::domain::sessions::TOKEN_CUT_CLOSED_WINDOW_MS;
@@ -259,10 +260,11 @@ fn every_event_is_the_records_of_one_row() {
         },
     );
     assert_eq!(window.events(), log.events);
-    // A node row is folded of the NodeSampleStore, not of the events.
+    // A node row is folded of the NodeSampleStore, not of the events; a
+    // queue row leaves only its records.
     for kind in LedgerKind::ALL
         .into_iter()
-        .filter(|kind| *kind != LedgerKind::Node)
+        .filter(|kind| !matches!(kind, LedgerKind::Node | LedgerKind::Queue))
     {
         assert!(window.of(kind).next().is_some(), "{kind:?}");
     }
@@ -509,18 +511,8 @@ fn a_window_takes_the_rows_of_its_cursors_and_filters() {
     );
     assert_eq!(by_time.start_ms, Some(T0 + 31 * MIN));
     assert_eq!(by_time.end_ms, T0 + 34 * MIN);
-    let kinds: Vec<&str> = by_time
-        .of(LedgerKind::Queue)
-        .map(|row| row.subject.as_ref().map_or("", |s| s.kind.as_str()))
-        .collect();
-    assert_eq!(kinds, ["slots_full", "claim_hold"]);
     // The run and its task, not ended, reach across it.
-    let open: Vec<&str> = by_time
-        .rows
-        .iter()
-        .filter(|row| row.kind != LedgerKind::Queue)
-        .map(|row| row.key.as_str())
-        .collect();
+    let open: Vec<&str> = by_time.rows.iter().map(|row| row.key.as_str()).collect();
     assert_eq!(open, ["7", RUN]);
     // `--goal 3`: the goal review (no task), the run and the task of goal 3.
     let goal = keys(&WindowQuery {
@@ -819,36 +811,93 @@ fn the_events_are_lent_from_the_records_and_not_copied() {
     ));
 }
 
-/// The prototypes that hold the records once give the window of no filter
-/// that [`select`] gives: the same events and the same reads.
+/// A window holds every row's records once, by id, in its own list: none on
+/// its rows, no queue row and no run row's steps, whether or not a row is
+/// chosen. A row's steps and a queue row's records were there to drop.
 #[test]
-fn the_prototypes_that_hold_the_records_once_read_as_select_reads() {
-    let log = two_landings();
-    let query = WindowQuery {
-        now_ms: T0 + 60 * MIN,
-        ..WindowQuery::default()
-    };
-    let rows = build(&log.events, query.now_ms, BUILT);
-    let selected = select(rows.clone(), &query);
-    let mut taken = Vec::new();
-    let mut stripped = rows.clone();
-    for row in &mut stripped {
-        taken.append(&mut row.records);
-    }
-    taken.reverse();
-    for window in [
-        select_moving_records(rows, &query),
-        select_of_records(taken, stripped, &query),
+fn a_window_holds_the_records_once_and_no_queue_row_or_steps() {
+    let log = queue_log();
+    let now_ms = T0 + 60 * MIN;
+    let mut rows = build(&log.events, now_ms, BUILT);
+    assert!(rows.iter().any(|row| row.kind == LedgerKind::Queue));
+    let run = rows
+        .iter_mut()
+        .find(|row| row.kind == LedgerKind::Run)
+        .unwrap();
+    run.detail[steps::DETAIL_KEY] = json!({"outside": 0});
+    for query in [
+        WindowQuery {
+            now_ms,
+            ..WindowQuery::default()
+        },
+        WindowQuery {
+            goal_id: Some(GoalId::new(3)),
+            now_ms,
+            ..WindowQuery::default()
+        },
     ] {
-        assert_eq!(window.events(), selected.events());
-        assert_eq!(window.upto, selected.upto);
-        assert_eq!(window.end_ms, selected.end_ms);
-        assert_eq!(window.main_log().changed, selected.main_log().changed);
-        assert_eq!(window.host(), selected.host());
-        assert_eq!(window.executions(), selected.executions());
-        assert_eq!(window.rows.len(), selected.rows.len());
+        let window = select(rows.clone(), &query);
+        assert_eq!(window.records, log.events);
+        assert!(!window.rows.is_empty());
         assert!(window.rows.iter().all(|row| row.records.is_empty()));
+        assert_eq!(window.of(LedgerKind::Queue).count(), 0);
+        let run = window.of(LedgerKind::Run).next().unwrap();
+        assert!(run.detail.get(steps::DETAIL_KEY).is_none());
+        // What the rows are kept for stays.
+        assert!(run.detail.get("executions").is_some());
     }
+}
+
+/// The rows of a page reader over `rows` by key, the pages it was asked for
+/// counted: `short` limits a page below what is asked, as a page of the
+/// queue service's may be.
+fn read_by_pages(rows: &[LedgerRow], short: Option<usize>) -> (WindowRows, usize) {
+    let query = WindowQuery::default();
+    let mut read = WindowRows::new(&query, 0);
+    let mut asked = 0;
+    read.take_pages::<()>(|after, limit| {
+        asked += 1;
+        Ok(rows
+            .iter()
+            .filter(|row| after.is_none_or(|after| row.key.as_str() > after))
+            .take(short.unwrap_or(limit).min(limit))
+            .cloned()
+            .collect())
+    })
+    .unwrap();
+    (read, asked)
+}
+
+/// Every row comes once, each at its place, at a page's exact length and
+/// past it, with no row at all, and with pages shorter than asked; an empty
+/// page alone ends the read.
+#[test]
+fn the_pages_lose_and_repeat_no_row_at_their_edges() {
+    for (count, short, pages) in [
+        (0, None, 0),
+        (1, None, 1),
+        (ROWS_PER_PAGE, None, 1),
+        (ROWS_PER_PAGE + 1, None, 2),
+        (2 * ROWS_PER_PAGE, None, 2),
+        (5, Some(2), 3),
+    ] {
+        let rows: Vec<LedgerRow> = (0..count)
+            .map(|at| LedgerRow::new(LedgerKind::Session, format!("{at:05}"), None, BUILT))
+            .collect();
+        let (read, asked) = read_by_pages(&rows, short);
+        let keys = |rows: &[LedgerRow]| -> Vec<String> {
+            rows.iter().map(|row| row.key.clone()).collect()
+        };
+        assert_eq!(keys(&read.rows), keys(&rows), "{count} rows");
+        assert_eq!(asked, pages + 1, "{count} rows");
+    }
+}
+
+/// A page that cannot be read ends the read with its error.
+#[test]
+fn a_page_that_cannot_be_read_ends_the_read() {
+    let mut read = WindowRows::new(&WindowQuery::default(), 0);
+    assert_eq!(read.take_pages(|_, _| Err("no page")), Err("no page"));
 }
 
 /// The reads of a window allocate what they answer, not a copy of the
@@ -1122,12 +1171,13 @@ fn a_stopped_job_of_no_run_keeps_its_execution() {
         event_kind::HEADLESS_JOB_STOPPED,
         ended(json!({"kind": "plan_review", "proposal_id": 4}), Some(5)),
     );
-    let window = through_ledger(&log.events, None);
-    let stopped = window
-        .of(LedgerKind::Session)
-        .find(|row| row.key == "plan_review/4/events/0")
+    let rows = build(&log.events, T0 + 60 * MIN, BUILT);
+    let stopped = rows
+        .iter()
+        .find(|row| row.kind == LedgerKind::Session && row.key == "plan_review/4/events/0")
         .unwrap();
     assert_eq!(stopped.records.len(), 1);
+    let window = through_ledger(&log.events, None);
     assert_eq!(window.executions(), executions(&log.events));
 }
 
@@ -1191,8 +1241,9 @@ fn an_event_cursor_bounds_the_rows_of_the_same_time() {
         json!({"kind": "runtime_planner", "planner_id": 5, "route": "headless"}),
     );
     let rows = build(&log.events, T0 + 10 * MIN, BUILT);
+    // Of every kind, the queue's too, as the same bound takes them all.
     let keys = |since: Option<EventId>, until: Option<EventId>| -> Vec<String> {
-        select(
+        select_holding_every_row(
             rows.clone(),
             &WindowQuery {
                 since: since.map(Cursor::Event),

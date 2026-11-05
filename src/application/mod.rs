@@ -81,6 +81,8 @@ pub mod telemetry_tokens;
 pub mod throughput_review;
 pub mod update;
 pub mod watch;
+#[cfg(test)]
+mod window_read_tests;
 pub mod worktree_processes;
 
 pub use crate::domain::ClaimRank;

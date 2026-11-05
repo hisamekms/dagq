@@ -3167,6 +3167,10 @@ impl LedgerStore for SupervisorQueue {
             }
         }
     }
+    fn ledger_events_expected(&self) -> Result<usize> {
+        Ok(usize::try_from(self.latest_event_id()?.as_i64()).unwrap_or(0))
+    }
+
     // One page asked for: past the answer's limit asked again at a
     // quarter of its size, and a row past it alone read in parts, so a
     // page may hold fewer rows than `limit` with more after it.

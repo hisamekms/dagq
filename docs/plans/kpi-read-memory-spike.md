@@ -403,3 +403,35 @@ $E measure "$TMPDIR/k/q20k" observer
 4. (d) の畳む層は 3% なので、計算の側の直しは後でよい。
 
 試作の `select_moving_records`・`select_of_records` は配線のときに置き換えて消す。
+
+## 配線の後
+
+`lean` を runtime に配線した。`LedgerStore::ledger_window` が `WindowRows`（`src/domain/ledger/window.rs`）で `ledger_rows_after` の頁を 50 行ずつ読みながら畳む。`select_moving_records`・`select_of_records`・`read_lean` と example の `measure` と candidate の切り替えは消した（Spike の測定の example は commit `70b44f049` にある）。今の example の `whole` は runtime の読み（`kpi::kpi` と、`report::window` と `of_window` と `observer_input`）をそのまま測る。
+
+比はどの組も 1.05 以下で、答えの digest は Spike の今の形と `lean` と同じだった。`stats` と `report` と filter のある窓は example で測らず、答えの一致を unit test（`application::window_read_tests`）で確かめた。
+
+| 読み | event 数 | 全体のピークの bytes | 試作 lean の全体のピークの bytes | 比 |
+| --- | ---: | ---: | ---: | ---: |
+| kpi | 20,064 | 43,161,532 | 43,157,820 | 1.0001 |
+| kpi | 100,006 | 183,277,277 | 183,258,265 | 1.0001 |
+| ObserverKpi | 20,064 | 43,591,128 | 43,586,795 | 1.0001 |
+| ObserverKpi | 100,006 | 191,148,673 | 191,129,040 | 1.0001 |
+
+値は確保量の和で周回で変わらないので、組ごとに 1 回流した。上限は同じ 1 process の数えた使用中 3 GiB で、止まった組は無い。40 万件は流していない。本番の DB は開いていない。
+
+- 対象の commit: `9e3a227b1ad0117a9aa4380b6b4677f31c0cc311`（base `ca332d68b` の上の、この配線の commit）。
+- 道具: `rustc 1.99.1 (58cf8f9c3 2026-10-13)`、`cargo 1.99.1 (5f94df478 2026-08-27)`、`--release` の build、macOS arm64。
+
+```sh
+cargo build --release --locked --example kpi_read_memory
+E=target/release/examples/kpi_read_memory
+$E prepare "$TMPDIR/k/q20k" 20000
+$E prepare "$TMPDIR/k/q100k" 100000
+# 1 process に 1 読み、同時に 1 process だけ
+for q in q20k q100k; do
+  for read in kpi observer; do
+    $E whole "$TMPDIR/k/$q" $read
+  done
+done
+rm -rf "$TMPDIR/k"
+```

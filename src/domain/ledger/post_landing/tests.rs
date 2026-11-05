@@ -332,7 +332,7 @@ fn what_arrives_after_the_final_row_leaves_it_as_it_was() {
     assert_eq!(read.ci_failures.count, 1);
     assert_eq!(read.ci_failures.reach_at, Some(ms(100_100)));
     assert!(
-        later
+        build(&late.events, ms(100_400), "2030-01-01T00:00:00.000Z")
             .iter()
             .filter(|row| row.kind == LedgerKind::Queue)
             .any(|row| row

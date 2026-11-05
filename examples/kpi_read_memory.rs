@@ -5,16 +5,11 @@
 //! `prepare <dir> <events>` lays down a queue at `<dir>/queue.db` of about
 //! `<events>` events, with its runs' session steps and the host's samples,
 //! and builds its ledger as a supervisor does, page by page behind the
-//! events. `measure <dir> <kpi|observer> [<candidate>]` makes one read, cut
-//! in the stages (a) the rows' text, (b) the rows ([`dagq::domain::ledger::LedgerRow`]),
-//! (c) the window, (d) the folds, and prints one line of JSON: each layer's
-//! peak and what it carried. `whole <dir> <kpi|observer>` makes the read as
-//! the runtime does, uncut, to set the cut read's peak against. `parts <dir>`
-//! reads the rows and prints what a copy of each of their parts takes, in a
-//! process of its own so that the copies count in no read's peak.
-//!
-//! The candidates are the prototypes the document names: none of them is
-//! wired to `kpi`, `stats` or `report`.
+//! events. `whole <dir> <kpi|observer>` makes the read as the runtime does
+//! and prints one line of JSON: its peak and its answer's digest. `parts
+//! <dir>` reads the rows the store holds and prints what a copy of each of
+//! their parts takes, in a process of its own so that the copies count in no
+//! read's peak.
 //!
 //! One process makes one read. A process whose counted bytes in use pass
 //! [`LIMIT`] stops in the allocator, whichever stage it is in.
@@ -27,21 +22,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dagq::application::kpi::{self, Host};
 use dagq::application::supervise::{Retain, build_pass};
 use dagq::application::{LedgerStore, NodeSampleStore, SessionStepStore};
+use dagq::domain::RunId;
 use dagq::domain::areas::AreaMap;
 use dagq::domain::environment::NodeRate;
 use dagq::domain::host_metrics::{COLUMNS, HostSample, SampleSource};
 use dagq::domain::kpi::config::KpiConfig;
 use dagq::domain::kpi::{KpiQuery, Period, observe};
 use dagq::domain::ledger::builder::Builder;
-use dagq::domain::ledger::window::{
-    self, LedgerWindow, WindowQuery, run_on_its_way, runs_on_their_way,
-};
-use dagq::domain::ledger::{LedgerKind, LedgerRow, steps};
+use dagq::domain::ledger::window::{LedgerWindow, WindowQuery, run_on_its_way, runs_on_their_way};
+use dagq::domain::ledger::{LedgerKind, LedgerRow};
 use dagq::domain::marks::utc_text;
 use dagq::domain::session_step::{Step, StepKind, StepTarget};
-use dagq::domain::{RunEvent, RunId};
 use dagq::infrastructure::sqlite::SqliteQueue;
-use rusqlite::types::ValueRef;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
@@ -637,35 +629,8 @@ fn fold(window: &LedgerWindow, now: i64, read: &str, queue: &SqliteQueue) -> Val
     }
 }
 
-/// The rows' text, every column of every row held at once: what a read
-/// would hold if it read the rows before it made any.
-fn read_text(db: &Connection) -> (usize, usize, Vec<Vec<String>>) {
-    let mut held = Vec::new();
-    let (mut total, mut largest) = (0, 0);
-    let mut statement = db
-        .prepare("SELECT * FROM ledger_rows WHERE kind=?1 ORDER BY key")
-        .unwrap();
-    for kind in LedgerKind::ALL {
-        let columns = statement.column_count();
-        let mut rows = statement.query([kind.as_str()]).unwrap();
-        while let Some(row) = rows.next().unwrap() {
-            let mut texts = Vec::new();
-            let mut bytes = 0;
-            for column in 0..columns {
-                if let ValueRef::Text(text) = row.get_ref(column).unwrap() {
-                    bytes += text.len();
-                    texts.push(String::from_utf8_lossy(text).into_owned());
-                }
-            }
-            total += bytes;
-            largest = largest.max(bytes);
-            held.push(texts);
-        }
-    }
-    (total, largest, held)
-}
-
-/// The rows of a window, as `LedgerStore::ledger_window` reads them.
+/// The rows the store holds with the runs' on their way, each whole: what
+/// [`parts`] copies the parts of.
 fn read_rows(queue: &SqliteQueue, query: &WindowQuery) -> Vec<LedgerRow> {
     let mut rows = Vec::new();
     for kind in LedgerKind::ALL {
@@ -676,154 +641,6 @@ fn read_rows(queue: &SqliteQueue, query: &WindowQuery) -> Vec<LedgerRow> {
         rows.extend(run_on_its_way(&run, &events, query.now_ms));
     }
     rows
-}
-
-/// How many rows the second prototype reads at a time.
-const ROWS_PER_PAGE: usize = 50;
-
-/// The second prototype, what a window needs of the rows as they are read:
-/// each page's records are moved out and kept once, a queue row is dropped
-/// (`kpi` and `report` read no queue row but its records) and a run row
-/// loses `detail.steps` (read only by what rebuilds a row, never by a read
-/// of a window). Rows and records in lists of the size they need.
-fn read_lean(queue: &SqliteQueue, query: &WindowQuery) -> (Vec<RunEvent>, Vec<LedgerRow>) {
-    let events = usize::try_from(queue.latest_event_id().unwrap().as_i64()).unwrap_or(0);
-    let mut records: Vec<RunEvent> = Vec::with_capacity(events);
-    let mut kept: Vec<LedgerRow> = Vec::new();
-    let mut keep = |mut row: LedgerRow, kept: &mut Vec<LedgerRow>| {
-        records.append(&mut row.records);
-        row.records = Vec::new();
-        if row.kind == LedgerKind::Queue {
-            return;
-        }
-        if row.kind == LedgerKind::Run
-            && let Some(detail) = row.detail.as_object_mut()
-        {
-            detail.remove(steps::DETAIL_KEY);
-        }
-        kept.push(row);
-    };
-    for kind in LedgerKind::ALL {
-        let mut after: Option<String> = None;
-        loop {
-            let page = queue
-                .ledger_rows_after(kind, after.as_deref(), ROWS_PER_PAGE)
-                .unwrap();
-            let Some(last) = page.last() else { break };
-            after = Some(last.key.clone());
-            for row in page {
-                keep(row, &mut kept);
-            }
-        }
-    }
-    let mut on_their_way = Vec::new();
-    for run in runs_on_their_way(&kept) {
-        let events = queue.ledger_run_events(&run).unwrap();
-        on_their_way.extend(run_on_its_way(&run, &events, query.now_ms));
-    }
-    for row in on_their_way {
-        keep(row, &mut kept);
-    }
-    kept.shrink_to_fit();
-    records.shrink_to_fit();
-    (records, kept)
-}
-
-/// The window of `rows` of the candidate named: `none` is the runtime's.
-fn window_of(candidate: &str, rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
-    match candidate {
-        "none" => window::select(rows, query),
-        "moved" => window::select_moving_records(rows, query),
-        other => panic!("no candidate {other}"),
-    }
-}
-
-/// What the stages (b) and (c) of the candidate named make.
-enum Read {
-    Rows(Vec<LedgerRow>),
-    Lean(Vec<RunEvent>, Vec<LedgerRow>),
-}
-
-struct Layer {
-    name: &'static str,
-    peak: usize,
-    carried: i64,
-}
-
-/// A stage: its peak over the bytes in use at its start, and what it left.
-fn stage<T>(name: &'static str, layers: &mut Vec<Layer>, run: impl FnOnce() -> T) -> T {
-    let start = in_use();
-    reset_peak();
-    let value = run();
-    let peak = peak().saturating_sub(start);
-    layers.push(Layer {
-        name,
-        peak,
-        carried: in_use() as i64 - start as i64,
-    });
-    value
-}
-
-fn measure(dir: &Path, read: &str, candidate: &str) {
-    let now = now_of(dir);
-    let queue = SqliteQueue::open(dir.join("queue.db")).unwrap();
-    let db = Connection::open(dir.join("queue.db")).unwrap();
-    let query = WindowQuery {
-        now_ms: dagq::application::stats::now_ms(now),
-        ..WindowQuery::default()
-    };
-    let base = in_use();
-    let mut layers = Vec::new();
-    // PEAK stands from each stage's start, so the process's is the largest
-    // of the stages'.
-    let mut whole = 0;
-    let mut seen = || whole = whole.max(peak().saturating_sub(base));
-    let (text_bytes, largest_row) = stage("a_text", &mut layers, || {
-        let (total, largest, held) = read_text(&db);
-        drop(held);
-        (total, largest)
-    });
-    seen();
-    let read_of = stage("b_rows", &mut layers, || {
-        if candidate == "lean" {
-            let (records, rows) = read_lean(&queue, &query);
-            Read::Lean(records, rows)
-        } else {
-            Read::Rows(read_rows(&queue, &query))
-        }
-    });
-    seen();
-    let row_count = match &read_of {
-        Read::Rows(rows) | Read::Lean(_, rows) => rows.len(),
-    };
-    let window = stage("c_window", &mut layers, || match read_of {
-        Read::Rows(rows) => window_of(candidate, rows, &query),
-        Read::Lean(records, rows) => window::select_of_records(records, rows, &query),
-    });
-    seen();
-    let answer = stage("d_folds", &mut layers, || fold(&window, now, read, &queue));
-    seen();
-    let events = window.events().len();
-    let (digest, answer_bytes) = answer_digest(&answer);
-    println!(
-        "{}",
-        json!({
-            "mode": "measure",
-            "read": read,
-            "candidate": candidate,
-            "events": events,
-            "rows": row_count,
-            "whole_peak": whole,
-            "layers": layers.iter().map(|layer| json!({
-                "layer": layer.name, "peak": layer.peak, "carried": layer.carried,
-            })).collect::<Vec<_>>(),
-            "text_bytes": text_bytes,
-            "largest_row_text": largest_row,
-            "answer_digest": digest.to_string(),
-            "answer_bytes": answer_bytes,
-            "max_rss": max_rss(),
-        })
-    );
 }
 
 /// The read as the runtime makes it, in one piece.
@@ -858,6 +675,7 @@ fn whole(dir: &Path, read: &str) {
         json!({
             "mode": "whole",
             "read": read,
+            "events": queue.latest_event_id().unwrap().as_i64(),
             "whole_peak": whole_peak,
             "answer_digest": digest.to_string(),
             "answer_bytes": answer_bytes,
@@ -943,13 +761,11 @@ fn main() {
         Some("prepare") if args.len() == 4 => {
             prepare(Path::new(arg(2)), arg(3).parse().unwrap());
         }
-        Some("measure") if args.len() == 4 => measure(Path::new(arg(2)), arg(3), "none"),
-        Some("measure") if args.len() == 5 => measure(Path::new(arg(2)), arg(3), arg(4)),
         Some("whole") if args.len() == 4 => whole(Path::new(arg(2)), arg(3)),
         Some("parts") if args.len() == 3 => parts(Path::new(arg(2))),
         _ => {
             eprintln!(
-                "usage: kpi_read_memory prepare <dir> <events> | measure <dir> <kpi|observer> [<candidate>] | whole <dir> <kpi|observer> | parts <dir>"
+                "usage: kpi_read_memory prepare <dir> <events> | whole <dir> <kpi|observer> | parts <dir>"
             );
             std::process::exit(2);
         }

@@ -562,6 +562,10 @@ impl LedgerStore for SqliteQueue {
         rows.map(|row| row?).collect()
     }
 
+    fn ledger_events_expected(&self) -> Result<usize> {
+        Ok(usize::try_from(self.latest_event_id()?.as_i64()).unwrap_or(0))
+    }
+
     fn ledger_rows_after(
         &self,
         kind: LedgerKind,
@@ -2390,6 +2394,91 @@ mod tests {
                 ..marks
             })
         );
+    }
+
+    /// The window of the store's rows: through a page's length exactly and
+    /// past it no row is lost or repeated, its records are each event once
+    /// by id, none on a row, no queue row and no run row's steps; a run on
+    /// its way, folded at the read, the same.
+    #[test]
+    fn the_window_reads_the_rows_by_pages_and_holds_each_event_once() {
+        use crate::domain::ledger::window::{ROWS_PER_PAGE, WindowQuery};
+        use crate::domain::marks::utc_text;
+        let run_id = |n: usize| format!("{n:08x}-1111-4111-8111-111111111111");
+        let way = run_id(999);
+        for runs in [ROWS_PER_PAGE, ROWS_PER_PAGE + 1, 2 * ROWS_PER_PAGE + 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+            let event = |kind: &str, task: Option<i64>, run: Option<&str>, payload: Value| {
+                queue
+                    .conn
+                    .execute(
+                        "INSERT INTO run_events(task_id, run_id, kind, payload, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            task,
+                            run,
+                            kind,
+                            payload.to_string(),
+                            utc_text(1_900_000_000_000)
+                        ],
+                    )
+                    .unwrap();
+            };
+            queue
+                .conn
+                .execute_batch("PRAGMA foreign_keys = OFF; PRAGMA ignore_check_constraints = ON;")
+                .unwrap();
+            for n in 0..runs {
+                let run = run_id(n);
+                let task = Some(n as i64 + 1);
+                event("run_claimed", task, Some(&run), json!({}));
+                event(
+                    "run_phase_changed",
+                    task,
+                    Some(&run),
+                    json!({"phase": "ended", "blocker": "runtime", "holds": "none",
+                           "attempt": {"kind": "first", "n": 1}, "cause": "x", "v": 1}),
+                );
+            }
+            event("update_installed", None, None, json!({"supervisor": "s"}));
+            event("task_created", Some(999), None, json!({}));
+            event("run_claimed", Some(999), Some(&way), json!({}));
+            let events: Vec<RunEvent> = queue.all_events().unwrap();
+            let on_way = RunId::new(way.clone()).unwrap();
+            for row in ledger::build(&events, 1_900_000_001_000, "2030-01-01T00:00:00.000Z") {
+                if row.key != way {
+                    let mut row = row;
+                    if row.kind == LedgerKind::Run {
+                        row.detail[ledger::steps::DETAIL_KEY] = json!({"outside": 0});
+                    }
+                    queue.write_ledger_row(&row).unwrap();
+                }
+            }
+            assert!(!queue.ledger_rows(LedgerKind::Queue).unwrap().is_empty());
+            let window = queue
+                .ledger_window(&WindowQuery {
+                    now_ms: 1_900_000_001_000,
+                    ..WindowQuery::default()
+                })
+                .unwrap();
+            assert_eq!(window.events(), events, "{runs} runs");
+            assert!(window.rows.iter().all(|row| row.records.is_empty()));
+            assert_eq!(window.of(LedgerKind::Queue).count(), 0);
+            let mut keys: Vec<&str> = window
+                .of(LedgerKind::Run)
+                .map(|row| row.key.as_str())
+                .collect();
+            keys.sort_unstable();
+            let mut expected: Vec<String> = (0..runs).map(run_id).collect();
+            expected.push(on_way.to_string());
+            assert_eq!(keys, expected, "{runs} runs");
+            assert!(
+                window
+                    .of(LedgerKind::Run)
+                    .all(|row| row.detail.get(ledger::steps::DETAIL_KEY).is_none())
+            );
+        }
     }
 
     /// R's time read reads back as written: the lowest too (no event read),
