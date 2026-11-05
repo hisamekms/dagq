@@ -31,7 +31,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use super::{Queue, Repository, Supervisor};
-use crate::application::DependencyGraph;
+use crate::application::{DependencyGraph, SearchIndex, TaskReads};
 use crate::domain::{
     ExecutionClass, Priority, RunId, TaskId, build_wait,
     claim_defer::{
@@ -883,7 +883,7 @@ impl DeferWatch {
     /// review).
     pub(in crate::application::supervise) fn expected_now(
         &mut self,
-        queue: &mut dyn Queue,
+        queue: &mut (impl TaskReads + SearchIndex + ?Sized),
         repository: &dyn Repository,
         task: TaskId,
     ) -> Result<Vec<String>> {
@@ -896,7 +896,7 @@ impl DeferWatch {
     /// changed (ADR-t1981-1).
     pub(in crate::application::supervise) fn expected(
         &mut self,
-        queue: &mut dyn Queue,
+        queue: &mut (impl TaskReads + SearchIndex + ?Sized),
         repository: &dyn Repository,
         task: TaskId,
     ) -> Result<Vec<String>> {

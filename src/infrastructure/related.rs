@@ -1,4 +1,4 @@
-//! `dagq related TASK` on the queue (ADR-0046 decision 4): reads every
+//! `dagq related TASK` on the queue (ADR-0063 decision 4): reads every
 //! task with its landed commits' messages, follow-up origins and duplicate
 //! mark, asks the search index how strongly the task's title matches each
 //! other task, and leaves the scoring to [`crate::domain::related`].

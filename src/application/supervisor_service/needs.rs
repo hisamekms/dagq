@@ -87,6 +87,7 @@ pub(super) const READS: &[&str] = &[
     "proposals",
     "lint_input",
     "notes",
+    // SearchIndex reads have the same read permission as planning records.
     "related_landed_commits",
     "related_tasks",
     "search_documents",

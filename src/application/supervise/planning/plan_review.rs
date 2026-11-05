@@ -638,7 +638,7 @@ impl PlanningState {
         let hotspots = self.conflict_hotspots(env)?;
         let candidates = tasks
             .iter()
-            .map(|detail| self.duplicate_candidates(env, proposal, &detail.task))
+            .map(|detail| self.duplicate_candidates(&*env.queue, proposal, &detail.task))
             .collect::<Result<Vec<_>>>()?;
         let language = env.verifier.language();
         // A replacement of a parked task: its plan, the conditions and the
@@ -723,14 +723,13 @@ impl PlanningState {
     /// them the proposal's own.
     fn duplicate_candidates(
         &self,
-        env: &PlanningEnv<'_>,
+        index: &(impl crate::application::SearchIndex + ?Sized),
         proposal: &Proposal,
         task: &Task,
     ) -> Result<DuplicateCandidates> {
         let own = proposal.task_ids();
         let wanted = DUPLICATE_CANDIDATES + own.len();
-        let related = env
-            .queue
+        let related = index
             .related_tasks(task.id(), &[], wanted)?
             .related
             .into_iter()
@@ -738,8 +737,7 @@ impl PlanningState {
             .take(DUPLICATE_CANDIDATES)
             .collect();
         let search = match any_word_query(task.title()) {
-            Some(terms) => env
-                .queue
+            Some(terms) => index
                 .search_documents(&SearchQuery {
                     terms,
                     kinds: vec![SearchKind::Task, SearchKind::Commit],

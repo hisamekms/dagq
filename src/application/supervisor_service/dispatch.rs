@@ -1213,19 +1213,15 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
         }
         "related_landed_commits" => {
             let (task, limit): (TaskId, usize) = read(op, args)?;
-            answer(PlanningRecords::related_landed_commits(
-                &*store, task, limit,
-            ))
+            answer(SearchIndex::related_landed_commits(&*store, task, limit))
         }
         "related_tasks" => {
             let (task, statuses, limit): (TaskId, Vec<String>, usize) = read(op, args)?;
-            answer(PlanningRecords::related_tasks(
-                &*store, task, &statuses, limit,
-            ))
+            answer(SearchIndex::related_tasks(&*store, task, &statuses, limit))
         }
         "search_documents" => {
             let (query,): (SearchQuery,) = read(op, args)?;
-            answer(PlanningRecords::search_documents(&*store, &query))
+            answer(SearchIndex::search_documents(&*store, &query))
         }
         "task_goals" => answer(PlanningRecords::task_goals(&*store)),
         "task_titles" => answer(PlanningRecords::task_titles(&*store)),

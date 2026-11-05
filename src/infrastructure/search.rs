@@ -1,10 +1,13 @@
-//! `dagq search` on the queue's FTS5 index (ADR-0046 decisions 1–3). The
+//! `dagq search` on the queue's FTS5 index (ADR-0063 decisions 1–3). The
 //! index and the triggers that keep it current are migration 0026's; this
 //! module only reads it, and fills the landed commits whose message the
 //! `run_integrated` payload lacked.
 use anyhow::{Result, ensure};
 use rusqlite::{Row, params, params_from_iter, types::Value};
 use serde_json::{Map, json};
+
+use crate::application::SearchIndex;
+use crate::domain::{TaskId, related::RelatedPage};
 
 use super::sqlite::{SqliteQueue, optional_enum_col};
 use crate::domain::search::{
@@ -30,6 +33,25 @@ const EXCERPT_CHARS: usize = 24;
 const OPEN: &str = "\u{2}";
 const CLOSE: &str = "\u{3}";
 const TITLE_CHARS: usize = 80;
+
+/// SQLite's search adapter: the index reads and relatedness joins stay
+/// here and in `related`, behind [`SearchIndex`] (ADR-0063 decisions 1–4).
+impl SearchIndex for SqliteQueue {
+    fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>> {
+        SqliteQueue::related_landed_commits(self, task, limit)
+    }
+    fn related_tasks(
+        &self,
+        task: TaskId,
+        statuses: &[String],
+        limit: usize,
+    ) -> Result<RelatedPage> {
+        SqliteQueue::related(self, task.as_i64(), statuses, limit)
+    }
+    fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage> {
+        SqliteQueue::search(self, query)
+    }
+}
 
 impl SqliteQueue {
     /// Documents matching `query`, best first. Terms of three or more
@@ -154,7 +176,7 @@ impl SqliteQueue {
         Ok(filled)
     }
 
-    /// The landed commits recorded without their message (ADR-0046
+    /// The landed commits recorded without their message (ADR-0063
     /// decision 3), oldest first: what `migrate`'s client reads with Git
     /// and sends back ([`Self::fill_commit_message`]).
     pub fn missing_commit_messages(&self) -> Result<Vec<MissingCommitMessage>> {

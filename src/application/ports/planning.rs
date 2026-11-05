@@ -1049,23 +1049,28 @@ pub trait GoalReviewStore {
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<serde_json::Value>;
 }
 
-/// What the other contexts read of the planning tables (`tasks`,
-/// `draft_origins` and the search index with `landed_commits`): the
-/// related tasks and their landed commits, the search, and the lookups
-/// `stats`, `kpi` and `forecast` join runs with. A pure read, open to
-/// every context (src/context_boundaries/ownership.rs).
-pub trait PlanningRecords {
+/// Search and relatedness over the indexed planning documents, published
+/// to every context. This read-only port is independent of the planning
+/// records: an adapter owns its index queries and joins, while the domain
+/// owns query interpretation and relatedness scoring (ADR-0063 decisions 1–4).
+pub trait SearchIndex {
     /// The commits that landed the `limit` completed tasks most related to
-    /// `task` (`dagq related`, ADR-0046), for the files it is expected to
+    /// `task` (`dagq related`, ADR-0063 decision 4), for the files it is expected to
     /// touch when it declares no concrete path (ADR-0069, ADR-t1981-1).
     fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>>;
     /// The `limit` tasks most related to `task`, best first, with their
     /// clues, kept to `statuses` (empty: any status; `dagq related`,
-    /// ADR-0046 decision 4).
+    /// ADR-0063 decision 4).
     fn related_tasks(&self, task: TaskId, statuses: &[String], limit: usize)
     -> Result<RelatedPage>;
-    /// The documents matching `query`, best first (`dagq search`, ADR-0046).
+    /// The documents matching `query`, best first (`dagq search`, ADR-0063 decisions 1–3).
     fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage>;
+}
+
+/// The planning tables' pure lookups (`tasks` and `draft_origins`) that
+/// `stats`, `kpi` and `forecast` join runs with, open to every context
+/// (src/context_boundaries/ownership.rs).
+pub trait PlanningRecords {
     /// The goal of every task, for `stats`.
     fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>>;
     /// The title of every task, for `stats`.

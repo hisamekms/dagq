@@ -38,7 +38,7 @@ use serde_json::{Value, json};
 pub use observation::ObservationSources;
 pub use planning::PlanningSources;
 
-use crate::application::{AskStore, ObserverLog, PlanningRecords, QueueRecords, RunLog, TaskStore};
+use crate::application::{AskStore, ObserverLog, QueueRecords, RunLog, SearchIndex, TaskStore};
 use crate::domain::kpi::CompareSpec;
 use crate::domain::queue_service::UseCase;
 use crate::domain::stats::Cursor;
@@ -1027,7 +1027,7 @@ impl<Q: ?Sized, T: PlanningSources<Q> + ObservationSources<Q> + ?Sized> QueueRea
 /// from `sources`.
 pub fn answer<Q, S>(queue: &mut Q, sources: &S, read: &QueueRead) -> Result<Value>
 where
-    Q: TaskStore + AskStore + RunLog + ObserverLog + QueueRecords + PlanningRecords,
+    Q: TaskStore + AskStore + RunLog + ObserverLog + QueueRecords + SearchIndex,
     S: QueueReadSources<Q> + ?Sized,
 {
     match read {

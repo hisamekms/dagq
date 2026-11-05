@@ -12,7 +12,7 @@ use super::host::{HeadlessJobStore, HostOpsQueue, InboxWatchLog, SupervisorRegis
 use super::observation::{ObservationQueue, QueueRecords};
 use super::planning::{
     DraftPlannerStore, GoalReviewStore, PlanRequestStore, PlanReviewStore, PlanningRecords,
-    TaskStore,
+    SearchIndex, TaskStore,
 };
 use crate::application::{timestamp, unix_seconds};
 use crate::domain::{
@@ -760,6 +760,7 @@ pub trait EventStore {
 pub trait StateStore:
     TaskStore
     + PlanningRecords
+    + SearchIndex
     + PlanRequestStore
     + DraftPlannerStore
     + PlanReviewStore
@@ -778,6 +779,7 @@ pub trait StateStore:
 impl<
     T: TaskStore
         + PlanningRecords
+        + SearchIndex
         + PlanRequestStore
         + DraftPlannerStore
         + PlanReviewStore

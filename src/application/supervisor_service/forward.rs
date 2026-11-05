@@ -204,7 +204,7 @@ impl TaskStore for SupervisorQueue {
     }
 }
 
-impl PlanningRecords for SupervisorQueue {
+impl SearchIndex for SupervisorQueue {
     fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>> {
         self.remote(
             "related_landed_commits",
@@ -225,6 +225,9 @@ impl PlanningRecords for SupervisorQueue {
     fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage> {
         self.remote("search_documents", vec![to_value(query)?])
     }
+}
+
+impl PlanningRecords for SupervisorQueue {
     fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>> {
         self.remote("task_goals", vec![])
     }

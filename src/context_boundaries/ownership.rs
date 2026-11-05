@@ -566,6 +566,7 @@ pub(super) const PORTS: &[Port] = &[
     port("TaskReads", Public(All)), // the reads of the tasks, goals, proposals and notes
     port("TaskStore", Partial),
     port("PlanningRecords", Public(All)),
+    port("SearchIndex", Public(All)),
     port("DraftPlannerReads", Public(All)), // the improvements running and the findings waiting for a planner
     port("DraftPlannerStore", Partial),
     port("PlanReviewStore", Internal),

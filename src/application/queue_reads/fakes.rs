@@ -1,4 +1,4 @@
-//! A [`QueueRecords`] and [`PlanningRecords`] of the tests of the context
+//! A [`QueueRecords`] and [`PlanningRecords`] and [`SearchIndex`] of the tests of the context
 //! modules: it records what a read asked of it and answers no other method.
 
 use std::cell::RefCell;
@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::application::{PlanningRecords, QueueRecords};
+use crate::application::{PlanningRecords, QueueRecords, SearchIndex};
 use crate::domain::related::RelatedPage;
 use crate::domain::search::{SearchPage, SearchQuery};
 use crate::domain::{
@@ -21,7 +21,7 @@ pub(super) struct Records {
     pub findings: RefCell<Vec<FindingQuery>>,
 }
 
-impl PlanningRecords for Records {
+impl SearchIndex for Records {
     fn related_landed_commits(&self, _: TaskId, _: usize) -> Result<Vec<String>> {
         unimplemented!()
     }
@@ -43,6 +43,9 @@ impl PlanningRecords for Records {
     fn search_documents(&self, _: &SearchQuery) -> Result<SearchPage> {
         unimplemented!()
     }
+}
+
+impl PlanningRecords for Records {
     fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>> {
         unimplemented!()
     }

@@ -1,5 +1,4 @@
-//! The lookups of the planning tables the other contexts read: the related
-//! tasks, the search, and what `stats`, `kpi` and `forecast` join with
+//! The lookups of the planning tables that `stats`, `kpi` and `forecast` join with
 //! ([`PlanningRecords`]).
 
 use super::*;
@@ -40,20 +39,6 @@ impl SqliteQueue {
 /// The [`PlanningRecords`] port over the inherent methods, which callers
 /// that hold a `SqliteQueue` keep using directly.
 impl PlanningRecords for SqliteQueue {
-    fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>> {
-        SqliteQueue::related_landed_commits(self, task, limit)
-    }
-    fn related_tasks(
-        &self,
-        task: TaskId,
-        statuses: &[String],
-        limit: usize,
-    ) -> Result<RelatedPage> {
-        SqliteQueue::related(self, task.as_i64(), statuses, limit)
-    }
-    fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage> {
-        SqliteQueue::search(self, query)
-    }
     fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>> {
         SqliteQueue::task_goals(self)
     }

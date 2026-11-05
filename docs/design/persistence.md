@@ -319,11 +319,12 @@ migrationを足すtaskの規則（リリース済みは変えない）は[migrat
 ## 全文検索（search）
 
 `dagq search`の索引（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)決定1〜3）。
-索引とtriggerは`migrations/0026_search.sql`、読むのは`src/infrastructure/search.rs`、問い合わせの解釈と抜粋は`src/domain/search.rs`。
+計画の記録と独立したport `SearchIndex`を通す。
+SQLite adapterは`src/infrastructure/search.rs`、索引とtriggerは`migrations/0026_search.sql`、問い合わせの解釈と抜粋は`src/domain/search.rs`。
 
 - 1つのFTS5の表にtask・goal・note・着地のcommitをまとめる（表を分けると`bm25`の統計が分かれ、kindをまたいで順位を比べられない）。
 - tokenizerは`trigram`で、空白で語を区切らない日本語とpathの部分一致を引く。
-  `domain::search::TRIGRAM`の文字数に満たない語は索引で引けないので`LIKE`で絞り、`OR` / `NOT` / 括弧とは組み合わせられない。
+  短い語の制約は`src/domain/search.rs`が持つ。
 - 索引はDBのtriggerが同じトランザクションで保つので、索引を知らない古いバイナリの書き込みにも追いつく。
   `tasks` / `goals` / `run_events`を作り直すmigrationはtriggerを作り直す。
 - `landed_commits`は`run_integrated`のeventからtriggerが書き（欠けたpayloadは着地を止めずに行を飛ばす）、messageの無い行は`dagq migrate`がGitから埋める。
@@ -331,7 +332,8 @@ migrationを足すtaskの規則（リリース済みは変えない）は[migrat
 ## 関連（related）
 
 `dagq related TASK`（ADR-0063決定4）は表を足さず、既存の表と`search_index`を読む。
-読むのは`src/infrastructure/related.rs`、手がかりの取り出しと点数と重みは`src/domain/related.rs`。
+`SearchIndex`が関連のtaskと着地のcommitを読む。
+SQLite adapterは`src/infrastructure/related.rs`、手がかりと点数と重みは`src/domain/related.rs`。
 
 - 点数は手がかりの重みの和で、多くのtaskが共有する手がかりほど割り引く（`rarity`）。
 - 重みはADR-0063を置き換えずに変えてよく、変えたら`tests/it/related.rs`の確かめと合わせる。
