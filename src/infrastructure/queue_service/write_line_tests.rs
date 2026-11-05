@@ -240,7 +240,7 @@ impl HeldLine {
                 let _ = gone.recv_timeout(BOUND);
                 LineAnswer {
                     response: ServiceResponse::success(Value::Null),
-                    role: None,
+                    notes: RequestNotes::default(),
                 }
             })
             .unwrap();
@@ -475,7 +475,7 @@ fn a_refused_read_does_not_wait_for_a_held_line_and_its_record_follows() {
         .line
         .enqueue(|| LineAnswer {
             response: ServiceResponse::success(Value::Null),
-            role: None,
+            notes: RequestNotes::default(),
         })
         .unwrap()
         .recv_timeout(BOUND)
@@ -538,7 +538,7 @@ fn marked_on_the_line(line: &Arc<ServiceWriteLine>, mark: bool) -> bool {
             );
             LineAnswer {
                 response: ServiceResponse::success(Value::Null),
-                role: None,
+                notes: RequestNotes::default(),
             }
         })
         .unwrap();

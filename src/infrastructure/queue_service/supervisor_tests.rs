@@ -30,7 +30,7 @@ pub(super) fn claimed_with(
 /// UUID, shared by every connection of the process that opens it while
 /// the returned queue (which keeps it) is open; the tokens' files stay in
 /// the returned directory.
-fn claimed_in_memdb(
+pub(super) fn claimed_in_memdb(
     token: &LeaseToken,
     name: &str,
 ) -> (tempfile::TempDir, SqliteQueue, SqliteServiceBackend) {
@@ -105,6 +105,7 @@ fn claimed_at_with(
         stands_for: None,
         doctor: None,
         write_line: None,
+        heavy_reads: None,
     };
     (backend, queue)
 }

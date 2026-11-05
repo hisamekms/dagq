@@ -868,6 +868,11 @@ string_enum!(
     /// request is longer than [`MAX_REQUEST_BYTES`], so it is not sent
     /// ([`request_too_large_message`]).
     RequestTooLarge => "request_too_large",
+    /// `busy`: the service runs as many heavy reads as it runs at once, and
+    /// no place came to this one in the time it waited, so it read
+    /// nothing ([`crate::application::heavy_reads`]). The same request may
+    /// be sent again in a little while.
+    Busy => "busy",
 });
 
 // The state of a queue's service as a look at it finds it: `running` (it

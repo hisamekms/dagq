@@ -29,6 +29,7 @@
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -38,6 +39,7 @@ use tracing::warn;
 
 use super::commands::dialogue::{Dialogue, DialogueStore, MarkChange};
 use super::commands::{DenialLog, Gate};
+use super::heavy_reads::{HeavyReadNote, HeavyReadPlace, HeavyReads, HeavyReadsBusy};
 use super::queue_commands::{BadCommand, QueueCommand};
 use super::queue_reads::{BadRead, QueueRead};
 use super::queue_writes::{BadWrite, QueueWrite};
@@ -215,6 +217,12 @@ pub trait ServiceBackend: Send + Sync {
     /// The unix milliseconds now, by the service's clock: what a target's
     /// command is read against, past the time it ends by or not.
     fn now_ms(&self) -> i64;
+    /// The places of the heavy reads this service answers at once; `None`
+    /// for a backend no service runs (a supervisor's or a test's in-process
+    /// one), whose one caller reads what it asks.
+    fn heavy_reads(&self) -> Option<&HeavyReads> {
+        None
+    }
     /// The queue's DB, which names the queue to [`Self::access`] and
     /// [`Self::telemetry`].
     fn db(&self) -> &std::path::Path;
@@ -459,6 +467,22 @@ pub struct QueueService<'a> {
     pub pid: u32,
 }
 
+/// What a record of the requests says of one, as
+/// [`QueueService::handle_noting`] finds it; never what it is answered by.
+#[derive(Clone, Default)]
+pub struct RequestNotes {
+    /// The role of the principal it was authenticated as: `None` for a
+    /// request refused before, and for `hello`, which needs none.
+    pub role: Option<ActorRole>,
+    /// What it met at the limit of the heavy reads: `None` for what takes no
+    /// place among them, or was refused before it asked for one.
+    pub heavy_read: Option<HeavyReadNote>,
+    /// The place it holds among the heavy reads, which the caller keeps
+    /// until the answer's line is built: the answer in memory counts as much
+    /// as the read that made it.
+    pub place: Option<Arc<HeavyReadPlace>>,
+}
+
 /// Who is at the other end of a request's connection, as the service reads
 /// it from the socket itself (ADR-t3102-1 decision 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,20 +514,17 @@ impl QueueService<'_> {
         peer: Peer,
         process: Option<u32>,
     ) -> ServiceResponse {
-        self.handle_noting_role(request, peer, process, &mut None)
+        self.handle_noting(request, peer, process, &mut RequestNotes::default())
     }
 
-    /// [`Self::handle_from_process`], telling in `role` the role of the
-    /// principal the request was authenticated as (left `None` for a
-    /// request refused before, and for `hello`, which needs none): what a
-    /// record of the requests names its caller by, never what it is
-    /// answered by.
-    pub fn handle_noting_role(
+    /// [`Self::handle_from_process`], telling in `notes` what a record of
+    /// the requests says of it.
+    pub fn handle_noting(
         &self,
         request: &ServiceRequest,
         peer: Peer,
         process: Option<u32>,
-        role: &mut Option<ActorRole>,
+        notes: &mut RequestNotes,
     ) -> ServiceResponse {
         if !answers(request.api_version) {
             return ServiceResponse::failure(
@@ -541,7 +562,7 @@ impl QueueService<'_> {
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
-        *role = Some(principal.role);
+        notes.role = Some(principal.role);
         // A repository queue answers only the repository it is bound to,
         // as the command line refused every command of another, and only
         // to a principal it knows.
@@ -617,10 +638,17 @@ impl QueueService<'_> {
         // The queue the token's run or target was read on, when it was,
         // is the use case's: it is opened once.
         let opened = checked.map_or_else(|| self.open_on(connection, &actor), Ok);
-        respond(
-            opened
-                .and_then(|mut queue| run(&mut *queue, &actor, request.use_case, &request.params)),
-        )
+        let heavy_reads = self.backend.heavy_reads();
+        respond(opened.and_then(|mut queue| {
+            run(
+                &mut *queue,
+                &actor,
+                request.use_case,
+                &request.params,
+                heavy_reads,
+                notes,
+            )
+        }))
     }
 
     /// The queue on `connection` as `actor`; the supervisor's requests
@@ -879,6 +907,9 @@ pub fn respond(result: Result<Value>) -> ServiceResponse {
             }
             None if error.downcast_ref::<super::NotLeader>().is_some() => {
                 ServiceResponse::failure(ServiceErrorCode::NotLeader, format!("{error:#}"))
+            }
+            None if error.downcast_ref::<HeavyReadsBusy>().is_some() => {
+                ServiceResponse::failure(ServiceErrorCode::Busy, format!("{error:#}"))
             }
             None => {
                 let mut response =
@@ -1877,12 +1908,29 @@ fn authorize_as(
     Ok(())
 }
 
-/// Run `use_case` as `actor` on `queue`.
+/// A place among `heavy_reads` in `notes` for `use_case`, when it is a heavy
+/// read of a service that limits them; the refusal when it gets none.
+fn take_place(
+    heavy_reads: Option<&HeavyReads>,
+    use_case: UseCase,
+    notes: &mut RequestNotes,
+) -> Result<(), HeavyReadsBusy> {
+    if let Some(reads) = heavy_reads {
+        notes.place = reads.admit(use_case, &mut notes.heavy_read)?.map(Arc::new);
+    }
+    Ok(())
+}
+
+/// Run `use_case` as `actor` on `queue`. What reads once it is authorized
+/// takes a place among `heavy_reads` first, when it is a heavy read, and a
+/// refusal reads nothing; the place and what it met go in `notes`.
 fn run(
     queue: &mut dyn ServiceQueue,
     actor: &ActorContext,
     use_case: UseCase,
     raw: &Value,
+    heavy_reads: Option<&HeavyReads>,
+    notes: &mut RequestNotes,
 ) -> Result<Value> {
     let mut store = Store(queue);
     // The executor's telemetry principal reaches `telemetry_report` alone
@@ -1907,6 +1955,7 @@ fn run(
     // authorized as the command line asks for its command.
     if let Some(read) = QueueRead::parse(use_case, raw)? {
         authorize_as(&store, actor, read.capability(), &read.resource())?;
+        take_place(heavy_reads, use_case, notes)?;
         return store.0.read(&read);
     }
     // The planning commands (ADR-t3102-3 decision 3), each authorized by
@@ -1922,6 +1971,7 @@ fn run(
         if let Some((capability, resource)) = command.authorization() {
             authorize_as(&store, actor, capability, &resource)?;
         }
+        take_place(heavy_reads, use_case, notes)?;
         return store.0.command(&command);
     }
     match use_case {
@@ -2968,6 +3018,72 @@ mod tests {
         status: RunStatus,
         log: std::sync::Arc<Mutex<Vec<Value>>>,
         denials: RefCell<Vec<Value>>,
+        reading: std::sync::Arc<ReadHold>,
+    }
+
+    /// What the test's reads go through: it counts them, and while it holds
+    /// them each read stays in until the test lets it go.
+    #[derive(Default)]
+    struct ReadHold {
+        state: Mutex<ReadsHeld>,
+        changed: std::sync::Condvar,
+    }
+
+    #[derive(Default)]
+    struct ReadsHeld {
+        entered: usize,
+        holding: bool,
+        let_go: usize,
+    }
+
+    impl ReadHold {
+        fn holding() -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                state: Mutex::new(ReadsHeld {
+                    holding: true,
+                    ..ReadsHeld::default()
+                }),
+                changed: std::sync::Condvar::new(),
+            })
+        }
+
+        fn entered(&self) -> usize {
+            self.state.lock().unwrap().entered
+        }
+
+        /// A read comes in, and stays while it is held, for [`STEP`] at most.
+        fn pass(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.entered += 1;
+            self.changed.notify_all();
+            let (mut state, _) = self
+                .changed
+                .wait_timeout_while(state, STEP, |state| state.holding && state.let_go == 0)
+                .unwrap();
+            state.let_go = state.let_go.saturating_sub(1);
+        }
+
+        /// Whether `count` reads came in, waiting for them for [`STEP`] at
+        /// most.
+        fn await_entered(&self, count: usize) -> bool {
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(self.state.lock().unwrap(), STEP, |state| {
+                    state.entered < count
+                })
+                .unwrap();
+            state.entered >= count
+        }
+
+        fn let_go(&self, count: usize) {
+            self.state.lock().unwrap().let_go += count;
+            self.changed.notify_all();
+        }
+
+        fn let_all_go(&self) {
+            self.state.lock().unwrap().holding = false;
+            self.changed.notify_all();
+        }
     }
 
     impl DenialLog for Queue {
@@ -3134,6 +3250,7 @@ mod tests {
             Ok(json!({"proposal": id}))
         }
         fn read(&mut self, read: &QueueRead) -> Result<Value> {
+            self.reading.pass();
             Ok(json!({"read": format!("{read:?}")}))
         }
         /// Kept as asked, after its authorization.
@@ -3253,6 +3370,8 @@ mod tests {
         older: bool,
         /// The connections opened, in order: `write`, `read` or `watch`.
         opened: Mutex<Vec<&'static str>>,
+        heavy_reads: Option<HeavyReads>,
+        reading: std::sync::Arc<ReadHold>,
     }
 
     impl Backend {
@@ -3265,11 +3384,15 @@ mod tests {
                 status: self.status,
                 log: self.log.clone(),
                 denials: RefCell::default(),
+                reading: self.reading.clone(),
             }))
         }
     }
 
     impl ServiceBackend for Backend {
+        fn heavy_reads(&self) -> Option<&HeavyReads> {
+            self.heavy_reads.as_ref()
+        }
         fn principal(&self, token: &str) -> Result<Option<Principal>> {
             let run = RunId::new("r1")?;
             Ok(match token {
@@ -3431,6 +3554,8 @@ mod tests {
             log: std::sync::Arc::default(),
             older: false,
             opened: Mutex::default(),
+            heavy_reads: None,
+            reading: std::sync::Arc::default(),
         }
     }
 
@@ -5886,6 +6011,7 @@ mod tests {
                 status: RunStatus::Running,
                 log: Default::default(),
                 denials: RefCell::default(),
+                reading: std::sync::Arc::default(),
             };
             let error = authorize_supervisor(&mut queue, &actor, false).unwrap_err();
             let refused = error.downcast_ref::<AuthorizationError>().unwrap();
@@ -5913,10 +6039,199 @@ mod tests {
             status: RunStatus::Running,
             log: Default::default(),
             denials: RefCell::default(),
+            reading: std::sync::Arc::default(),
         };
         let supervisor = ActorContext::instance(ActorRole::Supervisor, 7);
         authorize_supervisor(&mut queue, &supervisor, true).unwrap();
         assert!(queue.denials.borrow().is_empty());
+    }
+
+    use super::super::heavy_reads::HeavyReadNote as Note;
+    use super::super::heavy_reads::tests::{STEP, TestClock};
+
+    /// `request` as the user on `backend`: its answer and its notes.
+    fn as_user(backend: &Backend, request: &ServiceRequest) -> (ServiceResponse, RequestNotes) {
+        let mut notes = RequestNotes::default();
+        let response = QueueService {
+            backend,
+            build: "b",
+            pid: 1,
+        }
+        .handle_noting(request, Peer::Owner, None, &mut notes);
+        (response, notes)
+    }
+
+    /// Every heavy read reads on the connection of its own thread: none goes
+    /// on the write line, whose order a wait for a place would hold up.
+    #[test]
+    fn no_heavy_read_goes_on_the_write_line() {
+        for (use_case, params) in [
+            (UseCase::Kpi, json!({})),
+            (UseCase::Stats, json!({})),
+            (UseCase::Events, json!({})),
+            (UseCase::Timeline, json!({"run": "r1"})),
+            (UseCase::Forecast, json!({})),
+            (UseCase::Report, json!({"period": "week", "print": true})),
+            (UseCase::ReportInputs, json!({"period": "week"})),
+        ] {
+            assert!(super::super::heavy_reads::is_heavy_read(use_case));
+            assert!(!on_write_line(use_case, &params), "{use_case:?}");
+        }
+    }
+
+    /// As many heavy reads as the limit read at once, the one past it waits
+    /// without reading, and it reads once a place is given back, noting how
+    /// long it waited.
+    #[test]
+    fn heavy_reads_read_up_to_the_limit_and_the_next_waits_for_a_place() {
+        struct Ends<'a>(&'a TestClock, &'a ReadHold);
+        impl Drop for Ends<'_> {
+            fn drop(&mut self) {
+                self.0.advance(Duration::from_secs(3_600));
+                self.1.let_all_go();
+            }
+        }
+        let clock = TestClock::still();
+        let reading = ReadHold::holding();
+        let backend = Backend {
+            heavy_reads: Some(HeavyReads::new(2, Duration::from_secs(60), clock.clone())),
+            reading: reading.clone(),
+            ..backend(RunStatus::Running)
+        };
+        let reads = backend.heavy_reads.as_ref().unwrap();
+        let notes: Vec<_> = std::thread::scope(|scope| {
+            let threads: Vec<_> = [UseCase::Kpi, UseCase::Stats, UseCase::Events]
+                .map(|use_case| {
+                    let backend = &backend;
+                    scope.spawn(move || {
+                        // Its place goes back with the answer built.
+                        let (response, notes) =
+                            as_user(backend, &request(None, use_case, json!({})));
+                        (response, notes.heavy_read)
+                    })
+                })
+                .into_iter()
+                .collect();
+            let ends = Ends(&clock, &reading);
+            assert!(reading.await_entered(2));
+            assert!(reads.await_waiting(1, STEP));
+            assert_eq!(reading.entered(), 2, "the third did not read");
+            clock.advance(Duration::from_secs(5));
+            reading.let_go(1);
+            assert!(reading.await_entered(3), "it reads once a place is free");
+            drop(ends);
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect()
+        });
+        let mut waits: Vec<_> = notes
+            .iter()
+            .map(|(response, note)| {
+                assert!(response.ok, "{response:?}");
+                note.unwrap()
+            })
+            .collect();
+        waits.sort_by_key(|note| note.waited_ms);
+        let at = |waited_ms| Note {
+            waited_ms,
+            refused: false,
+        };
+        assert_eq!(waits, [at(0), at(0), at(5_000)]);
+    }
+
+    /// The place stays with the request's notes after the read, for the
+    /// time its answer's line takes to build, and goes back with them.
+    #[test]
+    fn a_heavy_read_keeps_its_place_until_its_notes_go() {
+        let backend = Backend {
+            heavy_reads: Some(HeavyReads::new(1, Duration::ZERO, TestClock::still())),
+            ..backend(RunStatus::Running)
+        };
+        let reads = backend.heavy_reads.as_ref().unwrap();
+        let (response, notes) = as_user(&backend, &request(None, UseCase::Kpi, json!({})));
+        assert!(response.ok, "{response:?}");
+        assert!(reads.admit(UseCase::Kpi, &mut None).is_err());
+        drop(notes);
+        assert!(reads.admit(UseCase::Kpi, &mut None).is_ok());
+    }
+
+    /// One that gets no place in the time it may wait is refused as `busy`,
+    /// with what the client says of it, and reads nothing.
+    #[test]
+    fn a_heavy_read_that_gets_no_place_is_refused_as_busy_and_reads_nothing() {
+        let wait = Duration::from_secs(60);
+        let backend = Backend {
+            heavy_reads: Some(HeavyReads::new(1, wait, TestClock::stepping(wait))),
+            ..backend(RunStatus::Running)
+        };
+        let reads = backend.heavy_reads.as_ref().unwrap();
+        let _running = reads.admit(UseCase::Stats, &mut None).unwrap();
+        for (use_case, params) in [
+            (UseCase::Kpi, json!({})),
+            (UseCase::Report, json!({"period": "week", "print": true})),
+        ] {
+            let (response, notes) = as_user(&backend, &request(None, use_case, params));
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::Busy),
+                "{response:?}"
+            );
+            let message = &response.error.unwrap().message;
+            assert!(message.contains(use_case.as_str()), "{message}");
+            assert!(message.contains("heavy reads running: 1"), "{message}");
+            assert_eq!(
+                notes.heavy_read,
+                Some(Note {
+                    waited_ms: 60_000,
+                    refused: true
+                })
+            );
+        }
+        assert_eq!(backend.reading.entered(), 0);
+        assert!(backend.log.lock().unwrap().is_empty(), "no command ran");
+    }
+
+    /// With no place free, what is no heavy read does not wait: a light read,
+    /// a write, `hello`; and a request the policy refuses is told so, not
+    /// `busy`.
+    #[test]
+    fn what_is_no_heavy_read_is_answered_with_no_place_free() {
+        let backend = Backend {
+            // A request that asked for a place would be refused at once.
+            heavy_reads: Some(HeavyReads::new(0, Duration::ZERO, TestClock::still())),
+            ..backend(RunStatus::Running)
+        };
+        for (use_case, params) in [
+            (UseCase::Hello, json!({})),
+            (UseCase::StatsInputs, json!({})),
+            (UseCase::List, json!({})),
+            (UseCase::Status, json!({})),
+            (UseCase::Mark, json!({"label": "m"})),
+            (UseCase::SessionRun, json!({"op": "unknown"})),
+        ] {
+            let (response, notes) = as_user(&backend, &request(None, use_case, params));
+            assert_ne!(
+                code(&response),
+                Some(ServiceErrorCode::Busy),
+                "{use_case:?}"
+            );
+            assert_eq!(notes.heavy_read, None, "{use_case:?}");
+        }
+        let mut notes = RequestNotes::default();
+        let denied = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        }
+        .handle_noting(
+            &request(Some("telemetry"), UseCase::Kpi, json!({})),
+            Peer::Other,
+            None,
+            &mut notes,
+        );
+        assert_eq!(code(&denied), Some(ServiceErrorCode::AuthorizationDenied));
+        assert_eq!(notes.heavy_read, None);
     }
 }
 

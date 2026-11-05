@@ -432,6 +432,7 @@ impl Wiring {
                     stands_for: None,
                     doctor: None,
                     write_line: None,
+                    heavy_reads: None,
                 },
                 tokens: self.tokens.clone(),
                 processes: self.processes.clone(),

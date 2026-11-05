@@ -37,7 +37,10 @@
 //!   before an answer past its limit is swapped for `response_too_large`),
 //!   `rows` (the length of a result that is a JSON array, `null` for any
 //!   other), `duration_ms` (from reading the request to building its
-//!   answer, on the monotonic clock; the socket's write is not in it), and
+//!   answer, on the monotonic clock; the socket's write is not in it, the
+//!   wait for a heavy read's place is), `heavy_read_wait_ms` (how long it
+//!   waited for that place, `null` for one that took none),
+//!   `heavy_read_refused` (it got none, and read nothing), and
 //!   `resident_before`, `resident_after` and `peak`.
 //! - `summary`: `at`, `reason` (`window_ended`, or why the service stopped
 //!   first: `stopped`, `queue_gone`, `owner_gone`),
@@ -166,6 +169,9 @@ pub struct Answered {
     pub role: Option<String>,
     pub bytes: usize,
     pub rows: Option<usize>,
+    /// What it met at the limit of the heavy reads, when it asked for a
+    /// place among them.
+    pub heavy_read: Option<crate::application::heavy_reads::HeavyReadNote>,
 }
 
 impl Answered {
@@ -349,6 +355,14 @@ impl StartupReads {
             let mut line = entry.clone();
             if let Value::Object(fields) = &mut line {
                 fields.insert("record".into(), json!("request"));
+                fields.insert(
+                    "heavy_read_wait_ms".into(),
+                    json!(answered.heavy_read.map(|note| note.waited_ms)),
+                );
+                fields.insert(
+                    "heavy_read_refused".into(),
+                    json!(answered.heavy_read.is_some_and(|note| note.refused)),
+                );
                 fields.insert("resident_before".into(), json!(began.before.resident));
                 fields.insert("resident_after".into(), json!(after.resident));
                 fields.insert("peak".into(), json!(after.peak));
@@ -592,6 +606,7 @@ mod tests {
             role: Some("supervisor".into()),
             bytes,
             rows,
+            heavy_read: None,
         }
     }
 
@@ -640,6 +655,8 @@ mod tests {
                 "bytes": 4_096,
                 "rows": 12,
                 "duration_ms": 250,
+                "heavy_read_wait_ms": null,
+                "heavy_read_refused": false,
                 "resident_before": 200,
                 "resident_after": 7_000,
                 "peak": 14_000,

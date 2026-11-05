@@ -59,7 +59,7 @@ use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::queue_commands::QueueCommand;
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
-    Admin, Issued, Peer, QueueService, QueueServiceControl, Replaced, ServiceAccess,
+    Admin, Issued, Peer, QueueService, QueueServiceControl, Replaced, RequestNotes, ServiceAccess,
     ServiceBackend, ServiceProbe, ServiceQueue, TelemetryTokens, on_write_line,
 };
 use crate::application::session::{AgentStart, ReasonParams, SessionOp, WrapperStore};
@@ -1681,6 +1681,39 @@ impl std::fmt::Display for RequestPastLimit {
 
 impl std::error::Error for RequestPastLimit {}
 
+/// A client's wait for the answer to a request of `use_case` that ended
+/// with no answer, after `waited`, what the socket's read says of it naming
+/// neither. The service may still be at it: a read that takes long, or a
+/// write it may yet do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnswerTimedOut {
+    pub use_case: UseCase,
+    pub waited: Duration,
+}
+
+impl std::fmt::Display for AnswerTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the queue service did not answer {} in the {:.1} seconds this client waited",
+            self.use_case.as_str(),
+            self.waited.as_secs_f64(),
+        )
+    }
+}
+
+impl std::error::Error for AnswerTimedOut {}
+
+/// What a read of the answer to a request of `use_case` that failed with
+/// `error` after `waited` says: [`AnswerTimedOut`] for a timeout, which the
+/// system tells as `WouldBlock` or `TimedOut`.
+fn answer_unread(error: std::io::Error, use_case: UseCase, waited: Duration) -> anyhow::Error {
+    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
+        return AnswerTimedOut { use_case, waited }.into();
+    }
+    anyhow::Error::new(error).context("read the queue service's answer")
+}
+
 /// The line of `request`, its newline included, refused as
 /// [`RequestPastLimit`] past [`MAX_REQUEST_BYTES`].
 fn request_line(request: &ServiceRequest) -> Result<Vec<u8>> {
@@ -1771,12 +1804,14 @@ impl std::error::Error for NotConnected {
 /// answer: a listener whose backlog is full, and a service that sends its
 /// answer a little at a time, end in it as one that does not answer. An
 /// error when nothing answers (the caller does not fall back to the DB,
-/// ADR-t1233-1 decision 7), or [`AnswerPastLimit`]; a request past
+/// ADR-t1233-1 decision 7), [`AnswerTimedOut`] when the answer did not come
+/// by the deadline, or [`AnswerPastLimit`]; a request past
 /// [`MAX_REQUEST_BYTES`] is [`RequestPastLimit`], refused before anything
 /// is sent.
 pub fn call(socket: &Path, request: &ServiceRequest, timeout: Duration) -> Result<ServiceResponse> {
     let line = request_line(request)?;
-    let deadline = std::time::Instant::now() + timeout;
+    let started = std::time::Instant::now();
+    let deadline = started + timeout;
     let mut stream = connect_by(socket, deadline).map_err(|source| NotConnected {
         socket: socket.to_path_buf(),
         source,
@@ -1784,7 +1819,7 @@ pub fn call(socket: &Path, request: &ServiceRequest, timeout: Duration) -> Resul
     write_by(&mut stream, &line, deadline).context("send the request to the queue service")?;
     stream.shutdown(std::net::Shutdown::Write).ok();
     let answer = read_by(&mut stream, deadline, MAX_ANSWER_BYTES + 1)
-        .context("read the queue service's answer")?;
+        .map_err(|error| answer_unread(error, request.use_case, started.elapsed()))?;
     if answer.len() > MAX_ANSWER_BYTES {
         return Err(AnswerPastLimit.into());
     }
@@ -1966,7 +2001,8 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// socket or at the broker; `response_too_large`: the answer, which the
 /// service gave, is longer than [`MAX_ANSWER_BYTES`]; `request_too_large`:
 /// the request on the socket is longer than [`MAX_REQUEST_BYTES`] and was
-/// not sent; `no_credential`: the
+/// not sent; the service's `busy`: a heavy read it refused unread, which may
+/// be sent again in a little while; `no_credential`: the
 /// token's file does not read; `control_side_command`: the command is one of the control
 /// side's (`doctor`, `service status`), which a person or the
 /// inbox runs on the host; `no_use_case`: any other command that is none
@@ -3157,6 +3193,9 @@ accepts: schema {} to {}",
         Box::new(super::startup_reads::OwnMemory),
     ));
     let backend = Arc::new(SqliteServiceBackend {
+        heavy_reads: Some(crate::application::heavy_reads::HeavyReads::of_service(
+            options.generators.clock.clone(),
+        )),
         db: options.db.clone(),
         queue_dir: queue_dir.clone(),
         generators: options.generators.clone(),
@@ -3326,7 +3365,7 @@ fn answer_request(
     let began = reads.begin();
     let mut use_case = None;
     let mut op = None;
-    let mut role = None;
+    let mut notes = RequestNotes::default();
     let response = if line.len() > MAX_REQUEST_BYTES {
         ServiceResponse::failure(ServiceErrorCode::BadRequest, "the request is too long")
     } else {
@@ -3340,7 +3379,7 @@ fn answer_request(
                     );
                 }
                 let handled = handled(backend, pid, request, peer, process)?;
-                role = handled.role;
+                notes = handled.notes;
                 handled.response
             }
             Err(error) => ServiceResponse::failure(
@@ -3356,7 +3395,8 @@ fn answer_request(
             &super::startup_reads::Answered {
                 use_case: use_case.map(|use_case| use_case.as_str().to_owned()),
                 op,
-                role: role.map(|role| role.as_str().to_owned()),
+                role: notes.role.map(|role| role.as_str().to_owned()),
+                heavy_read: notes.heavy_read,
                 bytes: built,
                 rows: super::startup_reads::Answered::rows_of(response.result.as_ref()),
             },
@@ -3379,14 +3419,14 @@ fn handled(
     process: Option<u32>,
 ) -> Result<LineAnswer> {
     let handle = move |backend: &SqliteServiceBackend, request: &ServiceRequest| {
-        let mut role = None;
+        let mut notes = RequestNotes::default();
         let response = QueueService {
             backend,
             build: crate::VERSION,
             pid,
         }
-        .handle_noting_role(request, peer, process, &mut role);
-        LineAnswer { response, role }
+        .handle_noting(request, peer, process, &mut notes);
+        LineAnswer { response, notes }
     };
     match &backend.write_line {
         Some(line) if on_write_line(request.use_case, &request.params) => {
@@ -3508,12 +3548,12 @@ fn answer_line(response: &ServiceResponse, use_case: Option<UseCase>) -> Result<
     Ok((out, built))
 }
 
-/// What the write line answers: the request's response and the role it was
-/// authenticated as (see [`QueueService::handle_noting_role`]).
+/// What the write line answers: the request's response and what a record of
+/// the requests says of it (see [`QueueService::handle_noting`]).
 #[derive(Clone)]
 struct LineAnswer {
     response: ServiceResponse,
-    role: Option<ActorRole>,
+    notes: RequestNotes,
 }
 
 /// A write the fence refused ([`crate::application::NotLeader`]): the line
@@ -3590,7 +3630,7 @@ fn on_line(
         }
         LineAnswer {
             response: crate::application::queue_service::respond(wrote.map(|()| Value::Null)),
-            role: None,
+            notes: RequestNotes::default(),
         }
     })?;
     let answer = match answered.recv_timeout(line.record_wait) {
@@ -3640,6 +3680,9 @@ pub struct SqliteServiceBackend {
     /// runs (a supervisor's or a test's in-process one), each of whose
     /// callers opens its own connection on its own thread.
     pub write_line: Option<Arc<ServiceWriteLine>>,
+    /// The places of the heavy reads, the service's alone; `None` for a
+    /// backend no service runs, as [`Self::write_line`].
+    pub heavy_reads: Option<crate::application::heavy_reads::HeavyReads>,
 }
 
 /// The keys ([`Principal::credential_key`]) of the tokens a service
@@ -3713,6 +3756,10 @@ impl SqliteServiceBackend {
 }
 
 impl ServiceBackend for SqliteServiceBackend {
+    fn heavy_reads(&self) -> Option<&crate::application::heavy_reads::HeavyReads> {
+        self.heavy_reads.as_ref()
+    }
+
     fn principal(&self, token: &str) -> Result<Option<Principal>> {
         lookup(&self.queue_dir, token)
     }
@@ -4267,6 +4314,7 @@ impl InProcessCaller {
                 stands_for: None,
                 doctor: None,
                 write_line: None,
+                heavy_reads: None,
             }),
             queue_dir,
             Arc::new(read_token),
@@ -4608,6 +4656,7 @@ impl InProcessControlCaller {
                 stands_for: executable.map(Path::to_path_buf),
                 doctor: None,
                 write_line: None,
+                heavy_reads: None,
             },
             control,
         }
@@ -5916,6 +5965,7 @@ mod tests {
             stands_for: None,
             doctor: None,
             write_line: None,
+            heavy_reads: None,
         };
         let backend = Arc::new(backend);
         let hello = serde_json::to_vec(&ServiceRequest {
@@ -5983,6 +6033,242 @@ mod tests {
             text.lines().all(|line| !line.contains("\"request\"")),
             "{text}"
         );
+    }
+
+    /// What the record says of a heavy read that was refused at the limit
+    /// and of one that took a place: the answer's code and its line's
+    /// fields; a read that takes none has `null` and `false`.
+    #[test]
+    fn the_record_says_what_a_heavy_read_met_at_the_limit() {
+        use super::super::startup_reads::{MemoryReading, ResidentMemory, StartupReads};
+        use crate::application::heavy_reads::HeavyReads;
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct NoMemory;
+        impl ResidentMemory for NoMemory {
+            fn read(&self) -> MemoryReading {
+                MemoryReading::default()
+            }
+        }
+        let clock: Arc<dyn crate::application::Clock> =
+            crate::application::heavy_reads::tests::TestClock::still();
+        let (dir, _queue, mut backend) = supervisor_tests::claimed_in_memdb(
+            &crate::domain::LeaseToken::new("owner"),
+            "heavy-read-record",
+        );
+        backend.queue_dir = dir.path().to_path_buf();
+        backend.heavy_reads = Some(HeavyReads::new(1, Duration::ZERO, clock.clone()));
+        let read_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = read_count.clone();
+        backend.reads = Arc::new(move |_, _, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::Null)
+        });
+        let backend = Arc::new(backend);
+        let buffer = Buffer::default();
+        let reads = StartupReads::new(
+            Some(Box::new(buffer.clone())),
+            clock,
+            Box::new(NoMemory),
+            Duration::from_secs(600),
+        );
+        let line_of = |use_case: UseCase| {
+            serde_json::to_vec(&ServiceRequest {
+                api_version: API_VERSION,
+                token: None,
+                env_role: None,
+                queue: None,
+                binding: None,
+                use_case,
+                params: json!({}),
+            })
+            .unwrap()
+        };
+        let answered = |use_case: UseCase| -> ServiceResponse {
+            let line = line_of(use_case);
+            let out = answer_request(&line, &backend, 7, (Peer::Owner, None), &reads).unwrap();
+            serde_json::from_slice(&out).unwrap()
+        };
+        let took_a_place = answered(UseCase::Kpi);
+        assert!(took_a_place.ok, "{took_a_place:?}");
+        assert_eq!(read_count.load(Ordering::SeqCst), 1);
+        let held = backend.heavy_reads.as_ref().unwrap();
+        let running = held.admit(UseCase::Stats, &mut None).unwrap();
+        let refused = answered(UseCase::Kpi);
+        assert_eq!(
+            refused.error.map(|error| error.code),
+            Some(ServiceErrorCode::Busy)
+        );
+        assert_eq!(read_count.load(Ordering::SeqCst), 1, "it read nothing");
+        let hello = answered(UseCase::Hello);
+        assert!(hello.ok);
+        drop(running);
+        let lines: Vec<Value> = String::from_utf8(buffer.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let of = |line: &Value| {
+            (
+                line["heavy_read_wait_ms"].clone(),
+                line["heavy_read_refused"].clone(),
+            )
+        };
+        assert_eq!(of(&lines[1]), (json!(0), json!(false)));
+        assert_eq!(of(&lines[2]), (json!(0), json!(true)));
+        assert_eq!(of(&lines[3]), (Value::Null, json!(false)));
+    }
+
+    /// A supervisor's operations forwarded to the queue take no place: they
+    /// are answered with none free, `job_read` too, and note no wait.
+    #[test]
+    fn a_supervisor_s_forwarded_operation_takes_no_place() {
+        use crate::application::heavy_reads::{HeavyReads, tests::TestClock};
+        let owner = crate::domain::LeaseToken::new("owner");
+        let (_dir, _queue, mut backend) = supervisor_tests::claimed_in_memdb(&owner, "heavy-op");
+        // A request that asked for a place would be refused at once.
+        backend.heavy_reads = Some(HeavyReads::new(0, Duration::ZERO, TestClock::still()));
+        let token = supervisor_tests::token_of(&backend, &Principal::supervisor(&owner, 7));
+        let service = QueueService {
+            backend: &backend,
+            build: "test",
+            pid: 1,
+        };
+        for (op, args) in [
+            ("ledger_heads", json!(["session", null, 10])),
+            ("ledger_session_anchors", json!([null, 10])),
+            ("job_read", json!([{"kind": "stats_inputs"}])),
+            (
+                "workspace_created",
+                json!([supervisor_tests::RUN, "owner", "ws-1"]),
+            ),
+        ] {
+            let mut notes = RequestNotes::default();
+            let response = service.handle_noting(
+                &ServiceRequest {
+                    api_version: API_VERSION,
+                    token: Some(token.clone()),
+                    env_role: None,
+                    queue: None,
+                    binding: None,
+                    use_case: UseCase::Supervisor,
+                    params: json!({"op": op, "args": args}),
+                },
+                Peer::Other,
+                None,
+                &mut notes,
+            );
+            assert_ne!(
+                response.error.as_ref().map(|error| error.code),
+                Some(ServiceErrorCode::Busy),
+                "{op}: {response:?}"
+            );
+            assert_eq!(notes.heavy_read, None, "{op}");
+            if op != "job_read" {
+                assert!(response.ok, "{op}: {response:?}");
+            }
+        }
+    }
+
+    /// The time a request waits for a place leaves most of a client's wait
+    /// to the read, so that a client gets the refusal and not its own
+    /// timeout.
+    #[test]
+    fn the_wait_for_a_place_leaves_most_of_a_client_s_wait_to_the_read() {
+        let wait = crate::application::heavy_reads::HEAVY_READ_WAIT;
+        assert!(wait * 4 <= CLIENT_TIMEOUT);
+    }
+
+    /// A timeout of the read of the answer, however the system tells it,
+    /// names the use case and the time waited, not the system's words; any
+    /// other failure of the read stays what it was.
+    #[test]
+    fn a_timeout_of_the_answer_s_read_names_the_use_case_and_the_wait() {
+        let waited = Duration::from_millis(300_400);
+        for error in [
+            std::io::Error::from_raw_os_error(libc::EAGAIN),
+            std::io::Error::from(ErrorKind::WouldBlock),
+            std::io::Error::from(ErrorKind::TimedOut),
+        ] {
+            let error = answer_unread(error, UseCase::Kpi, waited);
+            let said = format!("{error:#}");
+            assert!(said.contains("kpi"), "{said}");
+            assert!(said.contains("300.4 seconds"), "{said}");
+            assert!(!said.contains("os error"), "{said}");
+            assert_eq!(
+                error.downcast_ref::<AnswerTimedOut>(),
+                Some(&AnswerTimedOut {
+                    use_case: UseCase::Kpi,
+                    waited
+                })
+            );
+        }
+        let reset = answer_unread(
+            std::io::Error::from(ErrorKind::ConnectionReset),
+            UseCase::Kpi,
+            waited,
+        );
+        assert!(reset.downcast_ref::<AnswerTimedOut>().is_none());
+        assert!(format!("{reset:#}").contains("read the queue service's answer"));
+    }
+
+    /// A client whose service takes the request and never answers gets the
+    /// sentence of its own timeout, as a client's `unreachable`.
+    #[test]
+    fn a_client_that_gets_no_answer_in_time_names_the_use_case_and_the_wait() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = dir.path().join("q.sock");
+        // It listens and never accepts: the connection and the request go
+        // into its backlog, and no answer comes.
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let client = Client {
+            route: ClientRoute::Socket(socket),
+            credential: None,
+            env_role: None,
+            next: "look",
+            queue: None,
+            binding: None,
+        };
+        let error = client
+            .call_within(UseCase::Stats, json!({}), Duration::from_millis(500))
+            .unwrap_err();
+        let failure = error.downcast_ref::<ClientFailure>().unwrap();
+        assert_eq!(failure.code, "unreachable", "{failure}");
+        assert!(
+            failure.message.contains("did not answer stats"),
+            "{failure}"
+        );
+        assert!(
+            failure.message.contains("seconds this client waited"),
+            "{failure}"
+        );
+        assert!(!failure.message.contains("os error"), "{failure}");
+    }
+
+    /// A `busy` reaches a client as a refusal with the service's words.
+    #[test]
+    fn a_client_reads_busy_as_a_refusal_with_the_service_s_words() {
+        let error = answer_of(ServiceResponse::failure(
+            ServiceErrorCode::Busy,
+            "the queue service is busy: heavy reads running: 2",
+        ))
+        .unwrap_err();
+        let failure = error.downcast_ref::<ClientFailure>().unwrap();
+        assert_eq!(failure.code, "busy");
+        assert!(
+            failure.message.contains("heavy reads running: 2"),
+            "{failure}"
+        );
+        assert!(answered_refusal(&error));
     }
 
     #[test]
