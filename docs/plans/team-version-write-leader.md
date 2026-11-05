@@ -30,13 +30,13 @@ related:
 
 | 列 | 型（SQLite / Postgres） | 意味 |
 | --- | --- | --- |
-| `singleton` | `INTEGER` / `integer`、主キー、値は常に 1 | 1 行だけにする鍵（ADR 決定5 の「リーダーの行は 1 つ」を主キーが守る） |
+| `singleton` | `INTEGER` / `integer`、主キー、値は常に 1 | 1 行を指す鍵。主キーだけでは別の値の 2 行目を入れられるので、ADR 決定5 の「リーダーの行は 1 つ」は表の後の一意の索引が守る |
 | `holder` | `TEXT` / `text` | 係の識別子。serviceのプロセスが起動ごとに作る乱数の値（pid やホスト名を含めない。同じ host で起動し直しても別になる） |
 | `generation` | `INTEGER` / `bigint` | 世代の番号。引き継ぐたびに 1 進める。0 は「まだ誰も係になっていない」 |
 | `lease_until_ms` | `INTEGER` / `bigint` | lease の期限（UNIX 時刻のミリ秒、DB の時計）。手放したときは 0 |
 | `acquired_at_ms` | `INTEGER` / `bigint` | 今の世代を取った時刻（観測用） |
 
-行は表を作る migration が `generation = 0`・`lease_until_ms = 0` で 1 行入れる。期限を整数のミリ秒で持つのは、既存の INTEGER の時刻の列（`heartbeat_at` など）と同じ扱いにし、TEXT の日時の比較を増やさないため（[棚卸し](team-version-sqlite-dialect.md)の「型の緩さに頼る所」）。
+行は表を作る migration が `generation = 0`・`lease_until_ms = 0` で 1 行入れる。全表を高々 1 行にするのは定数の式の一意の索引 `write_leader_one_row ON write_leader((1))`（`one_integrating_run_per_queue` と同じ形）で、`singleton` の値に依らず 2 行目を拒む。`CHECK` で値を 1 に絞らないのは [ADR-t876-1](../adr/2026-09-28-t876-1-no-sqlite-check-constraints-until-schema-is-stable.md) が新しい migration の `CHECK` を禁じるため。期限を整数のミリ秒で持つのは、既存の INTEGER の時刻の列（`heartbeat_at` など）と同じ扱いにし、TEXT の日時の比較を増やさないため（[棚卸し](team-version-sqlite-dialect.md)の「型の緩さに頼る所」）。
 
 ### 確かめの SQL の形
 
@@ -113,7 +113,7 @@ migration との順:
 | 走っている plan review は高々 1 つ | `plan_reviews_running ON plan_reviews(finished_at IS NULL) WHERE finished_at IS NULL` | 同じ |
 | 同じ対象と種類の開いた ask は 1 つ | `asks_open`（`ifnull` の式） | `coalesce` の式 |
 | 同じ対象の片付いていない finding は 1 つ | `findings_unsettled`（`ifnull` の式） | `coalesce` の式 |
-| リーダーの行は 1 つ | 新しい表の主キー | 同じ |
+| リーダーの行は 1 つ | 主キーと `write_leader_one_row ON write_leader((1))` | 主キーと同じ式の一意の索引 |
 
 ## (b) trigger の移し先の対応
 
