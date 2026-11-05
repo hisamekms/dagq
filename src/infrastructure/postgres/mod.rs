@@ -12,14 +12,22 @@
 //! begins as `REPEATABLE READ`, which is the one snapshot SQLite's read entry
 //! reads, and read-only.
 //!
-//! The transactions run no statements of the store yet: they do not
-//! implement the execution port ([`super::sql_exec`]).
+//! A transaction is the execution port ([`super::sql_exec`]) on Postgres: it
+//! runs a statement of the shared SQL as [`exec`] maps its parameters' spelling
+//! and its values, so a store module holds no statement of its own for this
+//! dialect. A read entry hands out the same type as a write entry, as SQLite's
+//! does; the read-only transaction refuses a write.
 
 #[cfg(feature = "postgres")]
 pub mod client;
+pub mod exec;
 
+use self::exec::{PostgresRow, numbered_parameters, returning_id};
 use super::sql_dialect::SqlDialect;
-use super::sql_exec::TransactionEntries;
+use super::sql_exec::{
+    OptionalRow, SqlError, SqlRead, SqlResult, SqlRow, SqlValue, SqlWrite, TransactionEntries,
+    sql_params,
+};
 use super::write_leader::{IDENTITY_SQL, WriteIdentity, millis, renew_sql};
 use crate::application::NotLeader;
 use anyhow::{Context, Result};
@@ -38,47 +46,19 @@ fn fence_sql() -> String {
     numbered_parameters(&renew_sql(&SqlDialect::Postgres.now_millis()))
 }
 
-/// `sql` with the parameters spelled as the shared SQL spells them (`?1`,
-/// `?`) spelled as Postgres does (`$1`), and a `?` taking the number after
-/// the highest so far as SQLite's does. What is quoted is left as it is.
-fn numbered_parameters(sql: &str) -> String {
-    let mut numbered = String::with_capacity(sql.len());
-    let mut highest = 0_u64;
-    let mut quote = None;
-    let mut chars = sql.chars().peekable();
-    while let Some(c) = chars.next() {
-        match (quote, c) {
-            (None, '\'' | '"') => quote = Some(c),
-            (Some(open), _) if open == c => quote = None,
-            (None, '?') => {
-                let mut digits = String::new();
-                while let Some(digit) = chars.next_if(char::is_ascii_digit) {
-                    digits.push(digit);
-                }
-                let number = digits.parse().unwrap_or(highest + 1);
-                highest = highest.max(number);
-                numbered.push('$');
-                numbered.push_str(&number.to_string());
-                continue;
-            }
-            _ => {}
-        }
-        numbered.push(c);
-    }
-    numbered
-}
-
-/// What a driver answers for the entries.
+/// What a driver answers for the store. Its statements' parameters are
+/// already numbered as Postgres spells them.
 pub trait PostgresSession {
     /// Run `sql`, a statement without parameters.
     fn run(&self, sql: &str) -> Result<()>;
 
-    /// The holder and generation the query `sql` reads from its one row.
-    fn leader_identity(&self, sql: &str) -> Result<(Option<String>, i64)>;
+    /// The rows of `sql` with `params`, all of them: a store module may run
+    /// another statement while it visits a row, and the one connection cannot
+    /// while it is still reading rows.
+    fn query(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Vec<PostgresRow>>;
 
-    /// Run the fence `sql` with its parameters and return the rows changed.
-    fn fence(&self, sql: &str, holder: Option<&str>, generation: i64, lease_ms: i64)
-    -> Result<u64>;
+    /// Run the write `sql` with `params` and return the rows it changed.
+    fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<u64>;
 }
 
 /// The Postgres store on one session, which writes as the identity it read
@@ -92,14 +72,18 @@ impl<S: PostgresSession> PostgresStore<S> {
     /// The store on the newly connected `session`.
     pub fn open(session: S) -> Result<Self> {
         session.run(SESSION_SETUP_SQL)?;
-        let (holder, generation) = session
-            .leader_identity(IDENTITY_SQL)
-            .context("read the write leader's row")?;
-        Ok(Self {
-            session,
-            identity: WriteIdentity { holder, generation },
-        })
+        let identity = read_identity(&session).context("read the write leader's row")?;
+        Ok(Self { session, identity })
     }
+}
+
+fn read_identity(session: &impl PostgresSession) -> SqlResult<WriteIdentity> {
+    let rows = session.query(IDENTITY_SQL, &[])?;
+    let row = SqlRow::new(rows.first().ok_or(SqlError::NoRows)?);
+    Ok(WriteIdentity {
+        holder: row.get(0)?,
+        generation: row.get(1)?,
+    })
 }
 
 impl<S: PostgresSession> TransactionEntries for PostgresStore<S> {
@@ -116,11 +100,13 @@ impl<S: PostgresSession> TransactionEntries for PostgresStore<S> {
     /// before the retryable [`NotLeader`] returns.
     fn write_entry(&self, name: &'static str) -> Result<PostgresTx<'_, S>> {
         let tx = PostgresTx::begin(&self.session, name, BEGIN_WRITE_SQL)?;
-        let changed = self.session.fence(
+        let changed = self.session.execute(
             &fence_sql(),
-            self.identity.holder.as_deref(),
-            self.identity.generation,
-            millis(crate::domain::write_leader::LEASE)?,
+            sql_params![
+                self.identity.holder.as_deref(),
+                self.identity.generation,
+                millis(crate::domain::write_leader::LEASE)?,
+            ],
         )?;
         if changed == 0 {
             return Err(NotLeader.into());
@@ -160,6 +146,43 @@ impl<'s, S: PostgresSession> PostgresTx<'s, S> {
     }
 }
 
+impl<S: PostgresSession> SqlRead for PostgresTx<'_, S> {
+    fn dialect(&self) -> SqlDialect {
+        SqlDialect::Postgres
+    }
+
+    fn visit_rows(
+        &self,
+        sql: &str,
+        params: &[SqlValue],
+        visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
+    ) -> SqlResult<()> {
+        for row in self.session.query(&numbered_parameters(sql), params)? {
+            if !visit(&SqlRow::new(&row))? {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<S: PostgresSession> SqlWrite for PostgresTx<'_, S> {
+    fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
+        let changed = self.session.execute(&numbered_parameters(sql), params)?;
+        Ok(usize::try_from(changed).unwrap_or(usize::MAX))
+    }
+
+    fn insert_id(&self, sql: &str, params: &[SqlValue]) -> SqlResult<i64> {
+        self.insert_id_if_inserted(sql, params)?
+            .ok_or(SqlError::NoRows)
+    }
+
+    fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>> {
+        self.query_row(&returning_id(sql), params, |row| row.get(0))
+            .optional()
+    }
+}
+
 impl<S: PostgresSession> Drop for PostgresTx<'_, S> {
     fn drop(&mut self) {
         if self.open
@@ -179,13 +202,20 @@ mod tests {
     use super::*;
     use crate::domain::write_leader::LEASE;
     use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
-    /// A session that records its statements and whose fence changes
-    /// `changed` rows.
+    /// A row of the one column `name`.
+    fn one_column(name: &str, value: SqlValue) -> PostgresRow {
+        PostgresRow::new(Rc::from([name.to_owned()]), vec![value])
+    }
+
+    /// A session that records its statements and arguments, whose writes
+    /// change `changed` rows and whose queries answer `answers`.
     #[derive(Default)]
     struct Recorded {
         statements: RefCell<Vec<String>>,
-        fences: RefCell<Vec<(Option<String>, i64, i64)>>,
+        bound: RefCell<Vec<Vec<SqlValue>>>,
+        answers: RefCell<Vec<PostgresRow>>,
         changed: Cell<u64>,
         begin_fails: Cell<bool>,
     }
@@ -207,22 +237,20 @@ mod tests {
             Ok(())
         }
 
-        fn leader_identity(&self, sql: &str) -> Result<(Option<String>, i64)> {
+        fn query(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
             self.statements.borrow_mut().push(sql.to_owned());
-            Ok((Some("service-1".to_owned()), 7))
+            if sql == IDENTITY_SQL {
+                let columns: Rc<[String]> = ["holder".to_owned(), "generation".to_owned()].into();
+                let values = vec![SqlValue::Text("service-1".to_owned()), SqlValue::Integer(7)];
+                return Ok(vec![PostgresRow::new(columns, values)]);
+            }
+            self.bound.borrow_mut().push(params.to_vec());
+            Ok(self.answers.take())
         }
 
-        fn fence(
-            &self,
-            sql: &str,
-            holder: Option<&str>,
-            generation: i64,
-            lease_ms: i64,
-        ) -> Result<u64> {
+        fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<u64> {
             self.statements.borrow_mut().push(sql.to_owned());
-            self.fences
-                .borrow_mut()
-                .push((holder.map(str::to_owned), generation, lease_ms));
+            self.bound.borrow_mut().push(params.to_vec());
             Ok(self.changed.get())
         }
     }
@@ -261,12 +289,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            *session.fences.borrow(),
-            [(
-                Some("service-1".to_owned()),
-                7,
-                i64::try_from(LEASE.as_millis()).unwrap()
-            )]
+            *session.bound.borrow(),
+            [[
+                SqlValue::Text("service-1".to_owned()),
+                SqlValue::Integer(7),
+                SqlValue::Integer(i64::try_from(LEASE.as_millis()).unwrap())
+            ]]
         );
         tx.commit().unwrap();
         assert_eq!(after_open(&session).last().unwrap(), "COMMIT");
@@ -299,7 +327,7 @@ mod tests {
             ["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"]
         );
         drop(tx);
-        assert!(session.fences.borrow().is_empty());
+        assert!(session.bound.borrow().is_empty());
         assert_eq!(after_open(&session).last().unwrap(), "ROLLBACK");
     }
 
@@ -323,20 +351,133 @@ mod tests {
         );
     }
 
+    /// A holder of `NULL` is bound as one, which the shared fence compares.
     #[test]
-    fn parameters_are_numbered_as_sqlite_numbers_them_outside_quotes() {
+    fn a_leader_row_with_no_holder_fences_with_null() {
+        struct NoHolder(Recorded);
+        impl PostgresSession for &NoHolder {
+            fn run(&self, sql: &str) -> Result<()> {
+                (&self.0).run(sql)
+            }
+            fn query(&self, _: &str, _: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
+                let columns: Rc<[String]> = ["holder".to_owned(), "generation".to_owned()].into();
+                Ok(vec![PostgresRow::new(
+                    columns,
+                    vec![SqlValue::Null, SqlValue::Integer(0)],
+                )])
+            }
+            fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<u64> {
+                (&self.0).execute(sql, params)
+            }
+        }
+        let session = NoHolder(Recorded::taken());
+        let store = PostgresStore::open(&session).unwrap();
+        store.write_entry("a_write").unwrap().commit().unwrap();
+        assert_eq!(session.0.bound.borrow()[0][0], SqlValue::Null);
+    }
+
+    #[test]
+    fn opening_with_no_leader_row_fails_saying_so() {
+        struct Empty;
+        impl PostgresSession for Empty {
+            fn run(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn query(&self, _: &str, _: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
+                Ok(Vec::new())
+            }
+            fn execute(&self, _: &str, _: &[SqlValue]) -> SqlResult<u64> {
+                Ok(0)
+            }
+        }
+        let error = PostgresStore::open(Empty).err().unwrap();
+        assert!(format!("{error:#}").contains("read the write leader's row"));
+    }
+
+    /// The entries hand out the execution port, in the Postgres dialect.
+    #[test]
+    fn a_transaction_runs_the_shared_sql_with_its_parameters_numbered() {
+        let session = Recorded::taken();
+        let store = PostgresStore::open(&session).unwrap();
+        let tx = store.read_entry("a_read").unwrap();
+        assert_eq!(tx.dialect(), SqlDialect::Postgres);
+        session.answers.replace(vec![
+            one_column("load", SqlValue::Real(0.5)),
+            one_column("load", SqlValue::Null),
+        ]);
+        let loads = tx
+            .query_map(
+                "SELECT load FROM t WHERE a = ?1 AND b = '?'",
+                sql_params!["x"],
+                |row| row.get::<_, Option<f64>>("load"),
+            )
+            .unwrap();
+        assert_eq!(loads, [Some(0.5), None]);
+        drop(tx);
         assert_eq!(
-            numbered_parameters("a = ?2 AND b = ?2"),
-            "a = $2 AND b = $2"
+            after_open(&session),
+            [
+                "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+                "SELECT load FROM t WHERE a = $1 AND b = '?'",
+                "ROLLBACK"
+            ]
         );
-        assert_eq!(numbered_parameters("(?, ?4, ?)"), "($1, $4, $5)");
+        assert_eq!(*session.bound.borrow(), [[SqlValue::Text("x".to_owned())]]);
+    }
+
+    #[test]
+    fn query_row_stops_at_the_first_row() {
+        let session = Recorded::taken();
+        let store = PostgresStore::open(&session).unwrap();
+        let tx = store.read_entry("a_read").unwrap();
+        session.answers.replace(vec![
+            one_column("n", SqlValue::Integer(1)),
+            one_column("n", SqlValue::Integer(2)),
+        ]);
+        let first = tx.query_row("SELECT n FROM t", &[], |row| row.get::<_, i64>(0));
+        assert_eq!(first.unwrap(), 1);
+    }
+
+    #[test]
+    fn a_write_returns_the_rows_it_changed() {
+        let session = Recorded::taken();
+        let store = PostgresStore::open(&session).unwrap();
+        let tx = store.write_entry("a_write").unwrap();
+        session.changed.set(3);
+        let changed = SqlWrite::execute(&tx, "UPDATE t SET a = ?", sql_params![1_i64]).unwrap();
+        assert_eq!(changed, 3);
+        assert_eq!(after_open(&session).last().unwrap(), "UPDATE t SET a = $1");
+    }
+
+    #[test]
+    fn an_insert_reads_its_id_from_returning_and_no_row_is_none_or_an_error() {
+        let session = Recorded::taken();
+        let store = PostgresStore::open(&session).unwrap();
+        let tx = store.write_entry("a_write").unwrap();
+        let insert = "INSERT INTO asks (run) VALUES (?1)";
+        let returning = "INSERT INTO asks (run) VALUES ($1) RETURNING id";
+
+        session
+            .answers
+            .replace(vec![one_column("id", SqlValue::Integer(9))]);
+        assert_eq!(tx.insert_id(insert, sql_params!["r"]).unwrap(), 9);
+        assert_eq!(after_open(&session).last().unwrap(), returning);
+
+        session
+            .answers
+            .replace(vec![one_column("id", SqlValue::Integer(10))]);
         assert_eq!(
-            numbered_parameters("x = '?1' AND \"y?\" = ?1"),
-            "x = '?1' AND \"y?\" = $1"
+            tx.insert_id_if_inserted(insert, sql_params!["r"]).unwrap(),
+            Some(10)
         );
         assert_eq!(
-            numbered_parameters("x = 'it''s?' AND y = ?"),
-            "x = 'it''s?' AND y = $1"
+            tx.insert_id_if_inserted(insert, sql_params!["r"]).unwrap(),
+            None
         );
+        assert!(matches!(
+            tx.insert_id(insert, sql_params!["r"]),
+            Err(SqlError::NoRows)
+        ));
+        assert_eq!(after_open(&session).last().unwrap(), returning);
     }
 }

@@ -19,6 +19,8 @@ include = ["/build.rs", "/src/**", "/migrations/**", "/plugins/claude-dagq/skill
 
 [dependencies]
 anyhow = "1.0"
+# The buffer the driver's parameters are written to, behind the feature `postgres`.
+bytes = { version = "1", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 getrandom = "0.4"
 libc = "0.2"
@@ -48,7 +50,7 @@ disallowed_macros = "allow"
 test-paths = []
 # The Postgres store's adapter (src/infrastructure/postgres/client.rs): not in
 # a default build, so a local SQLite queue compiles none of its driver.
-postgres = ["dep:postgres"]
+postgres = ["dep:bytes", "dep:postgres"]
 
 [dev-dependencies]
 dagq = { path = ".", features = ["test-paths"] }

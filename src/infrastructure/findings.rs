@@ -104,7 +104,8 @@ impl SqliteQueue {
     }
 
     /// The findings `query` lists, larger impact first
-    /// ([`finding::by_impact`]). A pure read.
+    /// ([`finding::by_impact`]). A pure read. The list is small, so the SQL
+    /// reads every row and the domain filters them ([`FindingQuery::admits`]).
     pub fn findings(&self, query: &FindingQuery) -> Result<Vec<FindingView>> {
         let target = query
             .target

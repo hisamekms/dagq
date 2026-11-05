@@ -69,6 +69,8 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 - 判断（遷移を許すか、どのeventを書くか、payloadの中身）はdomainが持ち、storeは読む・復元する・書く・同じトランザクションにまとめるだけを持つ（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)）。
 - 例外は全体のグラフが要る依存の循環の検出（再帰CTE）だけで、拒むかの判断はdomainが持つ。
 - 共有のSQLを流す入口は実行のport（`src/infrastructure/sql_exec/`）。
+  Postgresの実行のportへの入口は`src/infrastructure/postgres/`の書き込みと読み取りの入口。
+- Postgresの実行のportは共有のSQLの引数の綴り・値・行を写し、storeのmoduleは方言ごとのSQLの文字列を持たない。
 - storeのmoduleはrusqliteでなく実行のportで共有のSQLを流し、rusqliteを名指してよいのは`src/context_boundaries/rusqlite_names.rs`の一覧のmoduleだけ。
 - 時刻とIDは`SqliteQueue`の`Generators`から取り、SQLの`now`で作らない。
   例外はDBの時計で判じる`write_leader`のleaseの期限（ADR-t3986-1決定4）。
@@ -164,13 +166,11 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 ## findings
 
 `findings`はobserverが見つけた問題を1行で持つ（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)、[Observer](supervisor-lifecycle/observer.md)）。
-入口は`src/infrastructure/findings.rs`、判断は`src/domain/finding.rs`。
+入口は`src/infrastructure/findings.rs`、判断と一覧の絞りは`src/domain/finding.rs`。
 
 - 記録は同じkind・対象・subjectの行に統合し（`finding::merge`）、何も変わらなければ何も書かない。
   `resolved`の問題がまた起きれば`open`に戻す。
 - eventは対象のtask・run・goalに付き、queueのfindingはどれにも付かない。
-- 一覧は件数が小さいのでSQLで絞らず、domainで絞って並べる。
-- CIの見張りの`ci_failure`は下の「CIの見張り」。
 
 ## Runtime ownership
 
@@ -252,7 +252,6 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒む。
 - NULLになる列を含む主キーはSQLiteではその行の一意を保たないので、その一意は書く関数がトランザクションの中で読んでから検査する（再計画の条件の対応の削除の行は`replans.rs`の`write_mappings`）。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。
-- contextをまたぐトランザクションは`src/context_boundaries/ownership.rs`の所有の表のものだけ（[architecture](architecture.md)のX1）。
 
 ### CHECK制約を使わない
 

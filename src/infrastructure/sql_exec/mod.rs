@@ -276,11 +276,11 @@ pub trait SqlWrite: SqlRead {
 /// transaction begins is the adapter's and no caller's to choose.
 pub trait TransactionEntries {
     /// The transaction of a write entry.
-    type Write<'store>
+    type Write<'store>: SqlWrite
     where
         Self: 'store;
     /// The transaction of a read entry, which reads one snapshot.
-    type Read<'store>
+    type Read<'store>: SqlRead
     where
         Self: 'store;
 
