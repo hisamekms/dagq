@@ -649,3 +649,11 @@ fn a_key_is_not_used_with_an_algorithm_other_than_its_own() {
         );
     }
 }
+
+#[test]
+fn an_empty_configured_audience_is_refused() {
+    assert_eq!(
+        OidcConfig::new(ISSUER, "").unwrap_err(),
+        KeyFetchFailure::AudienceEmpty
+    );
+}

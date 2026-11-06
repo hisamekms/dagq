@@ -78,10 +78,13 @@ pub struct OidcConfig {
 impl OidcConfig {
     /// The issuer is kept exactly as written (a trailing `/` is part of it)
     /// and has to be `https`, since its keys are trusted from that answer.
-    /// The algorithms are [`DEFAULT_ALGORITHMS`].
+    /// The audience must be nonempty. The algorithms are [`DEFAULT_ALGORITHMS`].
     pub fn new(issuer: &str, audience: &str) -> Result<Self, KeyFetchFailure> {
         if !is_https(issuer) {
             return Err(KeyFetchFailure::IssuerNotHttps);
+        }
+        if audience.is_empty() {
+            return Err(KeyFetchFailure::AudienceEmpty);
         }
         Ok(Self {
             issuer: issuer.to_string(),
@@ -384,6 +387,7 @@ pub enum KeyFetchFailure {
     /// The connection, TLS or a time limit, in the transport's words.
     Unreachable(String),
     IssuerNotHttps,
+    AudienceEmpty,
     DiscoveryMalformed,
     DiscoveryIssuerMismatch,
     JwksUriNotHttps,
@@ -399,6 +403,7 @@ impl fmt::Display for KeyFetchFailure {
             Self::Status(status) => write!(f, "the answer's status is {status}"),
             Self::TooLarge => write!(f, "the answer is over {MAX_DOCUMENT_BYTES} bytes"),
             Self::Unreachable(why) => write!(f, "the fetch failed: {why}"),
+            Self::AudienceEmpty => f.write_str("the audience is empty"),
             Self::IssuerNotHttps => f.write_str("the issuer is not an https address"),
             Self::DiscoveryMalformed => f.write_str("the discovery document is malformed"),
             Self::DiscoveryIssuerMismatch => {

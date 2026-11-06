@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use dagq::application::oidc::{OidcDocumentSource, verify_jwt};
+use dagq::application::oidc::{OidcDocumentSource, OidcVerifier};
 use dagq::domain::oidc::{
-    FETCH_TIMEOUT_SECS, KeyFetchFailure, KeyMemory, MAX_DOCUMENT_BYTES, OidcConfig, discovery_url,
+    FETCH_TIMEOUT_SECS, KeyFetchFailure, MAX_DOCUMENT_BYTES, OidcConfig, discovery_url,
 };
 use dagq::infrastructure::oidc_keys::HttpsDocumentSource;
 use ring::rand::SystemRandom;
@@ -178,12 +178,15 @@ fn keys_are_fetched_from_an_issuer_over_tls_within_the_limits_and_without_follow
     let config = OidcConfig::new(&issuer, "dagq").unwrap();
 
     // The whole way: discovery, the key document, the signature.
-    let mut memory = KeyMemory::default();
-    let verified = verify_jwt(&config, &token, &mut memory, &source, 1_000).unwrap();
+    let verifier = OidcVerifier::new(
+        config,
+        HttpsDocumentSource::with_roots(&[cert], Duration::from_secs(FETCH_TIMEOUT_SECS)),
+    );
+    let verified = verifier.verify_jwt(&token, 1_000).unwrap();
     assert_eq!(verified.identity.issuer, issuer);
     assert_eq!(verified.identity.subject, "person-1");
     // The lifetime of the answer's header holds: 299 s on no fetch comes.
-    verify_jwt(&config, &token, &mut memory, &source, 1_299).unwrap();
+    verifier.verify_jwt(&token, 1_299).unwrap();
     let hits = |path: &str| seen.paths.lock().unwrap().get(path).copied().unwrap_or(0);
     assert_eq!(hits("/jwks"), 1);
     assert_eq!(hits("/.well-known/openid-configuration"), 1);
@@ -203,7 +206,7 @@ fn keys_are_fetched_from_an_issuer_over_tls_within_the_limits_and_without_follow
     assert_eq!(hits("/jwks"), 1);
 
     // The lifetime on the second header line ends the memory: 300 s on, a fetch.
-    verify_jwt(&config, &token, &mut memory, &source, 1_300).unwrap();
+    verifier.verify_jwt(&token, 1_300).unwrap();
     assert_eq!(hits("/jwks"), 2);
 
     // Too much is refused without reading the rest.
