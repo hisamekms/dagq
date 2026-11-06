@@ -25,7 +25,9 @@ use super::replans::{
     approved_children as approved_children_of, check_replacement, child_version, latest_plan,
     move_in_as, read_operation, write_mappings,
 };
+use super::sql_exec::sql_params;
 use super::sqlite::{SqliteQueue, enum_col, event, read_task, transition_task};
+use super::store_rows;
 use crate::domain::event_kind::EventKind;
 use crate::domain::replan_apply::{
     self, ApplyOutcome, ApplyProblem, ApplyRecovery, ApplyState, ChildCarry, WaitNode,
@@ -253,18 +255,17 @@ impl SqliteQueue {
 
 /// Every task the applied replacements of `from` reach, through the
 /// replacements of a replaced child too, with its status, in ID order, read
-/// on `conn`: a replaced task is resolved only once each of these has
+/// on `tx`: a replaced task is resolved only once each of these has
 /// ended (ADR-t1521-2 decision 5), wherever it belongs now.
 pub(super) fn replacement_tasks(
-    conn: &Connection,
+    tx: &impl super::sql_exec::SqlRead,
     from: &[TaskId],
 ) -> Result<Vec<(TaskId, TaskStatus)>> {
     if from.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(conn
-        .prepare(
-            "WITH RECURSIVE reached(id) AS (
+    Ok(tx.query_map(
+        "WITH RECURSIVE reached(id) AS (
                SELECT r.to_task_id FROM replan_replacements r
                  JOIN replan_operations o ON o.id=r.operation_id AND o.status='applied'
                WHERE r.from_task_id IN (SELECT value FROM json_each(?1))
@@ -274,59 +275,56 @@ pub(super) fn replacement_tasks(
                  JOIN reached ON r.from_task_id=reached.id
              )
              SELECT t.id, t.status FROM reached JOIN tasks t ON t.id=reached.id ORDER BY t.id",
-        )?
-        .query_map([serde_json::to_string(from)?], |r| {
-            Ok((r.get(0)?, enum_col(r, "status")?))
-        })?
-        .collect::<rusqlite::Result<_>>()?)
+        sql_params![serde_json::to_string(from)?],
+        |r| Ok((r.get(0)?, store_rows::enum_col(r, "status")?)),
+    )?)
 }
 
 /// Whether replaced task `task` is not resolved yet: a task its
 /// replacements reach has not ended ([`replacement_tasks`]), or a record on
 /// the way is broken ([`unresolved_replacements`]).
-pub(super) fn replacement_open(conn: &Connection, task: TaskId) -> Result<bool> {
-    Ok(replacement_tasks(conn, &[task])?
+pub(super) fn replacement_open(tx: &impl super::sql_exec::SqlRead, task: TaskId) -> Result<bool> {
+    Ok(replacement_tasks(tx, &[task])?
         .iter()
         .any(|(_, status)| !status.is_terminal())
-        || !unresolved_replacements(conn, &[task])?.is_empty())
+        || !unresolved_replacements(tx, &[task])?.is_empty())
 }
 
 /// The replaced tasks reached from replaced tasks `from` whose applied
 /// replacement record is empty, names a task that is not there or loops
-/// ([`replan_apply::unresolved_replacements`]), read on `conn`. The walk
+/// ([`replan_apply::unresolved_replacements`]), read on `tx`. The walk
 /// visits each task once, so it ends on a loop that the recursive query of
 /// [`replacement_tasks`] would only stop at.
 pub(super) fn unresolved_replacements(
-    conn: &Connection,
+    tx: &impl super::sql_exec::SqlRead,
     from: &[TaskId],
 ) -> Result<Vec<replan_apply::UnresolvedReplacement>> {
     if from.is_empty() {
         return Ok(Vec::new());
     }
     let mut replacements: BTreeMap<TaskId, Vec<TaskId>> = BTreeMap::new();
-    let rows: Vec<(TaskId, TaskId)> = conn
-        .prepare(
-            "SELECT r.from_task_id, r.to_task_id FROM replan_replacements r
+    let rows: Vec<(TaskId, TaskId)> = tx.query_map(
+        "SELECT r.from_task_id, r.to_task_id FROM replan_replacements r
              JOIN replan_operations o ON o.id=r.operation_id AND o.status='applied'
              ORDER BY r.from_task_id, r.to_task_id",
-        )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+        &[],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     for (task, to) in rows {
         replacements.entry(task).or_default().push(to);
     }
-    let statuses: BTreeMap<TaskId, TaskStatus> = conn
-        .prepare(
+    let statuses: BTreeMap<TaskId, TaskStatus> = tx
+        .query_map(
             "SELECT id, status FROM tasks
              WHERE id IN (SELECT value FROM json_each(?1))
                 OR id IN (SELECT r.to_task_id FROM replan_replacements r
                           JOIN replan_operations o ON o.id=r.operation_id
                             AND o.status='applied')",
+            sql_params![serde_json::to_string(from)?],
+            |r| Ok((r.get(0)?, store_rows::enum_col(r, "status")?)),
         )?
-        .query_map([serde_json::to_string(from)?], |r| {
-            Ok((r.get(0)?, enum_col(r, "status")?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+        .into_iter()
+        .collect();
     Ok(replan_apply::unresolved_replacements(
         from,
         &replacements,

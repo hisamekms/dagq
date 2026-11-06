@@ -2,8 +2,8 @@
 //! supervisor started, so that another supervisor can stop it once the one
 //! that started it is gone.
 use anyhow::Result;
-use rusqlite::params;
 
+use super::sql_exec::{SqlRead, SqlWrite, sql_params};
 use super::sqlite::SqliteQueue;
 use crate::domain::write_rules::check_non_blank;
 use crate::domain::{LeaseToken, Provider, headless_job};
@@ -17,11 +17,12 @@ impl HeadlessJobStore for SqliteQueue {
         check_non_blank("headless job kind", job.kind)?;
         let now = self.generators.clock.now();
         let tx = self.write_tx("record_headless_job")?;
-        let id = tx.insert_id(
+        let id = SqlWrite::insert_id(
+            &tx,
             "INSERT INTO headless_jobs(kind, label, run_id, proposal_id, goal_id, attempt, pid,
                                        process_start, supervisor_token, started_at, provider, stdout)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
+            sql_params![
                 job.kind,
                 job.label,
                 job.run_id,
@@ -47,9 +48,10 @@ impl HeadlessJobStore for SqliteQueue {
         check_non_blank("headless job outcome", outcome)?;
         let now = self.generators.clock.now();
         let tx = self.write_tx("end_headless_job")?;
-        let ended = tx.execute(
+        let ended = SqlWrite::execute(
+            &tx,
             "UPDATE headless_jobs SET ended_at=?2, outcome=?3 WHERE id=?1 AND ended_at IS NULL",
-            params![id, now, outcome],
+            sql_params![id, now, outcome],
         )?;
         tx.commit()?;
         Ok(ended == 1)
@@ -61,10 +63,8 @@ impl HeadlessJobStore for SqliteQueue {
         own: bool,
     ) -> Result<Vec<HeadlessJobRecord>> {
         let now = self.generators.clock.now();
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT j.id, j.kind, j.label, j.run_id, j.proposal_id, j.goal_id, j.attempt,
+        Ok(self.conn.query_map(
+            "SELECT j.id, j.kind, j.label, j.run_id, j.proposal_id, j.goal_id, j.attempt,
                         j.pid, j.process_start, j.supervisor_token, j.started_at, s.pid,
                         j.provider, j.stdout
                  FROM headless_jobs j
@@ -73,8 +73,8 @@ impl HeadlessJobStore for SqliteQueue {
                    AND CASE WHEN j.supervisor_token = ?1 THEN ?2
                             ELSE s.token IS NULL OR ?3 - s.heartbeat_at > ?4 END
                  ORDER BY j.id",
-            )?
-            .query_map(params![token, own, now, HEARTBEAT_TIMEOUT_SECS], |r| {
+            sql_params![token, own, now, HEARTBEAT_TIMEOUT_SECS],
+            |r| {
                 Ok(HeadlessJobRecord {
                     id: r.get(0)?,
                     kind: r.get(1)?,
@@ -93,8 +93,8 @@ impl HeadlessJobStore for SqliteQueue {
                         .get::<_, Option<String>>(13)?
                         .map(std::path::PathBuf::from),
                 })
-            })?
-            .collect::<rusqlite::Result<_>>()?)
+            },
+        )?)
     }
 }
 

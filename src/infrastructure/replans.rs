@@ -21,9 +21,11 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
 use super::plan_requests::read_request;
+use super::sql_exec::{OptionalRow, sql_params};
 use super::sqlite::{
     SqliteQueue, enum_col, event, json_col, read_task, record_queue_event_in, replan_guarding,
 };
+use super::store_rows;
 use crate::domain::DomainError;
 use crate::domain::event_kind::EventKind;
 use crate::domain::plan_request::{RequestRef, RequestStatus};
@@ -455,7 +457,7 @@ impl SqliteQueue {
 
     /// The operation that guards `task` now, if any.
     pub fn replan_guard(&self, task: TaskId) -> Result<Option<ReplanGuard>> {
-        guard_of(&self.conn, task)
+        guard_of(&*self.conn, task)
     }
 }
 
@@ -935,21 +937,24 @@ pub(crate) fn write_mappings(
     Ok(())
 }
 
-/// The operation that guards `task` now, read on `conn` (inside the
+/// The operation that guards `task` now, read on `tx` (inside the
 /// caller's transaction when it has one).
-pub(super) fn guard_of(conn: &Connection, task: TaskId) -> Result<Option<ReplanGuard>> {
-    Ok(conn
+pub(super) fn guard_of(
+    tx: &impl super::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<ReplanGuard>> {
+    Ok(tx
         .query_row(
             concat!(
                 "SELECT id, status FROM replan_operations WHERE task_id=?1 AND status IN (",
                 replan_guarding!(),
                 ") ORDER BY id LIMIT 1"
             ),
-            [task],
+            sql_params![task],
             |r| {
                 Ok((
                     r.get::<_, ReplanId>(0)?,
-                    enum_col::<ReplanStatus>(r, "status")?,
+                    store_rows::enum_col::<ReplanStatus>(r, "status")?,
                 ))
             },
         )
@@ -962,12 +967,16 @@ pub(super) fn guard_of(conn: &Connection, task: TaskId) -> Result<Option<ReplanG
 }
 
 /// Refuse `step` of `task` while an operation or a hold guards it
-/// ([`task_replan::check_step`]), both read on `conn` inside the step's
+/// ([`task_replan::check_step`]), both read on `tx` inside the step's
 /// own transaction.
-pub(super) fn check_task_step(conn: &Connection, task: TaskId, step: GuardedStep) -> Result<()> {
+pub(super) fn check_task_step(
+    tx: &impl super::sql_exec::SqlRead,
+    task: TaskId,
+    step: GuardedStep,
+) -> Result<()> {
     let guards = task_replan::TaskGuards {
-        replan: guard_of(conn, task)?,
-        hold: super::task_holds::guard_of(conn, task)?,
+        replan: guard_of(tx, task)?,
+        hold: super::task_holds::guard_of(tx, task)?,
     };
     task_replan::check_step(&guards, step)?;
     Ok(())

@@ -12,8 +12,9 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
 
+use super::sql_exec::{FromSqlValue, OptionalRow, SqlRead, SqlWrite, sql_params};
+use super::store_writes::EventTx;
 use crate::domain::{
     AskKind, ExecutionClass, GoalId, TaskId,
     claim_defer::waits_for_owner,
@@ -52,25 +53,26 @@ fn active(cycle: &str) -> String {
 /// Record the missing requests of completed Spikes and close the cycles
 /// that ended at `now` (unix seconds): what a claim of a Spike needs before
 /// it opens a cycle, and what each pass reconciles.
-pub(super) fn settle(conn: &Connection, now: i64) -> Result<()> {
-    super::plan_requests::record_missing_spike_requests(conn, now)?;
-    conn.execute(
+pub(super) fn settle(tx: &impl EventTx, now: i64) -> Result<()> {
+    super::plan_requests::record_missing_spike_requests(tx, now)?;
+    tx.execute(
         &format!(
             "UPDATE spike_cycles SET closed_at=?1 WHERE closed_at IS NULL AND NOT {}",
             active("spike_cycles")
         ),
-        [now],
+        sql_params![now],
     )?;
     Ok(())
 }
 
 /// [`settle`], then read the open investigations the limit counts.
-pub(super) fn refresh(conn: &Connection, now: i64) -> Result<Investigations> {
-    settle(conn, now)?;
-    let cycles: Vec<(Option<GoalId>, Option<TaskId>)> = conn
-        .prepare("SELECT goal_id, task_id FROM spike_cycles WHERE closed_at IS NULL ORDER BY id")?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+pub(super) fn refresh(tx: &impl EventTx, now: i64) -> Result<Investigations> {
+    settle(tx, now)?;
+    let cycles: Vec<(Option<GoalId>, Option<TaskId>)> = tx.query_map(
+        "SELECT goal_id, task_id FROM spike_cycles WHERE closed_at IS NULL ORDER BY id",
+        &[],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     let mut open = Vec::new();
     let mut unfinished = Vec::new();
     for (goal, task) in cycles {
@@ -78,7 +80,7 @@ pub(super) fn refresh(conn: &Connection, now: i64) -> Result<Investigations> {
             (Some(goal), _) => (
                 InvestigationKey::Goal(goal),
                 ids(
-                    conn,
+                    tx,
                     &format!(
                         "SELECT id FROM tasks WHERE goal_id=?1 AND execution_class='spike'
                          AND status IN {UNFINISHED} ORDER BY id"
@@ -86,7 +88,7 @@ pub(super) fn refresh(conn: &Connection, now: i64) -> Result<Investigations> {
                     goal.as_i64(),
                 )?,
                 ids(
-                    conn,
+                    tx,
                     "SELECT r.id FROM plan_requests r JOIN tasks t ON t.id=r.spike_task_id
                      WHERE t.goal_id=?1 AND r.status='open' ORDER BY r.id",
                     goal.as_i64(),
@@ -95,12 +97,12 @@ pub(super) fn refresh(conn: &Connection, now: i64) -> Result<Investigations> {
             (None, Some(task)) => (
                 InvestigationKey::Spike(task),
                 ids(
-                    conn,
+                    tx,
                     &format!("SELECT id FROM tasks WHERE id=?1 AND status IN {UNFINISHED}"),
                     task.as_i64(),
                 )?,
                 ids(
-                    conn,
+                    tx,
                     "SELECT id FROM plan_requests WHERE spike_task_id=?1 AND status='open'",
                     task.as_i64(),
                 )?,
@@ -109,10 +111,10 @@ pub(super) fn refresh(conn: &Connection, now: i64) -> Result<Investigations> {
         };
         let mut waits = Vec::new();
         for &spike in &spikes {
-            waits.push(spike_waits_for_person(conn, TaskId::new(spike))?);
+            waits.push(spike_waits_for_person(tx, TaskId::new(spike))?);
         }
         for &request in &requests {
-            waits.push(request_waits_for_person(conn, request)?);
+            waits.push(request_waits_for_person(tx, request)?);
         }
         unfinished.extend(spikes.into_iter().map(TaskId::new));
         open.push(Investigation { key, waits });
@@ -120,13 +122,13 @@ pub(super) fn refresh(conn: &Connection, now: i64) -> Result<Investigations> {
     let mut edges = WaitEdges::default();
     let waiting = "JOIN tasks t ON t.id=d.task_id WHERE t.status NOT IN ('completed','canceled')";
     for (task, predecessor) in pairs(
-        conn,
+        tx,
         &format!("SELECT d.task_id, d.predecessor_id FROM task_dependencies d {waiting}"),
     )? {
         edges.tasks.entry(task).or_default().push(predecessor);
     }
     for (task, goal) in pairs(
-        conn,
+        tx,
         &format!(
             "SELECT d.task_id, d.goal_id FROM task_goal_dependencies d {waiting}
              AND NOT EXISTS(SELECT 1 FROM goals g WHERE g.id=d.goal_id
@@ -136,16 +138,20 @@ pub(super) fn refresh(conn: &Connection, now: i64) -> Result<Investigations> {
         edges.goals.entry(task).or_default().push(goal);
     }
     for (goal, task) in pairs(
-        conn,
+        tx,
         "SELECT goal_id, id FROM tasks WHERE goal_id IS NOT NULL
          AND status NOT IN ('completed','canceled')",
     )? {
         edges.goal_tasks.entry(goal).or_default().push(task);
     }
-    let spikes: HashSet<TaskId> = conn
-        .prepare("SELECT id FROM tasks WHERE execution_class='spike' AND status='ready'")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let spikes: HashSet<TaskId> = tx
+        .query_map(
+            "SELECT id FROM tasks WHERE execution_class='spike' AND status='ready'",
+            &[],
+            |r| r.get(0),
+        )?
+        .into_iter()
+        .collect();
     Ok(Investigations {
         open,
         awaited: awaited_spikes(&unfinished, &edges, &spikes),
@@ -156,7 +162,7 @@ pub(super) fn refresh(conn: &Connection, now: i64) -> Result<Investigations> {
 /// claimed for, inside the claim's transaction, unless it is open: whether
 /// it opened one.
 pub(super) fn open_cycle(
-    conn: &Connection,
+    tx: &impl SqlWrite,
     task: TaskId,
     class: ExecutionClass,
     goal: Option<GoalId>,
@@ -166,26 +172,26 @@ pub(super) fn open_cycle(
         return Ok(false);
     }
     let opened = match goal {
-        Some(goal) => conn.execute(
+        Some(goal) => tx.execute(
             "INSERT INTO spike_cycles(goal_id, task_id, opened_at) SELECT ?1, ?2, ?3
              WHERE NOT EXISTS(SELECT 1 FROM spike_cycles WHERE goal_id=?1 AND closed_at IS NULL)",
-            params![goal, task, now],
+            sql_params![goal, task, now],
         )?,
-        None => conn.execute(
+        None => tx.execute(
             "INSERT INTO spike_cycles(task_id, opened_at) SELECT ?1, ?2
              WHERE NOT EXISTS(SELECT 1 FROM spike_cycles WHERE goal_id IS NULL AND task_id=?1
                  AND closed_at IS NULL)",
-            params![task, now],
+            sql_params![task, now],
         )?,
     };
     Ok(opened == 1)
 }
 
 /// How many cycles `goal` has had, the open one included.
-pub(super) fn goal_cycles(conn: &Connection, goal: GoalId) -> Result<usize> {
-    let count: i64 = conn.query_row(
+pub(super) fn goal_cycles(tx: &impl SqlRead, goal: GoalId) -> Result<usize> {
+    let count: i64 = tx.query_row(
         "SELECT count(*) FROM spike_cycles WHERE goal_id=?1",
-        [goal],
+        sql_params![goal],
         |r| r.get(0),
     )?;
     Ok(usize::try_from(count)?)
@@ -193,23 +199,23 @@ pub(super) fn goal_cycles(conn: &Connection, goal: GoalId) -> Result<usize> {
 
 /// Whether `goal`'s results are being replanned: its investigation is
 /// open and a request of its Spikes is `open` (read after [`settle`]).
-pub(super) fn replanning(conn: &Connection, goal: GoalId) -> Result<bool> {
-    Ok(conn.query_row(
+pub(super) fn replanning(tx: &impl SqlRead, goal: GoalId) -> Result<bool> {
+    Ok(tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM spike_cycles WHERE goal_id=?1 AND closed_at IS NULL)
             AND EXISTS(SELECT 1 FROM plan_requests r JOIN tasks t ON t.id=r.spike_task_id
                 WHERE t.goal_id=?1 AND r.status='open')",
-        [goal],
+        sql_params![goal],
         |r| r.get(0),
     )?)
 }
 
 /// Whether one of `spikes` started a cycle of `goal`.
-pub(super) fn counted(conn: &Connection, goal: GoalId, spikes: &[TaskId]) -> Result<bool> {
+pub(super) fn counted(tx: &impl SqlRead, goal: GoalId, spikes: &[TaskId]) -> Result<bool> {
     for &spike in spikes {
-        let found: bool = conn.query_row(
+        let found: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM spike_cycles WHERE goal_id=?1 AND task_id=?2
                  AND opened_at=closed_at)",
-            params![goal, spike],
+            sql_params![goal, spike],
             |r| r.get(0),
         )?;
         if found {
@@ -223,10 +229,10 @@ pub(super) fn counted(conn: &Connection, goal: GoalId, spikes: &[TaskId]) -> Res
 /// starts inside its open investigation, closed at `now` (`opened_at` is
 /// `closed_at`): the open row keeps the investigation, this one only
 /// counts.
-pub(super) fn start_cycle(conn: &Connection, goal: GoalId, task: TaskId, now: i64) -> Result<()> {
-    conn.execute(
+pub(super) fn start_cycle(tx: &impl SqlWrite, goal: GoalId, task: TaskId, now: i64) -> Result<()> {
+    tx.execute(
         "INSERT INTO spike_cycles(goal_id, task_id, opened_at, closed_at) VALUES (?1, ?2, ?3, ?3)",
-        params![goal, task, now],
+        sql_params![goal, task, now],
     )?;
     Ok(())
 }
@@ -234,30 +240,32 @@ pub(super) fn start_cycle(conn: &Connection, goal: GoalId, task: TaskId, now: i6
 /// Since when the unfinished Spike `task` only waits for a person: its run
 /// on a question of [`waits_for_owner`], or its proposal on plan review's
 /// question to a person; `None` while it moves (ready, or worked on).
-fn spike_waits_for_person(conn: &Connection, task: TaskId) -> Result<Option<i64>> {
-    let status: String =
-        conn.query_row("SELECT status FROM tasks WHERE id=?1", [task], |r| r.get(0))?;
+fn spike_waits_for_person(tx: &impl SqlRead, task: TaskId) -> Result<Option<i64>> {
+    let status: String = tx.query_row(
+        "SELECT status FROM tasks WHERE id=?1",
+        sql_params![task],
+        |r| r.get(0),
+    )?;
     match status.as_str() {
         "in_progress" => {
-            let asks: Vec<(String, i64)> = conn
-                .prepare(
-                    "SELECT kind, created_at FROM asks WHERE task_id=?1 AND run_id IS NOT NULL
+            let asks: Vec<(String, i64)> = tx.query_map(
+                "SELECT kind, created_at FROM asks WHERE task_id=?1 AND run_id IS NOT NULL
                      AND answered_at IS NULL AND closed_at IS NULL",
-                )?
-                .query_map([task], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
+                sql_params![task],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
             Ok(asks
                 .into_iter()
                 .filter(|(kind, _)| waits_for_owner(&AskKind::read(kind)))
                 .map(|(_, at)| at)
                 .min())
         }
-        "submitted" => Ok(conn
+        "submitted" => Ok(tx
             .query_row(
                 "SELECT min(a.created_at) FROM asks a JOIN tasks m ON m.id=a.task_id
                  JOIN tasks t ON t.id=?1 AND t.proposal_id IS NOT NULL AND m.proposal_id=t.proposal_id
                  WHERE a.kind='approve_plan' AND a.answered_at IS NULL AND a.closed_at IS NULL",
-                [task],
+                sql_params![task],
                 |r| r.get::<_, Option<i64>>(0),
             )
             .optional()?
@@ -269,37 +277,28 @@ fn spike_waits_for_person(conn: &Connection, task: TaskId) -> Result<Option<i64>
 /// Since when the `open` request `request` only waits for a person: its
 /// `planner_question` unanswered while no planner works on it (none is
 /// open, or the one open was asked to exit for the answer alone).
-fn request_waits_for_person(conn: &Connection, request: i64) -> Result<Option<i64>> {
-    let working: bool = conn.query_row(
+fn request_waits_for_person(tx: &impl SqlRead, request: i64) -> Result<Option<i64>> {
+    let working: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM planners WHERE request_id=?1 AND closed_at IS NULL
              AND answer_wait_at IS NULL)",
-        [request],
+        sql_params![request],
         |r| r.get(0),
     )?;
     if working {
         return Ok(None);
     }
-    Ok(conn.query_row(
+    Ok(tx.query_row(
         "SELECT min(created_at) FROM asks WHERE request_id=?1 AND kind='planner_question'
          AND answered_at IS NULL AND closed_at IS NULL",
-        [request],
+        sql_params![request],
         |r| r.get::<_, Option<i64>>(0),
     )?)
 }
 
-fn ids(conn: &Connection, sql: &str, param: i64) -> Result<Vec<i64>> {
-    Ok(conn
-        .prepare(sql)?
-        .query_map([param], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
+fn ids(tx: &impl SqlRead, sql: &str, param: i64) -> Result<Vec<i64>> {
+    Ok(tx.query_map(sql, sql_params![param], |r| r.get(0))?)
 }
 
-fn pairs<A: rusqlite::types::FromSql, B: rusqlite::types::FromSql>(
-    conn: &Connection,
-    sql: &str,
-) -> Result<Vec<(A, B)>> {
-    Ok(conn
-        .prepare(sql)?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?)
+fn pairs<A: FromSqlValue, B: FromSqlValue>(tx: &impl SqlRead, sql: &str) -> Result<Vec<(A, B)>> {
+    Ok(tx.query_map(sql, &[], |r| Ok((r.get(0)?, r.get(1)?)))?)
 }

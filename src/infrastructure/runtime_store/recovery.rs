@@ -1306,7 +1306,7 @@ impl SqliteQueue {
 
     /// The guard the open hold of `task` puts on its steps, if any.
     pub fn hold_guard(&self, task: TaskId) -> Result<Option<HoldGuard>> {
-        crate::infrastructure::task_holds::guard_of(&self.conn, task)
+        crate::infrastructure::task_holds::guard_of(&*self.conn, task)
     }
 
     /// The tasks a claim would take but for their open hold.

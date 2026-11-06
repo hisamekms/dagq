@@ -6,10 +6,11 @@
 use crate::domain::event_kind::EventKind;
 use crate::domain::ledger::findings as findings_fold;
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
-use super::sqlite::{SqliteQueue, enum_col, event_row, json_col, read_goal, read_task};
+use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlWrite, sql_params};
+use super::sqlite::SqliteQueue;
+use super::store_rows::{enum_col, event_row, json_col, read_goal, read_task};
 use crate::domain::{
     AskId, EventId, Finding, FindingId, FindingOutcome, FindingQuery, FindingStatus, FindingTarget,
     FindingView, GoalId, NewFinding, RunId, TaskId, finding,
@@ -42,7 +43,7 @@ impl SqliteQueue {
             "SELECT EXISTS(SELECT 1 FROM findings WHERE kind=?1 AND target=?2
                AND ifnull(task_id,0)=ifnull(?3,0) AND ifnull(run_id,'')=ifnull(?4,'')
                AND ifnull(goal_id,0)=ifnull(?5,0) AND subject=?6)",
-            params![
+            sql_params![
                 new.kind,
                 new.target.name(),
                 task_id,
@@ -110,16 +111,14 @@ impl SqliteQueue {
         let target = query
             .target
             .as_ref()
-            .map(|target| resolve_target(&self.conn, target).map(|ids| (target.name(), ids)))
+            .map(|target| resolve_target(&*self.conn, target).map(|ids| (target.name(), ids)))
             .transpose()?;
         if let Some(id) = query.id {
-            read_finding(&self.conn, id)?;
+            read_finding(&*self.conn, id)?;
         }
         let mut findings: Vec<Finding> = self
             .conn
-            .prepare("SELECT * FROM findings ORDER BY id")?
-            .query_map([], finding_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            .query_map("SELECT * FROM findings ORDER BY id", &[], finding_row)?
             .into_iter()
             .filter(|f| query.admits(f))
             .filter(|f| {
@@ -138,23 +137,23 @@ impl SqliteQueue {
                 let proposal_status = finding
                     .proposal_id
                     .map(|id| {
-                        self.conn
-                            .query_row("SELECT status FROM proposals WHERE id=?1", [id], |r| {
-                                enum_col(r, "status")
-                            })
+                        SqlRead::query_row(
+                            &*self.conn,
+                            "SELECT status FROM proposals WHERE id=?1",
+                            sql_params![id],
+                            |r| enum_col(r, "status"),
+                        )
                     })
                     .transpose()?;
-                let open_asks = self
-                    .conn
-                    .prepare(
-                        "SELECT id FROM asks WHERE finding_id=?1
+                let open_asks = self.conn.query_map(
+                    "SELECT id FROM asks WHERE finding_id=?1
                          AND answered_at IS NULL AND closed_at IS NULL ORDER BY id",
-                    )?
-                    .query_map([finding.id], |r| r.get::<_, AskId>(0))?
-                    .collect::<rusqlite::Result<_>>()?;
+                    sql_params![finding.id],
+                    |r| r.get::<_, AskId>(0),
+                )?;
                 let evidence_events = query
                     .full
-                    .then(|| evidence_events(&self.conn, &finding.evidence))
+                    .then(|| evidence_events(&*self.conn, &finding.evidence))
                     .transpose()?;
                 Ok(FindingView {
                     finding,
@@ -168,7 +167,7 @@ impl SqliteQueue {
 }
 
 /// [`SqliteQueue::record_finding`] inside the caller's write transaction.
-pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<FindingOutcome> {
+pub(super) fn record_in(tx: &impl SqlWrite, new: &NewFinding, now: i64) -> Result<FindingOutcome> {
     new.validate()?;
     let (task_id, run_id, goal_id) = resolve_target(tx, &new.target)?;
     let evidence = new.distinct_evidence();
@@ -176,7 +175,7 @@ pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<F
         ensure!(
             tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE id=?1)",
-                [id],
+                sql_params![id],
                 |r| r.get::<_, bool>(0)
             )?,
             "event {id} does not exist"
@@ -187,7 +186,7 @@ pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<F
                 "SELECT * FROM findings WHERE kind=?1 AND target=?2 AND ifnull(task_id,0)=ifnull(?3,0)
                  AND ifnull(run_id,'')=ifnull(?4,'') AND ifnull(goal_id,0)=ifnull(?5,0) AND subject=?6
                  ORDER BY status IN ('open','proposed') DESC, id DESC LIMIT 1",
-                params![
+                sql_params![
                     new.kind,
                     new.target.name(),
                     task_id,
@@ -200,13 +199,12 @@ pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<F
             .optional()?;
     let outcome = match existing {
         None => {
-            let id = super::sqlite::insert_id(
-                tx,
+            let id = tx.insert_id(
                 "INSERT INTO findings(kind,target,task_id,run_id,goal_id,subject,summary,detail,
                        impact,first_seen_at,last_seen_at,occurrences,evidence,status,
                        propose_reason,propose_requested_at,recorded_by,updated_at)
                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,1,?11,'open',?12,?13,?14,?10)",
-                params![
+                sql_params![
                     new.kind,
                     new.target.name(),
                     task_id,
@@ -258,7 +256,7 @@ pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<F
                        occurrences=?6, evidence=?7, status=?8, status_reason=?9,
                        propose_reason=?10, propose_requested_at=?11, updated_at=?12
                      WHERE id=?1",
-                    params![
+                    sql_params![
                         f.id,
                         f.summary,
                         f.detail,
@@ -313,7 +311,7 @@ pub(super) fn record_in(tx: &Connection, new: &NewFinding, now: i64) -> Result<F
 /// [`SqliteQueue::set_finding_status`] inside the caller's write
 /// transaction.
 pub(super) fn set_status_in(
-    tx: &Connection,
+    tx: &impl SqlWrite,
     id: FindingId,
     to: FindingStatus,
     reason: &str,
@@ -326,7 +324,7 @@ pub(super) fn set_status_in(
 /// [`set_status_in`] with the task that covers the finding, written to
 /// `covered_by_task` and the event (checked by the caller).
 pub(super) fn set_status_covered_in(
-    tx: &Connection,
+    tx: &impl SqlWrite,
     id: FindingId,
     to: FindingStatus,
     reason: &str,
@@ -340,7 +338,7 @@ pub(super) fn set_status_covered_in(
     tx.execute(
         "UPDATE findings SET status=?2, status_reason=?3, updated_at=?4,
            covered_by_task=coalesce(?5, covered_by_task) WHERE id=?1",
-        params![id, to.as_str(), reason, now, covered_by],
+        sql_params![id, to.as_str(), reason, now, covered_by],
     )?;
     let changed = read_finding(tx, id)?;
     let mut payload = json!({
@@ -360,24 +358,26 @@ pub(super) fn set_status_covered_in(
 /// The (task, run, goal) columns of `target`, checking that it exists; a
 /// run brings its task.
 fn resolve_target(
-    conn: &Connection,
+    tx: &impl SqlRead,
     target: &FindingTarget,
 ) -> Result<(Option<TaskId>, Option<RunId>, Option<GoalId>)> {
     Ok(match target {
         FindingTarget::Queue => (None, None, None),
         FindingTarget::Goal(goal_id) => {
-            read_goal(conn, *goal_id)?;
+            read_goal(tx, *goal_id)?;
             (None, None, Some(*goal_id))
         }
         FindingTarget::Task(task_id) => {
-            read_task(conn, *task_id)?;
+            read_task(tx, *task_id)?;
             (Some(*task_id), None, None)
         }
         FindingTarget::Run(run_id) => {
-            let task_id: TaskId = conn
-                .query_row("SELECT task_id FROM task_runs WHERE id=?1", [run_id], |r| {
-                    r.get(0)
-                })
+            let task_id: TaskId = tx
+                .query_row(
+                    "SELECT task_id FROM task_runs WHERE id=?1",
+                    sql_params![run_id],
+                    |r| r.get(0),
+                )
                 .optional()?
                 .with_context(|| format!("run {run_id} does not exist"))?;
             (Some(task_id), Some(run_id.clone()), None)
@@ -397,7 +397,7 @@ fn resolve_target(
 /// (`link_findings`), the end of its proposal (`SqliteQueue::settle_findings`)
 /// and a person's `propose` answer (`apply_answer`).
 pub(super) fn finding_event(
-    conn: &Connection,
+    tx: &impl SqlWrite,
     finding: &Finding,
     kind: EventKind,
     mut payload: serde_json::Value,
@@ -407,10 +407,10 @@ pub(super) fn finding_event(
     }
     crate::domain::check_event_target(kind, finding.task_id, finding.goal_id)?;
     crate::domain::write_rules::check_run_has_task(finding.task_id, finding.run_id.as_ref())?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO run_events(task_id,run_id,goal_id,kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,?4,dagq_event_body(?5),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![
+        sql_params![
             finding.task_id,
             finding.run_id,
             finding.goal_id,
@@ -430,13 +430,17 @@ const RECORDS_VALUES: [EventKind; 3] = [
 
 /// The evidence events that still exist, in the finding's order.
 fn evidence_events(
-    conn: &Connection,
+    tx: &impl SqlRead,
     evidence: &[EventId],
 ) -> Result<Vec<crate::domain::RunEvent>> {
     let mut events = Vec::new();
     for id in evidence {
-        if let Some(event) = conn
-            .query_row("SELECT * FROM run_events WHERE id=?1", [id], event_row)
+        if let Some(event) = tx
+            .query_row(
+                "SELECT * FROM run_events WHERE id=?1",
+                sql_params![id],
+                event_row,
+            )
             .optional()?
         {
             events.push(event);
@@ -445,13 +449,17 @@ fn evidence_events(
     Ok(events)
 }
 
-pub(super) fn read_finding(conn: &Connection, id: FindingId) -> Result<Finding> {
-    conn.query_row("SELECT * FROM findings WHERE id=?1", [id], finding_row)
-        .optional()?
-        .with_context(|| format!("finding {id} does not exist"))
+pub(super) fn read_finding(tx: &impl SqlRead, id: FindingId) -> Result<Finding> {
+    tx.query_row(
+        "SELECT * FROM findings WHERE id=?1",
+        sql_params![id],
+        finding_row,
+    )
+    .optional()?
+    .with_context(|| format!("finding {id} does not exist"))
 }
 
-pub(super) fn finding_row(row: &Row<'_>) -> rusqlite::Result<Finding> {
+pub(super) fn finding_row(row: &SqlRow<'_>) -> SqlResult<Finding> {
     Ok(Finding {
         id: row.get("id")?,
         kind: row.get("kind")?,
@@ -476,4 +484,96 @@ pub(super) fn finding_row(row: &Row<'_>) -> rusqlite::Result<Finding> {
         recorded_by: row.get("recorded_by")?,
         updated_at: row.get("updated_at")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::sql_exec::sqlite::port_tx;
+    use super::*;
+    use crate::application::TaskStore;
+    use crate::domain::{NewGoal, NewTask, Priority};
+
+    fn queue() -> SqliteQueue {
+        let uri = format!("file:/findings-{}?vfs=memdb", uuid::Uuid::new_v4());
+        SqliteQueue::init(uri).unwrap()
+    }
+
+    /// Each target resolves to the same columns on any transaction of the
+    /// port, a run bringing its task, and one that is not there is refused.
+    #[test]
+    fn a_target_resolves_to_its_task_run_and_goal_on_each_transaction() {
+        let mut queue = queue();
+        let goal = queue
+            .add_goal(NewGoal {
+                title: "goal".into(),
+                description: "d".into(),
+                acceptance: "a".into(),
+                constraints: "c".into(),
+                doc: None,
+                draft: false,
+                priority: Some(Priority::High),
+                tags: Vec::new(),
+            })
+            .unwrap()
+            .id();
+        let task = queue
+            .add(NewTask {
+                title: "task".into(),
+                description: "d".into(),
+                acceptance: "a".into(),
+                verification_commands: vec!["true".into()],
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                priority: None,
+                change: None,
+                dependencies: Vec::new(),
+                goal_dependencies: Vec::new(),
+                goal_id: Some(goal),
+                context: String::new(),
+                provider: None,
+                worker_mode: None,
+                wait_for_build: false,
+                execution_class: Default::default(),
+            })
+            .unwrap()
+            .id();
+        let run = RunId::new("11111111-1111-4111-8111-111111111111").unwrap();
+        queue
+            .conn
+            .execute(
+                "INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit,worktree_path,workspace_id,run_dir)
+                 VALUES (?1,?2,'running','claude','claude','b','/wt','W','/run')",
+                rusqlite::params![run, task],
+            )
+            .unwrap();
+        let cases = [
+            (FindingTarget::Queue, (None, None, None)),
+            (FindingTarget::Goal(goal), (None, None, Some(goal))),
+            (FindingTarget::Task(task), (Some(task), None, None)),
+            (
+                FindingTarget::Run(run.clone()),
+                (Some(task), Some(run.clone()), None),
+            ),
+        ];
+        for (target, resolved) in &cases {
+            assert_eq!(&resolve_target(&*queue.conn, target).unwrap(), resolved);
+            assert_eq!(
+                &resolve_target(&port_tx(&queue.conn), target).unwrap(),
+                resolved
+            );
+        }
+        let tx = queue.read_tx("resolve_target_test").unwrap();
+        for (target, resolved) in &cases {
+            assert_eq!(&resolve_target(&tx, target).unwrap(), resolved);
+        }
+        let gone = RunId::new("22222222-2222-4222-8222-222222222222").unwrap();
+        assert_eq!(
+            resolve_target(&tx, &FindingTarget::Run(gone.clone()))
+                .unwrap_err()
+                .to_string(),
+            format!("run {gone} does not exist")
+        );
+        assert!(resolve_target(&tx, &FindingTarget::Task(TaskId::new(99))).is_err());
+        assert!(resolve_target(&tx, &FindingTarget::Goal(GoalId::new(99))).is_err());
+    }
 }

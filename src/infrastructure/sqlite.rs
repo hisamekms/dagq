@@ -21,12 +21,15 @@
 //!
 //! The row helpers other store modules share live in [`super::store_rows`]
 //! on the execution port; those of the same name here take rusqlite's types
-//! for a module that has not moved to it, and only hand on to them.
+//! for a module that has not moved to it, and only hand on to them, as do
+//! those here of [`super::store_writes`], the writes they share.
 use super::sql_dialect::{JsonType, json_field};
 use super::sql_exec::sqlite::{
     attach_event_actors, attach_event_bodies, is_contention, native_error, port_tx, with_row,
 };
 use super::store_rows::{self, ready_conditions, select_tasks};
+pub(super) use super::store_writes::next_id;
+use super::store_writes::{self, Node, request_priority, waits_for};
 use crate::domain::claim_facts;
 use crate::domain::event_kind::{self, EventKind};
 use crate::domain::task_replan::GuardedStep;
@@ -64,8 +67,7 @@ use crate::{
         cancel_reason::{CancelRecord, NewCancel},
         goal,
         plan_request::{
-            CreatingPlanner, Creator, PriorityBy, RecordedOrigin, creation_origin,
-            goal_priority_at_creation, task_priority_at_creation,
+            CreatingPlanner, Creator, PriorityBy, creation_origin, goal_priority_at_creation,
         },
         provider_switch::{self, SwitchPhase, WorkerRoute},
         provider_trial,
@@ -302,7 +304,7 @@ impl<'c> WriteTx<'c> {
         identity: &WriteIdentity,
     ) -> Result<Self> {
         let tx = Self::leader(conn, name, threshold)?;
-        super::write_leader::fence(&tx, identity)?;
+        super::write_leader::fence(&tx, identity).map_err(native_error)?;
         tx.rows.set(0);
         let mut tx = tx;
         tx.identity = Some(identity.clone());
@@ -384,7 +386,7 @@ impl<'c> WriteTx<'c> {
 
     /// Run the insert `sql` as [`WriteTx::execute`] does and return the ID
     /// of the row it inserted, or `None` when it inserted none
-    /// ([`insert_id_if_inserted`]).
+    /// ([`insert_id`]).
     pub fn insert_id_if_inserted<P: rusqlite::Params>(
         &self,
         sql: &str,
@@ -502,23 +504,13 @@ impl<'c> WriteTx<'c> {
 /// connection's last inserted rowid, read right after the statement, so an
 /// insert that inserts no row (`INSERT .. SELECT .. WHERE NOT EXISTS`)
 /// returns the ID of the connection's insert before it; such a caller
-/// checks the rows changed first ([`insert_id_if_inserted`]).
+/// checks the rows changed first ([`WriteTx::insert_id_if_inserted`]).
 pub(super) fn insert_id<P: rusqlite::Params>(
     conn: &Connection,
     sql: &str,
     params: P,
 ) -> rusqlite::Result<i64> {
     insert_counted(conn, sql, params).map(|(_, id)| id)
-}
-
-/// Run the insert `sql` on `conn` and return the ID of the row it
-/// inserted, or `None` when it inserted none.
-pub(super) fn insert_id_if_inserted<P: rusqlite::Params>(
-    conn: &Connection,
-    sql: &str,
-    params: P,
-) -> rusqlite::Result<Option<i64>> {
-    insert_counted(conn, sql, params).map(|(rows, id)| (rows > 0).then_some(id))
 }
 
 /// The rows the insert `sql` changed and the last inserted rowid after it:
@@ -888,7 +880,7 @@ impl SqliteQueue {
             .state()?
             .context("queue is not initialized; use init first")?
             .check_opens()?;
-        queue.write_identity = Some(WriteIdentity::read(&queue.conn)?);
+        queue.write_identity = Some(WriteIdentity::read(&*queue.conn)?);
         queue.conn.pragma_update(None, "journal_mode", "WAL")?;
         Ok(())
     }
@@ -1292,7 +1284,7 @@ impl SqliteQueue {
             std::sync::Arc::new(super::event_bodies::InlineEventBodies),
         )?;
         let write_identity = has_table(&conn, "write_leader")?
-            .then(|| WriteIdentity::read(&conn))
+            .then(|| WriteIdentity::read(&*conn))
             .transpose()?;
         Ok(Self {
             conn,
@@ -1367,7 +1359,7 @@ impl SqliteQueue {
     fn migration_tx(&self, mut after_read: impl FnMut() -> Result<()>) -> Result<WriteTx<'_>> {
         loop {
             let identity = has_table(&self.conn, "write_leader")?
-                .then(|| WriteIdentity::read(&self.conn))
+                .then(|| WriteIdentity::read(&*self.conn))
                 .transpose()?;
             after_read()?;
             let tx = WriteTx::leader(&self.conn, "schema_migrations", self.write_hold_warn)?;
@@ -2797,88 +2789,14 @@ pub(crate) fn tag_busy(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// Register `new` inside the caller's write transaction with
-/// `task_created` and its dependencies: what `add` does, and what a
-/// follow-up triage's `adopt` does in the transaction that cancels the draft.
-///
-/// `creator` is who creates it ([`creator_of_actor`] for the actor of the
-/// write): its origin is recorded once, and a task of a request a person
-/// gave a priority takes that priority as a person's own unless its goal
-/// already has it (ADR-t1975-1 decisions 2 and 5).
-///
-/// `task_created` carries the worker it is registered with: `provider` and
-/// `worker_mode` resolved, and `provider_named` and `worker_mode_named`,
-/// whether the registrant named each (`add --provider`, `--headless`, or
-/// the same fields of a draft) or left it to the default, which a task
-/// follows when the default changes (ADR-t1340-1).
+/// [`store_writes::insert_task`] on a rusqlite connection.
 pub(super) fn insert_task(
     tx: &Connection,
-    mut new: NewTask,
+    new: NewTask,
     now: &str,
     creator: Creator,
 ) -> Result<Task> {
-    let dependencies = new.dependencies.clone();
-    let goal_dependencies = new.goal_dependencies.clone();
-    let origin = creation_origin(creator);
-    let goal = new
-        .goal_id
-        .map(|goal_id| read_goal(tx, goal_id))
-        .transpose()?;
-    if let Some(goal) = &goal {
-        goal::check_accepts_tasks(goal)?;
-    }
-    let (priority, priority_by) = task_priority_at_creation(
-        creator,
-        request_priority(tx, origin)?,
-        new.priority,
-        goal.as_ref()
-            .map(|goal| (goal.priority(), goal.priority_by())),
-    )?;
-    new.priority = priority;
-    let (provider_named, worker_mode_named) = (new.provider.is_some(), new.worker_mode.is_some());
-    let task = Task::new(TaskId::new(next_id(tx, "tasks")?), new, now.to_owned())?;
-    let id = task.id();
-    tx.execute(
-            "INSERT INTO tasks(id, title, description, acceptance, verification_commands, status, goal_id,
-                               context, required_evidence, paths, priority, created_at,
-                               updated_at, worker_provider, worker_mode, change, wait_for_build,
-                               priority_by, origin, origin_kind, origin_request_id, execution_class)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
-            params![id, task.title(), task.description(), task.acceptance(),
-                serde_json::to_string(task.verification_commands())?, task.status().as_str(),
-                task.goal_id(), task.context(), serde_json::to_string(task.required_evidence())?,
-                serde_json::to_string(task.paths())?, task.own_priority().map(Priority::as_i64),
-                task.created_at(), task.updated_at(),
-                task.worker().provider.as_str(), task.stored_worker_mode().map(WorkerMode::as_str),
-                task.change().map(TaskChange::as_str), task.wait_for_build(),
-                priority_by.map(PriorityBy::as_str), origin.origin.as_str(),
-                origin.kind.map(|kind| kind.as_str()), origin.request_id,
-                task.execution_class().as_str()],
-        )?;
-    // The attributes the measurement folds (`domain::ledger::attributes`)
-    // as stored: its own priority and who set it, none to inherit.
-    event(
-        tx,
-        id,
-        None,
-        EventKind::TaskCreated,
-        json!({"goal_id": task.goal_id(), "status": task.status(), "title": task.title(),
-            "change": task.change().map(TaskChange::as_str),
-            "execution_class": task.execution_class().as_str(),
-            "priority": task.own_priority(),
-            "priority_by": priority_by.map(PriorityBy::as_str),
-            "provider": task.worker().provider.as_str(), "provider_named": provider_named,
-            "worker_mode": task.worker().mode.as_str(), "worker_mode_named": worker_mode_named}),
-    )?;
-    // Inserted after the task, which is in its goal already, so the
-    // cycle checks see the goal's wait for it (ADR-0038).
-    for predecessor in dependencies {
-        insert_dependency(tx, id, predecessor, now)?;
-    }
-    for goal_id in goal_dependencies {
-        insert_goal_dependency(tx, id, goal_id, now)?;
-    }
-    read_task(tx, id)
+    store_writes::insert_task(&port_tx(tx), new, now, creator).map_err(native_error)
 }
 
 /// The role of the actor of `conn`'s writes.
@@ -2945,29 +2863,6 @@ pub(super) fn creator_of_actor(conn: &Connection) -> Result<Creator> {
     }))
 }
 
-/// The request `origin` names and the priority a person gave it, when it
-/// has one (ADR-t1975-1 decision 2).
-fn request_priority(
-    conn: &Connection,
-    origin: RecordedOrigin,
-) -> Result<Option<(RequestId, Priority)>> {
-    let Some(request) = origin.request_id else {
-        return Ok(None);
-    };
-    let priority: Option<i64> = conn
-        .query_row(
-            "SELECT priority FROM plan_requests WHERE id=?1",
-            [request],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(priority
-        .map(Priority::from_i64)
-        .transpose()?
-        .map(|priority| (request, priority)))
-}
-
 pub(super) fn read_goal(conn: &Connection, goal_id: GoalId) -> Result<Goal> {
     store_rows::read_goal(&port_tx(conn), goal_id).map_err(native_error)
 }
@@ -3022,75 +2917,6 @@ fn landed_tasks(
             })
         })
         .collect()
-}
-
-/// A vertex of the wait graph (ADR-0038): a task waits for its predecessor
-/// tasks and the goals it depends on, a goal waits for its tasks, and a
-/// replaced task for the tasks its applied replacement made (ADR-t1521-2
-/// decision 5).
-#[derive(Debug, Clone, Copy)]
-enum Node {
-    Task(TaskId),
-    Goal(GoalId),
-}
-
-impl Node {
-    fn key(self) -> (&'static str, i64) {
-        match self {
-            Self::Task(id) => ("task", id.as_i64()),
-            Self::Goal(id) => ("goal", id.as_i64()),
-        }
-    }
-}
-
-/// Whether `from` already waits for `to`, directly or not, over every task
-/// and goal: the edge `to -> from` would close a cycle. Found in SQL
-/// because it needs the whole graph; whether that rejects the edge is the
-/// domain's rule (ADR-0013).
-fn waits_for(conn: &Connection, from: Node, to: Node) -> Result<bool> {
-    let (from_kind, from_id) = from.key();
-    let (to_kind, to_id) = to.key();
-    Ok(conn.query_row(
-        "WITH RECURSIVE
-           edges(from_kind, from_id, to_kind, to_id) AS (
-             SELECT 'task', task_id, 'task', predecessor_id FROM task_dependencies
-             UNION ALL
-             SELECT 'task', task_id, 'goal', goal_id FROM task_goal_dependencies
-             UNION ALL
-             -- A canceled task never holds its goal back (achieved allows it).
-             SELECT 'goal', goal_id, 'task', id FROM tasks
-               WHERE goal_id IS NOT NULL AND status <> 'canceled'
-             UNION ALL
-             -- A replaced task stands for the tasks it was replaced by,
-             -- wherever they belong (goal close waits for them).
-             SELECT 'task', r.from_task_id, 'task', r.to_task_id FROM replan_replacements r
-               JOIN replan_operations o ON o.id = r.operation_id AND o.status = 'applied'
-           ),
-           reached(kind, id) AS (
-             SELECT ?1, ?2
-             UNION
-             SELECT e.to_kind, e.to_id FROM edges e
-               JOIN reached r ON e.from_kind = r.kind AND e.from_id = r.id
-           )
-         SELECT EXISTS(SELECT 1 FROM reached WHERE kind = ?3 AND id = ?4)",
-        params![from_kind, from_id, to_kind, to_id],
-        |r| r.get(0),
-    )?)
-}
-
-/// The ID an `AUTOINCREMENT` insert into `table` would take now: one past
-/// the highest ever used. Inside the caller's write transaction no other
-/// insert can take it first, so the aggregate is built with its ID before
-/// it is saved.
-pub(super) fn next_id(conn: &Connection, table: &str) -> Result<i64> {
-    Ok(conn.query_row(
-        &format!(
-            "SELECT max(coalesce((SELECT seq FROM sqlite_sequence WHERE name=?1), 0),
-                        coalesce((SELECT max(id) FROM {table}), 0)) + 1"
-        ),
-        [table],
-        |r| r.get(0),
-    )?)
 }
 
 /// Close `goal_id` with `verdict` as `goal close` does (`achieved` only
@@ -3149,7 +2975,7 @@ pub(super) fn close_goal_in(
     // `abandoned` leaves unstarted tasks as they are; one another goal's
     // task waits on is told to the inbox (task 421).
     if verdict == GoalVerdict::Abandoned {
-        super::stranded::record_abandoned(conn, goal_id)?;
+        super::stranded::record_abandoned(&port_tx(conn), goal_id)?;
     }
     Ok(())
 }
@@ -3442,9 +3268,9 @@ pub(super) fn claim_task(
     let investigations = if held.investigations.max.is_some()
         && ready.iter().any(|task| task.execution_class().is_spike())
     {
-        super::investigations::refresh(tx, now_secs)?
+        super::investigations::refresh(&port_tx(tx), now_secs)?
     } else {
-        super::investigations::settle(tx, now_secs)?;
+        super::investigations::settle(&port_tx(tx), now_secs)?;
         crate::domain::investigation::Investigations::default()
     };
     ready.retain(|task| {
@@ -3619,7 +3445,7 @@ pub(super) fn claim_task(
             // A Spike's claim opens its investigation unless it is open
             // (ADR-t1487-1 decision 7).
             if super::investigations::open_cycle(
-                tx,
+                &port_tx(tx),
                 task.id(),
                 task.execution_class(),
                 task.goal_id(),
@@ -3794,7 +3620,7 @@ pub(super) fn complete_task(
     )?;
     // A Spike's completion leaves its replanning request in the same
     // transaction (ADR-t1487-1 decision 5).
-    super::plan_requests::record_spike_request(conn, task_id, now_secs)?;
+    super::plan_requests::record_spike_request(&port_tx(conn), task_id, now_secs)?;
     super::task_holds::end_with_task(conn, task_id, TaskStatus::Completed, now_secs)?;
     read_task(conn, task_id)
 }
@@ -4031,73 +3857,26 @@ pub(super) fn read_task(conn: &Connection, task_id: TaskId) -> Result<Task> {
     store_rows::read_task(&port_tx(conn), task_id).map_err(native_error)
 }
 
+/// [`store_writes::insert_dependency`] on a rusqlite connection.
 pub(super) fn insert_dependency(
     conn: &Connection,
     task_id: TaskId,
     predecessor_id: TaskId,
     now: &str,
 ) -> Result<()> {
-    task::check_not_self(task_id, predecessor_id)?;
-    // Neither end of an edge of a task being replanned changes: its apply
-    // moves every successor's edge itself (ADR-t1521-2 decision 5).
-    super::replans::check_task_step(conn, task_id, GuardedStep::Dependency)?;
-    super::replans::check_task_step(conn, predecessor_id, GuardedStep::Dependency)?;
-    task::check_dependencies_editable(&read_task(conn, task_id)?)?;
-    task::check_not_replaced(
-        task_id,
-        predecessor_id,
-        read_task(conn, predecessor_id)?.status(),
-    )?;
-    // Through goals too: the predecessor may wait for a goal that waits
-    // for the task (ADR-0038).
-    let cycle = waits_for(conn, Node::Task(predecessor_id), Node::Task(task_id))?;
-    task::check_acyclic(task_id, predecessor_id, cycle)?;
-    let inserted = conn.execute(
-        "INSERT INTO task_dependencies(task_id, predecessor_id) VALUES (?1,?2)
-         ON CONFLICT(task_id, predecessor_id) DO NOTHING",
-        params![task_id, predecessor_id],
-    )?;
-    if inserted != 0 {
-        touch(conn, task_id, now)?;
-        event(
-            conn,
-            task_id,
-            None,
-            EventKind::DependencyAdded,
-            json!({"predecessor_id": predecessor_id}),
-        )?;
-    }
-    Ok(())
+    store_writes::insert_dependency(&port_tx(conn), task_id, predecessor_id, now)
+        .map_err(native_error)
 }
 
+/// [`store_writes::insert_goal_dependency`] on a rusqlite connection.
 fn insert_goal_dependency(
     conn: &Connection,
     task_id: TaskId,
     goal_id: GoalId,
     now: &str,
 ) -> Result<()> {
-    let task = read_task(conn, task_id)?;
-    task::check_dependencies_editable(&task)?;
-    goal::check_accepts_dependents(&read_goal(conn, goal_id)?)?;
-    task::check_not_own_goal(&task, goal_id)?;
-    let cycle = waits_for(conn, Node::Goal(goal_id), Node::Task(task_id))?;
-    task::check_goal_acyclic(task_id, goal_id, cycle)?;
-    let inserted = conn.execute(
-        "INSERT INTO task_goal_dependencies(task_id, goal_id) VALUES (?1,?2)
-         ON CONFLICT(task_id, goal_id) DO NOTHING",
-        params![task_id, goal_id],
-    )?;
-    if inserted != 0 {
-        touch(conn, task_id, now)?;
-        event(
-            conn,
-            task_id,
-            None,
-            EventKind::GoalDependencyAdded,
-            json!({"goal_id": goal_id}),
-        )?;
-    }
-    Ok(())
+    store_writes::insert_goal_dependency(&port_tx(conn), task_id, goal_id, now)
+        .map_err(native_error)
 }
 
 /// Refuse, before anything is written, a task whose status, proposal,
@@ -4124,29 +3903,18 @@ pub(super) fn task_authorization(conn: &Connection, task: TaskId) -> Result<Task
     })
 }
 
+/// [`store_writes::touch`] on a rusqlite connection.
 fn touch(conn: &Connection, task_id: TaskId, now: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE tasks SET updated_at=?1 WHERE id=?2",
-        params![now, task_id],
-    )?;
-    Ok(())
+    store_writes::touch(&port_tx(conn), task_id, now).map_err(native_error)
 }
 
-/// Insert an event of the queue itself (one of [`EventKind::is_queue`]) in
-/// the open transaction `conn`, with the session span it opens or closes.
+/// [`store_writes::record_queue_event_in`] on a rusqlite connection.
 pub(super) fn record_queue_event_in(
     conn: &Connection,
     kind: EventKind,
     payload: &serde_json::Value,
 ) -> Result<()> {
-    crate::domain::check_event_target(kind, None, None)?;
-    let id = insert_id(
-        conn,
-        "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
-         VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![kind.as_str(), serde_json::to_string(payload)?],
-    )?;
-    super::sessions::follow(conn, EventId::new(id), None, None, kind, payload)
+    store_writes::record_queue_event_in(&port_tx(conn), kind, payload).map_err(native_error)
 }
 
 /// Give the task a priority of its own, or with none take its goal's again
@@ -4200,6 +3968,7 @@ pub(super) fn change_priority(
     event(conn, task_id, None, EventKind::TaskPriorityChanged, payload)
 }
 
+/// [`store_writes::event`] on a rusqlite connection.
 pub(super) fn event(
     conn: &Connection,
     task_id: TaskId,
@@ -4207,10 +3976,10 @@ pub(super) fn event(
     kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<()> {
-    event_id(conn, task_id, run_id, kind, payload).map(drop)
+    store_writes::event(&port_tx(conn), task_id, run_id, kind, payload).map_err(native_error)
 }
 
-/// [`event`], returning the ID of the event it inserted.
+/// [`store_writes::event_id`] on a rusqlite connection.
 pub(super) fn event_id(
     conn: &Connection,
     task_id: TaskId,
@@ -4218,20 +3987,7 @@ pub(super) fn event_id(
     kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<EventId> {
-    let id = EventId::new(insert_id(
-        conn,
-        "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
-         VALUES (?1,?2,?3,dagq_event_body(?4),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![
-            task_id,
-            run_id,
-            kind.as_str(),
-            serde_json::to_string(&payload)?
-        ],
-    )?);
-    // The Claude session spans this event starts or ends (ADR-0048).
-    super::sessions::follow(conn, id, Some(task_id), run_id, kind, &payload)?;
-    Ok(id)
+    store_writes::event_id(&port_tx(conn), task_id, run_id, kind, payload).map_err(native_error)
 }
 
 pub(super) fn enum_col<T: FromStr<Err = DomainError>>(
@@ -4998,9 +4754,20 @@ mod inserted_id_tests {
     fn an_insert_that_inserts_no_row_has_no_id() {
         let conn = table();
         let sql = "INSERT INTO t(v) SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM t WHERE v=?1)";
-        assert_eq!(insert_id_if_inserted(&conn, sql, ["a"]).unwrap(), Some(1));
-        assert_eq!(insert_id_if_inserted(&conn, sql, ["a"]).unwrap(), None);
-        assert_eq!(insert_id_if_inserted(&conn, sql, ["b"]).unwrap(), Some(2));
+        let tx = port_tx(&conn);
+        let insert = |value: &str| {
+            crate::infrastructure::sql_exec::SqlWrite::insert_id_if_inserted(
+                &tx,
+                sql,
+                &[crate::infrastructure::sql_exec::SqlValue::Text(
+                    value.to_owned(),
+                )],
+            )
+            .unwrap()
+        };
+        assert_eq!(insert("a"), Some(1));
+        assert_eq!(insert("a"), None);
+        assert_eq!(insert("b"), Some(2));
     }
 
     /// In a transaction, the insert returns the ID as outside one and is

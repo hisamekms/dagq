@@ -12,6 +12,7 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 
 use super::super::findings::{finding_event, finding_row};
+use super::super::sql_exec::sqlite::with_row;
 use super::super::sqlite::{SqliteQueue, event, event_row, goal_event, read_goal};
 use super::run_log::queue_event;
 use crate::domain::ledger::attributes::{
@@ -129,7 +130,7 @@ fn differing_findings(conn: &Connection) -> Result<Vec<Finding>> {
     };
     let rows: Vec<Finding> = conn
         .prepare("SELECT * FROM findings ORDER BY id")?
-        .query_map([], finding_row)?
+        .query_map([], |row| with_row(row, finding_row))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows
         .into_iter()

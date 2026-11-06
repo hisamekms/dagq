@@ -12,6 +12,10 @@
 //! row helper through [`with_row`], back to rusqlite's errors. A `Connection`
 //! is also a [`SqlRead`] as it is: the read connection needs no wrapper.
 //!
+//! The conversions of the domain's IDs to and from rusqlite's values are for
+//! such a module too. A transaction here also is an [`EventTx`], since the
+//! spans of an event are still written on a rusqlite connection.
+//!
 //! The actor and event body functions are here because registering a function
 //! is the driver's call; the state the actor functions read is
 //! [`super::super::event_actor`]'s, and what the body function returns is
@@ -20,10 +24,10 @@
 use std::sync::Arc;
 
 use rusqlite::{
-    Connection, Row,
+    Connection, Row, ToSql,
     functions::FunctionFlags,
     params_from_iter,
-    types::{ToSqlOutput, Type, Value},
+    types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Type, Value, ValueRef},
 };
 
 use super::{
@@ -32,10 +36,16 @@ use super::{
 };
 use crate::application::EventBodies;
 use crate::domain::actor::ActorContext;
+use crate::domain::{
+    AskId, CommitSha, EventId, EventKind, FindingId, GoalId, HoldId, LeaseToken, PlannerId,
+    ProposalId, ReplanId, RequestId, RunId, TaskId,
+};
 use crate::infrastructure::{
     event_actor::EventActors,
     event_bodies::event_body_for_row,
+    sessions,
     sqlite::{SqliteQueue, WriteTx, insert_counted},
+    store_writes::EventTx,
 };
 
 impl rusqlite::ToSql for SqlValue {
@@ -71,6 +81,67 @@ impl From<ValueKind> for Type {
             ValueKind::Text => Self::Text,
             ValueKind::Blob => Self::Blob,
         }
+    }
+}
+
+// rusqlite's conversions of the domain's ID and commit newtypes, for a module
+// that has not moved. They bind as the bare value; reading one back goes
+// through the same check as creating it, so a malformed stored run ID or
+// commit fails the row as a conversion error instead of producing an unchecked
+// value.
+
+macro_rules! integer_ids {
+    ($($id:ident),*) => {$(
+        impl ToSql for $id {
+            fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+                Ok(ToSqlOutput::from(self.as_i64()))
+            }
+        }
+
+        impl FromSql for $id {
+            fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                i64::column_result(value).map($id::new)
+            }
+        }
+    )*};
+}
+integer_ids!(
+    HoldId, ReplanId, TaskId, GoalId, ProposalId, FindingId, RequestId, PlannerId, AskId, EventId
+);
+
+impl ToSql for LeaseToken {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl FromSql for LeaseToken {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        String::column_result(value).map(LeaseToken::new)
+    }
+}
+
+impl ToSql for RunId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl FromSql for RunId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        RunId::new(value.as_str()?).map_err(|error| FromSqlError::Other(Box::new(error)))
+    }
+}
+
+impl ToSql for CommitSha {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl FromSql for CommitSha {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        CommitSha::try_from(value.as_str()?).map_err(|error| FromSqlError::Other(Box::new(error)))
     }
 }
 
@@ -307,6 +378,32 @@ impl SqlWrite for SqliteTx<'_> {
     fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>> {
         let (rows, id) = insert_counted(self.0, sql, params_from_iter(params))?;
         Ok((rows > 0).then_some(id))
+    }
+}
+
+impl EventTx for WriteTx<'_> {
+    fn follow_spans(
+        &self,
+        event_id: EventId,
+        task_id: Option<TaskId>,
+        run_id: Option<&RunId>,
+        kind: EventKind,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        sessions::follow(self, event_id, task_id, run_id, kind, payload)
+    }
+}
+
+impl EventTx for SqliteTx<'_> {
+    fn follow_spans(
+        &self,
+        event_id: EventId,
+        task_id: Option<TaskId>,
+        run_id: Option<&RunId>,
+        kind: EventKind,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        sessions::follow(self.0, event_id, task_id, run_id, kind, payload)
     }
 }
 
@@ -710,6 +807,46 @@ mod tests {
             .unwrap_err();
         assert!(!is_contention(&refused));
         assert!(!SqlError::from(refused).is_contention());
+    }
+
+    const SHA1: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn ids_round_trip_through_sqlite_and_are_checked_on_the_way_back() {
+        let conn = Connection::open_in_memory().unwrap();
+        let (task, goal, run, commit): (TaskId, GoalId, RunId, CommitSha) = conn
+            .query_row(
+                "SELECT ?1, ?2, ?3, ?4",
+                (
+                    TaskId::new(4),
+                    GoalId::new(2),
+                    RunId::new("r").unwrap(),
+                    CommitSha::try_from(SHA1).unwrap(),
+                ),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(task, TaskId::new(4));
+        assert_eq!(goal, GoalId::new(2));
+        assert_eq!(run.as_str(), "r");
+        assert_eq!(commit.as_str(), SHA1);
+
+        let (ask, event, proposal): (AskId, EventId, ProposalId) = conn
+            .query_row(
+                "SELECT ?1, ?2, ?3",
+                (AskId::new(3), EventId::new(8), ProposalId::new(6)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(ask, AskId::new(3));
+        assert_eq!(event, EventId::new(8));
+        assert_eq!(proposal, ProposalId::new(6));
+        assert_eq!((proposal.to_string(), proposal.as_i64()), ("6".into(), 6));
+
+        let blank = conn.query_row("SELECT ''", [], |row| row.get::<_, RunId>(0));
+        assert!(blank.is_err());
+        let short = conn.query_row("SELECT 'abc'", [], |row| row.get::<_, CommitSha>(0));
+        assert!(short.is_err());
     }
 
     /// The port's reads of no row and of the first row, on a real statement.

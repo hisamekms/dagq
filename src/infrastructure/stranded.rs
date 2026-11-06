@@ -6,10 +6,12 @@
 //! waiting tasks: that is the plan's call.
 use crate::domain::EventKind;
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
-use super::sqlite::{SqliteQueue, enum_col, event};
+use super::sql_exec::{OptionalRow, SqlRead, sql_params};
+use super::sqlite::SqliteQueue;
+use super::store_rows::enum_col;
+use super::store_writes::{EventTx, event};
 use crate::domain::{GoalId, StrandedDependency, TaskId, event_kind};
 
 /// The `cause` of a strand `approve` made by withholding the task is
@@ -58,22 +60,19 @@ const UPSTREAM: &str = "
     WHERE g.closed_at IS NOT NULL AND t.status IN ('draft','submitted','ready')
     ORDER BY t.id";
 
-fn upstream(conn: &Connection, task: TaskId) -> Result<Vec<TaskId>> {
-    Ok(conn
-        .prepare(UPSTREAM)?
-        .query_map([task], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
+fn upstream(tx: &impl SqlRead, task: TaskId) -> Result<Vec<TaskId>> {
+    Ok(tx.query_map(UPSTREAM, sql_params![task], |r| r.get(0))?)
 }
 
 /// `task` as a stranded dependency: a task of a closed goal left
 /// unfinished that some task waits on, and that waits on no other such
 /// task (a chain of them strands its dependents once, at its root).
 /// `None` otherwise.
-fn stranded(conn: &Connection, task: TaskId) -> Result<Option<StrandedDependency>> {
-    let Some((goal_id, verdict)) = conn
+fn stranded(tx: &impl SqlRead, task: TaskId) -> Result<Option<StrandedDependency>> {
+    let Some((goal_id, verdict)) = tx
         .query_row(
             &format!("{UNFINISHED_OF_CLOSED} AND t.id = ?1"),
-            [task],
+            sql_params![task],
             |r| Ok((r.get::<_, GoalId>("goal_id")?, enum_col(r, "verdict")?)),
         )
         .optional()?
@@ -82,13 +81,10 @@ fn stranded(conn: &Connection, task: TaskId) -> Result<Option<StrandedDependency
     };
     // A task that itself waits on such a task is not the strand: its root
     // is, and tells the same waiting tasks once.
-    if !upstream(conn, task)?.is_empty() {
+    if !upstream(tx, task)?.is_empty() {
         return Ok(None);
     }
-    let waiting: Vec<TaskId> = conn
-        .prepare(WAITING)?
-        .query_map([task], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let waiting: Vec<TaskId> = tx.query_map(WAITING, sql_params![task], |r| r.get(0))?;
     Ok((!waiting.is_empty()).then_some(StrandedDependency {
         task_id: task,
         goal_id,
@@ -101,16 +97,16 @@ fn stranded(conn: &Connection, task: TaskId) -> Result<Option<StrandedDependency
 /// with `cause` and the fields of `extra`, in the caller's transaction.
 /// The same strand is told once: nothing is recorded while the task's
 /// latest `dependency_stranded` names the same waiting tasks.
-pub(super) fn record(conn: &Connection, task: TaskId, cause: &str, extra: Value) -> Result<()> {
-    let Some(stranded) = stranded(conn, task)? else {
+pub(super) fn record(tx: &impl EventTx, task: TaskId, cause: &str, extra: Value) -> Result<()> {
+    let Some(stranded) = stranded(tx, task)? else {
         return Ok(());
     };
     let waiting = json!(stranded.waiting);
-    let told: Option<String> = conn
+    let told: Option<String> = tx
         .query_row(
             "SELECT payload FROM run_events WHERE task_id=?1 AND kind=?2
              ORDER BY id DESC LIMIT 1",
-            params![task, event_kind::DEPENDENCY_STRANDED],
+            sql_params![task, event_kind::DEPENDENCY_STRANDED],
             |r| r.get(0),
         )
         .optional()?;
@@ -128,20 +124,19 @@ pub(super) fn record(conn: &Connection, task: TaskId, cause: &str, extra: Value)
     if let (Some(payload), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
         payload.extend(extra.clone());
     }
-    event(conn, task, None, EventKind::DependencyStranded, payload)
+    event(tx, task, None, EventKind::DependencyStranded, payload)
 }
 
 /// [`record`] for every unfinished task of the goal just closed as
 /// `abandoned`.
-pub(super) fn record_abandoned(conn: &Connection, goal: GoalId) -> Result<()> {
-    let tasks: Vec<TaskId> = conn
-        .prepare(&format!(
-            "{UNFINISHED_OF_CLOSED} AND g.id = ?1 ORDER BY t.id"
-        ))?
-        .query_map([goal], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+pub(super) fn record_abandoned(tx: &impl EventTx, goal: GoalId) -> Result<()> {
+    let tasks: Vec<TaskId> = tx.query_map(
+        &format!("{UNFINISHED_OF_CLOSED} AND g.id = ?1 ORDER BY t.id"),
+        sql_params![goal],
+        |r| r.get(0),
+    )?;
     for task in tasks {
-        record(conn, task, GOAL_ABANDONED, json!({}))?;
+        record(tx, task, GOAL_ABANDONED, json!({}))?;
     }
     Ok(())
 }
@@ -150,13 +145,13 @@ pub(super) fn record_abandoned(conn: &Connection, goal: GoalId) -> Result<()> {
 /// (or a draft of another goal was approved after an abandoned close told
 /// its strand without it), so the waiting tasks changed.
 pub(super) fn record_upstream(
-    conn: &Connection,
+    tx: &impl EventTx,
     task: TaskId,
     cause: &str,
     extra: Value,
 ) -> Result<()> {
-    for stranded in upstream(conn, task)? {
-        record(conn, stranded, cause, extra.clone())?;
+    for stranded in upstream(tx, task)? {
+        record(tx, stranded, cause, extra.clone())?;
     }
     Ok(())
 }
@@ -164,14 +159,14 @@ pub(super) fn record_upstream(
 impl SqliteQueue {
     /// Every stranded dependency in the queue now, by task ID.
     pub fn stranded_dependencies(&self) -> Result<Vec<StrandedDependency>> {
-        let tasks: Vec<TaskId> = self
-            .conn
-            .prepare(&format!("{UNFINISHED_OF_CLOSED} ORDER BY t.id"))?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let tasks: Vec<TaskId> =
+            self.conn
+                .query_map(&format!("{UNFINISHED_OF_CLOSED} ORDER BY t.id"), &[], |r| {
+                    r.get(0)
+                })?;
         let mut all = Vec::new();
         for task in tasks {
-            all.extend(stranded(&self.conn, task)?);
+            all.extend(stranded(&*self.conn, task)?);
         }
         Ok(all)
     }

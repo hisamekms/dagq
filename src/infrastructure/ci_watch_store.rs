@@ -10,15 +10,16 @@
 //! write lock, so every read names `events_by_kind` (why:
 //! [`super::kpi_push`]).
 
-use super::sql_dialect::{JsonType, json_field};
+use super::sql_dialect::{JsonType, SqlDialect};
+use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 use super::event_bodies::set_event_body_field;
 use super::findings::{record_in, set_status_in};
-use super::sqlite::{SqliteQueue, event_row};
+use super::sqlite::SqliteQueue;
+use super::store_rows::event_row;
 use crate::domain::ci_watch::freshness::{FRESHNESS_KINDS, FreshnessRecord};
 use crate::domain::ci_watch::scheduled::{CI_SCHEDULED_CHECKED, ScheduledCheckRecord};
 use crate::domain::ci_watch::{CI_CHECKED, CI_WATCH_KINDS, CiCheckRecord, CiCheckRecorded};
@@ -52,37 +53,33 @@ pub(super) fn watch_events_sql() -> String {
 }
 
 /// The latest freshness record (kinds `?1`, `?2`) of the workflow `?3`.
-pub(super) fn latest_freshness_sql() -> String {
+pub(super) fn latest_freshness_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT id, kind FROM run_events INDEXED BY events_by_kind WHERE kind IN (?1,?2)
          AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
          AND {}=?3
          ORDER BY id DESC LIMIT 1",
-        json_field("payload", "$.workflow", JsonType::Text)
+        dialect.json_field("payload", "$.workflow", JsonType::Text)
     )
 }
 
 /// Whether a record of the kind `?1` of the workflow `?2` and its run `?3`
 /// is there.
-pub(super) fn freshness_there_sql() -> String {
+pub(super) fn freshness_there_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT EXISTS(SELECT 1 FROM run_events INDEXED BY events_by_kind WHERE kind=?1
          AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
          AND {}=?2
          AND {} IS ?3)",
-        json_field("payload", "$.workflow", JsonType::Text),
-        json_field("payload", "$.run_id", JsonType::Integer)
+        dialect.json_field("payload", "$.workflow", JsonType::Text),
+        dialect.json_field("payload", "$.run_id", JsonType::Integer)
     )
 }
 
 impl SqliteQueue {
     /// Every event of the watch, oldest first.
     pub fn ci_watch_events(&self) -> Result<Vec<RunEvent>> {
-        Ok(self
-            .conn
-            .prepare(&watch_events_sql())?
-            .query_map([], event_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(self.conn.query_map(&watch_events_sql(), &[], event_row)?)
     }
 
     /// Write `record` unless the latest `ci_checked` event is no longer the
@@ -98,7 +95,7 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let tx = self.write_tx("record_ci_check")?;
         let latest: Option<i64> = tx
-            .query_row(LATEST_OF_KIND_SQL, [CI_CHECKED], |r| r.get(0))
+            .query_row(LATEST_OF_KIND_SQL, sql_params![CI_CHECKED], |r| r.get(0))
             .optional()?;
         if latest != record.previous {
             return Ok(None);
@@ -137,11 +134,11 @@ impl SqliteQueue {
 
     /// Every `ci_scheduled_checked` event, oldest first.
     pub fn ci_scheduled_events(&self) -> Result<Vec<RunEvent>> {
-        Ok(self
-            .conn
-            .prepare(EVENTS_OF_KIND_SQL)?
-            .query_map([CI_SCHEDULED_CHECKED], event_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(self.conn.query_map(
+            EVENTS_OF_KIND_SQL,
+            sql_params![CI_SCHEDULED_CHECKED],
+            event_row,
+        )?)
     }
 
     /// Write `record` of a scheduled workflow's run unless the latest
@@ -157,7 +154,9 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let tx = self.write_tx("record_ci_scheduled_check")?;
         let latest: Option<i64> = tx
-            .query_row(LATEST_OF_KIND_SQL, [CI_SCHEDULED_CHECKED], |r| r.get(0))
+            .query_row(LATEST_OF_KIND_SQL, sql_params![CI_SCHEDULED_CHECKED], |r| {
+                r.get(0)
+            })
             .optional()?;
         if latest != record.previous {
             return Ok(None);
@@ -187,9 +186,7 @@ impl SqliteQueue {
         let [stale, fresh] = FRESHNESS_KINDS.map(EventKind::as_str);
         Ok(self
             .conn
-            .prepare(FRESHNESS_EVENTS_SQL)?
-            .query_map([stale, fresh], event_row)?
-            .collect::<rusqlite::Result<_>>()?)
+            .query_map(FRESHNESS_EVENTS_SQL, sql_params![stale, fresh], event_row)?)
     }
 
     /// Write `record` in one transaction, or nothing (`None`): a stale
@@ -206,8 +203,8 @@ impl SqliteQueue {
         let latest = |workflow: Option<&str>| -> Result<Option<(i64, String)>> {
             Ok(tx
                 .query_row(
-                    &latest_freshness_sql(),
-                    params![stale.as_str(), fresh.as_str(), workflow],
+                    &latest_freshness_sql(tx.dialect()),
+                    sql_params![stale.as_str(), fresh.as_str(), workflow],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?)
@@ -219,8 +216,8 @@ impl SqliteQueue {
                     return Ok(None);
                 }
                 let there: bool = tx.query_row(
-                    &freshness_there_sql(),
-                    params![stale.as_str(), workflow, payload["run_id"].as_i64()],
+                    &freshness_there_sql(tx.dialect()),
+                    sql_params![stale.as_str(), workflow, payload["run_id"].as_i64()],
                     |r| r.get(0),
                 )?;
                 if there {
@@ -246,18 +243,14 @@ impl SqliteQueue {
     /// task belongs to, or dismissed as covered by it (ADR-t1920-1
     /// decision 5).
     pub fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<FindingId>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT f.id FROM findings f WHERE f.kind=?2 AND (f.covered_by_task=?1
+        Ok(self.conn.query_map(
+            "SELECT f.id FROM findings f WHERE f.kind=?2 AND (f.covered_by_task=?1
                    OR (f.proposal_id IS NOT NULL
                        AND f.proposal_id=(SELECT proposal_id FROM tasks WHERE id=?1)))
                  ORDER BY f.id",
-            )?
-            .query_map(params![task, crate::domain::ci_watch::FINDING_KIND], |r| {
-                r.get(0)
-            })?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![task, crate::domain::ci_watch::FINDING_KIND],
+            |r| r.get(0),
+        )?)
     }
 
     /// The tasks that fix each `ci_failure` finding: those of the
@@ -265,19 +258,15 @@ impl SqliteQueue {
     /// canceled ones aside (ADR-t1920-1 decision 5).
     pub fn ci_failure_fix_tasks(&self) -> Result<BTreeMap<i64, Vec<TaskId>>> {
         let mut fixes: BTreeMap<i64, Vec<TaskId>> = BTreeMap::new();
-        let rows = self
-            .conn
-            .prepare(
-                "SELECT f.id, t.id FROM findings f JOIN tasks t
+        let rows = self.conn.query_map(
+            "SELECT f.id, t.id FROM findings f JOIN tasks t
                    ON t.id=f.covered_by_task
                    OR (f.proposal_id IS NOT NULL AND t.proposal_id=f.proposal_id)
                  WHERE f.kind=?1 AND t.status!='canceled'
                  ORDER BY f.id, t.id",
-            )?
-            .query_map(params![crate::domain::ci_watch::FINDING_KIND], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, TaskId>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            sql_params![crate::domain::ci_watch::FINDING_KIND],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, TaskId>(1)?)),
+        )?;
         for (finding, task) in rows {
             fixes.entry(finding).or_default().push(task);
         }
@@ -286,24 +275,23 @@ impl SqliteQueue {
 }
 
 /// Insert a queue event of the watch.
-fn insert(conn: &Connection, kind: EventKind, payload: &Value) -> Result<EventId> {
-    Ok(EventId::new(super::sqlite::insert_id(
-        conn,
+fn insert(tx: &impl SqlWrite, kind: EventKind, payload: &Value) -> Result<EventId> {
+    Ok(EventId::new(tx.insert_id(
         "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![kind.as_str(), serde_json::to_string(payload)?],
+        sql_params![kind.as_str(), serde_json::to_string(payload)?],
     )?))
 }
 
 /// Record `finding` (matched and updated as `finding record` does); one
 /// that opens again is marked for a proposal anew. Its ID.
-fn record_marked(conn: &Connection, finding: &NewFinding, now: i64) -> Result<FindingId> {
-    let outcome = record_in(conn, finding, now)?;
+fn record_marked(tx: &impl SqlWrite, finding: &NewFinding, now: i64) -> Result<FindingId> {
+    let outcome = record_in(tx, finding, now)?;
     let id = outcome.finding.id;
     if outcome.changed.contains(&"status") && outcome.finding.status == FindingStatus::Open {
-        conn.execute(
+        tx.execute(
             "UPDATE findings SET propose_requested_at=?2 WHERE id=?1",
-            params![id, now],
+            sql_params![id, now],
         )?;
     }
     Ok(id)
@@ -311,12 +299,16 @@ fn record_marked(conn: &Connection, finding: &NewFinding, now: i64) -> Result<Fi
 
 /// Resolve each finding of `resolve` with its reason where
 /// [`resolvable`]: the ones resolved.
-fn resolve_all(conn: &Connection, resolve: Vec<(i64, String)>, now: i64) -> Result<Vec<FindingId>> {
+fn resolve_all(
+    tx: &impl SqlWrite,
+    resolve: Vec<(i64, String)>,
+    now: i64,
+) -> Result<Vec<FindingId>> {
     let mut resolved = Vec::new();
     for (id, reason) in resolve {
         let id = FindingId::new(id);
-        if resolvable(conn, id)? {
-            set_status_in(conn, id, FindingStatus::Resolved, &reason, "runtime", now)?;
+        if resolvable(tx, id)? {
+            set_status_in(tx, id, FindingStatus::Resolved, &reason, "runtime", now)?;
             resolved.push(id);
         }
     }
@@ -325,13 +317,13 @@ fn resolve_all(conn: &Connection, resolve: Vec<(i64, String)>, now: i64) -> Resu
 
 /// Whether the runtime resolves the finding: still `open`, with no planner
 /// of the runtime's open for it (one that is open decides it).
-fn resolvable(conn: &Connection, id: FindingId) -> Result<bool> {
-    Ok(conn
+fn resolvable(tx: &impl SqlRead, id: FindingId) -> Result<bool> {
+    Ok(tx
         .query_row(
             "SELECT status='open' AND NOT EXISTS(SELECT 1 FROM planners p
                WHERE p.finding_id=f.id AND p.closed_at IS NULL)
              FROM findings f WHERE f.id=?1",
-            [id],
+            sql_params![id],
             |r| r.get::<_, bool>(0),
         )
         .optional()?

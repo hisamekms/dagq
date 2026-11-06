@@ -2,19 +2,19 @@
 //! decisions 2 and 4; the table's columns are its migration's comment).
 //! The statements are the shared SQL that SQLite and the later Postgres
 //! store run alike: only the DB's clock now comes from the dialect
-//! ([`now_millis`]), and each statement reads it where it runs, so a
-//! lease's end is judged by the DB's clock and not the process's.
+//! ([`super::sql_dialect::SqlDialect::now_millis`]), and each statement reads
+//! it where it runs, so a lease's end is judged by the DB's clock and not the
+//! process's.
 //!
 //! The takeover's condition is the one [`crate::domain::write_leader::takeover`]
 //! decides by, applied at the DB, so of two processes racing for the row
 //! one changes no row and is told so.
 
-use super::sql_dialect::now_millis;
-use super::sqlite::SqliteQueue;
+use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
+use super::sqlite::{SqliteQueue, WriteTx};
 use crate::application::WriteLeaderStore;
 use crate::domain::write_leader::WriteLeader;
 use anyhow::{Context, Result};
-use rusqlite::{OptionalExtension, params};
 use std::time::Duration;
 
 /// The caller's identity, retained by the service that opened the store.
@@ -31,8 +31,8 @@ pub(super) const IDENTITY_SQL: &str =
     "SELECT holder, generation FROM write_leader WHERE singleton = 1";
 
 impl WriteIdentity {
-    pub(super) fn read(conn: &rusqlite::Connection) -> Result<Self> {
-        Ok(conn.query_row(IDENTITY_SQL, [], |r| {
+    pub(super) fn read(tx: &impl SqlRead) -> Result<Self> {
+        Ok(tx.query_row(IDENTITY_SQL, &[], |r| {
             Ok(Self {
                 holder: r.get(0)?,
                 generation: r.get(1)?,
@@ -46,10 +46,10 @@ impl WriteIdentity {
 /// fences an old writer. NULL equality admits the unheld generation zero.
 /// A zero-row update drops (rolls back) the transaction before returning the
 /// retryable application error; it must never record a diagnostic write.
-pub(super) fn fence(tx: &super::sqlite::WriteTx<'_>, identity: &WriteIdentity) -> Result<()> {
+pub(super) fn fence(tx: &impl SqlWrite, identity: &WriteIdentity) -> Result<()> {
     let changed = tx.execute(
-        &renew_sql(&now_millis()),
-        params![
+        &renew_sql(&tx.dialect().now_millis()),
+        sql_params![
             identity.holder,
             identity.generation,
             millis(crate::domain::write_leader::LEASE)?
@@ -64,14 +64,11 @@ pub(super) fn fence(tx: &super::sqlite::WriteTx<'_>, identity: &WriteIdentity) -
 /// Migration locks the row it read outside the transaction, without extending
 /// another service's lease. A takeover in between returns false, so the caller
 /// rolls back and rereads. Even an unheld generation zero is locked this way.
-pub(super) fn lock_migration(
-    tx: &super::sqlite::WriteTx<'_>,
-    identity: &WriteIdentity,
-) -> Result<bool> {
+pub(super) fn lock_migration(tx: &impl SqlWrite, identity: &WriteIdentity) -> Result<bool> {
     Ok(tx.execute(
         "UPDATE write_leader SET generation = generation \
          WHERE singleton = 1 AND (holder = ?1 OR (holder IS NULL AND ?1 IS NULL)) AND generation = ?2",
-        params![identity.holder, identity.generation],
+        sql_params![identity.holder, identity.generation],
     )? == 1)
 }
 
@@ -116,7 +113,8 @@ pub(super) fn millis(lease: Duration) -> Result<i64> {
 }
 
 /// The statements of the row on `queue`, each reading the clock now as the
-/// SQL expression `now`: the DB's clock ([`now_millis`]) for the port, a
+/// SQL expression `now`: the DB's clock
+/// ([`super::sql_dialect::SqlDialect::now_millis`]) for the port, a
 /// fixed value for the tests, which judge the lease's end against it
 /// deterministically. Only the clock differs; the statements are the same.
 struct LeaderRow<'q> {
@@ -129,14 +127,14 @@ impl<'q> LeaderRow<'q> {
     fn at_db_clock(queue: &'q SqliteQueue) -> Self {
         Self {
             queue,
-            now: now_millis(),
+            now: queue.conn.dialect().now_millis(),
         }
     }
 
     fn read(&self) -> Result<(WriteLeader, i64)> {
         let tx = self.queue.read_tx("write_leader")?;
         let read = tx
-            .query_row(&read_sql(&self.now), [], |r| {
+            .query_row(&read_sql(&self.now), &[], |r| {
                 Ok((
                     WriteLeader {
                         holder: r.get(0)?,
@@ -154,45 +152,47 @@ impl<'q> LeaderRow<'q> {
     }
 
     fn take(&self, holder: &str, lease: Duration, local_proof: bool) -> Result<Option<i64>> {
-        let tx = super::sqlite::WriteTx::leader(
+        let tx = WriteTx::leader(
             &self.queue.conn,
             "take_write_leader",
             self.queue.write_hold_warn,
         )?;
-        let taken = tx.execute(
+        let taken = SqlWrite::execute(
+            &tx,
             &take_sql(&self.now),
-            params![holder, millis(lease)?, local_proof],
+            sql_params![holder, millis(lease)?, local_proof],
         )?;
         if taken == 0 {
             tx.finish()?;
             return Ok(None);
         }
-        let generation = tx.query_row(TAKEN_SQL, [], |r| r.get(0))?;
+        let generation = tx.query_row(TAKEN_SQL, &[], |r| r.get(0))?;
         tx.commit()?;
         Ok(Some(generation))
     }
 
     fn renew(&self, holder: &str, generation: i64, lease: Duration) -> Result<bool> {
-        let tx = super::sqlite::WriteTx::leader(
+        let tx = WriteTx::leader(
             &self.queue.conn,
             "renew_write_leader",
             self.queue.write_hold_warn,
         )?;
-        let renewed = tx.execute(
+        let renewed = SqlWrite::execute(
+            &tx,
             &renew_sql(&self.now),
-            params![holder, generation, millis(lease)?],
+            sql_params![holder, generation, millis(lease)?],
         )?;
         tx.commit()?;
         Ok(renewed == 1)
     }
 
     fn release(&self, holder: &str, generation: i64) -> Result<bool> {
-        let tx = super::sqlite::WriteTx::leader(
+        let tx = WriteTx::leader(
             &self.queue.conn,
             "release_write_leader",
             self.queue.write_hold_warn,
         )?;
-        let released = tx.execute(RELEASE_SQL, params![holder, generation])?;
+        let released = SqlWrite::execute(&tx, RELEASE_SQL, sql_params![holder, generation])?;
         tx.commit()?;
         Ok(released == 1)
     }
@@ -225,6 +225,7 @@ impl WriteLeaderStore for SqliteQueue {
 mod tests {
     use super::*;
     use crate::domain::write_leader::LEASE;
+    use crate::infrastructure::sql_dialect::SqlDialect;
 
     /// A migrated queue in a memdb of its own, kept while the queue is open.
     fn queue() -> SqliteQueue {
@@ -270,7 +271,7 @@ mod tests {
     #[test]
     fn the_port_judges_the_lease_by_the_dialects_db_clock() {
         let queue = queue();
-        let db_clock = now_millis();
+        let db_clock = SqlDialect::Sqlite.now_millis();
         assert_eq!(LeaderRow::at_db_clock(&queue).now, db_clock);
         // Each statement that reads the clock reads it where it runs.
         assert!(read_sql(&db_clock).contains(&format!("acquired_at_ms, {db_clock} FROM")));
@@ -294,7 +295,7 @@ mod tests {
         }
         let tx = queue.read_tx("count").unwrap();
         let rows: i64 = tx
-            .query_row("SELECT count(*) FROM write_leader", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM write_leader", &[], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 1);
     }
@@ -382,7 +383,7 @@ mod tests {
     fn a_stale_writer_changes_nothing_and_the_current_generation_writes() {
         let mut queue = queue();
         at(&queue, 10_000).take("a", LEASE, false).unwrap();
-        queue.write_identity = Some(WriteIdentity::read(&queue.conn).unwrap());
+        queue.write_identity = Some(WriteIdentity::read(&*queue.conn).unwrap());
         at(&queue, 10_001).take("a", LEASE, true).unwrap();
         let before = at(&queue, 10_001).read().unwrap().0;
         let changes = queue.conn.total_changes();
@@ -413,7 +414,7 @@ mod tests {
             0
         );
 
-        queue.write_identity = Some(WriteIdentity::read(&queue.conn).unwrap());
+        queue.write_identity = Some(WriteIdentity::read(&*queue.conn).unwrap());
         // No expiry predicate: the synthetic lease is long expired by now.
         let tx = queue.write_tx("current_writer").unwrap();
         tx.execute("INSERT INTO tasks(title, description, acceptance, verification_commands, status) VALUES ('fenced', '', '', '[]', 'draft')", []).unwrap();

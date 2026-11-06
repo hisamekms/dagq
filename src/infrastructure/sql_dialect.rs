@@ -216,11 +216,6 @@ pub(crate) fn time_value_spaced(value: &str, form: TimeForm) -> String {
     SqlDialect::Sqlite.time_value_spaced(value, form)
 }
 
-/// [`SqlDialect::now_millis`] in the SQLite kind.
-pub(crate) fn now_millis() -> String {
-    SqlDialect::Sqlite.now_millis()
-}
-
 /// The SQL expression that reads, in `form`, the time the SQL expression
 /// `value` gives moved by the SQL expression `shift` (a bound parameter
 /// holding a SQLite modifier such as `-100 seconds`); only the tests move
@@ -300,7 +295,6 @@ mod tests {
                 time_value_spaced("at", form)
             );
         }
-        assert_eq!(kind.now_millis(), now_millis());
     }
 
     #[test]
@@ -372,7 +366,7 @@ mod tests {
     #[test]
     fn the_db_clock_now_is_sqlites_julian_day_in_milliseconds() {
         assert_eq!(
-            now_millis(),
+            SqlDialect::Sqlite.now_millis(),
             "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
         );
     }

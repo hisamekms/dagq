@@ -16,6 +16,7 @@ use crate::infrastructure::ci_watch_store::{
     EVENTS_OF_KIND_SQL, FRESHNESS_EVENTS_SQL, LATEST_OF_KIND_SQL, freshness_there_sql,
     latest_freshness_sql, watch_events_sql,
 };
+use crate::infrastructure::sql_dialect::SqlDialect;
 
 /// The plan of `sql`, one line per step, its parameters NULL.
 fn plan(conn: &Connection, sql: &str) -> Vec<String> {
@@ -62,8 +63,14 @@ fn the_queue_event_reads_by_kind_stay_on_events_by_kind() {
             "record_ci_check, record_ci_scheduled_check: latest",
             LATEST_OF_KIND_SQL.to_owned(),
         ),
-        ("record_ci_freshness: latest", latest_freshness_sql()),
-        ("record_ci_freshness: there", freshness_there_sql()),
+        (
+            "record_ci_freshness: latest",
+            latest_freshness_sql(SqlDialect::Sqlite),
+        ),
+        (
+            "record_ci_freshness: there",
+            freshness_there_sql(SqlDialect::Sqlite),
+        ),
         ("claim_inbox_nudge", inbox_nudged_sql()),
         (
             "record_inbox_watcher_change",

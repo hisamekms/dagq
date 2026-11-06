@@ -6,6 +6,8 @@
 //! re-checks the request first, so two supervisors never open one for the
 //! same request. A request's events are the queue's.
 use super::sql_dialect::{JsonType, json_field};
+use super::sql_exec::{OptionalRow, sql_params};
+use super::store_writes::{self, EventTx};
 use crate::domain::event_kind::EventKind;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -463,15 +465,15 @@ impl PlanRequestStore for SqliteQueue {
 /// true, so a second call records nothing. `None` when it recorded nothing: the
 /// request is there already, or the task is not a completed Spike.
 pub(super) fn record_spike_request(
-    conn: &Connection,
+    tx: &impl EventTx,
     task: TaskId,
     now: i64,
 ) -> Result<Option<RequestId>> {
-    let row: Option<(String, Option<GoalId>)> = conn
+    let row: Option<(String, Option<GoalId>)> = tx
         .query_row(
             "SELECT title, goal_id FROM tasks WHERE id=?1 AND execution_class='spike'
              AND status='completed'",
-            [task],
+            sql_params![task],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
@@ -479,12 +481,11 @@ pub(super) fn record_spike_request(
         return Ok(None);
     };
     let refs = spike_request_refs(task, goal);
-    let inserted = super::sqlite::insert_id_if_inserted(
-        conn,
+    let inserted = tx.insert_id_if_inserted(
         "INSERT INTO plan_requests(text, refs, requested_by, requested_by_id, status,
            created_at, updated_at, spike_task_id) SELECT ?1, ?2, ?3, ?3, 'open', ?4, ?4, ?5
          WHERE NOT EXISTS(SELECT 1 FROM plan_requests WHERE spike_task_id=?5)",
-        params![
+        sql_params![
             spike_request_text(task, &title, goal),
             serde_json::to_string(&refs)?,
             SPIKE_REQUESTED_BY,
@@ -495,8 +496,8 @@ pub(super) fn record_spike_request(
     let Some(id) = inserted.map(RequestId::new) else {
         return Ok(None);
     };
-    record_queue_event_in(
-        conn,
+    store_writes::record_queue_event_in(
+        tx,
         EventKind::RequestRecorded,
         &json!({
             "request_id": id,
@@ -513,18 +514,17 @@ pub(super) fn record_spike_request(
 /// caller's write transaction (ADR-t1487-1 decision 5): what a landing of
 /// an older binary, a completion by hand or a failed transaction left
 /// out. The requests recorded, oldest Spike first.
-pub(super) fn record_missing_spike_requests(conn: &Connection, now: i64) -> Result<Vec<RequestId>> {
-    let missing: Vec<TaskId> = conn
-        .prepare(
-            "SELECT t.id FROM tasks t WHERE t.execution_class='spike' AND t.status='completed'
+pub(super) fn record_missing_spike_requests(tx: &impl EventTx, now: i64) -> Result<Vec<RequestId>> {
+    let missing: Vec<TaskId> = tx.query_map(
+        "SELECT t.id FROM tasks t WHERE t.execution_class='spike' AND t.status='completed'
              AND NOT EXISTS(SELECT 1 FROM plan_requests r WHERE r.spike_task_id=t.id)
              ORDER BY t.id",
-        )?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+        &[],
+        |r| r.get(0),
+    )?;
     let mut recorded = Vec::new();
     for task in missing {
-        recorded.extend(record_spike_request(conn, task, now)?);
+        recorded.extend(record_spike_request(tx, task, now)?);
     }
     Ok(recorded)
 }

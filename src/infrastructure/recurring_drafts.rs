@@ -6,13 +6,15 @@
 //! Registering re-checks the history, the tasks of the key not ended and
 //! the interval in one `BEGIN IMMEDIATE` transaction with the draft and its
 //! origin, so two supervisors across a handoff never register twice.
-use super::sql_dialect::{JsonType, json_field};
+use super::sql_dialect::JsonType;
+use super::sql_exec::{OptionalRow, SqlRead, sql_params};
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{
     draft_planners::insert_draft_origin,
-    sqlite::{SqliteQueue, insert_task, read_goal},
+    sqlite::SqliteQueue,
+    store_rows::{enum_col, read_goal},
+    store_writes::insert_task,
 };
 use crate::domain::{
     DraftOrigin, GoalId, TaskId, TaskStatus,
@@ -25,16 +27,16 @@ use crate::domain::{
 };
 
 /// The last registration of `key`: its task and when (Unix seconds).
-fn last_registration(conn: &Connection, key: &str) -> Result<Option<(TaskId, i64)>> {
-    Ok(conn
+fn last_registration(tx: &impl SqlRead, key: &str) -> Result<Option<(TaskId, i64)>> {
+    Ok(tx
         .query_row(
             &format!(
                 "SELECT task_id, created_at FROM draft_origins
              WHERE origin=?1 AND {}=?2
              ORDER BY created_at DESC, task_id DESC LIMIT 1",
-                json_field("material", "$.key", JsonType::Text)
+                tx.dialect().json_field("material", "$.key", JsonType::Text)
             ),
-            params![DraftOrigin::Recurring.as_str(), key],
+            sql_params![DraftOrigin::Recurring.as_str(), key],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
@@ -44,21 +46,21 @@ fn last_registration(conn: &Connection, key: &str) -> Result<Option<(TaskId, i64
 /// one adopted and submitted, ready, running, waiting for a person or
 /// held, or one a replanning replaced while a task its replacement reaches
 /// has not ended ([`super::replan_apply::replacement_open`]).
-fn open_task(conn: &Connection, key: &str) -> Result<Option<TaskId>> {
-    let tasks: Vec<(TaskId, TaskStatus)> = conn
-        .prepare(&format!(
+fn open_task(tx: &impl SqlRead, key: &str) -> Result<Option<TaskId>> {
+    let tasks: Vec<(TaskId, TaskStatus)> = tx.query_map(
+        &format!(
             "SELECT o.task_id, t.status FROM draft_origins o JOIN tasks t ON t.id=o.task_id
              WHERE o.origin=?1 AND {}=?2
                AND t.status NOT IN ('completed','canceled')
              ORDER BY o.task_id",
-            json_field("o.material", "$.key", JsonType::Text)
-        ))?
-        .query_map(params![DraftOrigin::Recurring.as_str(), key], |r| {
-            Ok((r.get(0)?, super::sqlite::enum_col(r, "status")?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+            tx.dialect()
+                .json_field("o.material", "$.key", JsonType::Text)
+        ),
+        sql_params![DraftOrigin::Recurring.as_str(), key],
+        |r| Ok((r.get(0)?, enum_col(r, "status")?)),
+    )?;
     for (task, status) in tasks {
-        if status != TaskStatus::Replaced || super::replan_apply::replacement_open(conn, task)? {
+        if status != TaskStatus::Replaced || super::replan_apply::replacement_open(tx, task)? {
             return Ok(Some(task));
         }
     }
@@ -67,8 +69,8 @@ fn open_task(conn: &Connection, key: &str) -> Result<Option<TaskId>> {
 
 /// Whether `goal` accepts tasks now (open, not a draft goal); a goal that
 /// is not there accepts none.
-fn accepts_tasks(conn: &Connection, goal: Option<GoalId>) -> bool {
-    goal.and_then(|goal| read_goal(conn, goal).ok())
+fn accepts_tasks(tx: &impl SqlRead, goal: Option<GoalId>) -> bool {
+    goal.and_then(|goal| read_goal(tx, goal).ok())
         .is_some_and(|read| check_accepts_tasks(&read).is_ok())
 }
 
@@ -116,8 +118,8 @@ impl SqliteQueue {
                 Ok(RecurringSchedule::of(
                     &item.key,
                     item.interval_days,
-                    last_registration(&self.conn, &item.key)?,
-                    open_task(&self.conn, &item.key)?,
+                    last_registration(&*self.conn, &item.key)?,
+                    open_task(&*self.conn, &item.key)?,
                 ))
             })
             .collect()

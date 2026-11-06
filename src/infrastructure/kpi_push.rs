@@ -12,9 +12,9 @@
 //! the read to the events of the two kinds whatever statistics or new
 //! indexes the queue gets, and a lost index fails the prepare.
 use anyhow::{Result, bail};
-use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
+use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
 use super::sqlite::SqliteQueue;
 use crate::domain::kpi::push::{
     KPI_BREACH_KINDS, KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS, breach_key,
@@ -33,18 +33,20 @@ pub const LATEST_PUSH_ATTENTION: &str = "SELECT kind FROM run_events INDEXED BY 
    ORDER BY id DESC LIMIT 1";
 
 /// Every breach event, oldest first: (id, kind, payload).
-fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(EventId, RecordedKind, Value)>> {
-    let mut statement = tx.prepare(BREACH_EVENTS)?;
-    let rows = statement.query_map(params![KPI_BREACH_KINDS[0], KPI_BREACH_KINDS[1]], |r| {
-        Ok((
-            EventId::new(r.get(0)?),
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-        ))
-    })?;
+fn breach_events(tx: &impl SqlRead) -> Result<Vec<(EventId, RecordedKind, Value)>> {
+    let rows = tx.query_map(
+        BREACH_EVENTS,
+        sql_params![KPI_BREACH_KINDS[0], KPI_BREACH_KINDS[1]],
+        |r| {
+            Ok((
+                EventId::new(r.get(0)?),
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    )?;
     let mut events = Vec::new();
-    for row in rows {
-        let (id, kind, payload) = row?;
+    for (id, kind, payload) in rows {
         events.push((
             id,
             RecordedKind::from_name(&kind),
@@ -56,8 +58,8 @@ fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(EventId, RecordedKind
 
 /// The breaches started and not resolved: the latest event of each
 /// period, KPI and stratum when it is a start, with its id.
-fn open_in(conn: &rusqlite::Connection) -> Result<Vec<(EventId, Value)>> {
-    Ok(open_among(breach_events(conn)?))
+fn open_in(tx: &impl SqlRead) -> Result<Vec<(EventId, Value)>> {
+    Ok(open_among(breach_events(tx)?))
 }
 
 /// [`open_in`] over `events`, the breach events oldest first.
@@ -91,7 +93,7 @@ impl SqliteQueue {
     /// The breaches started and not resolved, each its
     /// `kpi_breach_started` payload.
     pub fn kpi_breaches_open(&self) -> Result<Vec<Value>> {
-        Ok(open_in(&self.conn)?
+        Ok(open_in(&*self.conn)?
             .into_iter()
             .map(|(_, payload)| payload)
             .collect())
@@ -101,7 +103,7 @@ impl SqliteQueue {
     /// id: the evidence of the observer's `kpi` finding (ADR-0051
     /// decision 24).
     pub fn kpi_breach_events_open(&self) -> Result<Vec<(EventId, Value)>> {
-        open_in(&self.conn)
+        open_in(&*self.conn)
     }
 
     /// Record `kind` (`kpi_breach_started` / `kpi_breach_resolved`) with
@@ -148,10 +150,11 @@ impl SqliteQueue {
             payload["pushed"] = json!(pushed);
             payload["day"] = json!(push_day.map(|(day, _)| day));
         }
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
              VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-            params![kind.as_str(), serde_json::to_string(&payload)?],
+            sql_params![kind.as_str(), serde_json::to_string(&payload)?],
         )?;
         tx.commit()?;
         Ok(Some(payload))
@@ -165,16 +168,17 @@ impl SqliteQueue {
         let latest: Option<String> = tx
             .query_row(
                 LATEST_PUSH_ATTENTION,
-                params![KPI_PUSH_ATTENTION_KINDS[0], KPI_PUSH_ATTENTION_KINDS[1]],
+                sql_params![KPI_PUSH_ATTENTION_KINDS[0], KPI_PUSH_ATTENTION_KINDS[1]],
                 |r| r.get(0),
             )
             .optional()?;
         let record = latest.as_deref() != Some(KPI_PUSH_ABANDONED);
         if record {
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
              VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-                params![
+                sql_params![
                     EventKind::KpiPushAbandoned.as_str(),
                     serde_json::to_string(&payload)?
                 ],

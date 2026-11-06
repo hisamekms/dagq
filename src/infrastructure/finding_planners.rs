@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 
+use super::sql_exec::sqlite::{port_tx, with_row};
 use super::{
     asks::{ask_row, read_ask},
     findings::{finding_event, finding_row, read_finding, record_in, set_status_in},
@@ -117,7 +118,7 @@ impl SqliteQueue {
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         ids.into_iter()
-            .map(|id| read_finding(&self.conn, id))
+            .map(|id| read_finding(&*self.conn, id))
             .collect()
     }
 
@@ -259,7 +260,7 @@ impl SqliteQueue {
                 "SELECT * FROM findings WHERE status='proposed' AND proposal_id IS NOT NULL
                  ORDER BY id",
             )?
-            .query_map([], finding_row)?
+            .query_map([], |row| with_row(row, finding_row))?
             .collect::<rusqlite::Result<_>>()?;
         let mut settled = Vec::new();
         for current in proposed {
@@ -316,7 +317,7 @@ impl SqliteQueue {
                 finding_id = json_field("e.payload", "$.finding_id", JsonType::Integer),
                 marked_at = json_field("e.payload", "$.marked_at", JsonType::Integer),
             ))?
-            .query_map([], finding_row)?
+            .query_map([], |row| with_row(row, finding_row))?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -327,7 +328,7 @@ impl SqliteQueue {
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()> {
-        let current = read_finding(&self.conn, finding)?;
+        let current = read_finding(&*self.conn, finding)?;
         {
             let tx = self.write_tx("finding_planner_event")?;
             finding_event(&tx, &current, kind, payload)?;
@@ -583,7 +584,7 @@ pub(super) fn link_findings(
             params![id, proposal, now],
         )?;
         finding_event(
-            conn,
+            &port_tx(conn),
             &read_finding(conn, id)?,
             EventKind::FindingStatusChanged,
             json!({
@@ -654,7 +655,7 @@ pub(super) fn apply_answer(
                 )?;
                 if current.status != marked.status {
                     finding_event(
-                        conn,
+                        &port_tx(conn),
                         &marked,
                         EventKind::FindingStatusChanged,
                         json!({
@@ -668,7 +669,7 @@ pub(super) fn apply_answer(
                     )?;
                 }
                 finding_event(
-                    conn,
+                    &port_tx(conn),
                     &marked,
                     EventKind::FindingUpdated,
                     json!({
@@ -691,7 +692,14 @@ pub(super) fn apply_answer(
             let reason =
                 why.unwrap_or_else(|| format!("a person answered dismiss to ask {}", ask.id));
             if read_finding(conn, id)?.status != FindingStatus::Dismissed {
-                set_status_in(conn, id, FindingStatus::Dismissed, &reason, by, now)?;
+                set_status_in(
+                    &port_tx(conn),
+                    id,
+                    FindingStatus::Dismissed,
+                    &reason,
+                    by,
+                    now,
+                )?;
             }
             Ok(Some(AppliedAnswer {
                 finding: id,
@@ -739,7 +747,7 @@ fn record_from_ask(
         .take(200)
         .collect();
     let recorded = record_in(
-        conn,
+        &port_tx(conn),
         &NewFinding {
             kind: ask.kind.as_str().replace('-', "_"),
             target,

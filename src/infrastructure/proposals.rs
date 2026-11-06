@@ -13,6 +13,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 use std::collections::BTreeMap;
 
+use super::sql_exec::sqlite::port_tx;
 use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
 use crate::domain::{
     Ask, ChangeSet, DomainError, GoalId, GoalStatus, GoalSubmitted, PlannerOrigin, PlannerOwner,
@@ -174,7 +175,7 @@ pub(super) fn submit(
             }
         }
         if !spikes.is_empty() {
-            super::investigations::settle(conn, now_secs)?;
+            super::investigations::settle(&port_tx(conn), now_secs)?;
         }
         // A resubmission is counted by the Spikes the proposal ever held,
         // those its revision dropped or replaced included.
@@ -188,7 +189,7 @@ pub(super) fn submit(
                 cycles: super::investigations::goal_cycles(conn, goal_id)?,
             };
             if investigation::spike_submit(spikes[0], goal_id, submit, max_spike_cycles)? {
-                super::investigations::start_cycle(conn, goal_id, spikes[0], now_secs)?;
+                super::investigations::start_cycle(&port_tx(conn), goal_id, spikes[0], now_secs)?;
             }
         }
     }
@@ -375,7 +376,7 @@ pub(super) fn approve(conn: &Connection, id: ProposalId, now: &str) -> Result<Pr
     }
     for task_id in withheld {
         super::stranded::record(
-            conn,
+            &port_tx(conn),
             task_id,
             event_kind::APPROVE_WITHHELD,
             json!({"proposal_id": id}),
@@ -383,7 +384,7 @@ pub(super) fn approve(conn: &Connection, id: ProposalId, now: &str) -> Result<Pr
     }
     for task_id in readied {
         super::stranded::record_upstream(
-            conn,
+            &port_tx(conn),
             task_id,
             super::stranded::APPROVE_READIED,
             json!({"proposal_id": id}),

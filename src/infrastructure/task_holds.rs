@@ -20,6 +20,8 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
+use super::sql_exec::sqlite::with_row;
+use super::sql_exec::{OptionalRow, SqlResult, SqlRow, sql_params};
 use super::sqlite::{SqliteQueue, event, read_task};
 use crate::application::commands::holds::{ReleaseRequest, ReleaseView};
 use crate::domain::event_kind::EventKind;
@@ -493,8 +495,8 @@ impl SqliteQueue {
     /// ([`crate::domain::task_replan::TaskGuards::fence`]).
     pub fn turn_fence(&self, task: TaskId) -> Result<Option<crate::domain::task_replan::Fence>> {
         Ok(crate::domain::task_replan::TaskGuards {
-            replan: super::replans::guard_of(&self.conn, task)?,
-            hold: guard_of(&self.conn, task)?,
+            replan: super::replans::guard_of(&*self.conn, task)?,
+            hold: guard_of(&*self.conn, task)?,
         }
         .fence())
     }
@@ -904,6 +906,10 @@ fn read_hold(conn: &Connection, id: HoldId) -> Result<TaskHold> {
 }
 
 fn hold_row(row: &Row<'_>) -> rusqlite::Result<TaskHold> {
+    with_row(row, hold_of_row)
+}
+
+fn hold_of_row(row: &SqlRow<'_>) -> SqlResult<TaskHold> {
     Ok(TaskHold {
         id: row.get("id")?,
         task_id: row.get("task_id")?,
@@ -930,17 +936,20 @@ pub(super) fn open_hold_of(conn: &Connection, task: TaskId) -> Result<Option<Tas
         .optional()?)
 }
 
-/// The guard the open hold of `task` puts on its steps, read on `conn`:
+/// The guard the open hold of `task` puts on its steps, read on `tx`:
 /// none for a task that ended, which a hold no longer reaches.
-pub(super) fn guard_of(conn: &Connection, task: TaskId) -> Result<Option<HoldGuard>> {
-    Ok(conn
+pub(super) fn guard_of(
+    tx: &impl super::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<HoldGuard>> {
+    Ok(tx
         .query_row(
             "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
              WHERE h.task_id=?1 AND h.released_at IS NULL
                AND t.status NOT IN ('completed','canceled')
              ORDER BY h.id LIMIT 1",
-            [task],
-            hold_row,
+            sql_params![task],
+            hold_of_row,
         )
         .optional()?
         .map(|hold| hold.guard()))

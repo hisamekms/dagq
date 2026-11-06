@@ -3,6 +3,7 @@
 //! take, and the verdicts and `approve_goal` answers the supervisor
 //! applies, each in one transaction. Events go to the goal.
 use super::sql_dialect::{JsonType, json_field_spaced};
+use super::sql_exec::sqlite::port_tx;
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::write_rules::{check_at_least, check_non_blank};
@@ -253,7 +254,7 @@ fn register_gaps(
         });
         ensure!(
             super::draft_planners::insert_draft_origin(
-                conn,
+                &port_tx(conn),
                 task.id(),
                 crate::domain::follow_up::DraftOrigin::GoalGap,
                 &material,

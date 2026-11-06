@@ -18,20 +18,14 @@ use super::source;
 #[rustfmt::skip]
 const MAY_NAME_RUSQLITE: &[&str] = &[
     "src/infrastructure/asks.rs",
-    "src/infrastructure/ci_watch_store.rs",
     "src/infrastructure/draft_planners.rs",
     "src/infrastructure/finding_planners.rs",
-    "src/infrastructure/findings.rs",
     "src/infrastructure/follow_up_membership.rs",
     "src/infrastructure/goal_reviews.rs",
-    "src/infrastructure/headless_jobs.rs",
-    "src/infrastructure/investigations.rs",
-    "src/infrastructure/kpi_push.rs",
     "src/infrastructure/plan_requests.rs",
     "src/infrastructure/plan_reviews.rs",
     "src/infrastructure/planners.rs",
     "src/infrastructure/proposals.rs",
-    "src/infrastructure/recurring_drafts.rs",
     "src/infrastructure/related.rs",
     "src/infrastructure/replan_apply.rs",
     "src/infrastructure/replans.rs",
@@ -51,11 +45,8 @@ const MAY_NAME_RUSQLITE: &[&str] = &[
     "src/infrastructure/session_tokens.rs",
     "src/infrastructure/sessions.rs",
     "src/infrastructure/sql_exec/sqlite.rs",
-    "src/infrastructure/sql_ids.rs",
     "src/infrastructure/sqlite.rs",
-    "src/infrastructure/stranded.rs",
     "src/infrastructure/task_holds.rs",
-    "src/infrastructure/write_leader.rs",
 ];
 
 const NAME: &str = "rusqlite";

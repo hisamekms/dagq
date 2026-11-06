@@ -10,6 +10,8 @@
 //! transaction that re-checks the drafts first, so two supervisors never
 //! open one for the same draft.
 use super::sql_dialect::{JsonType, json_field};
+use super::sql_exec::sql_params;
+use super::store_writes::{self, EventTx};
 use crate::domain::cancel_reason;
 use crate::domain::event_kind::{self, EventKind};
 use std::collections::{HashMap, HashSet};
@@ -137,16 +139,16 @@ pub(super) fn draft_planned(conn: &Connection, task: TaskId, now: i64) -> Result
 /// Every writer of `draft_origins` goes through here. Whether it was
 /// recorded.
 pub(super) fn insert_draft_origin(
-    conn: &Connection,
+    tx: &impl EventTx,
     task: TaskId,
     origin: DraftOrigin,
     material: &Value,
     created_at: i64,
 ) -> Result<bool> {
-    let inserted = conn.execute(
+    let inserted = tx.execute(
         "INSERT OR IGNORE INTO draft_origins(task_id, origin, material, created_at)
          VALUES (?1, ?2, ?3, ?4)",
-        params![
+        sql_params![
             task,
             origin.as_str(),
             serde_json::to_string(material)?,
@@ -154,8 +156,8 @@ pub(super) fn insert_draft_origin(
         ],
     )? == 1;
     if inserted {
-        event(
-            conn,
+        store_writes::event(
+            tx,
             task,
             None,
             EventKind::DraftOriginRecorded,

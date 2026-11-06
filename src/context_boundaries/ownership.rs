@@ -365,6 +365,7 @@ pub(super) const TABLES: &[Table] = &[
 #[rustfmt::skip]
 pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/sqlite.rs", Planning), // TaskStore
+    store("src/infrastructure/store_writes.rs", Planning), // what sqlite.rs and the moved modules share
     store("src/infrastructure/proposals.rs", Planning),
     store("src/infrastructure/plan_reviews.rs", Planning),
     store("src/infrastructure/goal_reviews.rs", Planning),
