@@ -13,6 +13,7 @@ tags:
 related:
   - adr-t3986-1
   - adr-t4291-1
+  - adr-t4124-1
   - adr-t3981-1
   - adr-t3982-1
   - plan-team-version-sqlite-dialect
@@ -143,13 +144,98 @@ migration との順:
 
 ## (d) 古い event と台帳の移し方
 
-- 境目の案: 閉じた（completed か canceled）task の run の event と、`final` の台帳の行のうち、90 日より古いもの。制御側の判断と表示が読む一番長い窓（stats・kpi の週次と 30 日の窓）より後に置く。
-- 置き場の形: Parquet。鍵は `<prefix>/events/year=YYYY/month=MM/part-<最初の id>-<最後の id>.parquet` と `<prefix>/ledger/year=YYYY/month=MM/part-....parquet`。同じ区切りは同じ鍵に置き直すので、移し直しで重ならない。
-- 移す係: 制御側の supervisor のループが日に 1 回、係の書き込みの列で区切りごとに (1) 行を読む → (2) 置き場に置く → (3) 置いた写しの行数と id の範囲を確かめる → (4) 書き込みの transaction で DB の行を消し、`archive_written` の event を書く。
-- 移さない kind の案: 属性の畳み込み（`domain::ledger::attributes::fold` が読む属性の event）、所属の判断、`run_integrated`（着地の commit の記録の元）、goal と task の開き直しが読む event。一覧は移す係の定義のそばの定数に置く。
-- 保存期間: 写しは境目より古い event の正本なので、dagq は消さず、参考の構成の文書は置き場に期限（lifecycle の expiration）を付けない形を書く。付けるのは配置する側の選択。
-- 集計: DuckDB の `read_parquet('s3://<bucket>/<prefix>/events/**/*.parquet')` で読む。境目より新しい分は service の読み取りのユースケースで読み、DuckDB は置き場と service の答えを読む側（人の手元か job）で合わせる。
-- 読み戻し: 境目より古い run の `show` は、置き場の区切りを id の範囲で引いて読む。開き直した task の event は DB に戻し、写しは残す。DuckDB で合わせるときは `run_events.id` で重なりを除く。経路は実装の段が決める。
+方針・不変条件・退けた案は [ADR-t4124-1](../adr/2026-11-05-t4124-1-local-opt-in-archive-of-old-events-and-ledger-rows-port-parquet-boundary-mover-shrink-and-read-paths.md)（ADR-t3986-1 決定8 を amends）が持つ。opt-in・port・形式・境目・移す係・縮め方・読む経路はそちらを正にし、ここは鍵の形・値の案・部品の見込み・棚卸しだけを持つ。
+
+### 置き場の形と値の案
+
+| 項目 | 案 | 根拠 |
+| --- | --- | --- |
+| 設定（ADR 決定1） | `dagq.toml` の `[archive]` に `enabled` と `older_than_days`、`host.toml` の `[archive]` に `dir`。`dir` の既定は queue DB の隣の `archive/` | 名前は仮 |
+| このrepositoryの境目 | 21 日 | 下の棚卸しの時刻の窓（スループットの見直しの週次の event の読みが 14 日）より後。2026-09-22 からの queue で最初の回に約 3 週間分（約 0.4 GB/週から 1 GB 強）が移る。90 日は何も移さない |
+| 時刻の下限（ADR 決定4） | 14 日 | 判断の時刻の窓の最長は既定で 7 日。その 2 倍 |
+| 件数の下限（ADR 決定4） | 新しく終わった run 200 本 | 判断の件数の窓の最長が run 50 本と task 60 本（task は 1 本以上の run を持つ）。e2e の 200 件は kind の除外で守る |
+| 鍵 | `<dir or prefix>/events/year=YYYY/month=MM/part-<最初の id>-<最後の id>.parquet` と `<dir or prefix>/ledger/year=YYYY/month=MM/part-<通し番号>.parquet`（year と month は区切りの最初の行の時刻） | 区切りの行は閉じた物だけで ID が飛ぶ。置いて消せなかった後の移し直しは別の鍵になり ID が重なってよい（読む側が除く） |
+| 列 | DB の行の列のまま（event: `id`・`task_id`・`goal_id`・`run_id`・`kind`・`payload`・`created_at`・`actor_role`・`actor_id`・`requested_by`）。`id` は int64、JSON の列は UTF8 の文字列。本文の鍵を持つ行は戻した完全な本文で、写しに鍵を書かない（ADR-t4291-1 決定5） | DuckDB は `payload::JSON` か `json_extract` で読む |
+| 移す周期 | 日に 1 回 | 増え方は週 0.4 GB で、1 日の遅れは小さい |
+| 1 回の量 | 1 区切りは event 5 万行か 台帳 1 万行を上限に、消す transaction が約 1 秒に収まるよう実装の task が測って決める | 値の根拠は実装の測定 |
+| ファイルの縮め | 最初の VACUUM の前の空きの条件は DB の 2 倍以上。`incremental_vacuum` は 1 回 2,000 ページ前後を移す回の後に空きが尽きるまで | VACUUM の一時の空きは最大で DB の大きさの 2 倍。時間は移した後の DB の大きさに比例し、実装の task が本番の形の合成データで測る。動いている間に流さないのは supervisor の見張りの書き込みが同じ列で待ち `HEARTBEAT_TIMEOUT_SECS`（30 秒）で lease が古くなるため、起動の中で流さないのは `up` と supervisor の待ちが `QUEUE_SERVICE_START_TIMEOUT`（10 秒）のため。打つ CLI の待ちは `CLIENT_TIMEOUT`（300 秒）で、超えても service は流し続け、結果は記録の event で読む |
+
+保存期間: 写しは境目より古い event の正本なので、dagq は消さず、参考の構成の文書は置き場に期限（lifecycle の expiration）を付けない形を書く。付けるのは配置する側の選択。チームの版の起動は制御側の supervisor のループで、消す transaction は同じ係の書き込みの列に入る（S3 互換の adapter と配置は goal 250）。
+
+### 写しの部品の見込み（ADR 決定3）
+
+採る案: crate `parquet`（arrow-rs の同じ repository）を `default-features = false`、features は `zstd` だけ。列を低い層の writer と reader で読み書きし、`arrow` feature（RecordBatch）は使わない。圧縮は zstd（JSON の本文がよく縮み、DuckDB が読む）。
+
+2026-11-05 に `$TMPDIR` の小さな crate（int64 と UTF8 の 2 列を zstd で書いて読む）で測った値。host は他の run が動いている状態で、壁時計は参考（`parquet` 60.1.0、release の build、target を消してから）:
+
+| features | 依存の crate の数（Cargo.lock） | build の CPU（user） | 壁時計 | binary |
+| --- | --- | --- | --- | --- |
+| `zstd` | 64 | 22 秒 | 38 秒 | 2.06 MB（試しの全体） |
+| `zstd`, `arrow` | 81 | 24 秒 | 82 秒 | 2.09 MB（試しは arrow の API を呼ばないので、使った時の増え方はこれで分からない） |
+
+- dagq の Cargo.lock に無い crate: `zstd` の 3 本（`zstd-sys` は C を build する）・`half`・`ahash`・`chrono`（と macOS 以外の依存の時刻の crate）・`num-*`・`twox-hash`・`seq-macro`・`zerocopy` など約 30 本。`chrono` は parquet の必須の依存で、dagq の時刻の型には使わない。
+- 見込み: 固定バイナリ 38.9 MB に約 2 MB（約 5%）増える。clean の build は CPU で約 20 秒増え、sccache が効く普段の build は link の時間だけ増える。実装の task（4126）は足した後の実測の増分を receipt に残す。
+- 食い違いの恐れ: このhostに `duckdb` がまだ無く、DuckDB で読めることは測っていない。実装の task は `parquet` の reader で読み戻す test を持ち、DuckDB の実物での確認は host のツールを入れる人か inbox が行う（worker は host にツールを入れない）。
+
+### 判断が読む読み手と窓の棚卸し（ADR 決定4）
+
+`src` の 2026-11-05 の main（e5a162159）から。名前は入口で、値はコードが正。移す係の実装の task は下の「移さない kind の案」をコードの定数に移し、この表を確かめ直す。
+
+時刻の窓と件数の窓:
+
+| 読み手（入口） | 判断 | 窓 | 根拠 |
+| --- | --- | --- | --- |
+| `stats_window`（`conflict_hotspot_files`） | claim の控えと plan review の材料 | run 50 本（`DEFAULT_RUNS`） | 衝突の多いファイルの窓。移すと黙って更に古い run へ進む。件数の下限で守る |
+| `recent_run_sizes`（`latest_events_of`） | claim と着地のディスクの閾値 | kind ごとに 20 件（`DEFAULT_SAMPLE_RUNS`）、`dagq.toml` の `[disk] sample_runs` で変わる | run ごとの片付けの event。件数の下限で守る（下限は定数と `sample_runs` の大きい方） |
+| `trial_events` | claim の worker のモデルの試行 | 他の task 60 本（`PREDICTION_WINDOW`）。SQL は kind の全部を読む | `run_claimed` は除外、`task_weight_predicted` は run の無い event で移らない |
+| `e2e_gate_events` | e2e の連続の失敗（更新と install の関門） | 200 件（`HISTORY`）に `run_e2e_*` が混ざる | 除外 |
+| `review_reads`（agent の見張りと production の集合） | agent の見張りの期日 | 既定は 7 日（`REVIEW_LOOKBACK_MILLIS`）、agent の印の `since` で任意に古くなる | `review_started`・`review_finished` は除外 |
+| `queue_hold`・provider・jobs・recheck の `latest_events_of` | 保留の再開・provider の控え・引き継ぎ・recheck | 50・20・50・20 件 | 件数の下限で守る（run に属さない kind は移らない） |
+| `closed_without_final_cut_sql` | 対話の session の締め | 7 日（`TOKEN_CUT_CLOSED_WINDOW_MS`） | run の無い span なので移らない |
+| `event_id_before`（observer） | 日次の観測の起点 | 1 日 | 下限より短い |
+
+kind の全部か閉じた対象まで読む読み手:
+
+| 読み手（入口） | 判断 | 扱い |
+| --- | --- | --- |
+| `differing`・`differing_findings`（属性の照合、600 秒ごと） | 無いと `attributes_baseline` を書き直す | `attributes::KINDS`・`findings::KINDS` は除外。一番の危険なので定数を直接参照する |
+| `related_docs`（重複の候補） | plan review と claim の控え | `task_status_changed` は除外（属性）。`follow_up_registered` も除外 |
+| `cancel_of`・`completed_before`・`duplicate_target` | draft の結果、show、list | `task_status_changed` は完了のとき run を持つが、`attributes::KINDS` にあるので移らない |
+| `ended_run_workspaces` | 片付け | `workspace_created`・`resume_finished` が移ると resume の wrapper を見ない。境目より古い run の wrapper はもう無いので移してよいが、実装の task が確かめる |
+| `runs_with_pending_push` | status の注意 | `MAX(id)` の `push_finished` が移ると古い `push_failed` が残って見える。`push_finished`・`push_failed` は除外 |
+| `targets`（finding の planner、`finding_planner_exhausted`） | planner の起動 | finding を対象に run の無い event で移らない（実装の task が確かめる） |
+| `record_in`（finding の根拠） | 根拠の event が無いと新しい finding を拒む | 移した印の範囲も在ると数える。`evidence_events` は `show` の経路で読む |
+| `seeded_history` と `work_outliers` | `running_outlier` の知らせ（claim も着地も読まない） | goal ごとの中央値。開いた goal の行は移らない。goal の無い task と開き直した goal では読む本数が件数の下限まで減ってよい（開き直した goal で読む他の判断の読み手は実装の task が確かめる） |
+| `running_diagnoses`・`open_spans_sql`・`pending_hook_intakes_sql`（反結合） | 再計画と session の記録 | 開始と終わりの片方だけが移ると開いて見える。run を丸ごと移す（kind の除外で欠ける行は開始か終わりの片方にしない）。実装の task が test で確かめる |
+| `run_in_workspace`・`record_predictions` | hook の到着 | 動いている run だけ。境目より古い遅い hook は見つからないでよい |
+
+開いた対象だけを読むので移す行に当たらないもの: `run_events_of` の系統（landing・triage・resume・session・recovery・adopt・stall・provider の約 100 か所）、ask・hold・draft・proposal・plan request・replan の操作の読み、開いた task の全履歴（`task_events`・`pair_claims`・`session_events`）。`task_ready_at` は閉じた前提の task の `task_status_changed` を読み、これは除外の kind で残る。
+
+判断でなく決定7の経路で読むもの:
+
+| 読み手 | 窓 |
+| --- | --- |
+| `kpi` | 既定で 7 区切り。印をまたぐ比べは片側 7 日で、印は任意に古い |
+| `stats` | 既定は run 50 本、`--since` / `--full` で任意 |
+| `report` と超過の知らせ（`check_breaches`） | 埋め戻し 7 日、日と週の 2〜7 区切り、基準 7 日 |
+| スループットの見直し | event は 26 時間・2 日・14 日、`kpi` は週 5 区切りまで |
+| `forecast` | 台帳の run の行と `run_integrated`・`ask_*` の全部（claim も着地も読まない） |
+| `show`・`events`・`timeline`・`run log` | 対象の全履歴か、cursor より前 |
+
+`keep_daily_days`・`keep_weekly_weeks` はレポートのファイルの保持で、履歴を読まない。
+
+### 移さない kind の案
+
+`attributes::KINDS`・`findings::KINDS`・`owner` の queue の kind（判断の記録・main の履歴・slot の満ちと控えなど、そもそも run に属さないものが多い）に足して、`observation`（note の検索の索引、delete の trigger がある）・`run_integrated`（insert の trigger が着地の記録を作る）・`follow_up_registered`・`push_finished`・`push_failed`・`review_started`・`review_finished`・`run_e2e_finished`・`run_e2e_failed`。一覧は移す係の定義のそばの定数に置く。
+
+### 台帳を作る係と読み戻しの実装の注意
+
+- 係は版の古い行を対象の event から作り直し（`older_rows_to_read`）、続きから起動できないとき（`start_builder`）は cursor 0 から DB に残る event を読み、行の無い run と task の行を作る。`run_claimed` は run の行の event なので、印を見ないと run の行が減った中身で作り戻る。
+- 読み戻した event の ID は係や `watch` の cursor より小さいので、cursor の読みでは見えない。開き直しの書き込みの新しい event が task に印を付け、係はその task の全部を読み直す。
+- 確定（`final`）は錠でなく、後の入力で畳み直す。印を消すまでは入力が来ても畳まない。
+- queue と session の行も run の event から畳むので（`mark_events` の doc comment）、run の event を移す条件に入れる。印を見ずに畳むと `behind` で書かれず印のまま残って係の進みを止めるか、台帳の版の上がりで減った中身に書き換わる。実装の task は cursor 0 から作り直しても移した行が作られず変わらないことを test にする。
+- 印の表を足す migration の先頭は `-- dagq-schema: breaking` にする（ADR 決定5）。表は作り直さない（`docs/design/persistence.md` の fail closed の列を足す前例と同じ）。
+- 読む側の合わせ方（ADR 決定7）: 台帳の窓は行を 1 件ずつ畳む（`WindowRows`）ので、全部を持って除くのでなく、先に DB の鍵を受けて写しの行のうち DB にある鍵を飛ばす形にする。写しどうしの重なりは `inputs_through` の進んだ方を採る。ピークは [kpi の読みの Spike](kpi-read-memory-spike.md) の測り方で確かめる。
 
 ## (e) ローカルから移す手順の形
 
@@ -158,7 +244,7 @@ migration との順:
 3. 人の CLI が export のユースケース（専用の capability `queue.transfer`。user だけ）を呼ぶ。export は係の書き込みの列に並ぶ 1 つの transaction（SQLite の `BEGIN IMMEDIATE`）で、まず未完了の run・`run_leases` の行・生きている `supervisors` の登録が無いことを確かめ（あれば `export_refused`）、`queue_exported` の event を書き、同じ transaction の snapshot から下の「移す表」を表ごとに JSON Lines で書き出し、表ごとの行数と中身の hash の一覧を添える。export を終えた service は、起動し直すまで書き込みを `queue_exported` の答えで拒む（export の後の書き込みが移らずに失われないように）。
 4. `dagq service stop` で service を止める。
 5. export の版とチームの版の build の版が同じことを確かめる（違えば 2 に戻り、ローカルを先に `migrate` してから export し直す）。チームの版の `init` が表の無い Postgres の database に基点から最新まで schema を作る（ADR-t3102-2 決定1 の DB の無い所に作る例外）。`init` が作るのは版の表・リーダーの行（`generation = 0`）・空の表で、チームの版の service が起動して係になる。
-6. その service の import のユースケース（`queue.transfer`。チームの版では管理者の役の user だけ）が係として「移す表」だけを入れる。import の transaction は、リーダーの行の確かめ（係の識別子と世代が自分のもの）の次に、「移す表」がどれも 0 行で `queue_imports` の行が無いことを確かめ、違えば `import_refused`（理由つき）で何も書かない。行は ID を保って入れ、identity の次の値を移した行の最大の ID から合わせ、境目より古い行は (d) の形で置き場へ直接置き、本文が閾値を超える event は大きな本文の置き場の port（ADR-t3982-1 決定5・6）に置く。検索の索引は移した task・goal・note・着地の commit から検索の port が書く。終えたら `queue_imports`（出どころの queue の `application_id` と版、表ごとの行数と hash、import した人の principal と時刻）に 1 行書き、2 回目は拒む。大きな queue で 1 つの transaction に収まらないときは、表ごとの transaction に分け、最初の transaction で `queue_imports` に「進行中」の行を書いて以後の import の開始を拒む形にする（どちらにするかは Spike の結果で決める）。
+6. その service の import のユースケース（`queue.transfer`。チームの版では管理者の役の user だけ）が係として「移す表」だけを入れる。import の transaction は、リーダーの行の確かめ（係の識別子と世代が自分のもの）の次に、「移す表」がどれも 0 行で `queue_imports` の行が無いことを確かめ、違えば `import_refused`（理由つき）で何も書かない。行は ID を保って入れ、identity の次の値を移した行の最大の ID から合わせ、境目より古い行は (d) の形で置き場へ直接置き、本文が閾値を超える event は大きな本文の置き場の port（ADR-t3982-1 決定5・6）に置く。ローカルの opt-in で移した区切りは鍵の形のまま新しい置き場へ置き、直接置いた行には移した印も書く（ADR-t4124-1 の Consequences）。検索の索引は移した task・goal・note・着地の commit から検索の port が書く。終えたら `queue_imports`（出どころの queue の `application_id` と版、表ごとの行数と hash、import した人の principal と時刻）に 1 行書き、2 回目は拒む。大きな queue で 1 つの transaction に収まらないときは、表ごとの transaction に分け、最初の transaction で `queue_imports` に「進行中」の行を書いて以後の import の開始を拒む形にする（どちらにするかは Spike の結果で決める）。
 7. 「移す表」の表ごとの行数と hash を export の一覧と照合し、合えばチームの版の supervisor を始める。合わなければ Postgres を捨て、ローカルを `up` し直す（起動し直した service は書き込みを受ける）。
 
 止める時間 = drain + export + import + 照合。Spike は import の実装の後に、本番の queue.db の形（表ごとの行数と本文の大きさの分布）で作った合成のデータを CI の Postgres の job の環境で流し、3・6・7 の秒を測る。
