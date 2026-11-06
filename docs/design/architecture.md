@@ -217,6 +217,7 @@ queue serviceはqueue DBを開く唯一のプロセスで（例外は[Queue serv
 - 書き込みの入口でのfencingを通らない開始は`src/context_boundaries/write_tx.rs`が拒み、係の条件付きの更新とmigrationだけが専用の開始経路を使う。
   queueの接続への直接の書き込みと、書き込みのSQLを持つhelperへその接続を渡す呼び出しも同じtestが拒む（動的なSQLと接続の別名はreviewが見る）。
 - 方言の違う式の断片の置き場（ADR-t3982-1）は、`cargo test`が流すRustのtest（`src/context_boundaries/dialect.rs`）が当て、`src/`の本番のコードの文字列のSQLが`src/infrastructure/sql_dialect.rs`の外で方言の違う関数を呼ぶと落ちる。
+  共有のSQLで型を決めずに引数をNULLと比べる文も拒む。
   対象の関数と見ない部分はtestのdoc commentが持つ。
 - X4は、`cargo test`が流すRustのtest（`src/context_boundaries/inserted_ids.rs`）が当て、`src/`の本番のコードで内部の関数の外の`last_insert_rowid`の使用で落ちる。
   公開する関数と内部の関数の分担は[Persistence](persistence.md#transactions-and-constraints)。

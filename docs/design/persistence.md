@@ -69,12 +69,13 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 - 判断（遷移を許すか、どのeventを書くか、payloadの中身）はdomainが持ち、storeは読む・復元する・書く・同じトランザクションにまとめるだけを持つ（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)）。
 - 例外は全体のグラフが要る依存の循環の検出（再帰CTE）だけで、拒むかの判断はdomainが持つ。
 - 共有のSQLを流す入口は実行のport（`src/infrastructure/sql_exec/`）。
-  Postgresの実行のportへの入口は`src/infrastructure/postgres/`の書き込みと読み取りの入口。
-- Postgresの実行のportは共有のSQLの引数の綴り・値・行を写し、storeのmoduleは方言ごとのSQLの文字列を持たない。
-- storeのmoduleはrusqliteでなく実行のportで共有のSQLを流し、rusqliteを名指してよいのは`src/context_boundaries/rusqlite_names.rs`の一覧のmoduleだけ。
+  Postgresの読み書きの入口は`src/infrastructure/postgres/`。
+- Postgresの実行のportが共有のSQLの引数・値・行を写し、storeは方言ごとのSQLを持たない。
+- storeは実行のportで共有SQLを流し、rusqliteを名指してよいのは`src/context_boundaries/rusqlite_names.rs`の一覧のmoduleだけ。
 - 時刻とIDは`SqliteQueue`の`Generators`から取り、SQLの`now`で作らない。
   例外はDBの時計で判じる`write_leader`のleaseの期限（ADR-t3986-1決定4）。
 - schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`、場所は`src/infrastructure/location.rs`が持つ。
+- 共有のSQLの引数は型を決める形でNULLと比べる（境界の検査が守る）。
 - 方言の違う式の断片（JSONの欄の読み出しと日時の関数）は`src/infrastructure/sql_dialect.rs`の関数が返して文が埋める（ADR-t3982-1）。
 - runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く。
 

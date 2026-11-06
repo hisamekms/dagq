@@ -74,7 +74,7 @@ pub(super) fn lock_migration(tx: &impl SqlWrite, identity: &WriteIdentity) -> Re
 /// Lock the row of `?1` at generation `?2` without changing it; on either
 /// store.
 pub(super) const LOCK_MIGRATION_SQL: &str = "UPDATE write_leader SET generation = generation \
-     WHERE singleton = 1 AND (holder = ?1 OR (holder IS NULL AND ?1 IS NULL)) AND generation = ?2";
+     WHERE singleton = 1 AND (holder = ?1 OR (holder IS NULL AND CAST(?1 AS TEXT) IS NULL)) AND generation = ?2";
 
 /// The row and the DB's clock now.
 fn read_sql(now: &str) -> String {
@@ -104,7 +104,7 @@ const TAKEN_SQL: &str = "SELECT generation FROM write_leader WHERE singleton = 1
 pub(super) fn renew_sql(now: &str) -> String {
     format!(
         "UPDATE write_leader SET lease_until_ms = {now} + ?3 \
-         WHERE singleton = 1 AND (holder = ?1 OR (holder IS NULL AND ?1 IS NULL)) AND generation = ?2",
+         WHERE singleton = 1 AND (holder = ?1 OR (holder IS NULL AND CAST(?1 AS TEXT) IS NULL)) AND generation = ?2",
     )
 }
 

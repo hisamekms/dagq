@@ -67,6 +67,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("base types", base_types::<S, F>),
         ("event actors", event_actors::<S, F>),
         ("event bodies", event_bodies::<S, F>),
+        ("typed conditions", typed_conditions::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

@@ -162,6 +162,48 @@ pub(super) fn calls(sql: &str, functions: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// Untyped positional parameters (`?`, `?N`, `$N`) tested with IS [NOT] NULL.
+/// SQL comments and quoted text are ignored. Parentheses around a bare
+/// parameter do not give it a type; CAST(? AS BIGINT) (or a numbered
+/// parameter cast to its column's type) does, even
+/// when NULL is the parameter's only use. Dynamically split SQL is unseen.
+pub(super) fn untyped_null_parameters(sql: &str) -> Vec<String> {
+    let tokens = tokens(sql);
+    let mut out = Vec::new();
+    for (at, token) in tokens.iter().enumerate() {
+        if token.kind != Kind::Punct || !["?", "$"].contains(&token.text.as_str()) {
+            continue;
+        }
+        let number = tokens
+            .get(at + 1)
+            .filter(|t| t.kind == Kind::Number && t.text.chars().all(|c| c.is_ascii_digit()));
+        if number.is_none() && token.text != "?" {
+            continue;
+        }
+        let mut next = at + 1 + usize::from(number.is_some());
+        while tokens
+            .get(next)
+            .is_some_and(|t| t.kind == Kind::Punct && t.text == ")")
+        {
+            next += 1;
+        }
+        if is_word(&tokens, next, "is") {
+            next += 1;
+            if is_word(&tokens, next, "not") {
+                next += 1;
+            }
+            if is_word(&tokens, next, "null") {
+                out.push(format!(
+                    "{}{}",
+                    token.text,
+                    number.map_or("", |n| n.text.as_str())
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// The tables `sql` writes: `INSERT [OR choice] INTO t`, `REPLACE INTO t`,
 /// `DELETE FROM t`, and `UPDATE [OR choice] t [[AS] alias] [INDEXED BY i |
 /// NOT INDEXED] SET`, so a word update in prose, `DO UPDATE SET` and

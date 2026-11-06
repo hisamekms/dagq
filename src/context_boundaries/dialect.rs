@@ -9,6 +9,10 @@
 //! (byte strings and those inside a macro's tokens too) calls a function
 //! of [`FUNCTIONS`], read as SQLite reads it ([`sql::calls`]).
 //!
+//! Parameters compared with NULL must carry their type through
+//! CAST in shared SQL; a bare IS NULL cannot infer a Postgres parameter
+//! type. This rule applies inside the dialect module too.
+//!
 //! What is not seen: SQL built at run time from pieces that split a name
 //! from its `(`, and the migrations (`migrations/`, not under `src/`),
 //! whose SQL stays the dialect's own. The other JSON functions
@@ -49,13 +53,18 @@ fn check(rust: &[(String, String)]) -> Vec<String> {
             }
         }
     }
-    read.retain(|(path, _)| {
-        !test_paths.iter().any(|test| covers(test, path))
-            && !DIALECT.iter().any(|dialect| covers(dialect, path))
-    });
+    read.retain(|(path, _)| !test_paths.iter().any(|test| covers(test, path)));
     for (path, source) in &read {
         for literal in &source.literals {
             let inner = literal.fns.last().map_or("-", String::as_str);
+            for parameter in sql::untyped_null_parameters(&literal.text) {
+                errors.insert(format!(
+                    "{path}: SQL in {inner} tests untyped {parameter} against NULL; CAST the parameter to its column's type"
+                ));
+            }
+            if DIALECT.iter().any(|dialect| covers(dialect, path)) {
+                continue;
+            }
             for function in sql::calls(&literal.text, &FUNCTIONS) {
                 errors.insert(format!(
                     "{path}: SQL in {inner} calls {function}( outside the dialect's functions; take the expression from crate::infrastructure::sql_dialect"
@@ -79,7 +88,7 @@ fn the_sql_of_src_takes_the_dialects_functions_from_sql_dialect() {
     let errors = check(&rust);
     assert!(
         errors.is_empty(),
-        "SQL that spells a dialect's function outside sql_dialect (docs/design/persistence.md):\n{}",
+        "SQL with dialect functions outside sql_dialect or untyped NULL parameters (docs/design/persistence.md):\n{}",
         errors.join("\n")
     );
 }
@@ -176,4 +185,41 @@ mod fixtures {
         )]);
         assert!(found.is_empty(), "{found:?}");
     }
+}
+
+#[test]
+fn untyped_null_parameters_fail_and_casts_and_test_code_pass() {
+    for expression in [
+        "? IS NULL",
+        "? IS NOT NULL",
+        "(?) /* c */ IS NOT NULL",
+        "?1 IS NULL",
+        "?12 is not null",
+        "(?2) /* c */ IS NULL",
+        "$3 IS NULL",
+    ] {
+        let text = format!("fn f() {{ let _ = \"SELECT 1 WHERE {expression}\"; }}");
+        let errors = check(&[("src/infrastructure/store.rs".into(), text)]);
+        assert_eq!(errors.len(), 1, "{expression}: {errors:?}");
+        assert!(errors[0].contains("tests untyped"));
+    }
+    let text = r#"
+        fn f() {
+            let _ = "SELECT 1 WHERE CAST(?1 AS BIGINT) IS NULL OR CAST(?2 AS TEXT) IS NOT NULL";
+            let _ = "SELECT 1 WHERE CAST(? AS BIGINT) IS NULL OR CAST(? AS TEXT) IS NOT NULL";
+            let _ = "SELECT '?3 IS NULL', \"?4 IS NULL\" -- ?5 IS NULL";
+        }
+        #[cfg(test)] mod tests { fn f() { let _ = "SELECT ?1 IS NULL"; } }
+        #[cfg(test)] mod declared;
+    "#;
+    assert!(
+        check(&[
+            ("src/infrastructure/store.rs".into(), text.into()),
+            (
+                "src/infrastructure/store/declared.rs".into(),
+                "const SQL: &str = \"SELECT ?1 IS NULL\";".into()
+            ),
+        ])
+        .is_empty()
+    );
 }

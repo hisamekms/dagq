@@ -26,7 +26,7 @@ pub(super) fn installs_after_sql(dialect: SqlDialect) -> String {
         "FROM run_events INDEXED BY events_by_kind
      WHERE kind = ?1 AND id > ?2
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-     AND NOT COALESCE({}, 0)",
+     AND COALESCE({}, 0) = 0",
         dialect.json_field_spaced("payload", "$.plugin_only", JsonType::Boolean)
     )
 }
@@ -589,7 +589,7 @@ impl SqliteQueue {
                 &format!(
                     "SELECT {} AS finding FROM run_events
                      WHERE id>?2 AND kind=?3 AND {}=?1
-                       AND (?4 IS NULL OR {}
+                       AND (CAST(?4 AS TEXT) IS NULL OR {}
                             IN (SELECT value FROM json_each(?4)))
                      GROUP BY finding ORDER BY min(id)",
                     SqlRead::dialect(&*self.conn).json_field(
@@ -917,13 +917,13 @@ impl SqliteQueue {
             &*self.conn,
             &format!(
                 "SELECT * FROM run_events WHERE id>?1 AND id<=?2
-                 AND (?3 IS NULL OR kind IN (SELECT value FROM json_each(?3)))
-                 AND (?4 IS NULL OR run_id=?4 OR {}=?4)
-                 AND (?5 IS NULL OR task_id=?5)
-                 AND (?6 IS NULL OR goal_id=?6
+                 AND (CAST(?3 AS TEXT) IS NULL OR kind IN (SELECT value FROM json_each(?3)))
+                 AND (CAST(?4 AS TEXT) IS NULL OR run_id=?4 OR {}=?4)
+                 AND (CAST(?5 AS BIGINT) IS NULL OR task_id=?5)
+                 AND (CAST(?6 AS BIGINT) IS NULL OR goal_id=?6
                       OR task_id IN (SELECT id FROM tasks WHERE goal_id=?6))
-                 AND (?7 IS NULL OR {}>={})
-                 AND (?8 IS NULL OR {}<{})
+                 AND (CAST(?7 AS TEXT) IS NULL OR {}>={})
+                 AND (CAST(?8 AS TEXT) IS NULL OR {}<{})
                  ORDER BY id LIMIT ?9",
                 SqlRead::dialect(&*self.conn).json_field(
                     "payload",
@@ -1560,6 +1560,34 @@ mod tests {
             !steps.iter().any(|line| line == "SCAN run_events"),
             "{steps:#?}"
         );
+    }
+
+    #[test]
+    fn installs_after_includes_missing_null_and_false_plugin_only() {
+        use crate::domain::EventKind;
+        let uri = format!("file:/installs-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let queue = SqliteQueue::init(&uri).unwrap();
+        let mut expected = Vec::new();
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"plugin_only": null}),
+            serde_json::json!({"plugin_only": false}),
+        ] {
+            expected.push(
+                queue
+                    .record_queue_event(EventKind::UpdateInstalled, payload)
+                    .unwrap(),
+            );
+        }
+        queue
+            .record_queue_event(
+                EventKind::UpdateInstalled,
+                serde_json::json!({"plugin_only": true}),
+            )
+            .unwrap();
+        let (found, total) = queue.installs_after(EventId::new(0), 10).unwrap();
+        assert_eq!(found.iter().map(|e| e.id).collect::<Vec<_>>(), expected);
+        assert_eq!(total, 3);
     }
 
     /// The installs past a run's claim are read past any number of the

@@ -521,13 +521,13 @@ impl SqliteQueue {
     pub fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)> {
         let slots = SqlRead::query_row(
             &*self.conn,
-            "SELECT count(*) FROM run_leases WHERE ?1 IS NULL OR token=?1",
+            "SELECT count(*) FROM run_leases WHERE CAST(?1 AS TEXT) IS NULL OR token=?1",
             sql_params![token],
             |r| r.get(0),
         )?;
         let parallel = SqlRead::query_row(
             &*self.conn,
-            "SELECT SUM(parallel) FROM supervisors WHERE ?1 IS NULL OR token=?1",
+            "SELECT SUM(parallel) FROM supervisors WHERE CAST(?1 AS TEXT) IS NULL OR token=?1",
             sql_params![token],
             |r| r.get(0),
         )?;

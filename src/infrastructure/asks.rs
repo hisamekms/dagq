@@ -858,7 +858,7 @@ impl SqliteQueue {
             &tx,
             "SELECT a.id, r.status, t.status FROM asks a
                  JOIN task_runs r ON r.id=a.run_id JOIN tasks t ON t.id=r.task_id
-                 WHERE a.kind=?1 AND a.closed_at IS NULL AND (?2 IS NULL OR r.task_id=?2)
+                 WHERE a.kind=?1 AND a.closed_at IS NULL AND (CAST(?2 AS BIGINT) IS NULL OR r.task_id=?2)
                  ORDER BY a.id",
             sql_params![AskKind::ApproveLanding.as_str(), task],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),

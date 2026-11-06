@@ -277,7 +277,11 @@ fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
 /// it on the primary key, so a page reads no row before it; without, `?5`
 /// is NULL.
 fn wait_rows_sql(dialect: SqlDialect, after: bool) -> String {
-    let from = if after { "key > ?5" } else { "?5 IS NULL" };
+    let from = if after {
+        "key > ?5"
+    } else {
+        "CAST(?5 AS TEXT) IS NULL"
+    };
     format!(
         "SELECT kind, key, task_id, ledger_v, built_at, inputs_through, final,
                 legacy_values, started_at, ended_at, outcome, totals, intervals,
@@ -329,7 +333,7 @@ fn stops_after_sql(dialect: SqlDialect, after: bool) -> String {
     let from = if after {
         "r.key >= ?3 AND (r.key > ?3 OR j.key > ?4)"
     } else {
-        "?3 IS NULL AND ?4 IS NULL"
+        "CAST(?3 AS TEXT) IS NULL AND CAST(?4 AS BIGINT) IS NULL"
     };
     format!(
         "SELECT r.key, j.key, j.value FROM ledger_rows r, json_each(r.records) j
@@ -835,7 +839,7 @@ impl LedgerStore for SqliteQueue {
         let from = if after.is_some() {
             "(kind, key) > (?7, ?8)"
         } else {
-            "?7 IS NULL AND ?8 IS NULL"
+            "CAST(?7 AS TEXT) IS NULL AND CAST(?8 AS TEXT) IS NULL"
         };
         let statement = format!(
             "SELECT kind, key FROM ledger_rows
@@ -995,7 +999,7 @@ impl LedgerStore for SqliteQueue {
         let from = if after.is_some() {
             "r.key > ?3"
         } else {
-            "?3 IS NULL"
+            "CAST(?3 AS TEXT) IS NULL"
         };
         let filter = format!(
             "AND {from} AND NOT (r.final=1 AND r.ledger_v>=?9

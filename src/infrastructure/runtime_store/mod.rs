@@ -157,7 +157,7 @@ fn save_run_row(
         "UPDATE task_runs SET status=?3,repo_path=?4,run_dir=?5,branch=?6,worktree_path=?7,
          receipt_path=?8,log_path=?9,workspace_id=?10,result_commit=?11,last_error=?12,
          workspace_closed_at=?13
-         WHERE id=?1 AND status=?2 AND (?14 IS NULL OR supervisor_token=?14)",
+         WHERE id=?1 AND status=?2 AND (CAST(?14 AS TEXT) IS NULL OR supervisor_token=?14)",
         sql_params![
             run.id(),
             from.as_str(),

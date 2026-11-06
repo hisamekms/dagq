@@ -355,3 +355,49 @@ pub fn event_bodies<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<
     }
     Ok(())
 }
+
+/// NULL disables each typed filter; a value selects only matching rows.
+/// JSON booleans are integer expressions in both dialects and need an
+/// explicit comparison, including missing fields and JSON null.
+pub fn typed_conditions<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
+    use crate::infrastructure::sql_dialect::JsonType;
+    let store = open()?;
+    let read = store.read_entry("contract_typed_conditions")?;
+    let rows = "WITH rows(id, name, payload) AS (VALUES
+        (CAST(4294967296 AS BIGINT), 'missing', '{}'),
+        (CAST(4294967297 AS BIGINT), 'null', '{\"plugin_only\":null}'),
+        (CAST(4294967298 AS BIGINT), 'false', '{\"plugin_only\":false}'),
+        (CAST(4294967299 AS BIGINT), 'true', '{\"plugin_only\":true}'))";
+    let filtered = format!(
+        "{rows} SELECT name FROM rows
+         WHERE (CAST(?1 AS BIGINT) IS NULL OR id=?1)
+           AND (CAST(?2 AS TEXT) IS NULL OR name=?2) ORDER BY id"
+    );
+    for (id, name, expected) in [
+        (None, None, vec!["missing", "null", "false", "true"]),
+        (Some(4294967297_i64), None, vec!["null"]),
+        (None, Some("false"), vec!["false"]),
+        (Some(4294967297), Some("false"), vec![]),
+    ] {
+        let found = read.query_map(&filtered, sql_params![id, name], |r| r.get::<_, String>(0))?;
+        ensure!(found == expected, "typed filters: {found:?}");
+    }
+    let boolean = read
+        .dialect()
+        .json_field("payload", "$.plugin_only", JsonType::Boolean);
+    for (condition, expected) in [
+        (
+            format!("COALESCE({boolean}, 0) = 0"),
+            vec!["missing", "null", "false"],
+        ),
+        (format!("{boolean} = 1"), vec!["true"]),
+    ] {
+        let found = read.query_map(
+            &format!("{rows} SELECT name FROM rows WHERE {condition} ORDER BY id"),
+            &[],
+            |r| r.get::<_, String>(0),
+        )?;
+        ensure!(found == expected, "boolean condition: {found:?}");
+    }
+    Ok(())
+}

@@ -517,7 +517,7 @@ pub(super) fn read_before_sqlite(conn: &Connection, closing: Closing<'_>) -> Res
             conn,
             &format!(
                 "o.run_id IS NULL AND {}=?1
-             AND (?2 IS NULL OR {}=?2)",
+             AND (CAST(?2 AS BIGINT) IS NULL OR {}=?2)",
                 json_field("o.payload", "$.kind", JsonType::Text),
                 json_field("o.payload", "$.plan_review_id", JsonType::Integer),
             ),
@@ -2009,7 +2009,7 @@ fn open_goal_reviews(conn: &Connection, goal_review_id: Option<i64>) -> Result<V
         conn,
         &format!(
             "o.run_id IS NULL AND {}=?1
-         AND (?2 IS NULL OR {}=?2)",
+         AND (CAST(?2 AS BIGINT) IS NULL OR {}=?2)",
             json_field("o.payload", "$.kind", JsonType::Text),
             json_field("o.payload", "$.goal_review_id", JsonType::Integer),
         ),

@@ -518,7 +518,7 @@ mod tests {
             fence_sql(),
             format!(
                 "UPDATE write_leader SET lease_until_ms = {now} + $3 \
-                 WHERE singleton = 1 AND (holder = $1 OR (holder IS NULL AND $1 IS NULL)) \
+                 WHERE singleton = 1 AND (holder = $1 OR (holder IS NULL AND CAST($1 AS TEXT) IS NULL)) \
                  AND generation = $2"
             )
         );

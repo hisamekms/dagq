@@ -3151,6 +3151,10 @@ mod store_contract_tests {
         contract(|open| store_contract::base_types(&open));
     }
     #[test]
+    fn typed_conditions() {
+        contract(|open| store_contract::typed_conditions(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }
