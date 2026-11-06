@@ -124,6 +124,211 @@ pub fn parse_terms(query: &str) -> Result<SearchTerms, DomainError> {
     })
 }
 
+/// An FTS5 boolean expression. Implicit AND binds more tightly than NOT,
+/// explicit AND, then OR. Parentheses determine grouping, not a separate node.
+/// Leaves retain phrase order (including duplicates) for bm25 accumulation.
+/// AND and OR children are flattened as in FTS5, so arbitrarily long lists
+/// do not produce recursive Drop/Clone/Eq chains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchExpr {
+    Term(String),
+    And(Vec<Self>),
+    Or(Vec<Self>),
+    Not(Box<Self>, Box<Self>),
+}
+
+impl SearchTerms {
+    /// Interprets only the FTS5 expression produced by [`parse_terms`]. Short
+    /// terms remain separate mandatory filters; with no long terms this is None.
+    /// Rejects invalid operator placement as [`DomainError::SearchQuery`]. SQLite
+    /// deliberately keeps using FTS5 itself instead of this interpreter.
+    /// Enforces the bundled FTS5 parser's fixed stack and flattened expression
+    /// height limits before creating an unbounded recursive call or tree.
+    pub fn expression(&self) -> Result<Option<SearchExpr>, DomainError> {
+        let Some(fts) = &self.fts else {
+            return Ok(None);
+        };
+        let tokens = tokens(fts);
+        let mut parser = ExpressionParser {
+            tokens: &tokens,
+            at: 0,
+        };
+        let expr = parser.explicit(1, 0)?.expr;
+        if parser.at != tokens.len() {
+            return Err(expression_error());
+        }
+        Ok(Some(expr))
+    }
+}
+
+fn expression_error() -> DomainError {
+    DomainError::SearchQuery {
+        reason: "invalid FTS5 operator placement".into(),
+    }
+}
+
+struct ExpressionParser<'a> {
+    tokens: &'a [Token],
+    at: usize,
+}
+
+// The bundled FTS5 Lemon parser has 100 fixed stack entries (entry zero
+// is the initial state). For parse_terms' grammar, an unresolved parenthesis
+// occupies one entry and a pending binary operator occupies two. A STRING
+// needs two temporary entries, including the empty star_opt reduction; an
+// implicit-AND continuation or closing parenthesis needs three. Track these
+// entries before recursion, rather than approximating a parenthesis limit.
+const FTS5_PARSER_STACK: usize = 100;
+// FTS5 leaves have height zero; AND/OR flatten children of the same kind.
+const FTS5_EXPR_HEIGHT: usize = 256;
+
+struct ParsedExpr {
+    expr: SearchExpr,
+    height: usize,
+}
+
+impl ParsedExpr {
+    fn term(term: &str) -> Self {
+        Self {
+            expr: SearchExpr::Term(term.into()),
+            height: 0,
+        }
+    }
+
+    fn combine(op: &str, left: Self, right: Self) -> Result<Self, DomainError> {
+        let flattened = |expr: &SearchExpr| {
+            matches!(
+                (op, expr),
+                ("AND", SearchExpr::And(_)) | ("OR", SearchExpr::Or(_))
+            )
+        };
+        let height = (left.height + usize::from(!flattened(&left.expr)))
+            .max(right.height + usize::from(!flattened(&right.expr)));
+        if height > FTS5_EXPR_HEIGHT {
+            return Err(expression_error());
+        }
+        let expr = if op == "NOT" {
+            SearchExpr::Not(Box::new(left.expr), Box::new(right.expr))
+        } else {
+            let mut children = match left.expr {
+                SearchExpr::And(children) if op == "AND" => children,
+                SearchExpr::Or(children) if op == "OR" => children,
+                expr => vec![expr],
+            };
+            match right.expr {
+                SearchExpr::And(other) if op == "AND" => children.extend(other),
+                SearchExpr::Or(other) if op == "OR" => children.extend(other),
+                expr => children.push(expr),
+            }
+            if op == "AND" {
+                SearchExpr::And(children)
+            } else {
+                SearchExpr::Or(children)
+            }
+        };
+        Ok(Self { expr, height })
+    }
+}
+
+impl ExpressionParser<'_> {
+    fn stack_room(base: usize, temporary: usize) -> Result<(), DomainError> {
+        if base + temporary >= FTS5_PARSER_STACK {
+            Err(expression_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn explicit(&mut self, minimum: u8, base: usize) -> Result<ParsedExpr, DomainError> {
+        let mut left = self.primary(base)?;
+        loop {
+            let (op, precedence) = match self.tokens.get(self.at) {
+                Some(Token::Operator("OR")) => ("OR", 1),
+                Some(Token::Operator("AND")) => ("AND", 2),
+                Some(Token::Operator("NOT")) => ("NOT", 3),
+                _ => break,
+            };
+            if precedence < minimum {
+                break;
+            }
+            self.at += 1;
+            let right = self.explicit(precedence + 1, base + 2)?;
+            left = ParsedExpr::combine(op, left, right)?;
+        }
+        Ok(left)
+    }
+
+    fn primary(&mut self, base: usize) -> Result<ParsedExpr, DomainError> {
+        Self::stack_room(base, 2)?;
+        match self.tokens.get(self.at) {
+            Some(Token::Term(term)) => {
+                let mut expr = ParsedExpr::term(term);
+                self.at += 1;
+                // FTS5 allows implicit AND only between phrases, never beside
+                // a parenthesized expression: `foo (bar)` is a syntax error.
+                while let Some(Token::Term(term)) = self.tokens.get(self.at) {
+                    Self::stack_room(base, 3)?;
+                    expr = ParsedExpr::combine("AND", expr, ParsedExpr::term(term))?;
+                    self.at += 1;
+                }
+                Ok(expr)
+            }
+            Some(Token::Operator("(")) => {
+                self.at += 1;
+                let expr = self.explicit(1, base + 1)?;
+                if self.tokens.get(self.at) != Some(&Token::Operator(")")) {
+                    return Err(expression_error());
+                }
+                Self::stack_room(base, 3)?;
+                self.at += 1;
+                Ok(expr)
+            }
+            _ => Err(expression_error()),
+        }
+    }
+}
+
+/// One query phrase's statistics. `matching_rows` counts rows in the entire
+/// index containing the phrase in the query's selected columns, before other
+/// filters. `occurrences` counts overlapping phrase instances in those columns
+/// of the scored row, with column weights all one. For boolean queries the
+/// caller supplies FTS5's active instances (e.g. an excluded NOT branch has zero).
+#[derive(Debug, Clone, Copy)]
+pub struct Bm25Phrase {
+    pub matching_rows: u64,
+    pub occurrences: u64,
+}
+
+/// FTS5's bm25 from `fts5_aux.c`, without reading an index. Smaller is better.
+/// `rows` is N over the whole table, including other kinds and filtered-out rows.
+/// `total_trigrams` and `row_trigrams` sum `max(chars - 2, 0)` separately over
+/// all five indexed columns, even when matching only title and description.
+/// Phrases must be in FTS5's query order, including repeated phrases; counts
+/// use the tokenizer's case folding. The caller owns folding and counting.
+/// Keep the floating-point operation order: sum positive contributions in phrase
+/// order, then negate once. Empty/tokenless indexes have no ranked matches and
+/// return zero. Counts must describe a consistent index (`matching_rows <= rows`).
+pub fn bm25(rows: u64, total_trigrams: u64, row_trigrams: u64, phrases: &[Bm25Phrase]) -> f64 {
+    if rows == 0 || total_trigrams == 0 {
+        return 0.0;
+    }
+    let n = rows as f64;
+    let avgdl = total_trigrams as f64 / n;
+    let mut score = 0.0;
+    for phrase in phrases {
+        let hits = phrase.matching_rows as f64;
+        let mut idf = (((rows - phrase.matching_rows) as f64 + 0.5) / (hits + 0.5)).ln();
+        if idf <= 0.0 {
+            idf = 1e-6;
+        }
+        let frequency = phrase.occurrences as f64;
+        score += idf
+            * ((frequency * (1.2 + 1.0))
+                / (frequency + 1.2 * (1.0 - 0.75 + 0.75 * row_trigrams as f64 / avgdl)));
+    }
+    -score
+}
+
 fn tokens(query: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut chars = query.chars().peekable();
@@ -332,6 +537,86 @@ mod tests {
 
     fn terms(query: &str) -> SearchTerms {
         parse_terms(query).unwrap()
+    }
+
+    #[test]
+    fn expression_keeps_fts5_precedence_and_associativity() {
+        use SearchExpr::{And, Not, Or, Term};
+        let term = |s: &str| Term(s.into());
+        assert_eq!(
+            terms("foo OR bar AND baz NOT qux quux")
+                .expression()
+                .unwrap(),
+            Some(Or(vec![
+                term("foo"),
+                And(vec![
+                    term("bar"),
+                    Not(
+                        Box::new(term("baz")),
+                        Box::new(And(vec![term("qux"), term("quux")]))
+                    )
+                ])
+            ]))
+        );
+        assert_eq!(
+            terms("foo NOT bar NOT baz").expression().unwrap(),
+            Some(Not(
+                Box::new(Not(Box::new(term("foo")), Box::new(term("bar")))),
+                Box::new(term("baz"))
+            ))
+        );
+        assert_eq!(
+            terms("(foo OR bar) AND baz").expression().unwrap(),
+            Some(And(vec![Or(vec![term("foo"), term("bar")]), term("baz")]))
+        );
+        assert_eq!(terms("重複").expression().unwrap(), None);
+        // parse_terms already discards explicit ANDs beside short terms;
+        // interpret its output, preserving that local normalization.
+        assert_eq!(
+            terms("AND 重複 AND foo AND").expression().unwrap(),
+            Some(Term("foo".into()))
+        );
+    }
+
+    #[test]
+    fn long_flat_expressions_clone_compare_and_drop_without_deep_recursion() {
+        for separator in [" ", " AND ", " OR "] {
+            let query = vec!["foo"; 50_000].join(separator);
+            let expr = terms(&query).expression().unwrap().unwrap();
+            let children = match &expr {
+                SearchExpr::And(children) | SearchExpr::Or(children) => children,
+                _ => panic!("expected a flat list"),
+            };
+            assert_eq!(children.len(), 50_000);
+            assert!(
+                children
+                    .iter()
+                    .all(|child| matches!(child, SearchExpr::Term(_)))
+            );
+            let cloned = expr.clone();
+            assert_eq!(expr, cloned);
+            drop(cloned);
+            drop(expr);
+        }
+    }
+
+    #[test]
+    fn bm25_without_ranked_instances_is_zero() {
+        assert_eq!(bm25(0, 0, 0, &[]), 0.0);
+        assert_eq!(bm25(2, 0, 0, &[]), 0.0);
+        assert_eq!(bm25(2, 10, 5, &[]), 0.0);
+        assert_eq!(
+            bm25(
+                2,
+                10,
+                5,
+                &[Bm25Phrase {
+                    matching_rows: 1,
+                    occurrences: 0
+                }]
+            ),
+            0.0
+        );
     }
 
     #[test]

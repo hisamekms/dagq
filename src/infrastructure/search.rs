@@ -337,6 +337,269 @@ mod tests {
     use crate::domain::search::any_word_query;
     use crate::domain::{NewTask, Priority, TaskId};
 
+    // Keep the complete migration's FTS declaration, including UNINDEXED
+    // metadata: kind must not affect either document length or term frequency.
+    fn search_memdb() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        let migration = include_str!("../../migrations/0026_search.sql");
+        let start = migration.find("CREATE VIRTUAL TABLE search_index").unwrap();
+        let end = start + migration[start..].find(';').unwrap() + 1;
+        db.execute_batch(&migration[start..end]).unwrap();
+        db
+    }
+
+    #[test]
+    fn pure_bm25_matches_fts5_values_and_order_with_column_filters() {
+        use crate::domain::search::{Bm25Phrase, bm25};
+        let db = search_memdb();
+        let rows = [
+            [
+                "全文検索検索",
+                "aaaaa search",
+                "done",
+                "src/domain/search.rs",
+                "",
+            ],
+            ["SEARCH", "全文検索 search", "日本語の条件", "", "aaaa"],
+            [
+                "src/domain/search.rs",
+                "aaaa search",
+                "全文検索",
+                "context search",
+                "message search",
+            ],
+            ["その他の資料", "different", "", "", "全文検索 search"],
+            ["稀な検索語", "unique", "", "", ""],
+            ["SEARCH", "全文検索 search", "日本語の条件", "", "aaaa"],
+            ["", "", "", "", ""],
+            ["無関係", "unrelated", "criteria", "context", "message"],
+        ];
+        for (id, row) in rows.iter().enumerate() {
+            db.execute(
+                "INSERT INTO search_index(rowid,kind,title,description,acceptance,context,text)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    id as i64,
+                    ["task", "goal", "note", "commit"][id % 4],
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4]
+                ],
+            )
+            .unwrap();
+        }
+        let sizes: Vec<u64> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|text| text.chars().count().saturating_sub(2) as u64)
+                    .sum()
+            })
+            .collect();
+        let total = sizes.iter().sum();
+        // ASCII folding is sufficient for this fixture; no tokenizer or DB
+        // statistics feed the expected counts. Windows include overlaps.
+        let count = |text: &str, term: &str| -> u64 {
+            let text: Vec<char> = text.to_ascii_lowercase().chars().collect();
+            let term: Vec<char> = term.to_ascii_lowercase().chars().collect();
+            text.windows(term.len())
+                .filter(|part| *part == term)
+                .count() as u64
+        };
+        for columns in [5, 2] {
+            for terms in [
+                vec!["search"],
+                vec!["全文検索"],
+                vec!["aaa"],
+                vec!["src/domain/search.rs"],
+                vec!["unique"],
+                vec!["search", "全文検索", "aaa"],
+                vec!["aaa", "search", "search"],
+            ] {
+                let expression = terms
+                    .iter()
+                    .map(|t| format!("\"{t}\""))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                let query = if columns == 2 {
+                    format!("{{title description}} : ({expression})")
+                } else {
+                    expression
+                };
+                let frequencies: Vec<Vec<u64>> = rows
+                    .iter()
+                    .map(|row| {
+                        terms
+                            .iter()
+                            .map(|term| row[..columns].iter().map(|text| count(text, term)).sum())
+                            .collect()
+                    })
+                    .collect();
+                let matching: Vec<u64> = (0..terms.len())
+                    .map(|i| frequencies.iter().filter(|row| row[i] > 0).count() as u64)
+                    .collect();
+                let mut expected: Vec<(i64, f64)> = frequencies
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, fs)| fs.iter().any(|f| *f > 0))
+                    .map(|(id, fs)| {
+                        let phrases: Vec<_> = fs
+                            .iter()
+                            .zip(&matching)
+                            .map(|(&occurrences, &matching_rows)| Bm25Phrase {
+                                occurrences,
+                                matching_rows,
+                            })
+                            .collect();
+                        (
+                            id as i64,
+                            bm25(rows.len() as u64, total, sizes[id], &phrases),
+                        )
+                    })
+                    .collect();
+                expected.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)));
+                let mut stmt = db
+                    .prepare(
+                        "SELECT rowid, bm25(search_index) FROM search_index
+                    WHERE search_index MATCH ?1 ORDER BY bm25(search_index), rowid DESC",
+                    )
+                    .unwrap();
+                let actual: Vec<(i64, f64)> = stmt
+                    .query_map([&query], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect();
+                assert_eq!(actual.len(), expected.len(), "{query}");
+                for (actual, expected) in actual.iter().zip(&expected) {
+                    assert_eq!(actual.0, expected.0, "rank: {query}");
+                    assert!(
+                        (actual.1 - expected.1).abs() < 1e-9,
+                        "{query}: {actual:?} != {expected:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expression_rejects_the_same_operator_placements_as_fts5() {
+        let db = search_memdb();
+        for query in [
+            "foo",
+            "foo bar",
+            "foo AND bar",
+            "foo OR bar NOT baz",
+            "foo NOT bar baz",
+            "(foo OR bar) AND baz",
+            "foo AND (bar OR baz)",
+            "((foo))",
+            "foo NOT bar NOT baz",
+            "\"AND\" OR foo",
+            "foo OR",
+            "NOT foo",
+            "foo AND",
+            "AND foo",
+            "foo NOT",
+            "foo OR OR bar",
+            "()",
+            "foo ()",
+            "(foo",
+            "foo)",
+            "foo (bar)",
+            "(foo) bar",
+            "(foo)(bar)",
+            "foo AND NOT bar",
+            "foo NOT (bar OR baz)",
+            "foo OR (bar baz)",
+            "foo OR (bar) baz",
+            "foo NOT bar AND baz",
+            "\"foo bar\"",
+            "foo AND AND bar",
+        ] {
+            let terms = parse_terms(query);
+            // A termless expression such as () is rejected by parse_terms
+            // before the tree interpreter; FTS5 must reject it too.
+            let fts = terms
+                .as_ref()
+                .ok()
+                .and_then(|terms| terms.fts.as_deref())
+                .unwrap_or(query);
+            let actual = db.query_row(
+                "SELECT count(*) FROM search_index WHERE search_index MATCH ?1",
+                [fts],
+                |row| row.get::<_, i64>(0),
+            );
+            let interpreted = terms.and_then(|terms| terms.expression());
+            assert_eq!(
+                interpreted.is_ok(),
+                actual.is_ok(),
+                "{query}: {actual:?}, {interpreted:?}"
+            );
+            if let Err(error) = interpreted {
+                assert!(matches!(error, DomainError::SearchQuery { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn expression_limits_match_fts5_stack_and_tree_boundaries() {
+        let db = search_memdb();
+        let compare = |query: &str| {
+            let terms = parse_terms(query).unwrap();
+            let sqlite = db.query_row(
+                "SELECT count(*) FROM search_index WHERE search_index MATCH ?1",
+                [terms.fts.as_ref().unwrap()],
+                |row| row.get::<_, i64>(0),
+            );
+            let interpreted = terms.expression();
+            assert_eq!(
+                interpreted.is_ok(),
+                sqlite.is_ok(),
+                "length {}, prefix {:?}: SQLite {sqlite:?}",
+                query.len(),
+                &query[..query.len().min(50)]
+            );
+            if let Err(error) = interpreted {
+                assert!(matches!(error, DomainError::SearchQuery { .. }));
+            }
+        };
+        // Exercise both sides of the fixed parser-stack boundary. Pending
+        // operators and implicit AND consume different numbers of entries.
+        for depth in 0..=105 {
+            for phrase in [
+                "foo",
+                "foo bar",
+                "foo AND bar",
+                "foo OR bar AND baz NOT qux",
+            ] {
+                compare(&format!(
+                    "{}{}{}",
+                    "(".repeat(depth),
+                    phrase,
+                    ")".repeat(depth)
+                ));
+                compare(&format!(
+                    "{}{}{}",
+                    "foo OR (".repeat(depth),
+                    phrase,
+                    ")".repeat(depth)
+                ));
+            }
+        }
+        // NOT is left associative and cannot flatten like AND and OR. Its
+        // expression height, rather than the parser stack, is the limit.
+        for count in 240..=265 {
+            compare(&format!("foo{}", " NOT foo".repeat(count)));
+        }
+        for operator in [" ", " AND ", " OR "] {
+            compare(&vec!["foo"; 2048].join(operator));
+        }
+        compare(&format!("{}foo{}", "(".repeat(50_000), ")".repeat(50_000)));
+        compare(&format!("foo{}", " NOT foo".repeat(50_000)));
+    }
+
     fn add(queue: &mut SqliteQueue, title: &str, description: &str) -> TaskId {
         queue
             .add(NewTask {
