@@ -2084,7 +2084,8 @@ enum AgentCommand {
         rerun: bool,
         /// Dev only: the provider this round's runs start on, over the agent's
         /// [review.subagents.<agent>] in dagq.toml (else the role's): only one dagq.toml uses
-        /// for that agent or for [roles.review]. What is not given comes from that table, then
+        /// for that agent or for [roles.review], or declares with [eval.providers.<provider>].
+        /// What is not given comes from that table, then
         /// [roles.review]; another provider than the table's drops the table's model. Holdout
         /// and production run with the table and refuse it, so a hold-out's one run is never
         /// spent on a launch dagq.toml does not give.

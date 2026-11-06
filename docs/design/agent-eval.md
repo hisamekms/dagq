@@ -104,8 +104,8 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   capabilityの表は[Authorization](authorization.md)が持ち、要るcapabilityは`domain::authorization::eval_request_needs`が決める。
 - hold-outとproductionの周は集合の全体だけを流し、`--cases`は人の再実行の指定のときだけ受ける（[ADR-t2229-1](../adr/2026-10-21-t2229-1-held-out-rounds-run-their-case-set-whole.md)）。
   起動の組の上書きも受けず、記録に残った依頼も周の開始で拒む。
-- devの周は起動の組（provider・model・effort）をagentの`dagq.toml`の組の上に依頼で書け、依頼の時に検査する。
-  providerは`dagq.toml`がそのagentか役割に使うものに限り、設定に無い送り先は拒む。
+- devの周は起動の組をagentの`dagq.toml`の組の上に依頼で書け、依頼の時と周の開始に検査する。
+  providerは`dagq.toml`がそのagentか役割に使うものか`[eval.providers.<provider>]`で宣言したものに限り、他は拒む。
 - queue側のproductionの集合を選ぶ周のケースの集合のdigestは、選んだ集合の全体のもの（作り直しで飛ばしたケースがあればその残り）になる。
   周は開始の時の集合（ラベルと人の決定）で採点し、引き取ったsupervisorも同じ時点までのeventで集合を読み直すので、開始の後の人の決定は引き継ぎの有無に依らずその周を変えず、次の周から効く。
 - productionの集合の作成の依頼（`agent cases`）と人の決定（`agent decide`）は人・inbox・plannerの`eval.cases`で、workerとsupervisorは`authorization_denied`になる。

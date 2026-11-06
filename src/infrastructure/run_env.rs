@@ -299,7 +299,8 @@ const VERIFICATION_TABLE: &str = verification_limit::TABLE;
 /// decisions 8 and 9); its keys are on [`EvalConfig`].
 const EVAL_TABLE: &str = "eval";
 /// `[eval.providers.<provider>]`: one provider's estimate and prices of a
-/// run; its keys are on [`ProviderCost`].
+/// run, its keys on [`ProviderCost`]; its heading declares the provider
+/// ([`EvalConfig::declared_providers`]).
 const EVAL_PROVIDERS_PREFIX: &str = "eval.providers.";
 /// What [`parse_config`] calls the current table while in a
 /// `[eval.providers.*]`.
@@ -796,10 +797,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut targets_seen: Vec<RuntimeTarget> = Vec::new();
     let mut role_keys: Vec<String> = Vec::new();
     let mut eval_keys: Vec<String> = Vec::new();
-    // The provider of the `[eval.providers.<provider>]` being read, those
-    // read, and the keys of the current one.
+    // The provider of the `[eval.providers.<provider>]` being read and the
+    // keys of the current one; those read are `declared_providers`.
     let mut eval_provider: Option<crate::domain::Provider> = None;
-    let mut eval_providers_seen: Vec<crate::domain::Provider> = Vec::new();
     let mut eval_provider_keys: Vec<String> = Vec::new();
     let mut kpi = KpiTables::default();
     let mut telemetry = TelemetryTables::default();
@@ -1116,10 +1116,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     )
                 })?;
                 ensure!(
-                    !eval_providers_seen.contains(&provider),
+                    !config.eval.declared_providers.contains(&provider),
                     "{CONFIG_FILE_NAME}:{number}: [{EVAL_PROVIDERS_PREFIX}{name}] is defined twice"
                 );
-                eval_providers_seen.push(provider);
+                config.eval.declared_providers.push(provider);
                 eval_provider = Some(provider);
                 eval_provider_keys.clear();
                 table = Some(EVAL_PROVIDER_TABLE);
@@ -3408,9 +3408,9 @@ pub fn load_role_models(root: &Path) -> Result<RoleModels> {
 }
 
 /// What the `dagq.toml` in `root` gives the review agent `agent`'s launch
-/// ([`crate::application::agent_eval::LaunchSettings`]): `[roles.*]` and
-/// what its `[review.subagents.<agent>]` writes; none of either without
-/// the file.
+/// ([`crate::application::agent_eval::LaunchSettings`]): `[roles.*]`, what
+/// its `[review.subagents.<agent>]` writes and the providers
+/// `[eval.providers.*]` declares; none of them without the file.
 pub fn load_eval_launch_settings(
     root: &Path,
     agent: &str,
@@ -3422,6 +3422,7 @@ pub fn load_eval_launch_settings(
     let config = parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
     Ok(crate::application::agent_eval::LaunchSettings {
         table: config.review_agents().written_launch(agent),
+        declared: config.eval.declared_providers,
         roles: config.roles,
     })
 }
@@ -4780,6 +4781,65 @@ mod tests {
         );
         assert_eq!(read.table.provider, Some(crate::domain::Provider::Claude));
         assert_eq!(read.table.model.as_deref(), Some("claude-haiku-5-5"));
+    }
+
+    /// A request (`agent eval`) and a round's start read the same
+    /// `[eval.providers.*]` of the checkout's `dagq.toml`, by the heading
+    /// whatever its keys, so they decide a requested provider alike; the
+    /// table changes neither the estimate of another provider nor where a
+    /// review's own job of the agent starts.
+    #[test]
+    fn eval_providers_declare_a_rounds_sending_and_leave_the_review_alone() {
+        use crate::domain::Provider;
+        use crate::domain::actor_model::AgentModel;
+        use crate::domain::agent_eval::round::check_requested_launch;
+        let base = "[roles.review]\nprovider = \"codex\"\n\
+                    [review.subagents.design]\npaths = [\"docs/**\"]\n";
+        let dir = tempfile::tempdir().unwrap();
+        let verifier = ShellVerifier {
+            checkout: dir.path().to_path_buf(),
+            db: dir.path().join("q.db"),
+            user_config: None,
+            verification_timeout: Duration::from_secs(1),
+            profiles: &crate::domain::toolchain::BUILTIN,
+            children: crate::domain::environment::RunChildren::default(),
+        };
+        let asked = AgentModel {
+            provider: Some(Provider::Claude),
+            model: Some("claude-haiku-5-5".into()),
+            effort: Some("low".into()),
+        };
+        // `decisions` is what a request and a round's start each decide.
+        let decisions = |text: &str| {
+            fs::write(dir.path().join(CONFIG_FILE_NAME), text).unwrap();
+            let settings = load_eval_launch_settings(dir.path(), "design").unwrap();
+            let at_start = verifier.eval_config().unwrap().declared_providers;
+            assert_eq!(settings.declared, at_start);
+            check_requested_launch(&asked, &settings.roles, &settings.table, &at_start)
+        };
+        let without = decisions(base);
+        assert!(without.is_err());
+        for table in [
+            "[eval.providers.claude]\n",
+            "[eval.providers.claude]\ndefault_run_usd = 0.2\n",
+        ] {
+            assert_eq!(decisions(&format!("{base}{table}")), Ok(asked.clone()));
+        }
+        let read = load_eval_config(dir.path()).unwrap().unwrap();
+        assert_eq!(read.provider(Provider::Claude).default_run_usd, Some(0.2));
+        // `[eval.providers.codex]` declares Codex, not Claude.
+        assert!(decisions(&format!("{base}[eval.providers.codex]\n")).is_err());
+        // A review's own job starts as without the table.
+        let plan = |text: &str| {
+            let config = parse_config(text).unwrap();
+            config
+                .roles
+                .review_plan(&config.review_agents().written_launch("design"), None)
+                .unwrap()
+        };
+        let declared = plan(&format!("{base}[eval.providers.claude]\n"));
+        assert_eq!(declared, plan(base));
+        assert_eq!(declared.launch.provider, Provider::Codex);
     }
 
     #[test]

@@ -509,7 +509,8 @@ impl Supervisor<'_> {
     /// `requested` is the launch a dev round was asked with over the table
     /// (`agent eval --provider/--model/--effort`,
     /// [`crate::domain::agent_eval::round::check_requested_launch`]): its
-    /// provider one this `dagq.toml` uses for the agent or the role, its
+    /// provider one this `dagq.toml` uses for the agent or the role or the
+    /// main checkout's declares for the eval, as a request reads it, its
     /// model and effort ones that provider takes, else `Err`.
     fn eval_launch(
         &self,
@@ -525,7 +526,7 @@ impl Supervisor<'_> {
         )
         .map_err(|error| format!("{error:#}"))?;
         let models = self.role_models(ModelRole::Review);
-        let asked = check_requested_launch(requested, &models, &written)?;
+        let asked = asked_launch(requested, &models, &written, || self.verifier.eval_config())?;
         round_launch(&models, &asked, provider)
     }
 
@@ -1879,6 +1880,28 @@ fn selected_cases(
     Ok(cases)
 }
 
+/// What a round's request (`requested`) writes of its runs' launch, checked
+/// as the request was ([`check_requested_launch`]) with the providers
+/// `config`, the main checkout's `[eval]`, declares. It is read only for a
+/// request that names a provider, so that one that cannot be read refuses
+/// only such a round. `Err` says why.
+fn asked_launch(
+    requested: &AgentModel,
+    models: &RoleModels,
+    written: &AgentModel,
+    config: impl FnOnce() -> Result<crate::domain::agent_eval::round::EvalConfig>,
+) -> std::result::Result<AgentModel, String> {
+    let declared = match requested.provider {
+        Some(_) => {
+            config()
+                .map_err(|error| format!("{error:#}"))?
+                .declared_providers
+        }
+        None => Vec::new(),
+    };
+    check_requested_launch(requested, models, written, &declared)
+}
+
 /// What the runs of a round start with, `written` what the agent's table
 /// writes and `models` the roles' tables: what a review's job of the agent
 /// starts with where its provider can be used
@@ -2038,7 +2061,7 @@ mod tests {
         };
         let table = AgentModel::default();
         let derive = |models: &RoleModels, requested: &AgentModel, on: Option<Provider>| {
-            check_requested_launch(requested, models, &table)
+            check_requested_launch(requested, models, &table, &[])
                 .and_then(|written| round_launch(models, &written, on))
         };
         // It starts on the role's Codex with what it asks.
@@ -2096,6 +2119,47 @@ mod tests {
         );
     }
 
+    /// A round's start reads the providers its `dagq.toml` declares and
+    /// starts a request on one as it writes it; without the declaration, or
+    /// with a `dagq.toml` it cannot read, it refuses that request, and a
+    /// request that names no provider does not read the file.
+    #[test]
+    fn a_rounds_start_takes_a_provider_the_config_declares_and_refuses_others() {
+        let mut models = RoleModels::default();
+        models.entry(ModelRole::Review).provider = Some(Provider::Codex);
+        let table = AgentModel::default();
+        let asked = AgentModel {
+            provider: Some(Provider::Claude),
+            model: Some("claude-sonnet-5-5".to_owned()),
+            effort: Some("medium".to_owned()),
+        };
+        let declaring = crate::domain::agent_eval::round::EvalConfig {
+            declared_providers: vec![Provider::Claude],
+            ..Default::default()
+        };
+        let launch = asked_launch(&asked, &models, &table, || Ok(declaring.clone())).unwrap();
+        let started = round_launch(&models, &launch, None).unwrap();
+        assert_eq!(
+            (
+                started.provider,
+                started.model.as_deref(),
+                started.effort.as_deref()
+            ),
+            (Provider::Claude, Some("claude-sonnet-5-5"), Some("medium"))
+        );
+        let error = asked_launch(&asked, &models, &table, || Ok(Default::default())).unwrap_err();
+        assert!(error.contains("[eval.providers.claude]"), "{error}");
+        let error =
+            asked_launch(&asked, &models, &table, || anyhow::bail!("no such table")).unwrap_err();
+        assert!(error.contains("no such table"), "{error}");
+        let effort = AgentModel {
+            effort: Some("low".to_owned()),
+            ..AgentModel::default()
+        };
+        let launch = asked_launch(&effort, &models, &table, || anyhow::bail!("not read")).unwrap();
+        assert_eq!(launch, effort);
+    }
+
     /// A dev round asked with a launch starts its runs with what it names
     /// over the agent's table, the rest the table's or else the role's, on
     /// a provider dagq.toml uses for the agent or the role, and
@@ -2114,7 +2178,7 @@ mod tests {
         let started = |written: &AgentModel, asked: &AgentModel| {
             let launch = round_launch(
                 &models,
-                &check_requested_launch(asked, &models, written).unwrap(),
+                &check_requested_launch(asked, &models, written, &[]).unwrap(),
                 None,
             )
             .unwrap();
@@ -2161,7 +2225,7 @@ mod tests {
         );
         // Claude is a provider dagq.toml uses for neither an agent with no
         // table nor the role: refused, as the round's start refuses it.
-        assert!(check_requested_launch(&sonnet, &models, &AgentModel::default()).is_err());
+        assert!(check_requested_launch(&sonnet, &models, &AgentModel::default(), &[]).is_err());
         // The table's Claude, asked on Codex: the table's model is dropped
         // for the role's there, and its effort is kept.
         let codex = AgentModel {
@@ -2181,7 +2245,7 @@ mod tests {
         codex_prices.output_usd_per_mtok = Some(10.0);
         let provider = round_launch(
             &models,
-            &check_requested_launch(&codex, &models, &table).unwrap(),
+            &check_requested_launch(&codex, &models, &table, &[]).unwrap(),
             None,
         )
         .unwrap()

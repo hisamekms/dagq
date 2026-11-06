@@ -590,6 +590,14 @@ cached_input_usd_per_mtok = 0.1
 output_usd_per_mtok = 10.0
 default_run_usd = 0.242
 
+# Claude を dev の周の送り先に宣言する（[roles.review] は codex で各 agent の表に provider が無いので、宣言が無いと agent eval --provider claude は拒まれる）。
+# 7 本の表に provider を書くと本番の review まで動くので、測るためには宣言にする。本番の review の provider の解決はこの表を読まない。
+# default_run_usd は 1 回の見込み: 組み込みの $0.40 では $30 の上限に 75 回しか入らず plugin-generic（114 回）と receipt-evidence（104 回）が k 1 でも拒まれるが、
+# 0.2 なら比べの k の回の数（最大 114 回で $22.8）が全て上限に収まる。Claude の実績は design-layers の claude-haiku-5-5 で回あたり $0.004〜0.014（周 1171773・1199023）で、
+# 実績が溜まれば見込みは recent_runs の実績の最大に替わる。
+[eval.providers.claude]
+default_run_usd = 0.2
+
 # Rust の版の引き上げ（人の決定 2026-09-26: rust-toolchain.toml と rust-version を同じ最新の stable に固定し、stable の release ごと＝6 週ごとに上げる。goal 46）。
 # 42 日ごとに runtime が draft を 1 件登録し、runtime の planner が新しい stable の有無を確かめて採用（edit・submit）か cancel を決める。
 # 前の draft か task が終わるまで次は登録されない。仕組みは ADR-0072、書式と期限は docs/design/supervisor-lifecycle/run-environment.md の「定期draft」。

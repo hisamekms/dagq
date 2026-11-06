@@ -128,6 +128,14 @@ pub struct EvalConfig {
     /// table has Claude's [`DEFAULT_CLAUDE_RUN_USD`] for Claude and nothing
     /// for Codex.
     pub providers: BTreeMap<&'static str, ProviderCost>,
+    /// The providers whose `[eval.providers.<provider>]` table `dagq.toml`
+    /// writes, by the table's heading whatever keys it holds. Each is one a
+    /// dev round may be asked to send its runs to
+    /// ([`check_requested_launch`]), besides those the agent's table and
+    /// `[roles.review]` use. Claude's built-in estimate in
+    /// [`Self::providers`] is no table written, and a review's own launch
+    /// (`[roles.review]`, `[review.subagents.*]`) does not read this.
+    pub declared_providers: Vec<Provider>,
 }
 
 impl EvalConfig {
@@ -175,6 +183,7 @@ impl Default for EvalConfig {
             recent_runs: DEFAULT_RECENT_RUNS,
             watch: super::watch::WatchConfig::default(),
             providers,
+            declared_providers: Vec::new(),
         }
     }
 }
@@ -514,11 +523,12 @@ pub fn requested_launch(
 }
 
 /// What a dev round asked with `requested` starts its runs with, as
-/// `dagq.toml` lets it: `roles` its `[roles.*]` and `table` what the
-/// agent's table writes. The provider `requested` names must be one of
-/// those `dagq.toml` gives the agent's job or `[roles.review]` (the one
-/// each starts on), so a request never sends the round's material to a
-/// provider the project's settings do not use for it. What `requested`
+/// `dagq.toml` lets it: `roles` its `[roles.*]`, `table` what the agent's
+/// table writes and `declared` its [`EvalConfig::declared_providers`]. The
+/// provider `requested` names must be one of those `dagq.toml` gives the
+/// agent's job or `[roles.review]` (the one each starts on) or declares for
+/// the eval, so a request never sends the round's material to a provider
+/// the project's settings do not name for it. What `requested`
 /// writes goes over `table` ([`requested_launch`]), the rest inherited,
 /// and the result is checked against the provider it starts on as an
 /// agent's table is ([`AgentModel::check_on`]): a model of that provider's,
@@ -528,6 +538,7 @@ pub fn check_requested_launch(
     requested: &AgentModel,
     roles: &RoleModels,
     table: &AgentModel,
+    declared: &[Provider],
 ) -> Result<AgentModel, String> {
     if !requested.written() {
         return Ok(table.clone());
@@ -539,9 +550,10 @@ pub fn check_requested_launch(
     if let Some(provider) = requested.provider
         && provider != table_provider
         && provider != role_provider
+        && !declared.contains(&provider)
     {
         return Err(format!(
-            "agent eval: provider {} is not one dagq.toml uses for the agent ({}) or [roles.review] ({})",
+            "agent eval: provider {0} is not one dagq.toml uses for the agent ({1}) or [roles.review] ({2}), and it has no table [eval.providers.{0}]",
             provider.as_str(),
             table_provider.as_str(),
             role_provider.as_str()
@@ -748,7 +760,7 @@ mod tests {
             Some("low"),
         );
         assert_eq!(
-            check_requested_launch(&AgentModel::default(), &roles, &table),
+            check_requested_launch(&AgentModel::default(), &roles, &table, &[]),
             Ok(table.clone())
         );
         // A model alone inherits the table's provider and is checked on it.
@@ -756,7 +768,8 @@ mod tests {
             check_requested_launch(
                 &model(None, Some("claude-sonnet-5-5"), None),
                 &roles,
-                &table
+                &table,
+                &[]
             ),
             Ok(model(
                 Some(Provider::Claude),
@@ -769,12 +782,13 @@ mod tests {
             check_requested_launch(
                 &model(None, Some("gpt-5.5"), Some("high")),
                 &roles,
-                &AgentModel::default()
+                &AgentModel::default(),
+                &[]
             ),
             Ok(model(None, Some("gpt-5.5"), Some("high")))
         );
         assert_eq!(
-            check_requested_launch(&model(None, None, Some("xhigh")), &roles, &table),
+            check_requested_launch(&model(None, None, Some("xhigh")), &roles, &table, &[]),
             Ok(model(
                 Some(Provider::Claude),
                 Some("claude-haiku-5-5"),
@@ -787,7 +801,8 @@ mod tests {
             check_requested_launch(
                 &model(Some(Provider::Codex), Some("gpt-5.5"), None),
                 &roles,
-                &table
+                &table,
+                &[]
             ),
             Ok(model(Some(Provider::Codex), Some("gpt-5.5"), Some("low")))
         );
@@ -804,7 +819,7 @@ mod tests {
             ),
             (model(None, None, Some("huge")), "effort huge"),
         ] {
-            let error = check_requested_launch(&wrong, &roles, &table).unwrap_err();
+            let error = check_requested_launch(&wrong, &roles, &table, &[]).unwrap_err();
             assert!(error.contains(why), "{wrong:?}: {error}");
         }
         // Both on Claude: Codex is a provider dagq.toml does not use for
@@ -814,6 +829,7 @@ mod tests {
             &model(Some(Provider::Codex), None, None),
             &claude_roles,
             &table,
+            &[],
         )
         .unwrap_err();
         assert!(
@@ -824,10 +840,55 @@ mod tests {
             check_requested_launch(
                 &model(Some(Provider::Claude), None, Some("high")),
                 &claude_roles,
-                &table
+                &table,
+                &[]
             )
             .is_ok()
         );
+    }
+
+    /// With `[roles.review]` on Codex and an agent's table that writes no
+    /// launch, a provider `dagq.toml` declares for the eval takes a request
+    /// that starts on what it writes; one it does not declare is refused
+    /// and the refusal names the table, whatever the built-in estimate.
+    #[test]
+    fn a_declared_provider_takes_a_request_and_an_undeclared_one_is_refused() {
+        let mut roles = RoleModels::default();
+        roles.entry(ModelRole::Review).provider = Some(Provider::Codex);
+        let table = AgentModel::default();
+        for (name, effort) in [("claude-haiku-5-5", "low"), ("claude-sonnet-5-5", "medium")] {
+            let asked = model(Some(Provider::Claude), Some(name), Some(effort));
+            let launch =
+                check_requested_launch(&asked, &roles, &table, &[Provider::Claude]).unwrap();
+            assert_eq!(launch, asked);
+            let started = roles.written_agent_launch(ModelRole::Review, &launch);
+            assert_eq!(
+                (
+                    started.provider,
+                    started.model.as_deref(),
+                    started.effort.as_deref()
+                ),
+                (Provider::Claude, Some(name), Some(effort))
+            );
+            // Declared Codex alone does not let Claude in; nor does the
+            // built-in estimate, which declares nothing.
+            let builtin = EvalConfig::default();
+            assert!(builtin.provider(Provider::Claude).default_run_usd.is_some());
+            assert_eq!(builtin.declared_providers, Vec::new());
+            for declared in [&[Provider::Codex][..], &builtin.declared_providers] {
+                let error = check_requested_launch(&asked, &roles, &table, declared).unwrap_err();
+                assert!(
+                    error.contains("provider claude is not one dagq.toml uses")
+                        && error.contains("[eval.providers.claude]"),
+                    "{error}"
+                );
+            }
+        }
+        // A declared provider still checks what is written against it.
+        let wrong = model(Some(Provider::Claude), Some("gpt-5.5"), None);
+        let error =
+            check_requested_launch(&wrong, &roles, &table, &[Provider::Claude]).unwrap_err();
+        assert!(error.contains("not Claude's"), "{error}");
     }
 
     #[test]

@@ -37,12 +37,15 @@ pub trait EvalStore: DenialLog {
     fn launch_settings(&self, agent: &str) -> Result<Option<LaunchSettings>>;
 }
 
-/// What `dagq.toml` gives a review agent's launch: `[roles.*]` and what
-/// the agent's `[review.subagents.<agent>]` writes.
+/// What `dagq.toml` gives a review agent's launch: `[roles.*]`, what the
+/// agent's `[review.subagents.<agent>]` writes, and the providers it
+/// declares for the eval
+/// ([`crate::domain::agent_eval::round::EvalConfig::declared_providers`]).
 #[derive(Debug, Clone, Default)]
 pub struct LaunchSettings {
     pub roles: RoleModels,
     pub table: AgentModel,
+    pub declared: Vec<crate::domain::Provider>,
 }
 
 /// The rounds the eval's events of `store` say, oldest first.
@@ -79,8 +82,8 @@ pub struct EvalRequest {
     /// `--provider`, `--model` and `--effort`: a dev round's launch over
     /// the agent's table, the rest the table's or else the role's
     /// ([`crate::domain::agent_eval::round::requested_launch`]); refused
-    /// for holdout and production, and for a provider `dagq.toml` does not
-    /// use for the agent or the role
+    /// for holdout and production, and for a provider `dagq.toml` neither
+    /// uses for the agent or the role nor declares for the eval
     /// ([`crate::domain::agent_eval::round::check_requested_launch`]).
     pub launch: AgentModel,
 }
@@ -168,9 +171,12 @@ impl<'a> AgentEvals<'a> {
                     "agent eval: no dagq.toml of the queue's repository to check --provider, --model and --effort against"
                 );
             };
-            if let Err(why) =
-                check_requested_launch(&request.launch, &settings.roles, &settings.table)
-            {
+            if let Err(why) = check_requested_launch(
+                &request.launch,
+                &settings.roles,
+                &settings.table,
+                &settings.declared,
+            ) {
                 bail!(why);
             }
         }
@@ -709,6 +715,7 @@ mod tests {
             settings: Some(LaunchSettings {
                 roles,
                 table: haiku.clone(),
+                declared: Vec::new(),
             }),
             ..Store::default()
         };
@@ -760,6 +767,7 @@ mod tests {
             settings: Some(LaunchSettings {
                 roles: RoleModels::default(),
                 table: haiku.clone(),
+                declared: Vec::new(),
             }),
             ..Store::default()
         };
@@ -776,6 +784,19 @@ mod tests {
                 .contains("provider codex is not one dagq.toml uses"),
             "{error:#}"
         );
+        // The same provider declared for the eval is recorded as asked.
+        let declaring = Store {
+            settings: Some(LaunchSettings {
+                roles: RoleModels::default(),
+                table: haiku.clone(),
+                declared: vec![crate::domain::Provider::Codex],
+            }),
+            ..Store::default()
+        };
+        AgentEvals::new(&declaring, &user, &StaticPolicy)
+            .request(&with(Split::Dev, None, &codex))
+            .unwrap();
+        assert_eq!(declaring.events.lock().unwrap().len(), 1);
         let unbound = Store::default();
         let error = AgentEvals::new(&unbound, &user, &StaticPolicy)
             .request(&with(Split::Dev, None, &haiku))
