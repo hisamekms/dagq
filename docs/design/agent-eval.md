@@ -1,7 +1,7 @@
 ---
 id: design-agent-eval
 type: design
-title: agentのeval（定義とケースの置き場・ケースの欄・採点・漏れの検査・依頼と認可・記録・費用の上限・hold-outの1回の制限・evalの枠・本番と共有する起動経路・道具の宣言・採用の判定・productionのケースと見張り・programのreview）
+title: agentのeval（定義とケースの置き場・ケースの欄・採点・漏れの検査・依頼と認可・記録・費用の上限・hold-outの1回の制限・evalの枠・本番と共有する起動経路・道具の宣言・採用の判定・productionのケースと見張り・役割のharness・programのreview）
 status: current
 created: 2026-10-06
 scope: runtime
@@ -26,6 +26,9 @@ related:
   - adr-t1869-1
   - adr-t2599-1
   - adr-t2229-1
+  - adr-t3948-1
+  - design-agent-eval-programs
+  - plan-role-eval-snapshot-spike
 ---
 
 # agentのeval
@@ -61,8 +64,8 @@ workerもjobもLLMのCLIを直接打たない。
 - baseは`base_commit`か、built-inの同梱のケースだけの`baseline`の一方。
 - 読み手は形の誤りを、最初の1つでなく全て返す。
 - reviewのinputは本番のreview.mdの節を運び、evalの資料は同じ見出しと並びでdiffの前に載せる。
-- 起動・形の検査・採点・productionのケースの作り方は役割ごとのharnessが持つ。今作るのはreviewのharnessだけ。
-  役割が増えたら、その役割のharnessを足す。
+- 起動・形の検査・採点・productionのケースの作り方は役割ごとのharnessが持つ（下の「役割のharness」）。
+  この文書の欄・採点・起動の節はreviewのharnessの姿である。
 
 ## 採点
 
@@ -265,19 +268,22 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   走っているprocessを引き継いで続ける形にはしない。
 - 使わないもの: 全体のreviewのjob。
 
+## 役割のharness
+
+判定を返す役割（plan review・goal review・runのreviewの全体の判定）を、固定したsnapshotを入力に本番のその役割のjobと同じ起動で1ケース1本のjobとして測る約束で、決めた理由は[ADR-t3948-1](../adr/2026-11-06-t3948-1-role-evals-run-verdict-roles-from-fixed-snapshots-on-the-production-launch-and-adopt-the-lightest-setting-that-passes.md)が持つ。
+今動くのはreviewのagentのharnessだけで、役割のharnessはまだ実装が無い。
+入口と欄は実装するときに定義のそばのdoc commentへ、閾値の値は測定の文書へ置き、ここに写さない。
+
+- 判定の値と理由の分類は本番の形のままで、本番のpromptと判定のschemaを変えない。
+- ケースはsnapshotの記録が始まった後のjobからだけ作り、過去のeventから当時の入力を推測しない。
+- treeは役割で分かれる: plan reviewとgoal reviewは起動の時のmainのcommitのtree、runのreviewの全体は固定した変更をbaseに当てて作り直した変更後のtreeで、ケースの一覧と期待を除く前に記録したtreeの識別と合わないケースはjobを起動しない。
+- どちらのtreeも自分のGitで、ケースの一覧と期待を置かず、commitのtreeだけを再現する（ignoredのファイルと未commitの変更は無く、材料が名指すcommitはそのGitに無い）。
+- jobはqueueに届かない起動で、promptが促すdagqの読み取りは拒まれる。
+- jobはそのケースの材料とtreeを読め、他のケースと本番の記録とrepositoryのcheckoutを読めない。
+  Claudeの組は、この境界を実CLIで確かめるまで役割の設定に入れる根拠にしない。
+- devの周の起動の組の上書きの送り先の検査はreviewのagentと同じで、evalの宣言は本番の役割のproviderの解決に使わない。
+- 復旧のjobは対象にしない。
+
 ## programのreviewの当て方
 
-- evalは各ケースに本番のreviewと同じ段を当てる（判断は`domain::agent_eval::programs`）。
-  周の定義とケースを読むlanding branchのcommitから、programの一覧とscriptを読み（[ADR-t1895-2](../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)。一覧の設定・実行・envとbackendは[プログラムのreview](supervisor-lifecycle/review-programs.md)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、ここに写さない）、pathがケースの差分に当たるものを、ケースのtreeをcwdに設定の順に流す。
-  ケースのpatchがscriptや設定を変えても、流れるのはcommitの中身である。
-- 選んだprogramは、先にケースの`base_commit`のtree（ケースのtreeと同じものを隠す）で設定の順に流し、0以外で終わったものはそのケースのtreeで流さない（古いbaseは今の規則に既に違反しうるが、本番のreviewのbaseのlanding branchはCIが通すため。[ADR-t2300-1](../adr/2026-10-21-t2300-1-eval-leaves-out-programs-a-cases-base-fails.md)）。
-  baseで0のものだけをケースのtreeで流すので、ケースを止めるのは差分が足した違反だけである。
-  除いたprogramはケースごとに名前を残し、同じ周の同じbaseでの結果は使い回す。
-- built-inのprogramはケースに当てない（runの変更が足す行を着地の前に見るもので、ケースのpatchはそれに当たらない）。
-- programはケースの1回の枠の中でagentのjobの前に1本ずつ流し、周の同時数の上限を超えない。
-  providerの費用には数えない。
-  全部exit 0ならagentのjobを起動する。
-- ケースのtreeで1本でも0以外で終わったケースは、残りのprogramとagentを起動せず、agentの成績の分母から外し、`agent_eval_finished`に記録する。
-- programの起動の失敗（reviewのactorのbackendがcontainerのときを含む）か時間切れのケースがあれば（baseのtreeでも同じ）、新しい実行を起動せず、周を`incomplete`で閉じ、`passed`を`false`にする。
-- ケースごとのprogramの結果は`agent_eval_case_checked`に記録し、周を引き取ったsupervisorは止まったケースのagentを起動しない。
-- programが受け持つ規則コードはagentの定義から外すか狭め、ケースの`expected`は書き換えない（programが止めたケースは分母から外れ、ラベルの変更は人・inbox・plannerに限る。[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)の決定6・13）。
+ケースに本番のreviewと同じ段を当てる約束は[programのreviewの当て方](agent-eval-programs.md)が持つ。
