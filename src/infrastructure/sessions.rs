@@ -2692,7 +2692,10 @@ pub(super) mod tests {
         }
         // The planners' events have no run: they are found by their kind,
         // not by `events_by_run` among every event that has no run.
-        for sql in [planner_turns_sql(), planners::planner_turn_events_sql()] {
+        for sql in [
+            planner_turns_sql(),
+            planners::planner_turn_events_sql(crate::infrastructure::sql_exec::SqlDialect::Sqlite),
+        ] {
             let plan = searches(&sql);
             assert!(
                 !plan.iter().any(|step| step.contains("events_by_run")),

@@ -2,23 +2,23 @@
 //! headless job (one unfinished at a time, queue-wide), the goals it may
 //! take, and the verdicts and `approve_goal` answers the supervisor
 //! applies, each in one transaction. Events go to the goal.
-use super::sql_dialect::{JsonType, json_field_spaced};
-use super::sql_exec::OptionalRow;
+use super::sql_dialect::JsonType;
 use super::sql_exec::sql_params;
-use super::sql_exec::sqlite::native_error;
-use super::sql_exec::sqlite::port_tx;
+use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
+use super::store_writes::{EventTx, SessionTx};
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::write_rules::{check_at_least, check_non_blank};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::path::Path;
 
 use super::{
     asks::{insert_ask, read_ask, record_ask_closed},
     follow_up_membership, sessions,
-    sqlite::{SqliteQueue, close_goal_in, goal_event, insert_task},
+    sqlite::SqliteQueue,
+    store_writes::insert_task,
+    task_store::{close_goal_in, goal_event},
 };
 use crate::{
     application::{
@@ -33,8 +33,8 @@ use crate::{
 };
 
 /// Each task of the goal with its status, in ID order.
-fn own_tasks(conn: &Connection, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus)>> {
-    own_tasks_port(&port_tx(conn), goal).map_err(native_error)
+fn own_tasks(conn: &impl SqlRead, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus)>> {
+    own_tasks_port(conn, goal)
 }
 
 fn own_tasks_port(
@@ -49,7 +49,7 @@ fn own_tasks_port(
 }
 
 /// [`own_tasks`], then each task outside the goal that its replaced
-/// tasks' replacements reach ([`super::replan_apply::goal_replacing`]): a
+/// tasks' replacements reach ([`super::replan_apply::goal_replacing_port`]): a
 /// replaced task waits for them wherever they belong now.
 fn goal_tasks(
     conn: &impl crate::infrastructure::sql_exec::SqlRead,
@@ -65,16 +65,16 @@ fn goal_tasks(
 /// judgements) and whether it may close as achieved — its tasks and the
 /// replacements outside it all ended, one of its own completed, no
 /// replacement record of it broken (ADR-t1521-2 decision 5,
-/// [`super::replan_apply::goal_unresolved`]) and no follow-up of it
+/// [`super::replan_apply::goal_unresolved_port`]) and no follow-up of it
 /// unsettled.
-fn review_input(conn: &Connection, goal: GoalId) -> Result<(String, bool)> {
+fn review_input(conn: &impl SqlRead, goal: GoalId) -> Result<(String, bool)> {
     let own = own_tasks(conn, goal)?;
-    let replacing = super::replan_apply::goal_replacing(conn, goal)?;
-    let follow_ups = follow_up_membership::source_follow_ups(&port_tx(conn), goal)?;
-    let version = follow_up_membership::acceptance_version(&port_tx(conn), goal)?;
+    let replacing = super::replan_apply::goal_replacing_port(conn, goal)?;
+    let follow_ups = follow_up_membership::source_follow_ups(conn, goal)?;
+    let version = follow_up_membership::acceptance_version(conn, goal)?;
     let closable = goal_review::tasks_done(&own, &replacing)
         && follow_up::unsettled_follow_ups(&follow_ups).is_empty()
-        && super::replan_apply::goal_unresolved(conn, goal)?.is_empty();
+        && super::replan_apply::goal_unresolved_port(conn, goal)?.is_empty();
     let tasks: Vec<(TaskId, TaskStatus)> = own.into_iter().chain(replacing).collect();
     let lineage = super::replan_apply::goal_replacements(conn, goal)?.lineage;
     Ok((
@@ -88,13 +88,13 @@ fn review_input(conn: &Connection, goal: GoalId) -> Result<(String, bool)> {
 
 /// The goal's latest review that ran to an end (not `interrupted`):
 /// its ID, outcome, fingerprint and whether a person rearmed it.
-fn latest(conn: &Connection, goal: GoalId) -> Result<Option<(i64, String, String, bool)>> {
+fn latest(conn: &impl SqlRead, goal: GoalId) -> Result<Option<(i64, String, String, bool)>> {
     Ok(conn
         .query_row(
             "SELECT id, outcome, fingerprint, rearmed_at IS NOT NULL FROM goal_reviews
              WHERE goal_id=?1 AND finished_at IS NOT NULL AND outcome != 'interrupted'
              ORDER BY id DESC LIMIT 1",
-            [goal],
+            sql_params![goal],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?)
@@ -110,21 +110,21 @@ fn latest_review((_, outcome, seen, rearmed): &(i64, String, String, bool)) -> L
 }
 
 /// An `approve_goal` ask of the goal's reviews that is not closed.
-fn open_ask(conn: &Connection, goal: GoalId) -> Result<bool> {
+fn open_ask(conn: &impl SqlRead, goal: GoalId) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM goal_reviews r JOIN asks a ON a.id = r.ask_id
          WHERE r.goal_id=?1 AND a.closed_at IS NULL)",
-        [goal],
+        sql_params![goal],
         |r| r.get(0),
     )?)
 }
 
 /// Whether the goal is one a review may take now; `Some` with what the
 /// review sees ([`review_input`]) when it is.
-fn candidate(conn: &Connection, goal: GoalId) -> Result<Option<String>> {
+fn candidate(conn: &impl SqlRead, goal: GoalId) -> Result<Option<String>> {
     let open: bool = conn.query_row(
         "SELECT status='open' AND closed_at IS NULL FROM goals WHERE id=?1",
-        [goal],
+        sql_params![goal],
         |r| r.get(0),
     )?;
     if !open {
@@ -145,11 +145,12 @@ fn candidate(conn: &Connection, goal: GoalId) -> Result<Option<String>> {
     )
 }
 
-fn candidates(conn: &Connection) -> Result<Vec<GoalId>> {
-    let goals: Vec<GoalId> = conn
-        .prepare("SELECT id FROM goals WHERE status='open' AND closed_at IS NULL ORDER BY id")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+fn candidates(conn: &impl SqlRead) -> Result<Vec<GoalId>> {
+    let goals: Vec<GoalId> = conn.query_map(
+        "SELECT id FROM goals WHERE status='open' AND closed_at IS NULL ORDER BY id",
+        sql_params![],
+        |r| r.get(0),
+    )?;
     let mut found = Vec::new();
     for goal in goals {
         if candidate(conn, goal)?.is_some() {
@@ -160,16 +161,16 @@ fn candidates(conn: &Connection) -> Result<Vec<GoalId>> {
 }
 
 /// The goal's first task, where its `approve_goal` ask belongs.
-fn anchor(conn: &Connection, goal: GoalId) -> Result<Option<TaskId>> {
-    Ok(
-        conn.query_row("SELECT min(id) FROM tasks WHERE goal_id=?1", [goal], |r| {
-            r.get(0)
-        })?,
-    )
+fn anchor(conn: &impl SqlRead, goal: GoalId) -> Result<Option<TaskId>> {
+    Ok(conn.query_row(
+        "SELECT min(id) FROM tasks WHERE goal_id=?1",
+        sql_params![goal],
+        |r| r.get(0),
+    )?)
 }
 
 fn finish_row(
-    conn: &Connection,
+    conn: &impl EventTx,
     id: i64,
     now: i64,
     outcome: &str,
@@ -180,31 +181,30 @@ fn finish_row(
     conn.execute(
         "UPDATE goal_reviews SET finished_at=?2, outcome=?3, verdict=?4, error=?5
          WHERE id=?1 AND finished_at IS NULL",
-        params![id, now, outcome, verdict.map(Value::to_string), error],
+        sql_params![id, now, outcome, verdict.map(Value::to_string), error],
     )?;
     Ok(())
 }
 
 /// The job's row, while it is unfinished and still `token`'s.
-fn running(conn: &Connection, job: &GoalReviewJob, token: &LeaseToken) -> Result<bool> {
+fn running(conn: &impl SqlRead, job: &GoalReviewJob, token: &LeaseToken) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM goal_reviews WHERE id=?1 AND supervisor_token=?2
          AND finished_at IS NULL)",
-        params![job.id, token],
+        sql_params![job.id, token],
         |r| r.get(0),
     )?)
 }
 
 /// How many of the goal's latest reviews that decided something were
 /// `gaps`, counted back from the newest.
-fn gaps_in_a_row(conn: &Connection, goal: GoalId) -> Result<usize> {
-    let outcomes: Vec<String> = conn
-        .prepare(
-            "SELECT outcome FROM goal_reviews WHERE goal_id=?1
+fn gaps_in_a_row(conn: &impl SqlRead, goal: GoalId) -> Result<usize> {
+    let outcomes: Vec<String> = conn.query_map(
+        "SELECT outcome FROM goal_reviews WHERE goal_id=?1
              AND outcome IN ('achieved', 'gaps', 'ask') ORDER BY id DESC",
-        )?
-        .query_map([goal], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+        sql_params![goal],
+        |r| r.get(0),
+    )?;
     let outcomes: Vec<&str> = outcomes.iter().map(String::as_str).collect();
     Ok(goal_review::gaps_in_a_row(&outcomes))
 }
@@ -216,7 +216,7 @@ fn gaps_in_a_row(conn: &Connection, goal: GoalId) -> Result<usize> {
 /// its context is `goal_gap: goal review <review> of goal <goal> found this
 /// missing`.
 fn register_gaps(
-    conn: &Connection,
+    conn: &impl EventTx,
     goal: GoalId,
     review: i64,
     gaps: &[GoalGap],
@@ -268,7 +268,7 @@ fn register_gaps(
         });
         ensure!(
             super::draft_planners::insert_draft_origin(
-                &port_tx(conn),
+                conn,
                 task.id(),
                 crate::domain::follow_up::DraftOrigin::GoalGap,
                 &material,
@@ -283,8 +283,8 @@ fn register_gaps(
 }
 
 /// The review row that opened `ask`, and its goal.
-fn ask_review(conn: &Connection, ask: AskId) -> Result<Option<(i64, GoalId)>> {
-    ask_review_port(&port_tx(conn), ask).map_err(native_error)
+fn ask_review(conn: &impl SqlRead, ask: AskId) -> Result<Option<(i64, GoalId)>> {
+    ask_review_port(conn, ask)
 }
 
 fn ask_review_port(
@@ -304,15 +304,15 @@ fn ask_review_port(
 /// now: `None` when it is no option, the goal closed, or it cannot be
 /// applied (`achieved` with a task not ended, a follow-up whose
 /// membership is not settled or a broken replacement record
-/// ([`super::replan_apply::goal_unresolved`]), `abandoned` with one in
+/// ([`super::replan_apply::goal_unresolved_port`]), `abandoned` with one in
 /// progress, `gaps` with nothing to register). Read when the answer is
 /// given too, so one that cannot be applied then is the inbox's.
 fn applicable(
-    conn: &Connection,
+    conn: &impl SqlRead,
     ask: &Ask,
     text: &str,
 ) -> Result<Option<(GoalAnswer, i64, GoalId)>> {
-    applicable_port(&port_tx(conn), ask, text).map_err(native_error)
+    applicable_port(conn, ask, text)
 }
 
 fn applicable_port(
@@ -353,8 +353,8 @@ fn applicable_port(
 }
 
 /// The gaps the verdict of review `id` listed.
-fn review_gaps(conn: &Connection, id: i64) -> Result<Vec<GoalGap>> {
-    review_gaps_port(&port_tx(conn), id).map_err(native_error)
+fn review_gaps(conn: &impl SqlRead, id: i64) -> Result<Vec<GoalGap>> {
+    review_gaps_port(conn, id)
 }
 
 fn review_gaps_port(
@@ -389,14 +389,15 @@ impl GoalReviewStore for SqliteQueue {
     ) -> Result<()> {
         let now = self.generators.clock.now();
         // Read transcripts before taking the write lock, as in begin/finish.
-        let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None, false))?;
+        let _read =
+            self.read_session_transcripts_before(sessions::Closing::GoalReviews(None, false))?;
         let tx = self.write_tx("interrupt_goal_reviews_for_handoff")?;
-        let unfinished: Vec<i64> = tx
-            .prepare(
-                "SELECT id FROM goal_reviews WHERE supervisor_token=?1 AND finished_at IS NULL",
-            )?
-            .query_map([token], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let unfinished: Vec<i64> = SqlRead::query_map(
+            &tx,
+            "SELECT id FROM goal_reviews WHERE supervisor_token=?1 AND finished_at IS NULL",
+            sql_params![token],
+            |r| r.get(0),
+        )?;
         for id in unfinished.into_iter().filter(|id| !keep.contains(id)) {
             finish_row(
                 &tx,
@@ -406,14 +407,14 @@ impl GoalReviewStore for SqliteQueue {
                 None,
                 Some("stopped for the supervisor handoff"),
             )?;
-            sessions::close_goal_review(&tx, id, false)?;
+            tx.close_goal_review_spans(id, false)?;
         }
         tx.commit()?;
         Ok(())
     }
 
     fn goal_review_candidates(&self) -> Result<Vec<GoalId>> {
-        candidates(&self.conn)
+        candidates(&*self.conn)
     }
 
     fn begin_goal_review(
@@ -427,17 +428,18 @@ impl GoalReviewStore for SqliteQueue {
     ) -> Result<Option<GoalReviewJob>> {
         let now = self.generators.clock.now();
         // The spans it closes read their transcripts first (task 543).
-        let _read = sessions::read_before(&self.conn, sessions::Closing::GoalReviews(None, true))?;
+        let _read =
+            self.read_session_transcripts_before(sessions::Closing::GoalReviews(None, true))?;
         let tx = self.write_tx("begin_goal_review")?;
         type Unfinished = (i64, LeaseToken, Option<u32>, Option<i64>);
-        let unfinished: Vec<Unfinished> = tx
-            .prepare(
-                "SELECT r.id, r.supervisor_token, s.pid, s.heartbeat_at FROM goal_reviews r
+        let unfinished: Vec<Unfinished> = SqlRead::query_map(
+            &tx,
+            "SELECT r.id, r.supervisor_token, s.pid, s.heartbeat_at FROM goal_reviews r
                  LEFT JOIN supervisors s ON s.token = r.supervisor_token
                  WHERE r.finished_at IS NULL",
-            )?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
         for (id, owner, pid, heartbeat) in unfinished {
             let live =
                 job_supervisor_lives(owner == *token, pid.zip(heartbeat), now, supervisor_alive);
@@ -452,7 +454,7 @@ impl GoalReviewStore for SqliteQueue {
                 None,
                 Some("its supervisor is gone"),
             )?;
-            sessions::close_goal_review(&tx, id, true)?;
+            tx.close_goal_review_spans(id, true)?;
         }
         let Some(fingerprint) = candidate(&tx, goal)? else {
             // Keep the rows finished above.
@@ -460,23 +462,26 @@ impl GoalReviewStore for SqliteQueue {
             return Ok(None);
         };
         let anchor = anchor(&tx, goal)?.context("a goal to review has a task")?;
-        let attempt = tx.query_row(
+        let attempt = SqlRead::query_row(
+            &tx,
             "SELECT count(*) + 1 FROM goal_reviews WHERE goal_id=?1 AND outcome IS NOT 'interrupted'",
-            [goal],
+            sql_params![goal],
             |r| r.get::<_, i64>(0),
         )? as usize;
         check_at_least("goal review attempt", attempt as i64, 1)?;
         let gaps = gaps_in_a_row(&tx, goal)?;
-        let id = tx.insert_id(
+        let id = SqlWrite::insert_id(
+            &tx,
             "INSERT INTO goal_reviews(goal_id, attempt, supervisor_token, fingerprint, started_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![goal, attempt as i64, token, fingerprint, now],
+            sql_params![goal, attempt as i64, token, fingerprint, now],
         )?;
         let dir = goal_reviews_dir.join(id.to_string());
         let dir_text = dir.to_str().context("goal review directory is not UTF-8")?;
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "UPDATE goal_reviews SET dir=?2 WHERE id=?1",
-            params![id, dir_text],
+            sql_params![id, dir_text],
         )?;
         // The job's Claude session id, given to it by the runtime (ADR-0048
         // decision 4); Codex names its thread itself, which the job's end
@@ -503,13 +508,12 @@ impl GoalReviewStore for SqliteQueue {
     }
 
     fn goal_reviews(&self, goal: GoalId) -> Result<Vec<GoalReviewRecord>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT id, attempt, outcome, verdict, error FROM goal_reviews
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT id, attempt, outcome, verdict, error FROM goal_reviews
                  WHERE goal_id=?1 AND finished_at IS NOT NULL ORDER BY id",
-            )?
-            .query_map([goal], |r| {
+            sql_params![goal],
+            |r| {
                 let verdict: Option<String> = r.get(3)?;
                 Ok(GoalReviewRecord {
                     id: r.get(0)?,
@@ -519,8 +523,8 @@ impl GoalReviewStore for SqliteQueue {
                     verdict: verdict.and_then(|v| serde_json::from_str(&v).ok()),
                     error: r.get(4)?,
                 })
-            })?
-            .collect::<rusqlite::Result<_>>()?)
+            },
+        )?)
     }
 
     fn take_over_goal_review(
@@ -542,10 +546,8 @@ impl GoalReviewStore for SqliteQueue {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
         // The spans it closes read their transcripts first (task 543).
-        let _read = sessions::read_before(
-            &self.conn,
-            sessions::Closing::GoalReviews(Some(job.id), false),
-        )?;
+        let _read = self
+            .read_session_transcripts_before(sessions::Closing::GoalReviews(Some(job.id), false))?;
         let tx = self.write_tx("finish_goal_review")?;
         if !running(&tx, job, token)? {
             return Ok(GoalReviewApplied {
@@ -558,14 +560,16 @@ impl GoalReviewStore for SqliteQueue {
         // follow-ups with their judgements), unchanged and still closable,
         // and no one closed the goal meanwhile. A verdict collected across a
         // handoff (task 1425) is applied here too.
-        let seen: String = tx.query_row(
+        let seen: String = SqlRead::query_row(
+            &tx,
             "SELECT fingerprint FROM goal_reviews WHERE id=?1",
-            [job.id],
+            sql_params![job.id],
             |r| r.get(0),
         )?;
-        let open: bool = tx.query_row(
+        let open: bool = SqlRead::query_row(
+            &tx,
             "SELECT status='open' AND closed_at IS NULL FROM goals WHERE id=?1",
-            [job.goal_id],
+            sql_params![job.goal_id],
             |r| r.get(0),
         )?;
         let (fingerprint, closable) = review_input(&tx, job.goal_id)?;
@@ -578,7 +582,7 @@ impl GoalReviewStore for SqliteQueue {
                 Some(&verdict_json),
                 Some("the goal or its tasks changed during its review"),
             )?;
-            sessions::close_goal_review(&tx, job.id, false)?;
+            tx.close_goal_review_spans(job.id, false)?;
             tx.commit()?;
             return Ok(GoalReviewApplied {
                 stale: true,
@@ -614,10 +618,11 @@ impl GoalReviewStore for SqliteQueue {
                     .as_ref()
                     .context("an ask verdict opens an approve_goal ask")?;
                 ask.validate()?;
-                let outcome = insert_ask(&port_tx(&tx), ask)?;
-                tx.execute(
+                let outcome = insert_ask(&tx, ask)?;
+                SqlWrite::execute(
+                    &tx,
                     "UPDATE goal_reviews SET ask_id=?2 WHERE id=?1",
-                    params![job.id, outcome.ask.id],
+                    sql_params![job.id, outcome.ask.id],
                 )?;
                 applied.ask = Some(outcome);
             }
@@ -663,10 +668,8 @@ impl GoalReviewStore for SqliteQueue {
     ) -> Result<()> {
         let now = self.generators.clock.now();
         // The span it closes reads its transcript first (task 543).
-        let _read = sessions::read_before(
-            &self.conn,
-            sessions::Closing::GoalReviews(Some(job.id), false),
-        )?;
+        let _read = self
+            .read_session_transcripts_before(sessions::Closing::GoalReviews(Some(job.id), false))?;
         let tx = self.write_tx("fail_goal_review")?;
         if !running(&tx, job, token)? {
             return Ok(());
@@ -700,20 +703,27 @@ impl GoalReviewStore for SqliteQueue {
     }
 
     fn goal_answers(&self) -> Result<Vec<Ask>> {
-        let ids: Vec<AskId> = self
-            .conn
-            .prepare(&format!(
+        let ids: Vec<AskId> = SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "SELECT a.id FROM asks a WHERE a.kind='approve_goal' AND a.answered_at IS NOT NULL
                  AND a.closed_at IS NULL AND (SELECT {}
                      FROM run_events e WHERE e.kind='ask_answered'
                      AND {} = a.id
                      ORDER BY e.id DESC LIMIT 1) = 1
                  ORDER BY a.id",
-                json_field_spaced("e.payload", "$.runtime_delivers", JsonType::Boolean),
-                json_field_spaced("e.payload", "$.ask_id", JsonType::Integer)
-            ))?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+                self.conn.dialect().json_field_spaced(
+                    "e.payload",
+                    "$.runtime_delivers",
+                    JsonType::Boolean
+                ),
+                self.conn
+                    .dialect()
+                    .json_field_spaced("e.payload", "$.ask_id", JsonType::Integer)
+            ),
+            sql_params![],
+            |r| r.get(0),
+        )?;
         ids.into_iter()
             .map(|id| read_ask(&*self.conn, id))
             .collect()
@@ -723,7 +733,7 @@ impl GoalReviewStore for SqliteQueue {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
         let tx = self.write_tx("decide_goal")?;
-        let ask = read_ask(&port_tx(&tx), ask_id)?;
+        let ask = read_ask(&tx, ask_id)?;
         ensure!(
             ask.kind == AskKind::ApproveGoal,
             "ask {ask_id} is not an approve_goal ask"
@@ -732,25 +742,27 @@ impl GoalReviewStore for SqliteQueue {
             return Ok(None);
         }
         let text = ask.answer.clone().unwrap_or_default();
-        let close = |tx: &Connection| -> Result<()> {
-            tx.execute(
+        let close = || -> Result<()> {
+            SqlWrite::execute(
+                &tx,
                 "UPDATE asks SET closed_at=?2 WHERE id=?1",
-                params![ask_id, now],
+                sql_params![ask_id, now],
             )?;
             Ok(())
         };
         // A goal closed meanwhile no longer waits for the answer.
         if let Some((_, goal)) = ask_review(&tx, ask_id)? {
-            let closed: bool = tx.query_row(
+            let closed: bool = SqlRead::query_row(
+                &tx,
                 "SELECT closed_at IS NOT NULL FROM goals WHERE id=?1",
-                [goal],
+                sql_params![goal],
                 |r| r.get(0),
             )?;
             if closed {
-                close(&tx)?;
+                close()?;
                 // Nothing else names the ask: `ask_closed` ends its wait
                 // (task 568).
-                record_ask_closed(&port_tx(&tx), &ask)?;
+                record_ask_closed(&tx, &ask)?;
                 tx.commit()?;
                 return Ok(None);
             }
@@ -789,13 +801,14 @@ impl GoalReviewStore for SqliteQueue {
             // A rearm left from before the ask would review it again at
             // once: keep_open waits for the tasks to change.
             GoalAnswer::KeepOpen => {
-                tx.execute(
+                SqlWrite::execute(
+                    &tx,
                     "UPDATE goal_reviews SET rearmed_at=NULL WHERE goal_id=?1",
-                    [goal],
+                    sql_params![goal],
                 )?;
             }
         }
-        close(&tx)?;
+        close()?;
         goal_event(
             &tx,
             goal,
@@ -824,33 +837,35 @@ impl GoalReviewStore for SqliteQueue {
     }
 
     fn goal_review_holds(&self) -> Result<Vec<GoalReviewHold>> {
-        let goals: Vec<GoalId> = self
-            .conn
-            .prepare("SELECT id FROM goals WHERE status='open' AND closed_at IS NULL ORDER BY id")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let goals: Vec<GoalId> = SqlRead::query_map(
+            &*self.conn,
+            "SELECT id FROM goals WHERE status='open' AND closed_at IS NULL ORDER BY id",
+            sql_params![],
+            |r| r.get(0),
+        )?;
         let mut holds = Vec::new();
         for goal in goals {
-            let Some(row) = latest(&self.conn, goal)? else {
+            let Some(row) = latest(&*self.conn, goal)? else {
                 continue;
             };
             // Its input is read only for a failed review nobody rearmed.
             if row.1 != "failed" || row.3 {
                 continue;
             }
-            let fingerprint = review_input(&self.conn, goal)?.0;
+            let fingerprint = review_input(&*self.conn, goal)?.0;
             if !goal_review::waits_for_a_person(Some(latest_review(&row)), &fingerprint) {
                 continue;
             }
             let id = row.0;
-            let error: Option<String> =
-                self.conn
-                    .query_row("SELECT error FROM goal_reviews WHERE id=?1", [id], |r| {
-                        r.get(0)
-                    })?;
+            let error: Option<String> = SqlRead::query_row(
+                &*self.conn,
+                "SELECT error FROM goal_reviews WHERE id=?1",
+                sql_params![id],
+                |r| r.get(0),
+            )?;
             holds.push(GoalReviewHold {
                 goal_id: goal,
-                anchor: anchor(&self.conn, goal)?,
+                anchor: anchor(&*self.conn, goal)?,
                 error,
             });
         }
@@ -876,11 +891,12 @@ impl GoalReviewStore for SqliteQueue {
     }
 
     fn goal_follow_ups(&self) -> Result<Vec<follow_up::GoalFollowUps>> {
-        let goals: Vec<GoalId> = self
-            .conn
-            .prepare("SELECT id FROM goals WHERE status='open' AND closed_at IS NULL ORDER BY id")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let goals: Vec<GoalId> = SqlRead::query_map(
+            &*self.conn,
+            "SELECT id FROM goals WHERE status='open' AND closed_at IS NULL ORDER BY id",
+            sql_params![],
+            |r| r.get(0),
+        )?;
         let mut found = Vec::new();
         for goal in goals {
             let follow_ups = follow_up_membership::waiting_follow_ups(
@@ -893,7 +909,7 @@ impl GoalReviewStore for SqliteQueue {
             }
             found.push(follow_up::GoalFollowUps {
                 goal,
-                tasks: own_tasks(&self.conn, goal)?,
+                tasks: own_tasks(&*self.conn, goal)?,
                 replacing: super::replan_apply::goal_replacing(&*self.conn, goal)?,
                 follow_ups,
             });
@@ -904,19 +920,20 @@ impl GoalReviewStore for SqliteQueue {
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<Value> {
         let now = self.generators.clock.now();
         let tx = self.write_tx("rearm_goal_review")?;
-        let open: Option<bool> = tx
-            .query_row(
-                "SELECT status='open' AND closed_at IS NULL FROM goals WHERE id=?1",
-                [goal],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let open: Option<bool> = SqlRead::query_row(
+            &tx,
+            "SELECT status='open' AND closed_at IS NULL FROM goals WHERE id=?1",
+            sql_params![goal],
+            |r| r.get(0),
+        )
+        .optional()?;
         goal_review::rearmable(goal, open).map_err(anyhow::Error::msg)?;
         let rearmed = match latest(&tx, goal)? {
             Some((id, ..)) => {
-                tx.execute(
+                SqlWrite::execute(
+                    &tx,
                     "UPDATE goal_reviews SET rearmed_at=?2 WHERE id=?1",
-                    params![id, now],
+                    sql_params![id, now],
                 )?;
                 Some(id)
             }
@@ -948,7 +965,15 @@ mod tests {
     fn a_blank_outcome_is_not_written() {
         let dir = tempfile::tempdir().unwrap();
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let error = finish_row(&queue.conn, 1, 0, " ", None, None).unwrap_err();
+        let error = finish_row(
+            &super::super::sql_exec::sqlite::port_tx(&queue.conn),
+            1,
+            0,
+            " ",
+            None,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(error.to_string(), "goal review outcome must not be blank");
     }
 

@@ -28,7 +28,6 @@ use super::sql_exec::sqlite::{
 };
 use super::store_rows;
 use super::store_writes;
-pub(super) use super::store_writes::next_id;
 use crate::domain::event_kind::EventKind;
 use std::{
     path::{Path, PathBuf},
@@ -52,8 +51,7 @@ use crate::{
         NoteQuery, Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, Submission,
         TagSet, Task, TaskAction, TaskAuthorization, TaskDetail, TaskEdit, TaskId, TaskRun,
         TaskStatus, TitlePrefixes, actor::ActorContext, cancel_reason::NewCancel,
-        plan_request::Creator, provider_switch::WorkerRoute, scope::validate_path_globs,
-        worker_model::WorkerTrial,
+        provider_switch::WorkerRoute, scope::validate_path_globs, worker_model::WorkerTrial,
     },
     infrastructure::{
         clock,
@@ -64,7 +62,7 @@ use crate::{
     },
 };
 
-pub(super) use super::store_rows::{RecordedCancel, replan_guarding};
+pub(super) use super::store_rows::replan_guarding;
 pub use super::write_leader::WriteIdentity;
 
 const APPLICATION_ID: i64 = 0x43545131;
@@ -484,6 +482,8 @@ impl<'c> WriteTx<'c> {
 /// insert that inserts no row (`INSERT .. SELECT .. WHERE NOT EXISTS`)
 /// returns the ID of the connection's insert before it; such a caller
 /// checks the rows changed first ([`WriteTx::insert_id_if_inserted`]).
+// Kept for store modules migrating independently; current callers use the port.
+#[allow(dead_code)]
 pub(super) fn insert_id<P: rusqlite::Params>(
     conn: &Connection,
     sql: &str,
@@ -1183,6 +1183,15 @@ impl SqliteQueue {
         let changed = super::sql_exec::SqlWrite::execute(&tx, sql, params)?;
         tx.commit()?;
         Ok(changed)
+    }
+
+    /// Read transcripts before a write entry holds its lock. Session transcript
+    /// hooks belong to the SQLite adapter until their store moves to the port.
+    pub(super) fn read_session_transcripts_before(
+        &self,
+        closing: super::sessions::Closing<'_>,
+    ) -> Result<super::sessions::ReadBefore> {
+        super::sessions::read_before(&self.conn, closing)
     }
 
     /// A transaction that reads one snapshot, named `name` on this
@@ -2192,39 +2201,8 @@ pub(crate) fn tag_busy(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// [`store_writes::insert_task`] on a rusqlite connection.
-pub(super) fn insert_task(
-    tx: &Connection,
-    new: NewTask,
-    now: &str,
-    creator: Creator,
-) -> Result<Task> {
-    store_writes::insert_task(&port_tx(tx), new, now, creator).map_err(native_error)
-}
-
 pub(super) fn read_goal(conn: &Connection, goal_id: GoalId) -> Result<Goal> {
     store_rows::read_goal(&port_tx(conn), goal_id).map_err(native_error)
-}
-
-/// Close `goal_id` with `verdict` as `goal close` does (`achieved` only
-/// when its follow-ups' membership is settled), in the caller's
-/// transaction: the one check of `goal close`, a goal review's `achieved`
-/// and an `approve_goal` answer alike. Records
-/// `goal_closed` with the task counts and the fields of `extra` (who closed
-/// it and why), and `dependency_stranded` on each task an `abandoned` close
-/// leaves that others wait on. A goal review's `achieved` passes `by:
-/// "goal_review"`, its `goal_review_id` and `reason` (the verdict's
-/// `summary`); an `approve_goal` answer passes `by: "person"`, the
-/// `ask_id` answered and the `goal_review_id` of the review that asked.
-pub(super) fn close_goal_in(
-    conn: &Connection,
-    goal_id: GoalId,
-    verdict: GoalVerdict,
-    now: &str,
-    extra: serde_json::Value,
-) -> Result<()> {
-    super::task_store::close_goal_in(&port_tx(conn), goal_id, verdict, now, extra)
-        .map_err(native_error)
 }
 
 pub(super) fn goal_event(
@@ -2294,6 +2272,8 @@ pub(super) fn claim_task(
 /// Apply `action` to the task inside the caller's transaction, recording
 /// `task_status_changed`: what `transition` does, and what the triage does
 /// to the task of the run it triaged.
+// Kept for store modules migrating independently; current callers use the port.
+#[allow(dead_code)]
 pub(super) fn transition_task(
     conn: &Connection,
     task_id: TaskId,
@@ -2329,7 +2309,9 @@ pub(super) fn complete_task(
 /// `task_status_changed`: what `cancel` does, plan review's
 /// `cancel_duplicate` and the `cancel` answers of the asks the runtime
 /// applies. A task named as the one that holds the content is checked by
-/// [`check_duplicate`] and gives the reason of a `--duplicate-of` alone.
+/// [`super::task_store::check_duplicate`] and gives the reason of a `--duplicate-of` alone.
+// Kept for store modules migrating independently; current callers use the port.
+#[allow(dead_code)]
 pub(super) fn cancel_task(
     conn: &Connection,
     task_id: TaskId,
@@ -2339,48 +2321,18 @@ pub(super) fn cancel_task(
     super::task_store::cancel_task(&port_tx(conn), task_id, cancel, now).map_err(native_error)
 }
 
-/// Check that `task_id` may be canceled as a duplicate of `duplicate_of`:
-/// the target must be another task that exists and is not canceled; a
-/// completed one means the task was already implemented there. A target
-/// canceled as a duplicate itself is refused with its own target, so the
-/// records never chain nor loop.
-pub(super) fn check_duplicate(
+#[cfg(test)]
+pub(super) fn cancel_of(
     conn: &Connection,
     task_id: TaskId,
-    duplicate_of: TaskId,
-) -> Result<()> {
-    super::task_store::check_duplicate(&port_tx(conn), task_id, duplicate_of).map_err(native_error)
-}
-
-pub(super) fn cancel_of(conn: &Connection, task_id: TaskId) -> Result<Option<RecordedCancel>> {
+) -> Result<Option<store_rows::RecordedCancel>> {
     store_rows::cancel_of(&port_tx(conn), task_id).map_err(native_error)
 }
 
+// Kept for store modules migrating independently; current callers use the port.
+#[allow(dead_code)]
 pub(super) fn read_task(conn: &Connection, task_id: TaskId) -> Result<Task> {
     store_rows::read_task(&port_tx(conn), task_id).map_err(native_error)
-}
-
-/// [`store_writes::insert_dependency`] on a rusqlite connection.
-pub(super) fn insert_dependency(
-    conn: &Connection,
-    task_id: TaskId,
-    predecessor_id: TaskId,
-    now: &str,
-) -> Result<()> {
-    store_writes::insert_dependency(&port_tx(conn), task_id, predecessor_id, now)
-        .map_err(native_error)
-}
-
-/// Refuse, before anything is written, a task whose status, proposal,
-/// proposal status or proposal owner in the open transaction is not
-/// `authorized`, what its command was authorized with (ADR-t883-1, task
-/// 1609); `None` checks nothing.
-pub(super) fn check_authorized(
-    conn: &Connection,
-    task_id: TaskId,
-    authorized: Option<&TaskAuthorization>,
-) -> Result<()> {
-    super::task_store::check_authorized(&port_tx(conn), task_id, authorized).map_err(native_error)
 }
 
 /// The status of `task` and the proposal it is in, as a planning command
@@ -2396,21 +2348,6 @@ pub(super) fn record_queue_event_in(
     payload: &serde_json::Value,
 ) -> Result<()> {
     store_writes::record_queue_event_in(&port_tx(conn), kind, payload).map_err(native_error)
-}
-
-/// Give the task a priority of its own, or with none take its goal's again
-/// (`set-priority`, `--inherit` for none), recording `task_priority_changed`
-/// (with `by` when the runtime changes it for a job) when the own priority
-/// changes, even if the base value stays the same (ADR-t1639-1 decision 2).
-pub(super) fn change_priority(
-    conn: &Connection,
-    task_id: TaskId,
-    priority: Option<Priority>,
-    now: &str,
-    by: Option<&str>,
-) -> Result<()> {
-    super::task_store::change_priority(&port_tx(conn), task_id, priority, now, by)
-        .map_err(native_error)
 }
 
 /// [`store_writes::event`] on a rusqlite connection.

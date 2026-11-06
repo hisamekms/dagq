@@ -48,6 +48,21 @@ pub(super) trait EventTx: SqlWrite {
     ) -> Result<()>;
 }
 
+/// A transaction that closes session spans through the session adapter.
+/// Separate from event recording so either store can move to the execution
+/// port without requiring the other to move in the same change. Transcript
+/// reads still happen before the write entry; each close uses its transaction.
+pub(super) trait SessionTx: SqlWrite {
+    /// Close an interrupted plan review's spans through the session adapter.
+    fn close_plan_review_spans(&self, review: i64, inferred: bool) -> Result<()>;
+
+    /// Close an interrupted goal review's spans on this transaction.
+    fn close_goal_review_spans(&self, review: i64, inferred: bool) -> Result<()>;
+
+    /// Close a planner's spans when its row closes.
+    fn close_planner_spans(&self, planner: i64) -> Result<usize>;
+}
+
 /// Register `new` inside the caller's write transaction with
 /// `task_created` and its dependencies: what `add` does, and what a
 /// follow-up triage's `adopt` does in the transaction that cancels the draft.

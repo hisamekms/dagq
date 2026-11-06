@@ -46,7 +46,7 @@ use crate::infrastructure::{
     event_bodies::event_body_for_row,
     sessions,
     sqlite::{SqliteQueue, WriteTx, insert_counted},
-    store_writes::EventTx,
+    store_writes::{EventTx, SessionTx},
 };
 
 impl rusqlite::ToSql for SqlValue {
@@ -389,6 +389,14 @@ impl SqlWrite for rusqlite::Savepoint<'_> {
 /// connection is in, as that module's own statements do.
 pub(crate) struct SqliteTx<'c>(&'c Connection);
 
+impl std::ops::Deref for SqliteTx<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
 /// `conn` as a transaction of the port, for an unmoved module to call what
 /// has moved; a `&Transaction` coerces. Its writes are not counted as a
 /// [`WriteTx`]'s, so one who holds a `WriteTx` hands that on as it is. It
@@ -430,6 +438,18 @@ impl SqlWrite for SqliteTx<'_> {
     }
 }
 
+impl SessionTx for WriteTx<'_> {
+    fn close_plan_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
+        sessions::close_plan_review(self, review, inferred)
+    }
+    fn close_goal_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
+        sessions::close_goal_review(self, review, inferred)
+    }
+    fn close_planner_spans(&self, planner: i64) -> anyhow::Result<usize> {
+        sessions::close_planner_spans(self, planner)
+    }
+}
+
 impl EventTx for WriteTx<'_> {
     fn follow_spans(
         &self,
@@ -449,6 +469,18 @@ impl EventTx for WriteTx<'_> {
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
         sessions::follow_goal(self, event_id, goal_id, kind, payload)
+    }
+}
+
+impl SessionTx for rusqlite::Savepoint<'_> {
+    fn close_plan_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
+        sessions::close_plan_review(self, review, inferred)
+    }
+    fn close_goal_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
+        sessions::close_goal_review(self, review, inferred)
+    }
+    fn close_planner_spans(&self, planner: i64) -> anyhow::Result<usize> {
+        sessions::close_planner_spans(self, planner)
     }
 }
 
@@ -472,6 +504,18 @@ impl EventTx for rusqlite::Savepoint<'_> {
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
         sessions::follow_goal(self, event_id, goal_id, kind, payload)
+    }
+}
+
+impl SessionTx for SqliteTx<'_> {
+    fn close_plan_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
+        sessions::close_plan_review(self, review, inferred)
+    }
+    fn close_goal_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
+        sessions::close_goal_review(self, review, inferred)
+    }
+    fn close_planner_spans(&self, planner: i64) -> anyhow::Result<usize> {
+        sessions::close_planner_spans(self, planner)
     }
 }
 

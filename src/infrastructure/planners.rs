@@ -4,9 +4,11 @@
 //! background wrapper's of a planner of the runtime's, ADR-t1433-2; the
 //! workspace UUID of a person's planner opened before ADR-t1394-1) and
 //! what its session wrapper records (pids, heartbeat, the agent's exit).
-use super::sql_dialect::{JsonType, json_field, json_field_spaced};
+use super::sql_dialect::JsonType;
+use super::sql_exec::sql_params;
+use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
+use super::store_writes::SessionTx;
 use anyhow::{Result, ensure};
-use rusqlite::{OptionalExtension, Row, params};
 
 use super::sqlite::SqliteQueue;
 use crate::domain::{
@@ -60,27 +62,28 @@ impl SqliteQueue {
     ) -> Result<bool> {
         let tx = self.write_tx("mark_answer_wait")?;
         for ask in asks {
-            let waiting: bool = tx
-                .query_row(
-                    "SELECT (answered_at IS NOT NULL)=?2 AND closed_at IS NULL FROM asks WHERE id=?1",
-                    params![ask, answered],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .unwrap_or(false);
+            let waiting: bool = SqlRead::query_row(
+                &tx,
+                "SELECT (answered_at IS NOT NULL)=?2 AND closed_at IS NULL FROM asks WHERE id=?1",
+                sql_params![ask, answered],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
             if !waiting {
                 return Ok(false);
             }
         }
-        let marked = tx.execute(
+        let marked = SqlWrite::execute(
+            &tx,
             "UPDATE planners SET answer_wait_at=?2
              WHERE id=?1 AND closed_at IS NULL AND answer_wait_at IS NULL",
-            params![id, self.generators.clock.now()],
+            sql_params![id, self.generators.clock.now()],
         )? == 1;
         if !marked {
             return Ok(false);
         }
-        super::sqlite::record_queue_event_in(
+        super::store_writes::record_queue_event_in(
             &tx,
             crate::domain::EventKind::PlannerAnswerWait,
             payload,
@@ -94,48 +97,55 @@ impl SqliteQueue {
     /// decision 3): its notes and the drafts it created or edited that are
     /// still drafts. `None` when no planner ended so for it.
     pub fn planner_handover(&self, ask: AskId) -> Result<Option<PlannerHandover>> {
-        let planner: Option<PlannerId> = self
-            .conn
-            .query_row(
-                &format!(
-                    "SELECT {planner_id} FROM run_events e,
+        let planner: Option<PlannerId> = SqlRead::query_row(
+            &*self.conn,
+            &format!(
+                "SELECT {planner_id} FROM run_events e,
                      json_each(e.payload,'$.asks') j WHERE e.kind='{}' AND j.value=?1
                      ORDER BY e.id DESC LIMIT 1",
-                    event_kind::PLANNER_ANSWER_WAIT,
-                    planner_id = json_field("e.payload", "$.planner_id", JsonType::Integer),
-                ),
-                [ask],
-                |r| r.get(0),
-            )
-            .optional()?;
+                event_kind::PLANNER_ANSWER_WAIT,
+                planner_id =
+                    self.conn
+                        .dialect()
+                        .json_field("e.payload", "$.planner_id", JsonType::Integer),
+            ),
+            sql_params![ask],
+            |r| r.get(0),
+        )
+        .optional()?;
         let Some(planner) = planner else {
             return Ok(None);
         };
         let actor = format!("planner:{planner}");
-        let notes = self
-            .conn
-            .prepare(&format!(
+        let notes = SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "SELECT id, coalesce({text}, '') FROM run_events
                  WHERE kind='{}' AND actor_id=?1 ORDER BY id",
                 event_kind::OBSERVATION,
-                text = json_field("payload", "$.text", JsonType::Text),
-            ))?
-            .query_map([&actor], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        let ids: Vec<crate::domain::TaskId> = self
-            .conn
-            .prepare(&format!(
+                text = self
+                    .conn
+                    .dialect()
+                    .json_field("payload", "$.text", JsonType::Text),
+            ),
+            sql_params![&actor],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let ids: Vec<crate::domain::TaskId> = SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "SELECT DISTINCT e.task_id FROM run_events e JOIN tasks t ON t.id=e.task_id
                  WHERE e.kind IN ('{}','{}') AND e.actor_id=?1 AND t.status='draft'
                  ORDER BY e.task_id",
                 event_kind::TASK_CREATED,
                 event_kind::TASK_EDITED
-            ))?
-            .query_map([&actor], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+            ),
+            sql_params![&actor],
+            |r| r.get(0),
+        )?;
         let mut drafts = Vec::new();
         for id in ids {
-            let task = super::sqlite::read_task(&self.conn, id)?;
+            let task = super::store_rows::read_task(&*self.conn, id)?;
             if task.status() != TaskStatus::Draft {
                 continue;
             }
@@ -163,10 +173,10 @@ impl SqliteQueue {
         proposal: Option<ProposalId>,
     ) -> Result<PlannerSession> {
         let tx = self.write_tx("open_planner")?;
-        let id = PlannerId::new(super::sqlite::insert_id(
+        let id = PlannerId::new(SqlWrite::insert_id(
             &tx,
             "INSERT INTO planners(origin, proposal_id, created_at) VALUES (?1, ?2, ?3)",
-            params![origin.as_str(), proposal, self.generators.clock.now()],
+            sql_params![origin.as_str(), proposal, self.generators.clock.now()],
         )?);
         tx.commit()?;
         self.planner(id)
@@ -175,10 +185,10 @@ impl SqliteQueue {
     /// The UUID of the workspace cmux opened for the planner.
     pub fn planner_workspace_created(&self, id: PlannerId, workspace_id: &str) -> Result<()> {
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "planner_workspace_created",
                 "UPDATE planners SET workspace_id=?2 WHERE id=?1 AND workspace_id IS NULL",
-                params![id, workspace_id],
+                sql_params![id, workspace_id],
             )? == 1,
             "planner {id} already has a workspace or does not exist"
         );
@@ -195,46 +205,52 @@ impl SqliteQueue {
     pub fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession> {
         let tx = self.write_tx("close_planner")?;
         let now = self.generators.clock.now();
-        let closed = tx.execute(
+        let closed = SqlWrite::execute(
+            &tx,
             "UPDATE planners SET closed_at=?2, error=coalesce(error, ?3)
              WHERE id=?1 AND closed_at IS NULL",
-            params![id, now, error],
+            sql_params![id, now, error],
         )?;
         if closed == 1 {
             super::draft_planners::settle_bundle(&tx, id, now)?;
             super::plan_requests::decline_after_planner(&tx, id, now)?;
             // A headless session that had started ends with the row
             // (ADR-t1394-2 decision 4).
-            super::sessions::close_planner_spans(&tx, id.as_i64())?;
+            tx.close_planner_spans(id.as_i64())?;
         }
         tx.commit()?;
         self.planner(id)
     }
 
     pub fn planner(&self, id: PlannerId) -> Result<PlannerSession> {
-        self.conn
-            .query_row("SELECT * FROM planners WHERE id=?1", [id], planner_row)
-            .optional()?
-            .ok_or_else(|| anyhow::anyhow!("planner {id} does not exist"))
+        SqlRead::query_row(
+            &*self.conn,
+            "SELECT * FROM planners WHERE id=?1",
+            sql_params![id],
+            planner_row_port,
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("planner {id} does not exist"))
     }
 
     /// The planners not closed, oldest first; with `all`, every planner.
     pub fn planners(&self, all: bool) -> Result<Vec<PlannerSession>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM planners WHERE ?1 OR closed_at IS NULL ORDER BY id")?
-            .query_map([all], planner_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM planners WHERE ?1 OR closed_at IS NULL ORDER BY id",
+            sql_params![all],
+            planner_row_port,
+        )?)
     }
 
     /// Record the route the planner's agent runs on (ADR-t1394-2), before
     /// its session starts; interactive is left as the column's NULL.
     pub fn set_planner_route(&self, id: PlannerId, route: PlannerRoute) -> Result<()> {
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "set_planner_route",
                 "UPDATE planners SET route=?2 WHERE id=?1 AND wrapper_pid IS NULL",
-                params![
+                sql_params![
                     id,
                     (route != PlannerRoute::Interactive).then_some(route.as_str())
                 ],
@@ -248,11 +264,12 @@ impl SqliteQueue {
     /// queue's `turn_*` events that name it, and its waits for a provider
     /// (`provider_waiting`, decision 5), oldest first.
     pub fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>> {
-        Ok(self
-            .conn
-            .prepare(&planner_turn_events_sql())?
-            .query_map([id], super::sqlite::event_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            &planner_turn_events_sql(self.conn.dialect()),
+            sql_params![id],
+            super::store_rows::event_row,
+        )?)
     }
 
     /// The wrapper `pid` started for the planner (in the background, or in
@@ -260,11 +277,11 @@ impl SqliteQueue {
     /// one session: a second wrapper, or one for a closed planner, is refused.
     pub fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()> {
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "register_planner_wrapper",
                 "UPDATE planners SET wrapper_pid=?2, heartbeat_at=?3
                  WHERE id=?1 AND wrapper_pid IS NULL AND closed_at IS NULL",
-                params![id, pid, self.generators.clock.now()],
+                sql_params![id, pid, self.generators.clock.now()],
             )? == 1,
             "planner {id} already has a session or is closed"
         );
@@ -278,10 +295,10 @@ impl SqliteQueue {
         agent: u32,
     ) -> Result<()> {
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "register_planner_agent",
                 "UPDATE planners SET agent_pid=?3 WHERE id=?1 AND wrapper_pid=?2",
-                params![id, wrapper_pid, agent],
+                sql_params![id, wrapper_pid, agent],
             )? == 1,
             "wrapper {wrapper_pid} does not own planner {id}"
         );
@@ -290,11 +307,11 @@ impl SqliteQueue {
 
     pub fn heartbeat_planner(&self, id: PlannerId, wrapper_pid: u32) -> Result<()> {
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "heartbeat_planner",
                 "UPDATE planners SET heartbeat_at=?3
                  WHERE id=?1 AND wrapper_pid=?2 AND exited_at IS NULL",
-                params![id, wrapper_pid, self.generators.clock.now()],
+                sql_params![id, wrapper_pid, self.generators.clock.now()],
             )? == 1,
             "wrapper {wrapper_pid} does not own planner {id}"
         );
@@ -304,11 +321,11 @@ impl SqliteQueue {
     /// The planner's agent exited with `exit_code`.
     pub fn planner_exited(&self, id: PlannerId, wrapper_pid: u32, exit_code: i32) -> Result<()> {
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "planner_exited",
                 "UPDATE planners SET exit_code=?3, exited_at=?4
                  WHERE id=?1 AND wrapper_pid=?2 AND exited_at IS NULL",
-                params![id, wrapper_pid, exit_code, self.generators.clock.now()],
+                sql_params![id, wrapper_pid, exit_code, self.generators.clock.now()],
             )? == 1,
             "wrapper {wrapper_pid} does not own planner {id}"
         );
@@ -319,7 +336,7 @@ impl SqliteQueue {
 /// The `turn_*` and `provider_waiting` events of planner `?1`, oldest
 /// first, by their kind: `+run_id` keeps `events_by_run` from walking every
 /// event that has no run.
-pub(super) fn planner_turn_events_sql() -> String {
+pub(super) fn planner_turn_events_sql(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
         "SELECT * FROM run_events WHERE +run_id IS NULL
            AND kind IN ('{}','{}','{}','{}','{}')
@@ -329,12 +346,8 @@ pub(super) fn planner_turn_events_sql() -> String {
         event_kind::TURN_FINISHED,
         event_kind::TURN_SESSION_IDENTIFIED,
         event_kind::PROVIDER_WAITING,
-        planner_id = json_field_spaced("payload", "$.planner_id", JsonType::Integer),
+        planner_id = dialect.json_field_spaced("payload", "$.planner_id", JsonType::Integer),
     )
-}
-
-pub(super) fn planner_row(r: &Row<'_>) -> rusqlite::Result<PlannerSession> {
-    super::sql_exec::sqlite::with_row(r, planner_row_port)
 }
 
 pub(super) fn planner_row_port(

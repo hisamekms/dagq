@@ -7,17 +7,14 @@
 //! resolves the finding or opens it again. Opening a planner is one write
 //! transaction that re-checks the finding first, so two supervisors never
 //! open one for the same finding.
-use super::sql_dialect::{JsonType, json_field};
-use super::sql_exec::OptionalRow;
+use super::sql_dialect::JsonType;
 use super::sql_exec::sql_params;
-use super::sql_exec::sqlite::native_error;
+use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
 use super::store_writes::EventTx;
 use crate::domain::event_kind::{self, EventKind};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
 use serde_json::json;
 
-use super::sql_exec::sqlite::{port_tx, with_row};
 use super::{
     asks::{ask_row, read_ask},
     findings::{finding_event, finding_row, read_finding, record_in, set_status_in},
@@ -34,7 +31,7 @@ use crate::domain::{
 /// a proposal, no planner of the runtime's open for it, no
 /// `planner_question` about it nobody closed, and its planners since the
 /// mark not used up.
-fn targets() -> String {
+fn targets(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
         "SELECT f.id FROM findings f
     WHERE f.status='open' AND f.propose_reason IS NOT NULL
@@ -45,8 +42,8 @@ fn targets() -> String {
         AND {finding_id}=f.id
         AND {marked_at} IS f.propose_requested_at)",
         event_kind::FINDING_PLANNER_EXHAUSTED,
-        finding_id = json_field("e.payload", "$.finding_id", JsonType::Integer),
-        marked_at = json_field("e.payload", "$.marked_at", JsonType::Integer),
+        finding_id = dialect.json_field("e.payload", "$.finding_id", JsonType::Integer),
+        marked_at = dialect.json_field("e.payload", "$.marked_at", JsonType::Integer),
     )
 }
 
@@ -67,10 +64,10 @@ impl SqliteQueue {
             PlannerOrigin::Person => "person",
         };
         let tx = self.write_tx("submit_linking")?;
-        let previous = super::plan_requests::previous_proposals(&port_tx(&tx), &submission)?;
-        let held_retry = super::proposals::held_retry(&port_tx(&tx), &submission)?;
+        let previous = super::plan_requests::previous_proposals(&tx, &submission)?;
+        let held_retry = super::proposals::held_retry(&tx, &submission)?;
         let proposal = super::proposals::submit(
-            &port_tx(&tx),
+            &tx,
             submission,
             self.changes.as_ref(),
             self.title_prefixes.as_ref(),
@@ -86,7 +83,7 @@ impl SqliteQueue {
         // decision 6), and those of the proposals it carries on
         // (ADR-t1971-1 decision 2).
         super::plan_requests::link_requests(
-            &port_tx(&tx),
+            &tx,
             proposal.id(),
             workspace.as_deref(),
             &previous,
@@ -105,7 +102,7 @@ impl SqliteQueue {
                 now,
             )?;
         }
-        let proposal = super::proposals::read(&port_tx(&tx), proposal.id())?;
+        let proposal = super::proposals::read(&tx, proposal.id())?;
         tx.commit()?;
         Ok(proposal)
     }
@@ -113,14 +110,15 @@ impl SqliteQueue {
     /// The findings waiting for a planner of the runtime's, the oldest
     /// mark first, then by ID.
     pub fn planner_findings(&self) -> Result<Vec<Finding>> {
-        let ids: Vec<FindingId> = self
-            .conn
-            .prepare(&format!(
+        let ids: Vec<FindingId> = SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "{} ORDER BY f.propose_requested_at, f.id",
-                targets()
-            ))?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+                targets(self.conn.dialect())
+            ),
+            sql_params![],
+            |r| r.get(0),
+        )?;
         ids.into_iter()
             .map(|id| read_finding(&*self.conn, id))
             .collect()
@@ -156,13 +154,14 @@ impl SqliteQueue {
             // only a person's answer was left) is waited for (ADR-t1704-1
             // decision 2).
             Some(ask) => {
-                let ask = read_ask(&port_tx(&tx), ask)?;
+                let ask = read_ask(&tx, ask)?;
                 ask.finding_id == Some(finding)
                     && route_of(&tx, finding)? == PlannerAnswerRoute::NewPlanner
-                    && !tx.query_row(
+                    && !SqlRead::query_row(
+                        &tx,
                         "SELECT EXISTS(SELECT 1 FROM planners WHERE finding_id=?1
                          AND closed_at IS NULL)",
-                        [finding],
+                        sql_params![finding],
                         |r| r.get::<_, bool>(0),
                     )?
             }
@@ -198,9 +197,10 @@ impl SqliteQueue {
             tx.commit()?;
             return Ok(FindingPlannerStart::Exhausted { attempts: opened });
         }
-        let planner = PlannerId::new(tx.insert_id(
+        let planner = PlannerId::new(SqlWrite::insert_id(
+            &tx,
             "INSERT INTO planners(origin, finding_id, created_at) VALUES (?1, ?2, ?3)",
-            params![PlannerOrigin::Runtime.as_str(), finding, now],
+            sql_params![PlannerOrigin::Runtime.as_str(), finding, now],
         )?);
         let attempt = opened + 1;
         finding_event(
@@ -227,18 +227,19 @@ impl SqliteQueue {
     /// decision 25). A proposal of the runtime's that a person submits again
     /// becomes the person's, and is no longer counted.
     pub fn improvements(&self, limit: usize) -> Result<ImprovementLimit> {
-        improvement_limit(&self.conn, limit)
+        improvement_limit(&*self.conn, limit)
     }
 
     /// The asks about `finding`, oldest first: the observer's `blocked`
     /// ones, the asks a person answered `propose` or `dismiss` about it,
     /// and its planners' questions.
     pub fn finding_asks(&self, finding: FindingId) -> Result<Vec<Ask>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM asks WHERE finding_id=?1 ORDER BY id")?
-            .query_map([finding], |row| with_row(row, ask_row))?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM asks WHERE finding_id=?1 ORDER BY id",
+            sql_params![finding],
+            ask_row,
+        )?)
     }
 
     /// End the `proposed` findings whose proposal ended
@@ -249,9 +250,10 @@ impl SqliteQueue {
     /// `finding_status_changed` with the proposal.
     pub fn settle_findings(&mut self) -> Result<Vec<(FindingId, FindingStatus)>> {
         // Most passes have nothing to settle: no write lock for them.
-        let any: bool = self.conn.query_row(
+        let any: bool = SqlRead::query_row(
+            &*self.conn,
             "SELECT EXISTS(SELECT 1 FROM findings WHERE status='proposed')",
-            [],
+            sql_params![],
             |r| r.get(0),
         )?;
         if !any {
@@ -259,13 +261,13 @@ impl SqliteQueue {
         }
         let now = self.generators.clock.now();
         let tx = self.write_tx("settle_findings")?;
-        let proposed: Vec<Finding> = tx
-            .prepare(
-                "SELECT * FROM findings WHERE status='proposed' AND proposal_id IS NOT NULL
+        let proposed: Vec<Finding> = SqlRead::query_map(
+            &tx,
+            "SELECT * FROM findings WHERE status='proposed' AND proposal_id IS NOT NULL
                  ORDER BY id",
-            )?
-            .query_map([], |row| with_row(row, finding_row))?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![],
+            finding_row,
+        )?;
         let mut settled = Vec::new();
         for current in proposed {
             let proposal = current.proposal_id.context("a proposed finding")?;
@@ -274,16 +276,18 @@ impl SqliteQueue {
                 continue;
             };
             if to == FindingStatus::Open {
-                tx.execute(
+                SqlWrite::execute(
+                    &tx,
                     "UPDATE findings SET status='open', status_reason=?2, proposal_id=NULL,
                        propose_reason=NULL, propose_requested_at=NULL, updated_at=?3
                      WHERE id=?1",
-                    params![current.id, reason, now],
+                    sql_params![current.id, reason, now],
                 )?;
             } else {
-                tx.execute(
+                SqlWrite::execute(
+                    &tx,
                     "UPDATE findings SET status=?2, status_reason=?3, updated_at=?4 WHERE id=?1",
-                    params![current.id, to.as_str(), reason, now],
+                    sql_params![current.id, to.as_str(), reason, now],
                 )?;
             }
             let after = read_finding(&tx, current.id)?;
@@ -309,20 +313,27 @@ impl SqliteQueue {
     /// Findings still `open` and marked whose planners since the mark were
     /// used up (`finding_planner_exhausted`), by ID.
     pub fn exhausted_findings(&self) -> Result<Vec<Finding>> {
-        Ok(self
-            .conn
-            .prepare(&format!(
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "SELECT * FROM findings f WHERE f.status='open' AND f.propose_reason IS NOT NULL
                  AND EXISTS(SELECT 1 FROM run_events e WHERE e.kind='{}'
                      AND {finding_id}=f.id
                      AND {marked_at} IS f.propose_requested_at)
                  ORDER BY f.id",
                 event_kind::FINDING_PLANNER_EXHAUSTED,
-                finding_id = json_field("e.payload", "$.finding_id", JsonType::Integer),
-                marked_at = json_field("e.payload", "$.marked_at", JsonType::Integer),
-            ))?
-            .query_map([], |row| with_row(row, finding_row))?
-            .collect::<rusqlite::Result<_>>()?)
+                finding_id =
+                    self.conn
+                        .dialect()
+                        .json_field("e.payload", "$.finding_id", JsonType::Integer),
+                marked_at =
+                    self.conn
+                        .dialect()
+                        .json_field("e.payload", "$.marked_at", JsonType::Integer),
+            ),
+            sql_params![],
+            finding_row,
+        )?)
     }
 
     /// Record an event on the finding's target (on nothing for the queue).
@@ -344,16 +355,23 @@ impl SqliteQueue {
     /// Whether the supervisor typed the answer of `ask` into `workspace`
     /// (`ask_delivered`).
     pub fn ask_delivered_to(&self, ask: AskId, workspace: &str) -> Result<bool> {
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
              AND {ask_id}=?1
              AND {workspace_id}=?2)",
                 event_kind::ASK_DELIVERED,
-                ask_id = json_field("payload", "$.ask_id", JsonType::Integer),
-                workspace_id = json_field("payload", "$.workspace_id", JsonType::Text),
+                ask_id = self
+                    .conn
+                    .dialect()
+                    .json_field("payload", "$.ask_id", JsonType::Integer),
+                workspace_id =
+                    self.conn
+                        .dialect()
+                        .json_field("payload", "$.workspace_id", JsonType::Text),
             ),
-            params![ask, workspace],
+            sql_params![ask, workspace],
             |r| r.get(0),
         )?)
     }
@@ -363,17 +381,27 @@ impl SqliteQueue {
     /// typed it, as an older one is taken over only when its supervisor
     /// ended before typing.
     pub fn answer_claimed_at(&self, ask: AskId, workspace: &str) -> Result<Option<i64>> {
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             &format!(
                 "SELECT MAX({claimed_at}) FROM run_events WHERE kind='{}'
              AND {ask_id}=?1
              AND {workspace_id}=?2",
                 event_kind::PLANNER_ANSWER_CLAIMED,
-                claimed_at = json_field("payload", "$.claimed_at", JsonType::Integer),
-                ask_id = json_field("payload", "$.ask_id", JsonType::Integer),
-                workspace_id = json_field("payload", "$.workspace_id", JsonType::Text),
+                claimed_at =
+                    self.conn
+                        .dialect()
+                        .json_field("payload", "$.claimed_at", JsonType::Integer),
+                ask_id = self
+                    .conn
+                    .dialect()
+                    .json_field("payload", "$.ask_id", JsonType::Integer),
+                workspace_id =
+                    self.conn
+                        .dialect()
+                        .json_field("payload", "$.workspace_id", JsonType::Text),
             ),
-            params![ask, workspace],
+            sql_params![ask, workspace],
             |r| r.get(0),
         )?)
     }
@@ -381,24 +409,31 @@ impl SqliteQueue {
     /// Whether sending the answer of `ask` to `planner` ever failed
     /// (`ask_delivery_failed`).
     pub fn ask_delivery_failed(&self, ask: AskId, planner: PlannerId) -> Result<bool> {
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
              AND {ask_id}=?1 AND {planner_id}=?2)",
                 event_kind::ASK_DELIVERY_FAILED,
-                ask_id = json_field("payload", "$.ask_id", JsonType::Integer),
-                planner_id = json_field("payload", "$.planner_id", JsonType::Integer),
+                ask_id = self
+                    .conn
+                    .dialect()
+                    .json_field("payload", "$.ask_id", JsonType::Integer),
+                planner_id =
+                    self.conn
+                        .dialect()
+                        .json_field("payload", "$.planner_id", JsonType::Integer),
             ),
-            params![ask, planner],
+            sql_params![ask, planner],
             |r| r.get(0),
         )?)
     }
 }
 
-fn is_target(conn: &Connection, finding: FindingId) -> Result<bool> {
+fn is_target(conn: &impl SqlRead, finding: FindingId) -> Result<bool> {
     Ok(conn.query_row(
-        &format!("SELECT EXISTS({} AND f.id=?1)", targets()),
-        [finding],
+        &format!("SELECT EXISTS({} AND f.id=?1)", targets(conn.dialect())),
+        sql_params![finding],
         |r| r.get(0),
     )?)
 }
@@ -407,11 +442,11 @@ fn is_target(conn: &Connection, finding: FindingId) -> Result<bool> {
 /// but for those asked to exit because only a person's answer was left
 /// (ADR-t1704-1 decision 5). A planner that carries a person's answer is
 /// so counted only when it ends without deciding the finding.
-fn planners_since_mark(conn: &Connection, finding: &Finding) -> Result<usize> {
+fn planners_since_mark(conn: &impl SqlRead, finding: &Finding) -> Result<usize> {
     let count: i64 = conn.query_row(
         "SELECT count(*) FROM planners WHERE finding_id=?1 AND created_at>=?2
          AND answer_wait_at IS NULL",
-        params![finding.id, finding.propose_requested_at.unwrap_or(0)],
+        sql_params![finding.id, finding.propose_requested_at.unwrap_or(0)],
         |r| r.get(0),
     )?;
     Ok(usize::try_from(count)?)
@@ -426,21 +461,18 @@ fn planners_since_mark(conn: &Connection, finding: &Finding) -> Result<usize> {
 /// an improvement: it may submit one, and counting it keeps planners
 /// opened together from going past the limit (one that submitted made its
 /// finding `proposed`, and its proposal is the one counted).
-fn improvement_limit(conn: &Connection, limit: usize) -> Result<ImprovementLimit> {
+fn improvement_limit(conn: &impl SqlRead, limit: usize) -> Result<ImprovementLimit> {
     let mut proposals: Vec<ProposalId> = conn
-        .prepare(
+        .query_map(
             "SELECT f.proposal_id, f.kind, f.recorded_by FROM findings f
              JOIN proposals p ON p.id = f.proposal_id
              WHERE p.owner_origin='runtime' ORDER BY f.proposal_id",
+            sql_params![],
+            |r| Ok((r.get(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
         )?
-        .query_map([], |r| {
-            Ok((r.get(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-        })?
-        .filter_map(|row| match row {
-            Ok((proposal, kind, by)) => counts_as_improvement(&kind, &by).then_some(Ok(proposal)),
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<rusqlite::Result<_>>()?;
+        .into_iter()
+        .filter_map(|(proposal, kind, by)| counts_as_improvement(&kind, &by).then_some(proposal))
+        .collect();
     proposals.dedup();
     let mut running = 0;
     for proposal in proposals {
@@ -449,13 +481,12 @@ fn improvement_limit(conn: &Connection, limit: usize) -> Result<ImprovementLimit
             running += 1;
         }
     }
-    let planners: Vec<(String, String)> = conn
-        .prepare(
-            "SELECT f.kind, f.recorded_by FROM planners p JOIN findings f ON f.id = p.finding_id
+    let planners: Vec<(String, String)> = conn.query_map(
+        "SELECT f.kind, f.recorded_by FROM planners p JOIN findings f ON f.id = p.finding_id
              WHERE p.origin='runtime' AND p.closed_at IS NULL AND f.status='open'",
-        )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+        sql_params![],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     let planners = planners
         .iter()
         .filter(|(kind, by)| counts_as_improvement(kind, by))
@@ -469,19 +500,19 @@ fn improvement_limit(conn: &Connection, limit: usize) -> Result<ImprovementLimit
 /// The proposal's status and the statuses of the tasks it holds and of the
 /// tasks its goals hold now (ADR-t2951-1), each task once.
 fn proposal_state(
-    conn: &Connection,
+    conn: &impl SqlRead,
     proposal: ProposalId,
 ) -> Result<(ProposalStatus, Vec<TaskStatus>)> {
-    let record = super::proposals::read(&port_tx(conn), proposal)?;
+    let record = super::proposals::read(conn, proposal)?;
     let tasks = conn
-        .prepare(
+        .query_map(
             "SELECT id FROM tasks WHERE proposal_id=?1
              OR goal_id IN (SELECT id FROM goals WHERE proposal_id=?1) ORDER BY id",
+            sql_params![proposal],
+            |r| r.get::<_, TaskId>(0),
         )?
-        .query_map([proposal], |r| r.get::<_, TaskId>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
-        .map(|id| Ok(super::sqlite::read_task(conn, id)?.status()))
+        .map(|id| Ok(super::store_rows::read_task(conn, id)?.status()))
         .collect::<Result<Vec<_>>>()?;
     Ok((record.status(), tasks))
 }
@@ -493,8 +524,8 @@ fn proposal_state(
 /// moved on). A finding no planner of the runtime's was ever opened for
 /// leaves the answer to a person. A planner asked to exit because only a
 /// person's answer was left is no target of the answer.
-pub(super) fn route_of(conn: &Connection, finding: FindingId) -> Result<PlannerAnswerRoute> {
-    route_of_port(&port_tx(conn), finding).map_err(native_error)
+pub(super) fn route_of(conn: &impl SqlRead, finding: FindingId) -> Result<PlannerAnswerRoute> {
+    route_of_port(conn, finding)
 }
 
 pub(super) fn route_of_port(
@@ -560,7 +591,7 @@ pub(super) fn route_of_port(
 /// resubmission) stays. A named finding that cannot be linked fails the
 /// submission; the planner's own is linked only while `open`.
 pub(super) fn link_findings(
-    conn: &Connection,
+    conn: &impl EventTx,
     proposal: ProposalId,
     workspace: Option<&str>,
     named: &[FindingId],
@@ -569,13 +600,12 @@ pub(super) fn link_findings(
 ) -> Result<Vec<FindingId>> {
     let mut targets: Vec<(FindingId, bool)> = named.iter().map(|&id| (id, true)).collect();
     if let Some(workspace) = workspace {
-        let own: Vec<FindingId> = conn
-            .prepare(
-                "SELECT finding_id FROM planners WHERE workspace_id=?1 AND origin='runtime'
+        let own: Vec<FindingId> = conn.query_map(
+            "SELECT finding_id FROM planners WHERE workspace_id=?1 AND origin='runtime'
                  AND closed_at IS NULL AND finding_id IS NOT NULL ORDER BY id",
-            )?
-            .query_map([workspace], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![workspace],
+            |r| r.get(0),
+        )?;
         for id in own {
             if !targets.iter().any(|(named, _)| *named == id) {
                 targets.push((id, false));
@@ -596,10 +626,10 @@ pub(super) fn link_findings(
         conn.execute(
             "UPDATE findings SET status='proposed', status_reason=NULL, proposal_id=?2,
                updated_at=?3 WHERE id=?1",
-            params![id, proposal, now],
+            sql_params![id, proposal, now],
         )?;
         finding_event(
-            &port_tx(conn),
+            conn,
             &read_finding(conn, id)?,
             EventKind::FindingStatusChanged,
             json!({

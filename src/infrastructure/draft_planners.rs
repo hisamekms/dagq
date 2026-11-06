@@ -9,23 +9,23 @@
 //! each draft when the planner ended). Opening a planner is one write
 //! transaction that re-checks the drafts first, so two supervisors never
 //! open one for the same draft.
-use super::sql_dialect::{JsonType, json_field};
-use super::sql_exec::OptionalRow;
+use super::sql_dialect::JsonType;
+use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
 
 use super::sql_exec::sql_params;
-use super::sql_exec::sqlite::{native_error, port_tx, with_row};
 use super::store_writes::{self, EventTx};
 use crate::domain::cancel_reason;
 use crate::domain::event_kind::{self, EventKind};
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
 use super::{
     asks::{ask_row, read_ask},
-    sqlite::{SqliteQueue, event, insert_task, read_task},
+    sqlite::SqliteQueue,
+    store_rows::read_task,
+    store_writes::{event, insert_task},
 };
 use crate::application::{
     DraftPlannerStart, DraftPlannerStore, FindingPlannerStart, FollowUpRegistration,
@@ -61,10 +61,6 @@ pub const PLANNER_ANSWER_CLAIM_SECS: i64 = 120;
 /// answered `keep_draft`: nothing applies its other answers any more.
 /// Drafts registered before this existed match too (the migration gave them
 /// their origin).
-fn targets(now: i64) -> String {
-    targets_in(super::sql_exec::SqlDialect::Sqlite, now)
-}
-
 fn targets_in(dialect: super::sql_exec::SqlDialect, now: i64) -> String {
     let due = revisit_due(now, None);
     format!(
@@ -107,21 +103,23 @@ fn revisit_due(now: i64, by: Option<&str>) -> String {
 /// Whether an `open` planning request names the draft `task` (`task:N`):
 /// its planner decides it, and no planner of the runtime's for drafts is
 /// opened for it meanwhile (ADR-t1540-1).
-fn named_by_open_request(conn: &Connection, task: TaskId) -> Result<bool> {
+fn named_by_open_request(conn: &impl SqlRead, task: TaskId) -> Result<bool> {
     Ok(conn.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM plan_requests q, json_each(q.refs) j WHERE q.status='open'
          AND {}='task' AND {}=?1)",
-            json_field("j.value", "$.kind", JsonType::Text),
-            json_field("j.value", "$.id", JsonType::Integer)
+            conn.dialect()
+                .json_field("j.value", "$.kind", JsonType::Text),
+            conn.dialect()
+                .json_field("j.value", "$.id", JsonType::Integer)
         ),
-        [task],
+        sql_params![task],
         |r| r.get(0),
     )?)
 }
 
 /// Whether a planner of the runtime's is still to be opened for draft
-/// `task` ([`targets`]) at `now` (the queue's clock, Unix seconds) or one
+/// `task` ([`targets_in`]) at `now` (the queue's clock, Unix seconds) or one
 /// is open for it.
 pub(super) fn draft_planned(
     conn: &impl crate::infrastructure::sql_exec::SqlRead,
@@ -156,7 +154,8 @@ pub(super) fn insert_draft_origin(
     material: &Value,
     created_at: i64,
 ) -> Result<bool> {
-    let inserted = tx.execute(
+    let inserted = SqlWrite::execute(
+        tx,
         "INSERT OR IGNORE INTO draft_origins(task_id, origin, material, created_at)
          VALUES (?1, ?2, ?3, ?4)",
         sql_params![
@@ -187,14 +186,16 @@ impl SqliteQueue {
     ) -> Result<Vec<RegisteredFollowUp>> {
         ensure!(depth >= 0, "follow_up_depth must not be negative");
         let tx = self.write_tx("register_follow_ups")?;
-        let source: TaskId =
-            tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [run], |row| {
-                row.get(0)
-            })?;
+        let source: TaskId = SqlRead::query_row(
+            &tx,
+            "SELECT task_id FROM task_runs WHERE id=?1",
+            sql_params![run],
+            |row| row.get(0),
+        )?;
         let source_goal = read_task(&tx, source)?.goal_id();
         let source_open = goal_open(&tx, source_goal)?;
         let goal_closed = source_goal.is_some() && !source_open;
-        let events = super::runtime_store::run_events_of(&tx, run)?;
+        let events = super::runtime_store::run_events_of_port(&tx, run)?;
         let history = RunHistory::from_events(&events);
         let registered: HashSet<u64> = history.registered_follow_ups().into_iter().collect();
         let mut reviewed: HashSet<ReviewFollowUpKey> =
@@ -240,9 +241,10 @@ impl SqliteQueue {
                     &self.generators.clock.timestamp(),
                     Creator::Draft(DraftOrigin::FollowUp),
                 )?;
-                tx.execute(
+                SqlWrite::execute(
+                    &tx,
                     "UPDATE tasks SET follow_up_depth=?2 WHERE id=?1",
-                    params![created.id(), depth],
+                    sql_params![created.id(), depth],
                 )?;
                 let material = with_whence(json!({
                     "source_task_id": source, "source_run_id": run,
@@ -327,7 +329,7 @@ impl SqliteQueue {
     }
 
     pub fn draft_origin(&self, task: TaskId) -> Result<Option<(DraftOrigin, Value)>> {
-        draft_origin(&self.conn, task)
+        draft_origin(&*self.conn, task)
     }
 
     /// Set, change or clear the revisit time of the draft `task`
@@ -359,7 +361,7 @@ impl SqliteQueue {
     ) -> Result<Option<DraftRevisit>> {
         let now = self.generators.clock.now();
         let tx = self.write_tx("revisit_draft_authorized")?;
-        super::sqlite::check_authorized(&tx, task, authorized)?;
+        super::task_store::check_authorized(&tx, task, authorized)?;
         let status = read_task(&tx, task)?.status();
         ensure!(
             status == TaskStatus::Draft,
@@ -369,23 +371,25 @@ impl SqliteQueue {
         let before = read_revisit(&tx, task)?;
         match change {
             RevisitChange::Set { at, note } => {
-                let exhausted: bool = tx.query_row(
+                let exhausted: bool = SqlRead::query_row(
+                    &tx,
                     &format!(
                         "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind='{}')",
                         event_kind::DRAFT_PLANNER_EXHAUSTED
                     ),
-                    [task],
+                    sql_params![task],
                     |r| r.get(0),
                 )?;
                 if let Some(why) = revisit_refusal(role, exhausted) {
                     anyhow::bail!("task {task} gets no revisit time from a {role}: {why}");
                 }
                 let note = note.filter(|note| !note.trim().is_empty());
-                tx.execute(
+                SqlWrite::execute(
+                    &tx,
                     "INSERT OR REPLACE INTO draft_revisits(task_id, revisit_at, note, set_by,
                          set_by_id, created_at, opened_at, planner_id)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL)",
-                    params![task, at, note, role, actor, now],
+                    sql_params![task, at, note, role, actor, now],
                 )?;
                 let after = read_revisit(&tx, task)?.context("the revisit was just written")?;
                 event(
@@ -406,7 +410,11 @@ impl SqliteQueue {
             }
             RevisitChange::Clear => {
                 let before = before.with_context(|| format!("task {task} has no revisit time"))?;
-                tx.execute("DELETE FROM draft_revisits WHERE task_id=?1", [task])?;
+                SqlWrite::execute(
+                    &tx,
+                    "DELETE FROM draft_revisits WHERE task_id=?1",
+                    sql_params![task],
+                )?;
                 event(
                     &tx,
                     task,
@@ -429,27 +437,29 @@ impl SqliteQueue {
     /// Where every draft with an origin came from; an origin this binary
     /// does not know is left out.
     pub fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>> {
-        Ok(self
-            .conn
-            .prepare("SELECT task_id, origin FROM draft_origins")?
-            .query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<(TaskId, String)>>>()?
-            .into_iter()
-            .filter_map(|(task, origin)| Some((task, origin.parse().ok()?)))
-            .collect())
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT task_id, origin FROM draft_origins",
+            sql_params![],
+            |r| Ok((r.get(0)?, r.get::<_, String>(1)?)),
+        )?
+        .into_iter()
+        .filter_map(|(task, origin)| Some((task, origin.parse().ok()?)))
+        .collect())
     }
 
     pub fn planner_drafts(&self) -> Result<Vec<DraftTarget>> {
         let now = self.generators.clock.now();
-        let ids: Vec<TaskId> = self
-            .conn
-            .prepare(&format!("{} ORDER BY t.id", targets(now)))?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let open = open_bundle_keys(&self.conn)?;
+        let ids: Vec<TaskId> = SqlRead::query_map(
+            &*self.conn,
+            &format!("{} ORDER BY t.id", targets_in(self.conn.dialect(), now)),
+            sql_params![],
+            |r| r.get(0),
+        )?;
+        let open = open_bundle_keys(&*self.conn)?;
         Ok(ids
             .into_iter()
-            .map(|id| target(&self.conn, id, now))
+            .map(|id| target(&*self.conn, id, now))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .filter(|target| !open.contains(&target.bundle_key()))
@@ -474,7 +484,7 @@ impl SqliteQueue {
         let lead_target = match answer {
             None => waiting(&tx, lead, now)?,
             Some(ask) => {
-                let ask = read_ask(&port_tx(&tx), ask)?;
+                let ask = read_ask(&tx, ask)?;
                 // An answer about a draft an open planning request names
                 // waits for the request's planner (ADR-t1540-1).
                 if ask.task_id == Some(lead)
@@ -553,25 +563,28 @@ impl SqliteQueue {
             tx.commit()?;
             return Ok(DraftPlannerStart::Exhausted { drafts: exhausted });
         }
-        let planner = PlannerId::new(tx.insert_id(
+        let planner = PlannerId::new(SqlWrite::insert_id(
+            &tx,
             "INSERT INTO planners(origin, draft_task_id, created_at) VALUES (?1, ?2, ?3)",
-            params![PlannerOrigin::Runtime.as_str(), members[0].0, now],
+            sql_params![PlannerOrigin::Runtime.as_str(), members[0].0, now],
         )?);
         for revisit in &revisits {
             let taken = members.iter().any(|(id, _)| *id == revisit.task_id);
             use_revisit(&tx, revisit, taken.then_some(planner), now)?;
         }
         let (origin, _) = planned_origin(&tx, members[0].0)?.context("the draft has no origin")?;
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO draft_bundles(planner_id, origin, key_kind, key_value, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![planner, origin.as_str(), key.kind.as_str(), key.value, now],
+            sql_params![planner, origin.as_str(), key.kind.as_str(), key.value, now],
         )?;
         let ids: Vec<TaskId> = members.iter().map(|(id, _)| *id).collect();
         for &(id, attempt) in &members {
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "INSERT INTO draft_bundle_members(planner_id, task_id, attempt) VALUES (?1, ?2, ?3)",
-                params![planner, id, i64::try_from(attempt)?],
+                sql_params![planner, id, i64::try_from(attempt)?],
             )?;
             let task = read_task(&tx, id)?;
             let mut payload = json!({
@@ -611,13 +624,12 @@ impl SqliteQueue {
     /// The drafts a planner of the runtime's works on: its bundle's, or the
     /// draft it was opened for before bundles.
     pub fn planner_draft_tasks(&self, planner: PlannerId) -> Result<Vec<TaskId>> {
-        let members: Vec<TaskId> = self
-            .conn
-            .prepare(
-                "SELECT task_id FROM draft_bundle_members WHERE planner_id=?1 ORDER BY task_id",
-            )?
-            .query_map([planner], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let members: Vec<TaskId> = SqlRead::query_map(
+            &*self.conn,
+            "SELECT task_id FROM draft_bundle_members WHERE planner_id=?1 ORDER BY task_id",
+            sql_params![planner],
+            |r| r.get(0),
+        )?;
         if !members.is_empty() {
             return Ok(members);
         }
@@ -626,28 +638,27 @@ impl SqliteQueue {
 
     /// The bundle `planner` was opened for, with what became of each draft.
     pub fn draft_bundle(&self, planner: PlannerId) -> Result<Option<DraftBundleView>> {
-        bundle_view(&self.conn, planner)
+        bundle_view(&*self.conn, planner)
     }
 
     /// Where the task came from, if the runtime or a job made it
     /// (ADR-t807-1).
     pub fn task_origin(&self, task: TaskId) -> Result<Option<TaskOrigin>> {
-        task_origin(&self.conn, task)
+        task_origin(&*self.conn, task)
     }
 
     pub fn planner_answers(&self) -> Result<Vec<Ask>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT * FROM asks WHERE kind='planner_question'
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM asks WHERE kind='planner_question'
                  AND answered_at IS NOT NULL AND closed_at IS NULL ORDER BY id",
-            )?
-            .query_map([], |row| with_row(row, ask_row))?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![],
+            ask_row,
+        )?)
     }
 
     pub fn planner_answer_route(&self, ask: &Ask) -> Result<PlannerAnswerRoute> {
-        route_of(&self.conn, ask)
+        route_of(&*self.conn, ask)
     }
 
     /// The `planner_question`s a planner asked and nobody closed about the
@@ -660,23 +671,22 @@ impl SqliteQueue {
     /// ([`route_of`] sends its answer the same way).
     pub fn proposal_questions(&self, proposal: ProposalId) -> Result<Vec<Ask>> {
         let parked = serde_json::to_string(&self.replaced_tasks(proposal)?)?;
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT a.* FROM asks a JOIN tasks t ON t.id=a.task_id
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT a.* FROM asks a JOIN tasks t ON t.id=a.task_id
                  WHERE (t.proposal_id=?1 OR t.id IN (SELECT value FROM json_each(?2)))
                  AND a.kind='planner_question' AND a.run_id IS NULL
                  AND a.asked_by='planner' AND a.closed_at IS NULL ORDER BY a.id",
-            )?
-            .query_map(params![proposal, parked], |row| with_row(row, ask_row))?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![proposal, parked],
+            ask_row,
+        )?)
     }
 
     /// The parked tasks whose replacement proposal is `proposal`
     /// ([`parked_tasks`]).
     pub fn replaced_tasks(&self, proposal: ProposalId) -> Result<Vec<TaskId>> {
         Ok(parked_tasks(
-            &replan_links(&self.conn, "proposal_id", proposal.as_i64())?,
+            &replan_links(&*self.conn, "proposal_id", proposal.as_i64())?,
             proposal,
         ))
     }
@@ -695,7 +705,7 @@ impl SqliteQueue {
         workspace: &str,
     ) -> Result<bool> {
         let tx = self.write_tx("claim_planner_answer")?;
-        let ask = read_ask(&port_tx(&tx), id)?;
+        let ask = read_ask(&tx, id)?;
         // A question about a finding may be about no task: its claim is on
         // the finding's target (ADR-0044 decision 19).
         if ask.task_id.is_none() && ask.finding_id.is_none() && ask.request_id.is_none() {
@@ -705,16 +715,21 @@ impl SqliteQueue {
             return Ok(false);
         }
         let now = self.generators.clock.now();
-        let claimed: bool = tx.query_row(
+        let claimed: bool = SqlRead::query_row(
+            &tx,
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
              AND {ask_id}=?1
              AND COALESCE({claimed_at}, 0) > ?2)",
                 event_kind::PLANNER_ANSWER_CLAIMED,
-                ask_id = json_field("payload", "$.ask_id", JsonType::Integer),
-                claimed_at = json_field("payload", "$.claimed_at", JsonType::Integer),
+                ask_id = tx
+                    .dialect()
+                    .json_field("payload", "$.ask_id", JsonType::Integer),
+                claimed_at = tx
+                    .dialect()
+                    .json_field("payload", "$.claimed_at", JsonType::Integer),
             ),
-            params![id, now - PLANNER_ANSWER_CLAIM_SECS],
+            sql_params![id, now - PLANNER_ANSWER_CLAIM_SECS],
             |r| r.get(0),
         )?;
         if claimed {
@@ -724,7 +739,7 @@ impl SqliteQueue {
         match (ask.finding_id, ask.task_id) {
             // A question about a request is the queue's (ADR-t1394-1).
             _ if ask.request_id.is_some() => {
-                super::sqlite::record_queue_event_in(
+                super::store_writes::record_queue_event_in(
                     &tx,
                     EventKind::PlannerAnswerClaimed,
                     &payload,
@@ -748,18 +763,23 @@ impl SqliteQueue {
 
     pub fn close_planner_answer(&mut self, id: AskId, why: &str) -> Result<()> {
         let tx = self.write_tx("close_planner_answer")?;
-        let ask = read_ask(&port_tx(&tx), id)?;
+        let ask = read_ask(&tx, id)?;
         if ask.closed_at.is_some() {
             return Ok(());
         }
         ensure!(ask.answered_at.is_some(), "ask {id} is not answered");
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "UPDATE asks SET closed_at=?2 WHERE id=?1",
-            params![id, self.generators.clock.now()],
+            sql_params![id, self.generators.clock.now()],
         )?;
         let payload = json!({"ask_id": id, "reason": why});
         if ask.request_id.is_some() {
-            super::sqlite::record_queue_event_in(&tx, EventKind::PlannerAnswerClosed, &payload)?;
+            super::store_writes::record_queue_event_in(
+                &tx,
+                EventKind::PlannerAnswerClosed,
+                &payload,
+            )?;
         } else if let Some(finding) = ask.finding_id {
             let finding = super::findings::read_finding(&tx, finding)?;
             super::findings::finding_event(&tx, &finding, EventKind::PlannerAnswerClosed, payload)?;
@@ -771,32 +791,33 @@ impl SqliteQueue {
     }
 
     pub fn exhausted_drafts(&self) -> Result<Vec<Task>> {
-        let ids: Vec<TaskId> = self
-            .conn
-            .prepare(&format!(
+        let ids: Vec<TaskId> = SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "SELECT t.id FROM tasks t WHERE t.status='draft' AND EXISTS(
                      SELECT 1 FROM run_events e WHERE e.task_id=t.id
                      AND e.kind='{}') ORDER BY t.id",
                 event_kind::DRAFT_PLANNER_EXHAUSTED
-            ))?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+            ),
+            sql_params![],
+            |r| r.get(0),
+        )?;
         ids.into_iter()
-            .map(|id| read_task(&self.conn, id))
+            .map(|id| read_task(&*self.conn, id))
             .collect()
     }
 
     pub fn follow_up_depth(&self, task: TaskId) -> Result<i64> {
-        depth(&self.conn, task)
+        depth(&*self.conn, task)
     }
 
     pub fn set_follow_up_depth(&mut self, task: TaskId, depth: i64) -> Result<()> {
         ensure!(depth >= 0, "follow_up_depth must not be negative");
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "set_follow_up_depth",
                 "UPDATE tasks SET follow_up_depth=?2 WHERE id=?1",
-                params![task, depth],
+                sql_params![task, depth],
             )? == 1,
             "task {task} does not exist"
         );
@@ -859,7 +880,7 @@ impl DraftPlannerStore for SqliteQueue {
         SqliteQueue::replaced_tasks(self, proposal)
     }
     fn answer_request(&self, ask: &Ask) -> Result<Option<RequestId>> {
-        answer_request(&self.conn, ask)
+        answer_request(&*self.conn, ask)
     }
     fn claim_planner_answer(
         &mut self,
@@ -947,10 +968,13 @@ impl crate::application::DraftPlannerReads for SqliteQueue {
     }
 }
 
-fn is_target(conn: &Connection, draft: TaskId, now: i64) -> Result<bool> {
+fn is_target(conn: &impl SqlRead, draft: TaskId, now: i64) -> Result<bool> {
     Ok(conn.query_row(
-        &format!("SELECT EXISTS({} AND t.id=?1)", targets(now)),
-        [draft],
+        &format!(
+            "SELECT EXISTS({} AND t.id=?1)",
+            targets_in(conn.dialect(), now)
+        ),
+        sql_params![draft],
         |r| r.get(0),
     )?)
 }
@@ -959,7 +983,7 @@ fn is_target(conn: &Connection, draft: TaskId, now: i64) -> Result<bool> {
 /// open planner's bundle has its key (a draft of a piece of work whose
 /// other drafts a planner takes waits for it to end, and is then planned
 /// with what that planner left undecided).
-fn waiting(conn: &Connection, draft: TaskId, now: i64) -> Result<Option<DraftTarget>> {
+fn waiting(conn: &impl SqlRead, draft: TaskId, now: i64) -> Result<Option<DraftTarget>> {
     if !is_target(conn, draft, now)? {
         return Ok(None);
     }
@@ -968,14 +992,13 @@ fn waiting(conn: &Connection, draft: TaskId, now: i64) -> Result<Option<DraftTar
 }
 
 /// The keys of the bundles whose planner is not closed.
-fn open_bundle_keys(conn: &Connection) -> Result<Vec<BundleKey>> {
-    let rows: Vec<(String, String)> = conn
-        .prepare(
-            "SELECT b.key_kind, b.key_value FROM draft_bundles b
+fn open_bundle_keys(conn: &impl SqlRead) -> Result<Vec<BundleKey>> {
+    let rows: Vec<(String, String)> = conn.query_map(
+        "SELECT b.key_kind, b.key_value FROM draft_bundles b
              JOIN planners p ON p.id=b.planner_id WHERE p.closed_at IS NULL",
-        )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+        sql_params![],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     Ok(rows
         .into_iter()
         .filter_map(|(kind, value)| {
@@ -1001,14 +1024,10 @@ fn extend(payload: &mut Value, more: serde_json::Map<String, Value>) {
 /// `reviewed_proposal_id`), and a follow_up's `category` (ADR-t947-3).
 /// Empty for a task without an origin.
 pub(super) fn origin_fields(
-    conn: &Connection,
+    conn: &impl SqlRead,
     task: TaskId,
 ) -> Result<serde_json::Map<String, Value>> {
-    origin_fields_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        task,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+    origin_fields_port(conn, task)
 }
 
 /// [`origin_fields`] of a draft of `origin` with `material`.
@@ -1041,50 +1060,47 @@ fn material_fields(
 /// Record what became of each draft of `planner`'s bundle not settled yet
 /// (`draft_bundle_members.outcome`, `draft_planner_settled`), inside the
 /// caller's write transaction, as the planner ends (ADR-t807-1).
-pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> Result<()> {
+pub(super) fn settle_bundle(conn: &impl EventTx, planner: PlannerId, now: i64) -> Result<()> {
     // A planner asked to exit because only a person's answer was left
     // leaves each draft whose question its `planner_answer_wait` names,
     // still open, waiting for that answer (ADR-t1704-1 decision 5).
     let answer_wait: bool = conn.query_row(
         "SELECT answer_wait_at IS NOT NULL FROM planners WHERE id=?1",
-        [planner],
+        sql_params![planner],
         |r| r.get(0),
     )?;
-    let members: Vec<TaskId> = conn
-        .prepare(
-            "SELECT task_id FROM draft_bundle_members
+    let members: Vec<TaskId> = conn.query_map(
+        "SELECT task_id FROM draft_bundle_members
              WHERE planner_id=?1 AND outcome IS NULL ORDER BY task_id",
-        )?
-        .query_map([planner], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+        sql_params![planner],
+        |r| r.get(0),
+    )?;
     for task_id in members {
         let task = read_task(conn, task_id)?;
         let proposal: Option<i64> = conn.query_row(
             "SELECT proposal_id FROM tasks WHERE id=?1",
-            [task_id],
+            sql_params![task_id],
             |r| r.get(0),
         )?;
         let (outcome, proposal, duplicate_of) = match task.status() {
             TaskStatus::Draft => {
                 // Kept by an answer, or with a revisit time to come
                 // (ADR-t1540-1).
-                let kept: bool = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM asks WHERE task_id=?1 AND run_id IS NULL
+                let kept: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM asks WHERE task_id=?1 AND run_id IS NULL
                      AND kind IN ('planner_question','follow_up') AND trim(answer)='keep_draft')
                      OR EXISTS(SELECT 1 FROM draft_revisits WHERE task_id=?1 AND opened_at IS NULL)",
-                    [task_id],
+                    sql_params![task_id],
                     |r| r.get(0),
                 )?;
                 let asked: bool = answer_wait
-                    && conn.query_row(
-                        &format!(
+                    && conn.query_row(&format!(
                             "SELECT EXISTS(SELECT 1 FROM asks a, run_events e, json_each(e.payload,'$.asks') j
                              WHERE a.task_id=?1 AND a.run_id IS NULL AND a.kind='planner_question'
                              AND a.closed_at IS NULL AND e.kind='{}'
                              AND {planner_id}=?2 AND j.value=a.id)",
-                            event_kind::PLANNER_ANSWER_WAIT, planner_id = json_field("e.payload", "$.planner_id", JsonType::Integer),
+                            event_kind::PLANNER_ANSWER_WAIT, planner_id = conn.dialect().json_field("e.payload", "$.planner_id", JsonType::Integer),
 ),
-                        params![task_id, planner],
+                        sql_params![task_id, planner],
                         |r| r.get(0),
                     )?;
                 let outcome = if kept {
@@ -1098,8 +1114,8 @@ pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> 
             }
             // Only a duplicate's reasons make it one; a draft whose content
             // another task took is canceled (ADR-t947-4 decision 2).
-            TaskStatus::Canceled => match super::sqlite::cancel_of(conn, task_id)? {
-                Some(super::sqlite::RecordedCancel {
+            TaskStatus::Canceled => match super::store_rows::cancel_of(conn, task_id)? {
+                Some(super::store_rows::RecordedCancel {
                     duplicate_of: Some(target),
                     reason,
                 }) if cancel_reason::pairs_as_duplicate(reason.as_deref()) => {
@@ -1109,10 +1125,9 @@ pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> 
             },
             _ => (DraftOutcome::Submitted, proposal, None),
         };
-        conn.execute(
-            "UPDATE draft_bundle_members SET outcome=?3, proposal_id=?4, duplicate_of=?5, settled_at=?6
+        conn.execute("UPDATE draft_bundle_members SET outcome=?3, proposal_id=?4, duplicate_of=?5, settled_at=?6
              WHERE planner_id=?1 AND task_id=?2",
-            params![planner, task_id, outcome.as_str(), proposal, duplicate_of, now],
+            sql_params![planner, task_id, outcome.as_str(), proposal, duplicate_of, now],
         )?;
         let mut payload = json!({
             "planner_id": planner,
@@ -1128,25 +1143,17 @@ pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> 
 }
 
 /// The bundle `planner` was opened for, with its drafts.
-fn bundle_view(conn: &Connection, planner: PlannerId) -> Result<Option<DraftBundleView>> {
-    bundle_view_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        planner,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+fn bundle_view(conn: &impl SqlRead, planner: PlannerId) -> Result<Option<DraftBundleView>> {
+    bundle_view_port(conn, planner)
 }
 
 /// Where the task came from (ADR-t807-1), with the bundles that took it;
 /// `None` for a task without an origin.
-pub(super) fn task_origin(conn: &Connection, task: TaskId) -> Result<Option<TaskOrigin>> {
-    task_origin_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        task,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+pub(super) fn task_origin(conn: &impl SqlRead, task: TaskId) -> Result<Option<TaskOrigin>> {
+    task_origin_port(conn, task)
 }
 
-fn target(conn: &Connection, draft: TaskId, now: i64) -> Result<DraftTarget> {
+fn target(conn: &impl SqlRead, draft: TaskId, now: i64) -> Result<DraftTarget> {
     let (origin, material) = planned_origin(conn, draft)?.context("the draft has no origin")?;
     Ok(DraftTarget {
         task: read_task(conn, draft)?,
@@ -1160,35 +1167,27 @@ fn target(conn: &Connection, draft: TaskId, now: i64) -> Result<DraftTarget> {
 /// Where a draft the runtime plans came from: its origin
 /// ([`draft_origin`]), or `revisit` for a draft without one that was given
 /// a revisit time (ADR-t1540-1), whose material is empty.
-fn planned_origin(conn: &Connection, task: TaskId) -> Result<Option<(DraftOrigin, Value)>> {
-    planned_origin_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        task,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+fn planned_origin(conn: &impl SqlRead, task: TaskId) -> Result<Option<(DraftOrigin, Value)>> {
+    planned_origin_port(conn, task)
 }
 
 /// The revisit time of `task` (ADR-t1540-1), if it has one.
-pub(super) fn read_revisit(conn: &Connection, task: TaskId) -> Result<Option<DraftRevisit>> {
-    read_revisit_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        task,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+pub(super) fn read_revisit(conn: &impl SqlRead, task: TaskId) -> Result<Option<DraftRevisit>> {
+    read_revisit_port(conn, task)
 }
 
 /// Use the revisit time that came for its draft, inside the caller's write
 /// transaction, as `planner` opens for it (`None`: its planners were used
 /// up), with `draft_revisit_due` (ADR-t1540-1).
 fn use_revisit(
-    conn: &Connection,
+    conn: &impl EventTx,
     revisit: &DraftRevisit,
     planner: Option<PlannerId>,
     now: i64,
 ) -> Result<()> {
     conn.execute(
         "UPDATE draft_revisits SET opened_at=?2, planner_id=?3 WHERE task_id=?1",
-        params![revisit.task_id, now, planner],
+        sql_params![revisit.task_id, now, planner],
     )?;
     event(
         conn,
@@ -1211,21 +1210,17 @@ fn use_revisit(
 /// that proposal: a later proposal it joins makes the row stale), else its
 /// `draft_origins` row.
 pub(super) fn draft_origin(
-    conn: &Connection,
+    conn: &impl SqlRead,
     task: TaskId,
 ) -> Result<Option<(DraftOrigin, Value)>> {
-    draft_origin_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        task,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+    draft_origin_port(conn, task)
 }
 
 /// The planners of the runtime's opened for `draft` that count to
 /// [`MAX_DRAFT_PLANNERS`]: each `draft_planner_opened`, but for those that
 /// left it waiting for the answer of its `planner_question` as they ended
 /// for that wait alone (`answer_wait`, ADR-t1704-1 decision 5).
-fn planners_opened(conn: &Connection, draft: TaskId) -> Result<usize> {
+fn planners_opened(conn: &impl SqlRead, draft: TaskId) -> Result<usize> {
     let count: i64 = conn.query_row(
         &format!(
             "SELECT (SELECT count(*) FROM run_events WHERE task_id=?1 AND kind='{}')
@@ -1233,7 +1228,7 @@ fn planners_opened(conn: &Connection, draft: TaskId) -> Result<usize> {
             event_kind::DRAFT_PLANNER_OPENED,
             DraftOutcome::AnswerWait.as_str()
         ),
-        [draft],
+        sql_params![draft],
         |r| r.get(0),
     )?;
     Ok(usize::try_from(count.max(0))?)
@@ -1271,8 +1266,8 @@ struct ReplanLink {
 
 /// The operations of `column` (`task_id` or `proposal_id`) `id`, oldest
 /// first.
-fn replan_links(conn: &Connection, column: &str, id: i64) -> Result<Vec<ReplanLink>> {
-    replan_links_port(&port_tx(conn), column, id).map_err(native_error)
+fn replan_links(conn: &impl SqlRead, column: &str, id: i64) -> Result<Vec<ReplanLink>> {
+    replan_links_port(conn, column, id)
 }
 
 fn replan_links_port(
@@ -1433,8 +1428,8 @@ fn answer_route(
 /// its revisit time, ADR-t1540-1) or a
 /// draft that moved on; else a new planner for a draft that still waits
 /// (unless its planners are used up); else a person's.
-pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRoute> {
-    route_of_port(&port_tx(conn), ask).map_err(native_error)
+pub(super) fn route_of(conn: &impl SqlRead, ask: &Ask) -> Result<PlannerAnswerRoute> {
+    route_of_port(conn, ask)
 }
 
 pub(super) fn route_of_port(
@@ -1462,9 +1457,7 @@ pub(super) fn route_of_port(
     {
         return Ok(route);
     }
-    let planner: Option<i64> = conn
-        .query_row(
-            "SELECT p.id FROM planners p JOIN tasks t ON t.id=?1
+    let planner: Option<i64> = conn.query_row("SELECT p.id FROM planners p JOIN tasks t ON t.id=?1
              WHERE p.origin='runtime' AND p.closed_at IS NULL AND p.answer_wait_at IS NULL
              AND (p.draft_task_id=t.id OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)
                   OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id AND m.task_id=t.id))
@@ -1576,8 +1569,8 @@ pub(super) fn request_of_draft(
 /// The request whose planner of the runtime's carries the answer of
 /// `ask`: the request it is about, or the one whose planner added the
 /// draft it is about ([`request_of_draft`]).
-pub(super) fn answer_request(conn: &Connection, ask: &Ask) -> Result<Option<RequestId>> {
-    answer_request_port(&port_tx(conn), ask).map_err(native_error)
+pub(super) fn answer_request(conn: &impl SqlRead, ask: &Ask) -> Result<Option<RequestId>> {
+    answer_request_port(conn, ask)
 }
 
 pub(super) fn answer_request_port(
@@ -1606,8 +1599,8 @@ fn read_planner(
     .with_context(|| format!("planner {id} does not exist"))
 }
 
-fn depth(conn: &Connection, task: TaskId) -> Result<i64> {
-    depth_port(&port_tx(conn), task).map_err(native_error)
+fn depth(conn: &impl SqlRead, task: TaskId) -> Result<i64> {
+    depth_port(conn, task)
 }
 
 fn depth_port(conn: &impl crate::infrastructure::sql_exec::SqlRead, task: TaskId) -> Result<i64> {
@@ -1621,8 +1614,8 @@ fn depth_port(conn: &impl crate::infrastructure::sql_exec::SqlRead, task: TaskId
 }
 
 /// Whether the task's goal takes tasks: it has one and it is not closed.
-fn goal_open(conn: &Connection, goal: Option<GoalId>) -> Result<bool> {
-    goal_open_port(&port_tx(conn), goal).map_err(native_error)
+fn goal_open(conn: &impl SqlRead, goal: Option<GoalId>) -> Result<bool> {
+    goal_open_port(conn, goal)
 }
 
 fn goal_open_port(
@@ -1766,14 +1759,12 @@ pub(super) fn record_adoptions(conn: &impl EventTx, adoptions: &[Adoption]) -> R
             continue;
         }
         // The bundle's planner that submits it, if one works on it.
-        let planner: Option<i64> = conn
-            .query_row(
-                "SELECT m.planner_id FROM draft_bundle_members m JOIN planners p ON p.id=m.planner_id
+        let planner: Option<i64> = conn.query_row("SELECT m.planner_id FROM draft_bundle_members m JOIN planners p ON p.id=m.planner_id
                  WHERE m.task_id=?1 AND p.closed_at IS NULL ORDER BY m.planner_id DESC LIMIT 1",
-                sql_params![adoption.task],
-                |r| r.get(0),
-            )
-            .optional()?;
+            sql_params![adoption.task],
+            |r| r.get(0),
+        )
+        .optional()?;
         let mut payload = json!({
             "task_id": adoption.task,
             "origin": origin,
@@ -2002,8 +1993,7 @@ pub(super) fn record_reopened_port(
     material: &Value,
     now: i64,
 ) -> Result<()> {
-    conn.execute(
-        "INSERT INTO draft_reopens(task_id, material, created_at) VALUES (?1, ?2, ?3)
+    conn.execute("INSERT INTO draft_reopens(task_id, material, created_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(task_id) DO UPDATE SET material=excluded.material, created_at=excluded.created_at",
         crate::infrastructure::sql_exec::sql_params![task, serde_json::to_string(material)?, now],
     )?;
@@ -2147,7 +2137,7 @@ mod tests {
         assert!(error.contains("planner_question"), "{error}");
         assert!(error.contains("3 steps"), "{error}");
         assert_eq!(
-            read_task(&queue.conn, deep).unwrap().status(),
+            read_task(&*queue.conn, deep).unwrap().status(),
             TaskStatus::Draft
         );
         let orphan = follow_up(&mut queue, None, 1);
@@ -2231,7 +2221,7 @@ mod tests {
             (proposal.as_i64(), "it must use the new API"),
         ] {
             event(
-                &queue.conn,
+                &super::super::sql_exec::sqlite::port_tx(&queue.conn),
                 reopened,
                 None,
                 EventKind::TaskReopened,
@@ -2328,7 +2318,7 @@ mod tests {
                 .as_deref(),
             Some("answer_wait")
         );
-        assert_eq!(planners_opened(&queue.conn, runtime).unwrap(), 0);
+        assert_eq!(planners_opened(&*queue.conn, runtime).unwrap(), 0);
         let DraftPlannerStart::Opened {
             planner, members, ..
         } = queue
@@ -2339,7 +2329,7 @@ mod tests {
         };
         assert_eq!(members[0].1, 1);
         queue.close_planner(planner.id, None).unwrap();
-        assert_eq!(planners_opened(&queue.conn, runtime).unwrap(), 1);
+        assert_eq!(planners_opened(&*queue.conn, runtime).unwrap(), 1);
     }
 
     /// An answer whose sending to its draft's planner failed is handed
@@ -2413,7 +2403,7 @@ mod tests {
                 .as_deref(),
             Some("answer_wait")
         );
-        assert_eq!(planners_opened(&queue.conn, runtime).unwrap(), 0);
+        assert_eq!(planners_opened(&*queue.conn, runtime).unwrap(), 0);
         assert!(matches!(
             queue
                 .open_draft_planner(&[runtime], Some(asked.id))
@@ -2614,7 +2604,7 @@ mod tests {
                 .unwrap()
         );
         queue.close_planner(planner.id, None).unwrap();
-        assert_eq!(planners_opened(&queue.conn, mine).unwrap(), 0);
+        assert_eq!(planners_opened(&*queue.conn, mine).unwrap(), 0);
         // The same planner ended otherwise counts.
         let other = draft(&mut queue, "other");
         set(&mut queue, other, 0, "planner").unwrap();
@@ -2624,7 +2614,7 @@ mod tests {
             panic!("the revisit opens a planner");
         };
         queue.close_planner(planner.id, None).unwrap();
-        assert_eq!(planners_opened(&queue.conn, other).unwrap(), 1);
+        assert_eq!(planners_opened(&*queue.conn, other).unwrap(), 1);
     }
 
     fn set(queue: &mut SqliteQueue, task: TaskId, at: i64, role: &str) -> Result<DraftRevisit> {
