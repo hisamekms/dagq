@@ -13,34 +13,30 @@ use crate::domain::task_replan::{
     ContinuationRecord, GuardedStep, first_resume_of_continuation, restored_now,
 };
 use crate::domain::{AskKind, EventKind, run_phase};
-use crate::infrastructure::sql_dialect::{JsonType, json_field};
+use crate::infrastructure::sql_dialect::JsonType;
+use crate::infrastructure::sql_exec::{SqlRead, SqlSavepoint, SqlSavepoints, SqlWrite};
 
 impl SqliteQueue {
     /// The runs whose lease carries `token`, oldest first: what a supervisor
     /// that exec'd another binary under the same token picks up again.
     pub fn runs_leased_by(&self, token: &LeaseToken) -> Result<Vec<TaskRun>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT r.* FROM task_runs r JOIN run_leases l ON l.run_id=r.id
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT r.* FROM task_runs r JOIN run_leases l ON l.run_id=r.id
                  WHERE l.token=?1 ORDER BY r.rowid",
-            )?
-            .query_map([token], run_row(&self.runs_dir))?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![token],
+            run_row(&self.runs_dir),
+        )?)
     }
 
     /// The unclosed asks of the run, answered or not, oldest first.
     pub fn unclosed_run_asks(&self, run_id: &RunId) -> Result<Vec<crate::domain::Ask>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id")?
-            .query_map([run_id], |row| {
-                crate::infrastructure::sql_exec::sqlite::with_row(
-                    row,
-                    crate::infrastructure::asks::ask_row,
-                )
-            })?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id",
+            sql_params![run_id],
+            crate::infrastructure::asks::ask_row,
+        )?)
     }
 
     /// `running`, `validating`, `awaiting_integration` and `needs_session`
@@ -51,14 +47,14 @@ impl SqliteQueue {
     /// `needs_session` one while it is resumed or waits to land (task 356). Runs in other statuses
     /// and runs without a lease are not adoptable, so they are not listed.
     pub fn runs_leased_by_others(&self, token: &LeaseToken) -> Result<Vec<LeasedRun>> {
-        let mut statement = self.conn.prepare(
+        let rows = SqlRead::query_map(
+            &*self.conn,
             "SELECT r.*, l.token, l.pid, l.heartbeat_at FROM task_runs r
              JOIN run_leases l ON l.run_id=r.id
              WHERE r.status IN ('running','validating','awaiting_integration','needs_session') AND l.token<>?1
              ORDER BY r.rowid",
-        )?;
-        let rows = statement
-            .query_map([token], |r| {
+            sql_params![token],
+            |r| {
                 let run = run_row(&self.runs_dir)(r)?;
                 let lease = RunLease {
                     run_id: run.id().clone(),
@@ -67,18 +63,17 @@ impl SqliteQueue {
                     heartbeat_at: r.get("heartbeat_at")?,
                 };
                 Ok((run, lease))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            },
+        )?;
         rows.into_iter()
             .map(|(run, lease)| {
-                let wrapper = self
-                    .conn
-                    .query_row(
-                        "SELECT * FROM run_processes WHERE run_id=?1 AND role='wrapper'",
-                        [&run.id()],
-                        process_row,
-                    )
-                    .optional()?;
+                let wrapper = SqlRead::query_row(
+                    &*self.conn,
+                    "SELECT * FROM run_processes WHERE run_id=?1 AND role='wrapper'",
+                    sql_params![&run.id()],
+                    process_row,
+                )
+                .optional()?;
                 Ok(LeasedRun {
                     run,
                     lease,
@@ -110,34 +105,36 @@ impl SqliteQueue {
     ) -> Result<Option<TaskRun>> {
         let tx = self.write_tx("adopt_run")?;
         let now = self.generators.clock.now();
-        let lease = tx
-            .query_row(
-                "SELECT l.run_id,l.token,l.pid,l.heartbeat_at FROM run_leases l
+        let lease = SqlRead::query_row(
+            &tx,
+            "SELECT l.run_id,l.token,l.pid,l.heartbeat_at FROM run_leases l
                  JOIN task_runs r ON r.id=l.run_id
                  WHERE l.run_id=?1 AND l.token=?2
                  AND r.status IN ('running','validating','awaiting_integration','needs_session')",
-                params![id, previous_token],
-                lease_row,
-            )
-            .optional()?;
+            sql_params![id, previous_token],
+            lease_row,
+        )
+        .optional()?;
         let Some(lease) = lease else {
             return Ok(None);
         };
         if !lease_is_stale(&lease, now) {
             return Ok(None);
         }
-        let updated = tx.execute(
+        let updated = SqlWrite::execute(
+            &tx,
             "UPDATE run_leases SET token=?3,pid=?4,heartbeat_at=?5
              WHERE run_id=?1 AND token=?2",
-            params![id, previous_token, token, pid, now],
+            sql_params![id, previous_token, token, pid, now],
         )?;
         if updated == 0 {
             return Ok(None);
         }
         ensure!(
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "UPDATE task_runs SET supervisor_token=?2 WHERE id=?1",
-                params![id, token]
+                sql_params![id, token]
             )? == 1,
             "run does not exist"
         );
@@ -154,9 +151,10 @@ impl SqliteQueue {
                 "pid": pid,
             }),
         )?;
-        let result = tx.query_row(
+        let result = SqlRead::query_row(
+            &tx,
             "SELECT * FROM task_runs WHERE id=?1",
-            [id],
+            sql_params![id],
             run_row(&self.runs_dir),
         )?;
         tx.commit()?;
@@ -210,11 +208,12 @@ impl SqliteQueue {
         else {
             return Ok(None);
         };
-        let (leased, ask_open, task): (bool, bool, Option<String>) = tx.query_row(
+        let (leased, ask_open, task): (bool, bool, Option<String>) = SqlRead::query_row(
+            &tx,
             "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1),
                     EXISTS(SELECT 1 FROM asks WHERE run_id=?1 AND closed_at IS NULL),
                     (SELECT t.status FROM tasks t JOIN task_runs r ON r.task_id=t.id WHERE r.id=?1)",
-            [id],
+            sql_params![id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         let Some(task) = task else {
@@ -228,14 +227,14 @@ impl SqliteQueue {
             task: task.parse()?,
         };
         let events = run_events_of(&tx, id)?;
-        let build: Option<String> = tx
-            .query_row(
-                "SELECT binary_version FROM supervisors WHERE token=?1",
-                [token],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
+        let build: Option<String> = SqlRead::query_row(
+            &tx,
+            "SELECT binary_version FROM supervisors WHERE token=?1",
+            sql_params![token],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
         let build = build.as_deref();
         if crate::domain::stranded_landing::judge(seen, &events, build)
             != crate::domain::stranded_landing::Stranded::TakeUp
@@ -306,9 +305,10 @@ impl SqliteQueue {
         }) else {
             return Ok(None);
         };
-        let own = tx.execute(
+        let own = SqlWrite::execute(
+            &tx,
             "UPDATE run_leases SET heartbeat_at=?3 WHERE run_id=?1 AND token=?2",
-            params![id, token, now],
+            sql_params![id, token, now],
         )? == 1;
         if !own
             && !lease_in(
@@ -361,9 +361,10 @@ impl SqliteQueue {
         {
             return Ok(None);
         }
-        let own = tx.execute(
+        let own = SqlWrite::execute(
+            &tx,
             "UPDATE run_leases SET heartbeat_at=?3 WHERE run_id=?1 AND token=?2",
-            params![id, token, now],
+            sql_params![id, token, now],
         )? == 1;
         if !own
             && !lease_in(
@@ -416,9 +417,10 @@ impl SqliteQueue {
         if stored_run(&tx, id)?.is_none_or(|run| run.status() != RunStatus::NeedsSession) {
             return Ok(RestoreStart::Elsewhere);
         }
-        let own = tx.execute(
+        let own = SqlWrite::execute(
+            &tx,
             "UPDATE run_leases SET heartbeat_at=?3 WHERE run_id=?1 AND token=?2",
-            params![id, token, now],
+            sql_params![id, token, now],
         )? == 1;
         if !own
             && !lease_in(
@@ -457,9 +459,10 @@ impl SqliteQueue {
             return recorded;
         }
         let tx = self.write_tx("finish_restore")?;
-        if tx.execute(
+        if SqlWrite::execute(
+            &tx,
             "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-            params![id, token],
+            sql_params![id, token],
         )? == 1
         {
             run_event(
@@ -583,9 +586,10 @@ impl SqliteQueue {
         if !record_restore_in(&tx, id, op, generation, &operation, restored, now)? {
             return Ok(false);
         }
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-            params![id, token],
+            sql_params![id, token],
         )?;
         run_event(
             &tx,
@@ -605,7 +609,7 @@ impl SqliteQueue {
 /// Whether it was recorded: not a failure while another operation guards
 /// the task (the caller then commits nothing).
 fn record_restore_in(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &impl EventTx,
     id: &RunId,
     op: crate::domain::ReplanId,
     generation: i64,
@@ -628,14 +632,7 @@ fn record_restore_in(
                 json!({"operation_id": op, "generation": generation,
                        "snapshot_id": operation.snapshot_id, "reason": why}),
             )?;
-            return crate::infrastructure::replans::reopen_blocked(
-                &port_tx(tx),
-                op,
-                generation,
-                &why,
-                now,
-            )
-            .map_err(native_error);
+            return crate::infrastructure::replans::reopen_blocked(tx, op, generation, &why, now);
         }
     }
     Ok(true)
@@ -701,17 +698,19 @@ impl SqliteQueue {
         mut report: serde_json::Value,
     ) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::RunRecovered]))?;
+        let _read = self.read_before(Closing::Run(id, &[EventKind::RunRecovered]))?;
         let tx = self.write_tx("recover_run")?;
-        let fresh: bool = tx.query_row(
+        let fresh: bool = SqlRead::query_row(
+            &tx,
             "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1 AND heartbeat_at >= ?2-?3)",
-            params![id, self.generators.clock.now(), HEARTBEAT_TIMEOUT_SECS],
+            sql_params![id, self.generators.clock.now(), HEARTBEAT_TIMEOUT_SECS],
             |r| r.get(0),
         )?;
         ensure!(!fresh, "run lease heartbeat is fresh");
-        let registered: i64 = tx.query_row(
+        let registered: i64 = SqlRead::query_row(
+            &tx,
             "SELECT count(*) FROM run_processes WHERE run_id=?1",
-            [id],
+            sql_params![id],
             |r| r.get(0),
         )?;
         ensure!(
@@ -734,7 +733,11 @@ impl SqliteQueue {
             },
             run::interrupt,
         )?;
-        let leases_deleted = tx.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+        let leases_deleted = SqlWrite::execute(
+            &tx,
+            "DELETE FROM run_leases WHERE run_id=?1",
+            sql_params![id],
+        )?;
         report["previous_status"] = json!(previous);
         report["status"] = json!(run.status());
         report["lease_deleted"] = json!(leases_deleted == 1);
@@ -764,15 +767,14 @@ impl SqliteQueue {
         runs.into_iter()
             .map(|run| {
                 let lease = self.run_lease(run.id())?;
-                let wrapper = self
-                    .conn
-                    .query_row(
-                        "SELECT * FROM run_processes WHERE run_id=?1 AND role='wrapper'",
-                        [&run.id()],
-                        process_row,
-                    )
-                    .optional()?;
-                let resumes = resume_count(&self.conn, run.id())?;
+                let wrapper = SqlRead::query_row(
+                    &*self.conn,
+                    "SELECT * FROM run_processes WHERE run_id=?1 AND role='wrapper'",
+                    sql_params![&run.id()],
+                    process_row,
+                )
+                .optional()?;
+                let resumes = resume_count(&*self.conn, run.id())?;
                 Ok(ResumeCandidate {
                     run,
                     lease,
@@ -824,9 +826,10 @@ impl SqliteQueue {
             return Ok(None);
         };
         let run = if run.worker_mode() == crate::domain::worker::WorkerMode::Interactive {
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "UPDATE task_runs SET worker_mode='headless' WHERE id=?1",
-                [id],
+                sql_params![id],
             )?;
             run_event(
                 &tx,
@@ -988,7 +991,10 @@ impl SqliteQueue {
         let finished = run::resume_finished(status, payload);
         let mut payload = finished.payload;
         // The work of the resumed session, closed when it exited (task 514).
-        let resumed: i64 = tx.query_row(&last_resume_started_sql(), [id], |r| r.get(0))?;
+        let resumed: i64 =
+            SqlRead::query_row(&tx, &last_resume_started_sql(), sql_params![id], |r| {
+                r.get(0)
+            })?;
         if let Some(work) = crate::infrastructure::sessions::closed_work(
             &tx,
             id,
@@ -1008,9 +1014,10 @@ impl SqliteQueue {
         }
         run_event(&tx, id, finished.kind, payload)?;
         if !keep_lease {
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-                params![id, token],
+                sql_params![id, token],
             )?;
             run_event(
                 &tx,
@@ -1019,9 +1026,10 @@ impl SqliteQueue {
                 json!({"reason": "resume_finished"}),
             )?;
         }
-        let result = tx.query_row(
+        let result = SqlRead::query_row(
+            &tx,
             "SELECT * FROM task_runs WHERE id=?1",
-            [id],
+            sql_params![id],
             run_row(&self.runs_dir),
         )?;
         tx.commit()?;
@@ -1056,18 +1064,18 @@ impl SqliteQueue {
         launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<(TaskRun, usize)>> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::TriageStarted]))?;
+        let _read = self.read_before(Closing::Run(id, &[EventKind::TriageStarted]))?;
         let tx = self.write_tx("begin_triage")?;
         let now = self.generators.clock.now();
-        let run = tx
-            .query_row(
-                "SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
+        let run = SqlRead::query_row(
+            &tx,
+            "SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
                  WHERE r.id=?1 AND r.status IN ('failed','interrupted') AND t.status='in_progress'
                  AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id)",
-                [id],
-                run_row(&self.runs_dir),
-            )
-            .optional()?;
+            sql_params![id],
+            run_row(&self.runs_dir),
+        )
+        .optional()?;
         let Some(run) = run else {
             return Ok(None);
         };
@@ -1080,22 +1088,27 @@ impl SqliteQueue {
             crate::domain::TriageState::Waiting { until } if until <= now => {}
             _ => return Ok(None),
         }
-        let lease = tx
-            .query_row(
-                "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
-                [id],
-                lease_row,
-            )
-            .optional()?;
+        let lease = SqlRead::query_row(
+            &tx,
+            "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
+            sql_params![id],
+            lease_row,
+        )
+        .optional()?;
         if let Some(lease) = &lease {
             if !lease_is_stale(lease, now) {
                 return Ok(None);
             }
-            tx.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+            SqlWrite::execute(
+                &tx,
+                "DELETE FROM run_leases WHERE run_id=?1",
+                sql_params![id],
+            )?;
         }
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
-            params![id, token, holder_pid(&tx, token)?, now],
+            sql_params![id, token, holder_pid(&tx, token)?, now],
         )?;
         let attempt = RunHistory::from_events(&events).triage_attempts() + 1;
         run_event(
@@ -1145,12 +1158,13 @@ impl SqliteQueue {
         let kinds: Vec<EventKind> = std::iter::once(EventKind::TriageFinished)
             .chain(also.iter().map(|(kind, _)| *kind))
             .collect();
-        let _read = read_before(&self.conn, Closing::Run(id, &kinds))?;
+        let _read = self.read_before(Closing::Run(id, &kinds))?;
         let tx = self.write_tx("finish_triage")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
-        let run = tx.query_row(
+        let run = SqlRead::query_row(
+            &tx,
             "SELECT * FROM task_runs WHERE id=?1",
-            [id],
+            sql_params![id],
             run_row(&self.runs_dir),
         )?;
         ensure!(
@@ -1173,9 +1187,10 @@ impl SqliteQueue {
                 action,
                 &mut payload,
             )?;
-            let result = tx.query_row(
+            let result = SqlRead::query_row(
+                &tx,
                 "SELECT * FROM task_runs WHERE id=?1",
-                [id],
+                sql_params![id],
                 run_row(&self.runs_dir),
             )?;
             payload["action"] = json!(action.as_str());
@@ -1185,9 +1200,10 @@ impl SqliteQueue {
                 run_event(&tx, id, kind, payload)?;
             }
         }
-        let result = tx.query_row(
+        let result = SqlRead::query_row(
+            &tx,
             "SELECT * FROM task_runs WHERE id=?1",
-            [id],
+            sql_params![id],
             run_row(&self.runs_dir),
         )?;
         tx.commit()?;
@@ -1215,18 +1231,18 @@ impl SqliteQueue {
         config: resume::ResumeConfig,
     ) -> Result<Option<TaskRun>> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::TriageFinished]))?;
+        let _read = self.read_before(Closing::Run(id, &[EventKind::TriageFinished]))?;
         let tx = self.write_tx("exhaust_resumes")?;
         let now = self.generators.clock.now();
-        let run = tx
-            .query_row(
-                "SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
+        let run = SqlRead::query_row(
+            &tx,
+            "SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
                  WHERE r.id=?1 AND r.status='needs_session' AND t.status='in_progress'
                  AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id)",
-                [id],
-                run_row(&self.runs_dir),
-            )
-            .optional()?;
+            sql_params![id],
+            run_row(&self.runs_dir),
+        )
+        .optional()?;
         let Some(run) = run else {
             return Ok(None);
         };
@@ -1240,29 +1256,35 @@ impl SqliteQueue {
         }
         let events = run_events_of(&tx, id)?;
         let resumes = ResumeCount::of(&events);
-        let leased = tx
-            .query_row(
-                "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
-                [id],
-                lease_row,
-            )
-            .optional()?
-            .is_some_and(|lease| !lease_is_stale(&lease, now));
+        let leased = SqlRead::query_row(
+            &tx,
+            "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
+            sql_params![id],
+            lease_row,
+        )
+        .optional()?
+        .is_some_and(|lease| !lease_is_stale(&lease, now));
         if !resumes.exhausted(config) || leased {
             return Ok(None);
         }
         // Once per task, and only for a run still parked by a conflict
         // alone: checked again here, where no other supervisor can retry it.
         if matches!(exhaustion, Exhaustion::Inherit { .. }) {
-            let task_events: Vec<RunEvent> = tx
-                .prepare("SELECT * FROM run_events WHERE task_id=?1 ORDER BY id")?
-                .query_map([run.task_id()], event_row)?
-                .collect::<rusqlite::Result<_>>()?;
+            let task_events: Vec<RunEvent> = SqlRead::query_map(
+                &tx,
+                "SELECT * FROM run_events WHERE task_id=?1 ORDER BY id",
+                sql_params![run.task_id()],
+                event_row,
+            )?;
             if !resume::inherits_on_exhaustion(&events, &task_events) {
                 return Ok(None);
             }
         }
-        tx.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+        SqlWrite::execute(
+            &tx,
+            "DELETE FROM run_leases WHERE run_id=?1",
+            sql_params![id],
+        )?;
         let mut recorded = Vec::new();
         let result = apply(
             &tx,
@@ -1280,7 +1302,7 @@ impl SqliteQueue {
         // The task is ready again before the run's events, as it always
         // was in the event log.
         if matches!(exhaustion, Exhaustion::Inherit { .. }) {
-            crate::infrastructure::sqlite::transition_task(
+            crate::infrastructure::task_store::transition_task(
                 &tx,
                 run.task_id(),
                 TaskAction::Ready,
@@ -1323,7 +1345,7 @@ impl SqliteQueue {
 
     /// The tasks a claim would take but for their open hold.
     pub fn held_claims(&self) -> Result<Vec<HoldGuard>> {
-        crate::infrastructure::sqlite::held_claims(&self.conn)
+        crate::infrastructure::store_rows::held_claims(&*self.conn)
     }
 
     /// Record `hold_deferred` once per hold and step (see
@@ -1336,14 +1358,15 @@ impl SqliteQueue {
         supervisor: &LeaseToken,
     ) -> Result<bool> {
         let tx = self.write_tx("note_hold_deferred")?;
-        let noted: bool = tx.query_row(
+        let noted: bool = SqlRead::query_row(
+            &tx,
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2
                AND {}=?3 AND {}=?4)",
-                json_field("payload", "$.hold_id", JsonType::Integer),
-                json_field("payload", "$.step", JsonType::Text),
+                SqlRead::dialect(&tx).json_field("payload", "$.hold_id", JsonType::Integer),
+                SqlRead::dialect(&tx).json_field("payload", "$.step", JsonType::Text),
             ),
-            params![
+            sql_params![
                 hold.task,
                 event_kind::HOLD_DEFERRED,
                 hold.hold,
@@ -1354,7 +1377,7 @@ impl SqliteQueue {
         if noted {
             return Ok(false);
         }
-        crate::infrastructure::sqlite::event(
+        crate::infrastructure::store_writes::event(
             &tx,
             hold.task,
             run,
@@ -1424,26 +1447,28 @@ impl SqliteQueue {
 
     /// The kept results whose hold is released and that are not settled.
     pub fn released_kept_results(&self) -> Result<Vec<EventId>> {
-        Ok(self
-            .conn
-            .prepare(&format!(
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "SELECT e.id FROM run_events e WHERE e.kind=?1
                    AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
                      AND s.kind IN (?2,?3) AND {}=e.id)
                    AND NOT EXISTS (SELECT 1 FROM task_holds h WHERE h.task_id=e.task_id
                      AND h.released_at IS NULL)
                  ORDER BY e.id",
-                json_field("s.payload", "$.kept_id", JsonType::Integer),
-            ))?
-            .query_map(
-                params![
-                    event_kind::HOLD_RESULT_KEPT,
-                    event_kind::HOLD_RESULT_APPLIED,
-                    event_kind::HOLD_RESULT_DISCARDED
-                ],
-                |r| r.get(0),
-            )?
-            .collect::<rusqlite::Result<_>>()?)
+                SqlRead::dialect(&*self.conn).json_field(
+                    "s.payload",
+                    "$.kept_id",
+                    JsonType::Integer
+                ),
+            ),
+            sql_params![
+                event_kind::HOLD_RESULT_KEPT,
+                event_kind::HOLD_RESULT_APPLIED,
+                event_kind::HOLD_RESULT_DISCARDED
+            ],
+            |r| r.get(0),
+        )?)
     }
 
     /// Apply or discard the kept result `kept` once its hold is released
@@ -1457,26 +1482,27 @@ impl SqliteQueue {
     /// leaves the run as if none came: its next recovery round is due.
     pub fn settle_kept_result(&mut self, kept: EventId) -> Result<KeptOutcome> {
         let mut tx = self.write_tx("settle_kept_result")?;
-        let Some(event) = tx
-            .query_row(
-                "SELECT * FROM run_events WHERE id=?1 AND kind=?2",
-                params![kept, event_kind::HOLD_RESULT_KEPT],
-                crate::infrastructure::sqlite::event_row,
-            )
-            .optional()?
+        let Some(event) = SqlRead::query_row(
+            &tx,
+            "SELECT * FROM run_events WHERE id=?1 AND kind=?2",
+            sql_params![kept, event_kind::HOLD_RESULT_KEPT],
+            crate::infrastructure::store_rows::event_row,
+        )
+        .optional()?
         else {
             return Ok(KeptOutcome::Untouched);
         };
         let (Some(task), Some(run_id)) = (event.task_id, event.run_id.clone()) else {
             return Ok(KeptOutcome::Untouched);
         };
-        let settled: bool = tx.query_row(
+        let settled: bool = SqlRead::query_row(
+            &tx,
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND kind IN (?2,?3)
                AND {}=?4)",
-                json_field("payload", "$.kept_id", JsonType::Integer),
+                SqlRead::dialect(&tx).json_field("payload", "$.kept_id", JsonType::Integer),
             ),
-            params![
+            sql_params![
                 run_id,
                 event_kind::HOLD_RESULT_APPLIED,
                 event_kind::HOLD_RESULT_DISCARDED,
@@ -1497,7 +1523,7 @@ impl SqliteQueue {
         let (outcome, error) = match task_hold::disposition(source, &version, &now) {
             Disposition::Discard(reason) => (KeptOutcome::Discarded(reason), None),
             Disposition::Apply => {
-                let savepoint = tx.savepoint()?;
+                let savepoint = SqlSavepoints::savepoint(&mut tx)?;
                 // Recorded before the apply, so an apply that ends the task
                 // finds it settled and does not discard it with the task's
                 // end; a refusal rolls it back with the rest.
@@ -1509,7 +1535,7 @@ impl SqliteQueue {
                 )?;
                 match apply_kept(&savepoint, refusals, &run_id, kept, source, &event.payload) {
                     Ok(run) => {
-                        savepoint.commit()?;
+                        SqlSavepoint::commit(savepoint)?;
                         (KeptOutcome::Applied(Box::new(run)), None)
                     }
                     Err(error) => (
@@ -1523,18 +1549,13 @@ impl SqliteQueue {
             // A discarded answer's ask closes with the discard's reason.
             if let Some(ask) = task_hold::KeptResult::of_event(&event)
                 .and_then(task_hold::KeptResult::ask_to_close)
-                && let Some(ask) = tx
-                    .query_row(
-                        "SELECT * FROM asks WHERE id=?1 AND closed_at IS NULL",
-                        params![ask],
-                        |row| {
-                            crate::infrastructure::sql_exec::sqlite::with_row(
-                                row,
-                                crate::infrastructure::asks::ask_row,
-                            )
-                        },
-                    )
-                    .optional()?
+                && let Some(ask) = SqlRead::query_row(
+                    &tx,
+                    "SELECT * FROM asks WHERE id=?1 AND closed_at IS NULL",
+                    sql_params![ask],
+                    crate::infrastructure::asks::ask_row,
+                )
+                .optional()?
             {
                 let note = match reason {
                     DiscardReason::TaskEnded => format!(
@@ -1547,7 +1568,7 @@ impl SqliteQueue {
                     ),
                 };
                 crate::infrastructure::asks::discard_by_runtime(
-                    &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
+                    &tx,
                     &ask,
                     reason.as_str(),
                     &note,
@@ -1557,11 +1578,12 @@ impl SqliteQueue {
             // A round or a decision after the kept result (applied
             // in the window before this pass read the release) stays
             // the run's last word.
-            let superseded: bool = tx.query_row(
+            let superseded: bool = SqlRead::query_row(
+                &tx,
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND id>?2
                        AND kind IN ('triage_started','triage_finished','triage_decided',
                                     'triage_failed','resume_started'))",
-                params![run_id, kept],
+                sql_params![run_id, kept],
                 |r| r.get(0),
             )?;
             run_event(
@@ -1599,10 +1621,9 @@ impl SqliteQueue {
             |refusal: InheritRefusal| anyhow!("task {task_id} is not carried over: {refusal}");
         // The spans it closes read their transcripts first (task 543).
         let _read = match &request.at.run {
-            Some(run) => Some(read_before(
-                &self.conn,
-                Closing::Run(&run.id, &[EventKind::TriageFinished]),
-            )?),
+            Some(run) => {
+                Some(self.read_before(Closing::Run(&run.id, &[EventKind::TriageFinished]))?)
+            }
             None => None,
         };
         let tx = self.write_tx("inherit_by_hand")?;
@@ -1610,13 +1631,13 @@ impl SqliteQueue {
         let task = read_task(&tx, task_id)?;
         crate::domain::task::check_status_authorized(&task, request.authorized)?;
         crate::domain::task::check_status_authorized(&task, request.at.task)?;
-        let latest = tx
-            .query_row(
-                "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
-                [task_id],
-                run_row(&self.runs_dir),
-            )
-            .optional()?;
+        let latest = SqlRead::query_row(
+            &tx,
+            "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            sql_params![task_id],
+            run_row(&self.runs_dir),
+        )
+        .optional()?;
         ensure!(
             latest
                 .as_ref()
@@ -1627,10 +1648,11 @@ impl SqliteQueue {
         let (lease, process_alive) = match &latest {
             Some(run) => (
                 run_lease_of(&tx, run.id())?,
-                tx.query_row(
+                SqlRead::query_row(
+                    &tx,
                     "SELECT EXISTS(SELECT 1 FROM run_processes WHERE run_id=?1
                      AND exited_at IS NULL AND heartbeat_at >= ?2-?3)",
-                    params![run.id(), now, HEARTBEAT_TIMEOUT_SECS],
+                    sql_params![run.id(), now, HEARTBEAT_TIMEOUT_SECS],
                     |r| r.get(0),
                 )?,
             ),
@@ -1653,41 +1675,35 @@ impl SqliteQueue {
         // apply its round after this (ADR-0039 decision 7).
         let removed_lease = match lease {
             Some(lease) => {
-                tx.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+                SqlWrite::execute(
+                    &tx,
+                    "DELETE FROM run_leases WHERE run_id=?1",
+                    sql_params![id],
+                )?;
                 Some(lease.token)
             }
             None => None,
         };
-        let task = crate::infrastructure::sqlite::transition_task(
+        let task = crate::infrastructure::task_store::transition_task(
             &tx,
             task_id,
             TaskAction::Ready,
             &self.generators.clock.timestamp(),
         )?;
-        let decides: Vec<crate::domain::Ask> = tx
-            .prepare(
-                "SELECT * FROM asks WHERE run_id=?1 AND kind='decide' AND asked_by=?2
+        let decides: Vec<crate::domain::Ask> = SqlRead::query_map(
+            &tx,
+            "SELECT * FROM asks WHERE run_id=?1 AND kind='decide' AND asked_by=?2
                  AND closed_at IS NULL ORDER BY id",
-            )?
-            .query_map(params![id, TRIAGE_ASKER], |row| {
-                crate::infrastructure::sql_exec::sqlite::with_row(
-                    row,
-                    crate::infrastructure::asks::ask_row,
-                )
-            })?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![id, TRIAGE_ASKER],
+            crate::infrastructure::asks::ask_row,
+        )?;
         let answer = format!(
             "carried over by hand ({} ran `dagq ready --inherit`): {}",
             request.role.as_str(),
             request.reason
         );
         for ask in &decides {
-            crate::infrastructure::asks::close_by_runtime(
-                &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
-                ask,
-                &answer,
-                now,
-            )?;
+            crate::infrastructure::asks::close_by_runtime(&tx, ask, &answer, now)?;
         }
         let closed_asks: Vec<AskId> = decides.iter().map(|ask| ask.id).collect();
         let branch = run.branch().map(str::to_owned);
@@ -1915,18 +1931,18 @@ impl RunRecovery for SqliteQueue {
 }
 
 /// The task of run `id`.
-fn task_of(conn: &Connection, id: &RunId) -> Result<TaskId> {
-    Ok(
-        conn.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
-            r.get(0)
-        })?,
-    )
+fn task_of(conn: &impl SqlRead, id: &RunId) -> Result<TaskId> {
+    Ok(conn.query_row(
+        "SELECT task_id FROM task_runs WHERE id=?1",
+        sql_params![id],
+        |r| r.get(0),
+    )?)
 }
 
 /// Move `run` and its task on as a recovery round's `action` says,
 /// adding to the round's `payload` what the action records.
 fn apply_triage_action(
-    conn: &Connection,
+    conn: &impl EventTx,
     refusals: Refusals<'_>,
     run: &TaskRun,
     action: &TriageAction,
@@ -1936,7 +1952,7 @@ fn apply_triage_action(
     let now = refusals.generators.clock.timestamp();
     match action {
         TriageAction::Retry => {
-            crate::infrastructure::sqlite::transition_task(
+            crate::infrastructure::task_store::transition_task(
                 conn,
                 run.task_id(),
                 TaskAction::Ready,
@@ -1946,16 +1962,18 @@ fn apply_triage_action(
         TriageAction::RetryInherit { branch, head } => {
             // Once per task, checked again where no other supervisor
             // can retry it.
-            let task_events: Vec<RunEvent> = conn
-                .prepare("SELECT * FROM run_events WHERE task_id=?1 ORDER BY id")?
-                .query_map([run.task_id()], event_row)?
-                .collect::<rusqlite::Result<_>>()?;
+            let task_events: Vec<RunEvent> = SqlRead::query_map(
+                conn,
+                "SELECT * FROM run_events WHERE task_id=?1 ORDER BY id",
+                sql_params![run.task_id()],
+                event_row,
+            )?;
             ensure!(
                 !task_events.iter().any(resume::uses_automatic_inherit),
                 "task {} was retried with a branch carried over already",
                 run.task_id()
             );
-            crate::infrastructure::sqlite::transition_task(
+            crate::infrastructure::task_store::transition_task(
                 conn,
                 run.task_id(),
                 TaskAction::Ready,
@@ -1984,7 +2002,7 @@ fn apply_triage_action(
                 "SELECT EXISTS(SELECT 1 FROM task_runs r JOIN tasks t ON t.id=r.task_id
                  WHERE r.id=?1 AND t.status='in_progress'
                  AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id))",
-                [id],
+                sql_params![id],
                 |r| r.get(0),
             )?;
             ensure!(
@@ -2013,7 +2031,7 @@ fn apply_triage_action(
 /// saying nothing was applied, then `hold_result_kept` with the action
 /// and the version of the task and the run as they are kept.
 fn keep_held_verdict(
-    conn: &Connection,
+    conn: &impl EventTx,
     run: &TaskRun,
     hold: HoldGuard,
     action: &TriageAction,
@@ -2052,7 +2070,7 @@ fn keep_held_verdict(
 /// action on a run nobody leases that is still its task's latest, a
 /// person's answer as [`decide_triage_in`].
 fn apply_kept(
-    conn: &Connection,
+    conn: &impl EventTx,
     refusals: Refusals<'_>,
     id: &RunId,
     kept: EventId,
@@ -2069,7 +2087,7 @@ fn apply_kept(
             apply_triage_action(conn, refusals, &run, &action, &mut finished)?;
             let result = conn.query_row(
                 "SELECT * FROM task_runs WHERE id=?1",
-                [id],
+                sql_params![id],
                 run_row(refusals.runs_dir),
             )?;
             finished["action"] = json!(action.as_str());
@@ -2099,7 +2117,7 @@ fn apply_kept(
 /// removes such a run's kept steps
 /// ([`crate::domain::telemetry::run_ended`]), so the wrapper of its resume
 /// would number its sessions from the first seq again.
-fn ensure_revivable(conn: &Connection, id: &RunId) -> Result<()> {
+fn ensure_revivable(conn: &impl SqlRead, id: &RunId) -> Result<()> {
     ensure!(
         revivable(conn, id)?,
         "run {id} is no longer the latest run of a task that goes on"
@@ -2110,12 +2128,12 @@ fn ensure_revivable(conn: &Connection, id: &RunId) -> Result<()> {
 /// Whether recovery may still bring run `id` back under its own ID
 /// ([`crate::domain::telemetry::run_revivable`]), read in the caller's
 /// transaction ([`ensure_revivable`]).
-fn revivable(conn: &Connection, id: &RunId) -> Result<bool> {
+fn revivable(conn: &impl SqlRead, id: &RunId) -> Result<bool> {
     let (latest, task): (Option<RunId>, Option<String>) = conn.query_row(
         "SELECT (SELECT id FROM task_runs WHERE task_id=r.task_id ORDER BY rowid DESC LIMIT 1),
                 (SELECT status FROM tasks WHERE id=r.task_id)
          FROM task_runs r WHERE r.id=?1",
-        [id],
+        sql_params![id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let task = task
@@ -2132,11 +2150,11 @@ fn revivable(conn: &Connection, id: &RunId) -> Result<bool> {
 /// lease but a stale one, which goes (so its holder cannot renew it and
 /// write after this, ADR-0039 decision 7); refused as
 /// [`crate::domain::recovery::triage_answer_refusal`] says.
-fn unleased_latest_triageable(conn: &Connection, now: i64, id: &RunId) -> Result<TaskRun> {
+fn unleased_latest_triageable(conn: &impl EventTx, now: i64, id: &RunId) -> Result<TaskRun> {
     let lease = conn
         .query_row(
             "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
-            [id],
+            sql_params![id],
             lease_row,
         )
         .optional()?;
@@ -2145,7 +2163,7 @@ fn unleased_latest_triageable(conn: &Connection, now: i64, id: &RunId) -> Result
     let latest: Option<RunId> = match &run {
         Some(run) => Some(conn.query_row(
             "SELECT id FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
-            [run.task_id()],
+            sql_params![run.task_id()],
             |r| r.get(0),
         )?),
         None => None,
@@ -2158,7 +2176,7 @@ fn unleased_latest_triageable(conn: &Connection, now: i64, id: &RunId) -> Result
     ) {
         bail!(why);
     }
-    conn.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+    conn.execute("DELETE FROM run_leases WHERE run_id=?1", sql_params![id])?;
     run.with_context(|| format!("run {id} does not exist"))
 }
 
@@ -2175,7 +2193,7 @@ fn unleased_latest_triageable(conn: &Connection, now: i64, id: &RunId) -> Result
 /// (`ask_id`, `answer`, `reason`, `status`), and an answer a hold kept as
 /// `hold_result_applied`.
 fn decide_triage_in(
-    conn: &Connection,
+    conn: &impl EventTx,
     refusals: Refusals<'_>,
     id: &RunId,
     ask_id: AskId,
@@ -2188,14 +2206,15 @@ fn decide_triage_in(
     let pending: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM asks WHERE id=?1 AND run_id=?2
          AND answered_at IS NOT NULL AND closed_at IS NULL)",
-        params![ask_id, id],
+        sql_params![ask_id, id],
         |r| r.get(0),
     )?;
     let options: Vec<String> = if pending {
-        let options: String =
-            conn.query_row("SELECT options FROM asks WHERE id=?1", [ask_id], |r| {
-                r.get(0)
-            })?;
+        let options: String = conn.query_row(
+            "SELECT options FROM asks WHERE id=?1",
+            sql_params![ask_id],
+            |r| r.get(0),
+        )?;
         serde_json::from_str(&options)?
     } else {
         Vec::new()
@@ -2218,7 +2237,7 @@ fn decide_triage_in(
     let timestamp = refusals.generators.clock.timestamp();
     match action {
         TriageAnswer::Retry => {
-            crate::infrastructure::sqlite::transition_task(
+            crate::infrastructure::task_store::transition_task(
                 conn,
                 run.task_id(),
                 TaskAction::Ready,
@@ -2236,7 +2255,7 @@ fn decide_triage_in(
             )?;
         }
         TriageAnswer::Cancel => {
-            crate::infrastructure::sqlite::cancel_task(
+            crate::infrastructure::task_store::cancel_task(
                 conn,
                 run.task_id(),
                 &NewCancel::answered(AskKind::Decide, ask_id),
@@ -2250,11 +2269,11 @@ fn decide_triage_in(
     }
     conn.execute(
         "UPDATE asks SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
-        params![ask_id, now],
+        sql_params![ask_id, now],
     )?;
     let result = conn.query_row(
         "SELECT * FROM task_runs WHERE id=?1",
-        [id],
+        sql_params![id],
         run_row(refusals.runs_dir),
     )?;
     let mut payload = json!({"ask_id": ask_id, "answer": answer, "reason": reason, "status": result.status().as_str()});
@@ -2270,7 +2289,11 @@ fn decide_triage_in(
 
 /// The result a hold kept of the answer to ask `ask_id` of run `id` that
 /// is neither applied nor discarded yet.
-fn unsettled_kept_answer(conn: &Connection, id: &RunId, ask_id: AskId) -> Result<Option<EventId>> {
+fn unsettled_kept_answer(
+    conn: &impl SqlRead,
+    id: &RunId,
+    ask_id: AskId,
+) -> Result<Option<EventId>> {
     Ok(conn
         .query_row(
             &format!(
@@ -2279,10 +2302,12 @@ fn unsettled_kept_answer(conn: &Connection, id: &RunId, ask_id: AskId) -> Result
                AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
                  AND s.kind IN (?4,?5) AND {}=e.id)
              ORDER BY e.id LIMIT 1",
-                json_field("e.payload", "$.ask_id", JsonType::Integer),
-                json_field("s.payload", "$.kept_id", JsonType::Integer),
+                conn.dialect()
+                    .json_field("e.payload", "$.ask_id", JsonType::Integer),
+                conn.dialect()
+                    .json_field("s.payload", "$.kept_id", JsonType::Integer),
             ),
-            params![
+            sql_params![
                 id,
                 event_kind::HOLD_RESULT_KEPT,
                 ask_id,
@@ -2299,7 +2324,7 @@ fn unsettled_kept_answer(conn: &Connection, id: &RunId, ask_id: AskId) -> Result
 /// run's supervisor and `lease_acquired` with `payload`, its pid and the
 /// previous token. Whether it was leased.
 fn lease_in(
-    conn: &Connection,
+    conn: &impl EventTx,
     id: &RunId,
     token: &LeaseToken,
     now: i64,
@@ -2308,7 +2333,7 @@ fn lease_in(
     let lease = conn
         .query_row(
             "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
-            [id],
+            sql_params![id],
             lease_row,
         )
         .optional()?;
@@ -2316,15 +2341,15 @@ fn lease_in(
         if !lease_is_stale(lease, now) {
             return Ok(false);
         }
-        conn.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+        conn.execute("DELETE FROM run_leases WHERE run_id=?1", sql_params![id])?;
     }
     conn.execute(
         "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
-        params![id, token, holder_pid(conn, token)?, now],
+        sql_params![id, token, holder_pid(conn, token)?, now],
     )?;
     conn.execute(
         "UPDATE task_runs SET supervisor_token=?2 WHERE id=?1",
-        params![id, token],
+        sql_params![id, token],
     )?;
     payload["pid"] = json!(holder_pid(conn, token)?);
     payload["previous_token"] = json!(lease.map(|l| l.token));
@@ -2335,13 +2360,11 @@ fn lease_in(
 /// The events of run `id` its continuation of a replanning operation
 /// decides on, oldest first, each read back typed from its payload
 /// ([`ContinuationRecord`]); one whose payload does not read is left out.
-fn continuation_records(conn: &Connection, id: &RunId) -> Result<Vec<ContinuationRecord>> {
-    let mut statement = conn.prepare(
+fn continuation_records(conn: &impl SqlRead, id: &RunId) -> Result<Vec<ContinuationRecord>> {
+    let rows = conn.query_map(
         "SELECT kind, payload FROM run_events WHERE run_id=?1 AND kind IN (?2,?3,?4,?5,?6)
          ORDER BY id",
-    )?;
-    let rows = statement.query_map(
-        params![
+        sql_params![
             id,
             EventKind::ReplanStatusChanged.as_str(),
             EventKind::ReplanRestored.as_str(),
@@ -2352,8 +2375,7 @@ fn continuation_records(conn: &Connection, id: &RunId) -> Result<Vec<Continuatio
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
     )?;
     let mut records = Vec::new();
-    for row in rows {
-        let (kind, payload) = row?;
+    for (kind, payload) in rows {
         let record = match crate::domain::RecordedKind::from_name(&kind).known() {
             Some(EventKind::ReplanStatusChanged) => serde_json::from_str(&payload)
                 .ok()
@@ -2377,11 +2399,13 @@ fn continuation_records(conn: &Connection, id: &RunId) -> Result<Vec<Continuatio
 /// so that `step` waits for the operation's outcome (ADR-t1521-2,
 /// decision 1) or the hold's release (ADR-t1879-1): no resume nor
 /// recovery round of it starts.
-fn replanning(conn: &Connection, id: &RunId, step: GuardedStep) -> Result<bool> {
+fn replanning(conn: &impl SqlRead, id: &RunId, step: GuardedStep) -> Result<bool> {
     let task: Option<TaskId> = conn
-        .query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT task_id FROM task_runs WHERE id=?1",
+            sql_params![id],
+            |r| r.get(0),
+        )
         .optional()?;
     Ok(task.is_some_and(|task| {
         crate::infrastructure::replans::check_task_step(conn, task, step).is_err()

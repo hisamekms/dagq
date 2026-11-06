@@ -7,6 +7,7 @@ use crate::domain::environment::{NodeRate, Resources};
 use crate::domain::host_metrics::{
     HostSample, ImportMark, NodeSample, SampleSource, value_columns,
 };
+use rusqlite::params;
 
 /// The columns of the sample in the common units, in the order [`values`]
 /// gives them after the sample's.

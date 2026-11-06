@@ -6,24 +6,22 @@
 //! `run_log` reads runs and events, `queue_records` serves reports and
 //! `planning_records` the lookups of the planning tables.
 //! The helpers they share stay here.
-use super::sql_exec::OptionalRow;
-use super::sql_exec::sqlite::{native_error, port_tx, with_row};
-use super::sql_exec::{SqlResult, SqlRow, sql_params};
-use super::store_writes::EventTx;
+//!
+//! The traits of the execution port are not imported here: a module that
+//! has not moved globs this one, and with [`sql_exec::SqlRead`] in scope its
+//! rusqlite `query_row` on a `WriteTx` would resolve to the port's. A moved
+//! module imports them itself.
+use super::sql_exec::{self, OptionalRow, SqlResult, SqlRow, sql_params};
+use super::store_rows::{enum_col, event_row, read_task, run_row, stored_run_row};
+use super::store_writes::{EventTx, event};
+use super::task_store::claim_task;
 use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 
-use super::{
-    adapters::process_alive,
-    sessions::{Closing, read_before},
-    sqlite::{
-        SqliteQueue, claim_task, enum_col, event_row, json_col, read_task, run_row, stored_run_row,
-    },
-};
+use super::{adapters::process_alive, sessions::Closing, sqlite::SqliteQueue};
 use crate::application::{
     AskStore, EventStore, Generators, HeartbeatWrite, InboxWatchLog, PlanningRecords, QueueRecords,
     RunCoordination, RunReads, RunRecovery, RunTransitions, SessionRegistry, SupervisorRegistry,
@@ -77,31 +75,43 @@ mod session_registry;
 mod session_steps;
 mod transitions;
 
-/// The run as stored (its paths not relocated), for a command to start from.
-fn stored_run(conn: &Connection, id: &RunId) -> Result<Option<TaskRun>> {
-    stored_run_port(conn, id).map_err(native_error)
-}
+// The names the moved functions had beside their rusqlite wrappers: a module
+// on another branch calls them, or takes the wrappers' helpers through this
+// module's glob, whichever landed first (ADR-t3982-1).
+pub(super) use self::{
+    end_stalled_detections as end_stalled_detections_port, run_events_of as run_events_of_port,
+    run_lease_of as run_lease_of_port, supervisors_of as supervisors_of_port,
+};
+#[allow(unused_imports)]
+use self::{
+    lease_row as lease_row_port, process_row as process_row_port, run_event as run_event_port,
+    save_run as save_run_port, stored_run as stored_run_port,
+    supervisor_row as supervisor_row_port,
+};
+#[allow(unused_imports)]
+use super::sql_exec::sqlite::{native_error, port_tx, with_row};
 
-/// [`stored_run`] on the execution port.
-fn stored_run_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    id: &RunId,
-) -> Result<Option<TaskRun>> {
+/// The run as stored (its paths not relocated), for a command to start from.
+fn stored_run(conn: &impl sql_exec::SqlRead, id: &RunId) -> Result<Option<TaskRun>> {
     Ok(conn
         .query_row(
             "SELECT * FROM task_runs WHERE id=?1",
             sql_params![id],
-            crate::infrastructure::store_rows::stored_run_row,
+            stored_run_row,
         )
         .optional()?)
 }
 
 /// The run as stored if `token` is its supervisor.
-fn supervised_run(conn: &Connection, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
+fn supervised_run(
+    conn: &impl sql_exec::SqlRead,
+    id: &RunId,
+    token: &LeaseToken,
+) -> Result<Option<TaskRun>> {
     Ok(conn
         .query_row(
             "SELECT * FROM task_runs WHERE id=?1 AND supervisor_token=?2",
-            params![id, token],
+            sql_params![id, token],
             stored_run_row,
         )
         .optional()?)
@@ -114,16 +124,6 @@ fn supervised_run(conn: &Connection, id: &RunId, token: &LeaseToken) -> Result<O
 /// gives a move into or out of the unfinished statuses
 /// ([`run::unfinished_change`]) is written in the same transaction.
 fn save_run(
-    conn: &Connection,
-    run: &TaskRun,
-    from: RunStatus,
-    token: Option<&LeaseToken>,
-) -> Result<bool> {
-    save_run_port(&port_tx(conn), run, from, token).map_err(native_error)
-}
-
-/// [`save_run`] on the execution port.
-fn save_run_port(
     conn: &impl EventTx,
     run: &TaskRun,
     from: RunStatus,
@@ -131,7 +131,7 @@ fn save_run_port(
 ) -> Result<bool> {
     let saved = save_run_row(conn, run, from, token)?;
     if saved && let Some(change) = run::unfinished_change(from, run.status()) {
-        crate::infrastructure::store_writes::event(
+        event(
             conn,
             run.task_id(),
             Some(run.id()),
@@ -148,7 +148,7 @@ fn save_run_port(
 }
 
 fn save_run_row(
-    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    conn: &impl sql_exec::SqlWrite,
     run: &TaskRun,
     from: RunStatus,
     token: Option<&LeaseToken>,
@@ -190,15 +190,15 @@ pub(super) fn end_released_run(
     reason: String,
     carried: Option<serde_json::Value>,
 ) -> Result<TaskRun> {
-    let run = stored_run_port(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
+    let run = stored_run(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
     let from = run.status();
     let run = run::end_for_release(run, reason)?;
     ensure!(
-        save_run_port(conn, &run, from, None)?,
+        save_run(conn, &run, from, None)?,
         "run {id} changed while it was released; nothing is released, try again"
     );
     if let Some(payload) = carried {
-        run_event_port(conn, id, EventKind::TriageFinished, payload)?;
+        run_event(conn, id, EventKind::TriageFinished, payload)?;
     }
     Ok(run)
 }
@@ -207,11 +207,11 @@ pub(super) fn end_released_run(
 /// replaced it ([`run::end_for_replacement`]), inside the apply's
 /// transaction. The stored run comes back.
 pub(super) fn end_replaced_run(conn: &impl EventTx, id: &RunId) -> Result<TaskRun> {
-    let run = stored_run_port(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
+    let run = stored_run(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
     let from = run.status();
     let run = run::end_for_replacement(run)?;
     ensure!(
-        save_run_port(conn, &run, from, None)?,
+        save_run(conn, &run, from, None)?,
         "run {id} changed while its replacement was applied; nothing is applied"
     );
     Ok(run)
@@ -224,7 +224,7 @@ pub(super) fn end_replaced_run(conn: &impl EventTx, id: &RunId) -> Result<TaskRu
 /// given for the operation. The reason of a domain refusal is not part of
 /// that message; it is kept in `refusals` instead.
 fn apply(
-    conn: &Connection,
+    conn: &impl EventTx,
     refusals: Refusals<'_>,
     id: &RunId,
     token: Option<&LeaseToken>,
@@ -246,7 +246,7 @@ fn apply(
 /// ([`run::Recorded`]): the run is saved and the events written in the
 /// caller's transaction, in order.
 fn apply_recorded(
-    conn: &Connection,
+    conn: &impl EventTx,
     refusals: Refusals<'_>,
     id: &RunId,
     token: Option<&LeaseToken>,
@@ -264,7 +264,7 @@ fn apply_recorded(
 }
 
 /// Write the events a transition returned for run `id`.
-fn record_events(conn: &Connection, id: &RunId, events: Vec<run::NewRunEvent>) -> Result<()> {
+fn record_events(conn: &impl EventTx, id: &RunId, events: Vec<run::NewRunEvent>) -> Result<()> {
     for event in events {
         run_event(conn, id, event.kind, event.payload)?;
     }
@@ -369,10 +369,15 @@ fn not_at_rest() -> String {
 /// `HEARTBEAT_TIMEOUT_SECS` is no reason to refuse: after a host sleep the
 /// row is still this supervisor's until an adopter swaps the token or
 /// `recover` removes it, and SQLite serializes that write with this one.
-fn renew_lease(conn: &Connection, id: &RunId, token: &LeaseToken, now: i64) -> Result<()> {
+fn renew_lease(
+    conn: &impl sql_exec::SqlWrite,
+    id: &RunId,
+    token: &LeaseToken,
+    now: i64,
+) -> Result<()> {
     let renewed = conn.execute(
         "UPDATE run_leases SET heartbeat_at=?3 WHERE run_id=?1 AND token=?2",
-        params![id, token, now],
+        sql_params![id, token, now],
     )?;
     ensure!(
         renewed == 1,
@@ -384,20 +389,18 @@ fn renew_lease(conn: &Connection, id: &RunId, token: &LeaseToken, now: i64) -> R
 /// The pid a lease of `token` records: that of the supervisor registered
 /// under `token`, as the queue service writes for a supervisor in another
 /// process, or this process's when `token` has no registration.
-pub(super) fn holder_pid(conn: &Connection, token: &LeaseToken) -> Result<u32> {
+pub(super) fn holder_pid(conn: &impl sql_exec::SqlRead, token: &LeaseToken) -> Result<u32> {
     Ok(conn
-        .query_row("SELECT pid FROM supervisors WHERE token=?1", [token], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT pid FROM supervisors WHERE token=?1",
+            sql_params![token],
+            |r| r.get(0),
+        )
         .optional()?
         .unwrap_or_else(std::process::id))
 }
 
-fn lease_row(r: &Row<'_>) -> rusqlite::Result<RunLease> {
-    with_row(r, lease_row_port)
-}
-
-fn lease_row_port(r: &SqlRow<'_>) -> SqlResult<RunLease> {
+fn lease_row(r: &SqlRow<'_>) -> SqlResult<RunLease> {
     Ok(RunLease {
         run_id: r.get(0)?,
         token: r.get(1)?,
@@ -407,43 +410,26 @@ fn lease_row_port(r: &SqlRow<'_>) -> SqlResult<RunLease> {
 }
 
 /// The lease of run `id` on `conn`, if any.
-pub(super) fn run_lease_of(conn: &Connection, id: &RunId) -> Result<Option<RunLease>> {
-    run_lease_of_port(&port_tx(conn), id).map_err(native_error)
-}
-
-pub(super) fn run_lease_of_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    id: &RunId,
-) -> Result<Option<RunLease>> {
+pub(super) fn run_lease_of(conn: &impl sql_exec::SqlRead, id: &RunId) -> Result<Option<RunLease>> {
     Ok(conn
         .query_row(
             "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
             sql_params![id],
-            lease_row_port,
+            lease_row,
         )
         .optional()?)
 }
 
 /// Every registered supervisor on `conn`, oldest registration first.
-pub(super) fn supervisors_of(conn: &Connection) -> Result<Vec<SupervisorRegistration>> {
-    supervisors_of_port(&port_tx(conn)).map_err(native_error)
-}
-
-pub(super) fn supervisors_of_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-) -> Result<Vec<SupervisorRegistration>> {
+pub(super) fn supervisors_of(conn: &impl sql_exec::SqlRead) -> Result<Vec<SupervisorRegistration>> {
     Ok(conn.query_map(
         "SELECT * FROM supervisors ORDER BY started_at, rowid",
         sql_params![],
-        supervisor_row_port,
+        supervisor_row,
     )?)
 }
 
-fn supervisor_row(r: &Row<'_>) -> rusqlite::Result<SupervisorRegistration> {
-    with_row(r, supervisor_row_port)
-}
-
-fn supervisor_row_port(r: &SqlRow<'_>) -> SqlResult<SupervisorRegistration> {
+fn supervisor_row(r: &SqlRow<'_>) -> SqlResult<SupervisorRegistration> {
     Ok(SupervisorRegistration {
         token: r.get("token")?,
         pid: r.get("pid")?,
@@ -452,7 +438,7 @@ fn supervisor_row_port(r: &SqlRow<'_>) -> SqlResult<SupervisorRegistration> {
         heartbeat_at: r.get("heartbeat_at")?,
         mode: r
             .get::<_, Option<String>>("mode")?
-            .map(|_| super::store_rows::enum_col(r, "mode"))
+            .map(|_| enum_col(r, "mode"))
             .transpose()?,
         workspace_id: r.get("workspace_id")?,
         binary_version: r.get("binary_version")?,
@@ -487,9 +473,9 @@ fn source(r: &SqlRow<'_>, column: &str) -> SqlResult<Option<SettingSource>> {
         .and_then(SettingSource::parse))
 }
 
-fn assert_wrapper(conn: &Connection, id: &RunId, pid: u32) -> Result<()> {
+fn assert_wrapper(conn: &impl sql_exec::SqlRead, id: &RunId, pid: u32) -> Result<()> {
     let valid: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM run_processes WHERE run_id=?1 AND role='wrapper' AND pid=?2 AND exited_at IS NULL)",
-        params![id,pid], |r| r.get(0))?;
+        sql_params![id,pid], |r| r.get(0))?;
     ensure!(valid, "wrapper is not the live owner of this run");
     Ok(())
 }
@@ -499,15 +485,6 @@ fn assert_wrapper(conn: &Connection, id: &RunId, pid: u32) -> Result<()> {
 /// that step settles in the same transaction once the run rests
 /// ([`crate::infrastructure::task_holds::settle_at_rest_in`]).
 fn run_event(
-    conn: &Connection,
-    id: &RunId,
-    kind: EventKind,
-    payload: serde_json::Value,
-) -> Result<()> {
-    run_event_port(&port_tx(conn), id, kind, payload).map_err(native_error)
-}
-
-fn run_event_port(
     conn: &impl EventTx,
     id: &RunId,
     kind: EventKind,
@@ -518,9 +495,9 @@ fn run_event_port(
         sql_params![id],
         |r| r.get(0),
     )?;
-    super::store_writes::event(conn, task_id, Some(id), kind, payload)?;
+    event(conn, task_id, Some(id), kind, payload)?;
     if matches!(kind, EventKind::LeaseReleased | EventKind::RunRecovered) {
-        super::task_holds::settle_at_rest_in_port(conn, id, false)?;
+        super::task_holds::settle_at_rest_in(conn, id, false)?;
     }
     Ok(())
 }
@@ -531,7 +508,7 @@ fn run_event_port(
 /// fails the transition), `cause` the kind of the event the same
 /// transaction wrote.
 fn phase_event(
-    conn: &Connection,
+    conn: &impl EventTx,
     id: &RunId,
     phase: run_phase::Phase,
     cause: EventKind,
@@ -539,7 +516,7 @@ fn phase_event(
     let attempt = conn
         .query_row(
             "SELECT payload FROM run_events WHERE run_id=?1 AND kind=?2 ORDER BY id DESC LIMIT 1",
-            params![id, EventKind::RunPhaseChanged.as_str()],
+            sql_params![id, EventKind::RunPhaseChanged.as_str()],
             |r| r.get::<_, String>(0),
         )
         .ok()
@@ -562,15 +539,6 @@ fn phase_event(
 /// with no end recorded gets its `stall_resolved` of outcome `run_ended`,
 /// once: one already ended by the watch or an earlier close gets none.
 pub(super) fn end_stalled_detections(
-    tx: &Connection,
-    id: &RunId,
-    answer: &str,
-    now: i64,
-) -> Result<Vec<crate::domain::Ask>> {
-    end_stalled_detections_port(&port_tx(tx), id, answer, now).map_err(native_error)
-}
-
-pub(super) fn end_stalled_detections_port(
     tx: &impl EventTx,
     id: &RunId,
     answer: &str,
@@ -592,7 +560,7 @@ pub(super) fn end_stalled_detections_port(
         .into_iter()
         .collect();
     let ends = crate::domain::stats::thresholds::run_ended_resolutions(
-        &run_events_of_port(tx, id)?,
+        &run_events_of(tx, id)?,
         &|ask| answers.get(&ask).cloned(),
         now_ms,
     );
@@ -605,7 +573,7 @@ pub(super) fn end_stalled_detections_port(
         now,
     )?;
     for end in ends {
-        run_event_port(tx, id, EventKind::StallResolved, end)?;
+        run_event(tx, id, EventKind::StallResolved, end)?;
     }
     Ok(closed)
 }
@@ -618,7 +586,7 @@ pub(super) fn end_stalled_detections_port(
 /// becomes its supervisor. `Ok(Some(previous lease token))` once leased,
 /// `Ok(None)` when the run is not free to take.
 fn lease_parked_run(
-    tx: &Connection,
+    tx: &impl sql_exec::SqlWrite,
     id: &RunId,
     token: &LeaseToken,
     now: i64,
@@ -626,7 +594,7 @@ fn lease_parked_run(
 ) -> Result<Option<Option<LeaseToken>>> {
     let parked: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM task_runs WHERE id=?1 AND status='needs_session')",
-        [id],
+        sql_params![id],
         |r| r.get(0),
     )?;
     if !parked {
@@ -635,7 +603,7 @@ fn lease_parked_run(
     let lease = tx
         .query_row(
             "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
-            [id],
+            sql_params![id],
             lease_row,
         )
         .optional()?;
@@ -643,28 +611,28 @@ fn lease_parked_run(
         if !lease_is_stale(lease, now) {
             return Ok(None);
         }
-        tx.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+        tx.execute("DELETE FROM run_leases WHERE run_id=?1", sql_params![id])?;
     }
     // A session still heartbeating is left alone.
     let live: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM run_processes WHERE run_id=?1
          AND exited_at IS NULL AND heartbeat_at >= ?2-?3)",
-        params![id, now, HEARTBEAT_TIMEOUT_SECS],
+        sql_params![id, now, HEARTBEAT_TIMEOUT_SECS],
         |r| r.get(0),
     )?;
     if live {
         return Ok(None);
     }
     if clear_processes {
-        tx.execute("DELETE FROM run_processes WHERE run_id=?1", [id])?;
+        tx.execute("DELETE FROM run_processes WHERE run_id=?1", sql_params![id])?;
     }
     tx.execute(
         "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
-        params![id, token, holder_pid(tx, token)?, now],
+        sql_params![id, token, holder_pid(tx, token)?, now],
     )?;
     tx.execute(
         "UPDATE task_runs SET supervisor_token=?2 WHERE id=?1",
-        params![id, token],
+        sql_params![id, token],
     )?;
     Ok(Some(lease.map(|l| l.token)))
 }
@@ -685,28 +653,13 @@ pub(crate) fn last_resume_started_sql() -> String {
     )
 }
 
-pub(super) fn run_events_of(conn: &Connection, id: &RunId) -> Result<Vec<RunEvent>> {
-    run_events_of_port(&port_tx(conn), id).map_err(native_error)
-}
-
-pub(super) fn run_events_of_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    id: &RunId,
-) -> Result<Vec<RunEvent>> {
-    Ok(conn.query_map(
-        RUN_EVENTS_SQL,
-        sql_params![id],
-        super::store_rows::event_row,
-    )?)
+pub(super) fn run_events_of(conn: &impl sql_exec::SqlRead, id: &RunId) -> Result<Vec<RunEvent>> {
+    Ok(conn.query_map(RUN_EVENTS_SQL, sql_params![id], event_row)?)
 }
 
 /// The run's resumes, counted as ADR-0047 decision 24 says.
-fn resume_count(conn: &Connection, id: &RunId) -> Result<ResumeCount> {
+fn resume_count(conn: &impl sql_exec::SqlRead, id: &RunId) -> Result<ResumeCount> {
     Ok(ResumeCount::of(&run_events_of(conn, id)?))
-}
-
-fn process_row(r: &Row<'_>) -> rusqlite::Result<RunProcess> {
-    super::sql_exec::sqlite::with_row(r, process_row_port)
 }
 
 /// Opens the queue at `db` with `generators` for each connection the
@@ -753,15 +706,13 @@ impl<P: ?Sized> crate::application::QueueOpener<P> for SqlitePorts<P> {
 }
 
 pub(super) fn processes_for_task_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    conn: &impl sql_exec::SqlRead,
     task_id: TaskId,
 ) -> Result<Vec<RunProcess>> {
-    Ok(conn.query_map("SELECT p.* FROM run_processes p JOIN task_runs r ON r.id=p.run_id WHERE r.task_id=?1 ORDER BY r.rowid,p.role", crate::infrastructure::sql_exec::sql_params![task_id], process_row_port)?)
+    Ok(conn.query_map("SELECT p.* FROM run_processes p JOIN task_runs r ON r.id=p.run_id WHERE r.task_id=?1 ORDER BY r.rowid,p.role", sql_params![task_id], process_row)?)
 }
 
-fn process_row_port(
-    r: &crate::infrastructure::sql_exec::SqlRow<'_>,
-) -> crate::infrastructure::sql_exec::SqlResult<RunProcess> {
+fn process_row(r: &SqlRow<'_>) -> SqlResult<RunProcess> {
     Ok(RunProcess {
         run_id: r.get("run_id")?,
         role: r.get("role")?,
@@ -1050,9 +1001,9 @@ mod tests {
         let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let token = LeaseToken::new("registered");
         queue.register_supervisor(&token, 4242, 1, "0.0.1").unwrap();
-        assert_eq!(holder_pid(&queue.conn, &token).unwrap(), 4242);
+        assert_eq!(holder_pid(&*queue.conn, &token).unwrap(), 4242);
         assert_eq!(
-            holder_pid(&queue.conn, &LeaseToken::new("unregistered")).unwrap(),
+            holder_pid(&*queue.conn, &LeaseToken::new("unregistered")).unwrap(),
             std::process::id()
         );
     }

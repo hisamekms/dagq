@@ -14,22 +14,23 @@ use super::*;
 use crate::application::EvalRounds;
 use crate::domain::agent_eval::production::{self, Take};
 use crate::domain::agent_eval::round::owner_gone;
-use crate::infrastructure::sql_dialect::{JsonType, json_field};
+use crate::infrastructure::sql_dialect::{JsonType, SqlDialect};
+use crate::infrastructure::sql_exec::SqlRead;
 
 /// The queue's events of the eval of round `?1` of the kinds `?2` (a JSON
 /// array).
-fn of_round() -> String {
+fn of_round(dialect: SqlDialect) -> String {
     format!(
         "kind IN (SELECT value FROM json_each(?2))
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
      AND {} = ?1",
-        json_field("payload", "$.eval_id", JsonType::Integer)
+        dialect.json_field("payload", "$.eval_id", JsonType::Integer)
     )
 }
 
 /// The supervisor's token a start, a take-up or a take names.
-fn supervisor() -> String {
-    json_field("payload", "$.supervisor", JsonType::Text)
+fn supervisor(dialect: SqlDialect) -> String {
+    dialect.json_field("payload", "$.supervisor", JsonType::Text)
 }
 
 fn kinds(kinds: &[EventKind]) -> Result<String> {
@@ -45,43 +46,43 @@ fn any_of_sql(of: &str) -> String {
 
 /// The supervisor the latest event matching `of` ([`of_round`] or
 /// [`of_set`]) names.
-fn latest_owner_sql(of: &str) -> String {
+fn latest_owner_sql(dialect: SqlDialect, of: &str) -> String {
     format!(
         "SELECT {} FROM run_events INDEXED BY events_by_kind
          WHERE {of} ORDER BY id DESC LIMIT 1",
-        supervisor()
+        supervisor(dialect)
     )
 }
 
 /// Whether an event of the round `?1` of the kinds `?2` is there.
-pub(super) fn any_of_round_sql() -> String {
-    any_of_sql(&of_round())
+pub(super) fn any_of_round_sql(dialect: SqlDialect) -> String {
+    any_of_sql(&of_round(dialect))
 }
 
 /// The supervisor of the latest event of the round `?1` of the kinds `?2`.
-pub(super) fn round_owner_sql() -> String {
-    latest_owner_sql(&of_round())
+pub(super) fn round_owner_sql(dialect: SqlDialect) -> String {
+    latest_owner_sql(dialect, &of_round(dialect))
 }
 
 /// Whether a round started (kind `?1`) and has not finished (kind `?2`).
-pub(super) fn another_round_runs_sql() -> String {
+pub(super) fn another_round_runs_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT EXISTS(SELECT 1 FROM run_events s INDEXED BY events_by_kind
          WHERE s.kind = ?1 AND s.run_id IS NULL AND s.task_id IS NULL AND s.goal_id IS NULL
          AND NOT EXISTS(SELECT 1 FROM run_events f INDEXED BY events_by_kind
              WHERE f.kind = ?2 AND f.run_id IS NULL
              AND {} = {}))",
-        json_field("f.payload", "$.eval_id", JsonType::Integer),
-        json_field("s.payload", "$.eval_id", JsonType::Integer),
+        dialect.json_field("f.payload", "$.eval_id", JsonType::Integer),
+        dialect.json_field("s.payload", "$.eval_id", JsonType::Integer),
     )
 }
 
-fn any_of_round(tx: &Connection, eval_id: i64, of: &[EventKind]) -> Result<bool> {
-    Ok(
-        tx.query_row(&any_of_round_sql(), params![eval_id, kinds(of)?], |r| {
-            r.get(0)
-        })?,
-    )
+fn any_of_round(tx: &impl SqlRead, eval_id: i64, of: &[EventKind]) -> Result<bool> {
+    Ok(tx.query_row(
+        &any_of_round_sql(tx.dialect()),
+        sql_params![eval_id, kinds(of)?],
+        |r| r.get(0),
+    )?)
 }
 
 impl SqliteQueue {
@@ -101,7 +102,7 @@ impl SqliteQueue {
             kind.as_str()
         );
         crate::domain::check_event_target(kind, None, None)?;
-        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
+        let _read = self.read_before(Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("settle_eval_round")?;
         if any_of_round(
             &tx,
@@ -111,9 +112,10 @@ impl SqliteQueue {
             return Ok(false);
         }
         if kind == EventKind::AgentEvalStarted {
-            let another_runs: bool = tx.query_row(
-                &another_round_runs_sql(),
-                params![
+            let another_runs: bool = SqlRead::query_row(
+                &tx,
+                &another_round_runs_sql(SqlRead::dialect(&tx)),
+                sql_params![
                     EventKind::AgentEvalStarted.as_str(),
                     EventKind::AgentEvalFinished.as_str()
                 ],
@@ -139,34 +141,34 @@ impl SqliteQueue {
         crate::domain::check_event_target(kind, None, None)?;
         let now = self.generators.clock.now();
         let payload = json!({"eval_id": eval_id, "supervisor": token});
-        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
+        let _read = self.read_before(Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("take_up_eval_round")?;
         if any_of_round(&tx, eval_id, &[EventKind::AgentEvalFinished])? {
             return Ok(false);
         }
         // The supervisor of the latest start or take-up; no row: not
         // started.
-        let owner: Option<Option<String>> = tx
-            .query_row(
-                &round_owner_sql(),
-                params![
-                    eval_id,
-                    kinds(&[EventKind::AgentEvalStarted, EventKind::AgentEvalTakenUp])?
-                ],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let owner: Option<Option<String>> = SqlRead::query_row(
+            &tx,
+            &round_owner_sql(SqlRead::dialect(&tx)),
+            sql_params![
+                eval_id,
+                kinds(&[EventKind::AgentEvalStarted, EventKind::AgentEvalTakenUp])?
+            ],
+            |r| r.get(0),
+        )
+        .optional()?;
         let Some(owner) = owner else {
             return Ok(false);
         };
         let registration: Option<(Option<i64>, u32)> = match &owner {
-            Some(owner) => tx
-                .query_row(
-                    "SELECT heartbeat_at, pid FROM supervisors WHERE token = ?1",
-                    [owner],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?,
+            Some(owner) => SqlRead::query_row(
+                &tx,
+                "SELECT heartbeat_at, pid FROM supervisors WHERE token = ?1",
+                sql_params![owner],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?,
             None => None,
         };
         let registration = registration
@@ -183,24 +185,24 @@ impl SqliteQueue {
 }
 
 /// The queue's events of production set `?1` of the kinds `?2`.
-fn of_set() -> String {
+fn of_set(dialect: SqlDialect) -> String {
     format!(
         "kind IN (SELECT value FROM json_each(?2))
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
      AND {} = ?1",
-        json_field("payload", "$.set_id", JsonType::Integer)
+        dialect.json_field("payload", "$.set_id", JsonType::Integer)
     )
 }
 
 /// Whether an event of the production set `?1` of the kinds `?2` is there.
-pub(super) fn any_of_set_sql() -> String {
-    any_of_sql(&of_set())
+pub(super) fn any_of_set_sql(dialect: SqlDialect) -> String {
+    any_of_sql(&of_set(dialect))
 }
 
 /// The supervisor of the latest event of the production set `?1` of the
 /// kinds `?2`.
-pub(super) fn set_owner_sql() -> String {
-    latest_owner_sql(&of_set())
+pub(super) fn set_owner_sql(dialect: SqlDialect) -> String {
+    latest_owner_sql(dialect, &of_set(dialect))
 }
 
 impl SqliteQueue {
@@ -215,30 +217,33 @@ impl SqliteQueue {
         crate::domain::check_event_target(kind, None, None)?;
         let now = self.generators.clock.now();
         let payload = json!({"set_id": set_id, "supervisor": token});
-        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
+        let _read = self.read_before(Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("take_case_set")?;
-        let settled: bool = tx.query_row(
-            &any_of_set_sql(),
-            params![
+        let settled: bool = SqlRead::query_row(
+            &tx,
+            &any_of_set_sql(SqlRead::dialect(&tx)),
+            sql_params![
                 set_id,
                 kinds(&[EventKind::AgentCasesBuilt, EventKind::AgentCasesRefused])?
             ],
             |r| r.get(0),
         )?;
-        let owner: Option<Option<String>> = tx
-            .query_row(&set_owner_sql(), params![set_id, kinds(&[kind])?], |r| {
-                r.get(0)
-            })
-            .optional()?;
+        let owner: Option<Option<String>> = SqlRead::query_row(
+            &tx,
+            &set_owner_sql(SqlRead::dialect(&tx)),
+            sql_params![set_id, kinds(&[kind])?],
+            |r| r.get(0),
+        )
+        .optional()?;
         let owner = owner.flatten();
         let registration: Option<(Option<i64>, u32)> = match &owner {
-            Some(owner) => tx
-                .query_row(
-                    "SELECT heartbeat_at, pid FROM supervisors WHERE token = ?1",
-                    [owner],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?,
+            Some(owner) => SqlRead::query_row(
+                &tx,
+                "SELECT heartbeat_at, pid FROM supervisors WHERE token = ?1",
+                sql_params![owner],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?,
             None => None,
         };
         let registration = registration

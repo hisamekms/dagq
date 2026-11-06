@@ -19,15 +19,16 @@
 
 use super::*;
 use crate::domain::worker::ProviderCheck;
+use crate::infrastructure::sql_exec::{SqlRead, SqlWrite};
 
 impl SqliteQueue {
     /// Refresh every lease this supervisor holds. Zero rows is not an error:
     /// an idle supervisor owns nothing.
     pub fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize> {
-        self.write_statement(
+        self.write_sql(
             "heartbeat_leases",
             "UPDATE run_leases SET heartbeat_at=?2 WHERE token=?1",
-            params![token, self.generators.clock.now()],
+            sql_params![token, self.generators.clock.now()],
         )
     }
 
@@ -42,9 +43,10 @@ impl SqliteQueue {
         let write = || -> Result<HeartbeatWrite> {
             let tx = self.write_tx("heartbeat")?;
             let registered = refresh_registration(&tx, token, now)?;
-            let leases = tx.execute(
+            let leases = SqlWrite::execute(
+                &tx,
                 "UPDATE run_leases SET heartbeat_at=?2 WHERE token=?1",
-                params![token, now],
+                sql_params![token, now],
             )?;
             tx.commit()?;
             Ok(HeartbeatWrite { registered, leases })
@@ -99,19 +101,21 @@ impl SqliteQueue {
         ensure!(parallel >= 1, "parallel must be at least 1");
         let tx = self.write_tx("supervisor_register")?;
         let now = self.generators.clock.now();
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO supervisors(token,pid,parallel,binary_version,started_at,heartbeat_at)
              VALUES (?1,?2,?3,?4,?5,?5)",
-            params![token, pid, parallel, binary_version, now],
+            sql_params![token, pid, parallel, binary_version, now],
         )
         .context("supervisor token is already registered")?;
         if let Some((limits, providers)) = setup {
             write_slot_limits(&tx, token, limits)?;
             write_providers(&tx, token, providers)?;
         }
-        let result = tx.query_row(
+        let result = SqlRead::query_row(
+            &tx,
             "SELECT * FROM supervisors WHERE token=?1",
-            [token],
+            sql_params![token],
             supervisor_row,
         )?;
         tx.commit()?;
@@ -131,10 +135,10 @@ impl SqliteQueue {
         workspace_id: Option<&str>,
     ) -> Result<()> {
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "set_supervisor_mode",
                 "UPDATE supervisors SET mode=?2, workspace_id=?3 WHERE token=?1",
-                params![token, mode.as_str(), workspace_id],
+                sql_params![token, mode.as_str(), workspace_id],
             )? == 1,
             "supervisor {token} is no longer registered"
         );
@@ -147,10 +151,10 @@ impl SqliteQueue {
     /// ([`Self::prune_supervisor`]). Leases are untouched; a missing row is
     /// not an error.
     pub fn deregister_supervisor(&self, token: &LeaseToken) -> Result<bool> {
-        Ok(self.write_statement(
+        Ok(self.write_sql(
             "deregister_supervisor",
             "DELETE FROM supervisors WHERE token=?1",
-            [token],
+            sql_params![token],
         )? == 1)
     }
 
@@ -168,17 +172,21 @@ impl SqliteQueue {
     ) -> Result<bool> {
         crate::domain::check_event_target(kind, None, None)?;
         let tx = self.write_tx("prune_supervisor")?;
-        let Some(registration) = tx
-            .query_row(
-                "SELECT * FROM supervisors WHERE token=?1",
-                [token],
-                supervisor_row,
-            )
-            .optional()?
+        let Some(registration) = SqlRead::query_row(
+            &tx,
+            "SELECT * FROM supervisors WHERE token=?1",
+            sql_params![token],
+            supervisor_row,
+        )
+        .optional()?
         else {
             return Ok(false);
         };
-        tx.execute("DELETE FROM supervisors WHERE token=?1", [token])?;
+        SqlWrite::execute(
+            &tx,
+            "DELETE FROM supervisors WHERE token=?1",
+            sql_params![token],
+        )?;
         // No session span is closed by a supervisor's stop, so there are no
         // transcripts to read before the write, as `record_queue_event` does.
         super::run_log::queue_event(&tx, kind, &stopped(&registration))?;
@@ -190,10 +198,10 @@ impl SqliteQueue {
     /// (ADR-0045 decision 10): its process execs another binary when asked.
     pub fn accept_handoff(&self, token: &LeaseToken) -> Result<()> {
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "accept_handoff",
                 "UPDATE supervisors SET handoff_accepted=1 WHERE token=?1",
-                [token],
+                sql_params![token],
             )? == 1,
             "supervisor {token} is no longer registered"
         );
@@ -204,22 +212,22 @@ impl SqliteQueue {
     /// short steps. `false` when it is not registered or does not take a
     /// handoff.
     pub fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        Ok(self.write_statement(
+        Ok(self.write_sql(
             "request_handoff",
             "UPDATE supervisors SET handoff_binary=?2, handoff_requested_at=?3
              WHERE token=?1 AND handoff_accepted=1",
-            params![token, binary, self.generators.clock.now()],
+            sql_params![token, binary, self.generators.clock.now()],
         )? == 1)
     }
 
     /// Withdraw the request that the supervisor `token` exec `binary`, if
     /// it has not taken it yet; `false` when there was none.
     pub fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        Ok(self.write_statement(
+        Ok(self.write_sql(
             "cancel_handoff",
             "UPDATE supervisors SET handoff_binary=NULL, handoff_requested_at=NULL
              WHERE token=?1 AND handoff_binary=?2",
-            params![token, binary],
+            sql_params![token, binary],
         )? == 1)
     }
 
@@ -229,26 +237,25 @@ impl SqliteQueue {
     /// request, which also tells a waiting `hand_off` that the exec is in
     /// progress rather than over.
     pub fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        Ok(self.write_statement(
+        Ok(self.write_sql(
             "take_handoff",
             "UPDATE supervisors SET handoff_binary=NULL, handoff_requested_at=NULL,
                     handoff_accepted=0
              WHERE token=?1 AND handoff_binary=?2",
-            params![token, binary],
+            sql_params![token, binary],
         )? == 1)
     }
 
     /// The binary the supervisor `token` was asked to exec, if any.
     pub fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT handoff_binary FROM supervisors WHERE token=?1",
-                [token],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten())
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            "SELECT handoff_binary FROM supervisors WHERE token=?1",
+            sql_params![token],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten())
     }
 
     /// Take the registration of `token` back after exec'ing another binary
@@ -288,11 +295,12 @@ impl SqliteQueue {
     ) -> Result<SupervisorRegistration> {
         let tx = self.write_tx("supervisor_resume")?;
         ensure!(
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "UPDATE supervisors SET binary_version=?3, heartbeat_at=?4, handoff_accepted=1,
                         handoff_binary=NULL, handoff_requested_at=NULL
                  WHERE token=?1 AND pid=?2",
-                params![token, pid, binary_version, self.generators.clock.now()],
+                sql_params![token, pid, binary_version, self.generators.clock.now()],
             )? == 1,
             "supervisor {token} (pid {pid}) is no longer registered; nothing to hand off to"
         );
@@ -300,9 +308,10 @@ impl SqliteQueue {
             write_slot_limits(&tx, token, limits)?;
             write_providers(&tx, token, providers)?;
         }
-        let result = tx.query_row(
+        let result = SqlRead::query_row(
+            &tx,
             "SELECT * FROM supervisors WHERE token=?1",
-            [token],
+            sql_params![token],
             supervisor_row,
         )?;
         tx.commit()?;
@@ -313,10 +322,10 @@ impl SqliteQueue {
     /// (ADR-0045 decision 17).
     pub fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()> {
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "set_auto_update",
                 "UPDATE supervisors SET auto_update=?2 WHERE token=?1",
-                params![token, i64::from(enabled)],
+                sql_params![token, i64::from(enabled)],
             )? == 1,
             "supervisor {token} is no longer registered"
         );
@@ -333,10 +342,10 @@ impl SqliteQueue {
         source: Option<SettingSource>,
     ) -> Result<()> {
         ensure!(
-            self.write_statement(
+            self.write_sql(
                 "set_max_load",
                 "UPDATE supervisors SET max_load=?2, max_load_source=?3 WHERE token=?1",
-                params![token, max_load, source.map(SettingSource::as_str)],
+                sql_params![token, max_load, source.map(SettingSource::as_str)],
             )? == 1,
             "supervisor {token} is no longer registered"
         );
@@ -373,7 +382,7 @@ impl SqliteQueue {
     /// Every registered supervisor, oldest registration first, whether its
     /// process is alive or not.
     pub fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
-        supervisors_of(&self.conn)
+        supervisors_of(&*self.conn)
     }
 
     /// Give up ownership of a run the supervisor stops driving. The lease is
@@ -392,9 +401,10 @@ impl SqliteQueue {
     pub fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {
         let tx = self.write_tx("release_lease")?;
         ensure!(
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-                params![id, token]
+                sql_params![id, token]
             )? == 1,
             "run lease was lost"
         );
@@ -411,9 +421,10 @@ impl SqliteQueue {
     /// Whether this process still holds the run's lease. An adopted-away or
     /// recovered run answers `false`, and its former owner must not touch it.
     pub fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1 AND token=?2)",
-            params![id, token],
+            sql_params![id, token],
             |r| r.get(0),
         )?)
     }
@@ -423,13 +434,15 @@ impl SqliteQueue {
     /// another repository is refused; rebinding is never implicit.
     pub fn bind_repository(&mut self, common_dir: &str) -> Result<()> {
         let tx = self.write_tx("bind_repository")?;
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT OR IGNORE INTO queue_repository(singleton, git_common_dir) VALUES (1,?1)",
-            [common_dir],
+            sql_params![common_dir],
         )?;
-        let bound: String = tx.query_row(
+        let bound: String = SqlRead::query_row(
+            &tx,
             "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
-            [],
+            sql_params![],
             |r| r.get(0),
         )?;
         ensure!(
@@ -445,17 +458,18 @@ impl SqliteQueue {
     /// (ADR-0020); `init` and `supervise` go through `bind_repository`.
     pub fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
         let tx = self.write_tx("rebind_repository")?;
-        let previous: Option<String> = tx
-            .query_row(
-                "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        tx.execute(
+        let previous: Option<String> = SqlRead::query_row(
+            &tx,
+            "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
+            sql_params![],
+            |r| r.get(0),
+        )
+        .optional()?;
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO queue_repository(singleton, git_common_dir) VALUES (1,?1)
              ON CONFLICT(singleton) DO UPDATE SET git_common_dir=excluded.git_common_dir",
-            [common_dir],
+            sql_params![common_dir],
         )?;
         tx.commit()?;
         Ok(previous)
@@ -476,27 +490,27 @@ impl SqliteQueue {
     /// Git common directory the queue is bound to, recorded by `init` for a
     /// repository queue or by the first `supervise` otherwise.
     pub fn repository_binding(&self) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?)
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
+            sql_params![],
+            |r| r.get(0),
+        )
+        .optional()?)
     }
 
     /// Every lease in the queue, oldest run first.
     pub fn run_leases(&self) -> Result<Vec<RunLease>> {
-        Ok(self
-            .conn
-            .prepare("SELECT l.run_id,l.token,l.pid,l.heartbeat_at FROM run_leases l JOIN task_runs r ON r.id=l.run_id ORDER BY r.rowid")?
-            .query_map([], lease_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT l.run_id,l.token,l.pid,l.heartbeat_at FROM run_leases l JOIN task_runs r ON r.id=l.run_id ORDER BY r.rowid",
+            sql_params![],
+            lease_row,
+        )?)
     }
 
     pub fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>> {
-        run_lease_of(&self.conn, id)
+        run_lease_of(&*self.conn, id)
     }
 
     /// The slots held and the slots offered when a backend call failed:
@@ -505,14 +519,16 @@ impl SqliteQueue {
     /// registered supervisor. `parallel` is `None` when no supervisor is
     /// registered (under `token`).
     pub fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)> {
-        let slots = self.conn.query_row(
+        let slots = SqlRead::query_row(
+            &*self.conn,
             "SELECT count(*) FROM run_leases WHERE ?1 IS NULL OR token=?1",
-            [token],
+            sql_params![token],
             |r| r.get(0),
         )?;
-        let parallel = self.conn.query_row(
+        let parallel = SqlRead::query_row(
+            &*self.conn,
             "SELECT SUM(parallel) FROM supervisors WHERE ?1 IS NULL OR token=?1",
-            [token],
+            sql_params![token],
             |r| r.get(0),
         )?;
         Ok((slots, parallel))
@@ -535,9 +551,10 @@ impl SqliteQueue {
             run::check_resumable(&run).is_ok() || run::check_reopenable(&run).is_ok()
         });
         ensure!(allowed, "run is not being resumed by this supervisor");
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO run_processes(run_id,role,pid) VALUES (?1,'wrapper',?2)",
-            params![id, pid],
+            sql_params![id, pid],
         )
         .context("wrapper is already registered; a resume may only launch once")?;
         run_event(&tx, id, EventKind::WrapperStarted, json!({"pid": pid}))?;
@@ -553,12 +570,13 @@ impl SqliteQueue {
         agent_pid: u32,
     ) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::AgentStarted]))?;
+        let _read = self.read_before(Closing::Run(id, &[EventKind::AgentStarted]))?;
         let tx = self.write_tx("register_resume_agent")?;
         assert_wrapper(&tx, id, wrapper_pid)?;
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO run_processes(run_id,role,pid) VALUES (?1,'agent',?2)",
-            params![id, agent_pid],
+            sql_params![id, agent_pid],
         )?;
         run_event(
             &tx,
@@ -587,19 +605,23 @@ impl SqliteQueue {
         let allowed =
             supervised_run(&tx, id, token)?.is_some_and(|run| run::check_reopenable(&run).is_ok());
         ensure!(allowed, "run is not running under this supervisor");
-        let other: Option<u32> = tx
-            .query_row(
-                "SELECT pid FROM run_processes WHERE run_id=?1 AND role='wrapper'
+        let other: Option<u32> = SqlRead::query_row(
+            &tx,
+            "SELECT pid FROM run_processes WHERE run_id=?1 AND role='wrapper'
                  AND exited_at IS NULL",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .filter(|pid| Some(*pid) != lost);
+            sql_params![id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .filter(|pid| Some(*pid) != lost);
         if let Some(pid) = other {
             bail!("a wrapper of run {id} (pid {pid}) registered meanwhile");
         }
-        tx.execute("DELETE FROM run_processes WHERE run_id=?1", [id])?;
+        SqlWrite::execute(
+            &tx,
+            "DELETE FROM run_processes WHERE run_id=?1",
+            sql_params![id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -643,9 +665,10 @@ impl SqliteQueue {
         let allowed = supervised_run(&tx, id, token)?
             .is_some_and(|run| run::check_ready_for_wrapper(&run).is_ok());
         ensure!(allowed, "run is not ready for its wrapper");
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO run_processes(run_id,role,pid) VALUES (?1,'wrapper',?2)",
-            params![id, pid],
+            sql_params![id, pid],
         )
         .context("wrapper is already registered; a run may only launch once")?;
         run_event(&tx, id, EventKind::WrapperStarted, json!({"pid": pid}))?;
@@ -655,12 +678,13 @@ impl SqliteQueue {
 
     pub fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::AgentStarted]))?;
+        let _read = self.read_before(Closing::Run(id, &[EventKind::AgentStarted]))?;
         let tx = self.write_tx("register_agent")?;
         assert_wrapper(&tx, id, wrapper_pid)?;
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO run_processes(run_id,role,pid) VALUES (?1,'agent',?2)",
-            params![id, agent_pid],
+            sql_params![id, agent_pid],
         )?;
         apply(
             &tx,
@@ -693,10 +717,11 @@ impl SqliteQueue {
     ) -> Result<()> {
         let tx = self.write_tx("register_turn_agent")?;
         assert_wrapper(&tx, id, wrapper_pid)?;
-        let changed = tx.execute(
+        let changed = SqlWrite::execute(
+            &tx,
             "UPDATE run_processes SET pid=?2,heartbeat_at=?3
              WHERE run_id=?1 AND role='agent' AND exited_at IS NULL",
-            params![id, agent_pid, self.generators.clock.now()],
+            sql_params![id, agent_pid, self.generators.clock.now()],
         )?;
         ensure!(changed == 1, "the session's first agent is not registered");
         tx.commit()?;
@@ -705,24 +730,25 @@ impl SqliteQueue {
 
     pub fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()> {
         // Registration is immutable and a run ID is never reused.
-        assert_wrapper(&self.conn, id, pid)?;
-        self.write_statement(
+        assert_wrapper(&*self.conn, id, pid)?;
+        self.write_sql(
             "heartbeat_wrapper",
             "UPDATE run_processes SET heartbeat_at=?2 WHERE run_id=?1 AND exited_at IS NULL",
-            params![id, self.generators.clock.now()],
+            sql_params![id, self.generators.clock.now()],
         )?;
         Ok(())
     }
 
     pub fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::SessionExited]))?;
+        let _read = self.read_before(Closing::Run(id, &[EventKind::SessionExited]))?;
         let tx = self.write_tx("wrapper_exited")?;
         assert_wrapper(&tx, id, pid)?;
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "UPDATE run_processes SET exited_at=?3,exit_code=?2,heartbeat_at=?3
              WHERE run_id=?1 AND exited_at IS NULL",
-            params![id, exit_code, self.generators.clock.now()],
+            sql_params![id, exit_code, self.generators.clock.now()],
         )?;
         run_event(
             &tx,
@@ -735,34 +761,35 @@ impl SqliteQueue {
     }
 
     pub fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM run_processes WHERE run_id=?1 ORDER BY role")?
-            .query_map([id], process_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM run_processes WHERE run_id=?1 ORDER BY role",
+            sql_params![id],
+            process_row,
+        )?)
     }
 }
 
 /// Host運用's write of a heartbeat on `token`'s registration, which the
 /// heartbeat of the leases calls inside its transaction (T11 of
 /// src/context_boundaries/ownership.rs): whether the registration was there.
-fn refresh_registration(conn: &rusqlite::Connection, token: &LeaseToken, now: i64) -> Result<bool> {
+fn refresh_registration(conn: &impl SqlWrite, token: &LeaseToken, now: i64) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE supervisors SET heartbeat_at=?2 WHERE token=?1",
-        params![token, now],
+        sql_params![token, now],
     )? > 0)
 }
 
 /// The executables of the providers on `token`'s registration (ADR-t813-2).
 fn write_providers(
-    conn: &rusqlite::Connection,
+    conn: &impl SqlWrite,
     token: &LeaseToken,
     providers: &[ProviderCheck],
 ) -> Result<()> {
     ensure!(
         conn.execute(
             "UPDATE supervisors SET providers=?2 WHERE token=?1",
-            params![token, serde_json::to_string(providers)?],
+            sql_params![token, serde_json::to_string(providers)?],
         )? == 1,
         "supervisor {token} is no longer registered"
     );
@@ -770,11 +797,7 @@ fn write_providers(
 }
 
 /// The slot limits and their sources on `token`'s registration.
-fn write_slot_limits(
-    conn: &rusqlite::Connection,
-    token: &LeaseToken,
-    limits: SlotLimits,
-) -> Result<()> {
+fn write_slot_limits(conn: &impl SqlWrite, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
     let parallel = u32::try_from(limits.parallel.value)?;
     ensure!(parallel >= 1, "parallel must be at least 1");
     let max_waiting = u32::try_from(limits.max_waiting.value)?;
@@ -787,7 +810,7 @@ fn write_slot_limits(
     ensure!(
         conn.execute(
             "UPDATE supervisors SET parallel=?2, parallel_source=?3, max_waiting=?4, max_waiting_source=?5, runtime_planners=?6, runtime_planners_source=?7, claim_spacing=?8, claim_spacing_source=?9, max_spikes=?10, max_spikes_source=?11, class_aging=?12, class_aging_source=?13 WHERE token=?1",
-            params![
+            sql_params![
                 token,
                 parallel,
                 limits.parallel.source.as_str(),

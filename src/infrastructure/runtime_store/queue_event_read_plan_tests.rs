@@ -17,6 +17,7 @@ use crate::infrastructure::ci_watch_store::{
     latest_freshness_sql, watch_events_sql,
 };
 use crate::infrastructure::sql_dialect::SqlDialect;
+use rusqlite::Connection;
 
 /// The plan of `sql`, one line per step, its parameters NULL.
 fn plan(conn: &Connection, sql: &str) -> Vec<String> {
@@ -55,10 +56,13 @@ fn the_queue_event_reads_by_kind_stay_on_events_by_kind() {
     assert_eq!(count, 0, "the plan is the one with no statistics");
     let one_read = [
         // Under the write lock.
-        ("take_case_set: settled", any_of_set_sql()),
-        ("take_case_set: owner", set_owner_sql()),
-        ("any_of_round", any_of_round_sql()),
-        ("take_up_eval_round: owner", round_owner_sql()),
+        ("take_case_set: settled", any_of_set_sql(SqlDialect::Sqlite)),
+        ("take_case_set: owner", set_owner_sql(SqlDialect::Sqlite)),
+        ("any_of_round", any_of_round_sql(SqlDialect::Sqlite)),
+        (
+            "take_up_eval_round: owner",
+            round_owner_sql(SqlDialect::Sqlite),
+        ),
         (
             "record_ci_check, record_ci_scheduled_check: latest",
             LATEST_OF_KIND_SQL.to_owned(),
@@ -97,7 +101,7 @@ fn the_queue_event_reads_by_kind_stay_on_events_by_kind() {
     .map(|(name, sql)| (name, sql, 1));
     let statements = one_read.into_iter().chain([(
         "settle_eval_round: another_runs (s and f)",
-        another_round_runs_sql(),
+        another_round_runs_sql(SqlDialect::Sqlite),
         2,
     )]);
     for (name, sql, reads) in statements {

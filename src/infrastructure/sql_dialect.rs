@@ -180,6 +180,9 @@ pub(crate) fn json_field_spaced(column: &str, path: &str, ty: JsonType) -> Strin
 }
 
 /// [`SqlDialect::json_field_at`] in the SQLite kind.
+// No caller here any more, kept for a store module on another branch that
+// has not moved (ADR-t3982-1: the moves land in any order).
+#[allow(dead_code)]
 pub(crate) fn json_field_at(column: &str, path: &str, ty: JsonType) -> String {
     SqlDialect::Sqlite.json_field_at(column, path, ty)
 }

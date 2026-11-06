@@ -5,6 +5,7 @@
 use super::*;
 use crate::application::RunResourceStore;
 use crate::domain::environment::{Resources, RunResource};
+use rusqlite::{Row, params};
 
 /// The columns of a stored window, in the order [`resource_row`] reads
 /// them.

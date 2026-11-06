@@ -6,9 +6,12 @@
 //! `events_by_kind`, why: [`crate::infrastructure::kpi_push`].
 
 use super::*;
+use crate::infrastructure::sessions::read_before;
 use crate::infrastructure::sql_dialect::{
     JsonType, TimeForm, json_field, json_field_spaced, time_value,
 };
+use crate::infrastructure::sqlite::{enum_col, event_row, json_col, run_row};
+use rusqlite::{OptionalExtension, Row, params};
 
 /// The events of one kind in a range of ids, oldest first, at most a
 /// limit: a range of `events_by_kind`.
@@ -924,7 +927,7 @@ impl SqliteQueue {
 
     /// Every event of one run, oldest first.
     pub fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
-        run_events_of(&self.conn, id)
+        run_events_of(&*self.conn, id)
     }
 
     /// Every event of one task (its runs' too), oldest first, by
@@ -1104,7 +1107,7 @@ impl SqliteQueue {
             .query_row(
                 "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
                 [id],
-                lease_row,
+                |r| with_row(r, lease_row),
             )
             .optional()?;
         if lease.is_some_and(|lease| !lease_is_stale(&lease, now)) {
@@ -1155,7 +1158,7 @@ impl SqliteQueue {
         let mut statement = self
             .conn
             .prepare("SELECT run_id,token,pid,heartbeat_at FROM run_leases")?;
-        let leases = statement.query_map([], lease_row)?;
+        let leases = statement.query_map([], |r| with_row(r, lease_row))?;
         let mut live = std::collections::HashSet::new();
         for lease in leases {
             let lease = lease?;
@@ -1379,15 +1382,14 @@ impl EventStore for SqliteQueue {
 
 /// Insert an event of the queue itself in the open transaction `tx`, with
 /// the session span it opens or closes; its id.
-pub(super) fn queue_event(tx: &Connection, kind: EventKind, payload: &Value) -> Result<EventId> {
-    let id = EventId::new(crate::infrastructure::sqlite::insert_id(
-        tx,
+pub(super) fn queue_event(tx: &impl EventTx, kind: EventKind, payload: &Value) -> Result<EventId> {
+    let id = EventId::new(tx.insert_id(
         "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![kind.as_str(), serde_json::to_string(payload)?],
+        sql_params![kind.as_str(), serde_json::to_string(payload)?],
     )?);
     // The observer's session span (ADR-0048).
-    crate::infrastructure::sessions::follow(tx, id, None, None, kind, payload)?;
+    tx.follow_spans(id, None, None, kind, payload)?;
     Ok(id)
 }
 
@@ -1414,6 +1416,8 @@ impl crate::application::ObserverLog for SqliteQueue {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+
     use super::*;
 
     /// The plan of `sql`, one line per step, its parameters NULL.

@@ -16,7 +16,7 @@
 
 use crate::domain::RecordedKind;
 use crate::domain::event_kind::{self, EventKind};
-use crate::infrastructure::sql_dialect::{JsonType, TimeForm, json_field, json_field_at};
+use crate::infrastructure::sql_dialect::{JsonType, TimeForm, json_field};
 use std::cell::RefCell;
 
 use anyhow::Result;
@@ -29,7 +29,7 @@ use super::{
     event_bodies::set_event_body_field,
     run_env,
     sql_exec::{
-        self, SqlDialect, SqlResult, SqlRow, sql_params,
+        self, OptionalRow as _, SqlDialect, SqlResult, SqlRow, sql_params,
         sqlite::{native_error, port_tx, with_row},
     },
     sqlite::{WriteTx, event_row, json_col},
@@ -896,7 +896,7 @@ struct RunSessionClosed {
 /// the event `after`, with the span's kind and attempt: what `resume_finished`
 /// carries of the resumed session (task 514).
 pub(super) fn closed_work(
-    conn: &Connection,
+    conn: &impl sql_exec::SqlRead,
     run_id: &RunId,
     kind: &str,
     after: EventId,
@@ -909,7 +909,7 @@ pub(super) fn closed_work(
 /// the event `after`: what `resume_finished` carries of the resumed session
 /// (task 199).
 pub(super) fn closed_tokens(
-    conn: &Connection,
+    conn: &impl sql_exec::SqlRead,
     run_id: &RunId,
     kind: &str,
     after: EventId,
@@ -921,7 +921,7 @@ pub(super) fn closed_tokens(
 /// whose span opened after the event `after`, and the span's
 /// `session_opened` payload.
 fn closed_value(
-    conn: &Connection,
+    conn: &impl sql_exec::SqlRead,
     run_id: &RunId,
     kind: &str,
     after: EventId,
@@ -929,8 +929,8 @@ fn closed_value(
 ) -> Result<Option<(Value, Value)>> {
     let found: Option<(Value, Value)> = conn
         .query_row(
-            &closed_value_sql(),
-            params![run_id, kind, after, format!("$.{key}")],
+            &closed_value_sql(conn.dialect()),
+            sql_params![run_id, kind, after, format!("$.{key}")],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )
         .optional()?
@@ -945,7 +945,7 @@ fn closed_value(
 
 /// The query of [`closed_value`]: the run's `session_closed` by
 /// `events_by_run`, each joined to its `session_opened` by the key.
-fn closed_value_sql() -> String {
+fn closed_value_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT c.payload, o.payload FROM run_events c
            JOIN run_events o ON o.id={c_opened_event_id}
@@ -953,9 +953,9 @@ fn closed_value_sql() -> String {
            AND {c_kind}=?2
            AND {c_at} IS NOT NULL
          ORDER BY c.id DESC LIMIT 1",
-        c_at = json_field_at("c.payload", "?4", JsonType::Any),
-        c_opened_event_id = json_field("c.payload", "$.opened_event_id", JsonType::Integer),
-        c_kind = json_field("c.payload", "$.kind", JsonType::Text),
+        c_at = dialect.json_field_at("c.payload", "?4", JsonType::Any),
+        c_opened_event_id = dialect.json_field("c.payload", "$.opened_event_id", JsonType::Integer),
+        c_kind = dialect.json_field("c.payload", "$.kind", JsonType::Text),
     )
 }
 
@@ -2650,7 +2650,7 @@ pub(super) mod tests {
         );
         // closed_value joins the `session_opened` by its key and walks the
         // run's `session_closed` by the kind, never the whole table.
-        let plan = plan(conn, &closed_value_sql());
+        let plan = plan(conn, &closed_value_sql(SqlDialect::Sqlite));
         assert!(
             !plan.iter().any(|step| step.starts_with("SCAN")),
             "{plan:#?}"
@@ -3751,7 +3751,7 @@ pub(super) mod tests {
         assert_eq!(written[0]["kind"], "worker");
         assert_eq!(written[1]["command"], "cargo test --locked");
         assert_eq!(
-            closed_work(conn, &run, "worker", EventId::new(0)).unwrap(),
+            closed_work(&**conn, &run, "worker", EventId::new(0)).unwrap(),
             Some(exited.payload["work_breakdown"].clone())
         );
 
@@ -3791,7 +3791,7 @@ pub(super) mod tests {
                 .is_none()
         );
         assert_eq!(
-            closed_work(conn, &run, "resume", EventId::new(resumed)).unwrap(),
+            closed_work(&**conn, &run, "resume", EventId::new(resumed)).unwrap(),
             None
         );
     }
@@ -4023,7 +4023,7 @@ pub(super) mod tests {
         let finished = &of_kind(&queue, "resume_finished")[0];
         assert_eq!(finished.payload["tokens"], resumed);
         assert_eq!(
-            closed_tokens(&queue.conn, &run, "resume", EventId::new(before)).unwrap(),
+            closed_tokens(&*queue.conn, &run, "resume", EventId::new(before)).unwrap(),
             Some(resumed)
         );
 

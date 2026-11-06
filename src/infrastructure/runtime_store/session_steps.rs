@@ -11,6 +11,7 @@ use crate::domain::session_step::{
 };
 use crate::domain::telemetry::{Beat, TargetFacts};
 use crate::infrastructure::sql_dialect::{JsonType, TimeForm, json_field_spaced, time_value};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 /// The columns of a stored step, in the order [`step_row`] reads them.
 const COLUMNS: &str = "id,target_kind,target_id,session_id,seq,kind,offset_ms,duration_ms,\

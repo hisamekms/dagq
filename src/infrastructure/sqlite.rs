@@ -1172,6 +1172,19 @@ impl SqliteQueue {
         Ok(changed)
     }
 
+    /// [`Self::write_statement`] with the arguments of the execution port.
+    pub(super) fn write_sql(
+        &self,
+        name: &'static str,
+        sql: &str,
+        params: &[super::sql_exec::SqlValue],
+    ) -> Result<usize> {
+        let tx = self.write_tx(name)?;
+        let changed = super::sql_exec::SqlWrite::execute(&tx, sql, params)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
     /// A transaction that reads one snapshot, named `name` on this
     /// connection ([`WriteTx::read`], deferred), which records a long hold
     /// of a write in it on this connection.
@@ -2223,6 +2236,9 @@ pub(super) fn goal_event(
     super::task_store::goal_event(&port_tx(conn), goal_id, kind, payload).map_err(native_error)
 }
 
+// No caller here any more, kept for a store module on another branch that
+// has not moved (ADR-t3982-1: the moves land in any order).
+#[allow(dead_code)]
 pub(super) fn held_claims(conn: &Connection) -> Result<Vec<crate::domain::task_hold::HoldGuard>> {
     store_rows::held_claims(&port_tx(conn)).map_err(native_error)
 }
@@ -2243,6 +2259,9 @@ pub(super) fn held_claims(conn: &Connection) -> Result<Vec<crate::domain::task_h
 /// route's, recorded as `provider_switched` (phase `start`) when they
 /// differ.
 #[allow(clippy::too_many_arguments)]
+// No caller here any more, kept for a store module on another branch that
+// has not moved (ADR-t3982-1: the moves land in any order).
+#[allow(dead_code)]
 pub(super) fn claim_task(
     tx: &Connection,
     runs_dir: &Path,
@@ -2291,6 +2310,9 @@ pub(super) fn transition_task(
 /// than writing `tasks` itself: its landing (T2 of
 /// `src/context_boundaries/ownership.rs`) or the close of a verified
 /// `already_satisfied` claim without one (T12, ADR-t1818-1 decision 5).
+// No caller here any more, kept for a store module on another branch that
+// has not moved (ADR-t3982-1: the moves land in any order).
+#[allow(dead_code)]
 pub(super) fn complete_task(
     conn: &Connection,
     task_id: TaskId,
@@ -2425,6 +2447,9 @@ pub(super) fn run_row(runs_dir: &Path) -> impl Fn(&Row<'_>) -> rusqlite::Result<
     move |row| with_row(row, &read)
 }
 
+// No caller here any more, kept for a store module on another branch that
+// has not moved (ADR-t3982-1: the moves land in any order).
+#[allow(dead_code)]
 pub(super) fn stored_run_row(row: &Row<'_>) -> rusqlite::Result<TaskRun> {
     with_row(row, store_rows::stored_run_row)
 }

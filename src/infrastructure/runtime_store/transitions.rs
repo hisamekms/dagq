@@ -4,6 +4,7 @@
 use super::*;
 use crate::domain::satisfied::TaskMove;
 use crate::domain::{EventKind, run_phase};
+use crate::infrastructure::sql_exec::{SqlRead, SqlWrite};
 
 impl SqliteQueue {
     /// Reserve the next dependency-ready task of a Claude worker
@@ -82,13 +83,15 @@ impl SqliteQueue {
             routes,
         )?;
         if let ClaimOutcome::Claimed { run } = &outcome {
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "UPDATE task_runs SET supervisor_token=?2 WHERE id=?1",
-                params![run.id(), token],
+                sql_params![run.id(), token],
             )?;
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
-                params![run.id(), token, holder_pid(&tx, token)?, unix_seconds(at)],
+                sql_params![run.id(), token, holder_pid(&tx, token)?, unix_seconds(at)],
             )?;
             run_event(
                 &tx,
@@ -125,9 +128,10 @@ impl SqliteQueue {
             || "run does not exist".to_owned(),
             |run| run::abandon(run, message.to_owned()),
         )?;
-        let released = tx.execute(
+        let released = SqlWrite::execute(
+            &tx,
             "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-            params![id, token],
+            sql_params![id, token],
         )?;
         run_event(
             &tx,
@@ -216,9 +220,11 @@ impl SqliteQueue {
     ) -> Result<TaskRun> {
         let tx = self.write_tx("finish_supervision")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
-        let code: i32 = tx.query_row(
+        let code: i32 = SqlRead::query_row(
+            &tx,
             "SELECT exit_code FROM run_processes WHERE run_id=?1 AND role='wrapper' AND exited_at IS NOT NULL",
-            [id], |r| r.get(0)
+            sql_params![id],
+            |r| r.get(0),
         ).context("wrapper has not reported session exit")?;
         let run = apply_recorded(
             &tx,
@@ -308,9 +314,10 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
         let tx = self.write_tx("decide_landing")?;
-        let leased: bool = tx.query_row(
+        let leased: bool = SqlRead::query_row(
+            &tx,
             "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1)",
-            [id],
+            sql_params![id],
             |r| r.get(0),
         )?;
         ensure!(!leased, "run {id} is leased");
@@ -346,10 +353,12 @@ impl SqliteQueue {
             Some(token) => renew_lease(&tx, id, token, unix_seconds(at))?,
             None => ensure!(!run_leased(&tx, id)?, "run {id} is leased"),
         }
-        let task: crate::domain::TaskId =
-            tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
-                r.get(0)
-            })?;
+        let task: crate::domain::TaskId = SqlRead::query_row(
+            &tx,
+            "SELECT task_id FROM task_runs WHERE id=?1",
+            sql_params![id],
+            |r| r.get(0),
+        )?;
         crate::infrastructure::replans::check_task_step(
             &tx,
             task,
@@ -365,9 +374,10 @@ impl SqliteQueue {
         )?
         .relocated(&self.runs_dir);
         if let Some(token) = token {
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-                params![id, token],
+                sql_params![id, token],
             )?;
             run_event(
                 &tx,
@@ -376,7 +386,7 @@ impl SqliteQueue {
                 json!({"reason": EventKind::RunSatisfiedClosed.as_str()}),
             )?;
         }
-        let task = crate::infrastructure::sqlite::complete_task(
+        let task = crate::infrastructure::task_store::complete_task(
             &tx,
             run.task_id(),
             id,
@@ -413,14 +423,14 @@ impl SqliteQueue {
         )?;
         let now = self.generators.clock.timestamp();
         match task {
-            TaskMove::Ready => crate::infrastructure::sqlite::transition_task(
+            TaskMove::Ready => crate::infrastructure::task_store::transition_task(
                 &tx,
                 run.task_id(),
                 TaskAction::Ready,
                 &now,
             )?,
             TaskMove::Cancel(cancel) => {
-                crate::infrastructure::sqlite::cancel_task(&tx, run.task_id(), cancel, &now)?
+                crate::infrastructure::task_store::cancel_task(&tx, run.task_id(), cancel, &now)?
             }
         };
         tx.commit()?;
@@ -491,9 +501,10 @@ impl SqliteQueue {
                     |run| run::record_replan_park(run, reason, payload),
                 )?;
                 ensure!(
-                    tx.execute(
+                    SqlWrite::execute(
+                        &tx,
                         "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-                        params![id, token]
+                        sql_params![id, token]
                     )? == 1,
                     "run lease was lost"
                 );
@@ -532,7 +543,7 @@ impl SqliteQueue {
             crate::domain::AskKind::ApproveClose,
         ] {
             crate::infrastructure::asks::close_asks_in(
-                &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
+                &tx,
                 &id,
                 None,
                 kind,
@@ -574,9 +585,10 @@ impl SqliteQueue {
             |run| run::record_hold_park(run, reason, payload),
         )?;
         ensure!(
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-                params![id, token]
+                sql_params![id, token]
             )? == 1,
             "run lease was lost"
         );
@@ -593,7 +605,7 @@ impl SqliteQueue {
             crate::domain::AskKind::ApproveClose,
         ] {
             crate::infrastructure::asks::close_asks_in(
-                &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
+                &tx,
                 id,
                 None,
                 kind,
@@ -625,10 +637,12 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let tx = self.write_tx("rest_fenced")?;
         renew_lease(&tx, id, token, now)?;
-        let task: crate::domain::TaskId =
-            tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
-                r.get(0)
-            })?;
+        let task: crate::domain::TaskId = SqlRead::query_row(
+            &tx,
+            "SELECT task_id FROM task_runs WHERE id=?1",
+            sql_params![id],
+            |r| r.get(0),
+        )?;
         let Some(fence) = (crate::domain::task_replan::TaskGuards {
             replan: crate::infrastructure::replans::guard_of(&tx, task)?,
             hold: crate::infrastructure::task_holds::guard_of(&tx, task)?,
@@ -664,9 +678,10 @@ impl SqliteQueue {
             },
         )?;
         ensure!(
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-                params![id, token]
+                sql_params![id, token]
             )? == 1,
             "run lease was lost"
         );
@@ -683,7 +698,7 @@ impl SqliteQueue {
             crate::domain::AskKind::ApproveClose,
         ] {
             crate::infrastructure::asks::close_asks_in(
-                &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
+                &tx,
                 id,
                 None,
                 ask,
@@ -737,9 +752,10 @@ impl SqliteQueue {
     ) -> Result<bool> {
         let tx = self.write_tx("release_for_hold")?;
         ensure!(
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-                params![id, token]
+                sql_params![id, token]
             )? == 1,
             "run lease was lost"
         );
@@ -749,10 +765,12 @@ impl SqliteQueue {
             EventKind::LeaseReleased,
             json!({"reason": "hold_settled", "hold_id": hold}),
         )?;
-        let task: crate::domain::TaskId =
-            tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
-                r.get(0)
-            })?;
+        let task: crate::domain::TaskId = SqlRead::query_row(
+            &tx,
+            "SELECT task_id FROM task_runs WHERE id=?1",
+            sql_params![id],
+            |r| r.get(0),
+        )?;
         let open = crate::infrastructure::task_holds::open_hold_of(&tx, task)?;
         let settled = open.is_some_and(|open| open.id == hold && open.settled_at.is_some())
             || crate::infrastructure::task_holds::settle_at_rest_in(&tx, id, true)?;
@@ -800,9 +818,10 @@ impl SqliteQueue {
         let tx = self.write_tx("switch_provider")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         // Written from the typed worker: the column has no CHECK (ADR-t876-1).
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "UPDATE task_runs SET actual_provider=?2, worker_mode=?3 WHERE id=?1",
-            params![id, worker.provider.as_str(), worker.mode.as_str()],
+            sql_params![id, worker.provider.as_str(), worker.mode.as_str()],
         )?;
         run_event(&tx, id, EventKind::ProviderSwitched, payload)?;
         tx.commit()?;
@@ -827,11 +846,13 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
         let tx = self.write_tx("park_rechecked")?;
-        let lease: Option<LeaseToken> = tx
-            .query_row("SELECT token FROM run_leases WHERE run_id=?1", [id], |r| {
-                r.get(0)
-            })
-            .optional()?;
+        let lease: Option<LeaseToken> = SqlRead::query_row(
+            &tx,
+            "SELECT token FROM run_leases WHERE run_id=?1",
+            sql_params![id],
+            |r| r.get(0),
+        )
+        .optional()?;
         let waiting = stored_run(&tx, id)?
             .is_some_and(|run| run.status() == crate::domain::RunStatus::AwaitingIntegration);
         if lease.as_ref() != token || !waiting {
@@ -852,9 +873,10 @@ impl SqliteQueue {
         )?;
         // The lease goes first, as it always has in the event log.
         if let Some(token) = token {
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-                params![id, token],
+                sql_params![id, token],
             )?;
             run_event(
                 &tx,
@@ -952,7 +974,7 @@ impl SqliteQueue {
         refused_by_handoff: bool,
     ) -> Result<()> {
         let kind = EventKind::RunE2eStarted;
-        let _read = read_before(&self.conn, Closing::Event(id, kind, &payload))?;
+        let _read = self.read_before(Closing::Event(id, kind, &payload))?;
         let tx = self.write_tx("begin_e2e_with")?;
         if refused_by_handoff {
             refuse_on_handoff(&tx, token)?;
@@ -995,13 +1017,13 @@ impl SqliteQueue {
         };
         let tx = self.write_tx("begin_integration_then")?;
         if let Some(now) = registered_at {
-            let heartbeat_at: Option<i64> = tx
-                .query_row(
-                    "SELECT heartbeat_at FROM supervisors WHERE token=?1",
-                    [token],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            let heartbeat_at: Option<i64> = SqlRead::query_row(
+                &tx,
+                "SELECT heartbeat_at FROM supervisors WHERE token=?1",
+                sql_params![token],
+                |r| r.get(0),
+            )
+            .optional()?;
             let facts = crate::domain::queue_service::HeldFacts {
                 registration_expired: heartbeat_at
                     .map(|at| now - at > crate::domain::HEARTBEAT_TIMEOUT_SECS),
@@ -1017,13 +1039,13 @@ impl SqliteQueue {
         if refused_by_handoff {
             refuse_on_handoff(&tx, token)?;
         }
-        let busy: Option<RunId> = tx
-            .query_row(
-                "SELECT id FROM task_runs WHERE status='integrating'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let busy: Option<RunId> = SqlRead::query_row(
+            &tx,
+            "SELECT id FROM task_runs WHERE status='integrating'",
+            sql_params![],
+            |r| r.get(0),
+        )
+        .optional()?;
         if let Some(other) = busy {
             ensure!(
                 other == *id,
@@ -1061,11 +1083,12 @@ impl SqliteQueue {
             Some(pid) => pid,
             None => holder_pid(&tx, token)?,
         };
-        if tx.execute(
+        if SqlWrite::execute(
+            &tx,
             "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)
              ON CONFLICT(run_id) DO UPDATE SET pid=excluded.pid,heartbeat_at=excluded.heartbeat_at
              WHERE run_leases.token=excluded.token",
-            params![id, token, pid, self.generators.clock.now()],
+            sql_params![id, token, pid, self.generators.clock.now()],
         )? != 1
         {
             return Err(NotHeld("run is still leased".to_owned()).into());
@@ -1076,9 +1099,10 @@ impl SqliteQueue {
             EventKind::IntegrationStarted,
             json!({"main": main, "previous_status": previous, "pid": pid}),
         )?;
-        let started: i64 = tx.query_row(
+        let started: i64 = SqlRead::query_row(
+            &tx,
             "SELECT max(id) FROM run_events WHERE run_id=?1 AND kind='integration_started'",
-            [id],
+            sql_params![id],
             |r| r.get(0),
         )?;
         let done = then(crate::domain::EventId::new(started))?;
@@ -1217,9 +1241,10 @@ impl SqliteQueue {
             || format!("run {id} is not integrating"),
             command,
         )?;
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-            params![id, token],
+            sql_params![id, token],
         )?;
         detail["status"] = json!(run.status());
         detail["reason"] = json!(reason);
@@ -1253,7 +1278,7 @@ impl SqliteQueue {
             && landed.status() == RunStatus::Integrated
             && landed.result_commit() == Some(&landing.commit)
         {
-            let task = crate::infrastructure::sqlite::read_task(&tx, landed.task_id())?;
+            let task = crate::infrastructure::store_rows::read_task(&tx, landed.task_id())?;
             return Ok((task, landed.relocated(&self.runs_dir)));
         }
         let at = self.generators.clock.system_time();
@@ -1267,22 +1292,23 @@ impl SqliteQueue {
             |run| run::finish_integration(run, landing.commit.clone()),
         )?
         .relocated(&self.runs_dir);
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
-            params![id, token],
+            sql_params![id, token],
         )?;
         let mut payload = serde_json::to_value(landing)?;
         payload["result_commit"] = json!(landing.commit);
         payload["git_common_dir"] = json!(common_dir);
         // The supervisor's slot holds the run through its push; a
         // person's `integrate` leases it without a supervisor's row.
-        let in_slot = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM supervisors WHERE token=?1)",
-                [token],
-                |r| r.get::<_, bool>(0),
-            )
-            .unwrap_or(false);
+        let in_slot = SqlRead::query_row(
+            &tx,
+            "SELECT EXISTS(SELECT 1 FROM supervisors WHERE token=?1)",
+            sql_params![token],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
         run_event(&tx, id, EventKind::RunIntegrated, payload)?;
         phase_event(
             &tx,
@@ -1298,7 +1324,7 @@ impl SqliteQueue {
         )?;
         // A Spike's completion leaves its replanning request in the same
         // transaction (ADR-t1487-1 decision 5), through complete_task.
-        let task = crate::infrastructure::sqlite::complete_task(
+        let task = crate::infrastructure::task_store::complete_task(
             &tx,
             run.task_id(),
             id,
@@ -1344,7 +1370,7 @@ impl SqliteQueue {
     /// `cleanup_failed` need not order those events.
     pub fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::WorkspaceClosed]))?;
+        let _read = self.read_before(Closing::Run(id, &[EventKind::WorkspaceClosed]))?;
         let tx = self.write_tx("workspace_closed")?;
         let now = self.generators.clock.now();
         renew_lease(&tx, id, token, now)?;
@@ -1408,7 +1434,7 @@ impl SqliteQueue {
         mut payload: serde_json::Value,
     ) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::WorkspaceClosed]))?;
+        let _read = self.read_before(Closing::Run(id, &[EventKind::WorkspaceClosed]))?;
         let tx = self.write_tx("record_workspace_closed")?;
         let now = self.generators.clock.now();
         if let Some(run) = stored_run(&tx, id)? {
@@ -1915,11 +1941,11 @@ fn abandon_payload(message: &str, lease_released: bool, session: Option<&Value>)
 
 /// Refuse, inside the caller's write, what the supervisor `token` would
 /// start while it is asked to hand off ([`crate::application::HandoffAsked`]).
-fn refuse_on_handoff(tx: &rusqlite::Transaction<'_>, token: &LeaseToken) -> Result<()> {
+fn refuse_on_handoff(tx: &impl SqlRead, token: &LeaseToken) -> Result<()> {
     if let Some(binary) = tx
         .query_row(
             "SELECT handoff_binary FROM supervisors WHERE token=?1",
-            [token],
+            sql_params![token],
             |r| r.get::<_, Option<String>>(0),
         )
         .optional()?
@@ -1935,10 +1961,10 @@ fn refuse_on_handoff(tx: &rusqlite::Transaction<'_>, token: &LeaseToken) -> Resu
 }
 
 /// Whether run `id` has a lease row, stale or not.
-fn run_leased(tx: &rusqlite::Transaction<'_>, id: &RunId) -> Result<bool> {
+fn run_leased(tx: &impl SqlRead, id: &RunId) -> Result<bool> {
     Ok(tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1)",
-        [id],
+        sql_params![id],
         |r| r.get(0),
     )?)
 }
@@ -1995,7 +2021,7 @@ mod tests {
             "integration_started",
         );
         run_event(
-            &queue.conn,
+            &crate::infrastructure::sql_exec::sqlite::port_tx(&queue.conn),
             &run,
             EventKind::RunPhaseChanged,
             landing.payload(),
@@ -2017,7 +2043,7 @@ mod tests {
     }
 
     fn kinds_and_phases(queue: &SqliteQueue, run: &RunId) -> Vec<(i64, String, Value)> {
-        run_events_of(&queue.conn, run)
+        run_events_of(&*queue.conn, run)
             .unwrap()
             .into_iter()
             .map(|event| (event.id.as_i64(), event.kind.to_string(), event.payload))

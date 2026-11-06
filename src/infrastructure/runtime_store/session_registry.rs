@@ -3,7 +3,10 @@
 
 use super::*;
 use crate::domain::EventKind;
+use crate::infrastructure::sessions::read_before;
 use crate::infrastructure::sql_dialect::{JsonType, json_field};
+use crate::infrastructure::sqlite::event_row;
+use rusqlite::{OptionalExtension, params};
 
 impl SqliteQueue {
     /// Record a workspace for `role`, replacing any earlier one, as an

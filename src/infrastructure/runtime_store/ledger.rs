@@ -9,6 +9,8 @@ use crate::domain::ledger::{
 use crate::domain::pre_claim::rows::Since;
 use crate::domain::run_phase::{Blocker, Holds};
 use crate::infrastructure::sql_dialect::{JsonType, json_field_spaced};
+use crate::infrastructure::sqlite::event_row;
+use rusqlite::{OptionalExtension, Row, params};
 
 const BLOCKERS: [(Blocker, &str); 7] = [
     (Blocker::Queue, "blocker_queue_ms"),
