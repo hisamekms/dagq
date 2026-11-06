@@ -16,9 +16,7 @@
 //! planner on a new request, or held for a person. A second apply of an
 //! applied operation writes nothing.
 
-use super::sql_exec::sqlite::{port_tx, with_row};
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -26,9 +24,11 @@ use super::replans::{
     approved_children as approved_children_of, check_replacement, child_version, latest_plan,
     move_in_as, read_operation, write_mappings,
 };
-use super::sql_exec::sql_params;
-use super::sqlite::{SqliteQueue, enum_col, event, read_task, transition_task};
-use super::store_rows;
+use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
+use super::sqlite::SqliteQueue;
+use super::store_rows::{self, enum_col, read_task};
+use super::store_writes::{EventTx, event};
+use super::task_store::{replace_task, transition_task};
 use crate::domain::event_kind::EventKind;
 use crate::domain::replan_apply::{
     self, ApplyOutcome, ApplyProblem, ApplyRecovery, ApplyState, ChildCarry, WaitNode,
@@ -37,6 +37,14 @@ use crate::domain::replan_plan::{ItemDisposition, PlanRevision};
 use crate::domain::task_replan::{ConditionMapping, ReplanMove, ReplanOperation, ReplanStatus};
 use crate::domain::{GoalId, ReplanId, RunStatus, TaskAction, TaskId, TaskStatus};
 
+// The names other store modules call, which land in any order
+// (ADR-t3982-1): each is this module's function of that name.
+#[allow(unused_imports)]
+pub(super) use self::{
+    goal_replacing as goal_replacing_port, goal_unresolved as goal_unresolved_port,
+    successors_now as successors_now_port, wait_graph as wait_graph_port,
+};
+
 impl SqliteQueue {
     /// The operations whose replacement the trusted runtime applies now,
     /// oldest first: those `reviewing` whose latest plan plan review
@@ -44,10 +52,9 @@ impl SqliteQueue {
     /// restart did not finish), and those a refused apply held `blocked`,
     /// checked again.
     pub fn replacements_to_apply(&self) -> Result<Vec<ReplanOperation>> {
-        let ids: Vec<ReplanId> = self
-            .conn
-            .prepare(
-                "SELECT o.id FROM replan_operations o
+        let ids: Vec<ReplanId> = SqlRead::query_map(
+            &*self.conn,
+            "SELECT o.id FROM replan_operations o
                  WHERE o.closed_at IS NULL AND (o.status='applying'
                    OR (o.status='blocked' AND o.return_phase='applying')
                    OR (o.status='reviewing' AND EXISTS(
@@ -57,11 +64,11 @@ impl SqliteQueue {
                        AND p.revision=(SELECT MAX(revision) FROM replan_plans
                                        WHERE operation_id=o.id))))
                  ORDER BY o.id",
-            )?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![],
+            |r| r.get(0),
+        )?;
         ids.into_iter()
-            .map(|id| read_operation(&self.conn, id))
+            .map(|id| read_operation(&*self.conn, id))
             .collect()
     }
 
@@ -213,9 +220,10 @@ impl SqliteQueue {
             && op.return_phase == Some(ReplanStatus::Applying)
             && op.status_reason.as_deref() != Some(reason.as_str())
         {
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "UPDATE replan_operations SET status_reason=?1, updated_at=?2 WHERE id=?3",
-                params![reason, now, id],
+                sql_params![reason, now, id],
             )?;
             event(
                 &tx,
@@ -250,7 +258,7 @@ impl SqliteQueue {
     /// What child `task` takes of the saved work of the run its applied
     /// operation replaced, if it takes any ([`ChildCarry`]).
     pub fn child_carry(&self, task: TaskId) -> Result<Option<ChildCarry>> {
-        child_carry(&self.conn, task)
+        child_carry(&*self.conn, task)
     }
 }
 
@@ -259,7 +267,7 @@ impl SqliteQueue {
 /// on `tx`: a replaced task is resolved only once each of these has
 /// ended (ADR-t1521-2 decision 5), wherever it belongs now.
 pub(super) fn replacement_tasks(
-    tx: &impl super::sql_exec::SqlRead,
+    tx: &impl SqlRead,
     from: &[TaskId],
 ) -> Result<Vec<(TaskId, TaskStatus)>> {
     if from.is_empty() {
@@ -284,7 +292,7 @@ pub(super) fn replacement_tasks(
 /// Whether replaced task `task` is not resolved yet: a task its
 /// replacements reach has not ended ([`replacement_tasks`]), or a record on
 /// the way is broken ([`unresolved_replacements`]).
-pub(super) fn replacement_open(tx: &impl super::sql_exec::SqlRead, task: TaskId) -> Result<bool> {
+pub(super) fn replacement_open(tx: &impl SqlRead, task: TaskId) -> Result<bool> {
     Ok(replacement_tasks(tx, &[task])?
         .iter()
         .any(|(_, status)| !status.is_terminal())
@@ -297,7 +305,7 @@ pub(super) fn replacement_open(tx: &impl super::sql_exec::SqlRead, task: TaskId)
 /// visits each task once, so it ends on a loop that the recursive query of
 /// [`replacement_tasks`] would only stop at.
 pub(super) fn unresolved_replacements(
-    tx: &impl super::sql_exec::SqlRead,
+    tx: &impl SqlRead,
     from: &[TaskId],
 ) -> Result<Vec<replan_apply::UnresolvedReplacement>> {
     if from.is_empty() {
@@ -333,19 +341,6 @@ pub(super) fn unresolved_replacements(
     ))
 }
 
-/// [`unresolved_replacements`] from goal `goal`'s replaced tasks: while
-/// any is there, the goal neither starts a review nor closes as achieved.
-pub(super) fn goal_unresolved(
-    conn: &Connection,
-    goal: GoalId,
-) -> Result<Vec<replan_apply::UnresolvedReplacement>> {
-    goal_unresolved_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        goal,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
-}
-
 /// [`unresolved_replacements`] from the replaced tasks of each open goal
 /// in one walk per goal (a loop is found once, where it closes), and from
 /// those with no goal, each with the goal it holds back, in goal and task
@@ -353,16 +348,15 @@ pub(super) fn goal_unresolved(
 /// otherwise) since the record is not fixed by hand. A broken task two
 /// goals reach is shown for each.
 pub(super) fn open_unresolved(
-    conn: &Connection,
+    conn: &impl SqlRead,
 ) -> Result<Vec<(Option<GoalId>, replan_apply::UnresolvedReplacement)>> {
-    let replaced: Vec<(Option<GoalId>, TaskId)> = conn
-        .prepare(
-            "SELECT t.goal_id, t.id FROM tasks t LEFT JOIN goals g ON g.id=t.goal_id
+    let replaced: Vec<(Option<GoalId>, TaskId)> = conn.query_map(
+        "SELECT t.goal_id, t.id FROM tasks t LEFT JOIN goals g ON g.id=t.goal_id
              WHERE t.status='replaced' AND (t.goal_id IS NULL OR g.closed_at IS NULL)
              ORDER BY t.goal_id, t.id",
-        )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+        sql_params![],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     let mut by_goal: BTreeMap<Option<GoalId>, Vec<TaskId>> = BTreeMap::new();
     for (goal, task) in replaced {
         by_goal.entry(goal).or_default().push(task);
@@ -376,28 +370,18 @@ pub(super) fn open_unresolved(
     Ok(found)
 }
 
-/// The tasks outside goal `goal` that its replaced tasks' replacements
-/// reach ([`replacement_tasks`]), which hold its review and its close back
-/// as its own tasks do.
-pub(super) fn goal_replacing(conn: &Connection, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus)>> {
-    goal_replacing_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        goal,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
-}
-
 /// What replaced goal `goal`'s replaced tasks, through the replacements of
 /// replaced children too, and the tasks those replacements reach outside
 /// the goal ([`replan_apply::GoalReplacements`]), read on `conn`.
 pub(super) fn goal_replacements(
-    conn: &Connection,
+    conn: &impl SqlRead,
     goal: GoalId,
 ) -> Result<replan_apply::GoalReplacements> {
-    let members: Vec<TaskId> = conn
-        .prepare("SELECT id FROM tasks WHERE goal_id=?1 AND status='replaced' ORDER BY id")?
-        .query_map([goal], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let members: Vec<TaskId> = conn.query_map(
+        "SELECT id FROM tasks WHERE goal_id=?1 AND status='replaced' ORDER BY id",
+        sql_params![goal],
+        |r| r.get(0),
+    )?;
     let mut replaced: std::collections::BTreeSet<TaskId> = members.iter().copied().collect();
     replaced.extend(
         replacement_tasks(conn, &members)?
@@ -412,7 +396,7 @@ pub(super) fn goal_replacements(
                 "SELECT r.operation_id FROM replan_replacements r
                  JOIN replan_operations o ON o.id=r.operation_id AND o.status='applied'
                  WHERE r.from_task_id=?1 ORDER BY r.operation_id DESC LIMIT 1",
-                [task],
+                sql_params![task],
                 |r| r.get(0),
             )
             .optional()?;
@@ -441,7 +425,7 @@ pub(super) fn goal_replacements(
 }
 
 /// [`SqliteQueue::child_carry`] on `conn`.
-pub(super) fn child_carry(conn: &Connection, task: TaskId) -> Result<Option<ChildCarry>> {
+pub(super) fn child_carry(conn: &impl SqlRead, task: TaskId) -> Result<Option<ChildCarry>> {
     let carry = conn
         .query_row(
             "SELECT r.operation_id, r.from_task_id, r.carry, r.carry_order, o.run_id,
@@ -450,7 +434,7 @@ pub(super) fn child_carry(conn: &Connection, task: TaskId) -> Result<Option<Chil
              WHERE r.to_task_id=?1 AND o.status='applied'
                AND r.carry IN ('snapshot_head','snapshot_diff')
              ORDER BY r.operation_id DESC LIMIT 1",
-            [task],
+            sql_params![task],
             |r| {
                 Ok(ChildCarry {
                     operation: r.get("operation_id")?,
@@ -474,41 +458,27 @@ pub(super) fn child_carry(conn: &Connection, task: TaskId) -> Result<Option<Chil
     Ok(carry)
 }
 
-/// The tasks that wait for `task` now and have not ended, with their
-/// statuses, in ID order: a canceled successor waits for nothing, so the
-/// apply neither refuses for it nor moves its edge.
-pub(super) fn successors_now(
-    conn: &Connection,
-    task: TaskId,
-) -> Result<BTreeMap<TaskId, TaskStatus>> {
-    successors_now_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        task,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
-}
-
 /// The latest plan of `op`, which an apply needs.
-fn plan_of(conn: &Connection, op: &ReplanOperation) -> Result<Option<PlanRevision>> {
+fn plan_of(conn: &impl SqlRead, op: &ReplanOperation) -> Result<Option<PlanRevision>> {
     latest_plan(conn, op.id)
 }
 
 /// Why `op` cannot be applied now, read on `conn` inside the apply's
 /// transaction ([`replan_apply::apply_problems`]).
 fn problems_now(
-    conn: &Connection,
+    conn: &impl SqlRead,
     op: &ReplanOperation,
     generation: i64,
 ) -> Result<Vec<ApplyProblem>> {
     let plan = plan_of(conn, op)?;
     let proposal = plan
         .as_ref()
-        .map(|plan| super::proposals::read(&port_tx(conn), plan.proposal_id))
+        .map(|plan| super::proposals::read(conn, plan.proposal_id))
         .transpose()?;
     let (run, run_leased): (RunStatus, bool) = conn.query_row(
         "SELECT status, EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1) AS leased
          FROM task_runs WHERE id=?1",
-        [&op.run_id],
+        sql_params![op.run_id],
         |r| Ok((enum_col(r, "status")?, r.get(1)?)),
     )?;
     let mut children = BTreeMap::new();
@@ -545,7 +515,7 @@ fn problems_now(
 /// Write the replacement of `op`, checked by [`problems_now`] in the same
 /// transaction, and the operation as it then is.
 fn write_replacement(
-    conn: &Connection,
+    conn: &impl EventTx,
     op: &ReplanOperation,
     generation: i64,
     now: i64,
@@ -583,19 +553,19 @@ fn write_replacement(
     }
     // The parked run and its task end, neither completed nor canceled.
     super::runtime_store::end_replaced_run(conn, &op.run_id)?;
-    super::sqlite::replace_task(conn, op.task_id, &op.run_id, op.id, &stamp, now)?;
-    let mut insert = conn.prepare(
-        "INSERT INTO replan_replacements(operation_id, from_task_id, to_task_id, carry, carry_order)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?;
+    replace_task(conn, op.task_id, &op.run_id, op.id, &stamp, now)?;
     for child in &plan.children {
-        insert.execute(params![
-            op.id,
-            op.task_id,
-            child.task_id,
-            child.carry.as_str(),
-            child.order
-        ])?;
+        conn.execute(
+            "INSERT INTO replan_replacements(operation_id, from_task_id, to_task_id, carry, carry_order)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+            sql_params![
+                op.id,
+                op.task_id,
+                child.task_id,
+                child.carry.as_str(),
+                child.order
+            ],
+        )?;
     }
     write_mappings(conn, op.id, &mappings_of(plan))?;
     // Every task that waits for the task now waits for the children in
@@ -605,12 +575,12 @@ fn write_replacement(
     for (successor, needs) in &edges {
         conn.execute(
             "DELETE FROM task_dependencies WHERE task_id=?1 AND predecessor_id=?2",
-            params![successor, op.task_id],
+            sql_params![successor, op.task_id],
         )?;
         for need in needs {
             conn.execute(
                 "INSERT OR IGNORE INTO task_dependencies(task_id, predecessor_id) VALUES (?1, ?2)",
-                params![successor, need],
+                sql_params![successor, need],
             )?;
         }
     }
@@ -622,12 +592,13 @@ fn write_replacement(
         "run {} ended replaced by tasks {children:?} (replan operation {}); this ask no longer applies to it",
         op.run_id, op.id
     );
-    let asks: Vec<crate::domain::Ask> = conn
-        .prepare("SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id")?
-        .query_map([&op.run_id], |row| with_row(row, super::asks::ask_row))?
-        .collect::<rusqlite::Result<_>>()?;
+    let asks: Vec<crate::domain::Ask> = conn.query_map(
+        "SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id",
+        sql_params![op.run_id],
+        super::asks::ask_row,
+    )?;
     for ask in &asks {
-        super::asks::discard_by_runtime(&port_tx(conn), ask, "replaced", &note, now)?;
+        super::asks::discard_by_runtime(conn, ask, "replaced", &note, now)?;
     }
     event(
         conn,
@@ -680,32 +651,37 @@ fn mappings_of(plan: &crate::domain::replan_plan::ReplacementPlan) -> Vec<Condit
     rows
 }
 
-pub(super) fn goal_unresolved_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+/// [`unresolved_replacements`] from goal `goal`'s replaced tasks: while
+/// any is there, the goal neither starts a review nor closes as achieved.
+pub(super) fn goal_unresolved(
+    conn: &impl SqlRead,
     goal: GoalId,
 ) -> Result<Vec<replan_apply::UnresolvedReplacement>> {
     let replaced: Vec<TaskId> = conn.query_map(
         "SELECT id FROM tasks WHERE goal_id=?1 AND status='replaced' ORDER BY id",
-        crate::infrastructure::sql_exec::sql_params![goal],
+        sql_params![goal],
         |r| r.get(0),
     )?;
     unresolved_replacements(conn, &replaced)
 }
 
-pub(super) fn goal_replacing_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+/// The tasks outside goal `goal` that its replaced tasks' replacements
+/// reach ([`replacement_tasks`]), which hold its review and its close back
+/// as its own tasks do.
+pub(super) fn goal_replacing(
+    conn: &impl SqlRead,
     goal: GoalId,
 ) -> Result<Vec<(TaskId, TaskStatus)>> {
     let replaced: Vec<TaskId> = conn.query_map(
         "SELECT id FROM tasks WHERE goal_id=?1 AND status='replaced' ORDER BY id",
-        crate::infrastructure::sql_exec::sql_params![goal],
+        sql_params![goal],
         |r| r.get(0),
     )?;
     let mut reached = replacement_tasks(conn, &replaced)?;
     let members: std::collections::BTreeSet<TaskId> = conn
         .query_map(
             "SELECT id FROM tasks WHERE goal_id=?1",
-            crate::infrastructure::sql_exec::sql_params![goal],
+            sql_params![goal],
             |r| r.get(0),
         )?
         .into_iter()
@@ -722,15 +698,15 @@ pub(super) fn goal_replacing_port(
 /// replaced, its replacement tasks (its goal waits for them,
 /// [`replacement_tasks`]), as `dep add` reads it (`sqlite::waits_for`).
 /// The edges onto `task` are left out, since the apply re-points them.
-pub(super) fn wait_graph_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+pub(super) fn wait_graph(
+    conn: &impl SqlRead,
     task: TaskId,
 ) -> Result<BTreeMap<WaitNode, Vec<WaitNode>>> {
     let mut waits: BTreeMap<WaitNode, Vec<WaitNode>> = BTreeMap::new();
     let mut add = |from: WaitNode, to: WaitNode| waits.entry(from).or_default().push(to);
     let rows: Vec<(TaskId, TaskId)> = conn.query_map(
         "SELECT task_id, predecessor_id FROM task_dependencies WHERE predecessor_id<>?1",
-        crate::infrastructure::sql_exec::sql_params![task],
+        sql_params![task],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     for (from, to) in rows {
@@ -738,7 +714,7 @@ pub(super) fn wait_graph_port(
     }
     let rows: Vec<(TaskId, GoalId)> = conn.query_map(
         "SELECT task_id, goal_id FROM task_goal_dependencies",
-        crate::infrastructure::sql_exec::sql_params![],
+        sql_params![],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     for (from, to) in rows {
@@ -746,7 +722,7 @@ pub(super) fn wait_graph_port(
     }
     let rows: Vec<(GoalId, TaskId)> = conn.query_map(
         "SELECT goal_id, id FROM tasks WHERE goal_id IS NOT NULL AND status<>'canceled'",
-        crate::infrastructure::sql_exec::sql_params![],
+        sql_params![],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     for (from, to) in rows {
@@ -755,7 +731,7 @@ pub(super) fn wait_graph_port(
     let rows: Vec<(TaskId, TaskId)> = conn.query_map(
         "SELECT r.from_task_id, r.to_task_id FROM replan_replacements r
              JOIN replan_operations o ON o.id=r.operation_id AND o.status='applied'",
-        crate::infrastructure::sql_exec::sql_params![],
+        sql_params![],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     for (from, to) in rows {
@@ -764,14 +740,17 @@ pub(super) fn wait_graph_port(
     Ok(waits)
 }
 
-pub(super) fn successors_now_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+/// The tasks that wait for `task` now and have not ended, with their
+/// statuses, in ID order: a canceled successor waits for nothing, so the
+/// apply neither refuses for it nor moves its edge.
+pub(super) fn successors_now(
+    conn: &impl SqlRead,
     task: TaskId,
 ) -> Result<BTreeMap<TaskId, TaskStatus>> {
     let all: Vec<(TaskId, TaskStatus)> = conn.query_map(
         "SELECT t.id, t.status FROM task_dependencies d JOIN tasks t ON t.id=d.task_id
              WHERE d.predecessor_id=?1 ORDER BY t.id",
-        crate::infrastructure::sql_exec::sql_params![task],
+        sql_params![task],
         |r| {
             Ok((
                 r.get(0)?,

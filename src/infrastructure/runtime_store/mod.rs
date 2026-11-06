@@ -21,8 +21,7 @@ use super::{
     adapters::process_alive,
     sessions::{Closing, read_before},
     sqlite::{
-        SqliteQueue, claim_task, enum_col, event, event_row, json_col, read_task, run_row,
-        stored_run_row,
+        SqliteQueue, claim_task, enum_col, event_row, json_col, read_task, run_row, stored_run_row,
     },
 };
 use crate::application::{
@@ -80,8 +79,20 @@ mod transitions;
 
 /// The run as stored (its paths not relocated), for a command to start from.
 fn stored_run(conn: &Connection, id: &RunId) -> Result<Option<TaskRun>> {
+    stored_run_port(conn, id).map_err(native_error)
+}
+
+/// [`stored_run`] on the execution port.
+fn stored_run_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: &RunId,
+) -> Result<Option<TaskRun>> {
     Ok(conn
-        .query_row("SELECT * FROM task_runs WHERE id=?1", [id], stored_run_row)
+        .query_row(
+            "SELECT * FROM task_runs WHERE id=?1",
+            sql_params![id],
+            crate::infrastructure::store_rows::stored_run_row,
+        )
         .optional()?)
 }
 
@@ -108,9 +119,19 @@ fn save_run(
     from: RunStatus,
     token: Option<&LeaseToken>,
 ) -> Result<bool> {
+    save_run_port(&port_tx(conn), run, from, token).map_err(native_error)
+}
+
+/// [`save_run`] on the execution port.
+fn save_run_port(
+    conn: &impl EventTx,
+    run: &TaskRun,
+    from: RunStatus,
+    token: Option<&LeaseToken>,
+) -> Result<bool> {
     let saved = save_run_row(conn, run, from, token)?;
     if saved && let Some(change) = run::unfinished_change(from, run.status()) {
-        event(
+        crate::infrastructure::store_writes::event(
             conn,
             run.task_id(),
             Some(run.id()),
@@ -127,7 +148,7 @@ fn save_run(
 }
 
 fn save_run_row(
-    conn: &Connection,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     run: &TaskRun,
     from: RunStatus,
     token: Option<&LeaseToken>,
@@ -137,7 +158,7 @@ fn save_run_row(
          receipt_path=?8,log_path=?9,workspace_id=?10,result_commit=?11,last_error=?12,
          workspace_closed_at=?13
          WHERE id=?1 AND status=?2 AND (?14 IS NULL OR supervisor_token=?14)",
-        params![
+        sql_params![
             run.id(),
             from.as_str(),
             run.status().as_str(),
@@ -164,20 +185,20 @@ fn save_run_row(
 /// automatic retry's once-per-task count leaves out). The stored run comes
 /// back.
 pub(super) fn end_released_run(
-    conn: &Connection,
+    conn: &impl EventTx,
     id: &RunId,
     reason: String,
     carried: Option<serde_json::Value>,
 ) -> Result<TaskRun> {
-    let run = stored_run(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
+    let run = stored_run_port(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
     let from = run.status();
     let run = run::end_for_release(run, reason)?;
     ensure!(
-        save_run(conn, &run, from, None)?,
+        save_run_port(conn, &run, from, None)?,
         "run {id} changed while it was released; nothing is released, try again"
     );
     if let Some(payload) = carried {
-        run_event(conn, id, EventKind::TriageFinished, payload)?;
+        run_event_port(conn, id, EventKind::TriageFinished, payload)?;
     }
     Ok(run)
 }
@@ -185,12 +206,12 @@ pub(super) fn end_released_run(
 /// End run `id`, parked for a replanning, as the apply of its replacement
 /// replaced it ([`run::end_for_replacement`]), inside the apply's
 /// transaction. The stored run comes back.
-pub(super) fn end_replaced_run(conn: &Connection, id: &RunId) -> Result<TaskRun> {
-    let run = stored_run(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
+pub(super) fn end_replaced_run(conn: &impl EventTx, id: &RunId) -> Result<TaskRun> {
+    let run = stored_run_port(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
     let from = run.status();
     let run = run::end_for_replacement(run)?;
     ensure!(
-        save_run(conn, &run, from, None)?,
+        save_run_port(conn, &run, from, None)?,
         "run {id} changed while its replacement was applied; nothing is applied"
     );
     Ok(run)

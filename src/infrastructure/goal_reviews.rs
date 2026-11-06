@@ -861,7 +861,7 @@ impl GoalReviewStore for SqliteQueue {
         &self,
         goal: GoalId,
     ) -> Result<crate::domain::replan_apply::GoalReplacements> {
-        super::replan_apply::goal_replacements(&self.conn, goal)
+        super::replan_apply::goal_replacements(&*self.conn, goal)
     }
 
     fn unresolved_replacements(
@@ -872,7 +872,7 @@ impl GoalReviewStore for SqliteQueue {
             crate::domain::replan_apply::UnresolvedReplacement,
         )>,
     > {
-        super::replan_apply::open_unresolved(&self.conn)
+        super::replan_apply::open_unresolved(&*self.conn)
     }
 
     fn goal_follow_ups(&self) -> Result<Vec<follow_up::GoalFollowUps>> {
@@ -894,7 +894,7 @@ impl GoalReviewStore for SqliteQueue {
             found.push(follow_up::GoalFollowUps {
                 goal,
                 tasks: own_tasks(&self.conn, goal)?,
-                replacing: super::replan_apply::goal_replacing(&self.conn, goal)?,
+                replacing: super::replan_apply::goal_replacing(&*self.conn, goal)?,
                 follow_ups,
             });
         }

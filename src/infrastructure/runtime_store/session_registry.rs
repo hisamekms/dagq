@@ -227,13 +227,7 @@ impl SessionRegistry for SqliteQueue {
         )
     }
     fn record_session_tokens(&self) -> Result<usize> {
-        crate::infrastructure::session_tokens::record_session_tokens(
-            &self.conn,
-            self.write_hold_warn,
-            self.write_identity
-                .as_ref()
-                .context("queue has no write leader identity")?,
-        )
+        crate::infrastructure::session_tokens::record_session_tokens(self)
     }
     fn record_session_hook(
         &self,

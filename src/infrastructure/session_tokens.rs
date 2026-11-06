@@ -10,18 +10,19 @@
 //! and subtracts recorded numbers ([`write`]). A hook's close reads no
 //! transcript: its cut at the close is made here afterwards.
 
-use crate::infrastructure::sql_dialect::{JsonType, json_field};
+use crate::infrastructure::sql_dialect::JsonType;
+use crate::infrastructure::sql_exec::{OptionalRow, SqlDialect, SqlRead, sql_params};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
-use std::time::Duration;
 use tracing::{debug, info};
 
 use super::{
     sessions::{
-        HOOK_INTAKE_PENDING, insert_at, now, open_hook_spans, read, span_closed, span_task,
+        HOOK_INTAKE_PENDING, insert_at_port, now_port, open_hook_spans_port, span_closed_port,
+        span_task_port,
     },
-    sqlite::{WriteTx, json_col},
+    sqlite::SqliteQueue,
+    store_rows::json_col,
 };
 use crate::domain::{
     EventId,
@@ -41,25 +42,17 @@ use crate::domain::{
 /// A transcript of an open span that cannot be read or counted now is left
 /// for the next time; one of a closed span is cut as not measured, once. One span
 /// that fails holds back no other. Returns the cuts recorded.
-pub(super) fn record_session_tokens(
-    conn: &Connection,
-    write_hold_warn: Duration,
-    identity: &super::write_leader::WriteIdentity,
-) -> Result<usize> {
-    let now = now(conn)?;
-    record_at(conn, write_hold_warn, identity, &now)
+pub(super) fn record_session_tokens(queue: &SqliteQueue) -> Result<usize> {
+    let now = now_port(&*queue.conn)?;
+    record_at(queue, &now)
 }
 
 /// [`record_session_tokens`] at `now` (in the form of `created_at`).
-fn record_at(
-    conn: &Connection,
-    write_hold_warn: Duration,
-    identity: &super::write_leader::WriteIdentity,
-    now: &str,
-) -> Result<usize> {
+fn record_at(queue: &SqliteQueue, now: &str) -> Result<usize> {
+    let conn = &*queue.conn;
     let now = rfc3339_millis(now).context("the time now does not parse")?;
     let mut cuts = Vec::new();
-    for span in open_hook_spans(conn)? {
+    for span in open_hook_spans_port(conn)? {
         let Some(start) = span
             .opened_ms
             .filter(|_| TOKEN_CUT_KINDS.contains(&span.kind()))
@@ -83,11 +76,11 @@ fn record_at(
     }
     let mut recorded = 0;
     for (span, start, at, last) in cuts {
-        let Some(cut) = prepare(conn, span, start, at, last) else {
+        let Some(cut) = prepare(queue, span, start, at, last) else {
             continue;
         };
         let (opened, kind) = (cut.span.opened_event_id, cut.span.kind().to_owned());
-        match write(conn, write_hold_warn, identity, &cut) {
+        match write(queue, &cut) {
             Ok(true) => recorded += 1,
             Ok(false) => {}
             Err(error)
@@ -120,10 +113,10 @@ struct Cut {
 /// Read and analyse the transcript of `span` from `start` to `at`, never
 /// under a write lock. `None` when an open span's transcript cannot be read
 /// now.
-fn prepare(conn: &Connection, span: OpenSpan, start: i64, at: i64, last: bool) -> Option<Cut> {
+fn prepare(queue: &SqliteQueue, span: OpenSpan, start: i64, at: i64, last: bool) -> Option<Cut> {
     // Its tokens name no test: no profile is looked for.
     let none = &mut Some(crate::domain::toolchain::Toolchains::none());
-    let totals = match read(conn, &span, none) {
+    let totals = match queue.span_transcript(&span, none) {
         Ok(transcript) => match SpanTotals::of(&transcript.records, start, at) {
             // Its totals run from its start, so this would recur hourly:
             // only its close records why.
@@ -164,19 +157,14 @@ fn prepare(conn: &Connection, span: OpenSpan, start: i64, at: i64, last: bool) -
 /// span's cut that adds nothing is not recorded (an idle inbox writes no
 /// event each hour), so the next pass tries again. `false` when nothing was
 /// recorded.
-fn write(
-    conn: &Connection,
-    write_hold_warn: Duration,
-    identity: &super::write_leader::WriteIdentity,
-    cut: &Cut,
-) -> Result<bool> {
-    let tx = WriteTx::write(conn, "session_tokens_cut", write_hold_warn, identity)?.recorded();
+fn write(queue: &SqliteQueue, cut: &Cut) -> Result<bool> {
+    let tx = queue.write_tx("session_tokens_cut")?;
     let opened = cut.span.opened_event_id;
     let earlier = recorded_cuts(&tx, opened)?;
     let stale = if cut.last {
         earlier.iter().any(|payload| payload["final"] == true)
     } else {
-        span_closed(&tx, opened)?
+        span_closed_port(&tx, opened)?
             || earlier
                 .last()
                 .and_then(cut_at)
@@ -204,14 +192,14 @@ fn write(
         }
         Err(reason) => ExecutionTokens::unmeasured(reason).record(&mut payload),
     }
-    let task = span_task(&tx, &cut.span)?;
-    insert_at(
+    let task = span_task_port(&tx, &cut.span)?;
+    insert_at_port(
         &tx,
         task,
         None,
         EventKind::SessionTokens,
         &payload,
-        &now(&tx)?,
+        &now_port(&tx)?,
     )?;
     tx.commit()?;
     Ok(true)
@@ -224,28 +212,29 @@ fn cut_at(payload: &Value) -> Option<i64> {
 
 /// The query of the cuts of the span opened by `?1`, by
 /// `events_by_opened_event`.
-fn recorded_cuts_sql() -> String {
+fn recorded_cuts_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT payload FROM run_events WHERE kind='{SESSION_TOKENS}'
            AND {opened_event_id}=?1 ORDER BY id",
-        opened_event_id = json_field("payload", "$.opened_event_id", JsonType::Integer),
+        opened_event_id = dialect.json_field("payload", "$.opened_event_id", JsonType::Integer),
     )
 }
 
 /// The payloads of the cuts of the span opened by `opened`, oldest first.
-fn recorded_cuts(conn: &Connection, opened: EventId) -> Result<Vec<Value>> {
-    Ok(conn
-        .prepare(&recorded_cuts_sql())?
-        .query_map([opened], |r| json_col(r, "payload"))?
-        .collect::<rusqlite::Result<_>>()?)
+fn recorded_cuts(conn: &impl SqlRead, opened: EventId) -> Result<Vec<Value>> {
+    Ok(conn.query_map(
+        &recorded_cuts_sql(conn.dialect()),
+        sql_params![opened],
+        |r| json_col(r, "payload"),
+    )?)
 }
 
 /// The time the last cut of the span opened by `opened` cuts at.
-fn last_cut_at(conn: &Connection, opened: EventId) -> Result<Option<i64>> {
+fn last_cut_at(conn: &impl SqlRead, opened: EventId) -> Result<Option<i64>> {
     let payload: Option<Value> = conn
         .query_row(
-            &format!("{} DESC LIMIT 1", recorded_cuts_sql()),
-            [opened],
+            &format!("{} DESC LIMIT 1", recorded_cuts_sql(conn.dialect())),
+            sql_params![opened],
             |r| json_col(r, "payload"),
         )
         .optional()?;
@@ -255,7 +244,7 @@ fn last_cut_at(conn: &Connection, opened: EventId) -> Result<Option<i64>> {
 /// The query of the spans of [`TOKEN_CUT_KINDS`] closed since `?1` without
 /// their cut at the close, with when and why each closed. Its `NOT EXISTS` finds
 /// the cuts by `events_by_opened_event`.
-fn closed_without_final_cut_sql() -> String {
+fn closed_without_final_cut_sql(dialect: SqlDialect) -> String {
     let kinds = TOKEN_CUT_KINDS.map(|kind| format!("'{kind}'")).join(",");
     format!(
         "SELECT o.id, o.payload, o.created_at, c.created_at AS closed_at,
@@ -270,12 +259,13 @@ fn closed_without_final_cut_sql() -> String {
                  AND {t_opened_event_id}=+o.id
                  AND {t_final}=1)
              ORDER BY o.id",
-        c_reason = json_field("c.payload", "$.reason", JsonType::Text),
-        c_active_unavailable = json_field("c.payload", "$.active_unavailable", JsonType::Text),
-        c_opened_event_id = json_field("c.payload", "$.opened_event_id", JsonType::Integer),
-        o_kind = json_field("o.payload", "$.kind", JsonType::Text),
-        t_opened_event_id = json_field("t.payload", "$.opened_event_id", JsonType::Integer),
-        t_final = json_field("t.payload", "$.final", JsonType::Boolean),
+        c_reason = dialect.json_field("c.payload", "$.reason", JsonType::Text),
+        c_active_unavailable =
+            dialect.json_field("c.payload", "$.active_unavailable", JsonType::Text),
+        c_opened_event_id = dialect.json_field("c.payload", "$.opened_event_id", JsonType::Integer),
+        o_kind = dialect.json_field("o.payload", "$.kind", JsonType::Text),
+        t_opened_event_id = dialect.json_field("t.payload", "$.opened_event_id", JsonType::Integer),
+        t_final = dialect.json_field("t.payload", "$.final", JsonType::Boolean),
     )
 }
 
@@ -287,11 +277,12 @@ fn closed_without_final_cut_sql() -> String {
 /// its `session_closed` does. A close the hook made (its intake pending,
 /// even an `inferred` one) is counted to its close, as its final
 /// `session_turns` is.
-fn closed_without_final_cut(conn: &Connection, after: i64) -> Result<Vec<(OpenSpan, i64)>> {
+fn closed_without_final_cut(conn: &impl SqlRead, after: i64) -> Result<Vec<(OpenSpan, i64)>> {
     type Row = (OpenSpan, String, Option<String>, Option<String>);
-    let rows: Vec<Row> = conn
-        .prepare(&closed_without_final_cut_sql())?
-        .query_map(params![millis_text(after)], |r| {
+    let rows: Vec<Row> = conn.query_map(
+        &closed_without_final_cut_sql(conn.dialect()),
+        sql_params![millis_text(after)],
+        |r| {
             Ok((
                 OpenSpan {
                     opened_event_id: r.get("id")?,
@@ -302,8 +293,8 @@ fn closed_without_final_cut(conn: &Connection, after: i64) -> Result<Vec<(OpenSp
                 r.get("reason")?,
                 r.get("unavailable")?,
             ))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+        },
+    )?;
     Ok(rows
         .into_iter()
         .filter(|(span, ..)| span.payload["route"] != HEADLESS_ROUTE)
@@ -319,10 +310,13 @@ fn closed_without_final_cut(conn: &Connection, after: i64) -> Result<Vec<(OpenSp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::{Connection, params};
+
     fn identity(conn: &Connection) -> super::super::write_leader::WriteIdentity {
         super::super::write_leader::WriteIdentity::read(conn).unwrap()
     }
 
+    use crate::infrastructure::sql_dialect::json_field;
     use crate::infrastructure::sqlite::WRITE_HOLD_WARN;
     use crate::{
         domain::{
@@ -332,7 +326,7 @@ mod tests {
             transcript::Transcript,
         },
         infrastructure::{
-            sessions::{record_hook, tests::READS},
+            sessions::{open_hook_spans, record_hook, tests::READS},
             sqlite::{SqliteQueue, event_row},
             transcripts::ClaudeTranscripts,
         },
@@ -432,67 +426,22 @@ mod tests {
         assistant(dir.path(), "s", "m2", "2026-10-02T00:20:00.000Z", (5, 30));
         assistant(dir.path(), "s", "m3", "2026-10-02T00:40:00.000Z", (7, 7));
         // Not an hour since it opened.
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-01T22:59:59.999Z"
-            )
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-01T23:30:00.000Z"
-            )
-            .unwrap(),
-            1
-        );
+        assert_eq!(record_at(&queue, "2026-10-01T22:59:59.999Z").unwrap(), 0);
+        assert_eq!(record_at(&queue, "2026-10-01T23:30:00.000Z").unwrap(), 1);
         drop(queue);
         // The supervisor that takes over reads where the last cut ended
         // from the queue.
         let queue = SqliteQueue::init(&db).unwrap();
         let conn = &queue.conn;
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-02T00:00:00.000Z"
-            )
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-02T00:45:00.000Z"
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-02T00:45:00.000Z"
-            )
-            .unwrap(),
-            0
-        );
+        assert_eq!(record_at(&queue, "2026-10-02T00:00:00.000Z").unwrap(), 0);
+        assert_eq!(record_at(&queue, "2026-10-02T00:45:00.000Z").unwrap(), 1);
+        assert_eq!(record_at(&queue, "2026-10-02T00:45:00.000Z").unwrap(), 0);
         // A cut prepared at a time a cut reached already writes nothing.
         let span = open_hook_spans(conn).unwrap().remove(0);
         let start = span.opened_ms.unwrap();
         let at = rfc3339_millis("2026-10-02T00:45:00.000Z").unwrap();
-        let stale = prepare(conn, span, start, at, false).unwrap();
-        assert!(!write(conn, WRITE_HOLD_WARN, &identity(conn), &stale).unwrap());
+        let stale = prepare(&queue, span, start, at, false).unwrap();
+        assert!(!write(&queue, &stale).unwrap());
         let recorded = cuts(conn);
         assert_eq!(recorded.len(), 2);
         assert_eq!(recorded[0].payload["at"], "2026-10-01T23:30:00.000Z");
@@ -531,26 +480,8 @@ mod tests {
         set_time(conn, closed, "2026-10-02T01:00:00.000Z");
         assistant(dir.path(), "s", "m5", "2026-10-02T01:05:00.000Z", (50, 50));
         // The cut at the close is due at once, and only once.
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-02T01:01:00.000Z"
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-02T03:00:00.000Z"
-            )
-            .unwrap(),
-            0
-        );
+        assert_eq!(record_at(&queue, "2026-10-02T01:01:00.000Z").unwrap(), 1);
+        assert_eq!(record_at(&queue, "2026-10-02T03:00:00.000Z").unwrap(), 0);
         let recorded = cuts(conn);
         assert_eq!(recorded.len(), 3);
         assert_eq!(recorded[2].payload["final"], true);
@@ -619,19 +550,19 @@ mod tests {
         let at = rfc3339_millis("2099-01-01T01:00:00.000Z").unwrap();
         READS.set(0);
         let analysed = crate::domain::transcript::ANALYSED.get();
-        let cut = prepare(conn, span, start, at, false).unwrap();
+        let cut = prepare(&queue, span, start, at, false).unwrap();
         assert_eq!(READS.get(), 1);
         let before = crate::domain::transcript::ANALYSED.get();
         assert!(before > analysed);
-        assert!(write(conn, WRITE_HOLD_WARN, &identity(conn), &cut).unwrap());
+        assert!(write(&queue, &cut).unwrap());
         assert_eq!(READS.get(), 1);
         assert_eq!(crate::domain::transcript::ANALYSED.get(), before);
         assert_eq!(io(&cuts(conn)[0].payload), (3, 4));
         assert_eq!(cuts(conn)[0].payload["kind"], PLANNER);
         // An hour later with nothing new: no cut.
         let span = open_hook_spans(conn).unwrap().remove(0);
-        let idle = prepare(conn, span, start, at + 3_600_000, false).unwrap();
-        assert!(!write(conn, WRITE_HOLD_WARN, &identity(conn), &idle).unwrap());
+        let idle = prepare(&queue, span, start, at + 3_600_000, false).unwrap();
+        assert!(!write(&queue, &idle).unwrap());
         assert_eq!(cuts(conn).len(), 1);
     }
 
@@ -654,16 +585,7 @@ mod tests {
             .as_i64()
             .unwrap();
         set_time(conn, opened, "2026-10-01T00:00:00.000Z");
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-01T02:00:00.000Z"
-            )
-            .unwrap(),
-            0
-        );
+        assert_eq!(record_at(&queue, "2026-10-01T02:00:00.000Z").unwrap(), 0);
         record_hook(
             conn,
             WRITE_HOLD_WARN,
@@ -676,36 +598,9 @@ mod tests {
             .unwrap();
         set_time(conn, closed, "2026-10-01T03:00:00.000Z");
         // A week and more after the close: no cut.
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-08T03:00:00.001Z"
-            )
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-01T04:00:00.000Z"
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-01T05:00:00.000Z"
-            )
-            .unwrap(),
-            0
-        );
+        assert_eq!(record_at(&queue, "2026-10-08T03:00:00.001Z").unwrap(), 0);
+        assert_eq!(record_at(&queue, "2026-10-01T04:00:00.000Z").unwrap(), 1);
+        assert_eq!(record_at(&queue, "2026-10-01T05:00:00.000Z").unwrap(), 0);
         let recorded = cuts(conn);
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].payload["tokens"], Value::Null);
@@ -757,15 +652,7 @@ mod tests {
                 let b = open_hook_spans(conn).unwrap().remove(0);
                 let start = b.opened_ms.unwrap();
                 let at = rfc3339_millis("2026-10-01T03:00:00.000Z").unwrap();
-                assert!(
-                    write(
-                        conn,
-                        WRITE_HOLD_WARN,
-                        &identity(conn),
-                        &prepare(conn, b, start, at, false).unwrap()
-                    )
-                    .unwrap()
-                );
+                assert!(write(&queue, &prepare(&queue, b, start, at, false).unwrap()).unwrap());
             }
             record_hook(
                 conn,
@@ -797,16 +684,7 @@ mod tests {
                 .unwrap();
             }
         }
-        assert_eq!(
-            record_at(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                "2026-10-01T04:00:00.000Z"
-            )
-            .unwrap(),
-            3
-        );
+        assert_eq!(record_at(&queue, "2026-10-01T04:00:00.000Z").unwrap(), 3);
         let recorded = cuts(conn);
         let finals: Vec<&RunEvent> = recorded
             .iter()
@@ -830,7 +708,10 @@ mod tests {
     fn the_searches_of_the_cuts_use_the_index_by_the_opened_event() {
         let dir = tempfile::tempdir().unwrap();
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        for sql in [recorded_cuts_sql(), closed_without_final_cut_sql()] {
+        for sql in [
+            recorded_cuts_sql(SqlDialect::Sqlite),
+            closed_without_final_cut_sql(SqlDialect::Sqlite),
+        ] {
             let mut statement = queue
                 .conn
                 .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))

@@ -1445,7 +1445,7 @@ impl RunTransitions for SqliteQueue {
         SqliteQueue::task_hold(self, task)
     }
     fn latest_run_of(&self, task: crate::domain::TaskId) -> Result<Option<TaskRun>> {
-        match crate::infrastructure::task_holds::latest_run(&self.conn, task)? {
+        match crate::infrastructure::task_holds::latest_run(&*self.conn, task)? {
             Some((id, _)) => Ok(Some(SqliteQueue::run(self, &id)?)),
             None => Ok(None),
         }

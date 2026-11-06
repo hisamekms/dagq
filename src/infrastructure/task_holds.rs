@@ -15,16 +15,15 @@
 //! finds the hold still open and settling, and the release reads whether
 //! it settled in its own, so a release while `settling` is refused and a
 //! park after a release writes nothing.
-use super::sql_dialect::{JsonType, json_field};
+use super::sql_dialect::JsonType;
 
-use super::sql_exec::sqlite::{native_error, port_tx, with_row};
-use super::store_writes::EventTx;
+use super::store_writes::{EventTx, event};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
-use super::sql_exec::{OptionalRow, SqlResult, SqlRow, sql_params};
-use super::sqlite::{SqliteQueue, event, read_task};
+use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlWrite, sql_params};
+use super::sqlite::SqliteQueue;
+use super::store_rows::read_task;
 use crate::application::commands::holds::{ReleaseRequest, ReleaseView};
 use crate::domain::event_kind::EventKind;
 use crate::domain::task_hold::{
@@ -34,6 +33,15 @@ use crate::domain::task_hold::{
 use crate::domain::task_replan::GuardedStep;
 use crate::domain::{
     HoldId, RunId, RunStatus, TaskId, TaskRun, TaskStatus, run_phase, worker_model,
+};
+
+// The names other store modules call, which land in any order
+// (ADR-t3982-1): each is this module's function of that name.
+#[allow(unused_imports)]
+pub(super) use self::{
+    end_with_task as end_with_task_port, enter_held_phase as enter_held_phase_port,
+    latest_run as latest_run_port, open_hold_of as open_hold_of_port,
+    settle_at_rest_in as settle_at_rest_in_port, settle_open as settle_open_port,
 };
 
 impl SqliteQueue {
@@ -66,7 +74,7 @@ impl SqliteQueue {
         let leased = match &latest {
             Some((run, _)) => tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1)",
-                [run],
+                sql_params![run],
                 |r| r.get(0),
             )?,
             None => false,
@@ -80,11 +88,12 @@ impl SqliteQueue {
             HoldTarget::Run(run) => Some(run.clone()),
             HoldTarget::Task(_) => None,
         };
-        let id = HoldId::new(tx.insert_id(
+        let id = HoldId::new(SqlWrite::insert_id(
+            &tx,
             "INSERT INTO task_holds(task_id, run_id, reason, until, by_role, by_id,
                created_at, settled_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
+            sql_params![
                 task_id,
                 named,
                 reason.trim(),
@@ -122,19 +131,19 @@ impl SqliteQueue {
     /// [`ProgressVersion`] and whether it has a session a resume goes on in
     /// ([`task_hold::session_to_resume`]).
     pub fn release_view(&self, target: &HoldTarget) -> Result<ReleaseView> {
-        let task = read_task(&self.conn, resolve(&self.conn, target)?)?;
+        let task = read_task(&*self.conn, resolve(&*self.conn, target)?)?;
         // The hold before the run: a hold that settles in between is read
         // as settling, never as held with the version from before.
-        let hold = open_hold_of(&self.conn, task.id())?;
-        let run = latest_task_run(&self.conn, &self.runs_dir, task.id())?;
+        let hold = open_hold_of(&*self.conn, task.id())?;
+        let run = latest_task_run(&*self.conn, &self.runs_dir, task.id())?;
         let (version, session, kept) = match &run {
             Some(run) => (
-                Some(progress_version(&self.conn, task.id(), run.id())?),
-                task_hold::session_to_resume(&super::runtime_store::run_events_of(
-                    &self.conn,
+                Some(progress_version(&*self.conn, task.id(), run.id())?),
+                task_hold::session_to_resume(&super::runtime_store::run_events_of_port(
+                    &*self.conn,
                     run.id(),
                 )?),
-                kept_unsettled(&self.conn, run.id())?,
+                kept_unsettled(&*self.conn, run.id())?,
             ),
             None => (None, false, false),
         };
@@ -179,10 +188,10 @@ impl SqliteQueue {
         // The spans a carry-over's `triage_finished` closes read their
         // transcripts first (task 543), as `ready --inherit` does.
         let _read = match &request.work {
-            Some((at, _)) => Some(super::sessions::read_before(
-                &self.conn,
-                super::sessions::Closing::Run(&at.run, &[crate::domain::EventKind::TriageFinished]),
-            )?),
+            Some((at, _)) => Some(self.read_before(super::sessions::Closing::Run(
+                &at.run,
+                &[crate::domain::EventKind::TriageFinished],
+            ))?),
             None => None,
         };
         let now = self.generators.clock.now();
@@ -207,10 +216,9 @@ impl SqliteQueue {
             run: latest.as_ref().map(TaskRun::status),
             run_provider: latest.as_ref().map(TaskRun::actual_provider),
             session: match &latest {
-                Some(run) => task_hold::session_to_resume(&super::runtime_store::run_events_of(
-                    &tx,
-                    run.id(),
-                )?),
+                Some(run) => task_hold::session_to_resume(
+                    &super::runtime_store::run_events_of_port(&tx, run.id())?,
+                ),
                 None => false,
             },
             kept: match &latest {
@@ -272,7 +280,7 @@ impl SqliteQueue {
         let session = match &choice.model {
             Some(model) => {
                 let events = match &latest {
-                    Some(run) => super::runtime_store::run_events_of(&tx, run.id())?,
+                    Some(run) => super::runtime_store::run_events_of_port(&tx, run.id())?,
                     None => Vec::new(),
                 };
                 Some(worker_model::WorkerSession::released(
@@ -282,11 +290,12 @@ impl SqliteQueue {
             }
             None => None,
         };
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "UPDATE task_holds SET released_at=?2, released_by_role=?3, released_by_id=?4,
                continuation=?5
              WHERE id=?1 AND released_at IS NULL",
-            params![hold.id, now, by_role, by_id, decision.continuation()],
+            sql_params![hold.id, now, by_role, by_id, decision.continuation()],
         )?;
         let record = task_hold::Released {
             hold_id: Some(hold.id),
@@ -319,9 +328,10 @@ impl SqliteQueue {
             && provider != task.worker().provider
         {
             let task = crate::domain::task::release_on(task.clone(), provider)?;
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "UPDATE tasks SET worker_provider=?2, worker_mode=?3 WHERE id=?1",
-                params![
+                sql_params![
                     task_id,
                     task.worker().provider.as_str(),
                     task.stored_worker_mode().map(|mode| mode.as_str()),
@@ -334,7 +344,7 @@ impl SqliteQueue {
                      AND heartbeat_at >= ?2-?3)
                    OR EXISTS(SELECT 1 FROM run_processes WHERE run_id=?1
                      AND exited_at IS NULL AND heartbeat_at >= ?2-?3)",
-                params![run.id(), now, crate::domain::HEARTBEAT_TIMEOUT_SECS],
+                sql_params![run.id(), now, crate::domain::HEARTBEAT_TIMEOUT_SECS],
                 |r| r.get(0),
             )?;
             anyhow::ensure!(
@@ -356,25 +366,22 @@ impl SqliteQueue {
             )?;
             // The recovery job's `decide` asks on the run are answered by
             // the release: nothing of them applies to the run any more.
-            let decides: Vec<crate::domain::Ask> = tx
-                .prepare(
-                    "SELECT * FROM asks WHERE run_id=?1 AND kind='decide' AND asked_by=?2
+            let decides: Vec<crate::domain::Ask> = tx.query_map(
+                "SELECT * FROM asks WHERE run_id=?1 AND kind='decide' AND asked_by=?2
                      AND closed_at IS NULL ORDER BY id",
-                )?
-                .query_map(params![run.id(), crate::application::TRIAGE_ASKER], |row| {
-                    with_row(row, super::asks::ask_row)
-                })?
-                .collect::<rusqlite::Result<_>>()?;
+                sql_params![run.id(), crate::application::TRIAGE_ASKER],
+                super::asks::ask_row,
+            )?;
             for ask in &decides {
                 super::asks::close_by_runtime(
-                    &port_tx(&tx),
+                    &tx,
                     ask,
                     &format!("released from its hold by {by_role} with a new run: {why}"),
                     now,
                 )?;
             }
             leave_held_phase(&tx, run.id())?;
-            super::sqlite::transition_task(
+            super::task_store::transition_task(
                 &tx,
                 task_id,
                 crate::domain::TaskAction::Ready,
@@ -410,20 +417,19 @@ impl SqliteQueue {
 
     /// The open hold of `task`, if any.
     pub fn task_hold(&self, task: TaskId) -> Result<Option<TaskHold>> {
-        open_hold_of(&self.conn, task)
+        open_hold_of(&*self.conn, task)
     }
 
     /// Every open hold of a task that has not ended, oldest first.
     pub fn task_holds(&self) -> Result<Vec<TaskHold>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
                  WHERE h.released_at IS NULL AND t.status NOT IN ('completed','canceled')
                  ORDER BY h.id",
-            )?
-            .query_map([], hold_row)?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![],
+            hold_row,
+        )?)
     }
 }
 
@@ -434,7 +440,7 @@ impl SqliteQueue {
         self.task_holds()?
             .into_iter()
             .map(|hold| {
-                let run = latest_run(&self.conn, hold.task_id)?
+                let run = latest_run(&*self.conn, hold.task_id)?
                     .map(|(run, status)| Ok::<_, anyhow::Error>((run, status.parse()?)))
                     .transpose()?;
                 Ok((hold, run))
@@ -450,14 +456,13 @@ impl SqliteQueue {
     pub fn remind_task_holds(&mut self) -> Result<Vec<(TaskHold, task_hold::HoldReminder)>> {
         let now = self.generators.clock.now();
         let tx = self.write_tx("remind_task_holds")?;
-        let holds: Vec<TaskHold> = tx
-            .prepare(
-                "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
+        let holds: Vec<TaskHold> = tx.query_map(
+            "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
                  WHERE h.released_at IS NULL AND t.status NOT IN ('completed','canceled')
                  ORDER BY h.id",
-            )?
-            .query_map([], hold_row)?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![],
+            hold_row,
+        )?;
         let mut told = Vec::new();
         for hold in holds {
             let last: Option<i64> = tx
@@ -466,10 +471,12 @@ impl SqliteQueue {
                         "SELECT {} FROM run_events
                      WHERE task_id=?1 AND kind=?2 AND {}=?3
                      ORDER BY id DESC LIMIT 1",
-                        json_field("payload", "$.at", JsonType::Integer),
-                        json_field("payload", "$.hold_id", JsonType::Integer)
+                        tx.dialect()
+                            .json_field("payload", "$.at", JsonType::Integer),
+                        tx.dialect()
+                            .json_field("payload", "$.hold_id", JsonType::Integer)
                     ),
-                    params![hold.task_id, EventKind::TaskHoldReminded.as_str(), hold.id],
+                    sql_params![hold.task_id, EventKind::TaskHoldReminded.as_str(), hold.id],
                     |r| r.get(0),
                 )
                 .optional()?
@@ -505,16 +512,15 @@ impl SqliteQueue {
     /// The open holds of tasks that have not ended whose run has not
     /// settled for them yet, oldest first.
     pub fn settling_holds(&self) -> Result<Vec<TaskHold>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
                  WHERE h.released_at IS NULL AND h.settled_at IS NULL
                    AND t.status NOT IN ('completed','canceled')
                  ORDER BY h.id",
-            )?
-            .query_map([], hold_row)?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![],
+            hold_row,
+        )?)
     }
 }
 
@@ -525,7 +531,7 @@ impl SqliteQueue {
 /// taking saved work, or whose handover never began or ended already
 /// ([`task_hold::replan_carry_live`]).
 fn carry_ended(
-    conn: &Connection,
+    conn: &impl SqlRead,
     task: TaskId,
     run: &RunId,
     facts: task_hold::ReleaseFacts,
@@ -534,10 +540,11 @@ fn carry_ended(
     let Some(carry) = super::replan_apply::child_carry(conn, task)? else {
         return Ok(None);
     };
-    let events: Vec<crate::domain::RunEvent> = conn
-        .prepare("SELECT * FROM run_events WHERE task_id=?1 ORDER BY id DESC")?
-        .query_map([task], super::sqlite::event_row)?
-        .collect::<rusqlite::Result<_>>()?;
+    let events: Vec<crate::domain::RunEvent> = conn.query_map(
+        "SELECT * FROM run_events WHERE task_id=?1 ORDER BY id DESC",
+        sql_params![task],
+        super::store_rows::event_row,
+    )?;
     if !task_hold::replan_carry_live(&events, carry.operation) {
         return Ok(None);
     }
@@ -550,28 +557,6 @@ fn carry_ended(
     )))
 }
 
-/// Close, on `conn` inside the caller's transaction that moved `task` to
-/// `status`, the hold a task that ended takes with it
-/// ([`task_hold::HoldEnd`]): its open hold is released by the runtime and
-/// recorded as `task_hold_ended` with the end, and every result kept for
-/// the task that is not settled yet is discarded (`hold_result_discarded`,
-/// `task_ended`), a kept answer's ask closed. Nothing for a status that
-/// has not ended the task. Whether a hold was open.
-pub(super) fn end_with_task(
-    conn: &Connection,
-    task: TaskId,
-    status: TaskStatus,
-    now: i64,
-) -> Result<bool> {
-    end_with_task_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        task,
-        status,
-        now,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
-}
-
 /// Who `released_by_role` and `released_by_id` name for a hold its task's
 /// end closed.
 const HOLD_ENDER: &str = "runtime";
@@ -581,7 +566,7 @@ const HOLD_ENDER: &str = "runtime";
 /// in one transaction, which a pass with none to close does not open. The
 /// tasks whose hold was closed.
 pub(super) fn end_holds_of_ended(queue: &SqliteQueue, now: i64) -> Result<Vec<TaskId>> {
-    if ended_with_open_hold(&queue.conn)?.is_empty() {
+    if ended_with_open_hold(&*queue.conn)?.is_empty() {
         return Ok(Vec::new());
     }
     let tx = queue.write_tx("end_holds_of_ended")?;
@@ -596,15 +581,14 @@ pub(super) fn end_holds_of_ended(queue: &SqliteQueue, now: i64) -> Result<Vec<Ta
 }
 
 /// The tasks that ended with a hold still open, each with its status.
-fn ended_with_open_hold(conn: &Connection) -> Result<Vec<(TaskId, TaskStatus)>> {
-    let rows: Vec<(TaskId, String)> = conn
-        .prepare(
-            "SELECT DISTINCT h.task_id, t.status FROM task_holds h JOIN tasks t ON t.id = h.task_id
+fn ended_with_open_hold(conn: &impl SqlRead) -> Result<Vec<(TaskId, TaskStatus)>> {
+    let rows: Vec<(TaskId, String)> = conn.query_map(
+        "SELECT DISTINCT h.task_id, t.status FROM task_holds h JOIN tasks t ON t.id = h.task_id
              WHERE h.released_at IS NULL AND t.status IN ('completed','canceled')
              ORDER BY h.task_id",
-        )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+        sql_params![],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     rows.into_iter()
         .map(|(task, status)| Ok((task, status.parse()?)))
         .collect()
@@ -613,11 +597,7 @@ fn ended_with_open_hold(conn: &Connection) -> Result<Vec<(TaskId, TaskStatus)>> 
 /// Record on `conn` that the open hold `hold` settled at `now`: whether it
 /// was still open and settling (a release or another settle that came
 /// first leaves it, and the caller writes nothing more).
-pub(super) fn settle_open(conn: &Connection, hold: HoldId, now: i64) -> Result<bool> {
-    settle_open_port(&port_tx(conn), hold, now).map_err(native_error)
-}
-
-pub(super) fn settle_open_port(conn: &impl EventTx, hold: HoldId, now: i64) -> Result<bool> {
+pub(super) fn settle_open(conn: &impl EventTx, hold: HoldId, now: i64) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE task_holds SET settled_at=?2
          WHERE id=?1 AND released_at IS NULL AND settled_at IS NULL",
@@ -629,7 +609,7 @@ pub(super) fn settle_open_port(conn: &impl EventTx, hold: HoldId, now: i64) -> R
 /// or saved the run's work (ADR-t1521-2): its writer may still run in the
 /// worktree, so the run's rest is no safe wait until a look at the
 /// worktree finds none.
-fn park_blocked(conn: &impl crate::infrastructure::sql_exec::SqlRead, run: &RunId) -> Result<bool> {
+fn park_blocked(conn: &impl SqlRead, run: &RunId) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM replan_operations WHERE run_id=?1 AND status='blocked'
            AND return_phase IN ('pause_requested','quiescing','snapshotting'))",
@@ -644,10 +624,7 @@ fn park_blocked(conn: &impl crate::infrastructure::sql_exec::SqlRead, run: &RunI
 /// heartbeat gone old: a wrapper is dead only when its heartbeat is old
 /// and its process is gone, which the supervisor's park looks at, not the
 /// store.
-fn registered_writer(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    run: &RunId,
-) -> Result<bool> {
+fn registered_writer(conn: &impl SqlRead, run: &RunId) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM run_processes WHERE run_id=?1 AND exited_at IS NULL)",
         sql_params![run],
@@ -658,15 +635,7 @@ fn registered_writer(
 /// What may still write `run` as its records tell ([`park_blocked`],
 /// [`registered_writer`]), `checked` when the caller's park found the
 /// writer ended ([`task_hold::RestWriter`]).
-fn rest_writer(conn: &Connection, run: &RunId, checked: bool) -> Result<task_hold::RestWriter> {
-    rest_writer_port(&port_tx(conn), run, checked).map_err(native_error)
-}
-
-fn rest_writer_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    run: &RunId,
-    checked: bool,
-) -> Result<task_hold::RestWriter> {
+fn rest_writer(conn: &impl SqlRead, run: &RunId, checked: bool) -> Result<task_hold::RestWriter> {
     Ok(task_hold::RestWriter {
         park_blocked: park_blocked(conn, run)?,
         registered_process: registered_writer(conn, run)?,
@@ -681,14 +650,6 @@ fn rest_writer_port(
 /// when the caller's park found the writer ended (`writers_checked`). An
 /// unfinished run enters its `held` phase. Whether a hold settled now.
 pub(super) fn settle_at_rest_in(
-    conn: &Connection,
-    run: &RunId,
-    writers_checked: bool,
-) -> Result<bool> {
-    settle_at_rest_in_port(&port_tx(conn), run, writers_checked).map_err(native_error)
-}
-
-pub(super) fn settle_at_rest_in_port(
     conn: &impl EventTx,
     run: &RunId,
     writers_checked: bool,
@@ -712,19 +673,19 @@ pub(super) fn settle_at_rest_in_port(
         sql_params![run],
         |r| r.get(0),
     )?;
-    let latest = latest_run_port(conn, task)?.is_some_and(|(latest, _)| latest == *run);
-    let writer = rest_writer_port(conn, run, writers_checked)?;
+    let latest = latest_run(conn, task)?.is_some_and(|(latest, _)| latest == *run);
+    let writer = rest_writer(conn, run, writers_checked)?;
     if !task_hold::settles_at_rest(status, leased, latest, writer) {
         return Ok(false);
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs() as i64);
-    if !settle_open_port(conn, hold.hold, now)? {
+    if !settle_open(conn, hold.hold, now)? {
         return Ok(false);
     }
     if status.is_unfinished() {
-        enter_held_phase_port(conn, run, "hold_settled")?;
+        enter_held_phase(conn, run, "hold_settled")?;
     }
     Ok(true)
 }
@@ -732,13 +693,9 @@ pub(super) fn settle_at_rest_in_port(
 /// Record on `conn` that run `run` entered its hold's wait
 /// ([`run_phase::Phase::Held`]), which `cause` moved it to, unless it is
 /// the phase last recorded.
-pub(super) fn enter_held_phase(conn: &Connection, run: &RunId, cause: &str) -> Result<()> {
-    enter_held_phase_port(&port_tx(conn), run, cause).map_err(native_error)
-}
-
-pub(super) fn enter_held_phase_port(conn: &impl EventTx, run: &RunId, cause: &str) -> Result<()> {
+pub(super) fn enter_held_phase(conn: &impl EventTx, run: &RunId, cause: &str) -> Result<()> {
     let events = super::runtime_store::run_events_of_port(conn, run)?;
-    record_phase_port(
+    record_phase(
         conn,
         run,
         run_phase::next_change(&events, run_phase::Phase::Held, cause),
@@ -748,31 +705,24 @@ pub(super) fn enter_held_phase_port(conn: &impl EventTx, run: &RunId, cause: &st
 /// Close the hold's wait of run `run` at its release with the phase the
 /// run rests in now ([`run_phase::Phase::resting`], which `task_released`
 /// among its events lets say), when its last record is the wait.
-fn leave_held_phase(conn: &Connection, run: &RunId) -> Result<()> {
-    let events = super::runtime_store::run_events_of(conn, run)?;
+fn leave_held_phase(conn: &impl EventTx, run: &RunId) -> Result<()> {
+    let events = super::runtime_store::run_events_of_port(conn, run)?;
     let held = run_phase::last_recorded(&events)
         .is_some_and(|last| last.phase == run_phase::Phase::Held.name());
     if !held {
         return Ok(());
     }
-    let status: String =
-        conn.query_row("SELECT status FROM task_runs WHERE id=?1", [run], |r| {
-            r.get(0)
-        })?;
+    let status: String = conn.query_row(
+        "SELECT status FROM task_runs WHERE id=?1",
+        sql_params![run],
+        |r| r.get(0),
+    )?;
     let change = run_phase::Phase::resting(status.parse()?, &events, None)
         .and_then(|phase| run_phase::next_change(&events, phase, EventKind::TaskReleased.as_str()));
     record_phase(conn, run, change)
 }
 
 fn record_phase(
-    conn: &Connection,
-    run: &RunId,
-    change: Option<run_phase::PhaseChange>,
-) -> Result<()> {
-    record_phase_port(&port_tx(conn), run, change).map_err(native_error)
-}
-
-fn record_phase_port(
     conn: &impl EventTx,
     run: &RunId,
     change: Option<run_phase::PhaseChange>,
@@ -796,15 +746,16 @@ fn record_phase_port(
 
 /// Whether a result was kept for `run` while its task was held
 /// (`hold_result_kept`) that is neither applied nor discarded yet.
-fn kept_unsettled(conn: &Connection, run: &RunId) -> Result<bool> {
+fn kept_unsettled(conn: &impl SqlRead, run: &RunId) -> Result<bool> {
     Ok(conn.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM run_events e WHERE e.run_id=?1 AND e.kind=?2
            AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
              AND s.kind IN (?3,?4) AND {}=e.id))",
-            json_field("s.payload", "$.kept_id", JsonType::Integer)
+            conn.dialect()
+                .json_field("s.payload", "$.kept_id", JsonType::Integer)
         ),
-        params![
+        sql_params![
             run,
             EventKind::HoldResultKept.as_str(),
             EventKind::HoldResultApplied.as_str(),
@@ -816,50 +767,43 @@ fn kept_unsettled(conn: &Connection, run: &RunId) -> Result<bool> {
 
 /// The latest run of `task` as stored, if it has one.
 fn latest_task_run(
-    conn: &Connection,
+    conn: &impl SqlRead,
     runs_dir: &std::path::Path,
     task: TaskId,
 ) -> Result<Option<TaskRun>> {
     Ok(conn
         .query_row(
             "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
-            [task],
-            super::sqlite::run_row(runs_dir),
+            sql_params![task],
+            super::store_rows::run_row(runs_dir),
         )
         .optional()?)
 }
 
 /// The task `target` names; a run the queue does not know is an error.
-fn resolve(conn: &Connection, target: &HoldTarget) -> Result<TaskId> {
+fn resolve(conn: &impl SqlRead, target: &HoldTarget) -> Result<TaskId> {
     match target {
         HoldTarget::Task(task) => Ok(*task),
         HoldTarget::Run(run) => conn
-            .query_row("SELECT task_id FROM task_runs WHERE id=?1", [run], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT task_id FROM task_runs WHERE id=?1",
+                sql_params![run],
+                |r| r.get(0),
+            )
             .optional()?
             .with_context(|| format!("run {run} does not exist")),
     }
 }
 
-/// The latest run of `task` and its status, if it has one.
-pub(super) fn latest_run(conn: &Connection, task: TaskId) -> Result<Option<(RunId, String)>> {
-    latest_run_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        task,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+fn read_hold(conn: &impl SqlRead, id: HoldId) -> Result<TaskHold> {
+    Ok(conn.query_row(
+        "SELECT * FROM task_holds WHERE id=?1",
+        sql_params![id],
+        hold_row,
+    )?)
 }
 
-fn read_hold(conn: &Connection, id: HoldId) -> Result<TaskHold> {
-    Ok(conn.query_row("SELECT * FROM task_holds WHERE id=?1", [id], hold_row)?)
-}
-
-fn hold_row(row: &Row<'_>) -> rusqlite::Result<TaskHold> {
-    super::sql_exec::sqlite::with_row(row, hold_of_row)
-}
-
-fn hold_of_row(row: &SqlRow<'_>) -> SqlResult<TaskHold> {
+fn hold_row(row: &SqlRow<'_>) -> SqlResult<TaskHold> {
     Ok(TaskHold {
         id: row.get("id")?,
         task_id: row.get("task_id")?,
@@ -873,22 +817,9 @@ fn hold_of_row(row: &SqlRow<'_>) -> SqlResult<TaskHold> {
     })
 }
 
-/// The open hold of `task`, read on `conn` (inside the caller's
-/// transaction when it has one), whatever the task's status.
-pub(super) fn open_hold_of(conn: &Connection, task: TaskId) -> Result<Option<TaskHold>> {
-    open_hold_of_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        task,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
-}
-
 /// The guard the open hold of `task` puts on its steps, read on `tx`:
 /// none for a task that ended, which a hold no longer reaches.
-pub(super) fn guard_of(
-    tx: &impl super::sql_exec::SqlRead,
-    task: TaskId,
-) -> Result<Option<HoldGuard>> {
+pub(super) fn guard_of(tx: &impl SqlRead, task: TaskId) -> Result<Option<HoldGuard>> {
     Ok(tx
         .query_row(
             "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
@@ -896,7 +827,7 @@ pub(super) fn guard_of(
                AND t.status NOT IN ('completed','canceled')
              ORDER BY h.id LIMIT 1",
             sql_params![task],
-            hold_of_row,
+            hold_row,
         )
         .optional()?
         .map(|hold| hold.guard()))
@@ -905,20 +836,21 @@ pub(super) fn guard_of(
 /// The version of `task` and of its run `run` now, read on `conn`: what a
 /// kept result is compared with after its hold's release.
 pub(super) fn progress_version(
-    conn: &Connection,
+    conn: &impl SqlRead,
     task: TaskId,
     run: &RunId,
 ) -> Result<ProgressVersion> {
     let (status, updated_at): (String, String) = conn.query_row(
         "SELECT status, updated_at FROM tasks WHERE id=?1",
-        [task],
+        sql_params![task],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let run_status: String =
-        conn.query_row("SELECT status FROM task_runs WHERE id=?1", [run], |r| {
-            r.get(0)
-        })?;
-    let events = super::runtime_store::run_events_of(conn, run)?;
+    let run_status: String = conn.query_row(
+        "SELECT status FROM task_runs WHERE id=?1",
+        sql_params![run],
+        |r| r.get(0),
+    )?;
+    let events = super::runtime_store::run_events_of_port(conn, run)?;
     Ok(ProgressVersion::of(
         status.parse()?,
         &updated_at,
@@ -933,12 +865,13 @@ impl crate::application::commands::holds::HoldStore for SqliteQueue {
     }
 
     fn run_task(&self, run: &RunId) -> Result<Option<TaskId>> {
-        Ok(self
-            .conn
-            .query_row("SELECT task_id FROM task_runs WHERE id=?1", [run], |r| {
-                r.get(0)
-            })
-            .optional()?)
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            "SELECT task_id FROM task_runs WHERE id=?1",
+            sql_params![run],
+            |r| r.get(0),
+        )
+        .optional()?)
     }
 
     fn hold_task(
@@ -969,7 +902,7 @@ impl crate::application::commands::holds::HoldStore for SqliteQueue {
 
 /// Refuse `step` of `task` while its hold guards it, by the same judgment
 /// as every other guarded step ([`crate::domain::task_replan::check_step`]).
-pub(super) fn check_not_held(conn: &Connection, task: TaskId, step: GuardedStep) -> Result<()> {
+pub(super) fn check_not_held(conn: &impl SqlRead, task: TaskId, step: GuardedStep) -> Result<()> {
     crate::domain::task_replan::check_step(
         &crate::domain::task_replan::TaskGuards {
             replan: None,
@@ -980,22 +913,28 @@ pub(super) fn check_not_held(conn: &Connection, task: TaskId, step: GuardedStep)
     Ok(())
 }
 
-pub(super) fn open_hold_of_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    task: TaskId,
-) -> Result<Option<TaskHold>> {
+/// The open hold of `task`, read on `conn` (inside the caller's
+/// transaction when it has one), whatever the task's status.
+pub(super) fn open_hold_of(conn: &impl SqlRead, task: TaskId) -> Result<Option<TaskHold>> {
     Ok(conn
         .query_row(
             "SELECT * FROM task_holds WHERE task_id=?1 AND released_at IS NULL
              ORDER BY id LIMIT 1",
-            crate::infrastructure::sql_exec::sql_params![task],
-            hold_of_row,
+            sql_params![task],
+            hold_row,
         )
         .optional()?)
 }
 
-pub(super) fn end_with_task_port(
-    conn: &impl crate::infrastructure::store_writes::EventTx,
+/// Close, on `conn` inside the caller's transaction that moved `task` to
+/// `status`, the hold a task that ended takes with it
+/// ([`task_hold::HoldEnd`]): its open hold is released by the runtime and
+/// recorded as `task_hold_ended` with the end, and every result kept for
+/// the task that is not settled yet is discarded (`hold_result_discarded`,
+/// `task_ended`), a kept answer's ask closed. Nothing for a status that
+/// has not ended the task. Whether a hold was open.
+pub(super) fn end_with_task(
+    conn: &impl EventTx,
     task: TaskId,
     status: TaskStatus,
     now: i64,
@@ -1003,13 +942,13 @@ pub(super) fn end_with_task_port(
     let Some(end) = task_hold::HoldEnd::of(status) else {
         return Ok(false);
     };
-    let run = latest_run_port(conn, task)?.map(|(run, _)| run);
-    let open = open_hold_of_port(conn, task)?;
+    let run = latest_run(conn, task)?.map(|(run, _)| run);
+    let open = open_hold_of(conn, task)?;
     if let Some(hold) = &open {
         conn.execute(
             "UPDATE task_holds SET released_at=?2, released_by_role=?3, released_by_id=?3
              WHERE id=?1 AND released_at IS NULL",
-            crate::infrastructure::sql_exec::sql_params![hold.id, now, HOLD_ENDER],
+            sql_params![hold.id, now, HOLD_ENDER],
         )?;
         crate::infrastructure::store_writes::event(
             conn,
@@ -1020,7 +959,7 @@ pub(super) fn end_with_task_port(
                    "settled_secs": hold.settled_at.map(|at| now - at)}),
         )?;
     }
-    discard_kept_of_ended_port(conn, task, end, now)?;
+    discard_kept_of_ended(conn, task, end, now)?;
     Ok(open.is_some())
 }
 
@@ -1030,8 +969,8 @@ pub(super) fn end_with_task_port(
 /// an ended task is not recovered), and a kept answer's ask closed by the
 /// runtime, each read back as a [`task_hold::KeptResult`]. A result being
 /// applied now is settled already and stays.
-fn discard_kept_of_ended_port(
-    conn: &impl crate::infrastructure::store_writes::EventTx,
+fn discard_kept_of_ended(
+    conn: &impl EventTx,
     task: TaskId,
     end: task_hold::HoldEnd,
     now: i64,
@@ -1046,7 +985,7 @@ fn discard_kept_of_ended_port(
             conn.dialect()
                 .json_field("s.payload", "$.kept_id", JsonType::Integer)
         ),
-        crate::infrastructure::sql_exec::sql_params![
+        sql_params![
             task,
             EventKind::HoldResultKept.as_str(),
             EventKind::HoldResultApplied.as_str(),
@@ -1066,7 +1005,7 @@ fn discard_kept_of_ended_port(
             && let Some(ask) = conn
                 .query_row(
                     "SELECT * FROM asks WHERE id=?1 AND closed_at IS NULL",
-                    crate::infrastructure::sql_exec::sql_params![ask],
+                    sql_params![ask],
                     super::asks::ask_row,
                 )
                 .optional()?
@@ -1094,14 +1033,12 @@ fn discard_kept_of_ended_port(
     Ok(())
 }
 
-pub(super) fn latest_run_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    task: TaskId,
-) -> Result<Option<(RunId, String)>> {
+/// The latest run of `task` and its status, if it has one.
+pub(super) fn latest_run(conn: &impl SqlRead, task: TaskId) -> Result<Option<(RunId, String)>> {
     Ok(conn
         .query_row(
             "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
-            crate::infrastructure::sql_exec::sql_params![task],
+            sql_params![task],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)

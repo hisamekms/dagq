@@ -23,8 +23,6 @@ const MAY_NAME_RUSQLITE: &[&str] = &[
     "src/infrastructure/plan_reviews.rs",
     "src/infrastructure/planners.rs",
     "src/infrastructure/related.rs",
-    "src/infrastructure/replan_apply.rs",
-    "src/infrastructure/replans.rs",
     "src/infrastructure/runtime_store/attributes.rs",
     "src/infrastructure/runtime_store/coordination.rs",
     "src/infrastructure/runtime_store/ledger.rs",
@@ -38,11 +36,9 @@ const MAY_NAME_RUSQLITE: &[&str] = &[
     "src/infrastructure/runtime_store/session_steps.rs",
     "src/infrastructure/runtime_store/transitions.rs",
     "src/infrastructure/search.rs",
-    "src/infrastructure/session_tokens.rs",
     "src/infrastructure/sessions.rs",
     "src/infrastructure/sql_exec/sqlite.rs",
     "src/infrastructure/sqlite.rs",
-    "src/infrastructure/task_holds.rs",
 ];
 
 const NAME: &str = "rusqlite";

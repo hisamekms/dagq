@@ -628,7 +628,14 @@ fn record_restore_in(
                 json!({"operation_id": op, "generation": generation,
                        "snapshot_id": operation.snapshot_id, "reason": why}),
             )?;
-            return crate::infrastructure::replans::reopen_blocked(tx, op, generation, &why, now);
+            return crate::infrastructure::replans::reopen_blocked(
+                &port_tx(tx),
+                op,
+                generation,
+                &why,
+                now,
+            )
+            .map_err(native_error);
         }
     }
     Ok(true)

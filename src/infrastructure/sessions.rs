@@ -16,9 +16,7 @@
 
 use crate::domain::RecordedKind;
 use crate::domain::event_kind::{self, EventKind};
-use crate::infrastructure::sql_dialect::{
-    JsonType, TimeForm, json_field, json_field_at, time_value,
-};
+use crate::infrastructure::sql_dialect::{JsonType, TimeForm, json_field, json_field_at};
 use std::cell::RefCell;
 
 use anyhow::Result;
@@ -30,8 +28,12 @@ use tracing::{debug, info};
 use super::{
     event_bodies::set_event_body_field,
     run_env,
-    sql_exec::sqlite::port_tx,
+    sql_exec::{
+        self, SqlDialect, SqlResult, SqlRow, sql_params,
+        sqlite::{native_error, port_tx, with_row},
+    },
     sqlite::{WriteTx, event_row, json_col},
+    store_rows,
     transcripts::ClaudeTranscripts,
 };
 use crate::{
@@ -407,6 +409,24 @@ impl Drop for ReadBefore {
                 lines.append();
             }
         }
+    }
+}
+
+impl super::sqlite::SqliteQueue {
+    /// [`read_before`] on this queue's connection, for a store module that
+    /// names no driver: whether a transaction is open is the driver's to say.
+    pub(super) fn read_before(&self, closing: Closing<'_>) -> Result<ReadBefore> {
+        read_before(&self.conn, closing)
+    }
+
+    /// [`read`] on this queue's connection, for a store module that names no
+    /// driver.
+    pub(super) fn span_transcript(
+        &self,
+        span: &OpenSpan,
+        toolchains: &mut Option<Toolchains>,
+    ) -> Result<Transcript, Unreadable> {
+        read(&self.conn, span, toolchains)
     }
 }
 
@@ -950,9 +970,17 @@ fn exited_work(work: &Value, kind: &str, attempt: &Value) -> Value {
 
 /// The time now, in the form of `created_at`.
 pub(super) fn now(conn: &Connection) -> Result<String> {
+    now_port(conn).map_err(native_error)
+}
+
+/// [`now`] on the execution port.
+pub(super) fn now_port(conn: &impl sql_exec::SqlRead) -> Result<String> {
     Ok(conn.query_row(
-        &format!("SELECT {}", time_value("'now'", TimeForm::Text)),
-        [],
+        &format!(
+            "SELECT {}",
+            conn.dialect().time_value("'now'", TimeForm::Text)
+        ),
+        &[],
         |r| r.get(0),
     )?)
 }
@@ -1632,17 +1660,26 @@ fn recorded_turns_sql() -> String {
 
 /// The query of whether the span opened by `?1` is closed, by
 /// `events_by_opened_event`.
-fn span_closed_sql() -> String {
+fn span_closed_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT EXISTS (SELECT 1 FROM run_events WHERE kind='{SESSION_CLOSED}'
            AND {opened_event_id}=?1)",
-        opened_event_id = json_field("payload", "$.opened_event_id", JsonType::Integer),
+        opened_event_id = dialect.json_field("payload", "$.opened_event_id", JsonType::Integer),
     )
 }
 
 /// Whether the span opened by `opened` is closed.
 pub(super) fn span_closed(conn: &Connection, opened: EventId) -> Result<bool> {
-    Ok(conn.query_row(&span_closed_sql(), [opened], |r| r.get(0))?)
+    span_closed_port(conn, opened).map_err(native_error)
+}
+
+/// [`span_closed`] on the execution port.
+pub(super) fn span_closed_port(conn: &impl sql_exec::SqlRead, opened: EventId) -> Result<bool> {
+    Ok(
+        conn.query_row(&span_closed_sql(conn.dialect()), sql_params![opened], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 /// The turns of the span opened by `opened` recorded so far.
@@ -2024,18 +2061,27 @@ pub(super) fn close_review(
 /// The open spans of [`HOOK_KINDS`], which the plugin's hook records on no
 /// run (ADR-0048 decision 6), oldest first.
 pub(super) fn open_hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
+    open_hook_spans_port(conn).map_err(native_error)
+}
+
+/// [`open_hook_spans`] on the execution port.
+pub(super) fn open_hook_spans_port(conn: &impl sql_exec::SqlRead) -> Result<Vec<OpenSpan>> {
     let kinds = HOOK_KINDS.map(|kind| format!("'{kind}'")).join(",");
-    open_spans(
-        conn,
-        &format!(
-            "o.run_id IS NULL AND {o_kind} IN ({kinds})
+    let dialect = conn.dialect();
+    Ok(conn.query_map(
+        &open_spans_sql(
+            dialect,
+            &format!(
+                "o.run_id IS NULL AND {o_kind} IN ({kinds})
              AND {o_route} IS NOT '{HEADLESS_ROUTE}'",
-            o_kind = json_field("o.payload", "$.kind", JsonType::Text),
-            o_route = json_field("o.payload", "$.route", JsonType::Text),
+                o_kind = dialect.json_field("o.payload", "$.kind", JsonType::Text),
+                o_route = dialect.json_field("o.payload", "$.route", JsonType::Text),
+            ),
+            "c.run_id IS NULL",
         ),
-        "c.run_id IS NULL",
-        params![],
-    )
+        sql_params![],
+        open_span_row,
+    )?)
 }
 
 /// Whether `hook` is of a headless planner's session, whose span its turns
@@ -2057,9 +2103,17 @@ fn headless_planner_hook(conn: &Connection, hook: &SessionHook) -> Result<bool> 
 
 /// The task the `session_opened` of `span` is on.
 pub(super) fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<TaskId>> {
+    span_task_port(conn, span).map_err(native_error)
+}
+
+/// [`span_task`] on the execution port.
+pub(super) fn span_task_port(
+    conn: &impl sql_exec::SqlRead,
+    span: &OpenSpan,
+) -> Result<Option<TaskId>> {
     Ok(conn.query_row(
         "SELECT task_id FROM run_events WHERE id=?1",
-        [span.opened_event_id],
+        sql_params![span.opened_event_id],
         |r| r.get(0),
     )?)
 }
@@ -2277,22 +2331,29 @@ fn open_spans(
     params: impl rusqlite::Params,
 ) -> Result<Vec<OpenSpan>> {
     Ok(conn
-        .prepare(&open_spans_sql(opened, closed))?
-        .query_map(params, |r| {
-            Ok(OpenSpan {
-                opened_event_id: r.get("id")?,
-                payload: json_col(r, "payload")?,
-                opened_ms: rfc3339_millis(&r.get::<_, String>("created_at")?),
-            })
-        })?
+        .prepare(&open_spans_sql(
+            sql_exec::SqlRead::dialect(conn),
+            opened,
+            closed,
+        ))?
+        .query_map(params, |r| with_row(r, open_span_row))?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// A row of [`open_spans_sql`].
+fn open_span_row(r: &SqlRow<'_>) -> SqlResult<OpenSpan> {
+    Ok(OpenSpan {
+        opened_event_id: r.get("id")?,
+        payload: store_rows::json_col(r, "payload")?,
+        opened_ms: rfc3339_millis(&r.get::<_, String>("created_at")?),
+    })
 }
 
 /// The query of [`open_spans`]. Its `NOT EXISTS` finds the `session_closed`
 /// by `events_by_opened_event` (task 1333): `+o.id` drops the column's
 /// INTEGER affinity, which, applied to the expression, kept the index from
 /// being used and walked every `session_closed` once per span.
-fn open_spans_sql(opened: &str, closed: &str) -> String {
+fn open_spans_sql(dialect: SqlDialect, opened: &str, closed: &str) -> String {
     format!(
         "SELECT o.id, o.payload, o.created_at FROM run_events o
          WHERE o.kind='{SESSION_OPENED}' AND {opened}
@@ -2300,7 +2361,7 @@ fn open_spans_sql(opened: &str, closed: &str) -> String {
                            WHERE c.kind='{SESSION_CLOSED}' AND {closed}
                              AND {c_opened_event_id}=+o.id)
          ORDER BY o.id",
-        c_opened_event_id = json_field("c.payload", "$.opened_event_id", JsonType::Integer),
+        c_opened_event_id = dialect.json_field("c.payload", "$.opened_event_id", JsonType::Integer),
     )
 }
 
@@ -2413,13 +2474,24 @@ pub(super) fn insert_at(
     payload: &Value,
     created_at: &str,
 ) -> Result<EventId> {
+    insert_at_port(&port_tx(conn), task_id, run_id, kind, payload, created_at).map_err(native_error)
+}
+
+/// [`insert_at`] on the execution port.
+pub(super) fn insert_at_port(
+    conn: &impl sql_exec::SqlWrite,
+    task_id: Option<TaskId>,
+    run_id: Option<&RunId>,
+    kind: EventKind,
+    payload: &Value,
+    created_at: &str,
+) -> Result<EventId> {
     crate::domain::check_event_target(kind, task_id, None)?;
     crate::domain::write_rules::check_run_has_task(task_id, run_id)?;
-    let id = super::sqlite::insert_id(
-        conn,
+    let id = conn.insert_id(
         "INSERT INTO run_events(task_id,run_id,kind,payload,created_at,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,dagq_event_body(?4),?5,dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![
+        sql_params![
             task_id,
             run_id,
             kind.as_str(),
@@ -2528,7 +2600,7 @@ pub(super) mod tests {
             plan
         };
         uses(&recorded_turns_sql());
-        uses(&span_closed_sql());
+        uses(&span_closed_sql(SqlDialect::Sqlite));
         uses(&hook_intake_finished_sql());
         uses(&pending_hook_intakes_sql());
         // Every `closed` condition its callers give open_spans.
@@ -2549,7 +2621,7 @@ pub(super) mod tests {
                 "c.task_id IS NULL AND c.goal_id IS NULL",
             ),
         ] {
-            let plan = uses(&open_spans_sql(opened, closed));
+            let plan = uses(&open_spans_sql(SqlDialect::Sqlite, opened, closed));
             let subquery = plan
                 .iter()
                 .skip_while(|step| !step.contains("CORRELATED"))
@@ -2563,6 +2635,7 @@ pub(super) mod tests {
         // The queue's spans have no goal: the outer read goes by the kind of
         // `session_opened`, not every event without a goal.
         let spans = uses(&open_spans_sql(
+            SqlDialect::Sqlite,
             &queue_opened_condition(),
             QUEUE_CLOSED_CONDITION,
         ));

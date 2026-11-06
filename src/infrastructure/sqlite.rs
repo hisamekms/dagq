@@ -2302,22 +2302,6 @@ pub(super) fn complete_task(
         .map_err(native_error)
 }
 
-/// End `task_id`, whose replanning operation `operation` replaced it with
-/// child tasks, inside the apply's transaction: `in_progress` →
-/// `replaced` (neither completed nor canceled), recorded as
-/// `task_status_changed` on its parked run `run`, with its open hold ended.
-pub(super) fn replace_task(
-    conn: &Connection,
-    task_id: TaskId,
-    run: &RunId,
-    operation: crate::domain::ReplanId,
-    now: &str,
-    now_secs: i64,
-) -> Result<Task> {
-    super::task_store::replace_task(&port_tx(conn), task_id, run, operation, now, now_secs)
-        .map_err(native_error)
-}
-
 /// Cancel `task_id` inside the caller's transaction with the reason the
 /// domain decides of `cancel` (ADR-t947-4), recorded in the payload of its
 /// `task_status_changed`: what `cancel` does, plan review's
