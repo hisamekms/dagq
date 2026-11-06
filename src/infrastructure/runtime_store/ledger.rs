@@ -264,6 +264,18 @@ fn wait_rows_sql(after: bool) -> String {
     )
 }
 
+/// The read of a page of the rows of the kind `?1`, by key: with `after` the
+/// key's range past `?2` on the primary key, at most `?3`, so a page walks no
+/// row before it; without, from the kind's first, at most `?2`. Two statements
+/// because an `OR` over the bound key would leave the index only `kind=?`.
+fn rows_after_sql(after: bool) -> &'static str {
+    if after {
+        "SELECT * FROM ledger_rows WHERE kind=?1 AND key > ?2 ORDER BY key LIMIT ?3"
+    } else {
+        "SELECT * FROM ledger_rows WHERE kind=?1 ORDER BY key LIMIT ?2"
+    }
+}
+
 /// The read of the queue rows' heads (the kind `?1`), their columns and the
 /// ids of their records, by key, with `filter` on the rows and `limit`.
 fn queue_heads_sql(filter: &str, limit: &str) -> String {
@@ -572,12 +584,12 @@ impl LedgerStore for SqliteQueue {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<LedgerRow>> {
-        let mut statement = self.conn.prepare(
-            "SELECT * FROM ledger_rows WHERE kind=?1 AND (?2 IS NULL OR key > ?2)
-             ORDER BY key LIMIT ?3",
-        )?;
+        let mut statement = self.conn.prepare(rows_after_sql(after.is_some()))?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let rows = statement.query_map(params![kind.as_str(), after, limit], ledger_row)?;
+        let rows = match after {
+            Some(after) => statement.query_map(params![kind.as_str(), after, limit], ledger_row)?,
+            None => statement.query_map(params![kind.as_str(), limit], ledger_row)?,
+        };
         rows.map(|row| row?).collect()
     }
 
@@ -1877,6 +1889,95 @@ mod tests {
             &[&queue_kind, &"supervisor_stopped", &"1", &0, &10],
         );
         assert!(stops.contains("kind=? AND key>?"), "{stops}");
+    }
+
+    /// A page of the rows of a kind searches the primary key: past a place by
+    /// the key's range, so it walks no row before it, and from the first by
+    /// the kind, in the index's order, with no scan and no sort.
+    #[test]
+    fn a_page_of_the_rows_of_a_kind_searches_the_primary_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let plan = |sql: &str| -> String {
+            let mut statement = queue
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let count = statement.parameter_count();
+            let rows = statement
+                .query_map(
+                    rusqlite::params_from_iter(std::iter::repeat_n("1", count)),
+                    |r| r.get::<_, String>(3),
+                )
+                .unwrap();
+            rows.map(Result::unwrap).collect::<Vec<_>>().join("\n")
+        };
+        let after = plan(rows_after_sql(true));
+        assert!(after.contains("kind=? AND key>?"), "{after}");
+        let first = plan(rows_after_sql(false));
+        assert!(
+            first
+                .contains("SEARCH ledger_rows USING INDEX sqlite_autoindex_ledger_rows_1 (kind=?)"),
+            "{first}"
+        );
+        assert!(!first.contains("SCAN"), "{first}");
+        assert!(!first.contains("USE TEMP B-TREE"), "{first}");
+    }
+
+    /// The two statements of a page give the rows, their order and their
+    /// count of the one statement with the bound key's `OR` they stand for:
+    /// from the first, from a key on the way, from the last row's key and
+    /// from past it, with a limit under the rest, of the rest exactly and
+    /// over it, and none of another kind.
+    #[test]
+    fn a_page_of_the_rows_gives_the_rows_of_the_one_statement() {
+        use crate::domain::ledger::testkit::run_row;
+        const ONE_STATEMENT: &str = "SELECT * FROM ledger_rows
+             WHERE kind=?1 AND (?2 IS NULL OR key > ?2) ORDER BY key LIMIT ?3";
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        for key in ["d", "b", "e", "a", "c"] {
+            queue
+                .write_ledger_row(&run_row(key, None, Vec::new()))
+                .unwrap();
+        }
+        for key in ["0", "b", "z"] {
+            let row = LedgerRow {
+                kind: LedgerKind::Queue,
+                ..run_row(key, None, Vec::new())
+            };
+            queue.write_ledger_row(&row).unwrap();
+        }
+
+        let one_statement = |after: Option<&str>, limit: i64| -> Vec<LedgerRow> {
+            let mut statement = queue.conn.prepare(ONE_STATEMENT).unwrap();
+            let rows = statement
+                .query_map(params![LedgerKind::Run.as_str(), after, limit], ledger_row)
+                .unwrap();
+            rows.map(|row| row.unwrap().unwrap()).collect()
+        };
+        let cases: [(Option<&str>, usize, &[&str]); 8] = [
+            (None, 2, &["a", "b"]),
+            (None, 5, &["a", "b", "c", "d", "e"]),
+            (None, 9, &["a", "b", "c", "d", "e"]),
+            (Some("b"), 2, &["c", "d"]),
+            (Some("b"), 3, &["c", "d", "e"]),
+            (Some("b"), 9, &["c", "d", "e"]),
+            (Some("e"), 9, &[]),
+            (Some("f"), 9, &[]),
+        ];
+        for (after, limit, want) in cases {
+            let page = queue
+                .ledger_rows_after(LedgerKind::Run, after, limit)
+                .unwrap();
+            let got: Vec<&str> = page.iter().map(|row| row.key.as_str()).collect();
+            assert_eq!(got, want, "{after:?} {limit}");
+            assert_eq!(
+                page,
+                one_statement(after, i64::try_from(limit).unwrap()),
+                "{after:?} {limit}"
+            );
+        }
     }
 
     /// The last event naming a supervisor up to an id is the last of every
