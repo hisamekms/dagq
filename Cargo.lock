@@ -264,6 +264,7 @@ dependencies = [
  "clap",
  "dagq",
  "getrandom 0.4.3",
+ "httparse",
  "libc",
  "postgres",
  "proc-macro2",

@@ -49,10 +49,11 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 | --- | --- |
 | `queue.sock` | unix socket。pathが長すぎるqueueで`/tmp`の下に置くときは、そのdirがlinkでないことを確かめる。どの呼び出し元もqueueのディレクトリの実pathから同じpathを求める（`socket_path`） |
 | `lock` | serviceが生きている間`flock`の排他で持ち、2つ目のserviceは取れずに止まる。見る側（status・supervisor）は共有で試し、取れれば「居ない」と判定する。止めるときのsignalは`hello`が答えたpidか、`serves`（doc comment）が確かめた記録のpidにだけ送る |
-| `state.json` | 動いているserviceの記録。止まるときに消す |
-| `service.log` | `up`・supervisor・`service start`が起動したserviceのstdoutとstderr |
 | `tokens/<値のsha256>.json` | tokenのprincipalと発行の時刻 |
 | `credentials/<keyのsha256>` | tokenの値（keyとinboxのsessionごとのfileは`Principal::credential_key`）。呼び出し元にはこのfileのpathを渡し、値をenvにもargvにも置かない（ADR-t1233-4決定4）。worktreeとrun dirの外 |
+
+HTTPの入口は`queue_service_http`で、本番の起動の経路からは開かない。
+HTTPの受けはsocketと同じ確かめの順を通り、識別はbearerのtokenだけで、peerにも送り元のIPにも転送のheaderにも依らない。
 
 1つの接続に1つの要求で、要求は1行のJSON、答えも1行のJSONで、答えた後に閉じる。
 上限を超える答え（`MAX_ANSWER_BYTES`）はserviceが`response_too_large`（ADR-t1233-5）、要求（`MAX_REQUEST_BYTES`）はsocketのclientが`request_too_large`で断る。
@@ -63,7 +64,6 @@ transactionはserviceの中で完結し、クライアントとの往復で分�
 serviceの書き込みは1本の列で1つずつ確定し、読み取りは列を待たない。
 列がnot_leaderを受けたらその要求と列の残りに同じ答えを返す。
 書き込みはprincipalのactorで書く（eventの`actor`は呼び出し元のprincipal）。
-起動直後の要求ごとの読みとRSSの記録は`startup_reads::StartupReads`。
 
 ## API versionと互換
 

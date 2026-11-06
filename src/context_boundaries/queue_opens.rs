@@ -132,7 +132,11 @@ pub(super) const OPENERS: &[Opener] = &[
         "apply_start_migrations",
         Why::Service,
     ),
-    row("src/infrastructure/queue_service.rs", "serve", Why::Service),
+    row(
+        "src/infrastructure/queue_service.rs",
+        "serve_on",
+        Why::Service,
+    ),
     row(
         "src/infrastructure/queue_service.rs",
         "SqliteServiceBackend::binding",

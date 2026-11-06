@@ -32,6 +32,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::TcpListener;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -52,6 +53,7 @@ use tracing::{info, warn};
 use self::write_line::WriteLine;
 use super::dialogue::DialogueQueue;
 use super::queue_binary;
+use super::queue_service_http::{Answered, HttpAnswerer};
 use super::sqlite::{SqliteQueue, WriteConnection};
 use crate::application::actor_executor::ExecutorEvents;
 use crate::application::commands::DenialLog;
@@ -3081,6 +3083,18 @@ pub(crate) fn owner_gone(owner: Option<u32>) -> bool {
 /// found migrations pending once it held the lock, which decides whether
 /// `up` keeps it ([`replacement_due`]).
 pub fn serve(options: &ServeOptions) -> Result<Value> {
+    serve_on(options, None)
+}
+
+/// [`serve`] that also takes requests on `http`, the HTTP entrance
+/// ([`super::queue_service_http`]), with the same backend, so they go on the
+/// same write line and through the same checks as the socket's. No start of
+/// `up` or `service start` calls it: [`serve`] opens no TCP port.
+pub fn serve_with_http(options: &ServeOptions, http: TcpListener) -> Result<Value> {
+    serve_on(options, Some(http))
+}
+
+fn serve_on(options: &ServeOptions, http: Option<TcpListener>) -> Result<Value> {
     let queue_dir = queue_dir_of(&options.db);
     ensure!(options.db.is_file(), "no queue at {}", options.db.display());
     let dir = service_dir(&queue_dir);
@@ -3226,6 +3240,15 @@ accepts: schema {} to {}",
     if let Err(error) = swept {
         warn!("the supervisors' tokens could not be swept: {error:#}");
     }
+    let http = http
+        .map(|listener| {
+            super::queue_service_http::open(
+                listener,
+                http_answerer(backend.clone(), pid, reads.clone()),
+                options.poll,
+            )
+        })
+        .transpose()?;
     let mut served = 0u64;
     let mut checked = Instant::now();
     let outcome = loop {
@@ -3263,6 +3286,7 @@ accepts: schema {} to {}",
             }
         }
     };
+    drop(http);
     reads.stopped(outcome);
     if let Some(line) = &backend.write_line {
         line.line.finish(LINE_STOP_WAIT);
@@ -3315,7 +3339,7 @@ fn take_lock(dir: &Path, queue_dir: &Path, wait: Duration) -> Result<Lock> {
 /// one comes: a supervisor sends many requests a pass, each on a
 /// connection of its own, which a fixed sleep between looks would each
 /// hold back.
-fn wait_for_connection(listener: &UnixListener, poll: Duration) {
+pub(super) fn wait_for_connection(listener: &impl AsRawFd, poll: Duration) {
     let mut fd = libc::pollfd {
         fd: listener.as_raw_fd(),
         events: libc::POLLIN,
@@ -3362,33 +3386,62 @@ fn answer_request(
     (peer, process): (Peer, Option<u32>),
     reads: &super::startup_reads::StartupReads,
 ) -> Result<Vec<u8>> {
+    let read = if line.len() > MAX_REQUEST_BYTES {
+        Err(ServiceResponse::failure(
+            ServiceErrorCode::BadRequest,
+            "the request is too long",
+        ))
+    } else {
+        serde_json::from_slice::<ServiceRequest>(line).map_err(|error| {
+            ServiceResponse::failure(
+                ServiceErrorCode::BadRequest,
+                format!("the request does not read: {error}"),
+            )
+        })
+    };
+    Ok(answer_read(read, backend, pid, (peer, process), reads)?.line)
+}
+
+/// How the HTTP entrance has its requests answered: with no peer, by the
+/// service of `backend`.
+fn http_answerer(
+    backend: Arc<SqliteServiceBackend>,
+    pid: u32,
+    reads: Arc<super::startup_reads::StartupReads>,
+) -> HttpAnswerer {
+    Arc::new(move |request| answer_read(Ok(request), &backend, pid, (Peer::Absent, None), &reads))
+}
+
+/// The answer to a request as its transport read it (`Err`: the refusal of
+/// one that does not read) from `peer`; recorded in `reads` while its window
+/// is open. The record never changes the answer.
+fn answer_read(
+    read: Result<ServiceRequest, ServiceResponse>,
+    backend: &Arc<SqliteServiceBackend>,
+    pid: u32,
+    (peer, process): (Peer, Option<u32>),
+    reads: &super::startup_reads::StartupReads,
+) -> Result<Answered> {
     let began = reads.begin();
     let mut use_case = None;
     let mut op = None;
     let mut notes = RequestNotes::default();
-    let response = if line.len() > MAX_REQUEST_BYTES {
-        ServiceResponse::failure(ServiceErrorCode::BadRequest, "the request is too long")
-    } else {
-        match serde_json::from_slice::<ServiceRequest>(line) {
-            Ok(request) => {
-                use_case = Some(request.use_case);
-                if began.is_some() {
-                    op = super::startup_reads::Answered::op_of(
-                        request.use_case.as_str(),
-                        &request.params,
-                    );
-                }
-                let handled = handled(backend, pid, request, peer, process)?;
-                notes = handled.notes;
-                handled.response
+    let response = match read {
+        Ok(request) => {
+            use_case = Some(request.use_case);
+            if began.is_some() {
+                op = super::startup_reads::Answered::op_of(
+                    request.use_case.as_str(),
+                    &request.params,
+                );
             }
-            Err(error) => ServiceResponse::failure(
-                ServiceErrorCode::BadRequest,
-                format!("the request does not read: {error}"),
-            ),
+            let handled = handled(backend, pid, request, peer, process)?;
+            notes = handled.notes;
+            handled.response
         }
+        Err(refusal) => refusal,
     };
-    let (out, built) = answer_line(&response, use_case)?;
+    let (answered, built) = answered_of(&response, use_case)?;
     if let Some(began) = began {
         reads.answered(
             began,
@@ -3402,7 +3455,19 @@ fn answer_request(
             },
         );
     }
-    Ok(out)
+    Ok(answered)
+}
+
+/// [`answer_line`] with the code of what the line says: the response's own,
+/// or `response_too_large` when the line was swapped for it.
+fn answered_of(response: &ServiceResponse, use_case: Option<UseCase>) -> Result<(Answered, usize)> {
+    let (line, built) = answer_line(response, use_case)?;
+    let code = if line.len() == built {
+        response.error.as_ref().map(|error| error.code)
+    } else {
+        Some(ServiceErrorCode::ResponseTooLarge)
+    };
+    Ok((Answered { line, code }, built))
 }
 
 /// The answer to `request` from `peer`: on the write line when the service
@@ -6351,6 +6416,13 @@ mod tests {
         assert_eq!(error.code, ServiceErrorCode::ResponseTooLarge);
         let size = serde_json::to_vec(&large).unwrap().len() + 1;
         assert_eq!(built, size);
+        // The HTTP entrance is given the same line and its code.
+        let (answered, built_there) = answered_of(&large, Some(UseCase::Events)).unwrap();
+        assert_eq!(answered.line, line);
+        assert_eq!(answered.code, Some(ServiceErrorCode::ResponseTooLarge));
+        assert_eq!(built_there, size);
+        let (answered, _) = answered_of(&small, Some(UseCase::Events)).unwrap();
+        assert_eq!(answered.code, small.error.as_ref().map(|error| error.code));
         assert!(
             error.message.contains(&format!("is {size} bytes")),
             "{}",

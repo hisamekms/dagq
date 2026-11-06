@@ -25,6 +25,10 @@ base64 = "0.22"
 bytes = { version = "1", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 getrandom = "0.4"
+# Reads the head of a request on the queue service's HTTP entrance
+# (src/infrastructure/queue_service_http.rs): no I/O of its own, so it stays on
+# the service's one thread per connection, and no dependency of its own.
+httparse = "1.10"
 libc = "0.2"
 # The Postgres store's driver, behind the feature `postgres` (ADR-t3986-1).
 postgres = { version = "0.19", optional = true }

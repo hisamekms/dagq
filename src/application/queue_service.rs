@@ -491,6 +491,12 @@ pub enum Peer {
     Owner,
     /// Anything else, or a peer that could not be read.
     Other,
+    /// No peer to read: a transport that carries the request from elsewhere
+    /// (the HTTP entrance). Only the token says who it is, and every use case
+    /// asks for one: `hello`, which a local caller's look answers with none,
+    /// tells this service's build and pid to no one it has not identified.
+    /// The checks run in the same order as for the other peers.
+    Absent,
 }
 
 impl QueueService<'_> {
@@ -527,14 +533,7 @@ impl QueueService<'_> {
         notes: &mut RequestNotes,
     ) -> ServiceResponse {
         if !answers(request.api_version) {
-            return ServiceResponse::failure(
-                ServiceErrorCode::ApiVersionMismatch,
-                format!(
-                    "the queue service answers API versions {MIN_API_VERSION} to {API_VERSION}, \
-                     not {}",
-                    request.api_version
-                ),
-            );
+            return ServiceResponse::version_mismatch(request.api_version.into());
         }
         if let Some(db) = &request.queue
             && !self.backend.serves(db)
@@ -548,20 +547,26 @@ impl QueueService<'_> {
                 ),
             );
         }
-        if request.use_case == UseCase::Hello {
-            return ServiceResponse::success(json!({
+        let hello = || {
+            ServiceResponse::success(json!({
                 "service": "dagq-queue-service",
                 "build": self.build,
                 "pid": self.pid,
                 "api_version": API_VERSION,
                 "min_api_version": MIN_API_VERSION,
-            }));
+            }))
+        };
+        if request.use_case == UseCase::Hello && peer != Peer::Absent {
+            return hello();
         }
         let connection = connection(request.use_case, &request.params);
         let (principal, checked) = match self.authenticate(request, peer, connection) {
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
+        if request.use_case == UseCase::Hello {
+            return hello();
+        }
         notes.role = Some(principal.role);
         // A repository queue answers only the repository it is bound to,
         // as the command line refused every command of another, and only
@@ -829,13 +834,11 @@ enum Connection {
 /// whole request in turn on the line's thread, instead of on the thread of
 /// its connection: every request that opens the queue to write
 /// ([`connection`], which is told by the operations' own read judgements).
-/// `hello` opens nothing.
 pub fn on_write_line(use_case: UseCase, params: &Value) -> bool {
-    use_case != UseCase::Hello
-        && matches!(
-            connection(use_case, params),
-            Connection::Supervisor | Connection::Write
-        )
+    matches!(
+        connection(use_case, params),
+        Connection::Supervisor | Connection::Write
+    )
 }
 
 fn connection(use_case: UseCase, params: &Value) -> Connection {
@@ -853,7 +856,9 @@ fn connection(use_case: UseCase, params: &Value) -> Connection {
             Connection::Read
         }
         UseCase::WatchPoll => Connection::Watch,
-        UseCase::Show
+        // Only a peer-less `hello` opens the queue, to read its token's run.
+        UseCase::Hello
+        | UseCase::Show
         | UseCase::ProposalList
         | UseCase::ProposalShow
         | UseCase::AgentResults
@@ -2909,7 +2914,7 @@ pub fn stop_by_hand(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::RefCell;
     use std::sync::Mutex;
 
@@ -3363,15 +3368,15 @@ mod tests {
         }
     }
 
-    struct Backend {
+    pub(crate) struct Backend {
         status: RunStatus,
-        log: std::sync::Arc<Mutex<Vec<Value>>>,
+        pub(crate) log: std::sync::Arc<Mutex<Vec<Value>>>,
         /// The queue is at an older schema: as the SQLite backend, it
         /// opens for a read (from a copy) and refuses to open to write or
         /// for a watch's look.
         older: bool,
         /// The connections opened, in order: `write`, `read` or `watch`.
-        opened: Mutex<Vec<&'static str>>,
+        pub(crate) opened: Mutex<Vec<&'static str>>,
         heavy_reads: Option<HeavyReads>,
         reading: std::sync::Arc<ReadHold>,
     }
@@ -3550,7 +3555,7 @@ mod tests {
         }
     }
 
-    fn backend(status: RunStatus) -> Backend {
+    pub(crate) fn backend(status: RunStatus) -> Backend {
         Backend {
             status,
             log: std::sync::Arc::default(),
@@ -4102,6 +4107,52 @@ mod tests {
                 "{token}: {log:?}"
             );
         }
+    }
+
+    #[test]
+    fn with_no_peer_only_a_token_identifies_and_the_version_goes_before_it() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        // Never the user's, on any use case: hello asks for a token as well.
+        for use_case in [UseCase::Note, UseCase::Hello] {
+            let response = service.handle_from(&request(None, use_case, json!({})), Peer::Absent);
+            assert_eq!(code(&response), Some(ServiceErrorCode::Unauthenticated));
+            assert_eq!(
+                backend.log.lock().unwrap().pop().unwrap(),
+                json!({"use_case": use_case, "reason": "missing_token"})
+            );
+        }
+        let hello = service.handle_from(
+            &request(Some("worker"), UseCase::Hello, json!({})),
+            Peer::Absent,
+        );
+        assert_eq!(hello.result.unwrap()["pid"], 1);
+        // Its token's run is read beside the write line, which a real
+        // service's write connection refuses to be used from.
+        assert!(!on_write_line(UseCase::Hello, &json!({})));
+        assert_eq!(*backend.opened.lock().unwrap(), ["read"]);
+        // A known token is its principal's, as on the socket.
+        let show = request(Some("worker"), UseCase::Show, json!({"id": 1}));
+        assert_eq!(
+            service.handle_from(&show, Peer::Absent),
+            service.handle_from(&show, Peer::Other)
+        );
+        // Out of the range is refused before the token is looked at, and
+        // nothing is recorded of it.
+        let log = backend.log.lock().unwrap().len();
+        let mut other = request(None, UseCase::Note, json!({}));
+        other.api_version = API_VERSION + 1;
+        let response = service.handle_from(&other, Peer::Absent);
+        assert_eq!(code(&response), Some(ServiceErrorCode::ApiVersionMismatch));
+        assert_eq!(
+            (response.api_version, response.min_api_version),
+            (API_VERSION, MIN_API_VERSION)
+        );
+        assert_eq!(backend.log.lock().unwrap().len(), log);
     }
 
     #[test]

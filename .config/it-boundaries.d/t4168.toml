@@ -1,0 +1,9 @@
+# The registry's boundary task 4168 gave (the format is in the header of
+# scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "queue-service-http-loopback-carries-a-use-case"
+kind = "プロセス"
+test = "queue_service_http::a_request_over_loopback_reaches_the_service_and_passes_by_its_token"
+reason = "実の TCP の loopback の接続で HTTP の要求が serve の受けに届き、bearer の token の principal で実の SQLite の queue のユースケースに答え、token の run の読みと書き込みが実の書き込みの列のそばと上で通ることは、実の listener と service の起動の経路でしか確かめられない（既存の id は unix socket の経路だけを代表する）。要求の検査・上限・header の読みの判断は infrastructure::queue_service_http の unit test"
+task = 4168

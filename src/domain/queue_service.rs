@@ -864,7 +864,8 @@ string_enum!(
     /// [`MAX_ANSWER_BYTES`], so the service sends this instead of a part of
     /// it, with how to narrow the read ([`too_large_message`]).
     ResponseTooLarge => "response_too_large",
-    /// `request_too_large`, only a client's on the service's socket: the
+    /// `request_too_large`, a client's on the service's socket and the HTTP
+    /// entrance's (`infrastructure::queue_service_http`): the
     /// request is longer than [`MAX_REQUEST_BYTES`], so it is not sent
     /// ([`request_too_large_message`]).
     RequestTooLarge => "request_too_large",
@@ -902,7 +903,9 @@ pub struct ServiceRequest {
     /// its working directory), which the service compares with its own
     /// before anything else and refuses as [`ServiceErrorCode::WrongQueue`]
     /// when they differ, opening neither. `None` from a caller that names
-    /// no queue (a worker's or a job's, given only the socket).
+    /// no queue (a worker's or a job's, given only the socket), and on the
+    /// HTTP entrance, which does not carry it
+    /// (`infrastructure::queue_service_http`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<std::path::PathBuf>,
     /// The Git common directory of the repository the host's `dagq` ran in
@@ -1136,6 +1139,18 @@ impl ServiceResponse {
             result: Some(result),
             error: None,
         }
+    }
+
+    /// `api_version_mismatch` for a request of `version`, outside what the
+    /// service answers ([`answers`]). It carries the range as every answer does.
+    pub fn version_mismatch(version: u64) -> Self {
+        Self::failure(
+            ServiceErrorCode::ApiVersionMismatch,
+            format!(
+                "the queue service answers API versions {MIN_API_VERSION} to {API_VERSION}, not \
+                 {version}"
+            ),
+        )
     }
 
     pub fn failure(code: ServiceErrorCode, message: impl Into<String>) -> Self {
