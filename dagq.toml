@@ -135,8 +135,8 @@ scheduled_workflows = ["it-budget.yml"]
 # it-coverage-map.yml は着地の検証が IT を絞る対応表（artifact it-coverage-map）を作る。10/30・10/31 の定時の実行が runner の brownout で
 # cancelled になり、表が 48 時間を超えて IT 全件に落ちたのに約 12 時間誰も気づかなかった（request 209、goal 244）。
 # max_age_hours は scripts/landing-it.py の古い表の境（STALE_TABLE_AGE）と同じ 48 で、超えると表に無い分を広げる IT が増え着地が遅くなる。
-# warn_before_hours の 12 は、日に 1 回の定時の実行が 1 回成功しなくても、上限の前に作り直しの 1 本（job の timeout は 150 分）が走り終わる幅。
-# 定時の周期を縮めたらこの幅の根拠も見直す。
+# warn_before_hours の 12 は、1 時間ごとの定時の実行が続けて成功しなくても、上限の前に作り直しの 1 本（並列の job で見積もり 19〜26 分、
+# timeout は partition の job が 60 分・合わせる job が 15 分）が走り終わり、人が直す時間も残る幅。定時の周期を変えたらこの幅の根拠も見直す。
 # workflow のファイル名を変えたらここも合わせる。
 # [[ci_watch.freshness]] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 3924 を含んでから足した。
 [[ci_watch.freshness]]
