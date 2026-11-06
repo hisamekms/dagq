@@ -2,13 +2,14 @@
 //! and answering one also writes `ask_opened` / `ask_answered` to
 //! `run_events`, so the change rides the cursor `status` and `watch` hand out.
 use crate::domain::event_kind::EventKind;
+use crate::infrastructure::sql_exec::OptionalRow as _;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
 use super::adapters::process_alive;
 use super::sql_dialect::{JsonType, json_field, json_field_at};
-use super::sqlite::{SqliteQueue, enum_col, json_col};
+use super::sqlite::SqliteQueue;
 use crate::domain::Ask;
 use crate::domain::write_rules::check_run_has_task;
 use crate::domain::{
@@ -1031,52 +1032,27 @@ pub(super) fn discard_by_runtime(
     note: &str,
     now: i64,
 ) -> Result<()> {
-    let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "reason": reason,
-                             "note": note, "discarded": true});
-    let kind = if ask.is_open() {
-        payload["runtime_closed"] = json!(true);
-        write_answer(tx, ask, note, Answerer::RUNTIME, now, &mut payload)?;
-        EventKind::AskAnswered
-    } else {
-        EventKind::AskClosed
-    };
-    ask_event(tx, ask.task_id, ask.run_id.as_ref(), kind, payload)?;
-    tx.execute(
-        "UPDATE asks SET closed_at=?2 WHERE id=?1",
-        params![ask.id, now],
-    )?;
-    Ok(())
+    discard_by_runtime_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(tx),
+        ask,
+        reason,
+        note,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Close the unclosed `ask` in the caller's write transaction at `now`: an
 /// open one gets `answer` from the runtime (`ask_answered` with
 /// `runtime_closed: true`), an answered one `ask_closed`.
 pub(super) fn close_by_runtime(tx: &Connection, ask: &Ask, answer: &str, now: i64) -> Result<()> {
-    if ask.is_open() {
-        let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
-        write_answer(tx, ask, answer, Answerer::RUNTIME, now, &mut payload)?;
-        ask_event(
-            tx,
-            ask.task_id,
-            ask.run_id.as_ref(),
-            EventKind::AskAnswered,
-            payload,
-        )?;
-    } else {
-        // An answer given before is applied by this close.
-        ask_event(
-            tx,
-            ask.task_id,
-            ask.run_id.as_ref(),
-            EventKind::AskClosed,
-            json!({"ask_id": ask.id, "kind": ask.kind}),
-        )?;
-    }
-    tx.execute(
-        "UPDATE asks SET closed_at=?2 WHERE id=?1",
-        params![ask.id, now],
-    )?;
-    Ok(())
+    close_by_runtime_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(tx),
+        ask,
+        answer,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// [`SqliteQueue::close_asks_of`] inside the caller's write transaction,
@@ -1103,26 +1079,6 @@ pub(super) fn close_asks_in(
         closed.push(read_ask(tx, ask.id)?);
     }
     Ok(closed)
-}
-
-/// Close the unclosed asks about planning `request` (`asks.request_id`, its
-/// planners' `planner_question`s) inside the caller's write transaction at
-/// `now`, as [`close_by_runtime`] closes one: an open ask gets `answer`
-/// from the runtime, an answered one `ask_closed`. The asks closed.
-pub(super) fn close_request_asks_in(
-    tx: &Connection,
-    request: crate::domain::RequestId,
-    answer: &str,
-    now: i64,
-) -> Result<Vec<AskId>> {
-    let unclosed: Vec<Ask> = tx
-        .prepare("SELECT * FROM asks WHERE request_id=?1 AND closed_at IS NULL ORDER BY id")?
-        .query_map([request], ask_row)?
-        .collect::<rusqlite::Result<_>>()?;
-    for ask in &unclosed {
-        close_by_runtime(tx, ask, answer, now)?;
-    }
-    Ok(unclosed.into_iter().map(|ask| ask.id).collect())
 }
 
 /// The `subject` of a `planner_question` about planning request `id`:
@@ -1202,8 +1158,7 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
     // one open ask per subject, so questions about two requests, both
     // about no task, run or finding, do not collide (ADR-t1394-1).
     let request_subject = ask.request_id.map(request_ask_subject);
-    let id = AskId::new(super::sqlite::insert_id(
-        tx,
+    let id = AskId::new(super::sqlite::insert_id(tx,
         "INSERT INTO asks(kind,task_id,run_id,question,options,asked_by,reason_category,finding_id,topics,recommendation,confidence,request_id,subject)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
@@ -1266,50 +1221,23 @@ pub(super) fn write_answer(
     now: i64,
     payload: &mut serde_json::Value,
 ) -> Result<()> {
-    let index = option_index(&ask.options, text);
-    // The runtime withdrawing or superseding an ask approves nothing.
-    let approval = answerer.authority != AnswerAuthority::Runtime && answer_approves(ask, text);
-    conn.execute(
-        "UPDATE asks SET answer=?2, answered_at=?3, answered_by=?4, option_index=?5,
-           answer_authority=?6, answer_approval=?7 WHERE id=?1",
-        params![
-            ask.id,
-            text,
-            now,
-            answerer.by,
-            index,
-            answerer.authority.as_str(),
-            approval
-        ],
-    )?;
-    payload["answered_by"] = json!(answerer.by);
-    payload["authority"] = json!(answerer.authority);
-    payload["approval"] = json!(approval);
-    payload["option_index"] = json!(index);
-    if let Some(option) = index
-        .and_then(|index| usize::try_from(index).ok())
-        .and_then(|index| ask.options.get(index))
-    {
-        payload["option"] = json!(option);
-    } else if let Some(option) = reasoned_option(&ask.kind, &ask.options, text) {
-        // `send_back: <reason>` chose `send_back` with a reason; `option`
-        // and `option_index` stay those of an exact choice (task 1389).
-        payload["reasoned_option"] = json!(option);
-    }
-    Ok(())
+    write_answer_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        ask,
+        text,
+        answerer,
+        now,
+        payload,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Record `ask_closed` for `ask`, on its task and run, in the caller's
 /// transaction that closes it: `stats` reads it as the answer applied
 /// (task 468) when nothing else that names the ask applied it (task 568).
 pub(super) fn record_ask_closed(conn: &Connection, ask: &Ask) -> Result<()> {
-    ask_event(
-        conn,
-        ask.task_id,
-        ask.run_id.as_ref(),
-        EventKind::AskClosed,
-        json!({"ask_id": ask.id, "kind": ask.kind}),
-    )
+    record_ask_closed_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), ask)
+        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// An ask's event: on its task (and run), or, for a task-less `blocked`
@@ -1321,19 +1249,14 @@ fn ask_event(
     kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<()> {
-    check_event_target(kind, task_id, None)?;
-    check_run_has_task(task_id, run_id)?;
-    conn.execute(
-        "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
-         VALUES (?1,?2,?3,dagq_event_body(?4),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        params![
-            task_id,
-            run_id,
-            kind.as_str(),
-            serde_json::to_string(&payload)?
-        ],
-    )?;
-    Ok(())
+    ask_event_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task_id,
+        run_id,
+        kind,
+        payload,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// [`SqliteQueue::ask_delivered`] inside the caller's transaction, which
@@ -1361,22 +1284,27 @@ pub(super) fn deliver_ask_in(
 }
 
 pub(super) fn read_ask(conn: &Connection, id: AskId) -> Result<Ask> {
-    conn.query_row("SELECT * FROM asks WHERE id=?1", [id], ask_row)
-        .optional()?
-        .with_context(|| format!("ask {id} does not exist"))
+    read_ask_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), id)
+        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 pub(super) fn ask_row(row: &Row<'_>) -> rusqlite::Result<Ask> {
+    super::sql_exec::sqlite::with_row(row, ask_row_port)
+}
+
+pub(super) fn ask_row_port(
+    row: &crate::infrastructure::sql_exec::SqlRow<'_>,
+) -> crate::infrastructure::sql_exec::SqlResult<Ask> {
     Ok(Ask {
         id: row.get("id")?,
         kind: AskKind::read(&row.get::<_, String>("kind")?),
         task_id: row.get("task_id")?,
         run_id: row.get("run_id")?,
         question: row.get("question")?,
-        options: json_col(row, "options")?,
+        options: crate::infrastructure::store_rows::json_col(row, "options")?,
         answer: row.get("answer")?,
         asked_by: row.get("asked_by")?,
-        reason_category: enum_col(row, "reason_category")?,
+        reason_category: crate::infrastructure::store_rows::enum_col(row, "reason_category")?,
         // NULL for the kinds without topics and the asks before them; a
         // value that is no array of texts reads as none.
         topics: row
@@ -1389,7 +1317,7 @@ pub(super) fn ask_row(row: &Row<'_>) -> rusqlite::Result<Ask> {
             .get::<_, Option<String>>("confidence")?
             .and_then(|value| value.parse().ok()),
         subject: row.get("subject")?,
-        affected: json_col(row, "affected")?,
+        affected: crate::infrastructure::store_rows::json_col(row, "affected")?,
         created_at: row.get("created_at")?,
         answered_at: row.get("answered_at")?,
         closed_at: row.get("closed_at")?,
@@ -1403,6 +1331,173 @@ pub(super) fn ask_row(row: &Row<'_>) -> rusqlite::Result<Ask> {
             .and_then(|value| value.parse().ok()),
         answer_approval: row.get("answer_approval")?,
     })
+}
+
+pub(super) fn discard_by_runtime_port(
+    tx: &impl crate::infrastructure::store_writes::EventTx,
+    ask: &Ask,
+    reason: &str,
+    note: &str,
+    now: i64,
+) -> Result<()> {
+    let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "reason": reason,
+                             "note": note, "discarded": true});
+    let kind = if ask.is_open() {
+        payload["runtime_closed"] = json!(true);
+        write_answer_port(tx, ask, note, Answerer::RUNTIME, now, &mut payload)?;
+        EventKind::AskAnswered
+    } else {
+        EventKind::AskClosed
+    };
+    ask_event_port(tx, ask.task_id, ask.run_id.as_ref(), kind, payload)?;
+    tx.execute(
+        "UPDATE asks SET closed_at=?2 WHERE id=?1",
+        crate::infrastructure::sql_exec::sql_params![ask.id, now],
+    )?;
+    Ok(())
+}
+
+pub(super) fn read_ask_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: AskId,
+) -> Result<Ask> {
+    conn.query_row(
+        "SELECT * FROM asks WHERE id=?1",
+        crate::infrastructure::sql_exec::sql_params![id],
+        ask_row_port,
+    )
+    .optional()?
+    .with_context(|| format!("ask {id} does not exist"))
+}
+
+pub(super) fn write_answer_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    ask: &Ask,
+    text: &str,
+    answerer: Answerer,
+    now: i64,
+    payload: &mut serde_json::Value,
+) -> Result<()> {
+    let index = option_index(&ask.options, text);
+    // The runtime withdrawing or superseding an ask approves nothing.
+    let approval = answerer.authority != AnswerAuthority::Runtime && answer_approves(ask, text);
+    conn.execute(
+        "UPDATE asks SET answer=?2, answered_at=?3, answered_by=?4, option_index=?5,
+           answer_authority=?6, answer_approval=?7 WHERE id=?1",
+        crate::infrastructure::sql_exec::sql_params![
+            ask.id,
+            text,
+            now,
+            answerer.by,
+            index,
+            answerer.authority.as_str(),
+            approval
+        ],
+    )?;
+    payload["answered_by"] = json!(answerer.by);
+    payload["authority"] = json!(answerer.authority);
+    payload["approval"] = json!(approval);
+    payload["option_index"] = json!(index);
+    if let Some(option) = index
+        .and_then(|index| usize::try_from(index).ok())
+        .and_then(|index| ask.options.get(index))
+    {
+        payload["option"] = json!(option);
+    } else if let Some(option) = reasoned_option(&ask.kind, &ask.options, text) {
+        // `send_back: <reason>` chose `send_back` with a reason; `option`
+        // and `option_index` stay those of an exact choice (task 1389).
+        payload["reasoned_option"] = json!(option);
+    }
+    Ok(())
+}
+
+fn ask_event_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    task_id: Option<TaskId>,
+    run_id: Option<&RunId>,
+    kind: EventKind,
+    payload: serde_json::Value,
+) -> Result<()> {
+    check_event_target(kind, task_id, None)?;
+    check_run_has_task(task_id, run_id)?;
+    conn.execute(
+        "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
+         VALUES (?1,?2,?3,dagq_event_body(?4),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+        crate::infrastructure::sql_exec::sql_params![
+            task_id,
+            run_id,
+            kind.as_str(),
+            serde_json::to_string(&payload)?
+        ],
+    )?;
+    Ok(())
+}
+
+/// Close the unclosed asks about planning `request` (`asks.request_id`, its
+/// planners' `planner_question`s) inside the caller's write transaction at
+/// `now`, as [`close_by_runtime`] closes one: an open ask gets `answer`
+/// from the runtime, an answered one `ask_closed`. The asks closed.
+pub(super) fn close_request_asks_in_port(
+    tx: &impl crate::infrastructure::store_writes::EventTx,
+    request: crate::domain::RequestId,
+    answer: &str,
+    now: i64,
+) -> Result<Vec<AskId>> {
+    let unclosed: Vec<Ask> = tx.query_map(
+        "SELECT * FROM asks WHERE request_id=?1 AND closed_at IS NULL ORDER BY id",
+        crate::infrastructure::sql_exec::sql_params![request],
+        ask_row_port,
+    )?;
+    for ask in &unclosed {
+        close_by_runtime_port(tx, ask, answer, now)?;
+    }
+    Ok(unclosed.into_iter().map(|ask| ask.id).collect())
+}
+
+pub(super) fn close_by_runtime_port(
+    tx: &impl crate::infrastructure::store_writes::EventTx,
+    ask: &Ask,
+    answer: &str,
+    now: i64,
+) -> Result<()> {
+    if ask.is_open() {
+        let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
+        write_answer_port(tx, ask, answer, Answerer::RUNTIME, now, &mut payload)?;
+        ask_event_port(
+            tx,
+            ask.task_id,
+            ask.run_id.as_ref(),
+            EventKind::AskAnswered,
+            payload,
+        )?;
+    } else {
+        // An answer given before is applied by this close.
+        ask_event_port(
+            tx,
+            ask.task_id,
+            ask.run_id.as_ref(),
+            EventKind::AskClosed,
+            json!({"ask_id": ask.id, "kind": ask.kind}),
+        )?;
+    }
+    tx.execute(
+        "UPDATE asks SET closed_at=?2 WHERE id=?1",
+        crate::infrastructure::sql_exec::sql_params![ask.id, now],
+    )?;
+    Ok(())
+}
+
+pub(super) fn record_ask_closed_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    ask: &Ask,
+) -> Result<()> {
+    ask_event_port(
+        conn,
+        ask.task_id,
+        ask.run_id.as_ref(),
+        EventKind::AskClosed,
+        json!({"ask_id": ask.id, "kind": ask.kind}),
+    )
 }
 
 #[cfg(test)]

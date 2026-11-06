@@ -22,9 +22,7 @@ use serde_json::json;
 
 use super::plan_requests::read_request;
 use super::sql_exec::{OptionalRow, sql_params};
-use super::sqlite::{
-    SqliteQueue, enum_col, event, json_col, read_task, record_queue_event_in, replan_guarding,
-};
+use super::sqlite::{SqliteQueue, event, read_task, replan_guarding};
 use super::store_rows;
 use crate::domain::DomainError;
 use crate::domain::event_kind::EventKind;
@@ -537,7 +535,14 @@ pub(crate) fn move_in(
     step: &ReplanMove,
     now: i64,
 ) -> Result<ReplanOperation> {
-    move_in_as(conn, id, generation, step, now, false)
+    move_in_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        id,
+        generation,
+        step,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// [`move_in`], by the trusted runtime's atomic apply when `apply`: the
@@ -551,208 +556,25 @@ pub(super) fn move_in_as(
     now: i64,
     apply: bool,
 ) -> Result<ReplanOperation> {
-    let op = read_operation(conn, id)?;
-    if apply {
-        task_replan::check_apply_move(&op, generation, step)?;
-    } else {
-        task_replan::check_move(&op, generation, step)?;
-    }
-    if let Some(premise) = step
-        .diagnosis
-        .as_ref()
-        .and_then(|made| made.premise.as_ref())
-    {
-        check_premise(conn, &op, step.to, premise)?;
-    } else if step.to == ReplanStatus::Diagnosing {
-        check_not_held(conn, &op)?;
-    }
-    // An operation diagnosed, fenced or reopened (a restore that failed)
-    // must be the task's one open operation.
-    if task_replan::needs_task_alone(op.status, step.to) {
-        let other: Option<ReplanId> = conn
-            .query_row(
-                "SELECT id FROM replan_operations WHERE task_id=?1 AND closed_at IS NULL AND id<>?2
-                 LIMIT 1",
-                params![op.task_id, id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(other) = other {
-            anyhow::bail!(
-                "replan operation {id} cannot move to {}: task {} has operation {other} open",
-                step.to.as_str(),
-                op.task_id
-            );
-        }
-    }
-    let next = task_replan::generation_after(op.status, step.to, op.generation);
-    let return_phase = (step.to == ReplanStatus::Blocked).then_some(op.status);
-    let mut diagnosis = op.diagnosis.clone();
-    // A diagnosis keeps the evidence the request named.
-    if let Some(made) = &step.diagnosis {
-        let mut evidence = diagnosis.evidence.clone();
-        for id in &made.evidence {
-            if !evidence.contains(id) {
-                evidence.push(*id);
-            }
-        }
-        diagnosis = task_replan::Diagnosis {
-            evidence,
-            ..made.clone()
-        };
-    }
-    conn.execute(
-        "UPDATE replan_operations SET status=?1, status_reason=?2, generation=?3,
-           return_phase=?4, snapshot_id=COALESCE(?5, snapshot_id), diagnosis=?6,
-           updated_at=?7, closed_at=?8
-         WHERE id=?9 AND generation=?10",
-        params![
-            step.to.as_str(),
-            step.reason,
-            next,
-            return_phase.map(ReplanStatus::as_str),
-            step.snapshot_id,
-            serde_json::to_string(&diagnosis)?,
-            now,
-            step.to.is_closed().then_some(now),
-            id,
-            generation,
-        ],
-    )?;
-    if step.to.is_closed() && step.to != ReplanStatus::Applied {
-        release_children(conn, &op, now)?;
-    }
-    let planner_open = op
-        .request_id
-        .map(|request| super::plan_requests::planner_open(conn, request))
-        .transpose()?
-        .unwrap_or(false);
-    let declined = match op.request_id {
-        Some(request) if step.to.ends_request_undecided(planner_open) => {
-            super::plan_requests::decline_undecided(conn, request, id, step.to, &step.reason, now)?
-                .then_some(request)
-        }
-        _ => None,
-    };
-    let renewed = match op.request_id {
-        // Its `request_declined` is read only for a move onto the planner.
-        Some(request)
-            if op.status.renews_request(step.to, true)
-                && super::plan_requests::declined_at_close(conn, request, id)? =>
-        {
-            let renewed = super::plan_requests::renew_declined(conn, request, id, now)?;
-            conn.execute(
-                "UPDATE replan_operations SET request_id=?1 WHERE id=?2",
-                params![renewed, id],
-            )?;
-            Some(renewed)
-        }
-        _ => None,
-    };
-    // A diagnosis that fences an operation no person asked for (the
-    // runtime's detection, a worker's proposal) records the planning
-    // request its planner is opened for once the snapshot is saved, in
-    // the same transaction: the request of a person's is recorded with it.
-    let recorded = match (op.request_id, &step.diagnosis) {
-        (None, Some(made)) if step.to == ReplanStatus::PauseRequested => {
-            let new = NewReplan {
-                run: op.run_id.clone(),
-                reason: format!(
-                    "{}; diagnosed: {}",
-                    op.reason,
-                    made.summary.as_deref().unwrap_or(&step.reason)
-                ),
-                evidence: diagnosis.evidence.clone(),
-            };
-            let request = record_request(conn, &op, &new, "supervisor", &op.requested_by_id, now)?;
-            conn.execute(
-                "UPDATE replan_operations SET request_id=?1 WHERE id=?2",
-                params![request, id],
-            )?;
-            Some(request)
-        }
-        _ => None,
-    };
-    let mut payload = json!({"operation_id": id, "from": op.status, "to": step.to,
-                             "reason": step.reason, "generation": next,
-                             "snapshot_id": step.snapshot_id});
-    if let Some(request) = recorded {
-        payload["request_recorded"] = json!(request);
-    }
-    if let Some(request) = declined {
-        payload["request_declined"] = json!(request);
-    }
-    if let Some(request) = renewed {
-        payload["request_renewed"] = json!(request);
-    }
-    event(
-        conn,
-        op.task_id,
-        Some(&op.run_id),
-        EventKind::ReplanStatusChanged,
-        payload,
-    )?;
-    read_operation(conn, id)
+    move_in_as_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        id,
+        generation,
+        step,
+        now,
+        apply,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// [`SqliteQueue::replan_lineage`] on `conn`, inside the caller's
 /// transaction when it holds one.
 pub(crate) fn lineage_in(conn: &Connection, task: TaskId) -> Result<Vec<ReplanOperation>> {
-    let mut root = task;
-    let mut seen = std::collections::BTreeSet::from([task]);
-    while let Some(from) = conn
-        .query_row(
-            "SELECT from_task_id FROM replan_replacements WHERE to_task_id=?1 LIMIT 1",
-            [root],
-            |r| r.get::<_, TaskId>(0),
-        )
-        .optional()?
-    {
-        if !seen.insert(from) {
-            break;
-        }
-        root = from;
-    }
-    let mut tasks = vec![root];
-    let mut at = 0;
-    while let Some(&from) = tasks.get(at) {
-        at += 1;
-        let mut children =
-            conn.prepare("SELECT to_task_id FROM replan_replacements WHERE from_task_id=?1")?;
-        for child in children.query_map([from], |r| r.get::<_, TaskId>(0))? {
-            let child = child?;
-            if !tasks.contains(&child) {
-                tasks.push(child);
-            }
-        }
-    }
-    let mut ops = Vec::new();
-    for task in tasks {
-        let of_task: Vec<ReplanOperation> = conn
-            .prepare("SELECT * FROM replan_operations WHERE task_id=?1 ORDER BY id")?
-            .query_map([task], operation_row)?
-            .collect::<rusqlite::Result<_>>()?;
-        ops.extend(of_task);
-    }
-    ops.sort_by_key(|op| op.id);
-    ops.into_iter().map(|op| with_outcome(conn, op)).collect()
-}
-
-/// Refuse the claim of `op` for a diagnosis job or its ask, and the move
-/// or the ask of a verdict or a person's answer, while `op`'s task is held
-/// (ADR-t1879-1 decision 6), read in the write's own transaction: a hold
-/// that commits first wins, and the supervisor keeps the verdict or the
-/// answer until the release.
-fn check_not_held(conn: &Connection, op: &ReplanOperation) -> Result<()> {
-    if let Some(hold) = super::task_holds::guard_of(conn, op.task_id)? {
-        return Err(DomainError::ReplanDiagnosisHeld {
-            operation: op.id,
-            task_id: op.task_id,
-            hold: hold.hold,
-        }
-        .into());
-    }
-    Ok(())
+    lineage_in_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The diagnosis jobs that run now, queue-wide, on `conn` (inside the
@@ -799,107 +621,13 @@ fn check_premise(
     to: ReplanStatus,
     premise: &task_replan::DiagnosisPremise,
 ) -> Result<()> {
-    check_not_held(conn, op)?;
-    let stale = |why: String| {
-        anyhow::Error::new(DomainError::ReplanPremiseStale {
-            operation: op.id,
-            why,
-        })
-    };
-    let task = read_task(conn, op.task_id)?;
-    if task.status() != TaskStatus::InProgress {
-        return Err(stale(format!(
-            "task {} is {}",
-            op.task_id,
-            task.status().as_str()
-        )));
-    }
-    let latest: Option<(RunId, String)> = conn
-        .query_row(
-            "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
-            [op.task_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let landing = [
-        RunStatus::Integrating,
-        RunStatus::Integrated,
-        RunStatus::Succeeded,
-    ];
-    match latest {
-        Some((run, status))
-            if run == op.run_id
-                && status == premise.run_status.as_str()
-                && !landing.iter().any(|landing| landing.as_str() == status) => {}
-        Some((run, status)) => {
-            return Err(stale(format!(
-                "run {run} is {status}, and the diagnosis read run {} {}",
-                op.run_id,
-                premise.run_status.as_str()
-            )));
-        }
-        None => return Err(stale(format!("task {} has no run", op.task_id))),
-    }
-    if let Some(window_end) = premise.read_until {
-        let kinds = replan_detect::PROGRESS.map(EventKind::as_str);
-        let progress: Option<(i64, String)> = conn
-            .query_row(
-                "SELECT id, kind FROM run_events WHERE task_id=?1 AND id>?2
-                 AND kind IN (?3, ?4, ?5, ?6, ?7, ?8) ORDER BY id LIMIT 1",
-                params![
-                    op.task_id, window_end, kinds[0], kinds[1], kinds[2], kinds[3], kinds[4],
-                    kinds[5]
-                ],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((id, kind)) = progress {
-            return Err(stale(format!(
-                "{kind} event {id} came after the last event it read ({window_end})"
-            )));
-        }
-    }
-    if premise.manual == Some(false) {
-        let joined: Option<i64> = conn
-            .query_row(
-                &format!(
-                    "SELECT id FROM run_events WHERE task_id=?1 AND kind=?2
-                 AND {}=?3
-                 AND {}=?4 LIMIT 1",
-                    json_field("payload", "$.operation_id", JsonType::Integer),
-                    json_field("payload", "$.origin", JsonType::Text)
-                ),
-                params![
-                    op.task_id,
-                    EventKind::ReplanRequested.as_str(),
-                    op.id,
-                    ReplanOrigin::Manual.as_str()
-                ],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if op.origin == ReplanOrigin::Manual || joined.is_some() {
-            return Err(stale(
-                "a person's request joined the operation since it was decided".to_owned(),
-            ));
-        }
-    }
-    if let Some(limit) = premise.max_auto_parks
-        && to == ReplanStatus::PauseRequested
-    {
-        let parks = replan_detect::auto_parks(&lineage_in(conn, op.task_id)?);
-        if parks >= limit {
-            return Err(stale(format!(
-                "the lineage's parks without a person are used up ({parks} of {limit})"
-            )));
-        }
-    }
-    let mut now = conditions_of(conn, op.task_id)?;
-    now.successors.clone_from(&op.conditions.successors);
-    if now.version() != op.task_version {
-        return Err(stale(format!("task {} was edited", op.task_id)));
-    }
-    Ok(())
+    check_premise_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        op,
+        to,
+        premise,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Add `mappings` to operation `id`'s condition mappings on `conn` inside
@@ -982,23 +710,13 @@ pub(super) fn check_task_step(
     Ok(())
 }
 
-/// The operations on `task`, oldest first, with their outcome.
-pub(super) fn operations_of(conn: &Connection, task: TaskId) -> Result<Vec<ReplanOperation>> {
-    let ops: Vec<ReplanOperation> = conn
-        .prepare("SELECT * FROM replan_operations WHERE task_id=?1 ORDER BY id")?
-        .query_map([task], operation_row)?
-        .collect::<rusqlite::Result<_>>()?;
-    ops.into_iter().map(|op| with_outcome(conn, op)).collect()
-}
-
 /// The open operations on `task`, oldest first.
 fn open_operations(conn: &Connection, task: TaskId) -> Result<Vec<ReplanOperation>> {
-    Ok(conn
-        .prepare(
-            "SELECT * FROM replan_operations WHERE task_id=?1 AND closed_at IS NULL ORDER BY id",
-        )?
-        .query_map([task], operation_row)?
-        .collect::<rusqlite::Result<_>>()?)
+    open_operations_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Move operation `id` (closed in a continuation or a withdrawal), read
@@ -1044,17 +762,6 @@ pub(crate) fn reopen_blocked(
     Ok(true)
 }
 
-/// The task's open operation, if any ([`task_replan::current`]): what
-/// `list` marks it with. A task has at most one open operation that does
-/// not guard it, on its latest run ([`carry_open_to`]); one that guards
-/// stays on the run it parked, and is the one read.
-pub(super) fn open_operation_of(
-    conn: &Connection,
-    task: TaskId,
-) -> Result<Option<ReplanOperation>> {
-    Ok(task_replan::current(&open_operations(conn, task)?).cloned())
-}
-
 /// Keep one open operation on `task` now that `run` is its latest run, on
 /// `conn` inside the caller's transaction (the claim of `run`, or a request
 /// on it), as [`task_replan::carry`] decides and why: the others that do
@@ -1063,93 +770,22 @@ pub(super) fn open_operation_of(
 /// `replan_carried`, its planning request naming `run` beside the earlier
 /// run.
 pub(super) fn carry_open_to(conn: &Connection, task: TaskId, run: &RunId, now: i64) -> Result<()> {
-    let open = open_operations(conn, task)?;
-    let carry = task_replan::carry(&open, run);
-    let Some(kept) = carry.kept else {
-        return Ok(());
-    };
-    for older in open.iter().filter(|op| carry.superseded.contains(&op.id)) {
-        let step = ReplanMove {
-            to: ReplanStatus::Continuing,
-            reason: format!("superseded by replan operation {kept} of the task"),
-            snapshot_id: None,
-            diagnosis: None,
-        };
-        move_in(conn, older.id, older.generation, &step, now)?;
-    }
-    let Some((id, generation)) = carry.moved else {
-        return Ok(());
-    };
-    let Some(op) = open.iter().find(|op| op.id == id) else {
-        return Ok(());
-    };
-    conn.execute(
-        "UPDATE replan_operations SET run_id=?1, generation=?2, updated_at=?3 WHERE id=?4",
-        params![run, generation, now, id],
-    )?;
-    if let Some(request) = op.request_id {
-        let mut refs = read_request(conn, request)?.refs;
-        let to = RequestRef::Run(run.clone());
-        if !refs.contains(&to) {
-            refs.push(to);
-            conn.execute(
-                "UPDATE plan_requests SET refs=?1, updated_at=?2 WHERE id=?3",
-                params![serde_json::to_string(&refs)?, now, request],
-            )?;
-        }
-    }
-    event(
-        conn,
+    carry_open_to_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
         task,
-        Some(run),
-        EventKind::ReplanCarried,
-        json!({"operation_id": id, "from_run": op.run_id, "to_run": run,
-               "generation": generation}),
-    )?;
-    Ok(())
+        run,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The task's and its goal's conditions as they are on `conn` now.
 pub(super) fn conditions_of(conn: &Connection, task_id: TaskId) -> Result<OriginalConditions> {
-    let task = read_task(conn, task_id)?;
-    let ids = |sql: &str| -> Result<Vec<TaskId>> {
-        Ok(conn
-            .prepare(sql)?
-            .query_map([task_id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?)
-    };
-    let predecessors = ids(
-        "SELECT predecessor_id FROM task_dependencies WHERE task_id=?1 ORDER BY predecessor_id",
-    )?;
-    let successors =
-        ids("SELECT task_id FROM task_dependencies WHERE predecessor_id=?1 ORDER BY task_id")?;
-    let goal = task
-        .goal_id()
-        .map(|goal: GoalId| {
-            conn.query_row(
-                "SELECT acceptance, acceptance_version FROM goals WHERE id=?1",
-                [goal],
-                |r| {
-                    Ok(GoalConditions {
-                        id: goal,
-                        acceptance: acceptance_items(&r.get::<_, String>(0)?),
-                        acceptance_version: r.get(1)?,
-                    })
-                },
-            )
-        })
-        .transpose()?;
-    Ok(OriginalConditions {
-        title: task.title().to_owned(),
-        description: task.description().to_owned(),
-        acceptance: acceptance_items(task.acceptance()),
-        paths: task.paths().to_vec(),
-        verify: task.verification_commands().to_vec(),
-        evidence: serde_json::to_value(task.required_evidence())?,
-        predecessors,
-        successors,
-        goal,
-    })
+    conditions_of_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task_id,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Record the planning request of a person's request on `op`'s run: the
@@ -1163,134 +799,30 @@ fn record_request(
     by_id: &str,
     now: i64,
 ) -> Result<crate::domain::RequestId> {
-    let mut refs = vec![
-        RequestRef::Run(op.run_id.clone()),
-        RequestRef::Task(op.task_id),
-    ];
-    refs.extend(op.goal_id.map(RequestRef::Goal));
-    refs.extend(new.evidence.iter().copied().map(RequestRef::Event));
-    let id = crate::domain::RequestId::new(super::sqlite::insert_id(
-        conn,
-        "INSERT INTO plan_requests(text, refs, requested_by, requested_by_id, status,
-           created_at, updated_at, replan_operation_id) VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?5, ?6)",
-        params![
-            new.reason,
-            serde_json::to_string(&refs)?,
-            by_role,
-            by_id,
-            now,
-            op.id
-        ],
-    )?);
-    record_queue_event_in(
-        conn,
-        EventKind::RequestRecorded,
-        &json!({"request_id": id, "refs": refs, "requested_by": by_role,
-                "replan_operation_id": op.id}),
-    )?;
-    Ok(id)
+    record_request_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        op,
+        new,
+        by_role,
+        by_id,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 pub(super) fn read_operation(conn: &Connection, id: ReplanId) -> Result<ReplanOperation> {
-    let op = conn
-        .query_row(
-            "SELECT * FROM replan_operations WHERE id=?1",
-            [id],
-            operation_row,
-        )
-        .optional()?
-        .with_context(|| format!("replan operation {id} does not exist"))?;
-    with_outcome(conn, op)
+    read_operation_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), id)
+        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// `op` with its condition mappings and the tasks that replaced its task.
-fn with_outcome(conn: &Connection, mut op: ReplanOperation) -> Result<ReplanOperation> {
-    op.mappings = conn
-        .prepare(
-            "SELECT * FROM replan_mappings WHERE operation_id=?1
-             ORDER BY ordinal, child_task_id",
-        )?
-        .query_map([op.id], |r| {
-            Ok(task_replan::ConditionMapping {
-                ordinal: usize::try_from(r.get::<_, i64>("ordinal")?).unwrap_or_default(),
-                hash: r.get("hash")?,
-                child_task_id: r.get("child_task_id")?,
-                child_ordinal: r
-                    .get::<_, Option<i64>>("child_ordinal")?
-                    .and_then(|ordinal| usize::try_from(ordinal).ok()),
-                disposition: r.get("disposition")?,
-                authority: r
-                    .get::<_, Option<String>>("authority")?
-                    .and_then(|text| serde_json::from_str(&text).ok()),
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    op.replaced_by = conn
-        .prepare(
-            "SELECT to_task_id FROM replan_replacements WHERE operation_id=?1 ORDER BY to_task_id",
-        )?
-        .query_map([op.id], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    op.request_status = op
-        .request_id
-        .map(|request| {
-            conn.query_row(
-                "SELECT status FROM plan_requests WHERE id=?1",
-                [request],
-                |r| enum_col(r, "status"),
-            )
-            .optional()
-        })
-        .transpose()?
-        .flatten();
-    ensure!(
-        op.replaced_by.is_empty() || op.status == ReplanStatus::Applied,
-        "replan operation {} names replacements but is {}",
-        op.id,
-        op.status.as_str()
-    );
-    Ok(op)
+fn with_outcome(conn: &Connection, op: ReplanOperation) -> Result<ReplanOperation> {
+    with_outcome_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), op)
+        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 fn operation_row(r: &Row<'_>) -> rusqlite::Result<ReplanOperation> {
-    Ok(ReplanOperation {
-        id: r.get("id")?,
-        task_id: r.get("task_id")?,
-        run_id: r.get("run_id")?,
-        goal_id: r.get("goal_id")?,
-        origin: enum_col(r, "origin")?,
-        status: enum_col(r, "status")?,
-        status_reason: r.get("status_reason")?,
-        generation: r.get("generation")?,
-        return_phase: r
-            .get::<_, Option<String>>("return_phase")?
-            .map(|phase| {
-                phase.parse().map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })
-            })
-            .transpose()?,
-        reason: r.get("reason")?,
-        conditions: json_col(r, "conditions")?,
-        task_version: r.get("task_version")?,
-        goal_acceptance_version: r.get("goal_acceptance_version")?,
-        diagnosis: json_col(r, "diagnosis")?,
-        snapshot_id: r.get("snapshot_id")?,
-        request_id: r.get("request_id")?,
-        request_status: None,
-        proposal_id: r.get("proposal_id")?,
-        requested_by: r.get("requested_by")?,
-        requested_by_id: r.get("requested_by_id")?,
-        mappings: Vec::new(),
-        replaced_by: Vec::new(),
-        created_at: r.get("created_at")?,
-        updated_at: r.get("updated_at")?,
-        closed_at: r.get("closed_at")?,
-    })
+    super::sql_exec::sqlite::with_row(r, operation_row_port)
 }
 
 /// The open operation whose planning request `proposal` is linked to: the
@@ -1299,17 +831,11 @@ pub(super) fn replacing_operation(
     conn: &Connection,
     proposal: ProposalId,
 ) -> Result<Option<ReplanOperation>> {
-    let id: Option<ReplanId> = conn
-        .query_row(
-            "SELECT o.id FROM plan_request_proposals l
-             JOIN plan_requests r ON r.id=l.request_id
-             JOIN replan_operations o ON o.id=r.replan_operation_id
-             WHERE l.proposal_id=?1 AND o.closed_at IS NULL ORDER BY o.id LIMIT 1",
-            [proposal],
-            |r| r.get(0),
-        )
-        .optional()?;
-    id.map(|id| read_operation(conn, id)).transpose()
+    replacing_operation_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        proposal,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The version of child `task`'s conditions ([`ChildConditions`]) that
@@ -1344,24 +870,8 @@ pub(super) fn approved_children(
 
 /// The latest plan operation `id` was submitted with, if any.
 pub(super) fn latest_plan(conn: &Connection, id: ReplanId) -> Result<Option<PlanRevision>> {
-    let row: Option<(i64, ProposalId, String, String, Option<i64>)> = conn
-        .query_row(
-            "SELECT revision, proposal_id, plan, hash, approved_at FROM replan_plans
-             WHERE operation_id=?1 ORDER BY revision DESC LIMIT 1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .optional()?;
-    row.map(|(revision, proposal_id, plan, hash, approved_at)| {
-        Ok(PlanRevision {
-            revision,
-            proposal_id,
-            plan: ReplacementPlan::parse(&plan)?,
-            hash,
-            approved_at,
-        })
-    })
-    .transpose()
+    latest_plan_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), id)
+        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The problems of `plan` for `op`, whose proposal holds `members`, as the
@@ -1375,144 +885,21 @@ pub(super) fn check_replacement(
     members: &[TaskId],
     actions: &[PlanReviewAction],
 ) -> Result<Vec<PlanProblem>> {
-    let mut named: BTreeSet<TaskId> = plan.child_ids().into_iter().collect();
-    named.extend(members.iter().copied());
-    named.extend(plan.successors.iter().map(|successor| successor.task_id));
-    named.extend(op.conditions.successors.iter().copied());
-    named.extend(op.conditions.predecessors.iter().copied());
-    named.extend(
-        plan.mappings
-            .iter()
-            .filter_map(|mapping| mapping.landed_task_id),
-    );
-    let mut tasks = BTreeMap::new();
-    for id in named {
-        if let Some(task) = plan_task(conn, id)? {
-            tasks.insert(id, task);
-        }
-    }
-    let mut downstream = BTreeSet::new();
-    let mut stack = vec![op.task_id];
-    while let Some(next) = stack.pop() {
-        let waiting: Vec<TaskId> = conn
-            .prepare("SELECT task_id FROM task_dependencies WHERE predecessor_id=?1")?
-            .query_map([next], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for task in waiting {
-            if downstream.insert(task) {
-                stack.push(task);
-            }
-        }
-    }
-    let mut authorities = BTreeMap::new();
-    for ask in plan
-        .mappings
-        .iter()
-        .filter_map(|mapping| mapping.authority_ask_id)
-    {
-        let Ok(read) = super::asks::read_ask(conn, ask) else {
-            continue;
-        };
-        // Asked since the operation began: an older answer decided
-        // something else.
-        let about_operation = read.created_at >= op.created_at
-            && ((read.request_id.is_some() && read.request_id == op.request_id)
-                || read.run_id.as_ref() == Some(&op.run_id)
-                || read.task_id == Some(op.task_id));
-        let answered_by_person = read.answer.is_some()
-            && read.answered_by.as_deref().is_some_and(|by| {
-                matches!(by, crate::domain::ANSWERED_BY_PERSON | "user" | "inbox")
-            });
-        authorities.insert(
-            ask,
-            DeletionAuthority {
-                about_operation,
-                scope: read.reason_category == crate::domain::AskReason::Scope,
-                answered_by_person,
-                answer: read.answer.clone().unwrap_or_default(),
-                options: read.options.clone(),
-            },
-        );
-    }
-    let goal_acceptance_version_now = op
-        .goal_id
-        .map(|goal| {
-            conn.query_row(
-                "SELECT acceptance_version FROM goals WHERE id=?1",
-                [goal],
-                |r| r.get(0),
-            )
-        })
-        .transpose()?;
-    // The tasks that wait for the task are read live: one that came to
-    // wait since the operation fixed its conditions makes no plan stale,
-    // and the apply has it wait for every child.
-    let mut now = conditions_of(conn, op.task_id)?;
-    now.successors.clone_from(&op.conditions.successors);
-    let ctx = PlanContext {
-        operation: op,
-        task_version_now: now.version(),
-        goal_acceptance_version_now,
-        members: members.to_vec(),
-        tasks,
-        downstream,
-        authorities,
-    }
-    .after_actions(actions);
-    let mut problems = replan_plan::check_plan(plan, &ctx);
-    // A loop through goals as well as tasks (ADR-0038), on the graph the
-    // apply would leave: the successors and the task wait for the
-    // children.
-    let successors: Vec<TaskId> = super::replan_apply::successors_now(conn, op.task_id)?
-        .into_keys()
-        .collect();
-    let mut edges = crate::domain::replan_apply::successor_edges(plan, &successors);
-    edges.push((op.task_id, plan.child_ids()));
-    if let Some(task) = crate::domain::replan_apply::closes_loop(
-        &super::replan_apply::wait_graph(conn, op.task_id)?,
-        &edges,
-    ) {
-        problems.push(PlanProblem {
-            code: PlanProblemCode::DependencyCycle,
-            task_id: Some(task),
-            reason: format!(
-                "task {task} would wait for itself, through the tasks and goals it waits for, once the successors of task {} wait for the children",
-                op.task_id
-            ),
-        });
-    }
-    Ok(problems)
+    check_replacement_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        op,
+        plan,
+        members,
+        actions,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Task `id` as [`replan_plan::check_plan`] reads it; `None` for a task
 /// the queue does not have.
 fn plan_task(conn: &Connection, id: TaskId) -> Result<Option<PlanTask>> {
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
-        [id],
-        |r| r.get(0),
-    )?;
-    if !exists {
-        return Ok(None);
-    }
-    let task = read_task(conn, id)?;
-    let depends_on = conn
-        .prepare("SELECT predecessor_id FROM task_dependencies WHERE task_id=?1 ORDER BY 1")?
-        .query_map([id], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let evidence = match serde_json::to_value(task.required_evidence())? {
-        serde_json::Value::Array(items) => items,
-        _ => Vec::new(),
-    };
-    Ok(Some(PlanTask {
-        status: task.status(),
-        goal_id: task.goal_id(),
-        acceptance: acceptance_items(task.acceptance()),
-        verify: task.verification_commands().to_vec(),
-        paths: task.paths().to_vec(),
-        evidence,
-        depends_on,
-    }))
+    plan_task_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), id)
+        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Record, inside the submit's transaction, the plan `plan` of `proposal`
@@ -1716,23 +1103,12 @@ pub(super) fn replacement_problems(
     proposal: ProposalId,
     actions: &[PlanReviewAction],
 ) -> Result<Vec<String>> {
-    let Some(op) = replacing_operation(conn, proposal)? else {
-        return Ok(Vec::new());
-    };
-    let members = super::proposals::read(conn, proposal)?.task_ids().to_vec();
-    match latest_plan(conn, op.id)?.filter(|plan| plan.proposal_id == proposal) {
-        Some(latest) => Ok(replan_plan::describe(&check_replacement(
-            conn,
-            &op,
-            &latest.plan,
-            &members,
-            actions,
-        )?)),
-        None => Ok(vec![format!(
-            "proposal {proposal} replaces task {} of replan operation {} without a replacement plan",
-            op.task_id, op.id
-        )]),
-    }
+    replacement_problems_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        proposal,
+        actions,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Move the operation whose task `proposal` replaces as plan review holds
@@ -1746,50 +1122,14 @@ pub(super) fn proposal_moved(
     reason: &str,
     now: i64,
 ) -> Result<()> {
-    let Some(op) = replacing_operation(conn, proposal)? else {
-        return Ok(());
-    };
-    if op.proposal_id == Some(proposal) && op.status != to && op.status.can_move_to(to) {
-        move_in(
-            conn,
-            op.id,
-            op.generation,
-            &ReplanMove {
-                to,
-                reason: reason.to_owned(),
-                snapshot_id: None,
-                diagnosis: None,
-            },
-            now,
-        )?;
-    }
-    Ok(())
-}
-
-/// Refuse to make task `task` ready while it is a child of the replacement
-/// proposal of an open operation: only the trusted runtime's apply does.
-pub(super) fn check_child_ready(conn: &Connection, task: TaskId) -> Result<()> {
-    let proposal: Option<ProposalId> = conn
-        .query_row("SELECT proposal_id FROM tasks WHERE id=?1", [task], |r| {
-            r.get(0)
-        })
-        .optional()?
-        .flatten();
-    // Any live proposal linked to an open operation's request, not only
-    // the one the operation names: an older one sent back stays its.
-    if let Some(proposal) = proposal
-        && let Some(op) = replacing_operation(conn, proposal)?
-        && super::proposals::read(conn, proposal)?.status()
-            != crate::domain::ProposalStatus::Canceled
-    {
-        anyhow::bail!(
-            "task {task} is a child of proposal {proposal}, which replaces task {} of replan operation {} ({}): it becomes ready only when the trusted runtime applies the replacement",
-            op.task_id,
-            op.id,
-            op.status.as_str()
-        );
-    }
-    Ok(())
+    proposal_moved_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        proposal,
+        to,
+        reason,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Send operation `op`, held `blocked` with its snapshot (from its apply
@@ -1845,34 +1185,12 @@ pub(super) fn replan_again(
 /// withdrawn and an accepted one's children go back from `submitted` to
 /// `draft`, so none is claimed, with `replan_children_released`.
 fn release_children(conn: &Connection, op: &ReplanOperation, now: i64) -> Result<()> {
-    let Some(proposal) = op.proposal_id else {
-        return Ok(());
-    };
-    let stamp = crate::application::timestamp(
-        std::time::UNIX_EPOCH
-            + std::time::Duration::from_secs(u64::try_from(now).unwrap_or_default()),
-    );
-    let current = super::proposals::read(conn, proposal)?;
-    if current.status().is_active() {
-        super::proposals::withdraw(conn, proposal, &stamp, now)?;
-    }
-    let mut released = Vec::new();
-    for &task in current.task_ids() {
-        if read_task(conn, task)?.status() == TaskStatus::Submitted {
-            super::sqlite::transition_task(conn, task, crate::domain::TaskAction::Draft, &stamp)?;
-        }
-        if read_task(conn, task)?.status() == TaskStatus::Draft {
-            released.push(task);
-        }
-    }
-    event(
-        conn,
-        op.task_id,
-        Some(&op.run_id),
-        EventKind::ReplanChildrenReleased,
-        json!({"operation_id": op.id, "proposal_id": proposal, "children": released}),
-    )?;
-    Ok(())
+    release_children_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        op,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 impl SqliteQueue {
@@ -2130,6 +1448,954 @@ impl SqliteQueue {
         tx.commit()?;
         Ok(moved)
     }
+}
+
+/// The operations on `task`, oldest first, with their outcome.
+pub(super) fn operations_of_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Vec<ReplanOperation>> {
+    let ops: Vec<ReplanOperation> = conn.query_map(
+        "SELECT * FROM replan_operations WHERE task_id=?1 ORDER BY id",
+        crate::infrastructure::sql_exec::sql_params![task],
+        operation_row_port,
+    )?;
+    ops.into_iter()
+        .map(|op| with_outcome_port(conn, op))
+        .collect()
+}
+
+/// The task's open operation, if any ([`task_replan::current`]): what
+/// `list` marks it with. A task has at most one open operation that does
+/// not guard it, on its latest run ([`carry_open_to`]); one that guards
+/// stays on the run it parked, and is the one read.
+pub(super) fn open_operation_of_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<ReplanOperation>> {
+    Ok(task_replan::current(&open_operations_port(conn, task)?).cloned())
+}
+
+/// Refuse to make task `task` ready while it is a child of the replacement
+/// proposal of an open operation: only the trusted runtime's apply does.
+pub(super) fn check_child_ready_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<()> {
+    let proposal: Option<ProposalId> = conn
+        .query_row(
+            "SELECT proposal_id FROM tasks WHERE id=?1",
+            crate::infrastructure::sql_exec::sql_params![task],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    // Any live proposal linked to an open operation's request, not only
+    // the one the operation names: an older one sent back stays its.
+    if let Some(proposal) = proposal
+        && let Some(op) = replacing_operation_port(conn, proposal)?
+        && super::proposals::read_port(conn, proposal)?.status()
+            != crate::domain::ProposalStatus::Canceled
+    {
+        anyhow::bail!(
+            "task {task} is a child of proposal {proposal}, which replaces task {} of replan operation {} ({}): it becomes ready only when the trusted runtime applies the replacement",
+            op.task_id,
+            op.id,
+            op.status.as_str()
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn carry_open_to_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    task: TaskId,
+    run: &RunId,
+    now: i64,
+) -> Result<()> {
+    let open = open_operations_port(conn, task)?;
+    let carry = task_replan::carry(&open, run);
+    let Some(kept) = carry.kept else {
+        return Ok(());
+    };
+    for older in open.iter().filter(|op| carry.superseded.contains(&op.id)) {
+        let step = ReplanMove {
+            to: ReplanStatus::Continuing,
+            reason: format!("superseded by replan operation {kept} of the task"),
+            snapshot_id: None,
+            diagnosis: None,
+        };
+        move_in_port(conn, older.id, older.generation, &step, now)?;
+    }
+    let Some((id, generation)) = carry.moved else {
+        return Ok(());
+    };
+    let Some(op) = open.iter().find(|op| op.id == id) else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE replan_operations SET run_id=?1, generation=?2, updated_at=?3 WHERE id=?4",
+        crate::infrastructure::sql_exec::sql_params![run, generation, now, id],
+    )?;
+    if let Some(request) = op.request_id {
+        let mut refs = super::plan_requests::read_request_port(conn, request)?.refs;
+        let to = RequestRef::Run(run.clone());
+        if !refs.contains(&to) {
+            refs.push(to);
+            conn.execute(
+                "UPDATE plan_requests SET refs=?1, updated_at=?2 WHERE id=?3",
+                crate::infrastructure::sql_exec::sql_params![
+                    serde_json::to_string(&refs)?,
+                    now,
+                    request
+                ],
+            )?;
+        }
+    }
+    crate::infrastructure::store_writes::event(
+        conn,
+        task,
+        Some(run),
+        EventKind::ReplanCarried,
+        json!({"operation_id": id, "from_run": op.run_id, "to_run": run,
+               "generation": generation}),
+    )?;
+    Ok(())
+}
+
+pub(super) fn replacement_problems_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    proposal: ProposalId,
+    actions: &[PlanReviewAction],
+) -> Result<Vec<String>> {
+    let Some(op) = replacing_operation_port(conn, proposal)? else {
+        return Ok(Vec::new());
+    };
+    let members = super::proposals::read_port(conn, proposal)?
+        .task_ids()
+        .to_vec();
+    match latest_plan_port(conn, op.id)?.filter(|plan| plan.proposal_id == proposal) {
+        Some(latest) => Ok(replan_plan::describe(&check_replacement_port(
+            conn,
+            &op,
+            &latest.plan,
+            &members,
+            actions,
+        )?)),
+        None => Ok(vec![format!(
+            "proposal {proposal} replaces task {} of replan operation {} without a replacement plan",
+            op.task_id, op.id
+        )]),
+    }
+}
+
+fn with_outcome_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    mut op: ReplanOperation,
+) -> Result<ReplanOperation> {
+    op.mappings = conn.query_map(
+        "SELECT * FROM replan_mappings WHERE operation_id=?1
+             ORDER BY ordinal, child_task_id",
+        crate::infrastructure::sql_exec::sql_params![op.id],
+        |r| {
+            Ok(task_replan::ConditionMapping {
+                ordinal: usize::try_from(r.get::<_, i64>("ordinal")?).unwrap_or_default(),
+                hash: r.get("hash")?,
+                child_task_id: r.get("child_task_id")?,
+                child_ordinal: r
+                    .get::<_, Option<i64>>("child_ordinal")?
+                    .and_then(|ordinal| usize::try_from(ordinal).ok()),
+                disposition: r.get("disposition")?,
+                authority: r
+                    .get::<_, Option<String>>("authority")?
+                    .and_then(|text| serde_json::from_str(&text).ok()),
+            })
+        },
+    )?;
+    op.replaced_by = conn.query_map(
+        "SELECT to_task_id FROM replan_replacements WHERE operation_id=?1 ORDER BY to_task_id",
+        crate::infrastructure::sql_exec::sql_params![op.id],
+        |r| r.get(0),
+    )?;
+    op.request_status = op
+        .request_id
+        .map(|request| {
+            conn.query_row(
+                "SELECT status FROM plan_requests WHERE id=?1",
+                crate::infrastructure::sql_exec::sql_params![request],
+                |r| crate::infrastructure::store_rows::enum_col(r, "status"),
+            )
+            .optional()
+        })
+        .transpose()?
+        .flatten();
+    ensure!(
+        op.replaced_by.is_empty() || op.status == ReplanStatus::Applied,
+        "replan operation {} names replacements but is {}",
+        op.id,
+        op.status.as_str()
+    );
+    Ok(op)
+}
+
+fn operation_row_port(
+    r: &crate::infrastructure::sql_exec::SqlRow<'_>,
+) -> crate::infrastructure::sql_exec::SqlResult<ReplanOperation> {
+    Ok(ReplanOperation {
+        id: r.get("id")?,
+        task_id: r.get("task_id")?,
+        run_id: r.get("run_id")?,
+        goal_id: r.get("goal_id")?,
+        origin: crate::infrastructure::store_rows::enum_col(r, "origin")?,
+        status: crate::infrastructure::store_rows::enum_col(r, "status")?,
+        status_reason: r.get("status_reason")?,
+        generation: r.get("generation")?,
+        return_phase: r
+            .get::<_, Option<String>>("return_phase")?
+            .map(|phase| {
+                phase.parse().map_err(|error| {
+                    crate::infrastructure::sql_exec::SqlError::Conversion {
+                        index: 0,
+                        stored: crate::infrastructure::sql_exec::ValueKind::Text,
+                        cause: Box::new(error),
+                    }
+                })
+            })
+            .transpose()?,
+        reason: r.get("reason")?,
+        conditions: crate::infrastructure::store_rows::json_col(r, "conditions")?,
+        task_version: r.get("task_version")?,
+        goal_acceptance_version: r.get("goal_acceptance_version")?,
+        diagnosis: crate::infrastructure::store_rows::json_col(r, "diagnosis")?,
+        snapshot_id: r.get("snapshot_id")?,
+        request_id: r.get("request_id")?,
+        request_status: None,
+        proposal_id: r.get("proposal_id")?,
+        requested_by: r.get("requested_by")?,
+        requested_by_id: r.get("requested_by_id")?,
+        mappings: Vec::new(),
+        replaced_by: Vec::new(),
+        created_at: r.get("created_at")?,
+        updated_at: r.get("updated_at")?,
+        closed_at: r.get("closed_at")?,
+    })
+}
+
+fn open_operations_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Vec<ReplanOperation>> {
+    Ok(conn.query_map(
+        "SELECT * FROM replan_operations WHERE task_id=?1 AND closed_at IS NULL ORDER BY id",
+        crate::infrastructure::sql_exec::sql_params![task],
+        operation_row_port,
+    )?)
+}
+
+pub(super) fn replacing_operation_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    proposal: ProposalId,
+) -> Result<Option<ReplanOperation>> {
+    let id: Option<ReplanId> = conn
+        .query_row(
+            "SELECT o.id FROM plan_request_proposals l
+             JOIN plan_requests r ON r.id=l.request_id
+             JOIN replan_operations o ON o.id=r.replan_operation_id
+             WHERE l.proposal_id=?1 AND o.closed_at IS NULL ORDER BY o.id LIMIT 1",
+            crate::infrastructure::sql_exec::sql_params![proposal],
+            |r| r.get(0),
+        )
+        .optional()?;
+    id.map(|id| read_operation_port(conn, id)).transpose()
+}
+
+pub(crate) fn move_in_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    id: ReplanId,
+    generation: i64,
+    step: &ReplanMove,
+    now: i64,
+) -> Result<ReplanOperation> {
+    move_in_as_port(conn, id, generation, step, now, false)
+}
+
+pub(super) fn latest_plan_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: ReplanId,
+) -> Result<Option<PlanRevision>> {
+    let row: Option<(i64, ProposalId, String, String, Option<i64>)> = conn
+        .query_row(
+            "SELECT revision, proposal_id, plan, hash, approved_at FROM replan_plans
+             WHERE operation_id=?1 ORDER BY revision DESC LIMIT 1",
+            crate::infrastructure::sql_exec::sql_params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    row.map(|(revision, proposal_id, plan, hash, approved_at)| {
+        Ok(PlanRevision {
+            revision,
+            proposal_id,
+            plan: ReplacementPlan::parse(&plan)?,
+            hash,
+            approved_at,
+        })
+    })
+    .transpose()
+}
+
+pub(super) fn check_replacement_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    op: &ReplanOperation,
+    plan: &ReplacementPlan,
+    members: &[TaskId],
+    actions: &[PlanReviewAction],
+) -> Result<Vec<PlanProblem>> {
+    let mut named: BTreeSet<TaskId> = plan.child_ids().into_iter().collect();
+    named.extend(members.iter().copied());
+    named.extend(plan.successors.iter().map(|successor| successor.task_id));
+    named.extend(op.conditions.successors.iter().copied());
+    named.extend(op.conditions.predecessors.iter().copied());
+    named.extend(
+        plan.mappings
+            .iter()
+            .filter_map(|mapping| mapping.landed_task_id),
+    );
+    let mut tasks = BTreeMap::new();
+    for id in named {
+        if let Some(task) = plan_task_port(conn, id)? {
+            tasks.insert(id, task);
+        }
+    }
+    let mut downstream = BTreeSet::new();
+    let mut stack = vec![op.task_id];
+    while let Some(next) = stack.pop() {
+        let waiting: Vec<TaskId> = conn.query_map(
+            "SELECT task_id FROM task_dependencies WHERE predecessor_id=?1",
+            crate::infrastructure::sql_exec::sql_params![next],
+            |r| r.get(0),
+        )?;
+        for task in waiting {
+            if downstream.insert(task) {
+                stack.push(task);
+            }
+        }
+    }
+    let mut authorities = BTreeMap::new();
+    for ask in plan
+        .mappings
+        .iter()
+        .filter_map(|mapping| mapping.authority_ask_id)
+    {
+        let Ok(read) = super::asks::read_ask_port(conn, ask) else {
+            continue;
+        };
+        // Asked since the operation began: an older answer decided
+        // something else.
+        let about_operation = read.created_at >= op.created_at
+            && ((read.request_id.is_some() && read.request_id == op.request_id)
+                || read.run_id.as_ref() == Some(&op.run_id)
+                || read.task_id == Some(op.task_id));
+        let answered_by_person = read.answer.is_some()
+            && read.answered_by.as_deref().is_some_and(|by| {
+                matches!(by, crate::domain::ANSWERED_BY_PERSON | "user" | "inbox")
+            });
+        authorities.insert(
+            ask,
+            DeletionAuthority {
+                about_operation,
+                scope: read.reason_category == crate::domain::AskReason::Scope,
+                answered_by_person,
+                answer: read.answer.clone().unwrap_or_default(),
+                options: read.options.clone(),
+            },
+        );
+    }
+    let goal_acceptance_version_now = op
+        .goal_id
+        .map(|goal| {
+            conn.query_row(
+                "SELECT acceptance_version FROM goals WHERE id=?1",
+                crate::infrastructure::sql_exec::sql_params![goal],
+                |r| r.get(0),
+            )
+        })
+        .transpose()?;
+    // The tasks that wait for the task are read live: one that came to
+    // wait since the operation fixed its conditions makes no plan stale,
+    // and the apply has it wait for every child.
+    let mut now = conditions_of_port(conn, op.task_id)?;
+    now.successors.clone_from(&op.conditions.successors);
+    let ctx = PlanContext {
+        operation: op,
+        task_version_now: now.version(),
+        goal_acceptance_version_now,
+        members: members.to_vec(),
+        tasks,
+        downstream,
+        authorities,
+    }
+    .after_actions(actions);
+    let mut problems = replan_plan::check_plan(plan, &ctx);
+    // A loop through goals as well as tasks (ADR-0038), on the graph the
+    // apply would leave: the successors and the task wait for the
+    // children.
+    let successors: Vec<TaskId> = super::replan_apply::successors_now_port(conn, op.task_id)?
+        .into_keys()
+        .collect();
+    let mut edges = crate::domain::replan_apply::successor_edges(plan, &successors);
+    edges.push((op.task_id, plan.child_ids()));
+    if let Some(task) = crate::domain::replan_apply::closes_loop(
+        &super::replan_apply::wait_graph_port(conn, op.task_id)?,
+        &edges,
+    ) {
+        problems.push(PlanProblem {
+            code: PlanProblemCode::DependencyCycle,
+            task_id: Some(task),
+            reason: format!(
+                "task {task} would wait for itself, through the tasks and goals it waits for, once the successors of task {} wait for the children",
+                op.task_id
+            ),
+        });
+    }
+    Ok(problems)
+}
+
+pub(super) fn read_operation_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: ReplanId,
+) -> Result<ReplanOperation> {
+    let op = conn
+        .query_row(
+            "SELECT * FROM replan_operations WHERE id=?1",
+            crate::infrastructure::sql_exec::sql_params![id],
+            operation_row_port,
+        )
+        .optional()?
+        .with_context(|| format!("replan operation {id} does not exist"))?;
+    with_outcome_port(conn, op)
+}
+
+pub(super) fn move_in_as_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    id: ReplanId,
+    generation: i64,
+    step: &ReplanMove,
+    now: i64,
+    apply: bool,
+) -> Result<ReplanOperation> {
+    let op = read_operation_port(conn, id)?;
+    if apply {
+        task_replan::check_apply_move(&op, generation, step)?;
+    } else {
+        task_replan::check_move(&op, generation, step)?;
+    }
+    if let Some(premise) = step
+        .diagnosis
+        .as_ref()
+        .and_then(|made| made.premise.as_ref())
+    {
+        check_premise_port(conn, &op, step.to, premise)?;
+    } else if step.to == ReplanStatus::Diagnosing {
+        check_not_held_port(conn, &op)?;
+    }
+    // An operation diagnosed, fenced or reopened (a restore that failed)
+    // must be the task's one open operation.
+    if task_replan::needs_task_alone(op.status, step.to) {
+        let other: Option<ReplanId> = conn
+            .query_row(
+                "SELECT id FROM replan_operations WHERE task_id=?1 AND closed_at IS NULL AND id<>?2
+                 LIMIT 1",
+                crate::infrastructure::sql_exec::sql_params![op.task_id, id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(other) = other {
+            anyhow::bail!(
+                "replan operation {id} cannot move to {}: task {} has operation {other} open",
+                step.to.as_str(),
+                op.task_id
+            );
+        }
+    }
+    let next = task_replan::generation_after(op.status, step.to, op.generation);
+    let return_phase = (step.to == ReplanStatus::Blocked).then_some(op.status);
+    let mut diagnosis = op.diagnosis.clone();
+    // A diagnosis keeps the evidence the request named.
+    if let Some(made) = &step.diagnosis {
+        let mut evidence = diagnosis.evidence.clone();
+        for id in &made.evidence {
+            if !evidence.contains(id) {
+                evidence.push(*id);
+            }
+        }
+        diagnosis = task_replan::Diagnosis {
+            evidence,
+            ..made.clone()
+        };
+    }
+    conn.execute(
+        "UPDATE replan_operations SET status=?1, status_reason=?2, generation=?3,
+           return_phase=?4, snapshot_id=COALESCE(?5, snapshot_id), diagnosis=?6,
+           updated_at=?7, closed_at=?8
+         WHERE id=?9 AND generation=?10",
+        crate::infrastructure::sql_exec::sql_params![
+            step.to.as_str(),
+            step.reason,
+            next,
+            return_phase.map(ReplanStatus::as_str),
+            step.snapshot_id,
+            serde_json::to_string(&diagnosis)?,
+            now,
+            step.to.is_closed().then_some(now),
+            id,
+            generation,
+        ],
+    )?;
+    if step.to.is_closed() && step.to != ReplanStatus::Applied {
+        release_children_port(conn, &op, now)?;
+    }
+    let planner_open = op
+        .request_id
+        .map(|request| super::plan_requests::planner_open_port(conn, request))
+        .transpose()?
+        .unwrap_or(false);
+    let declined = match op.request_id {
+        Some(request) if step.to.ends_request_undecided(planner_open) => {
+            super::plan_requests::decline_undecided_port(
+                conn,
+                request,
+                id,
+                step.to,
+                &step.reason,
+                now,
+            )?
+            .then_some(request)
+        }
+        _ => None,
+    };
+    let renewed = match op.request_id {
+        // Its `request_declined` is read only for a move onto the planner.
+        Some(request)
+            if op.status.renews_request(step.to, true)
+                && super::plan_requests::declined_at_close_port(conn, request, id)? =>
+        {
+            let renewed = super::plan_requests::renew_declined_port(conn, request, id, now)?;
+            conn.execute(
+                "UPDATE replan_operations SET request_id=?1 WHERE id=?2",
+                crate::infrastructure::sql_exec::sql_params![renewed, id],
+            )?;
+            Some(renewed)
+        }
+        _ => None,
+    };
+    // A diagnosis that fences an operation no person asked for (the
+    // runtime's detection, a worker's proposal) records the planning
+    // request its planner is opened for once the snapshot is saved, in
+    // the same transaction: the request of a person's is recorded with it.
+    let recorded = match (op.request_id, &step.diagnosis) {
+        (None, Some(made)) if step.to == ReplanStatus::PauseRequested => {
+            let new = NewReplan {
+                run: op.run_id.clone(),
+                reason: format!(
+                    "{}; diagnosed: {}",
+                    op.reason,
+                    made.summary.as_deref().unwrap_or(&step.reason)
+                ),
+                evidence: diagnosis.evidence.clone(),
+            };
+            let request =
+                record_request_port(conn, &op, &new, "supervisor", &op.requested_by_id, now)?;
+            conn.execute(
+                "UPDATE replan_operations SET request_id=?1 WHERE id=?2",
+                crate::infrastructure::sql_exec::sql_params![request, id],
+            )?;
+            Some(request)
+        }
+        _ => None,
+    };
+    let mut payload = json!({"operation_id": id, "from": op.status, "to": step.to,
+                             "reason": step.reason, "generation": next,
+                             "snapshot_id": step.snapshot_id});
+    if let Some(request) = recorded {
+        payload["request_recorded"] = json!(request);
+    }
+    if let Some(request) = declined {
+        payload["request_declined"] = json!(request);
+    }
+    if let Some(request) = renewed {
+        payload["request_renewed"] = json!(request);
+    }
+    crate::infrastructure::store_writes::event(
+        conn,
+        op.task_id,
+        Some(&op.run_id),
+        EventKind::ReplanStatusChanged,
+        payload,
+    )?;
+    read_operation_port(conn, id)
+}
+
+pub(super) fn conditions_of_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task_id: TaskId,
+) -> Result<OriginalConditions> {
+    let task = crate::infrastructure::store_rows::read_task(conn, task_id)?;
+    let ids = |sql: &str| -> Result<Vec<TaskId>> {
+        Ok(conn.query_map(
+            sql,
+            crate::infrastructure::sql_exec::sql_params![task_id],
+            |r| r.get(0),
+        )?)
+    };
+    let predecessors = ids(
+        "SELECT predecessor_id FROM task_dependencies WHERE task_id=?1 ORDER BY predecessor_id",
+    )?;
+    let successors =
+        ids("SELECT task_id FROM task_dependencies WHERE predecessor_id=?1 ORDER BY task_id")?;
+    let goal = task
+        .goal_id()
+        .map(|goal: GoalId| {
+            conn.query_row(
+                "SELECT acceptance, acceptance_version FROM goals WHERE id=?1",
+                crate::infrastructure::sql_exec::sql_params![goal],
+                |r| {
+                    Ok(GoalConditions {
+                        id: goal,
+                        acceptance: acceptance_items(&r.get::<_, String>(0)?),
+                        acceptance_version: r.get(1)?,
+                    })
+                },
+            )
+        })
+        .transpose()?;
+    Ok(OriginalConditions {
+        title: task.title().to_owned(),
+        description: task.description().to_owned(),
+        acceptance: acceptance_items(task.acceptance()),
+        paths: task.paths().to_vec(),
+        verify: task.verification_commands().to_vec(),
+        evidence: serde_json::to_value(task.required_evidence())?,
+        predecessors,
+        successors,
+        goal,
+    })
+}
+
+fn plan_task_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: TaskId,
+) -> Result<Option<PlanTask>> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+        crate::infrastructure::sql_exec::sql_params![id],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    let task = crate::infrastructure::store_rows::read_task(conn, id)?;
+    let depends_on = conn.query_map(
+        "SELECT predecessor_id FROM task_dependencies WHERE task_id=?1 ORDER BY 1",
+        crate::infrastructure::sql_exec::sql_params![id],
+        |r| r.get(0),
+    )?;
+    let evidence = match serde_json::to_value(task.required_evidence())? {
+        serde_json::Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+    Ok(Some(PlanTask {
+        status: task.status(),
+        goal_id: task.goal_id(),
+        acceptance: acceptance_items(task.acceptance()),
+        verify: task.verification_commands().to_vec(),
+        paths: task.paths().to_vec(),
+        evidence,
+        depends_on,
+    }))
+}
+
+/// Refuse the claim of `op` for a diagnosis job or its ask, and the move
+/// or the ask of a verdict or a person's answer, while `op`'s task is held
+/// (ADR-t1879-1 decision 6), read in the write's own transaction: a hold
+/// that commits first wins, and the supervisor keeps the verdict or the
+/// answer until the release.
+fn check_not_held_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    op: &ReplanOperation,
+) -> Result<()> {
+    if let Some(hold) = super::task_holds::guard_of(conn, op.task_id)? {
+        return Err(DomainError::ReplanDiagnosisHeld {
+            operation: op.id,
+            task_id: op.task_id,
+            hold: hold.hold,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn check_premise_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    op: &ReplanOperation,
+    to: ReplanStatus,
+    premise: &task_replan::DiagnosisPremise,
+) -> Result<()> {
+    check_not_held_port(conn, op)?;
+    let stale = |why: String| {
+        anyhow::Error::new(DomainError::ReplanPremiseStale {
+            operation: op.id,
+            why,
+        })
+    };
+    let task = crate::infrastructure::store_rows::read_task(conn, op.task_id)?;
+    if task.status() != TaskStatus::InProgress {
+        return Err(stale(format!(
+            "task {} is {}",
+            op.task_id,
+            task.status().as_str()
+        )));
+    }
+    let latest: Option<(RunId, String)> = conn
+        .query_row(
+            "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            crate::infrastructure::sql_exec::sql_params![op.task_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let landing = [
+        RunStatus::Integrating,
+        RunStatus::Integrated,
+        RunStatus::Succeeded,
+    ];
+    match latest {
+        Some((run, status))
+            if run == op.run_id
+                && status == premise.run_status.as_str()
+                && !landing.iter().any(|landing| landing.as_str() == status) => {}
+        Some((run, status)) => {
+            return Err(stale(format!(
+                "run {run} is {status}, and the diagnosis read run {} {}",
+                op.run_id,
+                premise.run_status.as_str()
+            )));
+        }
+        None => return Err(stale(format!("task {} has no run", op.task_id))),
+    }
+    if let Some(window_end) = premise.read_until {
+        let kinds = replan_detect::PROGRESS.map(EventKind::as_str);
+        let progress: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT id, kind FROM run_events WHERE task_id=?1 AND id>?2
+                 AND kind IN (?3, ?4, ?5, ?6, ?7, ?8) ORDER BY id LIMIT 1",
+                crate::infrastructure::sql_exec::sql_params![
+                    op.task_id, window_end, kinds[0], kinds[1], kinds[2], kinds[3], kinds[4],
+                    kinds[5]
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((id, kind)) = progress {
+            return Err(stale(format!(
+                "{kind} event {id} came after the last event it read ({window_end})"
+            )));
+        }
+    }
+    if premise.manual == Some(false) {
+        let joined: Option<i64> = conn
+            .query_row(
+                &format!(
+                    "SELECT id FROM run_events WHERE task_id=?1 AND kind=?2
+                 AND {}=?3
+                 AND {}=?4 LIMIT 1",
+                    conn.dialect()
+                        .json_field("payload", "$.operation_id", JsonType::Integer),
+                    conn.dialect()
+                        .json_field("payload", "$.origin", JsonType::Text)
+                ),
+                crate::infrastructure::sql_exec::sql_params![
+                    op.task_id,
+                    EventKind::ReplanRequested.as_str(),
+                    op.id,
+                    ReplanOrigin::Manual.as_str()
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if op.origin == ReplanOrigin::Manual || joined.is_some() {
+            return Err(stale(
+                "a person's request joined the operation since it was decided".to_owned(),
+            ));
+        }
+    }
+    if let Some(limit) = premise.max_auto_parks
+        && to == ReplanStatus::PauseRequested
+    {
+        let parks = replan_detect::auto_parks(&lineage_in_port(conn, op.task_id)?);
+        if parks >= limit {
+            return Err(stale(format!(
+                "the lineage's parks without a person are used up ({parks} of {limit})"
+            )));
+        }
+    }
+    let mut now = conditions_of_port(conn, op.task_id)?;
+    now.successors.clone_from(&op.conditions.successors);
+    if now.version() != op.task_version {
+        return Err(stale(format!("task {} was edited", op.task_id)));
+    }
+    Ok(())
+}
+
+fn record_request_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    op: &ReplanOperation,
+    new: &NewReplan,
+    by_role: &str,
+    by_id: &str,
+    now: i64,
+) -> Result<crate::domain::RequestId> {
+    let mut refs = vec![
+        RequestRef::Run(op.run_id.clone()),
+        RequestRef::Task(op.task_id),
+    ];
+    refs.extend(op.goal_id.map(RequestRef::Goal));
+    refs.extend(new.evidence.iter().copied().map(RequestRef::Event));
+    let id = crate::domain::RequestId::new(conn.insert_id(
+        "INSERT INTO plan_requests(text, refs, requested_by, requested_by_id, status,
+           created_at, updated_at, replan_operation_id) VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?5, ?6)",
+        crate::infrastructure::sql_exec::sql_params![
+            new.reason,
+            serde_json::to_string(&refs)?,
+            by_role,
+            by_id,
+            now,
+            op.id
+        ],
+    )?);
+    crate::infrastructure::store_writes::record_queue_event_in(
+        conn,
+        EventKind::RequestRecorded,
+        &json!({"request_id": id, "refs": refs, "requested_by": by_role,
+                "replan_operation_id": op.id}),
+    )?;
+    Ok(id)
+}
+
+fn release_children_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    op: &ReplanOperation,
+    now: i64,
+) -> Result<()> {
+    let Some(proposal) = op.proposal_id else {
+        return Ok(());
+    };
+    let stamp = crate::application::timestamp(
+        std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(u64::try_from(now).unwrap_or_default()),
+    );
+    let current = super::proposals::read_port(conn, proposal)?;
+    if current.status().is_active() {
+        super::proposals::withdraw_port(conn, proposal, &stamp, now)?;
+    }
+    let mut released = Vec::new();
+    for &task in current.task_ids() {
+        if crate::infrastructure::store_rows::read_task(conn, task)?.status()
+            == TaskStatus::Submitted
+        {
+            crate::infrastructure::task_store::transition_task(
+                conn,
+                task,
+                crate::domain::TaskAction::Draft,
+                &stamp,
+            )?;
+        }
+        if crate::infrastructure::store_rows::read_task(conn, task)?.status() == TaskStatus::Draft {
+            released.push(task);
+        }
+    }
+    crate::infrastructure::store_writes::event(
+        conn,
+        op.task_id,
+        Some(&op.run_id),
+        EventKind::ReplanChildrenReleased,
+        json!({"operation_id": op.id, "proposal_id": proposal, "children": released}),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn lineage_in_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Vec<ReplanOperation>> {
+    let mut root = task;
+    let mut seen = std::collections::BTreeSet::from([task]);
+    while let Some(from) = conn
+        .query_row(
+            "SELECT from_task_id FROM replan_replacements WHERE to_task_id=?1 LIMIT 1",
+            crate::infrastructure::sql_exec::sql_params![root],
+            |r| r.get::<_, TaskId>(0),
+        )
+        .optional()?
+    {
+        if !seen.insert(from) {
+            break;
+        }
+        root = from;
+    }
+    let mut tasks = vec![root];
+    let mut at = 0;
+    while let Some(&from) = tasks.get(at) {
+        at += 1;
+        let children = "SELECT to_task_id FROM replan_replacements WHERE from_task_id=?1";
+        for child in conn.query_map(
+            children,
+            crate::infrastructure::sql_exec::sql_params![from],
+            |r| r.get::<_, TaskId>(0),
+        )? {
+            if !tasks.contains(&child) {
+                tasks.push(child);
+            }
+        }
+    }
+    let mut ops = Vec::new();
+    for task in tasks {
+        let of_task: Vec<ReplanOperation> = conn.query_map(
+            "SELECT * FROM replan_operations WHERE task_id=?1 ORDER BY id",
+            crate::infrastructure::sql_exec::sql_params![task],
+            operation_row_port,
+        )?;
+        ops.extend(of_task);
+    }
+    ops.sort_by_key(|op| op.id);
+    ops.into_iter()
+        .map(|op| with_outcome_port(conn, op))
+        .collect()
+}
+
+pub(super) fn proposal_moved_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    proposal: ProposalId,
+    to: ReplanStatus,
+    reason: &str,
+    now: i64,
+) -> Result<()> {
+    let Some(op) = replacing_operation_port(conn, proposal)? else {
+        return Ok(());
+    };
+    if op.proposal_id == Some(proposal) && op.status != to && op.status.can_move_to(to) {
+        move_in_port(
+            conn,
+            op.id,
+            op.generation,
+            &ReplanMove {
+                to,
+                reason: reason.to_owned(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+            now,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

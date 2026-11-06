@@ -630,19 +630,7 @@ fn resume_count(conn: &Connection, id: &RunId) -> Result<ResumeCount> {
 }
 
 fn process_row(r: &Row<'_>) -> rusqlite::Result<RunProcess> {
-    Ok(RunProcess {
-        run_id: r.get("run_id")?,
-        role: r.get("role")?,
-        pid: r.get("pid")?,
-        heartbeat_at: r.get("heartbeat_at")?,
-        exited_at: r.get("exited_at")?,
-        exit_code: r.get("exit_code")?,
-    })
-}
-
-pub(super) fn processes_for_task(conn: &Connection, task_id: TaskId) -> Result<Vec<RunProcess>> {
-    Ok(conn.prepare("SELECT p.* FROM run_processes p JOIN task_runs r ON r.id=p.run_id WHERE r.task_id=?1 ORDER BY r.rowid,p.role")?
-        .query_map([task_id], process_row)?.collect::<rusqlite::Result<_>>()?)
+    super::sql_exec::sqlite::with_row(r, process_row_port)
 }
 
 /// Opens the queue at `db` with `generators` for each connection the
@@ -686,6 +674,26 @@ impl<P: ?Sized> crate::application::QueueOpener<P> for SqlitePorts<P> {
     fn open(&self) -> Result<Box<P>> {
         self.opener.connect().map(self.keep)
     }
+}
+
+pub(super) fn processes_for_task_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task_id: TaskId,
+) -> Result<Vec<RunProcess>> {
+    Ok(conn.query_map("SELECT p.* FROM run_processes p JOIN task_runs r ON r.id=p.run_id WHERE r.task_id=?1 ORDER BY r.rowid,p.role", crate::infrastructure::sql_exec::sql_params![task_id], process_row_port)?)
+}
+
+fn process_row_port(
+    r: &crate::infrastructure::sql_exec::SqlRow<'_>,
+) -> crate::infrastructure::sql_exec::SqlResult<RunProcess> {
+    Ok(RunProcess {
+        run_id: r.get("run_id")?,
+        role: r.get("role")?,
+        pid: r.get("pid")?,
+        heartbeat_at: r.get("heartbeat_at")?,
+        exited_at: r.get("exited_at")?,
+        exit_code: r.get("exit_code")?,
+    })
 }
 
 #[cfg(test)]

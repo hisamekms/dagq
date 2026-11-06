@@ -20,7 +20,6 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
-use super::sql_exec::sqlite::with_row;
 use super::sql_exec::{OptionalRow, SqlResult, SqlRow, sql_params};
 use super::sqlite::{SqliteQueue, event, read_task};
 use crate::application::commands::holds::{ReleaseRequest, ReleaseView};
@@ -562,104 +561,18 @@ pub(super) fn end_with_task(
     status: TaskStatus,
     now: i64,
 ) -> Result<bool> {
-    let Some(end) = task_hold::HoldEnd::of(status) else {
-        return Ok(false);
-    };
-    let run = latest_run(conn, task)?.map(|(run, _)| run);
-    let open = open_hold_of(conn, task)?;
-    if let Some(hold) = &open {
-        conn.execute(
-            "UPDATE task_holds SET released_at=?2, released_by_role=?3, released_by_id=?3
-             WHERE id=?1 AND released_at IS NULL",
-            params![hold.id, now, HOLD_ENDER],
-        )?;
-        event(
-            conn,
-            task,
-            run.as_ref(),
-            EventKind::TaskHoldEnded,
-            json!({"hold_id": hold.id, "reason": end, "held_secs": now - hold.created_at,
-                   "settled_secs": hold.settled_at.map(|at| now - at)}),
-        )?;
-    }
-    discard_kept_of_ended(conn, task, end, now)?;
-    Ok(open.is_some())
+    end_with_task_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+        status,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Who `released_by_role` and `released_by_id` name for a hold its task's
 /// end closed.
 const HOLD_ENDER: &str = "runtime";
-
-/// Discard on `conn` every result kept for `task` that is neither applied
-/// nor discarded yet, its task having ended (`end`): `hold_result_discarded`
-/// with reason `task_ended`, superseded (it makes no round due: the run of
-/// an ended task is not recovered), and a kept answer's ask closed by the
-/// runtime, each read back as a [`task_hold::KeptResult`]. A result being
-/// applied now is settled already and stays.
-fn discard_kept_of_ended(
-    conn: &Connection,
-    task: TaskId,
-    end: task_hold::HoldEnd,
-    now: i64,
-) -> Result<()> {
-    let unsettled: Vec<crate::domain::RunEvent> = conn
-        .prepare(&format!(
-            "SELECT e.* FROM run_events e
-             WHERE e.task_id=?1 AND e.kind=?2 AND e.run_id IS NOT NULL
-               AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
-                 AND s.kind IN (?3,?4) AND {}=e.id)
-             ORDER BY e.id",
-            json_field("s.payload", "$.kept_id", JsonType::Integer)
-        ))?
-        .query_map(
-            params![
-                task,
-                EventKind::HoldResultKept.as_str(),
-                EventKind::HoldResultApplied.as_str(),
-                EventKind::HoldResultDiscarded.as_str()
-            ],
-            super::sqlite::event_row,
-        )?
-        .collect::<rusqlite::Result<_>>()?;
-    for kept in unsettled {
-        let (Some(result), Some(run)) = (task_hold::KeptResult::of_event(&kept), &kept.run_id)
-        else {
-            continue;
-        };
-        let task_hold::Disposition::Discard(reason) = end.kept_result() else {
-            unreachable!("a result kept for a task that ended is discarded");
-        };
-        if let Some(ask) = result.ask_to_close()
-            && let Some(ask) = conn
-                .query_row(
-                    "SELECT * FROM asks WHERE id=?1 AND closed_at IS NULL",
-                    [ask],
-                    super::asks::ask_row,
-                )
-                .optional()?
-        {
-            super::asks::discard_by_runtime(
-                conn,
-                &ask,
-                reason.as_str(),
-                &format!(
-                    "task {task} {}: the answer kept while it was held is discarded",
-                    end.as_str()
-                ),
-                now,
-            )?;
-        }
-        event(
-            conn,
-            task,
-            Some(run),
-            EventKind::HoldResultDiscarded,
-            json!({"kept_id": kept.id, "source": result.source, "reason": reason,
-                   "error": null, task_hold::SUPERSEDED: true}),
-        )?;
-    }
-    Ok(())
-}
 
 /// Close each hold left open on a task that ended before its end closed
 /// holds ([`end_with_task`]), as that end would have, the task unchanged:
@@ -892,13 +805,11 @@ fn resolve(conn: &Connection, target: &HoldTarget) -> Result<TaskId> {
 
 /// The latest run of `task` and its status, if it has one.
 pub(super) fn latest_run(conn: &Connection, task: TaskId) -> Result<Option<(RunId, String)>> {
-    Ok(conn
-        .query_row(
-            "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
-            [task],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?)
+    latest_run_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 fn read_hold(conn: &Connection, id: HoldId) -> Result<TaskHold> {
@@ -906,7 +817,7 @@ fn read_hold(conn: &Connection, id: HoldId) -> Result<TaskHold> {
 }
 
 fn hold_row(row: &Row<'_>) -> rusqlite::Result<TaskHold> {
-    with_row(row, hold_of_row)
+    super::sql_exec::sqlite::with_row(row, hold_of_row)
 }
 
 fn hold_of_row(row: &SqlRow<'_>) -> SqlResult<TaskHold> {
@@ -926,14 +837,11 @@ fn hold_of_row(row: &SqlRow<'_>) -> SqlResult<TaskHold> {
 /// The open hold of `task`, read on `conn` (inside the caller's
 /// transaction when it has one), whatever the task's status.
 pub(super) fn open_hold_of(conn: &Connection, task: TaskId) -> Result<Option<TaskHold>> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM task_holds WHERE task_id=?1 AND released_at IS NULL
-             ORDER BY id LIMIT 1",
-            [task],
-            hold_row,
-        )
-        .optional()?)
+    open_hold_of_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The guard the open hold of `task` puts on its steps, read on `tx`:
@@ -1031,4 +939,131 @@ pub(super) fn check_not_held(conn: &Connection, task: TaskId, step: GuardedStep)
         step,
     )?;
     Ok(())
+}
+
+pub(super) fn open_hold_of_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<TaskHold>> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM task_holds WHERE task_id=?1 AND released_at IS NULL
+             ORDER BY id LIMIT 1",
+            crate::infrastructure::sql_exec::sql_params![task],
+            hold_of_row,
+        )
+        .optional()?)
+}
+
+pub(super) fn end_with_task_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    task: TaskId,
+    status: TaskStatus,
+    now: i64,
+) -> Result<bool> {
+    let Some(end) = task_hold::HoldEnd::of(status) else {
+        return Ok(false);
+    };
+    let run = latest_run_port(conn, task)?.map(|(run, _)| run);
+    let open = open_hold_of_port(conn, task)?;
+    if let Some(hold) = &open {
+        conn.execute(
+            "UPDATE task_holds SET released_at=?2, released_by_role=?3, released_by_id=?3
+             WHERE id=?1 AND released_at IS NULL",
+            crate::infrastructure::sql_exec::sql_params![hold.id, now, HOLD_ENDER],
+        )?;
+        crate::infrastructure::store_writes::event(
+            conn,
+            task,
+            run.as_ref(),
+            EventKind::TaskHoldEnded,
+            json!({"hold_id": hold.id, "reason": end, "held_secs": now - hold.created_at,
+                   "settled_secs": hold.settled_at.map(|at| now - at)}),
+        )?;
+    }
+    discard_kept_of_ended_port(conn, task, end, now)?;
+    Ok(open.is_some())
+}
+
+/// Discard on `conn` every result kept for `task` that is neither applied
+/// nor discarded yet, its task having ended (`end`): `hold_result_discarded`
+/// with reason `task_ended`, superseded (it makes no round due: the run of
+/// an ended task is not recovered), and a kept answer's ask closed by the
+/// runtime, each read back as a [`task_hold::KeptResult`]. A result being
+/// applied now is settled already and stays.
+fn discard_kept_of_ended_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    task: TaskId,
+    end: task_hold::HoldEnd,
+    now: i64,
+) -> Result<()> {
+    let unsettled: Vec<crate::domain::RunEvent> = conn.query_map(
+        &format!(
+            "SELECT e.* FROM run_events e
+             WHERE e.task_id=?1 AND e.kind=?2 AND e.run_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
+                 AND s.kind IN (?3,?4) AND {}=e.id)
+             ORDER BY e.id",
+            conn.dialect()
+                .json_field("s.payload", "$.kept_id", JsonType::Integer)
+        ),
+        crate::infrastructure::sql_exec::sql_params![
+            task,
+            EventKind::HoldResultKept.as_str(),
+            EventKind::HoldResultApplied.as_str(),
+            EventKind::HoldResultDiscarded.as_str()
+        ],
+        crate::infrastructure::store_rows::event_row,
+    )?;
+    for kept in unsettled {
+        let (Some(result), Some(run)) = (task_hold::KeptResult::of_event(&kept), &kept.run_id)
+        else {
+            continue;
+        };
+        let task_hold::Disposition::Discard(reason) = end.kept_result() else {
+            unreachable!("a result kept for a task that ended is discarded");
+        };
+        if let Some(ask) = result.ask_to_close()
+            && let Some(ask) = conn
+                .query_row(
+                    "SELECT * FROM asks WHERE id=?1 AND closed_at IS NULL",
+                    crate::infrastructure::sql_exec::sql_params![ask],
+                    super::asks::ask_row_port,
+                )
+                .optional()?
+        {
+            super::asks::discard_by_runtime_port(
+                conn,
+                &ask,
+                reason.as_str(),
+                &format!(
+                    "task {task} {}: the answer kept while it was held is discarded",
+                    end.as_str()
+                ),
+                now,
+            )?;
+        }
+        crate::infrastructure::store_writes::event(
+            conn,
+            task,
+            Some(run),
+            EventKind::HoldResultDiscarded,
+            json!({"kept_id": kept.id, "source": result.source, "reason": reason,
+                   "error": null, task_hold::SUPERSEDED: true}),
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn latest_run_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<(RunId, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            crate::infrastructure::sql_exec::sql_params![task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
 }

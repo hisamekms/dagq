@@ -35,6 +35,17 @@ pub(super) trait EventTx: SqlWrite {
         kind: EventKind,
         payload: &Value,
     ) -> Result<()>;
+
+    /// Write the goal review spans the newly inserted goal event opens or
+    /// closes. Like `follow_spans`, this preserves the session adapter's
+    /// transaction and transcript hooks while its SQL is being moved.
+    fn follow_goal_spans(
+        &self,
+        event_id: EventId,
+        goal_id: GoalId,
+        kind: EventKind,
+        payload: &Value,
+    ) -> Result<()>;
 }
 
 /// Register `new` inside the caller's write transaction with

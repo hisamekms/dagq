@@ -1,5 +1,6 @@
 //! Append-only membership decisions and transactional membership changes.
 use super::sql_dialect::{JsonType, json_field, json_field_spaced};
+use crate::infrastructure::sql_exec::OptionalRow as _;
 use anyhow::{Result, anyhow, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -17,164 +18,27 @@ use crate::domain::{
 };
 
 pub(super) fn acceptance_version(conn: &Connection, goal: GoalId) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT acceptance_version FROM goals WHERE id=?1",
-        [goal],
-        |r| r.get(0),
-    )?)
-}
-
-fn json_array_column(row: &rusqlite::Row<'_>, name: &str) -> rusqlite::Result<Value> {
-    let text: String = row.get(name)?;
-    let parsed: Vec<String> = serde_json::from_str(&text).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            row.as_ref().column_index(name).unwrap_or(0),
-            rusqlite::types::Type::Text,
-            Box::new(e),
-        )
-    })?;
-    Ok(json!(parsed))
+    acceptance_version_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        goal,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 pub(super) fn judgements(conn: &Connection, task: TaskId) -> Result<Vec<Value>> {
-    let mut stmt =
-        conn.prepare("SELECT * FROM follow_up_judgements WHERE task_id=?1 ORDER BY id")?;
-    let rows = stmt.query_map([task], |r| {
-        Ok(json!({
-            "id": r.get::<_,i64>("id")?, "task_id": r.get::<_,i64>("task_id")?,
-            "source_goal_id": r.get::<_,i64>("source_goal_id")?,
-            "source_kind": r.get::<_,String>("source_kind")?,
-            "classification": r.get::<_,String>("classification")?,
-            "acceptance_items": json_array_column(r, "acceptance_items")?,
-            "reason": r.get::<_,String>("reason")?,
-            "evidence": json_array_column(r, "evidence")?,
-            "destination_goal_id": r.get::<_,Option<i64>>("destination_goal_id")?,
-            // NULL on a row an older binary wrote: it named none.
-            "destination_acceptance_items": match r.get::<_,Option<String>>("destination_acceptance_items")? {
-                Some(_) => json_array_column(r, "destination_acceptance_items")?,
-                None => json!([]),
-            },
-            "acceptance_version": r.get::<_,i64>("acceptance_version")?,
-            "corrects": r.get::<_,Option<i64>>("corrects")?,
-            "actor_role": r.get::<_,String>("actor_role")?,
-            "created_at": r.get::<_,String>("created_at")?
-        }))
-    })?;
-    let mut result = Vec::new();
-    for row in rows {
-        let mut row = row?;
-        let _: Class = row["classification"].as_str().unwrap().parse()?;
-        let version =
-            acceptance_version(conn, GoalId::new(row["source_goal_id"].as_i64().unwrap()))?;
-        row["current_acceptance_version"] = json!(version);
-        row["needs_recheck"] = json!(row["acceptance_version"].as_i64() != Some(version));
-        result.push(row);
-    }
-    Ok(result)
-}
-
-/// The unclosed `correct_goal` ask about follow-up `task`, if any: while
-/// it is open the follow-up's membership waits for the person
-/// (ADR-t1504-2 decision 9).
-fn open_correction(conn: &Connection, task: TaskId) -> Result<Option<AskId>> {
-    Ok(conn
-        .query_row(
-            "SELECT id FROM asks WHERE kind=?1 AND task_id=?2 AND closed_at IS NULL
-             ORDER BY id LIMIT 1",
-            params![AskKind::CorrectGoal.as_str(), task],
-            |r| r.get(0),
-        )
-        .optional()?)
+    judgements_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 fn check_no_open_correction(conn: &Connection, task: TaskId) -> Result<()> {
-    if let Some(ask) = open_correction(conn, task)? {
-        anyhow::bail!(
-            "task {task} waits for a person's answer to correct_goal ask {ask}; its membership does not change until the supervisor applies it"
-        );
-    }
-    Ok(())
-}
-
-/// Refuse, in the open transaction, a move of `task` to `goal` by `role`
-/// that waits for a person's correction, that a decided membership
-/// judgement names another goal for, or that takes a `goal_gap` draft out
-/// of its goal as a planner ([`follow_up::check_goal_gap_move`], returned
-/// as the typed [`crate::domain::DomainError::GoalGapMoved`] for the
-/// caller to record).
-pub(super) fn check_set_goal(
-    conn: &Connection,
-    task: TaskId,
-    goal: Option<GoalId>,
-    role: crate::domain::ActorRole,
-) -> Result<()> {
-    let origin: Option<String> = conn
-        .query_row(
-            "SELECT origin FROM draft_origins WHERE task_id=?1",
-            [task],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let origin = origin.map(|o| o.parse::<DraftOrigin>()).transpose()?;
-    let from = read_task(conn, task)?.goal_id();
-    follow_up::check_goal_gap_move(task, origin, role, from, goal)?;
-    check_no_open_correction(conn, task)?;
-    if let Some(last) = judgements(conn, task)?.last()
-        && last["classification"] != "undecided"
-    {
-        ensure!(
-            last["destination_goal_id"].as_i64() == goal.map(GoalId::as_i64),
-            "task {task} has a membership judgement for a different goal; record a correction with judge-follow-up"
-        );
-    }
-    Ok(())
-}
-
-/// The membership gap of `task` (ADR-t1504-2 decision 7), or `None` for a
-/// task that is not a follow_up, has no source goal to judge by, or has a
-/// current decided judgement.
-pub(super) fn membership_gap(conn: &Connection, task: TaskId) -> Result<Option<MembershipGap>> {
-    let material: Option<String> = conn
-        .query_row(
-            "SELECT material FROM draft_origins WHERE task_id=?1 AND origin=?2",
-            params![task, DraftOrigin::FollowUp.as_str()],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(material) = material else {
-        return Ok(None);
-    };
-    let material: Value = serde_json::from_str(&material)?;
-    let history = judgements(conn, task)?;
-    let last = history.last();
-    let source = material["source_goal_id"]
-        .as_i64()
-        .or_else(|| last.and_then(|l| l["source_goal_id"].as_i64()));
-    let source_goal_abandoned = match source {
-        Some(goal) => conn
-            .query_row(
-                "SELECT verdict='abandoned' FROM goals WHERE id=?1 AND closed_at IS NOT NULL",
-                [goal],
-                |r| r.get::<_, Option<bool>>(0),
-            )
-            .optional()?
-            .flatten()
-            .unwrap_or(false),
-        None => false,
-    };
-    let latest = last
-        .map(|l| {
-            Ok::<_, anyhow::Error>((
-                l["classification"].as_str().unwrap_or_default().parse()?,
-                l["needs_recheck"].as_bool() == Some(true),
-            ))
-        })
-        .transpose()?;
-    Ok(membership_gap_of(MembershipFacts {
-        source_goal_none: material["source_goal_state"] == "none",
-        source_goal_abandoned,
-        latest,
-    }))
+    check_no_open_correction_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Refuse a submission that takes a follow_up draft (or a person's bypass
@@ -185,23 +49,12 @@ pub(super) fn check_judged(
     tasks: &[TaskId],
     include_submitted: bool,
 ) -> Result<()> {
-    let mut refused = Vec::new();
-    for &task in tasks {
-        match read_task(conn, task)?.status() {
-            TaskStatus::Draft => {}
-            TaskStatus::Submitted if include_submitted => {}
-            _ => continue,
-        }
-        if let Some(gap) = membership_gap(conn, task)? {
-            refused.push(format!("task {task}: {}", gap.explain()));
-        }
-    }
-    ensure!(
-        refused.is_empty(),
-        "follow_up drafts need a current membership judgement before submit or bypass: {}. Record one with `dagq judge-follow-up TASK --classification required|out_of_scope ...`",
-        refused.join("; ")
-    );
-    Ok(())
+    check_judged_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        tasks,
+        include_submitted,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 impl SqliteQueue {
@@ -623,32 +476,6 @@ pub(super) fn decide_correction(
     Ok(Some(decided))
 }
 
-pub(super) fn goal_memberships(conn: &Connection, goal: GoalId) -> Result<Vec<Value>> {
-    let ids = conn.prepare(&format!("SELECT o.task_id FROM draft_origins o JOIN tasks t ON t.id=o.task_id
-        WHERE o.origin='follow_up' AND ({}=?1 OR t.goal_id=?1
-        OR EXISTS(SELECT 1 FROM follow_up_judgements j WHERE j.task_id=o.task_id AND j.source_goal_id=?1)) ORDER BY o.task_id", json_field("o.material", "$.source_goal_id", JsonType::Integer)))?
-        .query_map([goal], |r| r.get::<_,TaskId>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    ids.into_iter()
-        .map(|id| {
-            let task = read_task(conn, id)?;
-            let material: String = conn.query_row(
-                "SELECT material FROM draft_origins WHERE task_id=?1",
-                [id],
-                |r| r.get(0),
-            )?;
-            let depth: i64 =
-                conn.query_row("SELECT follow_up_depth FROM tasks WHERE id=?1", [id], |r| {
-                    r.get(0)
-                })?;
-            Ok(
-                json!({"task_id": id, "goal_id": task.goal_id(), "status": task.status(),
-            "follow_up_depth": depth, "material": serde_json::from_str::<Value>(&material)?,
-            "judgements": judgements(conn,id)?}),
-            )
-        })
-        .collect()
-}
-
 /// The follow_ups whose source goal is `goal` as recorded or restored at
 /// registration (one whose source is unknown enters no goal's check, even
 /// when its judge named one: ADR-t1504-2 decision 12(ii)), wherever
@@ -656,44 +483,11 @@ pub(super) fn goal_memberships(conn: &Connection, goal: GoalId) -> Result<Vec<Va
 /// acceptance version (ADR-t1504-2 decision 8). Read inside the caller's
 /// transaction, so a review and a close check the queue as it is.
 pub(super) fn source_follow_ups(conn: &Connection, goal: GoalId) -> Result<Vec<SourceFollowUp>> {
-    let version = acceptance_version(conn, goal)?;
-    let rows = conn
-        .prepare(
-            &format!("SELECT o.task_id, t.status, t.goal_id IS ?1, j.id, j.classification, j.acceptance_version
-             FROM draft_origins o JOIN tasks t ON t.id = o.task_id
-             LEFT JOIN follow_up_judgements j ON j.id =
-                 (SELECT max(id) FROM follow_up_judgements WHERE task_id = o.task_id)
-             WHERE o.origin = 'follow_up'
-               AND {} = ?1
-             ORDER BY o.task_id", json_field_spaced("o.material", "$.source_goal_id", JsonType::Integer)),
-        )?
-        .query_map([goal], |r| {
-            Ok((
-                r.get::<_, TaskId>(0)?,
-                enum_col::<TaskStatus>(r, "status")?,
-                r.get::<_, bool>(2)?,
-                r.get::<_, Option<i64>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<i64>>(5)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    rows.into_iter()
-        .map(|(task, status, in_goal, id, class, judged)| {
-            let judgement = match (id, class, judged) {
-                (Some(id), Some(class), Some(judged)) => {
-                    Some((id, class.parse::<Class>()?, judged != version))
-                }
-                _ => None,
-            };
-            Ok(SourceFollowUp {
-                task,
-                status,
-                in_goal,
-                judgement,
-            })
-        })
-        .collect()
+    source_follow_ups_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        goal,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The source follow-ups of `goal` with no settled membership, each with
@@ -726,4 +520,276 @@ pub(super) fn waiting_follow_ups(
             })
         })
         .collect()
+}
+
+pub(super) fn goal_memberships_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    goal: GoalId,
+) -> Result<Vec<Value>> {
+    let ids = conn.query_map(&format!("SELECT o.task_id FROM draft_origins o JOIN tasks t ON t.id=o.task_id
+        WHERE o.origin='follow_up' AND ({}=?1 OR t.goal_id=?1
+        OR EXISTS(SELECT 1 FROM follow_up_judgements j WHERE j.task_id=o.task_id AND j.source_goal_id=?1)) ORDER BY o.task_id", conn.dialect().json_field("o.material", "$.source_goal_id", JsonType::Integer)), crate::infrastructure::sql_exec::sql_params![goal], |r| r.get::<_,TaskId>(0))?;
+    ids.into_iter()
+        .map(|id| {
+            let task = crate::infrastructure::store_rows::read_task(conn, id)?;
+            let material: String = conn.query_row(
+                "SELECT material FROM draft_origins WHERE task_id=?1",
+                crate::infrastructure::sql_exec::sql_params![id],
+                |r| r.get(0),
+            )?;
+            let depth: i64 = conn.query_row(
+                "SELECT follow_up_depth FROM tasks WHERE id=?1",
+                crate::infrastructure::sql_exec::sql_params![id],
+                |r| r.get(0),
+            )?;
+            Ok(
+                json!({"task_id": id, "goal_id": task.goal_id(), "status": task.status(),
+            "follow_up_depth": depth, "material": serde_json::from_str::<Value>(&material)?,
+            "judgements": judgements_port(conn,id)?}),
+            )
+        })
+        .collect()
+}
+
+pub(super) fn acceptance_version_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    goal: GoalId,
+) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT acceptance_version FROM goals WHERE id=?1",
+        crate::infrastructure::sql_exec::sql_params![goal],
+        |r| r.get(0),
+    )?)
+}
+
+pub(super) fn judgements_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Vec<Value>> {
+    let stmt = "SELECT * FROM follow_up_judgements WHERE task_id=?1 ORDER BY id";
+    let rows = conn.query_map(stmt, crate::infrastructure::sql_exec::sql_params![task], |r| {
+        Ok(json!({
+            "id": r.get::<_,i64>("id")?, "task_id": r.get::<_,i64>("task_id")?,
+            "source_goal_id": r.get::<_,i64>("source_goal_id")?,
+            "source_kind": r.get::<_,String>("source_kind")?,
+            "classification": r.get::<_,String>("classification")?,
+            "acceptance_items": json_array_column_port(r, "acceptance_items")?,
+            "reason": r.get::<_,String>("reason")?,
+            "evidence": json_array_column_port(r, "evidence")?,
+            "destination_goal_id": r.get::<_,Option<i64>>("destination_goal_id")?,
+            // NULL on a row an older binary wrote: it named none.
+            "destination_acceptance_items": match r.get::<_,Option<String>>("destination_acceptance_items")? {
+                Some(_) => json_array_column_port(r, "destination_acceptance_items")?,
+                None => json!([]),
+            },
+            "acceptance_version": r.get::<_,i64>("acceptance_version")?,
+            "corrects": r.get::<_,Option<i64>>("corrects")?,
+            "actor_role": r.get::<_,String>("actor_role")?,
+            "created_at": r.get::<_,String>("created_at")?
+        }))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        let mut row = row;
+        let _: Class = row["classification"].as_str().unwrap().parse()?;
+        let version =
+            acceptance_version_port(conn, GoalId::new(row["source_goal_id"].as_i64().unwrap()))?;
+        row["current_acceptance_version"] = json!(version);
+        row["needs_recheck"] = json!(row["acceptance_version"].as_i64() != Some(version));
+        result.push(row);
+    }
+    Ok(result)
+}
+
+/// Refuse, in the open transaction, a move of `task` to `goal` by `role`
+/// that waits for a person's correction, that a decided membership
+/// judgement names another goal for, or that takes a `goal_gap` draft out
+/// of its goal as a planner ([`follow_up::check_goal_gap_move`], returned
+/// as the typed [`crate::domain::DomainError::GoalGapMoved`] for the
+/// caller to record).
+pub(super) fn check_set_goal_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+    goal: Option<GoalId>,
+    role: crate::domain::ActorRole,
+) -> Result<()> {
+    let origin: Option<String> = conn
+        .query_row(
+            "SELECT origin FROM draft_origins WHERE task_id=?1",
+            crate::infrastructure::sql_exec::sql_params![task],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let origin = origin.map(|o| o.parse::<DraftOrigin>()).transpose()?;
+    let from = crate::infrastructure::store_rows::read_task(conn, task)?.goal_id();
+    follow_up::check_goal_gap_move(task, origin, role, from, goal)?;
+    check_no_open_correction_port(conn, task)?;
+    if let Some(last) = judgements_port(conn, task)?.last()
+        && last["classification"] != "undecided"
+    {
+        ensure!(
+            last["destination_goal_id"].as_i64() == goal.map(GoalId::as_i64),
+            "task {task} has a membership judgement for a different goal; record a correction with judge-follow-up"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn check_judged_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    tasks: &[TaskId],
+    include_submitted: bool,
+) -> Result<()> {
+    let mut refused = Vec::new();
+    for &task in tasks {
+        match crate::infrastructure::store_rows::read_task(conn, task)?.status() {
+            TaskStatus::Draft => {}
+            TaskStatus::Submitted if include_submitted => {}
+            _ => continue,
+        }
+        if let Some(gap) = membership_gap_port(conn, task)? {
+            refused.push(format!("task {task}: {}", gap.explain()));
+        }
+    }
+    ensure!(
+        refused.is_empty(),
+        "follow_up drafts need a current membership judgement before submit or bypass: {}. Record one with `dagq judge-follow-up TASK --classification required|out_of_scope ...`",
+        refused.join("; ")
+    );
+    Ok(())
+}
+
+/// The membership gap of `task` (ADR-t1504-2 decision 7), or `None` for a
+/// task that is not a follow_up, has no source goal to judge by, or has a
+/// current decided judgement.
+pub(super) fn membership_gap_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<MembershipGap>> {
+    let material: Option<String> = conn
+        .query_row(
+            "SELECT material FROM draft_origins WHERE task_id=?1 AND origin=?2",
+            crate::infrastructure::sql_exec::sql_params![task, DraftOrigin::FollowUp.as_str()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(material) = material else {
+        return Ok(None);
+    };
+    let material: Value = serde_json::from_str(&material)?;
+    let history = judgements_port(conn, task)?;
+    let last = history.last();
+    let source = material["source_goal_id"]
+        .as_i64()
+        .or_else(|| last.and_then(|l| l["source_goal_id"].as_i64()));
+    let source_goal_abandoned = match source {
+        Some(goal) => conn
+            .query_row(
+                "SELECT verdict='abandoned' FROM goals WHERE id=?1 AND closed_at IS NOT NULL",
+                crate::infrastructure::sql_exec::sql_params![goal],
+                |r| r.get::<_, Option<bool>>(0),
+            )
+            .optional()?
+            .flatten()
+            .unwrap_or(false),
+        None => false,
+    };
+    let latest = last
+        .map(|l| {
+            Ok::<_, anyhow::Error>((
+                l["classification"].as_str().unwrap_or_default().parse()?,
+                l["needs_recheck"].as_bool() == Some(true),
+            ))
+        })
+        .transpose()?;
+    Ok(membership_gap_of(MembershipFacts {
+        source_goal_none: material["source_goal_state"] == "none",
+        source_goal_abandoned,
+        latest,
+    }))
+}
+
+pub(super) fn source_follow_ups_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    goal: GoalId,
+) -> Result<Vec<SourceFollowUp>> {
+    let version = acceptance_version_port(conn, goal)?;
+    let rows = conn
+        .query_map(
+            &format!("SELECT o.task_id, t.status, t.goal_id IS ?1, j.id, j.classification, j.acceptance_version
+             FROM draft_origins o JOIN tasks t ON t.id = o.task_id
+             LEFT JOIN follow_up_judgements j ON j.id =
+                 (SELECT max(id) FROM follow_up_judgements WHERE task_id = o.task_id)
+             WHERE o.origin = 'follow_up'
+               AND {} = ?1
+             ORDER BY o.task_id", conn.dialect().json_field_spaced("o.material", "$.source_goal_id", JsonType::Integer)), crate::infrastructure::sql_exec::sql_params![goal], |r| {
+            Ok((
+                r.get::<_, TaskId>(0)?,
+                crate::infrastructure::store_rows::enum_col::<TaskStatus>(r, "status")?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+            ))
+        })?;
+    rows.into_iter()
+        .map(|(task, status, in_goal, id, class, judged)| {
+            let judgement = match (id, class, judged) {
+                (Some(id), Some(class), Some(judged)) => {
+                    Some((id, class.parse::<Class>()?, judged != version))
+                }
+                _ => None,
+            };
+            Ok(SourceFollowUp {
+                task,
+                status,
+                in_goal,
+                judgement,
+            })
+        })
+        .collect()
+}
+
+fn json_array_column_port(
+    row: &crate::infrastructure::sql_exec::SqlRow<'_>,
+    name: &str,
+) -> crate::infrastructure::sql_exec::SqlResult<Value> {
+    let text: String = row.get(name)?;
+    let parsed: Vec<String> = serde_json::from_str(&text).map_err(|e| {
+        crate::infrastructure::sql_exec::SqlError::Conversion {
+            index: row.column_index(name).unwrap_or(0),
+            stored: crate::infrastructure::sql_exec::ValueKind::Text,
+            cause: Box::new(e),
+        }
+    })?;
+    Ok(json!(parsed))
+}
+
+fn check_no_open_correction_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<()> {
+    if let Some(ask) = open_correction_port(conn, task)? {
+        anyhow::bail!(
+            "task {task} waits for a person's answer to correct_goal ask {ask}; its membership does not change until the supervisor applies it"
+        );
+    }
+    Ok(())
+}
+
+/// The unclosed `correct_goal` ask about follow-up `task`, if any: while
+/// it is open the follow-up's membership waits for the person
+/// (ADR-t1504-2 decision 9).
+fn open_correction_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<AskId>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM asks WHERE kind=?1 AND task_id=?2 AND closed_at IS NULL
+             ORDER BY id LIMIT 1",
+            crate::infrastructure::sql_exec::sql_params![AskKind::CorrectGoal.as_str(), task],
+            |r| r.get(0),
+        )
+        .optional()?)
 }

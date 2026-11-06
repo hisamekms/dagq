@@ -8,8 +8,9 @@ use crate::domain::EventKind;
 use crate::domain::event_kind;
 use crate::domain::sessions::{PLANNER, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED};
 use crate::infrastructure::sql_dialect::{JsonType, TimeForm, json_field, time_value_spaced};
+use crate::infrastructure::sql_exec::OptionalRow as _;
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -453,112 +454,13 @@ pub(super) fn withdraw(
     now: &str,
     now_secs: i64,
 ) -> Result<Proposal> {
-    let current = read(conn, id)?;
-    let from = current.status();
-    let withdrawn = proposal::withdraw(current, now.into())?;
-    save(conn, &withdrawn)?;
-    conn.execute(
-        "UPDATE proposals SET review_hold=NULL, revise_reasons=NULL, revise_sent_at=NULL,
-             revise_planner_id=NULL, unresponsive_at=NULL WHERE id=?1",
-        [id],
-    )?;
-    // Its replanning operation, if it replaces one's task, goes back to its
-    // planner with the run still parked and its work kept.
-    super::replans::proposal_moved(
-        conn,
+    withdraw_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
         id,
-        crate::domain::task_replan::ReplanStatus::Planning,
-        &format!("proposal {id} was withdrawn"),
+        now,
         now_secs,
-    )?;
-    let payload = json!({"proposal_id": id, "from": from});
-    for &task_id in withdrawn.task_ids() {
-        if status(conn, task_id)? == TaskStatus::Submitted {
-            transition_task(conn, task_id, TaskAction::Draft, now)?;
-        }
-        event(
-            conn,
-            task_id,
-            None,
-            EventKind::ProposalWithdrawn,
-            payload.clone(),
-        )?;
-        close_plan_asks(conn, task_id, now_secs)?;
-        if status(conn, task_id)? == TaskStatus::Draft
-            && let Some(material) = reopened_into(conn, task_id, id)?
-        {
-            super::draft_planners::record_reopened(conn, task_id, &material, now_secs)?;
-        }
-    }
-    for &goal_id in withdrawn.goal_ids() {
-        goal_event(conn, goal_id, EventKind::ProposalWithdrawn, payload.clone())?;
-    }
-    read(conn, id)
-}
-
-/// The material of origin `reopened` when plan review reopened `task_id`
-/// into proposal `id` (its `task_reopened` event), else `None`.
-fn reopened_into(
-    conn: &Connection,
-    task_id: TaskId,
-    id: ProposalId,
-) -> Result<Option<serde_json::Value>> {
-    let reopened: Option<(String, Option<ProposalId>)> = conn
-        .query_row(
-            &format!(
-                "SELECT {}, {}
-             FROM run_events WHERE task_id=?1 AND kind=?3
-             AND {}=?2 ORDER BY id DESC LIMIT 1",
-                json_field("payload", "$.reason", JsonType::Text),
-                json_field("payload", "$.reviewed_proposal_id", JsonType::Integer),
-                json_field("payload", "$.proposal_id", JsonType::Integer)
-            ),
-            params![task_id, id, event_kind::TASK_REOPENED],
-            |r| {
-                Ok((
-                    r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                    r.get(1)?,
-                ))
-            },
-        )
-        .optional()?;
-    Ok(reopened.map(|(reason, reviewed)| reopened_material(&reason, id, reviewed)))
-}
-
-/// Close the task's `approve_plan` asks nobody closed, answering an open
-/// one `withdrawn` first and recording `ask_closed` for an answered one.
-fn close_plan_asks(conn: &Connection, task_id: TaskId, now: i64) -> Result<()> {
-    let unclosed: Vec<Ask> = conn
-        .prepare(
-            "SELECT * FROM asks
-             WHERE task_id=?1 AND kind='approve_plan' AND closed_at IS NULL ORDER BY id",
-        )?
-        .query_map([task_id], super::asks::ask_row)?
-        .collect::<rusqlite::Result<_>>()?;
-    for ask in unclosed {
-        if ask.is_open() {
-            let mut payload =
-                json!({"ask_id": ask.id, "kind": "approve_plan", "runtime_closed": true});
-            super::asks::write_answer(
-                conn,
-                &ask,
-                "withdrawn",
-                crate::domain::Answerer::RUNTIME,
-                now,
-                &mut payload,
-            )?;
-            event(conn, task_id, None, EventKind::AskAnswered, payload)?;
-        } else {
-            // An answer given before is closed unapplied: `ask_closed` ends
-            // its wait (task 568).
-            super::asks::record_ask_closed(conn, &ask)?;
-        }
-        conn.execute(
-            "UPDATE asks SET closed_at=?2 WHERE id=?1",
-            params![ask.id, now],
-        )?;
-    }
-    Ok(())
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The active proposals (submitted or revising) in the order plan review
@@ -581,100 +483,23 @@ pub(super) fn list(conn: &Connection, all: bool) -> Result<Vec<Proposal>> {
 /// one submitted before the queue recorded it. A missing proposal is an
 /// error.
 pub(super) fn owner_actor(conn: &Connection, id: ProposalId) -> Result<Option<String>> {
-    conn.query_row(
-        "SELECT CASE WHEN status='revising' AND revise_planner_id IS NOT NULL
-                     THEN 'planner:' || revise_planner_id ELSE owner_actor_id END
-         FROM proposals WHERE id=?1",
-        [id],
-        |row| row.get(0),
-    )
-    .optional()?
-    .with_context(|| format!("proposal {id} does not exist"))
-}
-
-/// The proposal `task` is in, with its status and its owner as
-/// [`owner_actor`] has it; `None` for a task in no proposal.
-pub(super) fn task_proposal(conn: &Connection, task: TaskId) -> Result<Option<TaskProposal>> {
-    let Some((id, status)) = conn
-        .query_row(
-            "SELECT p.id, p.status FROM tasks t JOIN proposals p ON p.id = t.proposal_id
-             WHERE t.id=?1",
-            [task],
-            |row| Ok((row.get::<_, ProposalId>(0)?, enum_col(row, "status")?)),
-        )
-        .optional()?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(TaskProposal {
-        id,
-        status,
-        owner: owner_actor(conn, id)?,
-    }))
+    owner_actor_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), id)
+        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 pub(super) fn read(conn: &Connection, id: ProposalId) -> Result<Proposal> {
-    let record = conn
-        .query_row("SELECT * FROM proposals WHERE id=?1", [id], record_row)
-        .optional()?
-        .with_context(|| format!("proposal {id} does not exist"))?;
-    let task_ids = ids(
-        conn,
-        "SELECT id FROM tasks WHERE proposal_id=?1 ORDER BY id",
-        id.as_i64(),
-    )?;
-    let goal_ids = ids(
-        conn,
-        "SELECT id FROM goals WHERE proposal_id=?1 ORDER BY id",
-        id.as_i64(),
-    )?;
-    Ok(Proposal::restore(ProposalRecord {
-        task_ids,
-        goal_ids,
-        ..record
-    })?)
-}
-
-fn record_row(row: &Row<'_>) -> rusqlite::Result<ProposalRecord> {
-    Ok(ProposalRecord {
-        id: row.get("id")?,
-        status: enum_col(row, "status")?,
-        owner: PlannerOwner {
-            origin: enum_col(row, "owner_origin")?,
-            workspace_id: row.get("owner_workspace_id")?,
-        },
-        submitted_at: row.get("submitted_at")?,
-        revise_count: row.get("revise_count")?,
-        task_ids: Vec::new(),
-        goal_ids: Vec::new(),
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-    })
+    read_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), id)
+        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Insert or update the proposal row; members are the tasks' and goals'
 /// `proposal_id`, written by the caller.
 pub(super) fn save(conn: &Connection, proposal: &Proposal) -> Result<()> {
-    conn.execute(
-        "INSERT INTO proposals(id, status, owner_origin, owner_workspace_id, submitted_at,
-                               revise_count, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-         ON CONFLICT(id) DO UPDATE SET status=excluded.status,
-             owner_origin=excluded.owner_origin, owner_workspace_id=excluded.owner_workspace_id,
-             submitted_at=excluded.submitted_at, revise_count=excluded.revise_count,
-             updated_at=excluded.updated_at",
-        params![
-            proposal.id(),
-            proposal.status().as_str(),
-            proposal.owner().origin.as_str(),
-            proposal.owner().workspace_id,
-            proposal.submitted_at(),
-            proposal.revise_count(),
-            proposal.created_at(),
-            proposal.updated_at()
-        ],
-    )?;
-    Ok(())
+    save_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        proposal,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The proposal a task or goal (`table`) belongs to now, with its status.
@@ -724,16 +549,299 @@ fn held(conn: &Connection, id: ProposalId) -> Result<bool> {
 }
 
 fn status(conn: &Connection, task_id: TaskId) -> Result<TaskStatus> {
-    Ok(
-        conn.query_row("SELECT status FROM tasks WHERE id=?1", [task_id], |row| {
-            enum_col(row, "status")
-        })?,
+    status_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task_id,
     )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
-fn ids<T: rusqlite::types::FromSql>(conn: &Connection, query: &str, key: i64) -> Result<Vec<T>> {
-    Ok(conn
-        .prepare(query)?
-        .query_map([key], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
+fn ids<T: crate::infrastructure::sql_exec::FromSqlValue>(
+    conn: &Connection,
+    query: &str,
+    key: i64,
+) -> Result<Vec<T>> {
+    ids_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        query,
+        key,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+}
+
+/// The proposal `task` is in, with its status and its owner as
+/// [`owner_actor`] has it; `None` for a task in no proposal.
+pub(super) fn task_proposal_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<TaskProposal>> {
+    let Some((id, status)) = conn
+        .query_row(
+            "SELECT p.id, p.status FROM tasks t JOIN proposals p ON p.id = t.proposal_id
+             WHERE t.id=?1",
+            crate::infrastructure::sql_exec::sql_params![task],
+            |row| {
+                Ok((
+                    row.get::<_, ProposalId>(0)?,
+                    crate::infrastructure::store_rows::enum_col(row, "status")?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(TaskProposal {
+        id,
+        status,
+        owner: owner_actor_port(conn, id)?,
+    }))
+}
+
+pub(super) fn owner_actor_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: ProposalId,
+) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT CASE WHEN status='revising' AND revise_planner_id IS NOT NULL
+                     THEN 'planner:' || revise_planner_id ELSE owner_actor_id END
+         FROM proposals WHERE id=?1",
+        crate::infrastructure::sql_exec::sql_params![id],
+        |row| row.get(0),
+    )
+    .optional()?
+    .with_context(|| format!("proposal {id} does not exist"))
+}
+
+fn status_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task_id: TaskId,
+) -> Result<TaskStatus> {
+    Ok(conn.query_row(
+        "SELECT status FROM tasks WHERE id=?1",
+        crate::infrastructure::sql_exec::sql_params![task_id],
+        |row| crate::infrastructure::store_rows::enum_col(row, "status"),
+    )?)
+}
+
+pub(super) fn read_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: ProposalId,
+) -> Result<Proposal> {
+    let record = conn
+        .query_row(
+            "SELECT * FROM proposals WHERE id=?1",
+            crate::infrastructure::sql_exec::sql_params![id],
+            record_row_port,
+        )
+        .optional()?
+        .with_context(|| format!("proposal {id} does not exist"))?;
+    let task_ids = ids_port(
+        conn,
+        "SELECT id FROM tasks WHERE proposal_id=?1 ORDER BY id",
+        id.as_i64(),
+    )?;
+    let goal_ids = ids_port(
+        conn,
+        "SELECT id FROM goals WHERE proposal_id=?1 ORDER BY id",
+        id.as_i64(),
+    )?;
+    Ok(Proposal::restore(ProposalRecord {
+        task_ids,
+        goal_ids,
+        ..record
+    })?)
+}
+
+fn record_row_port(
+    row: &crate::infrastructure::sql_exec::SqlRow<'_>,
+) -> crate::infrastructure::sql_exec::SqlResult<ProposalRecord> {
+    Ok(ProposalRecord {
+        id: row.get("id")?,
+        status: crate::infrastructure::store_rows::enum_col(row, "status")?,
+        owner: PlannerOwner {
+            origin: crate::infrastructure::store_rows::enum_col(row, "owner_origin")?,
+            workspace_id: row.get("owner_workspace_id")?,
+        },
+        submitted_at: row.get("submitted_at")?,
+        revise_count: row.get("revise_count")?,
+        task_ids: Vec::new(),
+        goal_ids: Vec::new(),
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn ids_port<T: crate::infrastructure::sql_exec::FromSqlValue>(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    query: &str,
+    key: i64,
+) -> Result<Vec<T>> {
+    Ok(conn.query_map(
+        query,
+        crate::infrastructure::sql_exec::sql_params![key],
+        |r| r.get(0),
+    )?)
+}
+
+pub(super) fn withdraw_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    id: ProposalId,
+    now: &str,
+    now_secs: i64,
+) -> Result<Proposal> {
+    let current = read_port(conn, id)?;
+    let from = current.status();
+    let withdrawn = proposal::withdraw(current, now.into())?;
+    save_port(conn, &withdrawn)?;
+    conn.execute(
+        "UPDATE proposals SET review_hold=NULL, revise_reasons=NULL, revise_sent_at=NULL,
+             revise_planner_id=NULL, unresponsive_at=NULL WHERE id=?1",
+        crate::infrastructure::sql_exec::sql_params![id],
+    )?;
+    // Its replanning operation, if it replaces one's task, goes back to its
+    // planner with the run still parked and its work kept.
+    super::replans::proposal_moved_port(
+        conn,
+        id,
+        crate::domain::task_replan::ReplanStatus::Planning,
+        &format!("proposal {id} was withdrawn"),
+        now_secs,
+    )?;
+    let payload = json!({"proposal_id": id, "from": from});
+    for &task_id in withdrawn.task_ids() {
+        if status_port(conn, task_id)? == TaskStatus::Submitted {
+            crate::infrastructure::task_store::transition_task(
+                conn,
+                task_id,
+                TaskAction::Draft,
+                now,
+            )?;
+        }
+        crate::infrastructure::store_writes::event(
+            conn,
+            task_id,
+            None,
+            EventKind::ProposalWithdrawn,
+            payload.clone(),
+        )?;
+        close_plan_asks_port(conn, task_id, now_secs)?;
+        if status_port(conn, task_id)? == TaskStatus::Draft
+            && let Some(material) = reopened_into_port(conn, task_id, id)?
+        {
+            super::draft_planners::record_reopened_port(conn, task_id, &material, now_secs)?;
+        }
+    }
+    for &goal_id in withdrawn.goal_ids() {
+        crate::infrastructure::task_store::goal_event(
+            conn,
+            goal_id,
+            EventKind::ProposalWithdrawn,
+            payload.clone(),
+        )?;
+    }
+    read_port(conn, id)
+}
+
+/// The material of origin `reopened` when plan review reopened `task_id`
+/// into proposal `id` (its `task_reopened` event), else `None`.
+fn reopened_into_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task_id: TaskId,
+    id: ProposalId,
+) -> Result<Option<serde_json::Value>> {
+    let reopened: Option<(String, Option<ProposalId>)> = conn
+        .query_row(
+            &format!(
+                "SELECT {}, {}
+             FROM run_events WHERE task_id=?1 AND kind=?3
+             AND {}=?2 ORDER BY id DESC LIMIT 1",
+                conn.dialect()
+                    .json_field("payload", "$.reason", JsonType::Text),
+                conn.dialect()
+                    .json_field("payload", "$.reviewed_proposal_id", JsonType::Integer),
+                conn.dialect()
+                    .json_field("payload", "$.proposal_id", JsonType::Integer)
+            ),
+            crate::infrastructure::sql_exec::sql_params![task_id, id, event_kind::TASK_REOPENED],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    r.get(1)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(reopened.map(|(reason, reviewed)| reopened_material(&reason, id, reviewed)))
+}
+
+/// Close the task's `approve_plan` asks nobody closed, answering an open
+/// one `withdrawn` first and recording `ask_closed` for an answered one.
+fn close_plan_asks_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    task_id: TaskId,
+    now: i64,
+) -> Result<()> {
+    let unclosed: Vec<Ask> = conn.query_map(
+        "SELECT * FROM asks
+             WHERE task_id=?1 AND kind='approve_plan' AND closed_at IS NULL ORDER BY id",
+        crate::infrastructure::sql_exec::sql_params![task_id],
+        super::asks::ask_row_port,
+    )?;
+    for ask in unclosed {
+        if ask.is_open() {
+            let mut payload =
+                json!({"ask_id": ask.id, "kind": "approve_plan", "runtime_closed": true});
+            super::asks::write_answer_port(
+                conn,
+                &ask,
+                "withdrawn",
+                crate::domain::Answerer::RUNTIME,
+                now,
+                &mut payload,
+            )?;
+            crate::infrastructure::store_writes::event(
+                conn,
+                task_id,
+                None,
+                EventKind::AskAnswered,
+                payload,
+            )?;
+        } else {
+            // An answer given before is closed unapplied: `ask_closed` ends
+            // its wait (task 568).
+            super::asks::record_ask_closed_port(conn, &ask)?;
+        }
+        conn.execute(
+            "UPDATE asks SET closed_at=?2 WHERE id=?1",
+            crate::infrastructure::sql_exec::sql_params![ask.id, now],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn save_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    proposal: &Proposal,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO proposals(id, status, owner_origin, owner_workspace_id, submitted_at,
+                               revise_count, created_at, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(id) DO UPDATE SET status=excluded.status,
+             owner_origin=excluded.owner_origin, owner_workspace_id=excluded.owner_workspace_id,
+             submitted_at=excluded.submitted_at, revise_count=excluded.revise_count,
+             updated_at=excluded.updated_at",
+        crate::infrastructure::sql_exec::sql_params![
+            proposal.id(),
+            proposal.status().as_str(),
+            proposal.owner().origin.as_str(),
+            proposal.owner().workspace_id,
+            proposal.submitted_at(),
+            proposal.revise_count(),
+            proposal.created_at(),
+            proposal.updated_at()
+        ],
+    )?;
+    Ok(())
 }

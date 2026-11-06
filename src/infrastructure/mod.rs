@@ -88,6 +88,7 @@ mod store_rows;
 mod store_writes;
 mod stranded;
 mod task_holds;
+mod task_store;
 pub mod telemetry;
 pub mod telemetry_config;
 pub mod throughput_review;

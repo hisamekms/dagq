@@ -441,6 +441,15 @@ impl EventTx for WriteTx<'_> {
     ) -> anyhow::Result<()> {
         sessions::follow(self, event_id, task_id, run_id, kind, payload)
     }
+    fn follow_goal_spans(
+        &self,
+        event_id: EventId,
+        goal_id: crate::domain::GoalId,
+        kind: EventKind,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        sessions::follow_goal(self, event_id, goal_id, kind, payload)
+    }
 }
 
 impl EventTx for rusqlite::Savepoint<'_> {
@@ -454,6 +463,16 @@ impl EventTx for rusqlite::Savepoint<'_> {
     ) -> anyhow::Result<()> {
         sessions::follow(self, event_id, task_id, run_id, kind, payload)
     }
+
+    fn follow_goal_spans(
+        &self,
+        event_id: EventId,
+        goal_id: GoalId,
+        kind: EventKind,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        sessions::follow_goal(self, event_id, goal_id, kind, payload)
+    }
 }
 
 impl EventTx for SqliteTx<'_> {
@@ -466,6 +485,15 @@ impl EventTx for SqliteTx<'_> {
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
         sessions::follow(self.0, event_id, task_id, run_id, kind, payload)
+    }
+    fn follow_goal_spans(
+        &self,
+        event_id: EventId,
+        goal_id: crate::domain::GoalId,
+        kind: EventKind,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        sessions::follow_goal(self.0, event_id, goal_id, kind, payload)
     }
 }
 
@@ -669,6 +697,102 @@ mod tests {
                 kinds,
                 if commit {
                     vec!["observe_started", "session_opened"]
+                } else {
+                    vec![]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_savepoint_keeps_or_rolls_back_a_goal_event_with_its_session_span() {
+        use crate::application::TaskStore;
+        use crate::domain::{NewGoal, NewTask};
+        use crate::infrastructure::task_store::goal_event;
+        use serde_json::json;
+
+        for commit in [false, true] {
+            let uri = format!(
+                "file:/sql-exec-savepoint-goal-events-{}?vfs=memdb",
+                uuid::Uuid::new_v4()
+            );
+            let mut queue = SqliteQueue::init(uri).unwrap();
+            let goal = queue
+                .add_goal(NewGoal {
+                    title: "g".into(),
+                    description: String::new(),
+                    acceptance: String::new(),
+                    constraints: String::new(),
+                    doc: None,
+                    priority: None,
+                    tags: Vec::new(),
+                    draft: false,
+                })
+                .unwrap()
+                .id();
+            let task = TaskStore::add(
+                &mut queue,
+                NewTask {
+                    title: "t".into(),
+                    description: "d".into(),
+                    acceptance: "a".into(),
+                    verification_commands: Vec::new(),
+                    dependencies: Vec::new(),
+                    goal_dependencies: Vec::new(),
+                    goal_id: Some(goal),
+                    context: String::new(),
+                    required_evidence: Vec::new(),
+                    paths: Vec::new(),
+                    priority: None,
+                    change: None,
+                    provider: None,
+                    worker_mode: None,
+                    wait_for_build: false,
+                    execution_class: Default::default(),
+                },
+            )
+            .unwrap()
+            .id();
+            let mut tx = queue.write_entry("savepoint_goal_events").unwrap();
+            {
+                let savepoint = SqlSavepoints::savepoint(&mut tx).unwrap();
+                goal_event(
+                    &savepoint,
+                    goal,
+                    EventKind::GoalReviewStarted,
+                    json!({"goal_review_id": 7, "attempt": 1, "session_id": "savepoint-goal"}),
+                )
+                .unwrap();
+                let (anchor, payload) = SqlRead::query_row(
+                    &savepoint,
+                    "SELECT task_id, payload FROM run_events WHERE kind='session_opened'",
+                    &[],
+                    |r| Ok((r.get::<_, TaskId>(0)?, r.get::<_, String>(1)?)),
+                )
+                .unwrap();
+                let span: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                assert_eq!(anchor, task);
+                assert_eq!(span["kind"], "goal_review");
+                assert_eq!(span["goal_id"], goal.as_i64());
+                assert_eq!(span["session_id"], "savepoint-goal");
+                if commit {
+                    SqlSavepoint::commit(savepoint).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+            let tx = queue.read_entry("read_savepoint_goal_events").unwrap();
+            let kinds = SqlRead::query_map(
+                &tx,
+                "SELECT kind FROM run_events
+                 WHERE kind IN ('goal_review_started', 'session_opened') ORDER BY id",
+                &[],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+            assert_eq!(
+                kinds,
+                if commit {
+                    vec!["goal_review_started", "session_opened"]
                 } else {
                     vec![]
                 }

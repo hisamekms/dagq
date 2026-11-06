@@ -8,7 +8,7 @@ use super::sql_dialect::{JsonType, json_field, json_field_spaced};
 use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, Row, params};
 
-use super::sqlite::{SqliteQueue, enum_col};
+use super::sqlite::SqliteQueue;
 use crate::domain::{
     AskId, GoalTask, PlannerHandover, PlannerId, PlannerOrigin, PlannerRoute, PlannerSession,
     ProposalId, RunEvent, TaskStatus, event_kind,
@@ -334,9 +334,15 @@ pub(super) fn planner_turn_events_sql() -> String {
 }
 
 pub(super) fn planner_row(r: &Row<'_>) -> rusqlite::Result<PlannerSession> {
+    super::sql_exec::sqlite::with_row(r, planner_row_port)
+}
+
+pub(super) fn planner_row_port(
+    r: &crate::infrastructure::sql_exec::SqlRow<'_>,
+) -> crate::infrastructure::sql_exec::SqlResult<PlannerSession> {
     Ok(PlannerSession {
         id: r.get("id")?,
-        origin: enum_col(r, "origin")?,
+        origin: crate::infrastructure::store_rows::enum_col(r, "origin")?,
         proposal_id: r.get("proposal_id")?,
         draft_task_id: r.get("draft_task_id")?,
         finding_id: r.get("finding_id")?,
@@ -352,11 +358,11 @@ pub(super) fn planner_row(r: &Row<'_>) -> rusqlite::Result<PlannerSession> {
         created_at: r.get("created_at")?,
         route: match r.get::<_, Option<String>>("route")? {
             Some(route) => route.parse().map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
+                crate::infrastructure::sql_exec::SqlError::Conversion {
+                    index: 0,
+                    stored: crate::infrastructure::sql_exec::ValueKind::Text,
+                    cause: Box::new(error),
+                }
             })?,
             None => PlannerRoute::Interactive,
         },

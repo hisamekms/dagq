@@ -14,6 +14,7 @@ use super::sql_exec::sql_params;
 use super::store_writes::{self, EventTx};
 use crate::domain::cancel_reason;
 use crate::domain::event_kind::{self, EventKind};
+use crate::infrastructure::sql_exec::OptionalRow as _;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, ensure};
@@ -993,10 +994,11 @@ pub(super) fn origin_fields(
     conn: &Connection,
     task: TaskId,
 ) -> Result<serde_json::Map<String, Value>> {
-    match planned_origin(conn, task)? {
-        Some((origin, material)) => material_fields(origin, &material, task),
-        None => Ok(serde_json::Map::new()),
-    }
+    origin_fields_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// [`origin_fields`] of a draft of `origin` with `material`.
@@ -1117,103 +1119,21 @@ pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> 
 
 /// The bundle `planner` was opened for, with its drafts.
 fn bundle_view(conn: &Connection, planner: PlannerId) -> Result<Option<DraftBundleView>> {
-    let row: Option<(String, String, String, i64)> = conn
-        .query_row(
-            "SELECT origin, key_kind, key_value, created_at FROM draft_bundles WHERE planner_id=?1",
-            [planner],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
-    let Some((origin, key_kind, key_value, created_at)) = row else {
-        return Ok(None);
-    };
-    let members = conn
-        .prepare(
-            "SELECT m.task_id, m.attempt, m.outcome, m.proposal_id, m.duplicate_of, t.status
-             FROM draft_bundle_members m JOIN tasks t ON t.id=m.task_id
-             WHERE m.planner_id=?1 ORDER BY m.task_id",
-        )?
-        .query_map([planner], |r| {
-            Ok(DraftBundleMember {
-                task_id: r.get(0)?,
-                attempt: r.get(1)?,
-                outcome: r.get(2)?,
-                proposal_id: r.get(3)?,
-                duplicate_of: r.get(4)?,
-                status: r.get(5)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(Some(DraftBundleView {
-        planner_id: planner,
-        origin,
-        key_kind,
-        key_value,
-        created_at,
-        members,
-    }))
+    bundle_view_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        planner,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Where the task came from (ADR-t807-1), with the bundles that took it;
 /// `None` for a task without an origin.
 pub(super) fn task_origin(conn: &Connection, task: TaskId) -> Result<Option<TaskOrigin>> {
-    let Some((origin, material)) = draft_origin(conn, task)? else {
-        return Ok(None);
-    };
-    let planners: Vec<PlannerId> = conn
-        .prepare(
-            "SELECT planner_id FROM draft_bundle_members WHERE task_id=?1 ORDER BY planner_id",
-        )?
-        .query_map([task], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let bundles = planners
-        .into_iter()
-        .map(|planner| bundle_view(conn, planner))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    Ok(Some(TaskOrigin {
-        origin,
-        source_task_id: material
-            .get("source_task_id")
-            .and_then(Value::as_i64)
-            .map(TaskId::new),
-        source_run_id: material
-            .get("source_run_id")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        index: material.get("index").and_then(Value::as_i64),
-        bundle_key: BundleKey::of(origin, &material, task),
-        material,
-        bundles,
-    }))
-}
-
-/// The follow_up drafts the receipts and the reviews of `task`'s runs
-/// proposed, by ID, with their status now (ADR-t807-1, ADR-t2352-1).
-pub(super) fn follow_up_drafts(conn: &Connection, task: TaskId) -> Result<Vec<FollowUpDraft>> {
-    Ok(conn
-        .prepare(&format!(
-            "SELECT o.task_id, {},
-                    {}, t.title, t.status
-             FROM draft_origins o JOIN tasks t ON t.id=o.task_id
-             WHERE o.origin='follow_up' AND {}=?1
-             ORDER BY o.task_id",
-            json_field("o.material", "$.source_run_id", JsonType::Text),
-            json_field("o.material", "$.index", JsonType::Integer),
-            json_field("o.material", "$.source_task_id", JsonType::Integer)
-        ))?
-        .query_map([task], |r| {
-            Ok(FollowUpDraft {
-                task_id: r.get(0)?,
-                run_id: r.get(1)?,
-                index: r.get(2)?,
-                title: r.get(3)?,
-                status: r.get(4)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?)
+    task_origin_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 fn target(conn: &Connection, draft: TaskId, now: i64) -> Result<DraftTarget> {
@@ -1231,35 +1151,20 @@ fn target(conn: &Connection, draft: TaskId, now: i64) -> Result<DraftTarget> {
 /// ([`draft_origin`]), or `revisit` for a draft without one that was given
 /// a revisit time (ADR-t1540-1), whose material is empty.
 fn planned_origin(conn: &Connection, task: TaskId) -> Result<Option<(DraftOrigin, Value)>> {
-    if let Some(origin) = draft_origin(conn, task)? {
-        return Ok(Some(origin));
-    }
-    Ok(read_revisit(conn, task)?.map(|_| (DraftOrigin::Revisit, json!({}))))
+    planned_origin_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The revisit time of `task` (ADR-t1540-1), if it has one.
 pub(super) fn read_revisit(conn: &Connection, task: TaskId) -> Result<Option<DraftRevisit>> {
-    Ok(conn
-        .query_row(
-            "SELECT task_id, revisit_at, note, set_by, set_by_id, created_at, opened_at, planner_id
-             FROM draft_revisits WHERE task_id=?1",
-            [task],
-            |r| {
-                let revisit_at: i64 = r.get(1)?;
-                Ok(DraftRevisit {
-                    task_id: r.get(0)?,
-                    revisit_at,
-                    revisit_at_utc: crate::domain::marks::utc_text(revisit_at.saturating_mul(1000)),
-                    note: r.get(2)?,
-                    set_by: r.get(3)?,
-                    set_by_id: r.get(4)?,
-                    created_at: r.get(5)?,
-                    opened_at: r.get(6)?,
-                    planner_id: r.get(7)?,
-                })
-            },
-        )
-        .optional()?)
+    read_revisit_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Use the revisit time that came for its draft, inside the caller's write
@@ -1291,33 +1196,6 @@ fn use_revisit(
     )
 }
 
-/// Record that the draft `task` is a ready task plan review reopened and
-/// whose proposal was withdrawn (origin `reopened`, task 418), inside the
-/// caller's write transaction; a later withdrawal replaces the material.
-/// The material's `reason` is the reason of the verdict's reopen, and
-/// `reviewed_proposal_id` the proposal of the plan review that reopened it.
-///
-/// `draft_reopens` is a table of its own, not an origin in `draft_origins`,
-/// because widening that origin would rebuild the table (a breaking
-/// migration) and an older binary could not read the new origin; an older
-/// binary just opens no planner for such a draft. The row counts only while
-/// its material's `proposal_id` is the task's current proposal, and it is
-/// read before `draft_origins`, so a follow-up that was adopted and later
-/// reopened shows as `reopened`. It is not counted as a registered draft.
-pub(super) fn record_reopened(
-    conn: &Connection,
-    task: TaskId,
-    material: &Value,
-    now: i64,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO draft_reopens(task_id, material, created_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(task_id) DO UPDATE SET material=excluded.material, created_at=excluded.created_at",
-        params![task, serde_json::to_string(material)?, now],
-    )?;
-    Ok(())
-}
-
 /// Where the draft came from and its material: `reopened` when plan review
 /// reopened it and its proposal was withdrawn (while the task is still of
 /// that proposal: a later proposal it joins makes the row stale), else its
@@ -1326,32 +1204,11 @@ pub(super) fn draft_origin(
     conn: &Connection,
     task: TaskId,
 ) -> Result<Option<(DraftOrigin, Value)>> {
-    let reopened: Option<String> = conn
-        .query_row(
-            &format!(
-                "SELECT r.material FROM draft_reopens r JOIN tasks t ON t.id=r.task_id
-             WHERE r.task_id=?1 AND {}=t.proposal_id",
-                json_field("r.material", "$.proposal_id", JsonType::Integer)
-            ),
-            [task],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(material) = reopened {
-        return Ok(Some((
-            DraftOrigin::Reopened,
-            serde_json::from_str(&material)?,
-        )));
-    }
-    let row: Option<(String, String)> = conn
-        .query_row(
-            "SELECT origin, material FROM draft_origins WHERE task_id=?1",
-            [task],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    row.map(|(origin, material)| Ok((origin.parse()?, serde_json::from_str(&material)?)))
-        .transpose()
+    draft_origin_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        task,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The planners of the runtime's opened for `draft` that count to
@@ -1870,6 +1727,222 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
         extend(&mut payload, fields);
         event(conn, adoption.task, None, kind, payload)?;
     }
+    Ok(())
+}
+
+pub(super) fn read_revisit_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<DraftRevisit>> {
+    Ok(conn
+        .query_row(
+            "SELECT task_id, revisit_at, note, set_by, set_by_id, created_at, opened_at, planner_id
+             FROM draft_revisits WHERE task_id=?1",
+            crate::infrastructure::sql_exec::sql_params![task],
+            |r| {
+                let revisit_at: i64 = r.get(1)?;
+                Ok(DraftRevisit {
+                    task_id: r.get(0)?,
+                    revisit_at,
+                    revisit_at_utc: crate::domain::marks::utc_text(revisit_at.saturating_mul(1000)),
+                    note: r.get(2)?,
+                    set_by: r.get(3)?,
+                    set_by_id: r.get(4)?,
+                    created_at: r.get(5)?,
+                    opened_at: r.get(6)?,
+                    planner_id: r.get(7)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// The follow_up drafts the receipts and the reviews of `task`'s runs
+/// proposed, by ID, with their status now (ADR-t807-1, ADR-t2352-1).
+pub(super) fn follow_up_drafts_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Vec<FollowUpDraft>> {
+    Ok(conn.query_map(
+        &format!(
+            "SELECT o.task_id, {},
+                    {}, t.title, t.status
+             FROM draft_origins o JOIN tasks t ON t.id=o.task_id
+             WHERE o.origin='follow_up' AND {}=?1
+             ORDER BY o.task_id",
+            conn.dialect()
+                .json_field("o.material", "$.source_run_id", JsonType::Text),
+            conn.dialect()
+                .json_field("o.material", "$.index", JsonType::Integer),
+            conn.dialect()
+                .json_field("o.material", "$.source_task_id", JsonType::Integer)
+        ),
+        crate::infrastructure::sql_exec::sql_params![task],
+        |r| {
+            Ok(FollowUpDraft {
+                task_id: r.get(0)?,
+                run_id: r.get(1)?,
+                index: r.get(2)?,
+                title: r.get(3)?,
+                status: r.get(4)?,
+            })
+        },
+    )?)
+}
+
+pub(super) fn task_origin_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<TaskOrigin>> {
+    let Some((origin, material)) = draft_origin_port(conn, task)? else {
+        return Ok(None);
+    };
+    let planners: Vec<PlannerId> = conn.query_map(
+        "SELECT planner_id FROM draft_bundle_members WHERE task_id=?1 ORDER BY planner_id",
+        crate::infrastructure::sql_exec::sql_params![task],
+        |r| r.get(0),
+    )?;
+    let bundles = planners
+        .into_iter()
+        .map(|planner| bundle_view_port(conn, planner))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(Some(TaskOrigin {
+        origin,
+        source_task_id: material
+            .get("source_task_id")
+            .and_then(Value::as_i64)
+            .map(TaskId::new),
+        source_run_id: material
+            .get("source_run_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        index: material.get("index").and_then(Value::as_i64),
+        bundle_key: BundleKey::of(origin, &material, task),
+        material,
+        bundles,
+    }))
+}
+
+pub(super) fn origin_fields_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<serde_json::Map<String, Value>> {
+    match planned_origin_port(conn, task)? {
+        Some((origin, material)) => material_fields(origin, &material, task),
+        None => Ok(serde_json::Map::new()),
+    }
+}
+
+pub(super) fn draft_origin_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<(DraftOrigin, Value)>> {
+    let reopened: Option<String> = conn
+        .query_row(
+            &format!(
+                "SELECT r.material FROM draft_reopens r JOIN tasks t ON t.id=r.task_id
+             WHERE r.task_id=?1 AND {}=t.proposal_id",
+                conn.dialect()
+                    .json_field("r.material", "$.proposal_id", JsonType::Integer)
+            ),
+            crate::infrastructure::sql_exec::sql_params![task],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(material) = reopened {
+        return Ok(Some((
+            DraftOrigin::Reopened,
+            serde_json::from_str(&material)?,
+        )));
+    }
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT origin, material FROM draft_origins WHERE task_id=?1",
+            crate::infrastructure::sql_exec::sql_params![task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    row.map(|(origin, material)| Ok((origin.parse()?, serde_json::from_str(&material)?)))
+        .transpose()
+}
+
+fn bundle_view_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    planner: PlannerId,
+) -> Result<Option<DraftBundleView>> {
+    let row: Option<(String, String, String, i64)> = conn
+        .query_row(
+            "SELECT origin, key_kind, key_value, created_at FROM draft_bundles WHERE planner_id=?1",
+            crate::infrastructure::sql_exec::sql_params![planner],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((origin, key_kind, key_value, created_at)) = row else {
+        return Ok(None);
+    };
+    let members = conn.query_map(
+        "SELECT m.task_id, m.attempt, m.outcome, m.proposal_id, m.duplicate_of, t.status
+             FROM draft_bundle_members m JOIN tasks t ON t.id=m.task_id
+             WHERE m.planner_id=?1 ORDER BY m.task_id",
+        crate::infrastructure::sql_exec::sql_params![planner],
+        |r| {
+            Ok(DraftBundleMember {
+                task_id: r.get(0)?,
+                attempt: r.get(1)?,
+                outcome: r.get(2)?,
+                proposal_id: r.get(3)?,
+                duplicate_of: r.get(4)?,
+                status: r.get(5)?,
+            })
+        },
+    )?;
+    Ok(Some(DraftBundleView {
+        planner_id: planner,
+        origin,
+        key_kind,
+        key_value,
+        created_at,
+        members,
+    }))
+}
+
+fn planned_origin_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<(DraftOrigin, Value)>> {
+    if let Some(origin) = draft_origin_port(conn, task)? {
+        return Ok(Some(origin));
+    }
+    Ok(read_revisit_port(conn, task)?.map(|_| (DraftOrigin::Revisit, json!({}))))
+}
+
+/// Record that the draft `task` is a ready task plan review reopened and
+/// whose proposal was withdrawn (origin `reopened`, task 418), inside the
+/// caller's write transaction; a later withdrawal replaces the material.
+/// The material's `reason` is the reason of the verdict's reopen, and
+/// `reviewed_proposal_id` the proposal of the plan review that reopened it.
+///
+/// `draft_reopens` is a table of its own, not an origin in `draft_origins`,
+/// because widening that origin would rebuild the table (a breaking
+/// migration) and an older binary could not read the new origin; an older
+/// binary just opens no planner for such a draft. The row counts only while
+/// its material's `proposal_id` is the task's current proposal, and it is
+/// read before `draft_origins`, so a follow-up that was adopted and later
+/// reopened shows as `reopened`. It is not counted as a registered draft.
+pub(super) fn record_reopened_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    task: TaskId,
+    material: &Value,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO draft_reopens(task_id, material, created_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(task_id) DO UPDATE SET material=excluded.material, created_at=excluded.created_at",
+        crate::infrastructure::sql_exec::sql_params![task, serde_json::to_string(material)?, now],
+    )?;
     Ok(())
 }
 

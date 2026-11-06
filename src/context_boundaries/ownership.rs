@@ -365,7 +365,8 @@ pub(super) const TABLES: &[Table] = &[
 
 #[rustfmt::skip]
 pub(super) const STORES: &[Store] = &[
-    store("src/infrastructure/sqlite.rs", Planning), // TaskStore
+    store("src/infrastructure/sqlite.rs", Planning), // SQLite entries and compatibility wrappers
+    store("src/infrastructure/task_store.rs", Planning), // shared TaskStore SQL
     store("src/infrastructure/store_writes.rs", Planning), // what sqlite.rs and the moved modules share
     store("src/infrastructure/proposals.rs", Planning),
     store("src/infrastructure/plan_reviews.rs", Planning),
@@ -410,14 +411,14 @@ pub(super) const STORES: &[Store] = &[
 
 #[rustfmt::skip]
 pub(super) const TRANSACTIONS: &[Transaction] = &[
-    transaction("T1", Execution, "src/infrastructure/sqlite.rs", "claim_task", "claim: no run without its owner, no in_progress without its run (ADR-0054); runtime_store::transitions calls it"),
+    transaction("T1", Execution, "src/infrastructure/task_store.rs", "claim_task", "claim: no run without its owner, no in_progress without its run (ADR-0054); runtime_store::transitions calls it"),
     transaction("T1", Execution, "src/infrastructure/runtime_store/transitions.rs", "claim_for_supervisor_holding", "claim, the supervisor's side"),
     transaction("T2", Execution, "src/infrastructure/runtime_store/transitions.rs", "finish_integration", "the landing on main and the task's completion agree"),
-    transaction("T2", Execution, "src/infrastructure/sqlite.rs", "complete_task", "planning's function T2 and T12 complete the task through"),
+    transaction("T2", Execution, "src/infrastructure/task_store.rs", "complete_task", "planning's function T2 and T12 complete the task through"),
     transaction("T3", Planning, "src/infrastructure/plan_reviews.rs", "decide_plan", "a proposal and its tasks in one step"),
     transaction("T4", Execution, "src/infrastructure/runtime_store/recovery.rs", "decide_triage", "a run's failure and its task's next state in one step (ADR-0047 decision 40)"),
-    transaction("T4", Execution, "src/infrastructure/sqlite.rs", "transition_task", "planning's function T4 changes the task through"),
-    transaction("T4", Execution, "src/infrastructure/sqlite.rs", "cancel_task", "planning's function T4 and T12 cancel the task through, with the answer as its reason (ADR-t947-4)"),
+    transaction("T4", Execution, "src/infrastructure/task_store.rs", "transition_task", "planning's function T4 changes the task through"),
+    transaction("T4", Execution, "src/infrastructure/task_store.rs", "cancel_task", "planning's function T4 and T12 cancel the task through, with the answer as its reason (ADR-t947-4)"),
     transaction("T5", Planning, "src/infrastructure/goal_reviews.rs", "decide_goal", "a goal's verdict and its gap tasks in one step"),
     transaction("T6", Planning, "src/infrastructure/finding_planners.rs", "submit_linking", "no double proposal of a finding"),
     transaction("T6", Planning, "src/infrastructure/finding_planners.rs", "settle_findings", "the verdict goes back to the finding"),

@@ -10,12 +10,12 @@ use super::sql_exec::{OptionalRow, sql_params};
 use super::store_writes::{self, EventTx};
 use crate::domain::event_kind::EventKind;
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 
 use super::{
     asks::{ask_row, read_ask},
-    sqlite::{SqliteQueue, enum_col, event_row, json_col, record_queue_event_in},
+    sqlite::{SqliteQueue, event_row, record_queue_event_in},
 };
 use crate::application::{PlanRequestStore, PlannerAnswerRoute, RequestPlannerStart};
 use crate::domain::{
@@ -529,30 +529,6 @@ pub(super) fn record_missing_spike_requests(tx: &impl EventTx, now: i64) -> Resu
     Ok(recorded)
 }
 
-/// Decline the `open` request of replanning operation `op` that `outcome`
-/// closes with no planner of the runtime's open for it (none was opened,
-/// or each one ended without deciding it), before the operation's
-/// snapshot or after it, on `conn` inside the move's own transaction: no
-/// planner will be opened for it (the operation is no longer with the
-/// planner), and `declined` with the operation's outcome as the reason
-/// tells the person who asked (`request_declined` by the runtime, naming
-/// the operation, which [`declined_at_close`] reads). Whether it declined
-/// it: a request already ended is left as it is.
-pub(super) fn decline_undecided(
-    conn: &Connection,
-    request: RequestId,
-    op: crate::domain::ReplanId,
-    outcome: crate::domain::task_replan::ReplanStatus,
-    why: &str,
-    now: i64,
-) -> Result<bool> {
-    let reason = format!(
-        "replan operation {op} ended {} with no planner of the runtime's open for it: {why}",
-        outcome.as_str()
-    );
-    decline_for_operation(conn, request, op, outcome, &reason, None, now)
-}
-
 /// Decline, on `conn` inside the transaction that closes planner
 /// `planner`'s row, the `open` request it was opened for when the request's
 /// replanning operation closed while it was open and it ended without
@@ -615,57 +591,26 @@ fn decline_for_operation(
     ended_planner: Option<PlannerId>,
     now: i64,
 ) -> Result<bool> {
-    if read_request(conn, request)?.status != RequestStatus::Open {
-        return Ok(false);
-    }
-    set_status(conn, request, RequestStatus::Declined, reason, now)?;
-    let closed = super::asks::close_request_asks_in(conn, request, reason, now)?;
-    let mut payload = json!({
-        "request_id": request,
-        "planner_id": null,
-        "reason": reason,
-        "by": "runtime",
-        "replan_operation_id": op,
-        "replan_status": outcome,
-        "closed_asks": closed,
-    });
-    if let Some(planner) = ended_planner {
-        payload["ended_planner_id"] = json!(planner);
-    }
-    record_queue_event_in(conn, EventKind::RequestDeclined, &payload)?;
-    Ok(true)
+    decline_for_operation_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        request,
+        op,
+        outcome,
+        reason,
+        ended_planner,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Whether a planner of the runtime's is open for `request` now, read on
 /// `conn`: one that is is left to end the request.
 pub(super) fn planner_open(conn: &Connection, request: RequestId) -> Result<bool> {
-    Ok(open_planner_of(conn, request)?.is_some())
-}
-
-/// Whether the runtime declined `request` as replanning operation `op`
-/// closed undecided ([`decline_undecided`], [`decline_after_planner`]),
-/// read on `conn` from its `request_declined`: such a request is renewed
-/// when the operation goes on to the planner again ([`renew_declined`]),
-/// one its planner submitted, declined or ran out of planners on is not.
-pub(super) fn declined_at_close(
-    conn: &Connection,
-    request: RequestId,
-    op: crate::domain::ReplanId,
-) -> Result<bool> {
-    Ok(conn.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM plan_requests r JOIN run_events e ON e.kind=?3
-             AND {}=r.id
-             AND {}='runtime'
-             AND {}=?2
-         WHERE r.id=?1 AND r.status='declined')",
-            json_field("e.payload", "$.request_id", JsonType::Integer),
-            json_field("e.payload", "$.by", JsonType::Text),
-            json_field("e.payload", "$.replan_operation_id", JsonType::Integer)
-        ),
-        params![request, op, EventKind::RequestDeclined.as_str()],
-        |r| r.get(0),
-    )?)
+    planner_open_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        request,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// Record, on `conn` inside the move's own transaction, the new request of
@@ -682,89 +627,20 @@ pub(super) fn renew_declined(
     op: crate::domain::ReplanId,
     now: i64,
 ) -> Result<RequestId> {
-    let old = read_request(conn, ended)?;
-    let id = RequestId::new(super::sqlite::insert_id(
-        conn,
-        "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
-           created_at, updated_at, priority, replan_operation_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7, ?8)",
-        params![
-            old.text,
-            old.note,
-            serde_json::to_string(&old.refs)?,
-            old.requested_by,
-            old.requested_by_id,
-            now,
-            old.priority.map(Priority::as_i64),
-            op
-        ],
-    )?);
-    record_queue_event_in(
-        conn,
-        EventKind::RequestRecorded,
-        &json!({
-            "request_id": id,
-            "refs": old.refs,
-            "priority": old.priority,
-            "requested_by": old.requested_by,
-            "replan_operation_id": op,
-            "renews_request": ended,
-        }),
-    )?;
-    Ok(id)
+    renew_declined_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        ended,
+        op,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The request `id` with its proposals and the number of its planners; a
 /// missing one is an error.
 pub(super) fn read_request(conn: &Connection, id: RequestId) -> Result<PlanRequest> {
-    let mut request = conn
-        .query_row("SELECT * FROM plan_requests WHERE id=?1", [id], request_row)
-        .optional()?
-        .with_context(|| format!("request {id} does not exist"))?;
-    request.proposals = conn
-        .prepare(
-            "SELECT proposal_id FROM plan_request_proposals WHERE request_id=?1
-             ORDER BY created_at, proposal_id",
-        )?
-        .query_map([id], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let planners: i64 = conn.query_row(
-        "SELECT count(*) FROM planners WHERE request_id=?1 AND answer_wait_at IS NULL",
-        [id],
-        |r| r.get(0),
-    )?;
-    request.planners = usize::try_from(planners)?;
-    Ok(request)
-}
-
-fn request_row(r: &Row<'_>) -> rusqlite::Result<PlanRequest> {
-    Ok(PlanRequest {
-        id: r.get("id")?,
-        text: r.get("text")?,
-        note: r.get("note")?,
-        refs: json_col(r, "refs")?,
-        priority: r
-            .get::<_, Option<i64>>("priority")?
-            .map(Priority::from_i64)
-            .transpose()
-            .map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Integer,
-                    Box::new(error),
-                )
-            })?,
-        requested_by: r.get("requested_by")?,
-        requested_by_id: r.get("requested_by_id")?,
-        status: enum_col(r, "status")?,
-        status_reason: r.get("status_reason")?,
-        proposals: Vec::new(),
-        planners: 0,
-        spike_task: r.get("spike_task_id")?,
-        replan_operation: r.get("replan_operation_id")?,
-        created_at: r.get("created_at")?,
-        updated_at: r.get("updated_at")?,
-    })
+    read_request_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), id)
+        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 fn set_status(
@@ -774,22 +650,22 @@ fn set_status(
     reason: &str,
     now: i64,
 ) -> Result<()> {
-    conn.execute(
-        "UPDATE plan_requests SET status=?2, status_reason=?3, updated_at=?4 WHERE id=?1",
-        params![request, to.as_str(), reason, now],
-    )?;
-    Ok(())
+    set_status_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        request,
+        to,
+        reason,
+        now,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 fn open_planner_of(conn: &Connection, request: RequestId) -> Result<Option<PlannerSession>> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM planners WHERE origin='runtime' AND closed_at IS NULL
-             AND request_id=?1 ORDER BY id DESC LIMIT 1",
-            [request],
-            super::planners::planner_row,
-        )
-        .optional()?)
+    open_planner_of_port(
+        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
+        request,
+    )
+    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
 }
 
 /// The planner of the runtime's open for `request` that an answer may
@@ -1015,4 +891,226 @@ impl crate::application::commands::requests::RequestStore for SqliteQueue {
     ) -> Result<PlanRequest> {
         SqliteQueue::decline_request_choosing(self, request, reason, by, planner, continue_run)
     }
+}
+
+pub(super) fn renew_declined_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    ended: RequestId,
+    op: crate::domain::ReplanId,
+    now: i64,
+) -> Result<RequestId> {
+    let old = read_request_port(conn, ended)?;
+    let id = RequestId::new(conn.insert_id(
+        "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
+           created_at, updated_at, priority, replan_operation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7, ?8)",
+        crate::infrastructure::sql_exec::sql_params![
+            old.text,
+            old.note,
+            serde_json::to_string(&old.refs)?,
+            old.requested_by,
+            old.requested_by_id,
+            now,
+            old.priority.map(Priority::as_i64),
+            op
+        ],
+    )?);
+    crate::infrastructure::store_writes::record_queue_event_in(
+        conn,
+        EventKind::RequestRecorded,
+        &json!({
+            "request_id": id,
+            "refs": old.refs,
+            "priority": old.priority,
+            "requested_by": old.requested_by,
+            "replan_operation_id": op,
+            "renews_request": ended,
+        }),
+    )?;
+    Ok(id)
+}
+
+/// Whether the runtime declined `request` as replanning operation `op`
+/// closed undecided ([`decline_undecided`], [`decline_after_planner`]),
+/// read on `conn` from its `request_declined`: such a request is renewed
+/// when the operation goes on to the planner again ([`renew_declined`]),
+/// one its planner submitted, declined or ran out of planners on is not.
+pub(super) fn declined_at_close_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    request: RequestId,
+    op: crate::domain::ReplanId,
+) -> Result<bool> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM plan_requests r JOIN run_events e ON e.kind=?3
+             AND {}=r.id
+             AND {}='runtime'
+             AND {}=?2
+         WHERE r.id=?1 AND r.status='declined')",
+            conn.dialect()
+                .json_field("e.payload", "$.request_id", JsonType::Integer),
+            conn.dialect()
+                .json_field("e.payload", "$.by", JsonType::Text),
+            conn.dialect()
+                .json_field("e.payload", "$.replan_operation_id", JsonType::Integer)
+        ),
+        crate::infrastructure::sql_exec::sql_params![
+            request,
+            op,
+            EventKind::RequestDeclined.as_str()
+        ],
+        |r| r.get(0),
+    )?)
+}
+
+/// Decline the `open` request of replanning operation `op` that `outcome`
+/// closes with no planner of the runtime's open for it (none was opened,
+/// or each one ended without deciding it), before the operation's
+/// snapshot or after it, on `conn` inside the move's own transaction: no
+/// planner will be opened for it (the operation is no longer with the
+/// planner), and `declined` with the operation's outcome as the reason
+/// tells the person who asked (`request_declined` by the runtime, naming
+/// the operation, which [`declined_at_close`] reads). Whether it declined
+/// it: a request already ended is left as it is.
+pub(super) fn decline_undecided_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    request: RequestId,
+    op: crate::domain::ReplanId,
+    outcome: crate::domain::task_replan::ReplanStatus,
+    why: &str,
+    now: i64,
+) -> Result<bool> {
+    let reason = format!(
+        "replan operation {op} ended {} with no planner of the runtime's open for it: {why}",
+        outcome.as_str()
+    );
+    decline_for_operation_port(conn, request, op, outcome, &reason, None, now)
+}
+
+pub(super) fn planner_open_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    request: RequestId,
+) -> Result<bool> {
+    Ok(open_planner_of_port(conn, request)?.is_some())
+}
+
+pub(super) fn read_request_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: RequestId,
+) -> Result<PlanRequest> {
+    let mut request = conn
+        .query_row(
+            "SELECT * FROM plan_requests WHERE id=?1",
+            crate::infrastructure::sql_exec::sql_params![id],
+            request_row_port,
+        )
+        .optional()?
+        .with_context(|| format!("request {id} does not exist"))?;
+    request.proposals = conn.query_map(
+        "SELECT proposal_id FROM plan_request_proposals WHERE request_id=?1
+             ORDER BY created_at, proposal_id",
+        crate::infrastructure::sql_exec::sql_params![id],
+        |r| r.get(0),
+    )?;
+    let planners: i64 = conn.query_row(
+        "SELECT count(*) FROM planners WHERE request_id=?1 AND answer_wait_at IS NULL",
+        crate::infrastructure::sql_exec::sql_params![id],
+        |r| r.get(0),
+    )?;
+    request.planners = usize::try_from(planners)?;
+    Ok(request)
+}
+
+fn decline_for_operation_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    request: RequestId,
+    op: crate::domain::ReplanId,
+    outcome: crate::domain::task_replan::ReplanStatus,
+    reason: &str,
+    ended_planner: Option<PlannerId>,
+    now: i64,
+) -> Result<bool> {
+    if read_request_port(conn, request)?.status != RequestStatus::Open {
+        return Ok(false);
+    }
+    set_status_port(conn, request, RequestStatus::Declined, reason, now)?;
+    let closed = super::asks::close_request_asks_in_port(conn, request, reason, now)?;
+    let mut payload = json!({
+        "request_id": request,
+        "planner_id": null,
+        "reason": reason,
+        "by": "runtime",
+        "replan_operation_id": op,
+        "replan_status": outcome,
+        "closed_asks": closed,
+    });
+    if let Some(planner) = ended_planner {
+        payload["ended_planner_id"] = json!(planner);
+    }
+    crate::infrastructure::store_writes::record_queue_event_in(
+        conn,
+        EventKind::RequestDeclined,
+        &payload,
+    )?;
+    Ok(true)
+}
+
+fn open_planner_of_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    request: RequestId,
+) -> Result<Option<PlannerSession>> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM planners WHERE origin='runtime' AND closed_at IS NULL
+             AND request_id=?1 ORDER BY id DESC LIMIT 1",
+            crate::infrastructure::sql_exec::sql_params![request],
+            super::planners::planner_row_port,
+        )
+        .optional()?)
+}
+
+fn request_row_port(
+    r: &crate::infrastructure::sql_exec::SqlRow<'_>,
+) -> crate::infrastructure::sql_exec::SqlResult<PlanRequest> {
+    Ok(PlanRequest {
+        id: r.get("id")?,
+        text: r.get("text")?,
+        note: r.get("note")?,
+        refs: crate::infrastructure::store_rows::json_col(r, "refs")?,
+        priority: r
+            .get::<_, Option<i64>>("priority")?
+            .map(Priority::from_i64)
+            .transpose()
+            .map_err(
+                |error| crate::infrastructure::sql_exec::SqlError::Conversion {
+                    index: 0,
+                    stored: crate::infrastructure::sql_exec::ValueKind::Integer,
+                    cause: Box::new(error),
+                },
+            )?,
+        requested_by: r.get("requested_by")?,
+        requested_by_id: r.get("requested_by_id")?,
+        status: crate::infrastructure::store_rows::enum_col(r, "status")?,
+        status_reason: r.get("status_reason")?,
+        proposals: Vec::new(),
+        planners: 0,
+        spike_task: r.get("spike_task_id")?,
+        replan_operation: r.get("replan_operation_id")?,
+        created_at: r.get("created_at")?,
+        updated_at: r.get("updated_at")?,
+    })
+}
+
+fn set_status_port(
+    conn: &impl crate::infrastructure::store_writes::EventTx,
+    request: RequestId,
+    to: RequestStatus,
+    reason: &str,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE plan_requests SET status=?2, status_reason=?3, updated_at=?4 WHERE id=?1",
+        crate::infrastructure::sql_exec::sql_params![request, to.as_str(), reason, now],
+    )?;
+    Ok(())
 }
