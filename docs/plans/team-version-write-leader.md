@@ -14,6 +14,7 @@ related:
   - adr-t3986-1
   - adr-t4291-1
   - adr-t4124-1
+  - adr-t4400-1
   - adr-t3981-1
   - adr-t3982-1
   - plan-team-version-sqlite-dialect
@@ -144,7 +145,7 @@ migration との順:
 
 ## (d) 古い event と台帳の移し方
 
-方針・不変条件・退けた案は [ADR-t4124-1](../adr/2026-11-05-t4124-1-local-opt-in-archive-of-old-events-and-ledger-rows-port-parquet-boundary-mover-shrink-and-read-paths.md)（ADR-t3986-1 決定8 を amends）が持つ。opt-in・port・形式・境目・移す係・縮め方・読む経路はそちらを正にし、ここは鍵の形・値の案・部品の見込み・棚卸しだけを持つ。
+方針・不変条件・退けた案は [ADR-t4124-1](../adr/2026-11-05-t4124-1-local-opt-in-archive-of-old-events-and-ledger-rows-port-parquet-boundary-mover-shrink-and-read-paths.md)（ADR-t3986-1 決定8 を amends）と [ADR-t4400-1](../adr/2026-11-06-t4400-1-archive-read-order-authority-config-and-report-senders.md)（読む順・操作の権限・値の読み元・report の送り手）が持つ。opt-in・port・形式・境目・移す係・縮め方・読む経路はそちらを正にし、ここは鍵の形・値の案・部品の見込み・棚卸しだけを持つ。
 
 ### 置き場の形と値の案
 
@@ -235,7 +236,7 @@ kind の全部か閉じた対象まで読む読み手:
 - 確定（`final`）は錠でなく、後の入力で畳み直す。印を消すまでは入力が来ても畳まない。
 - queue と session の行も run の event から畳むので（`mark_events` の doc comment）、run の event を移す条件に入れる。印を見ずに畳むと `behind` で書かれず印のまま残って係の進みを止めるか、台帳の版の上がりで減った中身に書き換わる。実装の task は cursor 0 から作り直しても移した行が作られず変わらないことを test にする。
 - 印の表を足す migration の先頭は `-- dagq-schema: breaking` にする（ADR 決定5）。表は作り直さない（`docs/design/persistence.md` の fail closed の列を足す前例と同じ）。
-- 読む側の合わせ方（ADR 決定7）: 台帳の窓は行を 1 件ずつ畳む（`WindowRows`）ので、全部を持って除くのでなく、先に DB の鍵を受けて写しの行のうち DB にある鍵を飛ばす形にする。写しどうしの重なりは `inputs_through` の進んだ方を採る。ピークは [kpi の読みの Spike](kpi-read-memory-spike.md) の測り方で確かめる。
+- 読む側の合わせ方（ADR 決定7）: 台帳の窓は行を 1 件ずつ畳む（`WindowRows`）ので、全部を持って除くのでなく、DB の行を読み終えて畳んだ後の鍵を保持し、その後に消えない移した履歴から区切りを選んで写しを読み、畳んだ鍵の行を飛ばす形にする（ADR-t4400-1 決定1）。読み戻しで消す印を合わせる読みの区切りの元にせず、移した記録が無い判定も DB を読み終えた後に行う。写しどうしの重なりは `inputs_through` の進んだ方を採る。ピークは [kpi の読みの Spike](kpi-read-memory-spike.md) の測り方で確かめる。
 
 ## (e) ローカルから移す手順の形
 
@@ -244,7 +245,7 @@ kind の全部か閉じた対象まで読む読み手:
 3. 人の CLI が export のユースケース（専用の capability `queue.transfer`。user だけ）を呼ぶ。export は係の書き込みの列に並ぶ 1 つの transaction（SQLite の `BEGIN IMMEDIATE`）で、まず未完了の run・`run_leases` の行・生きている `supervisors` の登録が無いことを確かめ（あれば `export_refused`）、`queue_exported` の event を書き、同じ transaction の snapshot から下の「移す表」を表ごとに JSON Lines で書き出し、表ごとの行数と中身の hash の一覧を添える。export を終えた service は、起動し直すまで書き込みを `queue_exported` の答えで拒む（export の後の書き込みが移らずに失われないように）。
 4. `dagq service stop` で service を止める。
 5. export の版とチームの版の build の版が同じことを確かめる（違えば 2 に戻り、ローカルを先に `migrate` してから export し直す）。チームの版の `init` が表の無い Postgres の database に基点から最新まで schema を作る（ADR-t3102-2 決定1 の DB の無い所に作る例外）。`init` が作るのは版の表・リーダーの行（`generation = 0`）・空の表で、チームの版の service が起動して係になる。
-6. その service の import のユースケース（`queue.transfer`。チームの版では管理者の役の user だけ）が係として「移す表」だけを入れる。import の transaction は、リーダーの行の確かめ（係の識別子と世代が自分のもの）の次に、「移す表」がどれも 0 行で `queue_imports` の行が無いことを確かめ、違えば `import_refused`（理由つき）で何も書かない。行は ID を保って入れ、identity の次の値を移した行の最大の ID から合わせ、境目より古い行は (d) の形で置き場へ直接置き、本文が閾値を超える event は大きな本文の置き場の port（ADR-t3982-1 決定5・6）に置く。ローカルの opt-in で移した区切りは鍵の形のまま新しい置き場へ置き、直接置いた行には移した印も書く（ADR-t4124-1 の Consequences）。検索の索引は移した task・goal・note・着地の commit から検索の port が書く。終えたら `queue_imports`（出どころの queue の `application_id` と版、表ごとの行数と hash、import した人の principal と時刻）に 1 行書き、2 回目は拒む。大きな queue で 1 つの transaction に収まらないときは、表ごとの transaction に分け、最初の transaction で `queue_imports` に「進行中」の行を書いて以後の import の開始を拒む形にする（どちらにするかは Spike の結果で決める）。
+6. その service の import のユースケース（`queue.transfer`。チームの版では管理者の役の user だけ）が係として「移す表」だけを入れる。import の transaction は、リーダーの行の確かめ（係の識別子と世代が自分のもの）の次に、「移す表」がどれも 0 行で `queue_imports` の行が無いことを確かめ、違えば `import_refused`（理由つき）で何も書かない。行は ID を保って入れ、identity の次の値を移した行の最大の ID から合わせ、境目より古い行は (d) の形で置き場へ直接置き、本文が閾値を超える event は大きな本文の置き場の port（ADR-t3982-1 決定5・6）に置く。ローカルの opt-in で移した区切りは鍵の形のまま新しい置き場へ置く。直接置いた行には移した印も書き、どちらの区切りも選べる消えない移した履歴を同じ import の transaction で記録する（ADR-t4400-1 決定1）。検索の索引は移した task・goal・note・着地の commit から検索の port が書く。終えたら `queue_imports`（出どころの queue の `application_id` と版、表ごとの行数と hash、import した人の principal と時刻）に 1 行書き、2 回目は拒む。大きな queue で 1 つの transaction に収まらないときは、表ごとの transaction に分け、最初の transaction で `queue_imports` に「進行中」の行を書いて以後の import の開始を拒む形にする（どちらにするかは Spike の結果で決める）。
 7. 「移す表」の表ごとの行数と hash を export の一覧と照合し、合えばチームの版の supervisor を始める。合わなければ Postgres を捨て、ローカルを `up` し直す（起動し直した service は書き込みを受ける）。
 
 止める時間 = drain + export + import + 照合。Spike は import の実装の後に、本番の queue.db の形（表ごとの行数と本文の大きさの分布）で作った合成のデータを CI の Postgres の job の環境で流し、3・6・7 の秒を測る。
