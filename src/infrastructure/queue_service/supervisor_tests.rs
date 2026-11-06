@@ -1487,3 +1487,49 @@ fn the_queue_heads_at_a_position_cross_in_pages_as_the_queues_own() {
     assert_eq!(page(json!([at, since, null, 1])), heads[..1]);
     assert_eq!(page(json!([at, since, heads[0].head.key, 1])), heads[1..2]);
 }
+
+/// The rows of an older version cross a page at a time as the queue's own
+/// adapter gives them, as their kinds and keys.
+#[test]
+fn the_rows_of_an_older_version_cross_in_pages_as_the_queues_own() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger;
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let direct = SqliteQueue::open(&backend.db).unwrap();
+    let log = ledger::testkit::forgotten_log(1);
+    let rows = ledger::testkit::built_and_settled(&log.events, ledger::testkit::ms(100_000));
+    let mut older: Vec<ledger::LedgerRow> = rows
+        .into_iter()
+        .filter(|row| row.kind == ledger::LedgerKind::Queue)
+        .take(3)
+        .collect();
+    assert_eq!(older.len(), 3);
+    for row in &mut older {
+        row.ledger_v = ledger::LEDGER_V - 1;
+        direct.write_ledger_row(row).unwrap();
+    }
+    let every = direct.ledger_older_rows_after(None, usize::MAX).unwrap();
+    assert_eq!(every.len(), 3);
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    assert_eq!(queue.ledger_older_rows_after(None, 2).unwrap(), every[..2]);
+    assert_eq!(
+        queue.ledger_older_rows_after(Some(&every[1]), 2).unwrap(),
+        every[2..]
+    );
+    assert_eq!(
+        std::mem::take(&mut *service.ops.lock().unwrap()),
+        ["ledger_older_rows_after", "ledger_older_rows_after"]
+    );
+}

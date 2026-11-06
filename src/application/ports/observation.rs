@@ -449,22 +449,42 @@ pub trait LedgerStore {
             .map(LedgerHead::of)
             .collect())
     }
-    /// Whether the store holds a row folded by an older
+    /// Whether the store holds a row [`Self::ledger_older_rows_after`] gives.
+    /// No row is read.
+    fn ledger_older_rows(&self) -> Result<bool> {
+        Ok(!self.ledger_older_rows_after(None, 1)?.is_empty())
+    }
+    /// At most `limit` of the rows the store holds folded by an older
     /// [`crate::domain::ledger::LEDGER_V`], a legacy one aside (the store
     /// keeps the version a legacy row was first written at, and no fold
-    /// moves it): a new builder then folds from its cursors' start
-    /// ([`crate::application::supervise::start_builder`]). No row is read.
-    fn ledger_older_rows(&self) -> Result<bool> {
+    /// moves it), after `after`, by the text of their kind and their key:
+    /// what a builder gone on from R folds again by target
+    /// ([`crate::domain::ledger::builder::Builder::older_rows_to_read`]).
+    /// Their kinds and keys only: no row of this version is read.
+    fn ledger_older_rows_after(
+        &self,
+        after: Option<&(LedgerKind, String)>,
+        limit: usize,
+    ) -> Result<Vec<(LedgerKind, String)>> {
+        let mut older = Vec::new();
         for kind in LedgerKind::ALL {
-            if self
-                .ledger_rows(kind)?
-                .iter()
-                .any(|row| !row.is_legacy() && row.ledger_v < crate::domain::ledger::LEDGER_V)
-            {
-                return Ok(true);
-            }
+            older.extend(
+                self.ledger_rows(kind)?
+                    .iter()
+                    .filter(|row| {
+                        !row.is_legacy() && row.ledger_v < crate::domain::ledger::LEDGER_V
+                    })
+                    .map(|row| (kind, row.key.clone())),
+            );
         }
-        Ok(false)
+        let place = |(kind, key): &(LedgerKind, String)| (kind.as_str(), key.clone());
+        older.sort_by_key(place);
+        let after = after.map(place);
+        Ok(older
+            .into_iter()
+            .filter(|row| after.as_ref().is_none_or(|after| place(row) > *after))
+            .take(limit)
+            .collect())
     }
     /// The keys of the run rows whose steps were folded and not classified
     /// by the rules of `version`

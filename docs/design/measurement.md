@@ -136,12 +136,14 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 
 ## 台帳を作る係
 
-何を書くかは`domain::ledger::builder`が決め、`supervise::observation::ledger`が書く（印・書く行・確定・旧方式・1周の上限と、周回・保持・失敗は両moduleのdoc）。
+何を書くかは`domain::ledger::builder`が決め、`supervise::observation::ledger`が書く（両moduleのdoc）。
 
 - 着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - runは終わりから猶予の後で、telemetryのtokenの失効と資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
 - storeの印は、その位置までの全入力を行が記録する約束で、Wはsession行、Rはほかの行のカーソルごとの位置。
 - 増分の走査はRより後だけを読み、対象別・id指定の読みはRより前に及ぶが確定済みの履歴に比例しない（`builder`のdoc）。
+- 古い版の行の作り直し（対象別の読みと例外）は`builder`のdocが持つ。
+  行の持ち主を変える版上げは直らない。
 - 読めない・書けない周回は印を残して次に任せ、runとtaskの結果を変えない。
 
 ## 共通の読み取り関数

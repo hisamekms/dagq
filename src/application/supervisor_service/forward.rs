@@ -3277,9 +3277,16 @@ impl LedgerStore for SupervisorQueue {
     fn ledger_tasks_open_since(&self) -> Result<crate::domain::pre_claim::rows::Since> {
         self.remote("ledger_tasks_open_since", vec![])
     }
-    // One answer the service computes: no row crosses.
-    fn ledger_older_rows(&self) -> Result<bool> {
-        self.remote("ledger_older_rows", vec![])
+    // One page asked for: kinds and keys only cross.
+    fn ledger_older_rows_after(
+        &self,
+        after: Option<&(crate::domain::ledger::LedgerKind, String)>,
+        limit: usize,
+    ) -> Result<Vec<(crate::domain::ledger::LedgerKind, String)>> {
+        self.remote(
+            "ledger_older_rows_after",
+            vec![to_value(after)?, to_value(limit)?],
+        )
     }
     // The keys the service picks: no row crosses.
     fn ledger_runs_classified_otherwise(&self, version: &str) -> Result<Vec<String>> {

@@ -143,6 +143,7 @@ whole!(
     crate::domain::environment::RunResource,
     crate::domain::ledger::LedgerRow,
     crate::domain::ledger::LedgerHead,
+    crate::domain::ledger::LedgerKind,
     crate::domain::ledger::queue::QueueHead,
     crate::domain::ledger::session::written::SessionsWritten,
     crate::domain::ledger::session::written::Marks,

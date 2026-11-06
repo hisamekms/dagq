@@ -54,7 +54,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{ENDED_FREED, IntervalKind, PreClaimBook, PreClaimInterval, Started};
 use crate::domain::claim_hold::ENDED_SUPERVISOR_GONE;
 use crate::domain::ledger::queue::{QueueHead, cut};
-use crate::domain::ledger::{LedgerKind, LedgerRow};
+use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow};
 use crate::domain::stats::timestamp_millis;
 use crate::domain::supervisor_life::{Lives, supervisor_of};
 use crate::domain::{EventId, EventKind, RunEvent};
@@ -134,16 +134,97 @@ pub fn holds(row: &LedgerRow, since: Since) -> bool {
     }
 }
 
+/// What a fold of an older row again ([`crate::domain::ledger::builder::Builder::fold_older_again`])
+/// reads of a book and takes from one.
+impl PreClaimBook {
+    /// The wait started by `start` as it holds it, of a claim or the
+    /// landings.
+    pub fn held_wait(&self, start: EventId) -> Option<&PreClaimInterval> {
+        self.closed
+            .get(&start)
+            .map(|(interval, _)| interval)
+            .or_else(|| self.open.get(&start))
+            .or_else(|| self.landings.get(&start).map(|(interval, _)| interval))
+    }
+
+    /// The last event `start`'s wait read, as it holds it: an input of a
+    /// fold of it again.
+    pub fn reach_of(&self, start: EventId) -> Option<EventId> {
+        self.held_wait(start).map(|wait| wait.reach)
+    }
+
+    /// Take what `fold`, a book of only the inputs of the wait started by
+    /// `start`, made of it in place of what it holds, an older row's values
+    /// (a builder going on from the rows,
+    /// [`crate::domain::ledger::builder::Builder::fold_older_again`]). One
+    /// the inputs leave open is held open, and its supervisor's life ends it
+    /// as it ends any ([`Self::close_lives`], [`Self::interval`]). A start of
+    /// no wait in `fold` leaves it as it is.
+    pub fn folded_again(&mut self, start: EventId, fold: &Self) {
+        if let Some(landing) = fold.landings.get(&start) {
+            self.landings.insert(start, landing.clone());
+            if self.landing_hold == Some(start) && landing.1.is_some() {
+                self.landing_hold = None;
+            }
+            if fold.landing_hold == Some(start) {
+                self.landing_hold.get_or_insert(start);
+            }
+            return;
+        }
+        let (closed, open) = (fold.closed.get(&start), fold.open.get(&start));
+        if closed.is_none() && open.is_none() {
+            return;
+        }
+        self.open.remove(&start);
+        self.closed.remove(&start);
+        self.slots.retain(|_, at| *at != start);
+        self.deferrals.retain(|_, at| *at != start);
+        if self.claim_hold == Some(start) {
+            self.claim_hold = None;
+        }
+        if let Some(closed) = closed {
+            self.closed.insert(start, closed.clone());
+        }
+        if let Some(open) = open {
+            self.open.insert(start, open.clone());
+            if let Some(supervisor) = open
+                .supervisor
+                .clone()
+                .filter(|_| open.kind == IntervalKind::SlotsFull)
+            {
+                self.named.insert(supervisor);
+            }
+        }
+        for (key, at) in &fold.slots {
+            if *at == start {
+                self.slots.entry(key.clone()).or_insert(start);
+            }
+        }
+        for (task, at) in &fold.deferrals {
+            if *at == start {
+                self.deferrals.entry(*task).or_insert(start);
+            }
+        }
+        if fold.claim_hold == Some(start) {
+            self.claim_hold.get_or_insert(start);
+        }
+    }
+}
+
 /// Whether the books made again at the position `at` ([`books`]) are made
 /// from `row`, one of the rows the store holds written at a later
 /// position: one [`holds`] keeps for `since` (that of the position,
-/// [`crate::application::LedgerStore::ledger_tasks_open_since_at`]), or a
-/// wait's or a stream's that read past `at`, which may be open there.
+/// [`crate::application::LedgerStore::ledger_tasks_open_since_at`]), a
+/// wait's or a stream's that read past `at`, which may be open there, or a
+/// wait's of an older [`LEDGER_V`], whose row folds out of the book and is
+/// to be written again.
 pub fn holds_at(row: &LedgerRow, since: Since, at: EventId) -> bool {
     holds(row, since)
         || (row.kind == LedgerKind::Queue
-            && subject_kind(row).is_some_and(|kind| kind == STREAM || started(kind).is_some())
-            && row.inputs_through.last() > at)
+            && subject_kind(row).is_some_and(|kind| {
+                ((kind == STREAM || started(kind).is_some()) && row.inputs_through.last() > at)
+                    || (started(kind).is_some() && row.ledger_v < LEDGER_V)
+            }))
 }
 
 /// Whether `row` is of a wait before a claim settled that a book made
@@ -225,7 +306,8 @@ fn told(rows: &[LedgerRow]) -> BTreeMap<String, Told> {
         };
         let told = by.entry(supervisor).or_default();
         told.last_id = told.last_id.max(row.inputs_through.last());
-        if life_ended(row) {
+        // An older fold's time is no input: its last event is ([`living`]).
+        if life_ended(row) && row.ledger_v >= LEDGER_V {
             told.ended_ms = told.ended_ms.max(row.ended_at);
         }
     }

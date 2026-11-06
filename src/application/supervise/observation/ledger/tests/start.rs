@@ -16,6 +16,8 @@ use crate::domain::toolchain::Toolchains;
 
 mod time_read;
 
+mod older;
+
 type Rows = BTreeMap<(LedgerKind, String), LedgerRow>;
 
 /// The latest time of an event read up to the event `at` of `log`, as the
@@ -388,6 +390,11 @@ struct ReadsOfAStart {
 }
 
 fn reads_of_a_start(settled: usize) -> ReadsOfAStart {
+    reads_of_a_start_on(settled, &|_| {})
+}
+
+/// [`reads_of_a_start`], `change` given the store before the start.
+fn reads_of_a_start_on(settled: usize, change: &dyn Fn(&Memory)) -> ReadsOfAStart {
     let classifier = rules("test");
     let memory = Memory::default();
     let mut log = settled_and_open(settled, &memory);
@@ -416,6 +423,7 @@ fn reads_of_a_start(settled: usize) -> ReadsOfAStart {
         LATER + 1,
     );
     memory.events.replace(log.events.clone());
+    change(&memory);
 
     memory.forget_reads();
     memory.read.set(0);
@@ -731,66 +739,6 @@ fn a_start_on_a_store_with_no_mark_and_lagging_rows_writes_the_rows_of_every_eve
     drain(&whole, &mut Builder::default(), LATER);
     let rows = started_and_drained(&memory, &log, LATER);
     assert_eq!(differing(&rows, &whole.rows.into_inner()), Vec::new());
-}
-
-/// A store with R that holds a row older than this version starts from its
-/// cursors' start; so does one with no mark whatever its rows' versions. A
-/// legacy row's version, which the store keeps as first written, is no such
-/// row: a start goes on from R over it.
-#[test]
-fn a_store_with_an_older_row_starts_from_the_cursors_start() {
-    let (log, samples) = every_kind_of_row();
-    let whole = drained_store(&log, &samples, log.events.len(), LATER)
-        .rows
-        .into_inner();
-
-    let older = |memory: &Memory, key: &(LedgerKind, String)| {
-        memory.rows.borrow_mut().get_mut(key).unwrap().ledger_v = LEDGER_V - 1;
-    };
-    let some_task = whole
-        .keys()
-        .find(|(kind, _)| *kind == LedgerKind::Task)
-        .unwrap()
-        .clone();
-
-    let memory = drained_store(&log, &samples, log.events.len(), LATER);
-    older(&memory, &some_task);
-    assert!(rows_written(&memory).unwrap().is_some());
-    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
-    assert_eq!(builder.cursors(), Cursors::default());
-    drain(&memory, &mut builder, LATER);
-    assert_eq!(differing(&memory.rows.borrow(), &whole), Vec::new());
-    assert_eq!(memory.scans.borrow().first().unwrap().1, 0);
-
-    let memory = drained_store(&log, &samples, log.events.len(), LATER);
-    older(&memory, &some_task);
-    memory.mark.replace(None);
-    memory.rows_mark.replace(None);
-    assert_eq!(rows_written(&memory).unwrap(), None);
-    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
-    assert_eq!(builder.cursors(), Cursors::default());
-    drain(&memory, &mut builder, LATER);
-    assert_eq!(differing(&memory.rows.borrow(), &whole), Vec::new());
-
-    let legacy = Memory::default();
-    let mut log = Log::default();
-    log.legacy(1, &run_id(1), 0);
-    legacy.events.replace(log.events.clone());
-    drain(&legacy, &mut Builder::default(), LATER);
-    assert!(
-        legacy
-            .rows
-            .borrow_mut()
-            .values_mut()
-            .filter(|row| row.is_legacy())
-            .map(|row| row.ledger_v = LEDGER_V - 1)
-            .count()
-            > 0
-    );
-    assert!(!legacy.ledger_older_rows().unwrap());
-    let builder = start_builder(&legacy, ms(LATER)).unwrap();
-    assert_eq!(builder.cursors(), r_of(&legacy));
-    assert_eq!(builder.events, log.last());
 }
 
 /// The kind of a landing slot's rows and the keys of those in `rows`.

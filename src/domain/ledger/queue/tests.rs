@@ -1184,6 +1184,69 @@ fn a_head_is_forgotten_only_of_a_row_settled_and_closed_with_nothing_past_the_po
     ));
     assert!(!changed(|head| head.head.records = vec![EventId::new(11)]));
     assert!(changed(|head| head.head.records = vec![EventId::new(10)]));
+    assert!(!changed(|head| head.head.ledger_v = LEDGER_V - 1));
+}
+
+/// A settled row no later event reaches stays in a book made of its head
+/// while it is of an older version, its fold to be written again; the same
+/// row of this version does not.
+#[test]
+fn a_book_keeps_a_closed_row_of_an_older_version() {
+    let mut row = LedgerRow::new(LedgerKind::Queue, "5".into(), None, "b");
+    row.is_final = true;
+    row.inputs_through.events = EventId::new(5);
+    row.records = vec![];
+    row.subject = Some(Subject {
+        kind: "mark_added".to_owned(),
+        ..Subject::default()
+    });
+    let book = |row: &LedgerRow| {
+        QueueBook::from_heads(
+            &[QueueHead::of(row)],
+            &PreClaimBook::default(),
+            EventId::new(10),
+        )
+    };
+    assert_eq!(book(&row).records_of("5"), None);
+    row.ledger_v = LEDGER_V - 1;
+    assert_eq!(book(&row).records_of("5"), Some(&[][..]));
+}
+
+/// A settled wait ended long before the position and the [`crate::domain::pre_claim::rows::Since`] is one
+/// the books at the position are made of only while it is of an older
+/// version, whose row folds out of them; a stream replaced is of neither.
+#[test]
+fn the_books_at_a_position_hold_the_waits_of_an_older_version() {
+    use crate::domain::pre_claim::rows::{Since, holds_at};
+    let row = |kind: &str, outcome: &str, ledger_v: u32| {
+        let mut row = LedgerRow::new(LedgerKind::Queue, "5".into(), None, "b");
+        row.is_final = true;
+        row.ledger_v = ledger_v;
+        row.ended_at = Some(1);
+        row.inputs_through.events = EventId::new(5);
+        row.outcome = Some(outcome.to_owned());
+        row.subject = Some(Subject {
+            kind: kind.to_owned(),
+            ..Default::default()
+        });
+        row
+    };
+    let since = Since {
+        ms: 1_000,
+        id: EventId::new(100),
+    };
+    let at = EventId::new(200);
+    assert!(!holds_at(&row("claim_deferral", "x", LEDGER_V), since, at));
+    assert!(holds_at(
+        &row("claim_deferral", "x", LEDGER_V - 1),
+        since,
+        at
+    ));
+    assert!(!holds_at(
+        &row("live_alert_stream", "replaced", LEDGER_V - 1),
+        since,
+        at
+    ));
 }
 
 /// A wait is left out by the [`Since`] of its position only settled, of

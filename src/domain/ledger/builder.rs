@@ -17,9 +17,7 @@
 //!   one.
 //! - **Where a new process starts**
 //!   ([`crate::application::supervise::start_builder`]): where the store's
-//!   marks give the position R and it holds no row of an older
-//!   [`LEDGER_V`] (a legacy row aside), at R. R is the one position of its
-//!   start: each cursor takes R's, and every book of [`Kept`] is made again
+//!   marks give the position R, at R. R is the one position of its start: each cursor takes R's, and every book of [`Kept`] is made again
 //!   from the rows as they were at it (below, "What a pass reads"), so that
 //!   no input after it is in a book twice, nor the rows' marks of what it
 //!   lacks missed: an input after R marks what the store lacks of it. The
@@ -28,16 +26,47 @@
 //!   the order of their ids need not be in the order of their times, so the
 //!   event at R does not say it. The rows not settled are marked with no
 //!   input, for what comes with time (a grace, a silence), and
-//!   [`Self::rules_moved`] goes as for any builder. With no R, with an R
+//!   [`Self::rules_moved`] goes as for any builder. With no R, or with an R
 //!   that does not hold that time at its position (one written before it
-//!   did, or whose events W cuts), or next to an older row, it starts with
-//!   its cursors at 0: it marks every run and task, those before the switch
+//!   did, or whose events W cuts), it starts with its cursors at 0: it marks every run and task, those before the switch
 //!   too, and catches up, and its writes fill what the rows lack and write
 //!   the marks, R with its time. Two kinds of read follow. The scan of an input after a
 //!   cursor reads after R only. A read by target (a push by id, the last
 //!   event of a life open, the events of a run or task it folds) may reach
 //!   before R, of what a scan after R marked, the rows not settled and the
-//!   lives open, the runs the rules mark, and the pushes those rows name.
+//!   lives open, the runs the rules mark, the rows of an older version, and
+//!   the pushes those rows name.
+//! - **A row of an older [`LEDGER_V`] where a builder goes on from R** (a
+//!   legacy row aside; marks of another version give no R, so the first
+//!   start after the version is raised reads from its cursors' start, and
+//!   this is of a start after its marks are of this version, those rows
+//!   left past its bounds): no scan moves back for it. A pass reads a share of
+//!   those rows by their version ([`Builder::older_rows_to_read`]) and marks
+//!   them, and [`writes`] writes the fold of each from reads by target: a
+//!   run's its `run_events`, a task's its `task_events`, a session's its
+//!   records out of its row. The heads and books at R keep them until then
+//!   ([`queue::QueueHead::forgotten_at`],
+//!   [`crate::domain::pre_claim::rows::holds_at`]). A queue row's head says
+//!   what an older fold made, so before it is folded, whatever named it, it
+//!   is folded on its own inputs again into books of only them
+//!   ([`Builder::fold_older_again`]), up to the events read. One a later
+//!   event may reach, and every landing slot's attempt, is folded so before
+//!   the events after R are read, what routes them being what its head says
+//!   ([`Builder::older_reached_later`]). So is every wait, whatever its share,
+//!   as a task's fold reads it and a settled task folds no more
+//!   ([`Builder::older_waits`]). Its inputs are its records, and by
+//!   id the events it read past them (the end of no record of its own, a
+//!   reach, the next baseline); a landing slot's attempt its run's events,
+//!   its start and the next slot's, over the attempt before it. Four things
+//!   come from no input of its own: the end a supervisor's life gives a row
+//!   is read from the lives, of each last event and the stops; that a row
+//!   is one event of its own and not the start of a wait, which an open wait
+//!   of another row made it; which records are its; and a landing slot's
+//!   ended attempt keeps the through of its row, which the events after R
+//!   read again set, as the exact one by R would take a scan of the events
+//!   after its end. So a raise that moves which row an event is an input of
+//!   (not what a row's inputs fold to) is not made right on this path. A row
+//!   of this version is read by none of this.
 //! - **Which are written**: a run whose life ended (its push finished or
 //!   was skipped, it ended without a landing, it was canceled), one pending
 //!   on its push, and a legacy run; every task from its `task_created`
@@ -234,7 +263,7 @@ use super::{
 use crate::domain::environment::{self, CountedSample, Folded, RunResource, Window};
 use crate::domain::host_metrics::NodeSample;
 use crate::domain::pre_claim::rows::Since;
-use crate::domain::pre_claim::{PreClaimBook, PreClaimInterval, Started};
+use crate::domain::pre_claim::{Moved, PreClaimBook, PreClaimInterval, Started};
 use crate::domain::run_phase::{Phase, Recorded};
 use crate::domain::session_step::{SessionResource, SessionStep};
 use crate::domain::stats::timestamp_millis;
@@ -289,6 +318,20 @@ pub enum Target {
 }
 
 impl Target {
+    /// The mark of the row of `kind` and `key`; none for a key of no such
+    /// row.
+    pub fn of_row(kind: LedgerKind, key: &str) -> Option<Self> {
+        match kind {
+            LedgerKind::Run => Some(Self::Run(key.to_owned())),
+            LedgerKind::Task => key.parse().ok().map(|id| Self::Task(TaskId::new(id))),
+            LedgerKind::Session | LedgerKind::Queue => Some(Self::Row(kind, key.to_owned())),
+            LedgerKind::Node => {
+                let (node, start) = key.rsplit_once('/')?;
+                Some(Self::Node(node.to_owned(), start.parse().ok()?))
+            }
+        }
+    }
+
     /// The kind and key of the row it is of.
     pub fn row_key(&self) -> (LedgerKind, String) {
         match self {
@@ -896,6 +939,66 @@ impl Kept {
         self.queue_rows = book;
     }
 
+    /// Fold the older queue row of `key` on its own inputs: the records it
+    /// keeps of it and `read`, up to the last event read, into books of only
+    /// them, and take what those make of it, what the older fold made of the
+    /// same inputs no longer read ([`Builder::older_to_fold_again`]). Whether
+    /// that changed a wait.
+    fn fold_older_again(&mut self, key: &str, read: Vec<RunEvent>) -> bool {
+        let Ok(id) = key.parse().map(EventId::new) else {
+            return false;
+        };
+        if self.queue_rows.is_slot(id) {
+            self.queue_rows.slot_folded_again(id, &read);
+            return false;
+        }
+        let mut inputs: Vec<RunEvent> = self
+            .queue_rows
+            .records_of(key)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|record| {
+                self.queue
+                    .binary_search_by_key(record, |event| event.id)
+                    .ok()
+                    .map(|at| self.queue[at].clone())
+            })
+            .chain(read)
+            .filter(|event| event.id <= self.queue_rows.last())
+            .collect();
+        inputs.sort_by_key(|event| event.id);
+        inputs.dedup_by_key(|event| event.id);
+        let own_event = self.queue_rows.is_own_event(id);
+        let mut fold = QueueBook::default();
+        let mut waits = PreClaimBook::default();
+        let mut touched = BTreeSet::new();
+        for event in &inputs {
+            // The lives were made of what the rows' heads said they read.
+            if let Some(supervisor) =
+                supervisor_of(event).filter(|_| event.kind != EventKind::SupervisorStopped)
+            {
+                self.lives
+                    .go_on(supervisor, event.id, timestamp_millis(&event.created_at));
+            }
+            // One event of its own, by what another row was then: no wait.
+            let moved = if own_event {
+                Moved::default()
+            } else {
+                waits.add(event)
+            };
+            fold.add(
+                event,
+                owner::owner(event) == Owner::Queue,
+                moved,
+                &mut touched,
+            );
+        }
+        self.queue_rows.folded_again(id, &fold);
+        let before = self.pre_claim.held_wait(id).cloned();
+        self.pre_claim.folded_again(id, &waits);
+        before.as_ref() != self.pre_claim.held_wait(id)
+    }
+
     /// The supervisors' lives of the events read.
     pub const fn lives(&self) -> &Lives {
         &self.lives
@@ -1023,6 +1126,20 @@ pub struct Builder {
     /// reads the inputs; a cursor set otherwise leaves the inputs before it
     /// unmarked, and it gives no R.
     rows_through: Cursors,
+    /// Where it is in the rows the store holds of an older [`LEDGER_V`]
+    /// ([`Self::walk_older_rows`]).
+    older_rows: OlderRows,
+}
+
+/// How far a builder went through the rows the store holds of an older
+/// [`LEDGER_V`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum OlderRows {
+    /// None left to read, or none to look for.
+    #[default]
+    Read,
+    /// Those after this one are to be read (none: from the first).
+    After(Option<(LedgerKind, String)>),
 }
 
 /// A position in the events with the latest time read up to it
@@ -1147,6 +1264,7 @@ impl Default for Builder {
             sessions_through: EventId::new(0),
             dirtied: BTreeMap::new(),
             rows_through: Cursors::default(),
+            older_rows: OlderRows::default(),
         }
     }
 }
@@ -1708,9 +1826,48 @@ impl Builder {
             .min()
     }
 
-    /// How many marks wait.
+    /// How many marks wait, the rows of an older version still to be read
+    /// counting as one.
     pub fn backlog(&self) -> usize {
-        self.marks.len()
+        self.marks.len() + usize::from(self.older_rows != OlderRows::Read)
+    }
+
+    /// Go through the rows the store holds of an older [`LEDGER_V`], as a
+    /// builder gone on from R does ([`Self::go_on_from_rows`]): an input up
+    /// to R marks none of them, and one of no input after it would stay old.
+    pub fn walk_older_rows(&mut self) {
+        self.older_rows = OlderRows::After(None);
+    }
+
+    /// What a pass reads next of the rows of an older version
+    /// ([`crate::application::LedgerStore::ledger_older_rows_after`]): those
+    /// after the first of the pair, as many as the second, so that with the
+    /// marks waiting they fill one pass's writes ([`WRITES_PER_PASS`]):
+    /// however many are left, it folds them a share at a time, with no more
+    /// of their records held at once. None when all were read, or the marks
+    /// fill the writes already.
+    pub fn older_rows_to_read(&self) -> Option<(Option<&(LedgerKind, String)>, usize)> {
+        let OlderRows::After(after) = &self.older_rows else {
+            return None;
+        };
+        let limit = WRITES_PER_PASS.saturating_sub(self.marks.len());
+        (limit > 0).then_some((after.as_ref(), limit))
+    }
+
+    /// Mark `rows`, what [`Self::older_rows_to_read`] read as at most
+    /// `limit`: their fold is written ([`writes`]). Such a mark holds no
+    /// position ([`Self::rows_written`]): a later start finds a row left of
+    /// them by its version.
+    pub fn mark_older_rows(&mut self, rows: Vec<(LedgerKind, String)>, limit: usize) {
+        let read_all = rows.len() < limit;
+        self.marks.extend(
+            rows.iter()
+                .filter_map(|(kind, key)| Target::of_row(*kind, key)),
+        );
+        self.older_rows = match (read_all, rows.into_iter().next_back()) {
+            (false, Some(last)) => OlderRows::After(Some(last)),
+            _ => OlderRows::Read,
+        };
     }
 
     /// [`Kept::clone_parts`] of what it keeps besides [`Kept`]: its marks
@@ -1818,6 +1975,78 @@ impl Builder {
         });
         self.sessions_through = held.through;
         Arc::make_mut(&mut self.kept).restore_sessions(held, records);
+    }
+
+    /// The queue rows of `rows` made of a head of an older [`LEDGER_V`] and
+    /// not folded again yet: before they are folded each is folded on its
+    /// own inputs again ([`Self::fold_older_again`]), whatever named them, a
+    /// mark of its version or an input after R. In the order of their
+    /// events: a landing slot's attempt starts no earlier than the end of
+    /// the one before.
+    pub fn older_to_fold_again(&self, rows: &BTreeSet<(LedgerKind, String)>) -> Vec<String> {
+        let book = &self.kept.queue_rows;
+        let mut keys: Vec<(i64, String)> = rows
+            .iter()
+            .filter(|(kind, key)| *kind == LedgerKind::Queue && book.is_older(key))
+            .filter_map(|(_, key)| Some((key.parse().ok()?, key.clone())))
+            .collect();
+        keys.sort();
+        keys.into_iter().map(|(_, key)| key).collect()
+    }
+
+    /// The older queue rows a later event may reach
+    /// ([`QueueBook::older_reached_later`]), which a builder folds again
+    /// before it reads the events after R: what routes those events to them
+    /// is what their heads say.
+    pub fn older_reached_later(&self) -> BTreeSet<(LedgerKind, String)> {
+        self.kept
+            .queue_rows
+            .older_reached_later(&self.kept.pre_claim)
+            .into_iter()
+            .map(|key| (LedgerKind::Queue, key))
+            .collect()
+    }
+
+    /// The older waits left to fold again ([`QueueBook::older_waits`]), which
+    /// a builder folds on the records of their rows before it folds any task.
+    /// Those records are given to the fold and not kept: the row gets them
+    /// back when it is written ([`Self::to_restore`]).
+    pub fn older_waits(&self) -> Vec<String> {
+        self.kept.queue_rows.older_waits()
+    }
+
+    /// The events that fold reads by id, besides the records the row has
+    /// back by then ([`Self::restore`]), `stored` the row the store holds.
+    pub fn older_inputs(&self, key: &str, stored: Option<&LedgerRow>) -> Vec<EventId> {
+        let mut inputs = self.kept.queue_rows.older_inputs(key, stored);
+        if let Some(reach) = key
+            .parse()
+            .ok()
+            .and_then(|id| self.kept.pre_claim.reach_of(EventId::new(id)))
+            .filter(|reach| *reach > EventId::new(0) && *reach <= self.kept.queue_rows.last())
+            && !inputs.contains(&reach)
+        {
+            inputs.push(reach);
+        }
+        inputs
+    }
+
+    /// The run whose events that fold reads too, a landing slot's
+    /// ([`QueueBook::older_slot_run`]).
+    pub fn older_slot_run(&self, key: &str, read: &[RunEvent]) -> Option<crate::domain::RunId> {
+        self.kept.queue_rows.older_slot_run(key, read)
+    }
+
+    /// Fold the older queue row of `key` again, on its records and `read`
+    /// (ascending id or not; those past [`Self::events`] are not read), and
+    /// take what that makes in place of what its head said
+    /// ([`Kept::fold_older_again`]). A wait it changes is read by the tasks
+    /// with time ready, as a wait that moves is ([`Self::mark_ready`]).
+    pub fn fold_older_again(&mut self, key: &str, read: Vec<RunEvent>) {
+        let kept = Arc::make_mut(&mut self.kept);
+        if kept.fold_older_again(key, read) {
+            self.mark_ready(true, None);
+        }
     }
 
     /// Whether the fold of a task whose events are `events` (ascending id,

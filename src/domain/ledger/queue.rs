@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{LedgerHead, LedgerKind, LedgerRow, Subject, findings};
+use super::{LEDGER_V, LedgerHead, LedgerKind, LedgerRow, Subject, findings};
 use crate::domain::{
     EventId, EventKind, RunEvent, RunId, TaskId, claim_hold,
     live_alerts::{self, AlertKey, StreamRecord},
@@ -95,10 +95,12 @@ impl QueueHead {
     /// ([`QueueBook::closed`]), and it is none of what the books of the
     /// waits and the lives or a cut ([`cut::Needs`]) read. A landing slot's
     /// row (its attempt), a finding's and any other wait are read whatever
-    /// they are.
+    /// they are, and so is a row of an older [`LEDGER_V`], whose fold is to
+    /// be written again.
     pub fn forgotten_at(&self, at: EventId, since: Since) -> bool {
         if self.head.kind != LedgerKind::Queue
             || !self.head.is_final
+            || self.head.ledger_v < LEDGER_V
             || cut::past(self, at)
             || self.subject_kind == "landing_slot"
         {
@@ -446,6 +448,10 @@ pub struct QueueBook {
     slot_of: HashMap<EventId, usize>,
     /// The last event read.
     last: EventId,
+    /// The rows made again from a head of an older [`LEDGER_V`] not folded
+    /// again yet ([`Self::older_inputs`]): what it holds of them is what
+    /// that older fold made.
+    older: BTreeSet<EventId>,
 }
 
 impl QueueBook {
@@ -494,11 +500,15 @@ impl QueueBook {
         let mut open = None;
         let mut settled = Vec::new();
         for (id, head) in heads {
+            if head.head.ledger_v < LEDGER_V {
+                book.older.insert(id);
+            }
             if head.subject_kind == "landing_slot" {
                 book.slot(id, head, &mut attempts, &mut open);
                 continue;
             }
-            if head.head.is_final {
+            // One of an older version stays until its fold is written.
+            if head.head.is_final && head.head.ledger_v >= LEDGER_V {
                 settled.push(id);
             }
             let of = of_kind(&head.subject_kind);
@@ -1035,7 +1045,8 @@ impl QueueBook {
             + self.lives_of.values().map(BTreeSet::len).sum::<usize>()
             + self.held.len()
             + self.slot_of.len()
-            + self.throughs.runs.len();
+            + self.throughs.runs.len()
+            + self.older.len();
         rows + slots + finders * size_of::<(String, EventId)>()
     }
 
@@ -1172,6 +1183,221 @@ impl QueueBook {
             ..Subject::default()
         });
         Some(row)
+    }
+
+    /// Whether the row of `key` is made of a head of an older [`LEDGER_V`]
+    /// and not folded again yet.
+    pub fn is_older(&self, key: &str) -> bool {
+        key.parse()
+            .is_ok_and(|id| self.older.contains(&EventId::new(id)))
+    }
+
+    /// The events a fold of the older row of `key` again reads by id, besides
+    /// its records: a landing slot's its start and the next slot's (which
+    /// ends it), and another's what it read past its records, those of
+    /// `ended_by` here and of `stored`, its row in the store (an end of no
+    /// record of its own, a reach, the last event naming its supervisor).
+    pub fn older_inputs(&self, key: &str, stored: Option<&LedgerRow>) -> Vec<EventId> {
+        let Ok(id) = key.parse().map(EventId::new) else {
+            return Vec::new();
+        };
+        if let Some(&index) = self.slot_of.get(&id) {
+            let next = self.slots.get(index + 1).map(|slot| slot.start);
+            return std::iter::once(id)
+                .chain(next)
+                .filter(|input| *input <= self.last)
+                .collect();
+        }
+        let Some(row) = self.rows.get(&id) else {
+            return Vec::new();
+        };
+        let read = stored.map(|stored| &stored.inputs_through);
+        let mut inputs: BTreeSet<EventId> = row
+            .ended_by
+            .into_iter()
+            .chain(read.map(|read| read.events))
+            .chain(read.and_then(|read| read.supervisor))
+            .filter(|input| *input > EventId::new(0) && *input <= self.last)
+            .collect();
+        for record in &row.records {
+            inputs.remove(record);
+        }
+        inputs.into_iter().collect()
+    }
+
+    /// The run of the landing slot's row of `key`, whose events a fold of it
+    /// again reads, by its start among `read` ([`Self::older_inputs`]); none
+    /// of another row.
+    pub fn older_slot_run(&self, key: &str, read: &[RunEvent]) -> Option<RunId> {
+        let id = EventId::new(key.parse().ok()?);
+        self.slot_of.get(&id)?;
+        read.iter()
+            .find(|event| event.id == id)
+            .and_then(|event| event.run_id.clone())
+    }
+
+    /// The older rows the events after those read may read of, by their
+    /// keys: all but those settled that none reaches ([`Self::closed`]).
+    /// What finds a row (its supervisor, task, key or run) and a landing
+    /// slot's attempt (what a late event reaches by its time, and the next
+    /// one starts no earlier than its end) are its head's until it is folded
+    /// again, so these are folded again before those events are read.
+    pub fn older_reached_later(&self, pre_claim: &PreClaimBook) -> BTreeSet<String> {
+        self.older
+            .iter()
+            .filter(|id| self.is_slot(**id) || !self.closed(&id.to_string(), pre_claim))
+            .map(EventId::to_string)
+            .collect()
+    }
+
+    /// The waits of an older version not folded again yet, by their keys
+    /// ascending. The fold of a task reads every wait that bears on its time
+    /// ready and a settled task folds no more, so a builder folds these again
+    /// before any task is folded, however few of their rows a pass writes.
+    pub fn older_waits(&self) -> Vec<String> {
+        self.older
+            .iter()
+            .filter(|id| {
+                self.rows
+                    .get(id)
+                    .is_some_and(|row| matches!(row.of, Of::Interval(_)))
+            })
+            .map(EventId::to_string)
+            .collect()
+    }
+
+    /// Whether the row of `key` is one event of its own: that it is so and
+    /// not the start of a wait another row made it (a slots full started
+    /// while one of its key is open goes on with that one), which its own
+    /// inputs do not say.
+    pub(super) fn is_own_event(&self, id: EventId) -> bool {
+        self.rows.get(&id).is_some_and(|row| row.of == Of::Event)
+    }
+
+    /// The last event read.
+    pub(super) const fn last(&self) -> EventId {
+        self.last
+    }
+
+    /// Whether the row of `id` is a landing slot's.
+    pub(super) fn is_slot(&self, id: EventId) -> bool {
+        self.slot_of.contains_key(&id)
+    }
+
+    /// Take what `fold`, a book of only the inputs of the older row of `id`,
+    /// made of it in place of what its older head said: what the row is and
+    /// what finds it (its open stream, alert or finding, the lives that
+    /// reach it). Its records stay those of the book, which follow what
+    /// the older row and the events read since assign it: an input read past
+    /// them that ended another row too is no record of it, though nothing of
+    /// that other row tells `fold` so. What no input of its own says stays
+    /// with the books of the lives, which end it as they end any row.
+    pub(super) fn folded_again(&mut self, id: EventId, fold: &Self) {
+        self.older.remove(&id);
+        let Some(row) = fold.rows.get(&id) else {
+            return;
+        };
+        let mut row = row.clone();
+        if let Some(old) = self.rows.get(&id) {
+            row.records.clone_from(&old.records);
+        }
+        if self.held.contains_key(&id) {
+            let lives: Vec<String> = self
+                .lives_of
+                .iter()
+                .filter(|(_, rows)| rows.contains(&id))
+                .map(|(supervisor, _)| supervisor.clone())
+                .collect();
+            for supervisor in lives {
+                self.release(&supervisor, id);
+            }
+        }
+        for (supervisor, rows) in &fold.lives_of {
+            if rows.contains(&id) {
+                self.hold(supervisor, id);
+            }
+        }
+        self.streams.retain(|_, start| *start != id);
+        for (supervisor, start) in &fold.streams {
+            if *start == id {
+                let later = self.streams.get(supervisor).is_some_and(|at| *at > id);
+                if !later {
+                    self.streams.insert(supervisor.clone(), id);
+                    self.stream_named.insert(supervisor.clone());
+                }
+            }
+        }
+        self.alerts.retain(|_, start| *start != id);
+        for (key, start) in &fold.alerts {
+            if *start == id {
+                self.alerts.entry(key.clone()).or_insert(id);
+            }
+        }
+        if let Some(finding) = self.rows.get(&id).and_then(|old| old.about.parse().ok())
+            && self.findings.get(&finding) == Some(&id)
+        {
+            self.findings.remove(&finding);
+        }
+        for (finding, start) in &fold.findings {
+            if *start == id {
+                self.findings.entry(*finding).or_insert(id);
+            }
+        }
+        self.rows.insert(id, row);
+    }
+
+    /// Take the attempt of the older landing slot's row of `id`, folded on
+    /// `read` (its start, its run's events and the next slot's start), over
+    /// the attempt before it as the book holds it, in place of what its older
+    /// head said. Its through stays its row's: the greatest id timed by its
+    /// end takes a scan of the events after its end to find, and the events
+    /// read after R set it ([`cut`]).
+    pub(super) fn slot_folded_again(&mut self, id: EventId, read: &[RunEvent]) {
+        self.older.remove(&id);
+        let Some(&index) = self.slot_of.get(&id) else {
+            return;
+        };
+        let next = self.slots.get(index + 1).map(|slot| slot.start);
+        let Some(run) = self.older_slot_run(&id.to_string(), read) else {
+            return;
+        };
+        let before: Vec<Attempt> = index
+            .checked_sub(1)
+            .and_then(|at| self.attempts.get(at, i64::MIN))
+            .into_iter()
+            .collect();
+        let at = before.len();
+        let mut fold = Attempts::from_parts(before, None);
+        let mut inputs: Vec<&RunEvent> = read
+            .iter()
+            .filter(|event| {
+                event.id >= id && event.id <= self.last && next.is_none_or(|next| event.id <= next)
+            })
+            .collect();
+        inputs.sort_by_key(|event| event.id);
+        inputs.dedup_by_key(|event| event.id);
+        for event in inputs {
+            if let (Some(of), Some(time)) = (&event.run_id, timestamp_millis(&event.created_at)) {
+                fold.add(event, of, time);
+            }
+        }
+        let Some(attempt) = fold.get(at, i64::MIN) else {
+            return;
+        };
+        let opens = attempt.open && index + 1 == self.slots.len();
+        let was_open = self.attempts.open().filter(|open| *open != index);
+        let mut all: Vec<Attempt> = self.attempts.at(i64::MIN).collect();
+        all[index] = attempt;
+        let open = if opens {
+            Some((run.clone(), index))
+        } else {
+            was_open.and_then(|open| {
+                let run = RunId::new(self.slots.get(open)?.run.clone()).ok()?;
+                Some((run, open))
+            })
+        };
+        self.attempts = Attempts::from_parts(all, open);
+        self.slots[index].run = run.as_str().to_owned();
     }
 
     /// The key of the landing slot's row open now: its inputs reach every

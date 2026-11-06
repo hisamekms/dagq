@@ -2493,8 +2493,16 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
         // The start of the task rows not settled: one aggregate, no row
         // read or sent.
         "ledger_tasks_open_since" => answer(LedgerStore::ledger_tasks_open_since(&*store)),
-        // Whether a row is older than this version: one answer, no row sent.
-        "ledger_older_rows" => answer(LedgerStore::ledger_older_rows(&*store)),
+        // A page of the rows of an older version: their kinds and keys.
+        "ledger_older_rows_after" => {
+            let (after, limit): (Option<(crate::domain::ledger::LedgerKind, String)>, usize) =
+                read(op, args)?;
+            answer(LedgerStore::ledger_older_rows_after(
+                &*store,
+                after.as_ref(),
+                limit,
+            ))
+        }
         // The keys of the runs other rules classified, no row sent.
         "ledger_runs_classified_otherwise" => {
             let (version,): (String,) = read(op, args)?;

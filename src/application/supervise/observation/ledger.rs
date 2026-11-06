@@ -296,6 +296,10 @@ fn pass(
     // What it read came by then.
     let now_ms = builder.folds_at(now_ms);
     builder.due(now_ms);
+    if let Some((after, limit)) = builder.older_rows_to_read() {
+        let older = store.ledger_older_rows_after(after, limit)?;
+        builder.mark_older_rows(older, limit);
+    }
     if !builder.marked() {
         // No row changed: the mark alone moves on.
         built.sessions = write_sessions(store, builder, (now_ms, built_at), session_bytes)?;
@@ -630,7 +634,8 @@ fn fold_rows(
 /// Give each row of `rows` whose records the builder dropped once it was
 /// settled (a later event reached it) its records back before it is
 /// folded: those of the row the store holds of it, and any it lacks read
-/// by id.
+/// by id. A queue row of an older version among them is then folded on its
+/// own inputs again ([`Builder::fold_older_again`]).
 fn restore(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
@@ -645,6 +650,27 @@ fn restore(
         if !read.is_empty() {
             builder.restore(kind, &key, read);
         }
+    }
+    for key in builder.older_to_fold_again(rows) {
+        let stored = store.ledger_row(LedgerKind::Queue, &key)?;
+        let mut read = read_by_id(store, &builder.older_inputs(&key, stored.as_ref()))?;
+        if let Some(run) = builder.older_slot_run(&key, &read) {
+            read.extend(store.ledger_run_events(&run)?);
+        }
+        builder.fold_older_again(&key, read);
+    }
+    Ok(())
+}
+
+/// Fold on its own inputs again each older wait left
+/// ([`Builder::older_waits`]), one row read at a time and none of its records
+/// kept, before any task's fold reads it.
+fn fold_older_waits(store: &dyn LedgerQueue, builder: &mut Builder) -> Result<()> {
+    for key in builder.older_waits() {
+        let stored = store.ledger_row(LedgerKind::Queue, &key)?;
+        let mut read = read_by_id(store, &builder.older_inputs(&key, stored.as_ref()))?;
+        read.extend(stored.map(|row| row.records).unwrap_or_default());
+        builder.fold_older_again(&key, read);
     }
     Ok(())
 }
@@ -999,9 +1025,8 @@ fn read_by_id(store: &dyn LedgerQueue, ids: &[EventId]) -> Result<Vec<RunEvent>>
 }
 
 /// The builder of a new process on `store`, at `now_ms`. Where the store's
-/// marks give the position R ([`rows_to_go_on_from`]) and it holds no row folded
-/// by an older version ([`crate::application::LedgerStore::ledger_older_rows`]),
-/// it goes on from R: its cursors at R, each its own
+/// marks give the position R ([`rows_to_go_on_from`]), it goes on from R: its
+/// cursors at R, each its own
 /// ([`Builder::go_on_from_rows`]), and every book of [`Kept`] made again
 /// from the rows as they were at R's events, the one position they all
 /// share ([`books_of_heads`], [`restore_sessions`], [`restore_pushes`]).
@@ -1017,14 +1042,19 @@ fn read_by_id(store: &dyn LedgerQueue, ids: &[EventId]) -> Result<Vec<RunEvent>>
 /// to R it takes from the mark ([`rows_to_go_on_from`],
 /// [`Builder::read_up_to`]), reading no event. Besides the heads, what it reads by
 /// target bears on the rows not settled and the lives open only
-/// ([`cut::Needs`], [`restore_pushes`]).
+/// ([`cut::Needs`], [`restore_pushes`]). A row folded by an older version
+/// is marked by its passes, a share at a time, and folded by target
+/// ([`Builder::older_rows_to_read`]): no cursor moves back for it, and rows
+/// of this version are not read for it. A queue row of an older version a
+/// later event may reach is folded on its own inputs here, before those
+/// events are read ([`Builder::older_reached_later`]), and so is every older
+/// wait, which a task's fold reads ([`Builder::older_waits`]).
 ///
-/// With no R (a store with no mark, or W alone), with an R that does not
-/// hold that time at its position, or with a row older than this version,
-/// it starts at its cursors' start, as [`Builder::default`]: it reads every
-/// input, and its writes fill what the rows lack and write the marks, R
-/// with its time. An R next to older rows moved on rows of this version alone,
-/// and those of no input after it would stay old.
+/// With no R (a store with no mark, W alone, or marks of another version),
+/// or with an R that does not hold that time at its position, it starts at
+/// its cursors' start, as [`Builder::default`], whatever the version of the
+/// rows: it reads every input, and its writes fill what the rows lack and
+/// write the marks, R with its time.
 ///
 /// A read that fails gives no builder: the next pass starts again.
 ///
@@ -1035,9 +1065,6 @@ pub fn start_builder(store: &dyn LedgerQueue, now_ms: i64) -> Result<Builder> {
     let Some((r, read_ms)) = rows_to_go_on_from(store.ledger_marks()?.as_ref(), &heads) else {
         return Ok(builder);
     };
-    if store.ledger_older_rows()? {
-        return Ok(builder);
-    }
     builder.go_on_from_rows(r);
     builder.read_up_to(read_ms);
     let now_ms = builder.folds_at(now_ms);
@@ -1060,17 +1087,15 @@ pub fn start_builder(store: &dyn LedgerQueue, now_ms: i64) -> Result<Builder> {
         }
     }
     for head in store.ledger_heads(LedgerKind::Node)? {
-        if let Some(target) = node_target(&head.key).filter(|_| !head.is_final) {
+        if let Some(target) = Target::of_row(head.kind, &head.key).filter(|_| !head.is_final) {
             builder.keep(target);
         }
     }
+    let reached = builder.older_reached_later();
+    restore(store, &mut builder, &reached)?;
+    fold_older_waits(store, &mut builder)?;
+    builder.walk_older_rows();
     Ok(builder)
-}
-
-/// The mark of the node row of `key` ([`crate::domain::ledger::node::key`]).
-fn node_target(key: &str) -> Option<Target> {
-    let (node, start) = key.rsplit_once('/')?;
-    Some(Target::Node(node.to_owned(), start.parse().ok()?))
 }
 
 /// How many times a pass folds a target whose row another writer wrote

@@ -497,6 +497,28 @@ impl LedgerStore for Memory {
         }
         Ok(rows)
     }
+    /// As SQLite gives them: no row read, so none counted.
+    fn ledger_older_rows_after(
+        &self,
+        after: Option<&(LedgerKind, String)>,
+        limit: usize,
+    ) -> Result<Vec<(LedgerKind, String)>> {
+        let place = |(kind, key): &(LedgerKind, String)| (kind.as_str(), key.clone());
+        let mut older: Vec<(LedgerKind, String)> = self
+            .rows
+            .borrow()
+            .iter()
+            .filter(|(_, row)| !row.is_legacy() && row.ledger_v < LEDGER_V)
+            .map(|(key, _)| key.clone())
+            .collect();
+        older.sort_by_key(place);
+        let after = after.map(place);
+        Ok(older
+            .into_iter()
+            .filter(|row| after.as_ref().is_none_or(|after| place(row) > *after))
+            .take(limit)
+            .collect())
+    }
     /// As SQLite gives them: no row's records read, so no key counted.
     fn ledger_queue_heads(&self) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
         Ok(self

@@ -201,7 +201,7 @@ pub(super) const READS: &[&str] = &[
     "ledger_session_anchors",
     "ledger_tasks_open_since",
     "ledger_tasks_open_since_at",
-    "ledger_older_rows",
+    "ledger_older_rows_after",
     "ledger_runs_classified_otherwise",
     "last_event_naming_supervisor",
     "ledger_queue_heads_at",
@@ -706,7 +706,7 @@ mod tests {
         for op in [
             "ledger_tasks_open_since_at",
             "last_event_naming_supervisor",
-            "ledger_older_rows",
+            "ledger_older_rows_after",
             "ledger_runs_classified_otherwise",
             "ledger_queue_heads_at",
         ] {

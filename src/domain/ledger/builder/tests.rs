@@ -1335,3 +1335,59 @@ fn a_rows_mark_holds_the_time_read_at_the_event_before_its_input() {
     assert_eq!(mark.through.events, log.events[1].id);
     assert_eq!(mark.read_ms, Some(ms(200)));
 }
+
+/// The mark of a row is the one [`Target::row_key`] gives its key back from,
+/// and a key of no such row has none.
+#[test]
+fn a_rows_kind_and_key_give_its_mark() {
+    for target in [
+        Target::Run(run_id(1)),
+        Target::Task(TaskId::new(7)),
+        Target::Row(LedgerKind::Session, "plan_review/9/session/1".to_owned()),
+        Target::Row(LedgerKind::Queue, "12".to_owned()),
+        Target::Node("host/a".to_owned(), 3600),
+    ] {
+        let (kind, key) = target.row_key();
+        assert_eq!(Target::of_row(kind, &key), Some(target));
+    }
+    assert_eq!(Target::of_row(LedgerKind::Task, "x"), None);
+    assert_eq!(Target::of_row(LedgerKind::Node, "x"), None);
+}
+
+/// A builder that walks the rows of an older version reads as many as fill
+/// a pass's writes with the marks waiting, after the last it read, none
+/// while the marks fill them, and is done at a page short of its limit; one
+/// that does not walk reads none. Until then it counts as a mark left.
+#[test]
+fn the_rows_of_an_older_version_are_read_a_share_at_a_time() {
+    let task = |n: usize| (LedgerKind::Task, n.to_string());
+    let mut builder = Builder::default();
+    assert_eq!(builder.older_rows_to_read(), None);
+    assert_eq!(builder.backlog(), 0);
+
+    builder.walk_older_rows();
+    assert_eq!(builder.backlog(), 1);
+    assert_eq!(builder.older_rows_to_read(), Some((None, WRITES_PER_PASS)));
+
+    let page: Vec<_> = (1..=WRITES_PER_PASS).map(task).collect();
+    let last = page.last().cloned().unwrap();
+    builder.mark_older_rows(page, WRITES_PER_PASS);
+    assert_eq!(builder.backlog(), WRITES_PER_PASS + 1);
+    assert_eq!(builder.older_rows_to_read(), None);
+    // Such a mark holds no position.
+    assert_eq!(builder.rows_written(), Some(builder.cursors()));
+
+    let taken = builder.take(WRITES_PER_PASS - 3);
+    assert_eq!(taken.len(), WRITES_PER_PASS - 3);
+    assert_eq!(
+        builder.older_rows_to_read(),
+        Some((Some(&last), WRITES_PER_PASS - 3))
+    );
+
+    builder.mark_older_rows(vec![task(1_000)], WRITES_PER_PASS - 3);
+    assert_eq!(builder.older_rows_to_read(), None);
+    assert_eq!(builder.backlog(), 4);
+    builder.take(4);
+    assert_eq!(builder.older_rows_to_read(), None);
+    assert_eq!(builder.backlog(), 0);
+}

@@ -735,12 +735,28 @@ impl LedgerStore for SqliteQueue {
         .collect()
     }
 
-    /// SQLite stops at the first such row; none is parsed.
-    fn ledger_older_rows(&self) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ledger_rows
-                            WHERE kind IN (?1, ?2, ?3, ?4, ?5)
-                              AND legacy=0 AND ledger_v<?6)",
+    /// SQLite picks them by their columns, from `after` on the primary key:
+    /// no row is parsed.
+    fn ledger_older_rows_after(
+        &self,
+        after: Option<&(LedgerKind, String)>,
+        limit: usize,
+    ) -> Result<Vec<(LedgerKind, String)>> {
+        let (after_kind, after_key) = after.map_or((None, None), |(kind, key)| {
+            (Some(kind.as_str()), Some(key.as_str()))
+        });
+        let from = if after.is_some() {
+            "(kind, key) > (?7, ?8)"
+        } else {
+            "?7 IS NULL AND ?8 IS NULL"
+        };
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT kind, key FROM ledger_rows
+              WHERE {from} AND kind IN (?1, ?2, ?3, ?4, ?5)
+                AND legacy=0 AND ledger_v<?6
+              ORDER BY kind, key LIMIT ?9",
+        ))?;
+        let rows = statement.query_map(
             params![
                 LedgerKind::Run.as_str(),
                 LedgerKind::Task.as_str(),
@@ -748,9 +764,21 @@ impl LedgerStore for SqliteQueue {
                 LedgerKind::Queue.as_str(),
                 LedgerKind::Node.as_str(),
                 crate::domain::ledger::LEDGER_V,
+                after_kind,
+                after_key,
+                i64::try_from(limit).unwrap_or(i64::MAX),
             ],
-            |r| r.get(0),
-        )?)
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?;
+        rows.map(|row| {
+            let (kind, key) = row?;
+            let kind = LedgerKind::ALL
+                .into_iter()
+                .find(|known| known.as_str() == kind)
+                .ok_or_else(|| anyhow::anyhow!("ledger row of unknown kind {kind}"))?;
+            Ok((kind, key))
+        })
+        .collect()
     }
 
     /// SQLite picks the keys by the rules in each run row's detail: no
@@ -853,7 +881,8 @@ impl LedgerStore for SqliteQueue {
             "?3 IS NULL"
         };
         let filter = format!(
-            "AND {from} AND NOT (r.final=1 AND {events}<=?2 AND COALESCE({supervisor}, 0)<=?2
+            "AND {from} AND NOT (r.final=1 AND r.ledger_v>=?9
+               AND {events}<=?2 AND COALESCE({supervisor}, 0)<=?2
                AND ((r.subject_kind='live_alert_stream' AND COALESCE(r.outcome, '')='replaced')
                     OR (r.subject_kind='live_alert' AND r.ended_at IS NOT NULL)
                     OR (r.subject_kind IN ('slots_full', 'claim_hold', 'claim_deferral',
@@ -884,6 +913,7 @@ impl LedgerStore for SqliteQueue {
                 since.id.as_i64(),
                 crate::domain::claim_hold::ENDED_SUPERVISOR_GONE,
                 crate::domain::pre_claim::ENDED_FREED,
+                crate::domain::ledger::LEDGER_V,
             ],
         )
     }
@@ -1418,6 +1448,23 @@ mod tests {
         assert!(fewest < every.len());
         let at = log.last();
         let all = queue.ledger_queue_heads_at(at, earliest).unwrap();
+        // A row left out at this version is read at an older one.
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET ledger_v=?1 WHERE kind='queue' AND key=?2",
+                rusqlite::params![LEDGER_V - 1, bare.key],
+            )
+            .unwrap();
+        let read = queue.ledger_queue_heads_at(at, earliest).unwrap();
+        assert!(read.iter().any(|head| head.head.key == bare.key));
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET ledger_v=?1 WHERE kind='queue' AND key=?2",
+                rusqlite::params![LEDGER_V, bare.key],
+            )
+            .unwrap();
         let is_reached = |head: &ledger::queue::QueueHead| head.head.key == reached.key;
         assert!(!all.iter().any(is_reached));
         let before = EventId::new(at.as_i64() - 1);
@@ -2864,6 +2911,7 @@ mod tests {
         assert_eq!(queue.ledger_runs_classified_otherwise("one").unwrap(), [b]);
 
         assert!(!queue.ledger_older_rows().unwrap());
+        assert_eq!(queue.ledger_older_rows_after(None, 9).unwrap(), Vec::new());
         // A legacy row keeps the version it was first written at.
         queue
             .conn
@@ -2873,6 +2921,7 @@ mod tests {
             )
             .unwrap();
         assert!(!queue.ledger_older_rows().unwrap());
+        assert_eq!(queue.ledger_older_rows_after(None, 9).unwrap(), Vec::new());
         // No marks' row is one.
         queue
             .write_ledger_marks(&written::Marks {
@@ -2883,6 +2932,7 @@ mod tests {
                 rows: None,
             })
             .unwrap();
+        assert_eq!(queue.ledger_older_rows_after(None, 9).unwrap(), Vec::new());
         assert!(!queue.ledger_older_rows().unwrap());
         queue
             .conn
@@ -2891,7 +2941,33 @@ mod tests {
                 params![ledger::LEDGER_V - 1, a],
             )
             .unwrap();
+        assert_eq!(
+            queue.ledger_older_rows_after(None, 9).unwrap(),
+            [(LedgerKind::Run, a.clone())]
+        );
         assert!(queue.ledger_older_rows().unwrap());
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET ledger_v=?1 WHERE legacy=0 AND kind IN ('run', 'task')",
+                params![ledger::LEDGER_V - 1],
+            )
+            .unwrap();
+        // In pages, as the port's default gives them over the rows whole.
+        let every = queue.ledger_older_rows_after(None, usize::MAX).unwrap();
+        assert!(every.len() > 3, "{every:?}");
+        assert!(every.iter().any(|(kind, _)| *kind == LedgerKind::Run));
+        assert!(every.iter().any(|(kind, _)| *kind == LedgerKind::Task));
+        let (mut paged, mut after) = (Vec::new(), None);
+        loop {
+            let page = queue.ledger_older_rows_after(after.as_ref(), 2).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().cloned();
+            paged.extend(page);
+        }
+        assert_eq!(paged, every);
     }
 
     /// The store keeps a legacy row's mark as first written, so its head is
