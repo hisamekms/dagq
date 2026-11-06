@@ -326,19 +326,23 @@ provider = "codex"
 # スループットの見直し（毎時・日次・週次）の job を Codex（codex exec の読み取りだけの job）で動かす（人の 2026-10-01 の決定
 # 「inbox と worker は Claude、それ以外の actor は Codex」のスループットの見直しの分。goal 80、task 1220・1221。
 # 書式と振る舞いは docs/design/supervisor-lifecycle/throughput-review.md の「Codexで動かす」と actor-model.md の provider）。
-# model と effort は書かず、Codex の既定の model と medium に任せる。Codex が使えないときは Claude に切り替えて起動する
+# effort は low にする（request 212。報告を出す役割は正誤が付けにくいので軽い設定を既定にして使われ方で見る。2026-11-01 に使用量の上限で job が
+# 止まるか切り替わった）。model だけを書かず、Codex の既定の model に任せる。Codex が使えないときは Claude に切り替えて起動する
 # （--no-claude では切り替えず、throughput_review_finished の error に理由を残す）。throughput_review の codex を知らない旧バイナリ
 # （CODEX_ROLES に throughput_review が無い）は設定の誤りとして拒むので、固定バイナリが task 1220 を含んでから足した。
 provider = "codex"
+effort = "low"
 
 [roles.observer]
 # observer の job を Codex で動かす（人の 2026-10-01 の決定
 # 「inbox と worker は Claude、それ以外の actor は Codex」の observer の分。goal 80、task 1224）。
 # 書式と振る舞いは docs/design/supervisor-lifecycle/observer.md の「Codexで動かす」と actor-model.md の provider。
-# model と effort は書かず、Codex の既定の model と medium に任せる。
+# effort は low にする（request 212。報告を出す役割は正誤が付けにくいので軽い設定を既定にして使われ方で見る。2026-11-01 に使用量の上限で job が
+# 止まるか切り替わった）。model だけを書かず、Codex の既定の model に任せる。
 # 固定バイナリが task 1223（observer の Codex 対応）と task 1378（Git の外の job に
 # --skip-git-repo-check を付ける）を両方含むことを verify の関門で確かめてから足す。
 provider = "codex"
+effort = "low"
 
 [roles.recovery]
 # 復旧 job（終わった run の triage と生きている run の復旧）を Codex（codex exec の読み取りだけの job）で動かす（人の 2026-10-01 の決定
