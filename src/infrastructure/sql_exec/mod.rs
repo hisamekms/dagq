@@ -269,6 +269,25 @@ pub trait SqlWrite: SqlRead {
     fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>>;
 }
 
+/// A write transaction that can isolate a group of writes. The mutable borrow
+/// keeps the outer transaction open and unused until the guard ends.
+pub trait SqlSavepoints: SqlWrite {
+    type Savepoint<'tx>: SqlSavepoint
+    where
+        Self: 'tx;
+
+    /// Begin a savepoint. Dropping its guard without committing rolls back
+    /// only its writes; the outer transaction can keep writing and commit.
+    fn savepoint(&mut self) -> anyhow::Result<Self::Savepoint<'_>>;
+}
+
+/// A savepoint uses the same execution port as its outer transaction.
+pub trait SqlSavepoint: SqlWrite {
+    /// Keep these writes in the outer transaction, which still must commit
+    /// for them to persist. Consumes the guard as rusqlite's savepoint does.
+    fn commit(self) -> anyhow::Result<()>;
+}
+
 /// The named entries of a store's transactions (ADR-t3982-1 decision 2): the
 /// one way a transaction begins, whichever the adapter. A write entry fences
 /// the caller as its first statement and fails with
@@ -276,7 +295,7 @@ pub trait SqlWrite: SqlRead {
 /// transaction begins is the adapter's and no caller's to choose.
 pub trait TransactionEntries {
     /// The transaction of a write entry.
-    type Write<'store>: SqlWrite
+    type Write<'store>: SqlSavepoints
     where
         Self: 'store;
     /// The transaction of a read entry, which reads one snapshot.

@@ -13,8 +13,9 @@
 //! is also a [`SqlRead`] as it is: the read connection needs no wrapper.
 //!
 //! The conversions of the domain's IDs to and from rusqlite's values are for
-//! such a module too. A transaction here also is an [`EventTx`], since the
-//! spans of an event are still written on a rusqlite connection.
+//! such a module too. A transaction here, including its savepoints, also is
+//! an [`EventTx`], since the spans of an event are still written on a rusqlite
+//! connection.
 //!
 //! The actor and event body functions are here because registering a function
 //! is the driver's call; the state the actor functions read is
@@ -31,8 +32,8 @@ use rusqlite::{
 };
 
 use super::{
-    RowValues, SqlDialect, SqlError, SqlRead, SqlResult, SqlRow, SqlValue, SqlWrite,
-    TransactionEntries, ValueKind,
+    RowValues, SqlDialect, SqlError, SqlRead, SqlResult, SqlRow, SqlSavepoint, SqlSavepoints,
+    SqlValue, SqlWrite, TransactionEntries, ValueKind,
 };
 use crate::application::EventBodies;
 use crate::domain::actor::ActorContext;
@@ -335,6 +336,54 @@ impl SqlWrite for WriteTx<'_> {
     }
 }
 
+impl SqlSavepoints for WriteTx<'_> {
+    type Savepoint<'tx>
+        = rusqlite::Savepoint<'tx>
+    where
+        Self: 'tx;
+
+    fn savepoint(&mut self) -> anyhow::Result<Self::Savepoint<'_>> {
+        // Keep WriteTx's lock-state accounting, including deferred writes
+        // made only through this guard, in the existing transaction wrapper.
+        Ok(WriteTx::savepoint(self)?)
+    }
+}
+
+impl SqlSavepoint for rusqlite::Savepoint<'_> {
+    fn commit(self) -> anyhow::Result<()> {
+        Ok(rusqlite::Savepoint::commit(self)?)
+    }
+}
+
+impl SqlRead for rusqlite::Savepoint<'_> {
+    fn dialect(&self) -> SqlDialect {
+        SqlDialect::Sqlite
+    }
+
+    fn visit_rows(
+        &self,
+        sql: &str,
+        params: &[SqlValue],
+        visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
+    ) -> SqlResult<()> {
+        visit_rows_on(self, sql, params, visit)
+    }
+}
+
+impl SqlWrite for rusqlite::Savepoint<'_> {
+    fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
+        SqlWrite::execute(&port_tx(self), sql, params)
+    }
+
+    fn insert_id(&self, sql: &str, params: &[SqlValue]) -> SqlResult<i64> {
+        SqlWrite::insert_id(&port_tx(self), sql, params)
+    }
+
+    fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>> {
+        SqlWrite::insert_id_if_inserted(&port_tx(self), sql, params)
+    }
+}
+
 /// A rusqlite `Connection` or `Transaction` an unmoved module holds, as a
 /// transaction of the port ([`port_tx`]). It writes on the transaction the
 /// connection is in, as that module's own statements do.
@@ -382,6 +431,19 @@ impl SqlWrite for SqliteTx<'_> {
 }
 
 impl EventTx for WriteTx<'_> {
+    fn follow_spans(
+        &self,
+        event_id: EventId,
+        task_id: Option<TaskId>,
+        run_id: Option<&RunId>,
+        kind: EventKind,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        sessions::follow(self, event_id, task_id, run_id, kind, payload)
+    }
+}
+
+impl EventTx for rusqlite::Savepoint<'_> {
     fn follow_spans(
         &self,
         event_id: EventId,
@@ -496,6 +558,149 @@ mod tests {
 
     fn read_tx(conn: &Connection) -> WriteTx<'_> {
         WriteTx::read(conn, "sql_exec_test", Duration::from_secs(60)).unwrap()
+    }
+
+    #[test]
+    fn a_savepoint_keeps_or_rolls_back_only_its_writes() {
+        for commit in [false, true] {
+            let conn = table("savepoint");
+            let mut tx = read_tx(&conn);
+            SqlWrite::execute(&tx, "INSERT INTO t(v) VALUES ('before')", &[]).unwrap();
+            {
+                let savepoint = SqlSavepoints::savepoint(&mut tx).unwrap();
+                assert_eq!(SqlRead::dialect(&savepoint), SqlDialect::Sqlite);
+                let id = SqlWrite::insert_id(
+                    &savepoint,
+                    "INSERT INTO t(v) VALUES (?1)",
+                    sql_params!["inside"],
+                )
+                .unwrap();
+                assert_eq!(
+                    SqlRead::query_row(
+                        &savepoint,
+                        "SELECT v FROM t WHERE id=?1",
+                        sql_params![id],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                    "inside"
+                );
+                SqlWrite::execute(&savepoint, "UPDATE t SET r=1 WHERE id=?1", sql_params![id])
+                    .unwrap();
+                assert_eq!(
+                    SqlWrite::insert_id_if_inserted(
+                        &savepoint,
+                        "INSERT INTO t(v) SELECT 'absent' WHERE 0",
+                        &[]
+                    )
+                    .unwrap(),
+                    None
+                );
+                if commit {
+                    SqlSavepoint::commit(savepoint).unwrap();
+                }
+            }
+            SqlWrite::execute(&tx, "INSERT INTO t(v) VALUES ('after')", &[]).unwrap();
+            tx.commit().unwrap();
+            let rows = SqlRead::query_map(&conn, "SELECT v FROM t ORDER BY id", &[], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap();
+            assert_eq!(
+                rows,
+                if commit {
+                    vec!["before", "inside", "after"]
+                } else {
+                    vec!["before", "after"]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_savepoint_keeps_or_rolls_back_an_event_with_its_session_span() {
+        use crate::infrastructure::store_writes::record_queue_event_in;
+        use serde_json::json;
+
+        for commit in [false, true] {
+            let uri = format!(
+                "file:/sql-exec-savepoint-events-{}?vfs=memdb",
+                uuid::Uuid::new_v4()
+            );
+            let queue = SqliteQueue::init(uri).unwrap();
+            let mut tx = queue.write_entry("savepoint_events").unwrap();
+            {
+                let savepoint = SqlSavepoints::savepoint(&mut tx).unwrap();
+                record_queue_event_in(
+                    &savepoint,
+                    EventKind::ObserveStarted,
+                    &json!({"mode": "hourly", "dir": "/obs", "session_id": "savepoint-observer"}),
+                )
+                .unwrap();
+                let events = SqlRead::query_map(
+                    &savepoint,
+                    "SELECT kind, payload FROM run_events ORDER BY id",
+                    &[],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .map(|(kind, _)| kind.as_str())
+                        .collect::<Vec<_>>(),
+                    ["observe_started", "session_opened"]
+                );
+                let span: serde_json::Value = serde_json::from_str(&events[1].1).unwrap();
+                assert_eq!(span["kind"], "observer");
+                assert_eq!(span["session_id"], "savepoint-observer");
+                if commit {
+                    SqlSavepoint::commit(savepoint).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+            let tx = queue.read_entry("read_savepoint_events").unwrap();
+            let kinds =
+                SqlRead::query_map(&tx, "SELECT kind FROM run_events ORDER BY id", &[], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap();
+            assert_eq!(
+                kinds,
+                if commit {
+                    vec!["observe_started", "session_opened"]
+                } else {
+                    vec![]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_deferred_transaction_keeps_the_write_lock_after_savepoint_only_writes() {
+        for commit in [false, true] {
+            let conn = table("savepoint-lock");
+            let mut tx = read_tx(&conn);
+            {
+                let savepoint = SqlSavepoints::savepoint(&mut tx).unwrap();
+                SqlWrite::execute(&savepoint, "INSERT INTO t(v) VALUES ('inside')", &[]).unwrap();
+                if commit {
+                    SqlSavepoint::commit(savepoint).unwrap();
+                }
+            }
+            // WriteTx reads this state when ending a deferred transaction
+            // whose writes went through a guard rather than its execute.
+            assert_eq!(
+                tx.transaction_state(Some(rusqlite::MAIN_DB)).unwrap(),
+                rusqlite::TransactionState::Write
+            );
+            assert_eq!(tx.rows_written(), 0);
+            tx.commit().unwrap();
+            let count: i64 = conn
+                .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, i64::from(commit));
+        }
     }
 
     /// A bool is stored as the integers 0 and 1, and reads back as a bool.

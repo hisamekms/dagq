@@ -26,8 +26,8 @@ pub mod migrate;
 use self::exec::{PostgresRow, numbered_parameters, returning_id};
 use super::sql_dialect::SqlDialect;
 use super::sql_exec::{
-    OptionalRow, SqlError, SqlRead, SqlResult, SqlRow, SqlValue, SqlWrite, TransactionEntries,
-    sql_params,
+    OptionalRow, SqlError, SqlRead, SqlResult, SqlRow, SqlSavepoint, SqlSavepoints, SqlValue,
+    SqlWrite, TransactionEntries, sql_params,
 };
 use super::write_leader::{IDENTITY_SQL, WriteIdentity, millis, renew_sql};
 use crate::application::NotLeader;
@@ -186,6 +186,81 @@ impl<S: PostgresSession> SqlWrite for PostgresTx<'_, S> {
     }
 }
 
+/// An exclusively borrowed transaction's savepoint. The fixed name is safe
+/// because no other guard can be opened on that transaction while it lives.
+/// Rollback must release too: ROLLBACK TO alone leaves the savepoint open.
+pub struct PostgresSavepoint<'tx, 's, S: PostgresSession> {
+    tx: &'tx mut PostgresTx<'s, S>,
+    open: bool,
+}
+
+impl<'s, S: PostgresSession> SqlSavepoints for PostgresTx<'s, S> {
+    type Savepoint<'tx>
+        = PostgresSavepoint<'tx, 's, S>
+    where
+        Self: 'tx;
+
+    fn savepoint(&mut self) -> Result<Self::Savepoint<'_>> {
+        self.session.run("SAVEPOINT dagq_savepoint")?;
+        Ok(PostgresSavepoint {
+            tx: self,
+            open: true,
+        })
+    }
+}
+
+impl<S: PostgresSession> SqlSavepoint for PostgresSavepoint<'_, '_, S> {
+    fn commit(mut self) -> Result<()> {
+        self.tx.session.run("RELEASE SAVEPOINT dagq_savepoint")?;
+        self.open = false;
+        Ok(())
+    }
+}
+
+impl<S: PostgresSession> SqlRead for PostgresSavepoint<'_, '_, S> {
+    fn dialect(&self) -> SqlDialect {
+        self.tx.dialect()
+    }
+
+    fn visit_rows(
+        &self,
+        sql: &str,
+        params: &[SqlValue],
+        visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
+    ) -> SqlResult<()> {
+        self.tx.visit_rows(sql, params, visit)
+    }
+}
+
+impl<S: PostgresSession> SqlWrite for PostgresSavepoint<'_, '_, S> {
+    fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
+        self.tx.execute(sql, params)
+    }
+
+    fn insert_id(&self, sql: &str, params: &[SqlValue]) -> SqlResult<i64> {
+        self.tx.insert_id(sql, params)
+    }
+
+    fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>> {
+        self.tx.insert_id_if_inserted(sql, params)
+    }
+}
+
+impl<S: PostgresSession> Drop for PostgresSavepoint<'_, '_, S> {
+    fn drop(&mut self) {
+        if self.open {
+            for sql in [
+                "ROLLBACK TO SAVEPOINT dagq_savepoint",
+                "RELEASE SAVEPOINT dagq_savepoint",
+            ] {
+                if let Err(error) = self.tx.session.run(sql) {
+                    tracing::warn!(transaction = self.tx.name, error = %error, sql, "could not roll back the savepoint");
+                }
+            }
+        }
+    }
+}
+
 impl<S: PostgresSession> Drop for PostgresTx<'_, S> {
     fn drop(&mut self) {
         if self.open
@@ -280,6 +355,43 @@ mod tests {
     /// The statements after the store opened.
     fn after_open(session: &Recorded) -> Vec<String> {
         session.statements.borrow()[4..].to_vec()
+    }
+
+    #[test]
+    fn a_savepoint_releases_or_rolls_back_then_releases_before_the_outer_commit() {
+        for commit in [false, true] {
+            let session = Recorded::taken();
+            let store = PostgresStore::open(&session).unwrap();
+            let mut tx = store.write_entry("savepoint").unwrap();
+            session.statements.borrow_mut().clear();
+            {
+                let savepoint = tx.savepoint().unwrap();
+                assert_eq!(savepoint.dialect(), SqlDialect::Postgres);
+                savepoint
+                    .execute("UPDATE t SET v=?1", sql_params!["inside"])
+                    .unwrap();
+                if commit {
+                    savepoint.commit().unwrap();
+                }
+            }
+            tx.execute("UPDATE t SET v=?1", sql_params!["after"])
+                .unwrap();
+            tx.commit().unwrap();
+            let mut expected = vec!["SAVEPOINT dagq_savepoint", "UPDATE t SET v=$1"];
+            if !commit {
+                expected.push("ROLLBACK TO SAVEPOINT dagq_savepoint");
+            }
+            expected.extend([
+                "RELEASE SAVEPOINT dagq_savepoint",
+                "UPDATE t SET v=$1",
+                "COMMIT",
+            ]);
+            assert_eq!(*session.statements.borrow(), expected);
+            assert_eq!(
+                *session.bound.borrow().last().unwrap(),
+                sql_params!["after"]
+            );
+        }
     }
 
     /// The fence is the statement the SQLite store runs: the shared text,
