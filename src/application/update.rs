@@ -62,6 +62,7 @@ pub const UPDATE_ASKER: &str = "supervisor";
 pub const RUNTIME_PATHS: &[&str] = &[
     "src/",
     "migrations/",
+    "migrations-postgres/",
     "Cargo.toml",
     "Cargo.lock",
     "build.rs",
@@ -2214,6 +2215,7 @@ mod tests {
         let paths = |paths: &[&str]| paths.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
         assert!(changes_runtime(&paths(&["docs/a.md", "src/main.rs"])));
         assert!(changes_runtime(&paths(&["migrations/0032_x.sql"])));
+        assert!(changes_runtime(&paths(&["migrations-postgres/x.sql"])));
         assert!(changes_runtime(&paths(&["Cargo.lock"])));
         assert!(changes_runtime(&paths(&["build.rs"])));
         assert!(changes_runtime(&paths(&["rust-toolchain.toml"])));

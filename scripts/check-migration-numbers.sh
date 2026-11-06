@@ -5,8 +5,9 @@
 # build, for CI and a task's verification.
 #
 # It also checks that the migrations of the latest release are unchanged
-# (ADR-t614-2): every migrations/*.sql in the latest v<X.Y.Z> tag must still be
-# in the working tree under the same name with the same bytes. The rule starts
+# (ADR-t614-2): every migrations/*.sql and migrations-postgres/*.sql in the
+# latest v<X.Y.Z> tag must still be in the working tree under the same name
+# with the same bytes. The rule starts
 # with the first release after ADR-t614-2, so tags up to v0.3.0 are not a base
 # (decision 3). A clone without such a tag (a shallow clone, a checkout that
 # did not fetch tags) says so and passes this part.
@@ -15,7 +16,10 @@
 # that dropped them all, migrations/NNNN_no_check_constraints.sql
 # (ADR-t876-1): until the schema is stable the rules live in the domain and
 # the write port, not in the queue. SQL comments are not read; the released
-# migrations and the ones up to that file are not checked.
+# migrations and the ones up to that file are not checked. Every file of the
+# Postgres series, migrations-postgres/*.sql, is checked: it starts after them
+# (ADR-t3986-1 decision 7). Its names and how they match migrations/ are for
+# build.rs, which reads them when it lists the series.
 #
 # Usage: sh scripts/check-migration-numbers.sh [--release vX.Y.Z]
 #   --release TAG  compare with the latest release tag before TAG instead of
@@ -30,7 +34,8 @@
 #
 # Exit 0 when the numbers are fine and the released migrations are unchanged,
 # 1 when a file is misnamed, a number is shared or missing, a migration after
-# the one that dropped the CHECKs has one, or a released migration was
+# the one that dropped the CHECKs or a file of the Postgres series has one, or
+# a released migration was
 # changed, renamed or removed (the offending files go to
 # stderr), 2 when migrations/ is not found or the arguments are wrong.
 set -eu
@@ -106,6 +111,15 @@ for n in $(printf '%s\n' "$numbers" | uniq); do
   fi
 done
 
+# Report a CHECK constraint in the migration $1, against $2 (ADR-t876-1).
+refuse_check() {
+  lines=$(sed 's/--.*$//' "$1" | grep -n -i -w 'check' | cut -d: -f1 | tr '\n' ' ' || true)
+  if [ -n "$lines" ]; then
+    echo "check-migration-numbers: $1 has a CHECK constraint (line ${lines% }); the queue has none $2 (ADR-t876-1), so keep the rule in the domain and the write port" >&2
+    status=1
+  fi
+}
+
 # No CHECK after the migration that dropped them all (ADR-t876-1).
 dropped=$(ls migrations/[0-9][0-9][0-9][0-9]_no_check_constraints.sql 2>/dev/null | head -n 1)
 if [ -z "$dropped" ]; then
@@ -117,13 +131,15 @@ else
     [ -e "$f" ] || continue
     n=$(basename "$f" | cut -c1-4 | sed 's/^0*//')
     [ "${n:-0}" -gt "$last" ] || continue
-    lines=$(sed 's/--.*$//' "$f" | grep -n -i -w 'check' | cut -d: -f1 | tr '\n' ' ' || true)
-    if [ -n "$lines" ]; then
-      echo "check-migration-numbers: $f has a CHECK constraint (line ${lines% }); the queue has none after $dropped (ADR-t876-1), so keep the rule in the domain and the write port" >&2
-      status=1
-    fi
+    refuse_check "$f" "after $dropped"
   done
 fi
+
+# Nor anywhere in the Postgres series.
+for f in migrations-postgres/*.sql; do
+  [ -e "$f" ] || continue
+  refuse_check "$f" "in the Postgres series"
+done
 
 # Released migrations (ADR-t614-2).
 
@@ -172,32 +188,34 @@ if [ -z "$base" ]; then
 fi
 
 changed=0
-released=$(git ls-tree --name-only "$base" migrations/ | grep '\.sql$' || true)
 count=0
-for f in $released; do
-  count=$((count + 1))
-  if [ -e "$f" ]; then
-    if ! git cat-file blob "$base:$f" | cmp -s - "$f"; then
-      echo "check-migration-numbers: $f was released in $base and has changed; add a new migration instead" >&2
-      changed=1
+for directory in migrations migrations-postgres; do
+  released=$(git ls-tree --name-only "$base" "$directory/" | grep '\.sql$' || true)
+  for f in $released; do
+    count=$((count + 1))
+    if [ -e "$f" ]; then
+      if ! git cat-file blob "$base:$f" | cmp -s - "$f"; then
+        echo "check-migration-numbers: $f was released in $base and has changed; add a new migration instead" >&2
+        changed=1
+      fi
+      continue
     fi
-    continue
-  fi
-  blob=$(git rev-parse "$base:$f")
-  renamed=
-  for g in migrations/*.sql; do
-    [ -e "$g" ] || continue
-    if [ "$(git hash-object "$g")" = "$blob" ]; then
-      renamed=$g
-      break
+    blob=$(git rev-parse "$base:$f")
+    renamed=
+    for g in "$directory"/*.sql; do
+      [ -e "$g" ] || continue
+      if [ "$(git hash-object "$g")" = "$blob" ]; then
+        renamed=$g
+        break
+      fi
+    done
+    if [ -n "$renamed" ]; then
+      echo "check-migration-numbers: $f was released in $base and was renamed to $renamed" >&2
+    else
+      echo "check-migration-numbers: $f was released in $base and was removed" >&2
     fi
+    changed=1
   done
-  if [ -n "$renamed" ]; then
-    echo "check-migration-numbers: $f was released in $base and was renamed to $renamed" >&2
-  else
-    echo "check-migration-numbers: $f was released in $base and was removed" >&2
-  fi
-  changed=1
 done
 
 if [ "$changed" -eq 0 ]; then

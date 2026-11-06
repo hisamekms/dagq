@@ -14,7 +14,7 @@ cargo publish --dry-run --locked -p dagq  # dagq の package の作成と build 
 ```
 
 - `gh run list` の先頭が main の HEAD の commit で `completed success` でなければリリースしない（`gh run view <run-id> --log-failed` で原因を見る）
-- `cargo publish --dry-run --locked -p dagq` は PATH の `dagq`（`~/.local/bin/dagq`）とは無関係に、package の中身（`build.rs`・`src/`・`migrations/`・`Cargo.toml`・`Cargo.lock`・`README.md`・`LICENSE`）だけで build できるかを見る。`cargo package --list --locked` で中身を確かめられる
+- `cargo publish --dry-run --locked -p dagq` は PATH の `dagq`（`~/.local/bin/dagq`）とは無関係に、package の中身（`build.rs`・`src/`・`migrations/`・`migrations-postgres/`・`Cargo.toml`・`Cargo.lock`・`README.md`・`LICENSE`）だけで build できるかを見る。`cargo package --list --locked` で中身を確かめられる
 
 ## 2. `-dev` を外して version を確定する
 

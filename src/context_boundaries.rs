@@ -330,6 +330,7 @@ fn the_stores_write_their_own_tables_and_the_ownership_matches_the_code() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let migrations = files(root, "migrations", "sql")
         .into_iter()
+        .chain(files(root, "migrations-postgres", "sql"))
         .map(|(_, text)| text + "\n")
         .collect();
     let tree = Tree {

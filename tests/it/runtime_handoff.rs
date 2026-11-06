@@ -1439,24 +1439,42 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
             .filter(|u| u.kind.as_str() == kind && u.payload["commit"] == sha)
             .count()
     };
-    let wait_failed = |sha: &str, times: usize| {
-        let started = Instant::now();
-        while of("update_failed", sha) < times {
-            assert!(
-                started.elapsed() < Duration::from_secs(60),
-                "the job for {sha} did not fail: {:?}",
-                updates()
-            );
-            thread::sleep(Duration::from_millis(100));
-        }
+    // The job reports through the service with its supervisor's token, which
+    // the registration's end revokes, so that supervisor lives until the job
+    // has reported its failure: a pass that ended first would leave the job
+    // refused however soon it failed.
+    let supervise_until_failed = |sha: &str| {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let options = SuperviseOptions {
+            once: false,
+            stop: stop.clone(),
+            ..options.clone()
+        };
+        thread::scope(|scope| {
+            let supervisor = scope.spawn(|| supervise_with(&db, &repo, &backend, &options));
+            let started = Instant::now();
+            while of("update_failed", sha) < 1
+                && started.elapsed() < Duration::from_secs(60)
+                && !supervisor.is_finished()
+            {
+                thread::sleep(Duration::from_millis(100));
+            }
+            stop.store(true, Ordering::SeqCst);
+            supervisor.join().unwrap().unwrap();
+        });
+        assert_eq!(
+            of("update_failed", sha),
+            1,
+            "the job for {sha} did not fail: {:?}",
+            updates()
+        );
     };
 
     // This build names a commit the repository does not have: main's head
     // is built once.
     let seed = head(&repo);
-    supervise_with(&db, &repo, &backend, &options).unwrap();
+    supervise_until_failed(&seed);
     assert_eq!(of("update_started", &seed), 1, "{:?}", updates());
-    wait_failed(&seed, 1);
     let failed = updates()
         .into_iter()
         .find(|u| u.kind == EventKind::UpdateFailed)
@@ -1482,17 +1500,15 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
         .find(|ask| ask.kind == dagq::domain::AskKind::UpdateFailed)
         .unwrap();
     queue.answer(ask.id, "retry").unwrap();
-    supervise_with(&db, &repo, &backend, &options).unwrap();
+    supervise_until_failed(&docs);
     assert_eq!(of("update_started", &docs), 1, "{:?}", updates());
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
     assert!(updates().iter().any(|u| u.kind == EventKind::UpdateRetry));
-    wait_failed(&docs, 1);
 
     // A change of the runtime starts the job for it.
     let source = commit("src/lib.rs");
-    supervise_with(&db, &repo, &backend, &options).unwrap();
+    supervise_until_failed(&source);
     assert_eq!(of("update_started", &source), 1, "{:?}", updates());
-    wait_failed(&source, 1);
 
     // A job that died without recording how it ended is reported, not
     // rebuilt on its own; an answer row does not hide a running job.

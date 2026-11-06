@@ -1567,6 +1567,16 @@ impl SchemaState {
         .check_floor()
     }
 
+    /// Refuse the queue unless this binary's other commands open it as it
+    /// is, with the error [`SqliteQueue::open`] gives.
+    pub fn check_opens(&self) -> Result<()> {
+        QueueSchema {
+            version: self.schema_version,
+            floor: self.floor,
+        }
+        .check_opens()
+    }
+
     /// Refuse the pending migrations when any of them is breaking (ADR-0045
     /// decisions 5, 15): a supervisor or run of the older binary could not
     /// open the queue afterwards, so `up` and `install` apply only

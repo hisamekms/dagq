@@ -20,7 +20,14 @@ pub const ENV: &str = "DAGQ_BUILD_ID";
 
 /// What the build depends on: a change to any of them reruns the build
 /// script, relative to the repository root.
-pub const SOURCES: [&str; 5] = ["src", "migrations", "build.rs", "Cargo.toml", "Cargo.lock"];
+pub const SOURCES: [&str; 6] = [
+    "src",
+    "migrations",
+    "migrations-postgres",
+    "build.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+];
 
 /// The build identifier of `version` built from `commit` (`None` when it is
 /// not known), `dirty` when the worktree had uncommitted changes.

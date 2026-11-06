@@ -66,11 +66,15 @@ pub(super) fn fence(tx: &impl SqlWrite, identity: &WriteIdentity) -> Result<()> 
 /// rolls back and rereads. Even an unheld generation zero is locked this way.
 pub(super) fn lock_migration(tx: &impl SqlWrite, identity: &WriteIdentity) -> Result<bool> {
     Ok(tx.execute(
-        "UPDATE write_leader SET generation = generation \
-         WHERE singleton = 1 AND (holder = ?1 OR (holder IS NULL AND ?1 IS NULL)) AND generation = ?2",
+        LOCK_MIGRATION_SQL,
         sql_params![identity.holder, identity.generation],
     )? == 1)
 }
+
+/// Lock the row of `?1` at generation `?2` without changing it; on either
+/// store.
+pub(super) const LOCK_MIGRATION_SQL: &str = "UPDATE write_leader SET generation = generation \
+     WHERE singleton = 1 AND (holder = ?1 OR (holder IS NULL AND ?1 IS NULL)) AND generation = ?2";
 
 /// The row and the DB's clock now.
 fn read_sql(now: &str) -> String {

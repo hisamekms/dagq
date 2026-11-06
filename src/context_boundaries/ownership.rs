@@ -354,6 +354,7 @@ pub(super) const TABLES: &[Table] = &[
     table("supervisors", Host),
     table("queue_repository", Host),
     table("schema_floor", Host),
+    table("dagq_schema", Host), // the Postgres series' schema_floor and user_version
     table("binary_updates", Host),
     table("headless_jobs", Host),
     table("asks", Shared), // an ask is opened and applied by the context of its kind
@@ -404,6 +405,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/runtime_store/ask_store.rs", Shared), // AskStore
     store("src/infrastructure/event_actor.rs", Shared), // EventStore
     store("src/infrastructure/write_leader.rs", Shared), // WriteLeaderStore
+    store("src/infrastructure/postgres/migrate.rs", Host), // the Postgres series' version
 ];
 
 #[rustfmt::skip]

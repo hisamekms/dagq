@@ -6,9 +6,26 @@
 //! repeat; `integrate` uses it to renumber a run's migration whose number
 //! `main` took meanwhile. The library compiles it as a module so the rule is
 //! tested like any other code.
+//!
+//! The Postgres series (ADR-t3986-1 decision 7) is `migrations-postgres/`,
+//! outside those names and numbers: `base.sql`, which makes the schema of the
+//! SQLite version on its first line, then one `<name>.sql` for each SQLite
+//! migration after that version, matched by `<name>` and in SQLite's order.
+//! A name is what survives renumbering, so a file there spells no number:
+//! `integrate` will not move a migration whose number another changed file
+//! mentions.
 
 /// The directory of the migrations, relative to the repository root.
 pub const DIRECTORY: &str = "migrations";
+
+/// The directory of the Postgres series, relative to the repository root.
+pub const POSTGRES_DIRECTORY: &str = "migrations-postgres";
+
+/// The file of the Postgres series' base.
+pub const POSTGRES_BASE: &str = "base.sql";
+
+/// What the base's first line starts with, before the SQLite version it makes.
+const POSTGRES_BASE_DECLARATION: &str = "-- dagq-postgres-base:";
 
 /// The number of a migration file named `NNNN_<name>.sql`, or `None` when
 /// `file_name` is not named so.
@@ -99,6 +116,87 @@ pub fn ordered(file_names: &[String]) -> Result<Vec<String>, String> {
     }
 }
 
+/// The SQLite version the Postgres base `text` makes, from its first line.
+pub fn postgres_base_version(text: &str) -> Result<usize, String> {
+    text.lines()
+        .next()
+        .and_then(|line| line.strip_prefix(POSTGRES_BASE_DECLARATION))
+        .and_then(|version| version.trim().parse().ok())
+        .filter(|version| *version > 0)
+        .ok_or_else(|| {
+            format!(
+                "{POSTGRES_DIRECTORY}/{POSTGRES_BASE} does not start with \
+                 `{POSTGRES_BASE_DECLARATION} <version>`"
+            )
+        })
+}
+
+/// The files of the Postgres series after its base, in the order of the
+/// SQLite migrations they match, or why they cannot be: `sqlite` (the files
+/// [`ordered`] gave) has a migration after `base_version` with no file of its
+/// name in `postgres` (the entries of the directory), the directory has a
+/// file no such migration names, or two of those files would have one name
+/// (two migrations named alike, or one named as the base). Files that are not
+/// `.sql` are left out; the names before the base are not looked at.
+pub fn postgres_series(
+    sqlite: &[String],
+    base_version: usize,
+    postgres: &[String],
+) -> Result<Vec<String>, String> {
+    let mut problems = Vec::new();
+    if !postgres.iter().any(|name| name == POSTGRES_BASE) {
+        problems.push(format!("{POSTGRES_DIRECTORY}/{POSTGRES_BASE} is missing"));
+    }
+    if base_version > sqlite.len() {
+        problems.push(format!(
+            "{POSTGRES_DIRECTORY}/{POSTGRES_BASE} makes version {base_version}, past the {} \
+             migrations under {DIRECTORY}",
+            sqlite.len()
+        ));
+    }
+    let after = sqlite.get(base_version..).unwrap_or_default();
+    let mut series: Vec<String> = Vec::new();
+    for migration in after {
+        // `ordered` only returns names `number` reads.
+        let file = migration[5..].to_owned();
+        if file == POSTGRES_BASE || series.contains(&file) {
+            problems.push(format!(
+                "{DIRECTORY}/{migration} has a name another file of {POSTGRES_DIRECTORY} \
+                 has after the base; rename it"
+            ));
+        } else if !postgres.contains(&file) {
+            problems.push(format!(
+                "{DIRECTORY}/{migration} has no {POSTGRES_DIRECTORY}/{file}; add it \
+                 (`-- postgres: none` alone when Postgres needs no change)"
+            ));
+        }
+        series.push(file);
+    }
+    for name in postgres.iter().filter(|name| name.ends_with(".sql")) {
+        if name != POSTGRES_BASE && !series.contains(name) {
+            problems.push(format!(
+                "{POSTGRES_DIRECTORY}/{name} matches no migration of {DIRECTORY} after the base"
+            ));
+        }
+    }
+    if problems.is_empty() {
+        Ok(series)
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
+/// A migration's number `text` spells, which a file of the Postgres series may
+/// not have even in a comment: `own` (the digits of the migration the file
+/// matches, if any) anywhere, as `integrate` searches for it, or else any four
+/// digits with a leading zero, not within longer digits.
+pub fn spelled_number<'a>(text: &'a str, own: Option<&'a str>) -> Option<&'a str> {
+    own.filter(|digits| text.contains(*digits)).or_else(|| {
+        text.split(|c: char| !c.is_ascii_digit())
+            .find(|digits| digits.len() == 4 && digits.starts_with('0'))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +268,140 @@ mod tests {
         // Every problem is named, not only the first.
         let error = ordered(&names(&["0002_b.sql", "0002_c.sql", "x.sql"])).unwrap_err();
         assert_eq!(error.lines().count(), 3, "{error}");
+    }
+
+    /// The SQLite migrations `0001_a` to `0003_c`, with the base at 2.
+    fn sqlite() -> Vec<String> {
+        names(&["0001_a.sql", "0002_b.sql", "0003_c.sql"])
+    }
+
+    #[test]
+    fn the_series_after_the_base_follows_sqlite_s_order_by_name() {
+        assert_eq!(
+            postgres_series(
+                &names(&["0001_a.sql", "0002_b.sql", "0003_z.sql", "0004_c.sql"]),
+                2,
+                &names(&["c.sql", "README.md", "base.sql", "z.sql"])
+            ),
+            Ok(names(&["z.sql", "c.sql"]))
+        );
+        assert_eq!(
+            postgres_series(&sqlite(), 3, &names(&["base.sql"])),
+            Ok(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_renumbered_sqlite_migration_leaves_the_series_as_it_is() {
+        let postgres = names(&["base.sql", "c.sql"]);
+        assert_eq!(
+            postgres_series(&sqlite(), 2, &postgres),
+            postgres_series(
+                &names(&["0001_a.sql", "0002_b.sql", "0007_c.sql"]),
+                2,
+                &postgres
+            )
+        );
+    }
+
+    #[test]
+    fn a_migration_after_the_base_without_its_file_is_refused() {
+        let error = postgres_series(&sqlite(), 2, &names(&["base.sql"])).unwrap_err();
+        assert_eq!(
+            error,
+            "migrations/0003_c.sql has no migrations-postgres/c.sql; add it \
+             (`-- postgres: none` alone when Postgres needs no change)"
+        );
+    }
+
+    #[test]
+    fn a_file_no_migration_after_the_base_names_is_refused() {
+        for file in ["z.sql", "a.sql", "0003_c.sql"] {
+            let error =
+                postgres_series(&sqlite(), 2, &names(&["base.sql", "c.sql", file])).unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "migrations-postgres/{file} matches no migration of migrations after the base"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn names_that_meet_after_the_base_are_refused() {
+        let error = postgres_series(
+            &names(&["0001_a.sql", "0002_c.sql", "0003_c.sql"]),
+            1,
+            &names(&["base.sql", "c.sql"]),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("migrations/0003_c.sql has a name"),
+            "{error}"
+        );
+        let error = postgres_series(
+            &names(&["0001_a.sql", "0002_base.sql"]),
+            1,
+            &names(&["base.sql"]),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("migrations/0002_base.sql has a name"),
+            "{error}"
+        );
+        // Before the base a name may repeat: nothing here matches it.
+        assert_eq!(
+            postgres_series(
+                &names(&["0001_a.sql", "0002_a.sql"]),
+                2,
+                &names(&["base.sql"])
+            ),
+            Ok(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_series_without_its_base_or_past_the_migrations_is_refused() {
+        let error = postgres_series(&sqlite(), 3, &names(&["c.sql"])).unwrap_err();
+        assert!(error.contains("base.sql is missing"), "{error}");
+        assert!(error.contains("matches no migration"), "{error}");
+        let error = postgres_series(&sqlite(), 4, &names(&["base.sql"])).unwrap_err();
+        assert!(error.contains("makes version 4, past the 3"), "{error}");
+    }
+
+    #[test]
+    fn the_base_declares_its_version_on_its_first_line() {
+        assert_eq!(
+            postgres_base_version("-- dagq-postgres-base: 94\nCREATE TABLE t (x bigint);"),
+            Ok(94)
+        );
+        for text in [
+            "",
+            "CREATE TABLE t (x bigint);",
+            "-- note\n-- dagq-postgres-base: 94",
+            "-- dagq-postgres-base: x",
+            "-- dagq-postgres-base: 0",
+        ] {
+            assert!(postgres_base_version(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn only_a_number_spelled_as_a_migration_file_s_is_found() {
+        assert_eq!(
+            spelled_number("-- added by 0075_node_samples", None),
+            Some("0075")
+        );
+        assert_eq!(spelled_number("0095", None), Some("0095"));
+        for text in ["94", "x * 1000", "10095", "00951", "-- ADR-t3986-1"] {
+            assert_eq!(spelled_number(text, None), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_file_s_own_number_is_found_anywhere_as_the_renumbering_searches() {
+        assert_eq!(spelled_number("x = 100950", Some("0095")), Some("0095"));
+        assert_eq!(spelled_number("x = 100960", Some("0095")), None);
     }
 }

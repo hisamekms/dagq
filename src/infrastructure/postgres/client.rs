@@ -6,9 +6,10 @@
 //! rather than going on in plain text.
 
 use super::exec::{PostgresRow, decode_column, encode_parameter, is_contention_state};
-use super::{PostgresSession, PostgresStore};
+use super::{PostgresSession, PostgresStore, migrate};
 use crate::domain::store_setting::ConnectionString;
 use crate::infrastructure::sql_exec::{SqlError, SqlResult, SqlValue};
+use crate::infrastructure::sqlite::MigrationReport;
 use anyhow::{Context, Result};
 use bytes::BytesMut;
 use postgres::types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
@@ -24,6 +25,14 @@ pub struct PostgresClient(RefCell<Client>);
 pub fn connect(connection: &ConnectionString) -> Result<PostgresStore<PostgresClient>> {
     let client = Client::connect(connection.expose(), NoTls).context("connect to Postgres")?;
     PostgresStore::open(PostgresClient(RefCell::new(client)))
+}
+
+/// Bring the database at `connection` to this binary's schema from what it
+/// has, nothing at all included, refusing a breaking migration
+/// ([`migrate::migrate`]). What it did, `None` when nothing was pending.
+pub fn migrate(connection: &ConnectionString) -> Result<Option<MigrationReport>> {
+    let client = Client::connect(connection.expose(), NoTls).context("connect to Postgres")?;
+    migrate::migrate(&PostgresClient(RefCell::new(client)))
 }
 
 /// A parameter of whatever type the server inferred.

@@ -14,9 +14,9 @@
 # (b) for each case in $cases, one violation put only into the clone makes the
 #     copied script exit 1, while the same script run from this repository's
 #     root still exits 0;
-# (c) a migration of a temporary release tag after v0.3.0 made in the clone,
-#     once changed, makes check-migration-numbers.sh exit 1, and passing that
-#     tag to --release takes it out of the base so it exits 0;
+# (c) a migration of a temporary release tag after v0.3.0 made in the clone, of
+#     either series, once changed, makes check-migration-numbers.sh exit 1, and
+#     passing that tag to --release takes it out of the base so it exits 0;
 # (d) with the cwd outside any git work tree, a copied script falls back to
 #     its own location and exits 2 (nothing to check there). Skipped when
 #     ${TMPDIR} is itself inside a git work tree;
@@ -46,6 +46,7 @@ scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
 cases="check-migration-numbers migration_gap
+check-migration-numbers migration_postgres_check
 check-test-file-lines test_file_too_long
 check-adr-numbers adr_id_mismatch
 check-e2e-quarantine e2e_quarantine_malformed
@@ -71,6 +72,11 @@ check-it-budget it_budget_malformed"
 
 violate_migration_gap() {
   echo 'SELECT 1;' >migrations/9999_scripts_root_gap.sql
+}
+
+violate_migration_postgres_check() {
+  mkdir -p migrations-postgres
+  printf -- '-- a CHECK in a comment is not one\nCREATE TABLE zz_scripts_root (x bigint CHECK (x > 0));\n' >migrations-postgres/zz_scripts_root_check.sql
 }
 
 violate_test_file_too_long() {
@@ -299,10 +305,13 @@ last=$(cd "$clone" && ls migrations/[0-9][0-9][0-9][0-9]_?*.sql | sed -n '$s|^mi
 [ -n "$last" ] || prep_fail "no migration in the clone"
 next=$(printf '%04d' $(($(echo "$last" | sed 's/^0*//') + 1)))
 released=migrations/${next}_scripts_root_released.sql
+released_postgres=migrations-postgres/scripts_root_released.sql
 (
   cd "$clone" &&
+    mkdir -p migrations-postgres &&
     echo 'SELECT 1;' >"$released" &&
-    git add "$released" &&
+    echo 'SELECT 1;' >"$released_postgres" &&
+    git add "$released" "$released_postgres" &&
     git -c user.name="$me" -c user.email="$me@localhost" -c commit.gpgsign=false \
       commit --quiet --no-verify -m "$me fixture" &&
     git tag "$tag"
@@ -311,6 +320,13 @@ expect 0 "check-migration-numbers with the clone at $tag" "$clone" "$bin/check-m
 echo 'SELECT 2;' >"$clone/$released" || prep_fail "cannot change $released in the clone"
 expect 1 "check-migration-numbers with $released of $tag changed" "$clone" "$bin/check-migration-numbers.sh"
 expect 0 "check-migration-numbers --release $tag with $released changed" "$clone" "$bin/check-migration-numbers.sh" --release "$tag"
+echo 'SELECT 1;' >"$clone/$released" || prep_fail "cannot put $released back in the clone"
+expect 0 "check-migration-numbers with $released of $tag put back" "$clone" "$bin/check-migration-numbers.sh"
+echo 'SELECT 2;' >"$clone/$released_postgres" || prep_fail "cannot change $released_postgres in the clone"
+expect 1 "check-migration-numbers with $released_postgres of $tag changed" "$clone" "$bin/check-migration-numbers.sh"
+expect 0 "check-migration-numbers --release $tag with $released_postgres changed" "$clone" "$bin/check-migration-numbers.sh" --release "$tag"
+rm "$clone/$released_postgres" || prep_fail "cannot remove $released_postgres in the clone"
+expect 1 "check-migration-numbers with $released_postgres of $tag removed" "$clone" "$bin/check-migration-numbers.sh"
 expect 0 "check-migration-numbers in $repo while the clone has $tag" "$repo" "$repo/scripts/check-migration-numbers.sh"
 if git -C "$repo" rev-parse --quiet --verify "refs/tags/$tag" >/dev/null 2>&1; then
   echo "$me: the tag $tag of the clone is in $repo" >&2

@@ -55,6 +55,7 @@ COMMON_FILES = [
     "rust-toolchain.toml",
     ".config/nextest.toml",
     "migrations/**",
+    "migrations-postgres/**",
     "src/migration_numbers.rs",
 ]
 #    The helpers of the integration tests under tests/common are not common

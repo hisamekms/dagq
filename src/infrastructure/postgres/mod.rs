@@ -21,6 +21,7 @@
 #[cfg(feature = "postgres")]
 pub mod client;
 pub mod exec;
+pub mod migrate;
 
 use self::exec::{PostgresRow, numbered_parameters, returning_id};
 use super::sql_dialect::SqlDialect;
@@ -69,9 +70,11 @@ pub struct PostgresStore<S> {
 }
 
 impl<S: PostgresSession> PostgresStore<S> {
-    /// The store on the newly connected `session`.
+    /// The store on the newly connected `session`, refused unless this
+    /// binary opens its schema as it is ([`migrate::check_opens`]).
     pub fn open(session: S) -> Result<Self> {
         session.run(SESSION_SETUP_SQL)?;
+        migrate::check_opens(&session)?;
         let identity = read_identity(&session).context("read the write leader's row")?;
         Ok(Self { session, identity })
     }
@@ -201,12 +204,27 @@ impl<S: PostgresSession> Drop for PostgresTx<'_, S> {
 mod tests {
     use super::*;
     use crate::domain::write_leader::LEASE;
+    use crate::infrastructure::schema::BINARY_SCHEMA;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     /// A row of the one column `name`.
     fn one_column(name: &str, value: SqlValue) -> PostgresRow {
         PostgresRow::new(Rc::from([name.to_owned()]), vec![value])
+    }
+
+    /// The answer to `sql` when it reads the schema, which is at `schema`
+    /// (this binary's when `None`).
+    fn schema_answer(sql: &str, schema: Option<(i64, i64)>) -> Option<Vec<PostgresRow>> {
+        if sql == migrate::HAS_SCHEMA_TABLE_SQL {
+            return Some(vec![one_column("count", SqlValue::Integer(1))]);
+        }
+        (sql == migrate::READ_SCHEMA_SQL).then(|| {
+            let (version, floor) = schema.unwrap_or((BINARY_SCHEMA, 1));
+            let columns: Rc<[String]> = ["version".to_owned(), "floor".to_owned()].into();
+            let values = vec![SqlValue::Integer(version), SqlValue::Integer(floor)];
+            vec![PostgresRow::new(columns, values)]
+        })
     }
 
     /// A session that records its statements and arguments, whose writes
@@ -218,6 +236,7 @@ mod tests {
         answers: RefCell<Vec<PostgresRow>>,
         changed: Cell<u64>,
         begin_fails: Cell<bool>,
+        schema: Cell<Option<(i64, i64)>>,
     }
 
     impl Recorded {
@@ -239,6 +258,9 @@ mod tests {
 
         fn query(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
             self.statements.borrow_mut().push(sql.to_owned());
+            if let Some(rows) = schema_answer(sql, self.schema.get()) {
+                return Ok(rows);
+            }
             if sql == IDENTITY_SQL {
                 let columns: Rc<[String]> = ["holder".to_owned(), "generation".to_owned()].into();
                 let values = vec![SqlValue::Text("service-1".to_owned()), SqlValue::Integer(7)];
@@ -257,7 +279,7 @@ mod tests {
 
     /// The statements after the store opened.
     fn after_open(session: &Recorded) -> Vec<String> {
-        session.statements.borrow()[2..].to_vec()
+        session.statements.borrow()[4..].to_vec()
     }
 
     /// The fence is the statement the SQLite store runs: the shared text,
@@ -342,13 +364,32 @@ mod tests {
     }
 
     #[test]
-    fn opening_sets_the_session_s_zone_before_it_reads_the_leader_s_row() {
+    fn opening_sets_the_session_s_zone_and_judges_the_schema_before_it_reads_the_leader_s_row() {
         let session = Recorded::default();
         PostgresStore::open(&session).unwrap();
-        assert_eq!(
-            *session.statements.borrow(),
-            ["SET TIME ZONE 'UTC'", IDENTITY_SQL]
-        );
+        let statements = session.statements.borrow();
+        assert_eq!(statements.first().unwrap(), "SET TIME ZONE 'UTC'");
+        assert_eq!(statements.last().unwrap(), IDENTITY_SQL);
+        assert_eq!(statements.len(), 4, "{statements:?}");
+    }
+
+    #[test]
+    fn a_schema_this_binary_does_not_open_is_refused_before_the_leader_s_row_is_read() {
+        for schema in [
+            (BINARY_SCHEMA - 1, 1),
+            (BINARY_SCHEMA + 1, BINARY_SCHEMA + 1),
+        ] {
+            let session = Recorded::default();
+            session.schema.set(Some(schema));
+            assert!(PostgresStore::open(&session).is_err(), "{schema:?}");
+            assert!(
+                !session
+                    .statements
+                    .borrow()
+                    .contains(&IDENTITY_SQL.to_owned()),
+                "{schema:?}"
+            );
+        }
     }
 
     /// A holder of `NULL` is bound as one, which the shared fence compares.
@@ -359,7 +400,10 @@ mod tests {
             fn run(&self, sql: &str) -> Result<()> {
                 (&self.0).run(sql)
             }
-            fn query(&self, _: &str, _: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
+            fn query(&self, sql: &str, _: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
+                if let Some(rows) = schema_answer(sql, None) {
+                    return Ok(rows);
+                }
                 let columns: Rc<[String]> = ["holder".to_owned(), "generation".to_owned()].into();
                 Ok(vec![PostgresRow::new(
                     columns,
@@ -383,8 +427,8 @@ mod tests {
             fn run(&self, _: &str) -> Result<()> {
                 Ok(())
             }
-            fn query(&self, _: &str, _: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
-                Ok(Vec::new())
+            fn query(&self, sql: &str, _: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
+                Ok(schema_answer(sql, None).unwrap_or_default())
             }
             fn execute(&self, _: &str, _: &[SqlValue]) -> SqlResult<u64> {
                 Ok(0)
