@@ -2201,10 +2201,15 @@ pub(crate) fn tag_busy(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
+// The row-mapping tests compare the port with this SQLite compatibility path.
+#[cfg(test)]
 pub(super) fn read_goal(conn: &Connection, goal_id: GoalId) -> Result<Goal> {
     store_rows::read_goal(&port_tx(conn), goal_id).map_err(native_error)
 }
 
+// Kept for store modules that have not moved; the moves land in any order
+// (ADR-t3982-1).
+#[allow(dead_code)]
 pub(super) fn goal_event(
     conn: &Connection,
     goal_id: GoalId,
@@ -2351,6 +2356,9 @@ pub(super) fn record_queue_event_in(
 }
 
 /// [`store_writes::event`] on a rusqlite connection.
+// Kept for store modules that have not moved; the moves land in any order
+// (ADR-t3982-1).
+#[allow(dead_code)]
 pub(super) fn event(
     conn: &Connection,
     task_id: TaskId,
@@ -2361,6 +2369,9 @@ pub(super) fn event(
     store_writes::event(&port_tx(conn), task_id, run_id, kind, payload).map_err(native_error)
 }
 
+// Kept for store modules that have not moved; the moves land in any order
+// (ADR-t3982-1).
+#[allow(dead_code)]
 pub(super) fn enum_col<T: FromStr<Err = DomainError>>(
     row: &Row<'_>,
     name: &str,
@@ -2379,6 +2390,9 @@ pub(super) fn optional_enum_col<T: std::str::FromStr<Err = DomainError>>(
     with_row(row, |row| store_rows::optional_enum_col(row, name))
 }
 
+// Kept for a store module on another branch that has not moved
+// (ADR-t3982-1: the moves land in any order).
+#[allow(dead_code)]
 pub(super) fn run_row(runs_dir: &Path) -> impl Fn(&Row<'_>) -> rusqlite::Result<TaskRun> + '_ {
     let read = store_rows::run_row(runs_dir);
     move |row| with_row(row, &read)

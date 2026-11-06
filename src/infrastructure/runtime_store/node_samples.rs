@@ -7,7 +7,7 @@ use crate::domain::environment::{NodeRate, Resources};
 use crate::domain::host_metrics::{
     HostSample, ImportMark, NodeSample, SampleSource, value_columns,
 };
-use rusqlite::params;
+use crate::infrastructure::sql_exec::{SqlRead, SqlValue, SqlWrite, ToSqlValue, sql_params};
 
 /// The columns of the sample in the common units, in the order [`values`]
 /// gives them after the sample's.
@@ -56,25 +56,25 @@ fn values(
     resources: &Resources,
     source: SampleSource,
     apart: i64,
-) -> Vec<rusqlite::types::Value> {
-    let mut values: Vec<rusqlite::types::Value> = vec![
-        node.to_owned().into(),
-        sample.unix.into(),
-        day.into(),
-        source.as_str().to_owned().into(),
-        apart.into(),
+) -> Vec<SqlValue> {
+    let mut values: Vec<SqlValue> = vec![
+        node.to_sql_value(),
+        sample.unix.to_sql_value(),
+        day.to_sql_value(),
+        source.as_str().to_sql_value(),
+        apart.to_sql_value(),
     ];
     values.extend(
         value_columns()
             .iter()
-            .map(|column| sample.values.get(column).copied().into()),
+            .map(|column| sample.values.get(column).copied().to_sql_value()),
     );
     values.extend([
-        resources.cpu_seconds.into(),
-        resources.cpu_limit.into(),
-        resources.memory_max_bytes.into(),
-        resources.throttled_seconds.into(),
-        resources.cpu_pressure.into(),
+        resources.cpu_seconds.to_sql_value(),
+        resources.cpu_limit.to_sql_value(),
+        resources.memory_max_bytes.to_sql_value(),
+        resources.throttled_seconds.to_sql_value(),
+        resources.cpu_pressure.to_sql_value(),
     ]);
     values
 }
@@ -92,25 +92,27 @@ impl NodeSampleStore for SqliteQueue {
         // Immediate: the rows around are read in the write that admits the
         // sample, so another supervisor's sample comes before or after both.
         let tx = self.write_tx("node_samples_record")?;
-        let (before, later): (Option<i64>, bool) = tx.query_row(
+        let (before, later): (Option<i64>, bool) = SqlRead::query_row(
+            &tx,
             "SELECT (SELECT max(unix) FROM node_samples WHERE node_id=?1 AND unix < ?2),
                     EXISTS(SELECT 1 FROM node_samples WHERE node_id=?1 AND unix > ?2)",
-            params![node, sample.unix],
+            sql_params![node, sample.unix],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         // A sample written after a later row of the node (it waited on the
         // queue's lock) stands for no time: the later row counted it.
         let previous = if later { Some(sample.unix) } else { before };
-        let written = tx.execute(
+        let written = SqlWrite::execute(
+            &tx,
             &insert(),
-            rusqlite::params_from_iter(values(
+            &values(
                 node,
                 day,
                 sample,
                 &resources.over(previous, sample.unix),
                 source,
                 apart_secs,
-            )),
+            ),
         )?;
         tx.commit()?;
         Ok(written == 1)
@@ -130,18 +132,21 @@ impl NodeSampleStore for SqliteQueue {
             "node_samples_csv_import",
             samples,
             |tx, batch, last| {
-                let mut statement = tx.prepare_cached(&insert())?;
+                let statement = insert();
                 for sample in batch {
                     // Only the second: every row a file kept is kept.
-                    let rows = statement.execute(rusqlite::params_from_iter(values(
-                        node,
-                        day,
-                        sample,
-                        &Resources::default(),
-                        SampleSource::CsvImport,
-                        0,
-                    )))?;
-                    tx.wrote(rows);
+                    let rows = SqlWrite::execute(
+                        tx,
+                        &statement,
+                        &values(
+                            node,
+                            day,
+                            sample,
+                            &Resources::default(),
+                            SampleSource::CsvImport,
+                            0,
+                        ),
+                    )?;
                     added += rows;
                 }
                 // The mark goes with the last batch: a file whose import
@@ -150,20 +155,17 @@ impl NodeSampleStore for SqliteQueue {
                 // whole, and its rows committed already are kept out by
                 // their second.
                 if last && let Some(mark) = mark {
-                    tx.execute(
-                    "INSERT INTO node_sample_imports(node_id,file,day,bytes,rows,imported_at)
+                    SqlWrite::execute(tx, "INSERT INTO node_sample_imports(node_id,file,day,bytes,rows,imported_at)
                      VALUES (?1,?2,?3,?4,?5,?6)
                      ON CONFLICT(node_id, file) DO UPDATE SET
-                         bytes=excluded.bytes, rows=excluded.rows, imported_at=excluded.imported_at",
-                    params![
+                         bytes=excluded.bytes, rows=excluded.rows, imported_at=excluded.imported_at", sql_params![
                         node,
                         file,
                         day,
                         i64::try_from(mark.bytes)?,
                         i64::try_from(mark.rows)?,
                         self.generators.clock.now()
-                    ],
-                )?;
+                    ])?;
                 }
                 Ok(())
             },
@@ -172,15 +174,14 @@ impl NodeSampleStore for SqliteQueue {
     }
 
     fn imported_files(&self, node: &str) -> Result<std::collections::BTreeMap<String, u64>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT file, bytes FROM node_sample_imports WHERE node_id=?1")?;
-        let files = statement.query_map([node], |row| {
+        let statement = "SELECT file, bytes FROM node_sample_imports WHERE node_id=?1";
+        let files = SqlRead::query_map(&*self.conn, statement, sql_params![node], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
         files
+            .into_iter()
             .map(|file| {
-                let (name, bytes) = file?;
+                let (name, bytes) = file;
                 Ok((name, u64::try_from(bytes)?))
             })
             .collect()
@@ -194,22 +195,19 @@ impl NodeSampleStore for SqliteQueue {
     /// marks again under its lock, and a retention stopped between batches
     /// is finished by the next.
     fn remove_node_samples(&self, before_day: i64) -> Result<usize> {
-        let mut removals: Vec<Removal> = self
-            .conn
-            .prepare("SELECT id FROM node_samples WHERE local_day < ?1 ORDER BY id")?
-            .query_map([before_day], |row| Ok(Removal::Sample(row.get(0)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        removals.extend(
-            self.conn
-                .prepare(
-                    "SELECT node_id, file FROM node_sample_imports WHERE day < ?1
+        let mut removals: Vec<Removal> = SqlRead::query_map(
+            &*self.conn,
+            "SELECT id FROM node_samples WHERE local_day < ?1 ORDER BY id",
+            sql_params![before_day],
+            |row| Ok(Removal::Sample(row.get(0)?)),
+        )?;
+        removals.extend(SqlRead::query_map(
+            &*self.conn,
+            "SELECT node_id, file FROM node_sample_imports WHERE day < ?1
                      ORDER BY node_id, file",
-                )?
-                .query_map([before_day], |row| {
-                    Ok(Removal::Mark(row.get(0)?, row.get(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?,
-        );
+            sql_params![before_day],
+            |row| Ok(Removal::Mark(row.get(0)?, row.get(1)?)),
+        )?);
         if removals.is_empty() {
             return Ok(0);
         }
@@ -218,22 +216,20 @@ impl NodeSampleStore for SqliteQueue {
             for removal in batch {
                 match removal {
                     Removal::Sample(id) => {
-                        let rows = tx
-                            .prepare_cached(
-                                "DELETE FROM node_samples WHERE id=?1 AND local_day < ?2",
-                            )?
-                            .execute(params![id, before_day])?;
-                        tx.wrote(rows);
+                        let rows = SqlWrite::execute(
+                            tx,
+                            "DELETE FROM node_samples WHERE id=?1 AND local_day < ?2",
+                            sql_params![id, before_day],
+                        )?;
                         removed += rows;
                     }
                     Removal::Mark(node, file) => {
-                        let rows = tx
-                            .prepare_cached(
-                                "DELETE FROM node_sample_imports
+                        SqlWrite::execute(
+                            tx,
+                            "DELETE FROM node_sample_imports
                                  WHERE node_id=?1 AND file=?2 AND day < ?3",
-                            )?
-                            .execute(params![node, file, before_day])?;
-                        tx.wrote(rows);
+                            sql_params![node, file, before_day],
+                        )?;
                     }
                 }
             }
@@ -245,12 +241,12 @@ impl NodeSampleStore for SqliteQueue {
     fn node_samples(&self, node: &str, from: i64, until: i64) -> Result<Vec<NodeSample>> {
         self.read_node_samples(
             "node_id=?1 AND unix BETWEEN ?2 AND ?3 ORDER BY unix",
-            params![node, from, until],
+            sql_params![node, from, until],
         )
     }
 
     fn node_samples_after(&self, after: i64) -> Result<Vec<NodeSample>> {
-        self.read_node_samples("id > ?1 ORDER BY id", params![after])
+        self.read_node_samples("id > ?1 ORDER BY id", sql_params![after])
     }
 }
 
@@ -264,16 +260,12 @@ enum Removal {
 impl SqliteQueue {
     /// The rows of `node_samples` `filter` (a `WHERE` clause and its order)
     /// keeps.
-    fn read_node_samples(
-        &self,
-        filter: &str,
-        params: impl rusqlite::Params,
-    ) -> Result<Vec<NodeSample>> {
-        let mut statement = self.conn.prepare(&format!(
+    fn read_node_samples(&self, filter: &str, params: &[SqlValue]) -> Result<Vec<NodeSample>> {
+        let statement = format!(
             "SELECT id,node_id,unix,local_day,source,{} FROM node_samples WHERE {filter}",
             sample_columns()
-        ))?;
-        let rows = statement.query_map(params, |row| {
+        );
+        let rows = SqlRead::query_map(&*self.conn, &statement, params, |row| {
             let source: String = row.get(4)?;
             let mut sample = HostSample::new(row.get(2)?);
             for (index, column) in value_columns().iter().enumerate() {
@@ -302,18 +294,19 @@ impl SqliteQueue {
                 resources,
             ))
         })?;
-        rows.map(|row| {
-            let (id, node_id, local_day, source, sample, resources) = row?;
-            Ok(NodeSample {
-                id,
-                node_id,
-                local_day,
-                source: SampleSource::parse(&source)
-                    .ok_or_else(|| anyhow!("unknown node sample source {source:?}"))?,
-                sample,
-                resources,
+        rows.into_iter()
+            .map(|row| {
+                let (id, node_id, local_day, source, sample, resources) = row;
+                Ok(NodeSample {
+                    id,
+                    node_id,
+                    local_day,
+                    source: SampleSource::parse(&source)
+                        .ok_or_else(|| anyhow!("unknown node sample source {source:?}"))?,
+                    sample,
+                    resources,
+                })
             })
-        })
-        .collect()
+            .collect()
     }
 }

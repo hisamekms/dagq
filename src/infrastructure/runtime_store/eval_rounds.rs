@@ -14,6 +14,7 @@ use super::*;
 use crate::application::EvalRounds;
 use crate::domain::agent_eval::production::{self, Take};
 use crate::domain::agent_eval::round::owner_gone;
+use crate::infrastructure::sessions::read_before_port;
 use crate::infrastructure::sql_dialect::{JsonType, SqlDialect};
 use crate::infrastructure::sql_exec::SqlRead;
 
@@ -102,7 +103,7 @@ impl SqliteQueue {
             kind.as_str()
         );
         crate::domain::check_event_target(kind, None, None)?;
-        let _read = self.read_before(Closing::Queue(kind, &payload))?;
+        let _read = read_before_port(&*self.conn, Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("settle_eval_round")?;
         if any_of_round(
             &tx,
@@ -141,7 +142,7 @@ impl SqliteQueue {
         crate::domain::check_event_target(kind, None, None)?;
         let now = self.generators.clock.now();
         let payload = json!({"eval_id": eval_id, "supervisor": token});
-        let _read = self.read_before(Closing::Queue(kind, &payload))?;
+        let _read = read_before_port(&*self.conn, Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("take_up_eval_round")?;
         if any_of_round(&tx, eval_id, &[EventKind::AgentEvalFinished])? {
             return Ok(false);
@@ -217,7 +218,7 @@ impl SqliteQueue {
         crate::domain::check_event_target(kind, None, None)?;
         let now = self.generators.clock.now();
         let payload = json!({"set_id": set_id, "supervisor": token});
-        let _read = self.read_before(Closing::Queue(kind, &payload))?;
+        let _read = read_before_port(&*self.conn, Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("take_case_set")?;
         let settled: bool = SqlRead::query_row(
             &tx,

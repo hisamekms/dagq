@@ -430,6 +430,13 @@ impl super::sqlite::SqliteQueue {
     }
 }
 
+/// A read connection that can prepare session transcripts before a write.
+/// The adapter keeps the transaction-state check and the transcript hooks
+/// together while the session implementation still needs its native connection.
+pub(super) trait BeforeWrite: super::sql_exec::SqlRead {
+    fn read_transcripts_before(&self, closing: Closing<'_>) -> Result<ReadBefore>;
+}
+
 /// Read, before a write transaction begins, the transcripts of the open
 /// spans `closing` may close, for their closes in it (ADR-0048 decision
 /// 10): a worker's transcript can be megabytes, and reading it under the
@@ -438,7 +445,21 @@ impl super::sqlite::SqliteQueue {
 /// active time ([`TRANSCRIPT_NOT_READ_BEFORE`]). Each transcript is also
 /// analysed for its close as if it closed now (task 1334). Called inside a
 /// transaction it reads nothing.
+pub(super) fn read_before_port(
+    conn: &impl BeforeWrite,
+    closing: Closing<'_>,
+) -> Result<ReadBefore> {
+    conn.read_transcripts_before(closing)
+}
+
+/// [`read_before_port`] for callers that still hold a native SQLite connection.
 pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<ReadBefore> {
+    read_before_port(conn, closing)
+}
+
+/// The SQLite session adapter's shared implementation, including the check
+/// that no transaction has begun before a transcript is read.
+pub(super) fn read_before_sqlite(conn: &Connection, closing: Closing<'_>) -> Result<ReadBefore> {
     if !conn.is_autocommit() {
         debug!("session transcripts not read: a write transaction is open");
         return Ok(ReadBefore { spans: Vec::new() });
@@ -4779,6 +4800,9 @@ pub(super) mod tests {
         )
         .unwrap();
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).unwrap();
+        let read = read_before_port(&*tx, Closing::Run(&run, &[EventKind::RunRecovered])).unwrap();
+        assert!(read.spans.is_empty());
+        drop(read);
         let read = read_before(&tx, Closing::Run(&run, &[EventKind::RunRecovered])).unwrap();
         assert!(read.spans.is_empty());
         drop(read);

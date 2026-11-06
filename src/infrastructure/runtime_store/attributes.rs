@@ -5,15 +5,17 @@
 //! record made or changed) gets its values now, read and written in one
 //! transaction.
 
+use crate::infrastructure::sql_exec::{SqlRead, ToSqlValue, sql_params};
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use rusqlite::Connection;
 use serde_json::{Value, json};
 
 use super::super::findings::{finding_event, finding_row};
-use super::super::sql_exec::sqlite::with_row;
-use super::super::sqlite::{SqliteQueue, event, event_row, goal_event, read_goal};
+use super::super::sqlite::SqliteQueue;
+use super::super::store_rows::{event_row, read_goal};
+use super::super::store_writes::event;
+use super::super::task_store::goal_event;
 use super::run_log::queue_event;
 use crate::domain::ledger::attributes::{
     Attributes, Folded, GoalAttributes, KINDS, TaskAttributes, fold,
@@ -114,7 +116,7 @@ impl SqliteQueue {
 
 /// The findings whose folded attributes differ from their row's, as
 /// stored.
-fn differing_findings(conn: &Connection) -> Result<Vec<Finding>> {
+fn differing_findings(conn: &impl SqlRead) -> Result<Vec<Finding>> {
     let folded = match findings::fold(
         &events_of(
             conn,
@@ -128,10 +130,12 @@ fn differing_findings(conn: &Connection) -> Result<Vec<Finding>> {
         findings::Folded::Findings(folded) => folded,
         findings::Folded::BeforeBaseline => findings::Findings::default(),
     };
-    let rows: Vec<Finding> = conn
-        .prepare("SELECT * FROM findings ORDER BY id")?
-        .query_map([], |row| with_row(row, finding_row))?
-        .collect::<rusqlite::Result<_>>()?;
+    let rows: Vec<Finding> = SqlRead::query_map(
+        conn,
+        "SELECT * FROM findings ORDER BY id",
+        sql_params![],
+        finding_row,
+    )?;
     Ok(rows
         .into_iter()
         .filter(|row| folded.findings.get(&row.id) != Some(&row.attributes()))
@@ -139,14 +143,17 @@ fn differing_findings(conn: &Connection) -> Result<Vec<Finding>> {
 }
 
 /// The events of `kinds`, ascending id.
-fn events_of(conn: &Connection, kinds: &[&str]) -> Result<Vec<RunEvent>> {
+fn events_of(conn: &impl SqlRead, kinds: &[&str]) -> Result<Vec<RunEvent>> {
     let marks = vec!["?"; kinds.len()].join(",");
-    Ok(conn
-        .prepare(&format!(
-            "SELECT * FROM run_events WHERE kind IN ({marks}) ORDER BY id"
-        ))?
-        .query_map(rusqlite::params_from_iter(kinds), event_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
+    Ok(SqlRead::query_map(
+        conn,
+        &format!("SELECT * FROM run_events WHERE kind IN ({marks}) ORDER BY id"),
+        &kinds
+            .iter()
+            .map(|value| value.to_sql_value())
+            .collect::<Vec<_>>(),
+        event_row,
+    )?)
 }
 
 type Differing = (
@@ -156,7 +163,7 @@ type Differing = (
 
 /// The tasks and goals whose folded attributes differ from the state's,
 /// with the state's.
-fn differing(conn: &Connection) -> Result<Differing> {
+fn differing(conn: &impl SqlRead) -> Result<Differing> {
     let folded = match fold(
         &events_of(
             conn,
@@ -183,14 +190,14 @@ fn differing(conn: &Connection) -> Result<Differing> {
 
 /// The attributes as the state tables hold them, read as the store's
 /// readers read them.
-fn state_attributes(conn: &Connection) -> Result<Attributes> {
+fn state_attributes(conn: &impl SqlRead) -> Result<Attributes> {
     let mut attributes = Attributes::default();
-    let rows: Vec<(TaskId, TaskRow)> = conn
-        .prepare(
-            "SELECT id, status, goal_id, title, change, execution_class, priority, priority_by
+    let rows: Vec<(TaskId, TaskRow)> = SqlRead::query_map(
+        conn,
+        "SELECT id, status, goal_id, title, change, execution_class, priority, priority_by
              FROM tasks ORDER BY id",
-        )?
-        .query_map([], |row| {
+        sql_params![],
+        |row| {
             Ok((
                 row.get(0)?,
                 TaskRow {
@@ -203,8 +210,8 @@ fn state_attributes(conn: &Connection) -> Result<Attributes> {
                     priority_by: row.get(7)?,
                 },
             ))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+        },
+    )?;
     for (id, row) in rows {
         let own_priority = row.priority.map(Priority::from_i64).transpose()?;
         attributes.tasks.insert(
@@ -226,10 +233,9 @@ fn state_attributes(conn: &Connection) -> Result<Attributes> {
         );
     }
     let pairs = |sql: &str| -> Result<Vec<(TaskId, i64)>> {
-        Ok(conn
-            .prepare(sql)?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(conn, sql, sql_params![], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?)
     };
     for (task, predecessor) in pairs("SELECT task_id, predecessor_id FROM task_dependencies")? {
         if let Some(task) = attributes.tasks.get_mut(&task) {
@@ -242,10 +248,9 @@ fn state_attributes(conn: &Connection) -> Result<Attributes> {
         }
     }
     let texts = |sql: &str| -> Result<Vec<(TaskId, String, String)>> {
-        Ok(conn
-            .prepare(sql)?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(conn, sql, sql_params![], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?)
     };
     for (task, origin, _) in texts("SELECT task_id, origin, '' FROM draft_origins")? {
         if let Some(task) = attributes.tasks.get_mut(&task) {
@@ -262,10 +267,12 @@ fn state_attributes(conn: &Connection) -> Result<Attributes> {
             task.unfinished_run = Some(RunId::new(run)?);
         }
     }
-    let goals: Vec<GoalId> = conn
-        .prepare("SELECT id FROM goals ORDER BY id")?
-        .query_map([], |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let goals: Vec<GoalId> = SqlRead::query_map(
+        conn,
+        "SELECT id FROM goals ORDER BY id",
+        sql_params![],
+        |row| row.get(0),
+    )?;
     for id in goals {
         let goal = read_goal(conn, id)?;
         attributes.goals.insert(

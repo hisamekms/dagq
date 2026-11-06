@@ -8,9 +8,11 @@ use crate::domain::ledger::{
 };
 use crate::domain::pre_claim::rows::Since;
 use crate::domain::run_phase::{Blocker, Holds};
-use crate::infrastructure::sql_dialect::{JsonType, json_field_spaced};
-use crate::infrastructure::sqlite::event_row;
-use rusqlite::{OptionalExtension, Row, params};
+use crate::infrastructure::sql_dialect::{JsonType, SqlDialect};
+use crate::infrastructure::sql_exec::{
+    OptionalRow, SqlRead, SqlResult, SqlRow, SqlValue, SqlWrite, ToSqlValue, sql_params,
+};
+use crate::infrastructure::store_rows::event_row;
 
 const BLOCKERS: [(Blocker, &str); 7] = [
     (Blocker::Queue, "blocker_queue_ms"),
@@ -45,10 +47,11 @@ fn text(value: &impl serde::Serialize) -> Result<String> {
 }
 
 /// The row of `kind` and `key` `conn` holds, if there is one.
-fn held_row(conn: &rusqlite::Connection, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
-    conn.query_row(
+fn held_row(conn: &impl SqlRead, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
+    SqlRead::query_row(
+        conn,
         "SELECT * FROM ledger_rows WHERE kind=?1 AND key=?2",
-        params![kind.as_str(), key],
+        sql_params![kind.as_str(), key],
         ledger_row,
     )
     .optional()?
@@ -59,7 +62,7 @@ fn held_row(conn: &rusqlite::Connection, kind: LedgerKind, key: &str) -> Result<
 /// ([`written::KIND`]): its position as the `events` of its
 /// `inputs_through`, its version as its `ledger_v`, nothing else. No
 /// reader of the rows of a [`LedgerKind`] reads it.
-fn write_mark(conn: &rusqlite::Connection, mark: &SessionsWritten) -> Result<()> {
+fn write_mark(conn: &impl SqlWrite, mark: &SessionsWritten) -> Result<()> {
     let through = text(&InputsThrough {
         events: mark.through,
         supervisor: None,
@@ -69,12 +72,13 @@ fn write_mark(conn: &rusqlite::Connection, mark: &SessionsWritten) -> Result<()>
         resources: None,
         inside_resources: None,
     })?;
-    conn.execute(
+    SqlWrite::execute(
+        conn,
         "INSERT INTO ledger_rows(kind, key, ledger_v, built_at, inputs_through)
          VALUES (?1, ?2, ?3, '', ?4)
          ON CONFLICT(kind, key) DO UPDATE SET
            ledger_v=excluded.ledger_v, inputs_through=excluded.inputs_through",
-        params![written::KIND, written::KEY, mark.ledger_v, through],
+        sql_params![written::KIND, written::KEY, mark.ledger_v, through],
     )?;
     Ok(())
 }
@@ -85,7 +89,7 @@ fn write_mark(conn: &rusqlite::Connection, mark: &SessionsWritten) -> Result<()>
 /// `inputs_through` with its `read_ms` ([`MarkThrough`]), its version as its
 /// `ledger_v`, nothing else. No reader of the rows of a [`LedgerKind`]
 /// reads it.
-fn write_rows_mark(conn: &rusqlite::Connection, mark: &RowsWritten) -> Result<()> {
+fn write_rows_mark(conn: &impl SqlWrite, mark: &RowsWritten) -> Result<()> {
     let through = text(&MarkThrough {
         positions: InputsThrough {
             events: mark.through.events,
@@ -98,12 +102,13 @@ fn write_rows_mark(conn: &rusqlite::Connection, mark: &RowsWritten) -> Result<()
         },
         read_ms: mark.read_ms,
     })?;
-    conn.execute(
+    SqlWrite::execute(
+        conn,
         "INSERT INTO ledger_rows(kind, key, ledger_v, built_at, inputs_through)
          VALUES (?1, ?2, ?3, '', ?4)
          ON CONFLICT(kind, key) DO UPDATE SET
            ledger_v=excluded.ledger_v, inputs_through=excluded.inputs_through",
-        params![written::ROWS_KIND, written::KEY, mark.ledger_v, through],
+        sql_params![written::ROWS_KIND, written::KEY, mark.ledger_v, through],
     )?;
     Ok(())
 }
@@ -123,23 +128,21 @@ struct MarkThrough {
 /// The marks of each of `kinds` (key [`written::KEY`]) `conn` holds, read
 /// in one statement: each kind with its version and what its
 /// `inputs_through` holds.
-fn read_marks(
-    conn: &rusqlite::Connection,
-    kinds: [&str; 2],
-) -> Result<Vec<(String, u32, MarkThrough)>> {
-    let mut statement = conn.prepare_cached(
-        "SELECT kind, ledger_v, inputs_through FROM ledger_rows
-         WHERE kind IN (?1, ?2) AND key=?3",
-    )?;
-    let rows = statement
-        .query_map(params![kinds[0], kinds[1], written::KEY], |r| {
+fn read_marks(conn: &impl SqlRead, kinds: [&str; 2]) -> Result<Vec<(String, u32, MarkThrough)>> {
+    let statement = "SELECT kind, ledger_v, inputs_through FROM ledger_rows
+         WHERE kind IN (?1, ?2) AND key=?3";
+    let rows = SqlRead::query_map(
+        conn,
+        statement,
+        sql_params![kinds[0], kinds[1], written::KEY],
+        |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
             ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        },
+    )?;
     rows.into_iter()
         .map(|(kind, ledger_v, through)| {
             Ok((
@@ -152,53 +155,75 @@ fn read_marks(
 }
 
 /// Write `row` on `conn` as [`LedgerStore::write_ledger_row`] says.
-fn upsert(conn: &rusqlite::Connection, row: &LedgerRow) -> Result<bool> {
+fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
     let totals = &row.totals;
-    let mut columns: Vec<(&str, rusqlite::types::Value)> = vec![
-        ("kind", row.kind.as_str().to_owned().into()),
-        ("key", row.key.clone().into()),
-        ("task_id", row.task_id.map(|task| task.as_i64()).into()),
-        ("ledger_v", i64::from(row.ledger_v).into()),
-        ("built_at", row.built_at.clone().into()),
-        ("inputs_through", text(&row.inputs_through)?.into()),
-        ("final", i64::from(row.is_final).into()),
-        ("legacy", i64::from(row.is_legacy()).into()),
+    let mut columns: Vec<(&str, SqlValue)> = vec![
+        ("kind", row.kind.as_str().to_sql_value()),
+        ("key", row.key.to_sql_value()),
+        (
+            "task_id",
+            row.task_id.map(|task| task.as_i64()).to_sql_value(),
+        ),
+        ("ledger_v", i64::from(row.ledger_v).to_sql_value()),
+        ("built_at", row.built_at.to_sql_value()),
+        ("inputs_through", text(&row.inputs_through)?.to_sql_value()),
+        ("final", i64::from(row.is_final).to_sql_value()),
+        ("legacy", i64::from(row.is_legacy()).to_sql_value()),
         (
             "legacy_values",
-            row.legacy.as_ref().map(text).transpose()?.into(),
+            row.legacy.as_ref().map(text).transpose()?.to_sql_value(),
         ),
-        ("started_at", row.started_at.into()),
-        ("ended_at", row.ended_at.into()),
-        ("outcome", row.outcome.clone().into()),
-        ("duration_ms", totals.all.duration_ms.into()),
-        ("slot_ms", totals.all.slot_ms.into()),
-        ("unattributed_ms", totals.unattributed_ms.into()),
-        ("attempts", totals.attempts.into()),
-        ("totals", text(totals)?.into()),
-        ("intervals", text(&row.intervals)?.into()),
-        ("attributes", text(&row.attributes)?.into()),
+        ("started_at", row.started_at.to_sql_value()),
+        ("ended_at", row.ended_at.to_sql_value()),
+        ("outcome", row.outcome.to_sql_value()),
+        ("duration_ms", totals.all.duration_ms.to_sql_value()),
+        ("slot_ms", totals.all.slot_ms.to_sql_value()),
+        ("unattributed_ms", totals.unattributed_ms.to_sql_value()),
+        ("attempts", totals.attempts.to_sql_value()),
+        ("totals", text(totals)?.to_sql_value()),
+        ("intervals", text(&row.intervals)?.to_sql_value()),
+        ("attributes", text(&row.attributes)?.to_sql_value()),
         (
             "after_claim",
-            row.after_claim.as_ref().map(text).transpose()?.into(),
+            row.after_claim
+                .as_ref()
+                .map(text)
+                .transpose()?
+                .to_sql_value(),
         ),
-        ("detail", text(&row.detail)?.into()),
-        ("inputs_from", row.inputs_from.as_i64().into()),
-        ("records", text(&row.records)?.into()),
+        ("detail", text(&row.detail)?.to_sql_value()),
+        ("inputs_from", row.inputs_from.as_i64().to_sql_value()),
+        ("records", text(&row.records)?.to_sql_value()),
     ];
     let subject = row.subject.as_ref();
     columns.extend([
-        ("subject_kind", subject.map(|s| s.kind.clone()).into()),
-        ("subject_id", subject.map(|s| s.id.clone()).into()),
-        ("round", subject.and_then(|s| s.round).into()),
-        ("route", subject.and_then(|s| s.route.clone()).into()),
-        ("provider", subject.and_then(|s| s.provider.clone()).into()),
-        ("model", subject.and_then(|s| s.model.clone()).into()),
+        (
+            "subject_kind",
+            subject.map(|s| s.kind.clone()).to_sql_value(),
+        ),
+        ("subject_id", subject.map(|s| s.id.clone()).to_sql_value()),
+        ("round", subject.and_then(|s| s.round).to_sql_value()),
+        (
+            "route",
+            subject.and_then(|s| s.route.clone()).to_sql_value(),
+        ),
+        (
+            "provider",
+            subject.and_then(|s| s.provider.clone()).to_sql_value(),
+        ),
+        (
+            "model",
+            subject.and_then(|s| s.model.clone()).to_sql_value(),
+        ),
     ]);
     for (blocker, column) in BLOCKERS {
-        columns.push((column, millis(&totals.by_blocker, tag(blocker)).into()));
+        columns.push((
+            column,
+            millis(&totals.by_blocker, tag(blocker)).to_sql_value(),
+        ));
     }
     for (holds, column) in HOLDS {
-        columns.push((column, millis(&totals.by_holds, tag(holds)).into()));
+        columns.push((column, millis(&totals.by_holds, tag(holds)).to_sql_value()));
     }
     let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
     let marks: Vec<String> = (1..=names.len()).map(|n| format!("?{n}")).collect();
@@ -221,15 +246,16 @@ fn upsert(conn: &rusqlite::Connection, row: &LedgerRow) -> Result<bool> {
                 ),
             })
             .collect();
-    let frozen: bool = conn
-        .query_row(
-            "SELECT legacy FROM ledger_rows WHERE kind=?1 AND key=?2",
-            params![row.kind.as_str(), row.key],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(false);
-    conn.execute(
+    let frozen: bool = SqlRead::query_row(
+        conn,
+        "SELECT legacy FROM ledger_rows WHERE kind=?1 AND key=?2",
+        sql_params![row.kind.as_str(), row.key],
+        |r| r.get(0),
+    )
+    .optional()?
+    .unwrap_or(false);
+    SqlWrite::execute(
+        conn,
         &format!(
             "INSERT INTO ledger_rows({}) VALUES ({})
                  ON CONFLICT(kind, key) DO UPDATE SET {}",
@@ -237,7 +263,10 @@ fn upsert(conn: &rusqlite::Connection, row: &LedgerRow) -> Result<bool> {
             marks.join(","),
             updates.join(","),
         ),
-        rusqlite::params_from_iter(columns.into_iter().map(|(_, value)| value)),
+        &columns
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>(),
     )?;
     Ok(!frozen)
 }
@@ -247,7 +276,7 @@ fn upsert(conn: &rusqlite::Connection, row: &LedgerRow) -> Result<bool> {
 /// with no records, at most `?6`: with `after` (`?5`) the key's range after
 /// it on the primary key, so a page reads no row before it; without, `?5`
 /// is NULL.
-fn wait_rows_sql(after: bool) -> String {
+fn wait_rows_sql(dialect: SqlDialect, after: bool) -> String {
     let from = if after { "key > ?5" } else { "?5 IS NULL" };
     format!(
         "SELECT kind, key, task_id, ledger_v, built_at, inputs_through, final,
@@ -262,7 +291,7 @@ fn wait_rows_sql(after: bool) -> String {
                  OR (subject_kind='live_alert_stream'
                      AND (outcome IS NULL OR outcome=?4)))
           ORDER BY key LIMIT ?6",
-        events = json_field_spaced("inputs_through", "$.events", JsonType::Integer),
+        events = dialect.json_field_spaced("inputs_through", "$.events", JsonType::Integer),
     )
 }
 
@@ -280,7 +309,7 @@ fn rows_after_sql(after: bool) -> &'static str {
 
 /// The read of the queue rows' heads (the kind `?1`), their columns and the
 /// ids of their records, by key, with `filter` on the rows and `limit`.
-fn queue_heads_sql(filter: &str, limit: &str) -> String {
+fn queue_heads_sql(dialect: SqlDialect, filter: &str, limit: &str) -> String {
     format!(
         "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v,
                 (SELECT COALESCE(json_group_array({id}), '[]')
@@ -288,7 +317,7 @@ fn queue_heads_sql(filter: &str, limit: &str) -> String {
                 r.task_id, r.subject_kind, r.subject_id, r.started_at, r.ended_at,
                 r.outcome, r.detail
            FROM ledger_rows r WHERE r.kind=?1 {filter} ORDER BY r.key {limit}",
-        id = json_field_spaced("j.value", "$.id", JsonType::Integer),
+        id = dialect.json_field_spaced("j.value", "$.id", JsonType::Integer),
     )
 }
 
@@ -296,7 +325,7 @@ fn queue_heads_sql(filter: &str, limit: &str) -> String {
 /// and its index among the row's records, at most `?5`: with `after` (the
 /// key `?3` and the index `?4`) the key's range from it on the primary key,
 /// so a page reads no row before it; without, `?3` and `?4` are NULL.
-fn stops_after_sql(after: bool) -> String {
+fn stops_after_sql(dialect: SqlDialect, after: bool) -> String {
     let from = if after {
         "r.key >= ?3 AND (r.key > ?3 OR j.key > ?4)"
     } else {
@@ -307,7 +336,7 @@ fn stops_after_sql(after: bool) -> String {
           WHERE r.kind=?1 AND {from}
             AND {kind}=?2
           ORDER BY r.key, j.key LIMIT ?5",
-        kind = json_field_spaced("j.value", "$.kind", JsonType::Text),
+        kind = dialect.json_field_spaced("j.value", "$.kind", JsonType::Text),
     )
 }
 
@@ -316,11 +345,11 @@ impl SqliteQueue {
     fn queue_heads(
         &self,
         sql: &str,
-        params: &[&dyn rusqlite::ToSql],
+        params: &[SqlValue],
     ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
-        let mut statement = self.conn.prepare(sql)?;
+        let statement = sql;
         let kind = LedgerKind::Queue;
-        let rows = statement.query_map(params, |r| {
+        let rows = SqlRead::query_map(&*self.conn, statement, params, |r| {
             let key: String = r.get("key")?;
             let inputs_from: i64 = r.get("inputs_from")?;
             let inputs_through: String = r.get("inputs_through")?;
@@ -357,7 +386,7 @@ impl SqliteQueue {
                 })
             })())
         })?;
-        rows.map(|row| row?).collect()
+        rows.into_iter().collect()
     }
 
     /// The rows [`crate::domain::pre_claim::rows::holds`] keeps for `since`,
@@ -369,10 +398,12 @@ impl SqliteQueue {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<LedgerRow>> {
-        let mut statement = self.conn.prepare(&wait_rows_sql(after.is_some()))?;
+        let statement = wait_rows_sql(SqlRead::dialect(&*self.conn), after.is_some());
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let rows = statement.query_map(
-            params![
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![
                 LedgerKind::Queue.as_str(),
                 since.ms,
                 since.id.as_i64(),
@@ -382,19 +413,19 @@ impl SqliteQueue {
             ],
             ledger_row,
         )?;
-        rows.map(|row| row?).collect()
+        rows.into_iter().collect()
     }
 }
 
 /// The last event naming a supervisor up to an id, by the index
 /// `events_by_supervisor` (its expression the one the index is on).
-fn last_event_naming_supervisor_sql() -> String {
+fn last_event_naming_supervisor_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT * FROM run_events
   WHERE {} = ?1 AND id <= ?2
     AND json_type(payload, '$.supervisor') = 'text'
   ORDER BY id DESC LIMIT 1",
-        json_field_spaced("payload", "$.supervisor", JsonType::Text)
+        dialect.json_field_spaced("payload", "$.supervisor", JsonType::Text)
     )
 }
 
@@ -407,16 +438,20 @@ impl SqliteQueue {
         &self,
         kind: LedgerKind,
         filter: &str,
-        params: impl rusqlite::Params,
+        params: &[SqlValue],
     ) -> Result<Vec<(LedgerHead, bool)>> {
-        let mut statement = self.conn.prepare(&format!(
+        let statement = format!(
             "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v, r.legacy,
                     (SELECT COALESCE(json_group_array({id}), '[]')
                        FROM json_each(r.records) j) AS ids
                FROM ledger_rows r WHERE r.kind=?1 AND {filter} ORDER BY r.key",
-            id = json_field_spaced("j.value", "$.id", JsonType::Integer),
-        ))?;
-        let rows = statement.query_map(params, |r| {
+            id = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "j.value",
+                "$.id",
+                JsonType::Integer
+            ),
+        );
+        let rows = SqlRead::query_map(&*self.conn, &statement, params, |r| {
             let key: String = r.get("key")?;
             let inputs_from: i64 = r.get("inputs_from")?;
             let inputs_through: String = r.get("inputs_through")?;
@@ -439,7 +474,7 @@ impl SqliteQueue {
                 Ok((head, legacy))
             })())
         })?;
-        rows.map(|row| row?).collect()
+        rows.into_iter().collect()
     }
 }
 
@@ -460,14 +495,13 @@ impl LedgerStore for SqliteQueue {
         supervisor: &str,
         upto: EventId,
     ) -> Result<Option<crate::domain::RunEvent>> {
-        Ok(self
-            .conn
-            .query_row(
-                &last_event_naming_supervisor_sql(),
-                params![supervisor, upto.as_i64()],
-                event_row,
-            )
-            .optional()?)
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            &last_event_naming_supervisor_sql(SqlRead::dialect(&*self.conn)),
+            sql_params![supervisor, upto.as_i64()],
+            event_row,
+        )
+        .optional()?)
     }
 
     fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool> {
@@ -540,7 +574,8 @@ impl LedgerStore for SqliteQueue {
     /// with the session rows' mark or before it.
     fn ledger_marks(&self) -> Result<Option<Marks>> {
         let (mut sessions, mut rows) = (None, None);
-        for (kind, ledger_v, mark) in read_marks(&self.conn, [written::KIND, written::ROWS_KIND])? {
+        for (kind, ledger_v, mark) in read_marks(&*self.conn, [written::KIND, written::ROWS_KIND])?
+        {
             let through = mark.positions;
             if kind == written::KIND {
                 sessions = Some(SessionsWritten {
@@ -565,15 +600,18 @@ impl LedgerStore for SqliteQueue {
     }
 
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
-        held_row(&self.conn, kind, key)
+        held_row(&*self.conn, kind, key)
     }
 
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT * FROM ledger_rows WHERE kind=?1 ORDER BY key")?;
-        let rows = statement.query_map([kind.as_str()], ledger_row)?;
-        rows.map(|row| row?).collect()
+        let statement = "SELECT * FROM ledger_rows WHERE kind=?1 ORDER BY key";
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            statement,
+            sql_params![kind.as_str()],
+            ledger_row,
+        )?;
+        rows.into_iter().collect()
     }
 
     fn ledger_events_expected(&self) -> Result<usize> {
@@ -586,20 +624,30 @@ impl LedgerStore for SqliteQueue {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<LedgerRow>> {
-        let mut statement = self.conn.prepare(rows_after_sql(after.is_some()))?;
+        let statement = rows_after_sql(after.is_some());
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = match after {
-            Some(after) => statement.query_map(params![kind.as_str(), after, limit], ledger_row)?,
-            None => statement.query_map(params![kind.as_str(), limit], ledger_row)?,
+            Some(after) => SqlRead::query_map(
+                &*self.conn,
+                statement,
+                sql_params![kind.as_str(), after, limit],
+                ledger_row,
+            )?,
+            None => SqlRead::query_map(
+                &*self.conn,
+                statement,
+                sql_params![kind.as_str(), limit],
+                ledger_row,
+            )?,
         };
-        rows.map(|row| row?).collect()
+        rows.into_iter().collect()
     }
 
     /// The ids of the records come from SQLite's JSON functions over the
     /// stored array: no record is parsed here.
     fn ledger_heads(&self, kind: LedgerKind) -> Result<Vec<LedgerHead>> {
         Ok(self
-            .heads_where(kind, "1", params![kind.as_str()])?
+            .heads_where(kind, "1", sql_params![kind.as_str()])?
             .into_iter()
             .map(|(head, _)| head)
             .collect())
@@ -609,8 +657,9 @@ impl LedgerStore for SqliteQueue {
     /// rows: no other record is parsed.
     fn ledger_push_records(&self) -> Result<Vec<crate::domain::RunEvent>> {
         use crate::domain::EventKind;
-        let kind = json_field_spaced("j.value", "$.kind", JsonType::Text);
-        let mut statement = self.conn.prepare(&format!(
+        let kind =
+            SqlRead::dialect(&*self.conn).json_field_spaced("j.value", "$.kind", JsonType::Text);
+        let statement = format!(
             "SELECT j.value FROM ledger_rows r, json_each(r.records) j
               WHERE r.kind=?1
                 AND ({kind}=?2
@@ -618,11 +667,21 @@ impl LedgerStore for SqliteQueue {
                          AND EXISTS (SELECT 1 FROM json_each(r.records) f
                                       WHERE {failed}=?3)))
               ORDER BY {id}",
-            failed = json_field_spaced("f.value", "$.kind", JsonType::Text),
-            id = json_field_spaced("j.value", "$.id", JsonType::Integer),
-        ))?;
-        let rows = statement.query_map(
-            params![
+            failed = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "f.value",
+                "$.kind",
+                JsonType::Text
+            ),
+            id = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "j.value",
+                "$.id",
+                JsonType::Integer
+            ),
+        );
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![
                 LedgerKind::Run.as_str(),
                 EventKind::PushFinished.as_str(),
                 EventKind::PushFailed.as_str(),
@@ -630,11 +689,12 @@ impl LedgerStore for SqliteQueue {
             ],
             |r| r.get::<_, String>(0),
         )?;
-        rows.map(|row| {
-            let event: crate::domain::RunEvent = serde_json::from_str(&row?)?;
-            Ok(crate::domain::ledger::builder::pushes::cut(&event))
-        })
-        .collect()
+        rows.into_iter()
+            .map(|row| {
+                let event: crate::domain::RunEvent = serde_json::from_str(&row)?;
+                Ok(crate::domain::ledger::builder::pushes::cut(&event))
+            })
+            .collect()
     }
 
     /// SQLite picks by their columns the run and task rows that may not be
@@ -648,10 +708,26 @@ impl LedgerStore for SqliteQueue {
                      OR COALESCE({supervisor}, 0)>?3
                      OR COALESCE({windows}, 0)>?4
                      OR json_array_length(COALESCE({life_ended}, '[]'))>0)",
-            events = json_field_spaced("r.inputs_through", "$.events", JsonType::Integer),
-            supervisor = json_field_spaced("r.inputs_through", "$.supervisor", JsonType::Integer),
-            windows = json_field_spaced("r.inputs_through", "$.resources", JsonType::Integer),
-            life_ended = json_field_spaced("r.inputs_through", "$.life_ended", JsonType::Any),
+            events = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "r.inputs_through",
+                "$.events",
+                JsonType::Integer
+            ),
+            supervisor = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "r.inputs_through",
+                "$.supervisor",
+                JsonType::Integer
+            ),
+            windows = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "r.inputs_through",
+                "$.resources",
+                JsonType::Integer
+            ),
+            life_ended = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "r.inputs_through",
+                "$.life_ended",
+                JsonType::Any
+            ),
         );
         let mut heads = Vec::new();
         for kind in [LedgerKind::Run, LedgerKind::Task] {
@@ -659,7 +735,7 @@ impl LedgerStore for SqliteQueue {
                 self.heads_where(
                     kind,
                     &open,
-                    params![
+                    sql_params![
                         kind.as_str(),
                         crate::domain::ledger::LEDGER_V,
                         through.as_i64(),
@@ -677,8 +753,7 @@ impl LedgerStore for SqliteQueue {
     /// SQLite picks the runs out of the task rows' details and a legacy
     /// row's values, and keeps those with no run row: no record is read.
     fn ledger_runs_without_row(&self) -> Result<Vec<crate::domain::RunId>> {
-        let mut statement = self.conn.prepare(
-            "SELECT DISTINCT j.value
+        let statement = "SELECT DISTINCT j.value
                FROM ledger_rows t, json_each(t.detail, '$.runs') j
               WHERE t.kind=?1 AND j.type='text'
                 AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?2 AND r.key=j.value)
@@ -687,44 +762,43 @@ impl LedgerStore for SqliteQueue {
                FROM ledger_rows t, json_each(COALESCE(t.legacy_values, '{}'), '$.runs') j
               WHERE t.kind=?1 AND j.type='text'
                 AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?2 AND r.key=j.value)
-              ORDER BY 1",
-        )?;
-        let rows = statement.query_map(
-            params![LedgerKind::Task.as_str(), LedgerKind::Run.as_str()],
+              ORDER BY 1";
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            statement,
+            sql_params![LedgerKind::Task.as_str(), LedgerKind::Run.as_str()],
             |r| r.get::<_, String>(0),
         )?;
-        rows.filter_map(|run| match run {
-            Ok(run) => crate::domain::RunId::new(&run).ok().map(Ok),
-            Err(error) => Some(Err(error.into())),
-        })
-        .collect()
+        Ok(rows
+            .into_iter()
+            .filter_map(|run| crate::domain::RunId::new(&run).ok())
+            .collect())
     }
 
     /// SQLite walks the events of the legacy task rows' tasks by the index
     /// on their task and keeps the runs of their claims with no run row:
     /// no payload is read.
     fn ledger_legacy_runs_without_row(&self) -> Result<Vec<crate::domain::RunId>> {
-        let mut statement = self.conn.prepare(
-            "SELECT DISTINCT e.run_id
+        let statement = "SELECT DISTINCT e.run_id
                FROM ledger_rows t
                JOIN run_events e ON e.task_id=t.task_id
               WHERE t.kind=?1 AND t.legacy=1 AND e.kind=?2 AND e.run_id IS NOT NULL
                 AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?3 AND r.key=e.run_id)
-              ORDER BY 1",
-        )?;
-        let rows = statement.query_map(
-            params![
+              ORDER BY 1";
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            statement,
+            sql_params![
                 LedgerKind::Task.as_str(),
                 crate::domain::EventKind::RunClaimed.as_str(),
                 LedgerKind::Run.as_str(),
             ],
             |r| r.get::<_, String>(0),
         )?;
-        rows.filter_map(|run| match run {
-            Ok(run) => crate::domain::RunId::new(&run).ok().map(Ok),
-            Err(error) => Some(Err(error.into())),
-        })
-        .collect()
+        Ok(rows
+            .into_iter()
+            .filter_map(|run| crate::domain::RunId::new(&run).ok())
+            .collect())
     }
 
     /// SQLite walks the claims of the task by the index on its task: no
@@ -733,20 +807,19 @@ impl LedgerStore for SqliteQueue {
         &self,
         task: crate::domain::TaskId,
     ) -> Result<Vec<crate::domain::RunId>> {
-        let mut statement = self.conn.prepare(
-            "SELECT DISTINCT run_id FROM run_events
+        let statement = "SELECT DISTINCT run_id FROM run_events
               WHERE task_id=?1 AND kind=?2 AND run_id IS NOT NULL
-              ORDER BY 1",
-        )?;
-        let rows = statement.query_map(
-            params![task.as_i64(), crate::domain::EventKind::RunClaimed.as_str()],
+              ORDER BY 1";
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            statement,
+            sql_params![task.as_i64(), crate::domain::EventKind::RunClaimed.as_str()],
             |r| r.get::<_, String>(0),
         )?;
-        rows.filter_map(|run| match run {
-            Ok(run) => crate::domain::RunId::new(&run).ok().map(Ok),
-            Err(error) => Some(Err(error.into())),
-        })
-        .collect()
+        Ok(rows
+            .into_iter()
+            .filter_map(|run| crate::domain::RunId::new(&run).ok())
+            .collect())
     }
 
     /// SQLite picks them by their columns, from `after` on the primary key:
@@ -764,14 +837,16 @@ impl LedgerStore for SqliteQueue {
         } else {
             "?7 IS NULL AND ?8 IS NULL"
         };
-        let mut statement = self.conn.prepare(&format!(
+        let statement = format!(
             "SELECT kind, key FROM ledger_rows
               WHERE {from} AND kind IN (?1, ?2, ?3, ?4, ?5)
                 AND legacy=0 AND ledger_v<?6
               ORDER BY kind, key LIMIT ?9",
-        ))?;
-        let rows = statement.query_map(
-            params![
+        );
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![
                 LedgerKind::Run.as_str(),
                 LedgerKind::Task.as_str(),
                 LedgerKind::Session.as_str(),
@@ -784,53 +859,66 @@ impl LedgerStore for SqliteQueue {
             ],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         )?;
-        rows.map(|row| {
-            let (kind, key) = row?;
-            let kind = LedgerKind::ALL
-                .into_iter()
-                .find(|known| known.as_str() == kind)
-                .ok_or_else(|| anyhow::anyhow!("ledger row of unknown kind {kind}"))?;
-            Ok((kind, key))
-        })
-        .collect()
+        rows.into_iter()
+            .map(|row| {
+                let (kind, key) = row;
+                let kind = LedgerKind::ALL
+                    .into_iter()
+                    .find(|known| known.as_str() == kind)
+                    .ok_or_else(|| anyhow::anyhow!("ledger row of unknown kind {kind}"))?;
+                Ok((kind, key))
+            })
+            .collect()
     }
 
     /// SQLite picks the keys by the rules in each run row's detail: no
     /// row is parsed.
     fn ledger_runs_classified_otherwise(&self, version: &str) -> Result<Vec<String>> {
-        let mut statement = self.conn.prepare(&format!(
+        let statement = format!(
             "SELECT key FROM ledger_rows
               WHERE kind=?1 AND json_type(detail, '$.steps') IS NOT NULL
                 AND {rules} IS NOT ?2
               ORDER BY key",
-            rules = json_field_spaced("detail", "$.steps.fold.classes.rules", JsonType::Text),
-        ))?;
-        let keys = statement
-            .query_map(params![LedgerKind::Run.as_str(), version], |r| r.get(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
+            rules = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "detail",
+                "$.steps.fold.classes.rules",
+                JsonType::Text
+            ),
+        );
+        let keys: Vec<String> = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![LedgerKind::Run.as_str(), version],
+            |r| r.get(0),
+        )?;
         Ok(keys)
     }
 
     /// SQLite looks each run row's next event after its inputs up in the
     /// index on the run: no record and no event is read.
     fn ledger_runs_past_their_rows(&self, through: EventId) -> Result<Vec<crate::domain::RunId>> {
-        let mut statement = self.conn.prepare(&format!(
+        let statement = format!(
             "SELECT r.key FROM ledger_rows r
               WHERE r.kind=?1
                 AND EXISTS (SELECT 1 FROM run_events e
                              WHERE e.run_id=r.key AND e.id>{inputs} AND e.id<=?2)
               ORDER BY r.key",
-            inputs = json_field_spaced("r.inputs_through", "$.events", JsonType::Integer),
-        ))?;
-        let rows = statement
-            .query_map(params![LedgerKind::Run.as_str(), through.as_i64()], |r| {
-                r.get::<_, String>(0)
-            })?;
-        rows.filter_map(|run| match run {
-            Ok(run) => crate::domain::RunId::new(&run).ok().map(Ok),
-            Err(error) => Some(Err(error.into())),
-        })
-        .collect()
+            inputs = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "r.inputs_through",
+                "$.events",
+                JsonType::Integer
+            ),
+        );
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![LedgerKind::Run.as_str(), through.as_i64()],
+            |r| r.get::<_, String>(0),
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|run| crate::domain::RunId::new(&run).ok())
+            .collect())
     }
 
     /// SQLite picks the pushes of no run out of the task rows' records and
@@ -838,18 +926,32 @@ impl LedgerStore for SqliteQueue {
     /// those are parsed.
     fn ledger_runless_pushes(&self) -> Result<Vec<crate::domain::RunEvent>> {
         use crate::domain::EventKind;
-        let mut statement = self.conn.prepare(&format!(
+        let statement = format!(
             "SELECT j.value FROM ledger_rows r, json_each(r.records) j
               WHERE (r.kind=?1 OR (r.kind=?2 AND r.subject_kind=?3))
                 AND {kind}=?3
                 AND {run} IS NULL
               ORDER BY {id}",
-            kind = json_field_spaced("j.value", "$.kind", JsonType::Text),
-            run = json_field_spaced("j.value", "$.run_id", JsonType::Any),
-            id = json_field_spaced("j.value", "$.id", JsonType::Integer),
-        ))?;
-        let rows = statement.query_map(
-            params![
+            kind = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "j.value",
+                "$.kind",
+                JsonType::Text
+            ),
+            run = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "j.value",
+                "$.run_id",
+                JsonType::Any
+            ),
+            id = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "j.value",
+                "$.id",
+                JsonType::Integer
+            ),
+        );
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![
                 LedgerKind::Task.as_str(),
                 LedgerKind::Queue.as_str(),
                 EventKind::PushFinished.as_str(),
@@ -857,8 +959,9 @@ impl LedgerStore for SqliteQueue {
             |r| r.get::<_, String>(0),
         )?;
         let mut pushes: Vec<crate::domain::RunEvent> = rows
+            .into_iter()
             .map(|row| {
-                let event: crate::domain::RunEvent = serde_json::from_str(&row?)?;
+                let event: crate::domain::RunEvent = serde_json::from_str(&row)?;
                 Ok(crate::domain::ledger::builder::pushes::cut(&event))
             })
             .collect::<Result<_>>()?;
@@ -870,8 +973,8 @@ impl LedgerStore for SqliteQueue {
     /// the stored array): no record is parsed here.
     fn ledger_queue_heads(&self) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
         self.queue_heads(
-            &queue_heads_sql("", ""),
-            params![LedgerKind::Queue.as_str()],
+            &queue_heads_sql(SqlRead::dialect(&*self.conn), "", ""),
+            sql_params![LedgerKind::Queue.as_str()],
         )
     }
 
@@ -912,13 +1015,25 @@ impl LedgerStore for SqliteQueue {
                     OR COALESCE(r.subject_kind, '') NOT IN
                        ('live_alert_stream', 'live_alert', 'finding', 'landing_slot',
                         'slots_full', 'claim_hold', 'claim_deferral', 'landing_hold')))",
-            events = json_field_spaced("r.inputs_through", "$.events", JsonType::Integer),
-            supervisor = json_field_spaced("r.inputs_through", "$.supervisor", JsonType::Integer),
-            end = json_field_spaced("r.detail", "$.interval.end", JsonType::Text),
+            events = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "r.inputs_through",
+                "$.events",
+                JsonType::Integer
+            ),
+            supervisor = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "r.inputs_through",
+                "$.supervisor",
+                JsonType::Integer
+            ),
+            end = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "r.detail",
+                "$.interval.end",
+                JsonType::Text
+            ),
         );
         self.queue_heads(
-            &queue_heads_sql(&filter, "LIMIT ?4"),
-            params![
+            &queue_heads_sql(SqlRead::dialect(&*self.conn), &filter, "LIMIT ?4"),
+            sql_params![
                 LedgerKind::Queue.as_str(),
                 at.as_i64(),
                 after,
@@ -935,31 +1050,38 @@ impl LedgerStore for SqliteQueue {
     /// Only the anchors of each session row are parsed: SQLite picks the
     /// first record and the `session_closed` ones out of the stored array.
     fn ledger_session_anchors(&self) -> Result<Vec<(String, crate::domain::RunEvent)>> {
-        let mut statement = self.conn.prepare(&format!(
+        let statement = format!(
             "SELECT r.key, j.value FROM ledger_rows r, json_each(r.records) j
               WHERE r.kind=?1
                 AND (j.key = 0 OR {} = 'session_closed')
               ORDER BY r.key, j.key",
-            json_field_spaced("j.value", "$.kind", JsonType::Text),
-        ))?;
-        let rows = statement.query_map([LedgerKind::Session.as_str()], |r| {
-            let key: String = r.get(0)?;
-            let event: String = r.get(1)?;
-            Ok((key, event))
-        })?;
-        rows.map(|row| {
-            let (key, event) = row?;
-            Ok((key, serde_json::from_str(&event)?))
-        })
-        .collect()
+            SqlRead::dialect(&*self.conn).json_field_spaced("j.value", "$.kind", JsonType::Text),
+        );
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![LedgerKind::Session.as_str()],
+            |r| {
+                let key: String = r.get(0)?;
+                let event: String = r.get(1)?;
+                Ok((key, event))
+            },
+        )?;
+        rows.into_iter()
+            .map(|row| {
+                let (key, event) = row;
+                Ok((key, serde_json::from_str(&event)?))
+            })
+            .collect()
     }
 
     /// One aggregate over the task rows not settled: no row is read.
     fn ledger_tasks_open_since(&self) -> Result<Since> {
-        let (ms, id): (Option<i64>, Option<i64>) = self.conn.query_row(
+        let (ms, id): (Option<i64>, Option<i64>) = SqlRead::query_row(
+            &*self.conn,
             "SELECT MIN(COALESCE(started_at, -9223372036854775808)), MIN(inputs_from)
                FROM ledger_rows WHERE kind=?1 AND final=0",
-            [LedgerKind::Task.as_str()],
+            sql_params![LedgerKind::Task.as_str()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         Ok(match (ms, id) {
@@ -974,7 +1096,8 @@ impl LedgerStore for SqliteQueue {
     /// One aggregate over the task rows, as [`Self::ledger_tasks_open_since`]
     /// with the cut to `at`: no row is read.
     fn ledger_tasks_open_since_at(&self, at: EventId) -> Result<Since> {
-        let (ms, id): (Option<i64>, Option<i64>) = self.conn.query_row(
+        let (ms, id): (Option<i64>, Option<i64>) = SqlRead::query_row(
+            &*self.conn,
             &format!(
                 "SELECT MIN(COALESCE(started_at, -9223372036854775808)), MIN(inputs_from)
                FROM ledger_rows
@@ -982,10 +1105,18 @@ impl LedgerStore for SqliteQueue {
                 AND (final=0
                      OR MAX({},
                             COALESCE({}, 0)) > ?2)",
-                json_field_spaced("inputs_through", "$.events", JsonType::Integer),
-                json_field_spaced("inputs_through", "$.supervisor", JsonType::Integer),
+                SqlRead::dialect(&*self.conn).json_field_spaced(
+                    "inputs_through",
+                    "$.events",
+                    JsonType::Integer
+                ),
+                SqlRead::dialect(&*self.conn).json_field_spaced(
+                    "inputs_through",
+                    "$.supervisor",
+                    JsonType::Integer
+                ),
             ),
-            params![LedgerKind::Task.as_str(), at.as_i64()],
+            sql_params![LedgerKind::Task.as_str(), at.as_i64()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         Ok(match (ms, id) {
@@ -1022,7 +1153,7 @@ impl LedgerStore for SqliteQueue {
         from: Since,
         until_ms: i64,
     ) -> Result<Vec<LedgerRow>> {
-        let mut statement = self.conn.prepare(&format!(
+        let statement = format!(
             "SELECT kind, key, task_id, ledger_v, built_at, inputs_through, final,
                     legacy_values, started_at, ended_at, outcome, totals, intervals,
                     attributes, after_claim, detail, inputs_from, '[]' AS records,
@@ -1035,11 +1166,21 @@ impl LedgerStore for SqliteQueue {
                 AND started_at <= ?7
                 AND (ended_at >= ?5 OR {} >= ?6)
               ORDER BY key",
-            json_field_spaced("inputs_through", "$.events", JsonType::Integer),
-            json_field_spaced("inputs_through", "$.events", JsonType::Integer),
-        ))?;
-        let rows = statement.query_map(
-            params![
+            SqlRead::dialect(&*self.conn).json_field_spaced(
+                "inputs_through",
+                "$.events",
+                JsonType::Integer
+            ),
+            SqlRead::dialect(&*self.conn).json_field_spaced(
+                "inputs_through",
+                "$.events",
+                JsonType::Integer
+            ),
+        );
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![
                 LedgerKind::Queue.as_str(),
                 held.ms,
                 held.id.as_i64(),
@@ -1050,27 +1191,31 @@ impl LedgerStore for SqliteQueue {
             ],
             ledger_row,
         )?;
-        rows.map(|row| row?).collect()
+        rows.into_iter().collect()
     }
 
     /// SQLite picks the stops out of the stored arrays: no other record is
     /// parsed.
     fn ledger_supervisor_stops(&self) -> Result<Vec<crate::domain::RunEvent>> {
-        let mut statement = self.conn.prepare(&format!(
+        let statement = format!(
             "SELECT j.value FROM ledger_rows r, json_each(r.records) j
               WHERE r.kind=?1 AND {}=?2
               ORDER BY {}",
-            json_field_spaced("j.value", "$.kind", JsonType::Text),
-            json_field_spaced("j.value", "$.id", JsonType::Integer),
-        ))?;
-        let rows = statement.query_map(
-            params![
+            SqlRead::dialect(&*self.conn).json_field_spaced("j.value", "$.kind", JsonType::Text),
+            SqlRead::dialect(&*self.conn).json_field_spaced("j.value", "$.id", JsonType::Integer),
+        );
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![
                 LedgerKind::Queue.as_str(),
                 crate::domain::EventKind::SupervisorStopped.as_str()
             ],
             |r| r.get::<_, String>(0),
         )?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        rows.into_iter()
+            .map(|row| Ok(serde_json::from_str(&row)?))
+            .collect()
     }
 
     /// SQLite picks the stops out of the stored arrays of the rows from the
@@ -1081,11 +1226,13 @@ impl LedgerStore for SqliteQueue {
         after: Option<(&str, i64)>,
         limit: usize,
     ) -> Result<Vec<((String, i64), crate::domain::RunEvent)>> {
-        let mut statement = self.conn.prepare(&stops_after_sql(after.is_some()))?;
+        let statement = stops_after_sql(SqlRead::dialect(&*self.conn), after.is_some());
         let (key, index) = after.unzip();
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let rows = statement.query_map(
-            params![
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![
                 LedgerKind::Queue.as_str(),
                 crate::domain::EventKind::SupervisorStopped.as_str(),
                 key,
@@ -1100,11 +1247,12 @@ impl LedgerStore for SqliteQueue {
                 ))
             },
         )?;
-        rows.map(|row| {
-            let (key, index, event) = row?;
-            Ok(((key, index), serde_json::from_str(&event)?))
-        })
-        .collect()
+        rows.into_iter()
+            .map(|row| {
+                let (key, index, event) = row;
+                Ok(((key, index), serde_json::from_str(&event)?))
+            })
+            .collect()
     }
 
     /// Read the node rows with no lock, then write only those the
@@ -1128,28 +1276,30 @@ impl LedgerStore for SqliteQueue {
         let mut removed = 0;
         in_batches(self, "ledger_node_retention", &changed, |tx, keys, _| {
             for key in keys {
-                let Some(row) = tx
-                    .query_row(
-                        "SELECT * FROM ledger_rows WHERE kind=?1 AND key=?2",
-                        params![LedgerKind::Node.as_str(), key],
-                        ledger_row,
-                    )
-                    .optional()?
-                    .transpose()?
+                let Some(row) = SqlRead::query_row(
+                    tx,
+                    "SELECT * FROM ledger_rows WHERE kind=?1 AND key=?2",
+                    sql_params![LedgerKind::Node.as_str(), key],
+                    ledger_row,
+                )
+                .optional()?
+                .transpose()?
                 else {
                     continue;
                 };
                 match node::retained(&row, before_day) {
                     None => {
-                        removed += tx.execute(
+                        removed += SqlWrite::execute(
+                            tx,
                             "DELETE FROM ledger_rows WHERE kind=?1 AND key=?2",
-                            params![LedgerKind::Node.as_str(), key],
+                            sql_params![LedgerKind::Node.as_str(), key],
                         )?;
                     }
                     Some(kept) if kept != row => {
-                        tx.execute(
+                        SqlWrite::execute(
+                            tx,
                             "UPDATE ledger_rows SET detail=?3 WHERE kind=?1 AND key=?2",
-                            params![LedgerKind::Node.as_str(), key, text(&kept.detail)?],
+                            sql_params![LedgerKind::Node.as_str(), key, text(&kept.detail)?],
                         )?;
                     }
                     Some(_) => {}
@@ -1163,9 +1313,9 @@ impl LedgerStore for SqliteQueue {
 
 /// A row of `ledger_rows`; its JSON is read in the outer result, so a row
 /// that does not read fails the read rather than reading as a default.
-fn ledger_row(r: &Row) -> rusqlite::Result<Result<LedgerRow>> {
-    let json = |column: &str| -> rusqlite::Result<String> { r.get(column) };
-    let optional = |column: &str| -> rusqlite::Result<Option<String>> { r.get(column) };
+fn ledger_row(r: &SqlRow<'_>) -> SqlResult<Result<LedgerRow>> {
+    let json = |column: &str| -> SqlResult<String> { r.get(column) };
+    let optional = |column: &str| -> SqlResult<Option<String>> { r.get(column) };
     let kind: String = r.get("kind")?;
     let key: String = r.get("key")?;
     let task_id: Option<i64> = r.get("task_id")?;
@@ -1230,9 +1380,12 @@ fn ledger_row(r: &Row) -> rusqlite::Result<Result<LedgerRow>> {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::params;
+
     use super::*;
     use crate::domain::ledger::{self, LEDGER_V};
     use crate::domain::{EventId, RunEvent, RunId};
+    use crate::infrastructure::sqlite::event_row;
 
     const RUN: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -1882,12 +2035,12 @@ mod tests {
         };
         let queue_kind = LedgerKind::Queue.as_str();
         let waits = plan(
-            &wait_rows_sql(true),
+            &wait_rows_sql(SqlDialect::Sqlite, true),
             &[&queue_kind, &0, &0, &"x", &"1", &10],
         );
         assert!(waits.contains("kind=? AND key>?"), "{waits}");
         let stops = plan(
-            &stops_after_sql(true),
+            &stops_after_sql(SqlDialect::Sqlite, true),
             &[&queue_kind, &"supervisor_stopped", &"1", &0, &10],
         );
         assert!(stops.contains("kind=? AND key>?"), "{stops}");
@@ -1954,7 +2107,9 @@ mod tests {
         let one_statement = |after: Option<&str>, limit: i64| -> Vec<LedgerRow> {
             let mut statement = queue.conn.prepare(ONE_STATEMENT).unwrap();
             let rows = statement
-                .query_map(params![LedgerKind::Run.as_str(), after, limit], ledger_row)
+                .query_map(params![LedgerKind::Run.as_str(), after, limit], |row| {
+                    with_row(row, ledger_row)
+                })
                 .unwrap();
             rows.map(|row| row.unwrap().unwrap()).collect()
         };
@@ -2066,7 +2221,7 @@ mod tests {
             .conn
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN {}",
-                last_event_naming_supervisor_sql()
+                last_event_naming_supervisor_sql(SqlDialect::Sqlite)
             ))
             .unwrap();
         let plan = statement

@@ -75,10 +75,10 @@ fn the_queue_event_reads_by_kind_stay_on_events_by_kind() {
             "record_ci_freshness: there",
             freshness_there_sql(SqlDialect::Sqlite),
         ),
-        ("claim_inbox_nudge", inbox_nudged_sql()),
+        ("claim_inbox_nudge", inbox_nudged_sql(SqlDialect::Sqlite)),
         (
             "record_inbox_watcher_change",
-            latest_inbox_watcher_change_sql(),
+            latest_inbox_watcher_change_sql(SqlDialect::Sqlite),
         ),
         // Outside the lock.
         ("ci_watch_events", watch_events_sql()),
@@ -87,13 +87,13 @@ fn the_queue_event_reads_by_kind_stay_on_events_by_kind() {
         ("update_events", UPDATE_EVENTS_SQL.to_owned()),
         (
             "installs_after: count",
-            format!("SELECT COUNT(*) {}", installs_after_sql()),
+            format!("SELECT COUNT(*) {}", installs_after_sql(SqlDialect::Sqlite)),
         ),
         (
             "installs_after: rows",
             format!(
                 "SELECT * {} ORDER BY id DESC LIMIT ?3",
-                installs_after_sql()
+                installs_after_sql(SqlDialect::Sqlite)
             ),
         ),
         ("latest_queue_event", LATEST_QUEUE_EVENT_SQL.to_owned()),

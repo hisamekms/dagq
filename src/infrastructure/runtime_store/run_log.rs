@@ -6,12 +6,12 @@
 //! `events_by_kind`, why: [`crate::infrastructure::kpi_push`].
 
 use super::*;
-use crate::infrastructure::sessions::read_before;
-use crate::infrastructure::sql_dialect::{
-    JsonType, TimeForm, json_field, json_field_spaced, time_value,
+use crate::infrastructure::sessions::read_before_port;
+use crate::infrastructure::sql_dialect::{JsonType, SqlDialect, TimeForm};
+use crate::infrastructure::sql_exec::{
+    OptionalRow, SqlRead, SqlResult, SqlRow, SqlWrite, ToSqlValue, sql_params,
 };
-use crate::infrastructure::sqlite::{enum_col, event_row, json_col, run_row};
-use rusqlite::{OptionalExtension, Row, params};
+use crate::infrastructure::store_rows::{enum_col, event_row, json_col, run_row};
 
 /// The events of one kind in a range of ids, oldest first, at most a
 /// limit: a range of `events_by_kind`.
@@ -21,13 +21,13 @@ const EVENTS_OF_KIND_BETWEEN_SQL: &str =
 
 /// The rows of [`SqliteQueue::installs_after`]: the queue's events of kind
 /// `?1` past id `?2` that installed more than the plugin.
-pub(super) fn installs_after_sql() -> String {
+pub(super) fn installs_after_sql(dialect: SqlDialect) -> String {
     format!(
         "FROM run_events INDEXED BY events_by_kind
      WHERE kind = ?1 AND id > ?2
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
      AND NOT COALESCE({}, 0)",
-        json_field_spaced("payload", "$.plugin_only", JsonType::Boolean)
+        dialect.json_field_spaced("payload", "$.plugin_only", JsonType::Boolean)
     )
 }
 
@@ -45,24 +45,24 @@ pub(super) const LATEST_QUEUE_EVENT_SQL: &str = "SELECT * FROM run_events INDEXE
 
 /// Whether an event of the kind `?1` with the `absent_since` `?2` and the
 /// `attempt` `?3` is there.
-pub(super) fn inbox_nudged_sql() -> String {
+pub(super) fn inbox_nudged_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT EXISTS(SELECT 1 FROM run_events INDEXED BY events_by_kind
          WHERE kind=?1 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
          AND {} IS ?2
          AND {} IS ?3)",
-        json_field("payload", "$.absent_since", JsonType::Integer),
-        json_field("payload", "$.attempt", JsonType::Integer),
+        dialect.json_field("payload", "$.absent_since", JsonType::Integer),
+        dialect.json_field("payload", "$.attempt", JsonType::Integer),
     )
 }
 
 /// The kind and `at` of the latest event of the kinds `?1` and `?2`.
-pub(super) fn latest_inbox_watcher_change_sql() -> String {
+pub(super) fn latest_inbox_watcher_change_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT kind, {} FROM run_events INDEXED BY events_by_kind
          WHERE kind IN (?1, ?2) AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
          ORDER BY id DESC LIMIT 1",
-        json_field("payload", "$.at", JsonType::Integer),
+        dialect.json_field("payload", "$.at", JsonType::Integer),
     )
 }
 
@@ -71,23 +71,20 @@ impl SqliteQueue {
     /// queue's `update_*` events (ADR-0073 decision 17), each job's
     /// `update_started` before its steps ([`crate::domain::in_job_order`]).
     pub fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-        Ok(crate::domain::in_job_order(
-            self.conn
-                .prepare(UPDATE_EVENTS_SQL)?
-                .query_map(
-                    params![
-                        serde_json::to_string(
-                            &crate::domain::UPDATE_EVENT_KINDS
-                                .iter()
-                                .map(|kind| kind.as_str())
-                                .collect::<Vec<_>>()
-                        )?,
-                        i64::try_from(limit).unwrap_or(i64::MAX)
-                    ],
-                    event_row,
-                )?
-                .collect::<rusqlite::Result<_>>()?,
-        ))
+        Ok(crate::domain::in_job_order(SqlRead::query_map(
+            &*self.conn,
+            UPDATE_EVENTS_SQL,
+            sql_params![
+                serde_json::to_string(
+                    &crate::domain::UPDATE_EVENT_KINDS
+                        .iter()
+                        .map(|kind| kind.as_str())
+                        .collect::<Vec<_>>()
+                )?,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            event_row,
+        )?))
     }
 
     /// The binary's installs past event `after`, the newest `limit` oldest
@@ -97,21 +94,21 @@ impl SqliteQueue {
         let kind = crate::domain::UPDATE_INSTALLED;
         // One read snapshot keeps the installs and their count consistent.
         let tx = self.read_tx("installs_after")?;
-        let total: i64 = tx.query_row(
-            &format!("SELECT COUNT(*) {}", installs_after_sql()),
-            params![kind, after],
+        let total: i64 = SqlRead::query_row(
+            &tx,
+            &format!("SELECT COUNT(*) {}", installs_after_sql(tx.dialect())),
+            sql_params![kind, after],
             |row| row.get(0),
         )?;
-        let mut installs: Vec<RunEvent> = tx
-            .prepare(&format!(
+        let mut installs: Vec<RunEvent> = SqlRead::query_map(
+            &tx,
+            &format!(
                 "SELECT * {} ORDER BY id DESC LIMIT ?3",
-                installs_after_sql()
-            ))?
-            .query_map(
-                params![kind, after, i64::try_from(limit).unwrap_or(i64::MAX)],
-                event_row,
-            )?
-            .collect::<rusqlite::Result<_>>()?;
+                installs_after_sql(tx.dialect())
+            ),
+            sql_params![kind, after, i64::try_from(limit).unwrap_or(i64::MAX)],
+            event_row,
+        )?;
         tx.finish()?;
         installs.reverse();
         Ok((installs, usize::try_from(total).unwrap_or(usize::MAX)))
@@ -128,49 +125,49 @@ impl SqliteQueue {
             RUN_E2E_FAILED,
             crate::domain::INSTALL_E2E_FINISHED,
         ];
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT * FROM run_events
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM run_events
                  WHERE kind IN (SELECT value FROM json_each(?1))
                  ORDER BY id DESC LIMIT ?2",
-            )?
-            .query_map(
-                params![
-                    serde_json::to_string(&kinds)?,
-                    i64::try_from(limit).unwrap_or(i64::MAX)
-                ],
-                event_row,
-            )?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![
+                serde_json::to_string(&kinds)?,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            event_row,
+        )?)
     }
 
     /// Whether the run has recorded at least one event of `kind`; an
     /// adopter rebuilds what the previous supervisor already did from these.
     pub fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
-        Ok(self
-            .conn
-            .query_row(HAS_RUN_EVENT_SQL, params![id, kind], |r| r.get(0))?)
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            HAS_RUN_EVENT_SQL,
+            sql_params![id, kind],
+            |r| r.get(0),
+        )?)
     }
 
     /// Every run of the queue, oldest first.
     pub fn all_runs(&self) -> Result<Vec<TaskRun>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM task_runs ORDER BY rowid")?
-            .query_map([], run_row(&self.runs_dir))?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM task_runs ORDER BY rowid",
+            sql_params![],
+            run_row(&self.runs_dir),
+        )?)
     }
 
     pub fn run(&self, id: &RunId) -> Result<TaskRun> {
-        self.conn
-            .query_row(
-                "SELECT * FROM task_runs WHERE id=?1",
-                [id],
-                run_row(&self.runs_dir),
-            )
-            .optional()?
-            .ok_or_else(|| crate::application::RunNotFound(id.clone()).into())
+        SqlRead::query_row(
+            &*self.conn,
+            "SELECT * FROM task_runs WHERE id=?1",
+            sql_params![id],
+            run_row(&self.runs_dir),
+        )
+        .optional()?
+        .ok_or_else(|| crate::application::RunNotFound(id.clone()).into())
     }
 
     pub fn record_runtime_event(
@@ -186,9 +183,9 @@ impl SqliteQueue {
         // or COMMIT rolls back as the transaction drops (task 1500), so the
         // connection leaves no transaction open and the closes' lines are
         // known rolled back.
-        let _read = read_before(&self.conn, Closing::Event(id, kind, &payload))?;
+        let _read = read_before_port(&*self.conn, Closing::Event(id, kind, &payload))?;
         let tx = self.write_tx("record_runtime_event")?;
-        run_event(&tx, id, kind, payload)?;
+        run_event_port(&tx, id, kind, payload)?;
         tx.commit()?;
         Ok(())
     }
@@ -204,12 +201,12 @@ impl SqliteQueue {
         payload: serde_json::Value,
         check: &mut dyn FnMut() -> Result<bool>,
     ) -> Result<bool> {
-        let _read = read_before(&self.conn, Closing::Event(id, kind, &payload))?;
+        let _read = read_before_port(&*self.conn, Closing::Event(id, kind, &payload))?;
         let tx = self.write_tx("record_runtime_event_if")?;
         if !check()? {
             return Ok(false);
         }
-        run_event(&tx, id, kind, payload)?;
+        run_event_port(&tx, id, kind, payload)?;
         tx.commit()?;
         Ok(true)
     }
@@ -224,7 +221,7 @@ impl SqliteQueue {
         match run {
             Some(id) => {
                 let tx = self.write_tx("record_backend_failure")?;
-                run_event(&tx, id, EventKind::BackendCallFailed, payload)?;
+                run_event_port(&tx, id, EventKind::BackendCallFailed, payload)?;
                 tx.commit()?;
                 Ok(())
             }
@@ -245,7 +242,7 @@ impl SqliteQueue {
         // Immediate like every other write: a deferred one that read first
         // (the schema, to prepare the insert) got SQLITE_BUSY at once, past
         // the busy timeout, when another supervisor wrote at the same time.
-        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
+        let _read = read_before_port(&*self.conn, Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("record_queue_event")?;
         let id = queue_event(&tx, kind, &payload)?;
         tx.commit()?;
@@ -263,7 +260,7 @@ impl SqliteQueue {
         }
         let _read = events
             .iter()
-            .map(|(kind, payload)| read_before(&self.conn, Closing::Queue(*kind, payload)))
+            .map(|(kind, payload)| read_before_port(&*self.conn, Closing::Queue(*kind, payload)))
             .collect::<Result<Vec<_>>>()?;
         let tx = self.write_tx("record_queue_events")?;
         let ids = events
@@ -291,32 +288,34 @@ impl SqliteQueue {
             Some(id) => Closing::Event(id, kind, &payload),
             None => Closing::Queue(kind, &payload),
         };
-        let _read = read_before(&self.conn, closing)?;
+        let _read = read_before_port(&*self.conn, closing)?;
         let tx = self.write_tx("record_event_once")?;
-        let found: Option<i64> = tx
-            .query_row(
-                "SELECT event_id FROM event_records WHERE record=?1",
-                [record],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let found: Option<i64> = SqlRead::query_row(
+            &tx,
+            "SELECT event_id FROM event_records WHERE record=?1",
+            sql_params![record],
+            |row| row.get(0),
+        )
+        .optional()?;
         if let Some(id) = found {
             return Ok(EventId::new(id));
         }
         let id = match run {
             Some(id) => {
-                run_event(&tx, id, kind, payload)?;
-                EventId::new(tx.query_row(
+                run_event_port(&tx, id, kind, payload)?;
+                EventId::new(SqlRead::query_row(
+                    &tx,
                     "SELECT max(id) FROM run_events WHERE run_id=?1 AND kind=?2",
-                    params![id.as_str(), kind.as_str()],
+                    sql_params![id.as_str(), kind.as_str()],
                     |row| row.get(0),
                 )?)
             }
             None => queue_event(&tx, kind, &payload)?,
         };
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO event_records(record, event_id) VALUES (?1, ?2)",
-            params![record, id.as_i64()],
+            sql_params![record, id.as_i64()],
         )?;
         tx.commit()?;
         Ok(id)
@@ -329,11 +328,12 @@ impl SqliteQueue {
     pub fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
         let kind = EventKind::InboxNudged;
         crate::domain::check_event_target(kind, None, None)?;
-        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
+        let _read = read_before_port(&*self.conn, Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("claim_inbox_nudge")?;
-        let claimed: bool = tx.query_row(
-            &inbox_nudged_sql(),
-            params![
+        let claimed: bool = SqlRead::query_row(
+            &tx,
+            &inbox_nudged_sql(tx.dialect()),
+            sql_params![
                 kind.as_str(),
                 payload["absent_since"].as_i64(),
                 payload["attempt"].as_i64()
@@ -368,18 +368,18 @@ impl SqliteQueue {
             kind.as_str()
         );
         crate::domain::check_event_target(kind, None, None)?;
-        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
+        let _read = read_before_port(&*self.conn, Closing::Queue(kind, &payload))?;
         let tx = self.write_tx("record_inbox_watcher_change")?;
-        let latest: Option<(String, Option<i64>)> = tx
-            .query_row(
-                &latest_inbox_watcher_change_sql(),
-                params![
-                    EventKind::InboxWatcherAbsent.as_str(),
-                    EventKind::InboxWatcherReturned.as_str()
-                ],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
+        let latest: Option<(String, Option<i64>)> = SqlRead::query_row(
+            &tx,
+            &latest_inbox_watcher_change_sql(tx.dialect()),
+            sql_params![
+                EventKind::InboxWatcherAbsent.as_str(),
+                EventKind::InboxWatcherReturned.as_str()
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
         // The same state, or a judgment older than the one recorded (a
         // supervisor slower to write than another that judged later).
         if let Some((latest, at)) = latest
@@ -413,15 +413,12 @@ impl SqliteQueue {
         kinds.dedup();
         let mut events = Vec::new();
         for kind in kinds {
-            events.extend(
-                self.conn
-                    .prepare_cached(EVENTS_OF_KIND_BETWEEN_SQL)?
-                    .query_map(
-                        params![kind, after, upto, i64::try_from(limit).unwrap_or(i64::MAX)],
-                        event_row,
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            );
+            events.extend(SqlRead::query_map(
+                &*self.conn,
+                EVENTS_OF_KIND_BETWEEN_SQL,
+                sql_params![kind, after, upto, i64::try_from(limit).unwrap_or(i64::MAX)],
+                event_row,
+            )?);
         }
         events.sort_by_key(|event| event.id);
         events.truncate(limit);
@@ -430,27 +427,24 @@ impl SqliteQueue {
 
     /// The newest event of `kind`, on whatever task, goal or run.
     pub fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT * FROM run_events WHERE kind=?1 ORDER BY id DESC LIMIT 1",
-                [kind],
-                event_row,
-            )
-            .optional()?)
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            "SELECT * FROM run_events WHERE kind=?1 ORDER BY id DESC LIMIT 1",
+            sql_params![kind],
+            event_row,
+        )
+        .optional()?)
     }
 
     /// The newest `limit` events of `kind`, on whatever task, goal or run,
     /// newest first.
     pub fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM run_events WHERE kind=?1 ORDER BY id DESC LIMIT ?2")?
-            .query_map(
-                params![kind, i64::try_from(limit).unwrap_or(i64::MAX)],
-                event_row,
-            )?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM run_events WHERE kind=?1 ORDER BY id DESC LIMIT ?2",
+            sql_params![kind, i64::try_from(limit).unwrap_or(i64::MAX)],
+            event_row,
+        )?)
     }
 
     /// The newest event of the queue itself (on no task, goal or run) of one
@@ -461,10 +455,13 @@ impl SqliteQueue {
     pub fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
         let mut latest: Option<RunEvent> = None;
         for kind in kinds {
-            let event = self
-                .conn
-                .query_row(LATEST_QUEUE_EVENT_SQL, [kind], event_row)
-                .optional()?;
+            let event = SqlRead::query_row(
+                &*self.conn,
+                LATEST_QUEUE_EVENT_SQL,
+                sql_params![kind],
+                event_row,
+            )
+            .optional()?;
             if let Some(event) = event
                 && latest.as_ref().is_none_or(|latest| latest.id < event.id)
             {
@@ -486,22 +483,28 @@ impl SqliteQueue {
         }
         let kind_marks = vec!["?"; kinds.len()].join(",");
         let supervisor_marks = vec!["?"; supervisors.len()].join(",");
-        Ok(self
-            .conn
-            .prepare(&format!(
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "SELECT * FROM run_events WHERE id IN (
                      SELECT MAX(id) FROM run_events
                      WHERE kind IN ({kind_marks})
                        AND {supervisor} IN ({supervisor_marks})
                      GROUP BY {supervisor})
                  ORDER BY id",
-                supervisor = json_field_spaced("payload", "$.supervisor", JsonType::Text),
-            ))?
-            .query_map(
-                rusqlite::params_from_iter(kinds.iter().chain(supervisors)),
-                event_row,
-            )?
-            .collect::<rusqlite::Result<_>>()?)
+                supervisor = SqlRead::dialect(&*self.conn).json_field_spaced(
+                    "payload",
+                    "$.supervisor",
+                    JsonType::Text
+                ),
+            ),
+            &kinds
+                .iter()
+                .chain(supervisors)
+                .map(|value| value.to_sql_value())
+                .collect::<Vec<_>>(),
+            event_row,
+        )?)
     }
 
     /// Per task, its newest event of one of `kinds`, by task.
@@ -510,44 +513,50 @@ impl SqliteQueue {
             return Ok(Vec::new());
         }
         let marks = vec!["?"; kinds.len()].join(",");
-        Ok(self
-            .conn
-            .prepare(&format!(
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "SELECT * FROM run_events WHERE id IN (
                      SELECT MAX(id) FROM run_events
                      WHERE task_id IS NOT NULL AND kind IN ({marks})
                      GROUP BY task_id)
                  ORDER BY task_id"
-            ))?
-            .query_map(rusqlite::params_from_iter(kinds), event_row)?
-            .collect::<rusqlite::Result<_>>()?)
+            ),
+            &kinds
+                .iter()
+                .map(|value| value.to_sql_value())
+                .collect::<Vec<_>>(),
+            event_row,
+        )?)
     }
 
     /// The id of the last event recorded before `unix` (seconds), 0 when
     /// there is none: a cursor that reads everything from that time on.
     pub fn event_id_before(&self, unix: i64) -> Result<EventId> {
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             &format!(
                 "SELECT ifnull(max(id),0) FROM run_events
              WHERE {} < ?1",
-                time_value("created_at", TimeForm::EpochSeconds)
+                SqlRead::dialect(&*self.conn).time_value("created_at", TimeForm::EpochSeconds)
             ),
-            [unix],
+            sql_params![unix],
             |r| r.get(0),
         )?)
     }
 
     /// When the observer of `mode` last started or finished (unix seconds).
     pub fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             &format!(
                 "SELECT max({}) FROM run_events
              WHERE kind IN (?2,?3)
                AND {}=?1",
-                time_value("created_at", TimeForm::EpochSeconds),
-                json_field("payload", "$.mode", JsonType::Text),
+                SqlRead::dialect(&*self.conn).time_value("created_at", TimeForm::EpochSeconds),
+                SqlRead::dialect(&*self.conn).json_field("payload", "$.mode", JsonType::Text),
             ),
-            params![
+            sql_params![
                 mode,
                 event_kind::OBSERVE_STARTED,
                 event_kind::OBSERVE_FINISHED
@@ -558,9 +567,12 @@ impl SqliteQueue {
 
     /// The newest ask's ID: the mark [`Self::written_by`] counts past.
     pub fn ask_high_water(&self) -> Result<AskId> {
-        Ok(self
-            .conn
-            .query_row("SELECT ifnull(max(id),0) FROM asks", [], |r| r.get(0))?)
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            "SELECT ifnull(max(id),0) FROM asks",
+            sql_params![],
+            |r| r.get(0),
+        )?)
     }
 
     /// What `role` wrote after the marks: the ids of the findings it
@@ -572,28 +584,30 @@ impl SqliteQueue {
     /// with no `blocked` ask opened after `ask_id` or open now.
     pub fn written_by(&self, role: &str, event_id: EventId, ask_id: AskId) -> Result<WrittenBy> {
         let findings = |kind: &str, to: &[&str]| -> Result<Vec<i64>> {
-            Ok(self
-                .conn
-                .prepare(&format!(
+            Ok(SqlRead::query_map(
+                &*self.conn,
+                &format!(
                     "SELECT {} AS finding FROM run_events
                      WHERE id>?2 AND kind=?3 AND {}=?1
                        AND (?4 IS NULL OR {}
                             IN (SELECT value FROM json_each(?4)))
                      GROUP BY finding ORDER BY min(id)",
-                    json_field("payload", "$.finding_id", JsonType::Integer),
-                    json_field("payload", "$.by", JsonType::Text),
-                    json_field("payload", "$.to", JsonType::Text),
-                ))?
-                .query_map(
-                    params![
-                        role,
-                        event_id,
-                        kind,
-                        (!to.is_empty()).then(|| serde_json::json!(to).to_string())
-                    ],
-                    |r| r.get(0),
-                )?
-                .collect::<rusqlite::Result<_>>()?)
+                    SqlRead::dialect(&*self.conn).json_field(
+                        "payload",
+                        "$.finding_id",
+                        JsonType::Integer
+                    ),
+                    SqlRead::dialect(&*self.conn).json_field("payload", "$.by", JsonType::Text),
+                    SqlRead::dialect(&*self.conn).json_field("payload", "$.to", JsonType::Text),
+                ),
+                sql_params![
+                    role,
+                    event_id,
+                    kind,
+                    (!to.is_empty()).then(|| serde_json::json!(to).to_string())
+                ],
+                |r| r.get(0),
+            )?)
         };
         let mut written = WrittenBy {
             recorded: findings(event_kind::FINDING_RECORDED, &[])?,
@@ -605,51 +619,50 @@ impl SqliteQueue {
                     crate::domain::FindingStatus::Dismissed.as_str(),
                 ],
             )?,
-            asks: self
-                .conn
-                .prepare("SELECT id FROM asks WHERE id>?2 AND asked_by=?1 ORDER BY id")?
-                .query_map(params![role, ask_id], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?,
+            asks: SqlRead::query_map(
+                &*self.conn,
+                "SELECT id FROM asks WHERE id>?2 AND asked_by=?1 ORDER BY id",
+                sql_params![role, ask_id],
+                |r| r.get(0),
+            )?,
             without_ask: Vec::new(),
         };
-        let mut asked = self.conn.prepare(
-            "SELECT EXISTS(SELECT 1 FROM asks WHERE kind=?1 AND finding_id=?2
-               AND (id>?3 OR (answered_at IS NULL AND closed_at IS NULL)))",
-        )?;
+        let asked = "SELECT EXISTS(SELECT 1 FROM asks WHERE kind=?1 AND finding_id=?2
+               AND (id>?3 OR (answered_at IS NULL AND closed_at IS NULL)))";
         for &finding in written.recorded.iter().chain(&written.updated) {
             if written.without_ask.contains(&finding) || written.closed.contains(&finding) {
                 continue;
             }
-            if !asked.query_row(
-                params![crate::domain::AskKind::Blocked.as_str(), finding, ask_id],
+            if !SqlRead::query_row(
+                &*self.conn,
+                asked,
+                sql_params![crate::domain::AskKind::Blocked.as_str(), finding, ask_id],
                 |r| r.get::<_, bool>(0),
             )? {
                 written.without_ask.push(finding);
             }
         }
-        drop(asked);
         Ok(written)
     }
 
     /// The last observation of `mode` that ran its agent: the id and the
     /// payload of its `observe_finished` (a skipped one is not).
     pub fn last_observation(&self, mode: &str) -> Result<Option<(EventId, Value)>> {
-        Ok(self
-            .conn
-            .query_row(
-                &format!(
-                    "SELECT id, payload FROM run_events
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            &format!(
+                "SELECT id, payload FROM run_events
                  WHERE kind='{}' AND {}=?1
                    AND ifnull({},'')<>'skipped'
                  ORDER BY id DESC LIMIT 1",
-                    event_kind::OBSERVE_FINISHED,
-                    json_field("payload", "$.mode", JsonType::Text),
-                    json_field("payload", "$.outcome", JsonType::Text),
-                ),
-                [mode],
-                |r| Ok((r.get(0)?, json_col(r, "payload")?)),
-            )
-            .optional()?)
+                event_kind::OBSERVE_FINISHED,
+                SqlRead::dialect(&*self.conn).json_field("payload", "$.mode", JsonType::Text),
+                SqlRead::dialect(&*self.conn).json_field("payload", "$.outcome", JsonType::Text),
+            ),
+            sql_params![mode],
+            |r| Ok((r.get(0)?, json_col(r, "payload")?)),
+        )
+        .optional()?)
     }
 
     /// How many events after `after` the observer did not write itself
@@ -669,7 +682,8 @@ impl SqliteQueue {
         ];
         ignored.extend_from_slice(crate::domain::kpi::BOOKKEEPING_KINDS);
         let ignored = serde_json::to_string(&ignored)?;
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             &format!(
                 "SELECT count(*) FROM run_events WHERE id>?3 AND NOT (
                kind IN (SELECT value FROM json_each(?4))
@@ -687,11 +701,16 @@ impl SqliteQueue {
                 event_kind::SESSION_OPENED,
                 event_kind::SESSION_CLOSED,
                 event_kind::SESSION_TURNS,
-                by = json_field("payload", "$.by", JsonType::Text),
-                asked_by = json_field("payload", "$.asked_by", JsonType::Text),
-                kind = json_field("payload", "$.kind", JsonType::Text),
+                by = SqlRead::dialect(&*self.conn).json_field("payload", "$.by", JsonType::Text),
+                asked_by = SqlRead::dialect(&*self.conn).json_field(
+                    "payload",
+                    "$.asked_by",
+                    JsonType::Text
+                ),
+                kind =
+                    SqlRead::dialect(&*self.conn).json_field("payload", "$.kind", JsonType::Text),
             ),
-            params![role, span_kind, after, ignored],
+            sql_params![role, span_kind, after, ignored],
             |r| r.get(0),
         )?)
     }
@@ -705,20 +724,23 @@ impl SqliteQueue {
             .into_iter()
             .map(|finished| {
                 let started = match finished.payload["dir"].as_str() {
-                    Some(dir) => self
-                        .conn
-                        .query_row(
-                            &format!(
-                                "SELECT * FROM run_events WHERE kind='{}'
+                    Some(dir) => SqlRead::query_row(
+                        &*self.conn,
+                        &format!(
+                            "SELECT * FROM run_events WHERE kind='{}'
                                AND id<?1 AND {}=?2
                              ORDER BY id DESC LIMIT 1",
-                                event_kind::OBSERVE_STARTED,
-                                json_field("payload", "$.dir", JsonType::Text),
+                            event_kind::OBSERVE_STARTED,
+                            SqlRead::dialect(&*self.conn).json_field(
+                                "payload",
+                                "$.dir",
+                                JsonType::Text
                             ),
-                            params![finished.id, dir],
-                            event_row,
-                        )
-                        .optional()?,
+                        ),
+                        sql_params![finished.id, dir],
+                        event_row,
+                    )
+                    .optional()?,
                     None => None,
                 };
                 Ok((finished, started))
@@ -728,61 +750,66 @@ impl SqliteQueue {
 
     /// The latest run whose session opened in `workspace_id`, if any.
     pub fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
-        let current = self
-            .conn
-            .query_row(
-                "SELECT id FROM task_runs WHERE workspace_id=?1 ORDER BY rowid DESC LIMIT 1",
-                [workspace_id],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let current = SqlRead::query_row(
+            &*self.conn,
+            "SELECT id FROM task_runs WHERE workspace_id=?1 ORDER BY rowid DESC LIMIT 1",
+            sql_params![workspace_id],
+            |r| r.get(0),
+        )
+        .optional()?;
         if current.is_some() {
             return Ok(current);
         }
         // A resume's workspace (or a background wrapper's handle,
         // ADR-t1404-1) is recorded in the run's events only.
-        Ok(self
-            .conn
-            .query_row(
-                &format!(
-                    "SELECT run_id FROM run_events WHERE kind='workspace_created'
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            &format!(
+                "SELECT run_id FROM run_events WHERE kind='workspace_created'
                  AND run_id IS NOT NULL AND {}=?1
                  ORDER BY id DESC LIMIT 1",
-                    json_field("payload", "$.workspace_id", JsonType::Text),
+                SqlRead::dialect(&*self.conn).json_field(
+                    "payload",
+                    "$.workspace_id",
+                    JsonType::Text
                 ),
-                [workspace_id],
-                |r| r.get(0),
-            )
-            .optional()?)
+            ),
+            sql_params![workspace_id],
+            |r| r.get(0),
+        )
+        .optional()?)
     }
 
     /// Runs a process is responsible for right now (executing under a
     /// supervisor, or being landed by `integrate`), oldest first.
     pub fn active_runs(&self) -> Result<Vec<TaskRun>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM task_runs WHERE status IN ('claimed','starting','running','validating','integrating') ORDER BY rowid")?
-            .query_map([], run_row(&self.runs_dir))?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM task_runs WHERE status IN ('claimed','starting','running','validating','integrating') ORDER BY rowid",
+            sql_params![],
+            run_row(&self.runs_dir),
+        )?)
     }
 
     /// The newest `run_events` id, 0 for an empty queue: the cursor that
     /// `status` hands out and `watch` starts from.
     pub fn latest_event_id(&self) -> Result<EventId> {
-        Ok(self
-            .conn
-            .query_row("SELECT COALESCE(MAX(id),0) FROM run_events", [], |r| {
-                r.get(0)
-            })?)
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            "SELECT COALESCE(MAX(id),0) FROM run_events",
+            sql_params![],
+            |r| r.get(0),
+        )?)
     }
 
     /// Every run event, oldest first, for `stats`. A pure read.
     pub fn all_events(&self) -> Result<Vec<RunEvent>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM run_events ORDER BY id")?
-            .query_map([], event_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM run_events ORDER BY id",
+            sql_params![],
+            event_row,
+        )?)
     }
 
     /// When the earliest event was recorded (unix milliseconds), by its
@@ -790,19 +817,21 @@ impl SqliteQueue {
     /// the order of their times until one whose time
     /// [`crate::domain::stats::timestamp_millis`] reads. A pure read.
     pub fn earliest_event_at(&self) -> Result<Option<i64>> {
-        let at = time_value("created_at", TimeForm::Ordinal);
-        let mut statement = self.conn.prepare(&format!(
+        let at = SqlRead::dialect(&*self.conn).time_value("created_at", TimeForm::Ordinal);
+        let statement = format!(
             "SELECT created_at FROM run_events WHERE {at} IS NOT NULL
              ORDER BY {at}, id",
-        ))?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
+        );
+        let mut found = None;
+        SqlRead::visit_rows(&*self.conn, &statement, &[], &mut |row| {
             let created_at: String = row.get(0)?;
             if let Some(millis) = crate::domain::stats::timestamp_millis(&created_at) {
-                return Ok(Some(millis));
+                found = Some(millis);
+                return Ok(false);
             }
-        }
-        Ok(None)
+            Ok(true)
+        })?;
+        Ok(found)
     }
 
     /// The default window of `stats` without reading every event
@@ -818,38 +847,34 @@ impl SqliteQueue {
         let upto = self.latest_event_id()?;
         // Each run met: its first event and the first event that ended it.
         let mut ended: HashMap<RunId, (EventId, EventId)> = HashMap::new();
-        let mut newest = self.conn.prepare(
-            "SELECT * FROM run_events WHERE run_id IS NOT NULL AND task_id IS NOT NULL
-             AND id<=?1 ORDER BY id DESC",
-        )?;
-        let mut rows = newest.query([upto])?;
-        let mut of_run = self
-            .conn
-            .prepare("SELECT * FROM run_events WHERE run_id=?1 AND id<=?2 ORDER BY id")?;
-        while let Some(row) = rows.next()? {
+        let newest = "SELECT * FROM run_events WHERE run_id IS NOT NULL AND task_id IS NOT NULL
+             AND id<=?1 ORDER BY id DESC";
+        let of_run = "SELECT * FROM run_events WHERE run_id=?1 AND id<=?2 ORDER BY id";
+        SqlRead::visit_rows(&*self.conn, newest, sql_params![upto], &mut |row| {
             let event = event_row(row)?;
             if ended.values().filter(|(_, end)| *end > event.id).count() >= DEFAULT_RUNS {
-                break;
+                return Ok(false);
             }
             let Some(run_id) = event.run_id.as_ref().filter(|_| window::ends_run(&event)) else {
-                continue;
+                return Ok(true);
             };
             if ended.contains_key(run_id) {
-                continue;
+                return Ok(true);
             }
             let mut first = None;
             let mut end = event.id;
-            let mut run_rows = of_run.query(params![run_id, upto])?;
-            while let Some(row) = run_rows.next()? {
+            SqlRead::visit_rows(&*self.conn, of_run, sql_params![run_id, upto], &mut |row| {
                 let run_event = event_row(row)?;
                 first.get_or_insert(run_event.id);
                 if window::ends_run(&run_event) {
                     end = run_event.id;
-                    break;
+                    return Ok(false);
                 }
-            }
+                Ok(true)
+            })?;
             ended.insert(run_id.clone(), (first.unwrap_or(end), end));
-        }
+            Ok(true)
+        })?;
         let latest = window::latest_ended(
             ended
                 .iter()
@@ -858,16 +883,14 @@ impl SqliteQueue {
         );
         let after = window::window_after(latest.iter().map(|(run, _)| ended[run].0).min());
         let (mut start_ms, mut end_ms) = (None::<i64>, None::<i64>);
-        let mut times = self
-            .conn
-            .prepare("SELECT created_at FROM run_events WHERE id>?1 AND id<=?2")?;
-        let mut rows = times.query(params![after, upto])?;
-        while let Some(row) = rows.next()? {
+        let times = "SELECT created_at FROM run_events WHERE id>?1 AND id<=?2";
+        SqlRead::visit_rows(&*self.conn, times, sql_params![after, upto], &mut |row| {
             if let Some(at) = timestamp_millis(&row.get::<_, String>(0)?) {
                 start_ms = Some(start_ms.map_or(at, |start| start.min(at)));
                 end_ms = Some(end_ms.map_or(at, |end| end.max(at)));
             }
-        }
+            Ok(true)
+        })?;
         Ok(StatsWindow {
             after,
             upto,
@@ -890,9 +913,9 @@ impl SqliteQueue {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
-        Ok(self
-            .conn
-            .prepare(&format!(
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "SELECT * FROM run_events WHERE id>?1 AND id<=?2
                  AND (?3 IS NULL OR kind IN (SELECT value FROM json_each(?3)))
                  AND (?4 IS NULL OR run_id=?4 OR {}=?4)
@@ -902,87 +925,86 @@ impl SqliteQueue {
                  AND (?7 IS NULL OR {}>={})
                  AND (?8 IS NULL OR {}<{})
                  ORDER BY id LIMIT ?9",
-                json_field("payload", "$.source_run_id", JsonType::Text),
-                time_value("created_at", TimeForm::Ordinal),
-                time_value("?7", TimeForm::Ordinal),
-                time_value("created_at", TimeForm::Ordinal),
-                time_value("?8", TimeForm::Ordinal),
-            ))?
-            .query_map(
-                params![
-                    after,
-                    upto,
-                    kinds,
-                    filter.run,
-                    filter.task,
-                    filter.goal,
-                    filter.since,
-                    filter.until,
-                    i64::try_from(limit)?
-                ],
-                event_row,
-            )?
-            .collect::<rusqlite::Result<_>>()?)
+                SqlRead::dialect(&*self.conn).json_field(
+                    "payload",
+                    "$.source_run_id",
+                    JsonType::Text
+                ),
+                SqlRead::dialect(&*self.conn).time_value("created_at", TimeForm::Ordinal),
+                SqlRead::dialect(&*self.conn).time_value("?7", TimeForm::Ordinal),
+                SqlRead::dialect(&*self.conn).time_value("created_at", TimeForm::Ordinal),
+                SqlRead::dialect(&*self.conn).time_value("?8", TimeForm::Ordinal),
+            ),
+            sql_params![
+                after,
+                upto,
+                kinds,
+                filter.run,
+                filter.task,
+                filter.goal,
+                filter.since,
+                filter.until,
+                i64::try_from(limit)?
+            ],
+            event_row,
+        )?)
     }
 
     /// Every event of one run, oldest first.
     pub fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
-        run_events_of(&*self.conn, id)
+        run_events_of_port(&*self.conn, id)
     }
 
     /// Every event of one task (its runs' too), oldest first, by
     /// `events_by_task`.
     pub fn task_events(&self, task: TaskId) -> Result<Vec<RunEvent>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM run_events WHERE task_id=?1 ORDER BY id")?
-            .query_map([task], event_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM run_events WHERE task_id=?1 ORDER BY id",
+            sql_params![task],
+            event_row,
+        )?)
     }
 
     /// The latest run of every `in_progress` task, oldest first: the runs
     /// `status` judges for attention. An older run of a retried task is
     /// history, and a completed or canceled task needs nobody.
     pub fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
                  WHERE t.status='in_progress'
                  AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id)
                  ORDER BY r.rowid",
-            )?
-            .query_map([], run_row(&self.runs_dir))?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![],
+            run_row(&self.runs_dir),
+        )?)
     }
 
     /// The `integrated` runs whose push of `main` failed after the latest
     /// successful push (`push_finished`), oldest first. A later successful
     /// push carries every earlier landing, so it clears them all.
     pub fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT r.* FROM task_runs r WHERE r.status='integrated'
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT r.* FROM task_runs r WHERE r.status='integrated'
                  AND r.id IN (SELECT run_id FROM run_events WHERE kind=?1
                    AND id>(SELECT COALESCE(MAX(id),0) FROM run_events WHERE kind=?2))
                  ORDER BY r.rowid",
-            )?
-            .query_map(
-                [event_kind::PUSH_FAILED, event_kind::PUSH_FINISHED],
-                run_row(&self.runs_dir),
-            )?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![event_kind::PUSH_FAILED, event_kind::PUSH_FINISHED],
+            run_row(&self.runs_dir),
+        )?)
     }
 
     /// Every run in one status, oldest first; `up` reports the runs that
     /// wait for a person or the supervisor (`awaiting_integration`, `needs_session`).
     pub fn runs_with_status(&self, status: crate::domain::RunStatus) -> Result<Vec<TaskRun>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM task_runs WHERE status=?1 ORDER BY rowid")?
-            .query_map([status.as_str()], run_row(&self.runs_dir))?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM task_runs WHERE status=?1 ORDER BY rowid",
+            sql_params![status.as_str()],
+            run_row(&self.runs_dir),
+        )?)
     }
 
     /// The oldest run awaiting integration by validation time: the FIFO
@@ -992,26 +1014,25 @@ impl SqliteQueue {
     /// (ADR-t1879-1), which wait for the outcome or the release without
     /// holding back the others.
     pub fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
-        Ok(self
-            .conn
-            .query_row(
-                concat!(
-                    "SELECT r.* FROM task_runs r WHERE r.status='awaiting_integration'
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            concat!(
+                "SELECT r.* FROM task_runs r WHERE r.status='awaiting_integration'
                  AND NOT EXISTS (SELECT 1 FROM replan_operations o WHERE o.task_id=r.task_id
                    AND o.status IN (",
-                    crate::infrastructure::sqlite::replan_guarding!(),
-                    "))
+                crate::infrastructure::sqlite::replan_guarding!(),
+                "))
                  AND NOT EXISTS (SELECT 1 FROM task_holds h WHERE h.task_id=r.task_id
                    AND h.released_at IS NULL)
                  ORDER BY (SELECT MIN(e.id) FROM run_events e
                            WHERE e.run_id=r.id AND e.kind=?1) NULLS LAST,
                           r.rowid
                  LIMIT 1"
-                ),
-                [event_kind::VALIDATION_FINISHED],
-                run_row(&self.runs_dir),
-            )
-            .optional()?)
+            ),
+            sql_params![event_kind::VALIDATION_FINISHED],
+            run_row(&self.runs_dir),
+        )
+        .optional()?)
     }
 
     /// The sessions of the runs that ended (`integrated`, `succeeded`,
@@ -1024,7 +1045,7 @@ impl SqliteQueue {
     /// or not its stop is recorded (whether its wrapper still runs decides),
     /// ordered by run.
     pub fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
-        let mut statement = self.conn.prepare(&format!(
+        let statement = format!(
             "WITH ended AS (
                SELECT r.id, r.status, r.workspace_id, r.rowid AS run_row FROM task_runs r
                JOIN tasks t ON t.id=r.task_id
@@ -1042,9 +1063,13 @@ impl SqliteQueue {
              ORDER BY 4, 5",
             event_kind::WORKSPACE_CREATED,
             event_kind::RESUME_FINISHED,
-            workspace = json_field("e.payload", "$.workspace_id", JsonType::Text)
-        ))?;
-        let rows = statement.query_map([], |row| {
+            workspace = SqlRead::dialect(&*self.conn).json_field(
+                "e.payload",
+                "$.workspace_id",
+                JsonType::Text
+            )
+        );
+        let rows = SqlRead::query_map(&*self.conn, &statement, sql_params![], |row| {
             Ok(EndedRunWorkspace {
                 run_id: row.get(0)?,
                 status: enum_col(row, "status")?,
@@ -1055,7 +1080,6 @@ impl SqliteQueue {
         let mut seen = std::collections::HashSet::new();
         let mut workspaces: Vec<EndedRunWorkspace> = Vec::new();
         for row in rows {
-            let row = row?;
             if !live.contains(&row.run_id)
                 && seen.insert((row.run_id.clone(), row.workspace_id.clone()))
             {
@@ -1078,17 +1102,17 @@ impl SqliteQueue {
     /// an ask of the run is open and unanswered, else
     /// [`WorktreeCleanup::Idle`].
     pub fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
-        let mut statement = self
-            .conn
-            .prepare(&format!("{ENDED_RUN_WORKTREES} ORDER BY r.rowid"))?;
+        let statement = format!("{ENDED_RUN_WORKTREES} ORDER BY r.rowid");
         let live = self.live_leased_runs()?;
         let now = self.generators.clock.now();
-        let rows = statement.query_map(params![now, HEARTBEAT_TIMEOUT_SECS], |row| {
-            self.ended_run_worktree_row(row)
-        })?;
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &statement,
+            sql_params![now, HEARTBEAT_TIMEOUT_SECS],
+            |row| self.ended_run_worktree_row(row),
+        )?;
         let mut worktrees = Vec::new();
         for row in rows {
-            let row = row?;
             if !live.contains(&row.run_id) {
                 worktrees.push(row);
             }
@@ -1102,29 +1126,27 @@ impl SqliteQueue {
     /// key and its lease, not every run again.
     pub fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>> {
         let now = self.generators.clock.now();
-        let lease = self
-            .conn
-            .query_row(
-                "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
-                [id],
-                |r| with_row(r, lease_row),
-            )
-            .optional()?;
+        let lease = SqlRead::query_row(
+            &*self.conn,
+            "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
+            sql_params![id],
+            lease_row_port,
+        )
+        .optional()?;
         if lease.is_some_and(|lease| !lease_is_stale(&lease, now)) {
             return Ok(None);
         }
-        Ok(self
-            .conn
-            .query_row(
-                &ended_run_worktree_sql(),
-                params![now, HEARTBEAT_TIMEOUT_SECS, id],
-                |row| self.ended_run_worktree_row(row),
-            )
-            .optional()?)
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            &ended_run_worktree_sql(),
+            sql_params![now, HEARTBEAT_TIMEOUT_SECS, id],
+            |row| self.ended_run_worktree_row(row),
+        )
+        .optional()?)
     }
 
     /// A row of [`ENDED_RUN_WORKTREES`].
-    fn ended_run_worktree_row(&self, row: &Row<'_>) -> rusqlite::Result<EndedRunWorktree> {
+    fn ended_run_worktree_row(&self, row: &SqlRow<'_>) -> SqlResult<EndedRunWorktree> {
         let run_id: RunId = row.get(0)?;
         let ended: bool = row.get(5)?;
         let ask: Option<i64> = row.get(6)?;
@@ -1155,13 +1177,10 @@ impl SqliteQueue {
     /// would fail if the row were gone.
     fn live_leased_runs(&self) -> Result<std::collections::HashSet<RunId>> {
         let now = self.generators.clock.now();
-        let mut statement = self
-            .conn
-            .prepare("SELECT run_id,token,pid,heartbeat_at FROM run_leases")?;
-        let leases = statement.query_map([], |r| with_row(r, lease_row))?;
+        let statement = "SELECT run_id,token,pid,heartbeat_at FROM run_leases";
+        let leases = SqlRead::query_map(&*self.conn, statement, sql_params![], lease_row_port)?;
         let mut live = std::collections::HashSet::new();
         for lease in leases {
-            let lease = lease?;
             if !lease_is_stale(&lease, now) {
                 live.insert(lease.run_id);
             }
@@ -1383,7 +1402,8 @@ impl EventStore for SqliteQueue {
 /// Insert an event of the queue itself in the open transaction `tx`, with
 /// the session span it opens or closes; its id.
 pub(super) fn queue_event(tx: &impl EventTx, kind: EventKind, payload: &Value) -> Result<EventId> {
-    let id = EventId::new(tx.insert_id(
+    let id = EventId::new(SqlWrite::insert_id(
+        tx,
         "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         sql_params![kind.as_str(), serde_json::to_string(payload)?],
@@ -1419,6 +1439,7 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
+    use crate::infrastructure::sql_dialect::json_field_spaced;
 
     /// The plan of `sql`, one line per step, its parameters NULL.
     fn plan(conn: &Connection, sql: &str) -> Vec<String> {
@@ -1596,10 +1617,10 @@ mod tests {
         assert_eq!(read.first().map(|e| e.id), Some(before));
         assert_eq!(total, 4);
         for sql in [
-            format!("SELECT COUNT(*) {}", installs_after_sql()),
+            format!("SELECT COUNT(*) {}", installs_after_sql(SqlDialect::Sqlite)),
             format!(
                 "SELECT * {} ORDER BY id DESC LIMIT ?3",
-                installs_after_sql()
+                installs_after_sql(SqlDialect::Sqlite)
             ),
         ] {
             let steps = plan(&queue.conn, &sql);

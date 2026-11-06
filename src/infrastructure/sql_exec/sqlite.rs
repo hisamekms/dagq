@@ -450,6 +450,15 @@ impl SessionTx for WriteTx<'_> {
     }
 }
 
+impl sessions::BeforeWrite for Connection {
+    fn read_transcripts_before(
+        &self,
+        closing: sessions::Closing<'_>,
+    ) -> anyhow::Result<sessions::ReadBefore> {
+        sessions::read_before_sqlite(self, closing)
+    }
+}
+
 impl EventTx for WriteTx<'_> {
     fn follow_spans(
         &self,
