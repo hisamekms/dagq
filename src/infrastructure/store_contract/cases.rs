@@ -249,3 +249,73 @@ pub fn base_types<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()
     }
     Ok(())
 }
+
+/// Connection actors survive the event row round trip. Nested request scopes
+/// restore both an existing requester and NULL, even inside one transaction.
+pub fn event_actors<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
+    use crate::domain::{
+        EventActor,
+        actor::{ActorContext, ActorRole},
+    };
+    use crate::infrastructure::event_actor::event_actor;
+
+    let store = open()?;
+    store.set_actor(ActorContext::instance(ActorRole::Supervisor, 42));
+    let tx = store.read_entry("contract_actor_read")?;
+    ensure!(
+        tx.query_row("SELECT dagq_actor_id()", &[], |r| r.get::<_, String>(0))? == "supervisor:42"
+    );
+    store.set_actor(ActorContext::user());
+    ensure!(tx.query_row("SELECT dagq_actor_id()", &[], |r| r.get::<_, String>(0))? == "user");
+    drop(tx);
+    let tx = store.write_entry("contract_actor_events")?;
+    let record = |role: &str, id: &str, requester: Option<&str>| -> Result<()> {
+        let event_id = tx.insert_id("INSERT INTO run_events(kind, payload, actor_role, actor_id, requested_by) VALUES ('observe_started', '{}', dagq_actor_role(), dagq_actor_id(), dagq_requested_by())", &[])?;
+        let expected = EventActor {
+            role: role.into(),
+            id: id.into(),
+            requested_by: requester.map(str::to_owned),
+        };
+        let restored = tx.query_row(
+            "SELECT actor_role, actor_id, requested_by FROM run_events WHERE id = ?1",
+            sql_params![event_id],
+            |row| {
+                let role: String = row.get("actor_role")?;
+                let id: String = row.get("actor_id")?;
+                let requested_by: Option<String> = row.get("requested_by")?;
+                let actor = event_actor(row)?;
+                assert_eq!(
+                    actor,
+                    Some(EventActor {
+                        role,
+                        id,
+                        requested_by
+                    })
+                );
+                Ok(actor)
+            },
+        )?;
+        ensure!(restored == Some(expected));
+        Ok(())
+    };
+    record("user", "user", None)?;
+    store.set_actor(ActorContext::instance(ActorRole::Supervisor, 42));
+    let outer = store.request(Some("outer-job".into()));
+    ensure!(outer.is_none());
+    record("supervisor", "supervisor:42", Some("outer-job"))?;
+    let previous = store.request(Some("inner-job".into()));
+    record("supervisor", "supervisor:42", Some("inner-job"))?;
+    store.request(previous);
+    record("supervisor", "supervisor:42", Some("outer-job"))?;
+    store.request(outer);
+    record("supervisor", "supervisor:42", None)?;
+    drop(tx);
+    // A new transaction must not inherit a transaction-local requester.
+    let tx = store.read_entry("contract_actor_after")?;
+    ensure!(
+        tx.query_row("SELECT dagq_requested_by()", &[], |r| r
+            .get::<_, Option<String>>(0))?
+            .is_none()
+    );
+    Ok(())
+}

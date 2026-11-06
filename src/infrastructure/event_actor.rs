@@ -1,9 +1,10 @@
 //! The actor each event records (ADR-t728-1 decision 4, task 730): every
-//! connection of a [`super::sqlite::SqliteQueue`] carries the actor its
+//! store connection carries the actor its
 //! process acts as, and every `INSERT INTO run_events` writes it through the
-//! SQL functions the adapter registers on the connection from this state
+//! SQL functions the adapter supplies from this state
 //! (`dagq_actor_role()`, `dagq_actor_id()`, `dagq_requested_by()`;
-//! [`super::sql_exec::sqlite::attach_event_actors`]), so no write site has
+//! [`super::sql_exec::sqlite::attach_event_actors`] for SQLite, transaction-local
+//! settings for Postgres), so no write site has
 //! to be handed the actor and none can leave it out: an insert on a
 //! connection without them fails. The actor is the process's ([`set_process_actor`],
 //! which `main` sets once from `DAGQ_ROLE`), the user when none was set, or

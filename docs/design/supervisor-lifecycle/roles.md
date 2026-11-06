@@ -161,8 +161,8 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 queueに書かれるeventは全て、書いたactorと、headless jobのverdictを適用したときの依頼元を`run_events`の列に持つ（ADR-t728-1の決定4。列は[SQLite persistence](../persistence.md)の`0044_event_actors.sql`）。
 askとanswerが持つ書き手の欄とは別で、それらの値は変えない。
 
-- 仕組み: `SqliteQueue`の接続ごとに`EventActors`（`src/infrastructure/event_actor.rs`）がactorを持ち、SQLiteのadapter（`src/infrastructure/sql_exec/sqlite.rs`）がSQLの関数として登録する。
-  `INSERT INTO run_events`は全てこの関数で列を埋めるので、書く場所にactorを渡さず、登録の無い接続での挿入は失敗する。
+- 仕組み: storeの接続ごとに`EventActors`（`src/infrastructure/event_actor.rs`）がactorを持ち、SQLの関数へSQLiteのadapterは接続の登録で、Postgresのadapterはtransaction内だけの設定で渡す。
+  `INSERT INTO run_events`は全てこの関数で列を埋めるので、書く場所にactorを渡さず、SQLiteでは登録の無い接続での挿入は失敗する。
 - 既定のactorはプロセスのactor（`set_process_actor`。`main`がコマンドの前に1回決める）で、決めていなければ（ライブラリを直接使うtest）`user`。
   `SqliteQueue::with_actor`で接続ごとに変えられる。
 - プロセスのactorは呼び出し元の`ActorContext`（`DAGQ_ROLE`が無ければ`user`）。

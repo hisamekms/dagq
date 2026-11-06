@@ -3104,6 +3104,12 @@ mod store_contract_tests {
         fn with_identity(self, identity: WriteIdentity) -> Self {
             self.with_write_identity(identity)
         }
+        fn set_actor(&self, actor: ActorContext) {
+            self.actors.set(actor);
+        }
+        fn request(&self, requested_by: Option<String>) -> Option<String> {
+            self.actors.request(requested_by)
+        }
         fn commit(tx: WriteTx<'_>) -> Result<()> {
             Ok(tx.commit()?)
         }
@@ -3131,6 +3137,10 @@ mod store_contract_tests {
     #[test]
     fn unique_indexes() {
         contract(|open| store_contract::unique_indexes(&open));
+    }
+    #[test]
+    fn event_actors() {
+        contract(|open| store_contract::event_actors(&open));
     }
     #[test]
     fn base_types() {

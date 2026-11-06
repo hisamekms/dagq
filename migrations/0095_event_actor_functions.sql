@@ -1,0 +1,2 @@
+-- dagq-schema: compatible
+-- SQLite registers the event actor functions on each connection; no schema change.

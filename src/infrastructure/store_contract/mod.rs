@@ -16,12 +16,20 @@ use anyhow::{Context, Result};
 /// would. This is test plumbing, not an alternative transaction entry.
 pub trait ContractStore: TransactionEntries + WriteLeaderStore + Sized {
     fn with_identity(self, identity: WriteIdentity) -> Self;
+    fn set_actor(&self, actor: crate::domain::actor::ActorContext);
+    fn request(&self, requested_by: Option<String>) -> Option<String>;
     fn commit(tx: Self::Write<'_>) -> Result<()>;
 }
 
 impl<S: super::postgres::PostgresSession> ContractStore for super::postgres::PostgresStore<S> {
     fn with_identity(self, identity: WriteIdentity) -> Self {
         self.with_write_identity(identity)
+    }
+    fn set_actor(&self, actor: crate::domain::actor::ActorContext) {
+        self.set_actor(actor);
+    }
+    fn request(&self, requested_by: Option<String>) -> Option<String> {
+        self.request(requested_by)
     }
     fn commit(tx: Self::Write<'_>) -> Result<()> {
         tx.commit()
@@ -55,6 +63,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("stale writer", stale_writer::<S, F>),
         ("unique indexes", unique_indexes::<S, F>),
         ("base types", base_types::<S, F>),
+        ("event actors", event_actors::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

@@ -20,11 +20,13 @@
 
 #[cfg(feature = "postgres")]
 pub mod client;
+mod event_actor;
 pub mod exec;
 mod leader;
 pub mod migrate;
 
 use self::exec::{PostgresRow, numbered_parameters, returning_id};
+use super::event_actor::{EventActors, process_actor};
 use super::sql_dialect::SqlDialect;
 use super::sql_exec::{
     OptionalRow, SqlError, SqlRead, SqlResult, SqlRow, SqlSavepoint, SqlSavepoints, SqlValue,
@@ -32,6 +34,7 @@ use super::sql_exec::{
 };
 use super::write_leader::{IDENTITY_SQL, WriteIdentity, millis, renew_sql};
 use crate::application::NotLeader;
+use crate::domain::actor::ActorContext;
 use anyhow::{Context, Result};
 
 /// What every connection runs first: a time without a zone reads as UTC, as
@@ -68,6 +71,7 @@ pub trait PostgresSession {
 pub struct PostgresStore<S> {
     session: S,
     identity: WriteIdentity,
+    actors: EventActors,
 }
 
 impl<S: PostgresSession> PostgresStore<S> {
@@ -77,10 +81,23 @@ impl<S: PostgresSession> PostgresStore<S> {
         self
     }
 
+    /// Write events as this actor, including statements in an open transaction.
+    pub fn set_actor(&self, actor: ActorContext) {
+        self.actors.set(actor);
+    }
+
+    /// Replace the requester until the caller restores the returned value.
+    pub fn request(&self, requested_by: Option<String>) -> Option<String> {
+        self.actors.request(requested_by)
+    }
+
     /// Only conditional leader mutations use this unfenced write entry.
     /// It is private to the Postgres adapter; ordinary writes fence first.
     fn leader_entry(&self, name: &'static str) -> Result<PostgresTx<'_, S>> {
-        PostgresTx::begin(&self.session, name, BEGIN_WRITE_SQL)
+        let mut tx = PostgresTx::begin(&self.session, name, BEGIN_WRITE_SQL)?;
+        tx.actors = Some(&self.actors);
+        tx.sync_actors()?;
+        Ok(tx)
     }
 
     /// The store on the newly connected `session`, refused unless this
@@ -89,7 +106,11 @@ impl<S: PostgresSession> PostgresStore<S> {
         session.run(SESSION_SETUP_SQL)?;
         migrate::check_opens(&session)?;
         let identity = read_identity(&session).context("read the write leader's row")?;
-        Ok(Self { session, identity })
+        Ok(Self {
+            session,
+            identity,
+            actors: EventActors::new(process_actor()),
+        })
     }
 }
 
@@ -115,7 +136,8 @@ impl<S: PostgresSession> TransactionEntries for PostgresStore<S> {
     /// The fence's zero rows drop the transaction, which rolls it back
     /// before the retryable [`NotLeader`] returns.
     fn write_entry(&self, name: &'static str) -> Result<PostgresTx<'_, S>> {
-        let tx = PostgresTx::begin(&self.session, name, BEGIN_WRITE_SQL)?;
+        let mut tx = PostgresTx::begin(&self.session, name, BEGIN_WRITE_SQL)?;
+        tx.actors = Some(&self.actors);
         let changed = self.session.execute(
             &fence_sql(),
             sql_params![
@@ -127,31 +149,48 @@ impl<S: PostgresSession> TransactionEntries for PostgresStore<S> {
         if changed == 0 {
             return Err(NotLeader.into());
         }
+        tx.sync_actors()?;
         Ok(tx)
     }
 
     fn read_entry(&self, name: &'static str) -> Result<PostgresTx<'_, S>> {
-        PostgresTx::begin(&self.session, name, BEGIN_READ_SQL)
+        let mut tx = PostgresTx::begin(&self.session, name, BEGIN_READ_SQL)?;
+        tx.actors = Some(&self.actors);
+        tx.sync_actors()?;
+        Ok(tx)
     }
 }
 
 /// A transaction of an entry, which rolls back unless it commits.
 pub struct PostgresTx<'s, S: PostgresSession> {
     session: &'s S,
+    actors: Option<&'s EventActors>,
     name: &'static str,
     open: bool,
 }
 
 impl<'s, S: PostgresSession> PostgresTx<'s, S> {
+    // Migration transactions have no store connection state to propagate.
     fn begin(session: &'s S, name: &'static str, begin: &str) -> Result<Self> {
         session
             .run(begin)
             .with_context(|| format!("begin the transaction {name}"))?;
         Ok(Self {
             session,
+            actors: None,
             name,
             open: true,
         })
+    }
+
+    // Repeat before each statement, including after a savepoint rollback: its
+    // SET LOCAL effects may have rolled back while the connection state did not.
+    fn sync_actors(&self) -> SqlResult<()> {
+        if let Some(actors) = self.actors {
+            let (sql, values) = event_actor::settings(actors);
+            self.session.query(&sql, &values)?;
+        }
+        Ok(())
     }
 
     pub fn commit(mut self) -> Result<()> {
@@ -173,6 +212,7 @@ impl<S: PostgresSession> SqlRead for PostgresTx<'_, S> {
         params: &[SqlValue],
         visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
     ) -> SqlResult<()> {
+        self.sync_actors()?;
         for row in self.session.query(&numbered_parameters(sql), params)? {
             if !visit(&SqlRow::new(&row))? {
                 break;
@@ -184,6 +224,7 @@ impl<S: PostgresSession> SqlRead for PostgresTx<'_, S> {
 
 impl<S: PostgresSession> SqlWrite for PostgresTx<'_, S> {
     fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
+        self.sync_actors()?;
         let changed = self.session.execute(&numbered_parameters(sql), params)?;
         Ok(usize::try_from(changed).unwrap_or(usize::MAX))
     }
@@ -322,6 +363,8 @@ mod tests {
         statements: RefCell<Vec<String>>,
         bound: RefCell<Vec<Vec<SqlValue>>>,
         answers: RefCell<Vec<PostgresRow>>,
+        // Settings record their position among business statements separately.
+        settings: RefCell<Vec<(usize, Vec<SqlValue>)>>,
         changed: Cell<u64>,
         begin_fails: Cell<bool>,
         schema: Cell<Option<(i64, i64)>>,
@@ -345,6 +388,12 @@ mod tests {
         }
 
         fn query(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
+            if sql == event_actor::settings(&EventActors::new(process_actor())).0 {
+                self.settings
+                    .borrow_mut()
+                    .push((self.statements.borrow().len(), params.to_vec()));
+                return Ok(vec![]);
+            }
             self.statements.borrow_mut().push(sql.to_owned());
             if let Some(rows) = schema_answer(sql, self.schema.get()) {
                 return Ok(rows);
@@ -368,6 +417,58 @@ mod tests {
     /// The statements after the store opened.
     fn after_open(session: &Recorded) -> Vec<String> {
         session.statements.borrow()[4..].to_vec()
+    }
+
+    #[test]
+    fn entries_load_actor_settings_and_refresh_them_before_each_statement() {
+        use crate::domain::actor::ActorRole;
+        for write in [false, true] {
+            let session = Recorded::taken();
+            let store = PostgresStore::open(&session).unwrap();
+            store.set_actor(ActorContext::instance(ActorRole::Supervisor, 42));
+            let tx = if write {
+                store.write_entry("actor")
+            } else {
+                store.read_entry("actor")
+            }
+            .unwrap();
+            let initial = event_actor::settings(&store.actors).1;
+            // BEGIN, then the fence for a write, precede the initial settings.
+            assert_eq!(
+                *session.settings.borrow(),
+                [(if write { 6 } else { 5 }, initial)]
+            );
+            let previous = store.request(Some("job'日本語".into()));
+            store.set_actor(ActorContext::user());
+            tx.visit_rows("SELECT dagq_actor_role()", &[], &mut |_| Ok(true))
+                .unwrap();
+            assert_eq!(
+                session.settings.borrow().last().unwrap().1,
+                sql_params!["user", "user", "job'日本語"]
+            );
+            store.request(previous);
+            if write {
+                tx.execute("UPDATE t SET v=1", &[]).unwrap();
+            } else {
+                tx.visit_rows("SELECT dagq_requested_by()", &[], &mut |_| Ok(true))
+                    .unwrap();
+            }
+            assert_eq!(
+                session.settings.borrow().last().unwrap().1,
+                sql_params!["user", "user", ""]
+            );
+            let start = if write { 6 } else { 5 };
+            assert_eq!(
+                session
+                    .settings
+                    .borrow()
+                    .iter()
+                    .map(|(at, _)| *at)
+                    .collect::<Vec<_>>(),
+                [start, start, start + 1]
+            );
+            drop(tx);
+        }
     }
 
     #[test]
