@@ -4,7 +4,9 @@
 //! run sequentially: business writes roll back except the fenced-write case,
 //! which removes its row; leader cases release their last holder.
 mod cases;
+mod search_writes;
 pub use cases::*;
+pub use search_writes::postgres_search_writes;
 
 use super::sql_exec::TransactionEntries;
 use super::sqlite::WriteIdentity;

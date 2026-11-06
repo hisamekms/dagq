@@ -11,6 +11,7 @@ fn main() -> Result<()> {
     store_contract::run_configured(connection.as_deref(), |url| {
         let connection = ConnectionString::new(url);
         client::migrate(&connection)?;
-        store_contract::run(&|| client::connect(&connection))
+        store_contract::run(&|| client::connect(&connection))?;
+        store_contract::postgres_search_writes(&|| client::connect(&connection))
     })
 }

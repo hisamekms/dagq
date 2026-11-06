@@ -381,6 +381,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/finding_planners.rs", Planning),
     store("src/infrastructure/follow_up_membership.rs", Planning),
     store("src/infrastructure/search.rs", Planning),
+    store("src/infrastructure/postgres/search_write.rs", Planning),
     store("src/infrastructure/runtime_store/planning_records.rs", Planning),
     store("src/infrastructure/runtime_store/mod.rs", Execution),
     store("src/infrastructure/runtime_store/transitions.rs", Execution),

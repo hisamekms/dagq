@@ -1,0 +1,2 @@
+-- dagq-schema: compatible
+-- SQLite retains its FTS5 search_index and triggers; no schema change.

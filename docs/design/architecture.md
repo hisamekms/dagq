@@ -211,6 +211,7 @@ queue serviceはqueue DBを開く唯一のプロセスで（例外は[Queue serv
   どのmigrationも作らないtableの行、migrationが残すのに行の無いtable、コードに無いstoreのmoduleとtransactionの関数でも落ちる。
   共有の部品のtableは、どのcontextが書いても違反に数えない。
   migrationのtriggerが書く`search_index`・`landed_commits`は数えない。
+- 所属の判断のportが追記だけを公開することは`src/context_boundaries/sql.rs`が構文で検査し、判断を更新・削除する操作を拒む。
 - queue DBを開く呼び出しの置き場（ADR-t3102-2決定8）は、`cargo test`が流すRustのtest（`src/context_boundaries/queue_opens.rs`）が当て、`src/`の本番のコードで表に無い呼び出しと、呼び出しの無い表の行で落ちる。
   開いてよい経路とtestの経路の区別は[Queue service](queue-service.md#dbを開く経路)。
 - 書き込みの入口でのfencingを通らない開始は`src/context_boundaries/write_tx.rs`が拒み、係の条件付きの更新とmigrationだけが専用の開始経路を使う。

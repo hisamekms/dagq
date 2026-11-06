@@ -33,6 +33,7 @@ requiredの所属先は元goalで、別の所属先は拒む。
 `follow_up_judgements`は追記の行で、最後の行が今の判断。
 分類・必須の欄・遷移はdomainの`MembershipJudgement::validate`とstoreが検査する。
 UPDATEとDELETEはtriggerで拒む。
+Postgresでは追記だけのportと、DBの役に判断のUPDATE・DELETEを与えない配置の選択で守る。
 判断が無い状態から3分類へ、undecidedからrequired/out_of_scopeへ進める。
 同じ分類の確かめ直しも許す。
 requiredとout_of_scopeの間の訂正は理由と最後の行の名指しを要し、undecidedへ戻すのは拒む。

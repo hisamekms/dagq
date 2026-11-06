@@ -24,6 +24,7 @@ mod event_actor;
 pub mod exec;
 mod leader;
 pub mod migrate;
+pub(crate) mod search_write;
 
 use self::exec::{PostgresRow, numbered_parameters, returning_id};
 use super::event_actor::{EventActors, process_actor};

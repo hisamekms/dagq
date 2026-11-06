@@ -79,6 +79,7 @@ pub mod runtime_store;
 pub mod sccache;
 pub mod schema;
 pub mod search;
+pub mod search_writes;
 mod session_tokens;
 mod sessions;
 pub mod setup_review;

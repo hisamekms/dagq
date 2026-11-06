@@ -424,3 +424,65 @@ mod tests {
         );
     }
 }
+
+/// The judgement-facing part of PlanningStore has exactly the append entry.
+/// Inspect names and argument types as Rust syntax: methods mentioning a
+/// judgement or membership cannot add an update/delete operation. Disguised
+/// names, dynamic dispatch outside this port and SQL built at runtime remain
+/// review concerns; deployment also withholds UPDATE/DELETE on the table.
+fn judgement_entries(text: &str) -> Vec<String> {
+    use syn::visit::{self, Visit};
+    struct Mentions(bool);
+    impl<'ast> Visit<'ast> for Mentions {
+        fn visit_ident(&mut self, ident: &'ast syn::Ident) {
+            let name = ident.to_string().to_lowercase();
+            self.0 |= ["judgement", "membership", "follow_up"]
+                .iter()
+                .any(|s| name.contains(s));
+            visit::visit_ident(self, ident);
+        }
+    }
+    let file = syn::parse_file(text).expect("planning port parses");
+    let port = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Trait(t) if t.ident == "PlanningStore" => Some(t),
+            _ => None,
+        })
+        .expect("PlanningStore exists");
+    port.items
+        .iter()
+        .filter_map(|item| {
+            let syn::TraitItem::Fn(method) = item else {
+                return None;
+            };
+            let mut mentions = Mentions(false);
+            mentions.visit_signature(&method.sig);
+            mentions.0.then(|| method.sig.ident.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn membership_port_only_appends_judgements() {
+    assert_eq!(
+        judgement_entries(include_str!("../application/commands/planning.rs")),
+        ["judge_follow_up"]
+    );
+}
+
+#[test]
+fn membership_port_rejects_update_and_delete_entries() {
+    for operation in [
+        "update_judgement",
+        "delete_membership",
+        "rewrite_follow_up",
+        "remove",
+    ] {
+        let text = format!(
+            "trait PlanningStore {{ fn judge_follow_up(&self); fn {operation}(&self, value: MembershipJudgement); }}"
+        );
+        assert_ne!(judgement_entries(&text), ["judge_follow_up"]);
+    }
+}
