@@ -31,6 +31,11 @@ impl EventBodies for InlineEventBodies {
 /// finishes before SQLite inserts the referencing row; its error aborts the
 /// INSERT. A later rollback may leave an orphan. Each large write has a fresh
 /// key.
+///
+/// Postgres has the same-named function in the DB
+/// (`migrations-postgres/event_body_function.sql`). It cannot call the port, so
+/// it returns its argument and the row holds the body, as [`InlineEventBodies`]
+/// makes it do here.
 pub(super) fn event_body_for_row(bodies: &dyn EventBodies, body: String) -> Result<String> {
     if !is_large_event_body(&body) {
         return Ok(body);

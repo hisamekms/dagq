@@ -3143,6 +3143,10 @@ mod store_contract_tests {
         contract(|open| store_contract::event_actors(&open));
     }
     #[test]
+    fn event_bodies() {
+        contract(|open| store_contract::event_bodies(&open));
+    }
+    #[test]
     fn base_types() {
         contract(|open| store_contract::base_types(&open));
     }

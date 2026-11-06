@@ -1,0 +1,2 @@
+-- dagq-schema: compatible
+-- SQLite registers the event body function on each connection; no schema change.

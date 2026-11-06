@@ -319,3 +319,39 @@ pub fn event_actors<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<
     );
     Ok(())
 }
+
+/// An event's body written through the shared `dagq_event_body()` reads back
+/// the same on both sides of the threshold. Compared as JSON: `jsonb` keeps the
+/// document, not its spelling.
+pub fn event_bodies<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
+    use crate::application::{EVENT_BODY_THRESHOLD, is_large_event_body};
+    use serde_json::{Value, json};
+
+    let store = open()?;
+    let tx = store.write_entry("contract_event_bodies")?;
+    let frame = json!({"message": "本文"}).to_string().len();
+    for size in [
+        EVENT_BODY_THRESHOLD - 1,
+        EVENT_BODY_THRESHOLD,
+        EVENT_BODY_THRESHOLD + 1,
+    ] {
+        let body = json!({"message": format!("本文{}", "x".repeat(size - frame))});
+        let text = body.to_string();
+        ensure!(text.len() == size);
+        ensure!(is_large_event_body(&text) == (size > EVENT_BODY_THRESHOLD));
+        let event_id = tx.insert_id(
+            "INSERT INTO run_events(kind, payload, actor_role, actor_id, requested_by) VALUES ('observe_started', dagq_event_body(?1), dagq_actor_role(), dagq_actor_id(), dagq_requested_by())",
+            sql_params![text],
+        )?;
+        let stored: String = tx.query_row(
+            "SELECT payload FROM run_events WHERE id = ?1",
+            sql_params![event_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            serde_json::from_str::<Value>(&stored)? == body,
+            "a body of {size} bytes changed in the row"
+        );
+    }
+    Ok(())
+}
