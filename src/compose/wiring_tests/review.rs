@@ -113,9 +113,17 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
         ("model", Value::Null),
         ("effort", Value::Null),
         ("source", json!("default")),
+        ("pair_group", Value::Null),
+        ("planned_provider", json!("claude")),
     ] {
-        assert_eq!(started[0]["launch"][key], expected, "{}", started[0]);
+        assert_eq!(
+            started[0]["launch"].get(key),
+            Some(&expected),
+            "{}",
+            started[0]
+        );
     }
+    assert_eq!(started[0].get("pair_group"), Some(&Value::Null));
     assert_eq!(started[0]["workspace_id"], run.workspace_id().unwrap());
     let session_id = started[0]["session_id"].as_str().unwrap();
     let opened: Vec<_> = payloads(&detail, "session_opened")

@@ -1207,7 +1207,7 @@ fn an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_
     let finished = payloads(&detail, "review_finished");
     assert_eq!(
         finished[0]["launches"]["design"],
-        json!({"provider": "claude", "model": null, "effort": null})
+        json!({"provider": "claude", "model": null, "effort": null, "planned_provider": "codex"})
     );
     let held: Vec<Value> = SqliteQueue::open(&db)
         .unwrap()
