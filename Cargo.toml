@@ -19,6 +19,8 @@ include = ["/build.rs", "/src/**", "/migrations/**", "/migrations-postgres/**", 
 
 [dependencies]
 anyhow = "1.0"
+# Decodes the parts of an OIDC JWT and its keys (src/domain/oidc.rs).
+base64 = "0.22"
 # The buffer the driver's parameters are written to, behind the feature `postgres`.
 bytes = { version = "1", optional = true }
 clap = { version = "4.5", features = ["derive"] }
@@ -26,12 +28,16 @@ getrandom = "0.4"
 libc = "0.2"
 # The Postgres store's driver, behind the feature `postgres` (ADR-t3986-1).
 postgres = { version = "0.19", optional = true }
+# Verifies the signature of an OIDC JWT, and is the crypto of ureq's TLS too.
+ring = "0.17"
 rusqlite = { version = "0.40", features = ["backup", "bundled", "functions", "hooks", "modern_sqlite"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+# Fetches an OIDC issuer's documents over HTTPS, blocking with no async runtime.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 uuid = { version = "1.20", features = ["v4"] }
 
 # The boundary lints of clippy.toml are off for the package and turned on
@@ -56,6 +62,8 @@ postgres = ["dep:bytes", "dep:postgres"]
 dagq = { path = ".", features = ["test-paths"] }
 # Reads the sources as syntax for the boundary tests (src/context_boundaries.rs).
 proc-macro2 = { version = "1.0", default-features = false }
+# The TLS end of the issuer the HTTPS fetching is tested against (tests/it/oidc_keys.rs).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 syn = { version = "2.0", default-features = false, features = ["full", "parsing", "visit"] }
 tempfile = "3.25"
 

@@ -43,6 +43,7 @@ pub mod marks;
 pub(crate) mod memory_files;
 pub mod naming;
 pub mod observer;
+pub mod oidc;
 pub mod planner;
 pub mod planner_handoff;
 pub mod planner_request;

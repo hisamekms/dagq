@@ -45,6 +45,7 @@ pub mod language;
 pub mod launchd;
 pub mod location;
 pub mod observer;
+pub mod oidc_keys;
 pub mod passed_env;
 mod plan_requests;
 mod plan_reviews;

@@ -555,6 +555,7 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/container_image.rs", Host),
     module("src/application/queue_broker.rs", Host),
     module("src/application/broker_relay.rs", Host),
+    module("src/application/oidc.rs", Host), // the check of an OIDC issuer's JWT, behind the team version's entry
     module("src/application/sccache.rs", Host),
     module("src/application/retention.rs", Host), // the observations' directories and the backups past their retention
     module("src/application/sccache/", Host),
@@ -684,6 +685,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/container_image.rs", "ImageRecords", Some(Host), Internal), // the queue's records of the container image
     outer_port("src/application/broker_relay.rs", "RelayControl", Some(Host), Public(Only(&[Execution]))), // the relays of the runs' containers in the dagq machine; a run's container opens its relay before it starts and closes it at its end
     outer_port("src/application/broker_relay.rs", "RelayRecords", Some(Host), Internal), // the supervisor's record of the relays, read by the gate
+    outer_port("src/application/oidc.rs", "OidcDocumentSource", Some(Host), Internal), // the HTTPS fetching of an OIDC issuer's documents
     outer_port("src/application/run_container.rs", "RunContainers", Some(Execution), Internal), // the containers a worker's turns run in; the wrapper starts and removes them, and every stop of a run's session or processes removes its container
     outer_port("src/application/run_container.rs", "VerificationContainers", Some(Execution), Internal), // the containers the commands of integrate's verification run in, on a clone of the commit that lands; integrate removes what each verification left
     outer_port("src/application/queue_service.rs", "ServiceAccess", Some(Host), Public(Only(&[Execution, Planning]))), // not classified by architecture.md; the supervisor issues a token at the claim and the resume, and a planner's wrapper's as it starts the wrapper

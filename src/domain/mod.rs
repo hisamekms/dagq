@@ -1295,6 +1295,7 @@ pub mod local_gates;
 pub mod machine_memory;
 pub mod marks;
 pub mod measure;
+pub mod oidc;
 pub mod plan_quality;
 pub mod plan_request;
 pub mod plan_review;

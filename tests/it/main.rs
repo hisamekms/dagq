@@ -84,6 +84,7 @@ mod location;
 mod main_checkout;
 mod node_samples;
 mod observer_codex;
+mod oidc_keys;
 mod plan_review;
 mod plan_review_attribution;
 mod plan_review_codex;

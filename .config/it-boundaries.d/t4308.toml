@@ -1,0 +1,9 @@
+# The registry's boundary task 4308 gave (the format is in the header of
+# scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "oidc-keys-fetched-from-issuer-over-tcp"
+kind = "プロセス"
+test = "oidc_keys::keys_are_fetched_from_an_issuer_over_tls_within_the_limits_and_without_following_redirects"
+reason = "発行元の discovery と鍵を外向きの HTTPS で取ること（TLS の検証、redirect の 3xx が追われないこと、上限を超える答えを読み切らずに接続を切ること、本文が止まった答えが時間の上限で終わること）は、実の TCP の loopback の相手に HTTP の client を通してしか確かめられない。外向きの HTTP の取得なので、受ける側の id では代表できない。答えの判断（redirect・大きさ・discovery の中身・鍵の記憶）は src/domain/oidc.rs の unit test が持つ。"
+task = 4308
