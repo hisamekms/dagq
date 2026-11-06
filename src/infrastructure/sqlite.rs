@@ -3118,3 +3118,50 @@ mod inserted_id_tests {
         assert_eq!(count, 1);
     }
 }
+
+#[cfg(test)]
+mod store_contract_tests {
+    use super::*;
+    use crate::infrastructure::store_contract::{self, ContractStore};
+
+    impl ContractStore for SqliteQueue {
+        fn with_identity(self, identity: WriteIdentity) -> Self {
+            self.with_write_identity(identity)
+        }
+        fn commit(tx: WriteTx<'_>) -> Result<()> {
+            Ok(tx.commit()?)
+        }
+    }
+
+    // Keep the named memdb alive across the connections opened by a case.
+    fn contract(case: impl FnOnce(&dyn Fn() -> Result<SqliteQueue>) -> Result<()>) {
+        let uri = format!("file:/store-contract-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let _keeper = SqliteQueue::init(&uri).unwrap();
+        case(&|| SqliteQueue::open(&uri)).unwrap();
+    }
+
+    #[test]
+    fn leader_lifecycle() {
+        contract(|open| store_contract::leader_lifecycle(&open));
+    }
+    #[test]
+    fn leader_singleton() {
+        contract(|open| store_contract::leader_singleton(&open));
+    }
+    #[test]
+    fn stale_writer() {
+        contract(|open| store_contract::stale_writer(&open));
+    }
+    #[test]
+    fn unique_indexes() {
+        contract(|open| store_contract::unique_indexes(&open));
+    }
+    #[test]
+    fn base_types() {
+        contract(|open| store_contract::base_types(&open));
+    }
+    #[test]
+    fn all_cases_run_in_order_on_the_same_database() {
+        contract(|open| store_contract::run(&open));
+    }
+}

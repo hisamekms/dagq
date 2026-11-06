@@ -237,8 +237,9 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
 
 ## Transactions and constraints
 
-- 名前付き入口`WriteTx::write`から`write_leader::fence`を呼ぶ。
-- 全部の書き込みのtransactionは最初の文で係と世代を確かめ、0行なら何も書かずに`not_leader`で拒む（期限は条件に入れない）。
+- 両adapterの通常の書き込みは入口でfenceし、係と世代が一致しなければ何も書かず`not_leader`で拒む。
+  期限は条件に入れない。
+- 係の引き継ぎ・延長・解放はfenceせず、共有のSQLの条件付きの更新を流す。
 
 - ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#起動とheartbeat)）。

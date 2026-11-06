@@ -624,3 +624,39 @@ jobs:
       - name: Remove the target's tmp before the cache is saved
         if: always()
         run: rm -rf target/tmp
+
+  # The real Postgres boundary is a CI-only example, outside nextest,
+  # coverage and landing verification (ADR-t3986-1 decision 10).
+  postgres:
+    name: postgres store contracts
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: dagq
+          POSTGRES_PASSWORD: dagq
+          POSTGRES_DB: store_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dagq -d store_contract"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DAGQ_TEST_POSTGRES_URL: postgres://dagq:dagq@localhost:5432/store_contract
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@v2
+      - name: Remove the target's tmp restored from the cache
+        run: rm -rf target/tmp
+      - name: Store contracts on Postgres
+        run: cargo run --locked --example store_contract_postgres --features store-contract,postgres
+      - name: Remove the target's tmp before the cache is saved
+        if: always()
+        run: rm -rf target/tmp

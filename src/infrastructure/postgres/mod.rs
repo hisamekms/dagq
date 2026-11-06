@@ -21,6 +21,7 @@
 #[cfg(feature = "postgres")]
 pub mod client;
 pub mod exec;
+mod leader;
 pub mod migrate;
 
 use self::exec::{PostgresRow, numbered_parameters, returning_id};
@@ -70,6 +71,18 @@ pub struct PostgresStore<S> {
 }
 
 impl<S: PostgresSession> PostgresStore<S> {
+    /// Use the identity acquired at startup, retained even after takeover.
+    pub fn with_write_identity(mut self, identity: WriteIdentity) -> Self {
+        self.identity = identity;
+        self
+    }
+
+    /// Only conditional leader mutations use this unfenced write entry.
+    /// It is private to the Postgres adapter; ordinary writes fence first.
+    fn leader_entry(&self, name: &'static str) -> Result<PostgresTx<'_, S>> {
+        PostgresTx::begin(&self.session, name, BEGIN_WRITE_SQL)
+    }
+
     /// The store on the newly connected `session`, refused unless this
     /// binary opens its schema as it is ([`migrate::check_opens`]).
     pub fn open(session: S) -> Result<Self> {
@@ -635,5 +648,94 @@ mod tests {
             Err(SqlError::NoRows)
         ));
         assert_eq!(after_open(&session).last().unwrap(), returning);
+    }
+    #[test]
+    fn leader_mutations_begin_unfenced_and_postgres_never_uses_local_proof() {
+        use crate::application::WriteLeaderStore;
+        let session = Recorded::taken();
+        let store = PostgresStore::open(&session).unwrap();
+        session
+            .answers
+            .replace(vec![one_column("generation", SqlValue::Integer(8))]);
+        assert_eq!(
+            store.take_write_leader("next", LEASE, true).unwrap(),
+            Some(8)
+        );
+        assert_eq!(session.bound.borrow()[0][2], SqlValue::Bool(false));
+        let statements = after_open(&session);
+        assert_eq!(statements[0], BEGIN_WRITE_SQL);
+        assert!(statements[1].contains("generation = generation + 1"));
+        assert_eq!(
+            statements[2],
+            "SELECT generation FROM write_leader WHERE singleton = 1"
+        );
+        assert_eq!(statements[3], COMMIT_SQL);
+        for release in [false, true] {
+            let start = session.statements.borrow().len();
+            let changed = if release {
+                store.release_write_leader("next", 8).unwrap()
+            } else {
+                store.renew_write_leader("next", 8, LEASE).unwrap()
+            };
+            assert!(changed);
+            let statements = session.statements.borrow();
+            assert_eq!(statements[start], BEGIN_WRITE_SQL);
+            assert_eq!(statements[start + 2], COMMIT_SQL);
+            assert_eq!(statements.len(), start + 3);
+        }
+        session.changed.set(0);
+        assert_eq!(
+            store.take_write_leader("other", LEASE, false).unwrap(),
+            None
+        );
+        assert!(!store.release_write_leader("next", 7).unwrap());
+        assert!(!store.renew_write_leader("next", 7, LEASE).unwrap());
+    }
+
+    #[test]
+    fn the_leader_reads_through_the_snapshot_entry_and_startup_identity_fences_writes() {
+        use crate::application::WriteLeaderStore;
+        let session = Recorded::taken();
+        let store = PostgresStore::open(&session).unwrap();
+        session.answers.replace(vec![PostgresRow::new(
+            [
+                "holder",
+                "generation",
+                "lease_until_ms",
+                "acquired_at_ms",
+                "now",
+            ]
+            .map(str::to_owned)
+            .into(),
+            vec![
+                SqlValue::Text("next".into()),
+                SqlValue::Integer(8),
+                SqlValue::Integer(99),
+                SqlValue::Integer(1),
+                SqlValue::Integer(2),
+            ],
+        )]);
+        let (row, now) = store.write_leader().unwrap();
+        assert_eq!(
+            (row.holder.as_deref(), row.generation, now),
+            (Some("next"), 8, 2)
+        );
+        let statements = after_open(&session);
+        assert_eq!(statements[0], BEGIN_READ_SQL);
+        assert_eq!(statements.last().unwrap(), COMMIT_SQL);
+        assert_eq!(statements.len(), 3);
+        let store = store.with_write_identity(WriteIdentity {
+            holder: Some("next".into()),
+            generation: 8,
+        });
+        store
+            .write_entry("startup_identity")
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(
+            session.bound.borrow().last().unwrap()[..2],
+            [SqlValue::Text("next".into()), SqlValue::Integer(8)]
+        );
     }
 }

@@ -10,7 +10,7 @@
 //! decides by, applied at the DB, so of two processes racing for the row
 //! one changes no row and is told so.
 
-use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
+use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, TransactionEntries, sql_params};
 use super::sqlite::{SqliteQueue, WriteTx};
 use crate::application::WriteLeaderStore;
 use crate::domain::write_leader::WriteLeader;
@@ -116,6 +116,63 @@ pub(super) fn millis(lease: Duration) -> Result<i64> {
     i64::try_from(lease.as_millis()).context("a write leader's lease too long to record")
 }
 
+/// Read the leader and the DB clock in the caller's snapshot. `now` is
+/// the dialect's clock expression (a fixed expression in adapter tests).
+pub(super) fn read(tx: &impl SqlRead, now: &str) -> Result<(WriteLeader, i64)> {
+    let read = tx
+        .query_row(&read_sql(now), &[], |r| {
+            Ok((
+                WriteLeader {
+                    holder: r.get(0)?,
+                    generation: r.get(1)?,
+                    lease_until_ms: r.get(2)?,
+                    acquired_at_ms: r.get(3)?,
+                },
+                r.get(4)?,
+            ))
+        })
+        .optional()?
+        .context("the queue has no write leader's row")?;
+    Ok(read)
+}
+
+/// Conditional takeover in an unfenced transaction; the caller commits it.
+pub(super) fn take(
+    tx: &impl SqlWrite,
+    now: &str,
+    holder: &str,
+    lease: Duration,
+    local_proof: bool,
+) -> Result<Option<i64>> {
+    if tx.execute(
+        &take_sql(now),
+        sql_params![holder, millis(lease)?, local_proof],
+    )? == 0
+    {
+        return Ok(None);
+    }
+    Ok(Some(tx.query_row(TAKEN_SQL, &[], |r| r.get(0))?))
+}
+
+/// Conditional lease extension in an unfenced transaction.
+pub(super) fn renew(
+    tx: &impl SqlWrite,
+    now: &str,
+    holder: &str,
+    generation: i64,
+    lease: Duration,
+) -> Result<bool> {
+    Ok(tx.execute(
+        &renew_sql(now),
+        sql_params![holder, generation, millis(lease)?],
+    )? == 1)
+}
+
+/// Conditional release in an unfenced transaction.
+pub(super) fn release(tx: &impl SqlWrite, holder: &str, generation: i64) -> Result<bool> {
+    Ok(tx.execute(RELEASE_SQL, sql_params![holder, generation])? == 1)
+}
+
 /// The statements of the row on `queue`, each reading the clock now as the
 /// SQL expression `now`: the DB's clock
 /// ([`super::sql_dialect::SqlDialect::now_millis`]) for the port, a
@@ -136,21 +193,8 @@ impl<'q> LeaderRow<'q> {
     }
 
     fn read(&self) -> Result<(WriteLeader, i64)> {
-        let tx = self.queue.read_tx("write_leader")?;
-        let read = tx
-            .query_row(&read_sql(&self.now), &[], |r| {
-                Ok((
-                    WriteLeader {
-                        holder: r.get(0)?,
-                        generation: r.get(1)?,
-                        lease_until_ms: r.get(2)?,
-                        acquired_at_ms: r.get(3)?,
-                    },
-                    r.get(4)?,
-                ))
-            })
-            .optional()?
-            .context("the queue has no write leader's row")?;
+        let tx = self.queue.read_entry("write_leader")?;
+        let read = read(&tx, &self.now)?;
         tx.commit()?;
         Ok(read)
     }
@@ -161,18 +205,13 @@ impl<'q> LeaderRow<'q> {
             "take_write_leader",
             self.queue.write_hold_warn,
         )?;
-        let taken = SqlWrite::execute(
-            &tx,
-            &take_sql(&self.now),
-            sql_params![holder, millis(lease)?, local_proof],
-        )?;
-        if taken == 0 {
+        let generation = take(&tx, &self.now, holder, lease, local_proof)?;
+        if generation.is_some() {
+            tx.commit()?;
+        } else {
             tx.finish()?;
-            return Ok(None);
         }
-        let generation = tx.query_row(TAKEN_SQL, &[], |r| r.get(0))?;
-        tx.commit()?;
-        Ok(Some(generation))
+        Ok(generation)
     }
 
     fn renew(&self, holder: &str, generation: i64, lease: Duration) -> Result<bool> {
@@ -181,13 +220,9 @@ impl<'q> LeaderRow<'q> {
             "renew_write_leader",
             self.queue.write_hold_warn,
         )?;
-        let renewed = SqlWrite::execute(
-            &tx,
-            &renew_sql(&self.now),
-            sql_params![holder, generation, millis(lease)?],
-        )?;
+        let renewed = renew(&tx, &self.now, holder, generation, lease)?;
         tx.commit()?;
-        Ok(renewed == 1)
+        Ok(renewed)
     }
 
     fn release(&self, holder: &str, generation: i64) -> Result<bool> {
@@ -196,9 +231,9 @@ impl<'q> LeaderRow<'q> {
             "release_write_leader",
             self.queue.write_hold_warn,
         )?;
-        let released = SqlWrite::execute(&tx, RELEASE_SQL, sql_params![holder, generation])?;
+        let released = release(&tx, holder, generation)?;
         tx.commit()?;
-        Ok(released == 1)
+        Ok(released)
     }
 }
 
@@ -248,14 +283,6 @@ mod tests {
     /// [`LEASE`] in milliseconds.
     const LEASE_MS: i64 = LEASE.as_millis() as i64;
 
-    fn insert(queue: &SqliteQueue, singleton: i64) -> rusqlite::Result<usize> {
-        let tx = queue.write_tx("test_insert").unwrap();
-        tx.execute(
-            "INSERT INTO write_leader (singleton, generation, lease_until_ms) VALUES (?1, 0, 0)",
-            [singleton],
-        )
-    }
-
     #[test]
     fn the_migration_leaves_one_row_no_process_has_led() {
         let queue = queue();
@@ -282,26 +309,6 @@ mod tests {
         assert!(take_sql(&db_clock).contains(&format!("lease_until_ms <= {db_clock} OR ?3")));
         assert!(take_sql(&db_clock).contains(&format!("acquired_at_ms = {db_clock} ")));
         assert!(renew_sql(&db_clock).contains(&format!("lease_until_ms = {db_clock} + ?3")));
-    }
-
-    #[test]
-    fn a_second_row_is_refused_whatever_its_singleton() {
-        let queue = queue();
-        for singleton in [1, 2, 0, -1] {
-            let refused = insert(&queue, singleton).unwrap_err();
-            assert!(
-                matches!(
-                    refused.sqlite_error_code(),
-                    Some(rusqlite::ErrorCode::ConstraintViolation)
-                ),
-                "{singleton}: {refused}"
-            );
-        }
-        let tx = queue.read_tx("count").unwrap();
-        let rows: i64 = tx
-            .query_row("SELECT count(*) FROM write_leader", &[], |r| r.get(0))
-            .unwrap();
-        assert_eq!(rows, 1);
     }
 
     #[test]
@@ -345,16 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn a_released_row_is_taken_over_without_waiting() {
-        let queue = queue();
-        assert_eq!(at(&queue, 10_000).take("a", LEASE, false).unwrap(), Some(1));
-        assert!(at(&queue, 10_001).release("a", 1).unwrap());
-        let (row, _) = at(&queue, 10_002).read().unwrap();
-        assert_eq!((row.generation, row.lease_until_ms), (1, 0));
-        assert_eq!(at(&queue, 10_002).take("b", LEASE, false).unwrap(), Some(2));
-    }
-
-    #[test]
     fn only_the_holder_at_its_generation_renews_or_releases() {
         let queue = queue();
         assert_eq!(at(&queue, 10_000).take("a", LEASE, false).unwrap(), Some(1));
@@ -383,25 +380,14 @@ mod tests {
         assert!(past_end.release("b", 2).unwrap());
         assert_eq!(past_end.read().unwrap().0.lease_until_ms, 0);
     }
+
     #[test]
-    fn a_stale_writer_changes_nothing_and_the_current_generation_writes() {
+    fn an_implicit_write_also_refuses_the_stale_identity_without_changes() {
         let mut queue = queue();
         at(&queue, 10_000).take("a", LEASE, false).unwrap();
         queue.write_identity = Some(WriteIdentity::read(&*queue.conn).unwrap());
         at(&queue, 10_001).take("a", LEASE, true).unwrap();
-        let before = at(&queue, 10_001).read().unwrap().0;
         let changes = queue.conn.total_changes();
-        let error = queue
-            .write_tx("stale_writer")
-            .err()
-            .expect("stale generation refused");
-        assert!(
-            error
-                .downcast_ref::<crate::application::NotLeader>()
-                .is_some()
-        );
-        assert_eq!(queue.conn.total_changes(), changes);
-        // A formerly implicit single-statement write uses the same entry.
         let error = queue.fill_commit_message(1, "stale").unwrap_err();
         assert!(
             error
@@ -409,26 +395,5 @@ mod tests {
                 .is_some()
         );
         assert_eq!(queue.conn.total_changes(), changes);
-        assert_eq!(at(&queue, 10_001).read().unwrap().0, before);
-        assert_eq!(
-            queue
-                .conn
-                .query_row("SELECT count(*) FROM tasks", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-
-        queue.write_identity = Some(WriteIdentity::read(&*queue.conn).unwrap());
-        // No expiry predicate: the synthetic lease is long expired by now.
-        let tx = queue.write_tx("current_writer").unwrap();
-        tx.execute("INSERT INTO tasks(title, description, acceptance, verification_commands, status) VALUES ('fenced', '', '', '[]', 'draft')", []).unwrap();
-        tx.commit().unwrap();
-        assert_eq!(
-            queue
-                .conn
-                .query_row("SELECT count(*) FROM tasks", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
     }
 }

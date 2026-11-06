@@ -10,12 +10,12 @@ homepage = "https://github.com/hisamekms/dagq"
 readme = "README.md"
 keywords = ["task-queue", "dag", "git-worktree", "claude", "codex"]
 categories = ["command-line-utilities", "development-tools"]
-# Only what builds the binary: migrations are embedded with include_str!,
+# Runtime sources and the opt-in CI example: migrations use include_str!,
 # and build.rs embeds the build identifier.
 # The integration tests are listed below instead of one binary per tests/*.rs
 # file (ADR-0078).
 autotests = false
-include = ["/build.rs", "/src/**", "/migrations/**", "/migrations-postgres/**", "/plugins/claude-dagq/skills/dagq/reference/kpi.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+include = ["/build.rs", "/src/**", "/migrations/**", "/migrations-postgres/**", "/examples/store_contract_postgres.rs", "/plugins/claude-dagq/skills/dagq/reference/kpi.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1.0"
@@ -54,6 +54,8 @@ disallowed_macros = "allow"
 # dev-dependency on this package below.
 [features]
 test-paths = []
+# Shared adapter contracts, used only by tests and the CI example.
+store-contract = []
 # The Postgres store's adapter (src/infrastructure/postgres/client.rs): not in
 # a default build, so a local SQLite queue compiles none of its driver.
 postgres = ["dep:bytes", "dep:postgres"]
@@ -66,6 +68,12 @@ proc-macro2 = { version = "1.0", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 syn = { version = "2.0", default-features = false, features = ["full", "parsing", "visit"] }
 tempfile = "3.25"
+
+# A CI boundary runner, deliberately outside the test binaries and coverage.
+[[example]]
+name = "store_contract_postgres"
+required-features = ["store-contract", "postgres"]
+test = false
 
 # One test binary for the integration tests (tests/it), so tests/common is
 # compiled and the binary linked once; e2e and plugin stay separate because

@@ -95,3 +95,10 @@ pub mod telemetry_config;
 pub mod throughput_review;
 pub mod transcripts;
 mod write_leader;
+
+// Separate declarations also identify these CI-only cases as test helpers
+// to the source boundary checks; neither is in a default library build.
+#[cfg(test)]
+pub mod store_contract;
+#[cfg(all(not(test), feature = "store-contract"))]
+pub mod store_contract;
