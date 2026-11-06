@@ -8,9 +8,13 @@
 //! transaction that re-checks the finding first, so two supervisors never
 //! open one for the same finding.
 use super::sql_dialect::{JsonType, json_field};
+use super::sql_exec::OptionalRow;
+use super::sql_exec::sql_params;
+use super::sql_exec::sqlite::native_error;
+use super::store_writes::EventTx;
 use crate::domain::event_kind::{self, EventKind};
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde_json::json;
 
 use super::sql_exec::sqlite::{port_tx, with_row};
@@ -63,10 +67,10 @@ impl SqliteQueue {
             PlannerOrigin::Person => "person",
         };
         let tx = self.write_tx("submit_linking")?;
-        let previous = super::plan_requests::previous_proposals(&tx, &submission)?;
-        let held_retry = super::proposals::held_retry(&tx, &submission)?;
+        let previous = super::plan_requests::previous_proposals(&port_tx(&tx), &submission)?;
+        let held_retry = super::proposals::held_retry(&port_tx(&tx), &submission)?;
         let proposal = super::proposals::submit(
-            &tx,
+            &port_tx(&tx),
             submission,
             self.changes.as_ref(),
             self.title_prefixes.as_ref(),
@@ -82,7 +86,7 @@ impl SqliteQueue {
         // decision 6), and those of the proposals it carries on
         // (ADR-t1971-1 decision 2).
         super::plan_requests::link_requests(
-            &tx,
+            &port_tx(&tx),
             proposal.id(),
             workspace.as_deref(),
             &previous,
@@ -101,7 +105,7 @@ impl SqliteQueue {
                 now,
             )?;
         }
-        let proposal = super::proposals::read(&tx, proposal.id())?;
+        let proposal = super::proposals::read(&port_tx(&tx), proposal.id())?;
         tx.commit()?;
         Ok(proposal)
     }
@@ -152,7 +156,7 @@ impl SqliteQueue {
             // only a person's answer was left) is waited for (ADR-t1704-1
             // decision 2).
             Some(ask) => {
-                let ask = read_ask(&tx, ask)?;
+                let ask = read_ask(&port_tx(&tx), ask)?;
                 ask.finding_id == Some(finding)
                     && route_of(&tx, finding)? == PlannerAnswerRoute::NewPlanner
                     && !tx.query_row(
@@ -233,7 +237,7 @@ impl SqliteQueue {
         Ok(self
             .conn
             .prepare("SELECT * FROM asks WHERE finding_id=?1 ORDER BY id")?
-            .query_map([finding], ask_row)?
+            .query_map([finding], |row| with_row(row, ask_row))?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -468,7 +472,7 @@ fn proposal_state(
     conn: &Connection,
     proposal: ProposalId,
 ) -> Result<(ProposalStatus, Vec<TaskStatus>)> {
-    let record = super::proposals::read(conn, proposal)?;
+    let record = super::proposals::read(&port_tx(conn), proposal)?;
     let tasks = conn
         .prepare(
             "SELECT id FROM tasks WHERE proposal_id=?1
@@ -490,26 +494,33 @@ fn proposal_state(
 /// leaves the answer to a person. A planner asked to exit because only a
 /// person's answer was left is no target of the answer.
 pub(super) fn route_of(conn: &Connection, finding: FindingId) -> Result<PlannerAnswerRoute> {
+    route_of_port(&port_tx(conn), finding).map_err(native_error)
+}
+
+pub(super) fn route_of_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    finding: FindingId,
+) -> Result<PlannerAnswerRoute> {
     let planner: Option<PlannerId> = conn
         .query_row(
             "SELECT id FROM planners WHERE origin='runtime' AND closed_at IS NULL
              AND answer_wait_at IS NULL AND finding_id=?1 ORDER BY id DESC LIMIT 1",
-            [finding],
+            sql_params![finding],
             |r| r.get(0),
         )
         .optional()?;
     if let Some(id) = planner {
         return Ok(PlannerAnswerRoute::Planner(Box::new(conn.query_row(
             "SELECT * FROM planners WHERE id=?1",
-            [id],
-            super::planners::planner_row,
+            sql_params![id],
+            super::planners::planner_row_port,
         )?)));
     }
     // A finding the runtime never opened a planner for is not the
     // runtime's to carry: a person's planner asked about it.
     let runtime_planned: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM planners WHERE origin='runtime' AND finding_id=?1)",
-        [finding],
+        sql_params![finding],
         |r| r.get(0),
     )?;
     if !runtime_planned {
@@ -522,10 +533,14 @@ pub(super) fn route_of(conn: &Connection, finding: FindingId) -> Result<PlannerA
          AND {finding_id}=?1
          AND {marked_at} IS ?2)",
             event_kind::FINDING_PLANNER_EXHAUSTED,
-            finding_id = json_field("payload", "$.finding_id", JsonType::Integer),
-            marked_at = json_field("payload", "$.marked_at", JsonType::Integer),
+            finding_id = conn
+                .dialect()
+                .json_field("payload", "$.finding_id", JsonType::Integer),
+            marked_at = conn
+                .dialect()
+                .json_field("payload", "$.marked_at", JsonType::Integer),
         ),
-        params![finding, current.propose_requested_at],
+        sql_params![finding, current.propose_requested_at],
         |r| r.get(0),
     )?;
     Ok(
@@ -618,7 +633,7 @@ pub(super) struct AppliedAnswer {
 /// `planner_question`'s goes to its planner. `None`: the answer is not one
 /// the runtime applies.
 pub(super) fn apply_answer(
-    conn: &Connection,
+    conn: &impl EventTx,
     ask: &Ask,
     text: &str,
     by: &str,
@@ -641,7 +656,7 @@ pub(super) fn apply_answer(
                     let id = record_from_ask(conn, ask, &reason, by, now)?;
                     conn.execute(
                         "UPDATE asks SET finding_id=?2 WHERE id=?1",
-                        params![ask.id, id],
+                        sql_params![ask.id, id],
                     )?;
                     id
                 }
@@ -651,11 +666,11 @@ pub(super) fn apply_answer(
                 conn.execute(
                     "UPDATE findings SET status=?2, status_reason=NULL, proposal_id=NULL,
                        propose_reason=?3, propose_requested_at=?4, updated_at=?4 WHERE id=?1",
-                    params![id, marked.status.as_str(), marked.propose_reason, now],
+                    sql_params![id, marked.status.as_str(), marked.propose_reason, now],
                 )?;
                 if current.status != marked.status {
                     finding_event(
-                        &port_tx(conn),
+                        conn,
                         &marked,
                         EventKind::FindingStatusChanged,
                         json!({
@@ -669,7 +684,7 @@ pub(super) fn apply_answer(
                     )?;
                 }
                 finding_event(
-                    &port_tx(conn),
+                    conn,
                     &marked,
                     EventKind::FindingUpdated,
                     json!({
@@ -692,14 +707,7 @@ pub(super) fn apply_answer(
             let reason =
                 why.unwrap_or_else(|| format!("a person answered dismiss to ask {}", ask.id));
             if read_finding(conn, id)?.status != FindingStatus::Dismissed {
-                set_status_in(
-                    &port_tx(conn),
-                    id,
-                    FindingStatus::Dismissed,
-                    &reason,
-                    by,
-                    now,
-                )?;
+                set_status_in(conn, id, FindingStatus::Dismissed, &reason, by, now)?;
             }
             Ok(Some(AppliedAnswer {
                 finding: id,
@@ -715,7 +723,7 @@ pub(super) fn apply_answer(
 /// ask's `ask_opened` as its evidence and its question as the summary (its
 /// first line) and the detail.
 fn record_from_ask(
-    conn: &Connection,
+    conn: &impl EventTx,
     ask: &Ask,
     reason: &str,
     by: &str,
@@ -732,9 +740,11 @@ fn record_from_ask(
                 "SELECT id FROM run_events WHERE kind='{}'
              AND {ask_id}=?1 ORDER BY id LIMIT 1",
                 event_kind::ASK_OPENED,
-                ask_id = json_field("payload", "$.ask_id", JsonType::Integer),
+                ask_id = conn
+                    .dialect()
+                    .json_field("payload", "$.ask_id", JsonType::Integer),
             ),
-            [ask.id],
+            sql_params![ask.id],
             |r| r.get(0),
         )
         .optional()?;
@@ -747,7 +757,7 @@ fn record_from_ask(
         .take(200)
         .collect();
     let recorded = record_in(
-        &port_tx(conn),
+        conn,
         &NewFinding {
             kind: ask.kind.as_str().replace('-', "_"),
             target,

@@ -3,6 +3,9 @@
 //! take, and the verdicts and `approve_goal` answers the supervisor
 //! applies, each in one transaction. Events go to the goal.
 use super::sql_dialect::{JsonType, json_field_spaced};
+use super::sql_exec::OptionalRow;
+use super::sql_exec::sql_params;
+use super::sql_exec::sqlite::native_error;
 use super::sql_exec::sqlite::port_tx;
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
@@ -15,7 +18,7 @@ use std::path::Path;
 use super::{
     asks::{insert_ask, read_ask, record_ask_closed},
     follow_up_membership, sessions,
-    sqlite::{SqliteQueue, close_goal_in, enum_col, goal_event, insert_task},
+    sqlite::{SqliteQueue, close_goal_in, goal_event, insert_task},
 };
 use crate::{
     application::{
@@ -31,18 +34,29 @@ use crate::{
 
 /// Each task of the goal with its status, in ID order.
 fn own_tasks(conn: &Connection, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus)>> {
-    Ok(conn
-        .prepare("SELECT id, status FROM tasks WHERE goal_id=?1 ORDER BY id")?
-        .query_map([goal], |r| Ok((r.get(0)?, enum_col(r, "status")?)))?
-        .collect::<rusqlite::Result<_>>()?)
+    own_tasks_port(&port_tx(conn), goal).map_err(native_error)
+}
+
+fn own_tasks_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    goal: GoalId,
+) -> Result<Vec<(TaskId, TaskStatus)>> {
+    Ok(conn.query_map(
+        "SELECT id, status FROM tasks WHERE goal_id=?1 ORDER BY id",
+        sql_params![goal],
+        |r| Ok((r.get(0)?, super::store_rows::enum_col(r, "status")?)),
+    )?)
 }
 
 /// [`own_tasks`], then each task outside the goal that its replaced
 /// tasks' replacements reach ([`super::replan_apply::goal_replacing`]): a
 /// replaced task waits for them wherever they belong now.
-fn goal_tasks(conn: &Connection, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus)>> {
-    let mut tasks = own_tasks(conn, goal)?;
-    tasks.extend(super::replan_apply::goal_replacing(conn, goal)?);
+fn goal_tasks(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    goal: GoalId,
+) -> Result<Vec<(TaskId, TaskStatus)>> {
+    let mut tasks = own_tasks_port(conn, goal)?;
+    tasks.extend(super::replan_apply::goal_replacing_port(conn, goal)?);
     Ok(tasks)
 }
 
@@ -56,8 +70,8 @@ fn goal_tasks(conn: &Connection, goal: GoalId) -> Result<Vec<(TaskId, TaskStatus
 fn review_input(conn: &Connection, goal: GoalId) -> Result<(String, bool)> {
     let own = own_tasks(conn, goal)?;
     let replacing = super::replan_apply::goal_replacing(conn, goal)?;
-    let follow_ups = follow_up_membership::source_follow_ups(conn, goal)?;
-    let version = follow_up_membership::acceptance_version(conn, goal)?;
+    let follow_ups = follow_up_membership::source_follow_ups(&port_tx(conn), goal)?;
+    let version = follow_up_membership::acceptance_version(&port_tx(conn), goal)?;
     let closable = goal_review::tasks_done(&own, &replacing)
         && follow_up::unsettled_follow_ups(&follow_ups).is_empty()
         && super::replan_apply::goal_unresolved(conn, goal)?.is_empty();
@@ -270,10 +284,17 @@ fn register_gaps(
 
 /// The review row that opened `ask`, and its goal.
 fn ask_review(conn: &Connection, ask: AskId) -> Result<Option<(i64, GoalId)>> {
+    ask_review_port(&port_tx(conn), ask).map_err(native_error)
+}
+
+fn ask_review_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    ask: AskId,
+) -> Result<Option<(i64, GoalId)>> {
     Ok(conn
         .query_row(
             "SELECT id, goal_id FROM goal_reviews WHERE ask_id=?1",
-            [ask],
+            sql_params![ask],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
@@ -291,18 +312,26 @@ fn applicable(
     ask: &Ask,
     text: &str,
 ) -> Result<Option<(GoalAnswer, i64, GoalId)>> {
+    applicable_port(&port_tx(conn), ask, text).map_err(native_error)
+}
+
+fn applicable_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    ask: &Ask,
+    text: &str,
+) -> Result<Option<(GoalAnswer, i64, GoalId)>> {
     if ask.kind != AskKind::ApproveGoal {
         return Ok(None);
     }
     let Some(answer) = GoalAnswer::parse(text) else {
         return Ok(None);
     };
-    let Some((review, goal)) = ask_review(conn, ask.id)? else {
+    let Some((review, goal)) = ask_review_port(conn, ask.id)? else {
         return Ok(None);
     };
     let closed: bool = conn.query_row(
         "SELECT closed_at IS NOT NULL FROM goals WHERE id=?1",
-        [goal],
+        sql_params![goal],
         |r| r.get(0),
     )?;
     if closed {
@@ -316,19 +345,27 @@ fn applicable(
             .all(|(_, status)| GoalVerdict::Achieved.allows(*status))
         || (follow_up::unsettled_follow_ups(&follow_up_membership::source_follow_ups(conn, goal)?)
             .is_empty()
-            && super::replan_apply::goal_unresolved(conn, goal)?.is_empty());
+            && super::replan_apply::goal_unresolved_port(conn, goal)?.is_empty());
     let review_has_gaps =
-        answer == GoalAnswer::Gaps(None) && !review_gaps(conn, review)?.is_empty();
+        answer == GoalAnswer::Gaps(None) && !review_gaps_port(conn, review)?.is_empty();
     let fits = answer.fits(&tasks, settled, review_has_gaps);
     Ok(fits.then_some((answer, review, goal)))
 }
 
 /// The gaps the verdict of review `id` listed.
 fn review_gaps(conn: &Connection, id: i64) -> Result<Vec<GoalGap>> {
-    let verdict: Option<String> =
-        conn.query_row("SELECT verdict FROM goal_reviews WHERE id=?1", [id], |r| {
-            r.get(0)
-        })?;
+    review_gaps_port(&port_tx(conn), id).map_err(native_error)
+}
+
+fn review_gaps_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: i64,
+) -> Result<Vec<GoalGap>> {
+    let verdict: Option<String> = conn.query_row(
+        "SELECT verdict FROM goal_reviews WHERE id=?1",
+        sql_params![id],
+        |r| r.get(0),
+    )?;
     let Some(verdict) = verdict else {
         return Ok(Vec::new());
     };
@@ -336,8 +373,12 @@ fn review_gaps(conn: &Connection, id: i64) -> Result<Vec<GoalGap>> {
     Ok(serde_json::from_value(verdict["gaps"].clone()).unwrap_or_default())
 }
 
-pub(super) fn goal_answer_applies(conn: &Connection, ask: &Ask, text: &str) -> Result<bool> {
-    Ok(ask.closed_at.is_none() && applicable(conn, ask, text)?.is_some())
+pub(super) fn goal_answer_applies(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    ask: &Ask,
+    text: &str,
+) -> Result<bool> {
+    Ok(ask.closed_at.is_none() && applicable_port(conn, ask, text)?.is_some())
 }
 
 impl GoalReviewStore for SqliteQueue {
@@ -573,7 +614,7 @@ impl GoalReviewStore for SqliteQueue {
                     .as_ref()
                     .context("an ask verdict opens an approve_goal ask")?;
                 ask.validate()?;
-                let outcome = insert_ask(&tx, ask)?;
+                let outcome = insert_ask(&port_tx(&tx), ask)?;
                 tx.execute(
                     "UPDATE goal_reviews SET ask_id=?2 WHERE id=?1",
                     params![job.id, outcome.ask.id],
@@ -673,14 +714,16 @@ impl GoalReviewStore for SqliteQueue {
             ))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        ids.into_iter().map(|id| read_ask(&self.conn, id)).collect()
+        ids.into_iter()
+            .map(|id| read_ask(&*self.conn, id))
+            .collect()
     }
 
     fn decide_goal(&mut self, ask_id: AskId) -> Result<Option<GoalDecided>> {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
         let tx = self.write_tx("decide_goal")?;
-        let ask = read_ask(&tx, ask_id)?;
+        let ask = read_ask(&port_tx(&tx), ask_id)?;
         ensure!(
             ask.kind == AskKind::ApproveGoal,
             "ask {ask_id} is not an approve_goal ask"
@@ -707,7 +750,7 @@ impl GoalReviewStore for SqliteQueue {
                 close(&tx)?;
                 // Nothing else names the ask: `ask_closed` ends its wait
                 // (task 568).
-                record_ask_closed(&tx, &ask)?;
+                record_ask_closed(&port_tx(&tx), &ask)?;
                 tx.commit()?;
                 return Ok(None);
             }
@@ -771,7 +814,7 @@ impl GoalReviewStore for SqliteQueue {
     }
 
     fn correction_answers(&self) -> Result<Vec<Ask>> {
-        follow_up_membership::correction_answers(&self.conn)
+        follow_up_membership::correction_answers(&*self.conn)
     }
 
     fn decide_correction(&mut self, ask: AskId) -> Result<Option<Value>> {
@@ -841,7 +884,7 @@ impl GoalReviewStore for SqliteQueue {
         let mut found = Vec::new();
         for goal in goals {
             let follow_ups = follow_up_membership::waiting_follow_ups(
-                &self.conn,
+                &*self.conn,
                 goal,
                 self.generators.clock.now(),
             )?;

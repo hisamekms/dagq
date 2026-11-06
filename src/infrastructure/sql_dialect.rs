@@ -212,6 +212,7 @@ pub(crate) fn time_value(value: &str, form: TimeForm) -> String {
 }
 
 /// [`SqlDialect::time_value_spaced`] in the SQLite kind.
+#[cfg(test)]
 pub(crate) fn time_value_spaced(value: &str, form: TimeForm) -> String {
     SqlDialect::Sqlite.time_value_spaced(value, form)
 }

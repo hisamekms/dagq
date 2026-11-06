@@ -16,6 +16,7 @@
 //! planner on a new request, or held for a person. A second apply of an
 //! applied operation writes nothing.
 
+use super::sql_exec::sqlite::{port_tx, with_row};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
@@ -502,7 +503,7 @@ fn problems_now(
     let plan = plan_of(conn, op)?;
     let proposal = plan
         .as_ref()
-        .map(|plan| super::proposals::read(conn, plan.proposal_id))
+        .map(|plan| super::proposals::read(&port_tx(conn), plan.proposal_id))
         .transpose()?;
     let (run, run_leased): (RunStatus, bool) = conn.query_row(
         "SELECT status, EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1) AS leased
@@ -623,10 +624,10 @@ fn write_replacement(
     );
     let asks: Vec<crate::domain::Ask> = conn
         .prepare("SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id")?
-        .query_map([&op.run_id], super::asks::ask_row)?
+        .query_map([&op.run_id], |row| with_row(row, super::asks::ask_row))?
         .collect::<rusqlite::Result<_>>()?;
     for ask in &asks {
-        super::asks::discard_by_runtime(conn, ask, "replaced", &note, now)?;
+        super::asks::discard_by_runtime(&port_tx(conn), ask, "replaced", &note, now)?;
     }
     event(
         conn,

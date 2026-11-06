@@ -1,14 +1,16 @@
 //! Asks (ADR-0022): questions for a person kept as queue rows. Registering
 //! and answering one also writes `ask_opened` / `ask_answered` to
 //! `run_events`, so the change rides the cursor `status` and `watch` hand out.
+use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlWrite, sql_params};
+use super::store_rows::{enum_col, json_col};
+use super::store_writes::EventTx;
 use crate::domain::event_kind::EventKind;
-use crate::infrastructure::sql_exec::OptionalRow as _;
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+
 use serde_json::json;
 
 use super::adapters::process_alive;
-use super::sql_dialect::{JsonType, json_field, json_field_at};
+use super::sql_dialect::JsonType;
 use super::sqlite::SqliteQueue;
 use crate::domain::Ask;
 use crate::domain::write_rules::check_run_has_task;
@@ -46,23 +48,26 @@ impl SqliteQueue {
         let tx = self.write_tx("ask_hold")?;
         let task_id: Option<TaskId> = match &hold.run_id {
             Some(run_id) => Some(
-                tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [run_id], |r| {
-                    r.get(0)
-                })
+                SqlRead::query_row(
+                    &tx,
+                    "SELECT task_id FROM task_runs WHERE id=?1",
+                    sql_params![run_id],
+                    |r| r.get(0),
+                )
                 .optional()?
                 .with_context(|| format!("run {run_id} does not exist"))?,
             ),
             None => None,
         };
-        let open = tx
-            .query_row(
-                "SELECT * FROM asks WHERE kind='queue_hold' AND reason_category=?1
+        let open = SqlRead::query_row(
+            &tx,
+            "SELECT * FROM asks WHERE kind='queue_hold' AND reason_category=?1
                  AND ifnull(subject,'')=ifnull(?2,'')
                  AND answered_at IS NULL AND closed_at IS NULL",
-                params![hold.reason_category.as_str(), hold.subject],
-                ask_row,
-            )
-            .optional()?;
+            sql_params![hold.reason_category.as_str(), hold.subject],
+            ask_row,
+        )
+        .optional()?;
         let entry = hold.entry();
         let outcome = match (open, entry) {
             (Some(ask), None) => HoldOutcome {
@@ -79,9 +84,10 @@ impl SqliteQueue {
                 let mut affected = ask.affected.clone();
                 affected.push(entry.clone());
                 let base = NewHold::base_question(&ask.question);
-                tx.execute(
+                SqlWrite::execute(
+                    &tx,
                     "UPDATE asks SET affected=?2, question=?3 WHERE id=?1",
-                    params![
+                    sql_params![
                         ask.id,
                         serde_json::to_string(&affected)?,
                         NewHold::question_for(base, &affected)
@@ -110,10 +116,10 @@ impl SqliteQueue {
                 let affected: Vec<String> = entry.into_iter().collect();
                 let kind = AskKind::QueueHold;
                 check_ask_kind(&kind, None, None, hold.reason_category)?;
-                let id = AskId::new(tx.insert_id(
+                let id = AskId::new(SqlWrite::insert_id(&tx,
                     "INSERT INTO asks(kind,question,options,asked_by,reason_category,subject,affected)
                      VALUES (?7,?1,?2,?3,?4,?5,?6)",
-                    params![
+                    sql_params![
                         NewHold::question_for(&hold.question, &affected),
                         serde_json::to_string(&hold.options)?,
                         hold.asked_by,
@@ -153,28 +159,28 @@ impl SqliteQueue {
     /// disk's `cost` ask (task 377) lists the runs whose landing waited,
     /// and holds no session: it is not one.
     pub fn hold_of(&self, run_id: &RunId) -> Result<Option<Ask>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT * FROM asks WHERE kind='queue_hold'
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            "SELECT * FROM asks WHERE kind='queue_hold'
                  AND ifnull(subject,'') <> 'disk'
                  AND answered_at IS NULL AND closed_at IS NULL
                  AND EXISTS (SELECT 1 FROM json_each(asks.affected) WHERE value=?1)
                  ORDER BY id LIMIT 1",
-                [run_id],
-                ask_row,
-            )
-            .optional()?)
+            sql_params![run_id],
+            ask_row,
+        )
+        .optional()?)
     }
 
     /// Whether a `queue_hold` ask (not the disk's) that holds the run is
     /// unclosed: open, or answered and not yet applied.
     pub fn hold_unclosed(&self, run_id: &RunId) -> Result<bool> {
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             "SELECT EXISTS (SELECT 1 FROM asks WHERE kind='queue_hold'
              AND ifnull(subject,'') <> 'disk' AND closed_at IS NULL
              AND EXISTS (SELECT 1 FROM json_each(asks.affected) WHERE value=?1))",
-            [run_id],
+            sql_params![run_id],
             |row| row.get(0),
         )?)
     }
@@ -230,7 +236,11 @@ impl SqliteQueue {
                 payload,
             )?;
             if ask.kind == AskKind::Blocked {
-                tx.execute("UPDATE asks SET closed_at=?2 WHERE id=?1", params![id, now])?;
+                SqlWrite::execute(
+                    &tx,
+                    "UPDATE asks SET closed_at=?2 WHERE id=?1",
+                    sql_params![id, now],
+                )?;
                 // Applied: `stats` reads `ask_closed` as the answer applied.
                 ask_event(
                     &tx,
@@ -252,19 +262,21 @@ impl SqliteQueue {
             // of a run that stopped running is the inbox's. A stale lease
             // (its supervisor died) delivers nothing, as `status` reads it
             // (task 584).
-            let status: String =
-                tx.query_row("SELECT status FROM task_runs WHERE id=?1", [run_id], |r| {
-                    r.get(0)
-                })?;
+            let status: String = SqlRead::query_row(
+                &tx,
+                "SELECT status FROM task_runs WHERE id=?1",
+                sql_params![run_id],
+                |r| r.get(0),
+            )?;
             let status: RunStatus = status.parse()?;
-            let leased = super::runtime_store::run_lease_of(&tx, run_id)?
+            let leased = super::runtime_store::run_lease_of_port(&tx, run_id)?
                 .is_some_and(|lease| !super::runtime_store::lease_is_stale(&lease, now));
             payload["runtime_delivers"] = json!(
                 status == RunStatus::Running
                     || (leased
                         && session_takes_answers(
                             status,
-                            &super::runtime_store::run_events_of(&tx, run_id)?,
+                            &super::runtime_store::run_events_of_port(&tx, run_id)?,
                             ask.created_at,
                         ))
             );
@@ -278,10 +290,12 @@ impl SqliteQueue {
             // each option also as `<option>: <reason>` (ADR-0027, task
             // 1424, ADR-t2521-1); any other answer is the inbox's to read.
             // One for a run elsewhere now applies once the run waits again.
-            let status: String =
-                tx.query_row("SELECT status FROM task_runs WHERE id=?1", [run_id], |r| {
-                    r.get(0)
-                })?;
+            let status: String = SqlRead::query_row(
+                &tx,
+                "SELECT status FROM task_runs WHERE id=?1",
+                sql_params![run_id],
+                |r| r.get(0),
+            )?;
             payload["runtime_delivers"] = json!(
                 status == RunStatus::AwaitingIntegration.as_str()
                     && LandingAnswer::accepted(text, &ask.options).is_some()
@@ -296,10 +310,12 @@ impl SqliteQueue {
             // recovery job's own) back to the recovery job (ADR-0047
             // decision 40); a free answer, or one for a run that moved on,
             // is a person's to read.
-            let status: String =
-                tx.query_row("SELECT status FROM task_runs WHERE id=?1", [run_id], |r| {
-                    r.get(0)
-                })?;
+            let status: String = SqlRead::query_row(
+                &tx,
+                "SELECT status FROM task_runs WHERE id=?1",
+                sql_params![run_id],
+                |r| r.get(0),
+            )?;
             payload["runtime_delivers"] = json!(
                 (status == RunStatus::Failed.as_str() || status == RunStatus::Interrupted.as_str())
                     && crate::domain::recovery::chosen_option(&ask.options, text).is_some()
@@ -323,7 +339,7 @@ impl SqliteQueue {
                 answer: Some(text.to_owned()),
                 ..ask.clone()
             };
-            let delivers = super::draft_planners::route_of(&tx, &answered)?
+            let delivers = super::draft_planners::route_of_port(&tx, &answered)?
                 != crate::application::PlannerAnswerRoute::Person;
             payload["runtime_delivers"] = json!(delivers);
             // A draft nobody works on is the inbox's to plan with the answer.
@@ -335,8 +351,9 @@ impl SqliteQueue {
             // The supervisor readies, sends back or cancels the proposal as
             // answered (ADR-0041 decision 11); any other answer, or one for
             // a proposal that moved on, is a person's to read.
-            payload["runtime_delivers"] =
-                json!(super::plan_reviews::plan_answer_applies(&tx, &ask, text)?);
+            payload["runtime_delivers"] = json!(super::plan_reviews::plan_answer_applies_port(
+                &tx, &ask, text
+            )?);
         }
         if ask.kind == AskKind::ApproveGoal {
             // The supervisor closes the goal, registers its gaps or leaves
@@ -370,27 +387,29 @@ impl SqliteQueue {
             let now = self.generators.clock.now();
             // The failure of a release's job is a release supervisor's to
             // apply, a build's one with the automatic update.
-            let source: Option<String> = tx
-                .query_row(
-                    &format!(
-                        "SELECT {} FROM run_events
+            let source: Option<String> = SqlRead::query_row(
+                &tx,
+                &format!(
+                    "SELECT {} FROM run_events
                      WHERE kind=?1 AND {}=?2
                      ORDER BY id DESC LIMIT 1",
-                        json_field("payload", "$.source", JsonType::Text),
-                        json_field("payload", "$.ask_id", JsonType::Integer),
-                    ),
-                    params![crate::domain::UPDATE_FAILED, id],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .flatten();
+                    tx.dialect()
+                        .json_field("payload", "$.source", JsonType::Text),
+                    tx.dialect()
+                        .json_field("payload", "$.ask_id", JsonType::Integer),
+                ),
+                sql_params![crate::domain::UPDATE_FAILED, id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
             let release = source.as_deref() == Some(crate::application::update::RELEASE_SOURCE);
             // A person's install's failure: no supervisor applies its
             // answer (ADR-0073 decision 14).
             let install = source.as_deref() == Some(crate::application::update::INSTALL_SOURCE);
             let applied = !install
                 && UPDATE_FAILED_OPTIONS.contains(&text.trim())
-                && super::runtime_store::supervisors_of(&tx)?
+                && super::runtime_store::supervisors_of_port(&tx)?
                     .iter()
                     .any(|registration| {
                         if release {
@@ -407,7 +426,7 @@ impl SqliteQueue {
             // person reads it and runs `install --release`.
             let now = self.generators.clock.now();
             let applied = APPROVE_RELEASE_OPTIONS.contains(&text.trim())
-                && super::runtime_store::supervisors_of(&tx)?
+                && super::runtime_store::supervisors_of_port(&tx)?
                     .iter()
                     .any(|registration| {
                         registration.applies_releases(now, process_alive, releases)
@@ -449,9 +468,10 @@ impl SqliteQueue {
             ask.answered_at.is_some(),
             "ask {id} is not answered yet; answer it (for example that it is withdrawn) before closing it"
         );
-        tx.execute(
+        SqlWrite::execute(
+            &tx,
             "UPDATE asks SET closed_at=?2 WHERE id=?1",
-            params![id, self.generators.clock.now()],
+            sql_params![id, self.generators.clock.now()],
         )?;
         ask_event(
             &tx,
@@ -467,14 +487,13 @@ impl SqliteQueue {
 
     /// Asks matching `query`, oldest first. A pure read.
     pub fn asks(&self, query: AskQuery) -> Result<Vec<Ask>> {
-        let asks: Vec<Ask> = self
-            .conn
-            .prepare(
-                "SELECT * FROM asks WHERE (?1 OR closed_at IS NULL)
+        let asks: Vec<Ask> = SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM asks WHERE (?1 OR closed_at IS NULL)
                  AND (NOT ?2 OR answered_at IS NULL) ORDER BY id",
-            )?
-            .query_map(params![query.all, query.open], ask_row)?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![query.all, query.open],
+            ask_row,
+        )?;
         Ok(asks
             .into_iter()
             .filter(|ask| query.role.is_none() || ask.waits_for() == query.role)
@@ -509,34 +528,40 @@ impl SqliteQueue {
             .get(crate::domain::UPDATE_ASK_RECORD)
             .and_then(serde_json::Value::as_str)
         {
-            let opened: Option<i64> = tx
-                .query_row(
-                    &format!(
-                        "SELECT {} FROM run_events WHERE kind=?1
+            let opened: Option<i64> = SqlRead::query_row(
+                &tx,
+                &format!(
+                    "SELECT {} FROM run_events WHERE kind=?1
                      AND {}=?2 ORDER BY id LIMIT 1",
-                        json_field("payload", "$.ask_id", JsonType::Integer),
-                        json_field_at("payload", "?3", JsonType::Text),
-                    ),
-                    params![
-                        EventKind::AskOpened.as_str(),
-                        record,
-                        format!("$.{}", crate::domain::UPDATE_ASK_RECORD)
-                    ],
-                    |r| r.get(0),
-                )
-                .optional()?;
+                    tx.dialect()
+                        .json_field("payload", "$.ask_id", JsonType::Integer),
+                    tx.dialect().json_field_at("payload", "?3", JsonType::Text),
+                ),
+                sql_params![
+                    EventKind::AskOpened.as_str(),
+                    record,
+                    format!("$.{}", crate::domain::UPDATE_ASK_RECORD)
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
             if let Some(id) = opened {
-                return Ok(tx.query_row("SELECT * FROM asks WHERE id=?1", [id], ask_row)?);
+                return Ok(SqlRead::query_row(
+                    &tx,
+                    "SELECT * FROM asks WHERE id=?1",
+                    sql_params![id],
+                    ask_row,
+                )?);
             }
         }
         let now = self.generators.clock.now();
-        let open: Vec<Ask> = tx
-            .prepare(
-                "SELECT * FROM asks WHERE kind=?1 AND task_id IS NULL
+        let open: Vec<Ask> = SqlRead::query_map(
+            &tx,
+            "SELECT * FROM asks WHERE kind=?1 AND task_id IS NULL
                  AND answered_at IS NULL AND closed_at IS NULL ORDER BY id",
-            )?
-            .query_map([kind.as_str()], ask_row)?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![kind.as_str()],
+            ask_row,
+        )?;
         // A person's install's failure and a job's are about different
         // things: neither supersedes the other (ADR-0073 decision 14).
         let source_of = |details: &serde_json::Value| {
@@ -545,17 +570,18 @@ impl SqliteQueue {
         };
         let by_install = source_of(&details);
         for ask in open {
-            let opened: Option<String> = tx
-                .query_row(
-                    &format!(
-                        "SELECT payload FROM run_events WHERE kind=?1
+            let opened: Option<String> = SqlRead::query_row(
+                &tx,
+                &format!(
+                    "SELECT payload FROM run_events WHERE kind=?1
                      AND {}=?2 ORDER BY id DESC LIMIT 1",
-                        json_field("payload", "$.ask_id", JsonType::Integer),
-                    ),
-                    params![EventKind::AskOpened.as_str(), ask.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
+                    tx.dialect()
+                        .json_field("payload", "$.ask_id", JsonType::Integer),
+                ),
+                sql_params![EventKind::AskOpened.as_str(), ask.id],
+                |r| r.get(0),
+            )
+            .optional()?;
             let opened: serde_json::Value = match opened {
                 Some(payload) => serde_json::from_str(&payload)?,
                 None => serde_json::Value::Null,
@@ -572,16 +598,18 @@ impl SqliteQueue {
                 now,
                 &mut payload,
             )?;
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "UPDATE asks SET closed_at=?2 WHERE id=?1",
-                params![ask.id, now],
+                sql_params![ask.id, now],
             )?;
             ask_event(&tx, None, None, EventKind::AskAnswered, payload)?;
         }
-        let id = AskId::new(tx.insert_id(
+        let id = AskId::new(SqlWrite::insert_id(
+            &tx,
             "INSERT INTO asks(kind,question,options,asked_by,reason_category,subject)
              VALUES (?5,?1,?2,?3,?4,?6)",
-            params![
+            sql_params![
                 question,
                 serde_json::to_string(options)?,
                 asked_by,
@@ -636,7 +664,11 @@ impl SqliteQueue {
             "installed_commit": installed,
         });
         write_answer(&tx, &ask, answer, Answerer::RUNTIME, now, &mut payload)?;
-        tx.execute("UPDATE asks SET closed_at=?2 WHERE id=?1", params![id, now])?;
+        SqlWrite::execute(
+            &tx,
+            "UPDATE asks SET closed_at=?2 WHERE id=?1",
+            sql_params![id, now],
+        )?;
         ask_event(&tx, None, None, EventKind::AskAnswered, payload)?;
         let closed = read_ask(&tx, id)?;
         tx.commit()?;
@@ -646,18 +678,17 @@ impl SqliteQueue {
     /// The payload of the `ask_opened` of the ask `id`; null when there is
     /// none.
     pub fn ask_opened_payload(&self, id: AskId) -> Result<serde_json::Value> {
-        let payload: Option<String> = self
-            .conn
-            .query_row(
-                &format!(
-                    "SELECT payload FROM run_events WHERE kind=?1
+        let payload: Option<String> = SqlRead::query_row(
+            &*self.conn,
+            &format!(
+                "SELECT payload FROM run_events WHERE kind=?1
                  AND {}=?2 ORDER BY id DESC LIMIT 1",
-                    json_field("payload", "$.ask_id", JsonType::Integer),
-                ),
-                params![EventKind::AskOpened.as_str(), id],
-                |r| r.get(0),
-            )
-            .optional()?;
+                SqlRead::dialect(&*self.conn).json_field("payload", "$.ask_id", JsonType::Integer),
+            ),
+            sql_params![EventKind::AskOpened.as_str(), id],
+            |r| r.get(0),
+        )
+        .optional()?;
         Ok(match payload {
             Some(payload) => serde_json::from_str(&payload)?,
             None => serde_json::Value::Null,
@@ -668,28 +699,26 @@ impl SqliteQueue {
     /// nobody closed yet, oldest first: answers the supervisor still has to
     /// apply.
     pub fn update_answers(&self, kind: &AskKind) -> Result<Vec<Ask>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT * FROM asks WHERE kind=?1 AND task_id IS NULL
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM asks WHERE kind=?1 AND task_id IS NULL
                  AND answered_at IS NOT NULL AND closed_at IS NULL ORDER BY id",
-            )?
-            .query_map([kind.as_str()], ask_row)?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![kind.as_str()],
+            ask_row,
+        )?)
     }
 
     /// The answered `worker_question` asks of a run that nobody closed yet,
     /// oldest first: answers the supervisor still has to type into the
     /// worker's terminal.
     pub fn undelivered_answers(&self, run_id: &RunId) -> Result<Vec<Ask>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT * FROM asks WHERE run_id=?1 AND kind='worker_question'
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM asks WHERE run_id=?1 AND kind='worker_question'
                  AND answered_at IS NOT NULL AND closed_at IS NULL ORDER BY id",
-            )?
-            .query_map([run_id], ask_row)?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![run_id],
+            ask_row,
+        )?)
     }
 
     /// Whether the run has a `worker_question` nobody closed, answered or
@@ -705,10 +734,11 @@ impl SqliteQueue {
         run_id: &RunId,
         created_from: i64,
     ) -> Result<bool> {
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             "SELECT EXISTS(SELECT 1 FROM asks WHERE run_id=?1 AND kind='worker_question'
              AND closed_at IS NULL AND created_at>=?2)",
-            params![run_id, created_from],
+            sql_params![run_id, created_from],
             |r| r.get(0),
         )?)
     }
@@ -716,19 +746,21 @@ impl SqliteQueue {
     /// When the run's `worker_question` closed last (unix seconds): its
     /// answer was delivered, by the supervisor or by hand.
     pub fn last_worker_question_closed(&self, run_id: &RunId) -> Result<Option<i64>> {
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             "SELECT MAX(closed_at) FROM asks WHERE run_id=?1 AND kind='worker_question'",
-            [run_id],
+            sql_params![run_id],
             |r| r.get(0),
         )?)
     }
 
     /// Whether the run has an ask of `kind` nobody closed, answered or not.
     pub fn has_unclosed_ask(&self, run_id: &RunId, kind: AskKind) -> Result<bool> {
-        Ok(self.conn.query_row(
+        Ok(SqlRead::query_row(
+            &*self.conn,
             "SELECT EXISTS(SELECT 1 FROM asks WHERE run_id=?1 AND kind=?2
              AND closed_at IS NULL)",
-            params![run_id, kind.as_str()],
+            sql_params![run_id, kind.as_str()],
             |r| r.get(0),
         )?)
     }
@@ -736,14 +768,13 @@ impl SqliteQueue {
     /// The answered `approve_landing` asks about a run that nobody closed,
     /// oldest first: the answers the supervisor applies (ADR-0027).
     pub fn landing_answers(&self) -> Result<Vec<Ask>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT * FROM asks WHERE kind='approve_landing' AND run_id IS NOT NULL
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM asks WHERE kind='approve_landing' AND run_id IS NOT NULL
                  AND answered_at IS NOT NULL AND closed_at IS NULL ORDER BY id",
-            )?
-            .query_map([], ask_row)?
-            .collect::<rusqlite::Result<_>>()?)
+            sql_params![],
+            ask_row,
+        )?)
     }
 
     /// Close an answered `worker_question` whose answer was typed into the
@@ -777,15 +808,15 @@ impl SqliteQueue {
     /// is open, and an answered one the supervisor has not applied yet
     /// comes first (ADR-0043 decision 1).
     pub fn unclosed_stalled_ask(&self, run_id: &RunId) -> Result<Option<Ask>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT * FROM asks WHERE run_id=?1 AND kind='stalled' AND closed_at IS NULL
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM asks WHERE run_id=?1 AND kind='stalled' AND closed_at IS NULL
                  ORDER BY id LIMIT 1",
-            )?
-            .query_map([run_id], ask_row)?
-            .next()
-            .transpose()?)
+            sql_params![run_id],
+            ask_row,
+        )?
+        .into_iter()
+        .next())
     }
 
     /// Close every `stalled` ask of the run nobody closed, the way
@@ -802,7 +833,7 @@ impl SqliteQueue {
     pub fn end_stalled_detections(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>> {
         let tx = self.write_tx("end_stalled_detections")?;
         let now = self.generators.clock.now();
-        let closed = super::runtime_store::end_stalled_detections(&tx, run_id, answer, now)?;
+        let closed = super::runtime_store::end_stalled_detections_port(&tx, run_id, answer, now)?;
         tx.commit()?;
         Ok(closed)
     }
@@ -823,17 +854,15 @@ impl SqliteQueue {
     /// asks closed, oldest first.
     pub fn close_ended_landing_asks(&mut self, task: Option<TaskId>) -> Result<Vec<Ask>> {
         let tx = self.write_tx("close_ended_landing_asks")?;
-        let unclosed: Vec<(AskId, String, String)> = tx
-            .prepare(
-                "SELECT a.id, r.status, t.status FROM asks a
+        let unclosed: Vec<(AskId, String, String)> = SqlRead::query_map(
+            &tx,
+            "SELECT a.id, r.status, t.status FROM asks a
                  JOIN task_runs r ON r.id=a.run_id JOIN tasks t ON t.id=r.task_id
                  WHERE a.kind=?1 AND a.closed_at IS NULL AND (?2 IS NULL OR r.task_id=?2)
                  ORDER BY a.id",
-            )?
-            .query_map(params![AskKind::ApproveLanding.as_str(), task], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![AskKind::ApproveLanding.as_str(), task],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
         let now = self.generators.clock.now();
         let mut closed = Vec::new();
         for (id, run, task) in unclosed {
@@ -855,10 +884,12 @@ impl SqliteQueue {
     /// Asks naming no run are left to their own closes.
     pub fn close_run_asks(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>> {
         let tx = self.write_tx("close_run_asks")?;
-        let unclosed: Vec<Ask> = tx
-            .prepare("SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id")?
-            .query_map([run_id], ask_row)?
-            .collect::<rusqlite::Result<_>>()?;
+        let unclosed: Vec<Ask> = SqlRead::query_map(
+            &tx,
+            "SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id",
+            sql_params![run_id],
+            ask_row,
+        )?;
         let now = self.generators.clock.now();
         let mut closed = Vec::with_capacity(unclosed.len());
         for ask in unclosed {
@@ -891,19 +922,22 @@ impl SqliteQueue {
     /// as it was is not written. Returns the asks noted, oldest first.
     pub fn note_on_asks(&mut self, run_id: &RunId, note: &str, why: &str) -> Result<Vec<Ask>> {
         let tx = self.write_tx("note_on_asks")?;
-        let unclosed: Vec<Ask> = tx
-            .prepare("SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id")?
-            .query_map([run_id], ask_row)?
-            .collect::<rusqlite::Result<_>>()?;
+        let unclosed: Vec<Ask> = SqlRead::query_map(
+            &tx,
+            "SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id",
+            sql_params![run_id],
+            ask_row,
+        )?;
         let mut noted = Vec::with_capacity(unclosed.len());
         for ask in unclosed {
             let question = crate::domain::recheck::noted_question(&ask.question, note);
             if question == ask.question {
                 continue;
             }
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "UPDATE asks SET question=?2 WHERE id=?1",
-                params![ask.id, question],
+                sql_params![ask.id, question],
             )?;
             ask_event(
                 &tx,
@@ -929,13 +963,13 @@ impl SqliteQueue {
         answer: &str,
     ) -> Result<Vec<Ask>> {
         let tx = self.write_tx("close_hold_asks")?;
-        let unclosed: Vec<Ask> = tx
-            .prepare(
-                "SELECT * FROM asks WHERE kind='queue_hold' AND reason_category=?1
+        let unclosed: Vec<Ask> = SqlRead::query_map(
+            &tx,
+            "SELECT * FROM asks WHERE kind='queue_hold' AND reason_category=?1
                  AND ifnull(subject,'')=ifnull(?2,'') AND closed_at IS NULL ORDER BY id",
-            )?
-            .query_map(params![reason.as_str(), subject], ask_row)?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![reason.as_str(), subject],
+            ask_row,
+        )?;
         let now = self.generators.clock.now();
         let mut closed = Vec::with_capacity(unclosed.len());
         for ask in unclosed {
@@ -953,9 +987,10 @@ impl SqliteQueue {
                     json!({"ask_id": ask.id, "kind": ask.kind}),
                 )?;
             }
-            tx.execute(
+            SqlWrite::execute(
+                &tx,
                 "UPDATE asks SET closed_at=?2 WHERE id=?1",
-                params![ask.id, now],
+                sql_params![ask.id, now],
             )?;
             closed.push(read_ask(&tx, ask.id)?);
         }
@@ -990,7 +1025,7 @@ impl SqliteQueue {
     }
 
     pub fn read_ask(&self, id: AskId) -> Result<Ask> {
-        read_ask(&self.conn, id)
+        read_ask(&*self.conn, id)
     }
 }
 
@@ -998,13 +1033,13 @@ impl SqliteQueue {
 /// `decide` ask of a run that ended that is only a runtime operation's name
 /// and none of its options ([`crate::domain::recovery::bare_action_answer`]):
 /// written, it would close the ask as a free answer nobody applies.
-fn refuse_bare_action(tx: &Connection, ask: &Ask, text: &str) -> Result<()> {
+fn refuse_bare_action(tx: &impl SqlRead, ask: &Ask, text: &str) -> Result<()> {
     let Some(run_id) = ask.run_id.as_ref() else {
         return Ok(());
     };
     let (status, task): (String, i64) = tx.query_row(
         "SELECT status, task_id FROM task_runs WHERE id=?1",
-        [run_id],
+        sql_params![run_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let bare = crate::domain::recovery::bare_action_answer(
@@ -1026,59 +1061,104 @@ fn refuse_bare_action(tx: &Connection, ask: &Ask, text: &str) -> Result<()> {
 /// (`ask_answered` with `runtime_closed: true`), an answered one
 /// `ask_closed`; each with `reason`, `note` and `discarded: true`.
 pub(super) fn discard_by_runtime(
-    tx: &Connection,
+    tx: &impl EventTx,
     ask: &Ask,
     reason: &str,
     note: &str,
     now: i64,
 ) -> Result<()> {
-    discard_by_runtime_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(tx),
-        ask,
-        reason,
-        note,
-        now,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+    let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "reason": reason,
+                             "note": note, "discarded": true});
+    let kind = if ask.is_open() {
+        payload["runtime_closed"] = json!(true);
+        write_answer(tx, ask, note, Answerer::RUNTIME, now, &mut payload)?;
+        EventKind::AskAnswered
+    } else {
+        EventKind::AskClosed
+    };
+    ask_event(tx, ask.task_id, ask.run_id.as_ref(), kind, payload)?;
+    tx.execute(
+        "UPDATE asks SET closed_at=?2 WHERE id=?1",
+        sql_params![ask.id, now],
+    )?;
+    Ok(())
 }
 
 /// Close the unclosed `ask` in the caller's write transaction at `now`: an
 /// open one gets `answer` from the runtime (`ask_answered` with
 /// `runtime_closed: true`), an answered one `ask_closed`.
-pub(super) fn close_by_runtime(tx: &Connection, ask: &Ask, answer: &str, now: i64) -> Result<()> {
-    close_by_runtime_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(tx),
-        ask,
-        answer,
-        now,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+pub(super) fn close_by_runtime(tx: &impl EventTx, ask: &Ask, answer: &str, now: i64) -> Result<()> {
+    if ask.is_open() {
+        let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
+        write_answer(tx, ask, answer, Answerer::RUNTIME, now, &mut payload)?;
+        ask_event(
+            tx,
+            ask.task_id,
+            ask.run_id.as_ref(),
+            EventKind::AskAnswered,
+            payload,
+        )?;
+    } else {
+        // An answer given before is applied by this close.
+        ask_event(
+            tx,
+            ask.task_id,
+            ask.run_id.as_ref(),
+            EventKind::AskClosed,
+            json!({"ask_id": ask.id, "kind": ask.kind}),
+        )?;
+    }
+    tx.execute(
+        "UPDATE asks SET closed_at=?2 WHERE id=?1",
+        sql_params![ask.id, now],
+    )?;
+    Ok(())
 }
 
 /// [`SqliteQueue::close_asks_of`] inside the caller's write transaction,
 /// at `now`: an open ask gets `answer` from the runtime (`ask_answered`
 /// with `runtime_closed: true`), an answered one `ask_closed`.
 pub(super) fn close_asks_in(
-    tx: &Connection,
+    tx: &impl EventTx,
     run_id: &RunId,
     task_id: Option<TaskId>,
     kind: AskKind,
     answer: &str,
     now: i64,
 ) -> Result<Vec<Ask>> {
-    let unclosed: Vec<Ask> = tx
-        .prepare(
-            "SELECT * FROM asks WHERE (run_id=?1 OR (run_id IS NULL AND task_id=?3))
+    let unclosed: Vec<Ask> = tx.query_map(
+        "SELECT * FROM asks WHERE (run_id=?1 OR (run_id IS NULL AND task_id=?3))
              AND kind=?2 AND closed_at IS NULL ORDER BY id",
-        )?
-        .query_map(params![run_id, kind.as_str(), task_id], ask_row)?
-        .collect::<rusqlite::Result<_>>()?;
+        sql_params![run_id, kind.as_str(), task_id],
+        ask_row,
+    )?;
     let mut closed = Vec::with_capacity(unclosed.len());
     for ask in unclosed {
         close_by_runtime(tx, &ask, answer, now)?;
         closed.push(read_ask(tx, ask.id)?);
     }
     Ok(closed)
+}
+
+/// Close the unclosed asks about planning `request` (`asks.request_id`, its
+/// planners' `planner_question`s) inside the caller's write transaction at
+/// `now`, as [`close_by_runtime`] closes one: an open ask gets `answer`
+/// from the runtime, an answered one `ask_closed`. The asks closed.
+pub(super) fn close_request_asks_in(
+    tx: &impl EventTx,
+    request: crate::domain::RequestId,
+    answer: &str,
+    now: i64,
+) -> Result<Vec<AskId>> {
+    let unclosed: Vec<Ask> = tx.query_map(
+        "SELECT * FROM asks WHERE request_id=?1 AND closed_at IS NULL ORDER BY id",
+        sql_params![request],
+        ask_row,
+    )?;
+    for ask in &unclosed {
+        close_by_runtime(tx, ask, answer, now)?;
+    }
+    Ok(unclosed.into_iter().map(|ask| ask.id).collect())
 }
 
 /// The `subject` of a `planner_question` about planning request `id`:
@@ -1093,21 +1173,24 @@ pub(super) fn request_ask_subject(id: crate::domain::RequestId) -> String {
 
 /// Register `ask` inside the caller's write transaction, or return the open
 /// one of the same task, run and kind unchanged (see [`SqliteQueue::ask`]).
-pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
+pub(super) fn insert_ask(tx: &impl EventTx, ask: &NewAsk) -> Result<AskOutcome> {
     let task_id = match (&ask.run_id, ask.task_id) {
         (Some(run_id), _) => tx
-            .query_row("SELECT task_id FROM task_runs WHERE id=?1", [run_id], |r| {
-                r.get::<_, TaskId>(0)
-            })
+            .query_row(
+                "SELECT task_id FROM task_runs WHERE id=?1",
+                sql_params![run_id],
+                |r| r.get::<_, TaskId>(0),
+            )
             .optional()?
             .with_context(|| format!("run {run_id} does not exist"))
             .map(Some)?,
         (None, Some(task_id)) => {
             ensure!(
-                tx.query_row("SELECT count(*) FROM tasks WHERE id=?1", [task_id], |r| r
-                    .get::<_, i64>(
-                    0
-                ))? == 1,
+                tx.query_row(
+                    "SELECT count(*) FROM tasks WHERE id=?1",
+                    sql_params![task_id],
+                    |r| r.get::<_, i64>(0)
+                )? == 1,
                 "task {task_id} does not exist"
             );
             Some(task_id)
@@ -1133,7 +1216,7 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
                  AND kind=?3 AND ifnull(finding_id,0)=ifnull(?4,0)
                  AND ifnull(request_id,0)=ifnull(?5,0)
                  AND answered_at IS NULL AND closed_at IS NULL",
-                params![task_id, ask.run_id, ask.kind.as_str(), ask.finding_id, ask.request_id],
+                sql_params![task_id, ask.run_id, ask.kind.as_str(), ask.finding_id, ask.request_id],
                 ask_row,
             )
             .optional()?
@@ -1158,10 +1241,10 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
     // one open ask per subject, so questions about two requests, both
     // about no task, run or finding, do not collide (ADR-t1394-1).
     let request_subject = ask.request_id.map(request_ask_subject);
-    let id = AskId::new(super::sqlite::insert_id(tx,
+    let id = AskId::new(tx.insert_id(
         "INSERT INTO asks(kind,task_id,run_id,question,options,asked_by,reason_category,finding_id,topics,recommendation,confidence,request_id,subject)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-        params![
+        sql_params![
             ask.kind.as_str(),
             task_id,
             ask.run_id,
@@ -1214,164 +1297,7 @@ pub(super) fn insert_ask(tx: &Connection, ask: &NewAsk) -> Result<AskOutcome> {
 /// `<option>: <reason>` to an `approve_plan` or `approve_landing` adds the
 /// option it names as `reasoned_option` (task 1389).
 pub(super) fn write_answer(
-    conn: &Connection,
-    ask: &Ask,
-    text: &str,
-    answerer: Answerer,
-    now: i64,
-    payload: &mut serde_json::Value,
-) -> Result<()> {
-    write_answer_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        ask,
-        text,
-        answerer,
-        now,
-        payload,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
-}
-
-/// Record `ask_closed` for `ask`, on its task and run, in the caller's
-/// transaction that closes it: `stats` reads it as the answer applied
-/// (task 468) when nothing else that names the ask applied it (task 568).
-pub(super) fn record_ask_closed(conn: &Connection, ask: &Ask) -> Result<()> {
-    record_ask_closed_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), ask)
-        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
-}
-
-/// An ask's event: on its task (and run), or, for a task-less `blocked`
-/// ask, on nothing.
-fn ask_event(
-    conn: &Connection,
-    task_id: Option<TaskId>,
-    run_id: Option<&RunId>,
-    kind: EventKind,
-    payload: serde_json::Value,
-) -> Result<()> {
-    ask_event_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        task_id,
-        run_id,
-        kind,
-        payload,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
-}
-
-/// [`SqliteQueue::ask_delivered`] inside the caller's transaction, which
-/// commits it with what else the delivery records.
-pub(super) fn deliver_ask_in(
-    conn: &Connection,
-    id: AskId,
-    workspace_id: &str,
-    now: i64,
-) -> Result<Ask> {
-    let ask = read_ask(conn, id)?;
-    if ask.closed_at.is_some() {
-        return Ok(ask);
-    }
-    ensure!(ask.answered_at.is_some(), "ask {id} is not answered");
-    conn.execute("UPDATE asks SET closed_at=?2 WHERE id=?1", params![id, now])?;
-    ask_event(
-        conn,
-        ask.task_id,
-        ask.run_id.as_ref(),
-        EventKind::AskDelivered,
-        json!({"ask_id": id, "workspace_id": workspace_id}),
-    )?;
-    read_ask(conn, id)
-}
-
-pub(super) fn read_ask(conn: &Connection, id: AskId) -> Result<Ask> {
-    read_ask_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), id)
-        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
-}
-
-pub(super) fn ask_row(row: &Row<'_>) -> rusqlite::Result<Ask> {
-    super::sql_exec::sqlite::with_row(row, ask_row_port)
-}
-
-pub(super) fn ask_row_port(
-    row: &crate::infrastructure::sql_exec::SqlRow<'_>,
-) -> crate::infrastructure::sql_exec::SqlResult<Ask> {
-    Ok(Ask {
-        id: row.get("id")?,
-        kind: AskKind::read(&row.get::<_, String>("kind")?),
-        task_id: row.get("task_id")?,
-        run_id: row.get("run_id")?,
-        question: row.get("question")?,
-        options: crate::infrastructure::store_rows::json_col(row, "options")?,
-        answer: row.get("answer")?,
-        asked_by: row.get("asked_by")?,
-        reason_category: crate::infrastructure::store_rows::enum_col(row, "reason_category")?,
-        // NULL for the kinds without topics and the asks before them; a
-        // value that is no array of texts reads as none.
-        topics: row
-            .get::<_, Option<String>>("topics")?
-            .and_then(|value| serde_json::from_str(&value).ok())
-            .unwrap_or_default(),
-        recommendation: row.get("recommendation")?,
-        // A newer binary's confidence this one does not know reads as none.
-        confidence: row
-            .get::<_, Option<String>>("confidence")?
-            .and_then(|value| value.parse().ok()),
-        subject: row.get("subject")?,
-        affected: crate::infrastructure::store_rows::json_col(row, "affected")?,
-        created_at: row.get("created_at")?,
-        answered_at: row.get("answered_at")?,
-        closed_at: row.get("closed_at")?,
-        finding_id: row.get("finding_id")?,
-        request_id: row.get("request_id")?,
-        answered_by: row.get("answered_by")?,
-        option_index: row.get("option_index")?,
-        // A newer binary's authority this one does not know reads as none.
-        answer_authority: row
-            .get::<_, Option<String>>("answer_authority")?
-            .and_then(|value| value.parse().ok()),
-        answer_approval: row.get("answer_approval")?,
-    })
-}
-
-pub(super) fn discard_by_runtime_port(
-    tx: &impl crate::infrastructure::store_writes::EventTx,
-    ask: &Ask,
-    reason: &str,
-    note: &str,
-    now: i64,
-) -> Result<()> {
-    let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "reason": reason,
-                             "note": note, "discarded": true});
-    let kind = if ask.is_open() {
-        payload["runtime_closed"] = json!(true);
-        write_answer_port(tx, ask, note, Answerer::RUNTIME, now, &mut payload)?;
-        EventKind::AskAnswered
-    } else {
-        EventKind::AskClosed
-    };
-    ask_event_port(tx, ask.task_id, ask.run_id.as_ref(), kind, payload)?;
-    tx.execute(
-        "UPDATE asks SET closed_at=?2 WHERE id=?1",
-        crate::infrastructure::sql_exec::sql_params![ask.id, now],
-    )?;
-    Ok(())
-}
-
-pub(super) fn read_ask_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    id: AskId,
-) -> Result<Ask> {
-    conn.query_row(
-        "SELECT * FROM asks WHERE id=?1",
-        crate::infrastructure::sql_exec::sql_params![id],
-        ask_row_port,
-    )
-    .optional()?
-    .with_context(|| format!("ask {id} does not exist"))
-}
-
-pub(super) fn write_answer_port(
-    conn: &impl crate::infrastructure::store_writes::EventTx,
+    conn: &impl EventTx,
     ask: &Ask,
     text: &str,
     answerer: Answerer,
@@ -1384,7 +1310,7 @@ pub(super) fn write_answer_port(
     conn.execute(
         "UPDATE asks SET answer=?2, answered_at=?3, answered_by=?4, option_index=?5,
            answer_authority=?6, answer_approval=?7 WHERE id=?1",
-        crate::infrastructure::sql_exec::sql_params![
+        sql_params![
             ask.id,
             text,
             now,
@@ -1411,8 +1337,23 @@ pub(super) fn write_answer_port(
     Ok(())
 }
 
-fn ask_event_port(
-    conn: &impl crate::infrastructure::store_writes::EventTx,
+/// Record `ask_closed` for `ask`, on its task and run, in the caller's
+/// transaction that closes it: `stats` reads it as the answer applied
+/// (task 468) when nothing else that names the ask applied it (task 568).
+pub(super) fn record_ask_closed(conn: &impl EventTx, ask: &Ask) -> Result<()> {
+    ask_event(
+        conn,
+        ask.task_id,
+        ask.run_id.as_ref(),
+        EventKind::AskClosed,
+        json!({"ask_id": ask.id, "kind": ask.kind}),
+    )
+}
+
+/// An ask's event: on its task (and run), or, for a task-less `blocked`
+/// ask, on nothing.
+fn ask_event(
+    conn: &impl EventTx,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,
     kind: EventKind,
@@ -1423,7 +1364,7 @@ fn ask_event_port(
     conn.execute(
         "INSERT INTO run_events(task_id,run_id,kind,payload,actor_role,actor_id,requested_by)
          VALUES (?1,?2,?3,dagq_event_body(?4),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
-        crate::infrastructure::sql_exec::sql_params![
+        sql_params![
             task_id,
             run_id,
             kind.as_str(),
@@ -1433,71 +1374,76 @@ fn ask_event_port(
     Ok(())
 }
 
-/// Close the unclosed asks about planning `request` (`asks.request_id`, its
-/// planners' `planner_question`s) inside the caller's write transaction at
-/// `now`, as [`close_by_runtime`] closes one: an open ask gets `answer`
-/// from the runtime, an answered one `ask_closed`. The asks closed.
-pub(super) fn close_request_asks_in_port(
-    tx: &impl crate::infrastructure::store_writes::EventTx,
-    request: crate::domain::RequestId,
-    answer: &str,
+/// [`SqliteQueue::ask_delivered`] inside the caller's transaction, which
+/// commits it with what else the delivery records.
+pub(super) fn deliver_ask_in(
+    conn: &impl EventTx,
+    id: AskId,
+    workspace_id: &str,
     now: i64,
-) -> Result<Vec<AskId>> {
-    let unclosed: Vec<Ask> = tx.query_map(
-        "SELECT * FROM asks WHERE request_id=?1 AND closed_at IS NULL ORDER BY id",
-        crate::infrastructure::sql_exec::sql_params![request],
-        ask_row_port,
-    )?;
-    for ask in &unclosed {
-        close_by_runtime_port(tx, ask, answer, now)?;
+) -> Result<Ask> {
+    let ask = read_ask(conn, id)?;
+    if ask.closed_at.is_some() {
+        return Ok(ask);
     }
-    Ok(unclosed.into_iter().map(|ask| ask.id).collect())
-}
-
-pub(super) fn close_by_runtime_port(
-    tx: &impl crate::infrastructure::store_writes::EventTx,
-    ask: &Ask,
-    answer: &str,
-    now: i64,
-) -> Result<()> {
-    if ask.is_open() {
-        let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
-        write_answer_port(tx, ask, answer, Answerer::RUNTIME, now, &mut payload)?;
-        ask_event_port(
-            tx,
-            ask.task_id,
-            ask.run_id.as_ref(),
-            EventKind::AskAnswered,
-            payload,
-        )?;
-    } else {
-        // An answer given before is applied by this close.
-        ask_event_port(
-            tx,
-            ask.task_id,
-            ask.run_id.as_ref(),
-            EventKind::AskClosed,
-            json!({"ask_id": ask.id, "kind": ask.kind}),
-        )?;
-    }
-    tx.execute(
+    ensure!(ask.answered_at.is_some(), "ask {id} is not answered");
+    conn.execute(
         "UPDATE asks SET closed_at=?2 WHERE id=?1",
-        crate::infrastructure::sql_exec::sql_params![ask.id, now],
+        sql_params![id, now],
     )?;
-    Ok(())
-}
-
-pub(super) fn record_ask_closed_port(
-    conn: &impl crate::infrastructure::store_writes::EventTx,
-    ask: &Ask,
-) -> Result<()> {
-    ask_event_port(
+    ask_event(
         conn,
         ask.task_id,
         ask.run_id.as_ref(),
-        EventKind::AskClosed,
-        json!({"ask_id": ask.id, "kind": ask.kind}),
-    )
+        EventKind::AskDelivered,
+        json!({"ask_id": id, "workspace_id": workspace_id}),
+    )?;
+    read_ask(conn, id)
+}
+
+pub(super) fn read_ask(conn: &impl SqlRead, id: AskId) -> Result<Ask> {
+    conn.query_row("SELECT * FROM asks WHERE id=?1", sql_params![id], ask_row)
+        .optional()?
+        .with_context(|| format!("ask {id} does not exist"))
+}
+
+pub(super) fn ask_row(row: &SqlRow<'_>) -> SqlResult<Ask> {
+    Ok(Ask {
+        id: row.get("id")?,
+        kind: AskKind::read(&row.get::<_, String>("kind")?),
+        task_id: row.get("task_id")?,
+        run_id: row.get("run_id")?,
+        question: row.get("question")?,
+        options: json_col(row, "options")?,
+        answer: row.get("answer")?,
+        asked_by: row.get("asked_by")?,
+        reason_category: enum_col(row, "reason_category")?,
+        // NULL for the kinds without topics and the asks before them; a
+        // value that is no array of texts reads as none.
+        topics: row
+            .get::<_, Option<String>>("topics")?
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .unwrap_or_default(),
+        recommendation: row.get("recommendation")?,
+        // A newer binary's confidence this one does not know reads as none.
+        confidence: row
+            .get::<_, Option<String>>("confidence")?
+            .and_then(|value| value.parse().ok()),
+        subject: row.get("subject")?,
+        affected: json_col(row, "affected")?,
+        created_at: row.get("created_at")?,
+        answered_at: row.get("answered_at")?,
+        closed_at: row.get("closed_at")?,
+        finding_id: row.get("finding_id")?,
+        request_id: row.get("request_id")?,
+        answered_by: row.get("answered_by")?,
+        option_index: row.get("option_index")?,
+        // A newer binary's authority this one does not know reads as none.
+        answer_authority: row
+            .get::<_, Option<String>>("answer_authority")?
+            .and_then(|value| value.parse().ok()),
+        answer_approval: row.get("answer_approval")?,
+    })
 }
 
 #[cfg(test)]
@@ -1507,6 +1453,8 @@ mod tests {
     use crate::domain::AttentionNext;
     use crate::domain::LeaseToken;
     use crate::infrastructure::adapters::SystemProcesses;
+    use crate::infrastructure::sql_exec::sqlite::port_tx;
+    use rusqlite::params;
 
     /// Open an `update_failed` ask, answer it `text`, and return whether
     /// the answer was recorded as the runtime's and whether `status`
@@ -1735,7 +1683,8 @@ mod tests {
         let install = json!({"source": crate::application::update::INSTALL_SOURCE});
         let job = open(&mut queue, serde_json::Value::Null);
         let by_hand = open(&mut queue, install.clone());
-        let is_open = |queue: &SqliteQueue, id: AskId| read_ask(&queue.conn, id).unwrap().is_open();
+        let is_open =
+            |queue: &SqliteQueue, id: AskId| read_ask(&*queue.conn, id).unwrap().is_open();
         assert!(is_open(&queue, job));
         assert!(is_open(&queue, by_hand));
         let next_job = open(&mut queue, json!({"plugin_only": false}));
@@ -1868,7 +1817,7 @@ mod tests {
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let run = RunId::new("run-1").unwrap();
         let error = ask_event(
-            &queue.conn,
+            &port_tx(&queue.conn),
             None,
             Some(&run),
             EventKind::AskOpened,

@@ -16,6 +16,8 @@
 //! the writing transaction: the table's key does not compare a deletion's
 //! NULL child task.
 use super::sql_dialect::{JsonType, json_field};
+use super::sql_exec::sqlite::{native_error, port_tx};
+use super::store_writes::EventTx;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -267,7 +269,7 @@ impl SqliteQueue {
             },
             now,
         )?;
-        let outcome = super::asks::insert_ask(&tx, ask)?;
+        let outcome = super::asks::insert_ask(&port_tx(&tx), ask)?;
         replan_detect::asked_payload(&mut payload, &outcome.ask, claimed.generation);
         event(
             &tx,
@@ -841,11 +843,24 @@ pub(super) fn replacing_operation(
 /// The version of child `task`'s conditions ([`ChildConditions`]) that
 /// plan review approves and the apply compares, read on `conn`.
 pub(super) fn child_version(conn: &Connection, task: TaskId) -> Result<String> {
-    let goals = conn
-        .prepare("SELECT goal_id FROM task_goal_dependencies WHERE task_id=?1 ORDER BY goal_id")?
-        .query_map([task], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(ChildConditions::of(&read_task(conn, task)?, conditions_of(conn, task)?, goals).version())
+    child_version_port(&port_tx(conn), task).map_err(native_error)
+}
+
+pub(super) fn child_version_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<String> {
+    let goals = conn.query_map(
+        "SELECT goal_id FROM task_goal_dependencies WHERE task_id=?1 ORDER BY goal_id",
+        sql_params![task],
+        |r| r.get(0),
+    )?;
+    Ok(ChildConditions::of(
+        &super::store_rows::read_task(conn, task)?,
+        conditions_of_port(conn, task)?,
+        goals,
+    )
+    .version())
 }
 
 /// The version of each child's conditions plan review approved with plan
@@ -998,7 +1013,7 @@ fn planning_step(reason: &str) -> ReplanMove {
 /// `planner` opens for it, inside the opening's transaction; nothing for a
 /// request of no operation or one past `parked`.
 pub(super) fn planner_opened(
-    conn: &Connection,
+    conn: &impl EventTx,
     request: crate::domain::RequestId,
     planner: crate::domain::PlannerId,
     now: i64,
@@ -1006,17 +1021,17 @@ pub(super) fn planner_opened(
     let op: Option<ReplanId> = conn
         .query_row(
             "SELECT replan_operation_id FROM plan_requests WHERE id=?1",
-            [request],
+            sql_params![request],
             |r| r.get(0),
         )
         .optional()?
         .flatten();
-    let Some(op) = op.map(|id| read_operation(conn, id)).transpose()? else {
+    let Some(op) = op.map(|id| read_operation_port(conn, id)).transpose()? else {
         return Ok(());
     };
     if op.status == ReplanStatus::Parked {
         let reason = format!("planner {planner} opened for request {request}");
-        move_in(conn, op.id, op.generation, &planning_step(&reason), now)?;
+        move_in_port(conn, op.id, op.generation, &planning_step(&reason), now)?;
     }
     Ok(())
 }
@@ -1031,13 +1046,13 @@ pub(super) fn planner_opened(
 /// awaiting a person's answer goes back to `reviewing`, with
 /// `replan_plan_approved`.
 pub(super) fn approve_replacement(
-    conn: &Connection,
+    conn: &impl EventTx,
     op: &ReplanOperation,
     proposal: ProposalId,
     accepted: &crate::domain::Proposal,
     now: i64,
 ) -> Result<()> {
-    let latest = latest_plan(conn, op.id)?
+    let latest = latest_plan_port(conn, op.id)?
         .filter(|plan| plan.proposal_id == proposal)
         .with_context(|| {
             format!(
@@ -1045,7 +1060,7 @@ pub(super) fn approve_replacement(
                 op.task_id, op.id
             )
         })?;
-    let problems = check_replacement(conn, op, &latest.plan, accepted.task_ids(), &[])?;
+    let problems = check_replacement_port(conn, op, &latest.plan, accepted.task_ids(), &[])?;
     ensure!(
         problems.is_empty(),
         "proposal {proposal} cannot be accepted: its replacement plan for replan operation {} no longer holds:\n{}",
@@ -1056,12 +1071,12 @@ pub(super) fn approve_replacement(
     // with the child as it is then.
     let mut approved = BTreeMap::new();
     for child in latest.plan.child_ids() {
-        approved.insert(child, child_version(conn, child)?);
+        approved.insert(child, child_version_port(conn, child)?);
     }
     conn.execute(
         "UPDATE replan_plans SET approved_at=?1, approved_children=?4
          WHERE operation_id=?2 AND revision=?3",
-        params![
+        sql_params![
             now,
             op.id,
             latest.revision,
@@ -1069,7 +1084,7 @@ pub(super) fn approve_replacement(
         ],
     )?;
     if op.status == ReplanStatus::AwaitingAnswer {
-        move_in(
+        move_in_port(
             conn,
             op.id,
             op.generation,
@@ -1082,7 +1097,7 @@ pub(super) fn approve_replacement(
             now,
         )?;
     }
-    event(
+    super::store_writes::event(
         conn,
         op.task_id,
         Some(&op.run_id),
@@ -1169,7 +1184,8 @@ pub(super) fn replan_again(
             |r| r.get(0),
         )?;
         if !open {
-            let renewed = super::plan_requests::renew_declined(conn, request, op.id, now)?;
+            let renewed =
+                super::plan_requests::renew_declined(&port_tx(conn), request, op.id, now)?;
             conn.execute(
                 "UPDATE replan_operations SET request_id=?1 WHERE id=?2",
                 params![renewed, op.id],
@@ -1224,7 +1240,7 @@ impl SqliteQueue {
         let op = read_operation(&tx, resolve.operation)?;
         let mut children = Vec::new();
         if let Some(proposal) = op.proposal_id {
-            for &task in super::proposals::read(&tx, proposal)?.task_ids() {
+            for &task in super::proposals::read(&port_tx(&tx), proposal)?.task_ids() {
                 children.push((task, read_task(&tx, task)?.status()));
             }
         }
@@ -1332,7 +1348,7 @@ impl SqliteQueue {
         let plan = latest_plan(&self.conn, id)?;
         let problems = match &plan {
             Some(latest) => {
-                let members = super::proposals::read(&self.conn, latest.proposal_id)?
+                let members = super::proposals::read(&*self.conn, latest.proposal_id)?
                     .task_ids()
                     .to_vec();
                 check_replacement(&self.conn, &op, &latest.plan, &members, &[])?
@@ -1494,7 +1510,7 @@ pub(super) fn check_child_ready_port(
     // the one the operation names: an older one sent back stays its.
     if let Some(proposal) = proposal
         && let Some(op) = replacing_operation_port(conn, proposal)?
-        && super::proposals::read_port(conn, proposal)?.status()
+        && super::proposals::read(conn, proposal)?.status()
             != crate::domain::ProposalStatus::Canceled
     {
         anyhow::bail!(
@@ -1538,7 +1554,7 @@ pub(super) fn carry_open_to_port(
         crate::infrastructure::sql_exec::sql_params![run, generation, now, id],
     )?;
     if let Some(request) = op.request_id {
-        let mut refs = super::plan_requests::read_request_port(conn, request)?.refs;
+        let mut refs = super::plan_requests::read_request(conn, request)?.refs;
         let to = RequestRef::Run(run.clone());
         if !refs.contains(&to) {
             refs.push(to);
@@ -1571,9 +1587,7 @@ pub(super) fn replacement_problems_port(
     let Some(op) = replacing_operation_port(conn, proposal)? else {
         return Ok(Vec::new());
     };
-    let members = super::proposals::read_port(conn, proposal)?
-        .task_ids()
-        .to_vec();
+    let members = super::proposals::read(conn, proposal)?.task_ids().to_vec();
     match latest_plan_port(conn, op.id)?.filter(|plan| plan.proposal_id == proposal) {
         Some(latest) => Ok(replan_plan::describe(&check_replacement_port(
             conn,
@@ -1786,7 +1800,7 @@ pub(super) fn check_replacement_port(
         .iter()
         .filter_map(|mapping| mapping.authority_ask_id)
     {
-        let Ok(read) = super::asks::read_ask_port(conn, ask) else {
+        let Ok(read) = super::asks::read_ask(conn, ask) else {
             continue;
         };
         // Asked since the operation began: an older answer decided
@@ -1956,20 +1970,13 @@ pub(super) fn move_in_as_port(
     }
     let planner_open = op
         .request_id
-        .map(|request| super::plan_requests::planner_open_port(conn, request))
+        .map(|request| super::plan_requests::planner_open(conn, request))
         .transpose()?
         .unwrap_or(false);
     let declined = match op.request_id {
         Some(request) if step.to.ends_request_undecided(planner_open) => {
-            super::plan_requests::decline_undecided_port(
-                conn,
-                request,
-                id,
-                step.to,
-                &step.reason,
-                now,
-            )?
-            .then_some(request)
+            super::plan_requests::decline_undecided(conn, request, id, step.to, &step.reason, now)?
+                .then_some(request)
         }
         _ => None,
     };
@@ -1977,9 +1984,9 @@ pub(super) fn move_in_as_port(
         // Its `request_declined` is read only for a move onto the planner.
         Some(request)
             if op.status.renews_request(step.to, true)
-                && super::plan_requests::declined_at_close_port(conn, request, id)? =>
+                && super::plan_requests::declined_at_close(conn, request, id)? =>
         {
-            let renewed = super::plan_requests::renew_declined_port(conn, request, id, now)?;
+            let renewed = super::plan_requests::renew_declined(conn, request, id, now)?;
             conn.execute(
                 "UPDATE replan_operations SET request_id=?1 WHERE id=?2",
                 crate::infrastructure::sql_exec::sql_params![renewed, id],
@@ -2292,9 +2299,9 @@ fn release_children_port(
         std::time::UNIX_EPOCH
             + std::time::Duration::from_secs(u64::try_from(now).unwrap_or_default()),
     );
-    let current = super::proposals::read_port(conn, proposal)?;
+    let current = super::proposals::read(conn, proposal)?;
     if current.status().is_active() {
-        super::proposals::withdraw_port(conn, proposal, &stamp, now)?;
+        super::proposals::withdraw(conn, proposal, &stamp, now)?;
     }
     let mut released = Vec::new();
     for &task in current.task_ids() {

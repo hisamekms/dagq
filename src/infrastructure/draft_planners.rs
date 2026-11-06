@@ -10,15 +10,17 @@
 //! transaction that re-checks the drafts first, so two supervisors never
 //! open one for the same draft.
 use super::sql_dialect::{JsonType, json_field};
+use super::sql_exec::OptionalRow;
+
 use super::sql_exec::sql_params;
+use super::sql_exec::sqlite::{native_error, port_tx, with_row};
 use super::store_writes::{self, EventTx};
 use crate::domain::cancel_reason;
 use crate::domain::event_kind::{self, EventKind};
-use crate::infrastructure::sql_exec::OptionalRow as _;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
 use super::{
@@ -60,6 +62,10 @@ pub const PLANNER_ANSWER_CLAIM_SECS: i64 = 120;
 /// Drafts registered before this existed match too (the migration gave them
 /// their origin).
 fn targets(now: i64) -> String {
+    targets_in(super::sql_exec::SqlDialect::Sqlite, now)
+}
+
+fn targets_in(dialect: super::sql_exec::SqlDialect, now: i64) -> String {
     let due = revisit_due(now, None);
     format!(
         "SELECT t.id FROM tasks t
@@ -83,7 +89,7 @@ fn targets(now: i64) -> String {
     AND ({person} OR NOT EXISTS(SELECT 1 FROM run_events e WHERE e.task_id=t.id
         AND e.kind='{exhausted}'))",
         person = revisit_due(now, Some("('user','inbox')")),
-        exhausted = event_kind::DRAFT_PLANNER_EXHAUSTED, proposal_id = json_field("r.material", "$.proposal_id", JsonType::Integer), kind = json_field("j.value", "$.kind", JsonType::Text), id = json_field("j.value", "$.id", JsonType::Integer),
+        exhausted = event_kind::DRAFT_PLANNER_EXHAUSTED, proposal_id = dialect.json_field("r.material", "$.proposal_id", JsonType::Integer), kind = dialect.json_field("j.value", "$.kind", JsonType::Text), id = dialect.json_field("j.value", "$.id", JsonType::Integer),
 )
 }
 
@@ -117,7 +123,11 @@ fn named_by_open_request(conn: &Connection, task: TaskId) -> Result<bool> {
 /// Whether a planner of the runtime's is still to be opened for draft
 /// `task` ([`targets`]) at `now` (the queue's clock, Unix seconds) or one
 /// is open for it.
-pub(super) fn draft_planned(conn: &Connection, task: TaskId, now: i64) -> Result<bool> {
+pub(super) fn draft_planned(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+    now: i64,
+) -> Result<bool> {
     Ok(conn.query_row(
         &format!(
             "SELECT EXISTS({} AND t.id=?1) OR EXISTS(SELECT 1 FROM tasks t
@@ -127,9 +137,9 @@ pub(super) fn draft_planned(conn: &Connection, task: TaskId, now: i64) -> Result
                       OR EXISTS(SELECT 1 FROM draft_bundle_members m
                                 WHERE m.planner_id=p.id AND m.task_id=t.id))
                  WHERE t.id=?1 AND t.status='draft')",
-            targets(now)
+            targets_in(conn.dialect(), now)
         ),
-        [task],
+        sql_params![task],
         |r| r.get(0),
     )?)
 }
@@ -464,7 +474,7 @@ impl SqliteQueue {
         let lead_target = match answer {
             None => waiting(&tx, lead, now)?,
             Some(ask) => {
-                let ask = read_ask(&tx, ask)?;
+                let ask = read_ask(&port_tx(&tx), ask)?;
                 // An answer about a draft an open planning request names
                 // waits for the request's planner (ADR-t1540-1).
                 if ask.task_id == Some(lead)
@@ -632,7 +642,7 @@ impl SqliteQueue {
                 "SELECT * FROM asks WHERE kind='planner_question'
                  AND answered_at IS NOT NULL AND closed_at IS NULL ORDER BY id",
             )?
-            .query_map([], ask_row)?
+            .query_map([], |row| with_row(row, ask_row))?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -658,7 +668,7 @@ impl SqliteQueue {
                  AND a.kind='planner_question' AND a.run_id IS NULL
                  AND a.asked_by='planner' AND a.closed_at IS NULL ORDER BY a.id",
             )?
-            .query_map(params![proposal, parked], ask_row)?
+            .query_map(params![proposal, parked], |row| with_row(row, ask_row))?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -685,7 +695,7 @@ impl SqliteQueue {
         workspace: &str,
     ) -> Result<bool> {
         let tx = self.write_tx("claim_planner_answer")?;
-        let ask = read_ask(&tx, id)?;
+        let ask = read_ask(&port_tx(&tx), id)?;
         // A question about a finding may be about no task: its claim is on
         // the finding's target (ADR-0044 decision 19).
         if ask.task_id.is_none() && ask.finding_id.is_none() && ask.request_id.is_none() {
@@ -738,7 +748,7 @@ impl SqliteQueue {
 
     pub fn close_planner_answer(&mut self, id: AskId, why: &str) -> Result<()> {
         let tx = self.write_tx("close_planner_answer")?;
-        let ask = read_ask(&tx, id)?;
+        let ask = read_ask(&port_tx(&tx), id)?;
         if ask.closed_at.is_some() {
             return Ok(());
         }
@@ -1232,14 +1242,19 @@ fn planners_opened(conn: &Connection, draft: TaskId) -> Result<usize> {
 /// The draft a `planner_question` is about
 /// ([`crate::domain::AttentionNext::planner_answer_task`]), when its task is a draft: the
 /// `draft_task_id` of the answer none of the runtime's planners carries.
-pub(super) fn answer_draft(conn: &Connection, ask: &Ask) -> Result<Option<TaskId>> {
+pub(super) fn answer_draft(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    ask: &Ask,
+) -> Result<Option<TaskId>> {
     let Some(task_id) = crate::domain::AttentionNext::planner_answer_task(ask) else {
         return Ok(None);
     };
     let status: Option<String> = conn
-        .query_row("SELECT status FROM tasks WHERE id=?1", [task_id], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT status FROM tasks WHERE id=?1",
+            sql_params![task_id],
+            |r| r.get(0),
+        )
         .optional()?;
     Ok((status.as_deref() == Some(TaskStatus::Draft.as_str())).then_some(task_id))
 }
@@ -1257,19 +1272,28 @@ struct ReplanLink {
 /// The operations of `column` (`task_id` or `proposal_id`) `id`, oldest
 /// first.
 fn replan_links(conn: &Connection, column: &str, id: i64) -> Result<Vec<ReplanLink>> {
-    Ok(conn
-        .prepare(&format!(
+    replan_links_port(&port_tx(conn), column, id).map_err(native_error)
+}
+
+fn replan_links_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    column: &str,
+    id: i64,
+) -> Result<Vec<ReplanLink>> {
+    Ok(conn.query_map(
+        &format!(
             "SELECT task_id, proposal_id, closed_at IS NOT NULL FROM replan_operations
              WHERE {column}=?1 ORDER BY id"
-        ))?
-        .query_map([id], |r| {
+        ),
+        sql_params![id],
+        |r| {
             Ok(ReplanLink {
                 task: r.get(0)?,
                 proposal: r.get(1)?,
                 closed: r.get(2)?,
             })
-        })?
-        .collect::<rusqlite::Result<_>>()?)
+        },
+    )?)
 }
 
 /// The replacement proposal whose revise answers about the task `links`
@@ -1330,8 +1354,11 @@ fn proposal_answer(
 }
 
 /// The parked task's replacement proposal ([`replacing_proposal`]).
-fn replaced_by(conn: &Connection, task: TaskId) -> Result<Option<ProposalId>> {
-    Ok(replacing_proposal(&replan_links(
+fn replaced_by(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<ProposalId>> {
+    Ok(replacing_proposal(&replan_links_port(
         conn,
         "task_id",
         task.as_i64(),
@@ -1340,18 +1367,21 @@ fn replaced_by(conn: &Connection, task: TaskId) -> Result<Option<ProposalId>> {
 
 /// Where an answer about a task of `proposal` goes, as [`route_of`] sends
 /// it ([`proposal_answer`]); `None` when it is not the proposal's to take.
-fn proposal_route(conn: &Connection, proposal: ProposalId) -> Result<Option<PlannerAnswerRoute>> {
+fn proposal_route(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    proposal: ProposalId,
+) -> Result<Option<PlannerAnswerRoute>> {
     let open: Option<PlannerId> = conn
         .query_row(
             "SELECT id FROM planners WHERE proposal_id=?1 AND origin='runtime'
              AND closed_at IS NULL AND answer_wait_at IS NULL ORDER BY id DESC LIMIT 1",
-            [proposal],
+            sql_params![proposal],
             |r| r.get(0),
         )
         .optional()?;
     let revising: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM proposals WHERE id=?1 AND status='revising')",
-        [proposal],
+        sql_params![proposal],
         |r| r.get(0),
     )?;
     let to = proposal_answer(open, revising, proposal_owner(conn, proposal)?);
@@ -1360,13 +1390,16 @@ fn proposal_route(conn: &Connection, proposal: ProposalId) -> Result<Option<Plan
 
 /// The owner of `proposal` open and not asked to exit for a person's
 /// answer: the planner of the runtime's in the workspace that submitted it.
-fn proposal_owner(conn: &Connection, proposal: ProposalId) -> Result<Option<PlannerId>> {
+fn proposal_owner(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    proposal: ProposalId,
+) -> Result<Option<PlannerId>> {
     Ok(conn
         .query_row(
             "SELECT p.id FROM planners p JOIN proposals x ON x.owner_workspace_id=p.workspace_id
              WHERE x.id=?1 AND p.origin='runtime' AND p.closed_at IS NULL
              AND p.answer_wait_at IS NULL ORDER BY p.id DESC LIMIT 1",
-            [proposal],
+            sql_params![proposal],
             |r| r.get(0),
         )
         .optional()?)
@@ -1374,7 +1407,7 @@ fn proposal_owner(conn: &Connection, proposal: ProposalId) -> Result<Option<Plan
 
 /// The route of `to` for an answer about a task of `proposal`.
 fn answer_route(
-    conn: &Connection,
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
     to: ProposalAnswer,
     proposal: ProposalId,
 ) -> Result<Option<PlannerAnswerRoute>> {
@@ -1401,6 +1434,13 @@ fn answer_route(
 /// draft that moved on; else a new planner for a draft that still waits
 /// (unless its planners are used up); else a person's.
 pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRoute> {
+    route_of_port(&port_tx(conn), ask).map_err(native_error)
+}
+
+pub(super) fn route_of_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    ask: &Ask,
+) -> Result<PlannerAnswerRoute> {
     if ask.kind != AskKind::PlannerQuestion || ask.answer.is_none() || ask.closed_at.is_some() {
         return Ok(PlannerAnswerRoute::Person);
     }
@@ -1412,7 +1452,7 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
     // A question about a finding goes the way of the finding's planners
     // (ADR-0044 decision 19).
     if let Some(finding) = ask.finding_id {
-        return super::finding_planners::route_of(conn, finding);
+        return super::finding_planners::route_of_port(conn, finding);
     }
     let Some(task_id) = ask.task_id else {
         return Ok(PlannerAnswerRoute::Person);
@@ -1429,7 +1469,7 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
              AND (p.draft_task_id=t.id OR (t.proposal_id IS NOT NULL AND p.proposal_id=t.proposal_id)
                   OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id AND m.task_id=t.id))
              ORDER BY p.id DESC LIMIT 1",
-            [task_id],
+            sql_params![task_id],
             |r| r.get(0),
         )
         .optional()?;
@@ -1455,7 +1495,7 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
         .query_row(
             "SELECT p.id FROM tasks t JOIN proposals p ON p.id=t.proposal_id
              WHERE t.id=?1 AND p.status='revising'",
-            [task_id],
+            sql_params![task_id],
             |r| r.get(0),
         )
         .optional()?;
@@ -1475,10 +1515,10 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
     if let Some(route) = request_route {
         return Ok(route);
     }
-    let task = read_task(conn, task_id)?;
+    let task = super::store_rows::read_task(conn, task_id)?;
     // A draft without an origin is planned only by a revisit
     // (ADR-t1540-1).
-    if planned_origin(conn, task_id)?.is_none() {
+    if planned_origin_port(conn, task_id)?.is_none() {
         return Ok(PlannerAnswerRoute::Person);
     }
     let exhausted: bool = conn.query_row(
@@ -1486,13 +1526,13 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind='{}')",
             event_kind::DRAFT_PLANNER_EXHAUSTED
         ),
-        [task_id],
+        sql_params![task_id],
         |r| r.get(0),
     )?;
     let in_proposal: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM tasks t JOIN proposals p ON p.id=t.proposal_id
          WHERE t.id=?1 AND p.status!='canceled')",
-        [task_id],
+        sql_params![task_id],
         |r| r.get(0),
     )?;
     match task.status() {
@@ -1507,8 +1547,11 @@ pub(super) fn route_of(conn: &Connection, ask: &Ask) -> Result<PlannerAnswerRout
 /// with no origin and in no proposal that was not canceled: its
 /// `planner_question`s go the way of the request's planners
 /// (ADR-t2015-1).
-pub(super) fn request_of_draft(conn: &Connection, task: TaskId) -> Result<Option<RequestId>> {
-    if planned_origin(conn, task)?.is_some() {
+pub(super) fn request_of_draft(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    task: TaskId,
+) -> Result<Option<RequestId>> {
+    if planned_origin_port(conn, task)?.is_some() {
         return Ok(None);
     }
     Ok(conn
@@ -1524,7 +1567,7 @@ pub(super) fn request_of_draft(conn: &Connection, task: TaskId) -> Result<Option
                  ORDER BY e.id LIMIT 1",
                 event_kind::TASK_CREATED
             ),
-            [task],
+            sql_params![task],
             |r| r.get(0),
         )
         .optional()?)
@@ -1534,6 +1577,13 @@ pub(super) fn request_of_draft(conn: &Connection, task: TaskId) -> Result<Option
 /// `ask`: the request it is about, or the one whose planner added the
 /// draft it is about ([`request_of_draft`]).
 pub(super) fn answer_request(conn: &Connection, ask: &Ask) -> Result<Option<RequestId>> {
+    answer_request_port(&port_tx(conn), ask).map_err(native_error)
+}
+
+pub(super) fn answer_request_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    ask: &Ask,
+) -> Result<Option<RequestId>> {
     if ask.request_id.is_some() || ask.finding_id.is_some() {
         return Ok(ask.request_id);
     }
@@ -1543,20 +1593,27 @@ pub(super) fn answer_request(conn: &Connection, ask: &Ask) -> Result<Option<Requ
     }
 }
 
-fn read_planner(conn: &Connection, id: PlannerId) -> Result<PlannerSession> {
+fn read_planner(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: PlannerId,
+) -> Result<PlannerSession> {
     conn.query_row(
         "SELECT * FROM planners WHERE id=?1",
-        [id],
-        super::planners::planner_row,
+        sql_params![id],
+        super::planners::planner_row_port,
     )
     .optional()?
     .with_context(|| format!("planner {id} does not exist"))
 }
 
 fn depth(conn: &Connection, task: TaskId) -> Result<i64> {
+    depth_port(&port_tx(conn), task).map_err(native_error)
+}
+
+fn depth_port(conn: &impl crate::infrastructure::sql_exec::SqlRead, task: TaskId) -> Result<i64> {
     conn.query_row(
         "SELECT follow_up_depth FROM tasks WHERE id=?1",
-        [task],
+        sql_params![task],
         |r| r.get(0),
     )
     .optional()?
@@ -1565,12 +1622,19 @@ fn depth(conn: &Connection, task: TaskId) -> Result<i64> {
 
 /// Whether the task's goal takes tasks: it has one and it is not closed.
 fn goal_open(conn: &Connection, goal: Option<GoalId>) -> Result<bool> {
+    goal_open_port(&port_tx(conn), goal).map_err(native_error)
+}
+
+fn goal_open_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    goal: Option<GoalId>,
+) -> Result<bool> {
     let Some(goal) = goal else {
         return Ok(false);
     };
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM goals WHERE id=?1 AND closed_at IS NULL)",
-        [goal],
+        sql_params![goal],
         |r| r.get(0),
     )?)
 }
@@ -1584,18 +1648,18 @@ fn goal_open(conn: &Connection, goal: Option<GoalId>) -> Result<bool> {
 /// `planner_question` about it (the error says why). Returns what
 /// [`record_adoptions`] records afterwards.
 pub(super) fn check_adoptions(
-    conn: &Connection,
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
     tasks: &[TaskId],
     origin: PlannerOrigin,
 ) -> Result<Vec<Adoption>> {
     let mut adoptions = Vec::new();
     for &task_id in tasks {
-        let task = read_task(conn, task_id)?;
+        let task = super::store_rows::read_task(conn, task_id)?;
         if task.status() != TaskStatus::Draft {
             continue;
         }
-        let depth = depth(conn, task_id)?;
-        let Some((draft_origin, material)) = draft_origin(conn, task_id)? else {
+        let depth = depth_port(conn, task_id)?;
+        let Some((draft_origin, material)) = draft_origin_port(conn, task_id)? else {
             adoptions.push(Adoption {
                 task: task_id,
                 origin: None,
@@ -1611,7 +1675,7 @@ pub(super) fn check_adoptions(
                 "SELECT id FROM asks WHERE task_id=?1 AND run_id IS NULL
                  AND kind IN ('planner_question','follow_up') AND trim(answer)='adopt'
                  ORDER BY id DESC LIMIT 1",
-                [task_id],
+                sql_params![task_id],
                 |r| r.get(0),
             )
             .optional()?;
@@ -1624,9 +1688,9 @@ pub(super) fn check_adoptions(
              AND {by}='person')",
                 event_kind::FOLLOW_UP_ADOPTED,
                 event_kind::DRAFT_ADOPTED,
-                by = json_field("payload", "$.by", JsonType::Text),
+                by = conn.dialect().json_field("payload", "$.by", JsonType::Text),
             ),
-            [task_id],
+            sql_params![task_id],
             |r| r.get(0),
         )?;
         if origin == PlannerOrigin::Runtime
@@ -1634,7 +1698,7 @@ pub(super) fn check_adoptions(
             && !adopted_by_person
             && draft_origin == DraftOrigin::FollowUp
             && let Some(why) = adopt_needs_person(FollowUpFacts {
-                goal_open: goal_open(conn, task.goal_id())?,
+                goal_open: goal_open_port(conn, task.goal_id())?,
                 source_goal_open: crate::domain::follow_up::source_goal_was_open(&material),
                 depth,
             })
@@ -1670,7 +1734,7 @@ pub(super) struct Adoption {
 /// answer) counts its follow-ups from 0 again; a draft of the runtime's or a
 /// job's records `follow_up_adopted` (`draft_adopted` for another origin)
 /// the first time it is submitted.
-pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Result<()> {
+pub(super) fn record_adoptions(conn: &impl EventTx, adoptions: &[Adoption]) -> Result<()> {
     for adoption in adoptions {
         let depth = if adoption.by_person {
             0
@@ -1680,7 +1744,7 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
         if adoption.by_person {
             conn.execute(
                 "UPDATE tasks SET follow_up_depth=0 WHERE id=?1",
-                [adoption.task],
+                sql_params![adoption.task],
             )?;
         }
         let Some(origin) = adoption.origin else {
@@ -1695,7 +1759,7 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
         };
         let recorded: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind=?2)",
-            params![adoption.task, kind.as_str()],
+            sql_params![adoption.task, kind.as_str()],
             |r| r.get(0),
         )?;
         if recorded {
@@ -1706,7 +1770,7 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
             .query_row(
                 "SELECT m.planner_id FROM draft_bundle_members m JOIN planners p ON p.id=m.planner_id
                  WHERE m.task_id=?1 AND p.closed_at IS NULL ORDER BY m.planner_id DESC LIMIT 1",
-                [adoption.task],
+                sql_params![adoption.task],
                 |r| r.get(0),
             )
             .optional()?;
@@ -1725,7 +1789,7 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
             !matches!(name.as_str(), "source_task_id" | "source_run_id" | "origin")
         });
         extend(&mut payload, fields);
-        event(conn, adoption.task, None, kind, payload)?;
+        super::store_writes::event(conn, adoption.task, None, kind, payload)?;
     }
     Ok(())
 }

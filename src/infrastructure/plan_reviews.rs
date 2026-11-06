@@ -5,6 +5,8 @@
 //! in one transaction. Events go to the first task of the proposal, since
 //! an event needs a task or a goal.
 use super::sql_dialect::{JsonType, json_field, json_field_spaced};
+use super::sql_exec::sql_params;
+use super::sql_exec::sqlite::{native_error, port_tx};
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, LIVE_PLANNER_NOT_RAISED};
 use crate::domain::headless_job::{ReviewTakeover, review_owner_gone};
@@ -56,9 +58,16 @@ fn anchor(conn: &Connection, proposal_id: ProposalId) -> Result<TaskId> {
 }
 
 fn hold(conn: &Connection, proposal_id: ProposalId) -> Result<Option<ReviewHold>> {
+    hold_port(&port_tx(conn), proposal_id).map_err(native_error)
+}
+
+fn hold_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    proposal_id: ProposalId,
+) -> Result<Option<ReviewHold>> {
     let hold: Option<String> = conn.query_row(
         "SELECT review_hold FROM proposals WHERE id=?1",
-        [proposal_id],
+        sql_params![proposal_id],
         |r| r.get(0),
     )?;
     Ok(hold.map(|hold| hold.parse()).transpose()?)
@@ -164,7 +173,7 @@ fn finish_row(
 /// Whether the proposal is still the submitted, unheld one the job took.
 fn reviewable(conn: &Connection, proposal_id: ProposalId) -> Result<bool> {
     Ok(
-        proposals::read(conn, proposal_id)?.status() == ProposalStatus::Submitted
+        proposals::read(&port_tx(conn), proposal_id)?.status() == ProposalStatus::Submitted
             && hold(conn, proposal_id)?.is_none(),
     )
 }
@@ -368,7 +377,7 @@ fn reopen(
     }
     let id = ProposalId::new(super::sqlite::next_id(conn, "proposals")?);
     let reopened = proposal::reopen(id, vec![task_id], now.into())?;
-    proposals::save(conn, &reopened)?;
+    proposals::save(&port_tx(conn), &reopened)?;
     transition_task(conn, task_id, TaskAction::Reopen, now)?;
     conn.execute(
         "UPDATE tasks SET proposal_id=?1 WHERE id=?2",
@@ -396,12 +405,20 @@ fn reopen(
 /// Whether the answer `text` of `ask` is one the supervisor applies
 /// ([`plan_review::plan_answer_applies`]).
 pub(super) fn plan_answer_applies(conn: &Connection, ask: &Ask, text: &str) -> Result<bool> {
+    plan_answer_applies_port(&port_tx(conn), ask, text).map_err(native_error)
+}
+
+pub(super) fn plan_answer_applies_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    ask: &Ask,
+    text: &str,
+) -> Result<bool> {
     // The proposal's status and hold are read only for an `approve_plan`
     // ask; any other kind does not apply whatever they are.
-    let proposal = match ask_proposal(conn, ask)? {
+    let proposal = match ask_proposal_port(conn, ask)? {
         Some(proposal_id) if ask.kind == AskKind::ApprovePlan => Some((
             proposals::read(conn, proposal_id)?.status(),
-            hold(conn, proposal_id)?,
+            hold_port(conn, proposal_id)?,
         )),
         _ => None,
     };
@@ -409,12 +426,19 @@ pub(super) fn plan_answer_applies(conn: &Connection, ask: &Ask, text: &str) -> R
 }
 
 fn ask_proposal(conn: &Connection, ask: &Ask) -> Result<Option<ProposalId>> {
+    ask_proposal_port(&port_tx(conn), ask).map_err(native_error)
+}
+
+fn ask_proposal_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    ask: &Ask,
+) -> Result<Option<ProposalId>> {
     let Some(task_id) = ask.task_id else {
         return Ok(None);
     };
     Ok(conn.query_row(
         "SELECT proposal_id FROM tasks WHERE id=?1",
-        [task_id],
+        sql_params![task_id],
         |r| r.get(0),
     )?)
 }
@@ -462,7 +486,7 @@ impl SqliteQueue {
         if !exists {
             return Ok(None);
         }
-        let proposal = proposals::read(&self.conn, proposal_id)?;
+        let proposal = proposals::read(&*self.conn, proposal_id)?;
         let members = proposal.task_ids();
         let has = |sql: &str| -> Result<bool> {
             Ok(self.conn.query_row(sql, [proposal_id], |r| r.get(0))?)
@@ -677,7 +701,9 @@ impl PlanReviewStore for SqliteQueue {
                 ..PlanReviewApplied::default()
             });
         }
-        let members = proposals::read(&tx, job.proposal_id)?.task_ids().to_vec();
+        let members = proposals::read(&port_tx(&tx), job.proposal_id)?
+            .task_ids()
+            .to_vec();
         // The tasks it predicted the weight of (ADR-0079 decision 2): those
         // still submitted, before a pass readies or cancels them.
         let mut submitted = Vec::new();
@@ -790,10 +816,10 @@ impl PlanReviewStore for SqliteQueue {
                     inherit_priority(&tx, task_id, &stamp)?;
                     priorities_inherited.push(task_id);
                 }
-                proposals::approve(&tx, job.proposal_id, &stamp)?;
+                proposals::approve(&port_tx(&tx), job.proposal_id, &stamp)?;
             }
             PlanReviewDecision::Revise => {
-                proposals::send_back(&tx, job.proposal_id, &stamp)?;
+                proposals::send_back(&port_tx(&tx), job.proposal_id, &stamp)?;
                 let mut reasons = apply.revise_reasons.clone();
                 reasons.extend(over_limit.as_ref().map(|over| over.reason.clone()));
                 reasons.extend(replacement.iter().cloned());
@@ -815,7 +841,7 @@ impl PlanReviewStore for SqliteQueue {
                     ask.question.push_str(problem);
                 }
                 ask.validate()?;
-                applied.ask = Some(insert_ask(&tx, &ask)?);
+                applied.ask = Some(insert_ask(&port_tx(&tx), &ask)?);
                 super::replans::proposal_moved(
                     &tx,
                     job.proposal_id,
@@ -993,7 +1019,7 @@ impl PlanReviewStore for SqliteQueue {
                     },
                 )?;
                 Ok(RevisingProposal {
-                    proposal: proposals::read(&tx, id)?,
+                    proposal: proposals::read(&port_tx(&tx), id)?,
                     reasons: reasons
                         .map(|text| serde_json::from_str(&text))
                         .transpose()?
@@ -1078,7 +1104,7 @@ impl PlanReviewStore for SqliteQueue {
         )?;
         let now = self.generators.clock.now();
         for &ask in answers {
-            deliver_ask_in(&tx, ask, workspace, now)?;
+            deliver_ask_in(&port_tx(&tx), ask, workspace, now)?;
         }
         tx.commit()?;
         Ok(())
@@ -1194,13 +1220,13 @@ impl PlanReviewStore for SqliteQueue {
                 [id],
                 |r| r.get(0),
             )?;
-            let current = proposals::read(&tx, id)?;
+            let current = proposals::read(&port_tx(&tx), id)?;
             let ended = if live {
                 proposal::accept(current, stamp.clone())?
             } else {
                 proposal::cancel(current, stamp.clone())?
             };
-            proposals::save(&tx, &ended)?;
+            proposals::save(&port_tx(&tx), &ended)?;
             set_hold(&tx, id, None)?;
             if let Ok(anchor) = anchor(&tx, id) {
                 event(
@@ -1226,14 +1252,16 @@ impl PlanReviewStore for SqliteQueue {
             )?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        ids.into_iter().map(|id| read_ask(&self.conn, id)).collect()
+        ids.into_iter()
+            .map(|id| read_ask(&*self.conn, id))
+            .collect()
     }
 
     fn decide_plan(&mut self, ask_id: AskId) -> Result<Option<PlanDecided>> {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
         let tx = self.write_tx("decide_plan")?;
-        let ask = read_ask(&tx, ask_id)?;
+        let ask = read_ask(&port_tx(&tx), ask_id)?;
         ensure!(
             ask.kind == AskKind::ApprovePlan,
             "ask {ask_id} is not an approve_plan ask"
@@ -1255,7 +1283,7 @@ impl PlanReviewStore for SqliteQueue {
         if !plan_answer_applies(&tx, &ask, &text)? {
             close(&tx)?;
             // Nothing else names the ask: `ask_closed` ends its wait (task 568).
-            record_ask_closed(&tx, &ask)?;
+            record_ask_closed(&port_tx(&tx), &ask)?;
             tx.commit()?;
             return Ok(None);
         }
@@ -1268,9 +1296,9 @@ impl PlanReviewStore for SqliteQueue {
                 // the answer (ADR-t1521-2 decision 4).
                 let problems = super::replans::replacement_problems(&tx, proposal_id, &[])?;
                 if problems.is_empty() {
-                    proposals::approve(&tx, proposal_id, &stamp)?
+                    proposals::approve(&port_tx(&tx), proposal_id, &stamp)?
                 } else {
-                    let sent = proposals::send_back(&tx, proposal_id, &stamp)?;
+                    let sent = proposals::send_back(&port_tx(&tx), proposal_id, &stamp)?;
                     let mut reasons = vec![format!(
                         "a person answered ready to ask {ask_id}, but the replacement plan no longer holds"
                     )];
@@ -1287,7 +1315,7 @@ impl PlanReviewStore for SqliteQueue {
                 }
             }
             PlanAnswer::SendBack(reason) => {
-                let sent = proposals::send_back(&tx, proposal_id, &stamp)?;
+                let sent = proposals::send_back(&port_tx(&tx), proposal_id, &stamp)?;
                 let mut reasons = vec![plan_review::person_send_back_reason(
                     ask_id,
                     reason.as_deref(),
@@ -1313,8 +1341,9 @@ impl PlanReviewStore for SqliteQueue {
                     &format!("a person canceled proposal {proposal_id} (ask {ask_id})"),
                     now,
                 )?;
-                let canceled = proposal::cancel(proposals::read(&tx, proposal_id)?, stamp.clone())?;
-                proposals::save(&tx, &canceled)?;
+                let canceled =
+                    proposal::cancel(proposals::read(&port_tx(&tx), proposal_id)?, stamp.clone())?;
+                proposals::save(&port_tx(&tx), &canceled)?;
                 for &task_id in canceled.task_ids() {
                     if read_task(&tx, task_id)?.status() == TaskStatus::Submitted {
                         cancel_task(
@@ -1325,7 +1354,7 @@ impl PlanReviewStore for SqliteQueue {
                         )?;
                     }
                 }
-                proposals::read(&tx, proposal_id)?
+                proposals::read(&port_tx(&tx), proposal_id)?
             }
         };
         close(&tx)?;
@@ -1401,7 +1430,9 @@ impl PlanReviewStore for SqliteQueue {
             )?
             .query_map([i64::try_from(limit)?], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        ids.into_iter().map(|id| read_ask(&self.conn, id)).collect()
+        ids.into_iter()
+            .map(|id| read_ask(&*self.conn, id))
+            .collect()
     }
 }
 

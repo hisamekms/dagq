@@ -17,15 +17,11 @@ use super::source;
 /// are store modules that have not moved to the port yet.
 #[rustfmt::skip]
 const MAY_NAME_RUSQLITE: &[&str] = &[
-    "src/infrastructure/asks.rs",
     "src/infrastructure/draft_planners.rs",
     "src/infrastructure/finding_planners.rs",
-    "src/infrastructure/follow_up_membership.rs",
     "src/infrastructure/goal_reviews.rs",
-    "src/infrastructure/plan_requests.rs",
     "src/infrastructure/plan_reviews.rs",
     "src/infrastructure/planners.rs",
-    "src/infrastructure/proposals.rs",
     "src/infrastructure/related.rs",
     "src/infrastructure/replan_apply.rs",
     "src/infrastructure/replans.rs",

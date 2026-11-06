@@ -213,7 +213,7 @@ pub(super) fn close_goal_in(
     goal::check_follow_ups(
         goal_id,
         verdict,
-        &super::follow_up_membership::source_follow_ups_port(conn, goal_id)?,
+        &super::follow_up_membership::source_follow_ups(conn, goal_id)?,
     )?;
     // A broken replacement record is never resolved (ADR-t1521-2
     // decision 5): the replaced task's own work did not land.
@@ -415,7 +415,7 @@ pub(super) fn read_lint_input(conn: &impl SqlRead, targets: &[TaskId]) -> Result
         .collect();
     let mut membership_gaps = BTreeMap::new();
     for task in &targets {
-        if let Some(gap) = super::follow_up_membership::membership_gap_port(conn, task.id())? {
+        if let Some(gap) = super::follow_up_membership::membership_gap(conn, task.id())? {
             membership_gaps.insert(task.id(), gap);
         }
     }
@@ -1054,7 +1054,7 @@ pub(super) fn apply_transition(
         // A person's bypass takes a follow_up past plan review only with a
         // current membership judgement, like submit (ADR-t1504-2 decision
         // 7); a submitted one too, as plan review is the other check.
-        super::follow_up_membership::check_judged_port(conn, &[task_id], true)?;
+        super::follow_up_membership::check_judged(conn, &[task_id], true)?;
     }
     let task = task::transition(task, action, has_unfinished_run(conn, task_id)?)?;
     // `status=?3` only detects a concurrent change; the domain decided the move.
@@ -1142,7 +1142,7 @@ pub(super) fn check_authorized(
 pub(super) fn task_authorization(conn: &impl SqlRead, task: TaskId) -> Result<TaskAuthorization> {
     Ok(TaskAuthorization {
         status: read_task(conn, task)?.status(),
-        proposal: super::proposals::task_proposal_port(conn, task)?,
+        proposal: super::proposals::task_proposal(conn, task)?,
     })
 }
 
@@ -1425,7 +1425,7 @@ impl<T: EventTx> Store<'_, T> {
         check_authorized(tx, task_id, authorized)?;
         super::replans::check_task_step(tx, task_id, GuardedStep::Edit)?;
         let role = actor_role(tx)?;
-        super::follow_up_membership::check_set_goal_port(tx, task_id, goal_id, role)?;
+        super::follow_up_membership::check_set_goal(tx, task_id, goal_id, role)?;
         let by = task::MovedBy::of(role);
         let result = set_goal_in(tx, task_id, goal_id, &self.generators.clock.timestamp(), by)?;
 
@@ -1659,7 +1659,7 @@ impl<T: EventTx> Store<'_, T> {
         let old = read_goal(tx, goal_id)?;
         // The event keeps the goal before the edit, which consumes it.
         let old_json = serde_json::to_value(&old)?;
-        let old_version = super::follow_up_membership::acceptance_version_port(tx, goal_id)?;
+        let old_version = super::follow_up_membership::acceptance_version(tx, goal_id)?;
         // A change of priority records who set it (ADR-t1975-1 decision 3).
         // Only a person changes a person's (ADR-t1975-1 decision 3).
         let priority_by = match edit.priority {
@@ -1698,7 +1698,7 @@ impl<T: EventTx> Store<'_, T> {
             // `new` keeps the setter of the priority before the edit; who
             // set it is the stored one (for the measurement's fold).
             json!({"old": old_json, "new": new, "old_acceptance_version": old_version,
-                "new_acceptance_version": super::follow_up_membership::acceptance_version_port(tx, goal_id)?,
+                "new_acceptance_version": super::follow_up_membership::acceptance_version(tx, goal_id)?,
                 "priority_by": priority_by.as_str()}),
         )?;
         let result = read_goal(tx, goal_id)?;
@@ -1947,7 +1947,7 @@ impl<T: SqlRead> Store<'_, T> {
             .map_or((None, None), |cancel| (cancel.duplicate_of, cancel.reason));
         let duplicate_reasons = duplicates_of(tx, task_id)?;
         let duplicates = duplicate_reasons.keys().copied().collect();
-        let membership_judgements = super::follow_up_membership::judgements_port(tx, task_id)?;
+        let membership_judgements = super::follow_up_membership::judgements(tx, task_id)?;
         let origin = super::draft_planners::task_origin_port(tx, task_id)?;
         let follow_up_drafts = super::draft_planners::follow_up_drafts_port(tx, task_id)?;
         let revisit = super::draft_planners::read_revisit_port(tx, task_id)?;
@@ -1957,7 +1957,7 @@ impl<T: SqlRead> Store<'_, T> {
             "SELECT * FROM asks WHERE task_id=?1
                  OR run_id IN (SELECT id FROM task_runs WHERE task_id=?1) ORDER BY id",
             sql_params![task_id],
-            super::asks::ask_row_port,
+            super::asks::ask_row,
         )?;
 
         Ok(TaskDetail {
@@ -2092,9 +2092,8 @@ impl<T: SqlRead> Store<'_, T> {
     pub(super) fn show_goal(&mut self, goal_id: GoalId) -> Result<GoalDetail> {
         let tx = self.tx;
         let goal = read_goal(tx, goal_id)?;
-        let acceptance_version = super::follow_up_membership::acceptance_version_port(tx, goal_id)?;
-        let follow_up_memberships =
-            super::follow_up_membership::goal_memberships_port(tx, goal_id)?;
+        let acceptance_version = super::follow_up_membership::acceptance_version(tx, goal_id)?;
+        let follow_up_memberships = super::follow_up_membership::goal_memberships(tx, goal_id)?;
         let tasks = tx.query_map(
             "SELECT t.id, t.title, t.status, t.priority, t.priority_by,
                  g.priority AS goal_priority, g.priority_by AS goal_priority_by

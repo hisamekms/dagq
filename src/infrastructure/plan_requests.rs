@@ -5,17 +5,23 @@
 //! (`asks.request_id`). Opening a planner is one write transaction that
 //! re-checks the request first, so two supervisors never open one for the
 //! same request. A request's events are the queue's.
-use super::sql_dialect::{JsonType, json_field};
-use super::sql_exec::{OptionalRow, sql_params};
-use super::store_writes::{self, EventTx};
+use super::sql_dialect::JsonType;
+use super::sql_exec::{
+    OptionalRow, SqlError, SqlRead, SqlResult, SqlRow, SqlWrite, ValueKind, sql_params,
+};
+use super::store_rows::{enum_col, event_row, json_col};
+use super::store_writes::EventTx;
+use super::store_writes::record_queue_event_in;
+
+use super::store_writes;
 use crate::domain::event_kind::EventKind;
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+
 use serde_json::json;
 
 use super::{
     asks::{ask_row, read_ask},
-    sqlite::{SqliteQueue, event_row, record_queue_event_in},
+    sqlite::SqliteQueue,
 };
 use crate::application::{PlanRequestStore, PlannerAnswerRoute, RequestPlannerStart};
 use crate::domain::{
@@ -132,7 +138,7 @@ pub(super) const REVISE_GOAL_WAIT_ENDED: &str = concat!(
 /// that is no longer with the planner. A closed operation whose restore
 /// failed that goes on to the planner again gets a new request
 /// ([`renew_declined`]) rather than this one back.
-fn targets() -> String {
+fn targets(conn: &impl SqlRead) -> String {
     format!(concat!("SELECT r.id FROM plan_requests r WHERE r.status='open'
     AND (r.replan_operation_id IS NULL OR EXISTS(SELECT 1 FROM replan_operations o
         WHERE o.id=r.replan_operation_id AND o.snapshot_id IS NOT NULL
@@ -156,9 +162,9 @@ fn targets() -> String {
              OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id
                  AND m.task_id={ref_id}))
         WHERE {ref_kind}='task')"),
-        reopened_proposal = json_field("d.material", "$.proposal_id", JsonType::Integer),
-        ref_id = json_field("j.value", "$.id", JsonType::Integer),
-        ref_kind = json_field("j.value", "$.kind", JsonType::Text),
+        reopened_proposal = conn.dialect().json_field("d.material", "$.proposal_id", JsonType::Integer),
+        ref_id = conn.dialect().json_field("j.value", "$.id", JsonType::Integer),
+        ref_kind = conn.dialect().json_field("j.value", "$.kind", JsonType::Text),
     )
 }
 
@@ -174,10 +180,11 @@ impl SqliteQueue {
         request.validate()?;
         let now = self.generators.clock.now();
         let tx = self.write_tx("record_plan_request")?;
-        let id = RequestId::new(tx.insert_id(
+        let id = RequestId::new(SqlWrite::insert_id(
+            &tx,
             "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
                created_at, updated_at, priority) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7)",
-            params![
+            sql_params![
                 request.text,
                 request.note,
                 serde_json::to_string(&request.refs)?,
@@ -205,52 +212,55 @@ impl SqliteQueue {
     /// The request `request`, whatever its status; a missing one is an
     /// error.
     pub fn request_by_id(&self, request: RequestId) -> Result<PlanRequest> {
-        read_request(&self.conn, request)
+        read_request(&*self.conn, request)
     }
 
     /// The requests, oldest first: the `open` ones, or every one with
     /// `all`.
     pub fn plan_requests(&self, all: bool) -> Result<Vec<PlanRequest>> {
-        let ids: Vec<RequestId> = self
-            .conn
-            .prepare(if all {
+        let ids: Vec<RequestId> = SqlRead::query_map(
+            &*self.conn,
+            if all {
                 "SELECT id FROM plan_requests ORDER BY id"
             } else {
                 "SELECT id FROM plan_requests WHERE status='open' ORDER BY id"
-            })?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+            },
+            sql_params![],
+            |r| r.get(0),
+        )?;
         ids.into_iter()
-            .map(|id| read_request(&self.conn, id))
+            .map(|id| read_request(&*self.conn, id))
             .collect()
     }
 
     /// The `open` requests waiting for a planner of the runtime's
     /// ([`targets`]), oldest first.
     pub fn planner_requests(&self) -> Result<Vec<PlanRequest>> {
-        let ids: Vec<RequestId> = self
-            .conn
-            .prepare(&format!("{} ORDER BY r.id", targets()))?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let ids: Vec<RequestId> = SqlRead::query_map(
+            &*self.conn,
+            &format!("{} ORDER BY r.id", targets(&*self.conn)),
+            sql_params![],
+            |r| r.get(0),
+        )?;
         ids.into_iter()
-            .map(|id| read_request(&self.conn, id))
+            .map(|id| read_request(&*self.conn, id))
             .collect()
     }
 
     /// The asks about `request`, oldest first: its planners' questions.
     pub fn request_asks(&self, request: RequestId) -> Result<Vec<Ask>> {
-        Ok(self
-            .conn
-            .prepare("SELECT * FROM asks WHERE request_id=?1 ORDER BY id")?
-            .query_map([request], ask_row)?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(SqlRead::query_map(
+            &*self.conn,
+            "SELECT * FROM asks WHERE request_id=?1 ORDER BY id",
+            sql_params![request],
+            ask_row,
+        )?)
     }
 
     /// The planner of the runtime's open for `request`, if any: the one
     /// that may decline it.
     pub fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
-        open_planner_of(&self.conn, request).map(|planner| planner.map(|planner| planner.id))
+        open_planner_of(&*self.conn, request).map(|planner| planner.map(|planner| planner.id))
     }
 
     /// Decline the `open` `request` with `reason` (ADR-t1394-1 decision 6):
@@ -325,9 +335,10 @@ impl PlanRequestStore for SqliteQueue {
         let now = self.generators.clock.now();
         let tx = self.write_tx("open_request_planner")?;
         let eligible = match answer {
-            None => tx.query_row(
-                &format!("SELECT EXISTS({} AND r.id=?1)", targets()),
-                [request],
+            None => SqlRead::query_row(
+                &tx,
+                &format!("SELECT EXISTS({} AND r.id=?1)", targets(&tx)),
+                sql_params![request],
                 |r| r.get(0),
             )?,
             // The answer is routed again as it is now: answered, not closed
@@ -339,16 +350,18 @@ impl PlanRequestStore for SqliteQueue {
             // request that replans the same goal.
             Some(ask) => {
                 let ask = read_ask(&tx, ask)?;
-                super::draft_planners::answer_request(&tx, &ask)? == Some(request)
-                    && super::draft_planners::route_of(&tx, &ask)? == PlannerAnswerRoute::NewPlanner
+                super::draft_planners::answer_request_port(&tx, &ask)? == Some(request)
+                    && super::draft_planners::route_of_port(&tx, &ask)?
+                        == PlannerAnswerRoute::NewPlanner
                     && open_planner_of(&tx, request)?.is_none()
-                    && !tx.query_row(
+                    && !SqlRead::query_row(
+                        &tx,
                         concat!(
                             "SELECT ",
                             goal_replanned_elsewhere!(),
                             " FROM plan_requests r WHERE r.id=?1"
                         ),
-                        [request],
+                        sql_params![request],
                         |r| r.get::<_, bool>(0),
                     )?
             }
@@ -372,9 +385,10 @@ impl PlanRequestStore for SqliteQueue {
                 return Ok(RequestPlannerStart::Exhausted { attempts });
             }
         };
-        let planner = PlannerId::new(tx.insert_id(
+        let planner = PlannerId::new(SqlWrite::insert_id(
+            &tx,
             "INSERT INTO planners(origin, request_id, created_at) VALUES (?1, ?2, ?3)",
-            params![PlannerOrigin::Runtime.as_str(), request, now],
+            sql_params![PlannerOrigin::Runtime.as_str(), request, now],
         )?);
         super::replans::planner_opened(&tx, request, planner, now)?;
         record_queue_event_in(
@@ -397,7 +411,7 @@ impl PlanRequestStore for SqliteQueue {
     }
 
     fn plan_request(&self, request: RequestId) -> Result<PlanRequest> {
-        read_request(&self.conn, request)
+        read_request(&*self.conn, request)
     }
 
     fn request_asks(&self, request: RequestId) -> Result<Vec<Ask>> {
@@ -405,10 +419,13 @@ impl PlanRequestStore for SqliteQueue {
     }
 
     fn event_by_id(&self, id: EventId) -> Result<Option<RunEvent>> {
-        Ok(self
-            .conn
-            .query_row("SELECT * FROM run_events WHERE id=?1", [id], event_row)
-            .optional()?)
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            "SELECT * FROM run_events WHERE id=?1",
+            sql_params![id],
+            event_row,
+        )
+        .optional()?)
     }
 
     fn replan_brief(
@@ -529,6 +546,30 @@ pub(super) fn record_missing_spike_requests(tx: &impl EventTx, now: i64) -> Resu
     Ok(recorded)
 }
 
+/// Decline the `open` request of replanning operation `op` that `outcome`
+/// closes with no planner of the runtime's open for it (none was opened,
+/// or each one ended without deciding it), before the operation's
+/// snapshot or after it, on `conn` inside the move's own transaction: no
+/// planner will be opened for it (the operation is no longer with the
+/// planner), and `declined` with the operation's outcome as the reason
+/// tells the person who asked (`request_declined` by the runtime, naming
+/// the operation, which [`declined_at_close`] reads). Whether it declined
+/// it: a request already ended is left as it is.
+pub(super) fn decline_undecided(
+    conn: &impl EventTx,
+    request: RequestId,
+    op: crate::domain::ReplanId,
+    outcome: crate::domain::task_replan::ReplanStatus,
+    why: &str,
+    now: i64,
+) -> Result<bool> {
+    let reason = format!(
+        "replan operation {op} ended {} with no planner of the runtime's open for it: {why}",
+        outcome.as_str()
+    );
+    decline_for_operation(conn, request, op, outcome, &reason, None, now)
+}
+
 /// Decline, on `conn` inside the transaction that closes planner
 /// `planner`'s row, the `open` request it was opened for when the request's
 /// replanning operation closed while it was open and it ended without
@@ -539,7 +580,7 @@ pub(super) fn record_missing_spike_requests(tx: &impl EventTx, now: i64) -> Resu
 /// as [`decline_undecided`]'s does. The request declined, if any: one of
 /// an operation still open is left to the planners that follow.
 pub(super) fn decline_after_planner(
-    conn: &Connection,
+    conn: &impl EventTx,
     planner: PlannerId,
     now: i64,
 ) -> Result<Option<RequestId>> {
@@ -550,7 +591,7 @@ pub(super) fn decline_after_planner(
              JOIN plan_requests r ON r.id=p.request_id AND r.status='open'
              JOIN replan_operations o ON o.id=r.replan_operation_id
              WHERE p.id=?1",
-            [planner],
+            sql_params![planner],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
@@ -583,7 +624,7 @@ pub(super) fn decline_after_planner(
 /// declined it: a request already ended, and its asks, are left as they
 /// are.
 fn decline_for_operation(
-    conn: &Connection,
+    conn: &impl EventTx,
     request: RequestId,
     op: crate::domain::ReplanId,
     outcome: crate::domain::task_replan::ReplanStatus,
@@ -591,26 +632,60 @@ fn decline_for_operation(
     ended_planner: Option<PlannerId>,
     now: i64,
 ) -> Result<bool> {
-    decline_for_operation_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        request,
-        op,
-        outcome,
-        reason,
-        ended_planner,
-        now,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+    if read_request(conn, request)?.status != RequestStatus::Open {
+        return Ok(false);
+    }
+    set_status(conn, request, RequestStatus::Declined, reason, now)?;
+    let closed = super::asks::close_request_asks_in(conn, request, reason, now)?;
+    let mut payload = json!({
+        "request_id": request,
+        "planner_id": null,
+        "reason": reason,
+        "by": "runtime",
+        "replan_operation_id": op,
+        "replan_status": outcome,
+        "closed_asks": closed,
+    });
+    if let Some(planner) = ended_planner {
+        payload["ended_planner_id"] = json!(planner);
+    }
+    record_queue_event_in(conn, EventKind::RequestDeclined, &payload)?;
+    Ok(true)
 }
 
 /// Whether a planner of the runtime's is open for `request` now, read on
 /// `conn`: one that is is left to end the request.
-pub(super) fn planner_open(conn: &Connection, request: RequestId) -> Result<bool> {
-    planner_open_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        request,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+pub(super) fn planner_open(conn: &impl SqlRead, request: RequestId) -> Result<bool> {
+    Ok(open_planner_of(conn, request)?.is_some())
+}
+
+/// Whether the runtime declined `request` as replanning operation `op`
+/// closed undecided ([`decline_undecided`], [`decline_after_planner`]),
+/// read on `conn` from its `request_declined`: such a request is renewed
+/// when the operation goes on to the planner again ([`renew_declined`]),
+/// one its planner submitted, declined or ran out of planners on is not.
+pub(super) fn declined_at_close(
+    conn: &impl SqlRead,
+    request: RequestId,
+    op: crate::domain::ReplanId,
+) -> Result<bool> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM plan_requests r JOIN run_events e ON e.kind=?3
+             AND {}=r.id
+             AND {}='runtime'
+             AND {}=?2
+         WHERE r.id=?1 AND r.status='declined')",
+            conn.dialect()
+                .json_field("e.payload", "$.request_id", JsonType::Integer),
+            conn.dialect()
+                .json_field("e.payload", "$.by", JsonType::Text),
+            conn.dialect()
+                .json_field("e.payload", "$.replan_operation_id", JsonType::Integer)
+        ),
+        sql_params![request, op, EventKind::RequestDeclined.as_str()],
+        |r| r.get(0),
+    )?)
 }
 
 /// Record, on `conn` inside the move's own transaction, the new request of
@@ -622,57 +697,126 @@ pub(super) fn planner_open(conn: &Connection, request: RequestId) -> Result<bool
 /// `request_recorded` naming the request it renews. The ended request
 /// keeps its outcome, so one planner is opened, for the new one.
 pub(super) fn renew_declined(
-    conn: &Connection,
+    conn: &impl EventTx,
     ended: RequestId,
     op: crate::domain::ReplanId,
     now: i64,
 ) -> Result<RequestId> {
-    renew_declined_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        ended,
-        op,
-        now,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+    let old = read_request(conn, ended)?;
+    let id = RequestId::new(conn.insert_id(
+        "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
+           created_at, updated_at, priority, replan_operation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7, ?8)",
+        sql_params![
+            old.text,
+            old.note,
+            serde_json::to_string(&old.refs)?,
+            old.requested_by,
+            old.requested_by_id,
+            now,
+            old.priority.map(Priority::as_i64),
+            op
+        ],
+    )?);
+    record_queue_event_in(
+        conn,
+        EventKind::RequestRecorded,
+        &json!({
+            "request_id": id,
+            "refs": old.refs,
+            "priority": old.priority,
+            "requested_by": old.requested_by,
+            "replan_operation_id": op,
+            "renews_request": ended,
+        }),
+    )?;
+    Ok(id)
 }
 
 /// The request `id` with its proposals and the number of its planners; a
 /// missing one is an error.
-pub(super) fn read_request(conn: &Connection, id: RequestId) -> Result<PlanRequest> {
-    read_request_port(&crate::infrastructure::sql_exec::sqlite::port_tx(conn), id)
-        .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+pub(super) fn read_request(conn: &impl SqlRead, id: RequestId) -> Result<PlanRequest> {
+    let mut request = conn
+        .query_row(
+            "SELECT * FROM plan_requests WHERE id=?1",
+            sql_params![id],
+            request_row,
+        )
+        .optional()?
+        .with_context(|| format!("request {id} does not exist"))?;
+    request.proposals = conn.query_map(
+        "SELECT proposal_id FROM plan_request_proposals WHERE request_id=?1
+             ORDER BY created_at, proposal_id",
+        sql_params![id],
+        |r| r.get(0),
+    )?;
+    let planners: i64 = conn.query_row(
+        "SELECT count(*) FROM planners WHERE request_id=?1 AND answer_wait_at IS NULL",
+        sql_params![id],
+        |r| r.get(0),
+    )?;
+    request.planners = usize::try_from(planners)?;
+    Ok(request)
+}
+
+fn request_row(r: &SqlRow<'_>) -> SqlResult<PlanRequest> {
+    Ok(PlanRequest {
+        id: r.get("id")?,
+        text: r.get("text")?,
+        note: r.get("note")?,
+        refs: json_col(r, "refs")?,
+        priority: r
+            .get::<_, Option<i64>>("priority")?
+            .map(Priority::from_i64)
+            .transpose()
+            .map_err(|error| SqlError::Conversion {
+                index: 0,
+                stored: ValueKind::Integer,
+                cause: Box::new(error),
+            })?,
+        requested_by: r.get("requested_by")?,
+        requested_by_id: r.get("requested_by_id")?,
+        status: enum_col(r, "status")?,
+        status_reason: r.get("status_reason")?,
+        proposals: Vec::new(),
+        planners: 0,
+        spike_task: r.get("spike_task_id")?,
+        replan_operation: r.get("replan_operation_id")?,
+        created_at: r.get("created_at")?,
+        updated_at: r.get("updated_at")?,
+    })
 }
 
 fn set_status(
-    conn: &Connection,
+    conn: &impl EventTx,
     request: RequestId,
     to: RequestStatus,
     reason: &str,
     now: i64,
 ) -> Result<()> {
-    set_status_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        request,
-        to,
-        reason,
-        now,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+    conn.execute(
+        "UPDATE plan_requests SET status=?2, status_reason=?3, updated_at=?4 WHERE id=?1",
+        sql_params![request, to.as_str(), reason, now],
+    )?;
+    Ok(())
 }
 
-fn open_planner_of(conn: &Connection, request: RequestId) -> Result<Option<PlannerSession>> {
-    open_planner_of_port(
-        &crate::infrastructure::sql_exec::sqlite::port_tx(conn),
-        request,
-    )
-    .map_err(crate::infrastructure::sql_exec::sqlite::native_error)
+fn open_planner_of(conn: &impl SqlRead, request: RequestId) -> Result<Option<PlannerSession>> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM planners WHERE origin='runtime' AND closed_at IS NULL
+             AND request_id=?1 ORDER BY id DESC LIMIT 1",
+            sql_params![request],
+            super::planners::planner_row_port,
+        )
+        .optional()?)
 }
 
 /// The planner of the runtime's open for `request` that an answer may
 /// still go to: not one asked to exit because only a person's answer was
 /// left (ADR-t1704-1 decision 2), whose answer waits for a new planner
 /// once its row is closed.
-fn answering_planner_of(conn: &Connection, request: RequestId) -> Result<Option<PlannerSession>> {
+fn answering_planner_of(conn: &impl SqlRead, request: RequestId) -> Result<Option<PlannerSession>> {
     Ok(open_planner_of(conn, request)?.filter(|planner| planner.answer_wait_at.is_none()))
 }
 
@@ -680,7 +824,7 @@ fn answering_planner_of(conn: &Connection, request: RequestId) -> Result<Option<
 /// (ADR-t1394-1 decision 7): the planner of the runtime's open for it;
 /// else a new planner while the request is still `open`; else closed by
 /// the supervisor (it was proposed, declined or ran out).
-pub(super) fn route_of(conn: &Connection, request: RequestId) -> Result<PlannerAnswerRoute> {
+pub(super) fn route_of(conn: &impl SqlRead, request: RequestId) -> Result<PlannerAnswerRoute> {
     if let Some(planner) = answering_planner_of(conn, request)? {
         return Ok(PlannerAnswerRoute::Planner(Box::new(planner)));
     }
@@ -698,7 +842,10 @@ pub(super) fn route_of(conn: &Connection, request: RequestId) -> Result<PlannerA
 /// for the request; else a new planner for it carrying the answer, even
 /// when the request is no longer `open` (proposed, declined or out of
 /// planners), so the draft is decided.
-pub(super) fn draft_route_of(conn: &Connection, request: RequestId) -> Result<PlannerAnswerRoute> {
+pub(super) fn draft_route_of(
+    conn: &impl SqlRead,
+    request: RequestId,
+) -> Result<PlannerAnswerRoute> {
     Ok(match answering_planner_of(conn, request)? {
         Some(planner) => PlannerAnswerRoute::Planner(Box::new(planner)),
         None => PlannerAnswerRoute::NewPlanner,
@@ -717,20 +864,19 @@ pub(super) fn draft_route_of(conn: &Connection, request: RequestId) -> Result<Pl
 /// request has ended otherwise since: the link records where the plan came
 /// from.
 pub(super) fn link_requests(
-    conn: &Connection,
+    conn: &impl EventTx,
     proposal: ProposalId,
     workspace: Option<&str>,
     previous: &[ProposalId],
     now: i64,
 ) -> Result<Vec<RequestId>> {
     let own: Vec<(PlannerId, RequestId)> = match workspace {
-        Some(workspace) => conn
-            .prepare(
-                "SELECT id, request_id FROM planners WHERE workspace_id=?1 AND origin='runtime'
+        Some(workspace) => conn.query_map(
+            "SELECT id, request_id FROM planners WHERE workspace_id=?1 AND origin='runtime'
                  AND closed_at IS NULL AND request_id IS NOT NULL ORDER BY id",
-            )?
-            .query_map([workspace], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?,
+            sql_params![workspace],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?,
         None => Vec::new(),
     };
     let mut linked = Vec::new();
@@ -758,27 +904,28 @@ pub(super) fn link_requests(
 /// the draft tasks of its goals included. An accepted proposal is not one
 /// carried on: new tasks for a goal it opened are another plan.
 pub(super) fn previous_proposals(
-    conn: &Connection,
+    conn: &impl SqlRead,
     submission: &Submission,
 ) -> Result<Vec<ProposalId>> {
     let mut named: Vec<ProposalId> = Vec::new();
     for task in &submission.tasks {
         named.extend(
-            conn.query_row("SELECT proposal_id FROM tasks WHERE id=?1", [task], |r| {
-                r.get::<_, Option<ProposalId>>(0)
-            })
+            conn.query_row(
+                "SELECT proposal_id FROM tasks WHERE id=?1",
+                sql_params![task],
+                |r| r.get::<_, Option<ProposalId>>(0),
+            )
             .optional()?
             .flatten(),
         );
     }
     for goal in &submission.goals {
-        let ids: Vec<Option<ProposalId>> = conn
-            .prepare(
-                "SELECT proposal_id FROM goals WHERE id=?1
+        let ids: Vec<Option<ProposalId>> = conn.query_map(
+            "SELECT proposal_id FROM goals WHERE id=?1
                  UNION SELECT proposal_id FROM tasks WHERE goal_id=?1 AND status='draft'",
-            )?
-            .query_map([goal], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+            sql_params![goal],
+            |r| r.get(0),
+        )?;
         named.extend(ids.into_iter().flatten());
     }
     named.sort();
@@ -787,7 +934,7 @@ pub(super) fn previous_proposals(
     for proposal in named {
         let accepted: bool = conn.query_row(
             "SELECT status='accepted' FROM proposals WHERE id=?1",
-            [proposal],
+            sql_params![proposal],
             |r| r.get(0),
         )?;
         if !accepted {
@@ -798,13 +945,14 @@ pub(super) fn previous_proposals(
 }
 
 /// The requests linked to a proposal of `previous`.
-fn carried_requests(conn: &Connection, previous: &[ProposalId]) -> Result<Vec<RequestId>> {
+fn carried_requests(conn: &impl SqlRead, previous: &[ProposalId]) -> Result<Vec<RequestId>> {
     let mut links = Vec::new();
     for &proposal in previous {
-        let requests: Vec<RequestId> = conn
-            .prepare("SELECT request_id FROM plan_request_proposals WHERE proposal_id=?1")?
-            .query_map([proposal], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+        let requests: Vec<RequestId> = conn.query_map(
+            "SELECT request_id FROM plan_request_proposals WHERE proposal_id=?1",
+            sql_params![proposal],
+            |r| r.get(0),
+        )?;
         links.extend(requests.into_iter().map(|request| (proposal, request)));
     }
     Ok(crate::domain::plan_review::carried_requests(
@@ -816,7 +964,7 @@ fn carried_requests(conn: &Connection, previous: &[ProposalId]) -> Result<Vec<Re
 /// `proposed` with `request_proposed` (with the planner that submitted it
 /// from the request, when one did).
 fn link_request(
-    conn: &Connection,
+    conn: &impl EventTx,
     request: RequestId,
     proposal: ProposalId,
     link: ProposalLink,
@@ -826,7 +974,7 @@ fn link_request(
     conn.execute(
         "INSERT OR IGNORE INTO plan_request_proposals(request_id, proposal_id, created_at)
          VALUES (?1, ?2, ?3)",
-        params![request, proposal, now],
+        sql_params![request, proposal, now],
     )?;
     if link == ProposalLink::Propose {
         let spike_task = read_request(conn, request)?.spike_task;
@@ -877,7 +1025,7 @@ impl crate::application::commands::requests::RequestStore for SqliteQueue {
     }
 
     fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
-        read_request(&self.conn, request)?;
+        read_request(&*self.conn, request)?;
         SqliteQueue::request_planner(self, request)
     }
 
@@ -891,226 +1039,4 @@ impl crate::application::commands::requests::RequestStore for SqliteQueue {
     ) -> Result<PlanRequest> {
         SqliteQueue::decline_request_choosing(self, request, reason, by, planner, continue_run)
     }
-}
-
-pub(super) fn renew_declined_port(
-    conn: &impl crate::infrastructure::store_writes::EventTx,
-    ended: RequestId,
-    op: crate::domain::ReplanId,
-    now: i64,
-) -> Result<RequestId> {
-    let old = read_request_port(conn, ended)?;
-    let id = RequestId::new(conn.insert_id(
-        "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
-           created_at, updated_at, priority, replan_operation_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7, ?8)",
-        crate::infrastructure::sql_exec::sql_params![
-            old.text,
-            old.note,
-            serde_json::to_string(&old.refs)?,
-            old.requested_by,
-            old.requested_by_id,
-            now,
-            old.priority.map(Priority::as_i64),
-            op
-        ],
-    )?);
-    crate::infrastructure::store_writes::record_queue_event_in(
-        conn,
-        EventKind::RequestRecorded,
-        &json!({
-            "request_id": id,
-            "refs": old.refs,
-            "priority": old.priority,
-            "requested_by": old.requested_by,
-            "replan_operation_id": op,
-            "renews_request": ended,
-        }),
-    )?;
-    Ok(id)
-}
-
-/// Whether the runtime declined `request` as replanning operation `op`
-/// closed undecided ([`decline_undecided`], [`decline_after_planner`]),
-/// read on `conn` from its `request_declined`: such a request is renewed
-/// when the operation goes on to the planner again ([`renew_declined`]),
-/// one its planner submitted, declined or ran out of planners on is not.
-pub(super) fn declined_at_close_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    request: RequestId,
-    op: crate::domain::ReplanId,
-) -> Result<bool> {
-    Ok(conn.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM plan_requests r JOIN run_events e ON e.kind=?3
-             AND {}=r.id
-             AND {}='runtime'
-             AND {}=?2
-         WHERE r.id=?1 AND r.status='declined')",
-            conn.dialect()
-                .json_field("e.payload", "$.request_id", JsonType::Integer),
-            conn.dialect()
-                .json_field("e.payload", "$.by", JsonType::Text),
-            conn.dialect()
-                .json_field("e.payload", "$.replan_operation_id", JsonType::Integer)
-        ),
-        crate::infrastructure::sql_exec::sql_params![
-            request,
-            op,
-            EventKind::RequestDeclined.as_str()
-        ],
-        |r| r.get(0),
-    )?)
-}
-
-/// Decline the `open` request of replanning operation `op` that `outcome`
-/// closes with no planner of the runtime's open for it (none was opened,
-/// or each one ended without deciding it), before the operation's
-/// snapshot or after it, on `conn` inside the move's own transaction: no
-/// planner will be opened for it (the operation is no longer with the
-/// planner), and `declined` with the operation's outcome as the reason
-/// tells the person who asked (`request_declined` by the runtime, naming
-/// the operation, which [`declined_at_close`] reads). Whether it declined
-/// it: a request already ended is left as it is.
-pub(super) fn decline_undecided_port(
-    conn: &impl crate::infrastructure::store_writes::EventTx,
-    request: RequestId,
-    op: crate::domain::ReplanId,
-    outcome: crate::domain::task_replan::ReplanStatus,
-    why: &str,
-    now: i64,
-) -> Result<bool> {
-    let reason = format!(
-        "replan operation {op} ended {} with no planner of the runtime's open for it: {why}",
-        outcome.as_str()
-    );
-    decline_for_operation_port(conn, request, op, outcome, &reason, None, now)
-}
-
-pub(super) fn planner_open_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    request: RequestId,
-) -> Result<bool> {
-    Ok(open_planner_of_port(conn, request)?.is_some())
-}
-
-pub(super) fn read_request_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    id: RequestId,
-) -> Result<PlanRequest> {
-    let mut request = conn
-        .query_row(
-            "SELECT * FROM plan_requests WHERE id=?1",
-            crate::infrastructure::sql_exec::sql_params![id],
-            request_row_port,
-        )
-        .optional()?
-        .with_context(|| format!("request {id} does not exist"))?;
-    request.proposals = conn.query_map(
-        "SELECT proposal_id FROM plan_request_proposals WHERE request_id=?1
-             ORDER BY created_at, proposal_id",
-        crate::infrastructure::sql_exec::sql_params![id],
-        |r| r.get(0),
-    )?;
-    let planners: i64 = conn.query_row(
-        "SELECT count(*) FROM planners WHERE request_id=?1 AND answer_wait_at IS NULL",
-        crate::infrastructure::sql_exec::sql_params![id],
-        |r| r.get(0),
-    )?;
-    request.planners = usize::try_from(planners)?;
-    Ok(request)
-}
-
-fn decline_for_operation_port(
-    conn: &impl crate::infrastructure::store_writes::EventTx,
-    request: RequestId,
-    op: crate::domain::ReplanId,
-    outcome: crate::domain::task_replan::ReplanStatus,
-    reason: &str,
-    ended_planner: Option<PlannerId>,
-    now: i64,
-) -> Result<bool> {
-    if read_request_port(conn, request)?.status != RequestStatus::Open {
-        return Ok(false);
-    }
-    set_status_port(conn, request, RequestStatus::Declined, reason, now)?;
-    let closed = super::asks::close_request_asks_in_port(conn, request, reason, now)?;
-    let mut payload = json!({
-        "request_id": request,
-        "planner_id": null,
-        "reason": reason,
-        "by": "runtime",
-        "replan_operation_id": op,
-        "replan_status": outcome,
-        "closed_asks": closed,
-    });
-    if let Some(planner) = ended_planner {
-        payload["ended_planner_id"] = json!(planner);
-    }
-    crate::infrastructure::store_writes::record_queue_event_in(
-        conn,
-        EventKind::RequestDeclined,
-        &payload,
-    )?;
-    Ok(true)
-}
-
-fn open_planner_of_port(
-    conn: &impl crate::infrastructure::sql_exec::SqlRead,
-    request: RequestId,
-) -> Result<Option<PlannerSession>> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM planners WHERE origin='runtime' AND closed_at IS NULL
-             AND request_id=?1 ORDER BY id DESC LIMIT 1",
-            crate::infrastructure::sql_exec::sql_params![request],
-            super::planners::planner_row_port,
-        )
-        .optional()?)
-}
-
-fn request_row_port(
-    r: &crate::infrastructure::sql_exec::SqlRow<'_>,
-) -> crate::infrastructure::sql_exec::SqlResult<PlanRequest> {
-    Ok(PlanRequest {
-        id: r.get("id")?,
-        text: r.get("text")?,
-        note: r.get("note")?,
-        refs: crate::infrastructure::store_rows::json_col(r, "refs")?,
-        priority: r
-            .get::<_, Option<i64>>("priority")?
-            .map(Priority::from_i64)
-            .transpose()
-            .map_err(
-                |error| crate::infrastructure::sql_exec::SqlError::Conversion {
-                    index: 0,
-                    stored: crate::infrastructure::sql_exec::ValueKind::Integer,
-                    cause: Box::new(error),
-                },
-            )?,
-        requested_by: r.get("requested_by")?,
-        requested_by_id: r.get("requested_by_id")?,
-        status: crate::infrastructure::store_rows::enum_col(r, "status")?,
-        status_reason: r.get("status_reason")?,
-        proposals: Vec::new(),
-        planners: 0,
-        spike_task: r.get("spike_task_id")?,
-        replan_operation: r.get("replan_operation_id")?,
-        created_at: r.get("created_at")?,
-        updated_at: r.get("updated_at")?,
-    })
-}
-
-fn set_status_port(
-    conn: &impl crate::infrastructure::store_writes::EventTx,
-    request: RequestId,
-    to: RequestStatus,
-    reason: &str,
-    now: i64,
-) -> Result<()> {
-    conn.execute(
-        "UPDATE plan_requests SET status=?2, status_reason=?3, updated_at=?4 WHERE id=?1",
-        crate::infrastructure::sql_exec::sql_params![request, to.as_str(), reason, now],
-    )?;
-    Ok(())
 }

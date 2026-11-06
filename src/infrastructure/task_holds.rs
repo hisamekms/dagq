@@ -16,6 +16,9 @@
 //! it settled in its own, so a release while `settling` is refused and a
 //! park after a release writes nothing.
 use super::sql_dialect::{JsonType, json_field};
+
+use super::sql_exec::sqlite::{native_error, port_tx, with_row};
+use super::store_writes::EventTx;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -358,14 +361,13 @@ impl SqliteQueue {
                     "SELECT * FROM asks WHERE run_id=?1 AND kind='decide' AND asked_by=?2
                      AND closed_at IS NULL ORDER BY id",
                 )?
-                .query_map(
-                    params![run.id(), crate::application::TRIAGE_ASKER],
-                    super::asks::ask_row,
-                )?
+                .query_map(params![run.id(), crate::application::TRIAGE_ASKER], |row| {
+                    with_row(row, super::asks::ask_row)
+                })?
                 .collect::<rusqlite::Result<_>>()?;
             for ask in &decides {
                 super::asks::close_by_runtime(
-                    &tx,
+                    &port_tx(&tx),
                     ask,
                     &format!("released from its hold by {by_role} with a new run: {why}"),
                     now,
@@ -612,10 +614,14 @@ fn ended_with_open_hold(conn: &Connection) -> Result<Vec<(TaskId, TaskStatus)>> 
 /// was still open and settling (a release or another settle that came
 /// first leaves it, and the caller writes nothing more).
 pub(super) fn settle_open(conn: &Connection, hold: HoldId, now: i64) -> Result<bool> {
+    settle_open_port(&port_tx(conn), hold, now).map_err(native_error)
+}
+
+pub(super) fn settle_open_port(conn: &impl EventTx, hold: HoldId, now: i64) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE task_holds SET settled_at=?2
          WHERE id=?1 AND released_at IS NULL AND settled_at IS NULL",
-        params![hold, now],
+        sql_params![hold, now],
     )? == 1)
 }
 
@@ -623,11 +629,11 @@ pub(super) fn settle_open(conn: &Connection, hold: HoldId, now: i64) -> Result<b
 /// or saved the run's work (ADR-t1521-2): its writer may still run in the
 /// worktree, so the run's rest is no safe wait until a look at the
 /// worktree finds none.
-fn park_blocked(conn: &Connection, run: &RunId) -> Result<bool> {
+fn park_blocked(conn: &impl crate::infrastructure::sql_exec::SqlRead, run: &RunId) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM replan_operations WHERE run_id=?1 AND status='blocked'
            AND return_phase IN ('pause_requested','quiescing','snapshotting'))",
-        [run],
+        sql_params![run],
         |r| r.get(0),
     )?)
 }
@@ -638,10 +644,13 @@ fn park_blocked(conn: &Connection, run: &RunId) -> Result<bool> {
 /// heartbeat gone old: a wrapper is dead only when its heartbeat is old
 /// and its process is gone, which the supervisor's park looks at, not the
 /// store.
-fn registered_writer(conn: &Connection, run: &RunId) -> Result<bool> {
+fn registered_writer(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    run: &RunId,
+) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM run_processes WHERE run_id=?1 AND exited_at IS NULL)",
-        [run],
+        sql_params![run],
         |r| r.get(0),
     )?)
 }
@@ -650,6 +659,14 @@ fn registered_writer(conn: &Connection, run: &RunId) -> Result<bool> {
 /// [`registered_writer`]), `checked` when the caller's park found the
 /// writer ended ([`task_hold::RestWriter`]).
 fn rest_writer(conn: &Connection, run: &RunId, checked: bool) -> Result<task_hold::RestWriter> {
+    rest_writer_port(&port_tx(conn), run, checked).map_err(native_error)
+}
+
+fn rest_writer_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    run: &RunId,
+    checked: bool,
+) -> Result<task_hold::RestWriter> {
     Ok(task_hold::RestWriter {
         park_blocked: park_blocked(conn, run)?,
         registered_process: registered_writer(conn, run)?,
@@ -668,10 +685,18 @@ pub(super) fn settle_at_rest_in(
     run: &RunId,
     writers_checked: bool,
 ) -> Result<bool> {
+    settle_at_rest_in_port(&port_tx(conn), run, writers_checked).map_err(native_error)
+}
+
+pub(super) fn settle_at_rest_in_port(
+    conn: &impl EventTx,
+    run: &RunId,
+    writers_checked: bool,
+) -> Result<bool> {
     let Some((task, status)) = conn
         .query_row(
             "SELECT task_id, status FROM task_runs WHERE id=?1",
-            [run],
+            sql_params![run],
             |r| Ok((r.get::<_, TaskId>(0)?, r.get::<_, String>(1)?)),
         )
         .optional()?
@@ -684,22 +709,22 @@ pub(super) fn settle_at_rest_in(
     let status: RunStatus = status.parse()?;
     let leased: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1)",
-        [run],
+        sql_params![run],
         |r| r.get(0),
     )?;
-    let latest = latest_run(conn, task)?.is_some_and(|(latest, _)| latest == *run);
-    let writer = rest_writer(conn, run, writers_checked)?;
+    let latest = latest_run_port(conn, task)?.is_some_and(|(latest, _)| latest == *run);
+    let writer = rest_writer_port(conn, run, writers_checked)?;
     if !task_hold::settles_at_rest(status, leased, latest, writer) {
         return Ok(false);
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs() as i64);
-    if !settle_open(conn, hold.hold, now)? {
+    if !settle_open_port(conn, hold.hold, now)? {
         return Ok(false);
     }
     if status.is_unfinished() {
-        enter_held_phase(conn, run, "hold_settled")?;
+        enter_held_phase_port(conn, run, "hold_settled")?;
     }
     Ok(true)
 }
@@ -708,8 +733,12 @@ pub(super) fn settle_at_rest_in(
 /// ([`run_phase::Phase::Held`]), which `cause` moved it to, unless it is
 /// the phase last recorded.
 pub(super) fn enter_held_phase(conn: &Connection, run: &RunId, cause: &str) -> Result<()> {
-    let events = super::runtime_store::run_events_of(conn, run)?;
-    record_phase(
+    enter_held_phase_port(&port_tx(conn), run, cause).map_err(native_error)
+}
+
+pub(super) fn enter_held_phase_port(conn: &impl EventTx, run: &RunId, cause: &str) -> Result<()> {
+    let events = super::runtime_store::run_events_of_port(conn, run)?;
+    record_phase_port(
         conn,
         run,
         run_phase::next_change(&events, run_phase::Phase::Held, cause),
@@ -740,13 +769,23 @@ fn record_phase(
     run: &RunId,
     change: Option<run_phase::PhaseChange>,
 ) -> Result<()> {
+    record_phase_port(&port_tx(conn), run, change).map_err(native_error)
+}
+
+fn record_phase_port(
+    conn: &impl EventTx,
+    run: &RunId,
+    change: Option<run_phase::PhaseChange>,
+) -> Result<()> {
     let Some(change) = change else {
         return Ok(());
     };
-    let task: TaskId = conn.query_row("SELECT task_id FROM task_runs WHERE id=?1", [run], |r| {
-        r.get(0)
-    })?;
-    event(
+    let task: TaskId = conn.query_row(
+        "SELECT task_id FROM task_runs WHERE id=?1",
+        sql_params![run],
+        |r| r.get(0),
+    )?;
+    super::store_writes::event(
         conn,
         task,
         Some(run),
@@ -1028,11 +1067,11 @@ fn discard_kept_of_ended_port(
                 .query_row(
                     "SELECT * FROM asks WHERE id=?1 AND closed_at IS NULL",
                     crate::infrastructure::sql_exec::sql_params![ask],
-                    super::asks::ask_row_port,
+                    super::asks::ask_row,
                 )
                 .optional()?
         {
-            super::asks::discard_by_runtime_port(
+            super::asks::discard_by_runtime(
                 conn,
                 &ask,
                 reason.as_str(),

@@ -532,7 +532,7 @@ impl SqliteQueue {
             crate::domain::AskKind::ApproveClose,
         ] {
             crate::infrastructure::asks::close_asks_in(
-                &tx,
+                &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
                 &id,
                 None,
                 kind,
@@ -593,7 +593,7 @@ impl SqliteQueue {
             crate::domain::AskKind::ApproveClose,
         ] {
             crate::infrastructure::asks::close_asks_in(
-                &tx,
+                &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
                 id,
                 None,
                 kind,
@@ -683,7 +683,7 @@ impl SqliteQueue {
             crate::domain::AskKind::ApproveClose,
         ] {
             crate::infrastructure::asks::close_asks_in(
-                &tx,
+                &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
                 id,
                 None,
                 ask,

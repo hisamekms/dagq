@@ -20,7 +20,7 @@ impl PlanningStore for SqliteQueue {
     }
 
     fn proposal_owner(&self, proposal: ProposalId) -> Result<Option<String>> {
-        super::proposals::owner_actor(&self.conn, proposal)
+        super::proposals::owner_actor(&*self.conn, proposal)
     }
 
     fn record_denial(&self, payload: Value) -> Result<()> {

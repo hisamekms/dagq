@@ -38,7 +38,7 @@ use std::{
 };
 
 #[cfg(test)]
-use crate::domain::{ActorRole, RequestId, plan_request::PriorityBy};
+use crate::domain::{ActorRole, RequestId, plan_request::PriorityBy, task};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior};
 use serde::de::DeserializeOwned;
@@ -52,7 +52,7 @@ use crate::{
         NoteQuery, Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, Submission,
         TagSet, Task, TaskAction, TaskAuthorization, TaskDetail, TaskEdit, TaskId, TaskRun,
         TaskStatus, TitlePrefixes, actor::ActorContext, cancel_reason::NewCancel,
-        plan_request::Creator, provider_switch::WorkerRoute, scope::validate_path_globs, task,
+        plan_request::Creator, provider_switch::WorkerRoute, scope::validate_path_globs,
         worker_model::WorkerTrial,
     },
     infrastructure::{
@@ -2457,6 +2457,7 @@ pub(super) fn event_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
 /// took from its old goal that the AI's `out_of_scope` judgement lets go
 /// of is recorded the same way with `dropped_on_move`, the value it had
 /// and `from_by: human` (ADR-t2373-1 decision 4).
+#[cfg(test)]
 pub(super) fn set_goal_in(
     conn: &Connection,
     task_id: TaskId,

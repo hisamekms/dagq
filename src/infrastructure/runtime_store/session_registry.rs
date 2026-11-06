@@ -100,7 +100,11 @@ impl SqliteQueue {
         )? == 1;
         if closed {
             crate::infrastructure::draft_planners::settle_bundle(&tx, id, now)?;
-            crate::infrastructure::plan_requests::decline_after_planner(&tx, id, now)?;
+            crate::infrastructure::plan_requests::decline_after_planner(
+                &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
+                id,
+                now,
+            )?;
             super::run_log::queue_event(&tx, EventKind::PlannerClosed, payload)?;
         }
         tx.commit()?;

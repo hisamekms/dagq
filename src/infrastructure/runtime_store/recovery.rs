@@ -34,7 +34,12 @@ impl SqliteQueue {
         Ok(self
             .conn
             .prepare("SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id")?
-            .query_map([run_id], crate::infrastructure::asks::ask_row)?
+            .query_map([run_id], |row| {
+                crate::infrastructure::sql_exec::sqlite::with_row(
+                    row,
+                    crate::infrastructure::asks::ask_row,
+                )
+            })?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1515,7 +1520,12 @@ impl SqliteQueue {
                     .query_row(
                         "SELECT * FROM asks WHERE id=?1 AND closed_at IS NULL",
                         params![ask],
-                        crate::infrastructure::asks::ask_row,
+                        |row| {
+                            crate::infrastructure::sql_exec::sqlite::with_row(
+                                row,
+                                crate::infrastructure::asks::ask_row,
+                            )
+                        },
                     )
                     .optional()?
             {
@@ -1530,7 +1540,7 @@ impl SqliteQueue {
                     ),
                 };
                 crate::infrastructure::asks::discard_by_runtime(
-                    &tx,
+                    &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
                     &ask,
                     reason.as_str(),
                     &note,
@@ -1652,10 +1662,12 @@ impl SqliteQueue {
                 "SELECT * FROM asks WHERE run_id=?1 AND kind='decide' AND asked_by=?2
                  AND closed_at IS NULL ORDER BY id",
             )?
-            .query_map(
-                params![id, TRIAGE_ASKER],
-                crate::infrastructure::asks::ask_row,
-            )?
+            .query_map(params![id, TRIAGE_ASKER], |row| {
+                crate::infrastructure::sql_exec::sqlite::with_row(
+                    row,
+                    crate::infrastructure::asks::ask_row,
+                )
+            })?
             .collect::<rusqlite::Result<_>>()?;
         let answer = format!(
             "carried over by hand ({} ran `dagq ready --inherit`): {}",
@@ -1663,7 +1675,12 @@ impl SqliteQueue {
             request.reason
         );
         for ask in &decides {
-            crate::infrastructure::asks::close_by_runtime(&tx, ask, &answer, now)?;
+            crate::infrastructure::asks::close_by_runtime(
+                &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
+                ask,
+                &answer,
+                now,
+            )?;
         }
         let closed_asks: Vec<AskId> = decides.iter().map(|ask| ask.id).collect();
         let branch = run.branch().map(str::to_owned);

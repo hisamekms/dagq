@@ -6,6 +6,10 @@
 //! `run_log` reads runs and events, `queue_records` serves reports and
 //! `planning_records` the lookups of the planning tables.
 //! The helpers they share stay here.
+use super::sql_exec::OptionalRow;
+use super::sql_exec::sqlite::{native_error, port_tx, with_row};
+use super::sql_exec::{SqlResult, SqlRow, sql_params};
+use super::store_writes::EventTx;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -369,6 +373,10 @@ pub(super) fn holder_pid(conn: &Connection, token: &LeaseToken) -> Result<u32> {
 }
 
 fn lease_row(r: &Row<'_>) -> rusqlite::Result<RunLease> {
+    with_row(r, lease_row_port)
+}
+
+fn lease_row_port(r: &SqlRow<'_>) -> SqlResult<RunLease> {
     Ok(RunLease {
         run_id: r.get(0)?,
         token: r.get(1)?,
@@ -379,24 +387,42 @@ fn lease_row(r: &Row<'_>) -> rusqlite::Result<RunLease> {
 
 /// The lease of run `id` on `conn`, if any.
 pub(super) fn run_lease_of(conn: &Connection, id: &RunId) -> Result<Option<RunLease>> {
+    run_lease_of_port(&port_tx(conn), id).map_err(native_error)
+}
+
+pub(super) fn run_lease_of_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: &RunId,
+) -> Result<Option<RunLease>> {
     Ok(conn
         .query_row(
             "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
-            [id],
-            lease_row,
+            sql_params![id],
+            lease_row_port,
         )
         .optional()?)
 }
 
 /// Every registered supervisor on `conn`, oldest registration first.
 pub(super) fn supervisors_of(conn: &Connection) -> Result<Vec<SupervisorRegistration>> {
-    Ok(conn
-        .prepare("SELECT * FROM supervisors ORDER BY started_at, rowid")?
-        .query_map([], supervisor_row)?
-        .collect::<rusqlite::Result<_>>()?)
+    supervisors_of_port(&port_tx(conn)).map_err(native_error)
+}
+
+pub(super) fn supervisors_of_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+) -> Result<Vec<SupervisorRegistration>> {
+    Ok(conn.query_map(
+        "SELECT * FROM supervisors ORDER BY started_at, rowid",
+        sql_params![],
+        supervisor_row_port,
+    )?)
 }
 
 fn supervisor_row(r: &Row<'_>) -> rusqlite::Result<SupervisorRegistration> {
+    with_row(r, supervisor_row_port)
+}
+
+fn supervisor_row_port(r: &SqlRow<'_>) -> SqlResult<SupervisorRegistration> {
     Ok(SupervisorRegistration {
         token: r.get("token")?,
         pid: r.get("pid")?,
@@ -405,7 +431,7 @@ fn supervisor_row(r: &Row<'_>) -> rusqlite::Result<SupervisorRegistration> {
         heartbeat_at: r.get("heartbeat_at")?,
         mode: r
             .get::<_, Option<String>>("mode")?
-            .map(|_| enum_col(r, "mode"))
+            .map(|_| super::store_rows::enum_col(r, "mode"))
             .transpose()?,
         workspace_id: r.get("workspace_id")?,
         binary_version: r.get("binary_version")?,
@@ -434,7 +460,7 @@ fn supervisor_row(r: &Row<'_>) -> rusqlite::Result<SupervisorRegistration> {
 
 /// A `*_source` column of `supervisors` (task 698); an unknown text reads
 /// as none.
-fn source(r: &Row<'_>, column: &str) -> rusqlite::Result<Option<SettingSource>> {
+fn source(r: &SqlRow<'_>, column: &str) -> SqlResult<Option<SettingSource>> {
     Ok(r.get::<_, Option<String>>(column)?
         .as_deref()
         .and_then(SettingSource::parse))
@@ -457,13 +483,23 @@ fn run_event(
     kind: EventKind,
     payload: serde_json::Value,
 ) -> Result<()> {
-    let task_id: TaskId =
-        conn.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
-            r.get(0)
-        })?;
-    event(conn, task_id, Some(id), kind, payload)?;
+    run_event_port(&port_tx(conn), id, kind, payload).map_err(native_error)
+}
+
+fn run_event_port(
+    conn: &impl EventTx,
+    id: &RunId,
+    kind: EventKind,
+    payload: serde_json::Value,
+) -> Result<()> {
+    let task_id: TaskId = conn.query_row(
+        "SELECT task_id FROM task_runs WHERE id=?1",
+        sql_params![id],
+        |r| r.get(0),
+    )?;
+    super::store_writes::event(conn, task_id, Some(id), kind, payload)?;
     if matches!(kind, EventKind::LeaseReleased | EventKind::RunRecovered) {
-        crate::infrastructure::task_holds::settle_at_rest_in(conn, id, false)?;
+        super::task_holds::settle_at_rest_in_port(conn, id, false)?;
     }
     Ok(())
 }
@@ -510,6 +546,15 @@ pub(super) fn end_stalled_detections(
     answer: &str,
     now: i64,
 ) -> Result<Vec<crate::domain::Ask>> {
+    end_stalled_detections_port(&port_tx(tx), id, answer, now).map_err(native_error)
+}
+
+pub(super) fn end_stalled_detections_port(
+    tx: &impl EventTx,
+    id: &RunId,
+    answer: &str,
+    now: i64,
+) -> Result<Vec<crate::domain::Ask>> {
     // Events are stamped by SQLite's clock, so their ages are too.
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -517,14 +562,16 @@ pub(super) fn end_stalled_detections(
     // The answers of its `stalled` asks tell a `wait` from a person
     // stepping in; the events carry only the option answered.
     let answers: std::collections::HashMap<i64, String> = tx
-        .prepare(
+        .query_map(
             "SELECT id, answer FROM asks WHERE run_id=?1 AND kind='stalled'
              AND answer IS NOT NULL",
+            sql_params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?
-        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+        .into_iter()
+        .collect();
     let ends = crate::domain::stats::thresholds::run_ended_resolutions(
-        &run_events_of(tx, id)?,
+        &run_events_of_port(tx, id)?,
         &|ask| answers.get(&ask).cloned(),
         now_ms,
     );
@@ -537,7 +584,7 @@ pub(super) fn end_stalled_detections(
         now,
     )?;
     for end in ends {
-        run_event(tx, id, EventKind::StallResolved, end)?;
+        run_event_port(tx, id, EventKind::StallResolved, end)?;
     }
     Ok(closed)
 }
@@ -618,10 +665,18 @@ pub(crate) fn last_resume_started_sql() -> String {
 }
 
 pub(super) fn run_events_of(conn: &Connection, id: &RunId) -> Result<Vec<RunEvent>> {
-    Ok(conn
-        .prepare(RUN_EVENTS_SQL)?
-        .query_map([id], event_row)?
-        .collect::<rusqlite::Result<_>>()?)
+    run_events_of_port(&port_tx(conn), id).map_err(native_error)
+}
+
+pub(super) fn run_events_of_port(
+    conn: &impl crate::infrastructure::sql_exec::SqlRead,
+    id: &RunId,
+) -> Result<Vec<RunEvent>> {
+    Ok(conn.query_map(
+        RUN_EVENTS_SQL,
+        sql_params![id],
+        super::store_rows::event_row,
+    )?)
 }
 
 /// The run's resumes, counted as ADR-0047 decision 24 says.
