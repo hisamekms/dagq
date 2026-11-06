@@ -1,7 +1,7 @@
 ---
 id: plan-team-version-write-leader
 type: plan
-title: チームの版の書き込みの係と PostgreSQL の store の具体案（リーダーの行の列・確かめの SQL の形・lease の値の案・一意の索引・migration の系列の置き方・古い event と台帳の移し方）
+title: チームの版の書き込みの係と PostgreSQL の store の具体案（リーダーの行の列・確かめの SQL の形・lease の値の案・一意の索引・migration の系列の置き方・古い event と台帳の移し方・event の本文を置き場へ出す形）
 status: proposed
 created: 2026-11-03
 owners:
@@ -12,6 +12,7 @@ tags:
   - queue-service
 related:
   - adr-t3986-1
+  - adr-t4291-1
   - adr-t3981-1
   - adr-t3982-1
   - plan-team-version-sqlite-dialect
@@ -178,3 +179,111 @@ migration との順:
 - SQLite: `src/infrastructure` の `#[cfg(test)]` から memdb で組を呼ぶ（ADR-t2895-1）。
 - Postgres: `examples/store_contract_postgres.rs`（`[[example]]`、`required-features = ["store-contract", "postgres"]`）が `DAGQ_TEST_POSTGRES_URL` の接続先で組の case を順に流し、1 件でも落ちれば終了 1。変数が無ければ何も流さず終了 1。test binary でないので nextest と `cargo llvm-cov nextest` は流さない。
 - CI: `ci.yml` に job `postgres`（Linux、`services: postgres` の container、`cargo run --locked --example store_contract_postgres --features store-contract,postgres`）。docs だけの差分では Rust の job と同じく飛ばす。着地の検証（`scripts/landing-it.sh`）には足さない。
+
+## (g) event の本文を置き場へ出す形
+
+[ADR-t4291-1](../adr/2026-11-06-t4291-1-team-version-event-bodies-keep-sql-read-fields-in-the-row-add-fields-to-the-row-and-restore-in-the-queue-service.md) の棚卸しと手順の案。方針と退けた案は ADR が持つ。
+
+### SQL が読む欄の棚卸し
+
+2026-11-06 の main の `src/` の test を除いた所と `migrations/` を数えた。`json_field` の系統（`sql_dialect.rs`）で本文の列を読む所が 151 か所・57 欄ある。読む所の名前は `src/infrastructure/` からの相対（`rs/` は `runtime_store/`）で、数字はか所の数。
+
+| 欄 | 読む型 | 読む所 |
+| --- | --- | --- |
+| `absent_since` | integer | rs/run_log 1 |
+| `active_unavailable` | text | session_tokens 1・sessions 1 |
+| `ask_id` | integer | asks 4・draft_planners 1・finding_planners 4・follow_up_membership 1・goal_reviews 1・rs/recovery 1 |
+| `asked_by` | text | rs/run_log 1 |
+| `at` | integer | rs/run_log 1・task_holds 1 |
+| `attempt` | integer | rs/run_log 1 |
+| `by` | text | draft_planners 1・plan_requests 1・rs/run_log 2 |
+| `claimed_at` | integer | draft_planners 1・finding_planners 1 |
+| `continue_run` | boolean | replans 1 |
+| `correction_ask_id` | integer | follow_up_membership 1 |
+| `dir` | text | rs/run_log 1・rs/session_steps 2 |
+| `duplicate_of` | integer | related 1・sqlite 1 |
+| `eval_id` | integer | rs/eval_rounds 3 |
+| `final` | boolean | session_tokens 1・sessions 2 |
+| `finding_id` | integer | finding_planners 3・rs/run_log 1 |
+| `from` | integer | sqlite 1 |
+| `goal_id` | integer | sessions 1・sqlite 1 |
+| `goal_review_id` | integer | sessions 1 |
+| `hold_id` | integer | rs/recovery 1・task_holds 1 |
+| `id` | integer | follow_up_membership 1 |
+| `kept_id` | integer | rs/recovery 3・task_holds 2 |
+| `kind` | text | proposals 1・rs/run_log 1・session_tokens 1・sessions 10 |
+| `label` | text | rs/queue_records 2 |
+| `marked_at` | integer | finding_planners 3 |
+| `mode` | text | rs/run_log 2・rs/session_steps 1 |
+| `opened_event_id` | integer | proposals 1・session_tokens 3・sessions 7 |
+| `operation_id` | integer | replans 2 |
+| `origin` | text | replans 1 |
+| `outcome` | text | rs/run_log 1 |
+| `period` | text | rs/queue_records 2・rs/session_steps 1 |
+| `pid` | integer | rs/session_steps 3 |
+| `plan_review_id` | integer | plan_reviews 1・sessions 2 |
+| `planner_id` | integer | draft_planners 1・finding_planners 1・planners 2・proposals 1・rs/session_registry 2・sessions 2 |
+| `plugin_only` | boolean | rs/run_log 1 |
+| `predecessor_id` | integer | sqlite 1 |
+| `proposal_id` | integer | proposals 1・sessions 1 |
+| `reason` | text | proposals 1・related 1・replans 1・session_tokens 1 |
+| `replan_operation_id` | integer | plan_requests 1 |
+| `request_id` | integer | plan_requests 1・replans 1 |
+| `reviewed_proposal_id` | integer | proposals 1 |
+| `route` | text | sessions 2 |
+| `run_id` | integer | ci_watch_store 1 |
+| `runtime_delivers` | boolean | follow_up_membership 1・goal_reviews 1 |
+| `session_id` | text | plan_reviews 1・rs/session_steps 1・sessions 1 |
+| `set_id` | integer | rs/eval_rounds 1 |
+| `source` | text | asks 1 |
+| `source_goal_id` | integer | follow_up_membership 1 |
+| `source_run_id` | text | rs/run_log 1 |
+| `step` | text | rs/recovery 1 |
+| `subject` | text | rs/session_registry 2 |
+| `supervisor` | text | rs/eval_rounds 1・rs/ledger 1・rs/run_log 1 |
+| `task_id` | integer | related 1 |
+| `text` | text | planners 1 |
+| `timeout_secs` | integer | rs/session_steps 1 |
+| `to` | integer・text | related 1・rs/run_log 1・sqlite 1・store_rows 1 |
+| `workflow` | text | ci_watch_store 2 |
+| `workspace_id` | text | finding_planners 2・rs/run_log 2 |
+
+表の外で SQL が読む欄:
+
+| 読み方 | 欄 | 読む所 |
+| --- | --- | --- |
+| 束ねた path（`json_field_at`） | `record`（`UPDATE_ASK_RECORD`）、`work`・`tokens` | asks、sessions の `closed_value_sql` |
+| `json_each` | `asks` | planners、draft_planners |
+| `json_type` | `task_id`・`duplicate_of`・`supervisor`（どれも表にある） | related、rs/ledger |
+| trigger の `new.payload` | `text`・`message`・`result_commit`・`git_common_dir` | `search_note_inserted`・`search_run_integrated`（Postgres では ADR-t3986-1 決定6 の書き込みに移る） |
+| 式の索引 | `opened_event_id`（`events_by_opened_event`）、`supervisor`（`events_by_supervisor`） | migrations |
+
+台帳のビューは SQL で本文の欄を読まず（表の `rs/ledger` は supervisor を名指す event を探す 1 か所だけ）、event 全体を読んで Rust で畳む。下の「全文の読み」に当たる。長くなりうる文字列で集合に入るのは `text`・`message`・`reason` で、これらが閾値を超える event は ADR 決定1 のとおり外に出ず行のまま持つ。
+
+### 全文の読み
+
+本文の列を選ぶ文は 20 か所ある: sessions 6・replans 3・asks 2・session_tokens 2・kpi_push 1・stranded 1・store_rows 1・plan_reviews 1・rs/mod 1・rs/recovery 1・rs/run_log 1。ほかに `SELECT * FROM run_events` が 37 か所（rs/run_log 13・sqlite 9・ci_watch_store 3・rs/recovery 3・sessions 2・task_holds 1・findings 1・planners 1・plan_requests 1・rs/ledger 1・rs/attributes 1・rs/mod 1）と、`SELECT e.*`（`rs/session_registry`・`task_holds` など）があり、多くは `event_row` で写す。文字列の検索では拾いきれないので、実装は数に頼らず型で閉じる: `event_row` と本文の列を受ける所は、戻す前の型（行の本文）を返し、完全な本文の `RunEvent` は戻す関数からだけ作れる形にする。本文の列を選ぶ文が許した関数の外にあれば境界の test で落とす。
+
+行だけの読みの候補は、`dagq list` の一覧と、stats・KPI の窓の集計のうち集合の欄で足りるもの。本文の object を渡さず、集合の欄を SQL で取り出す。実装の段が読む欄を見て決める。
+
+### 形の案
+
+- 予約した欄: `_dagq_body_key`（値は鍵の文字列）。新しい event の本文に同じ名前の欄があれば、実行時に書き込みを拒む。
+- 置く物: 本文の全文の文字列を今と同じ `EventBodies::put` に渡す。鍵は今と同じ UUID。
+- 書き込みの判定（`event_body_for_row` と `event_body_row` の置き換え）:
+  1. 全文が閾値以下、または object でない: そのまま行に書く。足す欄の更新の経路で、行がすでに `_dagq_body_key` を持つときも同じ。
+  2. 集合の欄だけの大きさが閾値を超えるか、除く欄が無い: そのまま行に書く。
+  3. 集合に無い欄を値の長い順に除き、残りが閾値以下になったら止める。
+  4. `put` が `Stored` なら残した欄と `_dagq_body_key` を書く。`Inline` なら全文を行に書く。
+- `put` の失敗: 外へ置く adapter は、届かないときと拒まれたときに `Err` でなく `Inline` を返し、記録する。port の `Err` は INSERT を止めるまま残すので、`a_failed_put_does_not_insert_a_reference` は変えない。
+- 足す欄（`set_event_body_field`）は SQLite では同じ UPDATE のままで、判定の 1 により鍵を持つ行は `put` を通らない。Postgres には SQL の関数 `dagq_event_body` が無いので、adapter が同じ transaction で行を読んで同じ判定をしてから書く。`a_field_that_takes_a_body_over_the_threshold_puts_it_and_a_keyed_row_stays` は、足した欄が行に残り、戻した全文に出ることを確かめる形に変える。
+- 足す欄の値の出どころ: `session_exited` の `work_breakdown`・`tokens`（`sessions.rs`。元は `session_closed` の `work`・`tokens` で集合に入る）、`ci_checked` と `ci_scheduled_checked` の `finding_id`、`ci_turned_red` の `finding_ids`（`ci_watch_store.rs`）。`run_events` の本文を変える本番の UPDATE はこの経路だけで、欄を除く更新は無い。
+- 戻す関数: `_dagq_body_key` が無ければそのまま。あれば `read` した全文に行の欄を重ね（同じ名前は行を正にする）、`_dagq_body_key` を除く。`read` が `None` なら行を読み直し、行が消えていれば（片付けとの競合）写しの経路へ進み、残っていれば「物が無い」の error にする。
+- 失ったと確定する印: 人の専用のユースケースが行に `_dagq_body_lost: true` を足す。戻す関数は置き場を読まず、行の欄と印を答える。actor を人に絞るのは ADR-t3986-1 決定11 と同じ形。
+- 人に見せる読みの印: 戻せなかった event の答えに、`_dagq_body_unavailable: true` と CLI の表示の一文を添える。actor が user のときだけ印付きを許し、ほかの actor は error にする。
+- 集合の検査: `src/context_boundaries/sql.rs` の SQL の解析を広げた境界の test が、`json_field` の系統の path、`json_each`・`json_type` の path、今の schema に残る式の索引と trigger（古い migration の一度きりの式は除く。Postgres の系列の式は含む）を拾い、定数の集合と比べる。束ねた path の文は許可の一覧に載せ、載っていなければ落とす。
+- 値の案: 置く時間の上限 5 秒、読む 1 回の上限 5 秒、1 つの書き込みの transaction で置き場を待つ合計の上限 10 秒（lease の案 30 秒より短く）、失敗の後に待たずに諦める間 30 秒、片付けの猶予 7 日、片付けは日に 1 回。
+- 物の置き場: `<prefix>/<queue の識別>/bodies/<鍵>`。片付けの一覧はこの prefix だけを読む。
+- import の照合（上の (e) の 3・7）: 行の中身の hash は、本文を戻し、キーを並べ替えて正規化した JSON で取る。`serde_json` の並びと `json_set` の並びの違いで一致が崩れないようにする。export の側も同じ形で取る。
+- 置き場の外れ: `put` が `Inline` に落ちた数、読みの失敗の数、物が無かった数を [ADR-t3990-4](../adr/2026-11-04-t3990-4-team-version-control-side-observability-by-stdout-logs-otlp-and-existing-ssot-commands.md) の指標に足す。
+- 古い event を移す手順（上の (d)）の「(1) 行を読む」は全文の読みにし、失敗した区切りを飛ばす。片付けは `_dagq_body_key` の式の部分索引（Postgres の系列だけ）で参照を確かめる。
