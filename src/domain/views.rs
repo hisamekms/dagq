@@ -226,6 +226,12 @@ pub struct TaskDetail {
 /// origin and material, for a follow_up the task and run whose receipt
 /// proposed it and which of its follow_ups it was, the key of the bundle it
 /// is planned in and the bundles (planners of the runtime's) that took it.
+/// `show` includes origin, revisit and source-task follow-up drafts even
+/// without `--full`. Person-added and observer draft-goal tasks remain null
+/// here after a revisit planner: a revisit does not create an origin row.
+/// Origin events carry bundle and source fields, so filtering events by task
+/// or run (`source_run_id` included) reaches each draft's settlement.
+/// `planners` reads the bundles; stats `draft_flow` counts their sizes.
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct TaskOrigin {
     pub origin: crate::domain::DraftOrigin,

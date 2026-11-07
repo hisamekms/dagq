@@ -6,6 +6,15 @@
 //! Registering re-checks the history, the tasks of the key not ended and
 //! the interval in one `BEGIN IMMEDIATE` transaction with the draft and its
 //! origin, so two supervisors across a handoff never register twice.
+//! Origin material keeps `key`, `previous_task_id` and
+//! `previous_registered_at` (both null initially), and the registration-time
+//! `setting` snapshot. The current registration time is the origin row's
+//! `created_at`; no second history store is maintained. Each registration
+//! bundles by task ID, never by nearby times, key or cycle. Exhausted and
+//! kept drafts still hold back the next cycle.
+//! Adoption records `draft_adopted`; recurring itself has no follow-up
+//! source-goal/depth gate. Its derived follow-ups use the usual depth + 1,
+//! source-goal facts, membership judgement and automatic adoption gate.
 use super::sql_dialect::JsonType;
 use super::sql_exec::{OptionalRow, SqlRead, sql_params};
 use anyhow::Result;

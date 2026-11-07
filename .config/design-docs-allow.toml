@@ -22,10 +22,6 @@ path = "docs/design/overview.md"
 line = 1095
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/draft-planners.md"
-size = 34292
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/observer.md"
 size = 34897
 

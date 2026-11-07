@@ -37,6 +37,8 @@ impl PlanningState {
     /// sending that fails records `ask_delivery_failed` and ends the planner
     /// ([`Self::hand_over_undelivered_answer`]), so the answer goes to a new
     /// planner.
+    /// A new planner leads with the answered draft and takes other waiting
+    /// drafts of its bundle; an open bundle key holds delivery until it closes.
     pub(in crate::application::supervise) fn deliver_planner_answers(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -169,7 +171,8 @@ impl PlanningState {
 
     /// Open a planner for each bundle of drafts waiting for one, the
     /// bundle of the oldest draft first, while the runtime's planners are
-    /// below the limit.
+    /// below the limit. The pass registers due recurring drafts first,
+    /// so a newly registered recurring draft can be taken in this same pass.
     pub(in crate::application::supervise) fn open_draft_planners(
         &mut self,
         env: &mut PlanningEnv<'_>,

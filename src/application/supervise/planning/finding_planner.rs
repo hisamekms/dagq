@@ -73,6 +73,9 @@ impl PlanningState {
     /// first claimed with `claim_planner_answer`, then the answer is written
     /// as the planner's next turn's request (nothing is typed into it), and
     /// once it is written the ask is closed with `ask_delivered`.
+    /// Failed delivery records `ask_delivery_failed` and calls
+    /// [`Self::hand_over_undelivered_answer`]: the planner is ended as an
+    /// answer-wait, and a new planner carries the answer after its row closes.
     pub(in crate::application::supervise) fn deliver_finding_answer(
         &mut self,
         env: &mut PlanningEnv<'_>,

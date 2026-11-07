@@ -14,6 +14,19 @@
 //! `dagq.toml` when its interval came gets origin `recurring` (ADR-0072,
 //! [`super::recurring`]).
 
+//! Review follow-ups take the same registration path before landing, so
+//! they may be planned before the receipt's follow-ups. Their category is
+//! `docs_drift`; receipt entries retain the worker's category and membership
+//! proposal. Missing categories read as `unlabeled`, missing proposals as
+//! `(none)`. Goal gaps include both the review verdict and an `approve_goal`
+//! answer's gaps. Observer draft-goal tasks, like a person's `add`, have no
+//! recorded origin; a due revisit alone can make them planning targets.
+//!
+//! A reopen belongs only to the proposal plan review put the task into;
+//! withdrawing a later proposal must not reuse it. Other submitted members
+//! simply return to draft. Repeated reopen/withdraw cycles still consume the
+//! per-draft planner limit.
+
 use serde::{Deserialize, Serialize};
 
 use super::DomainError;
@@ -65,6 +78,12 @@ pub const PLANNER_QUESTION_OPTIONS: &[&str] = &["adopt", "cancel", "keep_draft"]
 /// revisit time a person or the inbox gave comes, open one past it. A
 /// planner that ended only to wait for a person's answer counts to none of
 /// the limits (ADR-t1704-1 decision 5).
+/// Attempts are stored per member in `draft_bundle_members.attempt`.
+/// Revisit planners and answer-carrying planners count; failures and stalled
+/// turns count too, but provider-wall endings do not. A planner leaving some
+/// drafts undecided lets those drafts and newly waiting drafts of the same
+/// origin form the next bundle. Exhaustion stays visible in status/watch
+/// while the task remains draft (`AttentionNext::DecideDraft`).
 pub const MAX_DRAFT_PLANNERS: usize = 3;
 
 /// A follow-up this many steps from a person's judgement is not submitted
@@ -375,6 +394,11 @@ impl DraftTarget {
 /// planner of its own for the draft again, past a `keep_draft` answer and
 /// for a draft without an origin. Set, changed and cleared by a planner of
 /// the runtime's, a person or the inbox; used once, as the planner opens.
+/// One row per draft in `draft_revisits`; this is a time, not a condition
+/// such as another task landing. A used time is never used again: keeping
+/// the draft needs a new time. Setting one replaces even a previously used
+/// time; clearing removes the row. Its events use the setting/clearing CLI's
+/// role as actor, and supervisor for `draft_revisit_due`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct DraftRevisit {
     pub task_id: super::TaskId,
@@ -505,14 +529,18 @@ pub fn bundles(targets: Vec<DraftTarget>) -> Vec<Vec<DraftTarget>> {
     bundles.into_iter().map(|(_, members)| members).collect()
 }
 
-// What became of one draft of a bundle when its planner ended
-// (ADR-t807-1): submitted into a proposal, canceled (as a duplicate of
-// another task, or not), kept as a draft by a person's answer, left
-// waiting for the answer of its `planner_question` by a planner that
-// ended for that wait alone (ADR-t1704-1 decision 5: not counted as a
-// planner that ended undecided; the answer opens the next), or left
-// undecided (a later planner takes it again).
-string_enum!(DraftOutcome {
+string_enum!(
+    /// What became of one draft of a bundle when its planner ended
+    /// (ADR-t807-1): submitted into a proposal, canceled (as a duplicate of
+    /// another task, or not), kept as a draft by a person's answer, left
+    /// waiting for the answer of its `planner_question` by a planner that
+    /// ended for that wait alone (ADR-t1704-1 decision 5: not counted as a
+    /// planner that ended undecided; the answer opens the next), or left
+    /// undecided (a later planner takes it again).
+    /// An unused future revisit also settles as `keep_draft`. A planner
+    /// ended for answer-wait leaves only the drafts it asked about as
+    /// `answer_wait`; remaining undecided drafts keep that outcome.
+    DraftOutcome {
     Submitted => "submitted",
     Canceled => "canceled",
     Duplicate => "duplicate",

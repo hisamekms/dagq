@@ -7,6 +7,9 @@
 //! [`super::drafts`]: a draft's category is the one its
 //! `follow_up_registered` recorded, `unlabeled` for one registered before
 //! categories were kept, and a value outside the list is a row of its own.
+//! Cancellation reasons use `domain::cancel_reason` codes. Adoption's `by`
+//! and the draft's `planner_question` history distinguish a planner's own
+//! decision from one taken through a person's answer, without new events.
 use crate::domain::EventKind;
 use crate::domain::run::{AskOpened, restore_payload};
 use std::collections::{BTreeMap, HashMap};

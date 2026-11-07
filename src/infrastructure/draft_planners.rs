@@ -41,9 +41,9 @@ use crate::domain::{
     plan_request::Creator,
 };
 
-/// How long a claim on typing the answer of a `planner_question` holds
-/// (seconds): the typing takes seconds, so a claim this old was left by a
-/// supervisor that ended before it typed, and another may take it over.
+/// How long a claim on sending a `planner_question` answer holds (seconds):
+/// writing the next-turn request takes seconds, so a claim this old was
+/// left before delivery and another supervisor may take it over.
 pub const PLANNER_ANSWER_CLAIM_SECS: i64 = 120;
 
 /// The drafts waiting for a planner of the runtime's at `now` (Unix
@@ -179,6 +179,9 @@ pub(super) fn insert_draft_origin(
 }
 
 impl SqliteQueue {
+    /// Register a receipt's or review judgment's still-unregistered entries
+    /// in one write transaction: a planning pass sees all of that batch or
+    /// none. Categories and membership proposals are kept in origin material.
     pub fn register_follow_ups(
         &mut self,
         run: &RunId,
@@ -472,6 +475,11 @@ impl SqliteQueue {
     /// `draft_planner_exhausted` (the inbox's attention) and is left out
     /// of it. Each member's `draft_planner_opened` carries `ask_id` only
     /// on the lead draft: the ask whose `answer` the planner carries to it.
+    /// Re-check every member inside `BEGIN IMMEDIATE`, dropping members
+    /// that no longer qualify and recording planner, bundle and member
+    /// events atomically. A due revisit is consumed here, even when a
+    /// planner-set revisit is exhausted; a person/inbox-set one opens once
+    /// beyond the limit. `draft_planner_opened` includes its time and role.
     pub fn open_draft_planner(
         &mut self,
         drafts: &[TaskId],
@@ -696,12 +704,12 @@ impl SqliteQueue {
         ))
     }
 
-    /// Claim the typing of the answer of `id` into `planner`'s `workspace`
+    /// Claim sending the answer of `id` to `planner`'s next turn in `workspace`
     /// in one write transaction (`planner_answer_claimed`): `false` when
     /// the ask was closed, no longer goes to that planner, or another
     /// process claimed it within [`PLANNER_ANSWER_CLAIM_SECS`] (two
     /// supervisors across a handoff). An older claim is taken over: its
-    /// supervisor ended before typing (a typing that fails records
+    /// supervisor ended before delivery (a sending that fails records
     /// `ask_delivery_failed`, which holds the answer back first).
     pub fn claim_planner_answer(
         &mut self,
@@ -1657,6 +1665,9 @@ fn goal_open_port(
 /// or more follow-ups from a person without a person's `adopt` answer to a
 /// `planner_question` about it (the error says why). Returns what
 /// [`record_adoptions`] records afterwards.
+/// Both the registration-time source goal and the current goal must be
+/// known and open for automatic adoption; missing, unknown or closed source
+/// facts also require `adopt`. The check is per draft, not per bundle.
 pub(super) fn check_adoptions(
     conn: &impl crate::infrastructure::sql_exec::SqlRead,
     tasks: &[TaskId],
@@ -1739,9 +1750,10 @@ pub(super) struct Adoption {
     depth: i64,
 }
 
-/// Record the submission's adoptions: a task a person submitted (through
-/// their planner, or a planner of the runtime's with a person's `adopt`
-/// answer) counts its follow-ups from 0 again; a draft of the runtime's or a
+/// Record the submission's adoptions: a task a person submitted (from
+/// their own terminal without `DAGQ_ROLE`, or through a runtime planner
+/// with a person's `adopt` answer) counts its follow-ups from 0 again.
+/// The record keeps `by` as person or planner. A draft of the runtime's or a
 /// job's records `follow_up_adopted` (`draft_adopted` for another origin)
 /// the first time it is submitted.
 pub(super) fn record_adoptions(

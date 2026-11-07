@@ -862,6 +862,9 @@ pub const DRAFT_REVISIT_ITEM_BYTES: usize = 2_000;
 /// notes), the newest first; empty when none came. The section counts
 /// once in `revisit` when any question or note in it or the section as a
 /// whole was cut.
+/// Includes setter role and actor, note, question recommendation/confidence
+/// and answer, and note bodies, gathered via `show` as `RevisitHistory`.
+/// For origin `revisit`, the origin section says a person added the draft.
 pub(super) fn revisit_section(fit: &mut Fit, material: &DraftPlannerMaterial<'_>) -> String {
     let mut out = String::new();
     let mut cut = false;
@@ -931,6 +934,8 @@ pub(super) fn revisit_section(fit: &mut Fit, material: &DraftPlannerMaterial<'_>
 /// worker gave it (ADR-t947-3), with what the category means when it is
 /// one of the list; empty for a draft of another origin. The planner does
 /// not rewrite the category, so it does not lean to fit its decision.
+/// Unknown categories and `unlabeled` are explicitly identified in the
+/// rendered line; their values remain material rather than a decision.
 pub(super) fn follow_up_category_line(target: &DraftTarget) -> String {
     if target.origin != DraftOrigin::FollowUp {
         return String::new();
@@ -957,6 +962,9 @@ pub(super) fn follow_up_category_line(target: &DraftTarget) -> String {
 /// The line of a follow_up draft's section that shows the worker's
 /// membership proposal (ADR-t1504-2 decision 11) as the material keeps
 /// it; empty for a draft of another origin.
+/// Includes registration-time source goal and state, not merely the task's
+/// current goal; missing proposals render `(none)`. Goal gaps and reopened
+/// drafts have neither this line nor the membership step.
 pub(super) fn follow_up_proposal_line(target: &DraftTarget) -> Result<String> {
     if target.origin != DraftOrigin::FollowUp {
         return Ok(String::new());
@@ -991,6 +999,12 @@ pub(super) fn follow_up_proposal_line(target: &DraftTarget) -> Result<String> {
 /// can be met without the draft and record it, membership apart from
 /// adoption and priority, another goal found before one is made, and no
 /// acceptance weakened to leave a draft out.
+/// Earlier judgements are read before writing: a still-valid one needs no
+/// new row, a required/out_of_scope change corrects the earlier one, never
+/// returning to undecided. Dropping may skip a judgement needing a new goal.
+/// Unsettled membership records undecided with why and asks, then records a
+/// decided judgement before applying the answer. Acceptance is never
+/// weakened to exclude a follow-up; that requires a person's scope decision.
 pub(super) fn follow_up_membership_step(t: &str) -> String {
     format!(
         "For a follow_up draft whose source goal is not none, first judge where it belongs, apart from whether it is worth doing and from its priority. Start from the worker's membership proposal and decide the meaning yourself: can the source goal's acceptance be met without this draft? When it cannot, it is required and belongs to the source goal; when it can, it is out_of_scope and belongs to another goal: look for a fitting existing goal with `dagq search` first, make one only when none fits, and never park it in an unrelated large goal. Record the judgement before you adopt, drop or ask: `dagq judge-follow-up {t} --classification <required|out_of_scope|undecided> --acceptance-item '<the acceptance item>' --reason '<why that acceptance can or cannot be met without it>' --evidence '<a receipt, commit, document section or task>'`, with `--destination-goal <goal>` for out_of_scope (when that goal is above low, also `--destination-acceptance-item '<the item of its acceptance that needs the draft>'`; a goal whose acceptance does not need it loses to the low deferral goal of the source goal's tag, found with `dagq goal list --tag <tag>`), and `--source-goal <goal>` when the source goal is unknown. Read its earlier judgements with `dagq show {t}` (membership_judgements): one that still holds needs no new row; to change a required or out_of_scope one, record the other with `--corrects <its id>`; it never goes back to undecided. A draft you drop (a duplicate, already done, not worth doing) may skip the record when it would need a new goal, as a canceled follow-up never holds a goal open. When the acceptance, the receipt, the source and the recorded decisions cannot settle it, record undecided with why, ask as step 3 says with the membership question in it, and on the answer record required or out_of_scope before you do what it says. Moving a draft to another goal neither adopts it nor raises its priority. Never weaken a goal's acceptance to leave a follow_up out: that changes the goal's intent, so ask a person (`--because scope`).\n"
@@ -1065,6 +1079,24 @@ fn recurring_origin(target: &DraftTarget) -> Result<String> {
 /// section is held to its limit and the whole to
 /// [`DRAFT_PLANNER_PROMPT_LIMIT`]; what is left out is counted and named
 /// with the read-only dagq command that reads it (task 1571, ADR-t1566-1).
+/// Repository rules accompany per-draft content, origin once per bundle,
+/// goals and tasks outside the bundle in those goals. Multi-draft bundles
+/// first consider overlap and dependencies and submit adopted drafts in one
+/// proposal. Reopened drafts retain their intent and fix the reopen reason.
+/// Adopt fills provenance and dependencies, lints and submits; duplicate or
+/// already implemented drafts close with their duplicate target recorded.
+/// Adopt's reason goes in context; drop and keep reasons go in notes.
+/// A recurring draft without a goal is assigned an open goal with `set-goal`
+/// before submission, then follows normal plan review.
+/// A known decision time permits keeping with a revisit without asking,
+/// including after an answer. Questions carry recommendation and confidence,
+/// with reason `scope` or `discard`; only undecidable scope/discard, low
+/// confidence or the automatic adoption gate justify one.
+///
+/// Draft sections take the oldest members first; description is mandatory,
+/// truncated with `over_limit` when needed. Omitted drafts/goals have counts
+/// and reading CLI; origin material is cut both by field and as a whole,
+/// with a CLI for reading the receipt.
 pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<FittedPrompt> {
     let mut fit = Fit::new(DRAFT_PLANNER_PROMPT_LIMIT);
     let (first, _) = material

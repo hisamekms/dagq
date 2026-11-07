@@ -286,21 +286,27 @@ pub trait PlanRequestStore {
 }
 
 /// Where the answer of a `planner_question` goes (ADR-0041 decision 13).
+/// Non-person routes mark `ask_answered` with `runtime_delivers` instead
+/// of raising attention. A draft's question is per task even in a bundle.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PlannerAnswerRoute {
-    /// Typed into the workspace of this planner of the runtime's, which
+    /// Sent as the next turn of this planner of the runtime's, which
     /// works on the ask's task (its draft, or its proposal).
     Planner(Box<PlannerSession>),
     /// The draft's planner is gone: a new one is opened with the answer.
     NewPlanner,
-    /// The draft moved on (submitted, canceled) with no planner left: the
+    /// The draft moved on (submitted, canceled), or was kept by a
+    /// `keep_draft` answer with no planner left: the
     /// supervisor closes the ask.
     Close,
     /// Its task is in this proposal, sent back for a revise no planner
     /// holds: the answer goes with the revise to the planner opened for it
     /// (ADR-t1704-1 decision 4).
     Revise(ProposalId),
-    /// None of these: a person delivers it through the inbox.
+    /// None of these (including exhausted or origin-less drafts): the inbox
+    /// handles it, never the worker. For a draft it records a planning
+    /// request naming the task and ask, then closes the ask; otherwise it
+    /// reads and closes it.
     Person,
 }
 
@@ -318,7 +324,7 @@ pub trait DraftPlannerReads {
 
 /// The drafts the runtime or a job registered (ADR-0041 decision 16):
 /// where each came from, the planner of the runtime's opened for each, and
-/// the `planner_question` answers the supervisor types into a planner.
+/// the `planner_question` answers delivered as the planner's next turn.
 pub trait DraftPlannerStore: DraftPlannerReads {
     /// Register every still-unrecorded entry of one receipt, or of one
     /// review's judgment, atomically,
@@ -385,10 +391,10 @@ pub trait DraftPlannerStore: DraftPlannerReads {
     /// one it is about, or the one whose planner added the draft it is
     /// about and left it outside any proposal (ADR-t2015-1).
     fn answer_request(&self, ask: &Ask) -> Result<Option<crate::domain::RequestId>>;
-    /// Claim the typing of the answer of `ask` into `planner`'s
+    /// Claim sending the answer of `ask` as `planner`'s next turn in its
     /// `workspace` (`planner_answer_claimed`), in one write transaction:
     /// `false` when another process claimed it, the ask was closed, or its
-    /// answer no longer goes to that planner. Only the claimer types it.
+    /// answer no longer goes to that planner. Only the claimer sends it.
     fn claim_planner_answer(
         &mut self,
         ask: AskId,
