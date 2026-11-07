@@ -158,6 +158,9 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
   それらを通るITのうち上の必ず含めるものに入らないものはCIで初めて流れ、着地の検証は任せたファイルを出力に残す（[ADR-t2892-1](../../adr/2026-10-20-t2892-1-landing-it-leaves-added-sources-and-broad-entries-to-ci.md)）。
 - **古い表**: 生成から一定の時間を超えた表も上限までは使い、古さだけではITを全部流さない。
   古い表では、表が知らないファイル（表のtreeに無いsrcのファイルと、表のcommitの後にmainで変わったファイル）を同じdirectoryとそれを宣言するmoduleの項目のITに広げ、広げたITも閾値に数え、出力に古い表と広げたファイルを残す（[ADR-t3920-1](../../adr/2026-11-01-t3920-1-landing-it-keeps-using-an-old-table-and-widens-the-files-it-does-not-know.md)）。
+- **OSの条件を持つファイル**: Linuxの表では、ファイルが結びついていてもmacOSだけのコードを通るITの結びつきが欠ける。
+  広げる対象と除外の入口は[scripts/landing-it.py](../../../scripts/landing-it.py)の`files_to_widen`、選択と閾値は`choose`、出力は`report`（[ADR-t3927-1](../../adr/2026-11-07-t3927-1-landing-it-widens-platform-gated-files-at-any-table-age.md)）。
+  該当ファイルの記録が無い旧形式の表の選び方は変えない。
 - **testのhelper**: 差分がITの共通のhelperを変えたら、着地の検証はcheckoutしたtreeのtestのソースを静的に読み、そのhelperを使うtestのmoduleのITを選ぶ。
   使うmoduleのITが多いhelper（helperの集まりの入口と共通のfixture）は、壊れの見逃しが大半のITに及ぶのでCIに任せず全部流す（[ADR-t3761-1](../../adr/2026-10-31-t3761-1-landing-it-selects-the-modules-a-changed-test-helper-reaches.md)）。
 - **ITを全部流す条件**: 絞ったITの見込みの時間が上限を超えるとき、共通のファイルに触れたとき、使うmoduleのITが多いhelperを変えたとき、表が取れないか読めないか上限を超えて古いとき、表のcommitがrepositoryに無いとき（古さに関わらない）、古い表で表のcommitの後にmainで変わったファイルが取れないとき。

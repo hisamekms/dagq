@@ -56,6 +56,12 @@
 # $DAGQ_LANDING_BASE) are widened to the IT of the table's entries beside
 # them (the same directory and the module that declares it), and the output
 # names each with the count of IT it added. Broad entries stay left to CI.
+# The hourly Linux table misses links through macOS-only code in files using
+# cfg(target_os). A changed file in its platform_gated_files widens by the
+# same rule at any age, even with an existing entry: its own IT plus its
+# neighbours' IT, excluding unit-only files and broad entries. The output
+# names the cfg(target_os) reason and added IT count. Tables without the key
+# keep their selection unchanged.
 # Every IT runs instead, with the reasons printed, when the narrowed IT's
 # estimate (widened IT included) is over the threshold, a common file is
 # touched, a changed helper is broad (its users hold more than the broad

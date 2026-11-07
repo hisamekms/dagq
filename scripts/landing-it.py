@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The steps of scripts/landing-it.sh written in Python: choosing the tests of
-the landing's verification from the diff, the nightly IT coverage map and the
+the landing's verification from the diff, the hourly Linux IT coverage map and the
 known failures, and the self-test. What it chooses and why is in the comment
 at the top of scripts/landing-it.sh; run that script, not this file. Python
 3.9 and the standard library only (the host's /usr/bin/python3).
@@ -72,7 +72,9 @@ COMMON_FILES = [
 #    select the IT of their neighbours' entries (neighbours()), on top of their
 #    own entry. The widened IT count towards the threshold (1.) like any other.
 #    At any age, the IT not in the table (added or renamed after it was built)
-#    always run.
+#    always run. The table's platform_gated_files also widen at any age:
+#    Linux misses the IT through their macOS-only code, even for mapped files.
+#    The same unit-only and broad-entry exclusions apply.
 STALE_TABLE_AGE = datetime.timedelta(hours=48)
 MAX_TABLE_AGE = datetime.timedelta(days=7)
 # 4. The broad entries: a file the table maps to more than this share of its
@@ -404,21 +406,28 @@ def stale_note(table, now):
     )
 
 
-def unknown_files(diff, tree, table, since):
-    """The diff's files an old table does not know, each with why: a src or
-    crates .rs file (not of unit tests only) not in the table's tree, or
-    changed on main after the table's commit (since). A broad entry is not
-    one: rule 4 leaves its IT to CI at any age."""
+def files_to_widen(diff, tree, table, since, stale):
+    """The diff's source files to widen, each with why: an old table's
+    unknown files (absent from its tree or changed on main since its commit),
+    and at any age the table's platform_gated_files. Linux misses the IT
+    through their macOS-only code even when the file has an entry. A table
+    without that key adds none. Unit-only files and broad entries stay out:
+    rule 4 leaves a broad entry's IT to CI at any age."""
     files = table.get("files", {})
     limit = BROAD_SHARE * len(table.get("tests", {}))
     tree_files, since = set(tree), set(since or [])
+    gated = set(table.get("platform_gated_files", []))
     out = []
     for path in diff:
         if not is_source(path) or is_unit_test_module(path):
             continue
         if path in files and len(files[path]) > limit:
             continue
-        if path not in files and path not in tree_files:
+        if path in gated:
+            out.append((path, "cfg(target_os) file: Linux misses macOS-only links"))
+        elif not stale:
+            continue
+        elif path not in files and path not in tree_files:
             out.append((path, "not in the table's tree"))
         elif path in since:
             out.append((path, "changed on main after the table's commit"))
@@ -453,7 +462,7 @@ def neighbours(path, table):
 def left_to_ci(diff, tree, table, widened=()):
     """The diff's files whose IT the table does not select, each with why:
     the broad entries and the source files not in the table's tree (unless
-    an old table widened them)."""
+    they were widened)."""
     files = table.get("files", {})
     limit = BROAD_SHARE * len(table.get("tests", {}))
     tree_files = set(tree)
@@ -516,7 +525,10 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
     fix run's kept ones; None when no IT is chosen). since is the files
     changed on main after the table's commit (None when they cannot be
     had, which runs every IT with an old table); with an old table, stale says
-    so and widened names the files widened and the IT each added."""
+    so; widened names the files widened (including platform-gated files
+    at any age) and the IT each added. Widening adds the neighbours' IT to
+    the file's own mapped IT; their union counts towards the estimated wall
+    time threshold, which selects every IT when exceeded."""
     reasons = full_reasons(diff, tree, table, table_error, now, forced, root)
     narrowed = []
     from_table = set()
@@ -541,8 +553,8 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
         stale = stale_note(table, now)
         if stale and since is None:
             reasons.append("the files changed on main after the table's commit cannot be had")
-        elif stale:
-            for path, why in unknown_files(diff, tree, table, since):
+        else:
+            for path, why in files_to_widen(diff, tree, table, since, stale):
                 near = neighbours(path, table)
                 keys = {k for f in near for k in files[f] if k in table_tests}
                 added = keys - from_table
@@ -604,11 +616,13 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
 
 
 def report(choice):
-    """The lines landing-it.sh prints before it runs the tests."""
+    """The lines landing-it.sh prints before it runs the tests. Name each
+    widened file, its reason (including cfg(target_os)) and added IT count
+    at any table age, even when the threshold selects every IT."""
     lines = []
     if choice.get("stale"):
         lines.append("landing-it: %s" % choice["stale"])
-        lines.extend("landing-it: widened: %s" % w for w in choice["widened"])
+    lines.extend("landing-it: widened: %s" % w for w in choice["widened"])
     if choice["full"]:
         lines.append("landing-it: every IT runs:")
         lines.extend("landing-it:   %s" % r for r in choice["reasons"])
@@ -696,7 +710,7 @@ def cmd_self_test(args):
             case.get("full"), os.path.join(args.fixtures, "repo"), case.get("since", []),
         )
         want = case["want"]
-        got = {k: choice[k] for k in want}
+        got = {k: report(choice) if k == "report" else choice[k] for k in want}
         if got != want:
             failed += 1
             print("FAIL %s:\n  want %s\n  got  %s" % (

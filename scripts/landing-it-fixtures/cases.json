@@ -749,5 +749,210 @@
    "unit_filter": "((kind(lib) | kind(bin) | kind(proc-macro)) - ((binary_id(=dagq::it) & test(=c::small))))",
    "it_filter": "(((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)) | (binary_id(=dagq::it) & test(=b::big))) - ((binary_id(=dagq::it) & test(=c::small))))"
   }
+ },
+ {
+  "name": "a fresh Linux table widens an already mapped gated file and reports its reason and added count",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a/inner.rs"
+  ],
+  "table_patch": {
+   "files": {
+    "src/a/inner.rs": [
+     "dagq::it::a::one"
+    ],
+    "src/a/sibling.rs": [
+     "dagq::it::c::small"
+    ],
+    "src/a.rs": [
+     "dagq::it::a::two"
+    ],
+    "src/a/broad.rs": [
+     "dagq::it::a::one",
+     "dagq::it::a::two",
+     "dagq::it::b::big"
+    ]
+   },
+   "platform_gated_files": [
+    "src/a/inner.rs"
+   ]
+  },
+  "want": {
+   "full": false,
+   "stale": null,
+   "widened": [
+    "src/a/inner.rs (cfg(target_os) file: Linux misses macOS-only links): 2 IT from 2 neighbouring entries"
+   ],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=c::small))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "left_to_ci": [],
+   "report": "landing-it: widened: src/a/inner.rs (cfg(target_os) file: Linux misses macOS-only links): 2 IT from 2 neighbouring entries\nlanding-it: narrowed IT: 5 filters (2 not in the table)\nlanding-it:   (binary_id(=dagq::it) & test(=a::one))\nlanding-it:   (binary_id(=dagq::it) & test(=a::two))\nlanding-it:   (binary_id(=dagq::it) & test(=c::small))\nlanding-it:   (binary_id(=dagq::it) & test(=a::added_after_the_table))\nlanding-it:   (binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+  }
+ },
+ {
+  "name": "an old table without the gated key keeps the mapped file selection unchanged",
+  "now": "2026-10-09T00:00:00Z",
+  "diff": [
+   "src/a/inner.rs"
+  ],
+  "table_patch": {
+   "files": {
+    "src/a/inner.rs": [
+     "dagq::it::a::one"
+    ],
+    "src/a/sibling.rs": [
+     "dagq::it::c::small"
+    ],
+    "src/a.rs": [
+     "dagq::it::a::two"
+    ],
+    "src/a/broad.rs": [
+     "dagq::it::a::one",
+     "dagq::it::a::two",
+     "dagq::it::b::big"
+    ]
+   }
+  },
+  "want": {
+   "full": false,
+   "widened": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ]
+  }
+ },
+ {
+  "name": "a fresh table without the gated key keeps the mapped file selection unchanged",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a/inner.rs"
+  ],
+  "table_patch": {
+   "files": {
+    "src/a/inner.rs": [
+     "dagq::it::a::one"
+    ],
+    "src/a/sibling.rs": [
+     "dagq::it::c::small"
+    ],
+    "src/a.rs": [
+     "dagq::it::a::two"
+    ],
+    "src/a/broad.rs": [
+     "dagq::it::a::one",
+     "dagq::it::a::two",
+     "dagq::it::b::big"
+    ]
+   }
+  },
+  "want": {
+   "full": false,
+   "stale": null,
+   "widened": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ]
+  }
+ },
+ {
+  "name": "gated widening counts towards the threshold even with a fresh table",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs"
+  ],
+  "table_patch": {
+   "platform_gated_files": [
+    "src/a.rs"
+   ]
+  },
+  "want": {
+   "full": true,
+   "widened": [
+    "src/a.rs (cfg(target_os) file: Linux misses macOS-only links): 4 IT from 3 neighbouring entries"
+   ],
+   "reasons": [
+    "the narrowed IT's estimated wall time 100.0 s exceeds 50.0 s (0.5 of every IT's)"
+   ]
+  }
+ },
+ {
+  "name": "gated broad entries and unit-only files do not widen",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/shared.rs",
+   "src/b_tests.rs",
+   "src/domain/tests/new.rs"
+  ],
+  "table_patch": {
+   "platform_gated_files": [
+    "src/shared.rs",
+    "src/b_tests.rs",
+    "src/domain/tests/new.rs"
+   ]
+  },
+  "want": {
+   "full": false,
+   "widened": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "left_to_ci": [
+    "src/shared.rs (the table maps it to 3 of 9 IT)"
+   ]
+  }
+ },
+ {
+  "name": "an old gated file changed since the table widens once with the platform reason",
+  "now": "2026-10-09T00:00:00Z",
+  "diff": [
+   "src/a/inner.rs"
+  ],
+  "since": [
+   "src/a/inner.rs"
+  ],
+  "table_patch": {
+   "files": {
+    "src/a/inner.rs": [
+     "dagq::it::a::one"
+    ],
+    "src/a/sibling.rs": [
+     "dagq::it::c::small"
+    ],
+    "src/a.rs": [
+     "dagq::it::a::two"
+    ],
+    "src/a/broad.rs": [
+     "dagq::it::a::one",
+     "dagq::it::a::two",
+     "dagq::it::b::big"
+    ]
+   },
+   "platform_gated_files": [
+    "src/a/inner.rs"
+   ]
+  },
+  "want": {
+   "full": false,
+   "widened": [
+    "src/a/inner.rs (cfg(target_os) file: Linux misses macOS-only links): 2 IT from 2 neighbouring entries"
+   ],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=c::small))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ]
+  }
  }
 ]
