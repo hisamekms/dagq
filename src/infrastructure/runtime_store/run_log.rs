@@ -148,6 +148,116 @@ fn read_last_turns(
     Ok(rows.into_iter().flatten().collect())
 }
 
+/// Kinds whose writers put a top-level `source_run_id` in the payload.
+/// `draft_planners::register_follow_ups` writes `follow_up_registered`;
+/// `draft_planners::record_adoptions` writes `follow_up_adopted` and
+/// `draft_adopted`. Its `origin_fields` also feeds `open_draft_planner`
+/// (`draft_planner_opened`), `settle_bundle` (`draft_planner_settled`) and
+/// `task_store::apply_transition` (`task_status_changed`, canceling a draft).
+/// When a writer starts carrying this field on another kind, extend this
+/// list and the source-only fixtures in the events_between oracle test.
+/// The JSON predicate has no index, so only these kinds may enter that
+/// branch; the run's own events use events_by_run independently.
+const SOURCE_RUN_EVENT_KINDS: &[EventKind] = &[
+    EventKind::FollowUpRegistered,
+    EventKind::FollowUpAdopted,
+    EventKind::DraftAdopted,
+    EventKind::DraftPlannerOpened,
+    EventKind::DraftPlannerSettled,
+    EventKind::TaskStatusChanged,
+];
+
+/// Build a read without optional-parameter ORs. Parameters are after, upto,
+/// then only the present filter fields in declaration order, then limit.
+/// Choose the driving index in order: run, task, goal, kinds, or the id range.
+/// UNION deduplicates events matching both identity branches before paging.
+pub(super) fn events_between_sql(filter: &EventFilter, dialect: SqlDialect) -> String {
+    let mut next = 2;
+    let mut parameter = |present: bool| {
+        present.then(|| {
+            next += 1;
+            format!("?{next}")
+        })
+    };
+    let kinds = parameter(filter.kinds.is_some());
+    let run = parameter(filter.run.is_some());
+    let task = parameter(filter.task.is_some());
+    let goal = parameter(filter.goal.is_some());
+    let since = parameter(filter.since.is_some());
+    let until = parameter(filter.until.is_some());
+    let mut predicates = vec!["id>?1".to_owned(), "id<=?2".to_owned()];
+    if let Some(kinds) = &kinds {
+        predicates.push(format!(
+            "kind IN (SELECT {} FROM {})",
+            dialect.json_element("value", JsonType::Text),
+            dialect.json_elements(kinds)
+        ));
+    }
+    if let Some(task) = &task {
+        predicates.push(format!("task_id={task}"));
+    }
+    // With a higher-priority run/task, goal is a residual predicate.
+    if let Some(goal) = &goal
+        && (run.is_some() || task.is_some())
+    {
+        predicates.push(format!(
+            "(goal_id={goal} OR task_id IN (SELECT id FROM tasks WHERE goal_id={goal}))"
+        ));
+    }
+    for (bound, op) in [(&since, ">="), (&until, "<")] {
+        if let Some(bound) = bound {
+            predicates.push(format!(
+                "{}{op}{}",
+                dialect.time_value("created_at", TimeForm::Ordinal),
+                dialect.time_value(bound, TimeForm::Ordinal)
+            ));
+        }
+    }
+    let common = predicates.join(" AND ");
+    let branch = |index: &str, predicate: String| {
+        let index = if dialect == SqlDialect::Sqlite && !index.is_empty() {
+            format!(" INDEXED BY {index}")
+        } else {
+            String::new()
+        };
+        format!("SELECT * FROM run_events{index} WHERE {common}{predicate}")
+    };
+    let sql = if let Some(run) = run {
+        let source_kinds = SOURCE_RUN_EVENT_KINDS
+            .iter()
+            .map(|kind| format!("'{}'", kind.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{} UNION {}",
+            branch("events_by_run", format!(" AND run_id={run}")),
+            branch(
+                "events_by_kind",
+                format!(
+                    " AND kind IN ({source_kinds}) AND {}={run}",
+                    dialect.json_field("payload", "$.source_run_id", JsonType::Text)
+                )
+            )
+        )
+    } else if task.is_some() {
+        branch("events_by_task", String::new())
+    } else if let Some(goal) = goal {
+        format!(
+            "{} UNION {}",
+            branch("events_by_goal", format!(" AND goal_id={goal}")),
+            branch(
+                "events_by_task",
+                format!(" AND task_id IN (SELECT id FROM tasks WHERE goal_id={goal})")
+            )
+        )
+    } else if kinds.is_some() {
+        branch("events_by_kind", String::new())
+    } else {
+        branch("", String::new())
+    };
+    format!("{sql} ORDER BY id LIMIT ?{}", next + 1)
+}
+
 impl SqliteQueue {
     /// See [`RunReads::last_turns_of`]. Malformed last turns stay absent;
     /// parsing never retries an earlier turn. Width is bounded in SQL,
@@ -1010,41 +1120,26 @@ impl SqliteQueue {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        // Keep this order in step with the compact parameters in events_between_sql.
+        let mut params = vec![after.to_sql_value(), upto.to_sql_value()];
+        for value in [
+            kinds.map(|v| v.to_sql_value()),
+            filter.run.as_ref().map(ToSqlValue::to_sql_value),
+            filter.task.map(|v| v.to_sql_value()),
+            filter.goal.map(|v| v.to_sql_value()),
+            filter.since.as_ref().map(ToSqlValue::to_sql_value),
+            filter.until.as_ref().map(ToSqlValue::to_sql_value),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            params.push(value);
+        }
+        params.push(i64::try_from(limit)?.to_sql_value());
         Ok(SqlRead::query_map(
             &*self.conn,
-            &format!(
-                "SELECT * FROM run_events WHERE id>?1 AND id<=?2
-                 AND (CAST(?3 AS TEXT) IS NULL OR kind IN (SELECT {kind} FROM {kinds}))
-                 AND (CAST(?4 AS TEXT) IS NULL OR run_id=?4 OR {}=?4)
-                 AND (CAST(?5 AS BIGINT) IS NULL OR task_id=?5)
-                 AND (CAST(?6 AS BIGINT) IS NULL OR goal_id=?6
-                      OR task_id IN (SELECT id FROM tasks WHERE goal_id=?6))
-                 AND (CAST(?7 AS TEXT) IS NULL OR {}>={})
-                 AND (CAST(?8 AS TEXT) IS NULL OR {}<{})
-                 ORDER BY id LIMIT ?9",
-                SqlRead::dialect(&*self.conn).json_field(
-                    "payload",
-                    "$.source_run_id",
-                    JsonType::Text
-                ),
-                SqlRead::dialect(&*self.conn).time_value("created_at", TimeForm::Ordinal),
-                SqlRead::dialect(&*self.conn).time_value("?7", TimeForm::Ordinal),
-                SqlRead::dialect(&*self.conn).time_value("created_at", TimeForm::Ordinal),
-                SqlRead::dialect(&*self.conn).time_value("?8", TimeForm::Ordinal),
-                kind = SqlRead::dialect(&*self.conn).json_element("value", JsonType::Text),
-                kinds = SqlRead::dialect(&*self.conn).json_elements("?3"),
-            ),
-            sql_params![
-                after,
-                upto,
-                kinds,
-                filter.run,
-                filter.task,
-                filter.goal,
-                filter.since,
-                filter.until,
-                i64::try_from(limit)?
-            ],
+            &events_between_sql(filter, SqlRead::dialect(&*self.conn)),
+            &params,
             event_row,
         )?)
     }
