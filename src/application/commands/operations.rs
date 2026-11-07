@@ -114,6 +114,20 @@ fn run_or_unresolved(run: Option<&RunId>) -> Resource {
 
 impl Operation {
     /// The capability the operation needs and the resource it acts on.
+    /// The match has no catch-all, so a new operation must name its mapping.
+    /// `main.rs::requests` reuses this mapping. Numeric run selectors resolve
+    /// to a task's run; an unreadable run is `Resource::Unresolved`. Each
+    /// operation is checked before opening, creating or migrating the queue
+    /// or opening its logs; landing checks again inside `Integrator`.
+    /// Session wrappers use their token's principal. A planner's session-event
+    /// span is spooled to its wrapper, an inbox span is recorded as inbox/user,
+    /// and there is no run span; worker/planner have no `session.record`.
+    /// After authorization, `run screen` refuses with a reason and `run log`;
+    /// `run close-workspaces` accepts but ignores its arguments, closes nothing
+    /// and records nothing: wrappers stop themselves (ADR-t1433-3). A planner's
+    /// `planner request` is refused even on itself; the supervisor uses
+    /// `send_to_planner` instead. Successful requests record `turn_requested`
+    /// and `planner_request_handed` as the caller.
     pub fn request(&self) -> (Capability, Resource) {
         use Capability as C;
         match self {

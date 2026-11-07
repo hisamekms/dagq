@@ -594,6 +594,12 @@ pub(super) fn list(conn: &impl SqlRead, all: bool) -> Result<Vec<Proposal>> {
 /// that planner's; otherwise the actor that submitted it last, `None` for
 /// one submitted before the queue recorded it. A missing proposal is an
 /// error.
+/// A held proposal retried with `submit --proposal` keeps its owner;
+/// resubmitting after a revise replaces the owner with the submitting actor.
+/// A planner cannot withdraw an ownerless proposal, while user and inbox
+/// can. An id that is only the role name `planner` is not an owning actor;
+/// the same fail-closed rule protects tasks in a revising proposal
+/// (`Resource::Task`).
 pub(super) fn owner_actor(conn: &impl SqlRead, id: ProposalId) -> Result<Option<String>> {
     conn.query_row(
         "SELECT CASE WHEN status='revising' AND revise_planner_id IS NOT NULL

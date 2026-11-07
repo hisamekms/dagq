@@ -45,6 +45,15 @@ pub trait PlanningStore {
     /// `authorized` is what the edit was authorized with; the store
     /// refuses the edit when the task has another status, proposal,
     /// proposal status or owner in its transaction.
+    /// A verify-only edit of an `in_progress` task requires `task.verify_edit`
+    /// (the user and inbox only), an ended latest run and no live run, checked
+    /// in the store's transaction. It cannot change `required_evidence` or
+    /// `paths`; the changed fields and actor remain in `task_edited`.
+    /// After authorization, before the transaction, blank or whitespace-only
+    /// title, description or acceptance is refused for every role. Neither
+    /// that refusal nor a changed authorization snapshot changes the task or
+    /// writes `task_edited`. The status used to choose the capability and the
+    /// proposal's id, status and owner must all still match.
     fn edit_task(
         &mut self,
         task: TaskId,
@@ -130,6 +139,26 @@ pub enum Dependency {
 }
 
 /// The planning commands of one actor on one store.
+///
+/// Command authorization (the role grants are `StaticPolicy`'s):
+///
+/// | コマンド | capability | resource |
+/// | --- | --- | --- |
+/// | `add` | `task.write` | `--goal`のgoal、無ければqueue |
+/// | `edit` `set-goal` `set-paths` `draft` `dependency add/remove` | `task.write` | task（queueにある状態） |
+/// | `set-priority` | `task.write` | task（queueにある状態）。`in_progress`のtask（再開待ちか復旧を待つrunを持つもの）にも置け・外せ、次の再開と復旧jobの順に効く（ADR-t1850-1の決定7）。`in_progress`のtaskではplannerは`not on this resource`で拒まれ、user・inboxだけが通る。`completed` / `canceled`は全てのroleでdomainが拒む |
+/// | `revisit ID --at` / `revisit ID --clear` | `task.write` | task（queueにある状態）。draftの再検討の時刻を付け・変え・外す（ADR-t1540-1）。storeは同じtransactionでtaskが`draft`であることを確かめ（draft以外は全てのroleに拒む）、`user` / `inbox`以外が`draft_planner_exhausted`のあるdraftに付けるのを拒む |
+/// | `judge-follow-up` | `follow_up.judge` | task（状態による制限なし。follow_upの出どころと必須の欄・遷移をstoreが同一transactionで検査） |
+/// | `edit --verify` / `edit --no-verify`（`in_progress`のみ） | `task.verify_edit` | task（最新runが終了し、生きているrunが無いことをstoreが同一transactionで検査） |
+/// | `ready` / `ready --bypass-review`・`ready --inherit` | `task.ready` / `task.ready_bypass_review` | task（状態） |
+/// | `cancel`（`--duplicate-of`を含む） | `task.cancel` | task（状態） |
+/// | `submit` / `submit --proposal ID` | `proposal.submit` | queue / proposal（持ち主） |
+/// | `proposal withdraw` | `proposal.withdraw` | proposal（持ち主） |
+/// | `goal add` / `goal edit` / `goal ready` / `goal close` / `goal review` | `goal.write` / `goal.write` / `goal.ready` / `goal.close` / `goal.review_request` | queue / goal |
+///
+/// `Planning::refuse_ungranted` rejects before reading a missing task or
+/// proposal; for a role with the capability, a missing resource is the
+/// store's error rather than an authorization denial.
 pub struct Planning<'a, S: ?Sized> {
     store: &'a mut S,
     actor: &'a ActorContext,

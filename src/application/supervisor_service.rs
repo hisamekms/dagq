@@ -1035,6 +1035,10 @@ fn jobs(
 /// with the request's `requested_by`. `process` is the one that asked,
 /// which a token it asks for is kept with ([`tokens`]). `notes` takes what
 /// a job's read met among the heavy reads ([`jobs`]).
+/// Only a registered supervisor is accepted. Container parts, node samples,
+/// run resources and ledger operations require `scheduler.supervise` too.
+/// Planning operations keep the CLI's capabilities and are refused to the
+/// supervisor, as are unlisted operations and integrator-only landing ends.
 pub fn answer(
     backend: &dyn ServiceBackend,
     principal: &Principal,

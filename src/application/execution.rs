@@ -399,6 +399,13 @@ const IDENTITY_ENV: [&str; 4] = [ROLE_ENV, ACTOR_ID_ENV, RUN_ID_ENV, TASK_ID_ENV
 /// against a mistake, not enforcement: the same command by a path, through
 /// another shell or a script is not matched, and the CLI's own check stays
 /// the one that refuses (ADR-t728-1 decision 6).
+/// Every role also denies rewriting `IDENTITY_ENV`. Worker/planner
+/// session and turn settings place role denials after `SIGNAL_BY_NAME_DENIED`
+/// (the full turn order is `adapters::headless_worker_settings`). Review
+/// job settings contain only role denials; inbox settings contain only
+/// `permissions.deny` with role denials and no `SIGNAL_BY_NAME_DENIED`.
+/// `DAGQ_COMMANDS` agrees with `main.rs::requests` under unit tests; in
+/// particular a role without `ci.read` denies `Bash(dagq ci failures:*)`.
 pub fn permission_deny(role: ActorRole) -> Vec<String> {
     deny_forms(role).iter().map(DenyForm::claude_rule).collect()
 }

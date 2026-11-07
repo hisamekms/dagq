@@ -57,6 +57,21 @@ pub trait DialogueStore: DenialLog {
 }
 
 /// The dialogue and record commands of one actor on one store.
+///
+/// Command capabilities and resources:
+///
+/// | コマンド | capability | resource |
+/// | --- | --- | --- |
+/// | `ask --kind blocked --finding ID` | `finding.ask` | finding |
+/// | `ask`（それ以外） | `ask.open` | `NewAsk`（kind、`--run`、`--task`、`--request`とその依頼の閉じていないruntimeのplanner）。`--request`付きは、`ask.open`を持たないroleとkindの合わないroleを依頼を読む前に拒み、plannerはその依頼のplanner自身でなければ`not on this resource`で拒む |
+/// | `answer` / `ask close` | `ask.answer` / `ask.close` | ask（queueにあるrun）。capabilityを持たないroleはaskを読む前に拒む（記録のrunは`null`） |
+/// | `note` | `note.write` | `--task`のtask・`--run`のrun・`--goal`のgoal |
+/// | `mark` / `mark --retract` | `mark.write` | queue |
+/// | `finding record` | `finding.record` | 対象のtask・run・goal、`--queue`ならqueue |
+/// | `finding resolve` / `finding dismiss` | `finding.resolve` / `finding.dismiss` | finding |
+///
+/// Writers (`asked_by`, note/finding/mark `by`) always come from the actor.
+/// `finding dismiss --covered-by` still needs `finding.dismiss`.
 pub struct Dialogue<'a, S> {
     store: &'a mut S,
     gate: Gate<'a>,

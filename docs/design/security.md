@@ -57,7 +57,10 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 
 ## actor × capability
 
-`src/domain/authorization.rs`の`StaticPolicy`（`grants(role)`とresourceの規則）の要約。明示して許したもの以外は全て拒む（default deny）。resourceの持ち主や状態が分からないときも拒む（fail closed）。列はcapabilityの群（名前は[Authorization](authorization.md#capability)）で、○は許す、△はresourceの規則つきで許す、—は拒む。
+`src/domain/authorization.rs`の`StaticPolicy`（`grants(role)`とresourceの規則）の要約。
+明示して許したもの以外は全て拒む（default deny）。
+resourceの持ち主や状態が分からないときも拒む（fail closed）。
+列はcapabilityの群（入口は[Authorization](authorization.md#capability)）で、○は許す、△はresourceの規則つきで許す、—は拒む。
 
 | role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose` / `replan resolve`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push | telemetryの送信（`telemetry_report`） |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -148,7 +151,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   これは**guardrailであってenforcementではない**: denyはClaude Codeのtoolの呼び出しの綴りで照合する助言的な抑止で、`dagq inbox`を通さずに開いたinboxと、`claude`を打ち直したsessionには効かない（inboxがguardrailつきで開かれたかは`status` / `doctor`の`inbox_guardrail`が見せる）。
   hostの判定は助言的なまま（ADR-t728-1決定6）。
   人自身のterminal（`DAGQ_ROLE`なし）はsettingsを持たない
-- Codexのinboxは、同じ規則を`dagq inbox`が起動の引数で渡すPreToolUseのhookで持つ（ADR-t2159-1決定5。一致の範囲とClaudeとの違いは[Authorization](authorization.md#claudeのpermissionsdenyguardrail)）。
+- Codexのinboxは、同じ規則を`dagq inbox`が起動の引数で渡すPreToolUseのhookで持つ（ADR-t2159-1決定5。一致の範囲とClaudeとの違いは[Authorization](authorization-guardrail.md)）。
   hookが動かない（trustの欠けなど）Codexのinboxはguardrailの無いinboxで、これも助言的な抑止にとどまる
 
 ## host実行は助言的（advisory）

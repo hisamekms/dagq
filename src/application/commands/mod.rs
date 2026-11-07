@@ -39,6 +39,8 @@ impl Gate<'_> {
     /// Refuse, before the store is read, a capability the actor has on no
     /// resource: `named` is the resource as the command names it, its
     /// owner unknown; what the owner decides is left to [`Self::authorize`].
+    /// When this passes, a missing task or proposal is a store error rather
+    /// than a denial. It does not manufacture a resource to authorize.
     pub fn refuse_ungranted(
         &self,
         log: &dyn DenialLog,

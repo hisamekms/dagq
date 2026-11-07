@@ -41,6 +41,12 @@ pub trait RequestStore: DenialLog {
 }
 
 /// The request commands of one actor on one store.
+/// `request add` needs `request.record` on the queue. The CLI checks before
+/// reading a file or stdin; a service-routed request sends the input unread
+/// and lets the service refuse and record. A refusal returns immediately,
+/// so only one `authorization_denied` is written. `requests` is a read
+/// (`queue.read`). `request decline` needs `request.decline` on the request
+/// with its open runtime planner; missing ownership fails closed.
 pub struct Requests<'a, S> {
     store: &'a mut S,
     gate: Gate<'a>,

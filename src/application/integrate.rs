@@ -797,6 +797,12 @@ pub struct DiskRoom {
 /// person's `integrate`, or an `approve_landing` answered `land`), is
 /// recorded as the requester; a supervisor that lands a run takes the slot itself, so the
 /// `integration_started` of its landing is the supervisor's.
+/// `Integrator::approve` records `integration_approved` as the requester
+/// only after authorization and takes the slot before returning this request.
+/// For a supervisor landing, the service's `begin_landing` takes the slot
+/// and issues the integrator token in that same transaction.
+/// During `Integrator::land`, events are written as the integrator and
+/// `requested_by` is the requester's actor id.
 #[derive(Debug, Clone)]
 pub struct IntegrationRequest {
     pub requester: ActorContext,
@@ -984,6 +990,11 @@ impl Integrator {
 /// neither an approval to land (`integration_approved`) nor a pass as the
 /// latest review verdict. A review's pass is data the request carries;
 /// the landing's own checks still decide (ADR-t728-2 decision 3).
+/// A converged `revise_limit_judged` after the latest review also counts as
+/// landable (`RunHistory::landable`). When refused, `Integrator::land`
+/// returns any held slot through `abort_integration`, recording
+/// `integration_error`, and returns an error without landing. A pass does
+/// not bypass receipt, rebase, verification or scope checks.
 pub fn landing_refusal(
     requester: &ActorContext,
     run: &TaskRun,

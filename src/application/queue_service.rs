@@ -459,6 +459,18 @@ fn admin_of(backend: &dyn ServiceBackend, actor: &ActorContext, admin: &Admin) -
 }
 
 /// The service's use cases on a backend.
+/// Authorization uses the token's principal as actor, recording refusals
+/// as that principal's `authorization_denied`. Dialogue uses `Dialogue`;
+/// `show` asks `Gate` for `queue.read` on the task, proposal list/show for
+/// `queue.read` on the queue, and `watch_poll` for `queue.watch`.
+/// Whole-queue reads ask the same capability as the CLI (`ci.read` for
+/// `ci failures`, `queue.read` otherwise).
+/// Wrappers need `session.run`/`session.record` on their own run or planner;
+/// container preparation is allowed only for the run. Control steps need
+/// `service.lifecycle` for up/down/inbox and service/queue-broker start/stop,
+/// `service.install` for install/update, with recorded denials.
+/// The supervisor and landing scopes are `supervisor_service::answer` and
+/// `supervisor_service::integrator_scope`; unlisted operations are denied.
 pub struct QueueService<'a> {
     pub backend: &'a dyn ServiceBackend,
     /// The service's build identifier, which `hello` names.

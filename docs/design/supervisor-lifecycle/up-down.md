@@ -162,7 +162,7 @@ Codexのinboxの起動の中身は[Provider lifecycle](../provider-lifecycle.md)
    - **inboxのsettings**: inboxのcommandを作るたびにqueueのディレクトリへ書き直す。
      中身はinboxのroleの`permissions.deny`だけで、hook・idle marker・サジェストの設定は入れない（inboxはidleで判定せず、人が打つ）。
    - **見せる欄**: `status`と`doctor`のinboxのguardrailは、最新の`inbox_opened`で判定し、その起動のproviderとmodelを添える。
-     判定は起動のproviderで分かれ、Claudeのinboxはsettingsを渡したこと、CodexのinboxはPreToolUseのhookを渡したことで判定する（[Authorization](../authorization.md#claudeのpermissionsdenyguardrail)）。
+     判定は起動のproviderで分かれ、Claudeのinboxはsettingsを渡したこと、CodexのinboxはPreToolUseのhookを渡したことで判定する（[Authorization](../authorization-guardrail.md)）。
      Codexのinboxのguardrailはhookなので、渡したことと動いた記録を分けて出す。
      `[roles.inbox]`に設定したproviderは`doctor`の`roles`が出す。
      前のbinaryの`up`が開いたinboxの記録も同じく判定する。

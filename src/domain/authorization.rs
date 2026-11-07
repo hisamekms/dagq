@@ -983,6 +983,11 @@ pub const fn changes_persons_priority(role: ActorRole) -> bool {
 /// setter, else its goal's), when a person set it and `role` is not a
 /// person's ([`changes_persons_priority`]). The caller asks only for a
 /// change that changes something; the error names the person's value.
+/// The store checks in the same transaction for `set-priority`, `goal edit`
+/// and an `add`/`goal add` priority differing from the request. Refusals
+/// record `authorization_denied`; the error names the person's value
+/// without the word `denied`. `Planning::set_goal` separately records the
+/// typed refusal of a `goal_gap` move after rollback.
 pub fn check_priority_change(
     role: ActorRole,
     holder: PriorityHolder,
