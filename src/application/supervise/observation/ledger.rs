@@ -67,6 +67,37 @@ pub const FAILING_PASSES: u32 = 10;
 /// checkpoint even when its session marks prevent page checkpoints.
 const EVENTS_PER_PASS: usize = 20 * EVENTS_PER_READ;
 
+/// Let a pass finish for at most thirty seconds after loop shutdown starts
+/// waiting for it. Catch-up can outlive an update or service restart; it
+/// must not hold that handoff indefinitely. Earlier EndBy deadlines win,
+/// including a heartbeat deadline set while waiting. Committed checkpoints
+/// survive leaving the thread; exec discards it, and store transactions
+/// keep unfinished row/mark writes from exposing a partial certificate.
+const FINISH_WAIT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, PartialEq, Eq)]
+enum FinishWait {
+    Reap,
+    Leave,
+    Wait(Duration),
+}
+
+/// Decide from supplied monotonic elapsed time and the current EndBy
+/// remainder. Reap an already finished pass even at the boundary; otherwise
+/// sleep no longer than the earlier deadline, polling for completion.
+fn finish_wait(finished: bool, elapsed: Duration, end_left: Option<Duration>) -> FinishWait {
+    if finished {
+        return FinishWait::Reap;
+    }
+    let left = FINISH_WAIT.saturating_sub(elapsed);
+    let left = end_left.map_or(left, |end| left.min(end));
+    if left.is_zero() {
+        FinishWait::Leave
+    } else {
+        FinishWait::Wait(left.min(Duration::from_millis(20)))
+    }
+}
+
 /// How often the supervisor's log says how much the builder keeps between
 /// passes ([`KeptSize`]) while it changes little.
 pub const KEPT_LOG_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -1717,18 +1748,35 @@ impl LedgerWatch {
     }
 
     /// Wait for the pass still running, as the loop ends, until
-    /// `deadline` when one is given ([`super::finished_by`]); one still
-    /// running then is left, and the next supervisor's ledger catches up.
+    /// at most [`FINISH_WAIT`] or an earlier `deadline`. One still running
+    /// then is left, and the next supervisor resumes from committed R.
     pub(in crate::application::supervise) fn finish(
         &mut self,
         env: &mut ObservationEnv<'_>,
         deadline: &super::EndBy,
     ) {
         if let Some(job) = self.job.take() {
-            if super::finished_by(&job, deadline, &*env.generators.clock) {
-                self.reap(env, job);
-            } else {
-                tracing::warn!("the ledger's pass still runs as the supervisor ends; it is left");
+            let clock = &*env.generators.clock;
+            let started = clock.monotonic();
+            loop {
+                let now = clock.monotonic();
+                match finish_wait(
+                    job.is_finished(),
+                    now.saturating_duration_since(started),
+                    deadline.left(now),
+                ) {
+                    FinishWait::Reap => {
+                        self.reap(env, job);
+                        break;
+                    }
+                    FinishWait::Leave => {
+                        tracing::warn!(
+                            "the ledger's pass still runs as the supervisor ends; it is left"
+                        );
+                        break;
+                    }
+                    FinishWait::Wait(left) => thread::sleep(left),
+                }
             }
         }
     }

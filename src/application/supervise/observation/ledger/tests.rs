@@ -6096,3 +6096,49 @@ fn readers_settled_at_the_position_that_a_later_input_reaches_are_settled_as_eve
 }
 
 mod diagnostics;
+
+#[test]
+fn finish_wait_bounds_a_pass_without_an_end_deadline() {
+    assert_eq!(
+        finish_wait(false, Duration::ZERO, None),
+        FinishWait::Wait(Duration::from_millis(20))
+    );
+    assert_eq!(
+        finish_wait(false, FINISH_WAIT - Duration::from_millis(1), None),
+        FinishWait::Wait(Duration::from_millis(1))
+    );
+    assert_eq!(finish_wait(false, FINISH_WAIT, None), FinishWait::Leave);
+    assert_eq!(
+        finish_wait(false, FINISH_WAIT + Duration::from_secs(1), None),
+        FinishWait::Leave
+    );
+}
+
+#[test]
+fn finish_wait_obeys_an_earlier_or_new_end_deadline() {
+    assert_eq!(
+        finish_wait(false, Duration::ZERO, Some(Duration::from_millis(1))),
+        FinishWait::Wait(Duration::from_millis(1))
+    );
+    assert_eq!(
+        finish_wait(false, Duration::from_secs(1), Some(Duration::ZERO)),
+        FinishWait::Leave
+    );
+    assert_eq!(
+        finish_wait(false, FINISH_WAIT, Some(Duration::from_secs(60))),
+        FinishWait::Leave
+    );
+}
+
+#[test]
+fn finish_wait_reaps_completed_passes_even_at_the_boundary() {
+    for elapsed in [
+        Duration::ZERO,
+        FINISH_WAIT,
+        FINISH_WAIT + Duration::from_secs(1),
+    ] {
+        for end in [None, Some(Duration::ZERO)] {
+            assert_eq!(finish_wait(true, elapsed, end), FinishWait::Reap);
+        }
+    }
+}

@@ -126,13 +126,15 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 ## ループの終わり
 
 - 終わり方は`supervise`・`LoopSettings::owner`・`Supervisor::run_loop`のdoc comment、signalは`install_stop_signal`（1回目でdrain、2回目で即終了）。
-- ループの終わりの待ちに上限があるのは、ownerの居なくなったsupervisorとheartbeatの止まったsupervisorだけである（`EndBy`）。
+- ownerの居なくなったsupervisorとheartbeatの止まったsupervisorは、ループの終わりの待ち全体に上限を持つ（`EndBy`）。
   heartbeatの上限はheartbeatが止まった時に決まり、ループがほかの理由で終わった後に止まっても同じく効く（`EndDeadline`）。
   heartbeatの止まったsupervisorは、上限をqueue serviceへの呼び出しとstepの報告の1つずつにも当て、止まる前に始めて答えを待っているものにも当てる（`EndBound`・`EndBoundSinks`）。
   ループの終わりは最後にheartbeatを止めてから止まった理由を確かめるので、終わり際に止まったheartbeatの理由も記録に残る。
   上限までに送れなかった記録とjobの終わりはqueueのそばに残り、次のsupervisorが送る。
   走っているrunのsessionのturnは止めず、runは次のsupervisorが引き継ぐ。
   headlessのjobは止めて終わりを記録し、次のsupervisorが立て直す（[Headless jobのプロセス](headless-job-processes.md#引き継ぎ)）。
+- 台帳のpassの終了待ちは、終わる理由によらず上限を持ち、`EndBy`の期限がもっと早ければそちらに従う。
+  上限を超えたpassは置いていき、次のsupervisorは保存済みのRから続ける。
 - 登録を消すのは自分のループの終わり、`up`・`down`の掃除、生きているsupervisorによる死んだ登録の片付けだけで、どれも同じtransactionで`supervisor_stopped`を書く。
   `status` / `doctor` / `recover` / `integrate`は消さない（[Persistence](../persistence.md#runtime-ownership)、[`up` / `down`](up-down.md#up--down)）。
 
