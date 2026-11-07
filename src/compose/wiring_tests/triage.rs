@@ -833,20 +833,11 @@ fn a_failed_run_the_recovery_job_resumes_is_resumed_in_its_session_and_lands() {
     }
 }
 
-/// A run whose `integrate` verification fails on a broken verify command,
-/// and whose resumed session gives up, goes to its recovery job. Its
-/// `decide` asks offer the verify fix; a person answers the job's own
-/// option (once without its label) until the alert's three jobs are used
-/// up: each answer is `triage_decided` with `action: recover`, and the
-/// next round's job reads it without the label. The used-up ask, opened
-/// with no job, still offers the fix: the task's verify is edited and the
-/// fix answered, the job gets one more round that reads the corrected
-/// commands and the edit, chooses `retry_inherit`, and the next run lands
-/// through the corrected verification with the work kept.
-#[test]
-fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() {
+/// Fail integration on the broken verify command, then let its resumed
+/// worker give up and its first recovery job ask the person what to do.
+fn broken_verify_from_worker(name: &str) -> (Wiring, crate::domain::TaskId, TaskRun) {
     let mut wiring = Wiring::new(
-        "a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited",
+        name,
         Script {
             receipts: vec![succeeded, failed, succeeded],
             verdicts: vec![verdict("pass", "fine")],
@@ -856,27 +847,11 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
         wiring.files.clone(),
         &["false"],
     ));
-    let escalate = || {
-        json!({
-            "verdict": "escalate", "confidence": "high", "diagnosis": "the verify is wrong",
-            "options": [{"kind": "recover", "text": "try again"}], "reason_category": "recovery_failed"
-        })
-    };
-    let try_again = format!("try again{}", crate::domain::recovery::RECOVER_LABEL);
-    let option = "edit the task's --verify, then retry_inherit";
-    wiring.agent.recovering(vec![escalate()]);
+    wiring.agent.recovering(vec![wrong_verify()]);
     let task = wiring.ready_task(&["false"]);
     wiring.supervise_once();
 
     let mut queue = wiring.queue();
-    let decide = |queue: &mut crate::infrastructure::sqlite::SqliteQueue| {
-        queue
-            .asks(Default::default())
-            .unwrap()
-            .into_iter()
-            .find(|ask| ask.kind == AskKind::Decide && ask.is_open())
-            .expect("an open decide ask")
-    };
     let first = queue.show(task).unwrap().runs[0].clone();
     assert_eq!(
         first.status(),
@@ -884,6 +859,117 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
         "{:?}",
         first.last_error()
     );
+    (wiring, task, first)
+}
+
+/// The failed run produced by the worker-path test, supplied as input to
+/// the recovery wiring so each test drives only the rounds it checks.
+fn broken_verify(name: &str) -> (Wiring, crate::domain::TaskId, TaskRun) {
+    use crate::application::{Repository, RunFiles};
+    let wiring = Wiring::new(
+        name,
+        Script {
+            receipts: vec![succeeded],
+            verdicts: vec![verdict("pass", "fine")],
+        },
+    );
+    let task = wiring.ready_task(&["false"]);
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let worktree = format!("/wiring/repo/worktrees/{run_id}");
+    let run_dir = format!("/wiring/repo/runs/{run_id}");
+    let receipt_path = format!("{run_dir}/receipt.json");
+    let connection = connect(&wiring.db);
+    connection
+        .execute(
+            "UPDATE tasks SET status='in_progress' WHERE id=?1",
+            [task.as_i64()],
+        )
+        .unwrap();
+    connection.execute(
+        "INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,worker_mode,base_commit,branch,worktree_path,repo_path,run_dir,receipt_path,last_error)
+         VALUES (?1,?2,'failed','claude','claude','headless',?3,?4,?5,'/wiring/repo',?6,?7,'worker reported failed')",
+        rusqlite::params![run_id, task.as_i64(), wiring.git.main().as_str(), format!("dagq/{run_id}"), worktree, run_dir, receipt_path],
+    ).unwrap();
+    let mut queue = wiring.queue();
+    let run = queue.show(task).unwrap().runs[0].clone();
+    let worktree = run.worktree_path().unwrap();
+    let receipt_path = run.receipt_path().unwrap();
+    wiring.git.create_worktree(&run).unwrap();
+    let commit = wiring
+        .git
+        .commit_in(std::path::Path::new(&worktree))
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE task_runs SET result_commit=?2 WHERE id=?1",
+            rusqlite::params![run_id, commit.as_str()],
+        )
+        .unwrap();
+    wiring
+        .files
+        .write(
+            std::path::Path::new(&receipt_path),
+            failed(run.id(), std::path::Path::new(&worktree), &wiring.git)
+                .unwrap()
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+    connection.execute(
+        "INSERT INTO run_events(task_id,run_id,kind,payload) VALUES (?1,?2,'integration_deferred',?3)",
+        rusqlite::params![task.as_i64(), run_id, json!({"code": "verification_failed", "command": "false"}).to_string()],
+    ).unwrap();
+    wiring.agent.recovering(vec![wrong_verify()]);
+    wiring.supervise_once();
+    let first = queue.show(task).unwrap().runs[0].clone();
+    assert_eq!(first.status(), RunStatus::Failed);
+    (wiring, task, first)
+}
+
+/// The successful receipt fails integration on the broken command; the
+/// resumed worker's failed receipt sends the run to its recovery job.
+#[test]
+fn a_broken_verify_and_a_failed_resume_reach_the_recovery_ask() {
+    let (wiring, task, _) =
+        broken_verify_from_worker("a_broken_verify_and_a_failed_resume_reach_the_recovery_ask");
+    let mut queue = wiring.queue();
+    let ask = decide(&mut queue);
+    assert!(
+        ask.options
+            .contains(&"edit the task's --verify, then retry_inherit".to_owned())
+    );
+    assert!(
+        ask.question
+            .contains(&format!("dagq edit {} --verify", task.as_i64()))
+    );
+}
+
+fn wrong_verify() -> Value {
+    json!({
+        "verdict": "escalate", "confidence": "high", "diagnosis": "the verify is wrong",
+        "options": [{"kind": "recover", "text": "try again"}], "reason_category": "recovery_failed"
+    })
+}
+
+fn decide(queue: &mut crate::infrastructure::sqlite::SqliteQueue) -> crate::domain::Ask {
+    queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.kind == AskKind::Decide && ask.is_open())
+        .expect("an open decide ask")
+}
+
+/// Each answer (including one without its label) requests the next
+/// recovery job, until all three have run. The used-up ask runs no job
+/// and still offers the verify fix.
+#[test]
+fn a_broken_verify_uses_up_its_recovery_rounds_and_still_offers_the_fix() {
+    let (wiring, task, first) =
+        broken_verify("a_broken_verify_uses_up_its_recovery_rounds_and_still_offers_the_fix");
+    let mut queue = wiring.queue();
+    let try_again = format!("try again{}", crate::domain::recovery::RECOVER_LABEL);
+    let option = "edit the task's --verify, then retry_inherit";
     for round in 1..=3 {
         let ask = decide(&mut queue);
         assert!(
@@ -902,7 +988,7 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
         queue.answer(ask.id, answer).unwrap();
         let jobs = wiring.agent.recovery_prompts().len();
         if round < 3 {
-            wiring.agent.recovering(vec![escalate()]);
+            wiring.agent.recovering(vec![wrong_verify()]);
         }
         wiring.supervise_once();
         let ran = wiring.agent.recovery_prompts().len() - jobs;
@@ -930,8 +1016,7 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
             assert!(prompt.contains("try again"), "{prompt}");
         }
     }
-    // The used-up ask still offers the fix; answered after the edit, the
-    // job runs once more.
+    // Even without another job, the exhausted ask offers the verify fix.
     let ask = decide(&mut queue);
     assert!(
         ask.question
@@ -948,6 +1033,59 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
         "{:?}",
         ask.options
     );
+}
+
+/// From the exhausted recovery history checked by the companion test,
+/// correcting verify grants one more job: it reads the edit, retries with
+/// the work inherited and lands through the corrected verification.
+#[test]
+fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() {
+    let (wiring, task, first) =
+        broken_verify("a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited");
+    let mut queue = wiring.queue();
+    let option = "edit the task's --verify, then retry_inherit";
+    // Seed the two completed escalation rounds already checked above.
+    // Keep their request/start/finish order so no request is pending.
+    let detail = queue.show(task).unwrap();
+    let round_events: Vec<_> = detail
+        .events
+        .iter()
+        .filter(|event| {
+            event.run_id.as_ref() == Some(first.id())
+                && matches!(
+                    event.kind.as_str(),
+                    "recovery_requested"
+                        | "triage_started"
+                        | "triage_finished"
+                        | "recovery_finished"
+                )
+        })
+        .collect();
+    let connection = connect(&wiring.db);
+    for attempt in 2..=3 {
+        for event in &round_events {
+            let mut payload = event.payload.clone();
+            for field in ["attempt", "recovery_attempt"] {
+                if payload.get(field).is_some() {
+                    payload[field] = json!(attempt);
+                }
+            }
+            connection
+                .execute(
+                    "INSERT INTO run_events(task_id,run_id,kind,payload) VALUES (?1,?2,?3,?4)",
+                    rusqlite::params![
+                        task.as_i64(),
+                        first.id().as_str(),
+                        event.kind.as_str(),
+                        payload.to_string()
+                    ],
+                )
+                .unwrap();
+        }
+    }
+    // The companion test checks the exhausted ask itself. Here answer the
+    // still-open ask after the edit, with the completed history in place.
+    let ask = decide(&mut queue);
     queue
         .edit_task(
             task,
