@@ -763,6 +763,9 @@ impl Config {
 /// are skipped regardless of their contents; language is checked separately.
 /// A `run.env` key starting with `DAGQ_` is reserved for the runtime.
 /// A `#` outside a string starts a comment.
+/// A container runtime on a role other than worker or verification is refused
+/// with `refuse_container`'s reason. Inbox has no role table: such a table is
+/// an unknown role, rather than a way to select a runtime.
 pub fn parse_config(text: &str) -> Result<Config> {
     let mut table: Option<&str> = None;
     let mut seen: Vec<&str> = Vec::new();
@@ -3488,6 +3491,9 @@ fn inbox_table_only(text: &str) -> String {
 
 /// `runtime` of `[roles.worker]` and `[roles.verification]` of the
 /// `dagq.toml` in `root` (goal 38); no file is the host for both.
+/// Read afresh: the supervisor calls this each pass, and integrate for each
+/// invocation, against the main checkout. Status, doctor and the session
+/// wrapper read through `BoundRuntimes`, resolving the queue's checkout.
 pub fn load_runtimes(root: &Path) -> Result<RuntimeConfig> {
     let path = root.join(CONFIG_FILE_NAME);
     let Some(text) = read_config(&path)? else {

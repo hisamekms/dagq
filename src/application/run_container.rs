@@ -161,6 +161,11 @@ pub trait RunContainers: Send + Sync {
     /// Stop and remove the container of the run `run`, and forget the
     /// memory its turn reserved ([`Self::reserve_memory`]); nothing when
     /// there is none.
+    /// Called at each turn's end: stopping the podman client alone leaves the
+    /// container. Stop paths treat removal as best effort, log a failure (for
+    /// example a stopped machine), and leave final cleanup to the run's end.
+    /// The name derives from the run, so adopted sessions after a supervisor
+    /// restart use the same removal path.
     fn remove(&self, run: &RunId) -> Result<()>;
     /// Reserve the dagq machine's memory for the container of `run`'s turn
     /// (`prepared`'s limit), waiting while it does not fit (ADR-t3163-1):

@@ -1041,6 +1041,9 @@ impl GitRepository {
     }
 
     /// See [`Repository::hand_main`].
+    /// Before a session request that may require rebase, the control side leaves
+    /// this bundle for container_turn to import into CLONE_MAIN_REF
+    /// (refs/remotes/dagq/main); requests and revise reasons name that ref.
     pub fn hand_main(&self, run: &TaskRun, main: &CommitSha) -> Result<()> {
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let file = run_dir.join(MAIN_BUNDLE_FILE);

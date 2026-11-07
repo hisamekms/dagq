@@ -10,6 +10,8 @@
 //! reads every machine, to see whether the person's runs. Creating and
 //! starting a machine may make its connection the default on some Podman
 //! versions, so the default connection read before is set back after.
+//! When there was no previous default, there is nothing to restore and
+//! the dagq connection can remain the default.
 //! The volumes a machine was created with are read from its configuration
 //! file (`<ConfigDir>/<name>.json` of `podman machine inspect`), the only
 //! place Podman keeps them.

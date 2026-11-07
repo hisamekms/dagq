@@ -3019,6 +3019,13 @@ pub const PREPARE_LOG: &str = "verification-prepare.log";
 /// parts made ready and its materials prepared by [`Self::start`], each
 /// command run in a container of its own by [`Self::run_to_log`], and what
 /// it left removed when it goes, however the verification ends.
+/// Preparation uses RunMachine for the machine, image and relay, with a new
+/// build-output volume for this verification, never the worker's volume.
+/// The directory and clone's safety checks are GitRepository::create_verification_clone's;
+/// it also holds the 0600 token copy and command home. Known failures are
+/// written with the prepared materials and published through descriptors,
+/// replacing worker symlinks. Cleanup removes the final container as well as
+/// those left between commands, however verification ends.
 struct ContainerVerification<'a> {
     containers: &'a dyn super::run_container::VerificationContainers,
     prepared: super::run_container::PreparedVerification,

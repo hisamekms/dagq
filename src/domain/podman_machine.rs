@@ -231,6 +231,9 @@ pub fn lease_held(seen: OwnerSeen) -> bool {
 /// `$HOME`, which Podman mounts by default, or a directory elsewhere with
 /// one of their names). `None` when they serve it. Volumes are set only
 /// when a machine is created, so the way out is to create it again.
+/// Recreate with `podman machine stop dagq` and `podman machine rm dagq`;
+/// the next ensure initializes from the current host.toml and host queues.
+/// Queues added after creation and resource changes need the same recreation.
 pub fn mounts_mismatch(
     required: &MachineMounts,
     data_root: &Path,

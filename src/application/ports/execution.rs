@@ -2707,6 +2707,11 @@ pub struct DiffNumbers {
 /// dagq machine, the image and the relay, each answering for its part. A
 /// target set to the container that cannot be used waits, never on the
 /// host (ADR-t2113-1 decision 4).
+/// Composition for supervisor and integrate asks, outside in: BrokerGate,
+/// RelayGate, ClaudeCredentialGate (the worker credential selected in
+/// host.toml), MachineGate (mounts and memory), ImageGate, then
+/// ContainerExecutors, which accepts both targets. Each gate answers for
+/// its part or asks the next; the first unavailable part supplies the reason.
 pub trait ContainerRuntime {
     fn availability(
         &self,

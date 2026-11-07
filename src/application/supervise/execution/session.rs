@@ -96,6 +96,8 @@ impl Supervisor<'_> {
     /// container (goal 38) has its session wrapper started here, on the
     /// host, and its turns in their container; any other actor set to it is
     /// refused, never started on the host.
+    /// The worker actor's backend follows the worker runtime through
+    /// ExecutionConfig::of_runtimes; its session wrapper remains a host process.
     pub(super) fn actors(&self) -> HostActorExecutor<'_> {
         self.actors_on(self.reviewer)
     }

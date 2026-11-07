@@ -150,6 +150,12 @@ impl ImageRecords for KeptImageRecords {
 /// returned as why the container cannot be used; a removal that fails is
 /// left for the next time (an image a container runs is not removed).
 /// The reference of the image to run is returned.
+/// Called before worker turns and verification containers, after the machine
+/// is running. A missing base also rebuilds the project on it. Successful
+/// builds record `container_image_built`; unavailable client source, missing
+/// main-checkout inputs and build errors record `container_image_failed`.
+/// ImageGate only looks: failure_holds keeps the same failed image unavailable
+/// until its hold expires or the inputs change.
 pub fn prepare(
     specs: &dyn ImageSpecs,
     builder: &dyn ImageBuilder,

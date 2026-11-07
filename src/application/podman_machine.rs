@@ -12,7 +12,12 @@
 //! memory limit of the machine under the same lock, and waits outside it
 //! while it does not fit ([`try_reserve`], [`wait_for_memory`],
 //! [`release_memory`], ADR-t3163-1); a new claim looks first
-//! ([`look_room`]).
+//! ([`look_room`]). A turn holds its reservation with its container;
+//! verification holds it from before the first command through cleanup.
+//! Wrappers wait for subsequent turns and integrate waits for verification
+//! and landing rechecks; facts-only turns reserve too. Their waits are
+//! recorded as run events and appear in status. While waiting, a wrapper
+//! still checks exit requests and task fences and starts no turn if stopped.
 //!
 //! What is decided is [`crate::domain::podman_machine`]'s and
 //! [`crate::domain::machine_memory`]'s; the commands, the lock and the
@@ -486,6 +491,11 @@ pub struct Machine<'a> {
 /// `Err` says why it cannot be used (the person's machine runs, its
 /// volumes do not match, a command failed); then `user` is not counted.
 /// What was done is returned.
+/// Worker turns and verification use the run as owner, not the caller's
+/// process, and do not release that run between turns. The relay watch
+/// stops the machine at a look with no active relay and no remaining user.
+/// Facts-only turns and cleanup of a previous verification instead hold a
+/// user for the individual call; tests and smokes release theirs when done.
 pub fn ensure(machine: &Machine<'_>, user: &str, owner: &LeaseOwner) -> Result<Prepare, String> {
     let _held = machine
         .users

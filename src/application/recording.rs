@@ -324,6 +324,9 @@ impl<'a> RecordingSessions<'a> {
     /// that was killed with the wrapper, so every stop of a run's session
     /// (after its review, its triage, a cancel, the sweep, a resume's end)
     /// removes it too.
+    /// Covers session stops after review, landing, triage stop/cancel, sweep
+    /// and resume completion. Recovery's stop_processes also removes the run's
+    /// container; it does not rely on this wrapper having started the session.
     pub fn removing_containers(
         mut self,
         containers: Arc<dyn super::run_container::RunContainers>,

@@ -99,6 +99,9 @@ impl ClientSource {
 /// `build`, comes from, with dagq's `repository`; `Err` says why it cannot
 /// be had: a build with uncommitted changes or one that does not know its
 /// commit has no source of the same version anywhere.
+/// The base's build checks the resulting client's `--version` against the
+/// installed dagq's build identifier and fails on a mismatch; only the
+/// binary is copied out of the source-build stage.
 pub fn client_source(build: &str, repository: &str) -> Result<ClientSource, String> {
     if !crate::build_id::is_prerelease(build) {
         return Ok(ClientSource::Release {
