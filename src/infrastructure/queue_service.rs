@@ -3070,7 +3070,9 @@ pub(crate) fn owner_gone(owner: Option<u32>) -> bool {
 /// Run the queue's service until `stop` is set, its queue goes or its
 /// owner does (`owner`, a test's process): take
 /// the queue's lock (a second service of the queue is refused), bind the
-/// socket, record itself, and answer each connection on its own thread.
+/// configured TCP entrance and the socket, record itself, and answer each
+/// connection on its own thread. A TCP bind failure is reported as Refused
+/// before a socket or service record is created.
 ///
 /// A replacement's service ([`ServeOptions::start`], ADR-t3102-2 decision
 /// 2) first judges whether it may take over and apply what the queue lacks
@@ -3078,23 +3080,32 @@ pub(crate) fn owner_gone(owner: Option<u32>) -> bool {
 /// breaking migration unless after a drain) and, when it may not, ends
 /// touching nothing; else it
 /// waits for its starter to stop the running service, takes the lock and
-/// applies them ([`apply_start_migrations`]) before it binds, telling each
+/// applies them ([`apply_start_migrations`]) before it accepts, telling each
 /// step in [`ServeOptions::report`]. Any service records whether its build
 /// found migrations pending once it held the lock, which decides whether
 /// `up` keeps it ([`replacement_due`]).
 pub fn serve(options: &ServeOptions) -> Result<Value> {
-    serve_on(options, None)
+    let config = super::deployment_config::DeploymentConfig::from_process()?;
+    config.store.check_usable(cfg!(feature = "postgres"))?;
+    let http = config.http.map(HttpStart::Deployment);
+    serve_on(options, http)
 }
 
 /// [`serve`] that also takes requests on `http`, the HTTP entrance
 /// ([`super::queue_service_http`]), with the same backend, so they go on the
-/// same write line and through the same checks as the socket's. No start of
-/// `up` or `service start` calls it: [`serve`] opens no TCP port.
+/// same write line and through the same checks as the socket's. This explicit
+/// listener entry is for callers that already decided their configuration;
+/// the production entry [`serve`] reads the deployment settings.
 pub fn serve_with_http(options: &ServeOptions, http: TcpListener) -> Result<Value> {
-    serve_on(options, Some(http))
+    serve_on(options, Some(HttpStart::Bound(http)))
 }
 
-fn serve_on(options: &ServeOptions, http: Option<TcpListener>) -> Result<Value> {
+enum HttpStart {
+    Bound(TcpListener),
+    Deployment(super::deployment_config::HttpConfig),
+}
+
+fn serve_on(options: &ServeOptions, http: Option<HttpStart>) -> Result<Value> {
     let queue_dir = queue_dir_of(&options.db);
     ensure!(options.db.is_file(), "no queue at {}", options.db.display());
     let dir = service_dir(&queue_dir);
@@ -3141,6 +3152,21 @@ fn serve_on(options: &ServeOptions, http: Option<TcpListener>) -> Result<Value> 
             TAKE_OVER_WAIT
         };
         let lock = take_lock(&dir, &queue_dir, wait)?;
+        let http = http
+            .map(|http| {
+                let (listener, tls) = match http {
+                    HttpStart::Bound(listener) => (listener, None),
+                    HttpStart::Deployment(http) => (
+                        TcpListener::bind(http.address).context("bind DAGQ_LISTEN")?,
+                        http.tls,
+                    ),
+                };
+                listener
+                    .set_nonblocking(true)
+                    .context("prepare DAGQ_LISTEN")?;
+                Ok::<_, anyhow::Error>((listener, tls))
+            })
+            .transpose()?;
         // A queue that names no binary is named this one's now that it
         // holds the queue, so a start that fails names nothing.
         queue_binary::check(
@@ -3161,9 +3187,9 @@ accepts: schema {} to {}",
                 migrated.schema_version
             );
         }
-        Ok::<_, anyhow::Error>((lock, migrated))
+        Ok::<_, anyhow::Error>((lock, migrated, http))
     })();
-    let (lock, migrated) = match taken {
+    let (lock, migrated, http) = match taken {
         Ok(taken) => taken,
         Err(error) => {
             let _ = tell(&ReplacementState::Refused {
@@ -3241,11 +3267,12 @@ accepts: schema {} to {}",
         warn!("the supervisors' tokens could not be swept: {error:#}");
     }
     let http = http
-        .map(|listener| {
-            super::queue_service_http::open(
+        .map(|(listener, tls)| {
+            super::queue_service_http::open_tls(
                 listener,
                 http_answerer(backend.clone(), pid, reads.clone()),
                 options.poll,
+                tls,
             )
         })
         .transpose()?;

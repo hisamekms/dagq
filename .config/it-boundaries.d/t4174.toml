@@ -1,0 +1,6 @@
+[[boundary]]
+id = "deployment-config-starts-the-tls-service"
+kind = "プロセス"
+test = "queue_service_http::deployment_binds_tls_before_accepting_and_continues_a_request_before_its_body"
+reason = "配置の環境とmountした証明書を実のserviceプロセスへ渡し、使用中のTCPポートはsocketとrecordを残さずRefusedになり、起動したTLSの受けは本文より前に100 Continueを届けてclose_notifyで終わることを、実のprocessとTLSのloopbackで確かめる。設定の読みと入口の選択の判断はdeployment_configのunit testが持つ。"
+task = 4174

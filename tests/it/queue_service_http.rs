@@ -3,11 +3,15 @@
 
 use crate::common;
 use common::cli::ok;
+use common::service::OwnedByTest;
 use common::service::{events, queue, token};
+use common::{Bounded, WithoutActor};
 
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    path::Path,
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -133,4 +137,141 @@ fn a_request_over_loopback_reaches_the_service_and_passes_by_its_token() {
     assert_eq!(noted["result"]["actor"]["role"], "worker", "{noted}");
 
     assert_eq!(serving.stopped()["outcome"], "stopped");
+}
+
+/// Exercise the CLI's actual process environment without changing the test's.
+fn configured_service(
+    queue: &common::service::Queue,
+    address: SocketAddr,
+    report: &Path,
+) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command.without_actor_env().owned_by_test();
+    for name in dagq::infrastructure::deployment_config::NAMES {
+        command.env_remove(name).env_remove(format!("{name}_FILE"));
+    }
+    command
+        .current_dir(queue.dir())
+        .arg("--db")
+        .arg(&queue.db)
+        .args(["service", "serve", "--replacement"])
+        .arg(report)
+        .env("XDG_CONFIG_HOME", queue.dir())
+        .env("DAGQ_OIDC_ISSUER", "https://identity.example.com")
+        .env("DAGQ_OIDC_AUDIENCE", "queue")
+        .env("DAGQ_LISTEN", address.to_string())
+        .env("DAGQ_TLS_CERT_FILE", queue.dir().join("cert.pem"))
+        .env("DAGQ_TLS_KEY_FILE", queue.dir().join("key.pem"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+#[test]
+fn deployment_binds_tls_before_accepting_and_continues_a_request_before_its_body() {
+    let _test = common::test();
+    let queue = queue();
+    let task = queue.run.task_id();
+    let worker = token(&queue, &Principal::worker(queue.run.id(), task));
+    let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    std::fs::write(queue.dir().join("cert.pem"), generated.cert.pem()).unwrap();
+    std::fs::write(
+        queue.dir().join("key.pem"),
+        generated.signing_key.serialize_pem(),
+    )
+    .unwrap();
+    let report = queue.dir().join("start-report.json");
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = occupied.local_addr().unwrap();
+
+    // The failed start must report refusal before publishing a socket or
+    // service record; retrying with the same queue must remain possible.
+    let failed = configured_service(&queue, address, &report)
+        .bounded_output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let refused: service::ReplacementState =
+        serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    assert!(
+        matches!(refused, service::ReplacementState::Refused { ref error, .. } if error.contains("DAGQ_LISTEN")),
+        "{refused:?}"
+    );
+    assert!(service::ServiceRecord::read(queue.dir()).is_none());
+    assert!(!service::socket_path(queue.dir()).exists());
+    drop(occupied);
+    std::fs::remove_file(&report).unwrap();
+
+    let mut child = common::KillOnDrop::new(
+        configured_service(&queue, address, &report)
+            .spawn()
+            .unwrap(),
+        "the configured TLS service",
+    );
+    {
+        let _waiting = common::within(TIMEOUT, "the configured service to report Accepting");
+        loop {
+            let state = std::fs::read(&report)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<service::ReplacementState>(&bytes).ok());
+            if matches!(state, Some(service::ReplacementState::Accepting { .. })) {
+                break;
+            }
+            assert!(
+                child.child().try_wait().unwrap().is_none(),
+                "service exited: {state:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(generated.cert.der().clone()).unwrap();
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let connection =
+        rustls::ClientConnection::new(Arc::new(tls), "localhost".try_into().unwrap()).unwrap();
+    {
+        let _waiting = common::within(TIMEOUT, "100 Continue, the TLS answer and close_notify");
+        let tcp = TcpStream::connect(address).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        tcp.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut tls = rustls::StreamOwned::new(connection, tcp);
+        let body = json!({"api_version": API_VERSION, "use_case": "show", "params": {"id": task}})
+            .to_string();
+        write!(tls, "POST /api/use-case/show HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {worker}\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n", body.len()).unwrap();
+        tls.flush().unwrap();
+        // Deliberately send no body until the interim response has arrived.
+        let mut interim = [0; b"HTTP/1.1 100 Continue\r\n\r\n".len()];
+        tls.read_exact(&mut interim).unwrap();
+        assert_eq!(&interim, b"HTTP/1.1 100 Continue\r\n\r\n");
+        tls.write_all(body.as_bytes()).unwrap();
+        tls.flush().unwrap();
+        let mut answer = String::new();
+        // rustls reports UnexpectedEof here if the server omits close_notify.
+        tls.read_to_string(&mut answer).unwrap();
+        let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        let shown: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(shown["ok"], true, "{shown}");
+        assert_eq!(shown["result"]["task"]["id"], task.as_i64());
+    }
+
+    let pid = i32::try_from(child.child().id()).unwrap();
+    // SAFETY: signal the child this test started, by its exact PID.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    let _waiting = common::within(TIMEOUT, "the configured TLS service to stop");
+    let stopped = child.wait_with_output().unwrap();
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(service::ServiceRecord::read(queue.dir()).is_none());
+    assert!(!service::socket_path(queue.dir()).exists());
 }

@@ -49,10 +49,8 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 | --- | --- |
 | `queue.sock` | unix socket。pathが長すぎるqueueで`/tmp`の下に置くときは、そのdirがlinkでないことを確かめる。どの呼び出し元もqueueのディレクトリの実pathから同じpathを求める（`socket_path`） |
 | `lock` | serviceが生きている間`flock`の排他で持ち、2つ目のserviceは取れずに止まる。見る側（status・supervisor）は共有で試し、取れれば「居ない」と判定する。止めるときのsignalは`hello`が答えたpidか、`serves`（doc comment）が確かめた記録のpidにだけ送る |
-| `tokens/<値のsha256>.json` | tokenのprincipalと発行の時刻 |
 | `credentials/<keyのsha256>` | tokenの値（keyとinboxのsessionごとのfileは`Principal::credential_key`）。呼び出し元にはこのfileのpathを渡し、値をenvにもargvにも置かない（ADR-t1233-4決定4）。worktreeとrun dirの外 |
 
-HTTPの入口は`queue_service_http`で、本番の起動の経路からは開かない。
 HTTPの受けはsocketと同じ確かめの順を通り、識別はbearerのtokenだけで、peerにも送り元のIPにも転送のheaderにも依らない。
 
 1つの接続に1つの要求で、要求は1行のJSON、答えも1行のJSONで、答えた後に閉じる。
@@ -155,8 +153,7 @@ paramsの形は`domain::telemetry::TelemetryReport`（1つのsessionの、1つ�
   serviceは他の欄より先に版を読み、`MIN_TELEMETRY_VERSION`〜`TELEMETRY_VERSION`の外（版の無いものを含む）は何も記録せず`bad_request`で断る。
   知らない欄は、上の段でもstepとsampleの中でも捨てて受ける。
   前の版のserviceが一部だけ読んではいけない変更は版を上げ、他の欄と並ぶ欄を足すだけなら上げない
-- 1回の上限: executorは30秒ごとにまとめて送る（`REPORT_INTERVAL_SECS`）。
-  上限はparamsのJSONとしての大きさ（`MAX_REPORT_BYTES`、要求の1行に収まる理由はそのdoc comment）。
+- 1回の上限は`domain::telemetry`の定数（形は`MAX_REPORT_BYTES`のdoc comment）。
   ほかにstepとsampleの数・idと名前の長さ・コマンドのshapeの大きさにも上限があり（値は`domain::telemetry`の定数）、超えたものは何も記録せず`bad_request`で断る。
   溜まったstep（serviceが答えなかった後など）は何回かに分けて送る
 - 認可: `telemetry.report`を、paramsが名指す対象と、そのsessionを制御側が登録した対象（`Resource::Telemetry`）でprincipalに通す。
@@ -247,6 +244,9 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
 - Codexのworkerの`dagq ask`はserviceのユースケースとして送る（ADR-t1233-5決定5）
 
 ## 起動と停止（ADR-t1233-4決定1・2）
+
+配置の設定の入口は`infrastructure::deployment_config`で、serviceの起動がHTTPと任意のTLSを開く。
+配置の設定が欠ければ起動せず、OIDCの発行元が無ければHTTPの入口を開かず、配置の設定はdagq.tomlにもhost.tomlにもDBにも置かない。
 
 serviceは`dagq --db <db> service serve`で、固定バイナリ（`up`かsupervisorを動かしているもの）から起動する。
 起動するときはactorを名指すenvを外し、起動元の子でないprocessにし（`SystemQueueService`）、`service.log`に出力を足す。

@@ -23,6 +23,8 @@ anyhow = "1.0"
 base64 = "0.22"
 # The buffer the driver's parameters are written to, behind the feature `postgres`.
 bytes = { version = "1", optional = true }
+# Validate deployment IANA timezone names without host files.
+chrono-tz = { version = "0.10", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
 getrandom = "0.4"
 # Reads the head of a request on the queue service's HTTP entrance
@@ -34,6 +36,8 @@ libc = "0.2"
 postgres = { version = "0.19", optional = true }
 # Verifies the signature of an OIDC JWT, and is the crypto of ureq's TLS too.
 ring = "0.17"
+# Optional server TLS, sharing the existing ring provider with HTTPS clients.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rusqlite = { version = "0.40", features = ["backup", "bundled", "functions", "hooks", "modern_sqlite"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
@@ -65,11 +69,12 @@ store-contract = []
 postgres = ["dep:bytes", "dep:postgres"]
 
 [dev-dependencies]
+# Generate fresh RSA App keys and TLS fixtures in memory for deployment tests.
+# RSA generation needs rcgen's aws-lc backend; the runtime still uses ring.
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 dagq = { path = ".", features = ["test-paths"] }
 # Reads the sources as syntax for the boundary tests (src/context_boundaries.rs).
 proc-macro2 = { version = "1.0", default-features = false }
-# The TLS end of the issuer the HTTPS fetching is tested against (tests/it/oidc_keys.rs).
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 syn = { version = "2.0", default-features = false, features = ["full", "parsing", "visit"] }
 tempfile = "3.25"
 

@@ -205,7 +205,8 @@ fn process_env(name: &str) -> Option<String> {
 /// Stop a process whose deployment chose a store it cannot use, before it
 /// opens anything: a choice never falls back to the SQLite queue.
 pub fn refuse_unusable_store(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<()> {
-    let setting = crate::domain::store_setting::StoreSetting::from_env(env)?;
+    let config = crate::infrastructure::deployment_config::DeploymentConfig::from_env(env)?;
+    let setting = config.store;
     setting.check_usable(cfg!(feature = "postgres"))?;
     Ok(())
 }

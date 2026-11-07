@@ -18,6 +18,7 @@ const CREDENTIAL_NAMES: &[&str] = &[
     "GIT_ASKPASS",
     "SUDO_ASKPASS",
     crate::domain::store_setting::STORE_CONNECTION_ENV,
+    "DAGQ_DATABASE_URL_FILE",
 ];
 
 /// Whether `name` names a credential, which no narrowed environment is
@@ -72,12 +73,18 @@ mod tests {
     #[test]
     fn a_credential_is_given_only_as_a_named_exception() {
         let narrow = PassedEnv {
-            names: &["PATH", "API_TOKEN"],
+            names: &["PATH", "API_TOKEN", "DAGQ_DATABASE_URL_FILE"],
             prefixes: &["LC_"],
             exceptions: &[],
         };
         assert!(narrow.passes("PATH") && narrow.passes("LC_ALL"));
-        for name in ["API_TOKEN", "LC_SECRET", "HOME", "path"] {
+        for name in [
+            "API_TOKEN",
+            "LC_SECRET",
+            "HOME",
+            "path",
+            "DAGQ_DATABASE_URL_FILE",
+        ] {
             assert!(!narrow.passes(name), "{name}");
         }
         let excepted = PassedEnv {

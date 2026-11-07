@@ -5951,7 +5951,14 @@ fn main() -> ExitCode {
                 "dagq exited with an error: {error:#}"
             );
             eprintln!("{}", error_json(&error));
-            ExitCode::FAILURE
+            if error
+                .downcast_ref::<dagq::infrastructure::deployment_config::InvalidSettings>()
+                .is_some()
+            {
+                ExitCode::from(78)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
@@ -6779,7 +6786,7 @@ mod tests {
                 .unwrap_err();
                 assert!(
                     error
-                        .downcast_ref::<dagq::domain::store_setting::StoreRefusal>()
+                        .downcast_ref::<dagq::infrastructure::deployment_config::InvalidSettings>()
                         .is_some(),
                     "{error:#}"
                 );

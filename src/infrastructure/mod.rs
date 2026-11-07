@@ -22,6 +22,7 @@ pub mod container_runtime;
 pub mod container_turn;
 pub mod d2;
 pub mod denials;
+pub mod deployment_config;
 pub mod dialogue;
 pub mod draft_planners;
 pub mod e2e_gate;

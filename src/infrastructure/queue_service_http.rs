@@ -4,8 +4,8 @@
 //! the checks, the use cases and the policy are the socket's
 //! ([`crate::application::queue_service::QueueService`] with
 //! [`Peer::Absent`](crate::application::queue_service::Peer::Absent)), reached
-//! through [`super::queue_service::serve_with_http`], the only caller of
-//! [`open`]. TLS ends before this listener, on the deployment's side.
+//! through the queue service's shared backend. TLS normally ends on the
+//! deployment's side; `deployment_config` can supply server TLS here too.
 //!
 //! - The request is `POST` [`USE_CASE_PATH`]`<use case>`, with the socket's
 //!   request line as its body. The path's name and the body's must be the
@@ -33,6 +33,7 @@
 //!   service could not give closes the connection unanswered, as on the
 //!   socket: the caller reads it as maybe done.
 
+use std::cell::RefCell;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -396,6 +397,7 @@ pub fn carry(
     if body.len() < length {
         if head.expects_continue {
             writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+            writer.flush()?;
         }
         reader
             .take((length - body.len()) as u64)
@@ -438,14 +440,62 @@ impl Read for UntilDeadline<'_> {
     }
 }
 
-fn serve_connection(stream: &TcpStream, answer: &HttpAnswerer) -> Result<String> {
+impl Write for UntilDeadline<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        (&mut &*self.stream).write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        (&mut &*self.stream).flush()
+    }
+}
+
+/// The two sequential halves of `carry` share a bidirectional TLS stream.
+/// Each borrow ends with its I/O call; no borrow spans a read and a write.
+struct SharedConnection<'a, T>(&'a RefCell<T>);
+
+impl<T: Read> Read for SharedConnection<'_, T> {
+    fn read(&mut self, into: &mut [u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().read(into)
+    }
+}
+
+impl<T: Write> Write for SharedConnection<'_, T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.borrow_mut().flush()
+    }
+}
+
+fn serve_connection(
+    stream: &TcpStream,
+    answer: &HttpAnswerer,
+    tls: Option<Arc<rustls::ServerConfig>>,
+) -> Result<String> {
     stream.set_nonblocking(false)?;
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
     let mut reader = UntilDeadline {
         stream,
         deadline: Instant::now() + READ_LIMIT,
     };
-    carry(&mut reader, &mut &*stream, answer.as_ref())
+    if let Some(config) = tls {
+        let connection = rustls::ServerConnection::new(config)?;
+        let stream = RefCell::new(rustls::StreamOwned::new(connection, reader));
+        // Read and write the same TLS connection, including interim responses
+        // before a client waiting for 100 Continue sends its request body.
+        let result = carry(
+            &mut SharedConnection(&stream),
+            &mut SharedConnection(&stream),
+            answer.as_ref(),
+        );
+        let mut stream = stream.into_inner();
+        stream.conn.send_close_notify();
+        stream.flush()?;
+        result
+    } else {
+        carry(&mut reader, &mut &*stream, answer.as_ref())
+    }
 }
 
 /// The open entrance: its listener's thread takes connections until this goes,
@@ -458,12 +508,22 @@ pub struct HttpEntrance {
 
 /// Take requests on `listener` with `answer`, looking for a stop every `poll`.
 pub fn open(listener: TcpListener, answer: HttpAnswerer, poll: Duration) -> Result<HttpEntrance> {
+    open_tls(listener, answer, poll, None)
+}
+
+/// Serve plaintext or TLS as decided before binding the listener.
+pub fn open_tls(
+    listener: TcpListener,
+    answer: HttpAnswerer,
+    poll: Duration,
+    tls: Option<Arc<rustls::ServerConfig>>,
+) -> Result<HttpEntrance> {
     listener.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = stop.clone();
     let thread = thread::Builder::new()
         .name("queue-service-http".to_owned())
-        .spawn(move || accept_until(&listener, &stopping, &answer, poll))
+        .spawn(move || accept_until(&listener, &stopping, &answer, poll, tls))
         .context("start the queue service's HTTP entrance")?;
     Ok(HttpEntrance {
         stop,
@@ -480,14 +540,21 @@ impl Drop for HttpEntrance {
     }
 }
 
-fn accept_until(listener: &TcpListener, stop: &AtomicBool, answer: &HttpAnswerer, poll: Duration) {
+fn accept_until(
+    listener: &TcpListener,
+    stop: &AtomicBool,
+    answer: &HttpAnswerer,
+    poll: Duration,
+    tls: Option<Arc<rustls::ServerConfig>>,
+) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
                 let answer = answer.clone();
+                let tls = tls.clone();
                 let started = thread::Builder::new()
                     .name("queue-service-http-request".to_owned())
-                    .spawn(move || match serve_connection(&stream, &answer) {
+                    .spawn(move || match serve_connection(&stream, &answer, tls) {
                         Ok(line) => info!("{line}"),
                         Err(error) => warn!("a queue service HTTP request failed: {error:#}"),
                     });
