@@ -20,6 +20,8 @@
 //! other logs once it is older than [`super::telemetry::LOG_RETENTION`]
 //! and its process is gone; opening it prunes the directory first, as
 //! opening any of the runtime's log files does.
+//! With an explicit deployment store, these diagnostics go through tracing
+//! instead, inside the ordinary JSON Lines envelope, and open no file.
 //!
 //! Each line is one JSON object whose `record` says which:
 //!
@@ -231,7 +233,11 @@ impl StartupReads {
     /// by `clock`, in its own file in the queue's `logs/` (the old log
     /// files pruned first). A file that cannot be opened is said once on
     /// the service's stderr, and nothing is recorded.
+    /// An explicit deployment store uses tracing without opening a file.
     pub fn open(queue_dir: &Path, clock: Arc<dyn Clock>, memory: Box<dyn ResidentMemory>) -> Self {
+        if super::telemetry::deployment_streams(|name| std::env::var_os(name)) {
+            return Self::new(Some(Box::new(TracingWriter)), clock, memory, STARTUP_WINDOW);
+        }
         let logs = queue_dir.join(super::location::LOGS_DIR_NAME);
         let started = clock.system_time();
         super::telemetry::prune_logs(&logs, started, super::telemetry::LOG_RETENTION);
@@ -433,6 +439,22 @@ impl StartupReads {
     }
 }
 
+/// StartupReads writes one complete JSON record at a time. The tracing
+/// envelope keeps the same deployment sink, credential filtering and line
+/// escaping as other diagnostics; the inner record remains available as JSON.
+struct TracingWriter;
+
+impl Write for TracingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        tracing::info!(startup_reads = %String::from_utf8_lossy(bytes).trim_end(), "service startup reads");
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl State {
     /// Keep `reading`, read at `at`, toward the summary's largest.
     fn noted(&mut self, reading: MemoryReading, at: SystemTime) {
@@ -480,6 +502,25 @@ mod tests {
     use super::*;
     use std::io;
     use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn deployment_startup_records_use_the_tracing_envelope() {
+        let (telemetry, captured) = super::super::telemetry::Telemetry::capture();
+        let inner = json!({"record": "request", "op": "events_between", "bytes": 12});
+        telemetry.in_scope(|| {
+            let mut writer = TracingWriter;
+            writer.write_all(format!("{inner}\n").as_bytes()).unwrap();
+            writer.flush().unwrap();
+        });
+        let records = captured.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["message"], "service startup reads");
+        assert_eq!(
+            serde_json::from_str::<Value>(records[0]["fields"]["startup_reads"].as_str().unwrap())
+                .unwrap(),
+            inner
+        );
+    }
 
     /// A clock a test moves: the wall clock and the monotonic one alike,
     /// unless only the wall clock is stepped.

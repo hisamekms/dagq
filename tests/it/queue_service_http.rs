@@ -157,6 +157,7 @@ fn configured_service(
         .args(["service", "serve", "--replacement"])
         .arg(report)
         .env("XDG_CONFIG_HOME", queue.dir())
+        .env("DAGQ_STORE", "sqlite")
         .env("DAGQ_OIDC_ISSUER", "https://identity.example.com")
         .env("DAGQ_OIDC_AUDIENCE", "queue")
         .env("DAGQ_LISTEN", address.to_string())
@@ -191,6 +192,10 @@ fn deployment_binds_tls_before_accepting_and_continues_a_request_before_its_body
         .bounded_output()
         .unwrap();
     assert!(!failed.status.success());
+    let records = deployment_records(&failed);
+    assert!(records.iter().any(|record| record["target"] == "dagq::telemetry::exit" && record["level"] == "ERROR"));
+    assert!(!queue.dir().join("logs").exists());
+    assert!(!service::log_path(queue.dir()).exists());
     let refused: service::ReplacementState =
         serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
     assert!(
@@ -272,6 +277,39 @@ fn deployment_binds_tls_before_accepting_and_continues_a_request_before_its_body
         "{}",
         String::from_utf8_lossy(&stopped.stderr)
     );
+    let records = deployment_records(&stopped);
+    let exit = records
+        .iter()
+        .find(|record| record["target"] == "dagq::telemetry::exit")
+        .unwrap();
+    let result: Value = serde_json::from_str(exit["fields"]["result"].as_str().unwrap()).unwrap();
+    assert_eq!(result["outcome"], "stopped");
+    assert!(result["pid"].is_number() && result["served"].is_number());
+    assert!(!queue.dir().join("logs").exists());
+    assert!(!service::log_path(queue.dir()).exists());
     assert!(service::ServiceRecord::read(queue.dir()).is_none());
     assert!(!service::socket_path(queue.dir()).exists());
+}
+
+/// Every actual process output line, including its exit, has the tracing
+/// envelope; a pretty CLI response or a second error JSON fails parsing here.
+fn deployment_records(output: &std::process::Output) -> Vec<Value> {
+    let mut records = Vec::new();
+    for bytes in [&output.stdout, &output.stderr] {
+        for line in std::str::from_utf8(bytes).unwrap().lines() {
+            let record: Value = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("non-record line: {line}: {error}"));
+            assert_eq!(
+                record
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["fields", "level", "message", "spans", "target", "timestamp"]
+            );
+            records.push(record);
+        }
+    }
+    records
 }

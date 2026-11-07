@@ -16,6 +16,7 @@ related:
 # 計測のOpenTelemetryとの対応
 
 計測の記録を外へ出すときにOpenTelemetryのspan・attribute・resourceへ写す対応で、[計測](measurement.md)の一部。
+チームの版の制御側のlogは標準出力と標準エラーだけで、集めて保つのは配置の側の役目である。
 決めた理由はADR-t1662-3決定7（区間はspan、stepは子のspan、タグと属性はattribute）が持つ。
 
 > **対応だけ**: OTLPで外へ出す仕組みはまだ無い。

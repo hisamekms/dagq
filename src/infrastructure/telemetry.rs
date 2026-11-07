@@ -1,5 +1,5 @@
 //! The process's `tracing` subscriber (ADR-0033 decisions 1, 2 and 7): every
-//! progress and diagnostic event goes to one JSON Lines file per process in
+//! local progress and diagnostic event goes to one JSON Lines file per process in
 //! the queue's `logs/` and, as its message alone, to stderr as before.
 //!
 //! A record is one line: `timestamp` (ISO 8601, UTC, milliseconds), `level`,
@@ -23,6 +23,12 @@
 //! the number of files follows the runs and sessions of a day, and a cap
 //! would drop the recent files a busy day's investigation needs. A file is
 //! never rotated by size; it grows only for its one process's lifetime.
+//!
+//! With an explicit deployment store (`DAGQ_STORE` or `DAGQ_STORE_FILE`),
+//! records instead go only to stdout (TRACE/DEBUG/INFO) or stderr
+//! (WARN/ERROR), including start and panic records. The JSON schema above
+//! is unchanged; no plain message is duplicated and no log file is opened
+//! or pruned. Collecting and retaining these streams belongs to deployment.
 
 use std::{
     fmt,
@@ -52,14 +58,91 @@ pub const FILE_ONLY_TARGET: &str = "dagq::telemetry";
 /// How long a log file is kept after it was last written: 14 days.
 pub const LOG_RETENTION: Duration = Duration::from_secs(14 * 86_400);
 
+/// Whether the deployment explicitly selected a store. Presence, including
+/// a mounted setting, selects streams even for SQLite; validation of values
+/// belongs to deployment_config and refuses invalid settings before startup.
+/// This decision reads neither files nor process state.
+pub fn deployment_streams(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    env(crate::domain::store_setting::STORE_KIND_ENV).is_some() || env("DAGQ_STORE_FILE").is_some()
+}
+
+/// Apply the same sink decision to every detached control-side child.
+/// Deployment inherits the collector's descriptors without touching `log`;
+/// local children append to their private diagnostic file as before.
+pub(crate) fn child_output(
+    command: &mut std::process::Command,
+    log: &Path,
+    streams: bool,
+) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::process::Stdio;
+    if streams {
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(log)?;
+        command.stdout(file.try_clone()?).stderr(file);
+    }
+    Ok(())
+}
+
 /// Where the records of one process go.
 pub struct Telemetry {
     pub dispatch: Dispatch,
     /// The JSON Lines file, when it could be opened.
     pub path: Option<PathBuf>,
+    structured_stderr: bool,
 }
 
 impl Telemetry {
+    /// The deployed control side's only log sinks. Credentials in named
+    /// token/secret/password/authorization/key fields are redacted, including
+    /// span fields and later span updates. Known deployment credential values
+    /// are also scrubbed from messages and other fields; callers must never
+    /// interpolate an unlabelled runtime credential into a message.
+    pub fn standard_streams(config: Option<&super::deployment_config::DeploymentConfig>) -> Self {
+        Self::standard_streams_to(config, Box::new(io::stdout()), Box::new(io::stderr()))
+    }
+
+    /// The deployment subscriber with injected descriptors. An invalid
+    /// configuration has no values to log: `None` still gives startup
+    /// refusals the same JSON envelope and named-field redaction.
+    pub fn standard_streams_to(
+        config: Option<&super::deployment_config::DeploymentConfig>,
+        stdout: Box<dyn Write + Send>,
+        stderr: Box<dyn Write + Send>,
+    ) -> Self {
+        let secrets = super::deployment_config::NAMES
+            .iter()
+            .filter(|name| sensitive_field(name))
+            .filter_map(|name| {
+                config
+                    .and_then(|config| config.value(name))
+                    .map(str::to_owned)
+            })
+            .collect();
+        Self::with_stream_writers(stdout, stderr, secrets)
+    }
+
+    fn with_stream_writers(
+        stdout: Box<dyn Write + Send>,
+        stderr: Box<dyn Write + Send>,
+        secrets: Vec<String>,
+    ) -> Self {
+        Self {
+            dispatch: Dispatch::new(Registry::default().with(JsonLines {
+                writer: Mutex::new(stdout),
+                errors: Some(Mutex::new(stderr)),
+                secrets,
+            })),
+            path: None,
+            structured_stderr: true,
+        }
+    }
+
     /// Records to `<log_dir>/<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`
     /// (the directory created if missing) and messages to stderr. The
     /// file starts with a record of the process, its pid and version. The
@@ -117,6 +200,7 @@ impl Telemetry {
                 stamped: false,
             })),
             path: None,
+            structured_stderr: false,
         }
     }
 
@@ -131,6 +215,7 @@ impl Telemetry {
                 stamped: true,
             })),
             path: None,
+            structured_stderr: false,
         }
     }
 
@@ -139,6 +224,8 @@ impl Telemetry {
         let subscriber = Registry::default()
             .with(JsonLines {
                 writer: Mutex::new(writer),
+                errors: None,
+                secrets: Vec::new(),
             })
             .with(StderrLine {
                 enabled: stderr,
@@ -147,6 +234,7 @@ impl Telemetry {
         Self {
             dispatch: Dispatch::new(subscriber),
             path,
+            structured_stderr: false,
         }
     }
 
@@ -171,7 +259,13 @@ impl Telemetry {
     pub fn install(self) -> Option<PathBuf> {
         let installed = tracing::dispatcher::set_global_default(self.dispatch).is_ok();
         if installed {
-            install_panic_hook();
+            if self.structured_stderr {
+                // The default hook would append an unstructured duplicate.
+                panic::set_hook(Box::new(record_panic));
+                tracing::info!(target: FILE_ONLY_TARGET, pid = std::process::id(), version = crate::VERSION, "dagq process started");
+            } else {
+                install_panic_hook();
+            }
         }
         self.path
     }
@@ -262,16 +356,19 @@ pub(crate) fn log_file_owner(name: &str) -> Option<Option<u32>> {
 pub fn install_panic_hook() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        let thread = std::thread::current();
-        tracing::error!(
-            target: "dagq::telemetry::panic",
-            thread = thread.name().unwrap_or("unnamed"),
-            location = info.location().map(ToString::to_string),
-            "panic: {}",
-            panic_message(info)
-        );
+        record_panic(info);
         previous(info);
     }));
+}
+
+fn record_panic(info: &panic::PanicHookInfo<'_>) {
+    let thread = std::thread::current();
+    tracing::error!(
+        target: "dagq::telemetry::panic",
+        thread = thread.name().unwrap_or("unnamed"),
+        location = info.location().map(ToString::to_string),
+        "panic: {}", panic_message(info)
+    );
 }
 
 fn panic_message(info: &panic::PanicHookInfo<'_>) -> String {
@@ -317,6 +414,8 @@ impl Write for Captured {
 /// One JSON object per line.
 struct JsonLines {
     writer: Mutex<Box<dyn Write + Send>>,
+    errors: Option<Mutex<Box<dyn Write + Send>>>,
+    secrets: Vec<String>,
 }
 
 /// The fields of a span, kept in its extensions.
@@ -368,7 +467,7 @@ where
         }
         fields.extend(own.map);
         let metadata = event.metadata();
-        let record = json!({
+        let mut record = json!({
             "timestamp": timestamp(SystemTime::now()),
             "level": metadata.level().as_str(),
             "target": metadata.target(),
@@ -376,12 +475,63 @@ where
             "fields": fields,
             "spans": spans,
         });
+        if self.errors.is_some() {
+            redact(&mut record, &self.secrets);
+        }
         let mut line = record.to_string();
         line.push('\n');
         // One write per record, so appends of other processes do not
         // interleave; a panic that poisoned the lock does not end the log.
-        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let sink = if metadata.level() <= &tracing::Level::WARN {
+            self.errors.as_ref().unwrap_or(&self.writer)
+        } else {
+            &self.writer
+        };
+        let mut writer = sink.lock().unwrap_or_else(|e| e.into_inner());
         let _ = writer.write_all(line.as_bytes());
+        let _ = writer.flush();
+    }
+}
+
+fn sensitive_field(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "authorization",
+        "credential",
+        "key",
+        "database_url",
+    ]
+    .iter()
+    .any(|part| name.contains(part))
+}
+
+/// Redact both nested event/span fields and known credential values in free
+/// text before serialization, so JSON escaping cannot hide a multiline key.
+fn redact(value: &mut Value, secrets: &[String]) {
+    match value {
+        Value::Object(map) => {
+            for (name, value) in map {
+                if sensitive_field(name) {
+                    *value = json!("<redacted>");
+                } else {
+                    redact(value, secrets);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact(value, secrets);
+            }
+        }
+        Value::String(text) => {
+            for secret in secrets.iter().filter(|s| !s.is_empty()) {
+                *text = text.replace(secret, "<redacted>");
+            }
+        }
+        _ => {}
     }
 }
 
@@ -518,6 +668,105 @@ fn civil(secs: u64) -> (String, String) {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn only_an_explicit_deployment_store_selects_streams() {
+        assert!(!deployment_streams(|_| None));
+        for (name, value) in [
+            ("DAGQ_STORE", "postgres"),
+            ("DAGQ_STORE", "sqlite"),
+            ("DAGQ_STORE_FILE", "/mounted/store"),
+        ] {
+            assert!(deployment_streams(|key| (key == name).then(|| value.into())));
+        }
+        assert!(!deployment_streams(
+            |key| (key == "DAGQ_TIMEZONE").then(|| "UTC".into())
+        ));
+    }
+
+    #[test]
+    fn a_deployed_child_does_not_open_its_log() {
+        // This only configures a builder; it never starts a process. Opening
+        // this missing parent would fail, while inherited streams need no path.
+        // test-rules: allow A-262 A Command builder is configured only; no process is spawned.
+        let mut command = std::process::Command::new("unused");
+        child_output(
+            &mut command,
+            Path::new("missing-log-parent/child.log"),
+            true,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn deployment_streams_keep_json_lines_and_redact_credentials() {
+        let stdout = Captured::default();
+        let stderr = Captured::default();
+        let telemetry = Telemetry::with_stream_writers(
+            Box::new(stdout.clone()),
+            Box::new(stderr.clone()),
+            vec!["mounted-secret\nprivate-key".into()],
+        );
+        assert!(telemetry.path.is_none());
+        telemetry.in_scope(|| {
+            let span = tracing::info_span!(
+                "request",
+                run_id = "r1",
+                token = "span-token",
+                secret = tracing::field::Empty
+            );
+            let _entered = span.enter();
+            span.record("secret", "updated-secret");
+            tracing::info!(target: FILE_ONLY_TARGET, "start\nnext");
+            tracing::debug!("debug");
+            tracing::trace!("trace");
+            tracing::warn!(
+                secret = "event-secret",
+                authorization = "Bearer token",
+                request_id = 7,
+                "mounted-secret\nprivate-key"
+            );
+            tracing::error!(password = "password-value", "failure");
+        });
+        let out = stdout.records();
+        let err = stderr.records();
+        assert_eq!(out.len(), 3);
+        assert_eq!(err.len(), 2);
+        assert_eq!(out[0]["message"], "start\nnext");
+        assert_eq!(out[1]["level"], "DEBUG");
+        assert_eq!(out[2]["level"], "TRACE");
+        assert_eq!(err[0]["level"], "WARN");
+        assert_eq!(err[1]["level"], "ERROR");
+        assert_eq!(err[0]["message"], "<redacted>");
+        assert_eq!(err[0]["fields"]["request_id"], 7);
+        for record in out.iter().chain(&err) {
+            let keys: Vec<_> = record
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                ["fields", "level", "message", "spans", "target", "timestamp"]
+            );
+            assert_eq!(record["fields"]["run_id"], "r1");
+            assert_eq!(record["spans"][0]["token"], "<redacted>");
+            assert_eq!(record["spans"][0]["secret"], "<redacted>");
+        }
+        let text = format!("{}{}", stdout.text(), stderr.text());
+        for secret in [
+            "span-token",
+            "updated-secret",
+            "event-secret",
+            "Bearer token",
+            "password-value",
+            "mounted-secret",
+            "private-key",
+        ] {
+            assert!(!text.contains(secret), "credential leaked: {secret}");
+        }
+    }
 
     /// The queue service's stderr (its `service.log`) stamps a WARN and an
     /// ERROR with their time and level, and keeps their fields; an INFO, and

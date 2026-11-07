@@ -19,7 +19,7 @@
 //! Everything lives in `<queue dir>/broker/` (mode 0700): `state.json`
 //! (what the running broker recorded of itself, its address among it),
 //! `lock` (held with `flock` while one runs, as the queue service's),
-//! `broker.log`, and the verifications' tokens. The broker reads the queue
+//! the local-only `broker.log`, and the verifications' tokens. The broker reads the queue
 //! service's tokens (it is the control side) and writes no token's value
 //! to a log, an event or an error.
 //!
@@ -106,7 +106,7 @@ pub fn broker_dir(queue_dir: &Path) -> PathBuf {
     queue_dir.join(BROKER_DIR)
 }
 
-/// `<queue dir>/broker/broker.log`.
+/// `<queue dir>/broker/broker.log`; deployment streams create no file there.
 pub fn log_path(queue_dir: &Path) -> PathBuf {
     broker_dir(queue_dir).join(LOG_FILE)
 }
@@ -2153,7 +2153,8 @@ pub fn probe(queue_dir: &Path) -> BrokerProbe {
 
 /// The queue's broker on this host: started from `executable` (the fixed
 /// binary that runs `up` or the supervisor, ADR-t2114-1 decision 1), its
-/// output appended to `broker.log`, detached as the queue service is.
+/// output appended to `broker.log` locally, or inherited deployment streams,
+/// detached as the queue service is.
 #[derive(Debug, Clone)]
 pub struct SystemQueueBroker {
     pub db: PathBuf,
@@ -2194,20 +2195,18 @@ impl QueueBrokerControl for SystemQueueBroker {
         let queue_dir = self.queue_dir();
         private_dir(&broker_dir(&queue_dir))?;
         let log_file = log_path(&queue_dir);
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&log_file)
-            .with_context(|| format!("open {}", log_file.display()))?;
         let mut command = Command::new(&self.executable);
         command
             .arg("--db")
             .arg(&self.db)
             .args(["queue-broker", "serve"])
-            .stdin(Stdio::null())
-            .stdout(log.try_clone()?)
-            .stderr(log);
+            .stdin(Stdio::null());
+        super::telemetry::child_output(
+            &mut command,
+            &log_file,
+            super::telemetry::deployment_streams(|name| std::env::var_os(name)),
+        )
+        .with_context(|| format!("open {}", log_file.display()))?;
         // The broker is the control side's, whoever started it.
         for name in crate::domain::actor::ACTOR_ENV
             .into_iter()

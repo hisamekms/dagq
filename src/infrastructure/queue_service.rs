@@ -9,7 +9,7 @@
 //! `queue.sock` (mode 0600), `state.json` (what the running service
 //! recorded of itself), `lock` (held with `flock` while one runs, which is
 //! how a look tells a live service from a stale record and how a second
-//! one is refused), `service.log`, and the tokens: `tokens/<sha256 of the
+//! one is refused), the local-only `service.log`, and the tokens: `tokens/<sha256 of the
 //! value>.json` holds a token's principal, `credentials/<sha256 of its
 //! key>` its value (mode 0600, [`credential_path_of`]) for the caller to be
 //! handed the path of. No token value is ever written to a log, an event
@@ -252,7 +252,8 @@ impl OutagesTold {
     }
 }
 
-/// `<queue dir>/service/service.log`.
+/// `<queue dir>/service/service.log`, a diagnostic path only: deployment
+/// streams create no file there.
 pub fn log_path(queue_dir: &Path) -> PathBuf {
     service_dir(queue_dir).join(LOG_FILE)
 }
@@ -5249,7 +5250,8 @@ impl ServiceQueue for ServiceSqlite {
 
 /// The queue's service on this host: started from `executable` (the
 /// fixed binary that runs `up` or the supervisor, ADR-t1233-4 decision
-/// 1), its output appended to `service.log`. The service is started
+/// 1), its output appended to `service.log` locally, or inherited stdout
+/// and stderr with an explicit deployment store. The service is started
 /// through a second fork, so it is no child of its starter's: a
 /// supervisor that execs another binary leaves no service to reap.
 #[derive(Debug, Clone)]
@@ -5443,7 +5445,8 @@ fn refused_in(report: &Path) -> Option<String> {
 
 impl SystemQueueService {
     /// Start `dagq service serve` with `arguments` from the binary,
-    /// detached, its output appended to the service's log: the log's path.
+    /// detached, inheriting deployment streams or appending to the local
+    /// service's log. Returns the diagnostic log path (absent in deployment).
     fn spawn(&self, arguments: &[&std::ffi::OsStr]) -> Result<PathBuf> {
         self.spawn_reporting(arguments, None)
     }
@@ -5463,21 +5466,19 @@ impl SystemQueueService {
         let queue_dir = self.queue_dir();
         private_dir(&service_dir(&queue_dir))?;
         let log_file = log_path(&queue_dir);
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&log_file)
-            .with_context(|| format!("open {}", log_file.display()))?;
         let mut command = Command::new(&self.executable);
         command
             .arg("--db")
             .arg(&self.db)
             .args(["service", "serve"])
             .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(log.try_clone()?)
-            .stderr(log);
+            .stdin(Stdio::null());
+        super::telemetry::child_output(
+            &mut command,
+            &log_file,
+            super::telemetry::deployment_streams(|name| std::env::var_os(name)),
+        )
+        .with_context(|| format!("open {}", log_file.display()))?;
         // The service is the control side's, whoever started it: no
         // actor's variables reach it, nor a client-mode `dagq`'s (the
         // service opens the queue it names).

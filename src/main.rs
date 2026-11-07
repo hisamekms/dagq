@@ -4817,7 +4817,7 @@ fn execute(cli: Cli) -> Result<Value> {
         // The landing's and the jobs' processes keep their logs in the
         // queue's `logs/`, as on the DB (ADR-0033).
         if rebind || control_call(&cli.command).is_some() {
-            install_telemetry(&cli.command, &location);
+            install_telemetry(&cli.command, &location)?;
         }
         let result = host_client(
             &db,
@@ -4866,7 +4866,7 @@ fn execute(cli: Cli) -> Result<Value> {
     if route == Unserved::Refused {
         bail!(unserved_refusal(actor.role()));
     }
-    install_telemetry(&cli.command, &location);
+    install_telemetry(&cli.command, &location)?;
     // The clock and IDs of every queue and use case this command runs.
     let generators = dagq::infrastructure::clock::system();
     let one_shot = dagq::compose::OneShot {
@@ -5604,7 +5604,7 @@ fn record_inbox_hook(
 fn session_wrapper(cli: Cli) -> Result<Value> {
     let cwd = env::current_dir().context("working directory is unavailable")?;
     let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;
-    install_telemetry(&cli.command, &location);
+    install_telemetry(&cli.command, &location)?;
     let db = location.db;
     match cli.command {
         Command::Session {
@@ -5672,8 +5672,15 @@ fn command_path(arguments: &[OsString]) -> String {
 /// service, whose stderr is its `service.log`, prints its WARN and ERROR
 /// lines with their time, level and fields; every other command prints its
 /// messages on stderr only.
-fn install_telemetry(command: &Command, location: &QueueLocation) {
+/// An explicit deployment store replaces all these local sinks with JSON
+/// stdout/stderr, leaving collection and retention to the deployment.
+fn install_telemetry(command: &Command, location: &QueueLocation) -> Result<()> {
     use dagq::infrastructure::telemetry::Telemetry;
+    if dagq::infrastructure::telemetry::deployment_streams(|name| env::var_os(name)) {
+        let config = dagq::infrastructure::deployment_config::DeploymentConfig::from_process()?;
+        Telemetry::standard_streams(Some(&config)).install();
+        return Ok(());
+    }
     let file = match command {
         Command::Supervise { log_dir, .. } => Some((
             "supervise",
@@ -5716,6 +5723,7 @@ fn install_telemetry(command: &Command, location: &QueueLocation) {
         None => Telemetry::stderr(),
     };
     telemetry.install();
+    Ok(())
 }
 
 /// What `up` and `dagq inbox` read from the environment of the process.
@@ -5906,8 +5914,45 @@ fn main() -> ExitCode {
         let status = dagq::infrastructure::sccache::run_guard(&args[1..]);
         return ExitCode::from(u8::try_from(status).unwrap_or(1));
     }
-    let result = run(args).and_then(|value| {
-        let mut stdout = io::stdout().lock();
+    let structured = dagq::infrastructure::telemetry::deployment_streams(|name| env::var_os(name))
+        && daemon_command(&command_path(&args));
+    let result = if structured {
+        // Even a deployment refusal must have a subscriber before it exits.
+        let config = dagq::infrastructure::deployment_config::DeploymentConfig::from_process();
+        dagq::infrastructure::telemetry::Telemetry::standard_streams(config.as_ref().ok())
+            .install();
+        config.map_err(anyhow::Error::from).and_then(|_| run(args))
+    } else {
+        run(args)
+    };
+    finish_output(
+        result,
+        structured,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+    )
+}
+
+/// These resident control-side commands have no CLI response body in a
+/// deployment: startup, shutdown and failure all use the diagnostic streams.
+fn daemon_command(path: &str) -> bool {
+    matches!(path, "service serve" | "queue-broker serve" | "supervise")
+}
+
+/// Serialize terminal outcomes through the same subscriber as the running
+/// daemon, including credential filtering. Other CLI commands retain their
+/// pretty JSON/raw output and error response contracts.
+fn finish_output(
+    result: Result<Value>,
+    structured: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> ExitCode {
+    let result = result.and_then(|value| {
+        if structured {
+            tracing::info!(target: "dagq::telemetry::exit", result = %value, "dagq process stopped");
+            return Ok(());
+        }
         if let Some(text) = value
             .as_object()
             .filter(|object| object.len() == 1)
@@ -5917,40 +5962,40 @@ fn main() -> ExitCode {
             stdout.write_all(text.as_bytes())?;
             return Ok(());
         }
-        serde_json::to_writer_pretty(&mut stdout, &value)?;
+        serde_json::to_writer_pretty(&mut *stdout, &value)?;
         writeln!(stdout)?;
         Ok(())
     });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            // An install that kept the new binary for some supervisors
-            // reports what it did as well (ADR-t632-1).
-            // So does one whose handoff or watch failed and told the inbox
-            // (ADR-0073 decision 14), in place of the install's report.
-            if let Some(failed) = dagq::application::update::InstallFailed::of(&error) {
-                let mut stdout = io::stdout().lock();
-                let _ = serde_json::to_writer_pretty(&mut stdout, &failed.report);
-                let _ = writeln!(stdout);
-            } else if let Some(kept) = dagq::application::install::KeptBinary::of(&error) {
-                let mut stdout = io::stdout().lock();
-                let _ = serde_json::to_writer_pretty(&mut stdout, &kept.report);
-                let _ = writeln!(stdout);
+            if !structured {
+                // An install that kept the new binary for some supervisors
+                // reports what it did as well (ADR-t632-1).
+                // So does one whose handoff or watch failed and told the inbox
+                // (ADR-0073 decision 14), in place of the install's report.
+                if let Some(failed) = dagq::application::update::InstallFailed::of(&error) {
+                    let _ = serde_json::to_writer_pretty(&mut *stdout, &failed.report);
+                    let _ = writeln!(stdout);
+                } else if let Some(kept) = dagq::application::install::KeptBinary::of(&error) {
+                    let _ = serde_json::to_writer_pretty(&mut *stdout, &kept.report);
+                    let _ = writeln!(stdout);
+                }
+                // So does an `up` whose handoff some supervisors did not take.
+                if let Some(partial) = dagq::application::lifecycle::PartialHandoff::of(&error) {
+                    let _ = serde_json::to_writer_pretty(&mut *stdout, &partial.report);
+                    let _ = writeln!(stdout);
+                }
             }
-            // So does an `up` whose handoff some supervisors did not take.
-            if let Some(partial) = dagq::application::lifecycle::PartialHandoff::of(&error) {
-                let mut stdout = io::stdout().lock();
-                let _ = serde_json::to_writer_pretty(&mut stdout, &partial.report);
-                let _ = writeln!(stdout);
-            }
-            // The command's own failure, in its log file too; stderr gets
-            // the error JSON below as always.
+            // Deployment errors have no second, unfiltered response body.
             tracing::error!(
                 target: "dagq::telemetry::exit",
                 error = %format_args!("{error:#}"),
                 "dagq exited with an error: {error:#}"
             );
-            eprintln!("{}", error_json(&error));
+            if !structured {
+                let _ = writeln!(stderr, "{}", error_json(&error));
+            }
             if error
                 .downcast_ref::<dagq::infrastructure::deployment_config::InvalidSettings>()
                 .is_some()
@@ -5967,6 +6012,141 @@ fn main() -> ExitCode {
 mod emitted_text;
 #[cfg(test)]
 mod history_citation;
+
+#[cfg(test)]
+mod daemon_output_tests {
+    use super::*;
+    use dagq::infrastructure::{
+        deployment_config::DeploymentConfig,
+        telemetry::{Captured, Telemetry},
+    };
+
+    #[test]
+    fn only_resident_control_commands_replace_the_cli_response() {
+        for command in ["service serve", "queue-broker serve", "supervise"] {
+            assert!(daemon_command(command));
+        }
+        for command in ["service start", "queue-broker status", "show", "session"] {
+            assert!(!daemon_command(command));
+        }
+    }
+
+    #[test]
+    fn deployed_exit_records_share_the_envelope_and_secret_filter() {
+        let config = DeploymentConfig::from_env(|name| match name {
+            "DAGQ_STORE" => Some("sqlite".into()),
+            "DAGQ_ANTHROPIC_API_KEY" => Some("exit-secret".into()),
+            _ => None,
+        })
+        .unwrap();
+        let out = Captured::default();
+        let err = Captured::default();
+        let telemetry = Telemetry::standard_streams_to(
+            Some(&config),
+            Box::new(out.clone()),
+            Box::new(err.clone()),
+        );
+        let mut response = Vec::new();
+        let mut error_response = Vec::new();
+        let outcome = json!({"outcome": "stopped", "pid": 7, "served": 3});
+        telemetry.in_scope(|| {
+            assert_eq!(
+                finish_output(
+                    Ok(outcome.clone()),
+                    true,
+                    &mut response,
+                    &mut error_response
+                ),
+                ExitCode::SUCCESS
+            );
+            assert_eq!(
+                finish_output(
+                    Err(anyhow::anyhow!("failed: exit-secret\nnext")),
+                    true,
+                    &mut response,
+                    &mut error_response
+                ),
+                ExitCode::FAILURE
+            );
+        });
+        assert!(response.is_empty() && error_response.is_empty());
+        assert_eq!(out.records().len(), 1);
+        assert_eq!(err.records().len(), 1);
+        for record in out.records().into_iter().chain(err.records()) {
+            assert_eq!(
+                record
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["fields", "level", "message", "spans", "target", "timestamp"]
+            );
+            assert_eq!(record["target"], "dagq::telemetry::exit");
+        }
+        assert_eq!(
+            serde_json::from_str::<Value>(out.records()[0]["fields"]["result"].as_str().unwrap())
+                .unwrap(),
+            outcome
+        );
+        assert_eq!(
+            err.records()[0]["fields"]["error"],
+            "failed: <redacted>\nnext"
+        );
+        assert!(!format!("{}{}", out.text(), err.text()).contains("exit-secret"));
+    }
+
+    #[test]
+    fn deployment_refusal_is_structured_and_keeps_the_config_exit_code() {
+        let invalid =
+            DeploymentConfig::from_env(|name| (name == "DAGQ_STORE").then(|| "bad-secret".into()))
+                .err()
+                .unwrap();
+        let out = Captured::default();
+        let err = Captured::default();
+        let telemetry =
+            Telemetry::standard_streams_to(None, Box::new(out.clone()), Box::new(err.clone()));
+        telemetry.in_scope(|| {
+            assert_eq!(
+                finish_output(Err(invalid.into()), true, &mut Vec::new(), &mut Vec::new()),
+                ExitCode::from(78)
+            )
+        });
+        assert!(out.text().is_empty());
+        assert_eq!(err.records().len(), 1);
+        assert_eq!(err.records()[0]["level"], "ERROR");
+        assert!(!err.text().contains("bad-secret"));
+    }
+
+    #[test]
+    fn ordinary_cli_outcomes_retain_their_response_format() {
+        let (telemetry, _) = Telemetry::capture();
+        telemetry.in_scope(|| {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            assert_eq!(
+                finish_output(Ok(json!({"ok": true})), false, &mut out, &mut err),
+                ExitCode::SUCCESS
+            );
+            assert_eq!(String::from_utf8(out).unwrap(), "{\n  \"ok\": true\n}\n");
+            let mut out = Vec::new();
+            assert_eq!(
+                finish_output(
+                    Err(anyhow::anyhow!("ordinary error")),
+                    false,
+                    &mut out,
+                    &mut err
+                ),
+                ExitCode::FAILURE
+            );
+            assert!(out.is_empty());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&err).unwrap(),
+                json!({"error": "ordinary error"})
+            );
+        });
+    }
+}
 
 /// `observe` and `throughput-review`: the job commands a supervisor starts
 /// as its own, which open no queue when it names its registration
