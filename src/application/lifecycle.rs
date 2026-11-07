@@ -138,7 +138,9 @@ pub struct UpEnvironment {
 
 /// Set by the runtime in the environment of the `up` it runs to start a
 /// supervisor again ([`UpEnvironment::restart`]); a binary that does not
-/// know it ignores it.
+/// know it ignores it. This covers an `install --allow-breaking` drain and
+/// rollback of an installed binary, including restarting a supervisor
+/// registered in the retired in-cmux mode under launchd.
 pub const UP_RESTART_ENV: &str = "DAGQ_UP_RESTART";
 
 /// What `up --in-cmux` is refused with (ADR-t1433-4 decision 2): the mode
@@ -182,7 +184,17 @@ pub const PLUGIN_UPDATE_ARGUMENTS: [&[&str]; 2] = [
 /// `session` there without `--plugin-dir` (ADR-t617-2 decision 4): a
 /// session without it has none of the skills its prompt names. Anything
 /// but an enabled install, a failed or unreadable listing included, is an
-/// error that says how to install it.
+/// error that says how to install it, using the English command error and
+/// [`PLUGIN_INSTALL_COMMANDS`]; only a disabled install also gets the
+/// `claude plugin enable <id>` hint.
+///
+/// Callers check from the repository root where sessions start, so project
+/// scope installs count too. `up` and `inbox` check before opening anything;
+/// `plan` is refused without opening a session and does not check. An explicit
+/// `--plugin-dir` takes precedence over an installed plugin of the same name,
+/// so it bypasses this check. Runtime planners and install handoffs use the
+/// supervisor's plugin directory without repeating preflight; a runtime's
+/// restarted `up` bypasses it via [`UP_RESTART_ENV`].
 pub fn require_installed_plugin(
     agent: &dyn AgentProvider,
     executable: &Path,

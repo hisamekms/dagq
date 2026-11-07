@@ -3957,7 +3957,8 @@ impl SessionWrappers for BackgroundSessions {
 
 /// The entries of `claude plugin list --json` (an array of `{"id":
 /// "<plugin>@<marketplace>", "enabled": bool, "version": ..., ...}`) that
-/// are of the plugin `name`, each with its id.
+/// are of the plugin `name`, each with its id. Shared by the installed-plugin
+/// preflight ([`plugin_state`]) and release updates ([`plugin_version`]).
 fn plugin_entries(listed: &str, name: &str) -> Result<Vec<(String, Value)>> {
     let entries: Vec<Value> = serde_json::from_str(listed)
         .with_context(|| format!("the plugin list is not a JSON array: {}", listed.trim()))?;
@@ -3974,8 +3975,13 @@ fn plugin_entries(listed: &str, name: &str) -> Result<Vec<(String, Value)>> {
     Ok(found)
 }
 
-/// What `claude plugin list --json` says of the plugin `name`: enabled
-/// when any entry of it is.
+/// What `claude plugin list --json` says of the plugin `name`.
+/// First [`plugin_entries`] parses the JSON and validates every entry's id.
+/// Matching entries are then visited in listing order: the first `enabled: true`
+/// returns enabled without checking later enabled flags. A missing or non-boolean
+/// enabled flag encountered before that return is an error. If the scan finishes,
+/// no matches means missing; all disabled returns their ids so preflight can
+/// suggest enabling them.
 pub fn plugin_state(listed: &str, name: &str) -> Result<PluginState> {
     let mut disabled = Vec::new();
     for (id, entry) in plugin_entries(listed, name)? {

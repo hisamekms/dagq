@@ -2005,7 +2005,8 @@ pub(super) fn span_task(conn: &impl SqlRead, span: &OpenSpan) -> Result<Option<T
 /// read: a close is marked [`HOOK_INTAKE_PENDING`], and the supervisor's
 /// intake records its turns and measurements later
 /// ([`record_closed_hook_turns`], ADR-t655-1), so the short time Claude
-/// Code gives a `SessionEnd` hook is not spent reading files. A
+/// Code gives a `SessionEnd` hook is not spent reading files. The close commits
+/// before intake; a failed transcript read leaves the span closed. A
 /// `/clear`'s `SessionEnd` and the next `SessionStart` both closing the
 /// replaced span count it once. A runtime planner's span is on the first task of
 /// its proposal, with the proposal and its goals; the others are on no
