@@ -149,6 +149,7 @@ pub(super) struct Wiring {
     pub(super) sessions: Arc<FakeSessions>,
     /// The CI watch's port; none by default, as `--once` without it.
     ci_watch: Option<supervise::CiWatchPort>,
+    pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
 }
 
 impl Wiring {
@@ -205,7 +206,15 @@ impl Wiring {
             tokens,
             sessions,
             ci_watch: None,
+            pass_probe: None,
         }
+    }
+
+    /// Drive bounded, clock-controlled passes while counting this queue's reads.
+    pub(super) fn with_pass_probe(mut self, probe: Arc<super::pass_reads::PassProbe>) -> Self {
+        self.generators.clock = probe.clock.clone();
+        self.pass_probe = Some(probe);
+        self
     }
 
     /// Retry a review job that gives no readable verdict once, as production does.
@@ -592,6 +601,7 @@ impl Wiring {
                 tokens: self.tokens.clone(),
                 sessions: self.sessions.clone(),
                 ci_watch: self.ci_watch.clone(),
+                pass_probe: self.pass_probe.clone(),
                 stop: stop.clone(),
             };
             std::thread::Builder::new()
@@ -670,6 +680,7 @@ struct Parts {
     tokens: Arc<MemoryTokens>,
     sessions: Arc<FakeSessions>,
     ci_watch: Option<supervise::CiWatchPort>,
+    pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -688,6 +699,10 @@ impl Parts {
             Resending::new(service, Resend::Hold, self.generators.clone())
                 .kept_in(Arc::new(InMemory::default())),
         );
+        let service: Arc<dyn ServiceCaller> = match &self.pass_probe {
+            Some(probe) => probe.caller(service, self.stop.clone()),
+            None => service,
+        };
         let queues = SupervisorQueues::new(
             service.clone(),
             ActorContext::instance(ActorRole::Supervisor, self.pid),
@@ -802,6 +817,7 @@ impl Parts {
         supervise::supervise(
             &ports,
             &LoopSettings {
+                once: self.pass_probe.is_none(),
                 retry_unreadable_review: self.retry_review,
                 ..settings(
                     self.stop,

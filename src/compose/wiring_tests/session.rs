@@ -238,6 +238,11 @@ impl SessionWrappers for FakeSessions {
         Ok(None)
     }
 
+    /// The fake knows all process identities, so absence is definitive.
+    fn wrapper_exists(&self, handle: &str) -> Result<bool> {
+        self.exists(handle)
+    }
+
     /// Whether the process of `handle` lives with the start it names.
     fn exists(&self, handle: &str) -> Result<bool> {
         Ok(BackgroundHandle::parse(handle).is_some_and(|handle| {

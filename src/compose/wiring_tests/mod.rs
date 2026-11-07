@@ -22,6 +22,7 @@ mod ci_freshness;
 mod fresh_session_decisions;
 mod landing_answers;
 mod main_log;
+mod pass_reads;
 mod previous_run_decisions;
 mod provider_trial;
 mod review;
