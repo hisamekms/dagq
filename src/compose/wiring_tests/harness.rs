@@ -127,6 +127,8 @@ pub(super) struct Wiring {
     /// Whether the supervisor also runs Codex headless workers and jobs
     /// (on the same fake agent); Claude only by default.
     codex: bool,
+    /// Planner slot limit and timeout of the next supervisor pass.
+    planning: std::cell::Cell<(Option<usize>, Duration)>,
     /// `[provider_fallback] workers`; on by default.
     worker_fallback: bool,
     retry_review: bool,
@@ -193,6 +195,7 @@ impl Wiring {
             generators,
             pid,
             codex: false,
+            planning: std::cell::Cell::new((None, super::super::wiring_planner_timeout())),
             worker_fallback: true,
             retry_review: false,
             fresh_session: Default::default(),
@@ -505,6 +508,12 @@ impl Wiring {
         ))
     }
 
+    /// One planner pass with the test's planner limit and timeout.
+    pub(super) fn supervise_planning(&self, planners: usize, timeout: Duration) -> Value {
+        self.planning.set((Some(planners), timeout));
+        self.supervise_once()
+    }
+
     /// One `--once` supervisor on this test's queue: run until no run is
     /// active and nothing can be claimed, then every wrapper it started
     /// joined, all by the test's deadline. What it returned, which must
@@ -602,6 +611,7 @@ impl Wiring {
                 sessions: self.sessions.clone(),
                 ci_watch: self.ci_watch.clone(),
                 pass_probe: self.pass_probe.clone(),
+                planning: self.planning.get(),
                 stop: stop.clone(),
             };
             std::thread::Builder::new()
@@ -681,6 +691,7 @@ struct Parts {
     sessions: Arc<FakeSessions>,
     ci_watch: Option<supervise::CiWatchPort>,
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
+    planning: (Option<usize>, Duration),
     stop: Arc<AtomicBool>,
 }
 
@@ -814,20 +825,21 @@ impl Parts {
             resources: None,
             layout,
         };
-        supervise::supervise(
-            &ports,
-            &LoopSettings {
-                once: self.pass_probe.is_none(),
-                retry_unreadable_review: self.retry_review,
-                ..settings(
-                    self.stop,
-                    self.worker_fallback,
-                    self.fresh_session,
-                    self.parallel,
-                    self.passes,
-                )
-            },
-        )
+        let mut settings = LoopSettings {
+            once: self.pass_probe.is_none(),
+            retry_unreadable_review: self.retry_review,
+            ..settings(
+                self.stop,
+                self.worker_fallback,
+                self.fresh_session,
+                self.parallel,
+                self.passes,
+            )
+        };
+        settings.slot_flags.runtime_planners = self.planning.0;
+        settings.limits = SlotLimits::resolve(settings.slot_flags, &Default::default());
+        settings.planner_timeout = self.planning.1;
+        supervise::supervise(&ports, &settings)
     }
 }
 

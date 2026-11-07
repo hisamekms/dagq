@@ -318,11 +318,10 @@ impl RepositoryReads for FakeGit {
 
     /// Every commit has one parent, so its line is its first parents'.
     fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {
-        Ok(self
-            .lock()
-            .line(head)
-            .iter()
-            .any(|on| on.as_str() == commit))
+        let state = self.lock();
+        let commit = state.refs.get(commit).map_or(commit, |sha| sha.as_str());
+        let head = state.refs.get(head).map_or(head, |sha| sha.as_str());
+        Ok(state.line(head).iter().any(|on| on.as_str() == commit))
     }
 
     /// The nearest commit of `a`'s line on `b`'s.

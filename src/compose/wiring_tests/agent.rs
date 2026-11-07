@@ -362,6 +362,14 @@ impl FakeAgent {
             .clone()
     }
 
+    /// Replace the script for plan and goal review jobs between passes.
+    pub(super) fn scripted_jobs(&self, verdicts: Vec<Value>) {
+        *self
+            .verdicts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = verdicts.into();
+    }
+
     fn next_verdict(&self) -> Result<Value> {
         let mut verdicts = self
             .verdicts

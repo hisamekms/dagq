@@ -59,6 +59,8 @@ pub(super) struct FakeSessions {
     pub(super) files: Arc<MemoryFiles>,
     pub(super) clock: Arc<dyn Clock>,
     wrappers: Mutex<Vec<Wrapper>>,
+    /// Parked planner wrappers: fake process handles, with no thread.
+    planners: Mutex<Vec<String>>,
     /// What lets the next wrapper started (not a resume's) go on to its
     /// session, once: it waits, started and not yet registered, until it
     /// says so or is dropped (by the test's deadline at the latest).
@@ -88,6 +90,7 @@ impl FakeSessions {
             files,
             clock,
             wrappers: Mutex::default(),
+            planners: Mutex::default(),
             launch_gate: Mutex::default(),
             fail_resumes: std::sync::atomic::AtomicBool::new(false),
             fail_claims: std::sync::atomic::AtomicBool::new(false),
@@ -102,6 +105,11 @@ impl FakeSessions {
             .launch_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(go);
+    }
+
+    /// Number of planner wrappers started; their turns are played by the test.
+    pub(super) fn planner_launches(&self) -> usize {
+        self.planners.lock().unwrap().len()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Wrapper>> {
@@ -163,6 +171,16 @@ impl SessionWrappers for FakeSessions {
             .split(' ')
             .map(|word| word.trim_matches('\''))
             .collect();
+        if after(&words, "--planner").is_some() {
+            let (pid, start) = self.processes.start();
+            let handle = BackgroundHandle {
+                pid,
+                start: start_token(&start),
+            }
+            .to_string();
+            self.planners.lock().unwrap().push(handle.clone());
+            return Ok(handle);
+        }
         let id = RunId::new(after(&words, "--run").context("the wrapper names no run")?)?;
         let token =
             LeaseToken::new(after(&words, "--lease").context("the wrapper names no lease")?);
@@ -227,6 +245,12 @@ impl SessionWrappers for FakeSessions {
     /// The wrapper asked to exit, as the production stop asks it; its
     /// thread ends at its next look.
     fn stop_background(&self, handle: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
+        if self.planners.lock().unwrap().contains(&handle.to_owned()) {
+            if let Some(handle) = BackgroundHandle::parse(handle) {
+                self.processes.end(handle.pid);
+            }
+            return Ok(None);
+        }
         let run_dir = self
             .lock()
             .iter()

@@ -766,20 +766,6 @@ reason = "実の queue.db の全文検索の索引が、この repository の形
 task = 3804
 
 [[boundary]]
-id = "replan-request-gets-one-planner-with-its-material"
-kind = "supervisorの配線"
-test = "replan_planning::a_parked_operations_request_waits_for_a_planner_slot_and_gets_one_planner_with_its_material"
-reason = "park した replan の操作の planning request を supervisor の pass が planner の slot の空きまで待たせ、操作の材料を載せた runtime の planner を 1 つだけ開くことは、走る supervisor と queue と planner の起動をつないだ IT でしか確かめられない。いつ開くか・何を材料に載せるかの判断は replan_plan と planner_wait_start の unit test"
-task = 3804
-
-[[boundary]]
-id = "replan-approved-replacement-applied-by-the-runtime"
-kind = "supervisorの配線"
-test = "replan_planning::an_approved_replacement_is_applied_at_once_and_every_successor_waits_for_its_children"
-reason = "plan review が承認した置き換えを supervisor の pass がすぐ apply し、task と park した run を replaced で終え、child を ready にして後続を child に待たせることは、走る supervisor と plan review と queue をつないだ IT でしか確かめられない。apply できるか・後続がどの child を待つかの判断は replan_apply の unit test"
-task = 3804
-
-[[boundary]]
 id = "replan-apply-rolled-back-whole-on-a-failed-write"
 kind = "SQLite"
 test = "replan_planning::an_apply_that_fails_midway_writes_nothing_and_is_applied_once_the_failure_is_gone"

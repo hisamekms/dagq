@@ -25,6 +25,7 @@ mod main_log;
 mod pass_reads;
 mod previous_run_decisions;
 mod provider_trial;
+mod replan_planning;
 mod review;
 mod review_launch;
 mod review_revise_limit;
