@@ -5,7 +5,7 @@
 //! [super::tls]. Connection errors discard driver details, which can contain
 //! connection parameters or server-supplied text.
 
-use super::exec::{PostgresRow, decode_column, encode_parameter, is_contention_state};
+use super::exec::{PostgresRow, decode_column, encode_parameter, session_error};
 use super::tls::{Transport, TrustRoots, policy};
 use super::{PostgresSession, PostgresStore, migrate};
 use crate::domain::store_setting::ConnectionString;
@@ -162,12 +162,8 @@ impl<'r> FromSql<'r> for Column {
 }
 
 fn driver_error(error: postgres::Error) -> SqlError {
-    SqlError::Driver {
-        contention: error
-            .code()
-            .is_some_and(|state| is_contention_state(state.code())),
-        source: Box::new(error),
-    }
+    let state = error.code().cloned();
+    session_error(Box::new(error), state.as_ref().map(|state| state.code()))
 }
 
 /// `params` as the driver takes them, handed to `run`.

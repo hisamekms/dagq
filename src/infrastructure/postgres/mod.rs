@@ -27,7 +27,7 @@ pub mod migrate;
 pub(crate) mod search_write;
 pub mod tls;
 
-use self::exec::{PostgresRow, numbered_parameters, returning_id};
+use self::exec::{PostgresRow, numbered_parameters, returning_id, statement_was_rejected};
 use super::event_actor::{EventActors, process_actor};
 use super::sql_dialect::SqlDialect;
 use super::sql_exec::{
@@ -38,6 +38,7 @@ use super::write_leader::{IDENTITY_SQL, WriteIdentity, millis, renew_sql};
 use crate::application::NotLeader;
 use crate::domain::actor::ActorContext;
 use anyhow::{Context, Result};
+use std::cell::Cell;
 
 /// What every connection runs first: a time without a zone reads as UTC, as
 /// in SQLite, whatever the server's default.
@@ -78,7 +79,9 @@ impl<S: PostgresSession> PostgresQueue<S> {
 }
 
 /// What a driver answers for the store. Its statements' parameters are
-/// already numbered as Postgres spells them.
+/// already numbered as Postgres spells them. Driver errors from query and
+/// execute use [`exec::session_error`] to distinguish server rejections from
+/// local conversions.
 pub trait PostgresSession {
     /// Run `sql`, a statement without parameters.
     fn run(&self, sql: &str) -> Result<()>;
@@ -188,6 +191,13 @@ impl<S: PostgresSession> TransactionEntries for PostgresStore<S> {
 }
 
 /// A transaction of an entry, which rolls back unless it commits.
+/// PostgreSQL answers COMMIT on an aborted transaction with a ROLLBACK tag,
+/// which the driver does not expose. Track server-rejected session statements,
+/// so a caller cannot swallow their errors and report unwritten changes as saved.
+/// Row absence, visitor errors and driver-local encoding/decoding failures do
+/// not abort it; only server errors carrying SQLSTATE mark it as failed.
+/// A successful savepoint rollback restores the earlier failure state: PostgreSQL
+/// clears the inner abort too, letting recovery commit its discard record.
 pub struct PostgresTx<'s, S: PostgresSession> {
     session: &'s S,
     actors: Option<&'s EventActors>,
@@ -195,6 +205,7 @@ pub struct PostgresTx<'s, S: PostgresSession> {
     open: bool,
     actions: crate::infrastructure::sql_exec::CommitActions,
     writing: bool,
+    statement_failed: Cell<bool>,
 }
 
 impl<'s, S: PostgresSession> PostgresTx<'s, S> {
@@ -210,7 +221,15 @@ impl<'s, S: PostgresSession> PostgresTx<'s, S> {
             open: true,
             actions: crate::infrastructure::sql_exec::CommitActions::new(),
             writing: begin == BEGIN_WRITE_SQL,
+            statement_failed: Cell::new(false),
         })
+    }
+
+    fn statement<T>(&self, result: SqlResult<T>) -> SqlResult<T> {
+        if result.as_ref().is_err_and(statement_was_rejected) {
+            self.statement_failed.set(true);
+        }
+        result
     }
 
     // Repeat before each statement, including after a savepoint rollback: its
@@ -218,12 +237,19 @@ impl<'s, S: PostgresSession> PostgresTx<'s, S> {
     fn sync_actors(&self) -> SqlResult<()> {
         if let Some(actors) = self.actors {
             let (sql, values) = event_actor::settings(actors);
-            self.session.query(&sql, &values)?;
+            self.statement(self.session.query(&sql, &values))?;
         }
         Ok(())
     }
 
     pub fn commit(mut self) -> Result<()> {
+        if self.statement_failed.get() {
+            // Drop rolls back, including commit actions, even if rollback fails.
+            anyhow::bail!(
+                "cannot commit the transaction {}: a statement failed",
+                self.name
+            );
+        }
         self.session
             .run(COMMIT_SQL)
             .with_context(|| format!("commit the transaction {}", self.name))?;
@@ -249,7 +275,7 @@ impl<S: PostgresSession> SqlRead for PostgresTx<'_, S> {
         visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
     ) -> SqlResult<()> {
         self.sync_actors()?;
-        for row in self.session.query(&numbered_parameters(sql), params)? {
+        for row in self.statement(self.session.query(&numbered_parameters(sql), params))? {
             if !visit(&SqlRow::new(&row))? {
                 break;
             }
@@ -266,7 +292,7 @@ impl<S: PostgresSession> SqlWrite for PostgresTx<'_, S> {
 
     fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
         self.sync_actors()?;
-        let changed = self.session.execute(&numbered_parameters(sql), params)?;
+        let changed = self.statement(self.session.execute(&numbered_parameters(sql), params))?;
         Ok(usize::try_from(changed).unwrap_or(usize::MAX))
     }
 
@@ -288,6 +314,7 @@ pub struct PostgresSavepoint<'tx, 's, S: PostgresSession> {
     tx: &'tx mut PostgresTx<'s, S>,
     open: bool,
     checkpoint: usize,
+    statement_failed_before: bool,
 }
 
 impl<'s, S: PostgresSession> SqlSavepoints for PostgresTx<'s, S> {
@@ -297,10 +324,14 @@ impl<'s, S: PostgresSession> SqlSavepoints for PostgresTx<'s, S> {
         Self: 'tx;
 
     fn savepoint(&mut self) -> Result<Self::Savepoint<'_>> {
-        self.session.run("SAVEPOINT dagq_savepoint")?;
+        if let Err(error) = self.session.run("SAVEPOINT dagq_savepoint") {
+            self.statement_failed.set(true);
+            return Err(error);
+        }
         let checkpoint = self.actions.checkpoint();
         Ok(PostgresSavepoint {
             checkpoint,
+            statement_failed_before: self.statement_failed.get(),
             tx: self,
             open: true,
         })
@@ -309,7 +340,12 @@ impl<'s, S: PostgresSession> SqlSavepoints for PostgresTx<'s, S> {
 
 impl<S: PostgresSession> SqlSavepoint for PostgresSavepoint<'_, '_, S> {
     fn commit(mut self) -> Result<()> {
-        self.tx.session.run("RELEASE SAVEPOINT dagq_savepoint")?;
+        if let Err(error) = self.tx.session.run("RELEASE SAVEPOINT dagq_savepoint") {
+            // Drop still cleans up, but a failed commit must not erase the error.
+            self.statement_failed_before = true;
+            self.tx.statement_failed.set(true);
+            return Err(error);
+        }
         self.open = false;
         Ok(())
     }
@@ -360,8 +396,15 @@ impl<S: PostgresSession> Drop for PostgresSavepoint<'_, '_, S> {
                 "ROLLBACK TO SAVEPOINT dagq_savepoint",
                 "RELEASE SAVEPOINT dagq_savepoint",
             ] {
-                if let Err(error) = self.tx.session.run(sql) {
-                    tracing::warn!(transaction = self.tx.name, error = %error, sql, "could not roll back the savepoint");
+                match self.tx.session.run(sql) {
+                    Ok(()) if sql.starts_with("ROLLBACK TO") => {
+                        self.tx.statement_failed.set(self.statement_failed_before);
+                    }
+                    Ok(()) => {}
+                    Err(error) => {
+                        self.tx.statement_failed.set(true);
+                        tracing::warn!(transaction = self.tx.name, error = %error, sql, "could not roll back the savepoint");
+                    }
                 }
             }
         }
@@ -424,10 +467,22 @@ mod tests {
         changed: Cell<u64>,
         begin_fails: Cell<bool>,
         commit_fails: Cell<bool>,
+        rejected: RefCell<Option<String>>,
+        local_failure: RefCell<Option<SqlError>>,
         schema: Cell<Option<(i64, i64)>>,
     }
 
     impl Recorded {
+        fn reject(&self, sql: &str) -> SqlResult<()> {
+            if self.rejected.borrow().as_deref() == Some(sql) {
+                return Err(exec::session_error(
+                    "statement rejected".into(),
+                    Some("23505"),
+                ));
+            }
+            Ok(())
+        }
+
         fn taken() -> Self {
             let session = Self::default();
             session.changed.set(1);
@@ -441,6 +496,7 @@ mod tests {
                 anyhow::bail!("the connection is gone");
             }
             self.statements.borrow_mut().push(sql.to_owned());
+            self.reject(sql)?;
             if self.commit_fails.get() && sql == COMMIT_SQL {
                 anyhow::bail!("commit failed");
             }
@@ -449,12 +505,14 @@ mod tests {
 
         fn query(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
             if sql == event_actor::settings(&EventActors::new(process_actor())).0 {
+                self.reject(sql)?;
                 self.settings
                     .borrow_mut()
                     .push((self.statements.borrow().len(), params.to_vec()));
                 return Ok(vec![]);
             }
             self.statements.borrow_mut().push(sql.to_owned());
+            self.reject(sql)?;
             if let Some(rows) = schema_answer(sql, self.schema.get()) {
                 return Ok(rows);
             }
@@ -464,12 +522,19 @@ mod tests {
                 return Ok(vec![PostgresRow::new(columns, values)]);
             }
             self.bound.borrow_mut().push(params.to_vec());
+            if let Some(error) = self.local_failure.take() {
+                return Err(error);
+            }
             Ok(self.answers.take())
         }
 
         fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<u64> {
             self.statements.borrow_mut().push(sql.to_owned());
+            self.reject(sql)?;
             self.bound.borrow_mut().push(params.to_vec());
+            if let Some(error) = self.local_failure.take() {
+                return Err(error);
+            }
             Ok(self.changed.get())
         }
     }
@@ -645,6 +710,193 @@ mod tests {
                 sql_params!["after"]
             );
         }
+    }
+
+    #[test]
+    fn rejected_statements_roll_back_instead_of_committing_both_entries() {
+        for write in [false, true] {
+            for operation in ["query", "execute", "insert"] {
+                let session = Recorded::taken();
+                let store = PostgresStore::open(&session).unwrap();
+                let tx = if write {
+                    store.write_entry("failed-write")
+                } else {
+                    store.read_entry("failed-read")
+                }
+                .unwrap();
+                let sql = match operation {
+                    "insert" => "INSERT INTO t DEFAULT VALUES RETURNING id",
+                    _ => "rejected statement",
+                };
+                session.rejected.replace(Some(sql.into()));
+                let result = match operation {
+                    "query" => tx.visit_rows(sql, &[], &mut |_| Ok(true)),
+                    "execute" => tx.execute(sql, &[]).map(|_| ()),
+                    _ => tx
+                        .insert_id("INSERT INTO t DEFAULT VALUES", &[])
+                        .map(|_| ()),
+                };
+                assert!(result.is_err());
+                session.rejected.replace(None);
+                let called = Rc::new(Cell::new(false));
+                let action = called.clone();
+                tx.after_commit(Box::new(move || action.set(true))).unwrap();
+                let error = tx.commit().unwrap_err().to_string();
+                assert!(error.contains(if write { "failed-write" } else { "failed-read" }));
+                assert!(error.contains("a statement failed"));
+                let statements = session.statements.borrow();
+                assert_eq!(statements.last().unwrap(), ROLLBACK_SQL);
+                assert!(!statements.iter().any(|sql| sql == COMMIT_SQL));
+                crate::infrastructure::sql_exec::flush_after_commit();
+                assert!(!called.get());
+            }
+        }
+    }
+
+    #[test]
+    fn absent_rows_and_visitor_errors_do_not_abort_a_transaction() {
+        for write in [false, true] {
+            let session = Recorded::taken();
+            let store = PostgresStore::open(&session).unwrap();
+            let tx = if write {
+                store.write_entry("row-errors")
+            } else {
+                store.read_entry("row-errors")
+            }
+            .unwrap();
+            assert!(matches!(
+                tx.query_row("SELECT n FROM t", &[], |r| r.get::<_, i64>(0)),
+                Err(SqlError::NoRows)
+            ));
+            assert!(
+                tx.query_row("SELECT n FROM t", &[], |r| r.get::<_, i64>(0))
+                    .optional()
+                    .unwrap()
+                    .is_none()
+            );
+            session
+                .answers
+                .replace(vec![one_column("n", SqlValue::Text("text".into()))]);
+            assert!(matches!(
+                tx.query_row("SELECT n FROM t", &[], |r| r.get::<_, i64>(0)),
+                Err(SqlError::WrongType { .. })
+            ));
+            session
+                .answers
+                .replace(vec![one_column("n", SqlValue::Integer(1))]);
+            assert!(matches!(
+                tx.visit_rows("SELECT n FROM t", &[], &mut |_| Err(SqlError::Conversion {
+                    index: 0,
+                    stored: crate::infrastructure::sql_exec::ValueKind::Integer,
+                    cause: "invalid domain value".into(),
+                })),
+                Err(SqlError::Conversion { .. })
+            ));
+            tx.commit().unwrap();
+            assert_eq!(session.statements.borrow().last().unwrap(), COMMIT_SQL);
+        }
+    }
+
+    #[test]
+    fn driver_local_conversions_leave_both_entries_committable() {
+        for write in [false, true] {
+            for operation in ["decode", "encode-query", "encode-execute"] {
+                let session = Recorded::taken();
+                let store = PostgresStore::open(&session).unwrap();
+                let tx = if write {
+                    store.write_entry("local-conversion")
+                } else {
+                    store.read_entry("local-conversion")
+                }
+                .unwrap();
+                if write {
+                    tx.execute("INSERT INTO t VALUES (1)", &[]).unwrap();
+                }
+                // The driver uses this same classification after ToSql/FromSql
+                // fail: no server SQLSTATE, even though the driver returned Err.
+                let source = if operation == "decode" {
+                    exec::decode_column("numeric", Some(&[])).unwrap_err()
+                } else {
+                    exec::encode_parameter(&SqlValue::Text("invalid".into()), "int8").unwrap_err()
+                };
+                session
+                    .local_failure
+                    .replace(Some(exec::session_error(source, None)));
+                let result = if operation == "encode-execute" {
+                    tx.execute("INSERT INTO t VALUES (?)", sql_params!["invalid"])
+                        .map(|_| ())
+                } else if operation == "decode" {
+                    tx.visit_rows("SELECT 1::numeric", &[], &mut |_| Ok(true))
+                } else {
+                    tx.visit_rows("SELECT ?::bigint", sql_params!["invalid"], &mut |_| {
+                        Ok(true)
+                    })
+                };
+                assert!(result.is_err());
+                tx.commit().unwrap();
+                let statements = session.statements.borrow();
+                assert_eq!(statements.last().unwrap(), COMMIT_SQL);
+                assert!(!statements.iter().any(|sql| sql == ROLLBACK_SQL));
+            }
+        }
+    }
+
+    #[test]
+    fn savepoint_rollback_restores_only_failures_since_it_opened() {
+        for failed_before in [false, true] {
+            for outcome in ["rollback", "release-failure", "rollback-failure"] {
+                let session = Recorded::taken();
+                let store = PostgresStore::open(&session).unwrap();
+                let mut tx = store.write_entry("savepoint-failure").unwrap();
+                if failed_before {
+                    session.rejected.replace(Some("before".into()));
+                    assert!(tx.execute("before", &[]).is_err());
+                }
+                session.rejected.replace(None);
+                {
+                    let savepoint = tx.savepoint().unwrap();
+                    session.rejected.replace(Some("inside".into()));
+                    assert!(savepoint.execute("inside", &[]).is_err());
+                    session.rejected.replace(match outcome {
+                        "release-failure" => Some("RELEASE SAVEPOINT dagq_savepoint".into()),
+                        "rollback-failure" => Some("ROLLBACK TO SAVEPOINT dagq_savepoint".into()),
+                        _ => None,
+                    });
+                    if outcome == "release-failure" {
+                        assert!(savepoint.commit().is_err());
+                    }
+                }
+                session.rejected.replace(None);
+                let should_commit = !failed_before && outcome == "rollback";
+                assert_eq!(tx.commit().is_ok(), should_commit);
+                let statements = session.statements.borrow();
+                assert_eq!(
+                    statements.last().unwrap(),
+                    if should_commit {
+                        COMMIT_SQL
+                    } else {
+                        ROLLBACK_SQL
+                    }
+                );
+                assert_eq!(
+                    statements.iter().any(|sql| sql == COMMIT_SQL),
+                    should_commit
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_actor_settings_also_prevent_commit() {
+        let session = Recorded::taken();
+        let store = PostgresStore::open(&session).unwrap();
+        let tx = store.read_entry("actor-failure").unwrap();
+        session
+            .rejected
+            .replace(Some(event_actor::settings(&store.actors).0));
+        assert!(tx.visit_rows("SELECT 1", &[], &mut |_| Ok(true)).is_err());
+        assert!(tx.commit().is_err());
+        assert_eq!(session.statements.borrow().last().unwrap(), ROLLBACK_SQL);
     }
 
     /// The fence is the statement the SQLite store runs: the shared text,

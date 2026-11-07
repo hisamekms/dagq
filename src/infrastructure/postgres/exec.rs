@@ -27,6 +27,7 @@
 //! or store it, and a statement has to say so with a cast here.
 
 use std::rc::Rc;
+use std::{error::Error, fmt};
 
 use crate::infrastructure::sql_exec::{RowValues, SqlError, SqlResult, SqlValue};
 
@@ -130,6 +131,39 @@ pub fn is_contention_state(code: &str) -> bool {
     matches!(code, "55P03" | "40P01")
 }
 
+/// Preserve a driver's error, marking only a server rejection (a SQLSTATE)
+/// as aborting the transaction. Parameter encoding and result decoding failures
+/// have no SQLSTATE and leave the server's transaction usable.
+pub fn session_error(source: Box<dyn Error + Send + Sync>, sqlstate: Option<&str>) -> SqlError {
+    SqlError::Driver {
+        contention: sqlstate.is_some_and(is_contention_state),
+        source: if sqlstate.is_some() {
+            Box::new(RejectedStatement(source))
+        } else {
+            source
+        },
+    }
+}
+
+#[derive(Debug)]
+struct RejectedStatement(Box<dyn Error + Send + Sync>);
+
+impl fmt::Display for RejectedStatement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl Error for RejectedStatement {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&*self.0)
+    }
+}
+
+pub(super) fn statement_was_rejected(error: &SqlError) -> bool {
+    matches!(error, SqlError::Driver { source, .. } if source.is::<RejectedStatement>())
+}
+
 /// A row a statement returned, in the port's values.
 pub struct PostgresRow {
     columns: Rc<[String]>,
@@ -178,6 +212,19 @@ mod tests {
     fn round_trip(value: &SqlValue, type_name: &str) -> SqlValue {
         let bytes = encode_parameter(value, type_name).unwrap();
         decode_column(type_name, bytes.as_deref()).unwrap()
+    }
+
+    #[test]
+    fn session_errors_mark_only_server_rejections_and_preserve_contention() {
+        for state in [None, Some("23505"), Some("55P03"), Some("40P01")] {
+            let error = session_error("driver detail".into(), state);
+            assert_eq!(statement_was_rejected(&error), state.is_some());
+            assert_eq!(
+                error.is_contention(),
+                matches!(state, Some("55P03" | "40P01"))
+            );
+            assert_eq!(error.to_string(), "driver detail");
+        }
     }
 
     #[test]
