@@ -170,6 +170,8 @@ fn postgres_time(value: &str, form: TimeForm) -> String {
 }
 
 /// [`SqlDialect::json_field`] in the SQLite kind.
+// SQLite compatibility entry for store modules migrating independently.
+#[allow(dead_code)]
 pub(crate) fn json_field(column: &str, path: &str, ty: JsonType) -> String {
     SqlDialect::Sqlite.json_field(column, path, ty)
 }
@@ -210,6 +212,8 @@ pub(crate) enum TimeForm {
 }
 
 /// [`SqlDialect::time_value`] in the SQLite kind.
+// SQLite compatibility entry for store modules migrating independently.
+#[allow(dead_code)]
 pub(crate) fn time_value(value: &str, form: TimeForm) -> String {
     SqlDialect::Sqlite.time_value(value, form)
 }

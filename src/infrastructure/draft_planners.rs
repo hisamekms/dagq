@@ -13,7 +13,7 @@ use super::sql_dialect::JsonType;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
 
 use super::sql_exec::sql_params;
-use super::store_writes::{self, EventTx};
+use super::store_writes::{self};
 use crate::domain::cancel_reason;
 use crate::domain::event_kind::{self, EventKind};
 use std::collections::{HashMap, HashSet};
@@ -148,7 +148,7 @@ pub(super) fn draft_planned(
 /// Every writer of `draft_origins` goes through here. Whether it was
 /// recorded.
 pub(super) fn insert_draft_origin(
-    tx: &impl EventTx,
+    tx: &impl crate::infrastructure::sql_exec::SqlWrite,
     task: TaskId,
     origin: DraftOrigin,
     material: &Value,
@@ -1060,7 +1060,11 @@ fn material_fields(
 /// Record what became of each draft of `planner`'s bundle not settled yet
 /// (`draft_bundle_members.outcome`, `draft_planner_settled`), inside the
 /// caller's write transaction, as the planner ends (ADR-t807-1).
-pub(super) fn settle_bundle(conn: &impl EventTx, planner: PlannerId, now: i64) -> Result<()> {
+pub(super) fn settle_bundle(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    planner: PlannerId,
+    now: i64,
+) -> Result<()> {
     // A planner asked to exit because only a person's answer was left
     // leaves each draft whose question its `planner_answer_wait` names,
     // still open, waiting for that answer (ADR-t1704-1 decision 5).
@@ -1180,7 +1184,7 @@ pub(super) fn read_revisit(conn: &impl SqlRead, task: TaskId) -> Result<Option<D
 /// transaction, as `planner` opens for it (`None`: its planners were used
 /// up), with `draft_revisit_due` (ADR-t1540-1).
 fn use_revisit(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     revisit: &DraftRevisit,
     planner: Option<PlannerId>,
     now: i64,
@@ -1727,7 +1731,10 @@ pub(super) struct Adoption {
 /// answer) counts its follow-ups from 0 again; a draft of the runtime's or a
 /// job's records `follow_up_adopted` (`draft_adopted` for another origin)
 /// the first time it is submitted.
-pub(super) fn record_adoptions(conn: &impl EventTx, adoptions: &[Adoption]) -> Result<()> {
+pub(super) fn record_adoptions(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    adoptions: &[Adoption],
+) -> Result<()> {
     for adoption in adoptions {
         let depth = if adoption.by_person {
             0
@@ -1988,7 +1995,7 @@ fn planned_origin_port(
 /// read before `draft_origins`, so a follow-up that was adopted and later
 /// reopened shows as `reopened`. It is not counted as a registered draft.
 pub(super) fn record_reopened_port(
-    conn: &impl crate::infrastructure::store_writes::EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task: TaskId,
     material: &Value,
     now: i64,

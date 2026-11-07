@@ -7,7 +7,6 @@
 use super::sql_dialect::JsonType;
 use super::sql_exec::sql_params;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
-use super::store_writes::SessionTx;
 use anyhow::{Result, ensure};
 
 use super::sqlite::SqliteQueue;
@@ -216,7 +215,7 @@ impl SqliteQueue {
             super::plan_requests::decline_after_planner(&tx, id, now)?;
             // A headless session that had started ends with the row
             // (ADR-t1394-2 decision 4).
-            tx.close_planner_spans(id.as_i64())?;
+            crate::infrastructure::sessions::close_planner_spans(&tx, id.as_i64())?;
         }
         tx.commit()?;
         self.planner(id)

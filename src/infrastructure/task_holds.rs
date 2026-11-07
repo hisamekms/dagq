@@ -17,7 +17,7 @@
 //! park after a release writes nothing.
 use super::sql_dialect::JsonType;
 
-use super::store_writes::{EventTx, event};
+use super::store_writes::event;
 use anyhow::{Context, Result};
 use serde_json::json;
 
@@ -597,7 +597,11 @@ fn ended_with_open_hold(conn: &impl SqlRead) -> Result<Vec<(TaskId, TaskStatus)>
 /// Record on `conn` that the open hold `hold` settled at `now`: whether it
 /// was still open and settling (a release or another settle that came
 /// first leaves it, and the caller writes nothing more).
-pub(super) fn settle_open(conn: &impl EventTx, hold: HoldId, now: i64) -> Result<bool> {
+pub(super) fn settle_open(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    hold: HoldId,
+    now: i64,
+) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE task_holds SET settled_at=?2
          WHERE id=?1 AND released_at IS NULL AND settled_at IS NULL",
@@ -650,7 +654,7 @@ fn rest_writer(conn: &impl SqlRead, run: &RunId, checked: bool) -> Result<task_h
 /// when the caller's park found the writer ended (`writers_checked`). An
 /// unfinished run enters its `held` phase. Whether a hold settled now.
 pub(super) fn settle_at_rest_in(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     run: &RunId,
     writers_checked: bool,
 ) -> Result<bool> {
@@ -693,7 +697,11 @@ pub(super) fn settle_at_rest_in(
 /// Record on `conn` that run `run` entered its hold's wait
 /// ([`run_phase::Phase::Held`]), which `cause` moved it to, unless it is
 /// the phase last recorded.
-pub(super) fn enter_held_phase(conn: &impl EventTx, run: &RunId, cause: &str) -> Result<()> {
+pub(super) fn enter_held_phase(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    run: &RunId,
+    cause: &str,
+) -> Result<()> {
     let events = super::runtime_store::run_events_of_port(conn, run)?;
     record_phase(
         conn,
@@ -705,7 +713,10 @@ pub(super) fn enter_held_phase(conn: &impl EventTx, run: &RunId, cause: &str) ->
 /// Close the hold's wait of run `run` at its release with the phase the
 /// run rests in now ([`run_phase::Phase::resting`], which `task_released`
 /// among its events lets say), when its last record is the wait.
-fn leave_held_phase(conn: &impl EventTx, run: &RunId) -> Result<()> {
+fn leave_held_phase(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    run: &RunId,
+) -> Result<()> {
     let events = super::runtime_store::run_events_of_port(conn, run)?;
     let held = run_phase::last_recorded(&events)
         .is_some_and(|last| last.phase == run_phase::Phase::Held.name());
@@ -723,7 +734,7 @@ fn leave_held_phase(conn: &impl EventTx, run: &RunId) -> Result<()> {
 }
 
 fn record_phase(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     run: &RunId,
     change: Option<run_phase::PhaseChange>,
 ) -> Result<()> {
@@ -934,7 +945,7 @@ pub(super) fn open_hold_of(conn: &impl SqlRead, task: TaskId) -> Result<Option<T
 /// `task_ended`), a kept answer's ask closed. Nothing for a status that
 /// has not ended the task. Whether a hold was open.
 pub(super) fn end_with_task(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task: TaskId,
     status: TaskStatus,
     now: i64,
@@ -970,7 +981,7 @@ pub(super) fn end_with_task(
 /// runtime, each read back as a [`task_hold::KeptResult`]. A result being
 /// applied now is settled already and stays.
 fn discard_kept_of_ended(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task: TaskId,
     end: task_hold::HoldEnd,
     now: i64,

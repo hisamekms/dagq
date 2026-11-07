@@ -18,51 +18,6 @@ use crate::domain::{
     EventId, GoalId, NewTask, Priority, RequestId, RunId, Task, TaskChange, TaskId, goal, task,
 };
 
-/// A write transaction that records events: what each event also needs is
-/// the session spans it opens and closes, which `sessions::follow` writes
-/// and which still needs a rusqlite connection, so an adapter's transaction
-/// comes with it (`sql_exec::sqlite`). A function that records an event takes
-/// this rather than [`SqlWrite`], so the adapter that does not have it yet
-/// does not build a call that would lose the spans.
-pub(super) trait EventTx: SqlWrite {
-    /// Write the spans the event `event_id` (of `kind`, with `payload`, just
-    /// inserted on `task_id` and `run_id`) opens and closes.
-    fn follow_spans(
-        &self,
-        event_id: EventId,
-        task_id: Option<TaskId>,
-        run_id: Option<&RunId>,
-        kind: EventKind,
-        payload: &Value,
-    ) -> Result<()>;
-
-    /// Write the goal review spans the newly inserted goal event opens or
-    /// closes. Like `follow_spans`, this preserves the session adapter's
-    /// transaction and transcript hooks while its SQL is being moved.
-    fn follow_goal_spans(
-        &self,
-        event_id: EventId,
-        goal_id: GoalId,
-        kind: EventKind,
-        payload: &Value,
-    ) -> Result<()>;
-}
-
-/// A transaction that closes session spans through the session adapter.
-/// Separate from event recording so either store can move to the execution
-/// port without requiring the other to move in the same change. Transcript
-/// reads still happen before the write entry; each close uses its transaction.
-pub(super) trait SessionTx: SqlWrite {
-    /// Close an interrupted plan review's spans through the session adapter.
-    fn close_plan_review_spans(&self, review: i64, inferred: bool) -> Result<()>;
-
-    /// Close an interrupted goal review's spans on this transaction.
-    fn close_goal_review_spans(&self, review: i64, inferred: bool) -> Result<()>;
-
-    /// Close a planner's spans when its row closes.
-    fn close_planner_spans(&self, planner: i64) -> Result<usize>;
-}
-
 /// Register `new` inside the caller's write transaction with
 /// `task_created` and its dependencies: what `add` does, and what a
 /// follow-up triage's `adopt` does in the transaction that cancels the draft.
@@ -78,7 +33,7 @@ pub(super) trait SessionTx: SqlWrite {
 /// the same fields of a draft) or left it to the default, which a task
 /// follows when the default changes (ADR-t1340-1).
 pub(super) fn insert_task(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     mut new: NewTask,
     now: &str,
     creator: Creator,
@@ -240,7 +195,7 @@ pub(in crate::infrastructure) fn next_id(tx: &impl SqlRead, table: &str) -> Resu
 }
 
 pub(super) fn insert_dependency(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     task_id: TaskId,
     predecessor_id: TaskId,
     now: &str,
@@ -279,7 +234,7 @@ pub(super) fn insert_dependency(
 }
 
 pub(super) fn insert_goal_dependency(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     task_id: TaskId,
     goal_id: GoalId,
     now: &str,
@@ -319,7 +274,7 @@ pub(super) fn touch(tx: &impl SqlWrite, task_id: TaskId, now: &str) -> Result<()
 /// Insert an event of the queue itself (one of [`EventKind::is_queue`]) in
 /// the open transaction `tx`, with the session span it opens or closes.
 pub(super) fn record_queue_event_in(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     kind: EventKind,
     payload: &Value,
 ) -> Result<()> {
@@ -329,11 +284,11 @@ pub(super) fn record_queue_event_in(
          VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
         sql_params![kind.as_str(), serde_json::to_string(payload)?],
     )?;
-    tx.follow_spans(EventId::new(id), None, None, kind, payload)
+    super::sessions::follow(tx, EventId::new(id), None, None, kind, payload)
 }
 
 pub(super) fn event(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     task_id: TaskId,
     run_id: Option<&RunId>,
     kind: EventKind,
@@ -344,7 +299,7 @@ pub(super) fn event(
 
 /// [`event`], returning the ID of the event it inserted.
 pub(super) fn event_id(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     task_id: TaskId,
     run_id: Option<&RunId>,
     kind: EventKind,
@@ -361,7 +316,7 @@ pub(super) fn event_id(
         ],
     )?);
     // The Claude session spans this event starts or ends (ADR-0048).
-    tx.follow_spans(id, Some(task_id), run_id, kind, &payload)?;
+    super::sessions::follow(tx, id, Some(task_id), run_id, kind, &payload)?;
     Ok(id)
 }
 
@@ -395,6 +350,30 @@ mod tests {
             wait_for_build: false,
             execution_class: Default::default(),
         }
+    }
+
+    /// Every event writer is callable with SqlWrite as its only bound. Keep
+    /// these calls inside the generic body so adding a driver trait fails build.
+    #[test]
+    fn event_writers_require_only_sql_write() {
+        fn write(tx: &impl SqlWrite) -> Result<()> {
+            let task = insert_task(tx, new_task("generic", Vec::new()), "now", Creator::Other)?;
+            event(tx, task.id(), None, EventKind::TaskCreated, json!({}))?;
+            super::super::stranded::record(tx, task.id(), "test", json!({}))?;
+            super::super::investigations::settle(tx, 0)?;
+            super::super::plan_requests::record_missing_spike_requests(tx, 0)?;
+            super::super::draft_planners::insert_draft_origin(
+                tx,
+                task.id(),
+                crate::domain::DraftOrigin::FollowUp,
+                &json!({}),
+                0,
+            )?;
+            Ok(())
+        }
+        let queue = queue();
+        let tx = queue.write_tx("generic_event_writers").unwrap();
+        write(&tx).unwrap();
     }
 
     fn opened(tx: &impl SqlRead) -> i64 {

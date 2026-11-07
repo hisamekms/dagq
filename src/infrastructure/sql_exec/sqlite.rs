@@ -13,9 +13,8 @@
 //! is also a [`SqlRead`] as it is: the read connection needs no wrapper.
 //!
 //! The conversions of the domain's IDs to and from rusqlite's values are for
-//! such a module too. A transaction here, including its savepoints, also is
-//! an [`EventTx`], since the spans of an event are still written on a rusqlite
-//! connection.
+//! such a module too. Commit notifications and connection hooks remain here,
+//! including the notifications a savepoint discards on rollback.
 //!
 //! The actor and event body functions are here because registering a function
 //! is the driver's call; the state the actor functions read is
@@ -32,21 +31,20 @@ use rusqlite::{
 };
 
 use super::{
-    RowValues, SqlDialect, SqlError, SqlRead, SqlResult, SqlRow, SqlSavepoint, SqlSavepoints,
-    SqlValue, SqlWrite, TransactionEntries, ValueKind,
+    CommitActions, CommitState, CommitTransaction, RowValues, SessionConnection, SqlDialect,
+    SqlError, SqlRead, SqlResult, SqlRow, SqlSavepoint, SqlSavepoints, SqlValue, SqlWrite,
+    TransactionEntries, ValueKind,
 };
 use crate::application::EventBodies;
 use crate::domain::actor::ActorContext;
 use crate::domain::{
-    AskId, CommitSha, EventId, EventKind, FindingId, GoalId, HoldId, LeaseToken, PlannerId,
-    ProposalId, ReplanId, RequestId, RunId, TaskId,
+    AskId, CommitSha, EventId, FindingId, GoalId, HoldId, LeaseToken, PlannerId, ProposalId,
+    ReplanId, RequestId, RunId, TaskId,
 };
 use crate::infrastructure::{
     event_actor::EventActors,
     event_bodies::event_body_for_row,
-    sessions,
     sqlite::{SqliteQueue, WriteTx, insert_counted},
-    store_writes::{EventTx, SessionTx},
 };
 
 impl rusqlite::ToSql for SqlValue {
@@ -278,7 +276,7 @@ fn visit_rows_on(
     params: &[SqlValue],
     visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
 ) -> SqlResult<()> {
-    let mut statement = conn.prepare(sql)?;
+    let mut statement = conn.prepare_cached(sql)?;
     let mut rows = statement.query(params_from_iter(params))?;
     while let Some(row) = rows.next()? {
         if !visit(&SqlRow::new(&RowOf(row)))? {
@@ -289,6 +287,10 @@ fn visit_rows_on(
 }
 
 impl SqlRead for Connection {
+    fn in_write_transaction(&self) -> bool {
+        !self.is_autocommit()
+    }
+
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Sqlite
     }
@@ -304,6 +306,10 @@ impl SqlRead for Connection {
 }
 
 impl SqlRead for WriteTx<'_> {
+    fn in_write_transaction(&self) -> bool {
+        !self.is_autocommit()
+    }
+
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Sqlite
     }
@@ -319,6 +325,10 @@ impl SqlRead for WriteTx<'_> {
 }
 
 impl SqlWrite for WriteTx<'_> {
+    fn after_commit(&self, action: Box<dyn FnOnce()>) -> SqlResult<()> {
+        register_commit(self, action)
+    }
+
     fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
         Ok(WriteTx::execute(self, sql, params_from_iter(params))?)
     }
@@ -338,49 +348,87 @@ impl SqlWrite for WriteTx<'_> {
 
 impl SqlSavepoints for WriteTx<'_> {
     type Savepoint<'tx>
-        = rusqlite::Savepoint<'tx>
+        = SqliteSavepoint<'tx>
     where
         Self: 'tx;
 
     fn savepoint(&mut self) -> anyhow::Result<Self::Savepoint<'_>> {
         // Keep WriteTx's lock-state accounting, including deferred writes
         // made only through this guard, in the existing transaction wrapper.
-        Ok(WriteTx::savepoint(self)?)
+        let actions = actions_for(self)?;
+        let checkpoint = actions.checkpoint();
+        Ok(SqliteSavepoint {
+            inner: Some(WriteTx::savepoint(self)?),
+            actions,
+            checkpoint,
+        })
     }
 }
 
-impl SqlSavepoint for rusqlite::Savepoint<'_> {
-    fn commit(self) -> anyhow::Result<()> {
-        Ok(rusqlite::Savepoint::commit(self)?)
+/// A port savepoint keeps its commit registrations only when released.
+pub struct SqliteSavepoint<'tx> {
+    inner: Option<rusqlite::Savepoint<'tx>>,
+    actions: CommitActions,
+    checkpoint: usize,
+}
+impl SqlSavepoint for SqliteSavepoint<'_> {
+    fn commit(mut self) -> anyhow::Result<()> {
+        self.inner.take().expect("open savepoint").commit()?;
+        self.checkpoint = self.actions.checkpoint();
+        Ok(())
     }
 }
-
-impl SqlRead for rusqlite::Savepoint<'_> {
+impl Drop for SqliteSavepoint<'_> {
+    fn drop(&mut self) {
+        self.actions.rollback_to(self.checkpoint);
+    }
+}
+impl SqlRead for SqliteSavepoint<'_> {
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Sqlite
     }
-
+    fn in_write_transaction(&self) -> bool {
+        true
+    }
     fn visit_rows(
         &self,
         sql: &str,
         params: &[SqlValue],
         visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
     ) -> SqlResult<()> {
-        visit_rows_on(self, sql, params, visit)
+        visit_rows_on(
+            self.inner.as_ref().expect("open savepoint"),
+            sql,
+            params,
+            visit,
+        )
     }
 }
-
-impl SqlWrite for rusqlite::Savepoint<'_> {
+impl SqlWrite for SqliteSavepoint<'_> {
+    fn after_commit(&self, action: Box<dyn FnOnce()>) -> SqlResult<()> {
+        self.actions.push(action);
+        Ok(())
+    }
     fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
-        SqlWrite::execute(&port_tx(self), sql, params)
+        SqlWrite::execute(
+            &port_tx(self.inner.as_ref().expect("open savepoint")),
+            sql,
+            params,
+        )
     }
-
     fn insert_id(&self, sql: &str, params: &[SqlValue]) -> SqlResult<i64> {
-        SqlWrite::insert_id(&port_tx(self), sql, params)
+        SqlWrite::insert_id(
+            &port_tx(self.inner.as_ref().expect("open savepoint")),
+            sql,
+            params,
+        )
     }
-
     fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>> {
-        SqlWrite::insert_id_if_inserted(&port_tx(self), sql, params)
+        SqlWrite::insert_id_if_inserted(
+            &port_tx(self.inner.as_ref().expect("open savepoint")),
+            sql,
+            params,
+        )
     }
 }
 
@@ -391,7 +439,6 @@ pub(crate) struct SqliteTx<'c>(&'c Connection);
 
 impl std::ops::Deref for SqliteTx<'_> {
     type Target = Connection;
-
     fn deref(&self) -> &Self::Target {
         self.0
     }
@@ -408,6 +455,10 @@ pub(crate) fn port_tx(conn: &Connection) -> SqliteTx<'_> {
 }
 
 impl SqlRead for SqliteTx<'_> {
+    fn in_write_transaction(&self) -> bool {
+        !self.0.is_autocommit()
+    }
+
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Sqlite
     }
@@ -423,8 +474,15 @@ impl SqlRead for SqliteTx<'_> {
 }
 
 impl SqlWrite for SqliteTx<'_> {
+    fn after_commit(&self, action: Box<dyn FnOnce()>) -> SqlResult<()> {
+        register_commit(self.0, action)
+    }
+
     fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
-        Ok(self.0.execute(sql, params_from_iter(params))?)
+        Ok(self
+            .0
+            .prepare_cached(sql)?
+            .execute(params_from_iter(params))?)
     }
 
     fn insert_id(&self, sql: &str, params: &[SqlValue]) -> SqlResult<i64> {
@@ -435,118 +493,6 @@ impl SqlWrite for SqliteTx<'_> {
     fn insert_id_if_inserted(&self, sql: &str, params: &[SqlValue]) -> SqlResult<Option<i64>> {
         let (rows, id) = insert_counted(self.0, sql, params_from_iter(params))?;
         Ok((rows > 0).then_some(id))
-    }
-}
-
-impl SessionTx for WriteTx<'_> {
-    fn close_plan_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
-        sessions::close_plan_review(self, review, inferred)
-    }
-    fn close_goal_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
-        sessions::close_goal_review(self, review, inferred)
-    }
-    fn close_planner_spans(&self, planner: i64) -> anyhow::Result<usize> {
-        sessions::close_planner_spans(self, planner)
-    }
-}
-
-impl sessions::BeforeWrite for Connection {
-    fn read_transcripts_before(
-        &self,
-        closing: sessions::Closing<'_>,
-    ) -> anyhow::Result<sessions::ReadBefore> {
-        sessions::read_before_sqlite(self, closing)
-    }
-}
-
-impl EventTx for WriteTx<'_> {
-    fn follow_spans(
-        &self,
-        event_id: EventId,
-        task_id: Option<TaskId>,
-        run_id: Option<&RunId>,
-        kind: EventKind,
-        payload: &serde_json::Value,
-    ) -> anyhow::Result<()> {
-        sessions::follow(self, event_id, task_id, run_id, kind, payload)
-    }
-    fn follow_goal_spans(
-        &self,
-        event_id: EventId,
-        goal_id: crate::domain::GoalId,
-        kind: EventKind,
-        payload: &serde_json::Value,
-    ) -> anyhow::Result<()> {
-        sessions::follow_goal(self, event_id, goal_id, kind, payload)
-    }
-}
-
-impl SessionTx for rusqlite::Savepoint<'_> {
-    fn close_plan_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
-        sessions::close_plan_review(self, review, inferred)
-    }
-    fn close_goal_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
-        sessions::close_goal_review(self, review, inferred)
-    }
-    fn close_planner_spans(&self, planner: i64) -> anyhow::Result<usize> {
-        sessions::close_planner_spans(self, planner)
-    }
-}
-
-impl EventTx for rusqlite::Savepoint<'_> {
-    fn follow_spans(
-        &self,
-        event_id: EventId,
-        task_id: Option<TaskId>,
-        run_id: Option<&RunId>,
-        kind: EventKind,
-        payload: &serde_json::Value,
-    ) -> anyhow::Result<()> {
-        sessions::follow(self, event_id, task_id, run_id, kind, payload)
-    }
-
-    fn follow_goal_spans(
-        &self,
-        event_id: EventId,
-        goal_id: GoalId,
-        kind: EventKind,
-        payload: &serde_json::Value,
-    ) -> anyhow::Result<()> {
-        sessions::follow_goal(self, event_id, goal_id, kind, payload)
-    }
-}
-
-impl SessionTx for SqliteTx<'_> {
-    fn close_plan_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
-        sessions::close_plan_review(self, review, inferred)
-    }
-    fn close_goal_review_spans(&self, review: i64, inferred: bool) -> anyhow::Result<()> {
-        sessions::close_goal_review(self, review, inferred)
-    }
-    fn close_planner_spans(&self, planner: i64) -> anyhow::Result<usize> {
-        sessions::close_planner_spans(self, planner)
-    }
-}
-
-impl EventTx for SqliteTx<'_> {
-    fn follow_spans(
-        &self,
-        event_id: EventId,
-        task_id: Option<TaskId>,
-        run_id: Option<&RunId>,
-        kind: EventKind,
-        payload: &serde_json::Value,
-    ) -> anyhow::Result<()> {
-        sessions::follow(self.0, event_id, task_id, run_id, kind, payload)
-    }
-    fn follow_goal_spans(
-        &self,
-        event_id: EventId,
-        goal_id: crate::domain::GoalId,
-        kind: EventKind,
-        payload: &serde_json::Value,
-    ) -> anyhow::Result<()> {
-        sessions::follow_goal(self.0, event_id, goal_id, kind, payload)
     }
 }
 
@@ -609,6 +555,7 @@ mod tests {
     use rusqlite::{OpenFlags, params};
 
     use super::*;
+    use crate::domain::EventKind;
     use crate::infrastructure::sql_exec::{OptionalRow, sql_params};
     use crate::infrastructure::sqlite::WriteIdentity;
 
@@ -638,7 +585,75 @@ mod tests {
     }
 
     fn read_tx(conn: &Connection) -> WriteTx<'_> {
+        watch_commits(conn).unwrap();
         WriteTx::read(conn, "sql_exec_test", Duration::from_secs(60)).unwrap()
+    }
+
+    /// Savepoint rollback cancels only its callbacks; release keeps them for
+    /// the outer commit, and dropping that transaction cancels everything.
+    #[test]
+    fn commit_actions_follow_the_transaction_and_savepoint_outcome() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        for release in [false, true] {
+            for commit in [false, true] {
+                let conn = table("commit-actions");
+                let calls = Rc::new(RefCell::new(Vec::new()));
+                let mut tx = read_tx(&conn);
+                SqlWrite::execute(&tx, "INSERT INTO t(v) VALUES ('write')", &[]).unwrap();
+                assert!(SqlRead::in_write_transaction(&tx));
+                let called = calls.clone();
+                tx.after_commit(Box::new(move || called.borrow_mut().push("before")))
+                    .unwrap();
+                {
+                    let savepoint = SqlSavepoints::savepoint(&mut tx).unwrap();
+                    let called = calls.clone();
+                    savepoint
+                        .after_commit(Box::new(move || called.borrow_mut().push("inside")))
+                        .unwrap();
+                    if release {
+                        savepoint.commit().unwrap();
+                    }
+                }
+                let called = calls.clone();
+                tx.after_commit(Box::new(move || called.borrow_mut().push("after")))
+                    .unwrap();
+                assert!(calls.borrow().is_empty());
+                if commit {
+                    tx.commit().unwrap();
+                } else {
+                    drop(tx);
+                }
+                super::super::flush_after_commit();
+                assert_eq!(
+                    *calls.borrow(),
+                    if !commit {
+                        vec![]
+                    } else if release {
+                        vec!["before", "inside", "after"]
+                    } else {
+                        vec!["before", "after"]
+                    }
+                );
+                assert!(!SqlRead::in_write_transaction(&conn));
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_commit_discards_its_actions() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let conn = table("failed-commit-actions");
+        conn.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE child(parent INTEGER REFERENCES t(id) DEFERRABLE INITIALLY DEFERRED)").unwrap();
+        let called = Rc::new(Cell::new(false));
+        let tx = read_tx(&conn);
+        SqlWrite::execute(&tx, "INSERT INTO child VALUES (123)", &[]).unwrap();
+        let action = called.clone();
+        tx.after_commit(Box::new(move || action.set(true))).unwrap();
+        assert!(tx.commit().is_err());
+        super::super::flush_after_commit();
+        assert!(!called.get());
     }
 
     #[test]
@@ -1253,4 +1268,112 @@ mod tests {
         );
         assert!(SqlRead::query_row(&conn, "SELECT nothing", &[], |r| r.get::<_, i64>(0)).is_err());
     }
+}
+
+impl SessionConnection for Connection {
+    type Write<'c> = WriteTx<'c>;
+    fn session_write(
+        &self,
+        name: &'static str,
+        warn: std::time::Duration,
+        identity: &crate::infrastructure::write_leader::WriteIdentity,
+    ) -> anyhow::Result<WriteTx<'_>> {
+        Ok(WriteTx::write(self, name, warn, identity)?.recorded())
+    }
+}
+impl CommitTransaction for WriteTx<'_> {
+    fn commit(self) -> anyhow::Result<()> {
+        Ok(WriteTx::commit(self)?)
+    }
+}
+
+thread_local! {
+    static COMMIT_ACTIONS: std::cell::RefCell<std::collections::HashMap<i64, CommitActions>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+const CONNECTION_FUNCTION: &str = "dagq_sessions_connection";
+fn connection_id(conn: &Connection) -> SqlResult<i64> {
+    Ok(conn.query_row(&format!("SELECT {CONNECTION_FUNCTION}()"), [], |r| r.get(0))?)
+}
+fn actions_for(conn: &Connection) -> SqlResult<CommitActions> {
+    let id = connection_id(conn)?;
+    Ok(COMMIT_ACTIONS
+        .with_borrow_mut(|all| all.entry(id).or_insert_with(CommitActions::new).clone()))
+}
+fn register_commit(conn: &Connection, action: Box<dyn FnOnce()>) -> SqlResult<()> {
+    if conn.is_autocommit() {
+        action();
+    } else {
+        actions_for(conn)?.push(action);
+    }
+    Ok(())
+}
+fn follow_commits(id: i64, next: impl Fn(CommitState) -> Option<CommitState>) {
+    COMMIT_ACTIONS.with_borrow(|all| {
+        if let Some(actions) = all.get(&id) {
+            actions.follow(next);
+        }
+    });
+}
+fn commit_finished(id: i64) {
+    follow_commits(id, |state| {
+        Some(if state == CommitState::Committing {
+            CommitState::Committed
+        } else {
+            state
+        })
+    });
+}
+/// Follow successful commits, including legacy callers that commit through
+/// rusqlite. BEGIN/ROLLBACK are not cached; together with the update hook they
+/// distinguish a completed commit from a failed commit's immediate rollback.
+pub(crate) fn watch_commits(conn: &Connection) -> anyhow::Result<()> {
+    static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    struct Watched(i64);
+    impl Watched {
+        fn id(&self) -> i64 {
+            self.0
+        }
+    }
+    impl Drop for Watched {
+        fn drop(&mut self) {
+            let pending = COMMIT_ACTIONS
+                .try_with(|all| all.borrow_mut().remove(&self.0))
+                .ok()
+                .flatten();
+            if let Some(actions) = pending {
+                // Closing a connection is after its last commit statement.
+                // Keep that success even if its transcript guard still lives.
+                actions.follow(|state| (state != CommitState::Open).then_some(state));
+                actions.committed();
+            }
+        }
+    }
+    let watched = Watched(id);
+    conn.create_scalar_function(
+        CONNECTION_FUNCTION,
+        0,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        move |_| Ok(watched.id()),
+    )?;
+    conn.commit_hook(Some(move || {
+        follow_commits(id, |state| {
+            Some(match state {
+                CommitState::Open => CommitState::Committing,
+                _ => CommitState::Committed,
+            })
+        });
+        false
+    }))?;
+    conn.rollback_hook(Some(move || {
+        follow_commits(id, |state| {
+            (state == CommitState::Committed).then_some(state)
+        });
+    }))?;
+    conn.update_hook(Some(move |_, _: &str, _: &str, _| commit_finished(id)))?;
+    conn.authorizer(Some(move |_: rusqlite::hooks::AuthContext<'_>| {
+        commit_finished(id);
+        rusqlite::hooks::Authorization::Allow
+    }))?;
+    Ok(())
 }

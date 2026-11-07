@@ -3,7 +3,6 @@
 //! `run_events`, so the change rides the cursor `status` and `watch` hand out.
 use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlWrite, sql_params};
 use super::store_rows::{enum_col, json_col};
-use super::store_writes::EventTx;
 use crate::domain::event_kind::EventKind;
 use anyhow::{Context, Result, ensure};
 
@@ -1061,7 +1060,7 @@ fn refuse_bare_action(tx: &impl SqlRead, ask: &Ask, text: &str) -> Result<()> {
 /// (`ask_answered` with `runtime_closed: true`), an answered one
 /// `ask_closed`; each with `reason`, `note` and `discarded: true`.
 pub(super) fn discard_by_runtime(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     ask: &Ask,
     reason: &str,
     note: &str,
@@ -1087,7 +1086,12 @@ pub(super) fn discard_by_runtime(
 /// Close the unclosed `ask` in the caller's write transaction at `now`: an
 /// open one gets `answer` from the runtime (`ask_answered` with
 /// `runtime_closed: true`), an answered one `ask_closed`.
-pub(super) fn close_by_runtime(tx: &impl EventTx, ask: &Ask, answer: &str, now: i64) -> Result<()> {
+pub(super) fn close_by_runtime(
+    tx: &impl SqlWrite,
+    ask: &Ask,
+    answer: &str,
+    now: i64,
+) -> Result<()> {
     if ask.is_open() {
         let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "runtime_closed": true});
         write_answer(tx, ask, answer, Answerer::RUNTIME, now, &mut payload)?;
@@ -1119,7 +1123,7 @@ pub(super) fn close_by_runtime(tx: &impl EventTx, ask: &Ask, answer: &str, now: 
 /// at `now`: an open ask gets `answer` from the runtime (`ask_answered`
 /// with `runtime_closed: true`), an answered one `ask_closed`.
 pub(super) fn close_asks_in(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     run_id: &RunId,
     task_id: Option<TaskId>,
     kind: AskKind,
@@ -1145,7 +1149,7 @@ pub(super) fn close_asks_in(
 /// `now`, as [`close_by_runtime`] closes one: an open ask gets `answer`
 /// from the runtime, an answered one `ask_closed`. The asks closed.
 pub(super) fn close_request_asks_in(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     request: crate::domain::RequestId,
     answer: &str,
     now: i64,
@@ -1173,7 +1177,7 @@ pub(super) fn request_ask_subject(id: crate::domain::RequestId) -> String {
 
 /// Register `ask` inside the caller's write transaction, or return the open
 /// one of the same task, run and kind unchanged (see [`SqliteQueue::ask`]).
-pub(super) fn insert_ask(tx: &impl EventTx, ask: &NewAsk) -> Result<AskOutcome> {
+pub(super) fn insert_ask(tx: &impl SqlWrite, ask: &NewAsk) -> Result<AskOutcome> {
     let task_id = match (&ask.run_id, ask.task_id) {
         (Some(run_id), _) => tx
             .query_row(
@@ -1297,7 +1301,7 @@ pub(super) fn insert_ask(tx: &impl EventTx, ask: &NewAsk) -> Result<AskOutcome> 
 /// `<option>: <reason>` to an `approve_plan` or `approve_landing` adds the
 /// option it names as `reasoned_option` (task 1389).
 pub(super) fn write_answer(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     ask: &Ask,
     text: &str,
     answerer: Answerer,
@@ -1340,7 +1344,7 @@ pub(super) fn write_answer(
 /// Record `ask_closed` for `ask`, on its task and run, in the caller's
 /// transaction that closes it: `stats` reads it as the answer applied
 /// (task 468) when nothing else that names the ask applied it (task 568).
-pub(super) fn record_ask_closed(conn: &impl EventTx, ask: &Ask) -> Result<()> {
+pub(super) fn record_ask_closed(conn: &impl SqlWrite, ask: &Ask) -> Result<()> {
     ask_event(
         conn,
         ask.task_id,
@@ -1353,7 +1357,7 @@ pub(super) fn record_ask_closed(conn: &impl EventTx, ask: &Ask) -> Result<()> {
 /// An ask's event: on its task (and run), or, for a task-less `blocked`
 /// ask, on nothing.
 fn ask_event(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,
     kind: EventKind,
@@ -1377,7 +1381,7 @@ fn ask_event(
 /// [`SqliteQueue::ask_delivered`] inside the caller's transaction, which
 /// commits it with what else the delivery records.
 pub(super) fn deliver_ask_in(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     id: AskId,
     workspace_id: &str,
     now: i64,

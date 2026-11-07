@@ -143,7 +143,7 @@ inboxの区間はproviderによらずhookが記録し、起動の記録（`inbox
 
 - 入口: `infrastructure::transcripts::ClaudeTranscripts`、新しいsessionの後の区間が読むtranscriptは`domain::sessions::SpanContext`の`session`。
 - hookの`SessionEnd`はtranscriptを読まずに閉じ、後でsupervisorが取り込む（[ADR-t655-1](../adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md)）。
-- 落とし穴: `worktime.jsonl`の明細はcommitを確かめてから書く（`sessions::watch_commits`）。
+- 落とし穴: `worktime.jsonl`の明細はcommitを確かめてから書く（`sql_exec::sqlite::watch_commits`）。
 
 ### 作業の内訳
 

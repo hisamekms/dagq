@@ -5,9 +5,8 @@
 //! returns them to `draft` for the planner, and a [`withdraw`] releases
 //! them as drafts.
 use super::sql_dialect::{JsonType, TimeForm};
-use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, sql_params};
+use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlWrite, sql_params};
 use super::store_rows::{enum_col, read_goal};
-use super::store_writes::EventTx;
 use super::store_writes::event;
 use crate::domain::EventKind;
 use crate::domain::event_kind;
@@ -50,7 +49,7 @@ pub(super) struct SubmitTime<'a> {
 /// their own submit. A planner of the runtime's further Spikes of a goal
 /// whose results are replanned start its next cycle, at `now`.
 pub(super) fn submit(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     submission: Submission,
     changes: Option<&ChangeSet>,
     title_prefixes: Option<&TitlePrefixes>,
@@ -266,7 +265,7 @@ pub(super) fn submit(
 /// proposal's owner, which the next submit replaces, and is recorded on
 /// every submit, a held proposal's retry with no task moving included.
 fn record_submitter(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     proposal: ProposalId,
     task: TaskId,
     owner: &PlannerOwner,
@@ -338,7 +337,7 @@ fn record_submitter(
 /// accepted with its children left `submitted`: its replacement plan is
 /// checked again and marked approved, and only the trusted runtime's apply
 /// makes the children ready (ADR-t1521-2 decision 4).
-pub(super) fn approve(conn: &impl EventTx, id: ProposalId, now: &str) -> Result<Proposal> {
+pub(super) fn approve(conn: &impl SqlWrite, id: ProposalId, now: &str) -> Result<Proposal> {
     let accepted = proposal::accept(read(conn, id)?, now.into())?;
     save(conn, &accepted)?;
     if let Some(op) = super::replans::replacing_operation_port(conn, id)? {
@@ -432,7 +431,7 @@ fn closed_goal(conn: &impl SqlRead, task_id: TaskId) -> Result<Option<(i64, Stri
 
 /// Plan review sent the proposal back to its planner (ADR-0041 decision
 /// 11): its submitted tasks return to `draft` until it is submitted again.
-pub(super) fn send_back(conn: &impl EventTx, id: ProposalId, now: &str) -> Result<Proposal> {
+pub(super) fn send_back(conn: &impl SqlWrite, id: ProposalId, now: &str) -> Result<Proposal> {
     let revising = proposal::send_back(read(conn, id)?, now.into())?;
     save(conn, &revising)?;
     for &task_id in revising.task_ids() {
@@ -457,7 +456,7 @@ pub(super) fn send_back(conn: &impl EventTx, id: ProposalId, now: &str) -> Resul
 /// planner of the runtime's takes it up; it is not made ready here, which
 /// would skip the gate that found it has to change.
 pub(super) fn withdraw(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     id: ProposalId,
     now: &str,
     now_secs: i64,
@@ -544,7 +543,7 @@ fn reopened_into(
 
 /// Close the task's `approve_plan` asks nobody closed, answering an open
 /// one `withdrawn` first and recording `ask_closed` for an answered one.
-fn close_plan_asks(conn: &impl EventTx, task_id: TaskId, now: i64) -> Result<()> {
+fn close_plan_asks(conn: &impl SqlWrite, task_id: TaskId, now: i64) -> Result<()> {
     let unclosed: Vec<Ask> = conn.query_map(
         "SELECT * FROM asks
              WHERE task_id=?1 AND kind='approve_plan' AND closed_at IS NULL ORDER BY id",
@@ -673,7 +672,7 @@ fn record_row(row: &SqlRow<'_>) -> SqlResult<ProposalRecord> {
 
 /// Insert or update the proposal row; members are the tasks' and goals'
 /// `proposal_id`, written by the caller.
-pub(super) fn save(conn: &impl EventTx, proposal: &Proposal) -> Result<()> {
+pub(super) fn save(conn: &impl SqlWrite, proposal: &Proposal) -> Result<()> {
     conn.execute(
         "INSERT INTO proposals(id, status, owner_origin, owner_workspace_id, submitted_at,
                                revise_count, created_at, updated_at)

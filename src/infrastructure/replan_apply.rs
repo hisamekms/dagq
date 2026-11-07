@@ -27,7 +27,7 @@ use super::replans::{
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
 use super::sqlite::SqliteQueue;
 use super::store_rows::{self, enum_col, read_task};
-use super::store_writes::{EventTx, event};
+use super::store_writes::event;
 use super::task_store::{replace_task, transition_task};
 use crate::domain::event_kind::EventKind;
 use crate::domain::replan_apply::{
@@ -515,7 +515,7 @@ fn problems_now(
 /// Write the replacement of `op`, checked by [`problems_now`] in the same
 /// transaction, and the operation as it then is.
 fn write_replacement(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     op: &ReplanOperation,
     generation: i64,
     now: i64,

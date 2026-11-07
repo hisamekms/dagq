@@ -352,7 +352,11 @@ impl<'c> WriteTx<'c> {
     /// from its end; one that already had it (a write through the
     /// transaction it derefs to took it) had it from a time not known.
     pub fn execute<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
-        self.written(|tx| tx.execute(sql, params).map(|rows| (rows, rows)))
+        self.written(|tx| {
+            tx.prepare_cached(sql)?
+                .execute(params)
+                .map(|rows| (rows, rows))
+        })
     }
 
     /// Run the insert `sql` as [`WriteTx::execute`] does and return the ID
@@ -410,10 +414,16 @@ impl<'c> WriteTx<'c> {
 
     pub fn commit(mut self) -> rusqlite::Result<()> {
         self.read_lock_state();
-        match self.tx.take() {
+        let result = match self.tx.take() {
             Some(tx) => tx.commit(),
             None => Ok(()),
+        };
+        // Finish lock-hold accounting before callbacks do file I/O.
+        drop(self);
+        if result.is_ok() {
+            super::sql_exec::flush_after_commit();
         }
+        result
     }
 
     /// End it as its transaction's drop behavior says (a rollback unless
@@ -500,7 +510,7 @@ pub(super) fn insert_counted<P: rusqlite::Params>(
     sql: &str,
     params: P,
 ) -> rusqlite::Result<(usize, i64)> {
-    let rows = conn.execute(sql, params)?;
+    let rows = conn.prepare_cached(sql)?.execute(params)?;
     Ok((rows, conn.last_insert_rowid()))
 }
 
@@ -1185,13 +1195,13 @@ impl SqliteQueue {
         Ok(changed)
     }
 
-    /// Read transcripts before a write entry holds its lock. Session transcript
-    /// hooks belong to the SQLite adapter until their store moves to the port.
+    /// Read transcripts through the session execution port before a write
+    /// entry holds its lock.
     pub(super) fn read_session_transcripts_before(
         &self,
         closing: super::sessions::Closing<'_>,
     ) -> Result<super::sessions::ReadBefore> {
-        super::sessions::read_before(&self.conn, closing)
+        self.read_before(closing)
     }
 
     /// A transaction that reads one snapshot, named `name` on this
@@ -1258,7 +1268,7 @@ impl SqliteQueue {
         conn.pragma_update(None, "foreign_keys", true)?;
         // The `worktime.jsonl` lines of the session closes written through
         // it follow its commits (task 1334).
-        super::sessions::watch_commits(&conn)?;
+        super::sql_exec::sqlite::watch_commits(&conn)?;
         Ok(conn)
     }
 
@@ -2379,6 +2389,8 @@ pub(super) fn enum_col<T: FromStr<Err = DomainError>>(
     with_row(row, |row| store_rows::enum_col(row, name))
 }
 
+// SQLite compatibility entry for store modules migrating independently.
+#[allow(dead_code)]
 pub(super) fn json_col<T: DeserializeOwned>(row: &Row<'_>, name: &str) -> rusqlite::Result<T> {
     with_row(row, |row| store_rows::json_col(row, name))
 }
@@ -2405,6 +2417,8 @@ pub(super) fn stored_run_row(row: &Row<'_>) -> rusqlite::Result<TaskRun> {
     with_row(row, store_rows::stored_run_row)
 }
 
+// SQLite compatibility entry for store modules migrating independently.
+#[allow(dead_code)]
 pub(super) fn event_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
     with_row(row, store_rows::event_row)
 }

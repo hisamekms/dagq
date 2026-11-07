@@ -40,6 +40,7 @@
 //! and reads the sources and the migrations as files.
 
 mod dialect;
+mod event_tx;
 mod fixtures;
 mod inserted_ids;
 mod module_fixtures;

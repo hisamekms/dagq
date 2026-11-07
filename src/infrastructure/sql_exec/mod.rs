@@ -25,7 +25,10 @@
 //! [`sqlite::port_tx`] hands a `Connection` an unmoved module holds to what
 //! has moved.
 
+pub(crate) mod commit_actions;
 pub mod sqlite;
+use commit_actions::CommitState;
+pub(crate) use commit_actions::{CommitActions, flush_after_commit};
 mod values;
 
 pub use super::sql_dialect::SqlDialect;
@@ -210,6 +213,12 @@ pub trait SqlRead {
     /// The dialect the statements of this transaction are run in.
     fn dialect(&self) -> SqlDialect;
 
+    /// Whether this connection is inside a write transaction. Readers may
+    /// perform transcript I/O only when this is false.
+    fn in_write_transaction(&self) -> bool {
+        false
+    }
+
     /// Run the query `sql` with `params` and call `visit` on each row until
     /// it returns `false` or the rows end.
     fn visit_rows(
@@ -218,6 +227,14 @@ pub trait SqlRead {
         params: &[SqlValue],
         visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
     ) -> SqlResult<()>;
+
+    /// Whether the query yields at least one row.
+    fn exists(&self, sql: &str, params: &[SqlValue]) -> SqlResult<bool> {
+        Ok(self
+            .query_row(sql, params, |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
 
     /// What `read` makes of the query's first row, or [`SqlError::NoRows`].
     fn query_row<T>(
@@ -255,6 +272,12 @@ pub trait SqlRead {
 
 /// The transaction a store module writes through.
 pub trait SqlWrite: SqlRead {
+    /// Register an action for this transaction's successful commit. A rollback
+    /// or failed commit discards it. A savepoint owns its registrations until
+    /// release; rolling it back discards them too. SQLite defers actions until
+    /// the caller has left the commit statement (see `flush_after_commit`).
+    fn after_commit(&self, action: Box<dyn FnOnce()>) -> SqlResult<()>;
+
     /// Run the write statement `sql` and return the rows it changed.
     fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize>;
 
@@ -308,6 +331,26 @@ pub trait TransactionEntries {
 
     /// Begin the read transaction `name`.
     fn read_entry(&self, name: &'static str) -> anyhow::Result<Self::Read<'_>>;
+}
+
+/// A transaction whose owner can finish it after writing shared SQL.
+pub(crate) trait CommitTransaction: SqlWrite {
+    fn commit(self) -> anyhow::Result<()>;
+}
+
+/// The connection used by transcript intake: read before opening each short
+/// fenced write, and commit that write before reading the next transcript.
+/// The adapter owns the concrete transaction and its lock accounting.
+pub(crate) trait SessionConnection: SqlRead {
+    type Write<'c>: CommitTransaction
+    where
+        Self: 'c;
+    fn session_write(
+        &self,
+        name: &'static str,
+        warn: std::time::Duration,
+        identity: &crate::infrastructure::write_leader::WriteIdentity,
+    ) -> anyhow::Result<Self::Write<'_>>;
 }
 
 /// The arguments of a statement of the port, each bound as its

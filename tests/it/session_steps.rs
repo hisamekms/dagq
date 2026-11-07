@@ -570,11 +570,18 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RetentionRows {
 
 /// Watch the retention transactions of `queue` (opened with no threshold)
 /// on this thread, until the guard drops.
-fn retention_rows() -> (RetentionRows, tracing::subscriber::DefaultGuard) {
+fn retention_rows() -> (
+    RetentionRows,
+    (tracing::subscriber::DefaultGuard, tracing::Dispatch),
+) {
     use tracing_subscriber::layer::SubscriberExt;
     let rows = RetentionRows::default();
     let guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(rows.clone()));
-    (rows, guard)
+    // Another test can first reach the WARN without a subscriber. Keep two
+    // dispatchers registered so its cached interest asks this thread's default.
+    let second = tracing::Dispatch::new(tracing_subscriber::registry());
+    tracing::callsite::rebuild_interest_cache();
+    (rows, (guard, second))
 }
 
 /// More rows due than one transaction holds: the retention commits them a

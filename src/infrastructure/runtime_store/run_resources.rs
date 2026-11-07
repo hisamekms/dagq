@@ -5,7 +5,7 @@
 use super::*;
 use crate::application::RunResourceStore;
 use crate::domain::environment::{Resources, RunResource};
-use rusqlite::{Row, params};
+use crate::infrastructure::sql_exec::{SqlRead, SqlResult, SqlRow, SqlWrite, sql_params};
 
 /// The columns of a stored window, in the order [`resource_row`] reads
 /// them.
@@ -13,7 +13,7 @@ const COLUMNS: &str = "id,run_id,attachment,node_id,from_ms,until_ms,cpu_seconds
     memory_max_bytes,throttled_seconds,cpu_pressure,load_average,is_last";
 
 /// A row of `run_resources` read with [`COLUMNS`].
-fn resource_row(row: &Row<'_>) -> rusqlite::Result<RunResource> {
+fn resource_row(row: &SqlRow<'_>) -> SqlResult<RunResource> {
     Ok(RunResource {
         id: row.get(0)?,
         run_id: row.get(1)?,
@@ -36,11 +36,12 @@ fn resource_row(row: &Row<'_>) -> rusqlite::Result<RunResource> {
 impl RunResourceStore for SqliteQueue {
     fn record_run_resource(&self, row: &RunResource) -> Result<i64> {
         let tx = self.write_tx("run_resources_record")?;
-        let id = tx.insert_id(
+        let id = SqlWrite::insert_id(
+            &tx,
             "INSERT INTO run_resources(run_id,attachment,node_id,from_ms,until_ms,cpu_seconds,
                  cpu_limit,memory_max_bytes,throttled_seconds,cpu_pressure,load_average,is_last)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![
+            sql_params![
                 row.run_id,
                 row.attachment,
                 row.node_id,
@@ -60,27 +61,28 @@ impl RunResourceStore for SqliteQueue {
     }
 
     fn run_resources(&self, run: &RunId) -> Result<Vec<RunResource>> {
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM run_resources WHERE run_id=?1 ORDER BY id"
-        ))?;
-        let rows = statement
-            .query_map([run.as_str()], resource_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &format!("SELECT {COLUMNS} FROM run_resources WHERE run_id=?1 ORDER BY id"),
+            sql_params![run.as_str()],
+            resource_row,
+        )?;
         Ok(rows)
     }
 
     fn run_resources_after(&self, after: i64, limit: usize) -> Result<Vec<RunResource>> {
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM run_resources WHERE id > ?1 ORDER BY id LIMIT ?2"
-        ))?;
-        let rows = statement
-            .query_map(params![after, i64::try_from(limit)?], resource_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &format!("SELECT {COLUMNS} FROM run_resources WHERE id > ?1 ORDER BY id LIMIT ?2"),
+            sql_params![after, i64::try_from(limit)?],
+            resource_row,
+        )?;
         Ok(rows)
     }
 
     fn open_attachments(&self) -> Result<Vec<(RunId, i64)>> {
-        let mut statement = self.conn.prepare(
+        let open = SqlRead::query_map(
+            &*self.conn,
             "WITH attached AS (
                  SELECT run_id, MAX(id) AS attachment FROM run_events
                  WHERE kind='environment_attached' AND run_id IS NOT NULL
@@ -89,12 +91,9 @@ impl RunResourceStore for SqliteQueue {
              WHERE NOT EXISTS(SELECT 1 FROM run_resources r
                  WHERE r.attachment=attached.attachment AND r.is_last=1)
              ORDER BY attachment",
+            &[],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )?;
-        let open = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
         open.into_iter()
             .map(|(run, attachment)| Ok((RunId::new(&run)?, attachment)))
             .collect()

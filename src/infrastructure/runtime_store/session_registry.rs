@@ -4,44 +4,54 @@
 use super::*;
 use crate::domain::EventKind;
 use crate::infrastructure::sessions::read_before;
-use crate::infrastructure::sql_dialect::{JsonType, json_field};
-use crate::infrastructure::sqlite::event_row;
-use rusqlite::{OptionalExtension, params};
+use crate::infrastructure::sql_dialect::JsonType;
+use crate::infrastructure::sql_exec::{OptionalRow, SqlRead, SqlValue, SqlWrite, sql_params};
+use crate::infrastructure::store_rows::event_row;
 
 impl SqliteQueue {
+    fn write_session_statement(
+        &self,
+        name: &'static str,
+        sql: &str,
+        params: &[SqlValue],
+    ) -> Result<usize> {
+        let tx = self.write_tx(name)?;
+        let rows = SqlWrite::execute(&tx, sql, params)?;
+        tx.commit()?;
+        Ok(rows)
+    }
     /// Record a workspace for `role`, replacing any earlier one, as an
     /// earlier binary's `up` recorded the cmux workspace it opened
     /// (ADR-0026); this binary records none, and tests make such a record
     /// with it.
     pub fn register_session_workspace(&self, role: SessionRole, workspace_id: &str) -> Result<()> {
-        self.write_statement(
+        self.write_session_statement(
             "register_session_workspace",
             "INSERT INTO session_workspaces(role,workspace_id,created_at) VALUES (?1,?2,?3)
              ON CONFLICT(role) DO UPDATE SET workspace_id=excluded.workspace_id,
                                               created_at=excluded.created_at",
-            params![role.as_str(), workspace_id, self.generators.clock.now()],
+            sql_params![role.as_str(), workspace_id, self.generators.clock.now()],
         )?;
         Ok(())
     }
 
     /// The workspace last recorded for `role`.
     pub fn session_workspace(&self, role: SessionRole) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT workspace_id FROM session_workspaces WHERE role=?1",
-                [role.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?)
+        Ok(SqlRead::query_row(
+            &*self.conn,
+            "SELECT workspace_id FROM session_workspaces WHERE role=?1",
+            sql_params![role.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?)
     }
 
     /// Forget the workspace of `role`; `false` when none was recorded.
     pub fn remove_session_workspace(&self, role: SessionRole) -> Result<bool> {
-        Ok(self.write_statement(
+        Ok(self.write_session_statement(
             "remove_session_workspace",
             "DELETE FROM session_workspaces WHERE role=?1",
-            [role.as_str()],
+            sql_params![role.as_str()],
         )? == 1)
     }
 
@@ -53,10 +63,10 @@ impl SqliteQueue {
     /// how many were forgotten; the workspaces themselves are a person's to
     /// close.
     pub fn forget_retired_session_workspaces(&self) -> Result<usize> {
-        self.write_statement(
+        self.write_session_statement(
             "forget_retired_session_workspaces",
             "DELETE FROM session_workspaces WHERE role != ?1",
-            params![SessionRole::Supervisor.as_str()],
+            sql_params![SessionRole::Supervisor.as_str()],
         )
     }
 }
@@ -68,21 +78,26 @@ impl SqliteQueue {
     /// before.
     pub fn planner_silent(&self, id: PlannerId, payload: Value) -> Result<bool> {
         let tx = self.write_tx("planner_silent")?;
-        let seen: bool = tx.query_row(
+        let seen: bool = SqlRead::query_row(
+            &tx,
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
                  AND {}='planner'
                  AND {}=?2)",
-                json_field("payload", "$.subject", JsonType::Text),
-                json_field("payload", "$.planner_id", JsonType::Integer),
+                SqlRead::dialect(&tx).json_field("payload", "$.subject", JsonType::Text),
+                SqlRead::dialect(&tx).json_field("payload", "$.planner_id", JsonType::Integer),
             ),
-            params![event_kind::PLANNER_UNRESPONSIVE, id],
+            sql_params![event_kind::PLANNER_UNRESPONSIVE, id],
             |r| r.get(0),
         )?;
         if seen {
             return Ok(false);
         }
-        super::run_log::queue_event(&tx, EventKind::PlannerUnresponsive, &payload)?;
+        crate::infrastructure::store_writes::record_queue_event_in(
+            &tx,
+            EventKind::PlannerUnresponsive,
+            &payload,
+        )?;
         tx.commit()?;
         Ok(true)
     }
@@ -97,18 +112,19 @@ impl SqliteQueue {
     pub fn end_planner(&self, id: PlannerId, payload: &Value) -> Result<bool> {
         let tx = self.write_tx("end_planner")?;
         let now = self.generators.clock.now();
-        let closed = tx.execute(
+        let closed = SqlWrite::execute(
+            &tx,
             "UPDATE planners SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
-            params![id, now],
+            sql_params![id, now],
         )? == 1;
         if closed {
             crate::infrastructure::draft_planners::settle_bundle(&tx, id, now)?;
-            crate::infrastructure::plan_requests::decline_after_planner(
-                &crate::infrastructure::sql_exec::sqlite::port_tx(&tx),
-                id,
-                now,
+            crate::infrastructure::plan_requests::decline_after_planner(&tx, id, now)?;
+            crate::infrastructure::store_writes::record_queue_event_in(
+                &tx,
+                EventKind::PlannerClosed,
+                payload,
             )?;
-            super::run_log::queue_event(&tx, EventKind::PlannerClosed, payload)?;
         }
         tx.commit()?;
         Ok(closed)
@@ -119,9 +135,9 @@ impl SqliteQueue {
     /// planner a revise went to since is left out: the revise's own
     /// `planner_unresponsive` times it.
     pub fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>> {
-        let events: Vec<RunEvent> = self
-            .conn
-            .prepare(&format!(
+        let events: Vec<RunEvent> = SqlRead::query_map(
+            &*self.conn,
+            &format!(
                 "SELECT e.* FROM run_events e JOIN planners p
                    ON p.id = {}
                  WHERE e.kind=?1 AND {}='planner'
@@ -129,11 +145,16 @@ impl SqliteQueue {
                    AND NOT EXISTS (SELECT 1 FROM proposals r WHERE r.status='revising'
                                    AND r.revise_planner_id = p.id)
                  ORDER BY p.id",
-                json_field("e.payload", "$.planner_id", JsonType::Integer),
-                json_field("e.payload", "$.subject", JsonType::Text),
-            ))?
-            .query_map([event_kind::PLANNER_UNRESPONSIVE], event_row)?
-            .collect::<rusqlite::Result<_>>()?;
+                SqlRead::dialect(&*self.conn).json_field(
+                    "e.payload",
+                    "$.planner_id",
+                    JsonType::Integer
+                ),
+                SqlRead::dialect(&*self.conn).json_field("e.payload", "$.subject", JsonType::Text),
+            ),
+            sql_params![event_kind::PLANNER_UNRESPONSIVE],
+            event_row,
+        )?;
         events
             .into_iter()
             .map(|event| {
@@ -222,7 +243,7 @@ impl SessionRegistry for SqliteQueue {
     }
     fn record_session_turns(&self) -> Result<usize> {
         crate::infrastructure::sessions::record_open_turns(
-            &self.conn,
+            &*self.conn,
             self.write_hold_warn,
             self.write_identity
                 .as_ref()
@@ -237,7 +258,7 @@ impl SessionRegistry for SqliteQueue {
         hook: &crate::domain::sessions::SessionHook,
     ) -> Result<serde_json::Value> {
         crate::infrastructure::sessions::record_hook(
-            &self.conn,
+            &*self.conn,
             self.write_hold_warn,
             self.write_identity
                 .as_ref()
@@ -246,11 +267,11 @@ impl SessionRegistry for SqliteQueue {
         )
     }
     fn open_hook_session_spans(&self) -> Result<Vec<crate::domain::sessions::OpenSpan>> {
-        crate::infrastructure::sessions::hook_spans(&self.conn)
+        crate::infrastructure::sessions::hook_spans(&*self.conn)
     }
     fn close_inferred_sessions(&self, ended: &[EventId]) -> Result<usize> {
         crate::infrastructure::sessions::close_inferred_hook_spans(
-            &self.conn,
+            &*self.conn,
             self.write_hold_warn,
             self.write_identity
                 .as_ref()
@@ -263,7 +284,7 @@ impl SessionRegistry for SqliteQueue {
         id: &RunId,
         session: Option<&crate::domain::headless_job::JobSession>,
     ) -> Result<usize> {
-        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::ReviewFailed]))?;
+        let _read = read_before(&*self.conn, Closing::Run(id, &[EventKind::ReviewFailed]))?;
         let tx = self.write_tx("close_review_session")?;
         let ending = session.map(|session| {
             let mut ending = serde_json::json!({});

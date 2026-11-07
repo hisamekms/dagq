@@ -13,7 +13,7 @@
 //! module imports them itself.
 use super::sql_exec::{self, OptionalRow, SqlResult, SqlRow, sql_params};
 use super::store_rows::{enum_col, event_row, read_task, run_row, stored_run_row};
-use super::store_writes::{EventTx, event};
+use super::store_writes::event;
 use super::task_store::claim_task;
 use std::collections::HashMap;
 use std::path::Path;
@@ -124,7 +124,7 @@ fn supervised_run(
 /// gives a move into or out of the unfinished statuses
 /// ([`run::unfinished_change`]) is written in the same transaction.
 fn save_run(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     run: &TaskRun,
     from: RunStatus,
     token: Option<&LeaseToken>,
@@ -185,7 +185,7 @@ fn save_run_row(
 /// automatic retry's once-per-task count leaves out). The stored run comes
 /// back.
 pub(super) fn end_released_run(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: &RunId,
     reason: String,
     carried: Option<serde_json::Value>,
@@ -206,7 +206,10 @@ pub(super) fn end_released_run(
 /// End run `id`, parked for a replanning, as the apply of its replacement
 /// replaced it ([`run::end_for_replacement`]), inside the apply's
 /// transaction. The stored run comes back.
-pub(super) fn end_replaced_run(conn: &impl EventTx, id: &RunId) -> Result<TaskRun> {
+pub(super) fn end_replaced_run(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    id: &RunId,
+) -> Result<TaskRun> {
     let run = stored_run(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
     let from = run.status();
     let run = run::end_for_replacement(run)?;
@@ -224,7 +227,7 @@ pub(super) fn end_replaced_run(conn: &impl EventTx, id: &RunId) -> Result<TaskRu
 /// given for the operation. The reason of a domain refusal is not part of
 /// that message; it is kept in `refusals` instead.
 fn apply(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     refusals: Refusals<'_>,
     id: &RunId,
     token: Option<&LeaseToken>,
@@ -246,7 +249,7 @@ fn apply(
 /// ([`run::Recorded`]): the run is saved and the events written in the
 /// caller's transaction, in order.
 fn apply_recorded(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     refusals: Refusals<'_>,
     id: &RunId,
     token: Option<&LeaseToken>,
@@ -264,7 +267,11 @@ fn apply_recorded(
 }
 
 /// Write the events a transition returned for run `id`.
-fn record_events(conn: &impl EventTx, id: &RunId, events: Vec<run::NewRunEvent>) -> Result<()> {
+fn record_events(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    id: &RunId,
+    events: Vec<run::NewRunEvent>,
+) -> Result<()> {
     for event in events {
         run_event(conn, id, event.kind, event.payload)?;
     }
@@ -485,7 +492,7 @@ fn assert_wrapper(conn: &impl sql_exec::SqlRead, id: &RunId, pid: u32) -> Result
 /// that step settles in the same transaction once the run rests
 /// ([`crate::infrastructure::task_holds::settle_at_rest_in`]).
 fn run_event(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: &RunId,
     kind: EventKind,
     payload: serde_json::Value,
@@ -508,7 +515,7 @@ fn run_event(
 /// fails the transition), `cause` the kind of the event the same
 /// transaction wrote.
 fn phase_event(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: &RunId,
     phase: run_phase::Phase,
     cause: EventKind,
@@ -539,7 +546,7 @@ fn phase_event(
 /// with no end recorded gets its `stall_resolved` of outcome `run_ended`,
 /// once: one already ended by the watch or an earlier close gets none.
 pub(super) fn end_stalled_detections(
-    tx: &impl EventTx,
+    tx: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: &RunId,
     answer: &str,
     now: i64,

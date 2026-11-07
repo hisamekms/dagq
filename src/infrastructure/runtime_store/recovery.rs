@@ -609,7 +609,7 @@ impl SqliteQueue {
 /// Whether it was recorded: not a failure while another operation guards
 /// the task (the caller then commits nothing).
 fn record_restore_in(
-    tx: &impl EventTx,
+    tx: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: &RunId,
     op: crate::domain::ReplanId,
     generation: i64,
@@ -1942,7 +1942,7 @@ fn task_of(conn: &impl SqlRead, id: &RunId) -> Result<TaskId> {
 /// Move `run` and its task on as a recovery round's `action` says,
 /// adding to the round's `payload` what the action records.
 fn apply_triage_action(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     refusals: Refusals<'_>,
     run: &TaskRun,
     action: &TriageAction,
@@ -2031,7 +2031,7 @@ fn apply_triage_action(
 /// saying nothing was applied, then `hold_result_kept` with the action
 /// and the version of the task and the run as they are kept.
 fn keep_held_verdict(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     run: &TaskRun,
     hold: HoldGuard,
     action: &TriageAction,
@@ -2070,7 +2070,7 @@ fn keep_held_verdict(
 /// action on a run nobody leases that is still its task's latest, a
 /// person's answer as [`decide_triage_in`].
 fn apply_kept(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     refusals: Refusals<'_>,
     id: &RunId,
     kept: EventId,
@@ -2150,7 +2150,11 @@ fn revivable(conn: &impl SqlRead, id: &RunId) -> Result<bool> {
 /// lease but a stale one, which goes (so its holder cannot renew it and
 /// write after this, ADR-0039 decision 7); refused as
 /// [`crate::domain::recovery::triage_answer_refusal`] says.
-fn unleased_latest_triageable(conn: &impl EventTx, now: i64, id: &RunId) -> Result<TaskRun> {
+fn unleased_latest_triageable(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    now: i64,
+    id: &RunId,
+) -> Result<TaskRun> {
     let lease = conn
         .query_row(
             "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
@@ -2193,7 +2197,7 @@ fn unleased_latest_triageable(conn: &impl EventTx, now: i64, id: &RunId) -> Resu
 /// (`ask_id`, `answer`, `reason`, `status`), and an answer a hold kept as
 /// `hold_result_applied`.
 fn decide_triage_in(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     refusals: Refusals<'_>,
     id: &RunId,
     ask_id: AskId,
@@ -2324,7 +2328,7 @@ fn unsettled_kept_answer(
 /// run's supervisor and `lease_acquired` with `payload`, its pid and the
 /// previous token. Whether it was leased.
 fn lease_in(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: &RunId,
     token: &LeaseToken,
     now: i64,

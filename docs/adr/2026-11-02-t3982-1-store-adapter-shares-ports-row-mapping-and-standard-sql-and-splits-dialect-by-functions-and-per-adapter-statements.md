@@ -11,6 +11,8 @@ owners:
 tags:
   - architecture
   - persistence
+amended_by:
+  - adr-t4098-1
 related:
   - adr-t3981-1
   - adr-0013

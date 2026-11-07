@@ -4,6 +4,7 @@
 //! record `dependency_stranded` on it for the inbox, and `status` shows
 //! every one from the queue as it is now. Nothing here holds or cancels the
 //! waiting tasks: that is the plan's call.
+use super::sql_exec::SqlWrite;
 use crate::domain::EventKind;
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -11,7 +12,7 @@ use serde_json::{Value, json};
 use super::sql_exec::{OptionalRow, SqlRead, sql_params};
 use super::sqlite::SqliteQueue;
 use super::store_rows::enum_col;
-use super::store_writes::{EventTx, event};
+use super::store_writes::event;
 use crate::domain::{GoalId, StrandedDependency, TaskId, event_kind};
 
 /// The `cause` of a strand `approve` made by withholding the task is
@@ -97,7 +98,7 @@ fn stranded(tx: &impl SqlRead, task: TaskId) -> Result<Option<StrandedDependency
 /// with `cause` and the fields of `extra`, in the caller's transaction.
 /// The same strand is told once: nothing is recorded while the task's
 /// latest `dependency_stranded` names the same waiting tasks.
-pub(super) fn record(tx: &impl EventTx, task: TaskId, cause: &str, extra: Value) -> Result<()> {
+pub(super) fn record(tx: &impl SqlWrite, task: TaskId, cause: &str, extra: Value) -> Result<()> {
     let Some(stranded) = stranded(tx, task)? else {
         return Ok(());
     };
@@ -129,7 +130,7 @@ pub(super) fn record(tx: &impl EventTx, task: TaskId, cause: &str, extra: Value)
 
 /// [`record`] for every unfinished task of the goal just closed as
 /// `abandoned`.
-pub(super) fn record_abandoned(tx: &impl EventTx, goal: GoalId) -> Result<()> {
+pub(super) fn record_abandoned(tx: &impl SqlWrite, goal: GoalId) -> Result<()> {
     let tasks: Vec<TaskId> = tx.query_map(
         &format!("{UNFINISHED_OF_CLOSED} AND g.id = ?1 ORDER BY t.id"),
         sql_params![goal],
@@ -145,7 +146,7 @@ pub(super) fn record_abandoned(tx: &impl EventTx, goal: GoalId) -> Result<()> {
 /// (or a draft of another goal was approved after an abandoned close told
 /// its strand without it), so the waiting tasks changed.
 pub(super) fn record_upstream(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     task: TaskId,
     cause: &str,
     extra: Value,

@@ -8,8 +8,8 @@ use super::store_rows::{
     select_tasks, task_row,
 };
 use super::store_writes::{
-    EventTx, Node, event, event_id, insert_dependency, insert_goal_dependency, insert_task,
-    next_id, request_priority, touch, waits_for,
+    Node, event, event_id, insert_dependency, insert_goal_dependency, insert_task, next_id,
+    request_priority, touch, waits_for,
 };
 use crate::domain::claim_facts;
 use crate::domain::event_kind::{self, EventKind};
@@ -198,7 +198,7 @@ pub(super) fn landed_tasks(
 /// `summary`); an `approve_goal` answer passes `by: "person"`, the
 /// `ask_id` answered and the `goal_review_id` of the review that asked.
 pub(super) fn close_goal_in(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     goal_id: GoalId,
     verdict: GoalVerdict,
     now: &str,
@@ -264,7 +264,7 @@ pub(super) fn task_counts(conn: &impl SqlRead, goal_id: GoalId) -> Result<TaskSt
 }
 
 pub(super) fn goal_event(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     goal_id: GoalId,
     kind: EventKind,
     payload: serde_json::Value,
@@ -274,7 +274,7 @@ pub(super) fn goal_event(
 
 /// [`goal_event`], returning the ID of the event it inserted.
 pub(super) fn goal_event_id(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     goal_id: GoalId,
     kind: EventKind,
     payload: serde_json::Value,
@@ -285,7 +285,7 @@ pub(super) fn goal_event_id(
         sql_params![goal_id, kind.as_str(), serde_json::to_string(&payload)?],
     )?);
     // The goal review's session span this event starts or ends (ADR-0048).
-    conn.follow_goal_spans(id, goal_id, kind, &payload)?;
+    super::sessions::follow_goal(conn, id, goal_id, kind, &payload)?;
     Ok(id)
 }
 
@@ -475,7 +475,7 @@ pub(super) fn claim_order(conn: &impl SqlRead) -> Result<Vec<TaskId>> {
 /// differ.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn claim_task(
-    tx: &impl EventTx,
+    tx: &impl crate::infrastructure::sql_exec::SqlWrite,
     runs_dir: &Path,
     ids: &dyn IdGenerator,
     at: SystemTime,
@@ -846,7 +846,7 @@ pub(super) fn session_events(conn: &impl SqlRead, task: TaskId) -> Result<Vec<Ru
 /// `task_status_changed`: what `transition` does, and what the triage does
 /// to the task of the run it triaged.
 pub(super) fn transition_task(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task_id: TaskId,
     action: TaskAction,
     now: &str,
@@ -862,7 +862,7 @@ pub(super) fn transition_task(
 /// `src/context_boundaries/ownership.rs`) or the close of a verified
 /// `already_satisfied` claim without one (T12, ADR-t1818-1 decision 5).
 pub(super) fn complete_task(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task_id: TaskId,
     run: &RunId,
     now: &str,
@@ -894,7 +894,7 @@ pub(super) fn complete_task(
 /// `replaced` (neither completed nor canceled), recorded as
 /// `task_status_changed` on its parked run `run`, with its open hold ended.
 pub(super) fn replace_task(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task_id: TaskId,
     run: &RunId,
     operation: crate::domain::ReplanId,
@@ -927,7 +927,7 @@ pub(super) fn replace_task(
 /// applies. A task named as the one that holds the content is checked by
 /// [`check_duplicate`] and gives the reason of a `--duplicate-of` alone.
 pub(super) fn cancel_task(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task_id: TaskId,
     cancel: &NewCancel,
     now: &str,
@@ -1021,7 +1021,7 @@ pub(super) fn duplicates_of(
 }
 
 pub(super) fn apply_transition(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task_id: TaskId,
     action: TaskAction,
     now: &str,
@@ -1151,7 +1151,7 @@ pub(super) fn task_authorization(conn: &impl SqlRead, task: TaskId) -> Result<Ta
 /// (with `by` when the runtime changes it for a job) when the own priority
 /// changes, even if the base value stays the same (ADR-t1639-1 decision 2).
 pub(super) fn change_priority(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task_id: TaskId,
     priority: Option<Priority>,
     now: &str,
@@ -1206,7 +1206,7 @@ pub(super) fn change_priority(
 /// of is recorded the same way with `dropped_on_move`, the value it had
 /// and `from_by: human` (ADR-t2373-1 decision 4).
 pub(super) fn set_goal_in(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task_id: TaskId,
     goal_id: Option<GoalId>,
     timestamp: &str,
@@ -1295,7 +1295,7 @@ pub(super) struct Store<'a, T> {
     pub title_prefixes: &'a Option<TitlePrefixes>,
     pub goal_tags: &'a Option<TagSet>,
 }
-impl<T: EventTx> Store<'_, T> {
+impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
     pub(super) fn transition_authorized(
         &mut self,
         task_id: TaskId,

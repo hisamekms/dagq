@@ -409,7 +409,7 @@ mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let db = dir.path().join("q.db");
         let queue = SqliteQueue::init(&db).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let opened = record_hook(
             conn,
             WRITE_HOLD_WARN,
@@ -432,7 +432,7 @@ mod tests {
         // The supervisor that takes over reads where the last cut ended
         // from the queue.
         let queue = SqliteQueue::init(&db).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         assert_eq!(record_at(&queue, "2026-10-02T00:00:00.000Z").unwrap(), 0);
         assert_eq!(record_at(&queue, "2026-10-02T00:45:00.000Z").unwrap(), 1);
         assert_eq!(record_at(&queue, "2026-10-02T00:45:00.000Z").unwrap(), 0);
@@ -536,7 +536,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         record_hook(
             conn,
             WRITE_HOLD_WARN,
@@ -574,7 +574,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let opened = record_hook(
             conn,
             WRITE_HOLD_WARN,
@@ -620,7 +620,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let mut closes = Vec::new();
         for session in ["a", "b", "c"] {
             let opened = record_hook(

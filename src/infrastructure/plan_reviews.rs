@@ -7,7 +7,6 @@
 use super::sql_dialect::JsonType;
 use super::sql_exec::sql_params;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
-use super::store_writes::{EventTx, SessionTx};
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, LIVE_PLANNER_NOT_RAISED};
 use crate::domain::headless_job::{ReviewTakeover, review_owner_gone};
@@ -73,7 +72,11 @@ fn hold_port(
     Ok(hold.map(|hold| hold.parse()).transpose()?)
 }
 
-fn set_hold(conn: &impl EventTx, proposal_id: ProposalId, hold: Option<ReviewHold>) -> Result<()> {
+fn set_hold(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    proposal_id: ProposalId,
+    hold: Option<ReviewHold>,
+) -> Result<()> {
     conn.execute(
         "UPDATE proposals SET review_hold=?2 WHERE id=?1",
         sql_params![proposal_id, hold.map(ReviewHold::as_str)],
@@ -84,7 +87,7 @@ fn set_hold(conn: &impl EventTx, proposal_id: ProposalId, hold: Option<ReviewHol
 /// The revise `reasons` wait for the supervisor to deliver them, from
 /// `now` on.
 fn await_delivery(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     proposal_id: ProposalId,
     reasons: &[String],
     now: i64,
@@ -150,7 +153,7 @@ pub(super) fn take_over_review(
 }
 
 fn finish_row(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: i64,
     now: i64,
     outcome: PlanReviewOutcome,
@@ -220,7 +223,7 @@ fn edited_during(conn: &impl SqlRead, job: &PlanReviewJob) -> Result<Vec<TaskId>
 /// job's verdict, as recorded and as decided, `failure` its error when it
 /// failed. `false` when the end is to be applied.
 fn end_unapplied(
-    conn: &(impl EventTx + SessionTx),
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     job: &PlanReviewJob,
     now: i64,
     verdict: Option<(&Value, PlanReviewDecision)>,
@@ -247,7 +250,7 @@ fn end_unapplied(
         recorded,
         Some(&error),
     )?;
-    conn.close_plan_review_spans(job.id, false)?;
+    crate::infrastructure::sessions::close_plan_review(conn, job.id, false)?;
     if edited.is_none() && ran.is_none() {
         return Ok(true);
     }
@@ -298,7 +301,7 @@ fn check_action(conn: &impl SqlRead, members: &[TaskId], action: &PlanReviewActi
 }
 
 fn apply_action(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     action: &PlanReviewAction,
     proposal: ProposalId,
     now: &str,
@@ -334,7 +337,11 @@ fn pass_priority(conn: &impl SqlRead, task_id: TaskId) -> Result<PassPriority> {
 
 /// A pass's own priority taken off the task for its goal's, the way
 /// `set-priority --inherit` does, marked as the plan review's.
-fn inherit_priority(conn: &impl EventTx, task_id: TaskId, now: &str) -> Result<()> {
+fn inherit_priority(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    task_id: TaskId,
+    now: &str,
+) -> Result<()> {
     change_priority(conn, task_id, None, now, Some("plan_review"))
 }
 
@@ -342,7 +349,7 @@ fn inherit_priority(conn: &impl EventTx, task_id: TaskId, now: &str) -> Result<(
 /// waits for a planner with `reason` (ADR-0041 decision 14). A task that is
 /// not ready, or belongs to an active proposal, is skipped with why.
 fn reopen(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task_id: TaskId,
     reason: &str,
     reviewed: ProposalId,
@@ -564,7 +571,7 @@ impl PlanReviewStore for SqliteQueue {
                 None,
                 Some("stopped for the supervisor handoff"),
             )?;
-            tx.close_plan_review_spans(id, false)?;
+            crate::infrastructure::sessions::close_plan_review(&tx, id, false)?;
         }
         tx.commit()?;
         Ok(())
@@ -630,7 +637,7 @@ impl PlanReviewStore for SqliteQueue {
                 None,
                 Some("its supervisor is gone"),
             )?;
-            tx.close_plan_review_spans(id, true)?;
+            crate::infrastructure::sessions::close_plan_review(&tx, id, true)?;
         }
         let candidate = candidates(&tx)?;
         if !candidate.iter().any(|c| c.proposal_id == proposal_id) {
@@ -1463,7 +1470,7 @@ impl PlanReviewStore for SqliteQueue {
 /// (Codex), the model its output named (`named`). A later plan review of
 /// the task adds its own; the last one is the task's.
 fn record_predictions(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     job: &PlanReviewJob,
     named: Option<&crate::domain::headless_job::JobSession>,
     predictions: &[prediction::TaskWeightPrediction],
@@ -1534,7 +1541,7 @@ fn candidates(conn: &impl SqlRead) -> Result<Vec<PlanReviewCandidate>> {
 /// when that review was the concern, with its codes (a `send_back` carries
 /// them on).
 fn record_plan_outcome(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     proposal_id: ProposalId,
     ask_id: AskId,
     answer: &str,

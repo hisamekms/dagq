@@ -5,7 +5,6 @@
 use super::sql_dialect::JsonType;
 use super::sql_exec::sql_params;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
-use super::store_writes::{EventTx, SessionTx};
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::write_rules::{check_at_least, check_non_blank};
@@ -170,7 +169,7 @@ fn anchor(conn: &impl SqlRead, goal: GoalId) -> Result<Option<TaskId>> {
 }
 
 fn finish_row(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: i64,
     now: i64,
     outcome: &str,
@@ -216,7 +215,7 @@ fn gaps_in_a_row(conn: &impl SqlRead, goal: GoalId) -> Result<usize> {
 /// its context is `goal_gap: goal review <review> of goal <goal> found this
 /// missing`.
 fn register_gaps(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     goal: GoalId,
     review: i64,
     gaps: &[GoalGap],
@@ -407,7 +406,7 @@ impl GoalReviewStore for SqliteQueue {
                 None,
                 Some("stopped for the supervisor handoff"),
             )?;
-            tx.close_goal_review_spans(id, false)?;
+            crate::infrastructure::sessions::close_goal_review(&tx, id, false)?;
         }
         tx.commit()?;
         Ok(())
@@ -454,7 +453,7 @@ impl GoalReviewStore for SqliteQueue {
                 None,
                 Some("its supervisor is gone"),
             )?;
-            tx.close_goal_review_spans(id, true)?;
+            crate::infrastructure::sessions::close_goal_review(&tx, id, true)?;
         }
         let Some(fingerprint) = candidate(&tx, goal)? else {
             // Keep the rows finished above.
@@ -582,7 +581,7 @@ impl GoalReviewStore for SqliteQueue {
                 Some(&verdict_json),
                 Some("the goal or its tasks changed during its review"),
             )?;
-            tx.close_goal_review_spans(job.id, false)?;
+            crate::infrastructure::sessions::close_goal_review(&tx, job.id, false)?;
             tx.commit()?;
             return Ok(GoalReviewApplied {
                 stale: true,

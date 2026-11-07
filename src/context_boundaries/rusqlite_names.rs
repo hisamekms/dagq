@@ -18,12 +18,7 @@ use super::source;
 #[rustfmt::skip]
 const MAY_NAME_RUSQLITE: &[&str] = &[
     "src/infrastructure/related.rs",
-    "src/infrastructure/runtime_store/planning_records.rs",
-    "src/infrastructure/runtime_store/run_resources.rs",
-    "src/infrastructure/runtime_store/session_registry.rs",
-    "src/infrastructure/runtime_store/session_steps.rs",
     "src/infrastructure/search.rs",
-    "src/infrastructure/sessions.rs",
     "src/infrastructure/sql_exec/sqlite.rs",
     "src/infrastructure/sqlite.rs",
 ];

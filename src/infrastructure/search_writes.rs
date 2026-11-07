@@ -45,6 +45,9 @@ mod tests {
         }
     }
     impl SqlWrite for NoSql {
+        fn after_commit(&self, _: Box<dyn FnOnce()>) -> SqlResult<()> {
+            panic!("SQLite must not register a commit action")
+        }
         fn execute(&self, _: &str, _: &[SqlValue]) -> SqlResult<usize> {
             panic!("SQLite must not write")
         }

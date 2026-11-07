@@ -168,6 +168,8 @@ pub struct PostgresTx<'s, S: PostgresSession> {
     actors: Option<&'s EventActors>,
     name: &'static str,
     open: bool,
+    actions: crate::infrastructure::sql_exec::CommitActions,
+    writing: bool,
 }
 
 impl<'s, S: PostgresSession> PostgresTx<'s, S> {
@@ -181,6 +183,8 @@ impl<'s, S: PostgresSession> PostgresTx<'s, S> {
             actors: None,
             name,
             open: true,
+            actions: crate::infrastructure::sql_exec::CommitActions::new(),
+            writing: begin == BEGIN_WRITE_SQL,
         })
     }
 
@@ -195,14 +199,20 @@ impl<'s, S: PostgresSession> PostgresTx<'s, S> {
     }
 
     pub fn commit(mut self) -> Result<()> {
-        self.open = false;
         self.session
             .run(COMMIT_SQL)
-            .with_context(|| format!("commit the transaction {}", self.name))
+            .with_context(|| format!("commit the transaction {}", self.name))?;
+        self.open = false;
+        self.actions.committed();
+        Ok(())
     }
 }
 
 impl<S: PostgresSession> SqlRead for PostgresTx<'_, S> {
+    fn in_write_transaction(&self) -> bool {
+        self.writing
+    }
+
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Postgres
     }
@@ -224,6 +234,11 @@ impl<S: PostgresSession> SqlRead for PostgresTx<'_, S> {
 }
 
 impl<S: PostgresSession> SqlWrite for PostgresTx<'_, S> {
+    fn after_commit(&self, action: Box<dyn FnOnce()>) -> SqlResult<()> {
+        self.actions.push(action);
+        Ok(())
+    }
+
     fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
         self.sync_actors()?;
         let changed = self.session.execute(&numbered_parameters(sql), params)?;
@@ -247,6 +262,7 @@ impl<S: PostgresSession> SqlWrite for PostgresTx<'_, S> {
 pub struct PostgresSavepoint<'tx, 's, S: PostgresSession> {
     tx: &'tx mut PostgresTx<'s, S>,
     open: bool,
+    checkpoint: usize,
 }
 
 impl<'s, S: PostgresSession> SqlSavepoints for PostgresTx<'s, S> {
@@ -257,7 +273,9 @@ impl<'s, S: PostgresSession> SqlSavepoints for PostgresTx<'s, S> {
 
     fn savepoint(&mut self) -> Result<Self::Savepoint<'_>> {
         self.session.run("SAVEPOINT dagq_savepoint")?;
+        let checkpoint = self.actions.checkpoint();
         Ok(PostgresSavepoint {
+            checkpoint,
             tx: self,
             open: true,
         })
@@ -273,6 +291,10 @@ impl<S: PostgresSession> SqlSavepoint for PostgresSavepoint<'_, '_, S> {
 }
 
 impl<S: PostgresSession> SqlRead for PostgresSavepoint<'_, '_, S> {
+    fn in_write_transaction(&self) -> bool {
+        self.tx.in_write_transaction()
+    }
+
     fn dialect(&self) -> SqlDialect {
         self.tx.dialect()
     }
@@ -288,6 +310,10 @@ impl<S: PostgresSession> SqlRead for PostgresSavepoint<'_, '_, S> {
 }
 
 impl<S: PostgresSession> SqlWrite for PostgresSavepoint<'_, '_, S> {
+    fn after_commit(&self, action: Box<dyn FnOnce()>) -> SqlResult<()> {
+        self.tx.after_commit(action)
+    }
+
     fn execute(&self, sql: &str, params: &[SqlValue]) -> SqlResult<usize> {
         self.tx.execute(sql, params)
     }
@@ -304,6 +330,7 @@ impl<S: PostgresSession> SqlWrite for PostgresSavepoint<'_, '_, S> {
 impl<S: PostgresSession> Drop for PostgresSavepoint<'_, '_, S> {
     fn drop(&mut self) {
         if self.open {
+            self.tx.actions.rollback_to(self.checkpoint);
             for sql in [
                 "ROLLBACK TO SAVEPOINT dagq_savepoint",
                 "RELEASE SAVEPOINT dagq_savepoint",
@@ -318,6 +345,9 @@ impl<S: PostgresSession> Drop for PostgresSavepoint<'_, '_, S> {
 
 impl<S: PostgresSession> Drop for PostgresTx<'_, S> {
     fn drop(&mut self) {
+        if self.open {
+            self.actions.rollback_to(0);
+        }
         if self.open
             && let Err(error) = self.session.run(ROLLBACK_SQL)
         {
@@ -368,6 +398,7 @@ mod tests {
         settings: RefCell<Vec<(usize, Vec<SqlValue>)>>,
         changed: Cell<u64>,
         begin_fails: Cell<bool>,
+        commit_fails: Cell<bool>,
         schema: Cell<Option<(i64, i64)>>,
     }
 
@@ -385,6 +416,9 @@ mod tests {
                 anyhow::bail!("the connection is gone");
             }
             self.statements.borrow_mut().push(sql.to_owned());
+            if self.commit_fails.get() && sql == COMMIT_SQL {
+                anyhow::bail!("commit failed");
+            }
             Ok(())
         }
 
@@ -418,6 +452,60 @@ mod tests {
     /// The statements after the store opened.
     fn after_open(session: &Recorded) -> Vec<String> {
         session.statements.borrow()[4..].to_vec()
+    }
+
+    /// The fake session exercises successful, dropped and failed commits,
+    /// with both release and rollback of the savepoint's registrations.
+    #[test]
+    fn commit_actions_follow_the_transaction_and_savepoint_outcome() {
+        for release in [false, true] {
+            for outcome in ["commit", "rollback", "failure"] {
+                let session = Recorded::taken();
+                let store = PostgresStore::open(&session).unwrap();
+                let called = Rc::new(RefCell::new(Vec::new()));
+                let mut tx = store.write_entry("actions").unwrap();
+                assert!(tx.in_write_transaction());
+                let action = called.clone();
+                tx.after_commit(Box::new(move || action.borrow_mut().push("before")))
+                    .unwrap();
+                {
+                    let savepoint = tx.savepoint().unwrap();
+                    let action = called.clone();
+                    savepoint
+                        .after_commit(Box::new(move || action.borrow_mut().push("inside")))
+                        .unwrap();
+                    if release {
+                        savepoint.commit().unwrap();
+                    }
+                }
+                let action = called.clone();
+                tx.after_commit(Box::new(move || action.borrow_mut().push("after")))
+                    .unwrap();
+                assert!(called.borrow().is_empty());
+                match outcome {
+                    "commit" => tx.commit().unwrap(),
+                    "failure" => {
+                        session.commit_fails.set(true);
+                        assert!(tx.commit().is_err());
+                    }
+                    _ => drop(tx),
+                }
+                crate::infrastructure::sql_exec::flush_after_commit();
+                assert_eq!(
+                    *called.borrow(),
+                    if outcome != "commit" {
+                        vec![]
+                    } else if release {
+                        vec!["before", "inside", "after"]
+                    } else {
+                        vec!["before", "after"]
+                    }
+                );
+                session.commit_fails.set(false);
+                let read = store.read_entry("read-actions").unwrap();
+                assert!(!read.in_write_transaction());
+            }
+        }
     }
 
     #[test]

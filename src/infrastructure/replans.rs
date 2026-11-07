@@ -16,7 +16,7 @@
 //! the writing transaction: the table's key does not compare a deletion's
 //! NULL child task.
 use super::sql_dialect::JsonType;
-use super::store_writes::{EventTx, event};
+use super::store_writes::event;
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
@@ -631,7 +631,7 @@ pub(super) fn check_task_step(tx: &impl SqlRead, task: TaskId, step: GuardedStep
 /// task parks the run itself and keeps it: nothing is moved, and `false`
 /// (the caller writes nothing either).
 pub(super) fn reopen_blocked(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: ReplanId,
     generation: i64,
     why: &str,
@@ -710,7 +710,7 @@ pub(super) fn approved_children(
 /// trusted runtime applies the replacement: plan review's pass does not
 /// make them ready ([`approve_replacement`]).
 pub(super) fn record_replacement(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     proposal: ProposalId,
     members: &[TaskId],
     plan: Option<&ReplacementPlan>,
@@ -795,7 +795,7 @@ fn planning_step(reason: &str) -> ReplanMove {
 /// `planner` opens for it, inside the opening's transaction; nothing for a
 /// request of no operation or one past `parked`.
 pub(super) fn planner_opened(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     request: crate::domain::RequestId,
     planner: crate::domain::PlannerId,
     now: i64,
@@ -828,7 +828,7 @@ pub(super) fn planner_opened(
 /// awaiting a person's answer goes back to `reviewing`, with
 /// `replan_plan_approved`.
 pub(super) fn approve_replacement(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     op: &ReplanOperation,
     proposal: ProposalId,
     accepted: &crate::domain::Proposal,
@@ -900,7 +900,7 @@ pub(super) fn approve_replacement(
 /// it with the material and the plan's problems. That planner makes a new
 /// plan, continues the run or withdraws; the saved work stays.
 pub(super) fn replan_again(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     op: &ReplanOperation,
     reason: String,
     now: i64,
@@ -1249,7 +1249,7 @@ pub(super) fn check_child_ready(conn: &impl SqlRead, task: TaskId) -> Result<()>
 /// `replan_carried`, its planning request naming `run` beside the earlier
 /// run.
 pub(super) fn carry_open_to(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task: TaskId,
     run: &RunId,
     now: i64,
@@ -1473,7 +1473,7 @@ pub(super) fn replacing_operation(
 /// (`request_renewed`): its planner is opened once, for the new request.
 /// A request its planner submitted or declined is left as it is.
 pub(super) fn move_in(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: ReplanId,
     generation: i64,
     step: &ReplanMove,
@@ -1641,7 +1641,7 @@ pub(super) fn read_operation(conn: &impl SqlRead, id: ReplanId) -> Result<Replan
 /// one writer that moves an operation into `applying` and `applied`
 /// ([`task_replan::check_apply_move`], [`super::replan_apply`]).
 pub(super) fn move_in_as(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: ReplanId,
     generation: i64,
     step: &ReplanMove,
@@ -2003,7 +2003,7 @@ fn check_premise(
 /// person's words, referring to the run, its task and its goal, carrying
 /// the operation, `open` with `request_recorded`.
 fn record_request(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     op: &ReplanOperation,
     new: &NewReplan,
     by_role: &str,
@@ -2042,7 +2042,11 @@ fn record_request(
 /// withdrawal), inside the move's transaction: an active proposal is
 /// withdrawn and an accepted one's children go back from `submitted` to
 /// `draft`, so none is claimed, with `replan_children_released`.
-fn release_children(conn: &impl EventTx, op: &ReplanOperation, now: i64) -> Result<()> {
+fn release_children(
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
+    op: &ReplanOperation,
+    now: i64,
+) -> Result<()> {
     let Some(proposal) = op.proposal_id else {
         return Ok(());
     };
@@ -2127,7 +2131,7 @@ pub(super) fn lineage_in(conn: &impl SqlRead, task: TaskId) -> Result<Vec<Replan
 /// transaction: to `awaiting_answer`, or back to `planning`. Nothing for
 /// any other proposal.
 pub(super) fn proposal_moved(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     proposal: ProposalId,
     to: ReplanStatus,
     reason: &str,

@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 
 use super::sql_exec::{FromSqlValue, OptionalRow, SqlRead, SqlWrite, sql_params};
-use super::store_writes::EventTx;
+
 use crate::domain::{
     AskKind, ExecutionClass, GoalId, TaskId,
     claim_defer::waits_for_owner,
@@ -53,7 +53,7 @@ fn active(cycle: &str) -> String {
 /// Record the missing requests of completed Spikes and close the cycles
 /// that ended at `now` (unix seconds): what a claim of a Spike needs before
 /// it opens a cycle, and what each pass reconciles.
-pub(super) fn settle(tx: &impl EventTx, now: i64) -> Result<()> {
+pub(super) fn settle(tx: &impl SqlWrite, now: i64) -> Result<()> {
     super::plan_requests::record_missing_spike_requests(tx, now)?;
     tx.execute(
         &format!(
@@ -66,7 +66,7 @@ pub(super) fn settle(tx: &impl EventTx, now: i64) -> Result<()> {
 }
 
 /// [`settle`], then read the open investigations the limit counts.
-pub(super) fn refresh(tx: &impl EventTx, now: i64) -> Result<Investigations> {
+pub(super) fn refresh(tx: &impl SqlWrite, now: i64) -> Result<Investigations> {
     settle(tx, now)?;
     let cycles: Vec<(Option<GoalId>, Option<TaskId>)> = tx.query_map(
         "SELECT goal_id, task_id FROM spike_cycles WHERE closed_at IS NULL ORDER BY id",

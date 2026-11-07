@@ -10,35 +10,35 @@ use crate::domain::session_step::{
     StepKind, StepTarget, StepsRecorded, TargetKind, gaps, ranges, removed_within,
 };
 use crate::domain::telemetry::{Beat, TargetFacts};
-use crate::infrastructure::sql_dialect::{JsonType, TimeForm, json_field_spaced, time_value};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use crate::infrastructure::sql_dialect::{JsonType, TimeForm};
+use crate::infrastructure::sql_exec::{
+    OptionalRow, SqlError, SqlRead, SqlResult, SqlRow, SqlValue, SqlWrite, ValueKind, sql_params,
+};
 
 /// The columns of a stored step, in the order [`step_row`] reads them.
 const COLUMNS: &str = "id,target_kind,target_id,session_id,seq,kind,offset_ms,duration_ms,\
     model,tool,command_shape,exit_code,background,output_bytes,received_at";
 
-fn unknown(index: usize, what: &str, value: &str) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
+fn unknown(index: usize, what: &str, value: &str) -> SqlError {
+    SqlError::Conversion {
         index,
-        rusqlite::types::Type::Text,
-        format!("unknown {what} {value:?}").into(),
-    )
+        stored: ValueKind::Text,
+        cause: format!("unknown {what} {value:?}").into(),
+    }
 }
 
 /// A row of `session_steps` read with [`COLUMNS`].
-fn step_row(row: &Row<'_>) -> rusqlite::Result<SessionStep> {
+fn step_row(row: &SqlRow<'_>) -> SqlResult<SessionStep> {
     let target_kind: String = row.get(1)?;
     let kind: String = row.get(5)?;
     let shape: Option<String> = row.get(10)?;
     let command_shape = shape
         .map(|text| serde_json::from_str(&text))
         .transpose()
-        .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                10,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
+        .map_err(|error| SqlError::Conversion {
+            index: 10,
+            stored: ValueKind::Text,
+            cause: Box::new(error),
         })?;
     Ok(SessionStep {
         id: row.get(0)?,
@@ -70,7 +70,7 @@ const RESOURCE_COLUMNS: &str = "id,target_kind,target_id,session_id,seq,offset_m
     cpu_seconds,cpu_limit,throttled_seconds,memory_max_bytes,memory_limit_bytes,read_bytes,\
     write_bytes,cpu_pressure,load_average,node_id,received_at";
 
-fn target_of(kind: &str, id: String, index: usize) -> rusqlite::Result<StepTarget> {
+fn target_of(kind: &str, id: String, index: usize) -> SqlResult<StepTarget> {
     Ok(StepTarget {
         kind: TargetKind::parse(kind).ok_or_else(|| unknown(index, "target kind", kind))?,
         id,
@@ -78,7 +78,7 @@ fn target_of(kind: &str, id: String, index: usize) -> rusqlite::Result<StepTarge
 }
 
 /// A row of `session_resources` read with [`RESOURCE_COLUMNS`].
-fn resource_row(row: &Row<'_>) -> rusqlite::Result<SessionResource> {
+fn resource_row(row: &SqlRow<'_>) -> SqlResult<SessionResource> {
     let kind: String = row.get(1)?;
     Ok(SessionResource {
         id: row.get(0)?,
@@ -106,10 +106,10 @@ fn resource_row(row: &Row<'_>) -> rusqlite::Result<SessionResource> {
 /// Whether `session_id` is of another target than `target`: its owner,
 /// its steps or its samples name another.
 fn of_another_target(
-    conn: &Connection,
+    conn: &impl SqlRead,
     session_id: &str,
     target: &StepTarget,
-) -> rusqlite::Result<bool> {
+) -> SqlResult<bool> {
     conn.query_row(
         "SELECT EXISTS(
              SELECT 1 FROM session_owners
@@ -120,7 +120,7 @@ fn of_another_target(
              UNION ALL
              SELECT 1 FROM session_resources
              WHERE session_id=?1 AND (target_kind<>?2 OR target_id<>?3))",
-        params![session_id, target.kind.as_str(), target.id],
+        sql_params![session_id, target.kind.as_str(), target.id],
         |row| row.get(0),
     )
 }
@@ -140,18 +140,17 @@ const VOID_FROM: i64 = session_step::FIRST_SEQ - 1;
 
 /// The seqs of `session_id` the retention removed: none once they are void
 /// ([`VOID_FROM`]).
-fn removed(conn: &Connection, session_id: &str) -> rusqlite::Result<Vec<SeqRange>> {
-    let mut statement = conn.prepare_cached(
+fn removed(conn: &impl SqlRead, session_id: &str) -> SqlResult<Vec<SeqRange>> {
+    let ranges = conn.query_map(
         "SELECT from_seq, to_seq FROM session_step_removed WHERE session_id=?1 ORDER BY from_seq",
-    )?;
-    let ranges = statement
-        .query_map([session_id], |row| {
+        sql_params![session_id],
+        |row| {
             Ok(SeqRange {
                 from: row.get(0)?,
                 to: row.get(1)?,
             })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        },
+    )?;
     if ranges.first().is_some_and(|range| range.from == VOID_FROM) {
         return Ok(Vec::new());
     }
@@ -254,21 +253,19 @@ pub const RETENTION_CANDIDATE_READS: [(&str, &str); 2] = [
 /// Record `range` of `session_id` as removed, joined to the range that ends
 /// just below it if there is one, so that a run of consecutive seqs removed
 /// over batches and days stays one row: one row written either way.
-fn record_removed(
-    tx: &crate::infrastructure::sqlite::WriteTx<'_>,
-    session_id: &str,
-    range: SeqRange,
-) -> Result<usize> {
-    let joined = tx.execute(
+fn record_removed(tx: &impl SqlWrite, session_id: &str, range: SeqRange) -> Result<usize> {
+    let joined = SqlWrite::execute(
+        tx,
         EXTEND_REMOVED,
-        params![session_id, range.from - 1, range.from, range.to],
+        sql_params![session_id, range.from - 1, range.from, range.to],
     )?;
     if joined > 0 {
         return Ok(joined);
     }
-    Ok(tx.execute(
+    Ok(SqlWrite::execute(
+        tx,
         "INSERT INTO session_step_removed(session_id, from_seq, to_seq) VALUES (?1, ?2, ?3)",
-        params![session_id, range.from, range.to],
+        sql_params![session_id, range.from, range.to],
     )?)
 }
 
@@ -299,7 +296,7 @@ struct Candidates {
 /// [`ROWS_PER_TRANSACTION`] rows at a time with no lock, until `due` holds
 /// as many or the walk goes to the end: whether it did.
 fn walk_due(
-    conn: &Connection,
+    conn: &impl SqlRead,
     walk: &str,
     session_id: &str,
     before: i64,
@@ -307,17 +304,16 @@ fn walk_due(
     due: &mut Vec<i64>,
 ) -> Result<bool> {
     let limit = i64::try_from(ROWS_PER_TRANSACTION)?;
-    let mut statement = conn.prepare_cached(walk)?;
+
     // The row's seq, its key (its seq again for a step, its id for a
     // sample) and whether it is due.
-    let due_at = statement.column_count() - 1;
+    let due_at = if walk == WALK_STEPS { 1 } else { 2 };
     while due.len() < ROWS_PER_TRANSACTION {
-        let rows: Vec<(i64, i64, bool)> = statement
-            .query_map(
-                params![session_id, from.unwrap_or(i64::MIN), before, limit],
-                |row| Ok((row.get(0)?, row.get(due_at - 1)?, row.get(due_at)?)),
-            )?
-            .collect::<rusqlite::Result<_>>()?;
+        let rows: Vec<(i64, i64, bool)> = conn.query_map(
+            walk,
+            sql_params![session_id, from.unwrap_or(i64::MIN), before, limit],
+            |row| Ok((row.get(0)?, row.get(due_at - 1)?, row.get(due_at)?)),
+        )?;
         if let Some(&(seq, ..)) = rows.last() {
             *from = Some(seq);
         }
@@ -332,7 +328,7 @@ fn walk_due(
 impl Candidates {
     /// Walk on, with no lock, until each kind holds as many candidates as a
     /// transaction removes or its walk goes to the end.
-    fn fill(&mut self, conn: &Connection, session_id: &str, before: i64) -> Result<()> {
+    fn fill(&mut self, conn: &impl SqlRead, session_id: &str, before: i64) -> Result<()> {
         if !self.steps_walked {
             self.steps_walked = walk_due(
                 conn,
@@ -378,29 +374,32 @@ struct SessionRemoved {
 /// row at [`VOID_FROM`] voids), then that row once none is left and the
 /// budget has room: whether it is gone. `rows` counts what it removed.
 fn remove_void(
-    tx: &crate::infrastructure::sqlite::WriteTx<'_>,
+    tx: &impl SqlWrite,
     session_id: &str,
     budget: usize,
     rows: &mut usize,
 ) -> Result<bool> {
     let limit = budget.saturating_sub(*rows);
     if limit > 0 {
-        *rows += tx.execute(
+        *rows += SqlWrite::execute(
+            tx,
             REMOVE_VOID_RANGES,
-            params![session_id, VOID_FROM, i64::try_from(limit)?],
+            sql_params![session_id, VOID_FROM, i64::try_from(limit)?],
         )?;
     }
-    let left: bool = tx.query_row(
+    let left: bool = SqlRead::query_row(
+        tx,
         "SELECT EXISTS(SELECT 1 FROM session_step_removed WHERE session_id=?1 AND from_seq > ?2)",
-        params![session_id, VOID_FROM],
+        sql_params![session_id, VOID_FROM],
         |row| row.get(0),
     )?;
     if left || *rows >= budget {
         return Ok(false);
     }
-    *rows += tx.execute(
+    *rows += SqlWrite::execute(
+        tx,
         "DELETE FROM session_step_removed WHERE session_id=?1 AND from_seq=?2",
-        params![session_id, VOID_FROM],
+        sql_params![session_id, VOID_FROM],
     )?;
     Ok(true)
 }
@@ -425,7 +424,7 @@ fn remove_void(
 /// a bounded number a transaction; a step that comes in meanwhile starts
 /// the session anew.
 fn remove_session_rows(
-    tx: &crate::infrastructure::sqlite::WriteTx<'_>,
+    tx: &impl SqlWrite,
     session_id: &str,
     before: i64,
     budget: usize,
@@ -439,9 +438,10 @@ fn remove_session_rows(
         rows,
         done: false,
     };
-    let voided: bool = tx.query_row(
+    let voided: bool = SqlRead::query_row(
+        tx,
         "SELECT EXISTS(SELECT 1 FROM session_step_removed WHERE session_id=?1 AND from_seq=?2)",
-        params![session_id, VOID_FROM],
+        sql_params![session_id, VOID_FROM],
         |row| row.get(0),
     )?;
     // The ranges voided before go first: a range written now is not void.
@@ -451,10 +451,9 @@ fn remove_session_rows(
     // The first candidates the transaction has room for, those still due.
     let taken = candidates.steps.len().min(left(rows));
     let read: Vec<i64> = {
-        let mut statement = tx.prepare_cached(STEP_DUE)?;
         let mut read = Vec::with_capacity(taken);
         for seq in candidates.steps.drain(..taken) {
-            if statement.exists(params![session_id, seq, before])? {
+            if SqlRead::exists(tx, STEP_DUE, sql_params![session_id, seq, before])? {
                 read.push(seq);
             }
         }
@@ -465,17 +464,18 @@ fn remove_session_rows(
     // past no more than those.
     let all_due = candidates.steps_walked && candidates.steps.is_empty() && read.len() < left(rows);
     let whole: Option<bool> = if all_due {
-        let held = tx
-            .prepare_cached(STEPS_UP_TO)?
-            .query_map(params![session_id, i64::try_from(read.len() + 1)?], |_| {
-                Ok(())
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .len();
+        let held = SqlRead::query_map(
+            tx,
+            STEPS_UP_TO,
+            sql_params![session_id, i64::try_from(read.len() + 1)?],
+            |_| Ok(()),
+        )?
+        .len();
         if held == read.len() {
-            Some(tx.query_row(
+            Some(SqlRead::query_row(
+                tx,
                 "SELECT EXISTS(SELECT 1 FROM session_step_removed WHERE session_id=?1)",
-                [session_id],
+                sql_params![session_id],
                 |row| row.get(0),
             )?)
         } else {
@@ -487,13 +487,14 @@ fn remove_session_rows(
     if let Some(ranged) = whole {
         // Removed whole: its last steps go with the row that voids its
         // ranges, which fits as the read was not full.
-        steps = tx.execute(REMOVE_SESSION_STEPS, [session_id])?;
+        steps = SqlWrite::execute(tx, REMOVE_SESSION_STEPS, sql_params![session_id])?;
         rows += steps;
         if ranged {
-            rows += tx.execute(
+            rows += SqlWrite::execute(
+                tx,
                 "INSERT INTO session_step_removed(session_id, from_seq, to_seq)
                  VALUES (?1, ?2, ?3)",
-                params![session_id, VOID_FROM, VOID_FROM - 1],
+                sql_params![session_id, VOID_FROM, VOID_FROM - 1],
             )?;
             if !remove_void(tx, session_id, budget, &mut rows)? {
                 return Ok(not_done(steps, rows));
@@ -506,7 +507,7 @@ fn remove_session_rows(
             rows += record_removed(tx, session_id, range)?;
         }
         for &seq in seqs {
-            steps += tx.execute(REMOVE_STEP, params![session_id, seq])?;
+            steps += SqlWrite::execute(tx, REMOVE_STEP, sql_params![session_id, seq])?;
         }
         rows += steps;
         // The steps due it had no room for are the next transaction's
@@ -523,7 +524,7 @@ fn remove_session_rows(
     let taken = candidates.samples.len().min(limit);
     let mut samples = 0;
     for id in candidates.samples.drain(..taken) {
-        samples += tx.execute(REMOVE_DUE_RESOURCE, params![id, before])?;
+        samples += SqlWrite::execute(tx, REMOVE_DUE_RESOURCE, sql_params![id, before])?;
     }
     rows += samples;
     // A full take may leave samples due.
@@ -531,11 +532,12 @@ fn remove_session_rows(
         return Ok(not_done(steps, rows));
     }
     // The samples left room for one more row.
-    rows += tx.execute(
+    rows += SqlWrite::execute(
+        tx,
         "DELETE FROM session_owners WHERE session_id=?1 AND registered_at < ?2
              AND NOT EXISTS(SELECT 1 FROM session_steps WHERE session_id=?1)
              AND NOT EXISTS(SELECT 1 FROM session_resources WHERE session_id=?1)",
-        params![session_id, before],
+        sql_params![session_id, before],
     )?;
     Ok(SessionRemoved {
         steps,
@@ -546,13 +548,13 @@ fn remove_session_rows(
 
 impl SqliteQueue {
     /// The steps `filter` (a `WHERE` clause and its order) keeps.
-    fn read_steps(&self, filter: &str, params: impl rusqlite::Params) -> Result<Vec<SessionStep>> {
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM session_steps WHERE {filter}"
-        ))?;
-        let steps = statement
-            .query_map(params, step_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+    fn read_steps(&self, filter: &str, params: &[SqlValue]) -> Result<Vec<SessionStep>> {
+        let steps = SqlRead::query_map(
+            &*self.conn,
+            &format!("SELECT {COLUMNS} FROM session_steps WHERE {filter}"),
+            params,
+            step_row,
+        )?;
         Ok(steps)
     }
 }
@@ -573,13 +575,11 @@ impl SessionStepStore for SqliteQueue {
         let removed = removed(&tx, session_id)?;
         let mut recorded = StepsRecorded::default();
         {
-            let mut insert = tx.prepare_cached(
-                "INSERT INTO session_steps(target_kind,target_id,session_id,seq,kind,
+            let insert_sql = "INSERT INTO session_steps(target_kind,target_id,session_id,seq,kind,
                      offset_ms,duration_ms,model,tool,command_shape,exit_code,background,
                      output_bytes,received_at)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
-                 ON CONFLICT(session_id, seq) DO NOTHING",
-            )?;
+                 ON CONFLICT(session_id, seq) DO NOTHING";
             for step in steps {
                 // A step the retention removed came in already.
                 if removed.iter().any(|range| range.contains(step.seq)) {
@@ -591,23 +591,27 @@ impl SessionStepStore for SqliteQueue {
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?;
-                let rows = insert.execute(params![
-                    target.kind.as_str(),
-                    target.id,
-                    session_id,
-                    step.seq,
-                    step.kind.as_str(),
-                    step.offset_ms,
-                    step.duration_ms,
-                    step.model,
-                    step.tool,
-                    shape,
-                    step.exit_code,
-                    step.background,
-                    step.output_bytes,
-                    received_at,
-                ])?;
-                tx.wrote(rows);
+                let rows = SqlWrite::execute(
+                    &tx,
+                    insert_sql,
+                    sql_params![
+                        target.kind.as_str(),
+                        target.id,
+                        session_id,
+                        step.seq,
+                        step.kind.as_str(),
+                        step.offset_ms,
+                        step.duration_ms,
+                        step.model,
+                        step.tool,
+                        shape,
+                        step.exit_code,
+                        step.background,
+                        step.output_bytes,
+                        received_at,
+                    ],
+                )?;
+
                 if rows == 1 {
                     recorded.added += 1;
                 } else {
@@ -620,28 +624,27 @@ impl SessionStepStore for SqliteQueue {
     }
 
     fn session_gaps(&self, session_id: &str) -> Result<Vec<SeqRange>> {
-        let mut statement = self
-            .conn
-            .prepare_cached("SELECT seq FROM session_steps WHERE session_id=?1 ORDER BY seq")?;
-        let seqs = statement
-            .query_map([session_id], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        let seqs = self.conn.query_map(
+            "SELECT seq FROM session_steps WHERE session_id=?1 ORDER BY seq",
+            sql_params![session_id],
+            |row| row.get(0),
+        )?;
         let mut covered = ranges(seqs);
-        covered.extend(removed(&self.conn, session_id)?);
+        covered.extend(removed(&*self.conn, session_id)?);
         Ok(gaps(covered))
     }
 
     fn steps_after(&self, after: i64, limit: usize) -> Result<Vec<SessionStep>> {
         self.read_steps(
             "id > ?1 ORDER BY id LIMIT ?2",
-            params![after, i64::try_from(limit)?],
+            sql_params![after, i64::try_from(limit)?],
         )
     }
 
     fn target_steps(&self, target: &StepTarget) -> Result<Vec<SessionStep>> {
         self.read_steps(
             "target_kind=?1 AND target_id=?2 ORDER BY id",
-            params![target.kind.as_str(), target.id],
+            sql_params![target.kind.as_str(), target.id],
         )
     }
 
@@ -657,7 +660,8 @@ impl SessionStepStore for SqliteQueue {
     /// retention stopped between two is finished by the next.
     fn remove_steps(&self, before: i64) -> Result<usize> {
         let sessions: Vec<String> = {
-            let mut statement = self.conn.prepare(
+            SqlRead::query_map(
+                &*self.conn,
                 "SELECT session_id FROM session_steps WHERE received_at < ?1
                  UNION SELECT session_id FROM session_resources WHERE received_at < ?1
                  UNION SELECT session_id FROM session_owners o WHERE registered_at < ?1
@@ -668,10 +672,9 @@ impl SessionStepStore for SqliteQueue {
                  UNION SELECT session_id FROM session_step_removed d WHERE from_seq=?2
                      OR NOT EXISTS(SELECT 1 FROM session_steps s WHERE s.session_id=d.session_id)
                  ORDER BY 1",
-            )?;
-            statement
-                .query_map(params![before, VOID_FROM], |row| row.get(0))?
-                .collect::<rusqlite::Result<_>>()?
+                sql_params![before, VOID_FROM],
+                |row| row.get(0),
+            )?
         };
         let mut candidates: Vec<Option<Candidates>> = Vec::new();
         candidates.resize_with(sessions.len(), || None);
@@ -686,7 +689,7 @@ impl SessionStepStore for SqliteQueue {
             let mut planned = 0;
             while reach < sessions.len() && planned < ROWS_PER_TRANSACTION {
                 let session = candidates[reach].get_or_insert_with(Candidates::default);
-                session.fill(&self.conn, &sessions[reach], before)?;
+                session.fill(&*self.conn, &sessions[reach], before)?;
                 planned += session.rows();
                 reach += 1;
             }
@@ -730,35 +733,38 @@ impl SessionResourceStore for SqliteQueue {
         }
         let mut recorded = StepsRecorded::default();
         {
-            let mut insert = tx.prepare_cached(
+            let insert_sql =
                 "INSERT INTO session_resources(target_kind,target_id,session_id,seq,offset_ms,
                      duration_ms,cpu_seconds,cpu_limit,throttled_seconds,memory_max_bytes,
                      memory_limit_bytes,read_bytes,write_bytes,cpu_pressure,load_average,node_id,
                      received_at)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
-                 ON CONFLICT(session_id, seq) DO NOTHING",
-            )?;
+                 ON CONFLICT(session_id, seq) DO NOTHING";
             for sample in samples {
-                let rows = insert.execute(params![
-                    target.kind.as_str(),
-                    target.id,
-                    session_id,
-                    sample.seq,
-                    sample.offset_ms,
-                    sample.duration_ms,
-                    sample.cpu_seconds,
-                    sample.cpu_limit,
-                    sample.throttled_seconds,
-                    sample.memory_max_bytes,
-                    sample.memory_limit_bytes,
-                    sample.read_bytes,
-                    sample.write_bytes,
-                    sample.cpu_pressure,
-                    sample.load_average,
-                    sample.node_id,
-                    received_at,
-                ])?;
-                tx.wrote(rows);
+                let rows = SqlWrite::execute(
+                    &tx,
+                    insert_sql,
+                    sql_params![
+                        target.kind.as_str(),
+                        target.id,
+                        session_id,
+                        sample.seq,
+                        sample.offset_ms,
+                        sample.duration_ms,
+                        sample.cpu_seconds,
+                        sample.cpu_limit,
+                        sample.throttled_seconds,
+                        sample.memory_max_bytes,
+                        sample.memory_limit_bytes,
+                        sample.read_bytes,
+                        sample.write_bytes,
+                        sample.cpu_pressure,
+                        sample.load_average,
+                        sample.node_id,
+                        received_at,
+                    ],
+                )?;
+
                 if rows == 1 {
                     recorded.added += 1;
                 } else {
@@ -771,23 +777,27 @@ impl SessionResourceStore for SqliteQueue {
     }
 
     fn target_resources(&self, target: &StepTarget) -> Result<Vec<SessionResource>> {
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {RESOURCE_COLUMNS} FROM session_resources
+        let samples = SqlRead::query_map(
+            &*self.conn,
+            &format!(
+                "SELECT {RESOURCE_COLUMNS} FROM session_resources
              WHERE target_kind=?1 AND target_id=?2 ORDER BY id"
-        ))?;
-        let samples = statement
-            .query_map(params![target.kind.as_str(), target.id], resource_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            ),
+            sql_params![target.kind.as_str(), target.id],
+            resource_row,
+        )?;
         Ok(samples)
     }
 
     fn resources_after(&self, after: i64, limit: usize) -> Result<Vec<SessionResource>> {
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {RESOURCE_COLUMNS} FROM session_resources WHERE id > ?1 ORDER BY id LIMIT ?2"
-        ))?;
-        let samples = statement
-            .query_map(params![after, i64::try_from(limit)?], resource_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let samples = SqlRead::query_map(
+            &*self.conn,
+            &format!(
+                "SELECT {RESOURCE_COLUMNS} FROM session_resources WHERE id > ?1 ORDER BY id LIMIT ?2"
+            ),
+            sql_params![after, i64::try_from(limit)?],
+            resource_row,
+        )?;
         Ok(samples)
     }
 }
@@ -803,33 +813,33 @@ impl SessionOwners for SqliteQueue {
         if of_another_target(&tx, session_id, target)? {
             return Err(StepError::SessionOfAnotherTarget.into());
         }
-        let rows = tx.execute(
+        SqlWrite::execute(
+            &tx,
             "INSERT INTO session_owners(session_id, target_kind, target_id, registered_at)
              VALUES (?1, ?2, ?3, ?4) ON CONFLICT(session_id) DO NOTHING",
-            params![session_id, target.kind.as_str(), target.id, registered_at],
+            sql_params![session_id, target.kind.as_str(), target.id, registered_at],
         )?;
-        tx.wrote(rows);
+
         tx.commit()?;
         Ok(())
     }
 
     fn session_owner(&self, session_id: &str) -> Result<Option<SessionOwner>> {
-        let owner = self
-            .conn
-            .query_row(
-                "SELECT target_kind, target_id, registered_at FROM session_owners
+        let owner = SqlRead::query_row(
+            &*self.conn,
+            "SELECT target_kind, target_id, registered_at FROM session_owners
                  WHERE session_id=?1",
-                [session_id],
-                |row| {
-                    let kind: String = row.get(0)?;
-                    Ok(SessionOwner {
-                        session_id: session_id.to_owned(),
-                        target: target_of(&kind, row.get(1)?, 0)?,
-                        registered_at: row.get(2)?,
-                    })
-                },
-            )
-            .optional()?;
+            sql_params![session_id],
+            |row| {
+                let kind: String = row.get(0)?;
+                Ok(SessionOwner {
+                    session_id: session_id.to_owned(),
+                    target: target_of(&kind, row.get(1)?, 0)?,
+                    registered_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()?;
         Ok(owner)
     }
 }
@@ -864,34 +874,32 @@ impl SqliteQueue {
             return Ok(TargetFacts::Ended);
         };
         let job = |table: &str, ended: &str, only: &str| -> Result<TargetFacts> {
-            let row = self
-                .conn
-                .query_row(
-                    &format!(
-                        "SELECT r.{ended}, s.pid, unixepoch() - s.heartbeat_at FROM {table} r
+            let row = SqlRead::query_row(
+                &*self.conn,
+                &format!(
+                    "SELECT r.{ended}, s.pid, unixepoch() - s.heartbeat_at FROM {table} r
                          LEFT JOIN supervisors s ON s.token = r.supervisor_token
                          WHERE r.id = ?1{only}"
-                    ),
-                    [id],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<i64>>(0)?,
-                            row.get::<_, Option<i64>>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
+                ),
+                sql_params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
             Ok(row.map_or(TargetFacts::Ended, |(ended, pid, age)| {
                 supervised_job(ended, pid, age)
             }))
         };
         let command = |started: EventKind, finished: EventKind| -> Result<TargetFacts> {
-            let row = self
-                .conn
-                .query_row(
-                    &format!(
-                        "SELECT {},
+            let row = SqlRead::query_row(
+                &*self.conn,
+                &format!(
+                    "SELECT {},
                             {},
                             {},
                             EXISTS (SELECT 1 FROM run_events f
@@ -899,23 +907,39 @@ impl SqliteQueue {
                                       AND {}
                                           = {})
                      FROM run_events s WHERE s.id = ?1 AND s.kind = ?2",
-                        time_value("s.created_at", TimeForm::EpochMillis),
-                        json_field_spaced("s.payload", "$.timeout_secs", JsonType::Integer),
-                        json_field_spaced("s.payload", "$.pid", JsonType::Integer),
-                        json_field_spaced("f.payload", "$.dir", JsonType::Text),
-                        json_field_spaced("s.payload", "$.dir", JsonType::Text),
+                    SqlRead::dialect(&*self.conn).time_value("s.created_at", TimeForm::EpochMillis),
+                    SqlRead::dialect(&*self.conn).json_field_spaced(
+                        "s.payload",
+                        "$.timeout_secs",
+                        JsonType::Integer
                     ),
-                    params![id, started.as_str(), finished.as_str()],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, Option<i64>>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                            row.get::<_, bool>(3)?,
-                        ))
-                    },
-                )
-                .optional()?;
+                    SqlRead::dialect(&*self.conn).json_field_spaced(
+                        "s.payload",
+                        "$.pid",
+                        JsonType::Integer
+                    ),
+                    SqlRead::dialect(&*self.conn).json_field_spaced(
+                        "f.payload",
+                        "$.dir",
+                        JsonType::Text
+                    ),
+                    SqlRead::dialect(&*self.conn).json_field_spaced(
+                        "s.payload",
+                        "$.dir",
+                        JsonType::Text
+                    ),
+                ),
+                sql_params![id, started.as_str(), finished.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, bool>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
             Ok(match row {
                 Some((started_ms, timeout_secs, pid, false)) => TargetFacts::StartedCommand {
                     ends_by_ms: started_ms.saturating_add(timeout_secs.map_or(
@@ -933,14 +957,13 @@ impl SqliteQueue {
         match target.kind {
             TargetKind::Run => Ok(TargetFacts::Ended),
             TargetKind::Planner => {
-                let closed = self
-                    .conn
-                    .query_row(
-                        "SELECT closed_at IS NOT NULL FROM planners WHERE id = ?1",
-                        [id],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .optional()?;
+                let closed = SqlRead::query_row(
+                    &*self.conn,
+                    "SELECT closed_at IS NOT NULL FROM planners WHERE id = ?1",
+                    sql_params![id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()?;
                 Ok(if closed == Some(false) {
                     TargetFacts::OpenPlanner
                 } else {
@@ -979,24 +1002,27 @@ impl SqliteQueue {
             return Ok(None);
         };
         let command = |started: EventKind| -> Result<Option<TargetStart>> {
-            let row = self
-                .conn
-                .query_row(
-                    &format!(
-                        "SELECT actor_role, actor_id, {}
+            let row = SqlRead::query_row(
+                &*self.conn,
+                &format!(
+                    "SELECT actor_role, actor_id, {}
                      FROM run_events WHERE id = ?1 AND kind = ?2",
-                        json_field_spaced("payload", "$.pid", JsonType::Integer),
+                    SqlRead::dialect(&*self.conn).json_field_spaced(
+                        "payload",
+                        "$.pid",
+                        JsonType::Integer
                     ),
-                    params![id, started.as_str()],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
+                ),
+                sql_params![id, started.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
             Ok(row.map(|(role, actor_id, pid)| TargetStart::Command {
                 actor: role
                     .and_then(|role| role.parse::<crate::domain::ActorRole>().ok())
@@ -1005,14 +1031,13 @@ impl SqliteQueue {
             }))
         };
         let row = |table: &str, only: &str| -> Result<Option<TargetStart>> {
-            let supervisor = self
-                .conn
-                .query_row(
-                    &format!("SELECT supervisor_token FROM {table} r WHERE r.id = ?1{only}"),
-                    [id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()?;
+            let supervisor = SqlRead::query_row(
+                &*self.conn,
+                &format!("SELECT supervisor_token FROM {table} r WHERE r.id = ?1{only}"),
+                sql_params![id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
             Ok(supervisor.map(|supervisor| TargetStart::Supervised {
                 supervisor: supervisor.map(LeaseToken::new),
             }))
@@ -1049,11 +1074,10 @@ impl SqliteQueue {
         // Each record's id and whose it is: a row's registration, a
         // start's process.
         type Whose = (i64, Option<String>, Option<i64>);
-        let rows = |sql: &str, values: &[&dyn rusqlite::ToSql]| -> Result<Vec<Whose>> {
-            let mut statement = self.conn.prepare(sql)?;
-            let rows = statement
-                .query_map(values, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = |sql: &str, values: &[SqlValue]| -> Result<Vec<Whose>> {
+            let rows = SqlRead::query_map(&*self.conn, sql, values, |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
             Ok(rows)
         };
         let of = |kind: TargetKind, rows: Vec<Whose>| -> Result<Vec<JobRecord>> {
@@ -1070,7 +1094,7 @@ impl SqliteQueue {
         let started = &format!(
             "SELECT id, NULL, {} FROM run_events
                        WHERE kind = ?1",
-            json_field_spaced("payload", "$.pid", JsonType::Integer),
+            SqlRead::dialect(&*self.conn).json_field_spaced("payload", "$.pid", JsonType::Integer),
         );
         match records {
             JobRecords::PlanReview { proposal, attempt } => of(
@@ -1078,7 +1102,7 @@ impl SqliteQueue {
                 rows(
                     "SELECT id, supervisor_token, NULL FROM plan_reviews
                      WHERE proposal_id = ?1 AND attempt = ?2",
-                    params![proposal, attempt],
+                    sql_params![proposal, attempt],
                 )?,
             ),
             JobRecords::GoalReview { goal, attempt } => of(
@@ -1086,7 +1110,7 @@ impl SqliteQueue {
                 rows(
                     "SELECT id, supervisor_token, NULL FROM goal_reviews
                      WHERE goal_id = ?1 AND attempt = ?2",
-                    params![goal, attempt],
+                    sql_params![goal, attempt],
                 )?,
             ),
             JobRecords::ThroughputReview { mode, period } => of(
@@ -1095,10 +1119,18 @@ impl SqliteQueue {
                     &format!(
                         "{started} AND {} = ?2
                            AND {} = ?3",
-                        json_field_spaced("payload", "$.mode", JsonType::Text),
-                        json_field_spaced("payload", "$.period", JsonType::Text),
+                        SqlRead::dialect(&*self.conn).json_field_spaced(
+                            "payload",
+                            "$.mode",
+                            JsonType::Text
+                        ),
+                        SqlRead::dialect(&*self.conn).json_field_spaced(
+                            "payload",
+                            "$.period",
+                            JsonType::Text
+                        ),
                     ),
-                    params![EventKind::ThroughputReviewStarted.as_str(), mode, period],
+                    sql_params![EventKind::ThroughputReviewStarted.as_str(), mode, period],
                 )?,
             ),
             JobRecords::Observation { session_id } => of(
@@ -1106,9 +1138,13 @@ impl SqliteQueue {
                 rows(
                     &format!(
                         "{started} AND {} = ?2",
-                        json_field_spaced("payload", "$.session_id", JsonType::Text)
+                        SqlRead::dialect(&*self.conn).json_field_spaced(
+                            "payload",
+                            "$.session_id",
+                            JsonType::Text
+                        )
                     ),
-                    params![EventKind::ObserveStarted.as_str(), session_id],
+                    sql_params![EventKind::ObserveStarted.as_str(), session_id],
                 )?,
             ),
             JobRecords::RunJob {
@@ -1123,22 +1159,24 @@ impl SqliteQueue {
                 };
                 let mut records = Vec::new();
                 for kind in *kinds {
-                    let mut statement = self.conn.prepare(&format!(
+                    let rows = SqlRead::query_map(
+                        &*self.conn,
+                        &format!(
                         "SELECT r.ended_at, s.pid, unixepoch() - s.heartbeat_at, r.supervisor_token
                          FROM headless_jobs r
                          LEFT JOIN supervisors s ON s.token = r.supervisor_token
                          WHERE r.kind = ?1 AND r.run_id = ?2 AND r.attempt = ?3
                            AND r.label {operator} ?4"
-                    ))?;
-                    let rows = statement
-                        .query_map(params![kind, run, attempt, label], |row| {
+                    ),
+                        sql_params![kind, run, attempt, label],
+                        |row| {
                             Ok(JobRecord {
                                 facts: supervised_job(row.get(0)?, row.get(1)?, row.get(2)?),
                                 supervisor: Some(LeaseToken::new(row.get::<_, String>(3)?)),
                                 pid: None,
                             })
-                        })?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                        },
+                    )?;
                     records.extend(rows);
                 }
                 Ok(records)
@@ -1149,6 +1187,8 @@ impl SqliteQueue {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+
     use super::*;
     use crate::infrastructure::sqlite::WriteTx;
     use std::sync::Arc;

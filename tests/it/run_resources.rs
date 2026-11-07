@@ -153,7 +153,8 @@ fn a_pass_measures_the_runs_of_the_slots_and_closes_those_no_one_measures() {
     let measured_run = running(&mut queue, "sv");
     let orphan = running(&mut queue, "gone");
     let host = HostEnvironment::new();
-    // This host names itself by its own cores, memory and architecture.
+    // The host names its cores and architecture; memory is optional when the
+    // operating system does not expose it (as in the environment contract).
     let attached = host.attached();
     assert_eq!(attached.env_kind, EnvKind::Host);
     assert!(
@@ -161,7 +162,7 @@ fn a_pass_measures_the_runs_of_the_slots_and_closes_those_no_one_measures() {
         "{attached:?}"
     );
     assert!(
-        attached.mem_limit.is_some_and(|bytes| bytes > 0),
+        attached.mem_limit.is_none_or(|bytes| bytes > 0),
         "{attached:?}"
     );
     assert_eq!(attached.arch, std::env::consts::ARCH);

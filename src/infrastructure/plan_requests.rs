@@ -10,7 +10,6 @@ use super::sql_exec::{
     OptionalRow, SqlError, SqlRead, SqlResult, SqlRow, SqlWrite, ValueKind, sql_params,
 };
 use super::store_rows::{enum_col, event_row, json_col};
-use super::store_writes::EventTx;
 use super::store_writes::record_queue_event_in;
 
 use super::store_writes;
@@ -482,7 +481,7 @@ impl PlanRequestStore for SqliteQueue {
 /// true, so a second call records nothing. `None` when it recorded nothing: the
 /// request is there already, or the task is not a completed Spike.
 pub(super) fn record_spike_request(
-    tx: &impl EventTx,
+    tx: &impl SqlWrite,
     task: TaskId,
     now: i64,
 ) -> Result<Option<RequestId>> {
@@ -531,7 +530,10 @@ pub(super) fn record_spike_request(
 /// caller's write transaction (ADR-t1487-1 decision 5): what a landing of
 /// an older binary, a completion by hand or a failed transaction left
 /// out. The requests recorded, oldest Spike first.
-pub(super) fn record_missing_spike_requests(tx: &impl EventTx, now: i64) -> Result<Vec<RequestId>> {
+pub(super) fn record_missing_spike_requests(
+    tx: &impl SqlWrite,
+    now: i64,
+) -> Result<Vec<RequestId>> {
     let missing: Vec<TaskId> = tx.query_map(
         "SELECT t.id FROM tasks t WHERE t.execution_class='spike' AND t.status='completed'
              AND NOT EXISTS(SELECT 1 FROM plan_requests r WHERE r.spike_task_id=t.id)
@@ -556,7 +558,7 @@ pub(super) fn record_missing_spike_requests(tx: &impl EventTx, now: i64) -> Resu
 /// the operation, which [`declined_at_close`] reads). Whether it declined
 /// it: a request already ended is left as it is.
 pub(super) fn decline_undecided(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     request: RequestId,
     op: crate::domain::ReplanId,
     outcome: crate::domain::task_replan::ReplanStatus,
@@ -580,7 +582,7 @@ pub(super) fn decline_undecided(
 /// as [`decline_undecided`]'s does. The request declined, if any: one of
 /// an operation still open is left to the planners that follow.
 pub(super) fn decline_after_planner(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     planner: PlannerId,
     now: i64,
 ) -> Result<Option<RequestId>> {
@@ -624,7 +626,7 @@ pub(super) fn decline_after_planner(
 /// declined it: a request already ended, and its asks, are left as they
 /// are.
 fn decline_for_operation(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     request: RequestId,
     op: crate::domain::ReplanId,
     outcome: crate::domain::task_replan::ReplanStatus,
@@ -697,7 +699,7 @@ pub(super) fn declined_at_close(
 /// `request_recorded` naming the request it renews. The ended request
 /// keeps its outcome, so one planner is opened, for the new one.
 pub(super) fn renew_declined(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     ended: RequestId,
     op: crate::domain::ReplanId,
     now: i64,
@@ -788,7 +790,7 @@ fn request_row(r: &SqlRow<'_>) -> SqlResult<PlanRequest> {
 }
 
 fn set_status(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     request: RequestId,
     to: RequestStatus,
     reason: &str,
@@ -864,7 +866,7 @@ pub(super) fn draft_route_of(
 /// request has ended otherwise since: the link records where the plan came
 /// from.
 pub(super) fn link_requests(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     proposal: ProposalId,
     workspace: Option<&str>,
     previous: &[ProposalId],
@@ -964,7 +966,7 @@ fn carried_requests(conn: &impl SqlRead, previous: &[ProposalId]) -> Result<Vec<
 /// `proposed` with `request_proposed` (with the planner that submitted it
 /// from the request, when one did).
 fn link_request(
-    conn: &impl EventTx,
+    conn: &impl SqlWrite,
     request: RequestId,
     proposal: ProposalId,
     link: ProposalLink,

@@ -16,26 +16,20 @@
 
 use crate::domain::RecordedKind;
 use crate::domain::event_kind::{self, EventKind};
-use crate::infrastructure::sql_dialect::{JsonType, TimeForm, json_field};
+use crate::infrastructure::sql_dialect::{JsonType, TimeForm};
 use std::cell::RefCell;
 
+use super::sql_exec::{
+    CommitTransaction, OptionalRow, SessionConnection, SqlRead, SqlResult, SqlValue, SqlWrite,
+    sql_params,
+};
+use super::store_rows::{event_row, json_col};
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tracing::{debug, info};
 
-use super::{
-    event_bodies::set_event_body_field,
-    run_env,
-    sql_exec::{
-        self, OptionalRow as _, SqlDialect, SqlResult, SqlRow, sql_params,
-        sqlite::{native_error, port_tx, with_row},
-    },
-    sqlite::{WriteTx, event_row, json_col},
-    store_rows,
-    transcripts::ClaudeTranscripts,
-};
+use super::{event_bodies::set_event_body_field, run_env, transcripts::ClaudeTranscripts};
 use crate::{
     application::{TranscriptSource, Transcripts},
     domain::{
@@ -60,6 +54,28 @@ use crate::{
     },
 };
 
+// Keep the names used by independently migrated store modules on the same body.
+pub(super) use self::{
+    insert_at as insert_at_port, now as now_port, open_hook_spans as open_hook_spans_port,
+    read_before as read_before_port, span_closed as span_closed_port, span_task as span_task_port,
+};
+
+impl super::sqlite::SqliteQueue {
+    /// Read the closing spans through this queue's execution port.
+    pub(super) fn read_before(&self, closing: Closing<'_>) -> Result<ReadBefore> {
+        read_before(&*self.conn, closing)
+    }
+
+    /// Read a span's transcript through this queue's execution port.
+    pub(super) fn span_transcript(
+        &self,
+        span: &OpenSpan,
+        toolchains: &mut Option<Toolchains>,
+    ) -> Result<Transcript, Unreadable> {
+        read(&*self.conn, span, toolchains)
+    }
+}
+
 /// The run directory's file of the commands of its sessions (task 514).
 pub const WORKTIME_FILE: &str = "worktime.jsonl";
 
@@ -73,15 +89,7 @@ thread_local! {
     /// transaction began for the spans it may close ([`work_rules`]): the
     /// judgement runs Git, never under the write lock.
     static RULES_BEFORE: RefCell<Vec<(EventId, CommandClassifier)>> = const { RefCell::new(Vec::new()) };
-    /// The `worktime.jsonl` lines of the spans a write transaction on this
-    /// thread closed, written when the [`ReadBefore`] of their spans is
-    /// dropped, if their transaction committed (task 1334): the hooks
-    /// [`watch_commits`] puts on the connection follow it.
-    static WORKTIME_AFTER: RefCell<Vec<WorktimeLines>> = const { RefCell::new(Vec::new()) };
 }
-
-/// The SQL function that names a connection [`watch_commits`] watches.
-const CONNECTION_FUNCTION: &str = "dagq_sessions_connection";
 
 /// A span's transcript read before a write transaction, with its turns and
 /// the close's analysis to the end it is expected at (task 1334).
@@ -168,14 +176,13 @@ impl ReadTranscript {
     /// ([`Analysis::to`]); nothing of the transcript is analysed under the
     /// write lock, and `None` when it cannot be moved. Outside one,
     /// analysed now when it was not before or cannot be moved.
-    fn analysis(&mut self, conn: &Connection, want: Want) -> Option<Analysis> {
+    fn analysis(&mut self, conn: &impl SqlRead, want: Want) -> Option<Analysis> {
         if let Some(made) = self.analysis.take()
             && let Some(analysis) = made.to(self.last_at, &want)
         {
             return Some(analysis);
         }
-        conn.is_autocommit()
-            .then(|| analyse(&self.transcript.records, &self.turns, want))
+        (!conn.in_write_transaction()).then(|| analyse(&self.transcript.records, &self.turns, want))
     }
 }
 
@@ -235,101 +242,13 @@ impl Analysis {
     }
 }
 
-/// The `worktime.jsonl` lines of a close of the span `opened` in a write
-/// transaction on `connection`, to append to `path` once the transaction
-/// is committed.
+/// The `worktime.jsonl` lines for closing span `opened`, to append to `path`
+/// only after the close commits successfully.
 struct WorktimeLines {
     opened: EventId,
-    connection: i64,
-    commit: Commit,
     path: std::path::PathBuf,
     span: Value,
     commands: Vec<Command>,
-}
-
-/// Where the transaction of a close's [`WorktimeLines`] is.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Commit {
-    /// Neither committed nor rolled back yet.
-    Open,
-    /// Its commit began: rolled back if it fails.
-    Committing,
-    /// Committed: the connection prepared a statement, wrote or committed
-    /// again since, which it does only once the commit finished.
-    Committed,
-}
-
-/// Put on `conn` the hooks that follow its transactions for the
-/// `worktime.jsonl` lines of the closes in them (task 1334): a commit's
-/// lines are written, a rolled back one's never. A close is known by the
-/// transaction that wrote it, not by its event's id, which SQLite gives
-/// again after a rollback (to another writer's close of the same span).
-pub(super) fn watch_commits(conn: &Connection) -> Result<()> {
-    static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
-    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    conn.create_scalar_function(
-        CONNECTION_FUNCTION,
-        0,
-        rusqlite::functions::FunctionFlags::SQLITE_UTF8
-            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
-        move |_| Ok(id),
-    )?;
-    // The hooks run on the thread that commits or rolls back, the one that
-    // wrote the lines; they touch no database. A commit that fails after
-    // its hook is rolled back at once, in the same statement, and the
-    // rollback drops its lines; a rollback after anything else on the
-    // connection is another transaction's, and leaves them.
-    conn.commit_hook(Some(move || {
-        follow_commits(id, |commit| match commit {
-            // The commit before it finished: this is another transaction.
-            Commit::Committing => Some(Commit::Committed),
-            Commit::Open => Some(Commit::Committing),
-            Commit::Committed => Some(Commit::Committed),
-        });
-        false
-    }))?;
-    conn.rollback_hook(Some(move || {
-        follow_commits(id, |commit| (commit == Commit::Committed).then_some(commit));
-    }))?;
-    // A statement prepared (another transaction's `BEGIN`, a `ROLLBACK`)
-    // or a row written after a commit began comes after that commit
-    // finished.
-    conn.update_hook(Some(move |_, _: &str, _: &str, _| commit_finished(id)))?;
-    conn.authorizer(Some(move |_: rusqlite::hooks::AuthContext<'_>| {
-        commit_finished(id);
-        rusqlite::hooks::Authorization::Allow
-    }))?;
-    Ok(())
-}
-
-/// The commit begun on `connection` finished: its lines are committed.
-fn commit_finished(connection: i64) {
-    follow_commits(connection, |commit| match commit {
-        Commit::Committing => Some(Commit::Committed),
-        commit => Some(commit),
-    });
-}
-
-/// Move the lines of the transactions of `connection` on this thread to
-/// what `next` makes of where they are; `None` drops them.
-fn follow_commits(connection: i64, next: impl Fn(Commit) -> Option<Commit>) {
-    let _ = WORKTIME_AFTER.try_with(|after| {
-        let Ok(mut after) = after.try_borrow_mut() else {
-            return;
-        };
-        after.retain_mut(|lines| {
-            if lines.connection != connection {
-                return true;
-            }
-            match next(lines.commit) {
-                Some(commit) => {
-                    lines.commit = commit;
-                    true
-                }
-                None => false,
-            }
-        });
-    });
 }
 
 impl WorktimeLines {
@@ -373,9 +292,9 @@ pub(super) enum Closing<'a> {
 
 /// The transcripts [`read_before`] read, for the closes of the write that
 /// follows it on this thread; dropped with it. Dropped after that write
-/// (its owner keeps it to the end of the write), it writes the
-/// `worktime.jsonl` lines of the closes of its spans whose transactions
-/// committed (task 1334): those rolled back were dropped then.
+/// (its owner keeps it to the end of the write), it drains any commit
+/// notifications left by callers using a driver's transaction directly.
+/// Rolled-back transactions have already discarded their notifications.
 #[must_use = "the transcripts are there only while this lives"]
 pub(super) struct ReadBefore {
     spans: Vec<EventId>,
@@ -389,52 +308,8 @@ impl Drop for ReadBefore {
         RULES_BEFORE.with_borrow_mut(|read| {
             read.retain(|(span, _)| !self.spans.contains(span));
         });
-        let lines: Vec<WorktimeLines> = WORKTIME_AFTER.with_borrow_mut(|after| {
-            let (mine, others) = std::mem::take(after)
-                .into_iter()
-                .partition(|lines| self.spans.contains(&lines.opened));
-            *after = others;
-            mine
-        });
-        for lines in lines {
-            if lines.commit == Commit::Open {
-                // Left out rather than perhaps written twice: a close
-                // rolled back is closed again, with its lines, later.
-                info!(
-                    "session span {}: {} not written, its transaction was neither committed nor rolled back",
-                    lines.opened,
-                    lines.path.display()
-                );
-            } else {
-                lines.append();
-            }
-        }
+        super::sql_exec::flush_after_commit();
     }
-}
-
-impl super::sqlite::SqliteQueue {
-    /// [`read_before`] on this queue's connection, for a store module that
-    /// names no driver: whether a transaction is open is the driver's to say.
-    pub(super) fn read_before(&self, closing: Closing<'_>) -> Result<ReadBefore> {
-        read_before(&self.conn, closing)
-    }
-
-    /// [`read`] on this queue's connection, for a store module that names no
-    /// driver.
-    pub(super) fn span_transcript(
-        &self,
-        span: &OpenSpan,
-        toolchains: &mut Option<Toolchains>,
-    ) -> Result<Transcript, Unreadable> {
-        read(&self.conn, span, toolchains)
-    }
-}
-
-/// A read connection that can prepare session transcripts before a write.
-/// The adapter keeps the transaction-state check and the transcript hooks
-/// together while the session implementation still needs its native connection.
-pub(super) trait BeforeWrite: super::sql_exec::SqlRead {
-    fn read_transcripts_before(&self, closing: Closing<'_>) -> Result<ReadBefore>;
 }
 
 /// Read, before a write transaction begins, the transcripts of the open
@@ -445,22 +320,8 @@ pub(super) trait BeforeWrite: super::sql_exec::SqlRead {
 /// active time ([`TRANSCRIPT_NOT_READ_BEFORE`]). Each transcript is also
 /// analysed for its close as if it closed now (task 1334). Called inside a
 /// transaction it reads nothing.
-pub(super) fn read_before_port(
-    conn: &impl BeforeWrite,
-    closing: Closing<'_>,
-) -> Result<ReadBefore> {
-    conn.read_transcripts_before(closing)
-}
-
-/// [`read_before_port`] for callers that still hold a native SQLite connection.
-pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<ReadBefore> {
-    read_before_port(conn, closing)
-}
-
-/// The SQLite session adapter's shared implementation, including the check
-/// that no transaction has begun before a transcript is read.
-pub(super) fn read_before_sqlite(conn: &Connection, closing: Closing<'_>) -> Result<ReadBefore> {
-    if !conn.is_autocommit() {
+pub(super) fn read_before(conn: &impl SqlRead, closing: Closing<'_>) -> Result<ReadBefore> {
+    if conn.in_write_transaction() {
         debug!("session transcripts not read: a write transaction is open");
         return Ok(ReadBefore { spans: Vec::new() });
     }
@@ -474,7 +335,7 @@ pub(super) fn read_before_sqlite(conn: &Connection, closing: Closing<'_>) -> Res
             if kinds.is_empty() {
                 Vec::new()
             } else {
-                let open = open_spans(conn, "o.run_id=?1", "c.run_id=?1", params![run_id])?;
+                let open = open_spans(conn, "o.run_id=?1", "c.run_id=?1", sql_params![run_id])?;
                 let context = SpanContext::default();
                 kinds
                     .iter()
@@ -485,7 +346,7 @@ pub(super) fn read_before_sqlite(conn: &Connection, closing: Closing<'_>) -> Res
         }
         Closing::Event(run_id, kind, payload) => {
             if scope(kind) == Some(Scope::Run) {
-                let open = open_spans(conn, "o.run_id=?1", "c.run_id=?1", params![run_id])?;
+                let open = open_spans(conn, "o.run_id=?1", "c.run_id=?1", sql_params![run_id])?;
                 // A revise's closes end when it was sent, as `write_changes`
                 // ends them when that was before the event.
                 let sent = crate::domain::request_sent_at_millis(payload)
@@ -518,11 +379,13 @@ pub(super) fn read_before_sqlite(conn: &Connection, closing: Closing<'_>) -> Res
             &format!(
                 "o.run_id IS NULL AND {}=?1
              AND (CAST(?2 AS BIGINT) IS NULL OR {}=?2)",
-                json_field("o.payload", "$.kind", JsonType::Text),
-                json_field("o.payload", "$.plan_review_id", JsonType::Integer),
+                conn.dialect()
+                    .json_field("o.payload", "$.kind", JsonType::Text),
+                conn.dialect()
+                    .json_field("o.payload", "$.plan_review_id", JsonType::Integer),
             ),
             "c.run_id IS NULL",
-            params![PLAN_REVIEW, plan_review_id],
+            sql_params![PLAN_REVIEW, plan_review_id],
         )?
         .into_iter()
         .map(|span| (span, Some(job_close_reason(inferred)), None))
@@ -563,7 +426,7 @@ pub(super) fn read_before_sqlite(conn: &Connection, closing: Closing<'_>) -> Res
                 let mut read = ReadTranscript::new(transcript);
                 let run_id: Option<RunId> = conn.query_row(
                     "SELECT run_id FROM run_events WHERE id=?1",
-                    [span.opened_event_id],
+                    sql_params![span.opened_event_id],
                     |r| r.get(0),
                 )?;
                 // The close comes after now, which is after the transcript
@@ -618,7 +481,7 @@ fn closed_span(change: SpanChange) -> Option<(OpenSpan, Option<&'static str>, Op
 /// inferred when unknown), analyses of its transcript whose last record is
 /// at `last`; `None` when the span's times cannot be read.
 fn want(
-    conn: &Connection,
+    conn: &impl SqlRead,
     span: &OpenSpan,
     run_id: Option<&RunId>,
     reason: Option<&str>,
@@ -664,7 +527,10 @@ fn want(
 
 /// The transcript of `span` for its close: the one [`read_before`] read,
 /// else, outside a write transaction, read now; else unreadable.
-fn transcript_for_close(conn: &Connection, span: &OpenSpan) -> Result<ReadTranscript, Unreadable> {
+fn transcript_for_close(
+    conn: &impl SqlRead,
+    span: &OpenSpan,
+) -> Result<ReadTranscript, Unreadable> {
     let taken = READ_BEFORE.with_borrow_mut(|read| {
         read.iter()
             .position(|(read, _)| read == span)
@@ -676,7 +542,7 @@ fn transcript_for_close(conn: &Connection, span: &OpenSpan) -> Result<ReadTransc
 /// Write the spans the event `event_id` (of `kind`, with `payload`, just
 /// inserted on `task_id` and `run_id`) opens and closes.
 pub(super) fn follow(
-    conn: &Connection,
+    conn: &impl SqlWrite,
     event_id: EventId,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,
@@ -692,7 +558,7 @@ pub(super) fn follow(
                 conn,
                 "o.task_id=?1 AND o.run_id=?2",
                 "c.task_id=?1 AND c.run_id=?2",
-                params![task_id, run_id],
+                sql_params![task_id, run_id],
             )?,
             run_context(conn, run_id, kind)?,
         ),
@@ -703,10 +569,11 @@ pub(super) fn follow(
                     conn,
                     &format!(
                         "o.task_id=?1 AND o.run_id IS NULL AND {}=?2",
-                        json_field("o.payload", "$.proposal_id", JsonType::Integer),
+                        conn.dialect()
+                            .json_field("o.payload", "$.proposal_id", JsonType::Integer),
                     ),
                     "c.task_id=?1 AND c.run_id IS NULL",
-                    params![task_id, proposal],
+                    sql_params![task_id, proposal],
                 )?,
                 SpanContext {
                     goal_ids: proposal_goals(conn, proposal)?,
@@ -720,7 +587,7 @@ pub(super) fn follow(
             };
             let at: String = conn.query_row(
                 "SELECT created_at FROM run_events WHERE id=?1",
-                [event_id],
+                sql_params![event_id],
                 |r| r.get(0),
             )?;
             (
@@ -765,26 +632,32 @@ pub(super) fn follow(
 
 /// The open spans of the headless session of planner `planner`
 /// (ADR-t1394-2 decision 4), oldest first.
-fn open_planner_spans(conn: &Connection, planner: i64) -> Result<Vec<OpenSpan>> {
+fn open_planner_spans(conn: &impl SqlRead, planner: i64) -> Result<Vec<OpenSpan>> {
     open_spans(
         conn,
         &format!(
             "o.run_id IS NULL AND {o_kind}='{RUNTIME_PLANNER}'
              AND {o_route}='{HEADLESS_ROUTE}'
              AND {o_planner_id}=?1",
-            o_kind = json_field("o.payload", "$.kind", JsonType::Text),
-            o_route = json_field("o.payload", "$.route", JsonType::Text),
-            o_planner_id = json_field("o.payload", "$.planner_id", JsonType::Integer),
+            o_kind = conn
+                .dialect()
+                .json_field("o.payload", "$.kind", JsonType::Text),
+            o_route = conn
+                .dialect()
+                .json_field("o.payload", "$.route", JsonType::Text),
+            o_planner_id =
+                conn.dialect()
+                    .json_field("o.payload", "$.planner_id", JsonType::Integer),
         ),
         "c.run_id IS NULL",
-        params![planner],
+        sql_params![planner],
     )
 }
 
 /// Close the spans of planner `planner`'s headless session still open, as
 /// `inferred`: its row closed without a `planner_closed` (its session could
 /// not be opened or recorded). Returns how many it closed.
-pub(super) fn close_planner_spans(conn: &Connection, planner: i64) -> Result<usize> {
+pub(super) fn close_planner_spans(conn: &impl SqlWrite, planner: i64) -> Result<usize> {
     let open = open_planner_spans(conn, planner)?;
     let now = now(conn)?;
     for span in &open {
@@ -799,7 +672,7 @@ pub(super) fn close_planner_spans(conn: &Connection, planner: i64) -> Result<usi
 /// the goal's first task (where its `approve_goal` ask belongs) with the
 /// goal in their payload.
 pub(super) fn follow_goal(
-    conn: &Connection,
+    conn: &impl SqlWrite,
     event_id: EventId,
     goal_id: GoalId,
     kind: EventKind,
@@ -810,7 +683,7 @@ pub(super) fn follow_goal(
     }
     let anchor: Option<TaskId> = conn.query_row(
         "SELECT min(id) FROM tasks WHERE goal_id=?1",
-        [goal_id],
+        sql_params![goal_id],
         |r| r.get(0),
     )?;
     let Some(anchor) = anchor else {
@@ -821,11 +694,13 @@ pub(super) fn follow_goal(
         &format!(
             "o.run_id IS NULL AND {}=?1
          AND {}=?2",
-            json_field("o.payload", "$.kind", JsonType::Text),
-            json_field("o.payload", "$.goal_id", JsonType::Integer),
+            conn.dialect()
+                .json_field("o.payload", "$.kind", JsonType::Text),
+            conn.dialect()
+                .json_field("o.payload", "$.goal_id", JsonType::Integer),
         ),
         "c.run_id IS NULL",
-        params![GOAL_REVIEW, goal_id],
+        sql_params![GOAL_REVIEW, goal_id],
     )?;
     let context = SpanContext {
         goal_ids: vec![goal_id.as_i64()],
@@ -846,7 +721,7 @@ pub(super) fn follow_goal(
 /// `kind` makes of the spans `open`, on `task_id` and `run_id`, at the
 /// event's time.
 fn write_changes(
-    conn: &Connection,
+    conn: &impl SqlWrite,
     event_id: EventId,
     (task_id, run_id): (Option<TaskId>, Option<&RunId>),
     kind: EventKind,
@@ -860,7 +735,7 @@ fn write_changes(
     }
     let at: String = conn.query_row(
         "SELECT created_at FROM run_events WHERE id=?1",
-        [event_id],
+        sql_params![event_id],
         |r| r.get(0),
     )?;
     // The spans switch when the revise was sent (`sent_at`), so that its
@@ -898,7 +773,7 @@ fn write_changes(
     if kind == EventKind::SessionExited {
         for (key, value) in [("work_breakdown", exited.work), ("tokens", exited.tokens)] {
             if let Some(value) = value {
-                set_event_body_field(&port_tx(conn), event_id, key, &value)?;
+                set_event_body_field(conn, event_id, key, &value)?;
             }
         }
     }
@@ -917,7 +792,7 @@ struct RunSessionClosed {
 /// the event `after`, with the span's kind and attempt: what `resume_finished`
 /// carries of the resumed session (task 514).
 pub(super) fn closed_work(
-    conn: &impl sql_exec::SqlRead,
+    conn: &impl SqlRead,
     run_id: &RunId,
     kind: &str,
     after: EventId,
@@ -930,7 +805,7 @@ pub(super) fn closed_work(
 /// the event `after`: what `resume_finished` carries of the resumed session
 /// (task 199).
 pub(super) fn closed_tokens(
-    conn: &impl sql_exec::SqlRead,
+    conn: &impl SqlRead,
     run_id: &RunId,
     kind: &str,
     after: EventId,
@@ -942,7 +817,7 @@ pub(super) fn closed_tokens(
 /// whose span opened after the event `after`, and the span's
 /// `session_opened` payload.
 fn closed_value(
-    conn: &impl sql_exec::SqlRead,
+    conn: &impl SqlRead,
     run_id: &RunId,
     kind: &str,
     after: EventId,
@@ -966,7 +841,7 @@ fn closed_value(
 
 /// The query of [`closed_value`]: the run's `session_closed` by
 /// `events_by_run`, each joined to its `session_opened` by the key.
-fn closed_value_sql(dialect: SqlDialect) -> String {
+fn closed_value_sql(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
         "SELECT c.payload, o.payload FROM run_events c
            JOIN run_events o ON o.id={c_opened_event_id}
@@ -990,12 +865,7 @@ fn exited_work(work: &Value, kind: &str, attempt: &Value) -> Value {
 }
 
 /// The time now, in the form of `created_at`.
-pub(super) fn now(conn: &Connection) -> Result<String> {
-    now_port(conn).map_err(native_error)
-}
-
-/// [`now`] on the execution port.
-pub(super) fn now_port(conn: &impl sql_exec::SqlRead) -> Result<String> {
+pub(super) fn now(conn: &impl SqlRead) -> Result<String> {
     Ok(conn.query_row(
         &format!(
             "SELECT {}",
@@ -1015,7 +885,7 @@ pub(super) fn now_port(conn: &impl sql_exec::SqlRead) -> Result<String> {
 /// run's own session also returns. Every span also gets the model and
 /// effort its messages were written with (task 579).
 fn close(
-    conn: &Connection,
+    conn: &impl SqlWrite,
     now: &str,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,
@@ -1030,7 +900,7 @@ fn close(
 /// ADR-t1063-1 decision 6) takes the session id, model and why no model
 /// was read that the job's end records, since it has no transcript.
 fn close_with(
-    conn: &Connection,
+    conn: &impl SqlWrite,
     now: &str,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,
@@ -1104,7 +974,7 @@ fn close_with(
 /// close carries, and its work's `worktime.jsonl` lines. Under a write
 /// lock it reads nothing: it takes what [`read_before`] read.
 fn fill_transcript(
-    conn: &Connection,
+    conn: &impl SqlWrite,
     now: &str,
     (task_id, run_id): (Option<TaskId>, Option<&RunId>),
     span: &OpenSpan,
@@ -1219,7 +1089,7 @@ fn fill_transcript(
 /// file cannot be read or parsed, a turn has none, or the run directory is
 /// unknown) it is `null` with why in `work_unavailable`. Returns the work's `worktime.jsonl` lines.
 fn close_headless(
-    conn: &Connection,
+    conn: &impl SqlWrite,
     now: &str,
     (task_id, run_id): (Option<TaskId>, Option<&RunId>),
     span: &OpenSpan,
@@ -1433,16 +1303,16 @@ impl<'a> TurnEvents<'a> {
 
     /// Its `turn_started` and `turn_finished` after the event `opened`,
     /// oldest first.
-    fn events(self, conn: &Connection, opened: EventId) -> Result<Vec<RunEvent>> {
+    fn events(self, conn: &impl SqlRead, opened: EventId) -> Result<Vec<RunEvent>> {
         Ok(match self {
-            Self::Run(run_id) => conn
-                .prepare(&run_turns_sql())?
-                .query_map(params![run_id, opened], event_row)?
-                .collect::<rusqlite::Result<_>>()?,
-            Self::Planner(planner) => conn
-                .prepare(&planner_turns_sql())?
-                .query_map(params![planner, opened], event_row)?
-                .collect::<rusqlite::Result<_>>()?,
+            Self::Run(run_id) => {
+                conn.query_map(&run_turns_sql(), sql_params![run_id, opened], event_row)?
+            }
+            Self::Planner(planner) => conn.query_map(
+                &planner_turns_sql(conn.dialect()),
+                sql_params![planner, opened],
+                event_row,
+            )?,
         })
     }
 }
@@ -1467,12 +1337,12 @@ fn run_turns_sql() -> String {
 
 /// The turns of planner `?1` after the event `?2`, by their kind: `+run_id`
 /// keeps `events_by_run` from walking every event that has no run.
-fn planner_turns_sql() -> String {
+fn planner_turns_sql(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
         "SELECT * FROM run_events WHERE +run_id IS NULL AND id>?2 AND {}
            AND {planner_id}=?1 ORDER BY id",
         turn_kinds(),
-        planner_id = json_field("payload", "$.planner_id", JsonType::Integer),
+        planner_id = dialect.json_field("payload", "$.planner_id", JsonType::Integer),
     )
 }
 
@@ -1494,8 +1364,6 @@ fn work_breakdown(
         span_payload["opened_event_id"] = json!(span.opened_event_id);
         WorktimeLines {
             opened: span.opened_event_id,
-            connection: 0,
-            commit: Commit::Open,
             path: std::path::Path::new(&run_dir).join(WORKTIME_FILE),
             span: span_payload,
             commands: breakdown.commands,
@@ -1504,41 +1372,35 @@ fn work_breakdown(
     (payload, lines)
 }
 
-/// Write `lines` of the `session_closed` just inserted: now outside a write
-/// transaction (the insert committed), else when the [`ReadBefore`] of
-/// their span is dropped, if the transaction committed (task 1334).
+/// Append `lines` of the `session_closed` just inserted immediately outside
+/// a write transaction (the insert committed). Inside one, register them with
+/// [`SqlWrite::after_commit`] to append only after a successful commit.
+/// Rollback, a failed commit, or rollback of their savepoint discards them.
+/// Adapter commits run the action after the commit statement returns; native
+/// SQLite callers defer it until the next [`super::sql_exec::flush_after_commit`].
 /// Failing to write the file is only logged.
-fn write_worktime(conn: &Connection, lines: Option<WorktimeLines>) {
-    let Some(mut lines) = lines else {
+fn write_worktime(conn: &impl SqlWrite, lines: Option<WorktimeLines>) {
+    let Some(lines) = lines else {
         return;
     };
-    if conn.is_autocommit() {
+    if !conn.in_write_transaction() {
         lines.append();
         return;
     }
-    match conn.query_row(&format!("SELECT {CONNECTION_FUNCTION}()"), [], |r| r.get(0)) {
-        Ok(connection) => {
-            lines.connection = connection;
-            WORKTIME_AFTER.with_borrow_mut(|after| after.push(lines));
-        }
-        // Left out rather than perhaps written for a close rolled back.
-        Err(error) => info!(
-            "session span {}: {} not written, its commit is not watched: {error}",
-            lines.opened,
-            lines.path.display()
-        ),
+    if let Err(error) = conn.after_commit(Box::new(move || lines.append())) {
+        info!("session worktime not written, its commit is not watched: {error}");
     }
 }
 
 /// What the work breakdown of `span` of `run_id` is made with: the run's
 /// directory and its task's verification, and how its commands are
 /// classified ([`work_rules`]).
-fn work_inputs(conn: &Connection, run_id: &RunId, span: &OpenSpan) -> Result<WorkInputs> {
+fn work_inputs(conn: &impl SqlRead, run_id: &RunId, span: &OpenSpan) -> Result<WorkInputs> {
     let (run_dir, verification): (Option<String>, Option<String>) = conn
         .query_row(
             "SELECT r.run_dir, t.verification_commands FROM task_runs r
                JOIN tasks t ON t.id=r.task_id WHERE r.id=?1",
-            [run_id],
+            sql_params![run_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?
@@ -1558,7 +1420,7 @@ fn work_inputs(conn: &Connection, run_id: &RunId, span: &OpenSpan) -> Result<Wor
 /// [`read_before`] before the write transaction began, else, outside one,
 /// now; inside one without that judgement (never with a transcript read
 /// before), as a repository that declares nothing.
-fn work_rules(conn: &Connection, span: &OpenSpan) -> CommandClassifier {
+fn work_rules(conn: &impl SqlRead, span: &OpenSpan) -> CommandClassifier {
     let judged = RULES_BEFORE.with_borrow(|read| {
         read.iter()
             .find(|(opened, _)| *opened == span.opened_event_id)
@@ -1566,7 +1428,7 @@ fn work_rules(conn: &Connection, span: &OpenSpan) -> CommandClassifier {
     });
     match judged {
         Some(rules) => rules,
-        None if conn.is_autocommit() => judge_work_rules(conn),
+        None if !conn.in_write_transaction() => judge_work_rules(conn),
         None => crate::domain::command_rules::work_rules(&Toolchains::none()),
     }
 }
@@ -1574,7 +1436,7 @@ fn work_rules(conn: &Connection, span: &OpenSpan) -> CommandClassifier {
 /// How the work breakdowns classify their commands now: by the rules that
 /// work for the `dagq.toml` of the queue's main checkout
 /// ([`measured_toolchains`]).
-fn judge_work_rules(conn: &Connection) -> CommandClassifier {
+fn judge_work_rules(conn: &impl SqlRead) -> CommandClassifier {
     crate::domain::command_rules::work_rules(&measured_toolchains(conn))
 }
 
@@ -1582,11 +1444,11 @@ fn judge_work_rules(conn: &Connection) -> CommandClassifier {
 /// with: those of the repository the queue is bound to
 /// ([`run_env::measured_toolchains`]). Never fails: a binding that cannot
 /// be read reads with no profile, as an unreadable `dagq.toml` does.
-fn measured_toolchains(conn: &Connection) -> Toolchains {
-    let bound: rusqlite::Result<Option<String>> = conn
+fn measured_toolchains(conn: &impl SqlRead) -> Toolchains {
+    let bound: SqlResult<Option<String>> = conn
         .query_row(
             "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
-            [],
+            &[],
             |r| r.get(0),
         )
         .optional();
@@ -1606,11 +1468,11 @@ fn measured_toolchains(conn: &Connection) -> Toolchains {
 /// transaction (task 543). Its tool results are read with `toolchains`,
 /// found ([`measured_toolchains`]) the first time a transcript is read.
 pub(super) fn read(
-    conn: &Connection,
+    conn: &impl SqlRead,
     span: &OpenSpan,
     toolchains: &mut Option<Toolchains>,
 ) -> Result<Transcript, Unreadable> {
-    if !conn.is_autocommit() {
+    if conn.in_write_transaction() {
         return Err(Unreadable {
             code: TRANSCRIPT_NOT_READ_BEFORE,
             version: None,
@@ -1658,10 +1520,10 @@ fn unavailable(span: &OpenSpan, unreadable: &Unreadable) {
 }
 
 /// Unix milliseconds of the start of `span` and of `now`.
-fn times(conn: &Connection, span: &OpenSpan, now: &str) -> Result<Option<(i64, i64)>> {
+fn times(conn: &impl SqlRead, span: &OpenSpan, now: &str) -> Result<Option<(i64, i64)>> {
     let start: String = conn.query_row(
         "SELECT created_at FROM run_events WHERE id=?1",
-        [span.opened_event_id],
+        sql_params![span.opened_event_id],
         |r| r.get(0),
     )?;
     Ok(rfc3339_millis(&start)
@@ -1671,17 +1533,17 @@ fn times(conn: &Connection, span: &OpenSpan, now: &str) -> Result<Option<(i64, i
 
 /// The query of the `session_turns` of the span opened by `?1`, by
 /// `events_by_opened_event` (task 1333).
-fn recorded_turns_sql() -> String {
+fn recorded_turns_sql(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
         "SELECT payload FROM run_events WHERE kind='{SESSION_TURNS}'
            AND {opened_event_id}=?1 ORDER BY id",
-        opened_event_id = json_field("payload", "$.opened_event_id", JsonType::Integer),
+        opened_event_id = dialect.json_field("payload", "$.opened_event_id", JsonType::Integer),
     )
 }
 
 /// The query of whether the span opened by `?1` is closed, by
 /// `events_by_opened_event`.
-fn span_closed_sql(dialect: SqlDialect) -> String {
+fn span_closed_sql(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
         "SELECT EXISTS (SELECT 1 FROM run_events WHERE kind='{SESSION_CLOSED}'
            AND {opened_event_id}=?1)",
@@ -1690,12 +1552,7 @@ fn span_closed_sql(dialect: SqlDialect) -> String {
 }
 
 /// Whether the span opened by `opened` is closed.
-pub(super) fn span_closed(conn: &Connection, opened: EventId) -> Result<bool> {
-    span_closed_port(conn, opened).map_err(native_error)
-}
-
-/// [`span_closed`] on the execution port.
-pub(super) fn span_closed_port(conn: &impl sql_exec::SqlRead, opened: EventId) -> Result<bool> {
+pub(super) fn span_closed(conn: &impl SqlRead, opened: EventId) -> Result<bool> {
     Ok(
         conn.query_row(&span_closed_sql(conn.dialect()), sql_params![opened], |r| {
             r.get(0)
@@ -1704,11 +1561,12 @@ pub(super) fn span_closed_port(conn: &impl sql_exec::SqlRead, opened: EventId) -
 }
 
 /// The turns of the span opened by `opened` recorded so far.
-fn recorded_turns(conn: &Connection, opened: EventId) -> Result<Vec<Turn>> {
-    let payloads: Vec<Value> = conn
-        .prepare(&recorded_turns_sql())?
-        .query_map([opened], |r| json_col(r, "payload"))?
-        .collect::<rusqlite::Result<_>>()?;
+fn recorded_turns(conn: &impl SqlRead, opened: EventId) -> Result<Vec<Turn>> {
+    let payloads: Vec<Value> = conn.query_map(
+        &recorded_turns_sql(conn.dialect()),
+        sql_params![opened],
+        |r| json_col(r, "payload"),
+    )?;
     Ok(payloads
         .iter()
         .flat_map(|payload| payload["turns"].as_array().cloned().unwrap_or_default())
@@ -1753,7 +1611,7 @@ pub(super) const HOOK_INTAKE_PENDING: &str = "hook_intake_pending";
 /// The query of the closed hook spans whose transcript the supervisor has
 /// not taken in yet, with when each closed (task 655). Its `NOT EXISTS`
 /// finds their final `session_turns` by `events_by_opened_event`.
-fn pending_hook_intakes_sql() -> String {
+fn pending_hook_intakes_sql(dialect: super::sql_exec::SqlDialect) -> String {
     let kinds = HOOK_KINDS.map(|kind| format!("'{kind}'")).join(",");
     format!(
         "SELECT o.id, o.payload, o.created_at, c.created_at AS closed_at
@@ -1767,23 +1625,24 @@ fn pending_hook_intakes_sql() -> String {
                  AND {t_opened_event_id}=+o.id
                  AND {t_final}=1)
              ORDER BY o.id",
-        c_opened_event_id = json_field("c.payload", "$.opened_event_id", JsonType::Integer),
-        c_active_unavailable = json_field("c.payload", "$.active_unavailable", JsonType::Text),
-        o_kind = json_field("o.payload", "$.kind", JsonType::Text),
-        t_opened_event_id = json_field("t.payload", "$.opened_event_id", JsonType::Integer),
-        t_final = json_field("t.payload", "$.final", JsonType::Boolean),
+        c_opened_event_id = dialect.json_field("c.payload", "$.opened_event_id", JsonType::Integer),
+        c_active_unavailable =
+            dialect.json_field("c.payload", "$.active_unavailable", JsonType::Text),
+        o_kind = dialect.json_field("o.payload", "$.kind", JsonType::Text),
+        t_opened_event_id = dialect.json_field("t.payload", "$.opened_event_id", JsonType::Integer),
+        t_final = dialect.json_field("t.payload", "$.final", JsonType::Boolean),
     )
 }
 
 /// The query of whether the closed hook span opened by `?1` has its final
 /// `session_turns`, by `events_by_opened_event`.
-fn hook_intake_finished_sql() -> String {
+fn hook_intake_finished_sql(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
         "SELECT EXISTS (SELECT 1 FROM run_events WHERE kind='{SESSION_TURNS}'
            AND {opened_event_id}=?1
            AND {j_final}=1)",
-        opened_event_id = json_field("payload", "$.opened_event_id", JsonType::Integer),
-        j_final = json_field("payload", "$.final", JsonType::Boolean),
+        opened_event_id = dialect.json_field("payload", "$.opened_event_id", JsonType::Integer),
+        j_final = dialect.json_field("payload", "$.final", JsonType::Boolean),
     )
 }
 
@@ -1791,14 +1650,13 @@ fn hook_intake_finished_sql() -> String {
 /// followed by another input) turn. An append-only final session_turns event
 /// carries the measurements; even an unreadable transcript gets a final marker.
 fn record_closed_hook_turns(
-    conn: &Connection,
+    conn: &impl SessionConnection,
     write_hold_warn: Duration,
     identity: &super::write_leader::WriteIdentity,
 ) -> Result<usize> {
-    let pending = |conn: &Connection| -> Result<Vec<(OpenSpan, String)>> {
-        Ok(conn
-            .prepare(&pending_hook_intakes_sql())?
-            .query_map([], |r| {
+    fn pending(conn: &impl SqlRead) -> Result<Vec<(OpenSpan, String)>> {
+        Ok(
+            conn.query_map(&pending_hook_intakes_sql(conn.dialect()), &[], |r| {
                 Ok((
                     OpenSpan {
                         opened_event_id: r.get("id")?,
@@ -1807,9 +1665,9 @@ fn record_closed_hook_turns(
                     },
                     r.get("closed_at")?,
                 ))
-            })?
-            .collect::<rusqlite::Result<_>>()?)
-    };
+            })?,
+        )
+    }
     let mut recorded = 0;
     for (span, end) in pending(conn)? {
         // One span that cannot be finalized does not hold back the others
@@ -1838,19 +1696,21 @@ fn record_closed_hook_turns(
 /// its remaining turns and its final `session_turns` with its
 /// measurements. `false` when another intake finished it first.
 fn finalize_hook_intake(
-    conn: &Connection,
+    conn: &impl SessionConnection,
     write_hold_warn: Duration,
     identity: &super::write_leader::WriteIdentity,
     span: &OpenSpan,
     end: &str,
 ) -> Result<bool> {
     let _read = read_before(conn, Closing::Spans(&[(span.clone(), DEFERRED)]))?;
-    let tx = WriteTx::write(conn, "finalize_hook_intake", write_hold_warn, identity)?.recorded();
+    let tx = conn.session_write("finalize_hook_intake", write_hold_warn, identity)?;
     // Another intake may have finished while this one read the transcript.
-    let finished: bool =
-        tx.query_row(&hook_intake_finished_sql(), [span.opened_event_id], |r| {
-            r.get(0)
-        })?;
+    let finished: bool = SqlRead::query_row(
+        &tx,
+        &hook_intake_finished_sql(conn.dialect()),
+        sql_params![span.opened_event_id],
+        |r| r.get(0),
+    )?;
     if finished {
         return Ok(false);
     }
@@ -1882,11 +1742,11 @@ fn finalize_hook_intake(
 /// the span is checked again under it, since the process that closes it
 /// (a session's wrapper) records its remaining turns itself.
 pub(super) fn record_open_turns(
-    conn: &Connection,
+    conn: &impl SessionConnection,
     write_hold_warn: Duration,
     identity: &super::write_leader::WriteIdentity,
 ) -> Result<usize> {
-    let open = open_spans(conn, "1=1", "1=1", params![])?;
+    let open = open_spans(conn, "1=1", "1=1", sql_params![])?;
     // The closed hook spans' intake failing does not hold back the open
     // spans' turns.
     let mut recorded = match record_closed_hook_turns(conn, write_hold_warn, identity) {
@@ -1921,7 +1781,7 @@ pub(super) fn record_open_turns(
                 continue;
             }
         };
-        let tx = WriteTx::write(conn, "record_open_turns", write_hold_warn, identity)?.recorded();
+        let tx = conn.session_write("record_open_turns", write_hold_warn, identity)?;
         if span_closed(&tx, span.opened_event_id)? {
             continue;
         }
@@ -1931,9 +1791,10 @@ pub(super) fn record_open_turns(
         };
         let earlier = recorded_turns(&tx, span.opened_event_id)?;
         let through = earlier.iter().map(|turn| turn.end).max();
-        let (task_id, run_id): (Option<TaskId>, Option<RunId>) = tx.query_row(
+        let (task_id, run_id): (Option<TaskId>, Option<RunId>) = SqlRead::query_row(
+            &tx,
             "SELECT task_id, run_id FROM run_events WHERE id=?1",
-            [span.opened_event_id],
+            sql_params![span.opened_event_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let new = match (&transcript, &run_id) {
@@ -1970,7 +1831,7 @@ pub(super) fn record_open_turns(
 /// `plan_review_failed` (ADR-0048 decision 7). `inferred` says its
 /// supervisor was gone; otherwise the job ended when the proposal moved on.
 pub(super) fn close_plan_review(
-    conn: &Connection,
+    conn: &impl SqlWrite,
     plan_review_id: i64,
     inferred: bool,
 ) -> Result<()> {
@@ -1978,17 +1839,19 @@ pub(super) fn close_plan_review(
         conn,
         &format!(
             "o.run_id IS NULL AND {}=?1 AND {}=?2",
-            json_field("o.payload", "$.kind", JsonType::Text),
-            json_field("o.payload", "$.plan_review_id", JsonType::Integer),
+            conn.dialect()
+                .json_field("o.payload", "$.kind", JsonType::Text),
+            conn.dialect()
+                .json_field("o.payload", "$.plan_review_id", JsonType::Integer),
         ),
         "c.run_id IS NULL",
-        params![PLAN_REVIEW, plan_review_id],
+        sql_params![PLAN_REVIEW, plan_review_id],
     )?;
     let reason = job_close_reason(inferred);
     for span in open {
         let task_id: Option<TaskId> = conn.query_row(
             "SELECT task_id FROM run_events WHERE id=?1",
-            [span.opened_event_id],
+            sql_params![span.opened_event_id],
             |r| r.get(0),
         )?;
         close(conn, &now(conn)?, task_id, None, &span, reason)?;
@@ -2004,17 +1867,19 @@ fn job_close_reason(inferred: bool) -> &'static str {
 
 /// The open spans of the goal review `goal_review_id`, or of every goal
 /// review when `None`.
-fn open_goal_reviews(conn: &Connection, goal_review_id: Option<i64>) -> Result<Vec<OpenSpan>> {
+fn open_goal_reviews(conn: &impl SqlRead, goal_review_id: Option<i64>) -> Result<Vec<OpenSpan>> {
     open_spans(
         conn,
         &format!(
             "o.run_id IS NULL AND {}=?1
          AND (CAST(?2 AS BIGINT) IS NULL OR {}=?2)",
-            json_field("o.payload", "$.kind", JsonType::Text),
-            json_field("o.payload", "$.goal_review_id", JsonType::Integer),
+            conn.dialect()
+                .json_field("o.payload", "$.kind", JsonType::Text),
+            conn.dialect()
+                .json_field("o.payload", "$.goal_review_id", JsonType::Integer),
         ),
         "c.run_id IS NULL",
-        params![GOAL_REVIEW, goal_review_id],
+        sql_params![GOAL_REVIEW, goal_review_id],
     )
 }
 
@@ -2024,7 +1889,7 @@ fn open_goal_reviews(conn: &Connection, goal_review_id: Option<i64>) -> Result<V
 /// `inferred` says its supervisor was gone; otherwise the job ended when
 /// the goal or its tasks changed.
 pub(super) fn close_goal_review(
-    conn: &Connection,
+    conn: &impl SqlWrite,
     goal_review_id: i64,
     inferred: bool,
 ) -> Result<()> {
@@ -2043,7 +1908,7 @@ pub(super) fn close_goal_review(
 /// record of a Codex job's session (its thread and model), which the span
 /// takes as [`close_with`] does. Returns how many spans it closed.
 pub(super) fn close_review(
-    conn: &Connection,
+    conn: &impl SqlWrite,
     run_id: &RunId,
     ending: Option<&Value>,
 ) -> Result<usize> {
@@ -2051,18 +1916,21 @@ pub(super) fn close_review(
         conn,
         &format!(
             "o.run_id=?1 AND {}=?2",
-            json_field("o.payload", "$.kind", JsonType::Text),
+            conn.dialect()
+                .json_field("o.payload", "$.kind", JsonType::Text),
         ),
         "c.run_id=?1",
-        params![run_id, REVIEW],
+        sql_params![run_id, REVIEW],
     )?;
     if open.is_empty() {
         return Ok(0);
     }
     let task_id: Option<TaskId> = conn
-        .query_row("SELECT task_id FROM task_runs WHERE id=?1", [run_id], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT task_id FROM task_runs WHERE id=?1",
+            sql_params![run_id],
+            |r| r.get(0),
+        )
         .optional()?;
     let now = now(conn)?;
     for span in &open {
@@ -2081,57 +1949,46 @@ pub(super) fn close_review(
 
 /// The open spans of [`HOOK_KINDS`], which the plugin's hook records on no
 /// run (ADR-0048 decision 6), oldest first.
-pub(super) fn open_hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
-    open_hook_spans_port(conn).map_err(native_error)
-}
-
-/// [`open_hook_spans`] on the execution port.
-pub(super) fn open_hook_spans_port(conn: &impl sql_exec::SqlRead) -> Result<Vec<OpenSpan>> {
+pub(super) fn open_hook_spans(conn: &impl SqlRead) -> Result<Vec<OpenSpan>> {
     let kinds = HOOK_KINDS.map(|kind| format!("'{kind}'")).join(",");
-    let dialect = conn.dialect();
-    Ok(conn.query_map(
-        &open_spans_sql(
-            dialect,
-            &format!(
-                "o.run_id IS NULL AND {o_kind} IN ({kinds})
+    open_spans(
+        conn,
+        &format!(
+            "o.run_id IS NULL AND {o_kind} IN ({kinds})
              AND {o_route} IS NOT '{HEADLESS_ROUTE}'",
-                o_kind = dialect.json_field("o.payload", "$.kind", JsonType::Text),
-                o_route = dialect.json_field("o.payload", "$.route", JsonType::Text),
-            ),
-            "c.run_id IS NULL",
+            o_kind = conn
+                .dialect()
+                .json_field("o.payload", "$.kind", JsonType::Text),
+            o_route = conn
+                .dialect()
+                .json_field("o.payload", "$.route", JsonType::Text),
         ),
+        "c.run_id IS NULL",
         sql_params![],
-        open_span_row,
-    )?)
+    )
 }
 
 /// Whether `hook` is of a headless planner's session, whose span its turns
 /// record (ADR-t1394-2 decision 4): the hook its `claude -p` turns may
 /// still run is left out, so that it neither opens a second span nor
 /// closes the planner's at each turn.
-fn headless_planner_hook(conn: &Connection, hook: &SessionHook) -> Result<bool> {
+fn headless_planner_hook(conn: &impl SqlRead, hook: &SessionHook) -> Result<bool> {
     let Some(planner) = hook.planner_id.filter(|_| hook.kind == RUNTIME_PLANNER) else {
         return Ok(false);
     };
     Ok(conn
-        .query_row("SELECT route FROM planners WHERE id=?1", [planner], |r| {
-            r.get::<_, Option<String>>(0)
-        })
+        .query_row(
+            "SELECT route FROM planners WHERE id=?1",
+            sql_params![planner],
+            |r| r.get::<_, Option<String>>(0),
+        )
         .optional()?
         .flatten()
         .is_some_and(|route| route == HEADLESS_ROUTE))
 }
 
 /// The task the `session_opened` of `span` is on.
-pub(super) fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<TaskId>> {
-    span_task_port(conn, span).map_err(native_error)
-}
-
-/// [`span_task`] on the execution port.
-pub(super) fn span_task_port(
-    conn: &impl sql_exec::SqlRead,
-    span: &OpenSpan,
-) -> Result<Option<TaskId>> {
+pub(super) fn span_task(conn: &impl SqlRead, span: &OpenSpan) -> Result<Option<TaskId>> {
     Ok(conn.query_row(
         "SELECT task_id FROM run_events WHERE id=?1",
         sql_params![span.opened_event_id],
@@ -2154,7 +2011,7 @@ pub(super) fn span_task_port(
 /// its proposal, with the proposal and its goals; the others are on no
 /// task. Only the spans are written: no run, proposal or planner changes.
 pub(super) fn record_hook(
-    conn: &Connection,
+    conn: &impl SessionConnection,
     write_hold_warn: Duration,
     identity: &super::write_leader::WriteIdentity,
     hook: &SessionHook,
@@ -2168,7 +2025,7 @@ pub(super) fn record_hook(
             "skipped": "headless_planner",
         }));
     }
-    let tx = WriteTx::write(conn, "record_hook", write_hold_warn, identity)?.recorded();
+    let tx = conn.session_write("record_hook", write_hold_warn, identity)?;
     let (task_id, context) = planner_context(&tx, hook)?;
     let open = open_hook_spans(&tx)?;
     let changes = hook_changes(hook, &open, &context);
@@ -2216,14 +2073,15 @@ pub(super) fn record_hook(
 }
 
 /// Whether the guardrail's hook of `hook`'s session was recorded running.
-fn guardrail_reached(conn: &Connection, hook: &SessionHook) -> Result<bool> {
+fn guardrail_reached(conn: &impl SqlRead, hook: &SessionHook) -> Result<bool> {
     Ok(conn.query_row(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
            AND {}=?2)",
-            json_field("payload", "$.session_id", JsonType::Text),
+            conn.dialect()
+                .json_field("payload", "$.session_id", JsonType::Text),
         ),
-        params![EventKind::InboxGuardrailReached.as_str(), hook.session_id],
+        sql_params![EventKind::InboxGuardrailReached.as_str(), hook.session_id],
         |r| r.get(0),
     )?)
 }
@@ -2231,7 +2089,7 @@ fn guardrail_reached(conn: &Connection, hook: &SessionHook) -> Result<bool> {
 /// Where a span of `hook` is recorded, and what its payload adds: a
 /// runtime planner's goes on the first task of its planner's proposal,
 /// naming the proposal and its goals (as a plan review's does).
-fn planner_context(conn: &Connection, hook: &SessionHook) -> Result<(Option<TaskId>, Value)> {
+fn planner_context(conn: &impl SqlRead, hook: &SessionHook) -> Result<(Option<TaskId>, Value)> {
     let Some(planner) = hook.planner_id.filter(|_| hook.kind == RUNTIME_PLANNER) else {
         return Ok((None, Value::Null));
     };
@@ -2246,13 +2104,13 @@ fn planner_context(conn: &Connection, hook: &SessionHook) -> Result<(Option<Task
 /// proposal it was opened for, with the proposal and its goals; nothing
 /// without a proposal.
 fn planner_anchor(
-    conn: &Connection,
+    conn: &impl SqlRead,
     planner: i64,
 ) -> Result<(Option<TaskId>, Option<i64>, Vec<i64>)> {
     let proposal: Option<i64> = conn
         .query_row(
             "SELECT proposal_id FROM planners WHERE id=?1",
-            [planner],
+            sql_params![planner],
             |r| r.get(0),
         )
         .optional()?
@@ -2262,7 +2120,7 @@ fn planner_anchor(
     };
     let task: Option<TaskId> = conn.query_row(
         "SELECT min(id) FROM tasks WHERE proposal_id=?1",
-        [proposal],
+        sql_params![proposal],
         |r| r.get(0),
     )?;
     Ok((task, Some(proposal), proposal_goals(conn, Some(proposal))?))
@@ -2270,7 +2128,7 @@ fn planner_anchor(
 
 /// The open spans the hook recorded, oldest first: what the supervisor
 /// judges for [`crate::domain::sessions::inferred_hook_closes`].
-pub(super) fn hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
+pub(super) fn hook_spans(conn: &impl SqlRead) -> Result<Vec<OpenSpan>> {
     open_hook_spans(conn)
 }
 
@@ -2281,7 +2139,7 @@ pub(super) fn hook_spans(conn: &Connection) -> Result<Vec<OpenSpan>> {
 /// when it cannot be read, ADR-0048 decision 7). Returns how many it
 /// closed.
 pub(super) fn close_inferred_hook_spans(
-    conn: &Connection,
+    conn: &impl SessionConnection,
     write_hold_warn: Duration,
     identity: &super::write_leader::WriteIdentity,
     ended: &[EventId],
@@ -2296,8 +2154,7 @@ pub(super) fn close_inferred_hook_spans(
     let closing: Vec<(OpenSpan, &'static str)> =
         spans.iter().map(|span| (span.clone(), INFERRED)).collect();
     let _read = read_before(conn, Closing::Spans(&closing))?;
-    let tx =
-        WriteTx::write(conn, "close_inferred_hook_spans", write_hold_warn, identity)?.recorded();
+    let tx = conn.session_write("close_inferred_hook_spans", write_hold_warn, identity)?;
     let now = now(&tx)?;
     let mut closed = 0;
     // Found outside the write lock; checked again under it one by one, so a
@@ -2317,26 +2174,26 @@ pub(super) fn close_inferred_hook_spans(
 /// The open spans of the job of the queue an event of `kind` is about
 /// ([`queue_span_kind`]: the observer's or the throughput review's), or
 /// `None` when it is not an event of the queue's spans.
-fn queue_open_spans(conn: &Connection, kind: EventKind) -> Result<Option<Vec<OpenSpan>>> {
+fn queue_open_spans(conn: &impl SqlRead, kind: EventKind) -> Result<Option<Vec<OpenSpan>>> {
     let Some(span_kind) = queue_span_kind(kind).filter(|_| scope(kind) == Some(Scope::Queue))
     else {
         return Ok(None);
     };
     open_spans(
         conn,
-        &queue_opened_condition(),
+        &queue_opened_condition(conn.dialect()),
         QUEUE_CLOSED_CONDITION,
-        params![span_kind],
+        sql_params![span_kind],
     )
     .map(Some)
 }
 
 /// Which `session_opened` [`queue_open_spans`] reads: those of the queue
 /// and of the job kind `?1`.
-fn queue_opened_condition() -> String {
+fn queue_opened_condition(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
         "o.task_id IS NULL AND o.goal_id IS NULL AND {}=?1",
-        json_field("o.payload", "$.kind", JsonType::Text),
+        dialect.json_field("o.payload", "$.kind", JsonType::Text),
     )
 }
 
@@ -2346,35 +2203,29 @@ const QUEUE_CLOSED_CONDITION: &str = "c.task_id IS NULL AND c.goal_id IS NULL";
 /// The `session_opened` events matching `opened` that no `session_closed`
 /// matching `closed` names, oldest first. Both conditions share `params`.
 fn open_spans(
-    conn: &Connection,
+    conn: &impl SqlRead,
     opened: &str,
     closed: &str,
-    params: impl rusqlite::Params,
+    params: &[SqlValue],
 ) -> Result<Vec<OpenSpan>> {
-    Ok(conn
-        .prepare(&open_spans_sql(
-            sql_exec::SqlRead::dialect(conn),
-            opened,
-            closed,
-        ))?
-        .query_map(params, |r| with_row(r, open_span_row))?
-        .collect::<rusqlite::Result<_>>()?)
-}
-
-/// A row of [`open_spans_sql`].
-fn open_span_row(r: &SqlRow<'_>) -> SqlResult<OpenSpan> {
-    Ok(OpenSpan {
-        opened_event_id: r.get("id")?,
-        payload: store_rows::json_col(r, "payload")?,
-        opened_ms: rfc3339_millis(&r.get::<_, String>("created_at")?),
-    })
+    Ok(conn.query_map(
+        &open_spans_sql(conn.dialect(), opened, closed),
+        params,
+        |r| {
+            Ok(OpenSpan {
+                opened_event_id: r.get("id")?,
+                payload: json_col(r, "payload")?,
+                opened_ms: rfc3339_millis(&r.get::<_, String>("created_at")?),
+            })
+        },
+    )?)
 }
 
 /// The query of [`open_spans`]. Its `NOT EXISTS` finds the `session_closed`
 /// by `events_by_opened_event` (task 1333): `+o.id` drops the column's
 /// INTEGER affinity, which, applied to the expression, kept the index from
 /// being used and walked every `session_closed` once per span.
-fn open_spans_sql(dialect: SqlDialect, opened: &str, closed: &str) -> String {
+fn open_spans_sql(dialect: super::sql_exec::SqlDialect, opened: &str, closed: &str) -> String {
     format!(
         "SELECT o.id, o.payload, o.created_at FROM run_events o
          WHERE o.kind='{SESSION_OPENED}' AND {opened}
@@ -2386,19 +2237,19 @@ fn open_spans_sql(dialect: SqlDialect, opened: &str, closed: &str) -> String {
     )
 }
 
-fn run_context(conn: &Connection, run_id: &RunId, kind: EventKind) -> Result<SpanContext> {
+fn run_context(conn: &impl SqlRead, run_id: &RunId, kind: EventKind) -> Result<SpanContext> {
     let run = conn
         .query_row(
             "SELECT worktree_path, run_dir, workspace_id, worker_mode, actual_provider
                FROM task_runs WHERE id=?1",
-            [run_id],
+            sql_params![run_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
     let (worktree, run_dir, workspace_id, route, provider) =
         run.unwrap_or((None, None, None, None, None));
     let count = |kind: &str| -> Result<i64> {
-        Ok(conn.query_row(RUN_EVENT_COUNT_SQL, params![run_id, kind], |r| r.get(0))?)
+        Ok(conn.query_row(RUN_EVENT_COUNT_SQL, sql_params![run_id, kind], |r| r.get(0))?)
     };
     Ok(SpanContext {
         worktree,
@@ -2426,28 +2277,26 @@ const REVISE_EVENTS_SQL: &str = "SELECT kind, payload FROM run_events
 
 /// [`SpanContext::revise_attempt`] of run `run_id`
 /// ([`sessions::revise_attempt`] of its revise requests and withdrawals).
-fn revise_attempt(conn: &Connection, run_id: &RunId) -> Result<Option<i64>> {
-    let mut statement = conn.prepare_cached(REVISE_EVENTS_SQL)?;
-    let events = statement
-        .query_map(
-            params![
-                run_id,
-                event_kind::REVISE_REQUESTED,
-                event_kind::REVISE_UNSENT
-            ],
-            |r| {
-                let payload: Value = json_col(r, "payload")?;
-                let attempt = payload["attempt"].as_i64();
-                Ok(
-                    if r.get::<_, String>("kind")? == event_kind::REVISE_REQUESTED {
-                        ReviseEvent::Requested(attempt)
-                    } else {
-                        ReviseEvent::Unsent(attempt)
-                    },
-                )
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+fn revise_attempt(conn: &impl SqlRead, run_id: &RunId) -> Result<Option<i64>> {
+    let events = conn.query_map(
+        REVISE_EVENTS_SQL,
+        sql_params![
+            run_id,
+            event_kind::REVISE_REQUESTED,
+            event_kind::REVISE_UNSENT
+        ],
+        |r| {
+            let payload: Value = json_col(r, "payload")?;
+            let attempt = payload["attempt"].as_i64();
+            Ok(
+                if r.get::<_, String>("kind")? == event_kind::REVISE_REQUESTED {
+                    ReviseEvent::Requested(attempt)
+                } else {
+                    ReviseEvent::Unsent(attempt)
+                },
+            )
+        },
+    )?;
     Ok(sessions::revise_attempt(&events))
 }
 
@@ -2459,11 +2308,11 @@ const LAST_SESSION_BOUNDARY_SQL: &str = "SELECT kind, payload FROM run_events
 
 /// [`SpanContext::session`] of run `run_id`
 /// ([`fresh_session::renewed_session`] of its last session boundary).
-fn renewed_session(conn: &Connection, run_id: &RunId) -> Result<Option<String>> {
+fn renewed_session(conn: &impl SqlRead, run_id: &RunId) -> Result<Option<String>> {
     let last: Option<(String, Value)> = conn
         .query_row(
             LAST_SESSION_BOUNDARY_SQL,
-            params![
+            sql_params![
                 run_id,
                 event_kind::SESSION_RENEWED,
                 event_kind::PROVIDER_SWITCHED
@@ -2476,31 +2325,18 @@ fn renewed_session(conn: &Connection, run_id: &RunId) -> Result<Option<String>> 
     }))
 }
 
-fn proposal_goals(conn: &Connection, proposal: Option<i64>) -> Result<Vec<i64>> {
-    Ok(conn
-        .prepare(
-            "SELECT DISTINCT goal_id FROM tasks
+fn proposal_goals(conn: &impl SqlRead, proposal: Option<i64>) -> Result<Vec<i64>> {
+    Ok(conn.query_map(
+        "SELECT DISTINCT goal_id FROM tasks
              WHERE proposal_id=?1 AND goal_id IS NOT NULL ORDER BY goal_id",
-        )?
-        .query_map([proposal], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?)
+        sql_params![proposal],
+        |r| r.get(0),
+    )?)
 }
 
 /// Insert a span event at `created_at`.
 pub(super) fn insert_at(
-    conn: &Connection,
-    task_id: Option<TaskId>,
-    run_id: Option<&RunId>,
-    kind: EventKind,
-    payload: &Value,
-    created_at: &str,
-) -> Result<EventId> {
-    insert_at_port(&port_tx(conn), task_id, run_id, kind, payload, created_at).map_err(native_error)
-}
-
-/// [`insert_at`] on the execution port.
-pub(super) fn insert_at_port(
-    conn: &impl sql_exec::SqlWrite,
+    conn: &impl SqlWrite,
     task_id: Option<TaskId>,
     run_id: Option<&RunId>,
     kind: EventKind,
@@ -2518,13 +2354,30 @@ pub(super) fn insert_at_port(
             kind.as_str(),
             serde_json::to_string(payload)?,
             created_at
-        ],
-    )?;
+        ])?;
     Ok(EventId::new(id))
 }
 
 #[cfg(test)]
 pub(super) mod tests {
+    use crate::infrastructure::sql_exec::sqlite::port_tx;
+    use rusqlite::{Connection, params};
+    fn close_plan_review(conn: &Connection, plan_review_id: i64, inferred: bool) -> Result<()> {
+        super::close_plan_review(&port_tx(conn), plan_review_id, inferred)
+    }
+    fn close_goal_review(conn: &Connection, goal_review_id: i64, inferred: bool) -> Result<()> {
+        super::close_goal_review(&port_tx(conn), goal_review_id, inferred)
+    }
+    fn insert_at(
+        conn: &Connection,
+        task_id: Option<TaskId>,
+        run_id: Option<&RunId>,
+        kind: EventKind,
+        payload: &Value,
+        created_at: &str,
+    ) -> Result<EventId> {
+        super::insert_at(&port_tx(conn), task_id, run_id, kind, payload, created_at)
+    }
     use super::*;
     fn identity(conn: &Connection) -> super::super::write_leader::WriteIdentity {
         super::super::write_leader::WriteIdentity::read(conn).unwrap()
@@ -2610,7 +2463,7 @@ pub(super) mod tests {
     fn the_searches_by_the_opened_event_use_its_index() {
         let dir = tempfile::tempdir().unwrap();
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let by_index = "INDEX events_by_opened_event (kind=? AND <expr>=?)";
         let uses = |sql: &str| {
             let plan = plan(conn, sql);
@@ -2620,10 +2473,18 @@ pub(super) mod tests {
             );
             plan
         };
-        uses(&recorded_turns_sql());
-        uses(&span_closed_sql(SqlDialect::Sqlite));
-        uses(&hook_intake_finished_sql());
-        uses(&pending_hook_intakes_sql());
+        uses(&recorded_turns_sql(
+            crate::infrastructure::sql_exec::SqlDialect::Sqlite,
+        ));
+        uses(&span_closed_sql(
+            crate::infrastructure::sql_exec::SqlDialect::Sqlite,
+        ));
+        uses(&hook_intake_finished_sql(
+            crate::infrastructure::sql_exec::SqlDialect::Sqlite,
+        ));
+        uses(&pending_hook_intakes_sql(
+            crate::infrastructure::sql_exec::SqlDialect::Sqlite,
+        ));
         // Every `closed` condition its callers give open_spans.
         for (opened, closed) in [
             ("1=1", "1=1"),
@@ -2642,7 +2503,11 @@ pub(super) mod tests {
                 "c.task_id IS NULL AND c.goal_id IS NULL",
             ),
         ] {
-            let plan = uses(&open_spans_sql(SqlDialect::Sqlite, opened, closed));
+            let plan = uses(&open_spans_sql(
+                crate::infrastructure::sql_exec::SqlDialect::Sqlite,
+                opened,
+                closed,
+            ));
             let subquery = plan
                 .iter()
                 .skip_while(|step| !step.contains("CORRELATED"))
@@ -2656,8 +2521,8 @@ pub(super) mod tests {
         // The queue's spans have no goal: the outer read goes by the kind of
         // `session_opened`, not every event without a goal.
         let spans = uses(&open_spans_sql(
-            SqlDialect::Sqlite,
-            &queue_opened_condition(),
+            crate::infrastructure::sql_exec::SqlDialect::Sqlite,
+            &queue_opened_condition(crate::infrastructure::sql_exec::SqlDialect::Sqlite),
             QUEUE_CLOSED_CONDITION,
         ));
         let outer = spans
@@ -2671,7 +2536,10 @@ pub(super) mod tests {
         );
         // closed_value joins the `session_opened` by its key and walks the
         // run's `session_closed` by the kind, never the whole table.
-        let plan = plan(conn, &closed_value_sql(SqlDialect::Sqlite));
+        let plan = plan(
+            conn,
+            &closed_value_sql(crate::infrastructure::sql_exec::SqlDialect::Sqlite),
+        );
         assert!(
             !plan.iter().any(|step| step.starts_with("SCAN")),
             "{plan:#?}"
@@ -2686,7 +2554,7 @@ pub(super) mod tests {
         use crate::infrastructure::{planners, runtime_store};
         let dir = tempfile::tempdir().unwrap();
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let searches = |sql: &str| {
             let plan = plan(conn, sql);
             assert!(
@@ -2714,7 +2582,7 @@ pub(super) mod tests {
         // The planners' events have no run: they are found by their kind,
         // not by `events_by_run` among every event that has no run.
         for sql in [
-            planner_turns_sql(),
+            planner_turns_sql(crate::infrastructure::sql_exec::SqlDialect::Sqlite),
             planners::planner_turn_events_sql(crate::infrastructure::sql_exec::SqlDialect::Sqlite),
         ] {
             let plan = searches(&sql);
@@ -2743,7 +2611,7 @@ pub(super) mod tests {
                 params![run, task_id],
             )
             .unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let record = |kind: EventKind, payload: Value| {
             event(conn, task_id, Some(&run), kind, payload).unwrap();
         };
@@ -2987,7 +2855,7 @@ pub(super) mod tests {
     fn a_headless_span_takes_its_turns_and_tokens_from_the_run() {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         conn.execute(
             "UPDATE task_runs SET worker_mode='headless', requested_provider='codex', actual_provider='codex'",
             [],
@@ -3097,7 +2965,7 @@ pub(super) mod tests {
         turns: &[SpanTurnAt],
     ) -> (Value, std::path::PathBuf) {
         let (queue, task_id, run) = run_queue(dir);
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let run_dir = dir.join("run");
         std::fs::create_dir_all(run_dir.join("turns")).unwrap();
         bind(
@@ -3221,7 +3089,7 @@ pub(super) mod tests {
     fn a_headless_claude_span_takes_its_work_from_its_transcript() {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let run_dir = dir.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         conn.execute(
@@ -3343,7 +3211,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         conn.execute_batch(
             "INSERT INTO planners(id,origin,route,created_at) VALUES (4,'runtime','headless',0);
              INSERT INTO planners(id,origin,route,created_at) VALUES (5,'runtime','headless',0);",
@@ -3445,7 +3313,7 @@ pub(super) mod tests {
     fn a_span_records_its_turns_while_open_and_its_active_time_at_its_close() {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         event(
             conn,
             task_id,
@@ -3503,7 +3371,7 @@ pub(super) mod tests {
     fn a_revise_switches_the_spans_when_it_was_sent() {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         event(
             conn,
             task_id,
@@ -3548,7 +3416,7 @@ pub(super) mod tests {
     fn a_revise_sent_at_a_millisecond_switches_the_spans_there() {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         event(
             conn,
             task_id,
@@ -3581,7 +3449,7 @@ pub(super) mod tests {
     fn an_inferred_close_ends_at_the_transcript_and_an_unreadable_one_is_unavailable() {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         event(
             conn,
             task_id,
@@ -3694,7 +3562,7 @@ pub(super) mod tests {
         let (queue, task_id, run) = run_queue(dir.path());
         let run_dir = dir.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         // The Rust profile declared gives the cargo kinds and counts.
         bind(conn, dir.path(), RUST_DECLARED);
         conn.execute(
@@ -3775,7 +3643,7 @@ pub(super) mod tests {
         assert_eq!(written[0]["kind"], "worker");
         assert_eq!(written[1]["command"], "cargo test --locked");
         assert_eq!(
-            closed_work(&**conn, &run, "worker", EventId::new(0)).unwrap(),
+            closed_work(conn, &run, "worker", EventId::new(0)).unwrap(),
             Some(exited.payload["work_breakdown"].clone())
         );
 
@@ -3815,7 +3683,7 @@ pub(super) mod tests {
                 .is_none()
         );
         assert_eq!(
-            closed_work(&**conn, &run, "resume", EventId::new(resumed)).unwrap(),
+            closed_work(conn, &run, "resume", EventId::new(resumed)).unwrap(),
             None
         );
     }
@@ -4091,7 +3959,7 @@ pub(super) mod tests {
     fn an_inferred_close_keeps_the_tokens_of_the_last_record() {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         event(
             conn,
             task_id,
@@ -4249,7 +4117,7 @@ pub(super) mod tests {
             crate::domain::actor_model::ModelRole::GoalReview,
         )
         .to_value();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         goal_event(
             conn,
             goal,
@@ -4335,7 +4203,7 @@ pub(super) mod tests {
         use crate::domain::sessions::{OBSERVER, THROUGHPUT_REVIEW, THROUGHPUT_REVIEW_OPEN_MS};
         let dir = tempfile::tempdir().unwrap();
         let (queue, _, _) = run_queue(dir.path());
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let write = |cwd: &str, session: &str, base: i64, model: &str, effort: &str| {
             let project = dir
                 .path()
@@ -4576,7 +4444,7 @@ pub(super) mod tests {
             .unwrap()
             .id();
         queue.set_goal(task_id, Some(goal)).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         event(
             conn,
             task_id,
@@ -4658,7 +4526,7 @@ pub(super) mod tests {
         use crate::application::SessionRegistry;
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         // The rules are judged before the transaction too: the worker's
         // work keeps the counts the declared Rust profile gives.
         bind(conn, dir.path(), RUST_DECLARED);
@@ -4803,7 +4671,11 @@ pub(super) mod tests {
         let read = read_before_port(&*tx, Closing::Run(&run, &[EventKind::RunRecovered])).unwrap();
         assert!(read.spans.is_empty());
         drop(read);
-        let read = read_before(&tx, Closing::Run(&run, &[EventKind::RunRecovered])).unwrap();
+        let read = read_before(
+            &port_tx(&tx),
+            Closing::Run(&run, &[EventKind::RunRecovered]),
+        )
+        .unwrap();
         assert!(read.spans.is_empty());
         drop(read);
         tx.rollback().unwrap();
@@ -4878,7 +4750,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let started = record_hook(
             conn,
             WRITE_HOLD_WARN,
@@ -4979,7 +4851,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let start_hook = hook(dir.path(), Some("startup"), INBOX, "s");
         record_hook(conn, WRITE_HOLD_WARN, &identity(conn), &start_hook).unwrap();
         let start = retime(conn, 0, 100);
@@ -5071,7 +4943,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         record_hook(
             conn,
             WRITE_HOLD_WARN,
@@ -5113,7 +4985,7 @@ pub(super) mod tests {
         use crate::domain::sessions::{INBOX, PLANNER, RUNTIME_PLANNER};
         let dir = tempfile::tempdir().unwrap();
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let start = |kind, session| hook(dir.path(), Some("startup"), kind, session);
         for (kind, session) in [(INBOX, "i"), (PLANNER, "p"), (RUNTIME_PLANNER, "r")] {
             record_hook(
@@ -5168,7 +5040,7 @@ pub(super) mod tests {
             .unwrap();
         let first = task(&mut queue);
         let second = task(&mut queue);
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         conn.execute_batch(
             "INSERT INTO proposals(id,status,owner_origin,submitted_at,created_at,updated_at)
                VALUES (5,'revising','runtime','t','t','t');
@@ -5238,7 +5110,7 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         record_hook(
             conn,
             WRITE_HOLD_WARN,
@@ -5344,7 +5216,7 @@ pub(super) mod tests {
         let (queue, task_id, run) = run_queue(dir.path());
         let run_dir = dir.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         bind(conn, dir.path(), RUST_DECLARED);
         conn.execute(
             "UPDATE task_runs SET run_dir=?1",
@@ -5396,7 +5268,7 @@ pub(super) mod tests {
     /// transcripts analysed under the write lock.
     fn close_after(between: Between) -> (Vec<Value>, Vec<Value>, Vec<Value>, usize) {
         let (dir, queue, task_id, run, run_dir, start) = closing_worker();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         let read = read_before(conn, Closing::Run(&run, &[EventKind::SessionExited])).unwrap();
         let before = analysed();
         if between == Between::EditsVerification {
@@ -5415,7 +5287,7 @@ pub(super) mod tests {
                 let other = SqliteQueue::open(&db).unwrap();
                 if between == Between::RecordsTurns {
                     assert_eq!(
-                        record_open_turns(&other.conn, WRITE_HOLD_WARN, &identity(&other.conn))
+                        record_open_turns(&*other.conn, WRITE_HOLD_WARN, &identity(&other.conn))
                             .unwrap(),
                         1
                     );
@@ -5473,7 +5345,7 @@ pub(super) mod tests {
             conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK").unwrap();
         }
         drop(read);
-        assert!(WORKTIME_AFTER.with_borrow(Vec::is_empty));
+        assert!(super::super::sql_exec::commit_actions::pending_actions() == 0);
         let payloads = |kind: &str| -> Vec<Value> {
             of_kind(&queue, kind)
                 .into_iter()
@@ -5589,7 +5461,7 @@ pub(super) mod tests {
     #[test]
     fn a_runtime_event_whose_commit_fails_is_rolled_back_without_its_worktime() {
         let (_dir, queue, _, run, run_dir, _) = closing_worker();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         // A foreign key checked at COMMIT fails it and, unlike a failed
         // statement, leaves the transaction open.
         conn.execute_batch(
@@ -5607,7 +5479,7 @@ pub(super) mod tests {
         assert!(conn.is_autocommit());
         assert!(of_kind(&queue, SESSION_CLOSED).is_empty());
         assert!(!run_dir.join(WORKTIME_FILE).exists());
-        assert!(WORKTIME_AFTER.with_borrow(Vec::is_empty));
+        assert!(super::super::sql_exec::commit_actions::pending_actions() == 0);
 
         conn.execute_batch("DROP TRIGGER fail_commit").unwrap();
         exited().unwrap();
@@ -5628,7 +5500,7 @@ pub(super) mod tests {
         let (queue, task_id, run) = run_queue(dir.path());
         let run_dir = dir.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         bind(conn, dir.path(), RUST_DECLARED);
         conn.execute(
             "UPDATE task_runs SET run_dir=?1",
@@ -5668,6 +5540,9 @@ pub(super) mod tests {
             },
         )
         .unwrap();
+        // Inserts prepared before the test replaced SQLite's clock must be
+        // prepared again against that replacement, including their defaults.
+        conn.flush_prepared_statement_cache();
         let project = dir.path().join("config/projects/-wt");
         std::fs::create_dir_all(&project).unwrap();
         let line = |kind: &str, secs: i64, content: Value| {
@@ -5921,7 +5796,7 @@ pub(super) mod tests {
     fn a_revise_recorded_in_a_write_transaction_closes_where_it_was_sent() {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
-        let conn = &queue.conn;
+        let conn = &*queue.conn;
         event(
             conn,
             task_id,

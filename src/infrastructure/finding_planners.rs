@@ -10,7 +10,6 @@
 use super::sql_dialect::JsonType;
 use super::sql_exec::sql_params;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
-use super::store_writes::EventTx;
 use crate::domain::event_kind::{self, EventKind};
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -591,7 +590,7 @@ pub(super) fn route_of_port(
 /// resubmission) stays. A named finding that cannot be linked fails the
 /// submission; the planner's own is linked only while `open`.
 pub(super) fn link_findings(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     proposal: ProposalId,
     workspace: Option<&str>,
     named: &[FindingId],
@@ -663,7 +662,7 @@ pub(super) struct AppliedAnswer {
 /// `planner_question`'s goes to its planner. `None`: the answer is not one
 /// the runtime applies.
 pub(super) fn apply_answer(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     ask: &Ask,
     text: &str,
     by: &str,
@@ -753,7 +752,7 @@ pub(super) fn apply_answer(
 /// ask's `ask_opened` as its evidence and its question as the summary (its
 /// first line) and the detail.
 fn record_from_ask(
-    conn: &impl EventTx,
+    conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     ask: &Ask,
     reason: &str,
     by: &str,
