@@ -699,6 +699,12 @@ impl Supervisor<'_> {
 
     /// Ask host運用 for the worktrees of ended runs to be cleaned, every
     /// such run's or only `task`'s ([`HostOpsState::request_cleanup`]).
+    /// Requested when a slot ends (integrated, failed or interrupted),
+    /// after triage, and after applying triage decide or landing approval
+    /// answers, including cancellation (then for that task alone). The
+    /// periodic sweep requests every run. Manual integrate removes its
+    /// landed worktree itself; manual recover, ready or cancel, and runs
+    /// ended outside the supervisor, are picked up by the next sweep.
     pub(in crate::application) fn request_cleanup(&mut self, task: Option<TaskId>) {
         let held = self.cleanup_held();
         self.on_host(|host, env| host.request_cleanup(env, &held, task, None));

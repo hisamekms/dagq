@@ -2044,6 +2044,8 @@ impl GitRepository {
     /// [`AddedCheckout::NewBranch`] is made first, since `git worktree add
     /// -b` makes it before it can fail and a retry would find it made, and
     /// goes again when the add fails.
+    /// The add creates directly at `path`, without a worktree lock or a
+    /// move; Git has no option to choose the admin record's name separately.
     fn add_worktree(
         &self,
         path: &Path,

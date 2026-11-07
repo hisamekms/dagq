@@ -1493,6 +1493,9 @@ fn check_main(recheck: &Recheck<'_>, first: &Target) -> MainCheck {
 /// output in `log`, as `run`'s process when it checks a run's merge. The
 /// outer `Err` when Git or the setup failed; the inner one is the
 /// command's own (its time limit included).
+/// Before creating the current scratch, remove obsolete scratches under
+/// `recheck/` with their Git registrations: the legacy `worktree` and
+/// `worktree-recheck-*` names derived from a queue path before it moved.
 fn run_on_host(
     recheck: &Recheck<'_>,
     runs: &[Vec<BuildDir>],

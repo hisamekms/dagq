@@ -75,6 +75,16 @@
 //! is free ([`clear_build_cache`]): the job holds it while it clears, so
 //! what builds there waits, and leaves a cache in use for the next cleanup.
 
+//! Requests accumulated before stop or handoff are discarded except for
+//! the counted remainder of disk cleanup: it runs once after the current
+//! job, ignoring the stop flag through its last selected worktree. No new
+//! request is accepted during that drain; handoff exec and loop exit,
+//! including an error exit, wait for both jobs and record their events.
+//! A drain due only to provisioning failure (`claiming = false`) is not a
+//! cleanup drain: it still accepts requests and finishes ordinary and
+//! pending jobs, and the loop waits for disk cleanup before exiting.
+//!
+
 use super::*;
 use crate::application::update::{self, UpdatePaths};
 use crate::application::worktree_processes::{WORKTREE_STOP_POLLS, stop_worktree_processes};
@@ -1883,6 +1893,14 @@ fn remove_run_runner(ports: &JobPorts, candidate: &EndedRunWorktree) -> bool {
 /// session, under each of the scratchpad `roots`, once its task is over. A
 /// run whose task goes on keeps them, as a resume may go on in them, and
 /// so does a worktree outside the runs directory.
+/// The database's worktree path supplies the session cwd even when the
+/// worktree and branch are already gone. Other projects under the same
+/// root, other temporary files, and human planner, inbox or supervisor
+/// sessions whose cwd is the main checkout are outside this selection.
+/// Workers may keep throwaway repositories and measurement builds there,
+/// amounting to gigabytes for a run.
+/// Nonempty removals record `scratchpad_removed`; failures record
+/// `cleanup_failed` and are retried by the next cleanup.
 fn scratchpad_dirs(
     candidate: &EndedRunWorktree,
     runs_dir: &Path,
@@ -1910,6 +1928,11 @@ fn scratchpad_dirs(
 /// throwaway repository, a build outside the worktree) is what its next
 /// turn goes on with in the same session, which no look at the processes
 /// running now can tell from what nothing needs any more.
+/// Cleanup records the removed directories and their combined bytes in
+/// one `run_tmp_removed`, shaped like `scratchpad_removed`; those bytes
+/// count in the recent run-size estimate. A removal failure records
+/// `cleanup_failed` and is retried on the next cleanup. Files a worker
+/// puts outside these runtime-selected directories are not covered.
 fn run_tmp_dirs(candidate: &EndedRunWorktree, runs_dir: &Path) -> Vec<PathBuf> {
     if !task_over(candidate.task_status) {
         return Vec::new();
@@ -2166,6 +2189,9 @@ fn clean_worktree(
 /// none while none is declared, unless `tracks` says Git tracks a file in
 /// one. A link in their place measures as none and stays ([`measure`]).
 /// The paths removed, and what they took.
+/// The profiles are resolved as for the landing recheck. A missing
+/// worktree has no outputs; its branch, commits, receipt, sources and run
+/// directory are not removed by this operation.
 fn remove_build_outputs(
     files: &dyn RunFiles,
     worktree: &Path,
@@ -2259,6 +2285,10 @@ struct StaleRemoval {
 /// Git cannot be asked about are failures, which leave the rest to go and
 /// are returned beside what went: a failure is no "nothing stale", so the
 /// run is tried again ([`clean_candidate`]).
+/// Rust profiles select completed incremental sessions older than the
+/// newest completed session and their paired locks. No rustc lock is
+/// taken: callers must exclude active builds. A later build retains its
+/// predecessor again, so the freed space lasts only while the run is idle.
 fn remove_stale_entries(
     files: &dyn RunFiles,
     worktree: &Path,

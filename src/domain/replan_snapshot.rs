@@ -64,7 +64,9 @@ pub fn scratch_worktree(worktree: &Path) -> PathBuf {
 /// `worktree.restoring` beside a worktree of the old layout), when it is
 /// not [`scratch_worktree`]: a restore that stopped then may have left it
 /// with the run's branch checked out, which the next restore discards
-/// first.
+/// first. A link, a file or a worktree on another branch cannot hold
+/// the restored branch: `discard_worktree` refuses it, leaves it there,
+/// and the restore continues with its new scratch.
 pub fn legacy_scratch_worktree(worktree: &Path) -> Option<PathBuf> {
     let name = worktree.file_name()?.to_string_lossy().into_owned();
     let legacy = worktree.with_file_name(format!("{name}.restoring"));

@@ -96,6 +96,10 @@ pub struct TaskRun {
     /// Set once the run's session was stopped (its background wrapper's
     /// handle closed; before ADR-t1433-3, once cmux confirmed its
     /// workspace's close); null keeps the run out of any cleaned state.
+    /// Null means stopping was not confirmed, including a wrapper that
+    /// stopped but whose database write failed. Stop failure is recorded
+    /// in `cleanup_failed` and `last_error`, without changing run status;
+    /// doctor/recover can retry instead of treating the session as cleaned.
     workspace_closed_at: Option<i64>,
     created_at: String,
 }

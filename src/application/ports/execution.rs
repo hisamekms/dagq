@@ -22,6 +22,21 @@ use std::{
 /// their `TMPDIR` ([`run_tmp_dir`]), and removes with the run's leftovers
 /// once its task is over. The verification commands on the host have
 /// [`host_verification_tmp_path`] instead.
+/// This includes switching to a new worker session. Codex can write the
+/// run directory under its sandbox roots (ADR-t813-3); its original
+/// `TMPDIR` remains writable too, as does `/tmp`. Claude's turn adds the
+/// run directory with `--add-dir`. This does not redirect Claude Code's
+/// scratchpads, which use the system temporary directory instead.
+///
+/// Not supplied to container verification (the container cleans up), the
+/// landing recheck (shared by run and main checks, not owned by a run),
+/// pre-landing e2e (which creates and removes its own per-check `TMPDIR`),
+/// or planner turns (whose directory has no such cleanup).
+/// Codex headless review jobs use a read-only sandbox, or its queue-service
+/// job permissions, and cannot use a writable temporary directory. The
+/// setup-review generation job is also outside a run: it may write only
+/// its temporary worktree, not `/tmp` or `TMPDIR`, and the command removes
+/// that worktree on success or failure.
 pub const RUN_TMP_DIR: &str = "tmp";
 
 /// The directory the [`host_verification_tmp_path`] of every run is made
