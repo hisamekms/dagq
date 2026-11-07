@@ -1,11 +1,10 @@
 diff --git a/docs/design/measurement.md b/docs/design/measurement.md
-index c26e2b890..685396817 100644
 --- a/docs/design/measurement.md
 +++ b/docs/design/measurement.md
-@@ -191,6 +191,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
- ## 台帳を作る係
+@@ -187,6 +187,7 @@
  
- 何を書くかは`domain::ledger::builder`が決め、`supervise::observation::ledger`が書く。
+ 何を書くかは`domain::ledger::builder`が決め、`application::supervise::ledger`が書く。
+ 数値はそのmoduleの定数が持つ。
 +版が上がった行を畳み直す理由は[ADR-t1662-1](../adr/2026-10-04-t1662-1-runs-are-covering-phase-intervals-folded-into-a-ledger.md)決定11が持つ。
  
  - **周回**: supervisorの周回が間隔ごとに、drainとhandoffの間も、jobのthreadで動く（D7）。

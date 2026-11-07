@@ -6,7 +6,7 @@ index 6eb17df3d..87b6eb276 100644
  - verdictの`follow_ups`は判定と行き先を変えず、それだけでrunを差し戻さない。
  - reviseはrunを通した上限まで返し、resumeで数え直さず、上限の後は4aで決める（[ADR-t2599-1](../../adr/2026-10-17-t2599-1-run-review-revises-counted-across-the-run-and-judged-by-code-findings-past-the-limit.md)）。
    上限は試行ごとにlanding branchの`dagq.toml`から読む（[ADR-t3033-1](../../adr/2026-10-22-t3033-1-run-review-revise-limit-from-the-landing-branchs-dagq-toml.md)、`domain::ReviseLimit`）。
-+  上限は以前は5回で、task 2599で3回に下げた（request 91の人の判断）。
++  上限は以前は5回で、3回に下げた（request 91の人の判断）。
  - 依頼（revise・衝突の解消）はeventを記録してから`turns/`に書くので、二重には書かない。
  - 1つのrunに開いた`approve_landing`のaskは1つ。
  

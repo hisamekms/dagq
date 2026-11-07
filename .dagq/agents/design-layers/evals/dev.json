@@ -100,8 +100,8 @@
       "id": "hm-dl2-field-list",
       "source": "handmade",
       "made_by": "claude-opus-5-5 (this session)",
-      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
-      "patch": "f99f5ddaebf569f85fe8663780edace3103b4f5d92ffd9905d61f99117ac38d0",
+      "base_commit": "7c804d5947cb3286c83aa3217b5def2afb3a5a33",
+      "patch": "e2b3f03e7f89686207d16e84840588838c8d7be74e16f77e3d7225f66ef40d3c",
       "adjudicated": null,
       "disputed": null,
       "review": {
@@ -123,7 +123,7 @@
       "source": "handmade",
       "made_by": "claude-opus-5-5 (this session)",
       "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
-      "patch": "db39773a7efe57e36ddc8ac39548c15696901352dd556dd8fab564950851a9f1",
+      "patch": "b3cca31701f50b83d7443ad26efc3241147ebdfd966a95fc71a3df6b8cc2839f",
       "adjudicated": null,
       "disputed": null,
       "review": {
@@ -145,7 +145,7 @@
       "source": "handmade",
       "made_by": "claude-opus-5-5 (this session)",
       "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
-      "patch": "0f9e794a90f4a53de98767facd3d0c7ea47f4354dc9fd785a96ca1ed53f73e22",
+      "patch": "925bab8bfbc40a5dc2eb4566c90a86621e2e4c71c5c8177c6193457e2a8c2d13",
       "adjudicated": null,
       "disputed": null,
       "review": {
@@ -220,8 +220,8 @@
       "id": "neg-pitfall-measurement",
       "source": "handmade",
       "made_by": "claude-opus-5-5 (this session)",
-      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
-      "patch": "988b409b6f86de80648700c40803329c32f67921069592e8e1608e6ecaa764c3",
+      "base_commit": "5e39650b73d7cbf5a29a3a2d34f7120ce6580bb8",
+      "patch": "b35def06243ba6baa7de11b8dc8eae8e7012ff7f631a654b7447898a471d50bd",
       "adjudicated": null,
       "disputed": null,
       "review": {
@@ -238,8 +238,8 @@
       "id": "neg-pitfall-agent-eval",
       "source": "handmade",
       "made_by": "claude-opus-5-5 (this session)",
-      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
-      "patch": "cd3aa4f97118db047cf5cd3f3830bc2371126ca3836b2873684be324a8105f1e",
+      "base_commit": "7c804d5947cb3286c83aa3217b5def2afb3a5a33",
+      "patch": "89b9e7c73d54be676ff105ca3ac20860f9cf97dcdd88a9e624665e5a5563bd1d",
       "adjudicated": null,
       "disputed": null,
       "review": {
@@ -255,8 +255,8 @@
       "id": "neg-pointer-doc-comment",
       "source": "handmade",
       "made_by": "claude-opus-5-5 (this session)",
-      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
-      "patch": "66fa3087c48f61b8e369d81ffa2186a6d635677a68e443bd84b6ca01d8046834",
+      "base_commit": "7c804d5947cb3286c83aa3217b5def2afb3a5a33",
+      "patch": "396bb482fa4ccf5b4c3680c4e42e468a34d936a7d2eb3a31e8dedbbca05048db",
       "adjudicated": null,
       "disputed": null,
       "review": {
@@ -272,8 +272,8 @@
       "id": "neg-adr-link",
       "source": "handmade",
       "made_by": "claude-opus-5-5 (this session)",
-      "base_commit": "6ba79543e1aa0ad3752090b561a5d2962994b961",
-      "patch": "c19edfe6b0e3a98bd3ed5b113f9b536a6ddd792f5963019fccafd7276dc50b86",
+      "base_commit": "5e39650b73d7cbf5a29a3a2d34f7120ce6580bb8",
+      "patch": "f9dc567838278a8da7bddfc7281bd457c072cefb3fe8ec68a172449f9164344f",
       "adjudicated": null,
       "disputed": null,
       "review": {
@@ -333,8 +333,8 @@
       "id": "neg-promise-appended-to-map-list",
       "source": "handmade",
       "made_by": "claude-opus-5-5 (this session)",
-      "base_commit": "8e02fbfa4ee3cd3f47cf62f1ddc2e5aedffac533",
-      "patch": "71619435987ed9c3a4559b4d8a81bdfce496deea965c58009bf9657d424b459f",
+      "base_commit": "5e39650b73d7cbf5a29a3a2d34f7120ce6580bb8",
+      "patch": "ef702e49c279b86ca084697206745ffbf670e2b15ab079cb1a37001f6453f54d",
       "adjudicated": null,
       "disputed": null,
       "review": {

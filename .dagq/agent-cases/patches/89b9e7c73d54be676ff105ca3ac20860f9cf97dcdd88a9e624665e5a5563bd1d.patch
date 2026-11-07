@@ -1,8 +1,7 @@
 diff --git a/docs/design/agent-eval.md b/docs/design/agent-eval.md
-index 9bf791946..145b17788 100644
 --- a/docs/design/agent-eval.md
 +++ b/docs/design/agent-eval.md
-@@ -50,6 +50,7 @@ workerもjobもLLMのCLIを直接打たない。
+@@ -53,6 +53,7 @@
    `dagq doctor`の`agents`の`errors`が出す（[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
  - ケースのファイルの形とpatchの置き場の参照の過不足（上）は、ケースの一覧の読み手と、このrepositoryの全ての一覧をそれで読むtestが検査する。
    `dagq doctor`と設定の読み込みにはまだ足していない。

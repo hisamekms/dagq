@@ -1,11 +1,10 @@
 diff --git a/docs/design/measurement.md b/docs/design/measurement.md
-index b590e4566..6b45edb52 100644
 --- a/docs/design/measurement.md
 +++ b/docs/design/measurement.md
-@@ -222,6 +222,7 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時
+@@ -219,6 +219,7 @@
+ - 今の値を残す1期間（ADR-t1662-1決定19）の長さは段3のtaskが決める。
  - kpiの`phase.<工程>`と`land_phase.<工程>`も同じ1期間は同じ名前で作り、その後はタグごとの値と`phase.first_commit`に置き換える。hostの設定の`[kpi.targets."phase.startup"]`は`phase.first_commit`に読み替える（ADR-t1662-1が[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)決定1をamends）。
- - 新しい出力は所要時間とslotを握った時間の2本でタグごとの内訳とunattributedを出し、`change`と`area`で層に分ける。
- - 着地の後のrevertとCIの失敗はrunの行の確定の後に届き、全ての行の記録を窓の終わりで畳んで絞り込んだrunごとに返す（`LedgerWindow::post_landing`）。
+ - 新しい出力は所要時間とslotを握った時間の2本でタグごとの内訳を出し、`change`と`area`で層に分ける。
 +- 約束: stats・kpi・reportは同じ窓と絞り込みならこの関数が選んだ同じ行から値を返すので、同じ期間の数が出力の間で食い違わない。
  
  ### 欠測と集約の契約
