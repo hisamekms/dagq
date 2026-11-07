@@ -1,0 +1,6 @@
+[[boundary]]
+id = "review-change-copy-rebuilds-the-reviewed-tree"
+kind = "Git"
+test = "review_change_copy::review_change_copy_rebuilds_the_reviewed_tree"
+reason = "run の base と head から binary を含む変更の写しを書き、branch が消えた後で固定した写しから tree の識別が一致する独立した Git を置けることは実の Git でしか確かめられない。拒否の選び方は application::role_snapshot の unit test。"
+task = 4042

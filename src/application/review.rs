@@ -165,7 +165,7 @@ pub const LANDING_ANSWER_BYTES: usize = 1_400;
 /// A person's answer to an `approve_landing` ask of the run under review:
 /// the ask, the review round that opened it, and the text the person
 /// wrote.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PersonAnswer {
     pub ask: AskId,
     /// The `attempt` of the run's last `review_started` before the ask
@@ -207,7 +207,7 @@ pub fn landing_answers(run: &RunId, events: &[RunEvent], asks: &[Ask]) -> Person
 pub const LANDING_ANSWERS_INTRO: &str = "A person answered these approve_landing asks of this run, oldest first. They are a person's judgement on an earlier round, not an earlier review's findings.";
 
 /// What [`landing_answers`] hands a run's review.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PersonAnswers {
     pub answers: Vec<PersonAnswer>,
     /// The older answers left out past [`LANDING_ANSWERS`].

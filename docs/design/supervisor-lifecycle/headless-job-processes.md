@@ -28,6 +28,9 @@ observerの子プロセスはここに記録せず、時間切れとsupervisor�
 
 ## 記録
 
+判定を返す役割の起動のsnapshotの入口は`application::role_snapshot`、材料の受け持ちは[計測のSSOTとビュー](../measurement.md#ssotとビュー)。
+組み立ての入力と参照する資料の本文は起動の時に固定し、元のファイルの上書き・削除に依らず読み戻せる。
+
 - runのreviewの段のjobは2種（`domain::headless_job::JobKind`。[ADR-t1895-1](../../adr/2026-10-06-t1895-1-review-stage-runs-agent-and-program-jobs-in-a-fixed-shape.md)決定1）: providerのheadlessのsessionの`agent`と、決まったプログラムの子processの`program`。
   復旧job・plan review・goal reviewは`agent`のjobである。
   どちらの種類も、起動の記録・時間の上限・timeoutの停止・終わりの記録・引き継ぎは下の同じ経路（`record_job`と`HeadlessJob`）を通る。

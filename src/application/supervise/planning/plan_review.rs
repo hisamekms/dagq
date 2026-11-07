@@ -27,8 +27,7 @@ use crate::{
         planner_idle_marker,
         prompt::{
             Carried, DUPLICATE_CANDIDATES, DuplicateCandidates, PLAN_REVIEW_ACCESS, PRECEDENT_ASKS,
-            PlanReviewMaterial, PlanReviewPrompt, PromptBytes, plan_review_prompt,
-            plan_revise_request, precedent_line,
+            PlanReviewMaterial, PlanReviewPrompt, PromptBytes, plan_revise_request, precedent_line,
         },
         screen_idle,
     },
@@ -488,7 +487,7 @@ impl PlanningState {
         env.files
             .create_dir_all(&job.dir)
             .with_context(|| format!("create {}", job.dir.display()))?;
-        let prompt = self.plan_review_material(env, proposal)?;
+        let prompt = self.plan_review_material(env, proposal, &job.dir)?;
         env.files
             .write(&job.dir.join("prompt.txt"), prompt.text.as_bytes())?;
         let stdout = job.dir.join("review.out");
@@ -577,6 +576,7 @@ impl PlanningState {
         &mut self,
         env: &mut PlanningEnv<'_>,
         proposal: &Proposal,
+        dir: &Path,
     ) -> Result<PlanReviewPrompt> {
         let tasks = proposal
             .task_ids()
@@ -644,7 +644,7 @@ impl PlanningState {
         // A replacement of a parked task: its plan, the conditions and the
         // saved work it maps (ADR-t1521-2 decision 4).
         let (replacement, snapshot) = replacement_material(env, proposal.id())?;
-        plan_review_prompt(&PlanReviewMaterial {
+        let input = crate::application::role_snapshot::PlanInput::capture(&PlanReviewMaterial {
             proposal,
             tasks: &tasks,
             goals: &goals,
@@ -661,7 +661,17 @@ impl PlanningState {
             replacement: replacement
                 .as_ref()
                 .map(|brief| (brief, snapshot.as_deref())),
-        })
+        });
+        use crate::application::role_snapshot::{self, Input, Snapshot};
+        role_snapshot::record(&**env.files, &dir.join("input-snapshot.json"), || {
+            Snapshot::capture(
+                &**env.files,
+                env.repository.main_head()?.into_string(),
+                Input::Plan(Box::new(input.clone())),
+                None,
+            )
+        });
+        input.build()
     }
 
     /// The files each task of the proposal and each ready or in-progress

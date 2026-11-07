@@ -2155,6 +2155,11 @@ pub trait RepositoryReads {
     }
     /// The landing branch's current commit, read again on every call.
     fn main_head(&self) -> Result<CommitSha>;
+    /// The tree object of a commit, without needing its branch or checkout.
+    fn tree_id(&self, commit: &str) -> Result<String> {
+        let _ = commit;
+        anyhow::bail!("this repository cannot identify trees")
+    }
 
     /// Main's first-parent history since `since` (unix seconds) and the
     /// paths it has now, for `conflict_hotspots`; a repository that cannot
@@ -2212,6 +2217,14 @@ pub trait PreparedRef {
 /// the queue is bound to and on its run worktrees. Commits are named by
 /// their full SHA; a failed Git command is an error with Git's message.
 pub trait Repository: RepositoryReads {
+    /// A replayable copy of base...head, including binary blobs, with fixed
+    /// a/ and b/ prefixes for git apply regardless of display configuration.
+    /// Separate from review.md and agent-eval diffs, whose bytes stay unchanged.
+    fn diff_binary_to_file(&self, base: &str, head: &str, path: &Path) -> Result<()> {
+        let _ = (base, head, path);
+        anyhow::bail!("this repository cannot copy binary changes")
+    }
+
     /// `[repository]` of the main checkout's `dagq.toml`, read again on
     /// every call; a repository without one has the default (`origin`,
     /// pushed). `integrate --no-push` reads it only to record the remote

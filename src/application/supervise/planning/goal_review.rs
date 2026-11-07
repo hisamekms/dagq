@@ -12,9 +12,7 @@ use crate::domain::headless_job::ReviewTakeover;
 use crate::{
     application::{
         GoalReviewApply, GoalReviewFailure, GoalReviewJob, job_start_failure,
-        prompt::{
-            FittedPrompt, GOAL_REVIEW_ACCESS, GoalReviewMaterial, PromptBytes, goal_review_prompt,
-        },
+        prompt::{FittedPrompt, GOAL_REVIEW_ACCESS, GoalReviewMaterial, PromptBytes},
     },
     domain::{
         GoalId, Receipt, RunStatus,
@@ -381,17 +379,29 @@ impl PlanningState {
             .into_iter()
             .map(|review| serde_json::to_value(review).map_err(Into::into))
             .collect::<Result<Vec<Value>>>()?;
-        Ok(goal_review_prompt(&GoalReviewMaterial {
-            goal: serde_json::to_value(&detail.goal)?,
-            tasks,
-            replacements,
-            follow_ups: detail.follow_up_memberships.clone(),
-            events,
-            previous,
-            gaps_in_a_row: job.gaps_in_a_row,
-            repo_root: &env.layout.repo_root,
-        })
-        .with_language(env.verifier.language().as_ref()))
+        let input = crate::application::role_snapshot::GoalInput::capture(
+            GoalReviewMaterial {
+                goal: serde_json::to_value(&detail.goal)?,
+                tasks,
+                replacements,
+                follow_ups: detail.follow_up_memberships.clone(),
+                events,
+                previous,
+                gaps_in_a_row: job.gaps_in_a_row,
+                repo_root: &env.layout.repo_root,
+            },
+            env.verifier.language(),
+        );
+        use crate::application::role_snapshot::{self, Input, Snapshot};
+        role_snapshot::record(&**env.files, &job.dir.join("input-snapshot.json"), || {
+            Snapshot::capture(
+                &**env.files,
+                env.repository.main_head()?.into_string(),
+                Input::Goal(Box::new(input.clone())),
+                None,
+            )
+        });
+        Ok(input.build())
     }
 
     /// What landed for a task: its integrated run, the commit and what

@@ -259,6 +259,14 @@ impl State {
 }
 
 impl RepositoryReads for FakeGit {
+    fn tree_id(&self, commit: &str) -> Result<String> {
+        ensure!(
+            self.lock().parents.keys().any(|c| c.as_str() == commit),
+            "no commit {commit}"
+        );
+        // Distinct commits have distinct synthetic trees, without Git.
+        Ok(format!("tree-{commit}"))
+    }
     fn main_head(&self) -> Result<CommitSha> {
         Ok(self.main())
     }
@@ -637,7 +645,13 @@ impl Repository for FakeGit {
         Ok(DiffNumbers::default())
     }
 
-    /// An empty diff, written to the test's files.
+    /// A fixed change copy naming its range, without invoking Git.
+    fn diff_binary_to_file(&self, base: &str, head: &str, path: &Path) -> Result<()> {
+        Ok(self
+            .files
+            .write(path, format!("binary change {base}...{head}").as_bytes())?)
+    }
+    /// An empty display diff, written to the test's files.
     fn diff_to_file(&self, _: &str, _: &str, path: &Path) -> Result<()> {
         Ok(self.files.write(path, b"")?)
     }

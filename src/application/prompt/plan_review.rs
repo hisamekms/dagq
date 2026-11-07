@@ -28,7 +28,7 @@ pub const DUPLICATE_CANDIDATES: usize = 5;
 /// ranks highest with the clues that relate them, and the tasks and landed
 /// commits `dagq search` finds for the words of its title, in any status,
 /// none of them the proposal's own.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct DuplicateCandidates {
     pub task_id: TaskId,
     pub related: Vec<RelatedTask>,

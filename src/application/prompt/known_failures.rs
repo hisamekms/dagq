@@ -35,7 +35,7 @@ pub const KNOWN_FAILURE_NAME_BYTES: usize = 500;
 pub const KNOWN_FAILURE_URL_BYTES: usize = 300;
 
 /// One item of the list: a test, or a failed job and step.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KnownFailure {
     pub name: String,
     /// The CI run that added it to the list.
@@ -48,7 +48,7 @@ pub struct KnownFailure {
 /// fix, the CI run that failed last first; `fixing`, those of the CI
 /// failures the task fixes; `file`, the file in the run's directory that
 /// holds the whole list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KnownFailures {
     pub others: Vec<KnownFailure>,
     pub fixing: Vec<KnownFailure>,

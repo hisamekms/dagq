@@ -3641,6 +3641,18 @@ impl Repository for GitRepository {
     fn diff_numbers(&self, base: &str, head: &str) -> Result<DiffNumbers> {
         GitRepository::diff_numbers(self, base, head)
     }
+    fn diff_binary_to_file(&self, base: &str, head: &str, path: &Path) -> Result<()> {
+        let file = super::agent_dir::create_file(path)
+            .with_context(|| format!("create {}", path.display()))?;
+        review_output_to(
+            &mut self.diff_since(
+                base,
+                head,
+                &["--binary", "--src-prefix=a/", "--dst-prefix=b/"],
+            ),
+            &file,
+        )
+    }
     fn diff_to_file(&self, base: &str, head: &str, path: &Path) -> Result<()> {
         let file = super::agent_dir::create_file(path)
             .with_context(|| format!("create {}", path.display()))?;
@@ -3718,6 +3730,14 @@ impl crate::application::RepositoryReads for GitRepository {
     }
     fn landing_branch_stamp(&self) -> Option<LandingBranchStamp> {
         GitRepository::landing_branch_stamp(self)
+    }
+    fn tree_id(&self, commit: &str) -> Result<String> {
+        output(self.command().arg("-C").arg(&self.root).args([
+            "rev-parse",
+            "--verify",
+            &format!("{commit}^{{tree}}"),
+        ]))
+        .map(|text| text.trim().to_owned())
     }
     fn main_head(&self) -> Result<CommitSha> {
         GitRepository::main_head(self)

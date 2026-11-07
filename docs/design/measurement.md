@@ -55,6 +55,7 @@ SSOTは消えてはいけない正本、ビューはSSOTから作り直せるも
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル。Claude Codeのtranscriptはhostの`$CLAUDE_CONFIG_DIR`か`~/.claude`にあり、containerのrunのものは[Container runtime](container-runtime.md)。sessionの有無の判断と区間の計測が読み、非対話のworkerの区間のトークン数はtranscriptでなくturnのstreamから取る（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る） |
 | 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIのLinuxの並列のjob（`.github/workflows/it-coverage-map.yml`）が1時間ごとに統合テストをテストごとのcoverageつきで流して作り直せる。macOSだけのコードとテストの結びつきは欠ける。GitHub Actionsのartifact `it-coverage-map`で、保持の期間を過ぎて消えてもよい。着地の検証は下の「着地の検証の対応表のcache」から読む |
 | agentのevalの記録 | evalの依頼・周・実行と費用・成績、productionのケースの集合の依頼・準備・ラベル・組み立てとdigest・disputedの人の決定（[Agent eval](agent-eval.md)） | SSOT | `run_events`の`agent_eval_*`と`agent_cases_*`で、周と集合の状態はこれだけから作り直す。queueのdirの`agent-evals/`とラベルのjobの出力（`agent-cases/<set id>/labels/`）は材料 |
+| 役割の起動のsnapshot | promptの組み立ての入力・資料の本文・mainのcommit、runのreviewの変更の記録 | 材料 | jobとrunのdirのファイル。保持期限か書き込み失敗で記録の無いjobはケースにせず理由つきで外し、過去のeventから作り直さない |
 | productionの集合のファイル | 集合のケースの一覧とpatch | ビュー | queueのdirの`agent-cases/<set id>/`の`cases.json`と`patches/`。`agent_cases_*`とgitの`<base>...<head>`の差分から作り直し、commitが辿れないケースは理由つきで飛ばす |
 | queueのbrokerの記録 | 動いているbrokerが起動ごとに書き、probeとrelayの見張りが読む自分の記録 | 材料 | `<queue dir>/broker/state.json`（寿命はbrokerの1回の起動で、起動し直せば作り直せる） |
 | runのrelayの記録 | 開いたrunのrelay（containerを起動し直す材料）で、relayの見張りが読む | 材料 | `<queue dir>/relay/<run>.json`（寿命はrunのrelayを開いてから閉じるまで） |
@@ -86,7 +87,6 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 
 - storeは`run_integrated`と同じtransactionで工程`push`を、`run_recovered`と同じtransactionでstatusの工程を書く。
   台帳は、着地と回収の工程がそのeventと食い違わないことを前提に畳む。
-- 工程を足すときは、記録の工程のタグとsupervisorの工程の対応の網羅的な`match`に足す（書き忘れるとコンパイルが止まる）。
 
 ### 終端
 
@@ -179,8 +179,7 @@ stats・kpi・reportの全ての欄は、行を窓と絞り込みで選んで返
 
 claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）に持ち、記録・台帳・kpiはキーを知らずに運ぶ（ADR-t1662-1）。
 
-- 記録: claimは`run_claimed`の他の欄を書いた後に、その欄から`claim_facts::attributes`で組を作る。
-  キーと元の欄の対応は同じmoduleの表`KEYS`だけが持ち、新しいキーはそこに足す。
+- 属性の組み立てとキーの対応の入口は`domain::claim_facts`。
 - キーは`^[a-z][a-z0-9_.]{0,63}$`、値は256 byte、1つのrunに64キーまで（値と数は予定）。
 - 予約名（派生の軸。属性のキーにしない）は`claim_facts::RESERVED`が持ち、kpiが派生の規則で作る。
 - [指示の版](supervisor-lifecycle/prompt.md#workerが読んだ指示の版)も属性のキーで、`kpi --by`で層になる。

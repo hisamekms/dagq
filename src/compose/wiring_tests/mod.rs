@@ -32,3 +32,5 @@ mod task_release;
 mod triage;
 mod unapplied_decisions;
 mod worker_trial;
+
+mod role_snapshots;

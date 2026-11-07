@@ -15,7 +15,7 @@ use super::{
 };
 
 /// A rule [`lint`] checks; the snake-case name is the `code` it reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LintCode {
     /// The task reaches itself over task and goal dependencies.
@@ -71,7 +71,7 @@ pub enum LintCode {
 }
 
 /// One broken rule: its code, the task it is about and why.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct LintViolation {
     pub code: LintCode,
     pub task_id: TaskId,

@@ -6,7 +6,7 @@
 use serde::Serialize;
 
 /// Where the language in force came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LanguageSource {
     /// `[language] tag` of the repository's `dagq.toml`.
@@ -16,7 +16,7 @@ pub enum LanguageSource {
 }
 
 /// The language resolved for a prompt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Language {
     pub tag: String,
     pub source: LanguageSource,

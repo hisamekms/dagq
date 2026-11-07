@@ -18,6 +18,7 @@ pub struct MemoryFiles {
     /// The most bytes one read takes, as the run directory's reads are
     /// bounded; none when unbounded.
     read_limit: Option<u64>,
+    rejected_suffix: Mutex<Option<String>>,
     /// The directories that are there ([`Self::put_dir`]); none else is.
     dirs: Mutex<std::collections::HashSet<PathBuf>>,
     /// The milliseconds the files' `now` moved on since its start, one at
@@ -45,6 +46,11 @@ impl MemoryFiles {
             ticks: Some(std::sync::atomic::AtomicU64::new(0)),
             ..Self::default()
         }
+    }
+
+    /// Inject a write failure only for the named file suffix.
+    pub fn reject_writes_ending_with(&self, suffix: &str) {
+        *self.rejected_suffix.lock().unwrap() = Some(suffix.to_owned());
     }
 
     fn check_limit(&self, len: u64) -> io::Result<()> {
@@ -87,7 +93,10 @@ fn missing() -> io::Error {
 }
 
 impl RunFiles for MemoryFiles {
-    fn create_dir_all(&self, _: &Path) -> io::Result<()> {
+    fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
+        for parent in dir.ancestors() {
+            self.put_dir(parent);
+        }
         Ok(())
     }
     fn create_new_dir(&self, dir: &Path) -> io::Result<()> {
@@ -95,6 +104,18 @@ impl RunFiles for MemoryFiles {
         Ok(())
     }
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        if self
+            .rejected_suffix
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|suffix| path.to_string_lossy().ends_with(suffix))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected write failure",
+            ));
+        }
         let stamp = match &self.ticks {
             // The tick this write took, so that two writes at once each
             // take one of their own.
@@ -104,7 +125,10 @@ impl RunFiles for MemoryFiles {
             }
             None => self.now(),
         };
-        self.put(path, stamp, &String::from_utf8_lossy(contents));
+        self.files
+            .lock()
+            .unwrap()
+            .insert(path.to_owned(), (stamp, contents.to_vec()));
         Ok(())
     }
     fn copy(&self, _: &Path, _: &Path) -> io::Result<()> {
@@ -158,6 +182,7 @@ impl RunFiles for MemoryFiles {
         let files = self.files.lock().unwrap();
         Ok(files
             .keys()
+            .chain(self.dirs.lock().unwrap().iter())
             .filter(|path| path.parent() == Some(dir))
             .cloned()
             .collect())

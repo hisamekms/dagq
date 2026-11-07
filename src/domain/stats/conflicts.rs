@@ -292,6 +292,46 @@ pub struct ConflictHotspot {
     pub alert: bool,
 }
 
+// Deserialize the finite state as an owned string first: borrowing a static
+// string would restrict the whole snapshot to Deserialize<'static>.
+impl<'de> serde::Deserialize<'de> for ConflictHotspot {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Owned {
+            path: String,
+            conflicts: i64,
+            tasks: usize,
+            task_ids: Vec<TaskId>,
+            landings: Option<i64>,
+            ratio: Option<f64>,
+            last_conflict_at: String,
+            state: String,
+            renamed_to: Option<String>,
+            alert: bool,
+        }
+        let v = Owned::deserialize(d)?;
+        let state = match v.state.as_str() {
+            "present" => "present",
+            "renamed" => "renamed",
+            "deleted" => "deleted",
+            "unknown" => "unknown",
+            _ => return Err(serde::de::Error::custom("unknown conflict hotspot state")),
+        };
+        Ok(Self {
+            path: v.path,
+            conflicts: v.conflicts,
+            tasks: v.tasks,
+            task_ids: v.task_ids,
+            landings: v.landings,
+            ratio: v.ratio,
+            last_conflict_at: v.last_conflict_at,
+            state,
+            renamed_to: v.renamed_to,
+            alert: v.alert,
+        })
+    }
+}
+
 struct Tally {
     conflicts: i64,
     tasks: BTreeSet<TaskId>,

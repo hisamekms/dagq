@@ -7,7 +7,7 @@ use super::provider::ReviewJobFailure;
 use super::*;
 use crate::application::agent_job::{self, AgentJob};
 use crate::application::job_start_failure;
-use crate::application::prompt::{AcceptanceRules, PromptBytes, REVIEW_ACCESS};
+use crate::application::prompt::{PromptBytes, REVIEW_ACCESS};
 use crate::application::review::{
     ReviewRange, SnapshotAgent, SubagentSnapshot, acceptance_record, acceptance_rules,
     landing_answers, review_code_paths, review_range_at, review_revise_limit, snapshot_subagents,
@@ -1589,20 +1589,61 @@ impl Supervisor<'_> {
             self.files.write(&whole_at, rules.text.as_bytes())?;
         }
         let whole_at = whole_at.display().to_string();
-        let fitted = review_prompt(
-            &task,
-            run,
-            &path,
-            known_failures.as_ref(),
-            rules.as_ref().map(|rules| AcceptanceRules {
-                path: &rules.path,
-                commit: &commit,
-                text: &rules.text,
-                whole_at: &whole_at,
+        use crate::application::role_snapshot::{
+            self, Input, ReviewChange, RulesInput, RunInput, Snapshot, Whole,
+        };
+        let input = RunInput {
+            task: Whole(task),
+            run: run.clone(),
+            review_path: path.clone(),
+            known_failures,
+            rules: rules.as_ref().map(|r| RulesInput {
+                path: r.path.clone(),
+                commit: commit.clone(),
+                text: r.text.clone(),
+                whole_at,
             }),
-            &answers,
-        )
-        .with_language(language.as_ref());
+            answers: answers.clone(),
+            language: language.clone(),
+        };
+        role_snapshot::record(
+            &*self.files,
+            &run_dir.join(format!("review-{attempt}-snapshot.json")),
+            || {
+                let base = material["base"]
+                    .as_str()
+                    .context("review has no base")?
+                    .to_owned();
+                let head = material["head"]
+                    .as_str()
+                    .context("review has no head")?
+                    .to_owned();
+                let tree_commit = if run.in_container() {
+                    run.result_commit()
+                        .context("run has no validated result")?
+                        .to_string()
+                } else {
+                    run_git::head(&*self.repository, run)?.into_string()
+                };
+                let patch = PathBuf::from(format!("review-{attempt}-change.patch"));
+                self.repository
+                    .diff_binary_to_file(&base, &head, &run_dir.join(&patch))?;
+                let change = ReviewChange {
+                    base,
+                    head,
+                    tree: self.repository.tree_id(&tree_commit)?,
+                    tree_commit,
+                    patch,
+                };
+                Snapshot::capture(
+                    &*self.files,
+                    self.repository.main_head()?.into_string(),
+                    Input::Run(Box::new(input.clone())),
+                    Some(change),
+                )
+            },
+        );
+        let fitted = input.build();
         self.files.write(
             &run_dir.join(format!("review-prompt-{attempt}.txt")),
             fitted.text.as_bytes(),
