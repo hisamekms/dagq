@@ -77,6 +77,14 @@ pub fn check_distinct(tags: &[GoalTag]) -> Result<(), DomainError> {
 
 /// The repository's set of goal tags, `[goals] tags` of `dagq.toml`, in
 /// the order written, each once.
+/// Written as a one-line TOML string array.
+/// Values must have GoalTag's shape and occur once. When configured,
+/// goal add/edit reject tags outside the set; lint reports draft tasks whose
+/// goal has no tags or tags outside it. Submit rejects, without mutation,
+/// any open draft goal among the explicit goal and the submitted tasks'
+/// goals that has missing or disallowed tags. With no setting only shape
+/// is checked and tags are optional. Each command reads the bound main
+/// checkout's dagq.toml and fails on any parse error in the file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TagSet(Vec<GoalTag>);
 

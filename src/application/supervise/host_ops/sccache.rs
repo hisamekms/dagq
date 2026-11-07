@@ -20,6 +20,8 @@
 //! `sccache_wrapper_removed` ([`record_wrapper_removed`]). A
 //! worker's turns are looked at by its wrapper the same way
 //! ([`crate::application::headless_session`]).
+//! Monitoring continues during drain; retry and look intervals use the
+//! injected monotonic clock rather than wall time.
 
 use super::*;
 use crate::application::SccacheServer;

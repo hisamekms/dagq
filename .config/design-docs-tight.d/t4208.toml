@@ -1,0 +1,5 @@
+[[doc]]
+path = "docs/design/supervisor-lifecycle/run-environment.md"
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/sccache.md"

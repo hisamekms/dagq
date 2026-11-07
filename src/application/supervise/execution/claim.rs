@@ -566,6 +566,9 @@ impl Supervisor<'_> {
     /// on the queue, so a restarted supervisor does not repeat it. A
     /// `dagq.toml` that cannot be read leaves the last answer: provisioning
     /// and `integrate` report that file themselves.
+    /// Each fill pass checks before claims, also during drain or handoff.
+    /// A missing program holds new claims, needs_session resumes and landing
+    /// starts; live runs, reviews, triage and already-started resumes continue.
     pub(super) fn check_run_env_programs(&mut self) -> Result<()> {
         let check = match self.verifier.run_env_programs(None) {
             Ok(check) => check,

@@ -209,7 +209,7 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
 - buildの出力とworkerのcache: `dagq.toml`の`[container.build_output]`が名指すdirにrunごとのvolumeを、`[container.worker_cache]`が挙げるdirごとにqueueのvolumeをmountする（綴りと意味は`run_env`の各表のdoc comment、案は[profile](toolchain-profiles.md#推奨の設定)）。
   runtimeは道具を知らず、projectが`[run.env]`で向ける。
   workerのcacheは信頼せず、同じqueueのworker・resumeだけが共有する（ADR-t2257-1決定5）。
-- sccache: containerの中のserverを使う（[Run environment](supervisor-lifecycle/run-environment.md#sccacheのserver)）。
+- sccache: containerの中のserverを使う（[sccacheのserver](supervisor-lifecycle/sccache.md#sccacheのserver)）。
 - containerの中: `dagq relay turn`がagentの前後の手順を持ち（順は`infrastructure::container_turn`のdoc comment）、agentが終われば結果に依らず、run dirの事実のファイルを上の「git」の形で書く。
   agentのhomeはrun dirの下に置き、次のturnがsessionをresumeできる。
 - transcript: agentのhomeの`.claude`の下に、containerの中のcwd（clone）を名にしたprojectのdirでできる。

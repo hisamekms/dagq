@@ -101,6 +101,10 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
 - `--evidence e2e`を明示したtaskは差分に依らずe2eが要るので、`[e2e] paths`の外でも実プロセス・launchdで確かめる必要があるとplannerが判断したときだけ付け、理由をdescriptionに書く。
 - その判断の目安: runをまたぐsupervisorの振る舞い（superviseの回ごとのclaim・landing recheck・resume・`integrate --next`の着地の順・superviseの回ごとのrunの本数）を変え、`tests/e2e.rs`の複数passの筋書きを変えうるtaskには付ける。これらを変える差分は主に`[e2e] paths`の外のファイル（superviseの判断の部分（`src/application/supervise/`の`handoff.rs`・`handoff_slots.rs`と`update.rs`以外）や、claimと着地の順を決めるstoreとdomain）に収まるので、付けないと着地の前のe2eが流れない。task 1310（landing recheck）はこの外で着地の前のe2eが流れずに着地し、自動更新の関門で`tests/e2e.rs`の`two_independent_tasks_run_concurrently_and_a_dependent_follows_integration`が落ちて固定バイナリの更新が止まった（ask 350。testはtask 1516が直した）。`[e2e] paths`にsuperviseの判断のファイルを足して防がないのは、runtimeのcommitの多くが触るので狭める効果がほぼ消えるため（`dagq.toml`のコメントとtask 1516の判断）。目安に当たらないsuperviseの変更（1つのrunの中の判断だけを変えるもの）には付けない。
 
+## runtimeのdraftの検査
+
+runtimeが登録したdraftを含むplanは、`dagq lint`でchangeとtitleを点検し、必要なら`dagq edit`で直してから`dagq submit`に渡す。
+
 ## change
 
 - `--change`はtaskが行う変更の種類を1つ宣言する（[ADR-t980-1](../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)）。値の集合は`dagq.toml`の`[tasks] changes`で、`add`のたびに付ける。集合の外の値とchangeの無いtaskを拒む仕組みはpluginの`dagq`の`reference/register.md`の「Task fields」（`--change`の箇条）、areaを着地の差分から求める仕組みは同じskillの`reference/scope.md`の「Recommended combinations」、areaの対応表は`dagq.toml`の`[areas]`が持つ。

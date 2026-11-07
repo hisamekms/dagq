@@ -178,6 +178,7 @@ const TASKS_RELATED_DOCS: &str = "related_docs";
 const GOALS_TABLE: &str = "goals";
 /// The keys of `[goals]`.
 const GOALS_TAGS: &str = "tags";
+/// The Spike/replanning cycle limit of a goal, read only by submit.
 const GOALS_SPIKE_CYCLES: &str = "max_spike_cycles";
 /// `[e2e]`: `paths`, the globs whose change requires `e2e` of a run
 /// (ADR-t963-1 decision 2). The globs are written as `add --paths` takes
@@ -197,6 +198,12 @@ const RETIRED_TABLES: [&str; 2] = ["broker", "broker.package"];
 const RETIRED_TABLE: &str = "broker";
 /// `[review.subagents.<agent>]`: the globs that make a review's subagent
 /// required (ADR-t1453-1 decision 1), one table per agent.
+/// A custom agent's name is kebab-case and names its directory under
+/// `.dagq/agents/<agent>/AGENT.md`. A `builtin:` name instead selects
+/// a built-in: its optional paths replace the default paths, omitted
+/// settings retain defaults. Syntax errors fail the whole configuration.
+/// Missing definitions and names used by multiple roles are reported in
+/// doctor's `agents.errors`; the review handles them as definition errors.
 const REVIEW_SUBAGENTS_PREFIX: &str = "review.subagents.";
 /// What [`parse_config`] calls the current table while in a
 /// `[review.subagents.*]`.
@@ -238,6 +245,9 @@ const REVIEW_PROGRAM_KEYS: [&str; 4] = ["script", "args", "paths", "timeout_secs
 const REVIEW_BUILTIN_PROGRAM_TABLE: &str = "review.programs.builtin";
 /// `[headless]`: `wrapper`, where a headless session's wrapper runs
 /// (ADR-t1404-1 decision 7).
+/// Accepts `wrapper = "workspace"` or `"background"`, but neither changes
+/// workers or runtime planners: both always run in the background.
+/// A workspace value warns once per supervisor process that it has no effect.
 const HEADLESS_TABLE: &str = "headless";
 /// The one key of `[headless]`.
 const HEADLESS_WRAPPER: &str = "wrapper";
@@ -748,6 +758,11 @@ impl Config {
 /// `[supervisor] light_changes` is checked against `[tasks] changes` only
 /// after the whole file is read, so `[tasks]` may come after
 /// `[supervisor]`; its error carries the line of `light_changes`.
+/// Unknown tables or keys, duplicate keys and values of the wrong type or
+/// range fail the whole file with a line number. The retired broker tables
+/// are skipped regardless of their contents; language is checked separately.
+/// A `run.env` key starting with `DAGQ_` is reserved for the runtime.
+/// A `#` outside a string starts a comment.
 pub fn parse_config(text: &str) -> Result<Config> {
     let mut table: Option<&str> = None;
     let mut seen: Vec<&str> = Vec::new();
@@ -3361,6 +3376,12 @@ pub fn load_e2e_paths(root: &Path) -> Result<Vec<String>> {
 
 /// `[[recurring]]` of the `dagq.toml` in `root` (ADR-0072 decision 1); no
 /// file or no table is none.
+/// The supervisor's planner pass rereads the main checkout's working file.
+/// A parse error is an error of the whole file with its line; the pass
+/// registers nothing, warns once per error and never opens a decision ask.
+/// Doctor exposes it as recurring.error. Status/stats recurring.schedule
+/// show last registration, unfinished task and next due time via
+/// crate::domain::recurring::RecurringSchedule.
 pub fn load_recurring(root: &Path) -> Result<Vec<crate::domain::recurring::RecurringDraft>> {
     let path = root.join(CONFIG_FILE_NAME);
     let Some(text) = read_config(&path)? else {
@@ -3629,6 +3650,24 @@ pub fn expand(value: &str, queue_dir: &str, run_dir: &str) -> String {
 
 /// The expanded `[run.env]` of the `dagq.toml` in `root`; no file is an
 /// empty table.
+///
+/// Callers supply the main checkout, never the run's worktree.
+/// Provision reads before creating the worktree and appends these pairs
+/// after worker identity variables to the background wrapper's environment;
+/// a bad file fails provisioning, starts no wrapper and holds claims.
+/// Review passes the pairs to its headless command. Integrate and the
+/// already-satisfied snapshot check pass them to verification commands;
+/// other receipt validation runs no commands. With no verification command
+/// they do not read this table. Host verification (including flaky retries
+/// and the snapshot check) replaces TMPDIR with a short per-run directory
+/// outside runs/; container verification does not.
+/// A read error aborts landing and restores the run's previous state.
+/// Resume reads before spending an attempt and appends the pairs after the
+/// same worker identity variables (including the actor name). Its session
+/// continues the worker's workspace for ADR-0049 decision 3, so it needs
+/// the same compile cache and build/test concurrency. An unreadable file
+/// leaves needs_session and spends no attempt; the landing-branch read
+/// checks the same file first. Missing programs hold new resumes as claims.
 pub fn load_run_env(
     root: &Path,
     queue_dir: &Path,

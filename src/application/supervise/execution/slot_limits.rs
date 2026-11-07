@@ -35,6 +35,10 @@ impl ClaimState {
     /// `claim_spacing` spaces the next claim from the queue's latest one.
     /// `light_changes` (ADR-t1591-1) has no flag: it is read with every
     /// flag given too, and a change takes effect at the next claim.
+    /// The pass reads this after conflicts. Removing the table restores
+    /// defaults; a missing file keeps current values. A light_changes-only
+    /// change records an event without rewriting the registration. Other
+    /// readers of an invalid file can still hold claims and landings.
     pub(super) fn reread_limits(
         &mut self,
         queue: &(impl SupervisorRegistry + RunLog + ?Sized),

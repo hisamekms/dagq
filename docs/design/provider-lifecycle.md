@@ -185,7 +185,7 @@ claimの要求のworkerは`domain::provider_trial::ProviderTrial::requested`が�
 
 - 入口: `infrastructure::codex::Codex::turn_command`と`CodexTurnReader`（[ADR-t813-3](../adr/2026-09-28-t813-3-codex-worker-permissions.md)）。
 - 約束: 権限とtrustは毎回同じものを渡す（理由は`infrastructure::codex`のmodule doc comment）。
-- networkは[sccacheのserver](supervisor-lifecycle/run-environment.md#sccacheのserver)のため。
+- networkは[sccacheのserver](supervisor-lifecycle/sccache.md#sccacheのserver)のため。
 - 落とし穴: `pkill` / `killall`を止める主の防御はsandboxで、worktreeのrulesは補助で、sandboxは隔離ではない（[Security](security.md#codexのworkerのsandbox)）。
 - supervisorとwrapperはsandboxの外で動くので、run dirはlinkを辿らずに読み書きする（`infrastructure::agent_dir`）。
 

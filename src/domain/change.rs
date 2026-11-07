@@ -72,6 +72,15 @@ impl fmt::Display for TaskChange {
 
 /// The repository's set of changes, `[tasks] changes` of `dagq.toml`, in
 /// the order written, each once.
+/// When configured, add/edit reject a change outside the set; lint reports
+/// it and submit rejects it or a missing change without changing any task.
+/// Without the setting, only the value's shape is checked and it is optional.
+/// These command readers load the queue's bound main checkout on each call;
+/// any parse error anywhere in dagq.toml stops the command. Runtime-created
+/// drafts bypass these checks and must be aligned by lint and submit.
+/// Title prefixes and related-document hints share that read: without the
+/// respective settings no title check or hints run. Only lint reads the
+/// documents matching related_docs from that checkout.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChangeSet(Vec<TaskChange>);
 

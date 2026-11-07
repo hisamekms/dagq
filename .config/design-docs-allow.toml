@@ -20,8 +20,3 @@
 [[doc]]
 path = "docs/design/overview.md"
 line = 1095
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/run-environment.md"
-size = 36358
-

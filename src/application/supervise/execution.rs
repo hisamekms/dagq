@@ -1755,6 +1755,12 @@ enum Phase {
     Resume(ResumeWatch),
     /// A run to land (a passed review, or an approved resolved resume)
     /// waits for the single integration slot, keeping its lease.
+    /// Missing run.env programs keep the lease here without taking the
+    /// integration slot; a later pass finding them starts landing. Drain or
+    /// stopped claims release the lease instead of waiting, for adoption;
+    /// handoff retains it for the next process. An approve_landing land
+    /// answer still closes its ask and queues the run immediately; only
+    /// start_approved_landings waits for the programs.
     AwaitingSlot,
     /// A passed run that changes an agent's definition waits, its session
     /// open and its lease and slot kept, for the dev of the landing

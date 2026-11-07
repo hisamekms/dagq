@@ -732,7 +732,7 @@ Claude の turn の prompt は位置引数でなく stdin で渡り、container 
 
 ### container の中の sccache の server
 
-`[run.env]` が sccache を名指すとき、supervisor は走っている turn の container の `podman inspect`（`infrastructure::run_container` の `INSPECT_FORMAT`: Id・State.Running・json の Config.Env・json の Mounts を 1 行ずつ）から server の計画を作り、agent より前に container の中に server を起こす（[Run environment](../design/supervisor-lifecycle/run-environment.md#sccacheのserver)）。
+`[run.env]` が sccache を名指すとき、supervisor は走っている turn の container の `podman inspect`（`infrastructure::run_container` の `INSPECT_FORMAT`: Id・State.Running・json の Config.Env・json の Mounts を 1 行ずつ）から server の計画を作り、agent より前に container の中に server を起こす（[sccacheのserver](../design/supervisor-lifecycle/sccache.md#sccacheのserver)）。
 inspect の parse は fake の podman でしか確かめていない。
 
 1. 「用意」の 6 の `[run.env]`（`RUSTC_WRAPPER = "sccache"`、`SCCACHE_DIR` が worker の cache の下）のまま、`cargo build --locked` を流す task を 1 件流す。

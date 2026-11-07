@@ -10,6 +10,14 @@
 //! `--runtime-planners`), else `[supervisor]` of the main checkout's
 //! `dagq.toml`, else the default. `max_spikes` and `class_aging` have no
 //! flag, and `max_spikes` no default: without it no class is limited.
+//!
+//! Up forwards only explicit flags to supervise, so defaults are not baked
+//! into its argv. Startup (also after an exec handoff) resolves these values;
+//! unreadable startup configuration warns and uses defaults. An exec retains
+//! argv, hence flag precedence: to follow the file, down --wait then up with
+//! no flags. The restart callers are install's allow-breaking drain
+//! (restart_arguments) and watch rollback (flag_arguments), not the update job.
+//! Status and doctor expose values and sources through domain::views.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

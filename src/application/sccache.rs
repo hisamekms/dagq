@@ -7,6 +7,8 @@ use std::path::Path;
 
 /// Add sccache diagnostics only for a bound, readable configuration naming
 /// sccache. Without that configuration its restart attention is hidden too.
+/// Status reads no stats client; doctor requests stats. Both first confirm
+/// server presence so diagnostic reads never start a server.
 pub fn add_diagnostics(
     queue: &dyn RunLog,
     server: &dyn SccacheServer,

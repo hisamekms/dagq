@@ -33,6 +33,10 @@ pub struct RunEnvProgram {
 }
 
 /// What one check of `[run.env]` found.
+/// Doctor shows its own PATH's check and the supervisor's latest recorded
+/// answer, omitting run_env only when neither configuration nor record exists.
+/// Missing/found events belong to the queue (no task or goal); watch wakes
+/// for missing and status shows it until found clears the inbox attention.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct RunEnvCheck {
     /// Whether the repository has a `dagq.toml` at all; without one there is

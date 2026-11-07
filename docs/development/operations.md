@@ -54,6 +54,12 @@ hostのツールは人が入れ、miseのshimへのlinkを`~/.local/bin`に置�
   - workerのsandboxでprekがcacheを書けずにcommitが止まったとき: hookのエラーがprekのcacheのdirectory（既定は`~/.cache/prek`、`PREK_HOME`で変わる）への書き込みの拒否かを見る。同じworktreeで`committed --config .config/committed.toml --commit-file <メッセージのファイル>`を直接流して通れば、接頭辞の違反でなくcacheの書き込みで止まっている。そのときは既定のdirectoryへの書き込みをsandboxに許さず、`PREK_HOME`を[Security](../design/security.md#codexのworkerのsandbox)の「Codexのworkerのsandbox」が書いてよいとする場所（run dirなど）の中に向ける。
 - python: 他のツールと違い、版はrepositoryのrootの`mise.toml`が固定し、開発者はcheckoutで`mise install`を打って入れる（人の決定 2026-10-31）。runtimeが呼ぶhostのツールではなく開発者の環境の版の固定なので、[ADR-0049](../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定7のglobalとlinkの形は取らない。版を上げるときはcooldown（miseの`minimum_release_age`）を満たす最新（`mise latest python`）に`mise.toml`の1行を変えるtaskにする。scriptsは標準ライブラリだけで書き、3.9の`python3`でも動く今の形を保つので、CI（`.github/workflows`は`setup-python`を使わずrunnerの`python3`）とmiseを使わないhostは揃えない。rustの版はこの`mise.toml`でなく`rust-toolchain.toml`とrustupが決める。runのworktreeにもこの`mise.toml`が入り、miseを有効にしたshellでは選ばれる。toolsだけの`mise.toml`はmiseのtrustを求めないので、ADR-0049の比較の案が挙げたtrustで止まる懸念はこのファイルには当たらない。
 
+### sccacheの再起動の失敗
+
+再起動に失敗した知らせを受けた人は、`dagq doctor`でserverのidentityとportを確かめる。
+確認したserverをhostで止め、起動をsupervisorに任せる。
+serverの所有と通知が消える条件は[sccacheの地図](../design/supervisor-lifecycle/sccache.md#外部serverと失敗の偏り)が持つ。
+
 ## hostのswapとメモリ
 
 hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候補のprocessを確かめる。hostの操作は人とinboxのもので、workerはしない（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)）。

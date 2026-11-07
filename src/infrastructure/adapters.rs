@@ -1222,6 +1222,12 @@ pub fn checkout_files(checkout: &Path) -> Result<Vec<String>> {
 /// directory in its place, which leaves only `path` itself when it is that
 /// worktree. Both are errors that say why and what to do: the `dagq.toml`
 /// of the worktree dagq runs in is never read in the main checkout's place.
+/// Without a main checkout, up's preflight starts no supervisor;
+/// supervise and integrate fail at startup. Doctor reports repository.error
+/// and omits run_env. Plan refuses without reading a checkout. Install with
+/// no --from asks for it. Inbox watch notifications instead use the bound
+/// common-directory name (the invoking checkout for an unbound queue);
+/// see naming_checkout.
 pub fn main_checkout_of(path: &Path) -> Result<PathBuf> {
     let git = git_executable()?;
     let common_dir = git_common_dir(path)?;

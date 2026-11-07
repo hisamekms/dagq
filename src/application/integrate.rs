@@ -883,6 +883,11 @@ impl Integrator {
     /// `land`) or passed its latest review. A refused request gives the
     /// slot back and fails; nothing reaches `main`. The landing's events
     /// are written as the Integrator at the requester's request.
+    /// Host verification checks run.env programs expanded with this run_dir
+    /// before commands. Missing programs abort landing like an unreadable config,
+    /// restore the prior state (no needs_session or spent resume), and put
+    /// variables, values and PATH in last_error. No commands means no check.
+    /// Container verification removes the host wrapper instead.
     pub fn land(
         &self,
         ctx: &mut Integration<'_>,

@@ -289,6 +289,10 @@ pub struct Ports<'a> {
     /// `run_env_programs(checkout, db, path)` checks the programs the
     /// `[run.env]` of the `dagq.toml` in `checkout` names on `path`
     /// (ADR-0049 decision 9).
+    /// Preflight calls this after Claude availability/trust with up's PATH,
+    /// the PATH passed to the supervisor. Missing programs prevent startup;
+    /// the error names variables, values, PATH and the install/remove remedy.
+    /// A repository with dagq.toml includes the check in up's output.
     pub run_env_programs: &'a dyn Fn(&Path, &Path, &str) -> Result<RunEnvCheck>,
     /// `ci_watch_preflight(checkout, path)`: with `[ci_watch]` in the
     /// `dagq.toml` in `checkout`, why `gh` on `path` cannot read the CI

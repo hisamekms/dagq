@@ -3,6 +3,7 @@
 //! its rows of origin `recurring` in `draft_origins` (the key in their
 //! `material`); a key removed from the file keeps them, and adding it
 //! again or editing it does not reset its interval or its overlap check.
+//! Removing a key never cancels an already registered draft.
 //! Registering re-checks the history, the tasks of the key not ended and
 //! the interval in one `BEGIN IMMEDIATE` transaction with the draft and its
 //! origin, so two supervisors across a handoff never register twice.
