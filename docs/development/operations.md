@@ -138,6 +138,9 @@ KPI・印・レポートの使い方（設定・運用・hostを変えたとき�
 
 ## secretと外部送信
 
+- test・dev/hold-out のevalのケース（`.dagq/agent-cases/patches/`のpatchを含む）・文書にsecretの例を書くときは、`builtin:secrets`とGitHubのsecret scanningが検出しない形（明示のplaceholder、接頭辞や桁を崩した形）にする。
+  検出される形を入れると、着地の後のmainのpushがGH013で止まる。
+
 - レポート（queue dirの`reports/`）は外部に送らない。
 - pushの`[push]`の置き場と、ntfyのtopic・SlackのwebhookのURL・tokenなどのsecretの置き場（repositoryの外）は[push](../design/supervisor-lifecycle/push.md)の「設定（host.tomlの`[push]`）」「設定例」とpluginの`dagq`の`reference/kpi.md`の「Push to a person away from the screen」が持つ。
 

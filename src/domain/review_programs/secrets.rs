@@ -11,7 +11,10 @@
 //! past half of its lines) reads as a removed file and an added one, whose
 //! lines all count as added. A file whose name does not decode exactly is
 //! always read. No value is ever printed, only the file, the line and the
-//! [`Kind`].
+//! [`Kind`]. Slack webhook URLs use the prefixes, body characters and
+//! minimum length in [`TOKENS`]; a body starting with `<` or `{` is a
+//! placeholder, not a match. Rejections ask for explicit, undetected
+//! placeholders for fake values in tests, cases and documentation.
 
 /// What an added line looks like.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +28,10 @@ pub enum Kind {
     GithubToken,
     GitlabToken,
     SlackToken,
+    /// A Slack webhook URL: `https://hooks.slack.com/` followed by
+    /// `services/`, `workflows/` or `triggers/`, then at least 10 bytes
+    /// of `[A-Za-z0-9/]`. A body starting with `<` or `{` does not match.
+    SlackWebhookUrl,
     StripeKey,
     GoogleApiKey,
     AnthropicApiKey,
@@ -46,6 +53,7 @@ impl Kind {
             Self::GithubToken => "github_token",
             Self::GitlabToken => "gitlab_token",
             Self::SlackToken => "slack_token",
+            Self::SlackWebhookUrl => "slack_webhook_url",
             Self::StripeKey => "stripe_key",
             Self::GoogleApiKey => "google_api_key",
             Self::AnthropicApiKey => "anthropic_api_key",
@@ -63,6 +71,8 @@ enum Body {
     UpperAlnum,
     /// `[A-Za-z0-9]`
     Alnum,
+    /// `[A-Za-z0-9/]`
+    AlnumSlash,
     /// `[A-Za-z0-9_]`
     AlnumUnderscore,
     /// `[A-Za-z0-9_-]`
@@ -76,6 +86,7 @@ impl Body {
         match self {
             Self::UpperAlnum => byte.is_ascii_uppercase() || byte.is_ascii_digit(),
             Self::Alnum => byte.is_ascii_alphanumeric(),
+            Self::AlnumSlash => byte.is_ascii_alphanumeric() || byte == b'/',
             Self::AlnumUnderscore => byte.is_ascii_alphanumeric() || byte == b'_',
             Self::AlnumUnderscoreDash => {
                 byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
@@ -116,6 +127,16 @@ const TOKENS: &[(Kind, &[&str], Body, usize)] = &[
         Kind::SlackToken,
         &["xoxa-", "xoxb-", "xoxp-", "xoxo-", "xoxs-", "xoxr-"],
         Body::AlnumDash,
+        10,
+    ),
+    (
+        Kind::SlackWebhookUrl,
+        &[
+            "https://hooks.slack.com/services/",
+            "https://hooks.slack.com/workflows/",
+            "https://hooks.slack.com/triggers/",
+        ],
+        Body::AlnumSlash,
         10,
     ),
     (Kind::StripeKey, &["sk_live_", "rk_live_"], Body::Alnum, 20),
@@ -467,7 +488,7 @@ pub fn outcome(found: &[Finding]) -> (String, i32) {
         })
         .collect();
     text.push_str(&format!(
-        "builtin:secrets: {} added line(s) look like a credential; remove the value from the change (keep it outside the repository), or turn builtin:secrets off or narrow its paths in dagq.toml if it is none\n",
+        "builtin:secrets: {} added line(s) look like a credential; remove the value from the change (keep it outside the repository), use explicit placeholders that are not detected for fake values in tests, cases and documentation; or turn builtin:secrets off or narrow its paths in dagq.toml if it is none\n",
         found.len()
     ));
     (text, 1)
@@ -475,3 +496,68 @@ pub fn outcome(found: &[Finding]) -> (String, i32) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod slack_tests {
+    use super::*;
+
+    /// URL bodies are assembled so source scanners never see a fake credential.
+    #[test]
+    fn slack_webhook_urls_are_found_and_reported_without_values() {
+        for path in ["services", "workflows", "triggers"] {
+            let url = format!(
+                "https://hooks.slack.com/{path}/{}",
+                "T123abc45/B678def90/aBc123DeF456"
+            );
+            let diff = format!(
+                "diff --git a/example b/example\n+++ b/example\n@@ -0,0 +1 @@\n+url = \"{url}\"\n"
+            );
+            let found = scan(&diff, &[]);
+            assert_eq!(
+                found,
+                [Finding {
+                    file: "example".into(),
+                    line: 1,
+                    kind: Kind::SlackWebhookUrl,
+                }]
+            );
+            let (text, code) = outcome(&found);
+            assert_eq!(code, 1);
+            assert!(text.starts_with("example:1: slack_webhook_url\n"));
+            assert!(!text.contains(&url));
+            assert!(text.contains("explicit placeholders that are not detected for fake values in tests, cases and documentation"));
+        }
+    }
+
+    #[test]
+    fn slack_webhook_placeholders_and_short_or_invalid_bodies_are_none() {
+        for line in [
+            "<SLACK_WEBHOOK_URL>",
+            "hooks.slack.com",
+            "https://hooks.slack.com",
+        ] {
+            assert_eq!(line_kind(line), None);
+        }
+        for path in ["services", "workflows", "triggers"] {
+            let prefix = format!("https://hooks.slack.com/{path}/");
+            for body in [
+                "<placeholder>",
+                "{placeholder}",
+                "",
+                "aB12/cD34",
+                "_aB12cD3456",
+                "-aB12cD3456",
+            ] {
+                assert_eq!(
+                    line_kind(&format!("{prefix}{body}")),
+                    None,
+                    "{path}: {body}"
+                );
+            }
+            assert_eq!(
+                line_kind(&format!("{prefix}{}", "aB12/cD345")),
+                Some(Kind::SlackWebhookUrl)
+            );
+        }
+    }
+}

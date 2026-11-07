@@ -44,6 +44,8 @@ workerもjobもLLMのCLIを直接打たない。
 
 ## 定義とケースの置き場
 
+ケースの偽のsecretの形は[運用の「secretと外部送信」](../development/operations.md#secretと外部送信)に従う。
+
 - 定義: `.dagq/agents/<name>/AGENT.md`。形は[ADR-t1453-1](../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の定義と同じ（frontmatterの`description`と本文の検査項目と参照先の文書）に、道具の宣言の`tools`（下の「道具の宣言」）を足したもの。`<name>`はkebab-case。
 - ケース: `.dagq/agents/<name>/evals/`の`dev.json`・`holdout.json`・`production.json`。
   splitはこのファイルで区分し、ケースの欄に持たない。
