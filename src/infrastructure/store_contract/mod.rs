@@ -69,6 +69,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("event actors", event_actors::<S, F>),
         ("event bodies", event_bodies::<S, F>),
         ("typed conditions", typed_conditions::<S, F>),
+        ("backend parallel", backend_parallel::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

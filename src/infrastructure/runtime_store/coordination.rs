@@ -21,6 +21,10 @@ use super::*;
 use crate::domain::worker::ProviderCheck;
 use crate::infrastructure::sql_exec::{SqlRead, SqlWrite};
 
+/// SUM(bigint) returns numeric on Postgres; keep the shared result an integer
+/// while preserving NULL when no supervisor matches.
+pub(crate) const BACKEND_PARALLEL_SQL: &str = "SELECT CAST(SUM(parallel) AS BIGINT) FROM supervisors WHERE CAST(?1 AS TEXT) IS NULL OR token=?1";
+
 impl SqliteQueue {
     /// Refresh every lease this supervisor holds. Zero rows is not an error:
     /// an idle supervisor owns nothing.
@@ -528,12 +532,10 @@ impl SqliteQueue {
             sql_params![token],
             |r| r.get(0),
         )?;
-        let parallel = SqlRead::query_row(
-            &*self.conn,
-            "SELECT SUM(parallel) FROM supervisors WHERE CAST(?1 AS TEXT) IS NULL OR token=?1",
-            sql_params![token],
-            |r| r.get(0),
-        )?;
+        let parallel =
+            SqlRead::query_row(&*self.conn, BACKEND_PARALLEL_SQL, sql_params![token], |r| {
+                r.get(0)
+            })?;
         Ok((slots, parallel))
     }
 

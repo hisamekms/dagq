@@ -3187,6 +3187,10 @@ mod store_contract_tests {
         contract(|open| store_contract::json_set_field(&open));
     }
     #[test]
+    fn backend_parallel() {
+        contract(|open| store_contract::backend_parallel(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

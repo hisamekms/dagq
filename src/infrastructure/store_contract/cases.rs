@@ -432,3 +432,28 @@ pub fn typed_conditions<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Res
     }
     Ok(())
 }
+
+/// The backend capacity aggregate reads as an optional integer through the
+/// execution port, including an empty set and the supervisor token filter.
+pub fn backend_parallel<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
+    use crate::infrastructure::runtime_store::BACKEND_PARALLEL_SQL;
+
+    let store = open()?;
+    let tx = store.write_entry("contract_backend_parallel")?;
+    let parallel = |token: Option<&str>| {
+        tx.query_row(BACKEND_PARALLEL_SQL, sql_params![token], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
+    };
+    ensure!(parallel(None)?.is_none());
+    for (token, slots) in [("contract-backend-a", 3_i64), ("contract-backend-b", 5)] {
+        tx.execute(
+            "INSERT INTO supervisors(token, pid, parallel, binary_version, started_at, heartbeat_at) VALUES (?1, 1, ?2, 'contract', 0, 0)",
+            sql_params![token, slots],
+        )?;
+    }
+    ensure!(parallel(None)? == Some(8));
+    ensure!(parallel(Some("contract-backend-a"))? == Some(3));
+    ensure!(parallel(Some("contract-backend-missing"))?.is_none());
+    Ok(())
+}

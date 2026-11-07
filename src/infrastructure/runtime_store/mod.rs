@@ -61,6 +61,8 @@ pub fn lease_is_stale(lease: &RunLease, now: i64) -> bool {
 mod ask_store;
 mod attributes;
 mod coordination;
+#[cfg(any(test, feature = "store-contract"))]
+pub(crate) use coordination::BACKEND_PARALLEL_SQL;
 mod eval_rounds;
 mod ledger;
 mod node_samples;
