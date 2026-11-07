@@ -227,6 +227,11 @@ struct Material<'a> {
 }
 
 impl Material<'_> {
+    /// Render compact JSON, one retained item or key per line, with kept
+    /// and total counts in the heading. Omitted keys are named, omitted
+    /// lists give their continuation offset, and both give snapshot and
+    /// current-state reading commands. Summarized keys and clipped items
+    /// also name the command that reads them whole.
     fn render(&self, reading: &Reading<'_>) -> String {
         let spec = self.spec;
         let total = self.entries.len();
@@ -421,6 +426,12 @@ fn forecast_summary(forecast: &Value) -> Value {
     Value::Object(summary)
 }
 
+/// Prepare section entries in their selection order. Stats and KPI keys
+/// follow their declared order, then alphabetical order; improvements
+/// keys are alphabetical. Lists retain the input's order (latest notes,
+/// graph critical chain and candidates). Object values go whole or are
+/// omitted, except the documented trend/forecast summaries; list items
+/// are clipped by [`clip`].
 fn material<'a>(spec: &'a Spec, input: &Value) -> Material<'a> {
     let value = at(input, spec.path).cloned().unwrap_or(Value::Null);
     let mut summarized = Vec::new();
@@ -497,6 +508,14 @@ fn material<'a>(spec: &'a Spec, input: &Value) -> Material<'a> {
 /// the first that does not fit, so what it left out is one run from an
 /// offset, and an object skips a key that does not fit and goes on. What a
 /// section left out is named with how to read it.
+/// Instructions and section headings are never cut: if even those and
+/// the omission notices exceed the limit, omit every material entry and
+/// retain the headings and reading commands, exceptionally exceeding it.
+/// After estimating entry sizes, drop last entries from the latest
+/// sections until the rendered prompt fits (the estimate excludes count
+/// digits and entry-dependent notices). Selection is deterministic, not
+/// delegated to the LLM. Snapshot commands read the observation's input;
+/// each section's CLI command reads the current state instead.
 pub fn fit(head: &str, input: &Value, reading: &Reading<'_>, limit: usize) -> Fitted {
     let limit = limit.saturating_sub(LANGUAGE_RESERVE);
     let mut materials: Vec<Material<'_>> =

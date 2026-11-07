@@ -119,6 +119,9 @@ pub(in crate::application::supervise) fn unusable_timer_job(
 /// else the hourly one when `interval` passed since the last one started
 /// or finished (`last`, from the queue, whichever supervisor ran it) and
 /// since this process last launched it (`launched`).
+/// A mode with no recorded observation is due. Skipped finishes count;
+/// the process-local launch clock also prevents a child that dies before
+/// recording anything from being restarted on every pass.
 pub(in crate::application::supervise) fn due_observation(
     again: Option<ObserveMode>,
     interval: Duration,
@@ -219,6 +222,12 @@ impl ObservationState {
     /// finish is the first `observe_finished` past `mark`. It takes no run
     /// slot. A failure to launch is logged and retried after the interval.
     /// `fallback_jobs` is `[provider_fallback] jobs`.
+    /// The child runs in the checkout, with the supervisor's actor and
+    /// without the observer role inherited from its caller. Pass the
+    /// routed launch and the Codex executable resolved by supervise,
+    /// including an unavailable reason or disabled fallback when needed.
+    /// The loop starts observations only while the queue service is present;
+    /// `up` does not override supervise's observation defaults.
     pub(in crate::application::supervise) fn start_observer(
         &mut self,
         env: &ObservationEnv<'_>,
@@ -312,6 +321,9 @@ impl ObservationState {
     /// Kill the observer still running and the processes it started (its
     /// agent and that agent's Bash), so none outlives this supervisor or
     /// runs on unwatched after its exec; `why` ends the log line.
+    /// Used on a loop error and exec handoff; normal shutdown waits for
+    /// the observation instead. A killed command writes no finish: the
+    /// next supervisor starts it again when due.
     pub(in crate::application::supervise) fn stop_observer(
         &mut self,
         env: &ObservationEnv<'_>,

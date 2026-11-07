@@ -291,6 +291,10 @@ impl JobSession {
     /// `session_id`, `model` and `model_unknown` (only when set) when the
     /// provider named it, and the tokens ([`ExecutionTokens::record`])
     /// when its output gave them.
+    /// For an observer, Codex names its thread after the start: this puts
+    /// it on `observe_finished`, and the span closed by the observation's
+    /// directory carries it on `session_closed`. Stats and KPI job totals
+    /// can then be read by provider and model.
     pub fn record(&self, payload: &mut serde_json::Value) {
         if self.named {
             payload["session_id"] = serde_json::json!(self.session_id);

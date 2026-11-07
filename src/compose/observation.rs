@@ -1980,6 +1980,10 @@ impl OneShot {
     /// of the last 7 days and the last 4 weeks as [`Self::kpi_of`] judges
     /// them, of one window of the ledger, with the open breaches' events
     /// ([`crate::domain::kpi::observe::observer_input`]).
+    /// Uses the same KPI settings and host-load records as the KPI command,
+    /// including host-load targets. The input carries target judgments,
+    /// each breach's kind, subject, evidence and marks, and the trend and
+    /// forecast scoring for each period.
     pub fn observer_kpi(&self, queue: &SqliteQueue, db: &Path) -> Result<serde_json::Value> {
         self.observer_kpi_read(queue, db, false)
     }

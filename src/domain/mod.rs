@@ -3312,6 +3312,10 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
 pub const CONSECUTIVE_FAILURES: &str = "consecutive_failures";
 /// The failure in a row that makes `observe_finished` an attention
 /// ([`AttentionNext::CheckObserver`]).
+/// Equality, not a lower bound: only this failure in a continuous streak
+/// wakes the inbox watch with `check the failed observer` (ADR-t1418-1).
+/// Recovery to success and other counts create no attention, no ask or
+/// status item, and do not block claiming or landing.
 pub const OBSERVER_FAILURES_TOLD: i64 = 2;
 
 /// Whether an `observe_finished` payload ended `error` or `failed`.

@@ -44,6 +44,8 @@ pub fn read_cursor(db: &Path) -> Result<Option<EventId>> {
     }
 }
 
+/// Save the hourly cursor in `<queue dir>/observer/cursor` by renaming a
+/// temporary file, so a reader never sees a partly written cursor.
 fn write_cursor(db: &Path, cursor: EventId) -> Result<()> {
     let dir = observer_dir(db);
     fs::create_dir_all(&dir)?;
@@ -120,6 +122,16 @@ pub fn read_input(
 /// The agent's events (where it was found again) go to `events` (the
 /// queue through its service, or the caller's own queue); with none they
 /// are left to the log, and no queue's DB is opened here.
+/// For an observation the directory is the cwd; the agent receives its
+/// observer role, service socket and credential-file environment, never a
+/// DB path.
+/// The executor requests its token from the service and revokes it when
+/// the process ends. Put the supplied dagq's directory first on PATH and
+/// pass the prompt on stdin, without MCP servers (including user, project,
+/// plugin and claude.ai servers on Claude). Claude also denies the reserved
+/// print-mode tools. On timeout, enumerate descendants before killing the
+/// agent, then SIGKILL each descendant by pid, including Codex commands in
+/// separate process groups.
 pub fn run_agent(
     provider: &dyn AgentProvider,
     db: &Path,

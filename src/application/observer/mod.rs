@@ -61,7 +61,8 @@ pub use crate::application::supervise::{DAILY_WINDOW_SECS, ObserveMode};
 pub struct ObserveOptions {
     pub mode: ObserveMode,
     /// The cursor to read `stats` past; by default the hourly observation's
-    /// saved cursor, or for the daily one the last event 24 hours ago.
+    /// saved cursor (falling back to stats' default when absent), or for
+    /// the daily one the last event before the daily window.
     pub since: Option<EventId>,
     /// Build and return the prompt without starting the agent.
     pub dry_run: bool,
@@ -77,6 +78,12 @@ pub struct ObserveOptions {
     /// to (ADR-t1063-1 decisions 1 and 4, task 1223), the provider of
     /// `provider`; `None` reads `[roles.observer]` of the bound checkout's
     /// `dagq.toml` ([`ObserverHost::launch`]).
+    /// The CLI resolves only the provider it will start, and no executable
+    /// for a dry run or an unavailable observation. A missing Codex is
+    /// tried at the supplied path so its launch error can be recorded as
+    /// `provider_unusable: executable_missing` when switchable. Claude
+    /// resolution fails the command unless switchable with fallback off;
+    /// in that case its supplied path is tried and recorded the same way.
     pub launch: Option<ActorLaunch>,
     /// Whether `[roles.observer]` names its provider, so that a Codex
     /// observation that stopped where Codex cannot be used (a login, the
@@ -172,6 +179,26 @@ pub struct ObserverEnvironment<'a, Q: ?Sized> {
 /// refused (it is gone, `unreachable`) is no failure of the observation,
 /// and only when the agent exits non-zero on its error does the next one
 /// read the window again.
+///
+/// Unless skipped or unavailable, create the observation directory before
+/// building the prompt, so its name identifies the snapshot read by
+/// `observe --input`. Write `prompt.md` and the whole `input.json`, then
+/// record the taskless `observe_started`. Issue the executor's telemetry
+/// token against that start and revoke it after the finish (also on a
+/// failure that prevents the finish). A dry run creates no directory or
+/// event and names its observation `DRY-RUN`. KPI or improvement reads
+/// that fail become `{"error": ...}` input so other material remains usable.
+///
+/// `succeeded` means exit 0, `failed` another exit or a signal, and `error`
+/// a launch failure or timeout. Classify the failure at the end of the
+/// observation, after the agent stops, using [`read_failure`].
+/// Count only the observer's writes since the
+/// start (and asks since their high-water mark), using `written_by`.
+/// Save only a succeeded hourly observation's `stats.next_cursor`; failed
+/// windows are read again. Prompt bytes and section sizes go on the start,
+/// and are returned by history and dry runs, including a start whose agent
+/// subsequently fails to launch. The runtime does not reclassify old output
+/// when reading history.
 pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
     queue: &mut Q,
     db: &Path,
@@ -513,6 +540,10 @@ const OBSERVER_JOB: &str = "the observer";
 /// too: its start's error (`start`) or its wall, and the supervisor holds
 /// Claude and starts it again on Claude once Claude's hold ends
 /// (ADR-t1857-1). Neither is read for a success.
+/// The caller joins Claude's stdout and stderr with a newline before
+/// passing them to its signals, so diagnostics cannot merge with a partial
+/// stdout line. Codex's provider receives the streams separately. A
+/// failure to start is classified from the launch error instead of output.
 pub(crate) fn read_failure(
     succeeded: bool,
     provider: Provider,
@@ -742,6 +773,14 @@ fn new_alerts(last: &Value, alerts: &[Value]) -> bool {
 /// `alerts` is new since it (ADR-t649-1: an alert that grew past its
 /// threshold with time alone records no event), record a skipped
 /// `observe_finished` without starting anything, and return its payload.
+/// The caller bypasses this check with an explicit cursor or a dry run.
+/// Read stats first, but collect no other input and create no directory or
+/// start event when skipping. The cursor of the last non-skipped finish is
+/// the boundary: events written by others while its agent ran are unread
+/// too. A failed/error finish never skips. Missing saved alert identities
+/// count as none; unchanged or removed identities do not wake the agent.
+/// A skip records zero writes and empty id lists; its finish still counts
+/// as the timer's latest observation.
 fn skip(
     queue: &(impl AskStore + ObserverLog + RunLog + ?Sized),
     mode: ObserveMode,
