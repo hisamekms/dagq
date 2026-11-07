@@ -3169,6 +3169,10 @@ mod store_contract_tests {
         contract(|open| store_contract::typed_conditions(&open));
     }
     #[test]
+    fn json_set_field() {
+        contract(|open| store_contract::json_set_field(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

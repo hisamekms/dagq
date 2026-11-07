@@ -2,7 +2,7 @@
 //! task with its landed commits' messages, follow-up origins and duplicate
 //! mark, asks the search index how strongly the task's title matches each
 //! other task, and leaves the scoring to [`crate::domain::related`].
-use super::sql_dialect::{JsonType, json_field_spaced};
+use super::sql_dialect::{JsonType, json_field_spaced, json_type_of};
 use crate::domain::{cancel_reason, event_kind};
 use std::collections::HashMap;
 
@@ -105,10 +105,11 @@ impl SqliteQueue {
                  FROM run_events
                  WHERE kind = '{}' AND run_id IS NOT NULL
                    AND task_id IS NOT NULL
-                   AND json_type(payload, '$.task_id') = 'integer'
+                   AND {task_id_type} = 'integer'
                  ORDER BY id",
                 event_kind::FOLLOW_UP_REGISTERED,
                 task_id = json_field_spaced("payload", "$.task_id", JsonType::Integer),
+                task_id_type = json_type_of("payload", "$.task_id"),
             ))?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
@@ -124,7 +125,7 @@ impl SqliteQueue {
             .conn
             .prepare(&format!(
                 "SELECT e.task_id,
-                        CASE WHEN json_type(e.payload, '$.duplicate_of') = 'integer'
+                        CASE WHEN {duplicate_of_type} = 'integer'
                              THEN {duplicate_of} END,
                         {reason}
                  FROM run_events e JOIN tasks t ON t.id = e.task_id
@@ -132,6 +133,7 @@ impl SqliteQueue {
                    AND {to} = 'canceled'
                  ORDER BY e.id",
                 event_kind::TASK_STATUS_CHANGED,
+                duplicate_of_type = json_type_of("e.payload", "$.duplicate_of"),
                 duplicate_of = json_field_spaced("e.payload", "$.duplicate_of", JsonType::Integer),
                 reason = json_field_spaced("e.payload", "$.reason", JsonType::Text),
                 to = json_field_spaced("e.payload", "$.to", JsonType::Text),

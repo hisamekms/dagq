@@ -74,9 +74,10 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 - storeは実行のportで共有SQLを流し、rusqliteを名指してよいのは`src/context_boundaries/rusqlite_names.rs`の一覧のmoduleだけ。
 - 時刻とIDは`SqliteQueue`の`Generators`から取り、SQLの`now`で作らない。
   例外はDBの時計で判じる`write_leader`のleaseの期限（ADR-t3986-1決定4）。
-- schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`、場所は`src/infrastructure/location.rs`が持つ。
+- schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`が持つ。
 - 共有のSQLの引数は型を決める形でNULLと比べる（境界の検査が守る）。
-- 方言の違う式の断片（JSONの欄の読み出しと日時の関数）は`src/infrastructure/sql_dialect.rs`の関数が返して文が埋める（ADR-t3982-1）。
+- 方言の違う式の断片は`src/infrastructure/sql_dialect.rs`の関数が返す（ADR-t3982-1）。
+  JSONの関数と`unixepoch()`は方言の関数のmoduleの外で綴らない（境界の検査が守る）。
 - runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く。
 
 ## 大きなeventの本文

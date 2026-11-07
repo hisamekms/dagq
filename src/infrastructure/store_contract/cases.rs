@@ -250,6 +250,37 @@ pub fn base_types<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()
     Ok(())
 }
 
+/// The dialect's set of a field adds to an object and leaves any other document
+/// as it is: a row whose body went to the port holds its key, a JSON string.
+pub fn json_set_field<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
+    use serde_json::{Value, json};
+    let store = open()?;
+    let tx = store.read_entry("contract_json_set")?;
+    let dialect = tx.dialect();
+    let sql = format!(
+        "SELECT {}",
+        dialect.json_set_field("?1", "?2", &dialect.json_document("?3"))
+    );
+    for (document, expected) in [
+        (json!({"a": 1}), json!({"a": 1, "b": [2]})),
+        (json!({"b": 1}), json!({"b": [2]})),
+        (json!("object-key"), json!("object-key")),
+        (json!(7), json!(7)),
+        (json!([1]), json!([1])),
+    ] {
+        let set = tx.query_row(
+            &sql,
+            sql_params![document.to_string(), "$.b".to_owned(), "[2]".to_owned()],
+            |r| r.get::<_, String>(0),
+        )?;
+        ensure!(
+            serde_json::from_str::<Value>(&set)? == expected,
+            "{document} became {set}"
+        );
+    }
+    Ok(())
+}
+
 /// Connection actors survive the event row round trip. Nested request scopes
 /// restore both an existing requester and NULL, even inside one transaction.
 pub fn event_actors<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {

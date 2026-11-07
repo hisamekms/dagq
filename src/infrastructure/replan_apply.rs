@@ -18,6 +18,8 @@
 
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
+
+use super::sql_dialect::JsonType;
 use std::collections::BTreeMap;
 
 use super::replans::{
@@ -274,16 +276,20 @@ pub(super) fn replacement_tasks(
         return Ok(Vec::new());
     }
     Ok(tx.query_map(
-        "WITH RECURSIVE reached(id) AS (
+        &format!(
+            "WITH RECURSIVE reached(id) AS (
                SELECT r.to_task_id FROM replan_replacements r
                  JOIN replan_operations o ON o.id=r.operation_id AND o.status='applied'
-               WHERE r.from_task_id IN (SELECT value FROM json_each(?1))
+               WHERE r.from_task_id IN (SELECT {from_task} FROM {from_tasks})
                UNION
                SELECT r.to_task_id FROM replan_replacements r
                  JOIN replan_operations o ON o.id=r.operation_id AND o.status='applied'
                  JOIN reached ON r.from_task_id=reached.id
              )
              SELECT t.id, t.status FROM reached JOIN tasks t ON t.id=reached.id ORDER BY t.id",
+            from_task = tx.dialect().json_element("value", JsonType::Integer),
+            from_tasks = tx.dialect().json_elements("?1"),
+        ),
         sql_params![serde_json::to_string(from)?],
         |r| Ok((r.get(0)?, store_rows::enum_col(r, "status")?)),
     )?)
@@ -324,11 +330,15 @@ pub(super) fn unresolved_replacements(
     }
     let statuses: BTreeMap<TaskId, TaskStatus> = tx
         .query_map(
-            "SELECT id, status FROM tasks
-             WHERE id IN (SELECT value FROM json_each(?1))
+            &format!(
+                "SELECT id, status FROM tasks
+             WHERE id IN (SELECT {from_task} FROM {from_tasks})
                 OR id IN (SELECT r.to_task_id FROM replan_replacements r
                           JOIN replan_operations o ON o.id=r.operation_id
                             AND o.status='applied')",
+                from_task = tx.dialect().json_element("value", JsonType::Integer),
+                from_tasks = tx.dialect().json_elements("?1"),
+            ),
             sql_params![serde_json::to_string(from)?],
             |r| Ok((r.get(0)?, store_rows::enum_col(r, "status")?)),
         )?

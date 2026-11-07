@@ -24,9 +24,16 @@
 //! SQLite's text the same to the character. It asks for PostgreSQL 16 or
 //! later (`pg_input_is_valid`).
 //!
-//! Outside test code, no SQL of `src/` but this module's spells
-//! `json_extract`, `datetime`, `strftime` or `julianday`: the boundary test
-//! `src/context_boundaries/dialect.rs` fails on one that does.
+//! The rest of the JSON functions and the clock in seconds take the same
+//! form. A table of an array's elements ([`SqlDialect::json_elements`]) comes
+//! with the reads of its row ([`SqlDialect::json_element`],
+//! [`SqlDialect::json_element_index`], [`SqlDialect::json_element_type`]),
+//! because `jsonb_array_elements` has no `key` or `type` column and its
+//! `value` is a `jsonb`, not SQLite's plain value.
+//!
+//! Outside test code, no SQL of `src/` but this module's spells the functions
+//! the boundary test `src/context_boundaries/dialect.rs` lists: it fails on
+//! one that does.
 //!
 //! [`SqlDialect`] is the kind of dialect: a store module on the execution
 //! port (`super::sql_exec`) takes the expression from the method of the kind
@@ -103,6 +110,155 @@ impl SqlDialect {
         self.time_value("'now'", TimeForm::EpochMillis)
     }
 
+    /// The SQL table of the elements of the JSON array the SQL expression
+    /// `source` gives (a column, a bound parameter), one row each; a statement
+    /// reads a row with [`SqlDialect::json_element`] and gives the table its
+    /// alias after this text. `NULL` has no elements in both dialects. An
+    /// element is read from an array only: what is not an array is an error in
+    /// Postgres (`jsonb_array_elements`) where `json_each` walks it.
+    pub(crate) fn json_elements(self, source: &str) -> String {
+        match self {
+            Self::Sqlite => format!("json_each({source})"),
+            Self::Postgres => format!("jsonb_array_elements(({source})::jsonb)"),
+        }
+    }
+
+    /// [`SqlDialect::json_elements`] of the array at the literal `path` of
+    /// `source`; a path that is not there has no elements.
+    pub(crate) fn json_elements_at(self, source: &str, path: &str) -> String {
+        self.json_elements_at_sep(source, path, TIGHT)
+    }
+
+    /// [`SqlDialect::json_elements_at`] with a space after the comma between
+    /// the arguments.
+    pub(crate) fn json_elements_at_spaced(self, source: &str, path: &str) -> String {
+        self.json_elements_at_sep(source, path, SPACED)
+    }
+
+    fn json_elements_at_sep(self, source: &str, path: &str, sep: &str) -> String {
+        let path = path_literal(path);
+        match self {
+            Self::Sqlite => format!("json_each({source}{sep}{path})"),
+            Self::Postgres => format!("jsonb_array_elements({})", postgres_json_at(source, &path)),
+        }
+    }
+
+    /// [`SqlDialect::json_elements`] with its alias `alias`, for a statement
+    /// that reads an element's index ([`SqlDialect::json_element_index`]):
+    /// Postgres numbers the rows only in the table's own alias.
+    pub(crate) fn json_elements_numbered(self, source: &str, alias: &str) -> String {
+        match self {
+            Self::Sqlite => format!("json_each({source}) {alias}"),
+            Self::Postgres => format!(
+                "jsonb_array_elements(({source})::jsonb) WITH ORDINALITY AS {alias}(value, ordinal)"
+            ),
+        }
+    }
+
+    /// The SQL expression of the element in `column` (`value`, `j.value`) of a
+    /// row of [`SqlDialect::json_elements`] as `ty`: SQLite's column as it is,
+    /// which is a JSON string's text and a JSON integer's number; in Postgres
+    /// the `jsonb` as that text, cast to `ty`. An object or an array reads as
+    /// its document with [`JsonType::Text`].
+    pub(crate) fn json_element(self, column: &str, ty: JsonType) -> String {
+        match self {
+            Self::Sqlite => column.to_owned(),
+            Self::Postgres => postgres_cast(&format!("({column} #>> '{{}}')"), ty),
+        }
+    }
+
+    /// The SQL expression of the index from 0 of an element of the table
+    /// [`SqlDialect::json_elements_numbered`] made under `alias`.
+    pub(crate) fn json_element_index(self, alias: &str) -> String {
+        match self {
+            Self::Sqlite => format!("{alias}.key"),
+            Self::Postgres => format!("({alias}.ordinal - 1)"),
+        }
+    }
+
+    /// The name of the JSON type of an element of the table under `alias`, in
+    /// the names of [`SqlDialect::json_type_of`].
+    pub(crate) fn json_element_type(self, alias: &str) -> String {
+        match self {
+            Self::Sqlite => format!("{alias}.type"),
+            Self::Postgres => postgres_json_type(&format!("{alias}.value")),
+        }
+    }
+
+    /// The SQL expression of the name of the JSON type of the field at the
+    /// literal `path` of `column`, in SQLite's names whichever the dialect, so
+    /// a statement compares it with one text: `text`, `integer`, `real`,
+    /// `true`, `false`, `null`, `object`, `array`; SQL `NULL` when the field is
+    /// not there. Spaced, as every statement that reads it spells it. Postgres
+    /// has one `number`, so its `integer` is a number whose `jsonb` text has no
+    /// fraction (a stored `1e3` is one, where SQLite says `real`).
+    pub(crate) fn json_type_of(self, column: &str, path: &str) -> String {
+        let path = path_literal(path);
+        match self {
+            Self::Sqlite => format!("json_type({column}{SPACED}{path})"),
+            Self::Postgres => postgres_json_type(&postgres_json_at(column, &path)),
+        }
+    }
+
+    /// The SQL aggregate of the JSON array of what the SQL expression `value`
+    /// gives over a group's rows. It is SQL `NULL` over no rows in Postgres and
+    /// `[]` in SQLite, so a statement that reads the empty one says
+    /// `COALESCE(.., '[]')`.
+    pub(crate) fn json_array_agg(self, value: &str) -> String {
+        match self {
+            Self::Sqlite => format!("json_group_array({value})"),
+            Self::Postgres => format!("jsonb_agg({value})"),
+        }
+    }
+
+    /// The SQL expression of the length of the JSON array the SQL expression
+    /// `value` gives. An array only: what is not one is `0` in SQLite and an
+    /// error in Postgres.
+    pub(crate) fn json_array_length(self, value: &str) -> String {
+        match self {
+            Self::Sqlite => format!("json_array_length({value})"),
+            Self::Postgres => format!("jsonb_array_length(({value})::jsonb)"),
+        }
+    }
+
+    /// The SQL expression of the JSON document the SQL expression `value` (a
+    /// bound parameter) holds as text, as a value [`SqlDialect::json_set_field`]
+    /// sets rather than as a string.
+    pub(crate) fn json_document(self, value: &str) -> String {
+        match self {
+            Self::Sqlite => format!("json({value})"),
+            Self::Postgres => format!("({value})::jsonb"),
+        }
+    }
+
+    /// The SQL expression of the document in `column` with the field the SQL
+    /// expression `path` names (a bound `$.a`, of names without a dot or a
+    /// quote) set to the JSON value the SQL expression `value` gives, added
+    /// when it is not there. A document that is not an object stays as it is
+    /// (a row whose body went to the port holds its key, a JSON string): SQLite
+    /// does that itself, and `jsonb_set` would fail on it, so Postgres sets
+    /// only under an object. Postgres adds only under what is there, so a path
+    /// of more than one name asks for its parents to be there.
+    pub(crate) fn json_set_field(self, column: &str, path: &str, value: &str) -> String {
+        match self {
+            Self::Sqlite => format!("json_set({column}{TIGHT}{path}{TIGHT}{value})"),
+            Self::Postgres => format!(
+                "CASE WHEN jsonb_typeof(({column})::jsonb) = 'object' \
+                 THEN jsonb_set(({column})::jsonb, string_to_array(substr(({path})::text, 3), '.'), {value}) \
+                 ELSE ({column})::jsonb END"
+            ),
+        }
+    }
+
+    /// The SQL expression of the DB's clock now, in whole Unix seconds as an
+    /// integer. The clock is read as [`SqlDialect::now_millis`] reads it.
+    pub(crate) fn unix_epoch_now(self) -> String {
+        match self {
+            Self::Sqlite => "unixepoch()".to_owned(),
+            Self::Postgres => postgres_time("'now'", TimeForm::EpochSeconds),
+        }
+    }
+
     fn json_expression(self, column: &str, path: &str, ty: JsonType, sep: &str) -> String {
         match self {
             Self::Sqlite => {
@@ -134,13 +290,35 @@ impl SqlDialect {
 /// the `$.a.b` form both dialects read) as text, cast to `ty`. A field that
 /// is not there and a JSON `null` both read as `NULL`, as in SQLite.
 fn postgres_json(column: &str, path: &str, ty: JsonType) -> String {
-    let text =
-        format!("(jsonb_path_query_first(({column})::jsonb, ({path})::text::jsonpath) #>> '{{}}')");
+    postgres_cast(
+        &format!("({} #>> '{{}}')", postgres_json_at(column, path)),
+        ty,
+    )
+}
+
+/// The `jsonb` at the path `path` gives of `column`, SQL `NULL` when it is not
+/// there.
+fn postgres_json_at(column: &str, path: &str) -> String {
+    format!("jsonb_path_query_first(({column})::jsonb, ({path})::text::jsonpath)")
+}
+
+/// `text`, a JSON value as text, as `ty`.
+fn postgres_cast(text: &str, ty: JsonType) -> String {
     match ty {
-        JsonType::Text | JsonType::Any => text,
+        JsonType::Text | JsonType::Any => text.to_owned(),
         JsonType::Integer => format!("{text}::BIGINT"),
         JsonType::Boolean => format!("{text}::BOOLEAN::INTEGER"),
     }
+}
+
+/// The name in SQLite's names of the JSON type of the `jsonb` `value`.
+fn postgres_json_type(value: &str) -> String {
+    format!(
+        "CASE jsonb_typeof({value}) WHEN 'string' THEN 'text' \
+         WHEN 'number' THEN CASE WHEN ({value} #>> '{{}}') ~ '^-?[0-9]+$' THEN 'integer' ELSE 'real' END \
+         WHEN 'boolean' THEN ({value} #>> '{{}}') \
+         ELSE jsonb_typeof({value}) END"
+    )
 }
 
 /// The time `value` gives in `form`. `'now'` is the clock as the statement
@@ -209,6 +387,11 @@ pub(crate) enum TimeForm {
     /// A number that orders and compares the instants; `NULL` when the value
     /// is not a time.
     Ordinal,
+}
+
+/// [`SqlDialect::json_type_of`] in the SQLite kind.
+pub(crate) fn json_type_of(column: &str, path: &str) -> String {
+    SqlDialect::Sqlite.json_type_of(column, path)
 }
 
 /// [`SqlDialect::time_value`] in the SQLite kind.
@@ -353,6 +536,177 @@ mod tests {
             assert_eq!(kind.time_value("created_at", form), expected);
             assert_eq!(kind.time_value_spaced("created_at", form), expected);
         }
+    }
+
+    /// Each of the JSON functions and the clock in seconds in both kinds. The
+    /// SQLite text is what the statements spelled, character for character.
+    #[test]
+    fn each_kind_returns_its_own_json_function_and_clock() {
+        type Fragment = fn(SqlDialect) -> String;
+        let cases: [(Fragment, &str, &str); 16] = [
+            (
+                |d| d.json_elements("q.refs"),
+                "json_each(q.refs)",
+                "jsonb_array_elements((q.refs)::jsonb)",
+            ),
+            (
+                |d| d.json_elements("?2"),
+                "json_each(?2)",
+                "jsonb_array_elements((?2)::jsonb)",
+            ),
+            (
+                |d| d.json_elements_at("e.payload", "$.asks"),
+                "json_each(e.payload,'$.asks')",
+                "jsonb_array_elements(jsonb_path_query_first((e.payload)::jsonb, ('$.asks')::text::jsonpath))",
+            ),
+            (
+                |d| d.json_elements_at_spaced("t.detail", "$.runs"),
+                "json_each(t.detail, '$.runs')",
+                "jsonb_array_elements(jsonb_path_query_first((t.detail)::jsonb, ('$.runs')::text::jsonpath))",
+            ),
+            (
+                |d| d.json_elements_numbered("r.records", "j"),
+                "json_each(r.records) j",
+                "jsonb_array_elements((r.records)::jsonb) WITH ORDINALITY AS j(value, ordinal)",
+            ),
+            (
+                |d| d.json_element("value", JsonType::Text),
+                "value",
+                "(value #>> '{}')",
+            ),
+            (
+                |d| d.json_element("j.value", JsonType::Integer),
+                "j.value",
+                "(j.value #>> '{}')::BIGINT",
+            ),
+            (|d| d.json_element_index("j"), "j.key", "(j.ordinal - 1)"),
+            (
+                |d| d.json_element_type("j"),
+                "j.type",
+                "CASE jsonb_typeof(j.value) WHEN 'string' THEN 'text' \
+                 WHEN 'number' THEN CASE WHEN (j.value #>> '{}') ~ '^-?[0-9]+$' THEN 'integer' ELSE 'real' END \
+                 WHEN 'boolean' THEN (j.value #>> '{}') ELSE jsonb_typeof(j.value) END",
+            ),
+            (
+                |d| d.json_type_of("payload", "$.a"),
+                "json_type(payload, '$.a')",
+                "CASE jsonb_typeof(jsonb_path_query_first((payload)::jsonb, ('$.a')::text::jsonpath)) WHEN 'string' THEN 'text' \
+                 WHEN 'number' THEN CASE WHEN (jsonb_path_query_first((payload)::jsonb, ('$.a')::text::jsonpath) #>> '{}') ~ '^-?[0-9]+$' THEN 'integer' ELSE 'real' END \
+                 WHEN 'boolean' THEN (jsonb_path_query_first((payload)::jsonb, ('$.a')::text::jsonpath) #>> '{}') \
+                 ELSE jsonb_typeof(jsonb_path_query_first((payload)::jsonb, ('$.a')::text::jsonpath)) END",
+            ),
+            (
+                |d| d.json_array_agg("x"),
+                "json_group_array(x)",
+                "jsonb_agg(x)",
+            ),
+            (|d| d.json_document("?2"), "json(?2)", "(?2)::jsonb"),
+            (
+                |d| d.json_set_field("payload", "?3", "v"),
+                "json_set(payload,?3,v)",
+                "CASE WHEN jsonb_typeof((payload)::jsonb) = 'object' \
+                 THEN jsonb_set((payload)::jsonb, string_to_array(substr((?3)::text, 3), '.'), v) \
+                 ELSE (payload)::jsonb END",
+            ),
+            (
+                |d| d.json_set_field("payload", "?3", &d.json_document("?2")),
+                "json_set(payload,?3,json(?2))",
+                "CASE WHEN jsonb_typeof((payload)::jsonb) = 'object' \
+                 THEN jsonb_set((payload)::jsonb, string_to_array(substr((?3)::text, 3), '.'), (?2)::jsonb) \
+                 ELSE (payload)::jsonb END",
+            ),
+            (
+                |d| d.json_array_length("x"),
+                "json_array_length(x)",
+                "jsonb_array_length((x)::jsonb)",
+            ),
+            (
+                SqlDialect::unix_epoch_now,
+                "unixepoch()",
+                "FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::BIGINT",
+            ),
+        ];
+        for (fragment, sqlite, postgres) in cases {
+            assert_eq!(fragment(SqlDialect::Sqlite), sqlite);
+            assert_eq!(fragment(SqlDialect::Postgres), postgres);
+        }
+        assert_eq!(json_type_of("p", "$.a"), "json_type(p, '$.a')");
+    }
+
+    /// What the SQLite text of a table and of the reads of its row gives,
+    /// which is what the names and the doc comments promise of both kinds.
+    #[test]
+    fn the_sqlite_elements_read_what_their_functions_name() {
+        let kind = SqlDialect::Sqlite;
+        let conn = Connection::open_in_memory().unwrap();
+        let elements: Vec<(i64, String, String)> = conn
+            .prepare(&format!(
+                "SELECT {}, {}, {} FROM {}",
+                kind.json_element_index("j"),
+                kind.json_element_type("j"),
+                kind.json_element("j.value", JsonType::Text),
+                kind.json_elements_numbered("?1", "j"),
+            ))
+            .unwrap()
+            .query_map(["[\"a\", 2]"], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get::<_, rusqlite::types::Value>(2).map(|v| match v {
+                        rusqlite::types::Value::Text(text) => text,
+                        rusqlite::types::Value::Integer(number) => number.to_string(),
+                        other => panic!("{other:?}"),
+                    })?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            elements,
+            [
+                (0, "text".to_owned(), "a".to_owned()),
+                (1, "integer".to_owned(), "2".to_owned())
+            ]
+        );
+        let (set, none, ty, missing, aggregate, length): (
+            String,
+            i64,
+            String,
+            Option<String>,
+            String,
+            i64,
+        ) = conn
+            .query_row(
+                &format!(
+                    "SELECT {}, (SELECT count(*) FROM {}), {}, {}, (SELECT {} FROM {}), {}",
+                    kind.json_set_field("'{}'", "?1", &kind.json_document("?2")),
+                    kind.json_elements_at("'{}'", "$.none"),
+                    kind.json_type_of("'{\"a\":\"x\"}'", "$.a"),
+                    kind.json_type_of("'{}'", "$.a"),
+                    kind.json_array_agg("value"),
+                    kind.json_elements_at_spaced("'{\"r\":[1,2]}'", "$.r"),
+                    kind.json_array_length("'[1,2,3]'"),
+                ),
+                ["$.a", "{\"b\":1}"],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(set, "{\"a\":{\"b\":1}}");
+        assert_eq!(none, 0);
+        assert_eq!(ty, "text");
+        assert_eq!(missing, None);
+        assert_eq!(aggregate, "[1,2]");
+        assert_eq!(length, 3);
     }
 
     /// The DB's clock as the statement runs: `now()`, `'now'` and

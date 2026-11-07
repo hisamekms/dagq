@@ -8,8 +8,8 @@ use super::eval_rounds::{
     another_round_runs_sql, any_of_round_sql, any_of_set_sql, round_owner_sql, set_owner_sql,
 };
 use super::run_log::{
-    LATEST_QUEUE_EVENT_SQL, UPDATE_EVENTS_SQL, inbox_nudged_sql, installs_after_sql,
-    latest_inbox_watcher_change_sql,
+    LATEST_QUEUE_EVENT_SQL, inbox_nudged_sql, installs_after_sql, latest_inbox_watcher_change_sql,
+    update_events_sql,
 };
 use super::*;
 use crate::infrastructure::ci_watch_store::{
@@ -84,7 +84,7 @@ fn the_queue_event_reads_by_kind_stay_on_events_by_kind() {
         ("ci_watch_events", watch_events_sql()),
         ("ci_scheduled_events", EVENTS_OF_KIND_SQL.to_owned()),
         ("ci_freshness_events", FRESHNESS_EVENTS_SQL.to_owned()),
-        ("update_events", UPDATE_EVENTS_SQL.to_owned()),
+        ("update_events", update_events_sql(SqlDialect::Sqlite)),
         (
             "installs_after: count",
             format!("SELECT COUNT(*) {}", installs_after_sql(SqlDialect::Sqlite)),

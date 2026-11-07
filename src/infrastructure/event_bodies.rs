@@ -56,8 +56,12 @@ pub(super) fn set_event_body_field(
     field: &str,
     value: &Value,
 ) -> SqlResult<()> {
+    let dialect = tx.dialect();
     tx.execute(
-        "UPDATE run_events SET payload=dagq_event_body(json_set(payload,?3,json(?2))) WHERE id=?1",
+        &format!(
+            "UPDATE run_events SET payload=dagq_event_body({}) WHERE id=?1",
+            dialect.json_set_field("payload", "?3", &dialect.json_document("?2")),
+        ),
         sql_params![event_id.as_i64(), value.to_string(), format!("$.{field}")],
     )?;
     Ok(())

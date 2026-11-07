@@ -22,9 +22,11 @@ use crate::infrastructure::sql_exec::SqlRead;
 /// array).
 fn of_round(dialect: SqlDialect) -> String {
     format!(
-        "kind IN (SELECT value FROM json_each(?2))
+        "kind IN (SELECT {} FROM {})
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
      AND {} = ?1",
+        dialect.json_element("value", JsonType::Text),
+        dialect.json_elements("?2"),
         dialect.json_field("payload", "$.eval_id", JsonType::Integer)
     )
 }
@@ -188,9 +190,11 @@ impl SqliteQueue {
 /// The queue's events of production set `?1` of the kinds `?2`.
 fn of_set(dialect: SqlDialect) -> String {
     format!(
-        "kind IN (SELECT value FROM json_each(?2))
+        "kind IN (SELECT {} FROM {})
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
      AND {} = ?1",
+        dialect.json_element("value", JsonType::Text),
+        dialect.json_elements("?2"),
         dialect.json_field("payload", "$.set_id", JsonType::Integer)
     )
 }

@@ -100,9 +100,14 @@ impl SqliteQueue {
             &*self.conn,
             &format!(
                 "SELECT {planner_id} FROM run_events e,
-                     json_each(e.payload,'$.asks') j WHERE e.kind='{}' AND j.value=?1
+                     {asks} j WHERE e.kind='{}' AND {asked}=?1
                      ORDER BY e.id DESC LIMIT 1",
                 event_kind::PLANNER_ANSWER_WAIT,
+                asks = self.conn.dialect().json_elements_at("e.payload", "$.asks"),
+                asked = self
+                    .conn
+                    .dialect()
+                    .json_element("j.value", JsonType::Integer),
                 planner_id =
                     self.conn
                         .dialect()

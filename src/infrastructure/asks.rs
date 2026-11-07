@@ -160,11 +160,15 @@ impl SqliteQueue {
     pub fn hold_of(&self, run_id: &RunId) -> Result<Option<Ask>> {
         Ok(SqlRead::query_row(
             &*self.conn,
-            "SELECT * FROM asks WHERE kind='queue_hold'
+            &format!(
+                "SELECT * FROM asks WHERE kind='queue_hold'
                  AND ifnull(subject,'') <> 'disk'
                  AND answered_at IS NULL AND closed_at IS NULL
-                 AND EXISTS (SELECT 1 FROM json_each(asks.affected) WHERE value=?1)
+                 AND EXISTS (SELECT 1 FROM {affected} WHERE {run}=?1)
                  ORDER BY id LIMIT 1",
+                affected = SqlRead::dialect(&*self.conn).json_elements("asks.affected"),
+                run = SqlRead::dialect(&*self.conn).json_element("value", JsonType::Text),
+            ),
             sql_params![run_id],
             ask_row,
         )
@@ -176,9 +180,13 @@ impl SqliteQueue {
     pub fn hold_unclosed(&self, run_id: &RunId) -> Result<bool> {
         Ok(SqlRead::query_row(
             &*self.conn,
-            "SELECT EXISTS (SELECT 1 FROM asks WHERE kind='queue_hold'
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM asks WHERE kind='queue_hold'
              AND ifnull(subject,'') <> 'disk' AND closed_at IS NULL
-             AND EXISTS (SELECT 1 FROM json_each(asks.affected) WHERE value=?1))",
+             AND EXISTS (SELECT 1 FROM {affected} WHERE {run}=?1))",
+                affected = SqlRead::dialect(&*self.conn).json_elements("asks.affected"),
+                run = SqlRead::dialect(&*self.conn).json_element("value", JsonType::Text),
+            ),
             sql_params![run_id],
             |row| row.get(0),
         )?)

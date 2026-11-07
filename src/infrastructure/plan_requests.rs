@@ -156,11 +156,12 @@ fn targets(conn: &impl SqlRead) -> String {
             AND {reopened_proposal}=t.proposal_id)
         AND NOT EXISTS(SELECT 1 FROM proposals x WHERE x.id=t.proposal_id AND x.status!='canceled'))
     AND NOT ", goal_replanned_elsewhere!(), "
-    AND NOT EXISTS(SELECT 1 FROM json_each(r.refs) j JOIN planners p ON p.closed_at IS NULL
+    AND NOT EXISTS(SELECT 1 FROM {refs} j JOIN planners p ON p.closed_at IS NULL
         AND p.origin='runtime' AND (p.draft_task_id={ref_id}
              OR EXISTS(SELECT 1 FROM draft_bundle_members m WHERE m.planner_id=p.id
                  AND m.task_id={ref_id}))
         WHERE {ref_kind}='task')"),
+        refs = conn.dialect().json_elements("r.refs"),
         reopened_proposal = conn.dialect().json_field("d.material", "$.proposal_id", JsonType::Integer),
         ref_id = conn.dialect().json_field("j.value", "$.id", JsonType::Integer),
         ref_kind = conn.dialect().json_field("j.value", "$.kind", JsonType::Text),

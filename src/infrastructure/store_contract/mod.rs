@@ -65,6 +65,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("stale writer", stale_writer::<S, F>),
         ("unique indexes", unique_indexes::<S, F>),
         ("base types", base_types::<S, F>),
+        ("json set field", json_set_field::<S, F>),
         ("event actors", event_actors::<S, F>),
         ("event bodies", event_bodies::<S, F>),
         ("typed conditions", typed_conditions::<S, F>),

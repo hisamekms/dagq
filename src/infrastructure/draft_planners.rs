@@ -80,12 +80,12 @@ fn targets_in(dialect: super::sql_exec::SqlDialect, now: i64) -> String {
         AND a.kind IN ('planner_question','follow_up') AND trim(a.answer)='keep_draft'))
     AND NOT EXISTS(SELECT 1 FROM draft_revisits v WHERE v.task_id=t.id
         AND v.opened_at IS NULL AND v.revisit_at>{now})
-    AND NOT EXISTS(SELECT 1 FROM plan_requests q, json_each(q.refs) j WHERE q.status='open'
+    AND NOT EXISTS(SELECT 1 FROM plan_requests q, {refs} j WHERE q.status='open'
         AND {kind}='task' AND {id}=t.id)
     AND ({person} OR NOT EXISTS(SELECT 1 FROM run_events e WHERE e.task_id=t.id
         AND e.kind='{exhausted}'))",
         person = revisit_due(now, Some("('user','inbox')")),
-        exhausted = event_kind::DRAFT_PLANNER_EXHAUSTED, proposal_id = dialect.json_field("r.material", "$.proposal_id", JsonType::Integer), kind = dialect.json_field("j.value", "$.kind", JsonType::Text), id = dialect.json_field("j.value", "$.id", JsonType::Integer),
+        exhausted = event_kind::DRAFT_PLANNER_EXHAUSTED, refs = dialect.json_elements("q.refs"), proposal_id = dialect.json_field("r.material", "$.proposal_id", JsonType::Integer), kind = dialect.json_field("j.value", "$.kind", JsonType::Text), id = dialect.json_field("j.value", "$.id", JsonType::Integer),
 )
 }
 
@@ -106,8 +106,9 @@ fn revisit_due(now: i64, by: Option<&str>) -> String {
 fn named_by_open_request(conn: &impl SqlRead, task: TaskId) -> Result<bool> {
     Ok(conn.query_row(
         &format!(
-            "SELECT EXISTS(SELECT 1 FROM plan_requests q, json_each(q.refs) j WHERE q.status='open'
+            "SELECT EXISTS(SELECT 1 FROM plan_requests q, {} j WHERE q.status='open'
          AND {}='task' AND {}=?1)",
+            conn.dialect().json_elements("q.refs"),
             conn.dialect()
                 .json_field("j.value", "$.kind", JsonType::Text),
             conn.dialect()
@@ -673,10 +674,14 @@ impl SqliteQueue {
         let parked = serde_json::to_string(&self.replaced_tasks(proposal)?)?;
         Ok(SqlRead::query_map(
             &*self.conn,
-            "SELECT a.* FROM asks a JOIN tasks t ON t.id=a.task_id
-                 WHERE (t.proposal_id=?1 OR t.id IN (SELECT value FROM json_each(?2)))
+            &format!(
+                "SELECT a.* FROM asks a JOIN tasks t ON t.id=a.task_id
+                 WHERE (t.proposal_id=?1 OR t.id IN (SELECT {parked} FROM {elements}))
                  AND a.kind='planner_question' AND a.run_id IS NULL
                  AND a.asked_by='planner' AND a.closed_at IS NULL ORDER BY a.id",
+                parked = SqlRead::dialect(&*self.conn).json_element("value", JsonType::Integer),
+                elements = SqlRead::dialect(&*self.conn).json_elements("?2"),
+            ),
             sql_params![proposal, parked],
             ask_row,
         )?)
@@ -1097,13 +1102,21 @@ pub(super) fn settle_bundle(
                     |r| r.get(0),
                 )?;
                 let asked: bool = answer_wait
-                    && conn.query_row(&format!(
-                            "SELECT EXISTS(SELECT 1 FROM asks a, run_events e, json_each(e.payload,'$.asks') j
+                    && conn.query_row(
+                        &format!(
+                            "SELECT EXISTS(SELECT 1 FROM asks a, run_events e, {asks} j
                              WHERE a.task_id=?1 AND a.run_id IS NULL AND a.kind='planner_question'
                              AND a.closed_at IS NULL AND e.kind='{}'
-                             AND {planner_id}=?2 AND j.value=a.id)",
-                            event_kind::PLANNER_ANSWER_WAIT, planner_id = conn.dialect().json_field("e.payload", "$.planner_id", JsonType::Integer),
-),
+                             AND {planner_id}=?2 AND {asked}=a.id)",
+                            event_kind::PLANNER_ANSWER_WAIT,
+                            asks = conn.dialect().json_elements_at("e.payload", "$.asks"),
+                            asked = conn.dialect().json_element("j.value", JsonType::Integer),
+                            planner_id = conn.dialect().json_field(
+                                "e.payload",
+                                "$.planner_id",
+                                JsonType::Integer
+                            ),
+                        ),
                         sql_params![task_id, planner],
                         |r| r.get(0),
                     )?;

@@ -1,6 +1,6 @@
 //! The SQL functions whose spelling differs between the dialects of the
-//! queue store (reading a field of a JSON column, the date and time
-//! functions) are called only from the dialect's functions
+//! queue store (the JSON functions, the date and time functions, the clock
+//! in seconds) are called only from the dialect's functions
 //! (docs/design/persistence.md, "責務と境界"; ADR-t3982-1 decisions 3 and
 //! 4): a statement takes the expression from
 //! `crate::infrastructure::sql_dialect` instead of spelling it. Checked on
@@ -14,9 +14,8 @@
 //! type. This rule applies inside the dialect module too.
 //!
 //! What is not seen: SQL built at run time from pieces that split a name
-//! from its `(`, and the migrations (`migrations/`, not under `src/`),
-//! whose SQL stays the dialect's own. The other JSON functions
-//! (`json_each`, `json_set`, ...) are not checked.
+//! from its `(`, the messages of [`NOT_SQL`], and the migrations (`migrations/`, not under `src/`),
+//! whose SQL stays the dialect's own.
 
 use super::source;
 use super::sql;
@@ -30,7 +29,50 @@ const DIALECT: &[&str] = &[
 ];
 
 /// The functions spelled only in [`DIALECT`], in lower case.
-const FUNCTIONS: [&str; 4] = ["json_extract", "datetime", "strftime", "julianday"];
+const FUNCTIONS: [&str; 34] = [
+    "json",
+    "jsonb",
+    "json_array",
+    "jsonb_array",
+    "json_array_length",
+    "json_each",
+    "json_error_position",
+    "json_extract",
+    "jsonb_extract",
+    "json_group_array",
+    "jsonb_group_array",
+    "json_group_object",
+    "jsonb_group_object",
+    "json_insert",
+    "jsonb_insert",
+    "json_object",
+    "jsonb_object",
+    "json_patch",
+    "jsonb_patch",
+    "json_pretty",
+    "json_quote",
+    "json_remove",
+    "jsonb_remove",
+    "json_replace",
+    "jsonb_replace",
+    "json_set",
+    "jsonb_set",
+    "json_tree",
+    "json_type",
+    "json_valid",
+    "datetime",
+    "strftime",
+    "julianday",
+    "unixepoch",
+];
+
+/// Messages that read as a call but are no SQL, each with its file: the word
+/// `JSON` before a parenthesis. By the whole literal, since a call of `json`
+/// spaced, quoted or commented away from its `(` runs in SQLite all the same.
+const NOT_SQL: [(&str, &str); 1] = [(
+    "src/domain/transcript.rs",
+    "none of its lines is JSON ({} skipped)",
+)];
 
 /// Every failure of the files `rust` (paths from the repository root, with
 /// their text), one line each.
@@ -56,6 +98,9 @@ fn check(rust: &[(String, String)]) -> Vec<String> {
     read.retain(|(path, _)| !test_paths.iter().any(|test| covers(test, path)));
     for (path, source) in &read {
         for literal in &source.literals {
+            if NOT_SQL.contains(&(*path, literal.text.as_str())) {
+                continue;
+            }
             let inner = literal.fns.last().map_or("-", String::as_str);
             for parameter in sql::untyped_null_parameters(&literal.text) {
                 errors.insert(format!(
@@ -91,6 +136,13 @@ fn the_sql_of_src_takes_the_dialects_functions_from_sql_dialect() {
         "SQL with dialect functions outside sql_dialect or untyped NULL parameters (docs/design/persistence.md):\n{}",
         errors.join("\n")
     );
+    for (path, message) in NOT_SQL {
+        assert!(
+            rust.iter()
+                .any(|(file, text)| file == path && text.contains(message)),
+            "{path} no longer has the message {message}: take it off NOT_SQL"
+        );
+    }
 }
 
 mod fixtures {
@@ -105,7 +157,22 @@ mod fixtures {
     }
 
     /// A call of each function, in the spellings a statement may give it.
-    const CALLS: [(&str, &str); 6] = [
+    const CALLS: [(&str, &str); 21] = [
+        ("json (?1)", "json"),
+        ("[json](?1)", "json"),
+        ("`json`(?1)", "json"),
+        ("json/*c*/(?1)", "json"),
+        ("json_array_length(x)", "json_array_length"),
+        ("jsonb_set(p, '{a}', v)", "jsonb_set"),
+        ("json_each(?1)", "json_each"),
+        ("json_each (r.records, '$.a')", "json_each"),
+        ("json_group_array(x)", "json_group_array"),
+        ("json_type(payload, '$.a')", "json_type"),
+        ("JSON_SET(payload,?3,1)", "json_set"),
+        ("json_remove(payload,'$.a')", "json_remove"),
+        ("json(?2)", "json"),
+        ("\\\"JSON\\\"(?2)", "json"),
+        ("unixepoch()", "unixepoch"),
         ("json_extract(payload,'$.kind')", "json_extract"),
         ("JSON_EXTRACT(payload, '$.kind')", "json_extract"),
         ("datetime('now')", "datetime"),
@@ -177,11 +244,23 @@ mod fixtures {
         }
     }
 
+    /// Only the listed message in its listed file is left alone.
+    #[test]
+    fn only_a_listed_message_that_reads_as_a_call_passes() {
+        let (path, message) = NOT_SQL[0];
+        let message = format!("fn f(n: u32) -> String {{ format!(\"{message}\", n) }}");
+        assert!(errors(&[(path, &message)]).is_empty());
+        let found = errors(&[("src/domain/other.rs", &message)]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let found = errors(&[(path, "const SQL: &str = \"SELECT JSON ({} )\";")]);
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
     #[test]
     fn what_calls_no_dialects_function_passes() {
         let found = errors(&[(
             "src/infrastructure/store.rs",
-            "/// Reads `json_extract(payload,'$.kind')`.\nfn f(conn: &Connection) {\n    // strftime('%s', x)\n    conn.query_row(&format!(\"SELECT {} FROM t\", json_field(\"payload\", \"$.kind\", JsonType::Text)), [], f);\n    conn.execute(\"SELECT json_each(payload), json_set(p, '$.a', 1), 'datetime(x)', created_at FROM t -- julianday(x)\", []);\n    let message = \"the strftime of a time\";\n}",
+            "/// Reads `json_extract(payload,'$.kind')`.\nfn f(conn: &Connection) {\n    // strftime('%s', x)\n    conn.query_row(&format!(\"SELECT {} FROM t\", json_field(\"payload\", \"$.kind\", JsonType::Text)), [], f);\n    conn.execute(\"SELECT my_json(payload), json, unixepoch, 'json(x)', 'datetime(x)', created_at FROM t -- julianday(x)\", []);\n    let message = \"the strftime of a time\";\n}",
         )]);
         assert!(found.is_empty(), "{found:?}");
     }

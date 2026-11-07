@@ -877,9 +877,10 @@ impl SqliteQueue {
             let row = SqlRead::query_row(
                 &*self.conn,
                 &format!(
-                    "SELECT r.{ended}, s.pid, unixepoch() - s.heartbeat_at FROM {table} r
+                    "SELECT r.{ended}, s.pid, {now} - s.heartbeat_at FROM {table} r
                          LEFT JOIN supervisors s ON s.token = r.supervisor_token
-                         WHERE r.id = ?1{only}"
+                         WHERE r.id = ?1{only}",
+                    now = SqlRead::dialect(&*self.conn).unix_epoch_now(),
                 ),
                 sql_params![id],
                 |row| {
@@ -1162,12 +1163,13 @@ impl SqliteQueue {
                     let rows = SqlRead::query_map(
                         &*self.conn,
                         &format!(
-                        "SELECT r.ended_at, s.pid, unixepoch() - s.heartbeat_at, r.supervisor_token
+                            "SELECT r.ended_at, s.pid, {now} - s.heartbeat_at, r.supervisor_token
                          FROM headless_jobs r
                          LEFT JOIN supervisors s ON s.token = r.supervisor_token
                          WHERE r.kind = ?1 AND r.run_id = ?2 AND r.attempt = ?3
-                           AND r.label {operator} ?4"
-                    ),
+                           AND r.label {operator} ?4",
+                            now = SqlRead::dialect(&*self.conn).unix_epoch_now(),
+                        ),
                         sql_params![kind, run, attempt, label],
                         |row| {
                             Ok(JobRecord {

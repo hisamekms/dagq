@@ -316,12 +316,17 @@ fn rows_after_sql(after: bool) -> &'static str {
 fn queue_heads_sql(dialect: SqlDialect, filter: &str, limit: &str) -> String {
     format!(
         "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v,
-                (SELECT COALESCE(json_group_array({id}), '[]')
-                   FROM json_each(r.records) j) AS ids,
+                (SELECT COALESCE({ids}, '[]')
+                   FROM {records} j) AS ids,
                 r.task_id, r.subject_kind, r.subject_id, r.started_at, r.ended_at,
                 r.outcome, r.detail
            FROM ledger_rows r WHERE r.kind=?1 {filter} ORDER BY r.key {limit}",
-        id = dialect.json_field_spaced("j.value", "$.id", JsonType::Integer),
+        ids = dialect.json_array_agg(&dialect.json_field_spaced(
+            "j.value",
+            "$.id",
+            JsonType::Integer
+        )),
+        records = dialect.json_elements("r.records"),
     )
 }
 
@@ -330,16 +335,19 @@ fn queue_heads_sql(dialect: SqlDialect, filter: &str, limit: &str) -> String {
 /// key `?3` and the index `?4`) the key's range from it on the primary key,
 /// so a page reads no row before it; without, `?3` and `?4` are NULL.
 fn stops_after_sql(dialect: SqlDialect, after: bool) -> String {
+    let index = dialect.json_element_index("j");
     let from = if after {
-        "r.key >= ?3 AND (r.key > ?3 OR j.key > ?4)"
+        format!("r.key >= ?3 AND (r.key > ?3 OR {index} > ?4)")
     } else {
-        "CAST(?3 AS TEXT) IS NULL AND CAST(?4 AS BIGINT) IS NULL"
+        "CAST(?3 AS TEXT) IS NULL AND CAST(?4 AS BIGINT) IS NULL".to_owned()
     };
     format!(
-        "SELECT r.key, j.key, j.value FROM ledger_rows r, json_each(r.records) j
+        "SELECT r.key, {index}, {record} FROM ledger_rows r, {records}
           WHERE r.kind=?1 AND {from}
             AND {kind}=?2
-          ORDER BY r.key, j.key LIMIT ?5",
+          ORDER BY r.key, {index} LIMIT ?5",
+        record = dialect.json_element("j.value", JsonType::Text),
+        records = dialect.json_elements_numbered("r.records", "j"),
         kind = dialect.json_field_spaced("j.value", "$.kind", JsonType::Text),
     )
 }
@@ -427,9 +435,10 @@ fn last_event_naming_supervisor_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT * FROM run_events
   WHERE {} = ?1 AND id <= ?2
-    AND json_type(payload, '$.supervisor') = 'text'
+    AND {} = 'text'
   ORDER BY id DESC LIMIT 1",
-        dialect.json_field_spaced("payload", "$.supervisor", JsonType::Text)
+        dialect.json_field_spaced("payload", "$.supervisor", JsonType::Text),
+        dialect.json_type_of("payload", "$.supervisor"),
     )
 }
 
@@ -444,16 +453,18 @@ impl SqliteQueue {
         filter: &str,
         params: &[SqlValue],
     ) -> Result<Vec<(LedgerHead, bool)>> {
+        let dialect = SqlRead::dialect(&*self.conn);
         let statement = format!(
             "SELECT r.key, r.inputs_from, r.inputs_through, r.final, r.ledger_v, r.legacy,
-                    (SELECT COALESCE(json_group_array({id}), '[]')
-                       FROM json_each(r.records) j) AS ids
+                    (SELECT COALESCE({ids}, '[]')
+                       FROM {records} j) AS ids
                FROM ledger_rows r WHERE r.kind=?1 AND {filter} ORDER BY r.key",
-            id = SqlRead::dialect(&*self.conn).json_field_spaced(
+            ids = dialect.json_array_agg(&dialect.json_field_spaced(
                 "j.value",
                 "$.id",
                 JsonType::Integer
-            ),
+            )),
+            records = dialect.json_elements("r.records"),
         );
         let rows = SqlRead::query_map(&*self.conn, &statement, params, |r| {
             let key: String = r.get("key")?;
@@ -664,13 +675,15 @@ impl LedgerStore for SqliteQueue {
         let kind =
             SqlRead::dialect(&*self.conn).json_field_spaced("j.value", "$.kind", JsonType::Text);
         let statement = format!(
-            "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+            "SELECT {record} FROM ledger_rows r, {records} j
               WHERE r.kind=?1
                 AND ({kind}=?2
                      OR ({kind} IN (?3, ?4)
-                         AND EXISTS (SELECT 1 FROM json_each(r.records) f
+                         AND EXISTS (SELECT 1 FROM {records} f
                                       WHERE {failed}=?3)))
               ORDER BY {id}",
+            record = SqlRead::dialect(&*self.conn).json_element("j.value", JsonType::Text),
+            records = SqlRead::dialect(&*self.conn).json_elements("r.records"),
             failed = SqlRead::dialect(&*self.conn).json_field_spaced(
                 "f.value",
                 "$.kind",
@@ -711,7 +724,7 @@ impl LedgerStore for SqliteQueue {
                      OR {events}>?3
                      OR COALESCE({supervisor}, 0)>?3
                      OR COALESCE({windows}, 0)>?4
-                     OR json_array_length(COALESCE({life_ended}, '[]'))>0)",
+                     OR {life_ended_count}>0)",
             events = SqlRead::dialect(&*self.conn).json_field_spaced(
                 "r.inputs_through",
                 "$.events",
@@ -727,11 +740,14 @@ impl LedgerStore for SqliteQueue {
                 "$.resources",
                 JsonType::Integer
             ),
-            life_ended = SqlRead::dialect(&*self.conn).json_field_spaced(
-                "r.inputs_through",
-                "$.life_ended",
-                JsonType::Any
-            ),
+            life_ended_count = SqlRead::dialect(&*self.conn).json_array_length(&format!(
+                "COALESCE({}, '[]')",
+                SqlRead::dialect(&*self.conn).json_field_spaced(
+                    "r.inputs_through",
+                    "$.life_ended",
+                    JsonType::Any
+                )
+            )),
         );
         let mut heads = Vec::new();
         for kind in [LedgerKind::Run, LedgerKind::Task] {
@@ -757,19 +773,26 @@ impl LedgerStore for SqliteQueue {
     /// SQLite picks the runs out of the task rows' details and a legacy
     /// row's values, and keeps those with no run row: no record is read.
     fn ledger_runs_without_row(&self) -> Result<Vec<crate::domain::RunId>> {
-        let statement = "SELECT DISTINCT j.value
-               FROM ledger_rows t, json_each(t.detail, '$.runs') j
-              WHERE t.kind=?1 AND j.type='text'
-                AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?2 AND r.key=j.value)
+        let dialect = SqlRead::dialect(&*self.conn);
+        let statement = format!(
+            "SELECT DISTINCT {run}
+               FROM ledger_rows t, {detail} j
+              WHERE t.kind=?1 AND {run_type}='text'
+                AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?2 AND r.key={run})
              UNION
-             SELECT j.value
-               FROM ledger_rows t, json_each(COALESCE(t.legacy_values, '{}'), '$.runs') j
-              WHERE t.kind=?1 AND j.type='text'
-                AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?2 AND r.key=j.value)
-              ORDER BY 1";
+             SELECT {run}
+               FROM ledger_rows t, {legacy} j
+              WHERE t.kind=?1 AND {run_type}='text'
+                AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?2 AND r.key={run})
+              ORDER BY 1",
+            run = dialect.json_element("j.value", JsonType::Text),
+            run_type = dialect.json_element_type("j"),
+            detail = dialect.json_elements_at_spaced("t.detail", "$.runs"),
+            legacy = dialect.json_elements_at_spaced("COALESCE(t.legacy_values, '{}')", "$.runs"),
+        );
         let rows = SqlRead::query_map(
             &*self.conn,
-            statement,
+            &statement,
             sql_params![LedgerKind::Task.as_str(), LedgerKind::Run.as_str()],
             |r| r.get::<_, String>(0),
         )?;
@@ -880,9 +903,10 @@ impl LedgerStore for SqliteQueue {
     fn ledger_runs_classified_otherwise(&self, version: &str) -> Result<Vec<String>> {
         let statement = format!(
             "SELECT key FROM ledger_rows
-              WHERE kind=?1 AND json_type(detail, '$.steps') IS NOT NULL
+              WHERE kind=?1 AND {steps} IS NOT NULL
                 AND {rules} IS NOT ?2
               ORDER BY key",
+            steps = SqlRead::dialect(&*self.conn).json_type_of("detail", "$.steps"),
             rules = SqlRead::dialect(&*self.conn).json_field_spaced(
                 "detail",
                 "$.steps.fold.classes.rules",
@@ -931,11 +955,13 @@ impl LedgerStore for SqliteQueue {
     fn ledger_runless_pushes(&self) -> Result<Vec<crate::domain::RunEvent>> {
         use crate::domain::EventKind;
         let statement = format!(
-            "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+            "SELECT {record} FROM ledger_rows r, {records} j
               WHERE (r.kind=?1 OR (r.kind=?2 AND r.subject_kind=?3))
                 AND {kind}=?3
                 AND {run} IS NULL
               ORDER BY {id}",
+            record = SqlRead::dialect(&*self.conn).json_element("j.value", JsonType::Text),
+            records = SqlRead::dialect(&*self.conn).json_elements("r.records"),
             kind = SqlRead::dialect(&*self.conn).json_field_spaced(
                 "j.value",
                 "$.kind",
@@ -1012,13 +1038,17 @@ impl LedgerStore for SqliteQueue {
                         AND COALESCE(r.outcome, '') <> ?7
                         AND CASE r.subject_kind
                               WHEN 'slots_full' THEN COALESCE({end}, '') = ?8
-                                   OR json_type(r.detail, '$.interval.supervisor') IS NOT 'text'
+                                   OR {supervisor_type} IS NOT 'text'
                               ELSE COALESCE({end}, '') <> ?7
-                                   OR json_type(r.detail, '$.interval.ended_by') IS NOT 'text'
+                                   OR {ended_by_type} IS NOT 'text'
                             END)
                     OR COALESCE(r.subject_kind, '') NOT IN
                        ('live_alert_stream', 'live_alert', 'finding', 'landing_slot',
                         'slots_full', 'claim_hold', 'claim_deferral', 'landing_hold')))",
+            supervisor_type =
+                SqlRead::dialect(&*self.conn).json_type_of("r.detail", "$.interval.supervisor"),
+            ended_by_type =
+                SqlRead::dialect(&*self.conn).json_type_of("r.detail", "$.interval.ended_by"),
             events = SqlRead::dialect(&*self.conn).json_field_spaced(
                 "r.inputs_through",
                 "$.events",
@@ -1055,11 +1085,18 @@ impl LedgerStore for SqliteQueue {
     /// first record and the `session_closed` ones out of the stored array.
     fn ledger_session_anchors(&self) -> Result<Vec<(String, crate::domain::RunEvent)>> {
         let statement = format!(
-            "SELECT r.key, j.value FROM ledger_rows r, json_each(r.records) j
+            "SELECT r.key, {record} FROM ledger_rows r, {records}
               WHERE r.kind=?1
-                AND (j.key = 0 OR {} = 'session_closed')
-              ORDER BY r.key, j.key",
-            SqlRead::dialect(&*self.conn).json_field_spaced("j.value", "$.kind", JsonType::Text),
+                AND ({index} = 0 OR {kind} = 'session_closed')
+              ORDER BY r.key, {index}",
+            record = SqlRead::dialect(&*self.conn).json_element("j.value", JsonType::Text),
+            records = SqlRead::dialect(&*self.conn).json_elements_numbered("r.records", "j"),
+            index = SqlRead::dialect(&*self.conn).json_element_index("j"),
+            kind = SqlRead::dialect(&*self.conn).json_field_spaced(
+                "j.value",
+                "$.kind",
+                JsonType::Text
+            ),
         );
         let rows = SqlRead::query_map(
             &*self.conn,
@@ -1202,9 +1239,11 @@ impl LedgerStore for SqliteQueue {
     /// parsed.
     fn ledger_supervisor_stops(&self) -> Result<Vec<crate::domain::RunEvent>> {
         let statement = format!(
-            "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+            "SELECT {} FROM ledger_rows r, {} j
               WHERE r.kind=?1 AND {}=?2
               ORDER BY {}",
+            SqlRead::dialect(&*self.conn).json_element("j.value", JsonType::Text),
+            SqlRead::dialect(&*self.conn).json_elements("r.records"),
             SqlRead::dialect(&*self.conn).json_field_spaced("j.value", "$.kind", JsonType::Text),
             SqlRead::dialect(&*self.conn).json_field_spaced("j.value", "$.id", JsonType::Integer),
         );

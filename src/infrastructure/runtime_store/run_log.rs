@@ -33,10 +33,16 @@ pub(super) fn installs_after_sql(dialect: SqlDialect) -> String {
 
 /// The queue's events of the kinds `?1` (a JSON array), newest first, at
 /// most `?2`.
-pub(super) const UPDATE_EVENTS_SQL: &str = "SELECT * FROM run_events INDEXED BY events_by_kind
-     WHERE kind IN (SELECT value FROM json_each(?1))
+pub(super) fn update_events_sql(dialect: SqlDialect) -> String {
+    format!(
+        "SELECT * FROM run_events INDEXED BY events_by_kind
+     WHERE kind IN (SELECT {} FROM {})
      AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-     ORDER BY id DESC LIMIT ?2";
+     ORDER BY id DESC LIMIT ?2",
+        dialect.json_element("value", JsonType::Text),
+        dialect.json_elements("?1"),
+    )
+}
 
 /// The newest of the queue's events of the kind `?1`.
 pub(super) const LATEST_QUEUE_EVENT_SQL: &str = "SELECT * FROM run_events INDEXED BY events_by_kind
@@ -73,7 +79,7 @@ impl SqliteQueue {
     pub fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
         Ok(crate::domain::in_job_order(SqlRead::query_map(
             &*self.conn,
-            UPDATE_EVENTS_SQL,
+            &update_events_sql(SqlRead::dialect(&*self.conn)),
             sql_params![
                 serde_json::to_string(
                     &crate::domain::UPDATE_EVENT_KINDS
@@ -127,9 +133,13 @@ impl SqliteQueue {
         ];
         Ok(SqlRead::query_map(
             &*self.conn,
-            "SELECT * FROM run_events
-                 WHERE kind IN (SELECT value FROM json_each(?1))
+            &format!(
+                "SELECT * FROM run_events
+                 WHERE kind IN (SELECT {} FROM {})
                  ORDER BY id DESC LIMIT ?2",
+                SqlRead::dialect(&*self.conn).json_element("value", JsonType::Text),
+                SqlRead::dialect(&*self.conn).json_elements("?1"),
+            ),
             sql_params![
                 serde_json::to_string(&kinds)?,
                 i64::try_from(limit).unwrap_or(i64::MAX)
@@ -590,7 +600,7 @@ impl SqliteQueue {
                     "SELECT {} AS finding FROM run_events
                      WHERE id>?2 AND kind=?3 AND {}=?1
                        AND (CAST(?4 AS TEXT) IS NULL OR {}
-                            IN (SELECT value FROM json_each(?4)))
+                            IN (SELECT {to} FROM {tos}))
                      GROUP BY finding ORDER BY min(id)",
                     SqlRead::dialect(&*self.conn).json_field(
                         "payload",
@@ -599,6 +609,8 @@ impl SqliteQueue {
                     ),
                     SqlRead::dialect(&*self.conn).json_field("payload", "$.by", JsonType::Text),
                     SqlRead::dialect(&*self.conn).json_field("payload", "$.to", JsonType::Text),
+                    to = SqlRead::dialect(&*self.conn).json_element("value", JsonType::Text),
+                    tos = SqlRead::dialect(&*self.conn).json_elements("?4"),
                 ),
                 sql_params![
                     role,
@@ -686,7 +698,7 @@ impl SqliteQueue {
             &*self.conn,
             &format!(
                 "SELECT count(*) FROM run_events WHERE id>?3 AND NOT (
-               kind IN (SELECT value FROM json_each(?4))
+               kind IN (SELECT {ignored_kind} FROM {ignored_kinds})
                OR (kind IN ('{}','{}','{}')
                    AND {by} IS ?1)
                OR (kind='{}' AND {asked_by} IS ?1)
@@ -701,6 +713,8 @@ impl SqliteQueue {
                 event_kind::SESSION_OPENED,
                 event_kind::SESSION_CLOSED,
                 event_kind::SESSION_TURNS,
+                ignored_kind = SqlRead::dialect(&*self.conn).json_element("value", JsonType::Text),
+                ignored_kinds = SqlRead::dialect(&*self.conn).json_elements("?4"),
                 by = SqlRead::dialect(&*self.conn).json_field("payload", "$.by", JsonType::Text),
                 asked_by = SqlRead::dialect(&*self.conn).json_field(
                     "payload",
@@ -917,7 +931,7 @@ impl SqliteQueue {
             &*self.conn,
             &format!(
                 "SELECT * FROM run_events WHERE id>?1 AND id<=?2
-                 AND (CAST(?3 AS TEXT) IS NULL OR kind IN (SELECT value FROM json_each(?3)))
+                 AND (CAST(?3 AS TEXT) IS NULL OR kind IN (SELECT {kind} FROM {kinds}))
                  AND (CAST(?4 AS TEXT) IS NULL OR run_id=?4 OR {}=?4)
                  AND (CAST(?5 AS BIGINT) IS NULL OR task_id=?5)
                  AND (CAST(?6 AS BIGINT) IS NULL OR goal_id=?6
@@ -934,6 +948,8 @@ impl SqliteQueue {
                 SqlRead::dialect(&*self.conn).time_value("?7", TimeForm::Ordinal),
                 SqlRead::dialect(&*self.conn).time_value("created_at", TimeForm::Ordinal),
                 SqlRead::dialect(&*self.conn).time_value("?8", TimeForm::Ordinal),
+                kind = SqlRead::dialect(&*self.conn).json_element("value", JsonType::Text),
+                kinds = SqlRead::dialect(&*self.conn).json_elements("?3"),
             ),
             sql_params![
                 after,
