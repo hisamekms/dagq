@@ -9,7 +9,8 @@
 //! What counts as an open:
 //!
 //! - a path (called or not) whose last two segments are `SqliteQueue::f`
-//!   for an `f` of [`OPENS`], or `Self::f` in an `impl` of it;
+//!   for an `f` of [`OPENS`], or `Self::f` in an `impl` of it, including
+//!   the concrete spelling `StoreQueue<SqliteEntries>`;
 //! - a struct expression of `SqliteOpener`, which opens the queue for each
 //!   connection it is asked for, or of `SqliteServiceBackend`, the
 //!   service's use cases on a DB they open;
@@ -277,29 +278,64 @@ fn skipped(attrs: &[Attribute]) -> bool {
     is_test(attrs) || is_test_path(attrs)
 }
 
-/// The names of `SqliteQueue` (`queues`) and of the struct expressions
-/// that open the DB (`openers`) in the crate.
+/// The concrete queues, generic queues, SQLite entries and struct expressions
+/// that open the DB, including their aliases in the crate.
 #[derive(Debug, Clone, Default)]
 struct Names {
     queues: BTreeSet<String>,
     openers: BTreeSet<String>,
+    generic_queues: BTreeSet<String>,
+    sqlite_entries: BTreeSet<String>,
 }
 
-/// The names `files` give `SqliteQueue`, `SqliteOpener` and
-/// `SqliteServiceBackend` with a `type` alias or a `use ... as`, to the
+impl Names {
+    // A generic queue opens SQLite only when specialized with SQLite's
+    // entries. Resolve aliases of both names, including chained aliases.
+    fn queue_type_name(&self, segment: &syn::PathSegment) -> String {
+        if self.generic_queues.contains(&segment.ident.to_string())
+            && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+            && matches!(args.args.first(), Some(syn::GenericArgument::Type(ty))
+                if self.type_name(ty).is_some_and(|name| self.sqlite_entries.contains(&name)))
+        {
+            "SqliteQueue".to_owned()
+        } else {
+            segment.ident.to_string()
+        }
+    }
+
+    fn type_name(&self, ty: &syn::Type) -> Option<String> {
+        match ty {
+            syn::Type::Path(path) => path.path.segments.last().map(|s| self.queue_type_name(s)),
+            syn::Type::Reference(reference) => self.type_name(&reference.elem),
+            _ => None,
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.queues.len()
+            + self.openers.len()
+            + self.generic_queues.len()
+            + self.sqlite_entries.len()
+    }
+}
+
+/// The names `files` give the queue types, entries and openers
+/// with a `type` alias or a `use ... as`, to the
 /// names of names, in any file and any code (an alias in test code that
 /// production code names is still an alias).
 fn names<'a>(files: impl Iterator<Item = &'a syn::File> + Clone) -> Names {
     let mut names = Names::default();
     names.queues.insert("SqliteQueue".to_owned());
+    names.generic_queues.insert("StoreQueue".to_owned());
+    names.sqlite_entries.insert("SqliteEntries".to_owned());
     names.openers.insert("SqliteOpener".to_owned());
     names.openers.insert("SqliteServiceBackend".to_owned());
     loop {
-        let before = (names.queues.len(), names.openers.len());
+        let before = names.count();
         for file in files.clone() {
             Aliases { names: &mut names }.visit_file(file);
         }
-        if (names.queues.len(), names.openers.len()) == before {
+        if names.count() == before {
             return names;
         }
     }
@@ -308,8 +344,7 @@ fn names<'a>(files: impl Iterator<Item = &'a syn::File> + Clone) -> Names {
 /// The opens of `file` outside its test code and test paths.
 fn opens(file: &syn::File, names: &Names) -> BTreeSet<Open> {
     let mut reader = Reader {
-        aliases: names.queues.clone(),
-        openers: names.openers.clone(),
+        names: names.clone(),
         ..Reader::default()
     };
     if skipped(&file.attrs) {
@@ -330,6 +365,10 @@ impl Aliases<'_> {
             self.names.queues.insert(name);
         } else if self.names.openers.contains(of) {
             self.names.openers.insert(name);
+        } else if self.names.generic_queues.contains(of) {
+            self.names.generic_queues.insert(name);
+        } else if self.names.sqlite_entries.contains(of) {
+            self.names.sqlite_entries.insert(name);
         }
     }
 }
@@ -340,7 +379,7 @@ impl<'ast> Visit<'ast> for Aliases<'_> {
     }
 
     fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
-        if let Some(of) = type_name(&item.ty) {
+        if let Some(of) = self.names.type_name(&item.ty) {
             self.alias(&of, item.ident.to_string());
         }
         visit::visit_item_type(self, item);
@@ -349,9 +388,8 @@ impl<'ast> Visit<'ast> for Aliases<'_> {
 
 #[derive(Default)]
 struct Reader {
-    /// The names of `SqliteQueue` and of `SqliteOpener` in the file.
-    aliases: BTreeSet<String>,
-    openers: BTreeSet<String>,
+    /// Concrete queues, generic queues, entries and openers, with their aliases.
+    names: Names,
     /// The self type of each `impl` (or the trait) around, innermost last.
     owners: Vec<String>,
     fns: Vec<String>,
@@ -386,7 +424,7 @@ impl Reader {
             Some(of) if owner == "Self" => of.clone(),
             _ => owner.to_owned(),
         };
-        let queue = self.aliases.contains(&owner) && OPENS.contains(&name);
+        let queue = self.names.queues.contains(&owner) && OPENS.contains(&name);
         let in_process = IN_PROCESS
             .iter()
             .any(|(of, entry)| *of == owner && entry.is_none_or(|entry| entry == name));
@@ -400,11 +438,27 @@ impl Reader {
     fn tokens(&mut self, tokens: TokenStream) {
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
         for (at, tree) in trees.iter().enumerate() {
+            // Generic paths can start at an alias or at the opening `<` of
+            // qself. Starting only at the type name loses `<Q<E>>::open`.
+            if matches!(tree, TokenTree::Ident(name) if self.names.generic_queues.contains(&name.to_string()))
+                || matches!(tree, TokenTree::Punct(p) if p.as_char() == '<')
+            {
+                for end in at + 1..=trees.len() {
+                    if !matches!(&trees[end - 1], TokenTree::Ident(name) if OPENS.contains(&name.to_string().as_str()))
+                    {
+                        continue;
+                    }
+                    let prefix: TokenStream = trees[at..end].iter().cloned().collect();
+                    if let Ok(path) = syn::parse2::<syn::ExprPath>(prefix) {
+                        self.visit_expr_path(&path);
+                    }
+                }
+            }
             match tree {
                 TokenTree::Group(group) => self.tokens(group.stream()),
                 TokenTree::Ident(owner) => {
                     let owner = owner.to_string();
-                    if self.openers.contains(&owner)
+                    if self.names.openers.contains(&owner)
                         && matches!(trees.get(at + 1), Some(TokenTree::Group(group))
                             if group.delimiter() == proc_macro2::Delimiter::Brace)
                     {
@@ -427,14 +481,6 @@ impl Reader {
     }
 }
 
-fn type_name(ty: &syn::Type) -> Option<String> {
-    match ty {
-        syn::Type::Path(path) => path.path.segments.last().map(|s| s.ident.to_string()),
-        syn::Type::Reference(reference) => type_name(&reference.elem),
-        _ => None,
-    }
-}
-
 impl<'ast> Visit<'ast> for Reader {
     fn visit_item(&mut self, item: &'ast syn::Item) {
         if !skipped(item_attrs(item)) {
@@ -447,7 +493,7 @@ impl<'ast> Visit<'ast> for Reader {
     }
 
     fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-        let owner = type_name(&item.self_ty).unwrap_or_default();
+        let owner = self.names.type_name(&item.self_ty).unwrap_or_default();
         self.in_owner(owner, |r| visit::visit_item_impl(r, item));
     }
 
@@ -519,7 +565,7 @@ impl<'ast> Visit<'ast> for Reader {
             (name, _) => name.map(|name| name.ident.to_string()),
         };
         if let Some(name) = name
-            && self.openers.contains(&name)
+            && self.names.openers.contains(&name)
         {
             self.found(name);
         }
@@ -531,11 +577,11 @@ impl<'ast> Visit<'ast> for Reader {
             .path
             .segments
             .iter()
-            .map(|s| s.ident.to_string())
+            .map(|s| self.names.queue_type_name(s))
             .collect();
         // `<T>::f` and `<T as Trait>::f` name `f` of `T` in their qself.
         let owner = match &path.qself {
-            Some(qself) if qself.position + 1 >= segments.len() => type_name(&qself.ty),
+            Some(qself) if qself.position + 1 >= segments.len() => self.names.type_name(&qself.ty),
             _ => segments.len().checked_sub(2).map(|at| segments[at].clone()),
         };
         if let (Some(owner), Some(name)) = (owner, segments.last()) {
@@ -684,6 +730,51 @@ mod fixtures {
             "InProcessTelemetry",
         ),
     ];
+
+    #[test]
+    fn a_sqlite_specialization_open_outside_the_service_fails() {
+        for body in [
+            "StoreQueue::<SqliteEntries>::open(db);",
+            "<StoreQueue<SqliteEntries>>::open_read_only(db);",
+            r#"format!("{:?}", StoreQueue::<SqliteEntries>::open(db));"#,
+            r#"format!("{:?}", <StoreQueue<SqliteEntries>>::open(db));"#,
+            r#"format!("{:?}", <crate::infrastructure::store_queue::StoreQueue<crate::infrastructure::sqlite::SqliteEntries>>::open(db));"#,
+            "use crate::infrastructure::store_queue::StoreQueue as Q; Q::<SqliteEntries>::open(db);",
+            r#"use crate::infrastructure::store_queue::StoreQueue as Q; format!("{:?}", <Q<SqliteEntries>>::open(db));"#,
+            r#"use crate::infrastructure::store_queue::StoreQueue as Q; format!("{:?}", Q::<SqliteEntries>::open(db));"#,
+            r#"format!("{:?}", <StoreQueue<SqliteEntries> as Open>::open(db));"#,
+            "use crate::infrastructure::store_queue::StoreQueue as Q; type Again<E> = Q<E>; type Entries = SqliteEntries; Again::<Entries>::open_read_only(db);",
+            r#"use crate::infrastructure::store_queue::StoreQueue as Q; use crate::infrastructure::sqlite::SqliteEntries as E; format!("{:?}", <Q<E>>::open(db));"#,
+            "use crate::infrastructure::store_queue::StoreQueue as Q; impl Q<SqliteEntries> { fn read() { Self::open(db); } }",
+            "type Q = StoreQueue<SqliteEntries>; Q::open(db);",
+            "impl StoreQueue<SqliteEntries> { fn read() { Self::open(db); } }",
+        ] {
+            let text = format!("fn reads() {{ {body} }}");
+            let found = errors(&[("src/compose/reads.rs", &text)], &[]);
+            assert_eq!(found.len(), 1, "{text}: {found:#?}");
+            assert!(found[0].contains("opens the queue's DB"), "{found:#?}");
+        }
+        for text in [
+            "fn reads() { StoreQueue::<PostgresStore<S>>::open(session, runs); }",
+            r#"use crate::infrastructure::store_queue::StoreQueue as Q; fn reads() { format!("{:?}", <Q<PostgresStore<S>>>::open(session, runs)); }"#,
+        ] {
+            assert!(
+                errors(&[("src/compose/reads.rs", text)], &[]).is_empty(),
+                "{text}"
+            );
+        }
+        let definitions = "pub use crate::infrastructure::store_queue::StoreQueue as Q; pub use crate::infrastructure::sqlite::SqliteEntries as E; pub type Again<T> = Q<T>;";
+        let text = r#"fn reads() { format!("{:?}", <crate::infrastructure::store::Again<crate::infrastructure::store::E>>::open(db)); }"#;
+        let found = errors(
+            &[
+                ("src/compose/reads.rs", text),
+                ("src/infrastructure/store.rs", definitions),
+            ],
+            &[],
+        );
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].contains("opens the queue's DB"), "{found:#?}");
+    }
 
     /// The telemetry tokens every process takes, as a pub type of the
     /// service's module, open no queue: a row of the service's lets only

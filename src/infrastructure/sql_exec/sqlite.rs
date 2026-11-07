@@ -21,6 +21,11 @@
 //! [`super::super::event_actor`]'s, and what the body function returns is
 //! [`super::super::event_bodies`]'s.
 
+#[cfg(test)]
+use super::TransactionEntries;
+#[cfg(test)]
+use crate::infrastructure::sqlite::SqliteQueue;
+
 use std::sync::Arc;
 
 use rusqlite::{
@@ -33,7 +38,7 @@ use rusqlite::{
 use super::{
     CommitActions, CommitState, CommitTransaction, RowValues, SessionConnection, SqlDialect,
     SqlError, SqlRead, SqlResult, SqlRow, SqlSavepoint, SqlSavepoints, SqlValue, SqlWrite,
-    TransactionEntries, ValueKind,
+    ValueKind,
 };
 use crate::application::EventBodies;
 use crate::domain::actor::ActorContext;
@@ -44,7 +49,7 @@ use crate::domain::{
 use crate::infrastructure::{
     event_actor::EventActors,
     event_bodies::event_body_for_row,
-    sqlite::{SqliteQueue, WriteTx, insert_counted},
+    sqlite::{WriteTx, insert_counted},
 };
 
 impl rusqlite::ToSql for SqlValue {
@@ -533,19 +538,6 @@ pub(in crate::infrastructure) fn attach_event_bodies(
         },
     )?;
     Ok(())
-}
-
-impl TransactionEntries for SqliteQueue {
-    type Write<'store> = WriteTx<'store>;
-    type Read<'store> = WriteTx<'store>;
-
-    fn write_entry(&self, name: &'static str) -> anyhow::Result<WriteTx<'_>> {
-        self.write_tx(name)
-    }
-
-    fn read_entry(&self, name: &'static str) -> anyhow::Result<WriteTx<'_>> {
-        self.read_tx(name)
-    }
 }
 
 #[cfg(test)]

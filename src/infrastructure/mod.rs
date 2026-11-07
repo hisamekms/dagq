@@ -88,6 +88,7 @@ pub(crate) mod sql_dialect;
 pub mod sql_exec;
 pub mod sqlite;
 pub mod startup_reads;
+pub mod store_queue;
 mod store_rows;
 mod store_writes;
 mod stranded;

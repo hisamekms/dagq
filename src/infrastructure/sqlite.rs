@@ -55,7 +55,7 @@ use crate::{
     },
     infrastructure::{
         clock,
-        event_actor::{EventActors, process_actor},
+        event_actor::process_actor,
         location::runs_dir,
         proposals,
         schema::{self, BINARY_SCHEMA, MIGRATIONS},
@@ -748,49 +748,60 @@ impl Drop for NotLent<'_> {
     }
 }
 
-pub struct SqliteQueue {
+/// The local queue: shared state with SQLite's named transaction entries.
+pub type SqliteQueue = super::store_queue::StoreQueue<SqliteEntries>;
+
+pub use super::store_queue::DenialRecorder;
+
+/// SQLite's connection and transaction policy. Shared queue state lives on
+/// [`super::store_queue::StoreQueue`], independently of this adapter.
+pub struct SqliteEntries {
     pub(super) conn: QueueConnection,
     /// The opening service's identity; never reread by an ordinary write.
     /// None only while opening a schema predating the leader table.
     pub(super) write_identity: Option<WriteIdentity>,
-    /// `runs/` next to the database as opened now. A run's directory, worktree,
-    /// receipt and log are resolved under it by run ID, never read from the
-    /// absolute paths stored at claim time, so a moved queue keeps its runs.
-    pub(super) runs_dir: PathBuf,
-    /// Where every time the queue writes and every run ID it creates come
-    /// from; the system clock and random UUIDs unless a test fixes them.
-    pub(super) generators: Generators,
-    /// Who the events written through this connection record
-    /// (ADR-t728-1 decision 4).
-    pub(super) actors: EventActors,
-    /// The repository's set of changes (`[tasks] changes` of dagq.toml,
-    /// ADR-t980-1) that `add`, `edit`, `submit` and `lint` hold the tasks
-    /// to; none accepts any change and a task without one.
-    pub(super) changes: Option<ChangeSet>,
-    /// The repository's prefixes of a task's title (`[tasks]
-    /// title_prefixes` of dagq.toml) that `submit` and `lint` hold the
-    /// titles to; none checks no title.
-    pub(super) title_prefixes: Option<TitlePrefixes>,
-    /// The repository's set of goal tags (`[goals] tags` of dagq.toml,
-    /// ADR-t1639-1 decision 6) that `goal add`, `goal edit`, `submit` and
-    /// `lint` hold the goals to; none accepts any tag and a goal without one.
-    pub(super) goal_tags: Option<TagSet>,
-    /// `[goals] max_spike_cycles` (ADR-t1487-1 decision 8), which `submit`
-    /// holds a planner of the runtime's to; none limits nothing.
-    pub(super) max_spike_cycles: Option<usize>,
-    /// The replacement plan `submit --replacement` goes with
-    /// ([`crate::domain::replan_plan`]); none for any other submit.
-    pub(super) replacement: Option<crate::domain::replan_plan::ReplacementPlan>,
-    /// How long a [`WriteTx`] of this connection may hold the write lock
-    /// before it warns; [`WRITE_HOLD_WARN`] unless a test lowers it.
+    /// How long a [`WriteTx`] may hold the write lock before it warns.
     pub(super) write_hold_warn: Duration,
-    /// Where a refusal of the policy is recorded instead of on this
-    /// connection ([`Self::with_denial_log`]).
-    pub(super) denial_log: Option<DenialRecorder>,
 }
 
-/// What records a refusal of the policy, given its event's payload.
-pub type DenialRecorder = Arc<dyn Fn(serde_json::Value) -> Result<()> + Send + Sync>;
+// Keep connection access available to SQLite's adapter and existing tests,
+// but never to a StoreQueue whose entries are still generic.
+impl std::ops::Deref for SqliteQueue {
+    type Target = SqliteEntries;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl std::ops::DerefMut for SqliteQueue {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.entries
+    }
+}
+
+impl super::sql_exec::TransactionEntries for SqliteEntries {
+    type Write<'store> = WriteTx<'store>;
+    type Read<'store> = WriteTx<'store>;
+
+    fn write_entry(&self, name: &'static str) -> anyhow::Result<WriteTx<'_>> {
+        Ok(WriteTx::write(
+            &self.conn,
+            name,
+            self.write_hold_warn,
+            self.write_identity
+                .as_ref()
+                .context("queue has no write leader identity")?,
+        )?
+        .recorded())
+    }
+
+    fn read_entry(&self, name: &'static str) -> anyhow::Result<WriteTx<'_>> {
+        let mut tx = WriteTx::read(&self.conn, name, self.write_hold_warn)?.recorded();
+        tx.identity = self.write_identity.clone();
+        Ok(tx)
+    }
+}
 
 impl SqliteQueue {
     /// Select the independent body store used by new event writes on this
@@ -1286,8 +1297,11 @@ impl SqliteQueue {
             .then(|| WriteIdentity::read(&*conn))
             .transpose()?;
         Ok(Self {
-            conn,
-            write_identity,
+            entries: SqliteEntries {
+                conn,
+                write_identity,
+                write_hold_warn: WRITE_HOLD_WARN,
+            },
             runs_dir: runs_dir(&db),
             generators: clock::system(),
             actors,
@@ -1296,7 +1310,6 @@ impl SqliteQueue {
             goal_tags: None,
             max_spike_cycles: None,
             replacement: None,
-            write_hold_warn: WRITE_HOLD_WARN,
             denial_log: None,
         })
     }

@@ -52,6 +52,30 @@ fn fence_sql() -> String {
     numbered_parameters(&renew_sql(&SqlDialect::Postgres.now_millis()))
 }
 
+/// The shared queue state with Postgres's connection and transaction entries.
+pub type PostgresQueue<S> = super::store_queue::StoreQueue<PostgresStore<S>>;
+
+impl<S: PostgresSession> PostgresQueue<S> {
+    /// Open the session's schema without migrating it, and resolve run files
+    /// under the control side's supplied run directory.
+    pub fn open(session: S, runs_dir: std::path::PathBuf) -> Result<Self> {
+        let entries = PostgresStore::open(session)?;
+        let actors = entries.actors.clone();
+        Ok(Self {
+            entries,
+            runs_dir,
+            actors,
+            generators: super::clock::system(),
+            changes: None,
+            title_prefixes: None,
+            goal_tags: None,
+            max_spike_cycles: None,
+            replacement: None,
+            denial_log: None,
+        })
+    }
+}
+
 /// What a driver answers for the store. Its statements' parameters are
 /// already numbered as Postgres spells them.
 pub trait PostgresSession {
@@ -452,6 +476,31 @@ mod tests {
     /// The statements after the store opened.
     fn after_open(session: &Recorded) -> Vec<String> {
         session.statements.borrow()[4..].to_vec()
+    }
+
+    #[test]
+    fn the_shared_queue_delegates_fenced_writes_and_snapshot_reads() {
+        let session = Recorded::taken();
+        let queue = PostgresQueue::open(&session, "runs".into()).unwrap();
+        let tx = queue.write_entry("queue-write").unwrap();
+        tx.commit().unwrap();
+        let read = queue.read_entry("queue-read").unwrap();
+        drop(read);
+        assert_eq!(
+            after_open(&session),
+            [
+                BEGIN_WRITE_SQL.to_owned(),
+                fence_sql(),
+                COMMIT_SQL.to_owned(),
+                BEGIN_READ_SQL.to_owned(),
+                ROLLBACK_SQL.to_owned(),
+            ]
+        );
+        assert_eq!(
+            session.bound.borrow()[0][0],
+            SqlValue::Text("service-1".into())
+        );
+        assert_eq!(session.bound.borrow()[0][1], SqlValue::Integer(7));
     }
 
     /// The fake session exercises successful, dropped and failed commits,
