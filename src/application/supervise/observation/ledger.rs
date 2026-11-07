@@ -51,7 +51,9 @@ use crate::domain::ledger::builder::{
 };
 use crate::domain::ledger::queue::{QueueBook, QueueHead, cut};
 use crate::domain::ledger::session::SessionsHeld;
-use crate::domain::ledger::session::written::{Marks, rows_to_go_on_from, written_through};
+use crate::domain::ledger::session::written::{
+    Marks, marks_with_time_work, rows_to_go_on_from, written_through,
+};
 use crate::domain::ledger::{LedgerKind, LedgerRow};
 use crate::domain::pre_claim::{self, PreClaimBook};
 use crate::domain::session_step::{self, StepTarget};
@@ -60,6 +62,10 @@ use crate::domain::supervisor_life::Lives;
 /// How many passes in a row fail before one `ledger_build_failed` is
 /// recorded.
 pub const FAILING_PASSES: u32 = 10;
+
+/// Bound an event catch-up pass so missing rows get their write turn and
+/// checkpoint even when its session marks prevent page checkpoints.
+const EVENTS_PER_PASS: usize = 20 * EVENTS_PER_READ;
 
 /// How often the supervisor's log says how much the builder keeps between
 /// passes ([`KeptSize`]) while it changes little.
@@ -124,9 +130,10 @@ pub struct Built {
     pub failure: Option<String>,
     /// How much the builder keeps after it.
     pub kept: KeptSize,
-    /// All marks observed once before the session write; afterwards only
-    /// session counts and remembered written marks are refreshed. A pass
-    /// failing before that write observes its marks when it ends.
+    /// Remaining marks at the final session write, with session counts and
+    /// acknowledged marks refreshed afterwards. Checkpoints observe these
+    /// too; a pass ending before its final write observes its current marks
+    /// when it ends.
     pub marks: MarkObservation,
     marks_observed: bool,
     pub sweep: SweepCounts,
@@ -215,6 +222,34 @@ fn write_sessions_observed(
         };
     }
     result
+}
+
+/// Persist clock work before writing any prefix row. The position remains
+/// the store's previously certified one (zero if it has no usable R), so
+/// a later failure writing sessions/marks cannot strand an open row at its
+/// prefix time after a checkpoint. This reads no ledger row.
+fn preserve_time_work(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    until: i64,
+    built: &mut Built,
+) -> Result<()> {
+    builder.defer_time(until);
+    let stored = store.ledger_marks()?;
+    let heads = store.ledger_heads(LedgerKind::Session)?;
+    let marks = marks_with_time_work(stored.as_ref(), &heads, until);
+    if stored != Some(marks) {
+        store.write_ledger_marks(&marks)?;
+        built.work.marks_written = Some(marks);
+    }
+    builder.defer_time(
+        marks
+            .rows
+            .and_then(|rows| rows.time_pending)
+            .expect("clock work attached"),
+    );
+    builder.wrote_sessions_mark(marks);
+    Ok(())
 }
 
 /// What one pass removes past its retention: the node rows of a local
@@ -316,9 +351,31 @@ fn build_pass_timed(
     (per_read, session_bytes): (usize, usize),
     timing: Timing<'_>,
 ) -> Built {
+    build_pass_limited(
+        store,
+        builder,
+        (now_ms, built_at),
+        retain,
+        classifier,
+        (per_read, EVENTS_PER_PASS, session_bytes),
+        timing,
+    )
+}
+
+/// The same production pass with explicit read bounds, so tests can cross
+/// a catch-up boundary without manufacturing a full production batch.
+fn build_pass_limited(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    (now_ms, built_at): (i64, &str),
+    retain: Retain,
+    classifier: Option<&crate::domain::command_rules::CommandClassifier>,
+    (per_read, per_pass, session_bytes): (usize, usize, usize),
+    timing: Timing<'_>,
+) -> Built {
     let started = timing.start();
     let mut built = Built::default();
-    let read = (classifier, per_read, session_bytes, timing);
+    let read = (classifier, per_read, per_pass, session_bytes, timing);
     if let Err(error) = pass(store, builder, (now_ms, built_at), read, &mut built) {
         built.failure = Some(format!("{error:#}"));
     }
@@ -378,8 +435,9 @@ fn pass(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
     (now_ms, built_at): (i64, &str),
-    (classifier, per_read, session_bytes, timing): (
+    (classifier, per_read, per_pass, session_bytes, timing): (
         Option<&crate::domain::command_rules::CommandClassifier>,
+        usize,
         usize,
         usize,
         Timing<'_>,
@@ -390,15 +448,22 @@ fn pass(
     built.work.latest = latest.as_i64();
     let mut progress = Duration::ZERO;
     let reading_started = timing.start();
+    let mut checkpoint_events = 0;
     while latest > builder.events {
         let started = timing.start();
-        let read = store.events_between(builder.events, latest, &EventFilter::default(), per_read);
+        let read = store.events_between(
+            builder.events,
+            latest,
+            &EventFilter::default(),
+            per_read.min(per_pass - built.work.events),
+        );
         built.work.event_read += timing.since(started);
         let new = read?;
         if new.is_empty() {
             break;
         }
         built.work.events += new.len();
+        checkpoint_events += new.len();
         built.work.pages += 1;
         builder.mark_events(&new);
         drop(new);
@@ -407,11 +472,28 @@ fn pass(
             let result = sweep_page(
                 store,
                 builder,
-                (builder.folds_at(now_ms), built_at),
+                (builder.folds_at_snapshot(now_ms, latest), built_at),
                 &mut built.sweep,
             );
             built.work.page_sweep += timing.since(started);
             result?;
+            // Commit covered inputs during catch-up, before the next read
+            // can fail or the process can stop. The session writer certifies
+            // W and R together. With pending sessions, defer to the pass's
+            // bounded end instead of adding row reads for a checkpoint.
+            if checkpoint_events >= EVENTS_PER_READ && builder.sessions_mark().is_some() {
+                built.sessions += write_sessions_observed(
+                    store,
+                    builder,
+                    (builder.folds_at_snapshot(now_ms, latest), built_at),
+                    session_bytes,
+                    built,
+                )?;
+                // A later page can change marks and fail before the final
+                // write; its failure log must observe that state too.
+                built.marks_observed = false;
+                checkpoint_events = 0;
+            }
             let elapsed = timing.since(reading_started);
             log_progress(
                 &mut progress,
@@ -420,6 +502,14 @@ fn pass(
                 built.work.pages,
             );
         }
+        // Bound catch-up reads even when every page leaves missing rows.
+        // The normal end of the pass writes their folds and checkpoints.
+        if built.work.events >= per_pass {
+            break;
+        }
+    }
+    if builder.events < latest {
+        preserve_time_work(store, builder, builder.folds_at(now_ms), built)?;
     }
     let samples = store.node_samples_after(builder.samples)?;
     builder.mark_samples(&samples);
@@ -447,8 +537,9 @@ fn pass(
         };
         builder.mark_rules(rules.as_deref(), runs);
     }
-    // What it read came by then.
-    let now_ms = builder.folds_at(now_ms);
+    // Unread heartbeats are not silence: time follows the read prefix
+    // until the snapshot is complete, including a bounded pass's writes.
+    let now_ms = builder.folds_at_snapshot(now_ms, latest);
     builder.due(now_ms);
     if let Some((after, limit)) = builder.older_rows_to_read() {
         let older = store.ledger_older_rows_after(after, limit)?;
@@ -456,7 +547,10 @@ fn pass(
     }
     if !builder.marked() {
         // No row changed: the mark alone moves on.
-        built.sessions =
+        if builder.events >= latest {
+            builder.finished_time();
+        }
+        built.sessions +=
             write_sessions_observed(store, builder, (now_ms, built_at), session_bytes, built)?;
         return Ok(());
     }
@@ -486,10 +580,13 @@ fn pass(
         &rows,
         aside,
     );
+    if taken.is_ok() && !builder.marked() && builder.events >= latest {
+        builder.finished_time();
+    }
     let sessions =
         write_sessions_observed(store, builder, (now_ms, built_at), session_bytes, built);
     if let Ok(written) = sessions {
-        built.sessions = written;
+        built.sessions += written;
     }
     // The other rows' failure first, as they were written first.
     taken?;
@@ -560,7 +657,11 @@ fn write_taken(
     built.work.final_sweep += timing.since(started);
     built.work.final_reads += built.sweep.reads - reads_before;
     result?;
-    builder.swept();
+    // A bounded read can leave startup catch-up to another pass. Keep
+    // sweeping pages until that catch-up reaches its snapshot of latest.
+    if builder.events.as_i64() >= built.work.latest {
+        builder.swept();
+    }
     Ok(())
 }
 
@@ -1270,8 +1371,18 @@ fn start_builder_timed(
         return Ok(builder);
     };
     builder.go_on_from_rows(r);
+    builder.resume_taking(
+        marks
+            .and_then(|marks| marks.rows)
+            .map_or(0, |rows| rows.take_offset),
+    );
+    builder.restore_time(
+        marks
+            .and_then(|marks| marks.rows)
+            .and_then(|rows| rows.time_pending),
+    );
     builder.read_up_to(read_ms);
-    let now_ms = builder.folds_at(now_ms);
+    let now_ms = builder.folds_at_snapshot(now_ms, latest);
     let since = store.ledger_tasks_open_since_at(r.events)?;
     let heads = store.ledger_queue_heads_at(r.events, since)?;
     let (queue, lives, pre_claim) = books_of_heads(store, &heads, since, r.events, now_ms)?;
@@ -1311,7 +1422,8 @@ fn start_builder_timed(
 /// the next pass.
 pub const WRITE_TRIES: usize = 3;
 
-/// Fold `target` and write it when [`writes`] says so ([`fold_and_write`]),
+/// Fold `target` and write it when [`writes`] or an open row's advancing
+/// clock input says so ([`Builder::time_advanced`], [`fold_and_write`]),
 /// folding it again over the row held now while another writer (another
 /// supervisor's builder) wrote the row since it was read; after
 /// [`WRITE_TRIES`] the target stays marked for the next pass.
@@ -1337,7 +1449,7 @@ fn write(
 /// Fold `target`, a run's or a task's on its events up to the builder's
 /// cursor (a run's on its steps up to the step cursor too, over what the
 /// stored row folded of them, and on its resources up to the resource
-/// cursors), and write it when [`writes`] says so and it
+/// cursors), and write it when records or pending clock work changed and it
 /// is not [`behind`] the stored row (then it stays marked), only over the
 /// row it read
 /// ([`crate::application::LedgerStore::write_ledger_row_over`]). False
@@ -1437,7 +1549,18 @@ fn fold_and_write(
     let Some(row) = row else {
         return Ok(true);
     };
-    if writes(stored.as_ref(), &row) {
+    // A required version/settlement write may fail or be behind another
+    // writer, but inputs already held by that writer do not hold R.
+    if let Some(stored) = &stored
+        && Builder::inputs_recorded(stored, &row)
+    {
+        builder.track(target, stored);
+    }
+    if writes(stored.as_ref(), &row)
+        || stored
+            .as_ref()
+            .is_some_and(|stored| builder.time_advanced(stored, &row))
+    {
         // Its cursors or its time are behind the stored row's: they pass
         // it in a later pass.
         if stored.as_ref().is_some_and(|stored| behind(stored, &row)) {
@@ -1454,6 +1577,15 @@ fn fold_and_write(
         builder.track(target, &row);
     } else if let Some(stored) = stored {
         builder.track(target, &stored);
+    }
+    if builder.events.as_i64() < built.work.latest
+        && !row.is_final
+        && matches!(target, Target::Run(_) | Target::Task(_))
+    {
+        // The row has its records, so track released its input position.
+        // Keep clock work until the snapshot catches up; startup restores
+        // the same work from the unsettled heads if the process stops.
+        builder.keep(target.clone());
     }
     Ok(true)
 }

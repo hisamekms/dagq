@@ -1435,6 +1435,8 @@ fn mark_observation_is_read_only_and_ignores_session_positions() {
         },
     );
     builder.next = Some(targets[1].clone());
+    builder.take_offset = 3;
+    builder.defer_time(ms(1000));
     let before = (
         builder.marks.clone(),
         builder.dirtied.clone(),
@@ -1444,6 +1446,7 @@ fn mark_observation_is_read_only_and_ignores_session_positions() {
     let observed = builder.observe_marks();
     assert_eq!(observed.oldest.as_ref().unwrap().0, targets[1]);
     assert_eq!(observed.rows, builder.rows_mark());
+    assert_eq!(observed.rows.unwrap().take_offset, 3);
     assert_eq!(observed.rows.unwrap().through.events, EventId::new(5));
     assert_eq!(observed.rows.unwrap().through.samples, 4);
     assert_eq!(observed.counts[&LedgerKind::Run].positioned, 1);
@@ -1525,4 +1528,134 @@ fn sweep_counts_retention_reasons_and_removal() {
         counts.writes,
         BTreeMap::from([("older_version", 1), ("later_event", 1), ("life_ended", 1)])
     );
+}
+
+/// The comparison is of each input, independent of the row's version or
+/// finality. No missing input may disappear behind an advanced R.
+#[test]
+fn recorded_inputs_ignore_version_and_finality_but_require_every_input() {
+    let mut log = Log::default();
+    log.add(None, None, "authorization_denied", json!({}), 1);
+    let built = crate::domain::ledger::build(&log.events, ms(2), BUILT).remove(0);
+    let mut stored = built.clone();
+    stored.ledger_v = LEDGER_V - 1;
+    stored.is_final = false;
+    assert!(Builder::inputs_recorded(&stored, &built));
+    for field in 0..7 {
+        let mut missing = stored.clone();
+        let mut needed = built.clone();
+        match field {
+            0 => missing.inputs_through.events = EventId::new(0),
+            1 => needed.inputs_through.supervisor = Some(EventId::new(10)),
+            2 => needed.inputs_through.node_samples = Some(10),
+            3 => needed.inputs_through.steps = Some(10),
+            4 => needed.inputs_through.resources = Some(10),
+            5 => needed.inputs_through.inside_resources = Some(10),
+            _ => needed
+                .inputs_through
+                .life_ended
+                .push((EventId::new(1), EventId::new(2))),
+        }
+        assert!(
+            !Builder::inputs_recorded(&missing, &needed),
+            "field {field}"
+        );
+    }
+    let target = Target::Row(built.kind, built.key.clone());
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events);
+    let rows = BTreeMap::from([((built.kind, built.key.clone()), built.clone())]);
+    builder.mark_rows(&rows);
+    assert_eq!(builder.rows_written().unwrap().events, EventId::new(0));
+    let mut missing = stored.clone();
+    missing.inputs_through.events = EventId::new(0);
+    assert!(matches!(
+        builder.sweep(&target, Some(&missing), Some(&built)),
+        SweepOutcome::NotFinal | SweepOutcome::Writes(_)
+    ));
+    assert_eq!(builder.rows_written().unwrap().events, EventId::new(0));
+    assert_eq!(
+        builder.sweep(&target, Some(&stored), Some(&built)),
+        SweepOutcome::Writes("older_version")
+    );
+    assert_eq!(builder.rows_written().unwrap().events, log.last());
+    stored.ledger_v = LEDGER_V;
+    assert_eq!(
+        builder.sweep(&target, Some(&stored), Some(&built)),
+        SweepOutcome::Removed
+    );
+    // Tracking the stored, unsettled row still schedules its grace.
+    builder.due(ms(3600));
+    assert!(builder.take(CHECKS_PER_PASS).contains(&target));
+}
+
+/// With an unchanged set, persisted ranks cover even the rows after the
+/// check bound when each process lives for only one pass.
+#[test]
+fn persisted_take_rank_visits_marks_across_restarts() {
+    let count = CHECKS_PER_PASS * 3 + 17;
+    let mut seen = BTreeSet::new();
+    let mut offset = 0;
+    for _ in 0..4 {
+        let mut builder = Builder::default();
+        builder
+            .marks
+            .extend((1..=count).map(|id| Target::Task(TaskId::new(id as i64))));
+        builder.resume_taking(offset);
+        seen.extend(builder.take(CHECKS_PER_PASS));
+        offset = builder.rows_mark().unwrap().take_offset;
+    }
+    assert_eq!(seen.len(), count);
+}
+
+/// The bound is the latest time read, including out-of-order event times,
+/// until the snapshot is caught up; then the wall clock may advance it.
+#[test]
+fn snapshot_time_waits_for_unread_events() {
+    let mut builder = Builder::default();
+    assert_eq!(
+        builder.folds_at_snapshot(ms(1000), EventId::new(1)),
+        i64::MIN
+    );
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s"}),
+        20,
+    )
+    .add(None, None, "mark_added", json!({}), 10);
+    builder.mark_events(&log.events);
+    assert_eq!(builder.folds_at_snapshot(ms(1000), EventId::new(3)), ms(20));
+    assert_eq!(builder.folds_at_snapshot(ms(1000), log.last()), ms(1000));
+    assert_eq!(builder.folds_at_snapshot(ms(1), log.last()), ms(20));
+}
+
+/// Open rows written at a bounded prefix retain time work, while settled,
+/// legacy and clock-ahead rows never acquire a backward clock write.
+#[test]
+fn open_row_time_only_advances() {
+    let mut log = Log::default();
+    log.add(Some(1), None, "task_created", json!({"status": "draft"}), 1);
+    let target = Target::Task(TaskId::new(1));
+    let row = build(&target, &inputs(&log, 2), &[]).unwrap();
+    let later = build(&target, &inputs(&log, 1000), &[]).unwrap();
+    let mut builder = Builder::default();
+    assert!(!builder.time_advanced(&row, &later));
+    builder.defer_time(ms(1000));
+    assert!(builder.time_advanced(&row, &later));
+    assert!(!builder.time_advanced(&row, &row));
+    assert!(!builder.time_advanced(&later, &row));
+    let even_later = build(&target, &inputs(&log, 2000), &[]).unwrap();
+    assert!(!builder.time_advanced(&later, &even_later));
+    let mut newer = row.clone();
+    newer.ledger_v = LEDGER_V + 1;
+    assert!(!builder.time_advanced(&newer, &later));
+    let mut final_row = row.clone();
+    final_row.is_final = true;
+    assert!(!builder.time_advanced(&final_row, &later));
+    let mut legacy = row;
+    legacy.legacy = Some(json!({}));
+    assert!(!builder.time_advanced(&legacy, &later));
 }

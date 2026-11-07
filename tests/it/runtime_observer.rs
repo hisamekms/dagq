@@ -798,7 +798,13 @@ fn observe_starts_again_for_an_alert_that_time_alone_raised() {
     use dagq::application::observer::ObserveMode;
     use dagq::domain::{AskKind, AskReason, NewAsk};
     let (_dir, _repo, db) = fixture();
-    let mut queue = SqliteQueue::open(&db).unwrap();
+    let now = SystemClock.now();
+    let clock = ManualClock::at(now);
+    let mut generators = dagq::infrastructure::clock::system();
+    generators.clock = Arc::new(clock.clone());
+    let mut queue = SqliteQueue::open(&db)
+        .unwrap()
+        .with_generators(generators.clone());
     let ask = queue
         .ask(NewAsk {
             recommendation: None,
@@ -819,6 +825,15 @@ fn observe_starts_again_for_an_alert_that_time_alone_raised() {
     let quiet = ObserverProvider {
         script: "true".into(),
     };
+    let observe_now = || {
+        runtime_support::observer::observe_with_generators(
+            &db,
+            &quiet,
+            &observe_options(ObserveMode::Hourly),
+            &generators,
+        )
+        .unwrap()
+    };
     let unanswered = |payload: &Value| {
         payload["alerts"]
             .as_array()
@@ -826,7 +841,7 @@ fn observe_starts_again_for_an_alert_that_time_alone_raised() {
             .iter()
             .any(|alert| alert["kind"] == "ask_unanswered")
     };
-    let first = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    let first = observe_now();
     assert_eq!(first["outcome"], "succeeded", "{first}");
     assert!(!unanswered(&first), "{first}");
     // An older observation that kept no alerts, while there is none.
@@ -836,20 +851,15 @@ fn observe_starts_again_for_an_alert_that_time_alone_raised() {
             json!({"mode": "hourly", "outcome": "succeeded"}),
         )
         .unwrap();
-    let quiet_again = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    let quiet_again = observe_now();
     assert_eq!(quiet_again["outcome"], "skipped", "{quiet_again}");
 
     // Two hours pass with the ask open: `ask_unanswered` is raised with no
     // event recorded.
-    Connection::open(&db)
-        .unwrap()
-        .execute(
-            "UPDATE run_events SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-2 hours')
-             WHERE kind='ask_opened'",
-            [],
-        )
-        .unwrap();
-    let raised = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    let before = queue.latest_event_id().unwrap();
+    clock.set(now + 2 * 3600);
+    assert_eq!(queue.latest_event_id().unwrap(), before);
+    let raised = observe_now();
     assert_eq!(raised["outcome"], "succeeded", "{raised}");
     let alert = raised["alerts"]
         .as_array()
@@ -859,7 +869,7 @@ fn observe_starts_again_for_an_alert_that_time_alone_raised() {
         .unwrap_or_else(|| panic!("{raised}"));
     assert_eq!(alert["ask_id"], ask.id.to_string());
     // The alert stays but is no longer new: skipped.
-    let same = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    let same = observe_now();
     assert_eq!(same["outcome"], "skipped", "{same}");
     assert!(unanswered(&same), "{same}");
 
@@ -870,9 +880,9 @@ fn observe_starts_again_for_an_alert_that_time_alone_raised() {
             json!({"mode": "hourly", "outcome": "succeeded"}),
         )
         .unwrap();
-    let after_old = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    let after_old = observe_now();
     assert_eq!(after_old["outcome"], "succeeded", "{after_old}");
-    let settled = observe(&db, &quiet, &observe_options(ObserveMode::Hourly)).unwrap();
+    let settled = observe_now();
     assert_eq!(settled["outcome"], "skipped", "{settled}");
     assert_eq!(queue_events(&db, "observe_started").len(), 3);
 }

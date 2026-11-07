@@ -123,7 +123,6 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 行の項目と種類ごとの中身は`LedgerRow`と`domain::ledger`の各moduleのdoc comment、作り直しの規則は`ledger::rebuilds`が持つ。
 
 - どのeventも、どれか1つの行の記録になり（`domain::ledger::owner`）、読み手は行だけから今の統計の関数の入力を戻せる。
-- runの行には予定の欄があり、欄の一覧は`LedgerRow`のdoc commentが持つ。
 
 ## 畳む関数
 
@@ -141,8 +140,9 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - 着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - runは終わりから猶予の後で、telemetryのtokenの失効と資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
 - storeの印は、その位置までの全入力を行が記録する約束で、Wはsession行、Rはほかの行のカーソルごとの位置。
+- 入力を記録済みなら確定待ちと版の更新はRを押さえず、追いつきの印と確認の順番を起動をまたいで保つ。
 - 増分の走査はRより後だけを読み、対象別・id指定の読みはRより前に及ぶが確定済みの履歴に比例しない（`builder`のdoc）。
-- 古い版の行の作り直し（対象別の読みと例外）は`builder`のdocが持つ。
+- 古い版の作り直しは`builder`のdocが持つ。
   行の持ち主を変える版上げは直らない。
 - 読めない・書けない周回は印を残して次に任せ、runとtaskの結果を変えない。
 

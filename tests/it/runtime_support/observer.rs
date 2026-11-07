@@ -2,6 +2,78 @@
 //! the supervisor's through the queue service.
 use super::*;
 
+/// Observe an unbound fixture queue with an injected clock, including the
+/// real ledger-backed stats reads. Advancing the clock leaves recorded
+/// event times and the rows that already contain them unchanged.
+pub fn observe_with_generators(
+    db: &Path,
+    provider: &dyn AgentProvider,
+    options: &dagq::application::observer::ObserveOptions,
+    generators: &Generators,
+) -> Result<Value> {
+    common::service::serve(db);
+    common::ledger::build(db);
+    let mut queue = SqliteQueue::open(db)?.with_generators(generators.clone());
+    ensure!(
+        queue.repository_binding()?.is_none(),
+        "an unbound fixture queue"
+    );
+    let events = SqliteQueue::open(db)?.with_generators(generators.clone());
+    let sources = ObserverReads(dagq::compose::OneShot::new(generators.clone()));
+    let telemetry = dagq::infrastructure::queue_service::RequestedTelemetryTokens::of_caller(db);
+    dagq::application::observer::observe(
+        &mut queue,
+        db,
+        provider,
+        Some(&dagq::infrastructure::adapters::ClaudeCode {
+            executable: "/unused".into(),
+        }),
+        options,
+        &dagq::application::observer::ObserverEnvironment {
+            sources: &sources,
+            host: &dagq::infrastructure::observer::LocalObserver {
+                events: Some(&events),
+            },
+            generators,
+            pid: std::process::id(),
+            telemetry: Some(dagq::application::telemetry_tokens::TargetTelemetry {
+                tokens: &telemetry,
+                db,
+                lease: None,
+            }),
+            steps: Some(dagq::application::step_report::CommandSteps {
+                files: &dagq::infrastructure::run_files::LocalRunFiles,
+                sinks: Arc::new(dagq::infrastructure::queue_service::SystemServiceAccess),
+            }),
+        },
+    )
+}
+
+struct ObserverReads(dagq::compose::OneShot);
+
+impl dagq::application::observer::ObserverSources<SqliteQueue> for ObserverReads {
+    fn stats(
+        &self,
+        queue: &SqliteQueue,
+        db: &Path,
+        query: &dagq::domain::stats::StatsQuery,
+    ) -> Result<Value> {
+        self.0.stats_of(queue, db, query)
+    }
+
+    fn kpi(&self, queue: &SqliteQueue, db: &Path) -> Result<Value> {
+        self.0.observer_kpi(queue, db)
+    }
+
+    fn improvements(&self, queue: &SqliteQueue) -> Result<Value> {
+        self.0.improvements_of(queue)
+    }
+
+    fn checkout(&self, _: &SqliteQueue) -> Result<Option<PathBuf>> {
+        Ok(None)
+    }
+}
+
 /// The observer's provider double: the headless job is a shell script in the
 /// observation's directory, with the environment `observe` gives the agent.
 pub struct ObserverProvider {

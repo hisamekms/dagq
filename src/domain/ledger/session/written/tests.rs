@@ -216,6 +216,134 @@ fn a_builder_goes_on_only_from_an_r_that_holds_the_time_read_at_its_position() {
     assert_eq!(rows_to_go_on_from(Some(&cut), &heads), None);
 }
 
+/// Clock work changes neither input certificates nor check rotation; a
+/// usable certificate's existing horizon can only advance.
+#[test]
+fn clock_work_keeps_a_usable_certificate_and_never_retreats() {
+    let marks = Marks {
+        sessions: SessionsWritten::at(EventId::new(5)),
+        rows: Some(RowsWritten {
+            take_offset: 1700,
+            time_pending: Some(READ_MS + 100),
+            ..rows_at(4)
+        }),
+    };
+    let mut heads = heads();
+    // Older session rows are also compatible with the current mark.
+    heads[0].ledger_v = LEDGER_V - 1;
+    for (until, pending) in [
+        (READ_MS + 50, READ_MS + 100),
+        (READ_MS + 200, READ_MS + 200),
+    ] {
+        let held = marks_with_time_work(Some(&marks), &heads, until);
+        assert_eq!(
+            held,
+            Marks {
+                rows: Some(RowsWritten {
+                    time_pending: Some(pending),
+                    ..marks.rows.unwrap()
+                }),
+                ..marks
+            }
+        );
+        assert_eq!(
+            rows_to_go_on_from(Some(&held), &heads),
+            Some((rows_at(4).through, READ_MS))
+        );
+        assert_eq!(marks_with_time_work(Some(&held), &heads, until), held);
+    }
+}
+
+/// Without an exact, usable R, preserving clock work must not turn W
+/// alone, a different version or a mismatched event time into a certified
+/// input prefix. The zero fallback is resumable even after a failed pass.
+#[test]
+fn clock_work_without_a_usable_certificate_starts_every_input_at_zero() {
+    let valid = Marks {
+        sessions: SessionsWritten::at(EventId::new(5)),
+        rows: Some(RowsWritten {
+            take_offset: 1700,
+            time_pending: Some(READ_MS + 100),
+            ..rows_at(4)
+        }),
+    };
+    let until = READ_MS + 10;
+    let zero = Marks {
+        sessions: SessionsWritten::at(EventId::new(0)),
+        rows: Some(RowsWritten {
+            time_pending: Some(until),
+            ..RowsWritten::at(Cursors::default(), i64::MIN)
+        }),
+    };
+    let mut cases = vec![
+        ("no marks", None),
+        (
+            "W alone",
+            Some(Marks {
+                rows: None,
+                ..valid
+            }),
+        ),
+        (
+            "no read time",
+            Some(Marks {
+                rows: Some(RowsWritten {
+                    read_ms: None,
+                    ..valid.rows.unwrap()
+                }),
+                ..valid
+            }),
+        ),
+        (
+            "W cuts R",
+            Some(Marks {
+                sessions: SessionsWritten::at(EventId::new(3)),
+                ..valid
+            }),
+        ),
+    ];
+    for version in [LEDGER_V - 1, LEDGER_V + 1] {
+        cases.push((
+            "other W version",
+            Some(Marks {
+                sessions: SessionsWritten {
+                    ledger_v: version,
+                    ..valid.sessions
+                },
+                ..valid
+            }),
+        ));
+        cases.push((
+            "other R version",
+            Some(Marks {
+                rows: Some(RowsWritten {
+                    ledger_v: version,
+                    ..valid.rows.unwrap()
+                }),
+                ..valid
+            }),
+        ));
+    }
+    let heads = heads();
+    for (name, marks) in cases {
+        assert_eq!(
+            marks_with_time_work(marks.as_ref(), &heads, until),
+            zero,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        rows_to_go_on_from(Some(&zero), &heads),
+        Some((Cursors::default(), i64::MIN))
+    );
+    let mut later_heads = heads;
+    later_heads[0].ledger_v = LEDGER_V + 1;
+    assert_eq!(
+        marks_with_time_work(Some(&valid), &later_heads, until),
+        zero
+    );
+}
+
 /// The time crosses in the marks, and an R of no time (written before it
 /// was held) reads as one, written with no such field.
 #[test]
@@ -252,4 +380,34 @@ fn restart_reasons_explain_why_r_cannot_be_used() {
     assert_eq!(restart_reason(Some(&marks), &[]), Some("no_read_ms"));
     marks.rows = Some(rows_at(30));
     assert_eq!(restart_reason(Some(&marks), &[]), Some("w_cuts_r"));
+}
+
+/// Old marks start at the first check; new marks carry scheduling state
+/// independently of their certified positions and latest event time.
+#[test]
+fn take_offset_round_trips_and_defaults_for_existing_marks() {
+    let original = rows_at(10);
+    let text = serde_json::to_string(&original).unwrap();
+    assert!(!text.contains("take_offset"));
+    assert_eq!(
+        serde_json::from_str::<RowsWritten>(&text)
+            .unwrap()
+            .take_offset,
+        0
+    );
+    let rotated = RowsWritten {
+        take_offset: 1700,
+        time_pending: Some(1_900_000_100_000),
+        ..original
+    };
+    let text = serde_json::to_string(&rotated).unwrap();
+    assert_eq!(serde_json::from_str::<RowsWritten>(&text).unwrap(), rotated);
+    let marks = Marks {
+        sessions: SessionsWritten::at(EventId::new(10)),
+        rows: Some(rotated),
+    };
+    assert_eq!(
+        rows_to_go_on_from(Some(&marks), &[]),
+        Some((original.through, original.read_ms.unwrap()))
+    );
 }

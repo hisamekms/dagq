@@ -152,8 +152,9 @@
 //!   transaction, goes the mark R of where the other rows record every
 //!   input up to, each cursor its own ([`Builder::rows_written`]): each
 //!   mark an input made holds the position before the first such input
-//!   of each cursor until the row is looked at, and R is the pass's
-//!   cursors cut back to the earliest of those the pass left marked (past
+//!   of each cursor until the row is looked at or a sweep finds its inputs
+//!   already recorded (even while it waits on time or an older version).
+//!   R is the pass's cursors cut back to the earliest of those the pass left marked (past
 //!   the bound, a write that failed, a fold behind), so that a builder
 //!   going on from R reads those inputs again and marks those rows again;
 //!   a mark that comes with time holds back none (the rows not settled
@@ -170,9 +171,10 @@
 //!   cursors' start, and its writes fill what the rows lack and write the
 //!   marks.
 //! - **What a pass reads**: the events after its cursor, [`EVENTS_PER_READ`]
-//!   at a time, and the events of each run and task it folds. It folds at
-//!   its clock's time, or at the latest event's it read when that is later
-//!   ([`Builder::folds_at`]). What the
+//!   at a time, and the events of each run and task it folds. Until the
+//!   snapshot is caught up, its folds and time-driven work use the latest
+//!   event time read, including when it restores R. Once caught up they use
+//!   its clock, no earlier than that read time ([`Builder::folds_at_snapshot`]). What the
 //!   folds of the queue as a whole read of the rest is [`Kept`] between
 //!   passes, so no pass reads the whole EventStore again
 //!   ([`Inputs::of`]). It drops the records of the session and queue rows
@@ -340,8 +342,9 @@ pub struct MarkObservation {
 }
 
 /// Mutually exclusive sweep outcomes, in decision order. A missing build
-/// takes precedence over the stored-row checks; writes retains the same
-/// predicate as the writer (version, later inputs, life end, rules, etc.).
+/// takes precedence over the stored-row checks. A covered queue row may
+/// release its position while still reporting an older-version rewrite;
+/// settlement-only work is scheduled by tracking the stored row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SweepOutcome {
     Removed,
@@ -1125,6 +1128,10 @@ pub struct Builder {
     /// left past its bounds (not taken, or put back, [`Self::put_back`]).
     /// None: at the first.
     next: Option<Target>,
+    take_offset: usize,
+    take_size: usize,
+    resume_offset: Option<usize>,
+    time_pending: Option<i64>,
     /// Session and queue rows with an input after this event are to be
     /// looked at: set by an event of theirs, one that changed one of them
     /// or one naming a supervisor (whose life may end their intervals),
@@ -1309,6 +1316,10 @@ impl Default for Builder {
             inside_resources: 0,
             marks: BTreeSet::new(),
             next: None,
+            take_offset: 0,
+            take_size: 0,
+            resume_offset: None,
+            time_pending: None,
             rows_after: None,
             unsettled: BTreeMap::new(),
             pending_pushes: BTreeMap::new(),
@@ -1421,6 +1432,18 @@ impl Builder {
     /// read less of the waits than it ([`behind`]).
     pub fn folds_at(&self, now_ms: i64) -> i64 {
         now_ms.max(self.read_ms)
+    }
+
+    /// Fold a snapshot only as far in time as its events have been read.
+    /// While behind `latest`, wall time would invent a supervisor's silence
+    /// or settle a row before its later records are read. Restoration at R
+    /// uses the same bound before reconstructing waits and push readers.
+    pub fn folds_at_snapshot(&self, now_ms: i64, latest: EventId) -> i64 {
+        if self.events < latest {
+            self.read_ms
+        } else {
+            self.folds_at(now_ms)
+        }
     }
 
     /// Mark the tasks with time ready whose overlays or inputs a wait that
@@ -1734,7 +1757,8 @@ impl Builder {
 
     /// The session and queue rows of `rows` (those [`Self::rows_to_build`]
     /// names) a pass sweeps once it looked at its marks: until a pass
-    /// swept, each of them marked; none after.
+    /// swept, each marked session and each queue row with input still
+    /// unacknowledged; none after.
     pub fn rows_to_sweep<'a>(
         &self,
         rows: impl IntoIterator<Item = &'a (LedgerKind, String)>,
@@ -1745,14 +1769,24 @@ impl Builder {
         rows.into_iter()
             .map(|(kind, key)| Target::Row(*kind, key.clone()))
             .filter(|target| self.marks.contains(target))
+            // A queue mark already tracked on a page has no input left
+            // to certify. Its time/version work waits for take, without a
+            // second ledger_row call in the final sweep.
+            .filter(|target| {
+                !matches!(target, Target::Row(LedgerKind::Queue, _))
+                    || self.dirtied.contains_key(target)
+            })
             .collect()
     }
 
     /// Sweep the session or queue row of `target`, `built` its fold now
     /// and `stored` the row the store holds of it: one the store holds
-    /// settled that the fold would not write ([`writes`]) is tracked
-    /// settled and no longer marked, as a pass that looked at it would.
-    /// Another stays marked for its turn.
+    /// settled that the fold would not write ([`writes`]) is tracked and
+    /// unmarked. A queue row already holding every input is also unmarked,
+    /// regardless of settlement. An older version keeps its rewrite turn
+    /// without holding R; startup's older-row walk brings it back too.
+    /// Session marks still certify W via
+    /// the writer. Another stays marked for its turn.
     pub fn sweep(
         &mut self,
         target: &Target,
@@ -1768,6 +1802,17 @@ impl Builder {
         if !matches!(target, Target::Row(..)) {
             return SweepOutcome::NotRow;
         }
+        if matches!(target, Target::Row(LedgerKind::Queue, _))
+            && Self::inputs_recorded(stored, built)
+        {
+            self.track(target, stored);
+            if !stored.is_legacy() && stored.ledger_v < LEDGER_V {
+                // Keep its rewrite turn, but none of its inputs hold R.
+                return SweepOutcome::Writes("older_version");
+            }
+            self.marks.remove(target);
+            return SweepOutcome::Removed;
+        }
         if !stored.is_final {
             return SweepOutcome::NotFinal;
         }
@@ -1777,6 +1822,81 @@ impl Builder {
         self.marks.remove(target);
         self.track(target, stored);
         SweepOutcome::Removed
+    }
+
+    /// Whether the stored row contains every input of this fold. Version,
+    /// settlement and command rules do not add input positions. A covered
+    /// queue mark can be dropped: startup restores unsettled rows and the
+    /// older-row walk restores old versions; `track` schedules time here.
+    /// Session marks still require the writer's exact fold to certify W.
+    pub fn inputs_recorded(stored: &LedgerRow, built: &LedgerRow) -> bool {
+        let (held, read) = (&stored.inputs_through, &built.inputs_through);
+        read.events <= held.events
+            && read.supervisor <= held.supervisor
+            && read.node_samples <= held.node_samples
+            && read.steps <= held.steps
+            && read.resources <= held.resources
+            && read.inside_resources <= held.inside_resources
+            && read
+                .life_ended
+                .iter()
+                .all(|wait| held.life_ended.contains(wait))
+    }
+
+    /// Whether an open run/task fold extends the time horizon of its stored
+    /// row. A bounded catch-up writes a prefix at read time, so a later fold
+    /// must finish that clock input even if no new record belongs to this
+    /// target. Never move a stored horizon backwards or reopen a final row.
+    pub fn time_advanced(&self, stored: &LedgerRow, built: &LedgerRow) -> bool {
+        self.time_pending.is_some_and(|until| {
+            stored
+                .intervals
+                .last()
+                .is_none_or(|interval| interval.end < until)
+        }) && matches!(stored.kind, LedgerKind::Run | LedgerKind::Task)
+            && stored.ledger_v == LEDGER_V
+            && !stored.is_final
+            && !stored.is_legacy()
+            && stored.ended_at.is_none()
+            && built.ended_at.is_none()
+            && built.intervals.last().map(|interval| interval.end)
+                > stored.intervals.last().map(|interval| interval.end)
+    }
+
+    /// A bounded prefix leaves clock work, independent of its recorded
+    /// input positions. Keep a fixed horizon so restarts do not make rows
+    /// already refreshed acquire another clock-only write indefinitely.
+    pub fn defer_time(&mut self, until: i64) {
+        self.time_pending = Some(self.time_pending.map_or(until, |held| held.max(until)));
+    }
+
+    /// Restore clock work certified with the position R.
+    pub fn restore_time(&mut self, pending: Option<i64>) {
+        self.time_pending = pending;
+    }
+
+    /// No marked work remains once the snapshot has been read.
+    pub fn finished_time(&mut self) {
+        self.time_pending = None;
+    }
+
+    /// The full certificate used both by observation and the writer: keep
+    /// scheduling metadata together so the single observed walk offers the
+    /// exact same mark as the direct calculation.
+    fn row_certificate(&self, through: Cursors, read_ms: i64) -> RowsWritten {
+        let mut rows = RowsWritten::at(through, read_ms);
+        rows.take_offset = self.take_offset;
+        rows.time_pending = self.time_pending;
+        rows
+    }
+
+    /// Restore the rank at which a restarted builder takes its first mark.
+    /// The store persists it beside R; it is scheduling metadata, never an
+    /// input position. Modulo the current set handles marks disappearing.
+    /// Until the first take, checkpoints carry this restored rank too.
+    pub fn resume_taking(&mut self, offset: usize) {
+        self.resume_offset = Some(offset);
+        self.take_offset = offset;
     }
 
     /// Note the rows swept ([`Self::rows_to_sweep`]) and, the first time,
@@ -1797,8 +1917,19 @@ impl Builder {
     /// Take up to `limit` marks in their order (runs first), from where the
     /// last pass left off and round: the marks a pass left past its bounds
     /// are taken before those it looked at, which may be marked again
-    /// before the next pass.
+    /// before the next pass. A restart rotates the restored set by the rank
+    /// persisted with R, so an unchanged prefix cannot monopolize checks.
     pub fn take(&mut self, limit: usize) -> Vec<Target> {
+        self.take_size = self.marks.len();
+        self.take_offset = match &self.next {
+            Some(from) => self.marks.range(..from).count(),
+            None => self.resume_offset.take().unwrap_or_default(),
+        };
+        self.take_offset = if self.take_size == 0 {
+            0
+        } else {
+            self.take_offset % self.take_size
+        };
         let taken: Vec<Target> = match self.next.take() {
             Some(from) => self
                 .marks
@@ -1807,7 +1938,19 @@ impl Builder {
                 .take(limit)
                 .cloned()
                 .collect(),
-            None => self.marks.iter().take(limit).cloned().collect(),
+            None => self
+                .marks
+                .iter()
+                .cycle()
+                .skip(self.take_offset)
+                .take(limit.min(self.take_size))
+                .cloned()
+                .collect(),
+        };
+        self.take_offset = if self.take_size == 0 {
+            0
+        } else {
+            (self.take_offset + taken.len()) % self.take_size
         };
         for target in &taken {
             self.marks.remove(target);
@@ -1828,6 +1971,12 @@ impl Builder {
     /// `rest` in the order taken: the next pass starts at `first`.
     pub fn put_back(&mut self, first: Target, rest: impl IntoIterator<Item = Target>) {
         self.marks.insert(first.clone());
+        let rest: Vec<_> = rest.into_iter().collect();
+        if self.take_size > 0 {
+            self.take_offset = (self.take_offset + self.take_size
+                - (rest.len() + 1) % self.take_size)
+                % self.take_size;
+        }
         self.marks.extend(rest);
         self.next = Some(first);
     }
@@ -2248,8 +2397,9 @@ impl Builder {
     /// The position R up to which every input made dirty a run, task,
     /// queue or node row that is written, each cursor its own: its
     /// cursor, or the position before the first input that made a mark
-    /// still left (past [`WRITES_PER_PASS`], a write that failed, a fold
-    /// behind) if earlier. A mark that came with time ([`Self::due`], a
+    /// still left with unacknowledged input (past [`WRITES_PER_PASS`], a
+    /// write that failed, a fold behind) if earlier. Tracking inputs already
+    /// recorded clears their position even if version or time work remains. A mark that came with time ([`Self::due`], a
     /// grace over, a supervisor's silence, the rules moved) holds back
     /// none: the store's rows not settled give it back. None unless its
     /// marks follow every input from its cursors' start, or from the R it
@@ -2280,7 +2430,7 @@ impl Builder {
                 dirtied.cut(&mut at, &mut read_ms);
             }
         }
-        Some(RowsWritten::at(at, read_ms))
+        Some(self.row_certificate(at, read_ms))
     }
 
     /// Why no new W/R is offered. Incomplete books or pending session
@@ -2324,6 +2474,8 @@ impl Builder {
 
     /// Walk the remaining marks once without changing marks, cursors or
     /// the round-robin take position. Session marks count but never cut R.
+    /// The offered R includes the same check rank as `rows_mark`, since the
+    /// session writer uses this observation to persist R without a second walk.
     pub fn observe_marks(&self) -> MarkObservation {
         let mut observation = MarkObservation {
             cursors: self.cursors(),
@@ -2362,7 +2514,7 @@ impl Builder {
             }
         }
         if self.rows_through == observation.cursors {
-            observation.rows = Some(RowsWritten::at(at, read_ms));
+            observation.rows = Some(self.row_certificate(at, read_ms));
         }
         observation
     }

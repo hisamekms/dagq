@@ -86,8 +86,8 @@ fn write_mark(conn: &impl SqlWrite, mark: &SessionsWritten) -> Result<()> {
 /// Write `mark` on `conn` as the one row of its kind
 /// ([`written::ROWS_KIND`]): its positions as the `events`,
 /// `node_samples`, `steps`, `resources` and `inside_resources` of its
-/// `inputs_through` with its `read_ms` ([`MarkThrough`]), its version as its
-/// `ledger_v`, nothing else. No reader of the rows of a [`LedgerKind`]
+/// `inputs_through` with its read time and restart scheduling metadata ([`MarkThrough`]),
+/// its version as its `ledger_v`, nothing else. No reader of the rows of a [`LedgerKind`]
 /// reads it.
 fn write_rows_mark(conn: &impl SqlWrite, mark: &RowsWritten) -> Result<()> {
     let through = text(&MarkThrough {
@@ -101,6 +101,8 @@ fn write_rows_mark(conn: &impl SqlWrite, mark: &RowsWritten) -> Result<()> {
             inside_resources: Some(mark.through.inside_resources),
         },
         read_ms: mark.read_ms,
+        take_offset: mark.take_offset,
+        time_pending: mark.time_pending,
     })?;
     SqlWrite::execute(
         conn,
@@ -116,13 +118,18 @@ fn write_rows_mark(conn: &impl SqlWrite, mark: &RowsWritten) -> Result<()> {
 /// The text of the `inputs_through` of the mark R's row: the positions of
 /// [`InputsThrough`], and beside them the latest time read up to R's events
 /// ([`RowsWritten::read_ms`]), this row's alone: a row of another kind has
-/// no such field, and a reader of [`InputsThrough`] alone skips it.
+/// no such field, and a reader of [`InputsThrough`] alone skips it. The
+/// restart scheduling metadata is persisted here too, without changing input positions.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct MarkThrough {
     #[serde(flatten)]
     positions: InputsThrough,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     read_ms: Option<i64>,
+    #[serde(default)]
+    take_offset: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    time_pending: Option<i64>,
 }
 
 /// The marks of each of `kinds` (key [`written::KEY`]) `conn` holds, read
@@ -608,6 +615,8 @@ impl LedgerStore for SqliteQueue {
                     },
                     ledger_v,
                     read_ms: mark.read_ms,
+                    take_offset: mark.take_offset,
+                    time_pending: mark.time_pending,
                 });
             }
         }
@@ -2672,7 +2681,7 @@ mod tests {
         assert_eq!(queue.ledger_marks().unwrap(), None);
         let batch: Vec<(LedgerRow, Option<LedgerRow>)> =
             sessions().into_iter().map(|row| (row, None)).collect();
-        let marks = Marks {
+        let mut marks = Marks {
             sessions: SessionsWritten::at(EventId::new(7)),
             rows: Some(RowsWritten::at(
                 Cursors {
@@ -2685,6 +2694,8 @@ mod tests {
                 1_900_000_000_000,
             )),
         };
+        marks.rows.as_mut().unwrap().take_offset = 1700;
+        marks.rows.as_mut().unwrap().time_pending = Some(1_900_000_001_000);
         queue
             .conn
             .execute_batch(

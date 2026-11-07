@@ -276,3 +276,491 @@ fn a_page_swept_whose_read_fails_leaves_its_rows_marked() {
         assert_eq!(*memory.rows.borrow(), every, "{key}");
     }
 }
+
+/// Old and unsettled rows already contain these inputs. Restarting after
+/// each bounded pass must not replay their history forever.
+#[test]
+fn covered_marks_do_not_pin_restarts_past_the_check_bound() {
+    let mut log = Log::default();
+    for _ in 0..CHECKS_PER_PASS + 17 {
+        log.add(None, None, "authorization_denied", json!({}), 1);
+    }
+    let memory = Memory::of(&log);
+    let rows = crate::domain::ledger::build(&log.events, ms(2), BUILT);
+    for mut row in rows {
+        row.ledger_v = LEDGER_V - 1;
+        row.is_final = false;
+        memory
+            .rows
+            .borrow_mut()
+            .insert((row.kind, row.key.clone()), row);
+    }
+    // Inputs absent from the store must still hold R until written.
+    for _ in 0..37 {
+        log.add(None, None, "authorization_denied", json!({}), 1);
+    }
+    memory.events.replace(log.events.clone());
+    let mut previous = EventId::new(0);
+    for _ in 0..20 {
+        let mut builder = start_builder(&memory, ms(2)).unwrap();
+        let built = build_pass(
+            &memory,
+            &mut builder,
+            (ms(2), BUILT),
+            Retain::default(),
+            None,
+        );
+        assert_eq!(built.failure, None);
+        let r = memory.rows_mark.borrow().unwrap().through.events;
+        assert!(r >= previous);
+        previous = r;
+        if r == log.last() {
+            break;
+        }
+    }
+    assert_eq!(previous, log.last());
+    memory.scans.borrow_mut().clear();
+    let mut builder = start_builder(&memory, ms(2)).unwrap();
+    let built = build_pass(
+        &memory,
+        &mut builder,
+        (ms(2), BUILT),
+        Retain::default(),
+        None,
+    );
+    assert_eq!(built.failure, None);
+    assert_eq!(built.work.events, 0);
+    // Each restart can finish a share of the old rows and settle them.
+    // The same full fold must result regardless of where processes ended.
+    let inputs = Inputs::new(&log.events, ms(LATER), BUILT, true);
+    let expected: BTreeMap<_, _> = inputs
+        .rows
+        .keys()
+        .map(|(kind, key)| {
+            let target = Target::Row(*kind, key.clone());
+            ((*kind, key.clone()), build(&target, &inputs, &[]).unwrap())
+        })
+        .collect();
+    for _ in 0..30 {
+        let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+        let built = build_pass(
+            &memory,
+            &mut builder,
+            (ms(LATER), BUILT),
+            Retain::default(),
+            None,
+        );
+        assert_eq!(built.failure, None);
+        if *memory.rows.borrow() == expected {
+            return;
+        }
+    }
+    assert_eq!(
+        memory.rows.borrow().keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+    for (key, row) in expected {
+        assert_eq!(memory.row(key.0, &key.1), row, "{key:?}");
+    }
+}
+
+/// A failure after a page checkpoint discards the builder and its pass
+/// result, but not R. Startup scans only the tail, then new input only.
+#[test]
+fn interrupted_catch_up_resumes_after_the_committed_page() {
+    let mut log = Log::default();
+    for _ in 0..EVENTS_PER_READ + 3 {
+        log.add(None, None, "authorization_denied", json!({}), 1);
+    }
+    let memory = Memory::of(&log);
+    for mut row in crate::domain::ledger::build(&log.events[..EVENTS_PER_READ], ms(LATER), BUILT) {
+        row.is_final = true;
+        memory
+            .rows
+            .borrow_mut()
+            .insert((row.kind, row.key.clone()), row);
+    }
+    let checkpoint = log.events[EVENTS_PER_READ - 1].id;
+    memory.broken.replace(Some((
+        LedgerKind::Queue,
+        log.events[EVENTS_PER_READ].id.to_string(),
+    )));
+    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+    let discarded = pass(&memory, &mut builder, LATER);
+    assert!(discarded.failure.unwrap().contains("does not parse"));
+    assert_eq!(discarded.marks.cursors, builder.cursors());
+    assert!(discarded.marks.oldest.is_some());
+    assert_eq!(
+        memory.rows_mark.borrow().unwrap().through.events,
+        checkpoint
+    );
+    assert_eq!(memory.row_reads.get(), EVENTS_PER_READ + 1);
+    drop(builder);
+    memory.broken.replace(None);
+    memory.scans.borrow_mut().clear();
+    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+    let built = pass(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert_eq!(built.work.events, 3);
+    assert!(
+        memory
+            .scans
+            .borrow()
+            .iter()
+            .filter(|(kind, _, _)| *kind == "events")
+            .all(|(_, after, _)| *after >= checkpoint.as_i64())
+    );
+    // The same tail on an empty store measures the normal read/fold/CAS
+    // calls, separately from the covered history's one read per row.
+    let tail = Memory::of(&Log {
+        events: log.events[EVENTS_PER_READ..].to_vec(),
+    });
+    let tail_built = pass(&tail, &mut Builder::default(), LATER);
+    assert_eq!(tail_built.failure, None);
+    assert!(memory.row_reads.get() <= EVENTS_PER_READ + 1 + tail.row_reads.get());
+    let inputs = Inputs::new(&log.events, ms(LATER), BUILT, true);
+    let expected: BTreeMap<_, _> = inputs
+        .rows
+        .keys()
+        .map(|(kind, key)| {
+            let target = Target::Row(*kind, key.clone());
+            ((*kind, key.clone()), build(&target, &inputs, &[]).unwrap())
+        })
+        .collect();
+    assert_eq!(
+        memory.rows.borrow().keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+    for (key, row) in expected {
+        assert_eq!(memory.row(key.0, &key.1), row, "{key:?}");
+    }
+    log.add(None, None, "authorization_denied", json!({}), 2);
+    memory.events.replace(log.events.clone());
+    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+    let built = pass(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    assert_eq!(built.work.events, 1);
+    assert_eq!(
+        memory.rows_mark.borrow().unwrap().through.events,
+        log.last()
+    );
+}
+
+/// Restored, unsettled task rows ahead of dirty task marks must not win
+/// the same first checks after every restart. This reads the stored mark,
+/// through the production observer/session writer, rather than rows_mark.
+/// A checkpoint followed by failure before the first check must preserve
+/// the restored rank as well as the covered inputs.
+#[test]
+fn task_check_rank_is_written_and_rotates_through_one_pass_restarts() {
+    let count = CHECKS_PER_PASS + 17;
+    let mut log = Log::default();
+    for id in 1..=count {
+        log.add(
+            Some(id as i64),
+            None,
+            "task_created",
+            json!({"status": "draft"}),
+            1,
+        );
+    }
+    let inputs = Inputs::new(&log.events, ms(2), BUILT, true);
+    let memory = Memory::of(&log);
+    for id in 1..count {
+        let row = build(&Target::Task(TaskId::new(id as i64)), &inputs, &[]).unwrap();
+        memory
+            .rows
+            .borrow_mut()
+            .insert((row.kind, row.key.clone()), row);
+    }
+    let mut builder = start_builder(&memory, ms(2)).unwrap();
+    assert_eq!(pass(&memory, &mut builder, 2).failure, None);
+    let first = memory.rows_mark.borrow().unwrap();
+    assert_eq!(first.take_offset, CHECKS_PER_PASS);
+    assert_eq!(first.through.events, log.events[CHECKS_PER_PASS - 1].id);
+    drop(builder);
+
+    // Covered queue rows let catch-up checkpoint before it takes any task
+    // marks. Fail the next page and discard the builder and pass result.
+    for _ in 0..EVENTS_PER_READ + 3 {
+        log.add(None, None, "authorization_denied", json!({}), 1);
+    }
+    memory.events.replace(log.events.clone());
+    for mut row in crate::domain::ledger::build(&log.events[count..], ms(2), BUILT) {
+        row.is_final = true;
+        memory
+            .rows
+            .borrow_mut()
+            .insert((row.kind, row.key.clone()), row);
+    }
+    memory.broken.replace(Some((
+        LedgerKind::Queue,
+        log.events[CHECKS_PER_PASS + EVENTS_PER_READ].id.to_string(),
+    )));
+    let mut builder = start_builder(&memory, ms(2)).unwrap();
+    assert!(
+        pass(&memory, &mut builder, 2)
+            .failure
+            .unwrap()
+            .contains("does not parse")
+    );
+    let checkpoint = memory.rows_mark.borrow().unwrap();
+    assert_eq!(checkpoint.take_offset, first.take_offset);
+    assert_eq!(checkpoint.through.events, first.through.events);
+    assert_eq!(builder.events, log.last());
+    drop(builder);
+    memory.broken.replace(None);
+
+    let mut builder = start_builder(&memory, ms(2)).unwrap();
+    let second = pass(&memory, &mut builder, 2);
+    assert_eq!(second.failure, None);
+    assert_eq!(
+        second.work.events as i64,
+        log.last().as_i64() - checkpoint.through.events.as_i64()
+    );
+    let mark = memory.rows_mark.borrow().unwrap();
+    assert_eq!(mark.take_offset, (CHECKS_PER_PASS * 2) % count);
+    assert!(mark.through.events > first.through.events);
+    assert_eq!(mark.through.events, log.last());
+    for id in 1..=count {
+        let row = build(&Target::Task(TaskId::new(id as i64)), &inputs, &[]).unwrap();
+        assert_eq!(memory.row(row.kind, &row.key), row, "task {id}");
+    }
+    let mut builder = start_builder(&memory, ms(2)).unwrap();
+    let caught_up = pass(&memory, &mut builder, 2);
+    assert_eq!(caught_up.failure, None);
+    assert_eq!(caught_up.work.events, 0);
+}
+
+/// A wall clock days ahead of the unread heartbeats is not evidence of
+/// silence. A task whose own cancellation is in the first prefix must
+/// stay unsettled until the catch-up reads the wait's later records.
+#[test]
+fn bounded_catch_up_uses_read_time_for_waits_tasks_and_settlement() {
+    let mut log = Log::default();
+    log.add(Some(8), None, "task_created", json!({"status": "draft"}), 0)
+        .add(
+            Some(8),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "ready"}),
+            5,
+        )
+        .add(
+            None,
+            None,
+            "slots_full_started",
+            json!({"supervisor": "s", "class": "heavy"}),
+            10,
+        )
+        .add(
+            None,
+            None,
+            "live_alert_baseline",
+            json!({"supervisor": "s", "version": 3}),
+            15,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s"}),
+            20,
+        )
+        .add(
+            Some(9),
+            None,
+            "task_created",
+            json!({"status": "draft"}),
+            25,
+        )
+        .add(
+            Some(11),
+            Some(&run_id(11)),
+            "push_failed",
+            json!({"remote": "other", "branch": "main"}),
+            27,
+        )
+        .phase(
+            11,
+            &run_id(11),
+            28,
+            crate::domain::run_phase::Phase::PushPending,
+            "pending",
+        )
+        .add(
+            Some(8),
+            None,
+            "task_status_changed",
+            json!({"from": "ready", "to": "canceled"}),
+            30,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s"}),
+            200,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s"}),
+            400,
+        )
+        .add(
+            None,
+            None,
+            "slots_full_ended",
+            json!({"supervisor": "s", "class": "heavy"}),
+            500,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_stopped",
+            json!({"supervisor": "s"}),
+            510,
+        )
+        .landed(10, &run_id(10), 600);
+    let wall = LATER * 10;
+    let whole = Memory::of(&log);
+    drain(&whole, &mut Builder::default(), wall);
+    let expected = whole.rows.borrow().clone();
+    assert!(expected[&(LedgerKind::Task, "8".to_owned())].is_final);
+    for budget in [9, 10, 12] {
+        for restart in [false, true] {
+            let memory = Memory::of(&log);
+            let mut builder = start_builder(&memory, ms(wall)).unwrap();
+            let first = build_pass_limited(
+                &memory,
+                &mut builder,
+                (ms(wall), BUILT),
+                Retain::default(),
+                None,
+                (3, budget, SESSION_BYTES_PER_WRITE),
+                Timing::default(),
+            );
+            assert_eq!(first.failure, None);
+            assert_eq!(first.work.events, budget);
+            assert!(builder.events < log.last());
+            assert!(builder.sweeps_pages());
+            assert_eq!(
+                memory.rows_mark.borrow().unwrap().time_pending,
+                Some(ms(wall))
+            );
+            assert!(!memory.row(LedgerKind::Task, "8").is_final);
+            if budget == 9 {
+                // The unread heartbeat at 200 is within the live window.
+                let row = memory.row(LedgerKind::Queue, "3");
+                assert!(row.ended_at.is_none());
+            }
+            for _ in 0..30 {
+                if restart {
+                    builder = start_builder(&memory, ms(wall)).unwrap();
+                }
+                let built = build_pass_limited(
+                    &memory,
+                    &mut builder,
+                    (ms(wall), BUILT),
+                    Retain::default(),
+                    None,
+                    (3, budget, SESSION_BYTES_PER_WRITE),
+                    Timing::default(),
+                );
+                assert_eq!(built.failure, None);
+                if builder.events == log.last() && built.backlog == 0 {
+                    break;
+                }
+            }
+            assert_eq!(
+                memory.rows_mark.borrow().unwrap().through.events,
+                log.last()
+            );
+            assert_eq!(
+                memory.rows.borrow().keys().collect::<Vec<_>>(),
+                expected.keys().collect::<Vec<_>>()
+            );
+            for (key, row) in &expected {
+                assert_eq!(
+                    memory.row(key.0, &key.1),
+                    *row,
+                    "budget {budget}, restart {restart}, {key:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A failed final mark write must not erase the pending clock of a row
+/// already written at a bounded prefix, even if the next restart can read
+/// the entire remaining suffix in one pass.
+#[test]
+fn prefix_clock_work_survives_a_failed_final_mark_write() {
+    let wall = LATER;
+    let mut log = Log::default();
+    log.add(Some(1), None, "task_created", json!({"status": "draft"}), 1)
+        .add(Some(2), None, "task_created", json!({"status": "draft"}), 2)
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s"}),
+            3,
+        )
+        .add(None, None, "mark_added", json!({"mark": "a"}), 4)
+        .add(None, None, "mark_added", json!({"mark": "b"}), 5);
+    let memory = Memory::of(&log);
+    let inputs = Inputs::new(&log.events[..1], ms(wall), BUILT, true);
+    let row = build(&Target::Task(TaskId::new(1)), &inputs, &[]).unwrap();
+    memory
+        .rows
+        .borrow_mut()
+        .insert((row.kind, row.key.clone()), row);
+    memory
+        .mark
+        .replace(Some(SessionsWritten::at(log.events[0].id)));
+    memory.rows_mark.replace(Some(RowsWritten::at(
+        Cursors {
+            events: log.events[0].id,
+            ..Cursors::default()
+        },
+        ms(1),
+    )));
+    memory.batch_fails.set(1);
+    let mut builder = start_builder(&memory, ms(wall)).unwrap();
+    let first = build_pass_limited(
+        &memory,
+        &mut builder,
+        (ms(wall), BUILT),
+        Retain::default(),
+        None,
+        (3, 3, SESSION_BYTES_PER_WRITE),
+        Timing::default(),
+    );
+    assert!(first.failure.unwrap().contains("transaction failed"));
+    let saved = memory.rows_mark.borrow().unwrap();
+    assert_eq!(saved.through.events, log.events[0].id);
+    assert_eq!(saved.time_pending, Some(ms(wall)));
+    assert!(
+        memory
+            .row(LedgerKind::Task, "2")
+            .intervals
+            .last()
+            .unwrap()
+            .end
+            < ms(wall)
+    );
+    let mut builder = start_builder(&memory, ms(wall)).unwrap();
+    let recovered = pass(&memory, &mut builder, wall);
+    assert_eq!(recovered.failure, None);
+    assert_eq!(recovered.work.events, 4);
+    let whole = Memory::of(&log);
+    drain(&whole, &mut Builder::default(), wall);
+    assert_eq!(*memory.rows.borrow(), *whole.rows.borrow());
+    assert_eq!(
+        memory.rows_mark.borrow().unwrap().through.events,
+        log.last()
+    );
+}

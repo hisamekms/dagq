@@ -50,6 +50,7 @@ struct Memory {
     writes: Cell<usize>,
     read: Cell<usize>,
     read_all: Cell<usize>,
+    row_reads: Cell<usize>,
     /// The runs whose events were read whole, and the events read one by
     /// one by id, in order.
     runs_read: RefCell<Vec<RunId>>,
@@ -464,6 +465,7 @@ impl LedgerStore for Memory {
         }))
     }
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
+        self.row_reads.set(self.row_reads.get() + 1);
         let row = (kind, key.to_owned());
         ensure!(
             self.broken.borrow().as_ref() != Some(&row),

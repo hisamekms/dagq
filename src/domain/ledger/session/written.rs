@@ -107,7 +107,7 @@ pub struct Cursors {
 /// an input up to it made dirty is written. A pass writes it with the
 /// session rows' mark ([`SessionsWritten`]) in one transaction, its
 /// events no later than that mark's; each position is the pass's, or the
-/// position before the first input that made dirty a row the pass left
+/// position before the first unrecorded input of a row the pass left
 /// marked (past its bound of writes, a write that failed, a fold behind),
 /// whichever is earlier, so that a builder going on from it reads that
 /// input again and marks the row again
@@ -128,6 +128,19 @@ pub struct RowsWritten {
     pub ledger_v: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_ms: Option<i64>,
+    /// Rank of the next mark to check on restart, modulo the restored set.
+    /// This schedules work across process lifetimes and certifies no input.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub take_offset: usize,
+    /// Clock work left by a bounded prefix. Open rows must reach at least
+    /// this horizon once the event snapshot is caught up; it holds no input
+    /// cursor and remains fixed across restarts until that work drains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_pending: Option<i64>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl RowsWritten {
@@ -138,6 +151,8 @@ impl RowsWritten {
             through,
             ledger_v: LEDGER_V,
             read_ms: Some(read_ms),
+            take_offset: 0,
+            time_pending: None,
         }
     }
 }
@@ -186,6 +201,29 @@ pub fn rows_to_go_on_from(marks: Option<&Marks>, heads: &[LedgerHead]) -> Option
     let rows = marks?.rows?;
     let read_ms = rows.read_ms?;
     (r.events == rows.through.events).then_some((r, read_ms))
+}
+
+/// Attach clock work to the store's last usable certificate before prefix
+/// rows are written. Preserve its positions and scheduling rank only when
+/// startup could resume there ([`rows_to_go_on_from`]); otherwise certify
+/// zero for W and every R input, with no event time read. W alone, marks of
+/// another version, or a time of another position cannot certify a prefix.
+/// The horizon never retreats within a usable certificate. Pure: the caller
+/// writes the returned marks only when they differ from the stored ones.
+pub fn marks_with_time_work(marks: Option<&Marks>, heads: &[LedgerHead], until: i64) -> Marks {
+    let mut held = marks
+        .copied()
+        .filter(|marks| rows_to_go_on_from(Some(marks), heads).is_some())
+        .unwrap_or_else(|| Marks {
+            sessions: SessionsWritten::at(EventId::new(0)),
+            rows: Some(RowsWritten::at(Cursors::default(), i64::MIN)),
+        });
+    let rows = held.rows.as_mut().expect("a usable R or zero");
+    rows.time_pending = Some(
+        rows.time_pending
+            .map_or(until, |pending| pending.max(until)),
+    );
+    held
 }
 
 /// Why startup cannot resume at R. Labels describe absent marks, version
