@@ -162,6 +162,9 @@ pub(super) struct FakeAgent {
     started: Mutex<Vec<String>>,
     /// The arguments of each review agent's job it started, in order.
     agent_jobs: Mutex<Vec<Vec<String>>>,
+    agent_prompts: Mutex<Vec<String>>,
+    review_sessions: Mutex<Vec<String>>,
+    held_review: Mutex<Option<mpsc::Receiver<()>>>,
     /// The verdicts of the jobs of a review agent, by its name, one per job
     /// in order (the last one again for any after it); an agent without
     /// any passes.
@@ -210,6 +213,9 @@ impl FakeAgent {
             verdicts: Mutex::new(script.verdicts.into()),
             started: Mutex::default(),
             agent_jobs: Mutex::default(),
+            agent_prompts: Mutex::default(),
+            review_sessions: Mutex::default(),
+            held_review: Mutex::default(),
             agent_verdicts: Mutex::default(),
             reviewed_in: Mutex::default(),
             review_prompts: Mutex::default(),
@@ -223,6 +229,21 @@ impl FakeAgent {
             recovery_prompts: Mutex::default(),
             held_recovery: Mutex::default(),
         }
+    }
+
+    /// The prompts each review agent's job received, in start order.
+    pub(super) fn agent_prompts(&self) -> Vec<String> {
+        self.agent_prompts.lock().unwrap().clone()
+    }
+
+    /// Sessions actually assigned to whole review commands when spawned.
+    pub(super) fn review_sessions(&self) -> Vec<String> {
+        self.review_sessions.lock().unwrap().clone()
+    }
+
+    /// Keep the next whole review running until the gate is released.
+    pub(super) fn hold_next_review(&self, release: mpsc::Receiver<()>) {
+        *self.held_review.lock().unwrap() = Some(release);
     }
 
     /// Hold the next recovery job not held yet: its process starts and
@@ -271,6 +292,7 @@ impl FakeAgent {
     /// The jobs of the review agent `agent` answer `answers` (each its
     /// decision and reasons, with its recommendation and the like beside
     /// them), one per job in order, the last one again for any after it.
+    /// Null prints no verdict; [`login_wall`] exits at a login wall.
     pub(super) fn review_agent_answers(&self, agent: &str, answers: Vec<Value>) {
         self.agent_verdicts
             .lock()
@@ -438,6 +460,12 @@ impl FakeAgent {
             })
         };
         let said = said.unwrap_or_else(|| json!({"verdict": "pass", "reasons": []}));
+        if said == login_wall() {
+            return "Invalid API key · Please run /login\n".to_owned();
+        }
+        if said.is_null() {
+            return "no verdict\n".to_owned();
+        }
         let mut answer = json!({"agent": agent, "status": "completed",
                                 "summary": format!("{agent} looked")});
         for (key, value) in said.as_object().into_iter().flatten() {
@@ -448,6 +476,12 @@ impl FakeAgent {
 }
 
 impl AgentProvider for FakeAgent {
+    // Both scripted providers print the same login-wall output. Codex
+    // jobs ask this port directly, whereas Claude jobs ask AgentSignals.
+    fn job_failure(&self, stdout: &str, stderr: &str) -> JobFailure {
+        AgentSignals::job_failure(&self.claude, &format!("{stdout}\n{stderr}"))
+    }
+
     fn preflight(&self) -> Result<()> {
         Ok(())
     }
@@ -515,6 +549,12 @@ impl AgentProvider for FakeAgent {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((model.to_owned(), effort.to_owned()));
+        }
+    }
+
+    fn assign_session_id(&self, command: &mut CommandSpec, session_id: &str) {
+        if command.get_program() == REVIEW {
+            command.option_args(["--session-id", session_id]);
         }
     }
 
@@ -656,6 +696,12 @@ impl Spawner for FakeAgent {
                 stdout
             }
             REVIEW => {
+                self.review_sessions.lock().unwrap().push(
+                    args.windows(2)
+                        .find(|pair| pair[0] == Path::new("--session-id"))
+                        .map(|pair| pair[1].to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                );
                 if let Some(cwd) = command.get_current_dir() {
                     self.reviewed_in
                         .lock()
@@ -690,7 +736,19 @@ impl Spawner for FakeAgent {
                     code = 1;
                     "Invalid API key · Please run /login\n".to_owned()
                 } else {
-                    format!("{verdict}\n")
+                    let stdout = format!("{verdict}\n");
+                    let held = self.held_review.lock().unwrap().take();
+                    if let Some(release) = held {
+                        let outputs = Outputs::of(&streams);
+                        let files = self.files.clone();
+                        return Ok(Box::new(Held {
+                            pid: self.record_start(program),
+                            release,
+                            end: Some(Box::new(move || outputs.write(&files, &stdout))),
+                            ended: false,
+                        }));
+                    }
+                    stdout
                 }
             }
             JOB => format!("{}\n", self.next_verdict()?),
@@ -703,7 +761,13 @@ impl Spawner for FakeAgent {
                             .map(|arg| arg.to_string_lossy().into_owned())
                             .collect(),
                     );
-                self.agent_job(command.get_stdin().unwrap_or_default())
+                let prompt = command.get_stdin().unwrap_or_default();
+                self.agent_prompts.lock().unwrap().push(prompt.to_owned());
+                let output = self.agent_job(prompt);
+                if output.starts_with("Invalid API key") {
+                    code = 1;
+                }
+                output
             }
             RECOVERY => {
                 let [verdict] = args.as_slice() else {

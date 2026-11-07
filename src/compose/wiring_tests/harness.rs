@@ -131,6 +131,8 @@ pub(super) struct Wiring {
     planning: std::cell::Cell<(Option<usize>, Duration)>,
     /// `[provider_fallback] workers`; on by default.
     worker_fallback: bool,
+    job_fallback: bool,
+    review_concurrency: Option<u64>,
     retry_review: bool,
     /// `[fresh_session]`; no threshold by default.
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
@@ -197,6 +199,8 @@ impl Wiring {
             codex: false,
             planning: std::cell::Cell::new((None, super::super::wiring_planner_timeout())),
             worker_fallback: true,
+            job_fallback: true,
+            review_concurrency: None,
             retry_review: false,
             fresh_session: Default::default(),
             parallel: Arc::new(AtomicUsize::new(2)),
@@ -223,6 +227,18 @@ impl Wiring {
     /// Retry a review job that gives no readable verdict once, as production does.
     pub(super) fn with_review_retry(mut self) -> Self {
         self.retry_review = true;
+        self
+    }
+
+    /// Review jobs wait on their requested provider rather than falling back.
+    pub(super) fn without_job_fallback(mut self) -> Self {
+        self.job_fallback = false;
+        self
+    }
+
+    /// The limit shared by every run's review jobs.
+    pub(super) fn with_review_concurrency(mut self, limit: usize) -> Self {
+        self.review_concurrency = Some(u64::try_from(limit).unwrap());
         self
     }
 
@@ -596,6 +612,8 @@ impl Wiring {
                 pid: self.pid,
                 codex: self.codex,
                 worker_fallback: self.worker_fallback,
+                job_fallback: self.job_fallback,
+                review_concurrency: self.review_concurrency,
                 retry_review: self.retry_review,
                 fresh_session: self.fresh_session,
                 parallel: self.parallel.load(std::sync::atomic::Ordering::SeqCst),
@@ -676,6 +694,8 @@ struct Parts {
     pid: u32,
     codex: bool,
     worker_fallback: bool,
+    job_fallback: bool,
+    review_concurrency: Option<u64>,
     retry_review: bool,
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
     parallel: usize,
@@ -836,6 +856,8 @@ impl Parts {
                 self.passes,
             )
         };
+        settings.provider_fallback.jobs = self.job_fallback;
+        settings.review_jobs.concurrency = self.review_concurrency;
         settings.slot_flags.runtime_planners = self.planning.0;
         settings.limits = SlotLimits::resolve(settings.slot_flags, &Default::default());
         settings.planner_timeout = self.planning.1;

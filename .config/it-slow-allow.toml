@@ -756,30 +756,6 @@ name = "review_programs::a_rejecting_program_sends_the_worker_back_before_any_ag
 reason = "B 境界（守る境界）: supervisor wiring of program jobs over Git and processes, through a revise and a second review"
 task = 1900
 
-# 5.5s
-[[test]]
-name = "review_subagents::a_selected_agent_without_its_definition_fails_the_review"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 定義の無い agent が job を起動せずに review_failed と approve_landing の ask になり、doctor の agents も同じ誤りを出すことを実際の queue と Git で確かめる"
-task = 1903
-
-# 6.3s
-[[test]]
-name = "review_subagents::a_review_runs_its_whole_review_and_each_agent_as_jobs_side_by_side"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 全体と agent ごとの job が上限の中で並列に起動し、headless_jobs の行が label で分かれ、snapshot の定義が prompt に渡って着地することを実際のプロセスと queue で確かめる（ADR-t1895-1）。判定のまとめと上限は domain::review_jobs の unit test"
-task = 1903
-
-# 6.5s
-[[test]]
-name = "review_subagents::an_agent_that_never_answers_fails_the_review_and_no_other_job_runs_again"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 答えない agent の job だけが 1 回やり直され、他の job の答えを保ったまま review_failed と approve_landing の ask になることを実際のプロセスと queue で確かめる。やり直しとそろいの判断は domain::review_jobs の unit test"
-task = 1903
-
-# 9.4s
-[[test]]
-name = "review_subagents::the_reviews_of_two_runs_share_the_limit_of_jobs_at_once"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 2 本の run の review の job が [review.jobs] concurrency を共有して 1 本ずつ走ることを、実際の 2 つの slot と headless の job の event で確かめる。上限の判断は domain::review_jobs の unit test"
-task = 1903
-
 # 6.0s
 [[test]]
 name = "review_subagents::a_codex_review_runs_its_whole_review_and_its_agents_on_codex"
@@ -790,12 +766,6 @@ task = 1903
 [[test]]
 name = "review_subagents::an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_came_from"
 reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: fallback on で Codex を名指す agent の job だけが stub の codex の利用上限から Claude へ移り、Codex だけを控え、launch に出所と切り替えが残って着地することを確かめる。切り替えの判断は domain::actor_model と supervise::landing の unit test"
-task = 1905
-
-# 5.5s
-[[test]]
-name = "review_subagents::a_whole_review_that_waited_for_claude_starts_in_the_session_its_span_names"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: review の前に queue の event で控えた Claude が全体の review の job だけを待たせ、Codex を名指す agent の job は review を始めて答え、控えが解けた後に全体の job が review_started の session id で Claude で起動し、review の区間（session_opened / session_closed）がその session を名指して着地することを実際の queue の event で確かめる。待つかの判断は supervise::landing の unit test"
 task = 1905
 
 # 6.3s
@@ -1460,12 +1430,6 @@ task = 2600
 [[test]]
 name = "runtime_codex::a_codex_review_whose_login_ran_out_holds_codex_and_moves_to_claude"
 reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: refresh token の切れた stub の codex の stdout と stderr で review の job が落ちたとき、supervisor が review_failed も ask も作らず Codex を ProviderHold で控え、その job だけが Claude に移って着地することを実際の queue と supervisor で確かめる。分類の判断は infrastructure::codex と codex_turns の unit test"
-task = 2522
-
-# 8.8〜12.1s (stress 5 under the host's load of other runs, task 2522)
-[[test]]
-name = "review_subagents::with_the_fallback_off_an_agent_whose_codex_login_ran_out_waits_for_it_and_the_review_lands"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: [review.subagents.<agent>] provider が agent の job だけを stub の codex のプロセスで起動し、全体と他の agent の job は [roles.review] の provider で起動して launch に出所が残り、fallback off でその job が stderr だけの refresh token の期限切れで落ちたとき、Codex を ProviderHold で控えて job だけが待ち、queue の控えの event が解けた後の pass で Codex で起動し直して着地することを確かめる。行き先の判断は supervise::landing の unit test"
 task = 2522
 
 # 7.4s (stress under the host's load of other runs, task 2607)
