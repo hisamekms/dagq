@@ -3231,3 +3231,50 @@ fn a_job_does_not_ask_again_on_another_failure() {
         assert_eq!(service.asked(), 1);
     }
 }
+
+/// The bounded sweep page fits both wire envelopes even when every byte
+/// needs the longest JSON escape. No event history enters either envelope.
+#[test]
+fn last_turn_page_fits_the_request_and_answer_at_worst_escape_width() {
+    use crate::application::{LAST_TURNS_PAGE, LastSessionTurn, RunSessionPair};
+    use crate::domain::queue_service::{
+        API_VERSION, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, ServiceRequest, ServiceResponse,
+    };
+    let pairs: Vec<_> = (0..LAST_TURNS_PAGE)
+        .map(|_| RunSessionPair {
+            run_id: RunId::new("\u{1}".repeat(128)).unwrap(),
+            workspace_id: "\u{1}".repeat(128),
+        })
+        .collect();
+    assert!(pairs.iter().all(RunSessionPair::fits_sweep_read));
+    let params = SupervisorParams {
+        op: "last_turns_of".into(),
+        args: vec![serde_json::to_value(&pairs).unwrap()],
+        acting: None,
+        requested_by: None,
+        record: None,
+    };
+    let request = ServiceRequest {
+        api_version: API_VERSION,
+        token: Some("token".into()),
+        env_role: None,
+        queue: None,
+        binding: None,
+        use_case: UseCase::Supervisor,
+        params: serde_json::to_value(params).unwrap(),
+    };
+    assert!(serde_json::to_vec(&request).unwrap().len() <= MAX_REQUEST_BYTES);
+    let rows: Vec<_> = pairs
+        .into_iter()
+        .map(|p| LastSessionTurn {
+            run_id: p.run_id,
+            workspace_id: p.workspace_id,
+            pid: u32::MAX,
+            start: "\u{1}".repeat(128),
+        })
+        .collect();
+    let response = ServiceResponse::success(reply(Ok(rows)).unwrap());
+    assert!(serde_json::to_vec(&response).unwrap().len() <= MAX_ANSWER_BYTES);
+    assert!(request_reads_only(UseCase::Supervisor, &request.params));
+    assert!(needs::only_reads("last_turns_of"));
+}

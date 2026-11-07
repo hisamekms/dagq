@@ -454,6 +454,11 @@ impl SessionWrappers for RecordingSessions<'_> {
         }
         Ok(stop)
     }
+    fn wrapper_exists(&self, handle: &str) -> Result<bool> {
+        self.recorder.retried(self.limits(), "exists", handle, || {
+            self.inner.wrapper_exists(handle)
+        })
+    }
     /// A background session whose wrapper is gone still exists while the
     /// turn it left runs, so that whatever stops it stops that turn.
     fn exists(&self, handle: &str) -> Result<bool> {
@@ -560,6 +565,33 @@ mod tests {
 
     fn recording(backend: &Backend) -> RecordingSessions<'_> {
         RecordingSessions::over(backend, Arc::new(NoQueue), None, || None)
+    }
+
+    #[test]
+    fn sweep_wrapper_liveness_uses_the_raw_backend_without_session_lookup() {
+        struct RawWrapper;
+        impl SessionWrappers for RawWrapper {
+            fn launch_background(
+                &self,
+                _: &Path,
+                _: &str,
+                _: &[(String, String)],
+                _: &Path,
+            ) -> Result<String> {
+                unreachable!()
+            }
+            fn stop_background(&self, _: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
+                unreachable!()
+            }
+            fn exists(&self, _: &str) -> Result<bool> {
+                panic!("sweep must not ask session liveness")
+            }
+            fn wrapper_exists(&self, _: &str) -> Result<bool> {
+                Ok(false)
+            }
+        }
+        let sessions = RecordingSessions::over(&RawWrapper, Arc::new(NoQueue), None, || None);
+        assert!(!sessions.wrapper_exists("background:1:start").unwrap());
     }
 
     /// The [`BackendFailure`] `error` wraps.

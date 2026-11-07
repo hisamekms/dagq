@@ -34,6 +34,12 @@ impl RunReads for MemoryLog {
     fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
         unreachable!("sccache reads queue events only")
     }
+    fn last_turns_of(
+        &self,
+        _: &[crate::application::RunSessionPair],
+    ) -> Result<Vec<crate::application::LastSessionTurn>> {
+        unreachable!("last_turns_of is not what the test reaches")
+    }
     fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
         unreachable!("sccache reads queue events only")
     }

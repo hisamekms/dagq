@@ -6,6 +6,7 @@
 //! `events_by_kind`, why: [`crate::infrastructure::kpi_push`].
 
 use super::*;
+use crate::application::{LAST_TURNS_PAGE, LastSessionTurn, RunSessionPair};
 use crate::infrastructure::sessions::read_before_port;
 use crate::infrastructure::sql_dialect::{JsonType, SqlDialect, TimeForm};
 use crate::infrastructure::sql_exec::{
@@ -72,7 +73,89 @@ pub(super) fn latest_inbox_watcher_change_sql(dialect: SqlDialect) -> String {
     )
 }
 
+/// Three bounded index seeks per pair: newest matching launch, first
+/// session boundary after it, newest turn between them. No event list or
+/// window partition is accumulated, even for a run with many turns.
+pub(super) fn last_turns_sql(dialect: SqlDialect) -> String {
+    let field = |column: &str, path: &str| dialect.json_field(column, path, JsonType::Text);
+    let start = field("t.payload", "$.start");
+    let bytes = match dialect {
+        SqlDialect::Sqlite => format!("length(CAST({start} AS BLOB))"),
+        SqlDialect::Postgres => format!("octet_length({start})"),
+    };
+    format!(
+        "WITH pairs AS (
+           SELECT {run} AS run_id, {handle} AS workspace_id FROM {pairs}
+         ), launches AS MATERIALIZED (
+           SELECT p.*, (SELECT id FROM run_events
+             WHERE run_id=p.run_id AND kind='wrapper_launched' AND {workspace}=p.workspace_id
+             ORDER BY id DESC LIMIT 1) AS launched FROM pairs p
+         ), bounds AS MATERIALIZED (
+           SELECT l.*, (SELECT id FROM run_events
+             WHERE run_id=l.run_id AND id>l.launched
+             AND kind IN ('workspace_created','wrapper_launched')
+             ORDER BY id LIMIT 1) AS ended FROM launches l
+         )
+         SELECT b.run_id, b.workspace_id,
+           CASE WHEN {pid_type}='integer' THEN
+             CASE WHEN CAST({pid} AS NUMERIC) BETWEEN 0 AND 4294967295 THEN CAST({pid} AS TEXT) END END,
+           CASE WHEN {start_type}='text' AND {bytes}<=128 THEN {start} END
+         FROM bounds b JOIN run_events t ON t.id=(
+           SELECT id FROM run_events WHERE run_id=b.run_id AND id>b.launched
+             AND id<=COALESCE(b.ended-1,9223372036854775807) AND kind='turn_started'
+           ORDER BY id DESC LIMIT 1)",
+        run = field("value", "$.run_id"),
+        handle = field("value", "$.workspace_id"),
+        pairs = dialect.json_elements("?1"),
+        workspace = field("payload", "$.workspace_id"),
+        pid_type = dialect.json_type_of("t.payload", "$.pid"),
+        pid = field("t.payload", "$.pid"),
+        start_type = dialect.json_type_of("t.payload", "$.start"),
+    )
+}
+
+/// Execute the bounded read once, through the same SqlRead port on both
+/// storage dialects; separated so the adapter test can count statements.
+fn read_last_turns(
+    reader: &impl SqlRead,
+    sessions: &[RunSessionPair],
+) -> Result<Vec<LastSessionTurn>> {
+    anyhow::ensure!(sessions.len() <= LAST_TURNS_PAGE, "too many session pairs");
+    let sessions: Vec<_> = sessions.iter().filter(|s| s.fits_sweep_read()).collect();
+    if sessions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = SqlRead::query_map(
+        reader,
+        &last_turns_sql(reader.dialect()),
+        sql_params![serde_json::to_string(&sessions)?],
+        |r| {
+            let run_id: RunId = r.get(0)?;
+            let workspace_id: String = r.get(1)?;
+            let pid: Option<String> = r.get(2)?;
+            let start: Option<String> = r.get(3)?;
+            Ok(pid
+                .and_then(|pid| pid.parse::<u32>().ok())
+                .zip(start)
+                .map(|(pid, start)| LastSessionTurn {
+                    run_id,
+                    workspace_id,
+                    pid,
+                    start,
+                }))
+        },
+    )?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
 impl SqliteQueue {
+    /// See [`RunReads::last_turns_of`]. Malformed last turns stay absent;
+    /// parsing never retries an earlier turn. Width is bounded in SQL,
+    /// before a start can enter an adapter row or a service answer.
+    pub fn last_turns_of(&self, sessions: &[RunSessionPair]) -> Result<Vec<LastSessionTurn>> {
+        read_last_turns(&*self.conn, sessions)
+    }
+
     /// The latest `limit` steps of the automatic update, newest first: the
     /// queue's `update_*` events (ADR-0073 decision 17), each job's
     /// `update_started` before its steps ([`crate::domain::in_job_order`]).
@@ -1250,6 +1333,10 @@ impl InboxWatchLog for SqliteQueue {
 /// The [`RunReads`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
 impl RunReads for SqliteQueue {
+    fn last_turns_of(&self, sessions: &[RunSessionPair]) -> Result<Vec<LastSessionTurn>> {
+        SqliteQueue::last_turns_of(self, sessions)
+    }
+
     fn active_runs(&self) -> Result<Vec<TaskRun>> {
         SqliteQueue::active_runs(self)
     }
@@ -1460,6 +1547,231 @@ mod tests {
 
     use super::*;
     use crate::infrastructure::sql_dialect::json_field_spaced;
+
+    struct CountReads<'a> {
+        conn: &'a Connection,
+        reads: std::cell::Cell<usize>,
+    }
+
+    impl SqlRead for CountReads<'_> {
+        fn dialect(&self) -> SqlDialect {
+            SqlRead::dialect(self.conn)
+        }
+        fn visit_rows(
+            &self,
+            sql: &str,
+            params: &[crate::infrastructure::sql_exec::SqlValue],
+            visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
+        ) -> SqlResult<()> {
+            self.reads.set(self.reads.get() + 1);
+            SqlRead::visit_rows(self.conn, sql, params, visit)
+        }
+    }
+
+    /// Insert a synthetic run's log, without requiring lifecycle setup.
+    /// This tests the read adapter on init's real schema and indexes.
+    fn append_turn_event(queue: &SqliteQueue, run: &str, kind: &str, payload: Value) {
+        queue
+            .conn
+            .execute(
+                "INSERT INTO run_events(task_id,run_id,kind,payload) VALUES (1,?1,?2,?3)",
+                rusqlite::params![run, kind, payload.to_string()],
+            )
+            .unwrap();
+    }
+
+    fn pair(run: &str, handle: &str) -> RunSessionPair {
+        RunSessionPair {
+            run_id: RunId::new(run).unwrap(),
+            workspace_id: handle.into(),
+        }
+    }
+
+    #[test]
+    fn last_turn_pages_match_the_event_oracle_and_bound_start_width() {
+        use crate::domain::background_wrapper::{BackgroundHandle, last_turn_of};
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        queue
+            .conn
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        let mut pairs = Vec::new();
+        for (n, payload) in [
+            serde_json::json!({"pid": 2, "start": "turn"}),
+            serde_json::json!({"pid": u32::MAX, "start": "\u{1}".repeat(128)}),
+            serde_json::json!({"start": "turn"}),
+            serde_json::json!({"pid": 2}),
+            serde_json::json!({"pid": 4294967296_u64, "start": "turn"}),
+            serde_json::json!({"pid": -1, "start": "turn"}),
+            serde_json::json!({"pid": "2", "start": "turn"}),
+            serde_json::json!({"pid": 2.0, "start": "turn"}),
+            serde_json::json!({"pid": 2, "start": 3}),
+            serde_json::json!({"pid": 2, "start": "x".repeat(129)}),
+            serde_json::json!({"pid": 2, "start": "é".repeat(65)}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let run = format!("run{n}");
+            let p = pair(&run, "background:1:start");
+            append_turn_event(
+                &queue,
+                &run,
+                "wrapper_launched",
+                serde_json::json!({"workspace_id": p.workspace_id}),
+            );
+            append_turn_event(
+                &queue,
+                &run,
+                "turn_started",
+                serde_json::json!({"pid": 3, "start": "earlier"}),
+            );
+            append_turn_event(&queue, &run, "turn_started", payload);
+            pairs.push(p);
+        }
+        // Repeated launches of the same handle select its last launch;
+        // another wrapper and workspace_created both cut its interval.
+        for (kind, payload) in [
+            ("wrapper_launched", serde_json::json!({"workspace_id":"a"})),
+            ("turn_started", serde_json::json!({"pid":10,"start":"old"})),
+            ("wrapper_launched", serde_json::json!({"workspace_id":"a"})),
+            ("turn_started", serde_json::json!({"pid":11,"start":"a"})),
+            ("wrapper_launched", serde_json::json!({"workspace_id":"b"})),
+            ("turn_started", serde_json::json!({"pid":12,"start":"b"})),
+            ("workspace_created", serde_json::json!({"workspace_id":"c"})),
+            (
+                "turn_started",
+                serde_json::json!({"pid":13,"start":"outside"}),
+            ),
+            (
+                "wrapper_launched",
+                serde_json::json!({"workspace_id":"empty"}),
+            ),
+        ] {
+            append_turn_event(&queue, "multi", kind, payload);
+        }
+        pairs.extend([
+            pair("multi", "a"),
+            pair("multi", "b"),
+            pair("multi", "empty"),
+            pair("multi", "missing"),
+        ]);
+        let rows = queue.last_turns_of(&pairs).unwrap();
+        for p in &pairs {
+            let events = queue.run_events(&p.run_id).unwrap();
+            let oracle = last_turn_of(&events, &p.workspace_id);
+            let found = rows
+                .iter()
+                .find(|r| r.run_id == p.run_id && r.workspace_id == p.workspace_id)
+                .map(|r| BackgroundHandle {
+                    pid: r.pid,
+                    start: r.start.clone(),
+                });
+            if oracle.as_ref().is_some_and(|turn| turn.start.len() > 128) {
+                assert!(found.is_none());
+                // The real OS start token can never equal an oversized
+                // recorded start; both paths classify it as not alive.
+                let current_start = Some("OS-start");
+                assert!(!oracle.as_ref().unwrap().is(2, current_start));
+                assert!(!found.as_ref().is_some_and(|turn| turn.is(2, current_start)));
+            } else {
+                assert_eq!(found, oracle, "{p:?}");
+            }
+        }
+        assert_eq!(rows.len(), 4);
+        assert!(
+            queue
+                .last_turns_of(&[pair(&"r".repeat(257), "a")])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn last_turn_seeks_use_events_by_run_without_statistics() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let stats: i64 = queue
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='sqlite_stat1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stats, 0);
+        let steps = plan(&queue.conn, &last_turns_sql(SqlDialect::Sqlite));
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| step.contains("events_by_run"))
+                .count(),
+            3,
+            "{steps:#?}"
+        );
+        assert!(
+            !steps.iter().any(|step| step.contains("SCAN run_events")),
+            "{steps:#?}"
+        );
+        // Each event subquery must walk a run/id range, not sort all turns
+        // or materialize every event of a run.
+        assert!(
+            !steps.iter().any(|step| step.contains("TEMP B-TREE")),
+            "{steps:#?}"
+        );
+    }
+
+    #[test]
+    fn one_page_returns_one_row_per_pair_even_when_history_exceeds_the_wire_limit() {
+        use crate::domain::queue_service::MAX_ANSWER_BYTES;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        queue
+            .conn
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        queue.conn.execute_batch("BEGIN").unwrap();
+        append_turn_event(
+            &queue,
+            "huge",
+            "wrapper_launched",
+            serde_json::json!({"workspace_id":"huge"}),
+        );
+        let noise = "x".repeat(MAX_ANSWER_BYTES / 64 + 1);
+        for pid in 1..=65 {
+            append_turn_event(
+                &queue,
+                "huge",
+                "turn_started",
+                serde_json::json!({"pid":pid,"start":"turn","noise":noise}),
+            );
+            append_turn_event(
+                &queue,
+                "multi",
+                "wrapper_launched",
+                serde_json::json!({"workspace_id":"multi"}),
+            );
+            append_turn_event(
+                &queue,
+                "multi",
+                "turn_started",
+                serde_json::json!({"pid":pid,"start":"turn"}),
+            );
+        }
+        queue.conn.execute_batch("COMMIT").unwrap();
+        // One call, one SQL statement; no event paging or per-run reads.
+        let reader = CountReads {
+            conn: &queue.conn,
+            reads: std::cell::Cell::new(0),
+        };
+        let rows =
+            read_last_turns(&reader, &[pair("huge", "huge"), pair("multi", "multi")]).unwrap();
+        assert_eq!(reader.reads.get(), 1);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.pid == 65));
+        assert!(serde_json::to_vec(&rows).unwrap().len() < MAX_ANSWER_BYTES);
+    }
 
     /// The plan of `sql`, one line per step, its parameters NULL.
     fn plan(conn: &Connection, sql: &str) -> Vec<String> {

@@ -173,6 +173,18 @@ pub trait SessionWrappers {
     /// Whether the wrapper `handle` names still runs: its pid is alive with
     /// the start time the handle recorded. Any other ID is not open.
     fn exists(&self, handle: &str) -> Result<bool>;
+    /// Only the wrapper's liveness, without looking up a turn it left.
+    /// False must confirm absence or a different process identity. A
+    /// backend whose ordinary exists conflates absence and read failures
+    /// cannot certify false; the default keeps that answer unknown.
+    fn wrapper_exists(&self, handle: &str) -> Result<bool> {
+        anyhow::ensure!(
+            self.exists(handle)?,
+            "wrapper absence could not be confirmed"
+        );
+        Ok(true)
+    }
+
     /// How long one call may run before it is given up as failed; recorded
     /// with every `backend_call_failed`.
     fn call_timeout(&self) -> std::time::Duration {
@@ -282,6 +294,8 @@ pub type ServerPid = std::result::Result<u32, String>;
 
 /// Liveness and signals for the supervisor's PID, replaceable in tests.
 pub trait ProcessControl {
+    /// False confirms no process occupies this pid; a failed existence
+    /// probe must conservatively report true (as signal 0 does for EPERM).
     fn alive(&self, pid: u32) -> bool;
     /// Ask the process to drain (SIGTERM); used when no agent is loaded for it.
     fn terminate(&self, pid: u32) -> Result<()>;
@@ -317,6 +331,28 @@ pub trait ProcessControl {
     fn start_identity(&self, pid: u32) -> Option<String> {
         let _ = pid;
         None
+    }
+    /// Confirm the recorded identity without turning a failed start read
+    /// into permanent absence. An unreadable start is unknown while the
+    /// pid exists; only an independent negative existence probe proves it
+    /// gone. A readable different start proves the pid was reused.
+    fn confirmed_identity_alive(
+        &self,
+        handle: &crate::domain::background_wrapper::BackgroundHandle,
+    ) -> Result<bool> {
+        // pid 0 names a group to signal 0, never a process identity.
+        if handle.pid == 0 {
+            return Ok(false);
+        }
+        if let Some(start) = self.start_identity(handle.pid) {
+            return Ok(handle.is(handle.pid, Some(&start)));
+        }
+        anyhow::ensure!(
+            !self.alive(handle.pid),
+            "could not read the start identity of process {}",
+            handle.pid
+        );
+        Ok(false)
     }
     /// When the process `pid` started, as the system prints it in UTC
     /// whatever the zone of the caller's environment: the start an inbox's
@@ -551,6 +587,38 @@ impl<T: SupervisorRegistry + InboxWatchLog + RunLog + AskStore + ?Sized> HostOps
 mod tests {
     use super::*;
     use crate::domain::headless_job::JobFailure;
+
+    #[test]
+    fn ordinary_false_wrapper_liveness_does_not_confirm_absence() {
+        struct Ambiguous(std::cell::Cell<bool>);
+        impl SessionWrappers for Ambiguous {
+            fn launch_background(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &[(String, String)],
+                _: &std::path::Path,
+            ) -> Result<String> {
+                unreachable!()
+            }
+            fn stop_background(
+                &self,
+                _: &str,
+                _: crate::domain::background_wrapper::StopRoute,
+            ) -> Result<Option<crate::domain::background_wrapper::WrapperStop>> {
+                unreachable!()
+            }
+            fn exists(&self, _: &str) -> Result<bool> {
+                Ok(self.0.get())
+            }
+        }
+        let sessions = Ambiguous(std::cell::Cell::new(false));
+        let handle = "background:1:original";
+        assert!(!sessions.exists(handle).unwrap());
+        assert!(sessions.wrapper_exists(handle).is_err());
+        sessions.0.set(true);
+        assert!(sessions.wrapper_exists(handle).unwrap());
+    }
 
     #[test]
     fn a_job_that_did_not_start_is_classed_by_why() {

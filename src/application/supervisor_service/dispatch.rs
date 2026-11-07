@@ -127,6 +127,10 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             answer(RunReads::runs_with_status(&*store, status))
         }
         "next_awaiting_integration" => answer(RunReads::next_awaiting_integration(&*store)),
+        "last_turns_of" => {
+            let (sessions,): (Vec<RunSessionPair>,) = read(op, args)?;
+            answer(RunReads::last_turns_of(&*store, &sessions))
+        }
         "ended_run_workspaces" => answer(RunReads::ended_run_workspaces(&*store)),
         "ended_run_worktrees" => answer(RunReads::ended_run_worktrees(&*store)),
         "ended_run_worktree" => {

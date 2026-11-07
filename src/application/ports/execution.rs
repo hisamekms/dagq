@@ -962,6 +962,43 @@ pub struct EndedRunWorkspace {
     pub workspace_id: String,
 }
 
+/// One run/session pair in a bounded sweep read; a handle alone cannot
+/// select a run's turn records.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunSessionPair {
+    pub run_id: RunId,
+    pub workspace_id: String,
+}
+
+impl RunSessionPair {
+    /// Real handles contain a pid and a process start token. Larger pairs
+    /// are not real sessions and are treated as having no recorded turn.
+    pub fn fits_sweep_read(&self) -> bool {
+        self.run_id
+            .as_str()
+            .len()
+            .saturating_add(self.workspace_id.len())
+            <= 256
+    }
+}
+
+/// A session's latest turn, with no event payload or history transferred.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LastSessionTurn {
+    pub run_id: RunId,
+    pub workspace_id: String,
+    pub pid: u32,
+    pub start: String,
+}
+
+/// Each pair contributes at most 256 bytes, each start at most 128 bytes.
+/// Even at JSON's worst six-byte escape per byte, 256 pairs plus framing
+/// use at most 384 KiB of escaped values in MAX_REQUEST_BYTES (1 MiB);
+/// answers use at most 576 KiB plus framing in MAX_ANSWER_BYTES (16 MiB).
+/// Paging pairs, never events, keeps read counts independent of the
+/// number of turns within a run.
+pub const LAST_TURNS_PAGE: usize = 256;
+
 /// The worktree of a run that nobody leases and that either ended or
 /// belongs to a task that is over, for the supervisor's clean-up of the
 /// disk (task 376), or of a run left in the middle that nobody works on
@@ -2042,6 +2079,12 @@ pub trait RunReads {
     /// The sessions of the ended runs the triage does not take, for the
     /// supervisor's sweep.
     fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>>;
+    /// At most one latest turn per pair, after its last wrapper launch and
+    /// before the next workspace creation or wrapper launch. Invalid last
+    /// turns do not fall back to earlier ones. Starts exceeding 128 bytes
+    /// are omitted: they cannot equal an OS process start identity.
+    /// Call with at most LAST_TURNS_PAGE pairs, each fitting the read.
+    fn last_turns_of(&self, sessions: &[RunSessionPair]) -> Result<Vec<LastSessionTurn>>;
     /// The worktrees of the runs nobody leases that ended or whose task is
     /// `completed` / `canceled`, for the supervisor's clean-up of the disk.
     fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>>;

@@ -771,6 +771,9 @@ impl RunReads for SupervisorQueue {
     fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
         self.remote("next_awaiting_integration", vec![])
     }
+    fn last_turns_of(&self, sessions: &[RunSessionPair]) -> Result<Vec<LastSessionTurn>> {
+        self.remote("last_turns_of", vec![to_value(sessions)?])
+    }
     fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
         self.remote("ended_run_workspaces", vec![])
     }

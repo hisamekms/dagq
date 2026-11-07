@@ -87,6 +87,12 @@ impl RunReads for JobQueue {
     fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
         unreachable!("next_awaiting_integration is not what the test reaches")
     }
+    fn last_turns_of(
+        &self,
+        _: &[crate::application::RunSessionPair],
+    ) -> Result<Vec<crate::application::LastSessionTurn>> {
+        unreachable!("last_turns_of is not what the test reaches")
+    }
     fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
         unreachable!("ended_run_workspaces is not what the test reaches")
     }

@@ -286,7 +286,7 @@ fn opened_for(
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes by those who read this; the connection a
 /// request runs on goes by the wider [`needs::only_reads`].
-const READ_OPS: [&str; 100] = [
+const READ_OPS: [&str; 101] = [
     "diagnosis_owners",
     "candidates",
     "build_waits",
@@ -302,6 +302,7 @@ const READ_OPS: [&str; 100] = [
     "runs_with_status",
     "next_awaiting_integration",
     "ended_run_workspaces",
+    "last_turns_of",
     "ended_run_worktrees",
     "ended_run_worktree",
     "latest_runs_in_progress",

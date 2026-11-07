@@ -3915,6 +3915,15 @@ impl SessionWrappers for BackgroundSessions {
             .is_some_and(|handle| background_wrappers().alive(&handle)))
     }
 
+    fn wrapper_exists(&self, handle: &str) -> Result<bool> {
+        match BackgroundHandle::parse(handle) {
+            Some(handle) => background_wrappers()
+                .processes
+                .confirmed_identity_alive(&handle),
+            None => Ok(false),
+        }
+    }
+
     fn call_timeout(&self) -> Duration {
         OUTPUT_TIMEOUT
     }

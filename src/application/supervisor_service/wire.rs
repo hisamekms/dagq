@@ -68,6 +68,7 @@ whole!(
     LeasedRun,
     ResumeCandidate,
     EndedRunWorkspace,
+    crate::application::LastSessionTurn,
     EndedRunWorktree,
     crate::domain::task_replan::ReplanOperation,
     crate::domain::replan_detect::RunningOwner,

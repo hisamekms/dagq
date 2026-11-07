@@ -32,6 +32,7 @@ pub(super) const READS: &[&str] = &[
     "runs_with_status",
     "next_awaiting_integration",
     "ended_run_workspaces",
+    "last_turns_of",
     "ended_run_worktrees",
     "ended_run_worktree",
     "latest_runs_in_progress",
