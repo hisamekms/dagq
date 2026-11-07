@@ -93,40 +93,23 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
   - follow_upの所属の提案: `FOLLOW_UP_PROPOSAL`。
   - askの分類コード: `worker_question_topics_line`。
   - 要るevidence: `domain::required_of`。
-- verification commandsは「integrateがrebase後に1回流す」という見出しで見せ、直後の`local_checks`の一文が、worktreeで流すのはrepositoryの指示がworkerに求める検証だと言う。
-  指示が何も求めないときだけverification commandsを流す。
-  resume・reviseの依頼も同じ一文を持ち、続けて直しを全部commitしてから最終のtreeで検証を1回だけ流し、その後に直したらその直しに関係する検査だけを流し直すよう言う。
-  検証が落ちて戻ったresume（integrateのrebase後、着地の枝での再確認、e2e）はその落ちたものの再現を許し、足りないevidenceのresumeは足りない検査を流させる。
-  integrateと着地の枝での再確認のresumeは理由が衝突だけでも同じ依頼で、理由が落ちたコマンドのときだけ再現を許す。
-  それ以外のresume（人のsend_back・triage・precheckなど）とreviseは、直しに関係する検査だけを流し全体のtest suiteを流さないよう言う。
-  receiptを書き直す手順は、設定のresume timeoutの秒数の内に書き直さなければsupervisorがsessionを止めることを、引き継ぎのpromptと同じ文で言う。
-  検証の正は同じcommitに対するintegrateの1回である（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定1）。
-  このrepositoryでworkerが流すものは[手元の検証](../../development/local-checks.md)が持つ。
+
+verification commandsと手元の検証の入口は`local_checks`と`requests::ResumeKind`で、検証の正は同じcommitに対するintegrateの1回である（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定1）。
+このrepositoryでworkerが流すものは[手元の検証](../../development/local-checks.md)が持つ。
+
 - taskに`paths`があれば、宣言の外が要るときはaskにせず`failed`のreceiptに要るpathを書くよう言う（[ADR-0029](../../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)決定5）。
   走っているtaskのpathsは変えられず、plannerが広げて登録し直すため。
 - e2eはworkerが流さない（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)）。
-  runがe2eを要りうるときだけ、runtimeがreviewのpassの後にhostで流すことと、receiptの`e2e`を`not_applicable`にすることを1行で言う。
-  e2eが落ちて戻ったrunのresumeだけが、落ちたtestを名前で絞ってrepositoryの指示（AGENTS.mdかCLAUDE.md）のとおりに再現するよう頼む。
   e2eのファイルや再現のコマンドはpromptに書かない（どのrepositoryにも渡る文なので）。
   このrepositoryのそれは[手元の検証](../../development/local-checks.md)の「e2eを流さない」が持つ。
   関門の印は着地の前のe2eがlanding branchのtreeから読み、promptには載せない。
-- holdの待ちから続けるresumeの依頼は、人がtaskをholdして解除したこと、worktreeがturnの終わりのままであることを言い、止まった所から続けてcommitし、前と同じに検証・review・着地を通ると頼む。
-  保留の時にsessionが取っていなかった答えはその依頼に載せる（再計画の継続と同じ）。
-- Predecessor tasksにはtask依存に続けてgoal依存（[ADR-0038](../../adr/0038-task-depends-on-a-goal-until-it-is-achieved.md)）のgoalと、その完了したtaskを並べる。
-  goalのtaskは多くなりうるので、summaryを短く切る（`GOAL_TASK_SUMMARY_CHARS`）。
 - 上限（[ADR-t2072-1](../../adr/2026-10-08-t2072-1-worker-prompts-and-next-turns-carry-decision-material-within-limits.md)）: 上限は`WORKER_*`の定数で、値の理由と節ごとの取る順はそのdoc commentが持つ。
-  省いた依存元と切ったsummaryは着地のcommitのmessageをgitで読ませ、切ったgoalの記述はgoalのdocで読ませる（docが無いgoalは読む方法が無いと書く）。
-  どこにも無いもの（兄弟task、taskの記述の切った残り、引き継いだrunのreceiptのsummaryと人か復旧jobが引き継いだ理由と復旧jobの`retry`の理由の切った残り）は読む方法が無いと書く。
-  上限に当たらない入力では節は全文のまま載り、省いたことの注記は載らない。
+  省いたら読む方法か読めないことを示す。
 - 前のrunの人の判断（[ADR-t4018-1](../../adr/2026-11-02-t4018-1-worker-prompt-carries-unapplied-person-decisions-of-the-previous-run.md)）: 入口は`domain::unapplied_decisions`と`PreviousDecisions`。
   taskの直前に終わったrunの人の判断は、新しいrunがどう始まっても（誰のretryでも、素の`ready`やholdの解除でも）、sessionに届いたかを添えて全部、新しいrunのpromptが必ず従う判断として本文のまま入れる。
   落とし穴: `resume_started`も`wrapper_launched`も届いた印にならない（その後の起動や送信が失敗しうる）。
-  この節は必須の節で、判断の数に依らず自分の上限に収め、切った本文と外した判断に限りaskのidと`dagq`の読むコマンドを名指す（上の読む範囲の例外）。
-  同じ例外は新しいsessionの引き継ぎの人の判断の節にも当たる（ADR-t4027-1）。
   復旧jobの`retry`の理由は判断が無くても渡し、askの答えが読めなければrunを始めない。
-- 記録: claimのprovisionが`PromptBytes`（言語の指示を含む）を、workerの最初のturnを始める`wrapper_launched`の`prompt_bytes`に記録する。
-  providerの切り替えで書き直した`prompt.txt`は記録しない。
-- 新しいsession（ADR-t2080-1）の最初のturnは`prompt.txt`と引き継ぎのprompt（`handoff_text`）で、wrapperがつなぐ（`domain::turn::new_session_prompt`）。
+- 初期promptと引き継ぎの計測は`PromptBytes`、新しいsessionの文の接続は`domain::turn::new_session_prompt`が入口。
 - 落とし穴: `tests/e2e.rs`のstubはpromptの1行目とreceiptのpathの行だけを読むので、節を足してもstubは変わらない。
 - 既に落ちているtestの節: 一覧があるときだけclaimのpromptとresumeの依頼に載せ、文面・選ぶ順・上限・読む経路は[CI watch](ci-watch.md#workerとreviewの材料)が持つ。
   新しいsessionに送るresumeの依頼は節を持たず、引き継ぎのpromptがrunの触るファイルに絞った一覧を持つ（同じ節）。
@@ -134,28 +117,17 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
 
 ## 受け入れ条件の対応づけ
 
-- workerのpromptはreceiptの書き方の直前に`ACCEPTANCE_MAP`を置く（[ADR-t1420-1](../../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
-  各項目を満たすものへ対応づけ、満たせない項目を`follow_ups`に回して`succeeded`にしない。
-- baseが満たすときは`ALREADY_SATISFIED`が書き方を言い、verify全体を求めない（[receipt](worker-receipt.md#baseがすでに満たすときalready_satisfied)）。
-- resumeとreviseの依頼はreceiptを書き直す手順に`ACCEPTANCE_REMAP`と`FOLLOW_UP_PROPOSAL_AGAIN`を足す。
-- どのproviderのworkerも同じ文で、対応づけにも文書の照合にも検査のコマンドやtestの実行は求めない。
+receiptの前に各条件を満たすものへ対応づけ、満たせない項目をfollow_upへ回して成功にしない（[ADR-t1420-1](../../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
+文面の入口は`ACCEPTANCE_MAP`と、再開時の`ACCEPTANCE_REMAP`。
+baseがすでに満たす場合の契約は[receipt](worker-receipt.md#baseがすでに満たすときalready_satisfied)が持つ。
+
 - Codexのworkerの自分のdiffの見直しはこの対応づけの手順に寄せ、受け入れ条件との照合を2度言わない（下の[subagent review](#subagent-review)）。
 
 ## 文書の照合
 
-workerのpromptは`ACCEPTANCE_MAP`の直後に`DOCS_CHECK`を置き、対応づけの続きとして文書の照合を指示する（[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)、[ADR-t1942-2](../../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)）。
-
-- 候補: taskが名指す文書、作業中に見つけた文書、変えた名前でrepositoryを探して見つけた文書。
-  `summary`の探した名前は、reviewが同じ名前で探し直すための根拠である。
-- 書く条件: 流れ・境界・不変条件・コードから読めない約束が変わったときと、記述がコードと食い違うときだけ。
-  名前が文書に無いことはずれではなく、識別子の列挙と経緯を足さず、細かい事実は定義のそばのdoc commentに書かせる。
-- 行き先: taskのpathsの中は直し、外は`docs_drift`のfollow_upにする。
-  示すためだけに文書を触らない。
-- 汎用に保つ: 探す道具、repository固有のpath、文書の層や予算は名指さない（ADR-t1453-2）。
-  このrepositoryの範囲と書き方は[documents.md](../../development/documents.md#workerの文書の照合)が持つ。
-
-resumeとreviseの依頼は`ACCEPTANCE_REMAP`の「`summary`の句を書き直す」に照合した文書を含める。
-reviewの側は[Review](review.md#文書の照合)が持つ（`REVIEW_DOCS_CHECK`）。
+対応づけに続けて文書を照合させる入口は`DOCS_CHECK`（[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)、[ADR-t1942-2](../../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)）。
+探す道具やrepository固有のpath・文書の層と予算はpromptに名指さない（ADR-t1453-2）。
+このrepositoryの範囲と書き方は[documents.md](../../development/documents.md#workerの文書の照合)、reviewの側は[Review](review.md#文書の照合)が持つ。
 
 ## 経路とproviderごとの文面
 
@@ -181,20 +153,14 @@ reviewの側は[Review](review.md#文書の照合)が持つ（`REVIEW_DOCS_CHECK
 
 claimのたびに、supervisorはrunのproviderのworkerが読む指示のhashを3つ、`run_claimed`に別々のキーで記録する。
 
-- 入口: 対象と求め方は`domain::instructions`のmoduleと各箇条の名前のdoc commentが持つ。
-- promptの雛形: taskの値を入れる前のworkerのprompt（`worker_template`）。
-- plugin: Claudeのworkerが読むdagqのplugin（`worker_plugin_hash`）。
-- repositoryの指示の文書: runのbaseでの内容（`REPOSITORY_INSTRUCTIONS`）。
+- 入口: 対象と求め方は`domain::instructions`のmoduleのdoc commentが持つ。
 - 約束: 各hashは読む指示の内容だけで決まり、taskの値・commitのid・時刻によらず、同じ内容のrunは同じ版として比べられる。
   求められないhashは不明の値になり、claimは止まらない。
 
 ### subagent review
 
 - 入口: `review_line`。
-- Claude: 該当すればClaude Codeのsubagentで同じturnの中でreviewし、receiptの`subagent_review`にevidenceか理由を書く。
-- Codex: Codexの非対話の実行にsubagentは無く、入れ子のCodexのreviewはsandboxで`$CODEX_HOME`のsessionを書けず費用も倍になる（[spike](../../plans/headless-worker-spike.md)）。
-  そこで自分のdiffを読んで見直し、`subagent_review`を`not_applicable`にして理由と見つけたことを書く。
-  着地の前には全runと同じくsupervisorのreview jobがcommitをreviewする。
+- providerごとのreviewの指示は`review_line`のdoc commentが持つ（[spike](../../plans/headless-worker-spike.md)）。
 - 約束: taskが`subagent_review`を要るevidenceにしていても、runの`actual_provider`がCodexなら`required_of`が外す。
   validating・integrateのreceiptの検査・resumeの解決の判定・promptの`Required evidence:`の行はどれもこの絞った一覧を使う。
 - 落とし穴: runが途中でClaudeに切り替わった後は`actual_provider`がClaudeなので、要るevidenceに戻る。
@@ -202,27 +168,18 @@ claimのたびに、supervisorはrunのproviderのworkerが読む指示のhash�
 ### 復旧jobのprompt
 
 - 入口: `recovery_prompt`。
-- どのworkerの記録でも非対話の操作だけを案内し、画面のダイアログに答える操作と閉じて進める操作は許す操作から除く（`HEADLESS_NEVER`）。
-  返されてもsupervisorの`check_live`（`src/application/supervise/execution/recovery.rs`）が拒む。
-- `send_instruction`は次のturnの依頼で、画面の代わりにturnの抜粋を読む。
-- verdictのschemaの後に、jobの足すoptionの種類の宣言と、runtimeの操作や完了・cancelと紛らわしいoptionを足さない規則を書く（[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)。終わったrunは`RECOVERY_ENDED_OPTIONS_RULE`、生きているsessionは`RECOVERY_LIVE_OPTIONS_RULE`）。
-  固定の文で末尾にあるので、全体の上限を超えて中ほどを切っても残り、`RECOVERY_PROMPT_LIMIT`の中に収まる。
-- 終わったrunの許す操作の説明（`recovery_action_help`）は、baseがすでに受け入れ条件を満たすことの確かめへの引き渡し（`hand_off`）を、適用の前提（commitの無いreceiptの`commit_mismatch`、baseより先のcommitが無い）とともに書く（[Triage](triage.md)の5）。
-  説明と規則の文が増えても、節の上限の和と指示の文は`RECOVERY_PROMPT_LIMIT`の中に言語の指示の空きを残して収まり、上限は変えない（値と内訳はその定数のdoc comment）。
-- 引き渡されたrunの主張の判定のprompt（`claim_review_prompt`）は、workerが主張を書かなかったことと復旧jobの見立てを載せ、見立ては自分の上限（`CLAIM_REVIEW_HAND_OFF_BYTES`）で切る。
+- 非対話の操作だけを案内する入口は`recovery_prompt`、許さない操作の検査は`supervise::execution::recovery::check_live`。
+- verdictの規則は末尾に置き、中ほどを切っても残す（[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)）。
+- 引き渡された主張の判定の入口は`claim_review_prompt`。
 - 判定と上限は[復旧job](background-recovery-job.md)と下の[上限](#goal-reviewrunのreview復旧jobruntimeのplannerの上限)が持つ。
 
 ## repositoryの規則を読む順
 
 promptと固定の文字列には、dagqのrepositoryの規則（ADRの索引や番号の付け方、Rustのlinterの名前など）を書かない。
 
-- worker: `WORKER_READING`と`local_checks`が「AGENTS.mdかCLAUDE.md」を名指す。
-- planner: `repository_rules`が、AGENTS.md →（無ければ）CLAUDE.md →（どちらも無ければ）README・CIの設定・buildの設定の順で決め、決まらなければaskすると言う。
-  runtimeが立てるplannerのaskは`RUNTIME_PLANNER_ASK`で、材料で決めきれず人の判断に当たるか確信度が低いときだけ`planner_question`にする（ADR-t451-1決定5）。
-- plan review: repositoryの指示とそれが名指す文書を当てはめさせ、AGENTS.mdが無ければ同じ順で判断し、決まらなければ`concern`にする。
-  このrepositoryではAGENTS.mdの「plan review」の節から[taskの登録](../../development/task-registration.md)の「plan reviewが当てはめる規則」へ辿る。
-- review: 全体のreviewのpromptはworktreeの指示を名指さず、landing branchのcommitの`.dagq/review/builtin-acceptance.md`があればその中身をpjの規則として資料の行の後、`REVIEW_DOCS_CHECK`の前に置く（[Review](review.md#reviewの流れ)の2、[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)決定6）。
-  規則はpromptの上限に数え、超えた分は切って全文の場所を書く。
+読む規則の探し方は`repository_rules`、workerの読む範囲は`WORKER_READING`が入口。
+plan reviewへの適用は`plan_review_prompt`、全体のreviewへの挿入位置は`run_review::review_prompt`のdoc commentが持つ（[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)決定6）。
+
 - follow_up・goal gap・findingのdraftの`context`の見出しは英語の固定の文で、言語の設定に従わない（[Language](language.md#runtimeの固定の文字列)）。
 
 ## headlessのjobのprompt
@@ -276,36 +233,16 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 
 - 入口: 表の行のmoduleと定数。
   値の理由と本番の大きさは各定数のdoc commentが持つ。
-- 切り方: 可変の文は先頭を残して切り、省いたbyte数と読む方法を書く。
-  resumeの理由とreviseのfindings（全件で1つの節）は、切ったときだけ全文を依頼の文と同じrun directoryの`<依頼>-reason.txt`・`<依頼>-findings.txt`に書いてそのpathを示す。
-  receiptの名指すcommitはreceiptで読ませ、ほかの文はworkerが読める場所に無いので読む方法が無いと書く。
-- providerの再試行と切り替え: 届かなかった依頼は出どころによらず1つの節として切り、全文は`turns/request-<seq>.taken.json`で読ませる。
-- 引き継ぎのprompt: 材料は`handoff_prompt`が集め、上限と切り方と読む方法は`handoff_text`のdoc commentが持つ。
-- 必須の節: resumeとreviseのtaskの検証とresumeのpathsはtaskそのものの記述なので省かず、初期promptと同じ`WORKER_*`の上限で切って`over_limit`に書く。
-  手順の行と、切り替えの固定の文（`git log`と`git status`で作業を見る手順など）は省かない。
-- 「Tasks landed」の節はその節の行数とtitleの上限で有界なので、ここでは切らずに全体の上限に数える（[ADR-t1892-1](../../adr/2026-10-07-t1892-1-resume-request-lists-landed-tasks-by-title-with-a-cap.md)）。
-- 記録: 依頼を書いた`turn_requested`の`prompt_bytes`（言語の指示を含む）。
-- 引き継ぎの後に送る依頼: resumeの依頼は`handoff.json`が運んだ`prompt_bytes`を記録する。
-  それの無い依頼は測り直す（`restored_request`）。
+- 省略時の読む経路と必須の節は`requests`のmodule doc、引き継ぎは`handoff_text`、依頼の再送は`restored_request`が入口（[ADR-t1892-1](../../adr/2026-10-07-t1892-1-resume-request-lists-landed-tasks-by-title-with-a-cap.md)）。
 
 ### goal review・runのreview・復旧job・runtimeのplannerの上限
 
 - 入口: 値は`src/application/prompt/`の各jobの定数（上の表）、仕組みは`src/application/prompt_fit.rs`。
   値の理由と本番の大きさは各定数のdoc commentが持つ。
-- 選ぶ順: 一覧の節は決まった順で取り、入らない項目は飛ばして次を試し（1件の巨大な項目が残りを隠さない）、残したものはもとの順で載せる。
-  多くの節は新しい順に取り、それと違う順の節の取る順はその上限の定数のdoc commentが持つ。
-- 切り方: 長い文は先頭を残して切り、省いたbyte数と読む方法の注記を付ける。
-  JSONの項目は長い文字列から切り、それでも入らなければIDと読む方法だけの行にする。
-- 読む方法: 読めるファイルにも打てるコマンドにも無いもの（復旧jobのalertの事実・プロセス・過去のverdict、読めなかった依頼の参照）は、読む方法が無いと書き、読めない場所に退避しない。
-- 前のplannerからの引き継ぎ: 人の答えだけを待って終わったplanner（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3）の後に立つruntimeのplannerの4種類のpromptは、元の質問とanswerを`answer`の節に、前のplannerのnoteと、それが作った・編集したまだdraftのtaskを`handover`の節に載せる。
-  材料はsupervisorがqueueの記録から集める（sessionはresumeしない）。
-  `handover`のnoteとdraftの行の取る順と上限は`PLANNER_HANDOVER_BYTES`のdoc commentが持つ。
-  省いたnote・draft・answerは、plannerが打てる読むだけの`dagq`で読むと書く（コマンドは組み立ての関数が持つ）。
-  どのplannerの文面も、質問で止まる前に決められることを決め、draftの編集とnoteを残すように言う。
-- 必須の節は省かず、自分の上限で切って`over_limit`に書く（`Fit::required`）。
+- 項目の選び方と切り方は`prompt_fit::Fit`のdoc commentが持つ。
+- 前のplannerはresumeせず、queueの記録から材料を集めて引き継ぐ（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3）。
+  引き継ぐ材料の詳細は`planners::PLANNER_HANDOVER_BYTES`のdoc commentが入口。
 - 不変条件: 節の上限の和は全体の上限（言語の指示の分の空きを除く）に収まるように決める。
   それでも超えたときだけ、先頭と末尾（指示とverdictのschema）を残して中ほどを切る（`Fit::finish`）。
 - 約束: 復旧jobの固定バイナリの節はretryの判断の材料なので、alertの事実の直後に置き、中ほどを切っても残る側に置く（`binary_sections`）。
-  入れ替えの節は節の上限で省いたものを件数と`binary.json`で読むと書き、queueの読む上限で読まなかったclaim以後の`update_installed`も件数で書く（黙って落とさない）。
-- 記録: どのjobも`PromptBytes`を`prompt_bytes`としてeventに記録し、plan reviewと同じ形を持つ。
-  数え方は`PromptBytes`のdoc commentが持つ。
+- 記録の数え方とeventへの対応は`PromptBytes`のdoc commentが持つ。

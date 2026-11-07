@@ -82,6 +82,11 @@ pub use worker::*;
 /// The throughput review's `omitted` is keyed not by its sections but by
 /// the names of the parts its `DROP_ORDER` left out, each counted once
 /// ([`ReviewPrompt::record`](crate::application::throughput_review::ReviewPrompt::record)).
+///
+/// Claim provision includes language in the bytes recorded on the first
+/// worker turn's wrapper_launched. A prompt.txt rewritten for a provider
+/// switch is not recorded again. Every headless job uses this same event
+/// accounting shape.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PromptBytes {
     pub total: usize,

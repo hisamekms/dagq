@@ -47,6 +47,9 @@ pub const CLAIM_REVIEW_HAND_OFF_BYTES: usize = 2_000;
 /// option it recommends. Each section is held to its limit and the whole
 /// to [`CLAIM_REVIEW_PROMPT_LIMIT`]; what is cut says where the job reads
 /// it whole, or that it reads it nowhere.
+///
+/// For a recovery hand-off, say the worker did not make the claim and cut
+/// the recovery diagnosis at CLAIM_REVIEW_HAND_OFF_BYTES.
 pub fn claim_review_prompt(
     task: &Task,
     run: &TaskRun,

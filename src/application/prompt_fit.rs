@@ -230,6 +230,16 @@ pub(crate) fn left_out_note(what: &str, ids: &[String], read: &str) -> String {
 
 /// One headless prompt being held to its whole `limit`: what each section
 /// takes and what each left out, recorded as it is built.
+///
+/// List sections try items in their specified order, skipping oversized
+/// items so one cannot hide the rest, and display survivors in original
+/// order. Most callers choose newest first; each limit documents exceptions.
+/// Text keeps its start and adds omitted bytes and a reading path; JSON cuts
+/// long strings first, then falls back to an ID and reading path.
+/// Required sections are cut at their own limit and recorded in over_limit,
+/// never omitted. Unreadable recovery facts, processes, prior verdicts and
+/// unreadable request references use NOT_READABLE, never an inaccessible
+/// spill file.
 #[derive(Debug)]
 pub(crate) struct Fit {
     bytes: PromptBytes,

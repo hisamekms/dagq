@@ -26,6 +26,12 @@ pub fn inbox_prompt(db: &Path) -> Result<String> {
 /// shows them in its CLAUDE.md, README, CI and build configuration. `ask`
 /// is the last step, when none of them settles it: for a planner the
 /// runtime opened, a `planner_question` ask.
+///
+/// Plan review uses this same fallback order and applies documents named
+/// by repository instructions; unresolved rules become a concern. In this
+/// repository AGENTS.md's plan-review section points to task-registration.md's
+/// plan-review rules. Runtime planners use RUNTIME_PLANNER_ASK's narrower
+/// human-decision or low-confidence condition.
 pub(crate) fn repository_rules(ask: &str) -> String {
     format!(
         "Take a task's verification commands (`--verify`), declared paths (`--paths`) and required evidence (`--evidence`) from the repository's instructions and the documents and rules they name, in this order: its AGENTS.md; without one, its CLAUDE.md; without either, what its README, CI configuration and build configuration show; when none of them settles it, {ask}."
@@ -302,6 +308,14 @@ pub const BEFORE_YOU_STOP_AT_A_QUESTION: &str = "Before you stop at a planner_qu
 /// lines are taken after the notes, newest first too. The planners before
 /// a revise's planner share it, their headings and the lines naming what
 /// was left out included ([`handover_budgets`]).
+///
+/// All four runtime-planner prompts carry the prior question and answer in
+/// answer, and the prior planner's notes and still-draft tasks it created or
+/// edited in handover. The supervisor collects these from queue records;
+/// it never resumes that planner session. Omitted notes, drafts and answers
+/// name read-only dagq commands the planner may run. Every planner includes
+/// BEFORE_YOU_STOP_AT_A_QUESTION: decide what can be decided and save draft
+/// edits and notes before stopping.
 pub const PLANNER_HANDOVER_BYTES: usize = 8_000;
 pub const PLANNER_HANDOVER_NOTE_BYTES: usize = 2_000;
 

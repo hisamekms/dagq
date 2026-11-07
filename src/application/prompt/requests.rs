@@ -1,5 +1,22 @@
 //! The requests the supervisor types into a live worker session: a resume,
 //! a revise, a receipt that does not match, a stall (execution and landing).
+//!
+//! Variable text keeps its start and names omitted bytes and a readable
+//! source, or explicitly says no source exists. Resume reasons and revise
+//! findings (all findings are one section) are saved whole only when cut,
+//! beside the request as `<request>-reason.txt` / `<request>-findings.txt`.
+//! A receipt's commit is read in the receipt. Resume verification and paths,
+//! and revise verification, are required task material cut at WORKER_* limits
+//! with over_limit, never dropped. Fixed steps, including git log/status on
+//! a provider switch, are not cut. Tasks landed has its own bounded line count
+//! and titles and is counted whole (ADR-t1892-1).
+//!
+//! An undelivered request retried or switched to another provider is one
+//! section regardless of origin, read whole in turns/request-<seq>.taken.json
+//! (worker::restored_request). handoff_prompt collects handoff material;
+//! worker::handoff_text specifies its limits and reading paths. turn_requested
+//! records prompt_bytes including language; a resume after handoff uses the
+//! bytes carried in handoff.json, or restored_request measures them anew.
 
 use super::*;
 use crate::application::run_git::rebase_target;
@@ -220,6 +237,18 @@ pub(super) fn landed_title(title: &str) -> std::borrow::Cow<'_, str> {
 /// limits, said in `over_limit`; the section on landed tasks keeps its own
 /// bounds, as the known failures' does ([`known_failures_section`]); the
 /// steps are never cut.
+///
+/// Resume and revise request checks once on the committed final tree, then
+/// only the checks touched by any later fix. ResumeKind::reruns_what_failed
+/// permits the failed command's reproduction (only when the reason names a
+/// failure, even for Landing/Recheck), or the missing evidence's checks.
+/// Other resumes and revise forbid the whole suite. The receipt rewrite
+/// step uses the configured resume timeout and warns that the supervisor
+/// stops the session if it expires, as the handoff does.
+///
+/// Hold says a person held and released the task, leaves the worktree at the
+/// turn's end, and asks to continue there, commit, and pass validation,
+/// review and landing again. Unconsumed answers are carried as for Replan.
 pub(crate) fn resume_request(
     task: &Task,
     run: &TaskRun,

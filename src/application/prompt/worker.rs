@@ -103,6 +103,10 @@ pub const LANDED_SECTION_BYTES: usize = 12_000;
 /// Characters of a receipt summary the prompt keeps for each task of a goal
 /// the task depended on: a goal may hold many tasks, so each is a hint of
 /// what landed, not the whole account.
+///
+/// Predecessors list task dependencies before goal dependencies and their
+/// completed tasks (ADR-0038); the potentially large goal-task set is why
+/// its summaries are shortened here.
 pub const GOAL_TASK_SUMMARY_CHARS: usize = 200;
 
 /// What the prompt says about one goal the task depended on (ADR-0038):
@@ -322,6 +326,11 @@ impl Inheritance {
 /// to its session or not (ADR-t4018-1, widened to the delivered ones by
 /// ADR-t4027-1), with the retry that ended that run if one did: the
 /// prompt's section a worker must follow.
+///
+/// This is required material with its own limit regardless of the decision
+/// count. Only omitted decisions and cut text name ask IDs and dagq reading
+/// commands, an exception to WORKER_READING's initial reading restriction.
+/// The handoff's person-decisions section has the same exception (ADR-t4027-1).
 #[derive(Debug, Clone, Serialize)]
 pub struct PreviousDecisions {
     /// The run just before this one.
@@ -766,6 +775,12 @@ pub(super) fn headless_provider_line(provider: Provider) -> String {
 /// fixed on the spot, and one the task cannot meet is an ask or a failed
 /// receipt rather than a follow_up beside a succeeded receipt. It asks for
 /// no new command: the mapping reads the diff and the receipt.
+///
+/// Placed before the receipt contract, immediately followed by DOCS_CHECK.
+/// All providers use the same mapping and document check, neither of which
+/// requires another test or check command. A base that already satisfies the
+/// criteria uses ALREADY_SATISFIED; resume and revise use ACCEPTANCE_REMAP
+/// and FOLLOW_UP_PROPOSAL_AGAIN before rewriting the receipt.
 pub const ACCEPTANCE_MAP: &str = "Before the receipt, map each acceptance criterion to what meets it (a changed file, a test's name, the receipt's evidence, a document's section or a command that measures it) and fix on the spot any criterion nothing meets yet. Do not write succeeded with a criterion you cannot meet moved into follow_ups: when meeting it needs a person's decision (the acceptance or the scope changes), ask a worker_question with --because scope; when it needs work outside the task, write a failed receipt saying why. In summary, give each criterion's mapping in a short phrase.\n";
 
 /// The receipt of a worker whose base already meets every criterion
@@ -787,6 +802,11 @@ pub const ALREADY_SATISFIED: &str = "When the base already meets every acceptanc
 /// of identifiers nor history goes in (ADR-t1942-2). It names no tool, no
 /// repository path and none of a repository's own document rules, and asks
 /// for no command and no document change only to show the check.
+///
+/// Documents found while working are candidates too. Fix drift inside the
+/// task's paths; outside them, report a docs_drift follow_up. Resume and
+/// revise include the checked documents in ACCEPTANCE_REMAP's summary.
+/// The review checks the same claims through run_review::REVIEW_DOCS_CHECK.
 pub const DOCS_CHECK: &str = "Then check against your diff the documents on what you changed: named by the task, found as you work, or found by searching the repository for each changed name (command, flag, setting, role, path). Fix stale ones in the task's paths, file the rest as docs_drift follow_ups with path and section (one the acceptance names is a criterion above); in summary give the names searched and each path and section updated or why none was. Write to a document only when a flow, boundary, invariant or promise the code does not show changed, or the document disagrees with the code or an accepted decision; a changed name missing from it is not drift. Add no list of fields, flags, defaults or names and no history (task numbers, what was before); put what a name means in a doc comment by its definition. Touch no document only to show it.\n";
 
 /// What a resumed or revised session adds before it rewrites the receipt
@@ -810,6 +830,11 @@ pub const FOLLOW_UP_PROPOSAL_AGAIN: &str = "Write each follow_up as before: the 
 /// `not_applicable`; its run does not need the evidence
 /// ([`crate::domain::required_of`]), and the supervisor's review job reviews
 /// the commit before it lands.
+///
+/// Claude requests applicable subagent review in the same turn and evidence
+/// or a reason in the receipt. Codex records its self-review's findings as
+/// well as the not_applicable reason. A nested Codex review also doubles the
+/// cost; the investigation is in docs/plans/headless-worker-spike.md.
 pub(super) fn review_line(route: Route) -> &'static str {
     match route.0 {
         Provider::Codex => {
@@ -1358,6 +1383,9 @@ Do not run `dagq list` or `dagq show`, and skip the rest of the docs tree; open 
 /// run to integrate), and the verification commands only when the
 /// repository says nothing. The runtime names no tool here: dagq runs in
 /// any repository.
+///
+/// The initial prompt labels verification commands as integrate's single
+/// post-rebase run; resume and revise carry this same local-checks sentence.
 pub(crate) fn local_checks(verify: &str) -> String {
     format!(
         "Run in the worktree the checks the repository's instructions (AGENTS.md or CLAUDE.md) ask a worker to run, which may leave some of the verification commands to integrate; when the instructions name no such checks, run the verification commands {verify}."
@@ -1379,6 +1407,13 @@ pub(crate) fn local_checks(verify: &str) -> String {
 /// that fail already on the landing branch's CI ([`KNOWN_FAILURES_LIMIT`]). A prompt
 /// at p99 is not cut as a whole; how much of each section is kept is said
 /// by its own limit.
+///
+/// Omitted predecessors and cut summaries point to landing commit messages
+/// in git; cut goal text points to its doc, or says it has no readable source
+/// when no doc exists. Siblings, the remainder of task text, an inherited
+/// receipt summary and inheritance reason, and a recovery retry reason have
+/// no readable source: say so. Inputs below the limits remain whole without
+/// omission notes.
 pub const WORKER_PROMPT_LIMIT: usize = 121_000 + KNOWN_FAILURES_LIMIT;
 
 /// The bytes of the task's own title, description, acceptance,
@@ -2096,6 +2131,10 @@ pub(super) const SPIKE_LINES: &str = "Spike: this task is a Spike (execution cla
 /// runtime runs it on the host after the review passes, so the worker does
 /// not. Only when the run may need it (the task asks for it, or the
 /// repository names `[e2e] paths` its diff may touch); empty otherwise.
+///
+/// The line asks for e2e not_applicable in the receipt. Only a resume after
+/// failed host e2e asks to reproduce the named failed tests, following the
+/// repository instructions; it embeds no repository-specific command.
 pub(super) fn e2e_line(task: &Task, e2e_paths: &[String]) -> String {
     if e2e_paths.is_empty() && !task.required_evidence().contains(&EvidenceCheck::E2e) {
         return String::new();

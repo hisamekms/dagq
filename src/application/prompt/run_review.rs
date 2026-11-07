@@ -93,6 +93,10 @@ pub struct AcceptanceRules<'a> {
 /// run's `approve_landing` asks, go after the acceptance with
 /// [`ACCEPTED_CONCERNS`] ([`landing_answers_section`]), as in each agent's
 /// job; without any, nothing is added.
+///
+/// The landing commit's .dagq/review/builtin-acceptance.md is inserted after
+/// the material line and before REVIEW_DOCS_CHECK. Its text counts against
+/// the prompt limit; a cut points to its whole file.
 pub fn review_prompt(
     task: &Task,
     run: &TaskRun,
@@ -821,6 +825,9 @@ pub(super) const RECOVERY_BINARY_RULE: &str = "A run that failed because the fix
 /// ([`recovery_binary_file`]); for a job that may retry, the rule on a run
 /// the binary failed. It comes right after the alert's facts, so a prompt
 /// cut in its middle at the whole limit keeps it.
+///
+/// Omissions name their count and binary.json; update_installed events
+/// since claim that the queue read limit did not fetch are counted too.
 pub(super) fn binary_sections(
     fit: &mut Fit,
     material: &RecoveryMaterial<'_>,
@@ -962,6 +969,16 @@ pub(super) const RECOVERY_LIVE_OPTIONS_RULE: &str = "Each option declares its ki
 /// [`RECOVERY_PROMPT_LIMIT`]; what is cut names the file in the run
 /// directory or the worktree it is in, or says the job cannot read it
 /// (the job reads files only, ADR-t1566-1 decision 3; task 1571).
+///
+/// Only noninteractive operations are described, using turn excerpts rather
+/// than a screen; send_instruction is a next-turn request. HEADLESS_NEVER
+/// excludes dialog answers and close-and-proceed even for recorded interactive
+/// runs; supervise::execution::recovery::check_live rejects them too.
+/// The ended/live options rule follows the verdict schema at the fixed end,
+/// so a middle cut preserves it. The section budgets and fixed instructions
+/// still leave language room within RECOVERY_PROMPT_LIMIT.
+/// recovery_action_help describes hand_off to check an already-satisfied base,
+/// requiring commit_mismatch from a receipt with no commit past the base.
 pub fn recovery_prompt(
     task: &Task,
     run: &TaskRun,
