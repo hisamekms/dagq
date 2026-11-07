@@ -1504,7 +1504,10 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
         let new = if old.status() == TaskStatus::InProgress {
             let latest: Option<String> = tx
                 .query_row(
-                    "SELECT status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+                    &format!(
+                        "SELECT status FROM task_runs WHERE task_id=?1 ORDER BY {} DESC LIMIT 1",
+                        tx.dialect().insertion_order("")
+                    ),
                     sql_params![task_id],
                     |row| row.get(0),
                 )
@@ -1872,8 +1875,10 @@ impl<T: SqlRead> Store<'_, T> {
         let dependencies =
             "SELECT predecessor_id FROM task_dependencies WHERE task_id=?1 ORDER BY predecessor_id";
         let goal_dependencies = GOAL_DEPENDENCIES_QUERY;
-        let latest_run =
-            "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1";
+        let latest_run = format!(
+            "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY {} DESC LIMIT 1",
+            tx.dialect().insertion_order("")
+        );
         let tasks = tasks
             .into_iter()
             .map(|task| {
@@ -1882,7 +1887,7 @@ impl<T: SqlRead> Store<'_, T> {
                 let goal_dependencies =
                     tx.query_map(goal_dependencies, sql_params![task.id()], |r| r.get(0))?;
                 let latest_run = tx
-                    .query_row(latest_run, sql_params![task.id()], |row| {
+                    .query_row(&latest_run, sql_params![task.id()], |row| {
                         Ok(LatestRun {
                             id: row.get("id")?,
                             status: enum_col(row, "status")?,
@@ -1933,7 +1938,10 @@ impl<T: SqlRead> Store<'_, T> {
         let goal_dependencies =
             tx.query_map(GOAL_DEPENDENCIES_QUERY, sql_params![task_id], |r| r.get(0))?;
         let runs = tx.query_map(
-            "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY rowid",
+            &format!(
+                "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY {}",
+                tx.dialect().insertion_order("")
+            ),
             sql_params![task_id],
             run_row(self.runs_dir),
         )?;
@@ -1996,7 +2004,7 @@ impl<T: SqlRead> Store<'_, T> {
         let statement = "SELECT t.id, c.task_id, c.commit_sha FROM tasks t
              LEFT JOIN task_dependencies d ON d.task_id = t.id
              LEFT JOIN landed_commits c ON c.task_id = d.predecessor_id
-             WHERE t.status = 'ready' AND t.wait_for_build != 0
+             WHERE t.status = 'ready' AND t.wait_for_build <> FALSE
              ORDER BY t.id, c.id";
         let rows = self.tx.query_map(statement, sql_params![], |row| {
             Ok((

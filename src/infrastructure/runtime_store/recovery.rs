@@ -22,8 +22,11 @@ impl SqliteQueue {
     pub fn runs_leased_by(&self, token: &LeaseToken) -> Result<Vec<TaskRun>> {
         Ok(SqlRead::query_map(
             &*self.conn,
-            "SELECT r.* FROM task_runs r JOIN run_leases l ON l.run_id=r.id
-                 WHERE l.token=?1 ORDER BY r.rowid",
+            &format!(
+                "SELECT r.* FROM task_runs r JOIN run_leases l ON l.run_id=r.id
+                 WHERE l.token=?1 ORDER BY {insert_order_r}",
+                insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r")
+            ),
             sql_params![token],
             run_row(&self.runs_dir),
         )?)
@@ -49,10 +52,10 @@ impl SqliteQueue {
     pub fn runs_leased_by_others(&self, token: &LeaseToken) -> Result<Vec<LeasedRun>> {
         let rows = SqlRead::query_map(
             &*self.conn,
-            "SELECT r.*, l.token, l.pid, l.heartbeat_at FROM task_runs r
+            &format!("SELECT r.*, l.token, l.pid, l.heartbeat_at FROM task_runs r
              JOIN run_leases l ON l.run_id=r.id
              WHERE r.status IN ('running','validating','awaiting_integration','needs_session') AND l.token<>?1
-             ORDER BY r.rowid",
+             ORDER BY {insert_order_r}", insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r")),
             sql_params![token],
             |r| {
                 let run = run_row(&self.runs_dir)(r)?;
@@ -1069,9 +1072,9 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let run = SqlRead::query_row(
             &tx,
-            "SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
+            &format!("SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
                  WHERE r.id=?1 AND r.status IN ('failed','interrupted') AND t.status='in_progress'
-                 AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id)",
+                 AND {insert_order_r}=(SELECT MAX({insert_order}) FROM task_runs WHERE task_id=r.task_id)", insert_order_r = SqlRead::dialect(&tx).insertion_order("r"), insert_order = SqlRead::dialect(&tx).insertion_order("")),
             sql_params![id],
             run_row(&self.runs_dir),
         )
@@ -1236,9 +1239,9 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let run = SqlRead::query_row(
             &tx,
-            "SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
+            &format!("SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
                  WHERE r.id=?1 AND r.status='needs_session' AND t.status='in_progress'
-                 AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id)",
+                 AND {insert_order_r}=(SELECT MAX({insert_order}) FROM task_runs WHERE task_id=r.task_id)", insert_order_r = SqlRead::dialect(&tx).insertion_order("r"), insert_order = SqlRead::dialect(&tx).insertion_order("")),
             sql_params![id],
             run_row(&self.runs_dir),
         )
@@ -1633,7 +1636,10 @@ impl SqliteQueue {
         crate::domain::task::check_status_authorized(&task, request.at.task)?;
         let latest = SqlRead::query_row(
             &tx,
-            "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            &format!(
+                "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY {insert_order} DESC LIMIT 1",
+                insert_order = SqlRead::dialect(&tx).insertion_order("")
+            ),
             sql_params![task_id],
             run_row(&self.runs_dir),
         )
@@ -1999,9 +2005,9 @@ fn apply_triage_action(
             // Still the latest run of a task nobody moved on, checked again
             // where no person's `ready` or answer can come in between.
             let latest: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM task_runs r JOIN tasks t ON t.id=r.task_id
+                &format!("SELECT EXISTS(SELECT 1 FROM task_runs r JOIN tasks t ON t.id=r.task_id
                  WHERE r.id=?1 AND t.status='in_progress'
-                 AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id))",
+                 AND {insert_order_r}=(SELECT MAX({insert_order}) FROM task_runs WHERE task_id=r.task_id))", insert_order_r = conn.dialect().insertion_order("r"), insert_order = conn.dialect().insertion_order("")),
                 sql_params![id],
                 |r| r.get(0),
             )?;
@@ -2130,9 +2136,9 @@ fn ensure_revivable(conn: &impl SqlRead, id: &RunId) -> Result<()> {
 /// transaction ([`ensure_revivable`]).
 fn revivable(conn: &impl SqlRead, id: &RunId) -> Result<bool> {
     let (latest, task): (Option<RunId>, Option<String>) = conn.query_row(
-        "SELECT (SELECT id FROM task_runs WHERE task_id=r.task_id ORDER BY rowid DESC LIMIT 1),
+        &format!("SELECT (SELECT id FROM task_runs WHERE task_id=r.task_id ORDER BY {insert_order} DESC LIMIT 1),
                 (SELECT status FROM tasks WHERE id=r.task_id)
-         FROM task_runs r WHERE r.id=?1",
+         FROM task_runs r WHERE r.id=?1", insert_order = conn.dialect().insertion_order("")),
         sql_params![id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -2166,7 +2172,10 @@ fn unleased_latest_triageable(
     let run = if leased { None } else { stored_run(conn, id)? };
     let latest: Option<RunId> = match &run {
         Some(run) => Some(conn.query_row(
-            "SELECT id FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            &format!(
+                "SELECT id FROM task_runs WHERE task_id=?1 ORDER BY {insert_order} DESC LIMIT 1",
+                insert_order = conn.dialect().insertion_order("")
+            ),
             sql_params![run.task_id()],
             |r| r.get(0),
         )?),

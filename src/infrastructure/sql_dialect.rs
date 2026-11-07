@@ -68,6 +68,55 @@ const TIGHT: &str = ",";
 const SPACED: &str = ", ";
 
 impl SqlDialect {
+    /// The insertion order of `task_runs` or `supervisors`, qualified by
+    /// `alias` when nonempty. SQLite keeps its implicit rowid unchanged;
+    /// Postgres uses the unique identity `seq`. The single writer assigns
+    /// identities in insertion order; local import copies rowid into seq.
+    /// A run's text ID does not carry insertion order.
+    pub(crate) fn insertion_order(self, alias: &str) -> String {
+        let column = match self {
+            Self::Sqlite => "rowid",
+            Self::Postgres => "seq",
+        };
+        if alias.is_empty() {
+            column.to_owned()
+        } else {
+            format!("{alias}.{column}")
+        }
+    }
+
+    /// The larger of two scalar values: SQLite MAX and Postgres GREATEST.
+    /// Unlike Postgres's native function, SQLite propagates a NULL operand;
+    /// the CASE preserves that result in shared statements.
+    pub(crate) fn scalar_max(self, a: &str, b: &str) -> String {
+        self.scalar_extreme(a, b, "MAX", "GREATEST")
+    }
+
+    /// The smaller of two scalar values, with the same NULL propagation as
+    /// [`Self::scalar_max`]: SQLite MIN and Postgres LEAST.
+    #[allow(dead_code)] // Paired dialect operation; no shared statement needs MIN yet.
+    pub(crate) fn scalar_min(self, a: &str, b: &str) -> String {
+        self.scalar_extreme(a, b, "MIN", "LEAST")
+    }
+
+    fn scalar_extreme(self, a: &str, b: &str, sqlite: &str, postgres: &str) -> String {
+        match self {
+            Self::Sqlite => format!("{sqlite}({a},{b})"),
+            Self::Postgres => format!(
+                "CASE WHEN ({a}) IS NULL OR ({b}) IS NULL THEN NULL ELSE {postgres}({a},{b}) END"
+            ),
+        }
+    }
+
+    /// Whether any non-NULL predicate in the group is true. Empty groups
+    /// and all-NULL groups give NULL: SQLite MAX of 0/1, Postgres bool_or.
+    pub(crate) fn any_true(self, predicate: &str) -> String {
+        match self {
+            Self::Sqlite => format!("max({predicate})"),
+            Self::Postgres => format!("bool_or({predicate})"),
+        }
+    }
+
     /// The SQL expression that reads the JSON field at the literal `path`
     /// (`$.kind`) of `column` (`payload`, `o.payload`) as `ty`.
     pub(crate) fn json_field(self, column: &str, path: &str, ty: JsonType) -> String {
@@ -1273,5 +1322,78 @@ mod tests {
             )
             .unwrap();
         assert_eq!(text, "2026-11-01T23:59:59.000Z");
+    }
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::SqlDialect::{Postgres, Sqlite};
+
+    #[test]
+    fn insertion_order_names_the_same_sqlite_row_and_the_postgres_identity() {
+        for (alias, sqlite, postgres) in [
+            ("", "rowid", "seq"),
+            ("r", "r.rowid", "r.seq"),
+            ("s", "s.rowid", "s.seq"),
+        ] {
+            assert_eq!(Sqlite.insertion_order(alias), sqlite);
+            assert_eq!(Postgres.insertion_order(alias), postgres);
+        }
+    }
+
+    #[test]
+    fn extrema_and_boolean_aggregates_have_both_dialects_and_keep_nulls() {
+        assert_eq!(Sqlite.scalar_max("a", "b"), "MAX(a,b)");
+        assert_eq!(Sqlite.scalar_min("a", "b"), "MIN(a,b)");
+        assert_eq!(
+            Postgres.scalar_max("a", "b"),
+            "CASE WHEN (a) IS NULL OR (b) IS NULL THEN NULL ELSE GREATEST(a,b) END"
+        );
+        assert_eq!(
+            Postgres.scalar_min("a", "b"),
+            "CASE WHEN (a) IS NULL OR (b) IS NULL THEN NULL ELSE LEAST(a,b) END"
+        );
+        assert_eq!(Sqlite.any_true("a=b"), "max(a=b)");
+        assert_eq!(Postgres.any_true("a=b"), "bool_or(a=b)");
+    }
+
+    #[test]
+    fn sqlite_extrema_and_boolean_aggregates_read_values_and_nulls() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for (a, b, max, min) in [
+            ("2", "7", Some(7), Some(2)),
+            ("NULL", "7", None, None),
+            ("2", "NULL", None, None),
+        ] {
+            let actual: (Option<i64>, Option<i64>) = conn
+                .query_row(
+                    &format!(
+                        "SELECT {}, {}",
+                        Sqlite.scalar_max(a, b),
+                        Sqlite.scalar_min(a, b)
+                    ),
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(actual, (max, min));
+        }
+        for (values, expected) in [
+            ("(0),(1),(NULL)", Some(true)),
+            ("(0),(NULL)", Some(false)),
+            ("(NULL)", None),
+        ] {
+            let actual: Option<bool> = conn
+                .query_row(
+                    &format!(
+                        "WITH t(v) AS (VALUES {values}) SELECT {} FROM t",
+                        Sqlite.any_true("v=1")
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(actual, expected);
+        }
     }
 }

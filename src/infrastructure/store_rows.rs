@@ -182,7 +182,7 @@ pub(super) fn task_row(row: &SqlRow<'_>) -> SqlResult<Task> {
             .get::<_, Option<String>>("change")?
             .and_then(|change| change.parse().ok()),
         // Any value but 0 is declared (ADR-t1632-1); the column has no CHECK.
-        wait_for_build: row.get::<_, i64>("wait_for_build")? != 0,
+        wait_for_build: row.get("wait_for_build")?,
         // A class this binary does not know reads as `implementation`
         // (ADR-t1487-1); the column has no CHECK.
         execution_class: row

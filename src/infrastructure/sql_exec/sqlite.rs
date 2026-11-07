@@ -589,6 +589,16 @@ mod tests {
         WriteTx::read(conn, "sql_exec_test", Duration::from_secs(60)).unwrap()
     }
 
+    #[test]
+    fn next_id_keeps_the_autoincrement_high_water_after_deletion() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT); INSERT INTO tasks VALUES (2),(9); DELETE FROM tasks WHERE id=9").unwrap();
+        assert_eq!(SqlRead::next_id(&conn, "tasks").unwrap(), 10);
+        conn.execute("INSERT INTO tasks DEFAULT VALUES", [])
+            .unwrap();
+        assert_eq!(conn.last_insert_rowid(), 10);
+    }
+
     /// Savepoint rollback cancels only its callbacks; release keeps them for
     /// the outer commit, and dropping that transaction cancels everything.
     #[test]
@@ -1376,4 +1386,15 @@ pub(crate) fn watch_commits(conn: &Connection) -> anyhow::Result<()> {
         rusqlite::hooks::Authorization::Allow
     }))?;
     Ok(())
+}
+
+/// The ID an AUTOINCREMENT insert would take, including deleted rows' IDs.
+/// Called inside the writer transaction before constructing the aggregate;
+/// the eventual insert still supplies that ID explicitly.
+pub(super) fn next_id_sql(table: &str) -> String {
+    let maximum = SqlDialect::Sqlite.scalar_max(
+        "coalesce((SELECT seq FROM sqlite_sequence WHERE name=?1), 0)",
+        &format!("coalesce((SELECT max(id) FROM {table}), 0)"),
+    );
+    format!("SELECT {maximum} + 1")
 }

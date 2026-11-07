@@ -87,7 +87,10 @@ impl SqliteQueue {
             .optional()?
             .with_context(|| format!("run {} does not exist", new.run))?;
         let latest: RunId = tx.query_row(
-            "SELECT id FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            &format!(
+                "SELECT id FROM task_runs WHERE task_id=?1 ORDER BY {insert_order} DESC LIMIT 1",
+                insert_order = tx.dialect().insertion_order("")
+            ),
             sql_params![task_id],
             |r| r.get(0),
         )?;
@@ -1911,7 +1914,7 @@ fn check_premise(
     }
     let latest: Option<(RunId, String)> = conn
         .query_row(
-            "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            &format!("SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY {insert_order} DESC LIMIT 1", insert_order = conn.dialect().insertion_order("")),
             sql_params![op.task_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

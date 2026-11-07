@@ -89,7 +89,7 @@ impl RunResourceStore for SqliteQueue {
                  GROUP BY run_id)
              SELECT run_id, attachment FROM attached
              WHERE NOT EXISTS(SELECT 1 FROM run_resources r
-                 WHERE r.attachment=attached.attachment AND r.is_last=1)
+                 WHERE r.attachment=attached.attachment AND r.is_last=TRUE)
              ORDER BY attachment",
             &[],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),

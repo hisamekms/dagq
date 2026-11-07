@@ -174,8 +174,8 @@ fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
         ("ledger_v", i64::from(row.ledger_v).to_sql_value()),
         ("built_at", row.built_at.to_sql_value()),
         ("inputs_through", text(&row.inputs_through)?.to_sql_value()),
-        ("final", i64::from(row.is_final).to_sql_value()),
-        ("legacy", i64::from(row.is_legacy()).to_sql_value()),
+        ("final", row.is_final.to_sql_value()),
+        ("legacy", row.is_legacy().to_sql_value()),
         (
             "legacy_values",
             row.legacy.as_ref().map(text).transpose()?.to_sql_value(),
@@ -249,7 +249,7 @@ fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
                     format!("{name}=excluded.{name}")
                 }
                 _ => format!(
-                    "{name}=CASE WHEN ledger_rows.legacy = 1 THEN ledger_rows.{name} ELSE excluded.{name} END"
+                    "{name}=CASE WHEN ledger_rows.legacy = TRUE THEN ledger_rows.{name} ELSE excluded.{name} END"
                 ),
             })
             .collect();
@@ -297,7 +297,7 @@ fn wait_rows_sql(dialect: SqlDialect, after: bool) -> String {
            FROM ledger_rows
           WHERE kind=?1 AND {from}
             AND ((subject_kind IN ('slots_full', 'claim_hold', 'claim_deferral', 'landing_hold')
-                  AND (final=0 OR ended_at IS NULL OR ended_at >= ?2 OR outcome=?4
+                  AND (final=FALSE OR ended_at IS NULL OR ended_at >= ?2 OR outcome=?4
                        OR {events} >= ?3))
                  OR (subject_kind='live_alert_stream'
                      AND (outcome IS NULL OR outcome=?4)))
@@ -729,7 +729,7 @@ impl LedgerStore for SqliteQueue {
     fn ledger_heads_open_at(&self, through: EventId, resources: i64) -> Result<Vec<LedgerHead>> {
         use crate::domain::ledger::builder::pushes::settled_at;
         let open = format!(
-            "(r.final=0 OR r.legacy=1 OR r.ledger_v<>?2
+            "(r.final=FALSE OR r.legacy=TRUE OR r.ledger_v<>?2
                      OR {events}>?3
                      OR COALESCE({supervisor}, 0)>?3
                      OR COALESCE({windows}, 0)>?4
@@ -818,7 +818,7 @@ impl LedgerStore for SqliteQueue {
         let statement = "SELECT DISTINCT e.run_id
                FROM ledger_rows t
                JOIN run_events e ON e.task_id=t.task_id
-              WHERE t.kind=?1 AND t.legacy=1 AND e.kind=?2 AND e.run_id IS NOT NULL
+              WHERE t.kind=?1 AND t.legacy=TRUE AND e.kind=?2 AND e.run_id IS NOT NULL
                 AND NOT EXISTS (SELECT 1 FROM ledger_rows r WHERE r.kind=?3 AND r.key=e.run_id)
               ORDER BY 1";
         let rows = SqlRead::query_map(
@@ -876,7 +876,7 @@ impl LedgerStore for SqliteQueue {
         let statement = format!(
             "SELECT kind, key FROM ledger_rows
               WHERE {from} AND kind IN (?1, ?2, ?3, ?4, ?5)
-                AND legacy=0 AND ledger_v<?6
+                AND legacy=FALSE AND ledger_v<?6
               ORDER BY kind, key LIMIT ?9",
         );
         let rows = SqlRead::query_map(
@@ -1037,7 +1037,7 @@ impl LedgerStore for SqliteQueue {
             "CAST(?3 AS TEXT) IS NULL"
         };
         let filter = format!(
-            "AND {from} AND NOT (r.final=1 AND r.ledger_v>=?9
+            "AND {from} AND NOT (r.final=TRUE AND r.ledger_v>=?9
                AND {events}<=?2 AND COALESCE({supervisor}, 0)<=?2
                AND ((r.subject_kind='live_alert_stream' AND COALESCE(r.outcome, '')='replaced')
                     OR (r.subject_kind='live_alert' AND r.ended_at IS NOT NULL)
@@ -1130,7 +1130,7 @@ impl LedgerStore for SqliteQueue {
         let (ms, id): (Option<i64>, Option<i64>) = SqlRead::query_row(
             &*self.conn,
             "SELECT MIN(COALESCE(started_at, -9223372036854775808)), MIN(inputs_from)
-               FROM ledger_rows WHERE kind=?1 AND final=0",
+               FROM ledger_rows WHERE kind=?1 AND final=FALSE",
             sql_params![LedgerKind::Task.as_str()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -1152,18 +1152,22 @@ impl LedgerStore for SqliteQueue {
                 "SELECT MIN(COALESCE(started_at, -9223372036854775808)), MIN(inputs_from)
                FROM ledger_rows
               WHERE kind=?1 AND inputs_from <= ?2
-                AND (final=0
-                     OR MAX({},
-                            COALESCE({}, 0)) > ?2)",
-                SqlRead::dialect(&*self.conn).json_field_spaced(
-                    "inputs_through",
-                    "$.events",
-                    JsonType::Integer
-                ),
-                SqlRead::dialect(&*self.conn).json_field_spaced(
-                    "inputs_through",
-                    "$.supervisor",
-                    JsonType::Integer
+                AND (final=FALSE
+                     OR {} > ?2)",
+                SqlRead::dialect(&*self.conn).scalar_max(
+                    &SqlRead::dialect(&*self.conn).json_field_spaced(
+                        "inputs_through",
+                        "$.events",
+                        JsonType::Integer
+                    ),
+                    &format!(
+                        "COALESCE({}, 0)",
+                        SqlRead::dialect(&*self.conn).json_field_spaced(
+                            "inputs_through",
+                            "$.supervisor",
+                            JsonType::Integer
+                        )
+                    ),
                 ),
             ),
             sql_params![LedgerKind::Task.as_str(), at.as_i64()],
@@ -1211,7 +1215,7 @@ impl LedgerStore for SqliteQueue {
                FROM ledger_rows
               WHERE kind=?1
                 AND subject_kind IN ('slots_full', 'claim_hold', 'claim_deferral')
-                AND final=1 AND ended_at < ?2 AND (outcome IS NULL OR outcome<>?4)
+                AND final=TRUE AND ended_at < ?2 AND (outcome IS NULL OR outcome<>?4)
                 AND {} < ?3
                 AND started_at <= ?7
                 AND (ended_at >= ?5 OR {} >= ?6)

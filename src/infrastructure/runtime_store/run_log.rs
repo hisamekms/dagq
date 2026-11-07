@@ -356,7 +356,10 @@ impl SqliteQueue {
     pub fn all_runs(&self) -> Result<Vec<TaskRun>> {
         Ok(SqlRead::query_map(
             &*self.conn,
-            "SELECT * FROM task_runs ORDER BY rowid",
+            &format!(
+                "SELECT * FROM task_runs ORDER BY {insert_order}",
+                insert_order = SqlRead::dialect(&*self.conn).insertion_order("")
+            ),
             sql_params![],
             run_row(&self.runs_dir),
         )?)
@@ -959,7 +962,7 @@ impl SqliteQueue {
     pub fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
         let current = SqlRead::query_row(
             &*self.conn,
-            "SELECT id FROM task_runs WHERE workspace_id=?1 ORDER BY rowid DESC LIMIT 1",
+            &format!("SELECT id FROM task_runs WHERE workspace_id=?1 ORDER BY {insert_order} DESC LIMIT 1", insert_order = SqlRead::dialect(&*self.conn).insertion_order("")),
             sql_params![workspace_id],
             |r| r.get(0),
         )
@@ -992,7 +995,10 @@ impl SqliteQueue {
     pub fn active_runs(&self) -> Result<Vec<TaskRun>> {
         Ok(SqlRead::query_map(
             &*self.conn,
-            "SELECT * FROM task_runs WHERE status IN ('claimed','starting','running','validating','integrating') ORDER BY rowid",
+            &format!(
+                "SELECT * FROM task_runs WHERE status IN ('claimed','starting','running','validating','integrating') ORDER BY {insert_order}",
+                insert_order = SqlRead::dialect(&*self.conn).insertion_order("")
+            ),
             sql_params![],
             run_row(&self.runs_dir),
         )?)
@@ -1166,10 +1172,10 @@ impl SqliteQueue {
     pub fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
         Ok(SqlRead::query_map(
             &*self.conn,
-            "SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
+            &format!("SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
                  WHERE t.status='in_progress'
-                 AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id)
-                 ORDER BY r.rowid",
+                 AND {insert_order_r}=(SELECT MAX({insert_order}) FROM task_runs WHERE task_id=r.task_id)
+                 ORDER BY {insert_order_r}", insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r"), insert_order = SqlRead::dialect(&*self.conn).insertion_order("")),
             sql_params![],
             run_row(&self.runs_dir),
         )?)
@@ -1181,10 +1187,13 @@ impl SqliteQueue {
     pub fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
         Ok(SqlRead::query_map(
             &*self.conn,
-            "SELECT r.* FROM task_runs r WHERE r.status='integrated'
+            &format!(
+                "SELECT r.* FROM task_runs r WHERE r.status='integrated'
                  AND r.id IN (SELECT run_id FROM run_events WHERE kind=?1
                    AND id>(SELECT COALESCE(MAX(id),0) FROM run_events WHERE kind=?2))
-                 ORDER BY r.rowid",
+                 ORDER BY {insert_order_r}",
+                insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r")
+            ),
             sql_params![event_kind::PUSH_FAILED, event_kind::PUSH_FINISHED],
             run_row(&self.runs_dir),
         )?)
@@ -1195,7 +1204,10 @@ impl SqliteQueue {
     pub fn runs_with_status(&self, status: crate::domain::RunStatus) -> Result<Vec<TaskRun>> {
         Ok(SqlRead::query_map(
             &*self.conn,
-            "SELECT * FROM task_runs WHERE status=?1 ORDER BY rowid",
+            &format!(
+                "SELECT * FROM task_runs WHERE status=?1 ORDER BY {insert_order}",
+                insert_order = SqlRead::dialect(&*self.conn).insertion_order("")
+            ),
             sql_params![status.as_str()],
             run_row(&self.runs_dir),
         )?)
@@ -1210,18 +1222,21 @@ impl SqliteQueue {
     pub fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
         Ok(SqlRead::query_row(
             &*self.conn,
-            concat!(
-                "SELECT r.* FROM task_runs r WHERE r.status='awaiting_integration'
+            &format!(
+                concat!(
+                    "SELECT r.* FROM task_runs r WHERE r.status='awaiting_integration'
                  AND NOT EXISTS (SELECT 1 FROM replan_operations o WHERE o.task_id=r.task_id
                    AND o.status IN (",
-                crate::infrastructure::sqlite::replan_guarding!(),
-                "))
+                    crate::infrastructure::sqlite::replan_guarding!(),
+                    "))
                  AND NOT EXISTS (SELECT 1 FROM task_holds h WHERE h.task_id=r.task_id
                    AND h.released_at IS NULL)
                  ORDER BY (SELECT MIN(e.id) FROM run_events e
                            WHERE e.run_id=r.id AND e.kind=?1) NULLS LAST,
-                          r.rowid
+                          {insert_order_r}
                  LIMIT 1"
+                ),
+                insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r")
             ),
             sql_params![event_kind::VALIDATION_FINISHED],
             run_row(&self.runs_dir),
@@ -1241,11 +1256,11 @@ impl SqliteQueue {
     pub fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
         let statement = format!(
             "WITH ended AS (
-               SELECT r.id, r.status, r.workspace_id, r.rowid AS run_row FROM task_runs r
+               SELECT r.id, r.status, r.workspace_id, {insert_order_r} AS run_row FROM task_runs r
                JOIN tasks t ON t.id=r.task_id
                WHERE r.status IN ('integrated','succeeded','failed','interrupted')
                AND NOT (r.status IN ('failed','interrupted') AND t.status='in_progress'
-                        AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id))
+                        AND {insert_order_r}=(SELECT MAX({insert_order}) FROM task_runs WHERE task_id=r.task_id))
              )
              SELECT id, status, workspace_id, run_row, 0 AS event_id FROM ended
              WHERE workspace_id IS NOT NULL
@@ -1261,7 +1276,9 @@ impl SqliteQueue {
                 "e.payload",
                 "$.workspace_id",
                 JsonType::Text
-            )
+            ),
+            insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r"),
+            insert_order = SqlRead::dialect(&*self.conn).insertion_order("")
         );
         let rows = SqlRead::query_map(&*self.conn, &statement, sql_params![], |row| {
             Ok(EndedRunWorkspace {
@@ -1296,7 +1313,10 @@ impl SqliteQueue {
     /// an ask of the run is open and unanswered, else
     /// [`WorktreeCleanup::Idle`].
     pub fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
-        let statement = format!("{ENDED_RUN_WORKTREES} ORDER BY r.rowid");
+        let statement = format!(
+            "{ENDED_RUN_WORKTREES} ORDER BY {insert_order_r}",
+            insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r")
+        );
         let live = self.live_leased_runs()?;
         let now = self.generators.clock.now();
         let rows = SqlRead::query_map(
@@ -1642,6 +1662,79 @@ mod tests {
 
     use super::*;
     use crate::infrastructure::sql_dialect::json_field_spaced;
+
+    /// Equal timestamps and reverse-sorted text IDs must keep insertion
+    /// order, including the latest-run predicates used by recovery.
+    #[test]
+    fn equal_time_runs_and_supervisors_keep_insertion_order() {
+        let uri = format!("file:/run-order-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let queue = SqliteQueue::init(&uri).unwrap();
+        queue
+            .conn
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        queue.conn.execute("INSERT INTO tasks(id,title,description,acceptance,verification_commands,status,created_at,updated_at) VALUES (1,'t','','','[]','in_progress','2026-11-07T00:00:00.000Z','2026-11-07T00:00:00.000Z')", []).unwrap();
+        let ids = [
+            "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "11111111-1111-4111-8111-111111111111",
+        ];
+        for id in ids {
+            queue.conn.execute("INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit,created_at,workspace_id) VALUES (?1,1,'failed','codex','codex','0000000000000000000000000000000000000000','2026-11-07T00:00:00.000Z','shared')", [id]).unwrap();
+        }
+        let ids_of = |runs: Vec<TaskRun>| {
+            runs.into_iter()
+                .map(|run| run.id().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids_of(queue.all_runs().unwrap()), ids);
+        assert_eq!(
+            ids_of(queue.runs_with_status(RunStatus::Failed).unwrap()),
+            ids
+        );
+        assert_eq!(ids_of(queue.latest_runs_in_progress().unwrap()), [ids[1]]);
+        assert_eq!(
+            queue.run_in_workspace("shared").unwrap().unwrap().as_str(),
+            ids[1]
+        );
+        let conn = &*queue.conn;
+        assert_eq!(
+            crate::infrastructure::task_holds::latest_run(conn, TaskId::new(1))
+                .unwrap()
+                .unwrap()
+                .0
+                .as_str(),
+            ids[1]
+        );
+        for token in ["z", "a"] {
+            queue.conn.execute("INSERT INTO supervisors(token,pid,parallel,binary_version,started_at,heartbeat_at,handoff_accepted,auto_update) VALUES (?1,1,1,'v',10,10,2,2)", [token]).unwrap();
+        }
+        let tokens: Vec<_> = queue
+            .supervisors()
+            .unwrap()
+            .into_iter()
+            .map(|s| {
+                assert!(!s.handoff_accepted);
+                assert!(!s.auto_update);
+                s.token.into_string()
+            })
+            .collect();
+        assert_eq!(tokens, ["z", "a"]);
+        // SQLite's historical nonzero build flag remains declared.
+        queue
+            .conn
+            .execute("UPDATE tasks SET status='ready', wait_for_build=2", [])
+            .unwrap();
+        assert!(
+            crate::application::TaskReads::build_waits(&queue)
+                .unwrap()
+                .contains_key(&TaskId::new(1))
+        );
+        assert!(
+            crate::infrastructure::store_rows::read_task(&*queue.conn, TaskId::new(1))
+                .unwrap()
+                .wait_for_build()
+        );
+    }
 
     struct CountReads<'a> {
         conn: &'a Connection,

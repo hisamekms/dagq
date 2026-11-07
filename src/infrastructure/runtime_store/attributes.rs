@@ -258,7 +258,10 @@ fn state_attributes(conn: &impl SqlRead) -> Result<Attributes> {
         }
     }
     // The latest unfinished run of each task (a task has one at most).
-    for (task, run, status) in texts("SELECT task_id, id, status FROM task_runs ORDER BY rowid")? {
+    for (task, run, status) in texts(&format!(
+        "SELECT task_id, id, status FROM task_runs ORDER BY {insert_order}",
+        insert_order = conn.dialect().insertion_order("")
+    ))? {
         if status
             .parse::<RunStatus>()
             .is_ok_and(RunStatus::is_unfinished)

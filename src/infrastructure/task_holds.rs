@@ -784,7 +784,10 @@ fn latest_task_run(
 ) -> Result<Option<TaskRun>> {
     Ok(conn
         .query_row(
-            "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            &format!(
+                "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY {insert_order} DESC LIMIT 1",
+                insert_order = conn.dialect().insertion_order("")
+            ),
             sql_params![task],
             super::store_rows::run_row(runs_dir),
         )
@@ -1048,7 +1051,7 @@ fn discard_kept_of_ended(
 pub(super) fn latest_run(conn: &impl SqlRead, task: TaskId) -> Result<Option<(RunId, String)>> {
     Ok(conn
         .query_row(
-            "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            &format!("SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY {insert_order} DESC LIMIT 1", insert_order = conn.dialect().insertion_order("")),
             sql_params![task],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

@@ -1,6 +1,7 @@
 //! The SQL functions whose spelling differs between the dialects of the
 //! queue store (the JSON functions, the date and time functions, the clock
-//! in seconds) are called only from the dialect's functions
+//! in seconds, insertion order, scalar extrema and boolean aggregates)
+//! are called only from the dialect's functions
 //! (docs/design/persistence.md, "責務と境界"; ADR-t3982-1 decisions 3 and
 //! 4): a statement takes the expression from
 //! `crate::infrastructure::sql_dialect` instead of spelling it. Checked on
@@ -8,6 +9,10 @@
 //! [`source`](super::source)) and outside [`DIALECT`], no string literal
 //! (byte strings and those inside a macro's tokens too) calls a function
 //! of [`FUNCTIONS`], read as SQLite reads it ([`sql::calls`]).
+//!
+//! Rowid names (except in the FTS5 search adapter), two-argument extrema,
+//! extrema of predicates and direct numeric comparisons of boolean columns
+//! are rejected by [`sql::nonportable_values`].
 //!
 //! Parameters compared with NULL must carry their type through
 //! CAST in shared SQL; a bare IS NULL cannot infer a Postgres parameter
@@ -29,7 +34,7 @@ const DIALECT: &[&str] = &[
 ];
 
 /// The functions spelled only in [`DIALECT`], in lower case.
-const FUNCTIONS: [&str; 34] = [
+const FUNCTIONS: [&str; 37] = [
     "json",
     "jsonb",
     "json_array",
@@ -64,15 +69,23 @@ const FUNCTIONS: [&str; 34] = [
     "strftime",
     "julianday",
     "unixepoch",
+    "greatest",
+    "least",
+    "bool_or",
 ];
 
-/// Messages that read as a call but are no SQL, each with its file: the word
-/// `JSON` before a parenthesis. By the whole literal, since a call of `json`
-/// spaced, quoted or commented away from its `(` runs in SQLite all the same.
-const NOT_SQL: [(&str, &str); 1] = [(
-    "src/domain/transcript.rs",
-    "none of its lines is JSON ({} skipped)",
-)];
+/// Non-SQL literals that read as SQL, each by its exact text and file:
+/// a message with `JSON (` and an EXPLAIN plan expectation naming rowid.
+const NOT_SQL: [(&str, &str); 2] = [
+    (
+        "src/domain/transcript.rs",
+        "none of its lines is JSON ({} skipped)",
+    ),
+    (
+        "src/infrastructure/runtime_store/session_steps.rs",
+        "INTEGER PRIMARY KEY (rowid=?)",
+    ),
+];
 
 /// Every failure of the files `rust` (paths from the repository root, with
 /// their text), one line each.
@@ -109,6 +122,12 @@ fn check(rust: &[(String, String)]) -> Vec<String> {
             }
             if DIALECT.iter().any(|dialect| covers(dialect, path)) {
                 continue;
+            }
+            // FTS5 row identity belongs to the search adapter.
+            for violation in
+                sql::nonportable_values(&literal.text, *path == "src/infrastructure/search.rs")
+            {
+                errors.insert(format!("{path}: SQL in {inner} uses {violation}; take the dialect expression or shared BOOLEAN literal"));
             }
             for function in sql::calls(&literal.text, &FUNCTIONS) {
                 errors.insert(format!(
@@ -301,4 +320,45 @@ fn untyped_null_parameters_fail_and_casts_and_test_code_pass() {
         ])
         .is_empty()
     );
+}
+
+#[test]
+fn row_identity_scalar_extrema_and_numeric_booleans_fail_outside_the_adapter() {
+    for sql in [
+        "SELECT * FROM task_runs ORDER BY rowid",
+        "SELECT r.ROWID FROM task_runs r",
+        "SELECT MAX([rowid]) FROM task_runs",
+        "DELETE FROM t WHERE rowid IN (SELECT rowid FROM t)",
+        "SELECT MAX(a, coalesce(b, 0)) FROM t",
+        "SELECT min /* c */ (a, b) FROM t",
+        "SELECT max(a = b) FROM t",
+        "SELECT min(a IS NULL) FROM t",
+        "UPDATE ledger_rows SET final=1",
+        "SELECT * FROM supervisors WHERE handoff_accepted != 0",
+    ] {
+        let source = format!("fn f() {{ let _ = {sql:?}; }}");
+        assert!(
+            !check(&[("src/infrastructure/store.rs".into(), source.clone())]).is_empty(),
+            "{sql}"
+        );
+        assert!(check(&[("src/infrastructure/sql_dialect.rs".into(), source.clone())]).is_empty());
+        let test = format!("#[cfg(test)] mod tests {{ {source} }}");
+        assert!(check(&[("src/infrastructure/store.rs".into(), test)]).is_empty());
+    }
+    let plan = r#"const PLAN: &str = "INTEGER PRIMARY KEY (rowid=?)";"#;
+    assert!(
+        check(&[(
+            "src/infrastructure/runtime_store/session_steps.rs".into(),
+            plan.into()
+        )])
+        .is_empty()
+    );
+    assert!(!check(&[("src/infrastructure/store.rs".into(), plan.into())]).is_empty());
+    let source = r#"fn f() { let _ = "ORDER BY rowid DESC"; }"#;
+    assert!(check(&[("src/infrastructure/search.rs".into(), source.into())]).is_empty());
+    let source = r#"fn f() {
+        let _ = "SELECT max(COALESCE(a, 0)), MIN(id) FROM t WHERE final=FALSE AND legacy=TRUE";
+        let _ = "SELECT 'rowid', 'max(a,b)' -- rowid";
+    }"#;
+    assert!(check(&[("src/infrastructure/store.rs".into(), source.into())]).is_empty());
 }

@@ -1675,8 +1675,9 @@ fn queue_use(conn: &Connection) -> Result<QueueUse> {
     }
     if has_table(conn, "task_runs")? {
         let mut rows = conn.prepare(&format!(
-            "SELECT id, status FROM task_runs WHERE status IN ({}) ORDER BY rowid",
-            RUNS_IN_USE.map(|status| format!("'{status}'")).join(",")
+            "SELECT id, status FROM task_runs WHERE status IN ({}) ORDER BY {}",
+            RUNS_IN_USE.map(|status| format!("'{status}'")).join(","),
+            crate::infrastructure::sql_dialect::SqlDialect::Sqlite.insertion_order("")
         ))?;
         for row in rows.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
             found.runs.push(row?);

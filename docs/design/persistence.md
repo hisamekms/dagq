@@ -49,7 +49,6 @@ related:
 
 SQLiteのDBはqueueの正本で、プロセス間の共有と再起動の後の復旧に使う。
 stdoutやsessionの画面は正本にしない。
-runtimeが状態を変えるのは、このDBへの書き込みトランザクションの中だけである。
 
 ## 全体の流れ
 
@@ -71,13 +70,14 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 - 共有のSQLを流す入口は実行のport（`src/infrastructure/sql_exec/`）。
   Postgresの読み書きの入口は`src/infrastructure/postgres/`。
 - Postgresの実行のportが共有のSQLの引数・値・行を写し、storeは方言ごとのSQLを持たない。
-- storeは実行のportで共有SQLを流し、rusqliteを名指してよいのは`src/context_boundaries/rusqlite_names.rs`の一覧のmoduleだけ。
+- rusqliteを名指してよいのは`src/context_boundaries/rusqlite_names.rs`の一覧のmoduleだけ。
 - 時刻とIDは`SqliteQueue`の`Generators`から取り、SQLの`now`で作らない。
   例外はDBの時計で判じる`write_leader`のleaseの期限（ADR-t3986-1決定4）。
 - schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`が持つ。
 - 共有のSQLの引数は型を決める形でNULLと比べる（境界の検査が守る）。
 - 方言の違う式の断片は`src/infrastructure/sql_dialect.rs`の関数が返す（ADR-t3982-1）。
-  JSONの関数と`unixepoch()`は方言の関数のmoduleの外で綴らない（境界の検査が守る）。
+  JSONの関数と`unixepoch()`は方言の関数のmoduleの外で綴らない。
+  行の順と選び方はrowidに頼らず挿入の順の方言の関数で決め、真偽は両方のDBで同じに動く形で比べ・書く（境界の検査が守る）。
 - runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く。
 
 ## 大きなeventの本文
@@ -110,7 +110,7 @@ runのファイル・台帳の行・古いeventは通さない。
 
 - 入口: task・goal・依存・claim・一覧は`src/infrastructure/sqlite.rs`、runと計測はportごとの`runtime_store/`。
 - 読む: 行から`TaskRecord`などを組んで`restore`で復元し、復元が拒んだ行は変換エラーになる（既定値に読み替えない）。
-- 新しく作る: `next_id`がトランザクションの中で次のIDを決めてから集約を作るので、拒否で巻き戻ればIDも消費しない。
+- IDの入口は実行のportの`SqlRead::next_id`で、SQLiteでは拒否によるrollbackでIDを消費しない。
 - 変える: 読んだ集約をdomainのコマンドに渡し、返った値を書く。
   `WHERE status=<読んだstatus>`や`AND supervisor_token=<token>`は並行の変更を見つける条件で、どの遷移を許すかの判断ではない。
 - 認可の後の変化: 計画系のコマンドは認可に使ったtaskの状態を渡し、storeはトランザクションを開いた直後に照合して、変わっていれば何も書かずに拒む（[Authorization](authorization.md)）。

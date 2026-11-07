@@ -1521,12 +1521,13 @@ fn record_predictions(
 /// The `coalesce` is [`crate::domain::base_priority`] in SQL, so the whole
 /// queue is not read to find one: change the two together.
 fn candidates(conn: &impl SqlRead) -> Result<Vec<PlanReviewCandidate>> {
-    Ok(conn.query_map("SELECT p.id, p.submitted_at, max(t.status='submitted'
-                 AND coalesce(t.priority, (SELECT g.priority FROM goals g WHERE g.id = t.goal_id), 1)=?1)
+    Ok(conn.query_map(&format!("SELECT p.id, p.submitted_at, {interrupt}
              FROM proposals p JOIN tasks t ON t.proposal_id = p.id
              WHERE p.status='submitted' AND p.review_hold IS NULL
-             GROUP BY p.id HAVING max(t.status='submitted')
-             ORDER BY p.submitted_at, p.id", sql_params![Priority::Interrupt.as_i64()], |r| {
+             GROUP BY p.id HAVING {submitted}
+             ORDER BY p.submitted_at, p.id",
+        interrupt = conn.dialect().any_true("t.status='submitted' AND coalesce(t.priority, (SELECT g.priority FROM goals g WHERE g.id = t.goal_id), 1)=?1"),
+        submitted = conn.dialect().any_true("t.status='submitted'")), sql_params![Priority::Interrupt.as_i64()], |r| {
             Ok(PlanReviewCandidate {
                 proposal_id: r.get(0)?,
                 submitted_at: r.get(1)?,

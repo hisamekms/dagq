@@ -199,8 +199,9 @@ const EXTEND_REMOVED: &str = "UPDATE session_step_removed SET to_seq=?4
 
 /// Remove the first void ranges of a session (`?1`, those past the row at
 /// `?2` that voids them, at most `?3`), in the order of its primary key.
-const REMOVE_VOID_RANGES: &str = "DELETE FROM session_step_removed WHERE rowid IN (
-     SELECT rowid FROM session_step_removed WHERE session_id=?1 AND from_seq > ?2
+const REMOVE_VOID_RANGES: &str =
+    "DELETE FROM session_step_removed WHERE (session_id, from_seq) IN (
+     SELECT session_id, from_seq FROM session_step_removed WHERE session_id=?1 AND from_seq > ?2
      ORDER BY from_seq LIMIT ?3)";
 
 /// The statements a batch of the retention reads a session's rows by under
@@ -1195,6 +1196,46 @@ mod tests {
     use crate::infrastructure::sqlite::WriteTx;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn void_ranges_are_selected_by_their_session_and_sequence_key() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../../../migrations/0082_session_steps.sql"))
+            .unwrap();
+        conn.execute_batch("INSERT INTO session_step_removed VALUES ('a',9,9),('b',3,3),('a',3,3),('a',7,7),('a',1,1)").unwrap();
+        assert_eq!(
+            conn.execute(REMOVE_VOID_RANGES, rusqlite::params!["a", 2, 2])
+                .unwrap(),
+            2
+        );
+        let left: Vec<(String, i64)> = conn
+            .prepare(
+                "SELECT session_id,from_seq FROM session_step_removed ORDER BY session_id,from_seq",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(left, [("a".into(), 1), ("a".into(), 9), ("b".into(), 3)]);
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {REMOVE_VOID_RANGES}"))
+            .unwrap()
+            .query_map(rusqlite::params!["a", 2, 2], |r| r.get(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter().any(|p| p
+                .contains("sqlite_autoindex_session_step_removed_1 (session_id=? AND from_seq>?)")),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter().any(|p| p
+                .contains("sqlite_autoindex_session_step_removed_1 (session_id=? AND from_seq=?)")),
+            "{plan:?}"
+        );
+    }
 
     const BEFORE: i64 = 1_000;
 

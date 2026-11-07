@@ -114,7 +114,7 @@ impl SqliteQueue {
         }
         let result = SqlRead::query_row(
             &tx,
-            "SELECT * FROM supervisors WHERE token=?1",
+            &format!("{SUPERVISORS_SELECT} WHERE token=?1"),
             sql_params![token],
             supervisor_row,
         )?;
@@ -174,7 +174,7 @@ impl SqliteQueue {
         let tx = self.write_tx("prune_supervisor")?;
         let Some(registration) = SqlRead::query_row(
             &tx,
-            "SELECT * FROM supervisors WHERE token=?1",
+            &format!("{SUPERVISORS_SELECT} WHERE token=?1"),
             sql_params![token],
             supervisor_row,
         )
@@ -200,7 +200,7 @@ impl SqliteQueue {
         ensure!(
             self.write_sql(
                 "accept_handoff",
-                "UPDATE supervisors SET handoff_accepted=1 WHERE token=?1",
+                "UPDATE supervisors SET handoff_accepted=TRUE WHERE token=?1",
                 sql_params![token],
             )? == 1,
             "supervisor {token} is no longer registered"
@@ -215,7 +215,7 @@ impl SqliteQueue {
         Ok(self.write_sql(
             "request_handoff",
             "UPDATE supervisors SET handoff_binary=?2, handoff_requested_at=?3
-             WHERE token=?1 AND handoff_accepted=1",
+             WHERE token=?1 AND handoff_accepted=TRUE",
             sql_params![token, binary, self.generators.clock.now()],
         )? == 1)
     }
@@ -240,7 +240,7 @@ impl SqliteQueue {
         Ok(self.write_sql(
             "take_handoff",
             "UPDATE supervisors SET handoff_binary=NULL, handoff_requested_at=NULL,
-                    handoff_accepted=0
+                    handoff_accepted=FALSE
              WHERE token=?1 AND handoff_binary=?2",
             sql_params![token, binary],
         )? == 1)
@@ -297,7 +297,7 @@ impl SqliteQueue {
         ensure!(
             SqlWrite::execute(
                 &tx,
-                "UPDATE supervisors SET binary_version=?3, heartbeat_at=?4, handoff_accepted=1,
+                "UPDATE supervisors SET binary_version=?3, heartbeat_at=?4, handoff_accepted=TRUE,
                         handoff_binary=NULL, handoff_requested_at=NULL
                  WHERE token=?1 AND pid=?2",
                 sql_params![token, pid, binary_version, self.generators.clock.now()],
@@ -310,7 +310,7 @@ impl SqliteQueue {
         }
         let result = SqlRead::query_row(
             &tx,
-            "SELECT * FROM supervisors WHERE token=?1",
+            &format!("{SUPERVISORS_SELECT} WHERE token=?1"),
             sql_params![token],
             supervisor_row,
         )?;
@@ -325,7 +325,7 @@ impl SqliteQueue {
             self.write_sql(
                 "set_auto_update",
                 "UPDATE supervisors SET auto_update=?2 WHERE token=?1",
-                sql_params![token, i64::from(enabled)],
+                sql_params![token, enabled],
             )? == 1,
             "supervisor {token} is no longer registered"
         );
@@ -503,7 +503,10 @@ impl SqliteQueue {
     pub fn run_leases(&self) -> Result<Vec<RunLease>> {
         Ok(SqlRead::query_map(
             &*self.conn,
-            "SELECT l.run_id,l.token,l.pid,l.heartbeat_at FROM run_leases l JOIN task_runs r ON r.id=l.run_id ORDER BY r.rowid",
+            &format!(
+                "SELECT l.run_id,l.token,l.pid,l.heartbeat_at FROM run_leases l JOIN task_runs r ON r.id=l.run_id ORDER BY {insert_order_r}",
+                insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r")
+            ),
             sql_params![],
             lease_row,
         )?)

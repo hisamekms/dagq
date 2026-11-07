@@ -528,3 +528,80 @@ fn membership_port_rejects_update_and_delete_entries() {
         assert_ne!(judgement_entries(&text), ["judge_follow_up"]);
     }
 }
+
+/// SQLite-only row identity, scalar extrema, and numeric boolean columns.
+/// Names and comments are tokenized just as for calls; nested commas do
+/// not turn a one-argument aggregate into a scalar function.
+pub(super) fn nonportable_values(sql: &str, allow_rowid: bool) -> Vec<String> {
+    let tokens = tokens(sql);
+    let mut found = BTreeSet::new();
+    for (at, token) in tokens.iter().enumerate() {
+        if !matches!(token.kind, Kind::Word | Kind::Name) {
+            continue;
+        }
+        if !allow_rowid && token.text == "rowid" {
+            found.insert("rowid outside insertion_order".to_owned());
+        }
+        if [
+            "final",
+            "legacy",
+            "is_last",
+            "handoff_accepted",
+            "wait_for_build",
+            "answer_approval",
+            "auto_update",
+            "background",
+        ]
+        .contains(&token.text.as_str())
+        {
+            let mut next = at + 1;
+            while tokens.get(next).is_some_and(|t| {
+                t.kind == Kind::Punct && ["=", "!", "<", ">"].contains(&t.text.as_str())
+            }) {
+                next += 1;
+            }
+            if next > at + 1
+                && tokens.get(next).is_some_and(|t| {
+                    t.kind == Kind::Number && ["0", "1"].contains(&t.text.as_str())
+                })
+            {
+                found.insert(format!("numeric boolean {}", token.text));
+            }
+        }
+        if !["max", "min"].contains(&token.text.as_str())
+            || !tokens.get(at + 1).is_some_and(|t| t.text == "(")
+        {
+            continue;
+        }
+        let mut depth = 0;
+        let mut scalar = false;
+        let mut predicate = false;
+        for inner in &tokens[at + 1..] {
+            match inner.text.as_str() {
+                "(" if inner.kind == Kind::Punct => depth += 1,
+                ")" if inner.kind == Kind::Punct => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                "," if inner.kind == Kind::Punct && depth == 1 => scalar = true,
+                "=" | "<" | ">" if inner.kind == Kind::Punct => predicate = true,
+                "is" | "in" | "like" | "not" if inner.kind == Kind::Word => predicate = true,
+                _ => (),
+            }
+        }
+        if scalar || predicate {
+            found.insert(format!(
+                "{} of {}",
+                token.text,
+                if scalar {
+                    "two scalar arguments"
+                } else {
+                    "a predicate"
+                }
+            ));
+        }
+    }
+    found.into_iter().collect()
+}

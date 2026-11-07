@@ -427,10 +427,18 @@ pub(super) fn run_lease_of(conn: &impl sql_exec::SqlRead, id: &RunId) -> Result<
         .optional()?)
 }
 
+/// Compare the stored flags before mapping to bool: SQLite historically
+/// accepts exactly 1, not every nonzero integer; Postgres stores BOOLEAN.
+const SUPERVISORS_SELECT: &str = "SELECT *, handoff_accepted=TRUE AS accepts_handoff,
+    auto_update=TRUE AS updates_automatically FROM supervisors";
+
 /// Every registered supervisor on `conn`, oldest registration first.
 pub(super) fn supervisors_of(conn: &impl sql_exec::SqlRead) -> Result<Vec<SupervisorRegistration>> {
     Ok(conn.query_map(
-        "SELECT * FROM supervisors ORDER BY started_at, rowid",
+        &format!(
+            "{SUPERVISORS_SELECT} ORDER BY started_at, {}",
+            conn.dialect().insertion_order("")
+        ),
         sql_params![],
         supervisor_row,
     )?)
@@ -449,9 +457,13 @@ fn supervisor_row(r: &SqlRow<'_>) -> SqlResult<SupervisorRegistration> {
             .transpose()?,
         workspace_id: r.get("workspace_id")?,
         binary_version: r.get("binary_version")?,
-        handoff_accepted: r.get::<_, Option<i64>>("handoff_accepted")? == Some(1),
+        handoff_accepted: r
+            .get::<_, Option<bool>>("accepts_handoff")?
+            .unwrap_or(false),
         handoff_binary: r.get("handoff_binary")?,
-        auto_update: r.get::<_, Option<i64>>("auto_update")? == Some(1),
+        auto_update: r
+            .get::<_, Option<bool>>("updates_automatically")?
+            .unwrap_or(false),
         max_waiting: r.get("max_waiting")?,
         parallel_source: source(r, "parallel_source")?,
         max_waiting_source: source(r, "max_waiting_source")?,
@@ -716,7 +728,7 @@ pub(super) fn processes_for_task_port(
     conn: &impl sql_exec::SqlRead,
     task_id: TaskId,
 ) -> Result<Vec<RunProcess>> {
-    Ok(conn.query_map("SELECT p.* FROM run_processes p JOIN task_runs r ON r.id=p.run_id WHERE r.task_id=?1 ORDER BY r.rowid,p.role", sql_params![task_id], process_row)?)
+    Ok(conn.query_map(&format!("SELECT p.* FROM run_processes p JOIN task_runs r ON r.id=p.run_id WHERE r.task_id=?1 ORDER BY {},p.role", conn.dialect().insertion_order("r")), sql_params![task_id], process_row)?)
 }
 
 fn process_row(r: &SqlRow<'_>) -> SqlResult<RunProcess> {

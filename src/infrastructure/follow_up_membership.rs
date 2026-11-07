@@ -385,7 +385,10 @@ fn released_dependents(conn: &impl SqlRead, goal: GoalId) -> Result<Vec<Released
         .into_iter()
         .map(|(task, title, status)| {
             let runs = conn.query_map(
-                "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY rowid",
+                &format!(
+                    "SELECT id, status FROM task_runs WHERE task_id=?1 ORDER BY {insert_order}",
+                    insert_order = conn.dialect().insertion_order("")
+                ),
                 sql_params![task],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;

@@ -179,19 +179,11 @@ pub(super) fn waits_for(tx: &impl SqlRead, from: Node, to: Node) -> Result<bool>
     )?)
 }
 
-/// The ID an `AUTOINCREMENT` insert into `table` would take now: one past
-/// the highest ever used. Inside the caller's write transaction no other
-/// insert can take it first, so the aggregate is built with its ID before
-/// it is saved.
+/// The adapter's ID for constructing an aggregate before saving it in
+/// the caller's write transaction. [`SqlRead::next_id`] owns allocation;
+/// the eventual insert supplies the returned ID explicitly.
 pub(in crate::infrastructure) fn next_id(tx: &impl SqlRead, table: &str) -> Result<i64> {
-    Ok(tx.query_row(
-        &format!(
-            "SELECT max(coalesce((SELECT seq FROM sqlite_sequence WHERE name=?1), 0),
-                        coalesce((SELECT max(id) FROM {table}), 0)) + 1"
-        ),
-        sql_params![table],
-        |r| r.get(0),
-    )?)
+    Ok(tx.next_id(table)?)
 }
 
 pub(super) fn insert_dependency(

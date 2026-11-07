@@ -213,6 +213,19 @@ pub trait SqlRead {
     /// The dialect the statements of this transaction are run in.
     fn dialect(&self) -> SqlDialect;
 
+    /// Reserve the ID used to construct an aggregate before its explicit-ID
+    /// insert in this writer transaction. SQLite predicts AUTOINCREMENT
+    /// without consuming it; Postgres consumes the identity sequence. Like
+    /// insert_id, this adapter operation owns how an ID is obtained.
+    /// `table` is an internal table name, never user input.
+    fn next_id(&self, table: &str) -> SqlResult<i64> {
+        let sql = match self.dialect() {
+            SqlDialect::Sqlite => sqlite::next_id_sql(table),
+            SqlDialect::Postgres => "SELECT nextval(pg_get_serial_sequence(?1, 'id'))".to_owned(),
+        };
+        self.query_row(&sql, sql_params![table], |row| row.get(0))
+    }
+
     /// Whether this connection is inside a write transaction. Readers may
     /// perform transcript I/O only when this is false.
     fn in_write_transaction(&self) -> bool {
@@ -412,6 +425,36 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn next_id_is_an_adapter_operation_with_a_postgres_sequence_reservation() {
+        struct Capture(std::cell::RefCell<String>);
+        impl SqlRead for Capture {
+            fn dialect(&self) -> SqlDialect {
+                SqlDialect::Postgres
+            }
+            fn visit_rows(
+                &self,
+                sql: &str,
+                params: &[SqlValue],
+                visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
+            ) -> SqlResult<()> {
+                *self.0.borrow_mut() = sql.to_owned();
+                assert_eq!(params, sql_params!["tasks"]);
+                visit(&SqlRow::new(&Columns(vec![(
+                    "nextval",
+                    SqlValue::Integer(42),
+                )])))?;
+                Ok(())
+            }
+        }
+        let conn = Capture(std::cell::RefCell::new(String::new()));
+        assert_eq!(conn.next_id("tasks").unwrap(), 42);
+        assert_eq!(
+            *conn.0.borrow(),
+            "SELECT nextval(pg_get_serial_sequence(?1, 'id'))"
+        );
     }
 
     #[test]
