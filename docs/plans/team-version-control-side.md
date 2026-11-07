@@ -67,7 +67,8 @@ runnerの呼び出しの名前は[runnerの具体案](team-version-runner.md)、
 | 名前 | 中身 |
 | --- | --- |
 | `DAGQ_STORE` | `postgres`。無ければローカルの既定（SQLite） |
-| `DAGQ_DATABASE_URL` / `_FILE` | Postgresの接続の文字列（`postgres://…`、`sslmode`を含む） |
+| `DAGQ_DATABASE_URL` / `_FILE` | Postgresの接続の文字列。`sslmode`は`disable`・`prefer`・`require`だけを受け、`prefer`と無指定もTLS必須で平文に落ちない。driverは`verify-full`を受けず、証明書の検証は常に行う |
+| `DAGQ_DATABASE_CA_FILE` | 任意のPostgresのCA証明書のPEMファイルのpath |
 | `DAGQ_OBJECT_STORE_ENDPOINT`・`DAGQ_OBJECT_STORE_BUCKET`・`DAGQ_OBJECT_STORE_REGION` | S3互換の宛て。endpointは必須（AWSのS3でも`https://s3.<region>.amazonaws.com`を書く） |
 | `DAGQ_OBJECT_STORE_ACCESS_KEY_ID`・`DAGQ_OBJECT_STORE_SECRET_ACCESS_KEY` / `_FILE` | 明示の資格。無ければS3のSDKの標準の資格の探し方（AWSに固有のweb identity・containerの資格の宛てを含む。参考の構成のAWSではこれを使う） |
 | `DAGQ_OIDC_ISSUER`・`DAGQ_OIDC_AUDIENCE` | 発行元とaudience。許す署名の方式は既定で`RS256`・`ES256` |

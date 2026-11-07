@@ -15,7 +15,7 @@ categories = ["command-line-utilities", "development-tools"]
 # The integration tests are listed below instead of one binary per tests/*.rs
 # file (ADR-0078).
 autotests = false
-include = ["/build.rs", "/src/**", "/migrations/**", "/migrations-postgres/**", "/examples/store_contract_postgres.rs", "/plugins/claude-dagq/skills/dagq/reference/kpi.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+include = ["/build.rs", "/src/**", "/migrations/**", "/migrations-postgres/**", "/examples/store_contract_postgres.rs", "/examples/postgres_tls.rs", "/plugins/claude-dagq/skills/dagq/reference/kpi.md", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1.0"
@@ -34,6 +34,8 @@ httparse = "1.10"
 libc = "0.2"
 # The Postgres store's driver, behind the feature `postgres` (ADR-t3986-1).
 postgres = { version = "0.19", optional = true }
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"], optional = true }
+webpki-roots = { version = "1", optional = true }
 # Verifies the signature of an OIDC JWT, and is the crypto of ureq's TLS too.
 ring = "0.17"
 # Optional server TLS, sharing the existing ring provider with HTTPS clients.
@@ -66,7 +68,7 @@ test-paths = []
 store-contract = []
 # The Postgres store's adapter (src/infrastructure/postgres/client.rs): not in
 # a default build, so a local SQLite queue compiles none of its driver.
-postgres = ["dep:bytes", "dep:postgres"]
+postgres = ["dep:bytes", "dep:postgres", "dep:tokio-postgres-rustls", "dep:webpki-roots"]
 
 [dev-dependencies]
 # Generate fresh RSA App keys and TLS fixtures in memory for deployment tests.
@@ -82,6 +84,11 @@ tempfile = "3.25"
 [[example]]
 name = "store_contract_postgres"
 required-features = ["store-contract", "postgres"]
+test = false
+
+[[example]]
+name = "postgres_tls"
+required-features = ["postgres"]
 test = false
 
 # One test binary for the integration tests (tests/it), so tests/common is

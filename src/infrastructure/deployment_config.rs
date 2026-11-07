@@ -2,7 +2,9 @@
 //! Every name in `NAMES` also accepts `<name>_FILE`: its value is a mounted
 //! UTF-8 file's path. One final LF (or CRLF) is removed, preserving PEMs and
 //! other whitespace. Both forms, unreadable files, non-text and empty values
-//! refuse startup. Diagnostics contain only names, never values or paths.
+//! refuse startup. DATABASE_CA_FILE is a PEM file path, not a secret-file
+//! suffix for DATABASE_CA; it has no indirect form. Diagnostics contain only
+//! names and fixed reasons, never values or paths.
 //! The CLI returns 78 (EX_CONFIG) for these errors before opening a queue.
 
 use crate::domain::store_setting::{STORE_CONNECTION_ENV, STORE_KIND_ENV, StoreSetting};
@@ -56,16 +58,21 @@ pub const NAMES: &[&str] = &[
     "DAGQ_TLS_KEY",
 ];
 
-/// Names alone, sorted and deduplicated across all startup checks.
+/// Names sorted and deduplicated across all startup checks, with an optional
+/// fixed reason for an invalid database CA bundle. Never retains input values.
 #[derive(Debug, PartialEq, Eq)]
-pub struct InvalidSettings(pub BTreeSet<String>);
+pub struct InvalidSettings(pub BTreeSet<String>, Option<&'static str>);
 impl fmt::Display for InvalidSettings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "invalid deployment settings: {}",
             self.0.iter().cloned().collect::<Vec<_>>().join(", ")
-        )
+        )?;
+        if let Some(reason) = self.1 {
+            write!(f, "; {DATABASE_CA_FILE}: {reason}")?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for InvalidSettings {}
@@ -136,7 +143,21 @@ impl DeploymentConfig {
             }
         }
         let get = |name: &str| values.get(name).map(String::as_str);
-        let store = StoreSetting::from_env(|name| get(name).map(OsString::from));
+        let mut store = StoreSetting::from_env(|name| get(name).map(OsString::from));
+        let ca = database_ca(get(STORE_KIND_ENV), env(DATABASE_CA_FILE), &file);
+        let ca_error = ca.as_ref().err().copied();
+        if ca_error.is_some() {
+            errors.insert(DATABASE_CA_FILE.to_owned());
+        }
+        if let (
+            Ok(StoreSetting::Postgres {
+                connection: Some(connection),
+            }),
+            Ok(Some(ca)),
+        ) = (&mut store, ca)
+        {
+            *connection = connection.clone().with_ca_certificates(ca);
+        }
         if store.is_err() {
             errors.insert(STORE_KIND_ENV.to_owned());
             if get(STORE_CONNECTION_ENV).is_some() {
@@ -236,7 +257,7 @@ impl DeploymentConfig {
             _ => None,
         };
         if !errors.is_empty() {
-            return Err(InvalidSettings(errors));
+            return Err(InvalidSettings(errors, ca_error));
         }
         let http = get("DAGQ_OIDC_ISSUER").map(|_| HttpConfig {
             address: address.unwrap(),
@@ -249,6 +270,42 @@ impl DeploymentConfig {
         })
     }
 }
+/// Optional Postgres trust bundle. Its value is a PEM file path. If set,
+/// only its certificates are trusted (no standard roots are added). Absent,
+/// use the standard Mozilla roots. It is invalid for any other store, even
+/// when empty, and is validated before opening a queue in every build.
+pub const DATABASE_CA_FILE: &str = "DAGQ_DATABASE_CA_FILE";
+
+/// Resolve and validate the bundle with injected file I/O. Errors keep
+/// neither file paths nor contents. Also used by the CI connection probe.
+pub fn database_ca(
+    kind: Option<&str>,
+    path: Option<OsString>,
+    file: impl Fn(&std::path::Path) -> Result<Vec<u8>, ()>,
+) -> Result<Option<Vec<Vec<u8>>>, &'static str> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if kind != Some("postgres") {
+        return Err("requires the postgres store");
+    }
+    let bytes = file(std::path::Path::new(&path)).map_err(|_| "cannot read PEM file")?;
+    let certificates = CertificateDer::pem_slice_iter(&bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "invalid PEM certificate")?;
+    if certificates.is_empty() {
+        return Err("PEM file contains no certificates");
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in &certificates {
+        roots
+            .add(certificate.clone())
+            .map_err(|_| "invalid CA certificate")?;
+    }
+    Ok(Some(certificates.into_iter().map(|c| c.to_vec()).collect()))
+}
+
 fn tls_config(cert: &str, key: &str) -> Result<rustls::ServerConfig, ()> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
     let certificates = CertificateDer::pem_slice_iter(cert.as_bytes())

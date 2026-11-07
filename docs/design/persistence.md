@@ -293,8 +293,9 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
 - queueのディレクトリは丸ごと移せる: runのpathは開いた場所から解決し直し、worktreeのGitの管理情報は`integrate`が直す（[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。
 - `logs/`の書式と消す時期は`infrastructure::telemetry`、`planners/`・`plan-reviews/`・`observer/`・`backups/`は`[retention]`（ADR-t697-1）。
 - storeの選択の入口は`compose::refuse_unusable_store`で、どのコマンドもqueueを開く前に通る。
-- storeの種類と接続先は配置ごとの設定から読み`dagq.toml`から読まない。
-- 既定はSQLiteで、使えないstoreを選ぶとSQLiteに落ちずに誤りで止まる。
+- storeの種類・接続先は配置設定が持つ。
+- 既定はSQLite、使えないstoreなら代用せず止まる。
+- Postgres接続は明示の平文指定が無ければTLSでサーバの証明書を確かめ、平文に落ちない。
 
 ## Database setup and migrations
 

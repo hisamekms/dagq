@@ -647,7 +647,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DAGQ_TEST_POSTGRES_URL: postgres://dagq:dagq@localhost:5432/store_contract
+      DAGQ_TEST_POSTGRES_URL: postgres://dagq:dagq@localhost:5432/store_contract?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -657,6 +657,46 @@ jobs:
         run: rm -rf target/tmp
       - name: Store contracts on Postgres
         run: cargo run --locked --example store_contract_postgres --features store-contract,postgres
+      - name: Start Postgres with a private CA and TLS
+        run: |
+          set -eu
+          certs="$RUNNER_TEMP/postgres-tls"
+          mkdir -p "$certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=dagq-ci-ca \
+            -keyout "$certs/ca.key" -out "$certs/ca.crt"
+          openssl req -newkey rsa:2048 -nodes -subj /CN=localhost \
+            -keyout "$certs/server.key" -out "$certs/server.csr"
+          printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n' > "$certs/extensions"
+          openssl x509 -req -days 1 -in "$certs/server.csr" \
+            -CA "$certs/ca.crt" -CAkey "$certs/ca.key" -CAcreateserial \
+            -extfile "$certs/extensions" -out "$certs/server.crt"
+          # Copy through the image so ownership matches its Postgres user.
+          docker run --rm -u root -v "$certs:/input:ro" -v dagq-pg-tls:/tls postgres:17 \
+            sh -c 'cp /input/server.* /tls/; chown postgres:postgres /tls/*; chmod 600 /tls/server.key'
+          docker run -d --name dagq-postgres-tls -p 5433:5432 \
+            -e POSTGRES_USER=dagq -e POSTGRES_PASSWORD=dagq -e POSTGRES_DB=tls_probe \
+            -v dagq-pg-tls:/tls:ro postgres:17 \
+            -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key
+          for attempt in $(seq 1 60); do
+            if docker exec dagq-postgres-tls pg_isready -h 127.0.0.1 -U dagq -d tls_probe; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs dagq-postgres-tls
+          exit 1
+      - name: Verify TLS trust, hostname and refusal of plaintext fallback
+        env:
+          DAGQ_DATABASE_CA_FILE: ${{ runner.temp }}/postgres-tls/ca.crt
+          DAGQ_TEST_POSTGRES_TLS_URL: postgres://dagq:dagq@localhost:5433/tls_probe
+          DAGQ_TEST_POSTGRES_WRONG_HOST_URL: postgres://dagq:dagq@127.0.0.1:5433/tls_probe
+          DAGQ_TEST_POSTGRES_PLAIN_URL: postgres://dagq:dagq@localhost:5432/store_contract
+        run: cargo run --locked --example postgres_tls --features postgres
+      - name: Stop TLS Postgres
+        if: always()
+        run: |
+          docker rm -f dagq-postgres-tls || true
+          docker volume rm dagq-pg-tls || true
       - name: Remove the target's tmp before the cache is saved
         if: always()
         run: rm -rf target/tmp

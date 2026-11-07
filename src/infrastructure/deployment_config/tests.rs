@@ -258,3 +258,92 @@ fn unreadable_non_text_and_empty_inputs_fail_closed() {
         );
     }
 }
+
+#[test]
+fn database_ca_is_optional_and_replaces_roots_with_every_file_certificate() {
+    assert_eq!(database_ca(None, None, |_| panic!("no file")), Ok(None));
+    let (cert, _) = tls_pair();
+    let bundle = format!("{cert}{cert}");
+    let ca = database_ca(Some("postgres"), Some("private-path".into()), |_| {
+        Ok(bundle.as_bytes().to_vec())
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(ca.len(), 2);
+    let key = app_key();
+    let mut pairs = postgres(&key);
+    pairs.push((DATABASE_CA_FILE, "private-path"));
+    let config = DeploymentConfig::read(
+        |n| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == n)
+                .map(|(_, v)| OsString::from(v))
+        },
+        |_| Ok(bundle.as_bytes().to_vec()),
+    )
+    .unwrap();
+    let StoreSetting::Postgres {
+        connection: Some(connection),
+    } = config.store
+    else {
+        panic!("expected Postgres connection");
+    };
+    assert_eq!(connection.ca_certificates(), Some(ca.as_slice()));
+    let debug = format!("{connection:?}");
+    assert!(!debug.contains("secret"));
+    assert!(!debug.contains("BEGIN"));
+}
+
+#[test]
+fn database_ca_refuses_misplacement_unreadable_empty_and_invalid_files_without_secrets() {
+    for kind in [None, Some("sqlite")] {
+        assert_eq!(
+            database_ca(kind, Some("private-path".into()), |_| panic!(
+                "must not read"
+            )),
+            Err("requires the postgres store")
+        );
+    }
+    for (contents, reason) in [
+        (None, "cannot read PEM file"),
+        (
+            Some("private-contents"),
+            "PEM file contains no certificates",
+        ),
+        (
+            Some("-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----"),
+            "invalid PEM certificate",
+        ),
+        (
+            Some("-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----"),
+            "invalid CA certificate",
+        ),
+    ] {
+        let result = database_ca(Some("postgres"), Some("private-path".into()), |_| {
+            contents.map(|s| s.as_bytes().to_vec()).ok_or(())
+        });
+        assert_eq!(result, Err(reason));
+        let key = app_key();
+        let mut pairs = postgres(&key);
+        pairs.push((DATABASE_CA_FILE, "private-path"));
+        let error = DeploymentConfig::read(
+            |n| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == n)
+                    .map(|(_, v)| OsString::from(v))
+            },
+            |_| contents.map(|s| s.as_bytes().to_vec()).ok_or(()),
+        )
+        .err()
+        .expect("startup must fail");
+        assert!(error.0.contains(DATABASE_CA_FILE));
+        assert!(error.to_string().contains(reason));
+        for secret in ["private-path", "private-contents", "secret", "BEGIN"] {
+            assert!(!format!("{error:?} {error}").contains(secret));
+        }
+    }
+    let error = refused(&[(DATABASE_CA_FILE, "private-path")]);
+    assert!(error.to_string().contains("requires the postgres store"));
+}

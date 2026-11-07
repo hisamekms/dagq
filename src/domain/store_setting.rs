@@ -33,11 +33,22 @@ pub enum StoreSetting {
 /// A connection string: no `Debug` or error prints it, since it may hold a
 /// password.
 #[derive(Clone, PartialEq, Eq)]
-pub struct ConnectionString(String);
+pub struct ConnectionString(String, Option<Vec<Vec<u8>>>);
 
 impl ConnectionString {
     pub fn new(text: impl Into<String>) -> Self {
-        Self(text.into())
+        Self(text.into(), None)
+    }
+
+    /// Replace standard trust roots with these validated DER certificates.
+    /// Debug deliberately prints neither the connection nor certificate bytes.
+    pub fn with_ca_certificates(mut self, certificates: Vec<Vec<u8>>) -> Self {
+        self.1 = Some(certificates);
+        self
+    }
+
+    pub fn ca_certificates(&self) -> Option<&[Vec<u8>]> {
+        self.1.as_deref()
     }
 
     /// The text, for the driver alone.

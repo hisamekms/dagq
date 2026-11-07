@@ -1,19 +1,20 @@
 //! The driver under the Postgres store: it moves a statement's values to and
 //! from the wire, in the form [`super::exec`] decides.
 //!
-//! The connection string is `postgres`'s (a URL or `key=value` pairs) and
-//! this client connects without TLS: `sslmode=require` fails at connecting
-//! rather than going on in plain text.
+//! TLS is required unless plaintext is explicitly selected; policy is in
+//! [super::tls]. Connection errors discard driver details, which can contain
+//! connection parameters or server-supplied text.
 
 use super::exec::{PostgresRow, decode_column, encode_parameter, is_contention_state};
+use super::tls::{Transport, TrustRoots, policy};
 use super::{PostgresSession, PostgresStore, migrate};
 use crate::domain::store_setting::ConnectionString;
 use crate::infrastructure::sql_exec::{SqlError, SqlResult, SqlValue};
 use crate::infrastructure::sqlite::MigrationReport;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bytes::BytesMut;
 use postgres::types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
-use postgres::{Client, NoTls};
+use postgres::{Client, config::SslMode};
 use std::cell::RefCell;
 use std::error::Error;
 use std::rc::Rc;
@@ -23,7 +24,7 @@ pub struct PostgresClient(RefCell<Client>);
 
 /// Connect to the store at `connection`. The errors do not print it.
 pub fn connect(connection: &ConnectionString) -> Result<PostgresStore<PostgresClient>> {
-    let client = Client::connect(connection.expose(), NoTls).context("connect to Postgres")?;
+    let client = open_client(connection)?;
     PostgresStore::open(PostgresClient(RefCell::new(client)))
 }
 
@@ -31,8 +32,88 @@ pub fn connect(connection: &ConnectionString) -> Result<PostgresStore<PostgresCl
 /// has, nothing at all included, refusing a breaking migration
 /// ([`migrate::migrate`]). What it did, `None` when nothing was pending.
 pub fn migrate(connection: &ConnectionString) -> Result<Option<MigrationReport>> {
-    let client = Client::connect(connection.expose(), NoTls).context("connect to Postgres")?;
+    let client = open_client(connection)?;
     migrate::migrate(&PostgresClient(RefCell::new(client)))
+}
+
+fn open_client(connection: &ConnectionString) -> Result<Client> {
+    let (mut config, transport) = connection_config(connection)?;
+    let mut roots = rustls::RootCertStore::empty();
+    match transport {
+        Transport::Plaintext => {
+            config.ssl_mode(SslMode::Disable);
+        }
+        Transport::Tls(trust) => {
+            config.ssl_mode(SslMode::Require);
+            match trust {
+                TrustRoots::Standard => {
+                    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned())
+                }
+                TrustRoots::Custom(certificates) => {
+                    for certificate in certificates {
+                        roots
+                            .add(rustls::pki_types::CertificateDer::from(certificate.clone()))
+                            .map_err(|_| anyhow::anyhow!("invalid Postgres CA certificate"))?;
+                    }
+                }
+            }
+        }
+    }
+    let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    config
+        .connect(tokio_postgres_rustls::MakeRustlsConnect::new(tls))
+        .map_err(|_| anyhow::anyhow!("connect to Postgres failed"))
+}
+
+fn connection_config(connection: &ConnectionString) -> Result<(postgres::Config, Transport<'_>)> {
+    let config: postgres::Config = connection
+        .expose()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid Postgres connection settings"))?;
+    let mode = match config.get_ssl_mode() {
+        SslMode::Disable => "disable",
+        SslMode::Prefer => "prefer",
+        SslMode::Require => "require",
+        _ => anyhow::bail!("unsupported Postgres sslmode"),
+    };
+    let transport = policy(Some(mode), connection.ca_certificates())?;
+    Ok((config, transport))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urls_and_keyword_strings_use_the_same_secure_policy() {
+        for prefix in [
+            "postgres://user:secret@localhost/db",
+            "host=localhost password=secret",
+        ] {
+            for mode in [None, Some("prefer"), Some("require"), Some("disable")] {
+                let text = match mode {
+                    None => prefix.to_owned(),
+                    Some(mode) if prefix.starts_with("postgres:") => {
+                        format!("{prefix}?sslmode={mode}")
+                    }
+                    Some(mode) => format!("{prefix} sslmode={mode}"),
+                };
+                let connection = ConnectionString::new(text);
+                let (_, transport) = connection_config(&connection).unwrap();
+                assert_eq!(transport == Transport::Plaintext, mode == Some("disable"));
+            }
+        }
+        let error = connection_config(&ConnectionString::new(
+            "password=secret sslmode=verify-full",
+        ))
+        .unwrap_err();
+        assert!(!format!("{error:?}").contains("secret"));
+    }
 }
 
 /// A parameter of whatever type the server inferred.
