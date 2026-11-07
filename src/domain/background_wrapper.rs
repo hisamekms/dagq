@@ -406,7 +406,9 @@ pub fn wrapper_stop(running: bool, exited_after_term: bool, children_killed: usi
 }
 
 /// Which path of the runtime stopped a background wrapper: the `route` of
-/// `wrapper_stopped` (task 1657).
+/// `wrapper_stopped` (task 1657), together with the stop signal. Recovery's
+/// `stop_processes` stops individual pids rather than a wrapper, so it
+/// writes no such record. A failed record does not change the stop result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopRoute {
     /// The session ended after its review (or its rebase or revise) and

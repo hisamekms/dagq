@@ -3,12 +3,21 @@
 //! gone, while the run waited for the answer of its `worker_question` (or
 //! of its `stalled` ask) and had no receipt. Nothing is lost with it: the
 //! provider keeps the session, the worktree and the asks stay. So the
-//! runtime opens a new workspace whose wrapper waits for the supervisor's
+//! runtime starts a background wrapper which waits for the supervisor's
 //! request and resumes the same session ([`crate::application::session`]'s
 //! resume mode), and the wait goes on (ADR-0047's first layer, recorded as
 //! `auto_repaired`). Attempts in a row are bounded: past
 //! [`REOPEN_ATTEMPTS`], the run goes the way of a session that ended, to
 //! its recovery job.
+//!
+//! Only the initial session's wait with no receipt and an open
+//! `worker_question` or `stalled` ask is eligible. Attempt state belongs to
+//! this supervisor process alone (`ReopenWatch`); after takeover a new process
+//! waits the registration interval, as a previous attempt's wrapper may
+//! still be starting. A live last turn prevents another wrapper, and a
+//! surviving old wrapper must be stopped before a replacement can start.
+//! When a wrapper missed its turn's end, the supervisor writes that turn's
+//! idle marker so the replacement can deliver the answer as the next turn.
 
 use super::*;
 use crate::domain::run::{AutoRepaired, restore_payload};

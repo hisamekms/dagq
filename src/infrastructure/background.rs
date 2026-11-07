@@ -50,12 +50,15 @@ impl BackgroundWrappers<'_> {
     /// environment but a terminal pane's ([`TERMINAL_PANE_PREFIXES`]) and
     /// dagq's own (`DAGQ_*`, which
     /// `env` sets for the session as a workspace's `--env` would), its
-    /// stdin `/dev/null` and its output in `log`; the handle of the
+    /// stdin `/dev/null` and its output in `log`. Worker callers supply the
+    /// actor variables and `[run.env]` through `env`. Returns the handle of the
     /// process. The log is in the run directory, which the worker writes:
     /// it is made a fresh file through a descriptor of its pinned directory
     /// ([`agent_dir::create_file`](super::agent_dir::create_file)), never
     /// following a link or opening a FIFO a worker left at its name, and
-    /// the wrapper is given that descriptor, not the path.
+    /// the wrapper is given that descriptor, not the path. Failure to read
+    /// the process start identity immediately after launch fails the call;
+    /// `RecordingSessions::launch_background` records the backend failure.
     pub fn launch(
         &self,
         cwd: &Path,

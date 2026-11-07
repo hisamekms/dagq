@@ -7,6 +7,14 @@
 //! `/exit`; the wrapper takes each request in order and runs it as the
 //! next turn (a resume of the same session), and writes the run's idle
 //! marker when the turn's process ended ([`idle_marker`]).
+//!
+//! The supervisor writes requests, the exit request and `LIMITS_FILE`;
+//! the planner-request CLI may also write requests in a planner directory.
+//! The wrapper renames each request to its taken name, writes turn output
+//! and, for Codex, a commands file. Sequence numbers count taken and dropped
+//! requests too (`next_seq`) and are never reused. `prepare_turns` drops
+//! untaken requests before a new session; only a planner prioritizes a
+//! provider retry after a provider wall (`request_to_take`).
 
 use crate::domain::EventKind;
 use std::{
@@ -742,6 +750,8 @@ pub fn commands_path(run_dir: &Path, turn: u64) -> PathBuf {
 /// end with it) with the turn's outcome in `dagq_turn`. It is `Stop`
 /// shaped so that the watches of the first session, a revise, a resume
 /// and a wait read the idle marker, the receipt and the asks as they are.
+/// Consumers require a marker newer than their last input; stall detection
+/// also waits for the requested turn, rather than reusing an earlier marker.
 pub fn idle_marker(
     session_id: &str,
     turn: u64,

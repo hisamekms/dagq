@@ -8,6 +8,8 @@
 //! run or a closed planner is read as well; `--follow` prints what the
 //! wrapper appends until it ends. The caller authorizes the command first
 //! (`screen.read`, as `run screen`; `docs/design/authorization.md`).
+//! Failed summary writes discard the line without stopping the session
+//! (`headless_session::say`).
 
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};

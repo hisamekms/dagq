@@ -1,0 +1,5 @@
+[[doc]]
+path = "docs/design/supervisor-lifecycle/headless-worker.md"
+
+[[doc]]
+path = "docs/design/supervisor-lifecycle/worker-receipt.md"

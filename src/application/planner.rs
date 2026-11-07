@@ -201,6 +201,11 @@ pub fn open_draft_planner(
 /// error. The bytes of the prompt the runtime held to its limits (with
 /// its kind) are recorded as `planner_prompt_written` (task 1571,
 /// ADR-t1566-1 decision 6). Its agent starts as `actor` says.
+/// Before launch, issue its telemetry token outside the planner directory;
+/// neither wrapper nor turn env or argv contains it. The wrapper reads it
+/// by planner identity. Service access ends at `planner_closed`, and the
+/// sweep revokes it. `dagq submit` reads the recorded handle as proposal
+/// owner, so `run_planner_session` waits for that handle before its first turn.
 fn launch_planner(
     launch: &PlannerLaunch<'_>,
     planner: PlannerSession,
@@ -440,6 +445,8 @@ pub struct PlannerWrapper<'a> {
 /// workspace, which a person closes. A wrapper the row refuses (closed, or
 /// registered by another wrapper) logs why and ends with the error,
 /// closing no workspace either.
+/// Before the first headless turn it waits for the opener's handle record,
+/// since that handle identifies the proposal owner used by `dagq submit`.
 pub fn run_planner_session(
     ctx: PlannerWrapper<'_>,
     id: PlannerId,

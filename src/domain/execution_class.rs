@@ -77,6 +77,13 @@ const CONDITIONS: [&str; 4] = ["commit", "tools", "provider", "environment"];
 /// wrong shape, as dotted paths from the receipt (`spike_result` itself
 /// when it is absent or not an object); empty when it is complete. The
 /// runtime checks the shape only, never whether the grounds convince.
+/// Validation requires this completeness check only for Spike runs;
+/// implementation runs do not require a `spike_result`. Negative and
+/// unresolved verdicts are results, not missing evidence. After the
+/// required-evidence check, a missing Spike result parks the run in
+/// `needs_session` with `spike_result_missing`, and automatic resume asks
+/// the worker to fill the missing fields. Before landing, `integrate`
+/// rereads the receipt and applies the same check.
 pub fn missing_spike_result(result: Option<&Value>) -> Vec<String> {
     let Some(result) = result.and_then(Value::as_object) else {
         return vec![SPIKE_RESULT_FIELD.to_owned()];

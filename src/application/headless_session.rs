@@ -24,6 +24,27 @@
 //! first turn, and the revise, the answer of its `planner_question` and the
 //! exit come as requests; its turns are events of the queue that name it
 //! by `planner_id`, and it stays on Claude ([`TurnOwner::Planner`]).
+//!
+//! Silence stops a turn only when its reader supplies heartbeats; the
+//! other stop conditions are the time limit, a permission-mode mismatch,
+//! an unusable provider and the exit request (`stop_decision`). An exit
+//! request (after review, resume, a silent wrapper, or a stalled-stop answer)
+//! returns code 0; another stopped or failed turn returns code 1,
+//! except that a provider wall keeps the wrapper waiting for another turn.
+//!
+//! Each worker turn receives its actor environment, the queue-service
+//! socket and the worker token file issued at claim or resume. The wrapper
+//! uses its own service token, not a direct queue connection. Local-check
+//! records are prepared per worker turn and passed at the same mounted path
+//! in containers; landing verification, recheck and e2e do not receive them.
+//! Provider `StepReader` output is relayed with the run's or planner's
+//! telemetry token, which the wrapper reads itself (`step_report`).
+//! Claude settings are rewritten each turn, for planners too; tool denials
+//! come from the actor role through `headless_worker_settings`.
+//! Codex workers can open `dagq ask` immediately through the queue service
+//! from inside the sandbox. Neither worker nor planner receives terminal
+//! keystrokes: there are no typing retries, dialog responses or exit-wait
+//! timeout asks or recovery jobs; shutdown uses the exit request instead.
 
 use crate::domain::EventKind;
 use anyhow::{Context, Result};
@@ -166,7 +187,8 @@ pub(super) enum TurnOwner<'a> {
     /// A headless planner of the runtime's (ADR-t1394-2 decision 2): its
     /// directory (prompt, requests, turns, idle marker), the checkout it
     /// works in, the plugin directory it loads, the model and effort its
-    /// opener chose, and the name of its session.
+    /// opener chose, and the name of its session. Its turn events are queue
+    /// events naming the planner; its provider stays Claude without fallback.
     Planner {
         id: PlannerId,
         dir: &'a Path,
@@ -456,7 +478,7 @@ impl Tail {
 
 /// A line for the workspace's terminal, which shows what the turns do, or
 /// for the log of a wrapper in the `background`; nothing otherwise (no
-/// terminal).
+/// terminal). A failed write loses the line, never the session.
 fn say(background: bool, text: &str) {
     // The summary is a convenience: a write that fails (a full disk under
     // the log) loses the line, never the session.
@@ -1640,7 +1662,12 @@ impl<'a> Turns<'a> {
 
     /// Follow the turn's process until it exits or the wrapper stops it:
     /// its exit (`None` when stopped), why it was stopped, and the tail of
-    /// its stdout read so far.
+    /// its stdout read so far. A process that exits itself has only what
+    /// remains in its own group killed: detached descendants cannot safely
+    /// be identified by ancestry after reparenting or by earlier pid lists
+    /// after pid reuse. Recovery's `stop_processes` finds them by worktree.
+    /// On a wrapper exit signal, `stop_groups_on_exit_signals` stops groups
+    /// only, since descendant enumeration is not async-signal-safe.
     #[allow(clippy::too_many_arguments)]
     fn follow(
         &mut self,

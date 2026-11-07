@@ -16,6 +16,13 @@
 //! On either entry, a wrapper refused its registration logs that and ends
 //! with an error, without closing a workspace it may run in or calling
 //! cmux ([`wrapper_refused`]).
+//!
+//! Registration happens once, after the launch record is visible and only
+//! under a valid lease. The first turn registers the run's agent and moves
+//! its status; later turns replace that row's pid (`register_turn_agent`),
+//! leaving the last turn's pid there between turns. Heartbeats continue while
+//! waiting on the child. A queue outage does not release ownership of it;
+//! an error after launch must not record wrapper exit if the child may live.
 
 use crate::domain::LeaseToken;
 use anyhow::{Context, Result, ensure};

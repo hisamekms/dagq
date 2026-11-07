@@ -212,10 +212,19 @@ impl Receipt {
         self.check_requiring(run_id, &[])
     }
 
-    /// [`Self::check`], except that a `required` check reported `failed` or
-    /// with a blank `evidence_or_reason` is left to
-    /// [`Self::missing_evidence`]: the run then waits for a session instead
-    /// of failing (ADR-0019 decision 5).
+    /// Check the receipt's run identity and structural claims: `run_id`
+    /// must match the caller's run, and `result` must be `succeeded` or
+    /// `already_satisfied`. Each of `tests`, `e2e` and `subagent_review`
+    /// must not report `failed` and must give non-blank evidence for
+    /// `passed` or a reason for `not_applicable`. An `already_satisfied`
+    /// receipt additionally needs the checks documented on `base_checks`.
+    /// Its commit must be a full Git SHA; Git ancestry is checked by the
+    /// supervisor, not here.
+    ///
+    /// A `required` check reported `failed` or with a blank
+    /// `evidence_or_reason` is instead left to [`Self::missing_evidence`]:
+    /// the run then waits for a session instead of failing
+    /// (ADR-0019 decision 5).
     pub fn check_requiring(
         &self,
         run_id: &RunId,

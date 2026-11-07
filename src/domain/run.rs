@@ -52,6 +52,9 @@ pub struct TaskRun {
     actual_provider: Provider,
     /// The mode of its worker, as its task asked at the claim (ADR-t813-1
     /// decision 7); a run from before the mode existed is interactive.
+    /// Stored interactive tasks and runs remain readable. Claim and resume
+    /// use headless mode for the actual run and record a mode change only
+    /// when the stored mode differs.
     worker_mode: WorkerMode,
     /// The commit of main the run's branch starts from, in lowercase.
     base_commit: CommitSha,

@@ -1013,8 +1013,9 @@ pub fn resume_in_progress(events: &[RunEvent]) -> bool {
         })
 }
 
-/// Whether the supervisor types the answer of a run's `worker_question`
-/// into its worker's terminal: the run is `running`, awaiting integration
+/// Whether the supervisor queues the answer of a run's `worker_question`
+/// as its next turn, without inbox attention: the run is `running`,
+/// awaiting integration
 /// while its live session fixes what it was asked to ([`fix_requested`]),
 /// or `needs_session` while its resumed session is on
 /// ([`resume_in_progress`]). While a live session fixes a request, only the
@@ -1022,6 +1023,8 @@ pub fn resume_in_progress(events: &[RunEvent]) -> bool {
 /// request was sent is the supervisor's; an older one is the inbox's (task
 /// 582). For a run not running, the caller checks that a supervisor leases
 /// it; a running run's answer waits for the supervisor that adopts it.
+/// An answer with no runtime delivery owner becomes inbox attention to
+/// deliver the answer and close the ask.
 pub fn session_takes_answers(status: RunStatus, events: &[RunEvent], ask_created_at: i64) -> bool {
     status == RunStatus::Running
         || (status == RunStatus::AwaitingIntegration

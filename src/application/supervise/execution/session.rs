@@ -637,7 +637,9 @@ pub(super) fn followed_answers(
 }
 
 /// Watches one session: wrapper registration and heartbeat, receipt and idle
-/// marker, the single exit request, and the wrapper's exit.
+/// marker, the single exit request, and the wrapper's exit. A receipt with
+/// a newer idle marker proceeds to validation and review with the session
+/// open; an open worker question releases the slot while awaiting its answer.
 pub(super) struct SessionWatch {
     pub(super) workspace: String,
     pub(super) run_dir: PathBuf,
@@ -1094,14 +1096,17 @@ impl SessionWatch {
     }
 
     /// Queue the answer of each answered `worker_question` as a turn,
-    /// prefixed `answer to ask <id>:`, once the worker
-    /// went idle after asking (its idle marker is no older than the ask, to
-    /// the second), then close the ask and record `ask_delivered` (ADR-0022
-    /// decision 2). Each answer is sent at most once: a failed send records
-    /// `ask_delivery_failed` and leaves the ask unclosed for the inbox.
-    /// Only the asks this watch follows are typed
-    /// ([`SessionWatch::asks_from`]). Returns when the last answer sent was
-    /// typed, if one was.
+    /// prefixed `answer to ask <id>:`, between turns, then record delivery
+    /// and close the ask in one transaction (ADR-0022 decision 2). Between
+    /// turns the idle marker is not compared to the ask's time: an ask may
+    /// open after the turn ended (including Codex turns predating the queue
+    /// service). A failed send records `ask_delivery_failed`, leaves the ask
+    /// open for inbox attention and is not retried. A supervisor lost after
+    /// writing the request but before closing the ask may deliver it again.
+    /// Only asks this watch follows are delivered (`SessionWatch::asks_from`).
+    /// A question closed before delivery receives no answer; `observe_turn`
+    /// sends its closure notice once instead of nudging. Returns the time
+    /// the last answer was queued, if any.
     pub(super) fn deliver_answers(
         &mut self,
         sv: &mut Supervisor<'_>,
