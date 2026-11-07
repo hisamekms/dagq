@@ -104,7 +104,17 @@ fn passed_env(
 }
 
 /// Run the e2e of `checkout` as the module says; an error is an e2e that
-/// could not start.
+/// could not start. The first run and the single rerun by failed test
+/// name share checkout, environment and target, with separate logs,
+/// equally long timeouts, temporary directories and cleanup. Only an
+/// explicit `ok` on the rerun counts as a pass; a rerun that cannot start
+/// leaves all its tests failed. [`to_rerun`] requires libtest's failure
+/// summary so an early exit cannot hide tests with no result.
+///
+/// Hold the host e2e lock through the rerun. Before starting, clean up
+/// earlier directories under `settings.scratch` only when [`finished`]
+/// says their gate ended; a concurrent gate keeps its directory. This also
+/// retries cleanup left unfinished by a killed gate.
 pub fn run(
     checkout: &Path,
     target_dir: Option<&Path>,
@@ -656,7 +666,11 @@ fn subdirectories(dir: &Path) -> Vec<PathBuf> {
 /// Clean up what the e2e left under `root`: stop the processes inside it,
 /// then remove the directory; it is kept, with why, when it cannot be.
 /// The value: `dir` the root, `processes` the pids stopped, `removed`
-/// whether the root is gone, `errors` why not.
+/// whether the root is gone, `errors` why not. Processes are found with
+/// `ps` by command-line path arguments under the root and receive SIGTERM,
+/// then SIGKILL if still alive. A directory left behind is retried before
+/// a later gate runs. Each pass also kills anything left in its process
+/// group (for example a stub's sleep), even after a successful test.
 pub fn clean_up(root: &Path) -> Value {
     let stopped = stop_processes_inside(root);
     let mut errors = Vec::new();

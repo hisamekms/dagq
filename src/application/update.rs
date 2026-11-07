@@ -561,6 +561,17 @@ pub struct JobPorts<'a, P: ?Sized> {
 /// (see the module). Every outcome is an `update_*` event and the
 /// value returned: `installed`, `awaiting_approval` or `failed`; an error
 /// is only a queue that could not be written.
+///
+/// Hold [`hold_target`] before checkout through the job's end. Take the
+/// heavy turn exclusively through build and the e2e verdict, logging once
+/// while waiting without advancing `update_started`; a lock error fails
+/// at `build`. Check out the requested head in [`UpdatePaths::checkout`],
+/// build release with the Rust profile's output directory and environment
+/// (not the person's main checkout or target), and record `update_built`.
+/// [`e2e_gate`] records the verdict before [`put_in_place`] may stage or
+/// swap anything. Its failure opens `update_failed`, not a new ask kind;
+/// the supervisor does not repeat that commit automatically because its
+/// start advanced the base. Retry requests build the head again.
 pub fn run(
     ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
     db: &Path,
@@ -722,7 +733,11 @@ pub struct ReleaseJobOptions {
     /// Where cargo's output is appended.
     pub log: PathBuf,
     /// The arguments the question of a breaking release hands a person,
-    /// beside `--db`: `--claude`, `--codex`, `--plugin-dir`.
+    /// beside `--db`: `--claude`, `--codex`, `--plugin-dir`. No
+    /// `--auto-update`: a release supervisor has no source-build update
+    /// setting, and `up` refuses that flag outside dagq's source
+    /// (ADR-t614-1). After restart the supervisor reads host.toml again,
+    /// so release updates continue without another `up`.
     pub restart: Vec<String>,
     pub handoff_timeout: Duration,
     pub watch_timeout: Duration,
@@ -973,6 +988,11 @@ struct Job<'a> {
 /// the supervisors take it and put the old binary back when none does; once
 /// it is in place and taken, do the `plugin` step.
 ///
+/// A breaking migration goes through [`stage`] and [`awaiting_approval`],
+/// then returns without installing. This holds for source builds and
+/// releases alike, even when compatible releases install automatically.
+/// A staging error fails at `check` instead of opening the approval ask.
+///
 /// Its `update_installed` carries the `version` put in place, the
 /// `previous_version`, the migrations applied (`migrated`), each
 /// supervisor's handoff (`supervisors`), the job's `log`, and the plugin
@@ -1109,6 +1129,17 @@ enum Settled {
 /// the queue's registrations before the install, `before` the job's own
 /// supervisor among them (none for a person's install). A person's install
 /// that failed before any handoff is its own error, unchanged.
+///
+/// An all-failed handoff is stage `install` and recovers every handoff
+/// target plus the job's own supervisor if it was not live at handoff.
+/// A failure before handoff recovers only the job's own supervisor. Partial
+/// handoff failures keep the binary and watch the ones handed over, then
+/// report stage `handoff`; an all-successful handoff with a failed watch
+/// reports stage `watch`. Recovery uses the current token but the original
+/// mode/workspace when a pid registered again. After recovering the other
+/// supervisors, a successful restore records `update_restored` best-effort,
+/// an intermediate [`JOB_STEPS`] step (a job dying there is interrupted).
+/// A person's install writes no such step and has no job supervisor.
 #[allow(clippy::too_many_arguments)]
 fn settle(
     ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
@@ -1692,7 +1723,9 @@ fn watch(
 }
 
 /// One look at `watched`: done once it heartbeats on under `version`, an
-/// error when it cannot any more.
+/// error when it cannot any more: its pid died, it deregistered without
+/// a successor, it runs another build, or no later heartbeat arrived by
+/// the watch timeout.
 fn observe(
     ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
     registrations: &[SupervisorRegistration],
@@ -1892,7 +1925,8 @@ fn bringing_back(
 }
 
 /// Stop `current`'s supervisor when `alive` and start it again: what was
-/// done.
+/// done. Terminate with SIGTERM, then SIGKILL if it remains alive, before
+/// calling the mode-specific restart.
 fn carry_out(
     ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
     current: &SupervisorRegistration,
@@ -2059,6 +2093,8 @@ now, `up` starts one.",
 /// Open the `approve_update` ask for a build with a breaking migration,
 /// naming the command that drains and installs it. The command starts the
 /// supervisor again as the drained one ran, so no `up` follows it.
+/// Record `update_awaiting_approval` and return `awaiting_approval` with
+/// the staged binary and ask; the job ends here without replacing anything.
 fn awaiting_approval(
     queue: &mut (impl AskStore + RunLog + ?Sized),
     db: &Path,

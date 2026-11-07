@@ -206,6 +206,9 @@ fn holds_the_run(opened: &AskOpened<'_>) -> bool {
 
 /// A run's `events` with the queue's `others` (the steps of the automatic
 /// update in its span) among them, by id; an event in both shows once.
+/// The caller selects updates from the run's first event through its last
+/// (or now while running). Gaps are computed from the run's own events,
+/// so an intervening update explains a handoff without changing its gaps.
 pub fn merged(events: &[RunEvent], others: &[RunEvent]) -> Vec<RunEvent> {
     let mut all: Vec<RunEvent> = events.iter().chain(others).cloned().collect();
     all.sort_by_key(|event| event.id);

@@ -110,10 +110,8 @@ source buildの自動更新の見直しはこれらの段を数えない。
    cargoが見つからない・失敗した・binaryを残さなかったら`update_failed`で、何も置き換えない。
    問いには`retry`、`skip`と、手で入れ替える方法を書く。
    cargoの間はqueueの更新のlockを持つ（`update::hold_target`、[空き容量](claim-hold.md#空き容量)）。
-2. **非互換のmigration**: [Auto-update](auto-update.md)の2と同じく、stageして`approve_update`のaskを開いて終わる（`auto`でも同じ）。
-   書くコマンドに`up`の`--auto-update`は付かない（リリースのsupervisorは`auto_update`を持たず、ソースでないrepositoryでは`up --auto-update`がerrorになる。ADR-t614-1）。
-   起動し直したsupervisorはhost.tomlの設定をそのまま読むので、この仕組みは打ち直しなしで続く。
-3. **確認・差し替え・引き継ぎ・見張り・戻し**: [Auto-update](auto-update.md)の3〜6と同じ（source buildのjobと共通の`put_in_place`）。
+2. **非互換のmigration**: 人の承認なしに適用せず、判定の入口は`update::put_in_place`。
+3. **確認・差し替え・引き継ぎ・見張り・戻し**: [Auto-updateの入れ替えと見張り](auto-update.md#入れ替えと見張り)と同じ（source buildのjobと共通の`put_in_place`）。
 4. **plugin**（ADR-t618-2決定1〜3）: 3が見張りまで成功し`update_installed`を書く前に、supervisorがpluginをdirectoryから読み込んでいなければ、supervisorの`claude`でmarketplaceとpluginを更新する2つのコマンドを順に打つ（`lifecycle::PLUGIN_UPDATE_ARGUMENTS`。1つ目が失敗すれば2つ目は打たない）。
    失敗すれば`update_installed`を書いた後に`update_failed`を書いて`update_failed`のaskを開き、バイナリは戻さない。
    問いは、バイナリはそのまま動くこと、`retry`で次のpassにsupervisorが2つのコマンドを打ち直すこと（上の「ask」の4のとおりpluginだけのjob）、`skip`でpluginをそのままにすること、手で打つコマンドと開き直しを書く。

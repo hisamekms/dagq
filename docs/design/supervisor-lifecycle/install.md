@@ -92,7 +92,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    止めた登録がflagで与えた値（[claimを控える](claim-hold.md)loadの上限を含む）は起動し直す`up`に同じflagで渡るので、drainの後に`up`を打ち直す必要はない（どの値をどう引き継ぐかは`install_breaking`のdoc comment）。
    drainは7の見張りの対象外: 前のbinaryは非互換のmigrationの後のDBを開けないので戻せず、supervisorの起動し直しは上の`up`が行う（その`up`の失敗はerrorで止まる）。
 7. **見張り**（ADR-0073の決定13・14）: 5で引き継がせたsupervisorのそれぞれが、新しいbuild識別子のまま、取り戻したときより後のheartbeatを期限の内に書くのを待ち、確かめ終えるまで`install`は成功を返さない（`update::install_watched`）。
-   判定・戻し・起動し直しは自動更新のjobの4・5（[Auto-update](auto-update.md#auto-update)）と同じ`update::settle`を通る。
+   判定・戻し・起動し直しは[自動更新の見張り](auto-update.md#入れ替えと見張り)と同じ`update::settle`を通る。
    全員が失敗すれば`.previous`が置き換えた前のbuild識別子と同じときだけ固定バイナリを戻し、一部だけなら戻さず（ADR-t632-1）、失敗したsupervisorだけをそれぞれ戻す。
    戻すときの元の登録は`install::install`を呼ぶ前に読んだ記録から取り、ビルドと関門の間に登録したsupervisorも引き継ぎの後に読み直して足す（`update::registered_since`）。
    queueが無い・liveなsupervisorが居ない・6のdrainのときは見張らない。

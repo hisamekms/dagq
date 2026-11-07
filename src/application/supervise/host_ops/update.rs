@@ -121,6 +121,19 @@ impl HostOpsState {
         }
     }
 
+    /// At the configured interval, look only while this registration has
+    /// `auto_update`. Recheck that the repository is dagq's source before
+    /// applying answers or starting work; otherwise warn on the first such
+    /// look and log once per main head that nothing is built.
+    ///
+    /// Apply answers, then leave a live job alone (including one found in
+    /// the queue after exec; see [`look_at_job`]). Compare main with
+    /// [`base_commit`]: the latest start, this build's commit, or the first
+    /// main head this process saw. An unchanged or already-seen head does
+    /// nothing. A runtime change starts one job; an unknown Git base builds
+    /// the head once. A head without runtime changes is remembered and
+    /// logged once. A newer retry bypasses the diff. Release steps do not
+    /// set the source build's base or retry request.
     fn auto_update(&mut self, env: &mut HostEnv<'_>, options: &LoopSettings) -> Result<()> {
         if let Some(job) = self.update.job.as_mut()
             && let Some(exit) = job.try_wait()?
@@ -213,7 +226,10 @@ impl HostOpsState {
 
     /// Close the answered `update_failed` asks: `retry` asks the next look
     /// to build main's head again, `skip` waits for the next landing. Any
-    /// other answer is left for the inbox to read.
+    /// other answer is left for the inbox to read. Record `update_retry`
+    /// for retry or `update_answered` for skip and close the ask. Release
+    /// failures belong to the release pass; a person's install failure is
+    /// left to the inbox and never starts a source build.
     fn apply_update_answers(&mut self, env: &mut HostEnv<'_>) -> Result<()> {
         let updates = env.queue.update_events(UPDATE_HISTORY)?;
         for ask in env.queue.update_answers(&AskKind::UpdateFailed)? {
@@ -245,7 +261,11 @@ impl HostOpsState {
     }
 
     /// Start the update job for main's `head` in a session of its own, its
-    /// output in the queue's `logs/`, and record `update_started`.
+    /// output in the queue's `logs/`, and record `update_started`. The
+    /// command uses the supervisor's own runner (`current_exe` in the host
+    /// layout) and setsid creates a session and process group independent
+    /// of its exec or exit. Reports, stderr/tracing and build output have
+    /// separate files; retention is the queue log cleanup's responsibility.
     fn start_update_job(
         &mut self,
         env: &mut HostEnv<'_>,

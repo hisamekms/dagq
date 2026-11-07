@@ -50,7 +50,12 @@ pub struct E2eVerdict {
 
 /// Judge `outcome` of the gate run with `settings` at the unix second
 /// `now`; `history` is the queue's e2e gate events, newest first (the
-/// gates before this one).
+/// gates before this one). Consecutive rerun failures are counted whether
+/// or not previous gates used quarantine marks.
+/// The failure message names failed, still-failing, flaky and quarantined
+/// tests, ignored marks and file errors, and both log paths, for the
+/// caller's error and update ask. A rerun timeout or start error fails
+/// regardless of marks.
 pub fn judge(
     outcome: &E2eOutcome,
     settings: &E2eSettings,

@@ -163,7 +163,7 @@ Codexのinboxのhookもこの約束を持つ（[ADR-t2159-1](../adr/2026-10-09-t
   起動したプロセスのeventのactorは、呼び出し元ではなく`supervisor:<pid>`（`event_actor`）
 - `auto-update`と`release-update`は、supervisorが自分の環境（`supervisor:<pid>`）とtokenで起動する。
   `install`とjobは新しいbuildの確認を同じ環境の子として打つので、roleは`queue.admin`と`service.lifecycle`も持つ。
-  子の`up`は`install`だけが呼び出し元のprincipalで打ち、更新のjobは打たずlaunchdに任せるか打つ`up`をaskで人とinboxに知らせる（[Auto-update](supervisor-lifecycle/auto-update.md)の5）。
+  子の`up`は`install`だけが呼び出し元のprincipalで打ち、更新のjobは打たずlaunchdに任せるか打つ`up`をaskで人とinboxに知らせる（[supervisorを戻す](supervisor-lifecycle/auto-update.md#supervisorを戻す)）。
   人とinboxとplannerも`install`と同じ権限で打てる（手順の再現と復旧）。
   `observe`（`observe.run`）もsupervisorが自分の環境で起動し、その中のagentだけがobserverになる
 
