@@ -188,5 +188,30 @@ pub fn rows_to_go_on_from(marks: Option<&Marks>, heads: &[LedgerHead]) -> Option
     (r.events == rows.through.events).then_some((r, read_ms))
 }
 
+/// Why startup cannot resume at R. Labels describe absent marks, version
+/// mismatch, missing read time, or W cutting R's time to another position.
+/// None means the mark supplies the exact position and time for resumption.
+pub fn restart_reason(marks: Option<&Marks>, heads: &[LedgerHead]) -> Option<&'static str> {
+    let Some(marks) = marks else {
+        return Some("no_marks");
+    };
+    let Some(rows) = marks.rows else {
+        return Some("no_rows_mark");
+    };
+    if rows.ledger_v != LEDGER_V
+        || marks.sessions.ledger_v != LEDGER_V
+        || heads.iter().any(|head| head.ledger_v > LEDGER_V)
+    {
+        return Some("version_mismatch");
+    }
+    if rows.read_ms.is_none() {
+        return Some("no_read_ms");
+    }
+    if rows_to_go_on_from(Some(marks), heads).is_none() {
+        return Some("w_cuts_r");
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests;

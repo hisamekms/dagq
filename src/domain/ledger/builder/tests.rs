@@ -1391,3 +1391,138 @@ fn the_rows_of_an_older_version_are_read_a_share_at_a_time() {
     assert_eq!(builder.older_rows_to_read(), None);
     assert_eq!(builder.backlog(), 0);
 }
+
+/// Reading the summary does not move the round-robin take or any cursor;
+/// only a non-session event position chooses the single oldest blocker.
+#[test]
+fn mark_observation_is_read_only_and_ignores_session_positions() {
+    let mut builder = Builder::default();
+    let empty = builder.observe_marks();
+    assert_eq!(empty.rows.unwrap().through, builder.cursors());
+    assert!(empty.oldest.is_none());
+    assert_eq!(
+        builder.sessions_mark_from(empty.rows),
+        builder.sessions_mark()
+    );
+    let targets = [
+        Target::Run(run_id(1)),
+        Target::Task(TaskId::new(2)),
+        Target::Task(TaskId::new(3)),
+        Target::Row(LedgerKind::Session, "s".to_owned()),
+        Target::Row(LedgerKind::Queue, "q".to_owned()),
+        Target::Node("node".to_owned(), 0),
+    ];
+    builder.go_on_from_rows(Cursors {
+        events: EventId::new(20),
+        samples: 10,
+        ..Cursors::default()
+    });
+    builder.marks.extend(targets.iter().cloned());
+    for (index, event) in [(0, 8), (1, 5), (3, 0)] {
+        builder.dirtied.insert(
+            targets[index].clone(),
+            Dirtied::events(ReadTo {
+                event: EventId::new(event),
+                read_ms: event * 1000,
+            }),
+        );
+    }
+    builder.dirtied.insert(
+        targets[5].clone(),
+        Dirtied {
+            samples: Some(4),
+            ..Dirtied::default()
+        },
+    );
+    builder.next = Some(targets[1].clone());
+    let before = (
+        builder.marks.clone(),
+        builder.dirtied.clone(),
+        builder.cursors(),
+        builder.next.clone(),
+    );
+    let observed = builder.observe_marks();
+    assert_eq!(observed.oldest.as_ref().unwrap().0, targets[1]);
+    assert_eq!(observed.rows, builder.rows_mark());
+    assert_eq!(observed.rows.unwrap().through.events, EventId::new(5));
+    assert_eq!(observed.rows.unwrap().through.samples, 4);
+    assert_eq!(observed.counts[&LedgerKind::Run].positioned, 1);
+    assert_eq!(
+        observed.counts[&LedgerKind::Task],
+        MarkCounts {
+            positioned: 1,
+            unpositioned: 1
+        }
+    );
+    assert_eq!(observed.counts[&LedgerKind::Session].unpositioned, 1);
+    assert_eq!(observed.counts[&LedgerKind::Queue].unpositioned, 1);
+    assert_eq!(observed.counts[&LedgerKind::Node].positioned, 1);
+    assert_eq!(
+        before,
+        (
+            builder.marks.clone(),
+            builder.dirtied.clone(),
+            builder.cursors(),
+            builder.next.clone()
+        )
+    );
+    assert_eq!(builder.take(1), [targets[1].clone()]);
+    builder
+        .marks
+        .retain(|t| matches!(t, Target::Row(LedgerKind::Session, _)));
+    assert!(builder.observe_marks().oldest.is_none());
+    assert_eq!(
+        builder.observe_marks().rows.unwrap().through,
+        builder.cursors()
+    );
+    let mut session_only = builder.observe_marks();
+    builder.take_sessions();
+    builder.refresh_session_observation(&mut session_only);
+    assert_eq!(session_only, builder.observe_marks());
+}
+
+/// Every sweep outcome counts the decision actually used to retain or
+/// remove the mark; observing it leaves the writer's predicate unchanged.
+#[test]
+fn sweep_counts_retention_reasons_and_removal() {
+    let (log, _) = crate::domain::ledger::testkit::sessions_across();
+    let mut row = crate::domain::ledger::session::session_rows(&log.events, BUILT).remove(0);
+    row.is_final = true;
+    let target = Target::Row(row.kind, row.key.clone());
+    let mut builder = Builder::default();
+    builder.keep(target.clone());
+    let mut counts = SweepCounts::default();
+    counts.record(builder.sweep(&target, None, None));
+    counts.record(builder.sweep(&target, None, Some(&row)));
+    let mut open = row.clone();
+    open.is_final = false;
+    counts.record(builder.sweep(&target, Some(&open), Some(&row)));
+    let mut older = row.clone();
+    older.ledger_v = LEDGER_V - 1;
+    counts.record(builder.sweep(&target, Some(&older), Some(&row)));
+    let mut later = row.clone();
+    later.inputs_through.events = EventId::new(i64::MAX);
+    counts.record(builder.sweep(&target, Some(&row), Some(&later)));
+    let mut ended = row.clone();
+    ended
+        .inputs_through
+        .life_ended
+        .push((EventId::new(100), EventId::new(101)));
+    counts.record(builder.sweep(&target, Some(&row), Some(&ended)));
+    assert!(builder.marks.contains(&target));
+    counts.record(builder.sweep(&target, Some(&row), Some(&row)));
+    assert!(!builder.marks.contains(&target));
+    assert_eq!(
+        (
+            counts.no_build,
+            counts.no_stored,
+            counts.not_final,
+            counts.removed
+        ),
+        (1, 1, 1, 1)
+    );
+    assert_eq!(
+        counts.writes,
+        BTreeMap::from([("older_version", 1), ("later_event", 1), ("life_ended", 1)])
+    );
+}

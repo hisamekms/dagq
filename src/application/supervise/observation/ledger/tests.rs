@@ -6092,3 +6092,5 @@ fn readers_settled_at_the_position_that_a_later_input_reaches_are_settled_as_eve
     assert_eq!(made.1, whole.1);
     assert_eq!(made.2, whole.2);
 }
+
+mod diagnostics;

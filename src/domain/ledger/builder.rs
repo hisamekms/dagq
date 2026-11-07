@@ -317,6 +317,67 @@ pub enum Target {
     Node(String, i64),
 }
 
+/// Counts of marks with and without an input position. Session marks never
+/// hold R, even if they have Dirtied; row kinds stay separate and bounded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MarkCounts {
+    pub positioned: usize,
+    pub unpositioned: usize,
+}
+
+/// Read-only view of R, remembered W, cursors and remaining marks.
+/// `written` is the acknowledged mark, or the restored position before
+/// the first write (R can be before the store's W at startup).
+/// `oldest` is the single non-session target with the earliest events
+/// Dirtied (ties use Target order); no row records or other keys are kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MarkObservation {
+    pub rows: Option<RowsWritten>,
+    pub written: Option<Marks>,
+    pub cursors: Cursors,
+    pub counts: BTreeMap<LedgerKind, MarkCounts>,
+    pub oldest: Option<(Target, Dirtied)>,
+}
+
+/// Mutually exclusive sweep outcomes, in decision order. A missing build
+/// takes precedence over the stored-row checks; writes retains the same
+/// predicate as the writer (version, later inputs, life end, rules, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SweepOutcome {
+    Removed,
+    NoBuild,
+    NoStored,
+    NotFinal,
+    Writes(&'static str),
+    NotRow,
+}
+
+/// Counts of sweep attempts, not distinct targets: a row may be swept on
+/// several pages. These totals contain neither row records nor keys.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SweepCounts {
+    pub removed: usize,
+    pub no_build: usize,
+    pub no_stored: usize,
+    pub not_final: usize,
+    pub writes: BTreeMap<&'static str, usize>,
+    pub reads: usize,
+    pub not_row: usize,
+}
+
+impl SweepCounts {
+    pub fn record(&mut self, outcome: SweepOutcome) {
+        *match outcome {
+            SweepOutcome::Removed => &mut self.removed,
+            SweepOutcome::NoBuild => &mut self.no_build,
+            SweepOutcome::NoStored => &mut self.no_stored,
+            SweepOutcome::NotFinal => &mut self.not_final,
+            SweepOutcome::Writes(reason) => self.writes.entry(reason).or_default(),
+            SweepOutcome::NotRow => &mut self.not_row,
+        } += 1;
+    }
+}
+
 impl Target {
     /// The mark of the row of `kind` and `key`; none for a key of no such
     /// row.
@@ -1159,7 +1220,7 @@ pub struct ReadTo {
 /// the first of them ([`Builder::dirtied`]); none for a cursor no input
 /// of which made it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Dirtied {
+pub struct Dirtied {
     events: Option<ReadTo>,
     samples: Option<i64>,
     steps: Option<i64>,
@@ -1697,14 +1758,25 @@ impl Builder {
         target: &Target,
         stored: Option<&LedgerRow>,
         built: Option<&LedgerRow>,
-    ) {
-        let (Some(stored), Some(built)) = (stored, built) else {
-            return;
+    ) -> SweepOutcome {
+        let Some(built) = built else {
+            return SweepOutcome::NoBuild;
         };
-        if matches!(target, Target::Row(..)) && stored.is_final && !writes(Some(stored), built) {
-            self.marks.remove(target);
-            self.track(target, stored);
+        let Some(stored) = stored else {
+            return SweepOutcome::NoStored;
+        };
+        if !matches!(target, Target::Row(..)) {
+            return SweepOutcome::NotRow;
         }
+        if !stored.is_final {
+            return SweepOutcome::NotFinal;
+        }
+        if let Some(reason) = write_reason(Some(stored), built) {
+            return SweepOutcome::Writes(reason);
+        }
+        self.marks.remove(target);
+        self.track(target, stored);
+        SweepOutcome::Removed
     }
 
     /// Note the rows swept ([`Self::rows_to_sweep`]) and, the first time,
@@ -2099,20 +2171,56 @@ impl Builder {
     /// [`Self::rows_written`]) when it gives one. None when it wrote these
     /// marks already.
     pub fn sessions_mark(&self) -> Option<Marks> {
-        let left = self.rows_after.is_some()
-            || !self.touched.is_empty()
-            || self
-                .marks
-                .iter()
-                .any(|target| matches!(target, Target::Row(LedgerKind::Session, _)));
-        if !self.sessions_whole || self.sessions_through != self.events || left {
+        if !self.can_mark_sessions() {
+            return None;
+        }
+        self.sessions_mark_from(self.rows_mark())
+    }
+
+    fn can_mark_sessions(&self) -> bool {
+        self.sessions_whole
+            && self.sessions_through == self.events
+            && self.rows_after.is_none()
+            && self.touched.is_empty()
+            && self.session_marks().next().is_none()
+    }
+
+    /// Use R observed before writing sessions: only session marks change
+    /// during that write, and they never hold R. This avoids another walk
+    /// of all targets to certify the same R at the same cursors.
+    pub fn sessions_mark_from(&self, rows: Option<RowsWritten>) -> Option<Marks> {
+        if !self.can_mark_sessions() {
             return None;
         }
         let marks = Marks {
             sessions: SessionsWritten::at(self.events),
-            rows: self.rows_mark(),
+            rows,
         };
         (self.marks_written != Some(marks)).then_some(marks)
+    }
+
+    fn session_marks(&self) -> impl Iterator<Item = &Target> {
+        self.marks
+            .range(Target::Row(LedgerKind::Session, String::new())..)
+            .take_while(|target| matches!(target, Target::Row(LedgerKind::Session, _)))
+    }
+
+    /// Refresh just the session subset after its write. All other marks
+    /// and cursors are unchanged, so R and its blocker stay as observed.
+    pub fn refresh_session_observation(&self, observation: &mut MarkObservation) {
+        let count = self.session_marks().count();
+        if count == 0 {
+            observation.counts.remove(&LedgerKind::Session);
+        } else {
+            observation.counts.insert(
+                LedgerKind::Session,
+                MarkCounts {
+                    positioned: 0,
+                    unpositioned: count,
+                },
+            );
+        }
+        observation.written = self.marks_written;
     }
 
     /// The session rows' mark it last wrote or the position it went on
@@ -2173,6 +2281,90 @@ impl Builder {
             }
         }
         Some(RowsWritten::at(at, read_ms))
+    }
+
+    /// Why no new W/R is offered. Incomplete books or pending session
+    /// folds cannot certify a mark; otherwise it is already acknowledged.
+    pub fn mark_skip_reason(&self, observation: &MarkObservation) -> &'static str {
+        if !self.sessions_whole {
+            "sessions_not_whole"
+        } else if self.sessions_through != self.events
+            || self.rows_after.is_some()
+            || !self.touched.is_empty()
+            || observation
+                .counts
+                .get(&LedgerKind::Session)
+                .is_some_and(|counts| counts.positioned + counts.unpositioned > 0)
+        {
+            "sessions_pending"
+        } else if observation.rows.is_none() {
+            "rows_not_whole"
+        } else if self.marks_written
+            != Some(Marks {
+                sessions: SessionsWritten::at(self.events),
+                rows: observation.rows,
+            })
+        {
+            "session_write_not_acknowledged"
+        } else {
+            "marks_unchanged"
+        }
+    }
+
+    /// The marks last acknowledged, without walking the remaining targets.
+    pub const fn observe_written_marks(&self) -> Option<Marks> {
+        self.marks_written
+    }
+
+    /// Rows of the session and queue books reconstructed on startup,
+    /// including their settled anchors; no event text or byte estimate is read.
+    pub fn book_rows(&self) -> usize {
+        self.kept.session_rows.row_count() + self.kept.queue_rows.row_count()
+    }
+
+    /// Walk the remaining marks once without changing marks, cursors or
+    /// the round-robin take position. Session marks count but never cut R.
+    pub fn observe_marks(&self) -> MarkObservation {
+        let mut observation = MarkObservation {
+            cursors: self.cursors(),
+            written: self.marks_written,
+            ..MarkObservation::default()
+        };
+        let mut at = observation.cursors;
+        let mut read_ms = self.read_ms;
+        for target in &self.marks {
+            let kind = match target {
+                Target::Run(_) => LedgerKind::Run,
+                Target::Task(_) => LedgerKind::Task,
+                Target::Row(kind, _) => *kind,
+                Target::Node(..) => LedgerKind::Node,
+            };
+            let session = kind == LedgerKind::Session;
+            let dirtied = self.dirtied.get(target);
+            let counts = observation.counts.entry(kind).or_default();
+            if !session && dirtied.is_some_and(|d| *d != Dirtied::default()) {
+                counts.positioned += 1;
+            } else {
+                counts.unpositioned += 1;
+            }
+            if session {
+                continue;
+            }
+            if let Some(dirtied) = dirtied {
+                dirtied.cut(&mut at, &mut read_ms);
+                if let Some(events) = dirtied.events
+                    && observation.oldest.as_ref().is_none_or(|(_, old)| {
+                        old.events.is_none_or(|old| events.event < old.event)
+                    })
+                {
+                    observation.oldest = Some((target.clone(), *dirtied));
+                }
+            }
+        }
+        if self.rows_through == observation.cursors {
+            observation.rows = Some(RowsWritten::at(at, read_ms));
+        }
+        observation
     }
 
     /// Set its cursors at `from`, the R the store's mark gives
@@ -2372,21 +2564,51 @@ pub fn run_settles(row: &LedgerRow, now_ms: i64) -> bool {
 /// stored row that holds the same inputs is not written again, so the same
 /// inputs read twice leave it as it is.
 pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
+    write_reason(stored, built).is_some()
+}
+
+/// First matching write predicate, in the writer's decision order. A row
+/// with several changed inputs counts once under this reason in a sweep.
+fn write_reason(stored: Option<&LedgerRow>, built: &LedgerRow) -> Option<&'static str> {
     let Some(stored) = stored else {
-        return true;
+        return Some("no_stored");
     };
-    (!stored.is_legacy() && stored.ledger_v < LEDGER_V)
-        || built.inputs_through.last() > stored.inputs_through.last()
-        || built.inputs_through.life_ended != stored.inputs_through.life_ended
-        || built.inputs_through.supervisor > stored.inputs_through.supervisor
-        || built.inputs_through.node_samples > stored.inputs_through.node_samples
-        || built.inputs_through.steps > stored.inputs_through.steps
-        || built.inputs_through.resources > stored.inputs_through.resources
-        || built.inputs_through.inside_resources > stored.inputs_through.inside_resources
-        || (built.is_final && !stored.is_final && !stored.is_legacy())
-        || steps::rules_of(&built.detail) != steps::rules_of(&stored.detail)
-        || (stored.is_legacy()
-            && ProviderUse::of_detail(&built.detail) != ProviderUse::of_detail(&stored.detail))
+    if !stored.is_legacy() && stored.ledger_v < LEDGER_V {
+        return Some("older_version");
+    }
+    if built.inputs_through.last() > stored.inputs_through.last() {
+        return Some("later_event");
+    }
+    if built.inputs_through.life_ended != stored.inputs_through.life_ended {
+        return Some("life_ended");
+    }
+    if built.inputs_through.supervisor > stored.inputs_through.supervisor {
+        return Some("supervisor");
+    }
+    if built.inputs_through.node_samples > stored.inputs_through.node_samples {
+        return Some("node_samples");
+    }
+    if built.inputs_through.steps > stored.inputs_through.steps {
+        return Some("steps");
+    }
+    if built.inputs_through.resources > stored.inputs_through.resources {
+        return Some("resources");
+    }
+    if built.inputs_through.inside_resources > stored.inputs_through.inside_resources {
+        return Some("inside_resources");
+    }
+    if built.is_final && !stored.is_final && !stored.is_legacy() {
+        return Some("settled");
+    }
+    if steps::rules_of(&built.detail) != steps::rules_of(&stored.detail) {
+        return Some("rules");
+    }
+    if stored.is_legacy()
+        && ProviderUse::of_detail(&built.detail) != ProviderUse::of_detail(&stored.detail)
+    {
+        return Some("provider_use");
+    }
+    None
 }
 
 /// Whether `stored`, a task's row the store holds settled (of this

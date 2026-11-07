@@ -234,3 +234,22 @@ fn the_time_read_crosses_with_r_and_an_r_with_none_reads_as_none() {
     assert!(!text.contains("read_ms"), "{text}");
     assert_eq!(serde_json::from_str::<RowsWritten>(&text).unwrap(), none);
 }
+
+#[test]
+fn restart_reasons_explain_why_r_cannot_be_used() {
+    assert_eq!(restart_reason(None, &[]), Some("no_marks"));
+    let mut marks = Marks {
+        sessions: SessionsWritten::at(EventId::new(20)),
+        rows: None,
+    };
+    assert_eq!(restart_reason(Some(&marks), &[]), Some("no_rows_mark"));
+    marks.rows = Some(rows_at(10));
+    assert_eq!(restart_reason(Some(&marks), &[]), None);
+    marks.rows.as_mut().unwrap().ledger_v = LEDGER_V - 1;
+    assert_eq!(restart_reason(Some(&marks), &[]), Some("version_mismatch"));
+    marks.rows = Some(rows_at(10));
+    marks.rows.as_mut().unwrap().read_ms = None;
+    assert_eq!(restart_reason(Some(&marks), &[]), Some("no_read_ms"));
+    marks.rows = Some(rows_at(30));
+    assert_eq!(restart_reason(Some(&marks), &[]), Some("w_cuts_r"));
+}
