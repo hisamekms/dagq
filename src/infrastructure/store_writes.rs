@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
 use super::store_rows::{read_goal, read_task};
 use crate::domain::event_kind::EventKind;
+use crate::domain::goal_owner::Owner;
 use crate::domain::plan_request::{
     Creator, PriorityBy, RecordedOrigin, creation_origin, task_priority_at_creation,
 };
@@ -17,6 +18,50 @@ use crate::domain::worker::WorkerMode;
 use crate::domain::{
     EventId, GoalId, NewTask, Priority, RequestId, RunId, Task, TaskChange, TaskId, goal, task,
 };
+
+/// Record `owner` as `goal_id`'s, or none (ADR-t3989-1 decision 1): who
+/// becomes and who may change an owner is the caller's. Its tasks read it.
+#[cfg_attr(
+    not(any(test, feature = "store-contract")),
+    expect(dead_code, reason = "the creation and change of an owner call it")
+)]
+pub(super) fn set_goal_owner(
+    tx: &impl SqlWrite,
+    goal_id: GoalId,
+    owner: Option<&Owner>,
+) -> Result<()> {
+    let (issuer, subject) = Owner::columns(owner);
+    let changed = tx.execute(
+        "UPDATE goals SET owner_issuer=?2, owner_subject=?3 WHERE id=?1",
+        sql_params![goal_id, issuer, subject],
+    )?;
+    anyhow::ensure!(changed == 1, "goal {goal_id} does not exist");
+    Ok(())
+}
+
+/// Record `owner` as the own owner of `task_id`, a task without a goal: a
+/// task in a goal records none and reads its goal's (ADR-t3989-1 decision
+/// 1), so one in a goal is refused and nothing is written.
+#[cfg_attr(
+    not(any(test, feature = "store-contract")),
+    expect(dead_code, reason = "the creation and change of an owner call it")
+)]
+pub(super) fn set_task_owner(
+    tx: &impl SqlWrite,
+    task_id: TaskId,
+    owner: Option<&Owner>,
+) -> Result<()> {
+    let (issuer, subject) = Owner::columns(owner);
+    let changed = tx.execute(
+        "UPDATE tasks SET owner_issuer=?2, owner_subject=?3 WHERE id=?1 AND goal_id IS NULL",
+        sql_params![task_id, issuer, subject],
+    )?;
+    anyhow::ensure!(
+        changed == 1,
+        "task {task_id} does not exist or belongs to a goal, whose owner it inherits"
+    );
+    Ok(())
+}
 
 /// Register `new` inside the caller's write transaction with
 /// `task_created` and its dependencies: what `add` does, and what a

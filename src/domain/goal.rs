@@ -4,6 +4,8 @@
 
 use serde::Serialize;
 
+use super::goal_owner::Owner;
+
 use super::{
     DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalSummary, GoalTag, GoalVerdict,
     NewGoal, Priority, TaskId, TaskStatus, TaskStatusCounts,
@@ -46,6 +48,11 @@ pub struct Goal {
     /// decision 5): shown as `origin`, `origin_kind`, `origin_request_id`.
     #[serde(flatten)]
     origin: RecordedOrigin,
+    /// The person who owns it and whom its tasks inherit (ADR-t3989-1
+    /// decision 1); none, and not shown, where nobody is recorded and the
+    /// host's user owns it (decision 2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<Owner>,
     /// What the goal is about, each once, in the order given (ADR-t1639-1
     /// decision 6).
     tags: Vec<GoalTag>,
@@ -83,6 +90,7 @@ impl Goal {
             priority: new.priority.unwrap_or_default(),
             priority_by: PriorityBy::Ai,
             origin: RecordedOrigin::UNKNOWN,
+            owner: None,
             tags: new.tags,
             status: if new.draft {
                 GoalStatus::Draft
@@ -117,6 +125,7 @@ impl Goal {
             priority: record.priority,
             priority_by: PriorityBy::Human,
             origin: RecordedOrigin::UNKNOWN,
+            owner: None,
             tags: record.tags,
             status: record.status,
             closed_at: record.closed_at,
@@ -169,6 +178,17 @@ impl Goal {
     pub fn with_record(mut self, priority_by: PriorityBy, origin: RecordedOrigin) -> Self {
         self.priority_by = priority_by;
         self.origin = origin;
+        self
+    }
+
+    /// The recorded owner; none for the host's user (ADR-t3989-1).
+    pub fn owner(&self) -> Option<&Owner> {
+        self.owner.as_ref()
+    }
+
+    /// The goal with the owner the queue records for it.
+    pub fn with_owner(mut self, owner: Option<Owner>) -> Self {
+        self.owner = owner;
         self
     }
 
@@ -450,6 +470,9 @@ pub struct GoalWire {
     pub verdict: Option<GoalVerdict>,
     pub created_at: String,
     pub updated_at: String,
+    /// Absent from a peer that records no owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Owner>,
 }
 
 impl From<Goal> for GoalWire {
@@ -470,6 +493,7 @@ impl From<Goal> for GoalWire {
             verdict,
             created_at,
             updated_at,
+            owner,
         } = goal;
         Self {
             id,
@@ -487,6 +511,7 @@ impl From<Goal> for GoalWire {
             verdict,
             created_at,
             updated_at,
+            owner,
         }
     }
 }
@@ -509,6 +534,7 @@ impl From<GoalWire> for Goal {
             verdict,
             created_at,
             updated_at,
+            owner,
         } = wire;
         Self {
             id,
@@ -526,6 +552,7 @@ impl From<GoalWire> for Goal {
             verdict,
             created_at,
             updated_at,
+            owner,
         }
     }
 }
@@ -554,6 +581,32 @@ mod tests {
 
     fn goal(verdict: Option<GoalVerdict>) -> Goal {
         Goal::restore(record(GoalStatus::Open, verdict)).unwrap()
+    }
+
+    /// The local default records no owner, and the JSON shows none.
+    #[test]
+    fn an_unrecorded_owner_leaves_the_json_as_it_was() {
+        use crate::domain::goal_owner::Owner;
+        let plain = serde_json::to_value(goal(None)).unwrap();
+        assert!(plain.get("owner").is_none(), "{plain}");
+        let owner = Owner::new(crate::domain::oidc::OidcIdentity {
+            issuer: "i".into(),
+            subject: "s".into(),
+        });
+        let owned = goal(None).with_owner(Some(owner.clone()));
+        let mut shown = serde_json::to_value(&owned).unwrap();
+        assert_eq!(
+            shown.as_object_mut().unwrap().remove("owner"),
+            Some(serde_json::json!({"issuer": "i", "subject": "s"}))
+        );
+        assert_eq!(shown, plain);
+        let back = Goal::from(
+            serde_json::from_value::<GoalWire>(
+                serde_json::to_value(GoalWire::from(owned)).unwrap(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(back.owner(), Some(&owner));
     }
 
     /// ADR-t1504-2 decision 9: only an achieved goal opens again, without

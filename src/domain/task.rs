@@ -4,6 +4,8 @@
 
 use serde::Serialize;
 
+use super::goal_owner::{Owner, TaskOwner};
+
 use super::{
     DomainError, EvidenceCheck, ExecutionClass, GoalId, NewTask, Priority, PrioritySource,
     Provider, TaskChange, TaskEdit, TaskId, TaskRecord, TaskStatus, base_priority,
@@ -140,6 +142,11 @@ pub struct Task {
     /// decision 5): shown as `origin`, `origin_kind`, `origin_request_id`.
     #[serde(flatten)]
     origin: RecordedOrigin,
+    /// Whom it belongs to as read with it ([`super::goal_owner::task_owner`]):
+    /// its goal's owner, or its own without a goal (ADR-t3989-1 decision
+    /// 1). None, and not shown, for the host's user (decision 2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<Owner>,
     /// The kind of change it makes, as the registrant declared it
     /// (ADR-t980-1); null for a task registered without one.
     change: Option<TaskChange>,
@@ -199,6 +206,7 @@ impl Task {
             goal_priority: None,
             goal_priority_by: None,
             origin: RecordedOrigin::UNKNOWN,
+            owner: None,
             change: new.change,
             wait_for_build: new.wait_for_build,
             execution_class: new.execution_class,
@@ -242,6 +250,7 @@ impl Task {
             goal_priority: record.goal_priority,
             goal_priority_by: None,
             origin: RecordedOrigin::UNKNOWN,
+            owner: None,
             change: record.change,
             wait_for_build: record.wait_for_build,
             execution_class: record.execution_class,
@@ -268,6 +277,19 @@ impl Task {
         self.priority_by =
             PriorityBy::effective(self.own_priority, own_priority_by, goal_priority_by);
         self.origin = origin;
+        self
+    }
+
+    /// Whom it belongs to (ADR-t3989-1 decisions 1 and 2).
+    pub fn owner(&self) -> TaskOwner<'_> {
+        self.owner
+            .as_ref()
+            .map_or(TaskOwner::HostUser, TaskOwner::Person)
+    }
+
+    /// The task with the owner it was read with.
+    pub fn with_owner(mut self, owner: TaskOwner<'_>) -> Self {
+        self.owner = owner.person().cloned();
         self
     }
 
@@ -825,6 +847,9 @@ pub struct TaskWire {
     pub context: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Absent from a peer that records no owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Owner>,
 }
 
 impl From<Task> for TaskWire {
@@ -855,6 +880,7 @@ impl From<Task> for TaskWire {
             context,
             created_at,
             updated_at,
+            owner,
         } = task;
         Self {
             id,
@@ -882,6 +908,7 @@ impl From<Task> for TaskWire {
             context,
             created_at,
             updated_at,
+            owner,
         }
     }
 }
@@ -952,6 +979,7 @@ impl From<TaskWire> for Task {
             context,
             created_at,
             updated_at,
+            owner,
         } = wire;
         Self {
             id,
@@ -979,6 +1007,7 @@ impl From<TaskWire> for Task {
             context,
             created_at,
             updated_at,
+            owner,
         }
     }
 }
@@ -1047,6 +1076,37 @@ mod tests {
             wait_for_build: false,
             execution_class: Default::default(),
         }
+    }
+
+    /// The local default records no owner, and the JSON shows none;
+    /// a recorded owner is shown, and crosses the wire whole.
+    #[test]
+    fn an_unrecorded_owner_leaves_the_json_as_it_was() {
+        use crate::domain::goal_owner::{Owner, TaskOwner};
+        let task = Task::restore(record(TaskStatus::Ready)).unwrap();
+        assert_eq!(task.owner(), TaskOwner::HostUser);
+        let plain = serde_json::to_value(&task).unwrap();
+        assert!(plain.get("owner").is_none(), "{plain}");
+        let wire = serde_json::to_value(TaskWire::from(task.clone())).unwrap();
+        assert!(wire.get("owner").is_none(), "{wire}");
+        let owner = Owner::new(crate::domain::oidc::OidcIdentity {
+            issuer: "i".into(),
+            subject: "s".into(),
+        });
+        let owned = task.with_owner(TaskOwner::Person(&owner));
+        let mut shown = serde_json::to_value(&owned).unwrap();
+        assert_eq!(
+            shown.as_object_mut().unwrap().remove("owner"),
+            Some(serde_json::json!({"issuer": "i", "subject": "s"}))
+        );
+        assert_eq!(shown, plain);
+        let back = Task::from(
+            serde_json::from_value::<TaskWire>(
+                serde_json::to_value(TaskWire::from(owned)).unwrap(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(back.owner(), TaskOwner::Person(&owner));
     }
 
     fn goal(id: i64, priority: Priority, priority_by: PriorityBy) -> Destination {

@@ -92,6 +92,7 @@ proposalはplannerがplan reviewに出すtaskとgoalの束で、submitted → ac
 - taskは自分自身にも自分の属するgoalにも依存できない。
 - 依存のグラフ（task依存の辺、goal依存の辺、goalから`canceled`でない所属taskへの暗黙の辺、置換元から置換先への辺）は循環しない（[ADR-0038](../adr/0038-task-depends-on-a-goal-until-it-is-achieved.md)）。
 - taskは高々1つのgoalに属し、閉じたgoalに属するtaskは増えない。
+- チームの版でgoalはownerを持ち、taskは所属のgoalのownerを継ぐ（[ADR-t3989-1](../adr/2026-11-03-t3989-1-team-version-goal-owner-ask-routing-to-owner-delegate-and-on-call-admin-only-high-priority-and-shared-store-for-roadmap.md)決定1・2、`goal_owner`）。
 - goalの`closed_at`と`verdict`は同時にnullか同時に非nullで、verdictを消すのは人の`reopen`だけで、そのときも`goal_closed`のeventは残る。
 - `in_progress`はclaimしたtaskだけが持ち、終端（`completed`・`canceled`・`replaced`）のtaskは変わらない。
 - `replaced`は置換の適用だけが書き、依存を満たさない（後続は適用で子を待つ辺に付け替わる。goalのreviewとcloseは置換先を再置換も辿った全てのtaskが終わるまで待つ。[ADR-t1521-2](../adr/2026-10-05-t1521-2-trusted-runtime-parks-snapshots-and-atomically-replaces-tasks.md)決定5）。

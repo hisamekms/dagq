@@ -3,9 +3,9 @@
 use super::sql_dialect::{JsonType, SqlDialect};
 use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlValue, sql_params};
 use super::store_rows::{
-    RecordedCancel, cancel_of, enum_col, event_row, goal_row, optional_enum_col,
+    RecordedCancel, cancel_of, enum_col, event_row, goal_owner, goal_row, optional_enum_col,
     optional_priority_col, read_goal, read_task, ready_conditions, replan_guarding, run_row,
-    select_tasks, task_row,
+    select_tasks, task_own_owner, task_row,
 };
 use super::store_writes::{
     Node, event, event_id, insert_dependency, insert_goal_dependency, insert_task, next_id,
@@ -13,6 +13,7 @@ use super::store_writes::{
 };
 use crate::domain::claim_facts;
 use crate::domain::event_kind::{self, EventKind};
+use crate::domain::goal_owner::{Membership, Owner, own_owner_after_move};
 use crate::domain::task_replan::GuardedStep;
 use std::{collections::BTreeMap, path::Path, time::SystemTime};
 
@@ -1208,7 +1209,9 @@ pub(super) fn change_priority(
 /// `task_goal_changed` (ADR-t1975-1 decision 4). A person's priority it
 /// took from its old goal that the AI's `out_of_scope` judgement lets go
 /// of is recorded the same way with `dropped_on_move`, the value it had
-/// and `from_by: human` (ADR-t2373-1 decision 4).
+/// and `from_by: human` (ADR-t2373-1 decision 4). A task moved out of a goal
+/// takes that goal's recorded owner as its own, and one moved into a goal
+/// drops its own ([`own_owner_after_move`]).
 pub(super) fn set_goal_in(
     conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     task_id: TaskId,
@@ -1275,9 +1278,26 @@ pub(super) fn set_goal_in(
         )?;
     }
     if from != task.goal_id() {
+        // The owner moves with the goal in the same write (ADR-t3989-1
+        // decision 1): none into a goal, the old goal's out of one.
+        let from_owner = from.map(|goal| goal_owner(conn, goal)).transpose()?;
+        let membership = match &from_owner {
+            Some(owner) => Membership::Goal(owner.as_ref()),
+            None => Membership::NoGoal,
+        };
+        let own = task_own_owner(conn, task_id)?;
+        let own = own_owner_after_move(membership, own.as_ref(), task.goal_id().is_some());
+        let (owner_issuer, owner_subject) = Owner::columns(own.as_ref());
         conn.execute(
-            "UPDATE tasks SET goal_id=?1, updated_at=?2 WHERE id=?3",
-            sql_params![task.goal_id(), timestamp, task_id],
+            "UPDATE tasks SET goal_id=?1, updated_at=?2, owner_issuer=?4, owner_subject=?5
+                 WHERE id=?3",
+            sql_params![
+                task.goal_id(),
+                timestamp,
+                task_id,
+                owner_issuer,
+                owner_subject
+            ],
         )?;
         event(
             conn,

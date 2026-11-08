@@ -50,8 +50,10 @@ fn foreign_and_future_databases_are_rejected_without_rewriting_them() {
     let future = dir.path().join("future.db");
     drop(SqliteQueue::init(&future).unwrap());
     let raw = Connection::open(&future).unwrap();
-    raw.pragma_update(None, "user_version", 99).unwrap();
-    raw.execute("UPDATE schema_floor SET floor = 99", [])
+    let future_version = SqliteQueue::SCHEMA_VERSION + 1;
+    raw.pragma_update(None, "user_version", future_version)
+        .unwrap();
+    raw.execute("UPDATE schema_floor SET floor = ?1", [future_version])
         .unwrap();
     for error in [
         SqliteQueue::open(&future).err().unwrap(),
@@ -60,8 +62,9 @@ fn foreign_and_future_databases_are_rejected_without_rewriting_them() {
     ] {
         let error = error.to_string();
         assert!(
-            error.contains("unsupported queue schema version 99")
-                && error.contains("older than schema 99")
+            error.contains(&format!(
+                "unsupported queue schema version {future_version}"
+            )) && error.contains(&format!("older than schema {future_version}"))
                 && error.contains("install a newer dagq"),
             "{error}"
         );
@@ -70,7 +73,7 @@ fn foreign_and_future_databases_are_rejected_without_rewriting_them() {
     assert_eq!(
         raw.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        99
+        future_version
     );
 }
 
@@ -273,8 +276,11 @@ fn a_read_only_open_never_writes_and_reads_no_older_queue() {
     drop(queue);
 
     // Above the floor, or not a queue at all, it is refused like `open`.
-    raw.execute("UPDATE schema_floor SET floor = 99", [])
-        .unwrap();
+    raw.execute(
+        "UPDATE schema_floor SET floor = ?1",
+        [SqliteQueue::SCHEMA_VERSION + 1],
+    )
+    .unwrap();
     let error = SqliteQueue::open_read_only(&path)
         .err()
         .unwrap()

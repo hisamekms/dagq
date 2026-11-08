@@ -40,6 +40,8 @@ pub enum DomainError {
     GoalCloseInconsistent {
         goal_id: GoalId,
     },
+    /// A stored owner pair with only its issuer or only its subject.
+    OwnerIncomplete,
     /// A draft or submitted task made ready by hand without the bypass:
     /// only plan review readies it (ADR-0041 decision 8).
     ReadyNeedsPlanReview {
@@ -621,6 +623,9 @@ impl fmt::Display for DomainError {
                 f,
                 "goal {goal_id} has a close time without a verdict or a verdict without a close time"
             ),
+            Self::OwnerIncomplete => {
+                f.write_str("a stored owner has an issuer without a subject or a subject without an issuer")
+            }
             Self::TaskNotEditable { what } => {
                 write!(
                     f,

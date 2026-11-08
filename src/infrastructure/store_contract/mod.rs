@@ -4,8 +4,10 @@
 //! run sequentially: business writes roll back except the fenced-write case,
 //! which removes its row; leader cases release their last holder.
 mod cases;
+mod goal_owners;
 mod search_writes;
 pub use cases::*;
+pub use goal_owners::*;
 pub use search_writes::postgres_search_writes;
 
 use super::sql_exec::TransactionEntries;
@@ -73,6 +75,9 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("typed conditions", typed_conditions::<S, F>),
         ("backend parallel", backend_parallel::<S, F>),
         ("members", members::<S, F>),
+        ("goal owner records", goal_owner_records::<S, F>),
+        ("goal owner moves", goal_owner_moves::<S, F>),
+        ("goal owner move undone", goal_owner_move_undone::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

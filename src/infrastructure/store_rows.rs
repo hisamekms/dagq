@@ -18,6 +18,7 @@ use super::event_actor::event_actor;
 use super::sql_dialect::JsonType;
 use super::sql_exec::{OptionalRow, SqlError, SqlRead, SqlResult, SqlRow, ValueKind, sql_params};
 use crate::domain::event_kind::{self, RecordedKind};
+use crate::domain::goal_owner::{Membership, Owner, task_owner};
 use crate::domain::plan_request::RecordedOrigin;
 use crate::domain::worker::{Worker, WorkerMode};
 use crate::domain::{
@@ -27,11 +28,15 @@ use crate::domain::{
 
 /// The start of a query of tasks aliased `t`, each with the priority of its
 /// goal as `goal_priority`, which [`task_row`] reads to resolve what a task
-/// without a priority of its own inherits (ADR-t1639-1 decision 2).
+/// without a priority of its own inherits (ADR-t1639-1 decision 2), and its
+/// goal's owner as `goal_owner_issuer` and `goal_owner_subject`, which a task
+/// in a goal inherits (ADR-t3989-1 decision 1).
 macro_rules! select_tasks {
     () => {
         "SELECT t.*, (SELECT g.priority FROM goals g WHERE g.id = t.goal_id) AS goal_priority,
-         (SELECT g.priority_by FROM goals g WHERE g.id = t.goal_id) AS goal_priority_by
+         (SELECT g.priority_by FROM goals g WHERE g.id = t.goal_id) AS goal_priority_by,
+         (SELECT g.owner_issuer FROM goals g WHERE g.id = t.goal_id) AS goal_owner_issuer,
+         (SELECT g.owner_subject FROM goals g WHERE g.id = t.goal_id) AS goal_owner_subject
          FROM tasks t"
     };
 }
@@ -163,7 +168,20 @@ fn origin_cols(row: &SqlRow<'_>) -> SqlResult<RecordedOrigin> {
     })
 }
 
+/// The owner pair a row holds in the columns `issuer` and `subject`.
+fn owner_cols(row: &SqlRow<'_>, issuer: &str, subject: &str) -> SqlResult<Option<Owner>> {
+    Owner::from_columns(row.get(issuer)?, row.get(subject)?).map_err(restore_error)
+}
+
 pub(super) fn task_row(row: &SqlRow<'_>) -> SqlResult<Task> {
+    let goal_id: Option<GoalId> = row.get("goal_id")?;
+    let goal_owner = owner_cols(row, "goal_owner_issuer", "goal_owner_subject")?;
+    let own_owner = owner_cols(row, "owner_issuer", "owner_subject")?;
+    let membership = match goal_id {
+        Some(_) => Membership::Goal(goal_owner.as_ref()),
+        None => Membership::NoGoal,
+    };
+    let owner = task_owner(membership, own_owner.as_ref());
     Ok(Task::restore(TaskRecord {
         id: row.get("id")?,
         title: row.get("title")?,
@@ -209,7 +227,8 @@ pub(super) fn task_row(row: &SqlRow<'_>) -> SqlResult<Task> {
         optional_enum_col(row, "priority_by")?,
         optional_enum_col(row, "goal_priority_by")?,
         origin_cols(row)?,
-    ))
+    )
+    .with_owner(owner))
 }
 
 pub(super) fn goal_row(row: &SqlRow<'_>) -> SqlResult<Goal> {
@@ -238,7 +257,8 @@ pub(super) fn goal_row(row: &SqlRow<'_>) -> SqlResult<Goal> {
         updated_at: row.get("updated_at")?,
     })
     .map_err(restore_error)?
-    .with_record(enum_col(row, "priority_by")?, origin_cols(row)?))
+    .with_record(enum_col(row, "priority_by")?, origin_cols(row)?)
+    .with_owner(owner_cols(row, "owner_issuer", "owner_subject")?))
 }
 
 /// Reads a run with its queue-local paths resolved under `runs_dir`.
@@ -290,6 +310,31 @@ pub(super) fn read_task(tx: &impl SqlRead, task_id: TaskId) -> Result<Task> {
         concat!(select_tasks!(), " WHERE t.id=?1"),
         sql_params![task_id],
         task_row,
+    )
+    .optional()?
+    .with_context(|| format!("task {task_id} does not exist"))
+}
+
+/// The owner `goal_id` records; none for the host's user (ADR-t3989-1
+/// decision 2).
+pub(super) fn goal_owner(tx: &impl SqlRead, goal_id: GoalId) -> Result<Option<Owner>> {
+    tx.query_row(
+        "SELECT owner_issuer, owner_subject FROM goals WHERE id=?1",
+        sql_params![goal_id],
+        |r| owner_cols(r, "owner_issuer", "owner_subject"),
+    )
+    .optional()?
+    .with_context(|| format!("goal {goal_id} does not exist"))
+}
+
+/// The owner `task_id`'s own row records: one only a task without a goal
+/// has, since a task in a goal reads its goal's (ADR-t3989-1 decision 1).
+/// What the task belongs to is [`Task::owner`] of [`read_task`].
+pub(super) fn task_own_owner(tx: &impl SqlRead, task_id: TaskId) -> Result<Option<Owner>> {
+    tx.query_row(
+        "SELECT owner_issuer, owner_subject FROM tasks WHERE id=?1",
+        sql_params![task_id],
+        |r| owner_cols(r, "owner_issuer", "owner_subject"),
     )
     .optional()?
     .with_context(|| format!("task {task_id} does not exist"))

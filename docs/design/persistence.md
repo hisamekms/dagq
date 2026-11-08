@@ -110,6 +110,8 @@ runのファイル・台帳の行・古いeventは通さない。
 - 読む: 行から`TaskRecord`などを組んで`restore`で復元し、復元が拒んだ行は変換エラーになる（既定値に読み替えない）。
 - 変える: 読んだ集約をdomainのコマンドに渡し、返った値を書く。
   `WHERE status=<読んだstatus>`や`AND supervisor_token=<token>`は並行の変更を見つける条件で、どの遷移を許すかの判断ではない。
+- owner（ADR-t3989-1）: goalに属するtaskはownerを持たずgoalの行から読み、goalの無いtaskだけが自分のownerを持つ。
+  所属を変える書き込みは同じtransactionで、goalに入れるtaskのownerを空にし、goalから外すtaskに外す前のgoalのownerを写す。
 - 認可の後の変化: 計画系のコマンドは認可に使ったtaskの状態を渡し、storeはトランザクションを開いた直後に照合して、変わっていれば何も書かずに拒む（[Authorization](authorization.md)）。
   supervisor（`supervisor_needs`）と着地のintegrator（`integrator_scope`）の操作はserviceがcapabilityで認可し、taskの状態は照合しない。
 - runのdomainの拒否は、トランザクションが巻き戻ってeventに残せないので、run directoryの`refusals.log`に1行で残す（`runtime_store::REFUSALS_LOG`）。

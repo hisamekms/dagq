@@ -3216,6 +3216,18 @@ mod store_contract_tests {
         contract(|open| store_contract::members(&open));
     }
     #[test]
+    fn goal_owner_records() {
+        contract(|open| store_contract::goal_owner_records(&open));
+    }
+    #[test]
+    fn goal_owner_moves() {
+        contract(|open| store_contract::goal_owner_moves(&open));
+    }
+    #[test]
+    fn goal_owner_move_undone() {
+        contract(|open| store_contract::goal_owner_move_undone(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

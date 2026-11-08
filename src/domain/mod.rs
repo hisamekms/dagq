@@ -1272,6 +1272,7 @@ pub mod follow_up;
 pub mod forecast;
 pub mod fresh_session;
 pub mod goal;
+pub mod goal_owner;
 pub mod goal_review;
 pub mod goal_tag;
 pub mod headless_job;
