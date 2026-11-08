@@ -43,7 +43,7 @@ runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookの
 
 ## 目標割れの記録
 
-- レポートと目標割れの判定は台帳のwindow（`application::report::window`）から作り、全eventを読まない。
+- 目標割れの判定の入口は`application::push::check_breaches`で、レポートと同じく全eventを読まない。
 - supervisorのレポートのjob（[レポート](commands.md)のsupervisorの日次）が、`write_due`の後に`application::push::check_breaches`で、今の時点の日と週の`kpi`の目標の判定（[kpi](commands.md)）を読む。
   目標が1つも無く、開いた目標割れも無ければ何もしない。
   `dagq kpi`とレポートと同じくhostの負荷の記録も読むので、hostの負荷から作るKPI（`cpu_per_landing`・`load_per_core`）の目標も判定し、記録が無ければそのKPIは`not_judged`になるだけで検査は続く。

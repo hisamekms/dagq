@@ -20,6 +20,7 @@ use super::{
 use crate::domain::kpi::{
     KpiQuery, Period,
     push::{self, PushConfig, PushMessage},
+    read_from_ms,
     report::Report,
 };
 
@@ -74,6 +75,11 @@ pub struct BreachCheck {
 /// breach that started and each that ended since the last check (decision
 /// 18). A start is marked `pushed` while `push` sends breaches and the
 /// local day's limit allows.
+///
+/// Read one ledger window with
+/// [`WindowQuery::read_from_ms`](crate::domain::ledger::window::WindowQuery::read_from_ms)
+/// set to the earlier of [`read_from_ms`] for the day and week queries
+/// (`last: 2`), including the baseline and breach streak history both need.
 pub fn check_breaches(
     queue: &(impl QueueRecords + ?Sized),
     ledger: &(impl LedgerStore + ?Sized),
@@ -90,21 +96,30 @@ pub fn check_breaches(
     let push_day = push
         .filter(|push| push.breach)
         .map(|push| (day, push.max_breach_per_day));
-    let window = report::window(ledger, now)?;
-    for period in [Period::Day, Period::Week] {
+    let queries = [Period::Day, Period::Week].map(|period| KpiQuery {
+        period,
+        // The period over and the one in progress: a target's latest
+        // judged value is the one over.
+        last: 2,
+        ..KpiQuery::default()
+    });
+    let from = queries
+        .each_ref()
+        .map(|query| read_from_ms(query, &setup.config, now, setup.host.utc_offset_secs));
+    let window = ledger.ledger_window(&crate::domain::ledger::window::WindowQuery {
+        now_ms: super::stats::now_ms(now),
+        read_from_ms: from[0].zip(from[1]).map(|(day, week)| day.min(week)),
+        ..Default::default()
+    })?;
+    for query in &queries {
+        let period = query.period;
         let kpi = super::kpi::of_window(
             &window,
             now,
             setup.host,
             &setup.config,
             setup.areas.as_ref(),
-            &KpiQuery {
-                period,
-                // The period over and the one in progress: a target's
-                // latest judged value is the one over.
-                last: 2,
-                ..KpiQuery::default()
-            },
+            query,
         )?;
         for target in &kpi.targets {
             if let Some(started) = push::breach_started(period.as_str(), target)
@@ -285,3 +300,6 @@ pub fn record_attempt(
     }
     Ok(again)
 }
+
+#[cfg(test)]
+mod tests;
