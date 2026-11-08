@@ -496,6 +496,38 @@ fn last_event_naming_supervisor_sql(dialect: SqlDialect) -> String {
     )
 }
 
+/// The push records of the run rows (`?1`), by their ids: every
+/// `push_finished` (`?2`), and the `push_failed` (`?3`) and
+/// `run_phase_changed` (`?4`) records of the rows holding a `push_failed`.
+///
+/// Whether a row holds a `push_failed` is decided once for the row, not
+/// once for each of its records: an uncorrelated subquery picks the keys
+/// of those rows a single time for the statement (SQLite's `LIST
+/// SUBQUERY`), and a record of the two kinds is kept when its row's key is
+/// among them. An `EXISTS` over the row's records evaluated for each
+/// record would walk the row again for each one, so a row's time would
+/// grow with the square of its records. A derived table marking each row
+/// is the other way to decide it once, but SQLite flattens it into the
+/// outer statement and evaluates the mark again for each record, so the
+/// subquery of the keys is the one kept.
+fn push_records_sql(dialect: SqlDialect) -> String {
+    format!(
+        "SELECT {record} FROM ledger_rows r, {records} j
+              WHERE r.kind=?1
+                AND ({kind}=?2
+                     OR ({kind} IN (?3, ?4)
+                         AND r.key IN (SELECT g.key FROM ledger_rows g, {failed_records} f
+                                        WHERE g.kind=?1 AND {failed}=?3)))
+              ORDER BY {id}",
+        record = dialect.json_element("j.value", JsonType::Text),
+        records = dialect.json_elements("r.records"),
+        kind = dialect.json_field_spaced("j.value", "$.kind", JsonType::Text),
+        failed_records = dialect.json_elements("g.records"),
+        failed = dialect.json_field_spaced("f.value", "$.kind", JsonType::Text),
+        id = dialect.json_field_spaced("j.value", "$.id", JsonType::Integer),
+    )
+}
+
 impl SqliteQueue {
     /// The heads of the rows of `kind` (`?1` of `params`) that `filter`
     /// (SQL over the row `r`) keeps, by key, each with whether its row is
@@ -930,24 +962,11 @@ impl LedgerStore for SqliteQueue {
     }
 
     /// SQLite picks the push records out of the stored arrays of the run
-    /// rows: no other record is parsed.
+    /// rows ([`push_records_sql`]): no other record is parsed.
     fn ledger_push_records(&self) -> Result<Vec<crate::domain::RunEvent>> {
         let tx = self.read_entry("ledger_push_records")?;
         use crate::domain::EventKind;
-        let kind = SqlRead::dialect(&tx).json_field_spaced("j.value", "$.kind", JsonType::Text);
-        let statement = format!(
-            "SELECT {record} FROM ledger_rows r, {records} j
-              WHERE r.kind=?1
-                AND ({kind}=?2
-                     OR ({kind} IN (?3, ?4)
-                         AND EXISTS (SELECT 1 FROM {records} f
-                                      WHERE {failed}=?3)))
-              ORDER BY {id}",
-            record = SqlRead::dialect(&tx).json_element("j.value", JsonType::Text),
-            records = SqlRead::dialect(&tx).json_elements("r.records"),
-            failed = SqlRead::dialect(&tx).json_field_spaced("f.value", "$.kind", JsonType::Text),
-            id = SqlRead::dialect(&tx).json_field_spaced("j.value", "$.id", JsonType::Integer),
-        );
+        let statement = push_records_sql(SqlRead::dialect(&tx));
         let rows = SqlRead::query_map(
             &tx,
             &statement,
@@ -3194,6 +3213,148 @@ mod tests {
             assert_eq!(queue.ledger_marks().unwrap(), Some(marks));
         }
         assert!(!text(written::ROWS_KIND).contains("read_ms"));
+    }
+
+    /// The statement the push records were read with before
+    /// [`push_records_sql`]: an `EXISTS` over the row's records for each
+    /// `push_failed` and `run_phase_changed` record.
+    const PUSH_RECORDS_OLD_SQL: &str = "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+      WHERE r.kind=?1
+        AND (json_extract(j.value, '$.kind')=?2
+             OR (json_extract(j.value, '$.kind') IN (?3, ?4)
+                 AND EXISTS (SELECT 1 FROM json_each(r.records) f
+                              WHERE json_extract(f.value, '$.kind')=?3)))
+      ORDER BY json_extract(j.value, '$.id')";
+
+    /// A store of run rows of every mix of push records: `push_finished`
+    /// alone, a `push_failed` with `run_phase_changed` and `push_finished`,
+    /// `run_phase_changed` with no `push_failed`, and no push record, with
+    /// a task row holding a `push_failed` under the key of the run row
+    /// without one (its `push_failed` is no run row's); the ids of
+    /// the records interleave across the rows.
+    fn mixed_push_rows() -> (tempfile::TempDir, SqliteQueue, Vec<LedgerRow>) {
+        use crate::domain::EventKind;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let record = |id: i64, kind: EventKind| RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload: serde_json::json!({"phase": "ended", "reason": "r", "extra": id}),
+            created_at: "2026-11-01T00:00:00Z".to_owned(),
+            actor: None,
+        };
+        let row = |kind: LedgerKind, key: &str, records: Vec<(i64, EventKind)>| {
+            let mut row = ledger::testkit::run_row(key, None, Vec::new());
+            row.kind = kind;
+            row.records = records.into_iter().map(|(id, k)| record(id, k)).collect();
+            row
+        };
+        use EventKind::{PushFailed, PushFinished, RunClaimed, RunPhaseChanged};
+        let rows = vec![
+            row(
+                LedgerKind::Run,
+                "a",
+                vec![(1, RunClaimed), (5, PushFinished), (9, RunPhaseChanged)],
+            ),
+            row(
+                LedgerKind::Run,
+                "b",
+                vec![
+                    (2, RunClaimed),
+                    (6, RunPhaseChanged),
+                    (10, PushFailed),
+                    (13, RunPhaseChanged),
+                    (14, PushFinished),
+                ],
+            ),
+            row(
+                LedgerKind::Run,
+                "c",
+                vec![(3, RunClaimed), (7, RunPhaseChanged), (11, RunPhaseChanged)],
+            ),
+            row(LedgerKind::Run, "d", vec![(4, RunClaimed), (8, RunClaimed)]),
+            row(
+                LedgerKind::Task,
+                "c",
+                vec![(12, PushFailed), (15, RunPhaseChanged)],
+            ),
+        ];
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        (dir, queue, rows)
+    }
+
+    /// The push records of a store of every mix of them are what the rows
+    /// read whole give by the port's rule, and the records, their cut and
+    /// their order of the statement the store read them with before.
+    #[test]
+    fn the_push_records_of_every_mix_are_the_old_statements() {
+        use crate::domain::EventKind;
+        use crate::domain::ledger::builder::pushes::cut;
+        let (_dir, queue, rows) = mixed_push_rows();
+        let read = queue.ledger_push_records().unwrap();
+        let ids: Vec<i64> = read.iter().map(|e| e.id.as_i64()).collect();
+        assert_eq!(ids, [5, 6, 10, 13, 14]);
+        let mut expected: Vec<RunEvent> = rows
+            .iter()
+            .filter(|row| row.kind == LedgerKind::Run)
+            .flat_map(|row| {
+                let failed = row.records.iter().any(|e| e.kind == EventKind::PushFailed);
+                row.records.iter().filter(move |e| {
+                    e.kind == EventKind::PushFinished
+                        || (failed
+                            && (e.kind == EventKind::PushFailed
+                                || e.kind == EventKind::RunPhaseChanged))
+                })
+            })
+            .map(cut)
+            .collect();
+        expected.sort_by_key(|e| e.id);
+        assert_eq!(read, expected);
+        let old: Vec<RunEvent> = queue
+            .conn
+            .prepare(PUSH_RECORDS_OLD_SQL)
+            .unwrap()
+            .query_map(
+                params!["run", "push_finished", "push_failed", "run_phase_changed"],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            .map(|text| cut(&serde_json::from_str(&text.unwrap()).unwrap()))
+            .collect();
+        assert_eq!(read, old);
+    }
+
+    /// Whether a run row holds a `push_failed` is decided once: on the
+    /// schema `SqliteQueue::init` lays down, with no statistics, the plan of
+    /// the push records has no subquery correlated to the record, where the
+    /// old statement's has one.
+    #[test]
+    fn the_push_records_decide_a_failed_push_once_a_row() {
+        let (_dir, queue, _) = mixed_push_rows();
+        let plan = |sql: &str| -> String {
+            queue
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(
+                    params!["run", "push_finished", "push_failed", "run_phase_changed"],
+                    |r| r.get::<_, String>(3),
+                )
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let new = plan(&push_records_sql(SqlDialect::Sqlite));
+        assert!(!new.contains("CORRELATED"), "{new}");
+        assert!(new.contains("LIST SUBQUERY"), "{new}");
+        let old = plan(PUSH_RECORDS_OLD_SQL);
+        assert!(old.contains("CORRELATED SCALAR SUBQUERY"), "{old}");
     }
 
     /// The push records, the heads of the rows not settled at a position

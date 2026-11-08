@@ -42,7 +42,10 @@
 //! the push records of the run rows on a copy of that queue, and of a
 //! supervisor started through the queue service each
 //! `ledger_push_records` request's sender and time ([`pushes`],
-//! docs/plans/ledger-push-records-spike.md).
+//! docs/plans/ledger-push-records-spike.md). Before those it times the
+//! statement beside the one it replaced ([`old_and_new`]); `pushes <dir>
+//! dup` does so as well on copies whose run rows hold their records two
+//! and four times over ([`DUPLICATE_RUN_RECORDS`]).
 //!
 //! An allocator that counts for the whole process is set here only: the
 //! library's tests count per thread, and neither they nor the integration
@@ -1304,10 +1307,11 @@ fn main() {
         Some("measure") if args.len() == 3 => measure(Path::new(&args[2])),
         Some("check") if args.len() == 2 => check(),
         Some("callers") if args.len() == 3 => callers(Path::new(&args[2])),
-        Some("pushes") if args.len() == 3 => pushes(Path::new(&args[2])),
+        Some("pushes") if args.len() == 3 => pushes(Path::new(&args[2]), false),
+        Some("pushes") if args.len() == 4 && args[3] == "dup" => pushes(Path::new(&args[2]), true),
         _ => {
             eprintln!(
-                "usage: supervisor_startup_memory prepare <dir> <events> [<pad bytes>] | measure <dir> | check | callers <dir> | pushes <dir>"
+                "usage: supervisor_startup_memory prepare <dir> <events> [<pad bytes>] | measure <dir> | check | callers <dir> | pushes <dir> [dup]"
             );
             std::process::exit(2);
         }
@@ -1442,8 +1446,20 @@ fn through_the_service(db: &Path) -> (Arc<CountedCalls>, Box<dyn LedgerQueue + S
 
 /// The statement `SqliteQueue`'s `ledger_push_records` runs, in SQLite's
 /// words: written out here to read its plan and time it apart from the
-/// parse of its answer (docs/plans/ledger-push-records-spike.md).
+/// parse of its answer (docs/plans/ledger-push-records-spike.md). The rows
+/// holding a `push_failed` are picked once by an uncorrelated subquery.
 const PUSH_RECORDS_SQL: &str = "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+  WHERE r.kind=?1
+    AND (json_extract(j.value, '$.kind')=?2
+         OR (json_extract(j.value, '$.kind') IN (?3, ?4)
+             AND r.key IN (SELECT g.key FROM ledger_rows g, json_each(g.records) f
+                            WHERE g.kind=?1 AND json_extract(f.value, '$.kind')=?3)))
+  ORDER BY json_extract(j.value, '$.id')";
+
+/// The statement [`PUSH_RECORDS_SQL`] replaced, kept to time beside it: an
+/// `EXISTS` over the row's records evaluated again for every `push_failed`
+/// and `run_phase_changed` record.
+const PUSH_RECORDS_OLD_SQL: &str = "SELECT j.value FROM ledger_rows r, json_each(r.records) j
   WHERE r.kind=?1
     AND (json_extract(j.value, '$.kind')=?2
          OR (json_extract(j.value, '$.kind') IN (?3, ?4)
@@ -1453,9 +1469,8 @@ const PUSH_RECORDS_SQL: &str = "SELECT j.value FROM ledger_rows r, json_each(r.r
 
 /// Two other ways to write [`PUSH_RECORDS_SQL`], timed beside it: the
 /// `push_finished` records alone (what it reads of a row without a
-/// `push_failed`), and the rows with a `push_failed` picked once by an
-/// uncorrelated subquery instead of an `EXISTS` evaluated again for every
-/// `push_failed` and `run_phase_changed` record.
+/// `push_failed`), and each row's mark of a `push_failed` computed in a
+/// derived table, the other way to decide it once a row.
 const PUSH_RECORDS_VARIANTS: [(&str, &str); 2] = [
     (
         "push_finished alone",
@@ -1464,16 +1479,24 @@ const PUSH_RECORDS_VARIANTS: [(&str, &str); 2] = [
   ORDER BY json_extract(j.value, '$.id')",
     ),
     (
-        "failed rows picked once",
-        "SELECT j.value FROM ledger_rows r, json_each(r.records) j
-  WHERE r.kind=?1
-    AND (json_extract(j.value, '$.kind')=?2
-         OR (json_extract(j.value, '$.kind') IN (?3, ?4)
-             AND r.key IN (SELECT g.key FROM ledger_rows g, json_each(g.records) f
-                            WHERE g.kind=?1 AND json_extract(f.value, '$.kind')=?3)))
+        "failed marked in a derived table",
+        "SELECT j.value FROM (SELECT r.records AS records,
+                         EXISTS (SELECT 1 FROM json_each(r.records) f
+                                  WHERE json_extract(f.value, '$.kind')=?3) AS failed
+                    FROM ledger_rows r WHERE r.kind=?1) r, json_each(r.records) j
+  WHERE json_extract(j.value, '$.kind')=?2
+     OR (r.failed AND json_extract(j.value, '$.kind') IN (?3, ?4))
   ORDER BY json_extract(j.value, '$.id')",
     ),
 ];
+
+/// Doubles the records of every run row of a queue, the copy of
+/// each record after the records, as the Spike's `DUP` did: a row of 27
+/// records holds 54.
+const DUPLICATE_RUN_RECORDS: &str =
+    "UPDATE ledger_rows SET records=(SELECT json_group_array(json(v)) FROM
+  (SELECT value v FROM json_each(records) UNION ALL SELECT value FROM json_each(records)))
+  WHERE kind='run'";
 
 /// The page the service's `ledger_push_records` answers at most and the
 /// client asks first (`LEDGER_PUSHES_PAGE` of the supervisor's queue).
@@ -1498,7 +1521,7 @@ fn median(mut values: Vec<f64>) -> f64 {
 /// answer's bytes, and what the start's requests took beyond a statement
 /// and an answer each and one transfer. Before those it prints the
 /// statement's plan on the schema `SqliteQueue::init` lays down.
-fn pushes(dir: &Path) {
+fn pushes(dir: &Path, duplicate: bool) {
     use dagq::domain::RunEvent;
     use dagq::domain::ledger::builder::pushes::cut;
     const ROUNDS: usize = 3;
@@ -1525,22 +1548,41 @@ fn pushes(dir: &Path) {
             "SQLite {version}; events {events}, run rows {rows}, records in them {records}, their text {:.1} MiB",
             mib(bytes as usize)
         );
-        let mut plan = read
-            .prepare(&format!("EXPLAIN QUERY PLAN {PUSH_RECORDS_SQL}"))
-            .unwrap();
-        let lines = plan
-            .query_map(params, |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
-            .unwrap();
-        println!("plan:");
-        for line in lines {
-            let (id, parent, detail) = line.unwrap();
-            println!("  {id} {parent} {detail}");
+        let plans = [("new", PUSH_RECORDS_SQL), ("old", PUSH_RECORDS_OLD_SQL)]
+            .into_iter()
+            .chain(PUSH_RECORDS_VARIANTS);
+        for (name, sql) in plans {
+            let mut plan = read.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let lines = plan
+                .query_map(params, |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .unwrap();
+            println!("plan, {name}:");
+            for line in lines {
+                let (id, parent, detail) = line.unwrap();
+                println!("  {id} {parent} {detail}");
+            }
+        }
+    }
+    println!(
+        "| which | events | run rows | records a row | old ms | new ms | old ms / row | new ms / row | new / old |"
+    );
+    println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+    old_and_new(&db, "i", ROUNDS);
+    if duplicate {
+        for (doublings, name) in [(0, "pushes-x1"), (1, "pushes-x2"), (2, "pushes-x4")] {
+            let copy = copy_of(dir, name);
+            let write = Connection::open(&copy).unwrap();
+            for _ in 0..doublings {
+                write.execute(DUPLICATE_RUN_RECORDS, []).unwrap();
+            }
+            drop(write);
+            old_and_new(&copy, "ii", ROUNDS);
         }
     }
     let direct = SqliteQueue::open(&db).unwrap();
@@ -1650,6 +1692,58 @@ fn pushes(dir: &Path) {
     println!(
         "beyond the statement and the answer of each request and the transfer, a start's requests: median {:.1} ms",
         median(beyond)
+    );
+}
+
+/// Times on the queue at `db` [`PUSH_RECORDS_OLD_SQL`] and
+/// [`PUSH_RECORDS_SQL`], `rounds` times each, the two in turn and the one
+/// run first swapped each round so the host's drift falls on neither, and
+/// prints a row of their medians (the statement until every answer row is
+/// read out as text). It asserts that both give the same rows in the same
+/// order.
+fn old_and_new(db: &Path, which: &str, rounds: usize) {
+    let params = params!["run", "push_finished", "push_failed", "run_phase_changed"];
+    let read = Connection::open(db).unwrap();
+    let (events, rows, records): (i64, i64, i64) = read
+        .query_row(
+            "SELECT (SELECT count(*) FROM run_events), count(*), sum(json_array_length(records))
+               FROM ledger_rows WHERE kind='run'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let run = |sql: &str| -> (f64, Vec<String>) {
+        let started = Instant::now();
+        let texts: Vec<String> = read
+            .prepare(sql)
+            .unwrap()
+            .query_map(params, |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        (started.elapsed().as_secs_f64() * 1000.0, texts)
+    };
+    let (mut old, mut new) = (Vec::new(), Vec::new());
+    for round in 0..rounds {
+        let (old_run, new_run) = if round % 2 == 0 {
+            let old_run = run(PUSH_RECORDS_OLD_SQL);
+            (old_run, run(PUSH_RECORDS_SQL))
+        } else {
+            let new_run = run(PUSH_RECORDS_SQL);
+            (run(PUSH_RECORDS_OLD_SQL), new_run)
+        };
+        assert_eq!(old_run.1, new_run.1, "the old and the new statement agree");
+        old.push(old_run.0);
+        new.push(new_run.0);
+    }
+    let (old, new) = (median(old), median(new));
+    let per = |ms: f64| ms / rows.max(1) as f64;
+    println!(
+        "| {which} | {events} | {rows} | {:.0} | {old:.1} | {new:.1} | {:.4} | {:.4} | {:.3} |",
+        records as f64 / rows.max(1) as f64,
+        per(old),
+        per(new),
+        new / old
     );
 }
 
