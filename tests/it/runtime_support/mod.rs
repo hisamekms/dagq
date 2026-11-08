@@ -1244,6 +1244,11 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
         codex: PathBuf::from("/nonexistent/codex"),
         // A stop of a run in a clone does not reach the host's podman.
         run_containers: Some(runtime::RunContainersPort(Arc::new(NoContainers))),
+        // The host's disk is not read: a test that gives no free space
+        // checks none, and one that does gets the reserve's least, 5 GiB,
+        // whatever the host's volume (ADR-t4473-1).
+        free_space: |_| None,
+        total_space: |_| None,
         ..base
     }
 }

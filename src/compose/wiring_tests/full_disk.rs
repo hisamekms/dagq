@@ -17,9 +17,6 @@ use crate::{
     domain::{AskKind, RunStatus, TaskDetail, TaskStatus},
 };
 
-/// The least free bytes a claim needs in this test.
-const GIB: u64 = 1 << 30;
-
 /// The payloads of `detail`'s events of `kind`, oldest first.
 fn payloads(detail: &TaskDetail, kind: &str) -> Vec<Value> {
     detail
@@ -49,8 +46,7 @@ fn a_session_dead_on_a_full_disk_resumes_once_there_is_room_and_lands() {
             receipts: vec![died_on_a_full_disk, succeeded],
             verdicts: vec![verdict("pass", "meets the acceptance")],
         },
-    )
-    .with_min_free(GIB);
+    );
     let free = wiring.free.clone();
     wiring
         .agent

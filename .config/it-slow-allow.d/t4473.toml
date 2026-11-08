@@ -1,0 +1,24 @@
+# The items of task 4473 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+# Task 4473 changed only the free space values and the thresholds these tests
+# compare (the reserve of ADR-t4473-1 in place of a factor); each runs a real
+# supervisor or integrate and its time under the host's load is that of its
+# processes, not of the change.
+
+# 6.3s
+[[test]]
+name = "runtime_disk::a_run_in_flight_keeps_a_shortage_from_asking_until_it_waits"
+reason = "B 境界（守る境界）: 走っている run がある間は空きの不足で ask を開かず、run が待ちに入ると開くことを、supervisor の pass と SQLite の ask の配線で確かめる"
+task = 4473
+
+# 5.4s
+[[test]]
+name = "runtime_disk::a_persons_integrate_counts_the_scratchpads_in_a_runs_size"
+reason = "B 境界（守る境界）: 人の integrate が承認の前に queue の標本と空きを読み、足りなければ run を変えずに断ることを、integrate のプロセスと SQLite の event の配線で確かめる"
+task = 4473
+
+# 7.1s
+[[test]]
+name = "runtime_disk::a_handoff_hands_over_a_landing_that_waits_for_room"
+reason = "B 境界（守る境界）: 空きを待つ着地を handoff が lease ごと渡すことを、supervisor の handoff と SQLite の lease の配線で確かめる"
+task = 4473

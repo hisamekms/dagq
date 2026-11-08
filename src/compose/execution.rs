@@ -648,6 +648,8 @@ impl OneShot {
         let read_free =
             || (self.free_space)(&runs_dir(&db)).or_else(|| db.parent().and_then(self.free_space));
         let free = read_free();
+        let total =
+            (self.total_space)(&runs_dir(&db)).or_else(|| db.parent().and_then(self.total_space));
         // Only looked at: the supervisor starts the server (ADR-t2086-1).
         let sccache = crate::infrastructure::sccache::SystemSccache {
             dagq: std::env::current_exe().ok(),
@@ -745,10 +747,16 @@ impl OneShot {
             processes: &SystemProcesses,
             pid: std::process::id(),
             load_average,
-            disk: Some(integration::DiskRoom { config: disk, free }),
+            disk: Some(integration::DiskRoom {
+                config: disk,
+                free,
+                total,
+            }),
             retry_disk: Some(integration::RetryDisk {
                 config: disk,
                 free: &read_free,
+                total,
+                moving: None,
             }),
             sccache: Some(&sccache),
             verification_tokens: &crate::infrastructure::queue_broker::SystemVerificationTokens {

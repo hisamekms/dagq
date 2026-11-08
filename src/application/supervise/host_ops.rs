@@ -59,11 +59,13 @@ pub(super) struct HostOpsState {
     /// Looks at and starts the host's sccache server (ADR-t1215-1).
     sccache_port: Option<SccachePort>,
     sccache: sccache::SccacheWatch,
-    /// `[disk]`: how much free disk space a claim and a landing need
-    /// (task 377).
+    /// `[disk]`: the reserve and when the disk ask opens (task 377,
+    /// ADR-t4473-1).
     disk_config: crate::domain::disk::DiskConfig,
     /// Reads the free bytes of the file system of a path.
     free_space: fn(&Path) -> Option<u64>,
+    /// Reads the size of the file system of a path.
+    total_space: fn(&Path) -> Option<u64>,
     /// Lists the directories of the Claude Code scratchpads (task 1100).
     scratchpad_roots: ScratchpadRoots,
     /// The disk between passes (task 377).
@@ -79,6 +81,19 @@ pub(super) struct HostOpsState {
     /// The 1-minute load average, and the host's versions a claim records.
     load_average: fn() -> Option<f64>,
     host_versions: fn(&Path, Option<&Path>, Option<&Path>) -> HostVersions,
+}
+
+/// What a landing's retry of its verification reads the disk with
+/// ([`HostOpsState::disk_reader`]).
+#[derive(Debug, Clone)]
+pub(super) struct DiskReader {
+    pub(super) config: crate::domain::disk::DiskConfig,
+    pub(super) free_space: fn(&Path) -> Option<u64>,
+    pub(super) total_space: fn(&Path) -> Option<u64>,
+    /// The runs moving besides the landings under way at the latest
+    /// pass's reading, read when it is needed (a retry comes minutes after
+    /// the landing started).
+    pub(super) moving: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl HostOpsState {
@@ -101,6 +116,7 @@ impl HostOpsState {
             sccache: sccache::SccacheWatch::default(),
             disk_config: settings.disk,
             free_space: ports.free_space,
+            total_space: ports.total_space,
             scratchpad_roots: ports.scratchpad_roots.clone(),
             disk: disk::DiskWatch::default(),
             free: None,
@@ -259,12 +275,27 @@ impl HostOpsState {
         self.disk.landing_short
     }
 
-    /// `[disk]` and the reader of the free bytes, for a landing's retry
-    /// of its verification.
-    pub(super) const fn disk_reader(
-        &self,
-    ) -> (crate::domain::disk::DiskConfig, fn(&Path) -> Option<u64>) {
-        (self.disk_config, self.free_space)
+    /// `[disk]`, the readers of the free and total bytes and the runs
+    /// moving at this pass's reading, for a landing's retry of its
+    /// verification.
+    pub(super) fn disk_reader(&self) -> DiskReader {
+        DiskReader {
+            config: self.disk_config,
+            free_space: self.free_space,
+            total_space: self.total_space,
+            moving: self.disk.moving.clone(),
+        }
+    }
+
+    /// What a claim and a landing need, as this pass read the disk.
+    pub(super) const fn disk_needs(&self) -> crate::domain::disk::DiskNeeds {
+        self.disk.needs
+    }
+
+    /// How many new runs this pass may claim for the disk; `None` for no
+    /// limit.
+    pub(super) const fn disk_claims(&self) -> Option<usize> {
+        self.disk.claims
     }
 
     /// The port of the host's sccache server.

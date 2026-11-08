@@ -1,23 +1,13 @@
-//! The free disk space a run needs (ADR-0047 decision 44, task 377): the
-//! supervisor claims no new run, and starts no landing's verification,
-//! while the free space of the queue's directory (where the run worktrees
-//! are) is below what one needs. What one needs follows from what the
-//! recent runs built: the largest `bytes` of the latest
-//! `build_outputs_removed` (the `target/` an ended run left, task 376) and
-//! of the latest `scratchpad_removed` (the Claude Code scratchpad a run's
-//! session wrote to, task 1100) and `run_tmp_removed` (the `TMPDIR` the
-//! runtime gave a run's worker turns and its landing's verification on
-//! the host, task 1290) together
-//! ([`run_size`]), times a
-//! factor per step, never below `min_free_bytes`. The `[disk]` table of
-//! `dagq.toml` sets them.
-//!
-//! Beside them stands the rule without factors that is not yet wired to
-//! the supervisor: a size sample per ended run ([`run_samples`]), the size
-//! a new run is expected to take from the recent samples
-//! ([`expected_run_size`]), a reserve of the volume ([`reserve_bytes`])
-//! and the verdict on a claim and a landing ([`DiskState::verdict`]),
-//! which always lets the queue move on above the reserve.
+//! The free disk space a run needs (ADR-0047 decision 44 as ADR-t4473-1
+//! amends it): the supervisor claims no new run, and starts no landing's
+//! verification, while the free space of the queue's directory (where the
+//! run worktrees are) is short of what one needs. What one needs follows
+//! from a reserve of the volume ([`reserve_bytes`]) and the size a new run
+//! is expected to take from the recent runs' samples ([`run_samples`],
+//! [`expected_run_size`]), with no factor; [`DiskState::needs`] and
+//! [`DiskState::claims`] give them for a pass, and the queue always moves
+//! on above the reserve with no run moving. The `[disk]` table of
+//! `dagq.toml` sets the reserve's share and when the disk ask opens.
 
 use crate::domain::EventKind;
 use serde::Serialize;
@@ -25,20 +15,6 @@ use std::path::Path;
 
 use super::views::RunEvent;
 
-/// The run event whose `bytes` measure what a run built.
-pub const BUILD_OUTPUTS_REMOVED: &str = super::event_kind::BUILD_OUTPUTS_REMOVED;
-/// The run event whose `bytes` measure what a run's session left in its
-/// Claude Code scratchpad (task 1100).
-pub const SCRATCHPAD_REMOVED: &str = super::event_kind::SCRATCHPAD_REMOVED;
-/// The run event whose `bytes` measure what a run's turns left in the
-/// `TMPDIR` the runtime gave them (task 1290).
-pub const RUN_TMP_REMOVED: &str = super::event_kind::RUN_TMP_REMOVED;
-/// The kinds of the events a run's size is read from.
-pub const RUN_SIZE_EVENTS: [EventKind; 3] = [
-    EventKind::BuildOutputsRemoved,
-    EventKind::ScratchpadRemoved,
-    EventKind::RunTmpRemoved,
-];
 /// The `subject` of the `cost` ask about the disk (ADR-0047 decision 42).
 pub const DISK_SUBJECT: &str = "disk";
 /// The options of the disk ask (ADR-0047 decision 44): `done` once a
@@ -47,14 +23,6 @@ pub const DISK_OPTIONS: &[&str] = &["done", "wait"];
 /// The `repair` of the `auto_repaired` a cleanup for the disk records.
 pub const DISK_CLEANUP: &str = "disk_cleanup";
 
-/// Default number of the latest `build_outputs_removed` read.
-pub const DEFAULT_SAMPLE_RUNS: i64 = 20;
-/// Default factor of the recent run size (the largest build outputs plus
-/// the largest scratchpad and run `TMPDIR`) a claim needs free.
-pub const DEFAULT_CLAIM_FACTOR: f64 = 2.0;
-/// Default factor of the recent run size a landing's verification needs
-/// free.
-pub const DEFAULT_INTEGRATE_FACTOR: f64 = 1.5;
 /// Default seconds a shortage lasts, from the first reading short of it,
 /// before the disk ask opens: 30 minutes, past the few minutes a run's
 /// build or a cleanup moves the free space across a threshold.
@@ -69,18 +37,11 @@ pub const DEFAULT_CLOSE_MARGIN: f64 = 0.05;
 /// The `[disk]` table of `dagq.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct DiskConfig {
-    /// How many of the latest `build_outputs_removed`, of the latest
-    /// `scratchpad_removed` and of the latest `run_tmp_removed` the runs'
-    /// sizes are read from.
-    pub sample_runs: i64,
-    /// A claim needs the recent run size (the largest build outputs plus
-    /// the largest scratchpad and run `TMPDIR`) times this free.
-    pub claim_factor: f64,
-    /// A landing's verification needs the recent run size times this free.
-    pub integrate_factor: f64,
-    /// The least free bytes either needs, also before any build was
-    /// measured; `None` checks nothing until one was.
-    pub min_free_bytes: Option<u64>,
+    /// `reserve` (a share of the volume written as `"5%"`, default
+    /// [`DEFAULT_RESERVE_SHARE`]): the free space no claim nor landing goes
+    /// below is this share of the volume's size, at least
+    /// [`MIN_RESERVE_BYTES`] ([`reserve_bytes`]).
+    pub reserve: f64,
     /// `ask_after_secs` (a positive whole number of seconds, default
     /// [`DEFAULT_ASK_AFTER_SECS`]): how long a shortage lasts, from the
     /// first pass that read it, before the disk ask opens. The claims and
@@ -103,10 +64,7 @@ pub struct DiskConfig {
 impl Default for DiskConfig {
     fn default() -> Self {
         Self {
-            sample_runs: DEFAULT_SAMPLE_RUNS,
-            claim_factor: DEFAULT_CLAIM_FACTOR,
-            integrate_factor: DEFAULT_INTEGRATE_FACTOR,
-            min_free_bytes: None,
+            reserve: DEFAULT_RESERVE_SHARE,
             ask_after_secs: DEFAULT_ASK_AFTER_SECS,
             ask_margin: DEFAULT_ASK_MARGIN,
             close_margin: DEFAULT_CLOSE_MARGIN,
@@ -116,112 +74,61 @@ impl Default for DiskConfig {
 
 impl DiskConfig {
     /// The setting names of the `[disk]` table.
-    pub const KEYS: [&str; 7] = [
+    pub const KEYS: [&str; 4] = ["reserve", "ask_after_secs", "ask_margin", "close_margin"];
+    /// The settings that are shares (positive numbers, not whole ones).
+    pub const FACTORS: [&str; 2] = ["ask_margin", "close_margin"];
+    /// The settings of an older `[disk]` that are read no more: the
+    /// thresholds follow the reserve and the recent runs' samples with no
+    /// factor (ADR-t4473-1), so a `dagq.toml` that still has them is
+    /// warned of and read on without them.
+    pub const RETIRED_KEYS: [&str; 4] = [
         "sample_runs",
         "claim_factor",
         "integrate_factor",
         "min_free_bytes",
-        "ask_after_secs",
-        "ask_margin",
-        "close_margin",
-    ];
-    /// The settings that are factors or shares (positive numbers, not
-    /// whole ones).
-    pub const FACTORS: [&str; 4] = [
-        "claim_factor",
-        "integrate_factor",
-        "ask_margin",
-        "close_margin",
     ];
 
     /// The whole-number setting `key` set to `value`; `None` for a key
     /// that is not one.
     pub fn set_whole(&mut self, key: &str, value: i64) -> Option<()> {
         match key {
-            "sample_runs" => self.sample_runs = value,
-            "min_free_bytes" => self.min_free_bytes = Some(u64::try_from(value).ok()?),
             "ask_after_secs" => self.ask_after_secs = u64::try_from(value).ok()?,
             _ => return None,
         }
         Some(())
     }
 
-    /// The factor `key` set to `value`; `None` for a key that is not one.
+    /// The share `key` set to `value`; `None` for a key that is not one.
     pub fn set_factor(&mut self, key: &str, value: f64) -> Option<()> {
         match key {
-            "claim_factor" => self.claim_factor = value,
-            "integrate_factor" => self.integrate_factor = value,
             "ask_margin" => self.ask_margin = value,
             "close_margin" => self.close_margin = value,
             _ => return None,
         }
         Some(())
     }
-
-    /// What a claim and a landing need free, given the sizes of the recent
-    /// runs (the largest counts; [`run_size`] gives one).
-    pub fn needs(&self, builds: &[u64]) -> DiskNeeds {
-        let largest = builds.iter().copied().max();
-        let need = |factor: f64| {
-            let scaled = largest.map(|bytes| (bytes as f64 * factor).ceil() as u64);
-            match (scaled, self.min_free_bytes) {
-                (Some(scaled), Some(least)) => Some(scaled.max(least)),
-                (scaled, least) => scaled.or(least),
-            }
-        };
-        DiskNeeds {
-            largest_build: largest,
-            claim: need(self.claim_factor),
-            landing: need(self.integrate_factor),
-        }
-    }
 }
 
-/// The free bytes a claim and a landing need; `None` checks nothing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub struct DiskNeeds {
-    /// The recent run size they follow from: the largest build outputs
-    /// plus the largest Claude Code scratchpad and run `TMPDIR` of the recent runs (the name
-    /// is kept from before scratchpads were counted).
-    pub largest_build: Option<u64>,
-    pub claim: Option<u64>,
-    pub landing: Option<u64>,
+/// The share of the volume `text` (`"5%"`: a number above 0 and below 100
+/// followed by `%`) names, for `[disk] reserve`; `None` for any other text.
+pub fn parse_reserve(text: &str) -> Option<f64> {
+    let percent: f64 = text.trim().strip_suffix('%')?.trim().parse().ok()?;
+    (percent.is_finite() && percent > 0.0 && percent < 100.0).then_some(percent / 100.0)
 }
 
-/// The size of a recent run the thresholds follow, from `events` (the
-/// latest `build_outputs_removed`, `scratchpad_removed` and
-/// `run_tmp_removed`), for [`DiskConfig::needs`]: the largest build
-/// outputs, the largest scratchpad and the largest run `TMPDIR` together,
-/// as a run keeps them on the disk at once. They are
-/// taken over the runs apart, not per run: a run whose task goes on
-/// records its build outputs, and its scratchpad only once the task is
-/// over (a landed run's build goes with its whole worktree), so the two
-/// seldom fall on the same run. A `build_outputs_removed` counts whatever
-/// its `reason`, of an unfinished run too. `None` without either; events
-/// of other kinds or without `bytes` are left out, the
-/// `incremental_sessions_removed` of a part of a run's build outputs
-/// among them: a run's next build writes that part again, and the rest of
-/// what it built stayed, so its bytes are no run's size.
-pub fn run_size(events: &[RunEvent]) -> Option<u64> {
-    let mut largest: [Option<u64>; RUN_SIZE_EVENTS.len()] = [None; RUN_SIZE_EVENTS.len()];
-    for event in events {
-        let Some(kind) = RUN_SIZE_EVENTS.iter().position(|kind| *kind == event.kind) else {
-            continue;
-        };
-        let Some(bytes) = event
-            .payload
-            .get("bytes")
-            .and_then(serde_json::Value::as_u64)
-        else {
-            continue;
-        };
-        largest[kind] = Some(largest[kind].map_or(bytes, |seen| seen.max(bytes)));
-    }
-    largest
-        .iter()
-        .any(Option::is_some)
-        .then(|| largest.iter().flatten().sum())
-}
+/// The kinds of the records the samples are read from ([`run_samples`]).
+pub const SAMPLE_KINDS: [EventKind; 4] = [
+    EventKind::BuildOutputsRemoved,
+    EventKind::WorktreeRemoved,
+    EventKind::ScratchpadRemoved,
+    EventKind::RunTmpRemoved,
+];
+
+/// How many of the latest records of each of [`SAMPLE_KINDS`] the samples
+/// are read from: 500, far more than the [`SAMPLE_COUNT`] runs the
+/// expectation reads, as a run records some kinds more than once, while a
+/// pass reads no more than a bounded number.
+pub const SAMPLE_EVENT_LIMIT: usize = 500;
 
 /// The kinds of the records a run's size sample is read from
 /// ([`run_samples`]), with the part of the size each gives. The
@@ -446,19 +353,68 @@ pub struct DiskVerdict {
     pub landing: bool,
 }
 
+/// The free bytes a claim and a landing need now ([`DiskState::needs`]),
+/// for the holds, the cleanup and the disk ask.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DiskNeeds {
+    /// The reserve ([`reserve_bytes`]).
+    pub reserve: u64,
+    /// What a new run is expected to take ([`expected_run_size`]).
+    pub expected: Option<u64>,
+    /// What a claim needs free: the reserve with no run moving or no
+    /// expectation, else the reserve, the expectation, the moving runs'
+    /// remaining and, with a landing waiting, the expectation once more.
+    pub claim: u64,
+    /// What a landing's verification needs free: the reserve with no run
+    /// moving or no expectation, else the reserve and the expectation.
+    pub landing: u64,
+    /// The claims wait this pass whatever is free, with no hold: a landing
+    /// waits with no run moving (it goes first), or runs move with no
+    /// expectation (a project with no samples runs one at a time).
+    pub claims_wait: bool,
+}
+
 impl DiskState {
-    /// Whether a claim and a landing may go, with the reserve `share` of
-    /// the volume ([`reserve_bytes`]). No factor is applied: a run larger
-    /// than expected may fail for want of space and is retried. Unread
-    /// free space holds nothing; below the reserve both are held. Above
-    /// it, the queue always moves on: a landing goes with no run moving
-    /// or no expectation, and otherwise when what is free above the
-    /// reserve holds the expectation. A claim with no run moving goes
-    /// unless a landing waits (the landing goes first, and frees the
-    /// worktree; the next pass decides the claim); with runs moving and
-    /// no expectation it is held (a project with no records runs one at a
-    /// time); otherwise it goes when what is free above the reserve holds
-    /// the expectation, the moving runs' remaining and, with a landing
+    /// What a claim and a landing need free now, with the reserve `share`
+    /// of the volume ([`reserve_bytes`]). No factor is applied: a run
+    /// larger than expected may fail for want of space and is retried.
+    pub fn needs(&self, share: f64) -> DiskNeeds {
+        let reserve = reserve_bytes(self.total, share);
+        let moving = self.moving > 0;
+        let landing = match (moving, self.expected) {
+            (true, Some(expected)) => reserve.saturating_add(expected),
+            _ => reserve,
+        };
+        let claim = match (moving, self.expected) {
+            (true, Some(expected)) => reserve
+                .saturating_add(expected)
+                .saturating_add(self.remaining)
+                .saturating_add(if self.landing_waiting { expected } else { 0 }),
+            _ => reserve,
+        };
+        DiskNeeds {
+            reserve,
+            expected: self.expected,
+            claim,
+            landing,
+            claims_wait: if moving {
+                self.expected.is_none()
+            } else {
+                self.landing_waiting
+            },
+        }
+    }
+
+    /// Whether a claim and a landing may go ([`Self::needs`]). Unread free
+    /// space holds nothing; below the reserve both are held. Above it, the
+    /// queue always moves on: a landing goes with no run moving or no
+    /// expectation, and otherwise when what is free above the reserve
+    /// holds the expectation. A claim with no run moving goes unless a
+    /// landing waits (the landing goes first, and frees the worktree; the
+    /// next pass decides the claim); with runs moving and no expectation
+    /// it is held (a project with no records runs one at a time);
+    /// otherwise it goes when what is free above the reserve holds the
+    /// expectation, the moving runs' remaining and, with a landing
     /// waiting, the expectation once more.
     pub fn verdict(&self, share: f64) -> DiskVerdict {
         let Some(free) = self.free else {
@@ -467,24 +423,38 @@ impl DiskState {
                 landing: true,
             };
         };
-        let Some(room) = free.checked_sub(reserve_bytes(self.total, share)) else {
-            return DiskVerdict {
-                claim: false,
-                landing: false,
-            };
+        let needs = self.needs(share);
+        DiskVerdict {
+            claim: free >= needs.claim && !needs.claims_wait,
+            landing: free >= needs.landing,
+        }
+    }
+
+    /// How many new runs may be claimed this pass ([`Self::verdict`]);
+    /// `None` for no limit (unread free space, or an expectation of 0).
+    /// With no run moving the first goes whatever it is expected to take,
+    /// and more only as the room above the reserve holds the expectation
+    /// for each; with runs moving, each claim needs the expectation above
+    /// what the moving runs and a waiting landing need.
+    pub fn claims(&self, share: f64) -> Option<usize> {
+        let free = self.free?;
+        if !self.verdict(share).claim {
+            return Some(0);
+        }
+        let needs = self.needs(share);
+        let Some(expected) = self.expected else {
+            return Some(1);
         };
-        let landing = self.moving == 0 || self.expected.is_none_or(|expected| room >= expected);
-        let claim = match (self.moving, self.expected) {
-            (0, _) => !self.landing_waiting,
-            (_, None) => false,
-            (_, Some(expected)) => {
-                let landing = if self.landing_waiting { expected } else { 0 };
-                room >= expected
-                    .saturating_add(self.remaining)
-                    .saturating_add(landing)
-            }
-        };
-        DiskVerdict { claim, landing }
+        if expected == 0 {
+            return None;
+        }
+        let each = |room: u64| usize::try_from(room / expected).unwrap_or(usize::MAX);
+        if self.moving == 0 {
+            return Some(each(free - needs.reserve).max(1));
+        }
+        // What the moving runs and a waiting landing need: what a claim
+        // needs less the expectation of the first new run.
+        Some(each(free - (needs.claim - expected)))
     }
 }
 
@@ -535,31 +505,8 @@ pub fn worktree_executables<'a>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::event_kind::{BUILD_OUTPUTS_REMOVED, RUN_TMP_REMOVED, SCRATCHPAD_REMOVED};
     use super::*;
-
-    #[test]
-    fn the_needs_follow_the_largest_recent_build() {
-        let config = DiskConfig::default();
-        assert_eq!(config.needs(&[]), DiskNeeds::default());
-        let needs = config.needs(&[100, 400, 250]);
-        assert_eq!(needs.largest_build, Some(400));
-        assert_eq!(needs.claim, Some(800));
-        assert_eq!(needs.landing, Some(600));
-        // The least free bytes apply before any build and as a floor.
-        let floor = DiskConfig {
-            min_free_bytes: Some(700),
-            ..config
-        };
-        assert_eq!(floor.needs(&[]).claim, Some(700));
-        assert_eq!(floor.needs(&[]).landing, Some(700));
-        assert_eq!(floor.needs(&[400]).claim, Some(800));
-        assert_eq!(floor.needs(&[400]).landing, Some(700));
-        let odd = DiskConfig {
-            integrate_factor: 1.5,
-            ..config
-        };
-        assert_eq!(odd.needs(&[3]).landing, Some(5));
-    }
 
     fn event(kind: &str, run: Option<&str>, bytes: Option<u64>) -> RunEvent {
         RunEvent {
@@ -577,101 +524,57 @@ mod tests {
         }
     }
 
+    /// The incremental sessions removed of a run's build outputs are no
+    /// sample's record: the run's next build writes them again.
     #[test]
-    fn a_run_size_adds_the_largest_scratchpad_to_the_largest_build() {
-        const A: &str = "00000000-0000-4000-8000-00000000000a";
-        const B: &str = "00000000-0000-4000-8000-00000000000b";
-        let size = run_size(&[
-            event(BUILD_OUTPUTS_REMOVED, Some(A), Some(300)),
-            event(BUILD_OUTPUTS_REMOVED, Some(A), Some(500)),
-            event(SCRATCHPAD_REMOVED, Some(B), Some(1_000)),
-            event(SCRATCHPAD_REMOVED, None, Some(40)),
-            // Not counted: no bytes, another kind.
-            event(BUILD_OUTPUTS_REMOVED, Some(B), None),
-            event(
-                super::super::event_kind::WORKTREE_REMOVED,
-                Some(B),
-                Some(9_000),
-            ),
-        ]);
-        assert_eq!(size, Some(1_500));
-        assert_eq!(
-            run_size(&[event(SCRATCHPAD_REMOVED, Some(A), Some(7))]),
-            Some(7)
-        );
-        assert_eq!(
-            run_size(&[event(BUILD_OUTPUTS_REMOVED, Some(A), Some(9))]),
-            Some(9)
-        );
-        assert_eq!(run_size(&[]), None);
-        // A run's `TMPDIR` (task 1290) adds its largest too.
-        assert_eq!(
-            run_size(&[
-                event(BUILD_OUTPUTS_REMOVED, Some(A), Some(500)),
-                event(SCRATCHPAD_REMOVED, Some(B), Some(1_000)),
-                event(RUN_TMP_REMOVED, Some(A), Some(20)),
-                event(RUN_TMP_REMOVED, Some(B), Some(70)),
-            ]),
-            Some(1_570)
-        );
-        assert_eq!(
-            run_size(&[event(RUN_TMP_REMOVED, Some(A), Some(3))]),
-            Some(3)
-        );
-    }
-
-    /// The old incremental sessions removed of a run that builds nothing
-    /// now are a part of its build outputs: no run's size, beside a build
-    /// or alone, however large.
-    #[test]
-    fn the_incremental_sessions_removed_are_no_run_size() {
-        const A: &str = "00000000-0000-4000-8000-00000000000a";
+    fn the_incremental_sessions_removed_are_no_sample() {
         let sessions = super::super::event_kind::INCREMENTAL_SESSIONS_REMOVED;
-        assert!(!RUN_SIZE_EVENTS.iter().any(|kind| kind.as_str() == sessions));
-        assert_eq!(
-            run_size(&[
-                event(BUILD_OUTPUTS_REMOVED, Some(A), Some(500)),
-                event(sessions, Some(A), Some(9_000)),
-            ]),
-            Some(500)
-        );
-        assert_eq!(run_size(&[event(sessions, Some(A), Some(9_000))]), None);
+        assert!(!SAMPLE_KINDS.iter().any(|kind| kind.as_str() == sessions));
+        for (kind, _) in SAMPLE_EVENTS {
+            assert!(SAMPLE_KINDS.contains(&kind), "{kind:?}");
+        }
     }
 
     #[test]
     fn the_settings_are_set_by_name() {
         let mut config = DiskConfig::default();
-        assert_eq!(config.set_whole("sample_runs", 5), Some(()));
-        assert_eq!(config.set_whole("min_free_bytes", 9), Some(()));
+        assert_eq!(config.reserve, DEFAULT_RESERVE_SHARE);
         assert_eq!(config.set_whole("ask_after_secs", 60), Some(()));
-        assert_eq!(config.set_whole("claim_factor", 9), None);
         assert_eq!(config.set_whole("ask_margin", 9), None);
-        assert_eq!(config.set_factor("claim_factor", 3.0), Some(()));
-        assert_eq!(config.set_factor("integrate_factor", 2.5), Some(()));
+        assert_eq!(config.set_whole("reserve", 9), None);
         assert_eq!(config.set_factor("ask_margin", 0.2), Some(()));
         assert_eq!(config.set_factor("close_margin", 0.1), Some(()));
-        assert_eq!(config.set_factor("sample_runs", 2.5), None);
         assert_eq!(config.set_factor("ask_after_secs", 2.5), None);
         assert_eq!(
             config,
             DiskConfig {
-                sample_runs: 5,
-                claim_factor: 3.0,
-                integrate_factor: 2.5,
-                min_free_bytes: Some(9),
+                reserve: DEFAULT_RESERVE_SHARE,
                 ask_after_secs: 60,
                 ask_margin: 0.2,
                 close_margin: 0.1,
             }
         );
-        // Every key is set by one of the two, and the factors by the second.
-        for key in DiskConfig::KEYS {
+        // Every key but the reserve is set by one of the two, and the
+        // shares by the second; no retired key is a key.
+        for key in DiskConfig::KEYS.iter().filter(|key| **key != "reserve") {
             let mut config = DiskConfig::default();
             let factor = config.set_factor(key, 1.0).is_some();
-            assert_eq!(factor, DiskConfig::FACTORS.contains(&key), "{key}");
+            assert_eq!(factor, DiskConfig::FACTORS.contains(key), "{key}");
             assert_eq!(config.set_whole(key, 1).is_some(), !factor, "{key}");
         }
+        for key in DiskConfig::RETIRED_KEYS {
+            assert!(!DiskConfig::KEYS.contains(&key), "{key}");
+        }
         assert_eq!(gib(1.5 * f64::from(1u32 << 30)), "1.5 GiB");
+    }
+
+    #[test]
+    fn a_reserve_is_a_share_written_as_a_percentage() {
+        assert_eq!(parse_reserve("5%"), Some(0.05));
+        assert_eq!(parse_reserve(" 12.5 % "), Some(0.125));
+        for bad in ["5", "0%", "100%", "-1%", "x%", "", "%", "inf%"] {
+            assert_eq!(parse_reserve(bad), None, "{bad}");
+        }
     }
 
     const GIB: u64 = 1 << 30;
@@ -1080,6 +983,80 @@ mod tests {
             })
             .landing
         );
+    }
+
+    /// The needs give the verdict's thresholds to the byte, and the claims
+    /// of a pass: one at least with no run moving, then one per expectation
+    /// the room holds.
+    #[test]
+    fn the_needs_give_the_verdict_and_bound_the_claims_of_a_pass() {
+        let reserve = 5 * GIB;
+        let state = |free: u64, expected: Option<u64>, moving, landing_waiting| DiskState {
+            free: Some(free),
+            total: 50 * GIB,
+            expected,
+            moving,
+            remaining: 0,
+            landing_waiting,
+        };
+        let share = DEFAULT_RESERVE_SHARE;
+        let e = Some(10 * GIB);
+        assert_eq!(
+            state(0, e, 2, true).needs(share),
+            DiskNeeds {
+                reserve,
+                expected: e,
+                claim: reserve + 20 * GIB,
+                landing: reserve + 10 * GIB,
+                claims_wait: false,
+            }
+        );
+        assert_eq!(state(0, e, 0, false).needs(share).claim, reserve);
+        assert_eq!(state(0, e, 0, false).needs(share).landing, reserve);
+        assert!(state(0, e, 0, true).needs(share).claims_wait);
+        assert!(state(0, None, 1, false).needs(share).claims_wait);
+        assert!(!state(0, None, 0, false).needs(share).claims_wait);
+        // A claim goes exactly when the claims of the pass are not 0.
+        for free in [
+            0,
+            reserve - 1,
+            reserve,
+            14 * GIB,
+            15 * GIB,
+            26 * GIB,
+            60 * GIB,
+        ] {
+            for expected in [None, Some(0), e] {
+                for moving in [0, 1, 3] {
+                    for waiting in [false, true] {
+                        let state = state(free, expected, moving, waiting);
+                        assert_eq!(
+                            state.verdict(share).claim,
+                            state.claims(share) != Some(0),
+                            "{state:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // No run moving: one whatever the expectation, more as the room
+        // above the reserve holds it; none while a landing waits.
+        assert_eq!(state(reserve, e, 0, false).claims(share), Some(1));
+        assert_eq!(state(reserve, None, 0, false).claims(share), Some(1));
+        assert_eq!(state(26 * GIB, e, 0, false).claims(share), Some(2));
+        assert_eq!(state(26 * GIB, e, 0, true).claims(share), Some(0));
+        // Runs moving: one per expectation above a waiting landing's.
+        assert_eq!(state(35 * GIB, e, 2, false).claims(share), Some(3));
+        assert_eq!(state(35 * GIB, e, 2, true).claims(share), Some(2));
+        assert_eq!(state(24 * GIB, e, 2, true).claims(share), Some(0));
+        assert_eq!(state(60 * GIB, None, 2, false).claims(share), Some(0));
+        // No limit: an expectation of 0, or unread free space.
+        assert_eq!(state(60 * GIB, Some(0), 2, true).claims(share), None);
+        let unread = DiskState {
+            free: None,
+            ..state(0, e, 2, true)
+        };
+        assert_eq!(unread.claims(share), None);
     }
 
     fn executable(pid: u32, ppid: u32, executable: Option<&str>) -> ProcessExecutable {

@@ -37,7 +37,7 @@ use crate::domain::{
     CommitSha, EvidenceCheck, IntegrationOutcome, NewTask, PushReport, PushResult, Reason,
     ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus, Task,
     TaskId, TaskRun,
-    disk::{DiskConfig, gib},
+    disk::{DiskConfig, DiskState, gib},
     execution_class::missing_spike_result,
     heartbeat_stale,
     landing_branch::{
@@ -776,22 +776,30 @@ impl HandoffDrain<'_> {
 }
 
 /// The free disk space integrate checks before it retries a verification
-/// command that failed on a full disk (task 639): the `[disk]` of
-/// `dagq.toml` and a reading of the free bytes of the queue's directory
-/// now, `None` when it cannot be read.
+/// command that failed on a full disk (task 639), against what a
+/// landing's verification needs as the supervisor judges it
+/// ([`crate::domain::disk::DiskState::needs`]): the `[disk]` of
+/// `dagq.toml`, a reading of the free bytes of the queue's directory now
+/// and the size of its volume, `None` when they cannot be read, and the
+/// runs moving besides the landing, read at the retry (`None` counts the
+/// queue's runs in [`MOVING_STATUSES`]).
 #[derive(Clone, Copy)]
 pub struct RetryDisk<'a> {
     pub config: DiskConfig,
     pub free: &'a dyn Fn() -> Option<u64>,
+    pub total: Option<u64>,
+    pub moving: Option<&'a dyn Fn() -> usize>,
 }
 
 /// What a person's `integrate` checks the free disk space with (task
-/// 638): the `[disk]` of `dagq.toml` and the free bytes of the queue's
-/// directory, `None` when they could not be read.
+/// 638): the `[disk]` of `dagq.toml`, the free bytes of the queue's
+/// directory and the size of its volume, `None` when they could not be
+/// read; the runs moving are the queue's runs in [`MOVING_STATUSES`].
 #[derive(Debug, Clone, Copy)]
 pub struct DiskRoom {
     pub config: DiskConfig,
     pub free: Option<u64>,
+    pub total: Option<u64>,
 }
 
 /// A request to the [`Integrator`] to land a run that holds the
@@ -1103,7 +1111,8 @@ fn begin(
         },
     )?;
     if let Some(room) = ctx.disk {
-        check_disk_room(&*queue, &room, run.id())?;
+        let now = crate::application::unix_millis(ctx.clock.system_time());
+        check_disk_room(&*queue, &room, run.id(), now)?;
     }
     // The call is the approval to land (ADR-0016 decision 5): a run it
     // parks as `needs_session` is landed by the supervisor once a resumed
@@ -1180,52 +1189,43 @@ fn approval_due(
 }
 
 /// Refuse to land `run` while the free disk space is below what a
-/// landing's verification needs (task 638, ADR-0047 decision 44): the same
-/// threshold the supervisor holds its landings at. A person is at hand, so
-/// the call fails instead of waiting; nothing is recorded. No threshold (no
-/// build measured and no `min_free_bytes`) or unread free space checks
-/// nothing, as in the supervisor.
-fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId) -> Result<()> {
-    if let Some(DiskShort {
-        free,
-        need,
-        largest_build,
-    }) = disk_short(queue, &room.config, room.free)?
-    {
-        bail!(disk_refusal(
-            run,
-            DiskShort {
-                free,
-                need,
-                largest_build
-            }
-        ));
+/// landing's verification needs (task 638, ADR-t4473-1): the same need the
+/// supervisor holds its landings at, with the queue's running runs as the
+/// runs moving. A person is at hand, so the call fails instead of
+/// waiting; nothing is recorded. Unread free space checks nothing, as in
+/// the supervisor.
+fn check_disk_room(queue: &dyn Queue, room: &DiskRoom, run: &RunId, now_millis: i64) -> Result<()> {
+    if let Some(short) = disk_short(queue, &room.config, room.free, room.total, None, now_millis)? {
+        bail!(disk_refusal(run, short));
     }
     Ok(())
 }
 
 /// Why a person's `integrate` refuses to land `run` while the disk is
-/// `short`: what is free, what is needed, the recent run size and where
-/// to free room, in the words of the inbox's disk ask.
+/// `short`: what is free, what is needed and what it is made of, and
+/// where to free room, in the words of the inbox's disk ask.
 fn disk_refusal(run: &RunId, short: DiskShort) -> String {
-    let largest = short
-        .largest_build
-        .map_or_else(|| "none measured".into(), |bytes| gib(bytes as f64));
+    let expected = short
+        .expected
+        .map_or_else(|| "none yet".into(), |bytes| gib(bytes as f64));
     format!(
-        "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR of the recent runs, {largest}, times [disk] integrate_factor of dagq.toml, at least min_free_bytes); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
+        "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the reserve of {}, [disk] reserve of dagq.toml as a share of the volume and at least {}, plus, while other runs move, what a run is expected to take from the sizes of the recent runs, {expected}); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
         gib(short.free as f64),
         gib(short.need as f64),
+        gib(short.reserve as f64),
+        gib(crate::domain::disk::MIN_RESERVE_BYTES as f64),
     )
 }
 
-/// The free disk space below a landing's threshold (task 377): what is
-/// free, what is needed, and the recent run size it follows (the largest
-/// build outputs plus the largest scratchpad and run `TMPDIR`).
+/// The free disk space below what a landing's verification needs: what
+/// is free, what is needed, and the reserve and the expectation it is
+/// made of.
 #[derive(Debug, Clone, Copy)]
 struct DiskShort {
     free: u64,
     need: u64,
-    largest_build: Option<u64>,
+    reserve: u64,
+    expected: Option<u64>,
 }
 
 impl DiskShort {
@@ -1233,34 +1233,74 @@ impl DiskShort {
         json!({
             "free_bytes": self.free,
             "needed_bytes": self.need,
-            "largest_build_bytes": self.largest_build,
+            "reserve_bytes": self.reserve,
+            "expected_bytes": self.expected,
         })
     }
 }
 
-/// Whether `free` is short of the landing threshold `config` sets over the
-/// sizes of the recent runs (`build_outputs_removed`,
-/// `scratchpad_removed` and `run_tmp_removed`): `None` with room, no
-/// threshold or no reading.
-fn disk_short(
-    queue: &dyn Queue,
+/// Whether `free` is short of what a landing's verification needs, with
+/// `total` the size of the volume, `moving` the runs moving besides it
+/// (`None` counts the queue's runs in [`MOVING_STATUSES`]) and the expectation from the
+/// recent runs' samples ([`crate::application::recent_run_samples`]):
+/// `None` with room or no reading.
+fn disk_short<L: super::RunLog + ?Sized>(
+    queue: &L,
     config: &DiskConfig,
     free: Option<u64>,
+    total: Option<u64>,
+    moving: Option<usize>,
+    now_millis: i64,
 ) -> Result<Option<DiskShort>> {
-    let builds = crate::application::recent_run_sizes(queue, config.sample_runs)?;
-    Ok(landing_short(config, &builds, free))
+    if free.is_none() {
+        return Ok(None);
+    }
+    let samples = crate::application::recent_run_samples(queue)?;
+    let moving = match moving {
+        Some(moving) => moving,
+        None => {
+            let mut moving = 0;
+            for status in MOVING_STATUSES {
+                moving += queue.runs_with_status(status)?.len();
+            }
+            moving
+        }
+    };
+    Ok(landing_short(
+        &DiskState {
+            free,
+            total: total.unwrap_or(0),
+            expected: crate::domain::disk::expected_run_size(&samples, now_millis),
+            moving,
+            remaining: 0,
+            landing_waiting: false,
+        },
+        config.reserve,
+    ))
 }
 
-/// Whether `free` is short of the landing threshold `config` sets over
-/// `sizes`, the sizes of the recent runs ([`crate::domain::disk::run_size`]):
-/// `None` with room, no threshold or no reading.
-fn landing_short(config: &DiskConfig, sizes: &[u64], free: Option<u64>) -> Option<DiskShort> {
-    let needs = config.needs(sizes);
-    match (free, needs.landing) {
-        (Some(free), Some(need)) if free < need => Some(DiskShort {
+/// The statuses of the runs a person's `integrate` counts as moving: a
+/// worker's session or a verification under way. A run waiting for a
+/// person rests as `running` too and is counted, which errs toward
+/// needing more.
+const MOVING_STATUSES: [RunStatus; 4] = [
+    RunStatus::Claimed,
+    RunStatus::Starting,
+    RunStatus::Running,
+    RunStatus::Validating,
+];
+
+/// Whether the free bytes of `state` are short of what a landing's
+/// verification needs with the reserve `share`
+/// ([`DiskState::needs`]): `None` with room or no reading.
+fn landing_short(state: &DiskState, share: f64) -> Option<DiskShort> {
+    let needs = state.needs(share);
+    match state.free {
+        Some(free) if free < needs.landing => Some(DiskShort {
             free,
-            need,
-            largest_build: needs.largest_build,
+            need: needs.landing,
+            reserve: needs.reserve,
+            expected: needs.expected,
         }),
         _ => None,
     }
@@ -2618,7 +2658,14 @@ fn land(
             if first_failure.class.is_environmental() {
                 let short = match retry_disk {
                     Some(room) if first_failure.class == verify_failure::FailureClass::DiskFull => {
-                        disk_short(&*queue, &room.config, (room.free)())?
+                        disk_short(
+                            &*queue,
+                            &room.config,
+                            (room.free)(),
+                            room.total,
+                            room.moving.map(|moving| moving()),
+                            crate::application::unix_millis(clock.system_time()),
+                        )?
                     }
                     _ => None,
                 };
@@ -6792,52 +6839,84 @@ mod tests {
         assert!(!drains_for_handoff(Some(drain)));
     }
 
-    /// A person's `integrate` (task 638) refuses below the landing
-    /// threshold of `[disk]`: `min_free_bytes` with no run measured, else
-    /// the recent run size (task 1100: the largest build outputs plus the
-    /// largest scratchpad and run `TMPDIR`) times `integrate_factor`. With
-    /// room, no threshold or no reading it lands.
+    /// A person's `integrate` (task 638) and the retry of a command that
+    /// failed on a full disk refuse below what a landing's verification
+    /// needs as the supervisor judges it (ADR-t4473-1): the reserve with no
+    /// run moving or no expectation, else the reserve and the expectation,
+    /// with no factor. With room or no reading it lands.
     #[test]
-    fn a_persons_integrate_refuses_below_the_landing_threshold_only() {
+    fn a_persons_integrate_refuses_below_what_a_landing_needs_only() {
         const GIB: u64 = 1 << 30;
-        let least = DiskConfig {
-            min_free_bytes: Some(GIB),
-            ..DiskConfig::default()
+        let state = |free: Option<u64>, expected: Option<u64>, moving| DiskState {
+            free,
+            total: 0,
+            expected,
+            moving,
+            remaining: 0,
+            landing_waiting: false,
         };
-        let refusal = |config: &DiskConfig, sizes: &[u64], free: Option<u64>| {
-            let short = landing_short(config, sizes, free).expect("short");
+        let share = DiskConfig::default().reserve;
+        let refusal = |state: DiskState| {
+            let short = landing_short(&state, share).expect("short");
             disk_refusal(&RunId::new("r").unwrap(), short)
         };
-        // min_free_bytes with no run measured.
-        let error = refusal(&least, &[], Some(GIB / 2));
+        // The reserve (5 GiB of an unread volume) with nothing moving.
+        let error = refusal(state(Some(GIB / 2), Some(8 * GIB), 0));
         assert!(
             error.contains("not enough free disk space to land run r"),
             "{error}"
         );
         assert!(error.contains("0.5 GiB free"), "{error}");
-        assert!(error.contains("below the 1.0 GiB"), "{error}");
-        assert!(error.contains("none measured"), "{error}");
+        assert!(error.contains("below the 5.0 GiB"), "{error}");
+        assert!(error.contains("the reserve of 5.0 GiB"), "{error}");
+        assert!(error.contains("and at least 5.0 GiB,"), "{error}");
         assert!(error.contains("dagq doctor"), "{error}");
         assert!(error.contains("not approved and is unchanged"), "{error}");
-        // The largest recent run times integrate_factor (1.5).
-        let error = refusal(&DiskConfig::default(), &[GIB], Some(GIB / 2));
-        assert!(error.contains("below the 1.5 GiB"), "{error}");
-        assert!(error.contains("1.0 GiB, times"), "{error}");
-        // A run of 0.625 GiB (build, scratchpad and TMPDIR together):
-        // above half a gibibyte free.
-        let error = refusal(&DiskConfig::default(), &[GIB * 5 / 8], Some(GIB / 2));
-        assert!(error.contains("below the 0.9 GiB"), "{error}");
-        assert!(error.contains("0.6 GiB, times"), "{error}");
-        assert!(
-            error.contains("the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR"),
-            "{error}"
-        );
-        // Room, no threshold, no reading.
-        assert!(landing_short(&DiskConfig::default(), &[GIB], Some(2 * GIB)).is_none());
-        assert!(landing_short(&least, &[], Some(GIB)).is_none());
-        assert!(landing_short(&DiskConfig::default(), &[], Some(GIB / 2)).is_none());
-        assert!(landing_short(&least, &[], None).is_none());
-        assert!(landing_short(&least, &[GIB], None).is_none());
+        assert!(!error.contains("factor"), "{error}");
+        // With runs moving: the reserve and the expectation.
+        let error = refusal(state(Some(12 * GIB), Some(8 * GIB), 2));
+        assert!(error.contains("below the 13.0 GiB"), "{error}");
+        assert!(error.contains("recent runs, 8.0 GiB"), "{error}");
+        let error = refusal(state(Some(GIB), None, 2));
+        assert!(error.contains("recent runs, none yet"), "{error}");
+        // Room, nothing moving, no reading.
+        assert!(landing_short(&state(Some(13 * GIB), Some(8 * GIB), 2), share).is_none());
+        assert!(landing_short(&state(Some(5 * GIB), Some(8 * GIB), 0), share).is_none());
+        assert!(landing_short(&state(Some(5 * GIB), None, 3), share).is_none());
+        assert!(landing_short(&state(None, Some(8 * GIB), 2), share).is_none());
+    }
+
+    /// The supervisor's retry of a command that failed on a full disk
+    /// gives the runs moving besides the landing and reads the samples of
+    /// the queue: with none besides it the reserve is enough, as at the
+    /// landing's start; with one, the reserve and the expectation.
+    #[test]
+    fn the_supervisors_retry_needs_what_the_landing_needed() {
+        use crate::domain::{EventId, EventKind, RunId};
+        const GIB: u64 = 1 << 30;
+        let now = 1_793_664_000_000;
+        let queue = crate::application::port_fakes::SupervisorsAndEvents::default();
+        *queue.events.borrow_mut() = vec![RunEvent {
+            id: EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: Some(RunId::new("00000000-0000-4000-8000-000000000001").unwrap()),
+            kind: EventKind::BuildOutputsRemoved.as_str().into(),
+            payload: json!({"bytes": 8 * GIB}),
+            created_at: "2026-11-02T00:00:00Z".into(),
+            actor: None,
+        }];
+        let config = DiskConfig::default();
+        let short = |free: u64, moving: usize| {
+            disk_short(&queue, &config, Some(free), None, Some(moving), now).unwrap()
+        };
+        // The landing alone: the reserve.
+        assert!(short(5 * GIB, 0).is_none());
+        assert_eq!(short(5 * GIB - 1, 0).map(|short| short.need), Some(5 * GIB));
+        // Another run moving: the reserve and the expectation.
+        let one = short(12 * GIB, 1).expect("short");
+        assert_eq!((one.need, one.expected), (13 * GIB, Some(8 * GIB)));
+        assert!(short(13 * GIB, 1).is_none());
     }
 
     #[test]
@@ -6846,7 +6925,8 @@ mod tests {
         let short = DiskShort {
             free: 1 << 30,
             need: 10 << 30,
-            largest_build: None,
+            reserve: 5 << 30,
+            expected: Some(5 << 30),
         };
         let Verdict::Held { reason, detail } = held(
             &run(Path::new(DIR)),

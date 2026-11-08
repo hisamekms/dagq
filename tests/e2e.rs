@@ -1128,12 +1128,13 @@ fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
     assert_eq!(open["asks"], json!([]), "{open}");
 }
 
-/// Two independent tasks run in two background wrappers at once; the task
-/// that depends on one of them waits for its integration and then starts
-/// from the main that contains it.
+/// Two independent tasks run in one pass with two slots; on a new queue,
+/// with no run size sample yet, one at a time (ADR-t4473-1). The task that
+/// depends on one of them waits for its integration and then starts from
+/// the main that contains it.
 #[test]
 #[ignore = "an e2e; run with --ignored"]
-fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() {
+fn two_independent_tasks_run_one_at_a_time_on_a_new_queue_and_a_dependent_follows_integration() {
     let fixture = fixture();
     let Fixture {
         repo, base, env, ..
@@ -1149,13 +1150,9 @@ fn two_independent_tasks_run_concurrently_and_a_dependent_follows_integration() 
         2
     );
 
-    let pass = supervise_once(&fixture, &["--parallel", "2"], &[&first, &second]);
-    assert!(
-        pass.running_together,
-        "both wrappers were never running at the same time: {:?}",
-        pass.sessions
-    );
-    assert_ne!(pass.sessions[0].1, pass.sessions[1].1);
+    // The stubs are not held to be seen running together: the second is
+    // claimed only once the first no longer moves.
+    let pass = supervise_once(&fixture, &["--parallel", "2"], &[]);
     let outcome = &pass.outcome;
     assert_eq!(outcome["errors"], Value::Array(vec![]), "{outcome}");
     let runs = outcome["runs"].as_array().unwrap();

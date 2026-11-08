@@ -597,6 +597,10 @@ pub struct Config {
     pub recheck: RecheckConfig,
     /// `[disk]`, the defaults for the keys it does not set.
     pub disk: DiskConfig,
+    /// The retired keys of `[disk]` the file still sets
+    /// ([`DiskConfig::RETIRED_KEYS`]), in file order: read on without
+    /// their values, and warned of by [`load_disk_config`].
+    pub disk_retired: Vec<String>,
     /// `[resume]`, the default for the key it does not set.
     pub resume: ResumeConfig,
     /// `[retention]` (ADR-t697-1), the defaults for the keys it does not
@@ -2309,6 +2313,12 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 supervisor_keys.push(key.to_owned());
             }
             Some(DISK_TABLE) => {
+                if DiskConfig::RETIRED_KEYS.contains(&key) {
+                    if !config.disk_retired.iter().any(|seen| seen == key) {
+                        config.disk_retired.push(key.to_owned());
+                    }
+                    continue;
+                }
                 ensure!(
                     DiskConfig::KEYS.contains(&key),
                     "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{DISK_TABLE}]; the keys are {}",
@@ -2318,7 +2328,16 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     !disk_keys.iter().any(|existing| existing == key),
                     "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
                 );
-                if DiskConfig::FACTORS.contains(&key) {
+                if key == "reserve" {
+                    let text = parse_string(rest.trim())
+                        .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+                    config.disk.reserve = crate::domain::disk::parse_reserve(&text)
+                        .with_context(|| {
+                            format!(
+                                "{CONFIG_FILE_NAME}:{number}: value of {key}: expected a share of the volume such as \"5%\" (above 0% and below 100%), not {text:?}"
+                            )
+                        })?;
+                } else if DiskConfig::FACTORS.contains(&key) {
                     let value = parse_positive_number(rest.trim())
                         .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
                     config.disk.set_factor(key, value);
@@ -2955,26 +2974,41 @@ fn parse_positive_number(text: &str) -> Result<f64> {
     Ok(value)
 }
 
-/// `[disk]` of the `dagq.toml` in `root` (ADR-0047 decision 44), `None`
-/// when there is no file; no table or no key is the default
-/// ([`DiskConfig`] names each key, its type and default). The factors and
-/// shares (`claim_factor`, `integrate_factor`, `ask_margin`,
-/// `close_margin`) take a positive number, the others (`sample_runs`,
-/// `min_free_bytes`, `ask_after_secs`) a positive whole number; a key it
-/// does not know, a value of the wrong type or a key set twice is an
-/// error, and the supervisor that cannot read the table warns and runs on
-/// the defaults. An older binary refuses the keys it does not know, so a
-/// new key goes into `dagq.toml` only once the installed binary reads it.
+/// `[disk]` of the `dagq.toml` in `root` (ADR-0047 decision 44,
+/// ADR-t4473-1), `None` when there is no file; no table or no key is the
+/// default ([`DiskConfig`] names each key, its type and default).
+/// `reserve` takes a share written as `"5%"`, the shares (`ask_margin`,
+/// `close_margin`) a positive number and `ask_after_secs` a positive whole
+/// number; a key it does not know, a value of the wrong type or a key set
+/// twice is an error, and the supervisor that cannot read the table warns
+/// and runs on the defaults. A retired key ([`DiskConfig::RETIRED_KEYS`])
+/// is read on without its value, warned of once in a process
+/// ([`warns_of_retired_disk_keys`]). An older binary refuses the keys it
+/// does not know, so a new key goes into `dagq.toml` only once the
+/// installed binary reads it.
 pub fn load_disk_config(root: &Path) -> Result<Option<DiskConfig>> {
     let path = root.join(CONFIG_FILE_NAME);
     let Some(text) = read_config(&path)? else {
         return Ok(None);
     };
-    Ok(Some(
-        parse_config(&text)
-            .with_context(|| format!("parse {}", path.display()))?
-            .disk,
-    ))
+    let config = parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
+    if !config.disk_retired.is_empty() && warns_of_retired_disk_keys() {
+        tracing::warn!(
+            keys = %config.disk_retired.join(", "),
+            "{}: [{DISK_TABLE}] {} are read no more and their values are not used: the disk's thresholds follow [{DISK_TABLE}] reserve and the recent runs' sizes with no factor; remove them",
+            path.display(),
+            config.disk_retired.join(", ")
+        );
+    }
+    Ok(Some(config.disk))
+}
+
+/// Whether this call is the first of the process to warn of the retired
+/// keys of `[disk]`: the supervisor reads the table again and again, and
+/// the warning is told once.
+fn warns_of_retired_disk_keys() -> bool {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    !WARNED.swap(true, std::sync::atomic::Ordering::SeqCst)
 }
 
 /// `[resume]` of the `dagq.toml` in `root` (ADR-0047 decision 24), `None`
@@ -6407,20 +6441,39 @@ LITERAL = 'no \n escapes # here'
 
     #[test]
     fn parses_the_disk_table() {
+        // The retired keys of an older `[disk]` are read on, their values
+        // not used, whatever they hold.
         let config = parse_config(
-            "[disk]\nsample_runs = 5\nclaim_factor = 2.5 # more\nintegrate_factor = 1\nmin_free_bytes = 1_000\n",
+            "[disk]\nsample_runs = 5\nclaim_factor = 2.5 # more\nintegrate_factor = x\nmin_free_bytes = 1_000\n",
         )
         .unwrap();
+        assert_eq!(config.disk, DiskConfig::default());
+        assert_eq!(config.disk.reserve, 0.05);
         assert_eq!(
-            config.disk,
-            DiskConfig {
-                sample_runs: 5,
-                claim_factor: 2.5,
-                integrate_factor: 1.0,
-                min_free_bytes: Some(1000),
-                ..DiskConfig::default()
-            }
+            config.disk_retired,
+            [
+                "sample_runs",
+                "claim_factor",
+                "integrate_factor",
+                "min_free_bytes"
+            ]
         );
+        assert!(parse_config("").unwrap().disk_retired.is_empty());
+        let twice = parse_config("[disk]\nsample_runs = 1\nsample_runs = 2\n").unwrap();
+        assert_eq!(twice.disk_retired, ["sample_runs"]);
+        // The reserve, a share of the volume.
+        let config = parse_config("[disk]\nreserve = \"10%\" # more\n").unwrap();
+        assert_eq!(config.disk.reserve, 0.10);
+        for text in [
+            "reserve = 5",
+            "reserve = \"0%\"",
+            "reserve = \"5\"",
+            "reserve = \"x%\"",
+        ] {
+            let text = format!("[disk]\n{text}");
+            let message = format!("{:#}", parse_config(&text).unwrap_err());
+            assert!(message.contains("value of reserve"), "{text}: {message}");
+        }
         // The disk ask's hysteresis: a whole number of seconds and two
         // shares.
         let config = parse_config(
@@ -6452,13 +6505,20 @@ LITERAL = 'no \n escapes # here'
         assert_eq!(load_disk_config(dir.path()).unwrap(), None);
         fs::write(
             dir.path().join(CONFIG_FILE_NAME),
-            "[disk]\nclaim_factor = 3\n",
+            "[disk]\nclaim_factor = 3\nask_after_secs = 60\n",
         )
         .unwrap();
         assert_eq!(
-            load_disk_config(dir.path()).unwrap().unwrap().claim_factor,
-            3.0
+            load_disk_config(dir.path()).unwrap().unwrap(),
+            DiskConfig {
+                ask_after_secs: 60,
+                ..DiskConfig::default()
+            }
         );
+        // Warned of once in a process: the first call says so, the next
+        // ones not.
+        let _ = warns_of_retired_disk_keys();
+        assert!(!warns_of_retired_disk_keys());
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[disk]\nx = 3\n").unwrap();
         assert!(load_disk_config(dir.path()).is_err());
     }
@@ -6511,13 +6571,13 @@ LITERAL = 'no \n escapes # here'
             ),
             ("A = 'x'", "a key outside [run.env]"),
             ("[disk]\nother = 1", "unknown key other in [disk]"),
-            ("[disk]\nclaim_factor = 0", "positive number, not 0"),
-            ("[disk]\nclaim_factor = x", "expected a number, not x"),
-            ("[disk]\nclaim_factor = ", "missing value"),
-            ("[disk]\nsample_runs = 1.5", "whole number"),
+            ("[disk]\nask_margin = 0", "positive number, not 0"),
+            ("[disk]\nask_margin = x", "expected a number, not x"),
+            ("[disk]\nask_margin = ", "missing value"),
+            ("[disk]\nask_after_secs = 1.5", "whole number"),
             (
-                "[disk]\nsample_runs = 1\nsample_runs = 2",
-                "sample_runs is defined twice",
+                "[disk]\nask_after_secs = 1\nask_after_secs = 2",
+                "ask_after_secs is defined twice",
             ),
             ("[resume]\nother = 1", "2: unknown key other in [resume]"),
             (

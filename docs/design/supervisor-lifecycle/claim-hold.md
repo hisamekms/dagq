@@ -96,16 +96,17 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 ## 空き容量
 
-supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイルシステムの空きを確かめ、足りなければclaimと着地を控えて掃除し、それでも足りないときだけinboxに1件知らせる（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44）。
+supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイルシステムの空きを確かめ、足りなければclaimと着地を控えて掃除し、それでも足りないときだけinboxに1件知らせる（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44、閾値はADR-t4473-1が改めた）。
 検証が容量不足で落ちる代わりに、容量不足という理由で止まる。
 
 ### 閾値
 
-- 閾値は`domain::disk::DiskConfig::needs`が、直近のrunの大きさ（`domain::disk::run_size`）にclaimと着地のそれぞれの係数を掛けて決め、下限を設定の最小の空きにする。
-- 直近のrunの大きさは新しいrunと着地の検証がdiskに新しく書く量の見積もりで、runごとに増えない共有のキャッシュ（下の「queueのdirのビルドのキャッシュ」）と、古いincrementalのsessionの削除（`incremental_sessions_removed`）は数えない。
-  runの一時ファイルのdirが別のファイルシステムにあっても区別しない。
-- 記録も最小の空きも無いときと、空き（`statvfs(3)`の一般のprocessが使える量）が読めないときは確かめず、控えない。
-- `[disk]`はsupervisorの起動時にmain checkoutの作業ファイルから読み（[Run environment](run-environment.md)）、読めなければwarnを出して既定値で動く。
+- 必要量は`domain::disk::DiskState::needs`が最低ラインと直近の標本からの想定で係数なしで決める（[ADR-t4473-1](../../adr/2026-11-08-t4473-1-disk-needs-follow-a-reserve-and-recent-runs-with-no-factor.md)）。
+- 動いているrun（`check_disk`の`in_flight`）が0本なら最低ラインだけを要り、0本で着地待ちがあれば着地が先に始まり、claimは控えのeventなしにそのpassを待つ。
+  標本が無ければqueueは1本ずつ進む。
+- 空き（`statvfs(3)`）が読めないときは控えない。
+- `[disk]`はsupervisorの起動時にmain checkoutの作業ファイルから読み（[Run environment](run-environment.md)）、読めなければ既定値で、廃止したkeyは読み飛ばして、warnを出す。
+- 人の`integrate`と、検証が容量不足で落ちたときのやり直しも、着地と同じ必要量で確かめる。
 
 ### 判定と掃除
 
@@ -150,7 +151,7 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 
 - 着地の検証コマンドが`disk_full`で落ちたら、integrateはやり直す前に着地の閾値で確かめる（`Integration::retry_disk`、[`integrate`](integrate.md#hostの失敗のやり直し)）。
 - 足りれば同じ試行で1回やり直し、足りなければrunを`awaiting_integration`に戻して`integration_held`を記録しinboxの`review and integrate`にする（resumeしない）。
-  閾値が決まらないか空きが読めないときは確かめずにやり直す。
+  空きが読めないときは確かめずにやり直す。
 
 ### inboxに知らせる
 

@@ -130,7 +130,7 @@ impl Supervisor<'_> {
         let push = RunHistory::from_events(&self.queue.run_events(run.id())?).landing_pushes();
         let generators = self.generators.clone();
         let load_average = self.host.load_average();
-        let (disk_config, free_space) = self.host.disk_reader();
+        let disk = self.host.disk_reader();
         let runs_dir = self.layout.runs_dir.clone();
         let db = self.layout.db.clone();
         let heavy_turn = crate::application::heavy_turn::HeavyTurn::under(
@@ -165,7 +165,11 @@ impl Supervisor<'_> {
             let mut queue = queues.open()?;
             // As `check_disk` reads it, for the retry of a command that
             // failed on a full disk (task 639).
-            let free = || free_space(&runs_dir).or_else(|| db.parent().and_then(free_space));
+            let free =
+                || (disk.free_space)(&runs_dir).or_else(|| db.parent().and_then(disk.free_space));
+            let total =
+                (disk.total_space)(&runs_dir).or_else(|| db.parent().and_then(disk.total_space));
+            let moving = || disk.moving.load(std::sync::atomic::Ordering::SeqCst);
             integrator.land(
                 &mut Integration {
                     queue: &mut *queue,
@@ -182,8 +186,10 @@ impl Supervisor<'_> {
                     load_average,
                     disk: None,
                     retry_disk: Some(integration::RetryDisk {
-                        config: disk_config,
+                        config: disk.config,
                         free: &free,
+                        total,
+                        moving: Some(&moving),
                     }),
                     sccache: sccache.as_ref().map(|SccachePort(server)| {
                         &**server as &dyn crate::application::SccacheServer

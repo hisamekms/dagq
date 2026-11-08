@@ -256,6 +256,9 @@ pub struct SuperviseOptions {
     pub resume: Option<crate::domain::resume::ResumeConfig>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
+    /// Reads the size of the file system of a path, the reserve's share of
+    /// which a claim and a landing keep free; tests set it.
+    pub total_space: fn(&Path) -> Option<u64>,
     /// The Claude Code configuration directory whose
     /// `plugins/installed_plugins.json` names the plugin a Claude worker
     /// loads, hashed once per claim pass (goal 113). The CLI gives the
@@ -500,6 +503,7 @@ impl SuperviseOptions {
             disk: None,
             resume: None,
             free_space: free_disk_bytes,
+            total_space: crate::infrastructure::adapters::total_disk_bytes,
             claude_config_dir: None,
             scratchpad_roots: Some(Vec::new()),
             report_daily: false,
@@ -1107,6 +1111,7 @@ pub fn supervise_with_reviewer(
         review_material: &review_material,
         load_average: options.load_average,
         free_space: options.free_space,
+        total_space: options.total_space,
         scratchpad_roots: options.scratchpad_roots.clone().map_or_else(
             || {
                 Arc::new(crate::infrastructure::run_files::claude_scratchpad_roots)

@@ -409,13 +409,28 @@ impl Supervisor<'_> {
                         && !matches!(slot.phase, Phase::AwaitingSlot | Phase::ReviewHeld { .. })
                 })
                 .count();
+            // Of them, the landings under way: a landing's retry of its
+            // verification counts the runs moving besides itself.
+            let landing = self
+                .claim
+                .slots
+                .iter()
+                .filter(|slot| !slot.out_of_slot() && matches!(slot.phase, Phase::Landing(_)))
+                .count();
+            // A landing goes before the claims only when nothing but the
+            // disk holds it.
+            let landing_waiting = !landings.is_empty() && self.landing_goes_but_for_disk();
             self.on_host(|host, env| {
                 host.check_disk(
                     env,
                     options.disk_cleanup_interval,
                     &landings,
                     &held,
-                    in_flight,
+                    super::super::host_ops::disk::DiskMoves {
+                        in_flight,
+                        landing,
+                        landing_waiting,
+                    },
                 )
             })?;
             // Every pass too: the answer of an authentication or usage-limit

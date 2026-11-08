@@ -1195,18 +1195,19 @@ pub fn or_none(text: &str) -> &str {
     }
 }
 
-/// The size of a recent run a disk threshold follows from
-/// ([`crate::domain::disk::run_size`]), as the sizes
-/// [`crate::domain::disk::DiskConfig::needs`] takes: read from the latest
-/// `sample_runs` of each of `build_outputs_removed`,
-/// `scratchpad_removed` (task 1100) and `run_tmp_removed` (task 1290).
-pub fn recent_run_sizes<L: RunLog + ?Sized>(log: &L, sample_runs: i64) -> anyhow::Result<Vec<u64>> {
-    let limit = usize::try_from(sample_runs).unwrap_or(0);
+/// The run size samples the disk's thresholds follow
+/// ([`crate::domain::disk::run_samples`]): read from the latest
+/// [`crate::domain::disk::SAMPLE_EVENT_LIMIT`] of each of
+/// [`crate::domain::disk::SAMPLE_KINDS`].
+pub fn recent_run_samples<L: RunLog + ?Sized>(
+    log: &L,
+) -> anyhow::Result<Vec<crate::domain::disk::RunSample>> {
     let mut events = Vec::new();
-    for kind in crate::domain::disk::RUN_SIZE_EVENTS {
-        events.extend(log.latest_events_of(kind.as_str(), limit)?);
+    for kind in crate::domain::disk::SAMPLE_KINDS {
+        events
+            .extend(log.latest_events_of(kind.as_str(), crate::domain::disk::SAMPLE_EVENT_LIMIT)?);
     }
-    Ok(crate::domain::disk::run_size(&events).into_iter().collect())
+    Ok(crate::domain::disk::run_samples(&events))
 }
 
 /// `path` as text; the runtime keeps every path it records as UTF-8.

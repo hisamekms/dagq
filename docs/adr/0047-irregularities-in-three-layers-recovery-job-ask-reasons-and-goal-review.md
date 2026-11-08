@@ -48,6 +48,7 @@ amended_by:
   - adr-t3255-1
   - adr-t3737-1
   - adr-t3989-1
+  - adr-t4473-1
 owners:
   - hisamekms
 tags:

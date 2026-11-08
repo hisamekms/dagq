@@ -282,7 +282,7 @@ static READS: AtomicUsize = AtomicUsize::new(0);
 
 fn room_then_short(_: &Path) -> Option<u64> {
     Some(if READS.fetch_add(1, Ordering::SeqCst) == 0 {
-        2 * GIB
+        8 * GIB
     } else {
         GIB / 2
     })
@@ -297,11 +297,9 @@ fn a_full_disk_without_room_is_held_without_a_retry() {
     READS.store(0, Ordering::SeqCst);
     set_commands(&db, json!([full_disk_once(&dir.path().join("full once"))]));
     let outcome = runtime::OneShot {
-        disk: Some(DiskConfig {
-            min_free_bytes: Some(GIB),
-            ..DiskConfig::default()
-        }),
+        disk: Some(DiskConfig::default()),
         free_space: room_then_short,
+        total_space: |_| None,
         ..landing_one_shot()
     }
     .integrate(&db, IntegrateTarget::Task(TaskId::new(1)), &repo, None)
@@ -320,6 +318,6 @@ fn a_full_disk_without_room_is_held_without_a_retry() {
     assert_eq!(held[0]["first_failure"], Value::Null);
     assert_eq!(
         held[0]["disk"],
-        json!({"free_bytes": GIB / 2, "needed_bytes": GIB, "largest_build_bytes": null})
+        json!({"free_bytes": GIB / 2, "needed_bytes": 5 * GIB, "reserve_bytes": 5 * GIB, "expected_bytes": null})
     );
 }

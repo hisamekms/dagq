@@ -12,12 +12,11 @@ use std::sync::atomic::AtomicBool;
 
 const GIB: u64 = 1 << 30;
 
-/// Needs of a gibibyte for a claim and a landing, with no build measured.
-fn gibibyte_needed() -> Option<DiskConfig> {
-    Some(DiskConfig {
-        min_free_bytes: Some(GIB),
-        ..DiskConfig::default()
-    })
+/// The default `[disk]`: with the volume's size not read
+/// ([`supervise_options`]), a claim and a landing with no run moving need
+/// the reserve's least, 5 GiB.
+fn reserve_needed() -> Option<DiskConfig> {
+    Some(DiskConfig::default())
 }
 
 fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
@@ -56,7 +55,7 @@ fn short_disk(_: &Path) -> Option<u64> {
     Some(if SHORT.load(Ordering::SeqCst) {
         GIB / 2
     } else {
-        4 * GIB
+        8 * GIB
     })
 }
 
@@ -76,7 +75,7 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let stop = Arc::new(AtomicBool::new(false));
     let options = SuperviseOptions {
-        disk: gibibyte_needed(),
+        disk: reserve_needed(),
         free_space: short_disk,
         stop: stop.clone(),
         ..supervise_options(2, false)
@@ -92,12 +91,12 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(held[0]["reason"], "disk_space");
     assert_eq!(held[0]["value"], json!((GIB / 2) as f64));
-    assert_eq!(held[0]["threshold"], json!(GIB as f64));
+    assert_eq!(held[0]["threshold"], json!((5 * GIB) as f64));
     assert!(
         held[0]["message"]
             .as_str()
             .unwrap()
-            .contains("0.5 GiB of the queue's directory is below the 1.0 GiB a new run needs"),
+            .contains("0.5 GiB of the queue's directory is below the 5.0 GiB a new run needs"),
         "{held:?}"
     );
     // Nothing to clean: no repair, and the one ask.
@@ -184,7 +183,7 @@ fn short_while_in_flight(_: &Path) -> Option<u64> {
     Some(if IN_FLIGHT_SHORT.load(Ordering::SeqCst) {
         GIB / 2
     } else {
-        4 * GIB
+        8 * GIB
     })
 }
 
@@ -206,7 +205,7 @@ fn a_run_in_flight_keeps_a_shortage_from_asking_until_it_waits() {
     );
     let stop = Arc::new(AtomicBool::new(false));
     let options = SuperviseOptions {
-        disk: gibibyte_needed(),
+        disk: reserve_needed(),
         free_space: short_while_in_flight,
         stop: stop.clone(),
         ..supervise_options(2, false)
@@ -263,7 +262,7 @@ static FREED: AtomicBool = AtomicBool::new(false);
 /// Short once a run waits to land, until [`FREED`].
 fn short_at_landing(_: &Path) -> Option<u64> {
     if FREED.load(Ordering::SeqCst) {
-        return Some(4 * GIB);
+        return Some(8 * GIB);
     }
     let db = LANDING_DB
         .lock()
@@ -274,7 +273,7 @@ fn short_at_landing(_: &Path) -> Option<u64> {
         .latest_event_of("landing_queued")
         .ok()?
         .is_some();
-    Some(if queued { GIB / 2 } else { 4 * GIB })
+    Some(if queued { GIB / 2 } else { 8 * GIB })
 }
 
 /// A run that passed its review but finds the disk short of what its
@@ -294,7 +293,7 @@ fn a_landing_waits_for_room_before_its_verification() {
         "meets the acceptance",
     )]));
     let options = SuperviseOptions {
-        disk: gibibyte_needed(),
+        disk: reserve_needed(),
         free_space: short_at_landing,
         ..supervise_options(1, true)
     };
@@ -390,8 +389,8 @@ fn half_a_gibibyte(_: &Path) -> Option<u64> {
     Some(GIB / 2)
 }
 
-fn two_gibibytes(_: &Path) -> Option<u64> {
-    Some(2 * GIB)
+fn eight_gibibytes(_: &Path) -> Option<u64> {
+    Some(8 * GIB)
 }
 
 /// A person's `integrate` with `disk` and the free space `free_space` reads.
@@ -404,6 +403,7 @@ fn integrate_on(
     runtime::OneShot {
         disk,
         free_space,
+        total_space: |_| None,
         ..runtime::OneShot::system()
     }
     .integrate(db, IntegrateTarget::Task(TaskId::new(1)), repo, None)
@@ -417,19 +417,18 @@ fn short_while_scratchpad(_: &Path) -> Option<u64> {
     Some(if left.as_ref().is_some_and(|dir| dir.exists()) {
         1
     } else {
-        4 * GIB
+        8 * GIB
     })
 }
 
-/// Short of the room a claim needs (twice the largest build of the recent
-/// runs), the supervisor cleans what an ended run left: task 1100, the
+/// Short of the room a claim needs (the reserve with no run moving), the
+/// supervisor cleans what an ended run left: task 1100, the
 /// Claude Code scratchpad of a run whose task was canceled goes with its
 /// worktree and its run `TMPDIR`, and `auto_repaired` (`disk_cleanup`)
 /// counts their bytes. With room after it, the next task is claimed
-/// without a hold or an ask. That a run's size adds the largest
-/// scratchpad and run `TMPDIR` to the largest build is the unit tests' of
-/// `domain::disk::run_size` and `DiskConfig::needs`, read from the queue
-/// as in `a_persons_integrate_counts_the_scratchpads_in_a_runs_size`.
+/// without a hold or an ask. That a run's size sample adds its largest
+/// scratchpad and run `TMPDIR` to its largest build is the unit tests' of
+/// `domain::disk::run_samples`.
 ///
 /// The build caches of the queue's directory go only in the cleanup for
 /// room, and only the one whose lock is free: the recheck's build output
@@ -546,8 +545,10 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
     assert_eq!(repaired[0]["detail"]["caches"], json!(recheck_targets));
     assert_eq!(repaired[0]["layer"], "runtime");
     assert_eq!(repaired[0]["conditions"]["free_bytes"], 1);
+    // With no run moving a claim needs the reserve, whatever the samples.
     let needed = repaired[0]["conditions"]["needed_bytes"].as_u64().unwrap();
-    assert_eq!(needed, 2 * built);
+    assert!(built > 0);
+    assert_eq!(needed, 5 * GIB);
     assert!(queue_events(&db, "claim_held").is_empty());
     assert!(disk_asks(&db).is_empty());
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -562,13 +563,13 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
 }
 
 /// A person's `integrate` (task 638) reads the free space and the recent
-/// runs' sizes from the queue before it approves the run: short of the
-/// landing threshold it fails and leaves the run as it was, with no
-/// `integration_approved`; with room it lands. Task 1100: the largest
-/// `scratchpad_removed` (and, task 1290, `run_tmp_removed`) adds to the
-/// largest `build_outputs_removed`. The threshold, the message and the
-/// cases with no threshold or no reading are the unit test
-/// `integrate::tests::a_persons_integrate_refuses_below_the_landing_threshold_only`.
+/// runs' samples from the queue before it approves the run: short of what
+/// a landing's verification needs it fails and leaves the run as it was,
+/// with no `integration_approved`; with room it lands. With no run moving
+/// that is the reserve, whatever the run's size (its build, scratchpad
+/// and run `TMPDIR`); what runs moving add, the message and the cases with
+/// no reading are the unit test
+/// `integrate::tests::a_persons_integrate_refuses_below_what_a_landing_needs_only`.
 #[test]
 fn a_persons_integrate_counts_the_scratchpads_in_a_runs_size() {
     let (_dir, repo, db, run) = awaiting_run();
@@ -594,22 +595,19 @@ fn a_persons_integrate_counts_the_scratchpads_in_a_runs_size() {
             json!({"bytes": GIB / 8}),
         )
         .unwrap();
-    // 0.625 GiB times 1.5 is above the half a gibibyte free; the build
-    // alone (0.375 GiB) would not be.
+    // No run moves: the reserve, 5 GiB of a volume not read, with no
+    // factor.
     let error = format!(
         "{:#}",
         integrate_on(&db, &repo, Some(DiskConfig::default()), half_a_gibibyte).unwrap_err()
     );
-    assert!(error.contains("below the 0.9 GiB"), "{error}");
-    assert!(error.contains("0.6 GiB, times"), "{error}");
-    assert!(
-        error.contains("the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR"),
-        "{error}"
-    );
+    assert!(error.contains("below the 5.0 GiB"), "{error}");
+    assert!(error.contains("the reserve of 5.0 GiB"), "{error}");
+    assert!(!error.contains("factor"), "{error}");
     assert!(events_of(&db, run.id(), "integration_approved").is_empty());
     let now = SqliteQueue::open(&db).unwrap().run(run.id()).unwrap();
     assert_eq!(now.status(), RunStatus::AwaitingIntegration);
-    let outcome = integrate_on(&db, &repo, Some(DiskConfig::default()), two_gibibytes).unwrap();
+    let outcome = integrate_on(&db, &repo, Some(DiskConfig::default()), eight_gibibytes).unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     assert_eq!(events_of(&db, run.id(), "integration_approved").len(), 1);
 }
@@ -622,7 +620,7 @@ static HANDOFF_FREED: AtomicBool = AtomicBool::new(false);
 /// Short once a run waits to land, until [`HANDOFF_FREED`].
 fn short_at_landing_until_freed(_: &Path) -> Option<u64> {
     if HANDOFF_FREED.load(Ordering::SeqCst) {
-        return Some(4 * GIB);
+        return Some(8 * GIB);
     }
     let db = HANDOFF_DB
         .lock()
@@ -633,7 +631,7 @@ fn short_at_landing_until_freed(_: &Path) -> Option<u64> {
         .latest_event_of("landing_queued")
         .ok()?
         .is_some();
-    Some(if queued { GIB / 2 } else { 4 * GIB })
+    Some(if queued { GIB / 2 } else { 8 * GIB })
 }
 
 /// A handoff does not wait for a run whose landing waits for room, nor
@@ -653,7 +651,7 @@ fn a_handoff_hands_over_a_landing_that_waits_for_room() {
         "meets the acceptance",
     )]));
     let options = SuperviseOptions {
-        disk: gibibyte_needed(),
+        disk: reserve_needed(),
         free_space: short_at_landing_until_freed,
         ..supervise_options(1, true)
     };

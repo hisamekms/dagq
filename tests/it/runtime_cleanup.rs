@@ -922,7 +922,7 @@ fn short_while_skip_target(_: &Path) -> Option<u64> {
     Some(if target.as_ref().is_some_and(|dir| dir.exists()) {
         1
     } else {
-        4 * GIB
+        8 * GIB
     })
 }
 
@@ -996,10 +996,7 @@ fn a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs() {
     let stop = Arc::new(AtomicBool::new(false));
     let options = files.options(SuperviseOptions {
         stop: stop.clone(),
-        disk: Some(DiskConfig {
-            min_free_bytes: Some(GIB),
-            ..DiskConfig::default()
-        }),
+        disk: Some(DiskConfig::default()),
         free_space: short_while_skip_target,
         ..supervise_options(4, false)
     });
@@ -1123,10 +1120,7 @@ fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
     });
     let options = files.options(SuperviseOptions {
         stop: stop.clone(),
-        disk: Some(DiskConfig {
-            min_free_bytes: Some(GIB),
-            ..DiskConfig::default()
-        }),
+        disk: Some(DiskConfig::default()),
         free_space: drain_free_space,
         ..supervise_options(1, false)
     });
@@ -1357,10 +1351,7 @@ fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
             ..GatedFiles::default()
         };
         let options = files.options(SuperviseOptions {
-            disk: Some(DiskConfig {
-                min_free_bytes: Some(GIB),
-                ..DiskConfig::default()
-            }),
+            disk: Some(DiskConfig::default()),
             free_space: rest_free_space,
             ..supervise_options(1, false)
         });
@@ -1609,10 +1600,7 @@ fn a_withdrawn_handoff_resumes_the_cleanup() {
         let stop = Arc::new(AtomicBool::new(false));
         let options = files.options(SuperviseOptions {
             stop: stop.clone(),
-            disk: Some(DiskConfig {
-                min_free_bytes: Some(GIB),
-                ..DiskConfig::default()
-            }),
+            disk: Some(DiskConfig::default()),
             free_space: withdrawn_free_space,
             ..supervise_options(1, false)
         });
@@ -1723,7 +1711,7 @@ struct Ride {
     db: PathBuf,
     idle_target: PathBuf,
     /// The free bytes once a run waits to land, while the idle run's build
-    /// outputs are there.
+    /// outputs are there and until a run landed; once one did, 1.
     during: u64,
     /// The free bytes once they went.
     after: u64,
@@ -1743,12 +1731,21 @@ fn ride_free_space(_: &Path) -> Option<u64> {
         .latest_event_of("landing_queued")
         .unwrap()
         .is_some();
+    let landed = || {
+        SqliteQueue::open(&state.db)
+            .unwrap()
+            .latest_event_of("run_integrated")
+            .unwrap()
+            .is_some()
+    };
     Some(if !queued {
         1 << 40
-    } else if state.idle_target.exists() {
-        state.during
-    } else {
+    } else if !state.idle_target.exists() {
         state.after
+    } else if landed() {
+        1
+    } else {
+        state.during
     })
 }
 
@@ -1761,19 +1758,21 @@ fn ride_passes(db: &Path, count: usize) {
 }
 
 /// Task 1478: while the rest of a cleanup for room another job took on
-/// (`Request::counted`) runs, a disk with room for a landing but short of
-/// what a claim needs opens no disk ask and records no `claim_held` or
-/// `landing_held`: the claim waits for the rest, and the landing, there
-/// being room for it, goes on without waiting. Once the rest recorded what
-/// it removed, the next reading, still short of a claim, opens the one
-/// disk ask and records the claims' hold, and no landing's. The other
-/// readings (short of both, room for both, enough after the rest) differ
-/// only in
+/// (`Request::counted`) runs, a disk with room for a landing with no run
+/// moving (the reserve) lets the landing go on without waiting for it,
+/// and the claim waits for the landing (ADR-t4473-1); short of what a run
+/// moving makes a claim need, and after the landing short of the reserve,
+/// it opens no disk ask and records no `claim_held` or `landing_held`: the
+/// claim waits for the rest. Once the rest recorded what it removed, the
+/// next reading, still short, opens the one disk ask and records the
+/// claims' hold, and no landing's (none waits). The other readings
+/// (short of both, room for both, enough after the rest) differ only in
 /// `supervise::disk::tests::the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done`.
 #[test]
 fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
-    // Room for a landing (a gibibyte), short of a claim.
-    const LANDING_ROOM: u64 = 4 * GIB;
+    // Room for a landing with no run moving: the reserve, 5 GiB of a
+    // volume not read; short of a claim with the landing moving.
+    const LANDING_ROOM: u64 = 5 * GIB;
     let (_dir, repo, db) = fixture();
     declare_rust_profile(&repo);
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
@@ -1788,8 +1787,8 @@ fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
     building.join();
     let ended = queue.show(TaskId::new(2)).unwrap().runs[0].clone();
     assert_eq!(ended.status(), RunStatus::Failed);
-    // A measured build: the claim's need follows it (far above
-    // LANDING_ROOM), the landing's stays the least (a gibibyte).
+    // A measured build: with a run moving a claim needs it above the
+    // reserve.
     assert!(!payloads_of(&queue, &ended, "build_outputs_removed").is_empty());
     let ended_target = Path::new(ended.worktree_path().unwrap()).join("target");
     fs::create_dir_all(ended_target.join("debug")).unwrap();
@@ -1807,13 +1806,13 @@ fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
     backend.script_for(3, &worker("landing.txt"));
     backend.script_for(4, &worker("claimed.txt"));
     add_ready_task(&mut queue, "landing", &[]);
-    // Short of both once the landing is queued; from the rest on, and
-    // after it, room for a landing only.
+    // Short of both once the landing is queued; from the rest on room for
+    // a landing with no run moving until it landed, then short of both.
     *RIDE.lock().unwrap() = Some(Ride {
         db: db.clone(),
         idle_target: idle_target.clone(),
         during: 1,
-        after: LANDING_ROOM,
+        after: 1,
     });
     let rest = GatedFiles {
         only: Some(idle_target.clone()),
@@ -1826,12 +1825,7 @@ fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
     let stop = Arc::new(AtomicBool::new(false));
     let options = files.options(SuperviseOptions {
         stop: stop.clone(),
-        disk: Some(DiskConfig {
-            min_free_bytes: Some(GIB),
-            claim_factor: 100_000.0,
-            integrate_factor: 1.0,
-            ..DiskConfig::default()
-        }),
+        disk: Some(DiskConfig::default()),
         free_space: ride_free_space,
         ..supervise_options(2, false)
     });
@@ -1900,7 +1894,8 @@ fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
             .runs
             .is_empty()
     };
-    // The landing does not wait for the rest; the claim does.
+    // The landing does not wait for the rest; the claim waits for the
+    // landing, then for the rest.
     wait_until(&db, common::STEP_LIMIT, |queue| integrated(queue, 3));
     ride_passes(&db, 4);
     // The rest is still held: nothing is asked for or held.
@@ -2170,7 +2165,7 @@ fn short_while_waiting(_: &Path) -> Option<u64> {
     Some(if WAITING_SHORT.load(Ordering::SeqCst) {
         1
     } else {
-        4 << 30
+        8 << 30
     })
 }
 
@@ -2193,10 +2188,7 @@ fn a_waiting_runs_build_outputs_go_for_room_and_its_answer_waits_for_the_cleanup
     let files = GatedFiles::default();
     let processes = StubWrapperHidden::default();
     let options = files.options(SuperviseOptions {
-        disk: Some(DiskConfig {
-            min_free_bytes: Some(1 << 30),
-            ..DiskConfig::default()
-        }),
+        disk: Some(DiskConfig::default()),
         free_space: short_while_waiting,
         processes: Some(runtime::ProcessesPort(Arc::new(processes.clone()))),
         ..supervise_options(1, true)
@@ -2332,7 +2324,7 @@ fn short_while_built(runs_dir: &Path) -> Option<u64> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|dir| fs::canonicalize(dir).ok() == fs::canonicalize(runs_dir).ok());
-    Some(if built && !ample { 1 } else { 4 * GIB })
+    Some(if built && !ample { 1 } else { 8 * GIB })
 }
 
 /// A supervisor whose run, reviewed and passed, waits for the landing slot
@@ -2370,10 +2362,7 @@ fn landing_held_by_the_cleanup(repo: &Path, db: &Path) -> LandingHeld {
     let stop = Arc::new(AtomicBool::new(false));
     let options = files.options(SuperviseOptions {
         stop: stop.clone(),
-        disk: Some(DiskConfig {
-            min_free_bytes: Some(GIB),
-            ..DiskConfig::default()
-        }),
+        disk: Some(DiskConfig::default()),
         free_space: short_while_built,
         disk_cleanup_interval: Duration::from_millis(200),
         ..supervise_options(1, false)

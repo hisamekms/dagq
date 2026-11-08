@@ -177,6 +177,9 @@ pub struct OneShot {
     pub disk: Option<crate::domain::disk::DiskConfig>,
     /// Reads the free bytes of the file system of a path; tests set it.
     pub free_space: fn(&Path) -> Option<u64>,
+    /// Reads the size of the file system of a path, the reserve's share of
+    /// which a landing keeps free; tests set it.
+    pub total_space: fn(&Path) -> Option<u64>,
     /// How long one verification command of `integrate` may run in all
     /// when `dagq.toml` declares no `[verification]
     /// command_timeout_secs`, which replaces it ([`VERIFICATION_TIMEOUT`];
@@ -658,6 +661,7 @@ impl OneShot {
             user_config: None,
             disk: None,
             free_space: free_disk_bytes,
+            total_space: crate::infrastructure::adapters::total_disk_bytes,
             verification_timeout: VERIFICATION_TIMEOUT,
             profiles: &crate::domain::toolchain::BUILTIN,
             lifecycle_route: LifecycleRoute::Socket(process_env),

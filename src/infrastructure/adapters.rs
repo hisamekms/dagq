@@ -510,6 +510,12 @@ pub fn disk_space(path: &Path) -> Option<crate::domain::host_metrics::DiskSpace>
     })
 }
 
+/// The size of the filesystem `path` is on ([`disk_space`]); `None` when
+/// it cannot be read.
+pub fn total_disk_bytes(path: &Path) -> Option<u64> {
+    disk_space(path).map(|space| space.total_bytes)
+}
+
 /// How long [`host_versions`] lets each version command run.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 

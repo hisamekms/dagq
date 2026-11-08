@@ -558,6 +558,9 @@ pub struct Ports<'a> {
     pub load_average: fn() -> Option<f64>,
     /// The free bytes of the file system of a path (task 377).
     pub free_space: fn(&Path) -> Option<u64>,
+    /// The size of the file system of a path, the reserve's share of which
+    /// a claim and a landing keep free (ADR-t4473-1).
+    pub total_space: fn(&Path) -> Option<u64>,
     /// The directories Claude Code keeps the sessions' scratchpads under,
     /// read at each cleanup (task 1100).
     pub scratchpad_roots: ScratchpadRoots,

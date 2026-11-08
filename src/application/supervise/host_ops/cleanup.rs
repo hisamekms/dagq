@@ -483,7 +483,7 @@ fn build_outputs_record(
 /// says what the run waits for, as no build runs in it meanwhile (`idle`,
 /// `awaiting_answer` with its `ask_id`, `awaiting_landing_slot`). Unlike
 /// `build_outputs_removed`, the run's size is not read from it
-/// ([`crate::domain::disk::run_size`]): the rest of its build outputs
+/// ([`crate::domain::disk::run_samples`]): the rest of its build outputs
 /// stay, and its next build writes these again.
 fn stale_entries_record(
     cleanup: WorktreeCleanup,

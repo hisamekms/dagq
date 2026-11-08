@@ -1,7 +1,8 @@
 //! The free disk space a claim and a landing need (ADR-0047 decision 44,
-//! task 377): on every pass the supervisor reads the free bytes of the
-//! queue's directory and what a claim and a landing need
-//! ([`DiskConfig::needs`]). Short of either, it cleans what the ended runs
+//! ADR-t4473-1): on every pass the supervisor reads the free and total
+//! bytes of the queue's directory and, from the recent runs' samples,
+//! the runs moving and whether a landing waits, what a claim and a landing
+//! need ([`crate::domain::disk::DiskState::needs`]). Short of either, it cleans what the ended runs
 //! left ([`HostOpsState::request_cleanup`] and `git worktree prune`,
 //! off the loop: task 405) and reads again once that is done, recording
 //! `auto_repaired` (`repair: disk_cleanup`) when it freed something; the
@@ -22,11 +23,14 @@ use super::{cleanup::DiskRequest, *};
 use crate::domain::EventKind;
 use crate::domain::{
     Ask,
-    disk::{DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskConfig, DiskNeeds, gib},
+    disk::{
+        DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskConfig, DiskNeeds, DiskState, RunSample,
+        expected_run_size, gib,
+    },
 };
 
-/// How long the needs read from the recent runs' sizes are kept.
-const NEEDS_INTERVAL: Duration = Duration::from_secs(60);
+/// How long the samples read from the recent runs' records are kept.
+const SAMPLES_INTERVAL: Duration = Duration::from_secs(60);
 /// Least time from the end of a cleanup for room (the rest of one another
 /// job took on included) to the next one (task 1627).
 pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -35,13 +39,42 @@ pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const DISK_ENOUGH_CLOSED: &str = "the free disk space is enough again; closed by the runtime";
 
 /// The question of the disk ask; the runs whose landing waits follow it.
-const DISK_QUESTION: &str = "The free disk space of the queue's directory stays below what the runs need, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`, and the target directories of the automatic update and the landing recheck when neither runs) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the size of a recent run, the largest build outputs plus the largest Claude Code scratchpad and the largest run TMPDIR of the recent runs, times [disk] claim_factor / integrate_factor of dagq.toml). No new run is claimed and no run lands until there is room; the runs in flight go on. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
+const DISK_QUESTION: &str = "The free disk space of the queue's directory stays below what the runs need, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`, and the target directories of the automatic update and the landing recheck when neither runs) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the reserve of {reserve}, [disk] reserve of dagq.toml as a share of the volume and at least {least}, plus what a run is expected to take, {expected}, from the sizes of the recent runs, for each run while others move). No new run is claimed and no run lands until there is room; the runs in flight go on. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
+
+/// What moves at a pass's reading of the disk: `in_flight`, the runs the
+/// slots hold that go on by themselves, `landing`, how many of them are
+/// landings under way, and `landing_waiting`, whether a run awaits its
+/// landing that nothing but the disk holds.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::application::supervise) struct DiskMoves {
+    pub(in crate::application::supervise) in_flight: usize,
+    pub(in crate::application::supervise) landing: usize,
+    pub(in crate::application::supervise) landing_waiting: bool,
+}
+
+impl DiskMoves {
+    /// The runs a landing's retry of its verification counts as moving:
+    /// those besides the landings under way, so that the retry needs what
+    /// the landing needed at its start, when its slot was not counted.
+    pub(in crate::application::supervise) const fn besides_the_landing(self) -> usize {
+        self.in_flight.saturating_sub(self.landing)
+    }
+}
 
 /// What the supervisor knows of the disk between passes.
 #[derive(Debug, Default)]
 pub(in crate::application::supervise) struct DiskWatch {
-    /// The needs and when they were read.
-    needs: Option<(Instant, DiskNeeds)>,
+    /// The recent runs' samples and when they were read.
+    samples: Option<(Instant, Vec<RunSample>)>,
+    /// What this pass read of the disk: what a claim and a landing need.
+    pub(super) needs: DiskNeeds,
+    /// How many new runs this pass may claim ([`DiskState::claims`]);
+    /// `None` for no limit.
+    pub(super) claims: Option<usize>,
+    /// How many runs moved at the latest pass's reading besides the
+    /// landings under way ([`DiskMoves::besides_the_landing`]), shared with
+    /// the landings' retries.
+    pub(super) moving: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// When a cleanup for room was last asked for, then when it (or the
     /// rest of it another job took on) ended; `None` while there is room.
     pub(super) cleaned: Option<Instant>,
@@ -77,8 +110,13 @@ impl HostOpsState {
         interval: Duration,
         landings: &[RunId],
         held: &super::cleanup::Held,
-        in_flight: usize,
+        moves: DiskMoves,
     ) -> Result<()> {
+        let DiskMoves {
+            in_flight,
+            landing_waiting,
+            ..
+        } = moves;
         let unclosed: Vec<Ask> = env
             .queue
             .asks(AskQuery::default())?
@@ -86,9 +124,27 @@ impl HostOpsState {
             .filter(is_disk_ask)
             .collect();
         self.apply_disk_answers(env, &unclosed)?;
-        let needs = self.disk_needs(env)?;
+        let expected = self.expected_run_size(env)?;
         let free = self.free_bytes(env);
-        let most = needs.claim.max(needs.landing);
+        // The moving runs' remaining counts 0: their size now is not
+        // measured, and an assumed one held claims far longer than the
+        // records (ADR-t4473-1).
+        let state = DiskState {
+            free,
+            total: self.total_bytes(env).unwrap_or(0),
+            expected,
+            moving: in_flight,
+            remaining: 0,
+            landing_waiting,
+        };
+        let needs = state.needs(self.disk_config.reserve);
+        self.disk.needs = needs;
+        self.disk.claims = state.claims(self.disk_config.reserve);
+        self.disk.moving.store(
+            moves.besides_the_landing(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let most = Some(needs.claim.max(needs.landing));
         if short_of(free, most) {
             self.clean_for_disk(env, held, free, most, interval);
         }
@@ -166,23 +222,31 @@ impl HostOpsState {
         (self.free_space)(&env.layout.runs_dir)
             .or_else(|| env.layout.db.parent().and_then(self.free_space))
     }
-    /// What a claim and a landing need, read again every
-    /// [`NEEDS_INTERVAL`] from the latest `build_outputs_removed`,
-    /// `scratchpad_removed` and `run_tmp_removed`.
-    pub(in crate::application::supervise) fn disk_needs(
-        &mut self,
-        env: &mut HostEnv<'_>,
-    ) -> Result<DiskNeeds> {
-        if let Some((at, needs)) = self.disk.needs
-            && needs_fresh(env.generators.clock.since(at))
-        {
-            return Ok(needs);
+    /// The size of the volume of the queue's directory; `None` when it
+    /// cannot be read, when the reserve is its least.
+    fn total_bytes(&self, env: &HostEnv<'_>) -> Option<u64> {
+        (self.total_space)(&env.layout.runs_dir)
+            .or_else(|| env.layout.db.parent().and_then(self.total_space))
+    }
+    /// What a new run is expected to take now, from the recent runs'
+    /// samples read again every [`SAMPLES_INTERVAL`]
+    /// ([`crate::application::recent_run_samples`]).
+    fn expected_run_size(&mut self, env: &mut HostEnv<'_>) -> Result<Option<u64>> {
+        let fresh = self
+            .disk
+            .samples
+            .as_ref()
+            .is_some_and(|(at, _)| samples_fresh(env.generators.clock.since(*at)));
+        if !fresh {
+            let samples = crate::application::recent_run_samples(&*env.queue)?;
+            self.disk.samples = Some((env.generators.clock.monotonic(), samples));
         }
-        let builds =
-            crate::application::recent_run_sizes(&*env.queue, self.disk_config.sample_runs)?;
-        let needs = self.disk_config.needs(&builds);
-        self.disk.needs = Some((env.generators.clock.monotonic(), needs));
-        Ok(needs)
+        let now = crate::application::unix_millis(env.generators.clock.system_time());
+        Ok(self
+            .disk
+            .samples
+            .as_ref()
+            .and_then(|(_, samples)| expected_run_size(samples, now)))
     }
     /// Ask for what the ended runs left to be cleaned for room, when
     /// [`asks_for_cleanup`] says so; the job does it off the loop, and
@@ -311,10 +375,10 @@ pub(in crate::application::supervise) fn read_disk(
     needs: &DiskNeeds,
     for_disk: bool,
 ) -> Reading {
-    let short = short_of(free, needs.claim.max(needs.landing));
+    let short = short_of(free, Some(needs.claim.max(needs.landing)));
     Reading {
         short,
-        landing_short: short_of(free, needs.landing),
+        landing_short: short_of(free, Some(needs.landing)),
         cleaning: cleaning(short, for_disk),
     }
 }
@@ -356,7 +420,7 @@ pub(in crate::application::supervise) fn judge_reading(
     let landings = if landings_waiting {
         ClaimHold::judge(&HoldInputs {
             free_bytes: free,
-            needed_bytes: needs.landing,
+            needed_bytes: Some(needs.landing),
             ..HoldInputs::default()
         })
     } else {
@@ -588,10 +652,19 @@ pub(in crate::application::supervise) fn disk_question(
     needs: &DiskNeeds,
 ) -> String {
     let show = |bytes: Option<u64>| bytes.map_or_else(|| "unknown".into(), |b| gib(b as f64));
+    let expected = needs
+        .expected
+        .map_or_else(|| "none yet".into(), |bytes| gib(bytes as f64));
     DISK_QUESTION
         .replace("{free}", &show(free))
-        .replace("{claim}", &show(needs.claim))
-        .replace("{landing}", &show(needs.landing))
+        .replace("{claim}", &show(Some(needs.claim)))
+        .replace("{landing}", &show(Some(needs.landing)))
+        .replace("{reserve}", &show(Some(needs.reserve)))
+        .replace("{expected}", &expected)
+        .replace(
+            "{least}",
+            &gib(crate::domain::disk::MIN_RESERVE_BYTES as f64),
+        )
 }
 
 /// The queue's `cost` ask about the disk.
@@ -628,10 +701,10 @@ impl Cleaned {
     }
 }
 
-/// Whether the needs read `since` ago are used still: until
-/// [`NEEDS_INTERVAL`], at which they are read again.
-fn needs_fresh(since: Duration) -> bool {
-    since < NEEDS_INTERVAL
+/// Whether the samples read `since` ago are used still: until
+/// [`SAMPLES_INTERVAL`], at which they are read again.
+fn samples_fresh(since: Duration) -> bool {
+    since < SAMPLES_INTERVAL
 }
 
 #[cfg(test)]
@@ -639,14 +712,29 @@ mod tests {
     use super::*;
     use crate::domain::claim_hold::HoldReason;
 
-    /// The needs are kept until 1 ms before [`NEEDS_INTERVAL`] and read
-    /// again at it.
+    /// A landing's retry counts the runs moving besides the landing under
+    /// way: with the landing alone in flight, none, as at its start.
     #[test]
-    fn the_disk_needs_are_read_again_at_their_interval() {
+    fn a_landings_retry_counts_the_runs_moving_besides_it() {
+        let moves = |in_flight, landing| DiskMoves {
+            in_flight,
+            landing,
+            landing_waiting: false,
+        };
+        assert_eq!(moves(1, 1).besides_the_landing(), 0);
+        assert_eq!(moves(3, 1).besides_the_landing(), 2);
+        assert_eq!(moves(2, 0).besides_the_landing(), 2);
+        assert_eq!(moves(0, 0).besides_the_landing(), 0);
+    }
+
+    /// The samples are kept until 1 ms before [`SAMPLES_INTERVAL`] and
+    /// read again at it.
+    #[test]
+    fn the_disk_samples_are_read_again_at_their_interval() {
         let ms = Duration::from_millis(1);
-        assert!(needs_fresh(Duration::ZERO));
-        assert!(needs_fresh(NEEDS_INTERVAL - ms));
-        assert!(!needs_fresh(NEEDS_INTERVAL));
+        assert!(samples_fresh(Duration::ZERO));
+        assert!(samples_fresh(SAMPLES_INTERVAL - ms));
+        assert!(!samples_fresh(SAMPLES_INTERVAL));
     }
     use crate::domain::landing_hold::{self, LandingHold, LandingHoldInputs};
 
@@ -655,9 +743,11 @@ mod tests {
     /// A claim needs far more than a landing (a measured build), as the
     /// cases below read.
     const NEEDS: DiskNeeds = DiskNeeds {
-        largest_build: None,
-        claim: Some(100 * GIB),
-        landing: Some(GIB),
+        reserve: GIB,
+        expected: Some(GIB),
+        claim: 100 * GIB,
+        landing: GIB,
+        claims_wait: false,
     };
 
     /// What a pass does with `free` free bytes while a cleanup for room
@@ -668,11 +758,11 @@ mod tests {
     /// (`landing_held`), and whether the disk ask is opened.
     fn pass(free: u64, for_disk: bool) -> (bool, bool, LandingHold, bool, bool) {
         let reading = read_disk(Some(free), &NEEDS, for_disk);
-        let waits = claims_wait_for_cleanup(reading.cleaning, Some(free), NEEDS.claim);
+        let waits = claims_wait_for_cleanup(reading.cleaning, Some(free), Some(NEEDS.claim));
         let claim_held = !waits
             && ClaimHold::judge(&HoldInputs {
                 free_bytes: Some(free),
-                needed_bytes: NEEDS.claim,
+                needed_bytes: Some(NEEDS.claim),
                 ..HoldInputs::default()
             })
             .is_some();
@@ -737,9 +827,6 @@ mod tests {
                 "{free:?} {for_disk}"
             );
         }
-        // No need known: never short.
-        let unknown = DiskNeeds::default();
-        assert!(!read_disk(Some(1), &unknown, true).short);
         assert!(!claims_wait_for_cleanup(true, Some(1), None));
         assert!(!claims_wait_for_cleanup(true, None, Some(1)));
         assert!(!claims_wait_for_cleanup(false, Some(1), Some(2)));
@@ -1168,22 +1255,35 @@ mod tests {
     }
 
     /// The disk ask's question names the free bytes, what a claim and a
-    /// landing need, and the scratchpads both among what was cleaned and
-    /// in the size of a run the needs follow (task 1100); nothing read is
-    /// `unknown`.
+    /// landing need and what they are made of (the reserve and what a run
+    /// is expected to take, with no factor), and the scratchpads among
+    /// what was cleaned (task 1100); free bytes not read are `unknown`, no
+    /// expectation `none yet`.
     #[test]
-    fn the_disk_question_names_the_reading_the_needs_and_the_scratchpads() {
+    fn the_disk_question_names_the_reading_the_needs_and_what_they_are_made_of() {
         let question = disk_question(
             Some(GIB / 2),
             &DiskNeeds {
-                largest_build: None,
-                claim: Some(GIB),
-                landing: Some(GIB),
+                reserve: 5 * GIB,
+                expected: Some(8 * GIB),
+                claim: 13 * GIB,
+                landing: 5 * GIB,
+                claims_wait: false,
             },
         );
         assert!(question.contains("0.5 GiB free"), "{question}");
         assert!(
-            question.contains("a new run needs 1.0 GiB and a landing's verification 1.0 GiB"),
+            question.contains("a new run needs 13.0 GiB and a landing's verification 5.0 GiB"),
+            "{question}"
+        );
+        assert!(
+            question.contains(
+                "the reserve of 5.0 GiB, [disk] reserve of dagq.toml as a share of the volume and at least 5.0 GiB,"
+            ),
+            "{question}"
+        );
+        assert!(
+            question.contains("what a run is expected to take, 8.0 GiB,"),
             "{question}"
         );
         assert!(
@@ -1196,13 +1296,10 @@ mod tests {
             question.contains("the target directories of the automatic update and the landing recheck when neither runs"),
             "{question}"
         );
-        assert!(
-            question.contains("the largest build outputs plus the largest Claude Code scratchpad"),
-            "{question}"
-        );
+        assert!(!question.contains("factor"), "{question}");
         assert!(!question.contains("Affected:"));
         let unread = disk_question(None, &DiskNeeds::default());
         assert!(unread.contains("unknown free"), "{unread}");
-        assert!(unread.contains("a new run needs unknown"), "{unread}");
+        assert!(unread.contains("expected to take, none yet,"), "{unread}");
     }
 }

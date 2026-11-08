@@ -30,6 +30,9 @@ struct ClaimPass {
     /// The hash of the plugin a Claude worker loads, read once per pass.
     plugin: Option<String>,
     trial: WorkerTrial,
+    /// How many more runs the free disk space lets this pass claim
+    /// (ADR-t4473-1); `None` for no limit.
+    disk_claims: Option<usize>,
 }
 
 /// How a claim loop of a fill pass ended.
@@ -206,6 +209,7 @@ impl Supervisor<'_> {
                     host: None,
                     plugin: None,
                     trial,
+                    disk_claims: self.host.disk_claims(),
                 });
                 // Only while there is room for a claim, as the claim loop
                 // reads the candidates only then.
@@ -339,6 +343,11 @@ impl Supervisor<'_> {
             if room == ClaimRoom::None {
                 return Ok(ClaimStep::Stop);
             }
+            // Each claim needs what a run is expected to take free: the
+            // free disk space read at the top of the pass bounds them.
+            if pass.disk_claims == Some(0) {
+                return Ok(ClaimStep::Stop);
+            }
             // Highest effective priority, then most-releasing, then lowest
             // ID (ADR-0040 decision 4), with the aging across the execution
             // classes within each priority (ADR-t1489-1); `candidates` and
@@ -468,6 +477,9 @@ impl Supervisor<'_> {
                 ClaimOutcome::Claimed { run } => *run,
                 ClaimOutcome::NoReadyTask => return Ok(ClaimStep::Next),
             };
+            if let Some(left) = pass.disk_claims.as_mut() {
+                *left = left.saturating_sub(1);
+            }
             self.claim.defer.claimed();
             if self.provision_claimed(&run, attributes.load_avg)? == ClaimStep::Stop {
                 return Ok(ClaimStep::Stop);
@@ -547,12 +559,13 @@ impl Supervisor<'_> {
         });
         self.on_observation(|observation, env| observation.record_candidates(env, sample));
     }
-    /// Whether the free disk space this pass read is short of what a claim
-    /// needs, so that [`Self::hold_claims`] holds the claims for it (a
-    /// space or a need that could not be read is not short).
+    /// Whether the free disk space this pass read lets no claim go
+    /// ([`crate::domain::disk::DiskState::claims`]): short of what a claim
+    /// needs, or a claim that waits for a landing first or for the one run
+    /// of a project with no samples (a space that could not be read is not
+    /// short).
     pub(super) fn claims_short_of_disk(&mut self) -> Result<bool> {
-        let needed = self.on_host(|host, env| host.disk_needs(env))?.claim;
-        Ok(matches!((self.host.free(), needed), (Some(free), Some(needed)) if free < needed))
+        Ok(self.host.disk_claims() == Some(0))
     }
     /// Judge whether new claims are held now ([`ClaimHold::judge`]: the
     /// free disk space this pass read against what a claim needs (task
@@ -560,7 +573,8 @@ impl Supervisor<'_> {
     /// the answer differs from the hold in place on the queue (task 327).
     /// Returns whether they are held.
     pub(super) fn hold_claims(&mut self) -> Result<bool> {
-        let needed = self.on_host(|host, env| host.disk_needs(env))?.claim;
+        let needs = self.host.disk_needs();
+        let needed = Some(needs.claim);
         // Short while a cleanup for room runs: wait for it without a hold
         // (task 405).
         if disk::claims_wait_for_cleanup(self.host.disk_cleaning(), self.host.free(), needed) {
@@ -575,7 +589,11 @@ impl Supervisor<'_> {
             // run on the other provider either (ADR-t813-2 decision 6).
             queue_hold: self.queue_hold.filter(|_| self.routes().is_empty()),
         });
-        self.with_env(|env| env.record_hold(claim_hold::CLAIMS, hold.as_ref()))
+        let held = self.with_env(|env| env.record_hold(claim_hold::CLAIMS, hold.as_ref()))?;
+        // A landing that waits with no run moving goes first, and a project
+        // with no samples runs one at a time: the claims wait this pass,
+        // with no hold, as there is room (ADR-t4473-1).
+        Ok(held || (self.host.free().is_some() && needs.claims_wait))
     }
     /// Check the programs `[run.env]` names on this process's PATH
     /// (ADR-0049 decision 9) and record `run_env_program_missing` or
@@ -680,6 +698,24 @@ impl Supervisor<'_> {
             draining: self.registration.draining(),
             handing_off: self.registration.handing_off(),
         })
+    }
+
+    /// Whether a run awaiting the landing slot would start its landing but
+    /// for the disk: only such a landing goes before the claims
+    /// (ADR-t4473-1), so a landing held for another reason (a held
+    /// container, a drain) keeps no claim waiting.
+    pub(super) fn landing_goes_but_for_disk(&self) -> bool {
+        crate::domain::landing_hold::judge(crate::domain::landing_hold::LandingHoldInputs {
+            run_env_missing: self.landing.run_env_missing,
+            container_held: self.verification_container_held(),
+            ci_held: self.observation.ci().held(),
+            ci_unreadable: self.observation.ci().unreadable(),
+            landing_unresolved: self.landing.unresolved,
+            landing_short: false,
+            disk_cleaning: false,
+            draining: self.registration.draining(),
+            handing_off: self.registration.handing_off(),
+        }) == crate::domain::landing_hold::LandingHold::Proceed
     }
 
     fn record_landing_hold(&mut self, error: Option<String>) {

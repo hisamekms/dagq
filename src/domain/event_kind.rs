@@ -1148,7 +1148,7 @@ pub const INBOX_NUDGE_FAILED: &str = EventKind::InboxNudgeFailed.as_str();
 /// were in, `entries`, how many went, `bytes`, `by`, `reason`, with the
 /// `ask_id` of a run waiting for an answer). Unlike
 /// `build_outputs_removed`, its `bytes` are no measure of what a run
-/// builds ([`super::disk::run_size`]).
+/// builds ([`super::disk::run_samples`]).
 pub const INCREMENTAL_SESSIONS_REMOVED: &str = EventKind::IncrementalSessionsRemoved.as_str();
 /// The supervisor judged the inbox's watcher absent after it was alive, or
 /// first (task 1021): once per change of its state.

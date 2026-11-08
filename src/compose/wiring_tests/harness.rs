@@ -69,18 +69,20 @@ const CHECKOUT: &str = "/wiring/repo";
 
 thread_local! {
     /// The free bytes the supervisor started on this thread reads
-    /// ([`Wiring::free`]); a thread that set none reads all the room
-    /// there is. Per thread, so no two tests share it.
+    /// ([`Wiring::free`]); `u64::MAX`, and a thread that set none, read
+    /// none, so the disk holds nothing. Per thread, so no two tests share
+    /// it.
     static FREE: std::cell::RefCell<Option<Arc<AtomicU64>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The supervisor's reading of the free space: its thread's [`FREE`].
 fn free_space(_: &Path) -> Option<u64> {
-    Some(FREE.with(|free| {
+    let free = FREE.with(|free| {
         free.borrow().as_ref().map_or(u64::MAX, |free| {
             free.load(std::sync::atomic::Ordering::SeqCst)
         })
-    }))
+    });
+    (free != u64::MAX).then_some(free)
 }
 
 /// The memdb URI of the queue named `name`: one shared by every connection
@@ -170,9 +172,11 @@ pub(super) struct Wiring {
     /// The CI watch's port; none by default, as `--once` without it.
     ci_watch: Option<supervise::CiWatchPort>,
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
-    /// The free bytes the supervisors read; all there is by default.
+    /// The free bytes the supervisors read; `u64::MAX` (the default) reads
+    /// none, so the disk holds nothing.
     pub(super) free: Arc<AtomicU64>,
-    /// `[disk]`; the production's default (no threshold) by default.
+    /// `[disk]`; the production's default, whose reserve is its least
+    /// (5 GiB) as the supervisors read no volume's size.
     disk: crate::domain::disk::DiskConfig,
 }
 
@@ -237,13 +241,6 @@ impl Wiring {
             free: Arc::new(AtomicU64::new(u64::MAX)),
             disk: Default::default(),
         }
-    }
-
-    /// The supervisors started from now on hold the claims while fewer
-    /// than `bytes` are free ([`Self::free`]).
-    pub(super) fn with_min_free(mut self, bytes: u64) -> Self {
-        self.disk.min_free_bytes = Some(bytes);
-        self
     }
 
     /// Drive bounded, clock-controlled passes while counting this queue's reads.
@@ -852,6 +849,7 @@ impl Parts {
             review_material: &review_material,
             load_average: || None,
             free_space,
+            total_space: |_| None,
             scratchpad_roots: Arc::new(Vec::new),
             host_versions: |_, _, _| Default::default(),
             worker_plugin: Arc::new(|_| crate::domain::instructions::NO_PLUGIN.to_owned()),
