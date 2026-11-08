@@ -583,26 +583,28 @@ pub struct Ports<'a> {
     /// while the queue does not take them, for this supervisor and the
     /// next (ADR-t3102-3 decision 5).
     pub held_verdicts: Arc<dyn crate::application::supervisor_service::resend::HeldRecords>,
-    /// `[conflicts]` of the main checkout's `dagq.toml` (`None` for no
+    /// `[conflicts]` of the repository's `dagq.toml` (`None` for no
     /// file), read again each pass (ADR-0080); `None` when the options
     /// set the thresholds, which are then never read again.
     pub conflicts_file: Option<ConflictsFile>,
-    /// `[supervisor]` of the main checkout's `dagq.toml` (`None` for no
+    /// `[supervisor]` of the repository's `dagq.toml` (`None` for no
     /// file), read again each pass for the values the flags did not give
     /// (task 698); `None` reads nothing.
     pub supervisor_file: Option<SupervisorFile>,
-    /// `[provider_fallback]` of the main checkout's `dagq.toml` (`None`
+    /// Deployment startup tables, retried until installed before claims.
+    pub repository_startup_file: Option<super::repository_config::RepositoryStartupFile>,
+    /// `[provider_fallback]` of the repository's `dagq.toml` (`None`
     /// for no file), read again each pass (ADR-t1857-1); `None` reads
     /// nothing.
     pub provider_fallback_file: Option<ProviderFallbackFile>,
-    /// `[fresh_session]` of the main checkout's `dagq.toml` (`None` for no
+    /// `[fresh_session]` of the repository's `dagq.toml` (`None` for no
     /// file), read again each pass (ADR-t2080-1); `None` reads nothing.
     pub fresh_session_file: Option<FreshSessionFile>,
-    /// `[replan]` of the main checkout's `dagq.toml` (`None` for no file,
+    /// `[replan]` of the repository's `dagq.toml` (`None` for no file,
     /// which detects and diagnoses nothing), read again each pass; `None`
     /// reads nothing.
     pub replan_file: Option<ReplanFile>,
-    /// `[[recurring]]` of the main checkout's `dagq.toml` (ADR-0072
+    /// `[[recurring]]` of the repository's `dagq.toml` (ADR-0072
     /// decision 1), read again each pass; `None` registers no recurring
     /// draft.
     pub recurring_file: Option<RecurringFile>,
@@ -655,29 +657,31 @@ pub struct Ports<'a> {
 /// under (task 1100).
 pub type ScratchpadRoots = Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync>;
 
-/// Reads `[conflicts]` of the main checkout's `dagq.toml` (ADR-0080).
+/// Reads `[conflicts]` of the repository's `dagq.toml` (ADR-0080).
 pub type ConflictsFile =
     Arc<dyn Fn() -> Result<Option<crate::domain::stats::ConflictConfig>> + Send + Sync>;
 
-/// Reads `[supervisor]` of the main checkout's `dagq.toml` (task 698).
+/// Reads `[supervisor]` of repository rules: the main checkout locally,
+/// main through the runner App in deployment. A `ConfigUnavailable` error
+/// means no deployment snapshot has ever been read and holds new claims.
 pub type SupervisorFile = Arc<dyn Fn() -> Result<Option<SupervisorConfig>> + Send + Sync>;
 
-/// Reads `[provider_fallback]` of the main checkout's `dagq.toml`
+/// Reads `[provider_fallback]` of the repository's `dagq.toml`
 /// (ADR-t1857-1).
 pub type ProviderFallbackFile =
     Arc<dyn Fn() -> Result<Option<crate::domain::provider_switch::ProviderFallback>> + Send + Sync>;
 
-/// Reads `[fresh_session]` of the main checkout's `dagq.toml`
+/// Reads `[fresh_session]` of the repository's `dagq.toml`
 /// (ADR-t2080-1).
 pub type FreshSessionFile =
     Arc<dyn Fn() -> Result<Option<crate::domain::fresh_session::FreshSessionConfig>> + Send + Sync>;
 
-/// Reads `[replan]` of the main checkout's `dagq.toml`
+/// Reads `[replan]` of the repository's `dagq.toml`
 /// (docs/plans/task-replanning.md).
 pub type ReplanFile =
     Arc<dyn Fn() -> Result<Option<crate::domain::replan_detect::ReplanConfig>> + Send + Sync>;
 
-/// Reads `[[recurring]]` of the main checkout's `dagq.toml` (ADR-0072).
+/// Reads `[[recurring]]` of the repository's `dagq.toml` (ADR-0072).
 pub type RecurringFile =
     Arc<dyn Fn() -> Result<Vec<crate::domain::recurring::RecurringDraft>> + Send + Sync>;
 
@@ -1365,6 +1369,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         last_turns: None,
         generators: ports.generators.clone(),
         stall: settings.stall,
+        repository_startup_file: ports.repository_startup_file.clone(),
         wrapper_setting_warned: false,
         agent_eval: None,
         agent_cases: None,
@@ -1395,6 +1400,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             slot_flags: settings.slot_flags,
             supervisor_file: ports.supervisor_file.clone(),
             supervisor_error: None,
+            repository_config_missing: false,
             light_changes: settings.light_changes.clone(),
             spaced_since: None,
             claiming: true,
@@ -1661,6 +1667,7 @@ struct Supervisor<'a> {
     utc_offset: fn(i64) -> i64,
     /// The thresholds of the stalled-session checks (ADR-0043 decision 4).
     stall: StallConfig,
+    repository_startup_file: Option<super::repository_config::RepositoryStartupFile>,
     /// Whether `[headless] wrapper = "workspace"`, which a worker ignores,
     /// was warned of (ADR-t1433-3 decision 2).
     wrapper_setting_warned: bool,

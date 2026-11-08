@@ -387,6 +387,7 @@ dependencies = [
  "getrandom 0.4.3",
  "httparse",
  "libc",
+ "log",
  "postgres",
  "proc-macro2",
  "rcgen",

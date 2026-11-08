@@ -33,6 +33,7 @@ mod finding_planners;
 mod findings;
 mod follow_up_membership;
 pub mod git_binary;
+pub mod github_app;
 mod goal_reviews;
 mod headless_jobs;
 pub mod held_records;

@@ -228,7 +228,7 @@ pub(super) fn runs_slots_and_waits(
 /// 327); one that holds the landings' verification for the disk has
 /// `landing_hold` in the same shape (task 377), and one that holds its
 /// claims for the CI watch or a landing branch that does not resolve
-/// `ci_watch_hold` / `landing_branch_hold`.
+/// `ci_watch_hold`, `landing_branch_hold` and `repository_config_hold`.
 pub(super) fn slots_and_waits(
     queue: &(impl RunLog + ?Sized),
     health: Vec<SupervisorHealth>,
@@ -307,6 +307,15 @@ pub(super) fn slots_and_waits(
         .map(|registration| registration.token.as_str())
         .collect();
     let own_holds = [
+        (
+            "repository_config_hold",
+            crate::domain::claim_hold::REPOSITORY_CONFIG_HOLD,
+            own_hold_records(
+                queue,
+                crate::domain::claim_hold::REPOSITORY_CONFIG_HOLD,
+                &tokens,
+            )?,
+        ),
         (
             "ci_watch_hold",
             crate::domain::ci_watch::CI_WATCH_HOLD,
@@ -433,7 +442,7 @@ pub(super) fn claim_spacing(
 /// record of each hold that is on (`claim_held` for the load, the disk or
 /// a queue hold, `run_env_program_missing`) of a live supervisor or of
 /// none named, then each live supervisor's own holds (`ci_watch_held`,
-/// `landing_branch_unresolved`) by that supervisor's own latest record,
+/// `landing_branch_unresolved`, `repository_config_held`) by its own latest record,
 /// however many the others recorded since, then each live supervisor's
 /// wait for its claim spacing. A hold no supervisor records is not shown,
 /// nor guessed at.
@@ -485,6 +494,7 @@ pub fn claim_holds(
         .map(|registration| registration.token.as_str())
         .collect();
     for kinds in [
+        crate::domain::claim_hold::REPOSITORY_CONFIG_HOLD,
         crate::domain::ci_watch::CI_WATCH_HOLD,
         crate::domain::landing_branch::LANDING_BRANCH_HOLD,
     ] {

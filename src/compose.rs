@@ -45,6 +45,7 @@ mod host;
 mod observation;
 mod planning;
 mod supervisor;
+pub use crate::infrastructure::github_app::{RemoteRules, remote_repository_rules};
 #[cfg(test)]
 mod wiring_tests;
 

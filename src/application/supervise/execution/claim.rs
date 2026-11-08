@@ -182,7 +182,8 @@ impl Supervisor<'_> {
         // Nor while the CI cannot be read (ADR-t1920-1 decision 2).
         if !(self.landing.run_env_missing
             || self.observation.ci().held()
-            || self.landing.unresolved)
+            || self.landing.unresolved
+            || self.claim.repository_config_missing)
             && self.host.service_up()
         {
             // Read once per pass, so turning the trial on or off takes

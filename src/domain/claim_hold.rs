@@ -64,6 +64,13 @@ pub const CLAIMS: HoldKinds = HoldKinds {
     resumed: EventKind::ClaimResumed,
     own: false,
 };
+/// Each process's missing repository snapshot. Independent from host-wide
+/// load/disk holds: another supervisor can neither close nor repeat it.
+/// Payload: reason, message, supervisor; resumed retains the reason/token.
+pub const REPOSITORY_CONFIG_HOLD: OwnHold = OwnHold {
+    held: EventKind::RepositoryConfigHeld,
+    resumed: EventKind::RepositoryConfigResumed,
+};
 /// The holds on the landings' verification.
 pub const LANDINGS: HoldKinds = HoldKinds {
     held: EventKind::LandingHeld,
@@ -114,6 +121,8 @@ pub enum HoldReason {
     DiskSpace,
     /// The 1-minute load average is above `--max-load`.
     LoadAverage,
+    /// Deployment has no successfully read main dagq.toml yet.
+    RepositoryConfigUnavailable,
 }
 
 impl HoldReason {
@@ -123,6 +132,7 @@ impl HoldReason {
             Self::UsageLimit => "usage_limit",
             Self::DiskSpace => "disk_space",
             Self::LoadAverage => "load_average",
+            Self::RepositoryConfigUnavailable => "repository_config_unavailable",
         }
     }
 }
@@ -210,6 +220,7 @@ impl ClaimHold {
     pub fn message(&self) -> String {
         let ask = self.ask_id.unwrap_or_default();
         match self.reason {
+            HoldReason::RepositoryConfigUnavailable => "main dagq.toml has not been read: no new run is claimed until repository rules are available".into(),
             HoldReason::Authentication => format!(
                 "the authentication ask {ask} is open (Claude Code's login ran out): no new run is claimed and no headless job (review, recovery, plan review, goal review, observer) starts until a person logs in and answers it; the runs in flight keep their leases"
             ),

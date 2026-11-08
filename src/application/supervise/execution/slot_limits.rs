@@ -1,8 +1,9 @@
 //! `parallel`, `max_waiting`, `runtime_planners` and `claim_spacing` read
-//! again from `[supervisor]` of the main checkout's `dagq.toml` each pass
+//! again from `[supervisor]` of the repository rules each pass
 //! (task 698, task 941, ADR-t1479-1), for the values the flags did not
 //! give.
 
+use crate::application::supervise::repository_config::ConfigUnavailable;
 use crate::domain::EventKind;
 use anyhow::Result;
 use tracing::{info, warn};
@@ -49,14 +50,17 @@ impl ClaimState {
         };
         let config = match read() {
             Ok(Some(config)) => {
+                self.repository_config_missing = false;
                 self.supervisor_error = None;
                 config
             }
             Ok(None) => {
+                self.repository_config_missing = false;
                 self.supervisor_error = None;
                 return Ok(());
             }
             Err(error) => {
+                self.repository_config_missing = error.is::<ConfigUnavailable>();
                 let message = format!("{error:#}");
                 if self.supervisor_error.as_ref() != Some(&message) {
                     warn!(error = %message, "[supervisor] of dagq.toml not read: {message}; keeping parallel {}, max_waiting {}, runtime_planners {} and claim_spacing {}", self.parallel, self.max_waiting, self.limits.runtime_planners.value, self.limits.claim_spacing.value);

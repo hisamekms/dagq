@@ -13,6 +13,36 @@
 use super::*;
 
 impl Supervisor<'_> {
+    /// Apply startup-only tables exactly once from the first good snapshot.
+    /// A failed read leaves claims held; setting the host disk precedes the
+    /// pass's resource reading. The config event records applied values.
+    fn initialize_repository_rules(&mut self) -> Result<bool> {
+        let Some(read) = self.repository_startup_file.clone() else {
+            return Ok(false);
+        };
+        let Ok(rules) = read() else {
+            return Ok(true);
+        };
+        self.stall = rules.stall;
+        self.resume.config = rules.resume;
+        self.review_jobs = rules.review_jobs;
+        self.host.set_repository_disk(rules.disk);
+        self.queue.record_queue_event(
+            EventKind::SupervisorConfigChanged,
+            json!({
+                "supervisor": self.registration.token(),
+                "repository_startup": { "stall": self.stall, "disk": self.host.disk_reader().config,
+                    "resume": self.resume.config, "review_jobs": {"agent_timeout_secs": self.review_jobs.agent, "program_timeout_secs": self.review_jobs.program, "concurrency": self.review_jobs.concurrency} }
+            }),
+        )?;
+        let mut stall = serde_json::to_value(self.stall)?;
+        stall["supervisor"] = json!(self.registration.token());
+        self.queue
+            .record_queue_event(EventKind::StallConfigLoaded, stall)?;
+        self.repository_startup_file = None;
+        Ok(false)
+    }
+
     /// Drive the loop, then remove this process's registration with the
     /// record of its stop: it is about to exit, whether it drained its
     /// runs, ran out of work, or failed on a claim or provisioning. A
@@ -356,8 +386,20 @@ impl Supervisor<'_> {
             // And `[supervisor]`: a change of `parallel`, `max_waiting` or
             // `runtime_planners` takes effect without a restart (task 698,
             // task 941).
+            let startup_missing = self.initialize_repository_rules()?;
             self.claim
                 .reread_limits(&*self.queue, self.registration.token())?;
+            self.claim.repository_config_missing |= startup_missing;
+            let hold = crate::application::supervise::repository_config::config_hold(
+                self.claim.repository_config_missing,
+            );
+            let payload = hold.map(|hold| {
+                (
+                    "repository_config_unavailable",
+                    json!({"message": hold.message()}),
+                )
+            });
+            self.with_env(|env| env.record_own_hold(claim_hold::REPOSITORY_CONFIG_HOLD, payload));
             // And `[provider_fallback]`: turning the workers' fallback on
             // or off takes effect without a restart (ADR-t1857-1).
             self.reread_provider_fallback();

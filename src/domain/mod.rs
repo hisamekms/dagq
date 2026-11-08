@@ -3065,9 +3065,9 @@ pub fn abandon_left_session_open(kind: &RecordedKind, payload: &serde_json::Valu
 /// or the job's own, for a `failed` or `interrupted` run).
 /// `integration_retried` is not one: the landing verifies once more by
 /// itself. Neither are the supervisor's holds of its claims (`claim_held`,
-/// `ci_watch_held`, `landing_branch_unresolved` and their ends), which
+/// `ci_watch_held`, `landing_branch_unresolved`, `repository_config_held` and their ends), which
 /// `candidates` shows as `held` and `status` on the supervisor's item as
-/// `claim_hold`, `ci_watch_hold` and `landing_branch_hold`: the cause a
+/// `claim_hold`, `ci_watch_hold`, `landing_branch_hold` and `repository_config_hold`: the cause a
 /// person acts on is its own attention (`ci_watch_unavailable`,
 /// `run_env_program_missing`).
 /// A kind this binary does not know is none, and its readers keep it.

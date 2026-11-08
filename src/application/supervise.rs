@@ -93,6 +93,7 @@ mod execution;
 mod host_ops;
 mod observation;
 mod planning;
+pub mod repository_config;
 
 use self::contexts::{HostEnv, ObservationEnv, PassEnv, PlanningEnv};
 pub use self::execution::*;

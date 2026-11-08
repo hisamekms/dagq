@@ -1,5 +1,5 @@
 //! The supervisor loop's wiring ([`supervise`]): it reads the settings
-//! of the main checkout's `dagq.toml`, builds the adapters and takes the
+//! of the repository rules (the main checkout locally), builds adapters and takes the
 //! port of each context from that context's module, and runs
 //! [`supervisor::supervise`]. Unlike the context modules it names them
 //! all, since the loop drives every context.
@@ -635,14 +635,33 @@ pub fn supervise_with_reviewer(
     let db = db
         .canonicalize()
         .context("queue must already be initialized")?;
+    let deployment = crate::infrastructure::deployment_config::DeploymentConfig::from_process()?;
+    let remote_rules =
+        super::remote_repository_rules(&deployment, options.generators.clock.clone())?;
     let repository = GitRepository::inspect(repo)?;
-    // Every setting is read from it: a repository without one stops here.
+    // Local execution adapters still require their bound checkout. The
+    // deployment rules source above itself requires no checkout.
     let main_checkout = repository.checkout()?.to_path_buf();
+    // Local reads retain their exact loader semantics. Deployment reads return
+    // complete validated snapshots and never fall back to checkout contents.
+    macro_rules! rules {
+        ($load:expr, $field:ident) => {
+            match &remote_rules {
+                Some(source) => source.read().map(|rules| Some(rules.$field)),
+                None => ($load)(&main_checkout),
+            }
+        };
+    }
+
     // Every claim and landing reads it (ADR-t615-1).
     repository.landing_branch()?;
     let stall = match options.stall {
         Some(stall) => stall,
-        None => load_stall_config(&main_checkout)?.unwrap_or_default(),
+        None if remote_rules.is_some() => rules!(load_stall_config, stall)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        None => rules!(load_stall_config, stall)?.unwrap_or_default(),
     };
     // For the plan review's hotspots and the claims deferred on them
     // (ADR-0069): a `[conflicts]` that cannot be read at the start leaves
@@ -651,13 +670,13 @@ pub fn supervise_with_reviewer(
     // of again by the first read again (ADR-t775-1).
     let (conflicts, conflicts_error) =
         crate::application::supervise::read_conflicts_at_start(options.conflicts, || {
-            (options.load_conflicts)(&main_checkout)
+            rules!(options.load_conflicts, conflicts)
         });
     // The free disk space a claim and a landing need (ADR-0047 decision
     // 44): a `[disk]` that cannot be read leaves the defaults, as
     // `[conflicts]` does.
     let disk = options.disk.unwrap_or_else(|| {
-        load_disk_config(&main_checkout)
+        rules!(load_disk_config, disk)
             .unwrap_or_else(|error| {
                 tracing::warn!(error = %format_args!("{error:#}"), "[disk] of dagq.toml not read: {error:#}; using the defaults");
                 None
@@ -667,7 +686,7 @@ pub fn supervise_with_reviewer(
     // The limit of the conflict-only attempts (ADR-0047 decision 24): a
     // `[resume]` that cannot be read leaves the default, as `[disk]` does.
     let resume = options.resume.unwrap_or_else(|| {
-        load_resume_config(&main_checkout)
+        rules!(load_resume_config, resume)
             .unwrap_or_else(|error| {
                 tracing::warn!(error = %format_args!("{error:#}"), "[resume] of dagq.toml not read: {error:#}; using the defaults");
                 None
@@ -681,7 +700,7 @@ pub fn supervise_with_reviewer(
     let slot_flags = options.slot_flags();
     // Read even with every flag given: `light_changes` has no flag
     // (ADR-t1591-1).
-    let supervisor_config = load_supervisor_config(&main_checkout)
+    let supervisor_config = rules!(load_supervisor_config, supervisor)
         .unwrap_or_else(|error| {
             tracing::warn!(error = %format_args!("{error:#}"), "[supervisor] of dagq.toml not read: {error:#}; using the defaults");
             None
@@ -693,13 +712,16 @@ pub fn supervise_with_reviewer(
     // flag (ADR-t1591-1).
     let supervisor_file = Some({
         let checkout = main_checkout.clone();
-        Arc::new(move || load_supervisor_config(&checkout))
-            as crate::application::supervise::SupervisorFile
+        let remote = remote_rules.clone();
+        Arc::new(move || match &remote {
+            Some(source) => source.read().map(|rules| Some(rules.supervisor)),
+            None => load_supervisor_config(&checkout),
+        }) as crate::application::supervise::SupervisorFile
     });
     // `[provider_fallback]` (ADR-t1857-1): a table that cannot be read at
     // the start leaves the default (on); later reads keep the value in
     // use. Read again each pass.
-    let provider_fallback = load_provider_fallback(&main_checkout)
+    let provider_fallback = rules!(load_provider_fallback, provider_fallback)
         .unwrap_or_else(|error| {
             tracing::warn!(error = %format_args!("{error:#}"), "[provider_fallback] of dagq.toml not read: {error:#}; using the default");
             None
@@ -707,13 +729,16 @@ pub fn supervise_with_reviewer(
         .unwrap_or_default();
     let provider_fallback_file = Some({
         let checkout = main_checkout.clone();
-        Arc::new(move || load_provider_fallback(&checkout))
-            as crate::application::supervise::ProviderFallbackFile
+        let remote = remote_rules.clone();
+        Arc::new(move || match &remote {
+            Some(source) => source.read().map(|rules| Some(rules.provider_fallback)),
+            None => load_provider_fallback(&checkout),
+        }) as crate::application::supervise::ProviderFallbackFile
     });
     // `[fresh_session]` (ADR-t2080-1), read as `[provider_fallback]` is:
     // a table that cannot be read at the start starts no new session;
     // later reads keep the value in use.
-    let fresh_session = load_fresh_session(&main_checkout)
+    let fresh_session = rules!(load_fresh_session, fresh_session)
         .unwrap_or_else(|error| {
             tracing::warn!(error = %format_args!("{error:#}"), "[fresh_session] of dagq.toml not read: {error:#}; starting no new session");
             None
@@ -721,25 +746,34 @@ pub fn supervise_with_reviewer(
         .unwrap_or_default();
     let fresh_session_file = Some({
         let checkout = main_checkout.clone();
-        Arc::new(move || load_fresh_session(&checkout))
-            as crate::application::supervise::FreshSessionFile
+        let remote = remote_rules.clone();
+        Arc::new(move || match &remote {
+            Some(source) => source.read().map(|rules| Some(rules.fresh_session)),
+            None => load_fresh_session(&checkout),
+        }) as crate::application::supervise::FreshSessionFile
     });
     // `[replan]`, read each pass: no file or no table detects and
     // diagnoses nothing.
     let replan_file = Some({
         let checkout = main_checkout.clone();
-        Arc::new(move || crate::infrastructure::run_env::load_replan(&checkout))
-            as crate::application::supervise::ReplanFile
+        let remote = remote_rules.clone();
+        Arc::new(move || match &remote {
+            Some(source) => source.read().map(|rules| Some(rules.replan)),
+            None => crate::infrastructure::run_env::load_replan(&checkout),
+        }) as crate::application::supervise::ReplanFile
     });
     // `[[recurring]]` (ADR-0072), read each pass that tends the planners.
     let recurring_file = Some({
         let checkout = main_checkout.clone();
-        Arc::new(move || crate::infrastructure::run_env::load_recurring(&checkout))
-            as crate::application::supervise::RecurringFile
+        let remote = remote_rules.clone();
+        Arc::new(move || match &remote {
+            Some(source) => source.read().map(|rules| rules.recurring),
+            None => crate::infrastructure::run_env::load_recurring(&checkout),
+        }) as crate::application::supervise::RecurringFile
     });
     // `[review.jobs]` (ADR-t1895-1 decision 1), read at the start: a table
     // that cannot be read keeps each kind's timeout the provider's.
-    let review_jobs = load_review_jobs(&main_checkout)
+    let review_jobs = rules!(load_review_jobs, review_jobs)
         .unwrap_or_else(|error| {
             tracing::warn!(error = %format_args!("{error:#}"), "[review.jobs] of dagq.toml not read: {error:#}; using the providers' review timeouts");
             None
@@ -831,7 +865,11 @@ pub fn supervise_with_reviewer(
     let conflicts_file = options.conflicts.is_none().then(|| {
         let checkout = main_checkout.clone();
         let load = options.load_conflicts;
-        Arc::new(move || load(&checkout)) as crate::application::supervise::ConflictsFile
+        let remote = remote_rules.clone();
+        Arc::new(move || match &remote {
+            Some(source) => source.read().map(|rules| Some(rules.conflicts)),
+            None => load(&checkout),
+        }) as crate::application::supervise::ConflictsFile
     });
     let limit_checkout = main_checkout.clone();
     let max_improvement_proposals =
@@ -1138,6 +1176,16 @@ pub fn supervise_with_reviewer(
             &db,
         )),
         conflicts_file,
+        repository_startup_file: remote_rules.clone().map(|source| {
+            crate::infrastructure::github_app::repository_startup_file(
+                source,
+                crate::application::supervise::repository_config::StartupOverrides {
+                    stall: options.stall,
+                    disk: options.disk,
+                    resume: options.resume,
+                },
+            )
+        }),
         supervisor_file,
         provider_fallback_file,
         fresh_session_file,

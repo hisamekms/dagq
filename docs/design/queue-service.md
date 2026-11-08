@@ -170,6 +170,7 @@ wrapperもDBを開かず、届かなければそのerrorで終わる。
 
 配置の設定の入口は`infrastructure::deployment_config`で、serviceの起動がHTTPと任意のTLSを開く。
 配置の設定が欠ければ起動せず、OIDCの発行元が無ければHTTPの入口を開かず、配置の設定はdagq.tomlにもhost.tomlにもDBにも置かない。
+チーム制御側はmainのdagq.tomlをrunner用Appの読み取り専用tokenで読む。
 
 起動するprocessとbinaryは`infrastructure::queue_service::SystemQueueService`、終了条件は同moduleの`serve`が持つ。
 入れ替えの口は`application::queue_service::ensure_replaced`、supervisorの見張りは`application::supervise::host_ops::queue_service`のmodule doc、停止とdrainの境界は`application::lifecycle::down`を入口に読む。

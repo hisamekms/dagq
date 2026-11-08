@@ -164,6 +164,8 @@ event_kinds! {
     CiWorkflowStale => "ci_workflow_stale",
     ClaimDeferralEnded => "claim_deferral_ended",
     ClaimDeferred => "claim_deferred",
+    RepositoryConfigHeld => "repository_config_held",
+    RepositoryConfigResumed => "repository_config_resumed",
     ClaimHeld => "claim_held",
     ClaimResumed => "claim_resumed",
     CleanupFailed => "cleanup_failed",
@@ -629,6 +631,8 @@ impl EventKind {
                 | CiWorkflowFresh
                 // The supervisor's hold of its claims for the CI watch and
                 // for a landing branch that does not resolve (task 2016).
+                | RepositoryConfigHeld
+                | RepositoryConfigResumed
                 | CiWatchHeld
                 | CiWatchResumed
                 | LandingBranchUnresolved
@@ -1653,6 +1657,11 @@ mod tests {
             (EventKind::CiWorkflowStale, "ci_workflow_stale"),
             (EventKind::ClaimDeferralEnded, "claim_deferral_ended"),
             (EventKind::ClaimDeferred, "claim_deferred"),
+            (EventKind::RepositoryConfigHeld, "repository_config_held"),
+            (
+                EventKind::RepositoryConfigResumed,
+                "repository_config_resumed",
+            ),
             (EventKind::ClaimHeld, "claim_held"),
             (EventKind::ClaimResumed, "claim_resumed"),
             (EventKind::CleanupFailed, "cleanup_failed"),

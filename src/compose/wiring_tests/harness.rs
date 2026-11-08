@@ -178,6 +178,8 @@ pub(super) struct Wiring {
     /// `[disk]`; the production's default, whose reserve is its least
     /// (5 GiB) as the supervisors read no volume's size.
     disk: crate::domain::disk::DiskConfig,
+    supervisor_file: Option<supervise::SupervisorFile>,
+    repository_startup_file: Option<supervise::repository_config::RepositoryStartupFile>,
 }
 
 impl Wiring {
@@ -240,6 +242,8 @@ impl Wiring {
             pass_probe: None,
             free: Arc::new(AtomicU64::new(u64::MAX)),
             disk: Default::default(),
+            supervisor_file: None,
+            repository_startup_file: None,
         }
     }
 
@@ -312,6 +316,20 @@ impl Wiring {
             serde_json::to_value(outcome).unwrap()["outcome"],
             "integrated"
         );
+    }
+
+    /// The repository rules table read by each pass of the real supervisor.
+    pub(super) fn with_supervisor_file(mut self, file: supervise::SupervisorFile) -> Self {
+        self.supervisor_file = Some(file);
+        self
+    }
+
+    pub(super) fn with_repository_startup_file(
+        mut self,
+        file: supervise::repository_config::RepositoryStartupFile,
+    ) -> Self {
+        self.repository_startup_file = Some(file);
+        self
     }
 
     /// The wiring whose supervisor watches the CI through `port`.
@@ -488,6 +506,15 @@ impl Wiring {
         .expect("read the queue's status")
     }
 
+    pub(super) fn claim_holds(&self) -> Vec<Value> {
+        crate::application::health::claim_holds(
+            &self.queue(),
+            &*self.processes,
+            &*self.generators.clock,
+        )
+        .unwrap()
+    }
+
     /// What a `watch --role inbox` from the queue's start returns now, as
     /// the inbox reads it: its events in their compact form.
     pub(super) fn inbox_watch(&self) -> Vec<Value> {
@@ -656,6 +683,8 @@ impl Wiring {
                 ci_watch: self.ci_watch.clone(),
                 pass_probe: self.pass_probe.clone(),
                 planning: self.planning.get(),
+                supervisor_file: self.supervisor_file.clone(),
+                repository_startup_file: self.repository_startup_file.clone(),
                 stop: stop.clone(),
                 free: self.free.clone(),
                 disk: self.disk,
@@ -740,6 +769,8 @@ struct Parts {
     ci_watch: Option<supervise::CiWatchPort>,
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
     planning: (Option<usize>, Duration),
+    supervisor_file: Option<supervise::SupervisorFile>,
+    repository_startup_file: Option<supervise::repository_config::RepositoryStartupFile>,
     stop: Arc<AtomicBool>,
     free: Arc<AtomicU64>,
     disk: crate::domain::disk::DiskConfig,
@@ -857,7 +888,8 @@ impl Parts {
             max_improvement_proposals: Arc::new(|| Ok(0)),
             held_verdicts: Arc::new(InMemory::default()),
             conflicts_file: None,
-            supervisor_file: None,
+            supervisor_file: self.supervisor_file,
+            repository_startup_file: self.repository_startup_file,
             provider_fallback_file: None,
             fresh_session_file: None,
             replan_file: None,
@@ -878,7 +910,7 @@ impl Parts {
             layout,
         };
         let mut settings = LoopSettings {
-            once: self.pass_probe.is_none(),
+            once: self.pass_probe.is_none() && ports.repository_startup_file.is_none(),
             cleanup_jobs: self
                 .pass_probe
                 .as_ref()

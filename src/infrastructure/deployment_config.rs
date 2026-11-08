@@ -25,6 +25,8 @@ use std::{
 /// domain OidcConfig retains the RS256/ES256 defaults).
 /// GITHUB_{RUNNER,MAIN}_APP_ID are positive numeric IDs of distinct Apps;
 /// their APP_KEY values are PEM private keys, normally supplied via _FILE.
+/// GITHUB_API_BASE_URL is the HTTPS REST base, default https://api.github.com;
+/// Enterprise includes its /api/v3 prefix. No credentials, query or fragment.
 /// GITHUB_REPOSITORY and IMAGE_CI_REPOSITORY are `owner/name`;
 /// IMAGE_CI_WORKFLOW is the workflow path, IMAGE_CI_REF its full `refs/...`.
 /// ANTHROPIC_API_KEY is optional: absent disables the team's API key.
@@ -48,6 +50,7 @@ pub const NAMES: &[&str] = &[
     "DAGQ_GITHUB_MAIN_APP_ID",
     "DAGQ_GITHUB_MAIN_APP_KEY",
     "DAGQ_GITHUB_REPOSITORY",
+    "DAGQ_GITHUB_API_BASE_URL",
     "DAGQ_ANTHROPIC_API_KEY",
     "DAGQ_IMAGE_CI_REPOSITORY",
     "DAGQ_IMAGE_CI_WORKFLOW",
@@ -214,9 +217,7 @@ impl DeploymentConfig {
             ]);
         }
         for name in ["DAGQ_GITHUB_REPOSITORY", "DAGQ_IMAGE_CI_REPOSITORY"] {
-            if get(name)
-                .is_some_and(|s| s.split('/').count() != 2 || s.split('/').any(str::is_empty))
-            {
+            if get(name).is_some_and(|s| !super::github_app::valid_repository(s)) {
                 errors.insert(name.to_owned());
             }
         }
@@ -228,6 +229,12 @@ impl DeploymentConfig {
             if get(name).is_some_and(|s| !valid_url(s, schemes)) {
                 errors.insert(name.to_owned());
             }
+        }
+        if get("DAGQ_GITHUB_API_BASE_URL").is_some_and(|s| !super::github_app::valid_base(s)) {
+            errors.insert("DAGQ_GITHUB_API_BASE_URL".to_owned());
+        }
+        if get("DAGQ_GITHUB_RUNNER_APP_ID").is_some() && get("DAGQ_GITHUB_REPOSITORY").is_none() {
+            errors.insert("DAGQ_GITHUB_REPOSITORY".to_owned());
         }
         if get("DAGQ_IMAGE_CI_REF").is_some_and(|s| !s.starts_with("refs/") || s.len() == 5) {
             errors.insert("DAGQ_IMAGE_CI_REF".to_owned());

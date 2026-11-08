@@ -450,6 +450,8 @@ pub(super) struct ClaimState {
     /// The error the last read of `[supervisor]` failed with, warned of
     /// once until it changes or a read succeeds.
     pub(super) supervisor_error: Option<String>,
+    /// True only before deployment rules have ever been read successfully.
+    pub(super) repository_config_missing: bool,
     /// `[supervisor] light_changes` as last read (ADR-t1591-1): the tasks
     /// claimed in the room the landing queue leaves.
     pub(super) light_changes: crate::domain::light_slots::LightChanges,
@@ -762,6 +764,7 @@ mod tests {
             slot_flags: SlotFlags::default(),
             supervisor_file: None,
             supervisor_error: None,
+            repository_config_missing: false,
             light_changes: light,
             spaced_since: None,
             claiming: true,

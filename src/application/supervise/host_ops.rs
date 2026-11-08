@@ -275,9 +275,12 @@ impl HostOpsState {
         self.disk.landing_short
     }
 
+    /// Install the first successfully read deployment snapshot before claims.
+    pub(super) fn set_repository_disk(&mut self, config: crate::domain::disk::DiskConfig) {
+        self.disk_config = config;
+    }
     /// `[disk]`, the readers of the free and total bytes and the runs
-    /// moving at this pass's reading, for a landing's retry of its
-    /// verification.
+    /// moving at this pass's reading, for a landing's retry of verification.
     pub(super) fn disk_reader(&self) -> DiskReader {
         DiskReader {
             config: self.disk_config,

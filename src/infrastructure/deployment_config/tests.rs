@@ -67,6 +67,7 @@ fn every_setting_accepts_a_mounted_file_and_rejects_both_forms() {
         ("DAGQ_OBJECT_STORE_SECRET_ACCESS_KEY", "secret"),
         ("DAGQ_ANTHROPIC_API_KEY", "secret"),
         ("DAGQ_TIMEZONE", "Asia/Tokyo"),
+        ("DAGQ_GITHUB_API_BASE_URL", "https://github.example/api/v3"),
         ("DAGQ_LISTEN", "127.0.0.1:0"),
         ("DAGQ_TLS_CERT", cert.as_str()),
         ("DAGQ_TLS_KEY", key.as_str()),

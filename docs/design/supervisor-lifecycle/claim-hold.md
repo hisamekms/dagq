@@ -65,6 +65,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 - 控えが止めるのは新しいclaimと、空き容量では着地の開始と容量不足で落ちたrunのresumeの開始、providerの控えではそのproviderで始めるheadless jobとrunのreviewだけで、走っているrunとleaseを持つrunには触れない。
 - queue全体の控えの記録は判定が前回の記録と変わったときだけ書き、同じqueueの2つのsupervisorが交互に書き直さない。
+- 設定待ちは各supervisorに属する。
 - 候補ごとの控えは始まりと終わりをtaskのeventに残し、`candidates`と`graph`はその記録だけを読むので、表示と実際のclaimが一致する。
 - 控えたtaskも、効く優先度が`interrupt`ならhotspotでは控えないが、workerとbuildと実行区分の上限では控える。
 

@@ -32,6 +32,9 @@ getrandom = "0.4"
 # the service's one thread per connection, and no dependency of its own.
 httparse = "1.10"
 libc = "0.2"
+# ureq-proto's wire trace includes bearer headers and token replies. Compile
+# that trace out; application tracing is independent of dependency log calls.
+log = { version = "0.4", features = ["max_level_debug"] }
 # The Postgres store's driver, behind the feature `postgres` (ADR-t3986-1).
 postgres = { version = "0.19", optional = true }
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"], optional = true }

@@ -645,6 +645,8 @@ pub(super) const PORTS: &[Port] = &[
 
 #[rustfmt::skip]
 pub(super) const OUTER_PORTS: &[OuterPort] = &[
+    outer_port("src/application/supervise/repository_config.rs", "InstallationTokens", Some(Execution), Internal),
+    outer_port("src/application/supervise/repository_config.rs", "MainRules", Some(Execution), Internal),
     outer_port("src/application/inherit.rs", "InheritStore", Some(Execution), Public(Only(&[Planning]))), // ready --inherit (T10)
     outer_port("src/application/inherit.rs", "CarriedBranches", Some(Execution), Public(Only(&[Planning]))), // ready --inherit (T10)
     outer_port("src/application/inherit.rs", "ReleasedBranches", Some(Execution), Public(Only(&[Planning]))), // the release of a task's hold that ends its run for a new one (T13)

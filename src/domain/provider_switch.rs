@@ -61,7 +61,9 @@ impl SwitchReason {
         match reason {
             HoldReason::Authentication => Some(Self::Authentication),
             HoldReason::UsageLimit => Some(Self::UsageLimit),
-            HoldReason::DiskSpace | HoldReason::LoadAverage => None,
+            HoldReason::DiskSpace
+            | HoldReason::LoadAverage
+            | HoldReason::RepositoryConfigUnavailable => None,
         }
     }
 
