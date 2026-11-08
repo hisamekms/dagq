@@ -572,7 +572,8 @@ fn a_store_with_no_mark_starts_from_the_cursors_start_and_the_next_start_goes_on
 /// Without it the rows lack them.
 #[test]
 fn a_start_on_rows_left_past_the_bound_writes_what_the_store_lacks() {
-    let (mut log, samples) = every_kind_of_row();
+    let (mut log, mut samples) = every_kind_of_row();
+    one_more_hour(&mut samples);
     for task in 1_000..1_000 + i64::try_from(WRITES_PER_PASS).unwrap() {
         log.add(Some(task), None, "task_created", json!({}), 3_300);
     }

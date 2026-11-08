@@ -137,8 +137,9 @@
 //!   marked again each pass (more tasks ready under a slots full than a
 //!   pass writes, which each event of its supervisor marks and makes
 //!   dirty). Ahead of the round each pass takes the marks of the earliest
-//!   positions holding R back ([`HOLDING_R_PER_PASS`],
-//!   [`Builder::holding_r`]), whatever the round's place: a new process
+//!   positions holding R back, the earliest of each cursor among them
+//!   ([`HOLDING_R_PER_PASS`], [`Builder::holding_r`]), whatever the
+//!   round's place: a new process
 //!   goes on from the round's rank kept with R, and with more marks than
 //!   the round comes back to before the process ends, R would stay where
 //!   those marks hold it. The session rows are not bounded so: a pass folds every one
@@ -302,8 +303,11 @@ pub const SESSION_BYTES_PER_WRITE: usize = 32 << 20;
 /// already holds up to date is looked at and not written).
 pub const CHECKS_PER_PASS: usize = 2_000;
 
-/// How many of the marks holding R's events back a pass takes first, the
-/// earliest positions first ([`Builder::holding_r`]), before its round of
+/// How many of the marks holding R back a pass takes first, the earliest
+/// of each cursor and then the earliest of the events
+/// ([`Builder::holding_r`]: a mark of a run's steps or resources or a
+/// node's samples holds its cursor as a mark of an event does, and at
+/// most four of these leave the events the rest), before its round of
 /// the rest ([`Builder::take`]): the round goes on from a rank a new
 /// process restores, and marks that grow past what a pass looks at (rows
 /// of an older version kept for their rewrite) would keep it from coming
@@ -1945,14 +1949,19 @@ impl Builder {
         !self.marks.is_empty() || self.rows_after.is_some()
     }
 
-    /// The marks, at most `limit`, that hold R's events back
-    /// ([`Self::rows_mark`]: a run, task, queue or node row's with a
-    /// position of the events) but those whose write failed
-    /// ([`Self::failed`]), those of the earliest positions, in the
-    /// marks' order (runs first). Nothing changes: [`Self::take`] takes
-    /// them first.
+    /// The marks, at most `limit`, that hold R back ([`Self::rows_mark`]:
+    /// a run, task, queue or node row's with a position of a cursor) but
+    /// those whose write failed ([`Self::failed`]): the one of the
+    /// earliest position of each cursor, the events' first and then the
+    /// samples', the steps', the resources' and the inside resources'
+    /// (one mark may be several of them), and then those of the earliest
+    /// positions of the events, in the marks' order (runs first). A mark
+    /// made by the other cursors only (a run's steps or resources, a
+    /// node's samples) holds R's cursor as one of the events does, so the
+    /// earliest of each is among them whatever the round's place. Nothing
+    /// changes: [`Self::take`] takes them first.
     pub fn holding_r(&self, limit: usize) -> Vec<Target> {
-        let mut held: Vec<(ReadTo, &Target)> = self
+        let held: Vec<(&Target, &Dirtied)> = self
             .dirtied
             .iter()
             .filter(|(target, _)| {
@@ -1960,18 +1969,49 @@ impl Builder {
                     && self.marks.contains(*target)
                     && !self.failed.contains(*target)
             })
-            .filter_map(|(target, dirtied)| dirtied.events.map(|at| (at, target)))
             .collect();
-        if held.len() > limit {
-            held.select_nth_unstable(limit);
-            held.truncate(limit);
+        let mut events: Vec<(ReadTo, &Target)> = held
+            .iter()
+            .filter_map(|(target, dirtied)| dirtied.events.map(|at| (at, *target)))
+            .collect();
+        if events.len() > limit {
+            events.select_nth_unstable(limit);
+            events.truncate(limit);
         }
-        let mut held: Vec<Target> = held.into_iter().map(|(_, target)| target.clone()).collect();
-        held.sort_unstable();
-        held
+        events.sort_unstable();
+        let oldest = |position: fn(&Dirtied) -> Option<i64>| {
+            held.iter()
+                .filter_map(|(target, dirtied)| position(dirtied).map(|at| (at, *target)))
+                .min()
+                .map(|(_, target)| target)
+        };
+        let cursors = [
+            oldest(|dirtied| dirtied.samples),
+            oldest(|dirtied| dirtied.steps),
+            oldest(|dirtied| dirtied.resources),
+            oldest(|dirtied| dirtied.inside_resources),
+        ];
+        let mut taken: Vec<&Target> = Vec::with_capacity(limit);
+        for target in events
+            .first()
+            .map(|(_, target)| *target)
+            .into_iter()
+            .chain(cursors.into_iter().flatten())
+            .chain(events.iter().map(|(_, target)| *target))
+        {
+            if taken.len() == limit {
+                break;
+            }
+            if !taken.contains(&target) {
+                taken.push(target);
+            }
+        }
+        let mut taken: Vec<Target> = taken.into_iter().cloned().collect();
+        taken.sort_unstable();
+        taken
     }
 
-    /// Take up to `limit` marks: first those holding R's events back
+    /// Take up to `limit` marks: first those holding R back
     /// ([`Self::holding_r`], [`HOLDING_R_PER_PASS`] at most), whatever the
     /// round's place, and then the others in their order (runs first),
     /// from where the last pass left off and round: the marks a pass left

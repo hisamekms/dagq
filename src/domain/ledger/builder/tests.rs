@@ -159,6 +159,115 @@ fn a_take_takes_the_mark_holding_r_first_whatever_the_rank() {
     assert_eq!(builder.take(2), [queue(12), queue(13)]);
 }
 
+/// Besides those of the events, the marks holding R are the one of the
+/// earliest position of each other cursor (a run's steps, its windows
+/// from outside or inside, a node's samples), the events' first when
+/// fewer are asked, the earliest events after them; one whose write
+/// failed or a session's is not. A take takes them first whatever the
+/// round's rank; kept without its row recording its input such a mark
+/// holds its cursor of R, and once tracked R moves past it.
+#[test]
+fn the_oldest_mark_of_each_cursor_holds_r_and_is_taken_first() {
+    let mut log = Log::default();
+    for task in [1, 2] {
+        log.add(Some(task), None, "task_created", json!({}), task);
+    }
+    let start = node::bucket_of(1_900_000_000);
+    let mut builder = Builder::default();
+    let queue = |id: usize| Target::Row(LedgerKind::Queue, format!("q{id:02}"));
+    builder.marks.extend((0..20).map(queue));
+    builder.mark_samples(&[sample(1, start + 10)]);
+    builder.mark_events(&log.events);
+    let node = Target::Node(HOST_NODE.to_owned(), start);
+    let run = |n| Target::Run(run_id(n));
+    let task = |id| Target::Task(TaskId::new(id));
+    for (target, dirtied) in [
+        (
+            run(1),
+            Dirtied {
+                steps: Some(5),
+                ..Dirtied::default()
+            },
+        ),
+        (
+            run(2),
+            Dirtied {
+                steps: Some(3),
+                ..Dirtied::default()
+            },
+        ),
+        (
+            run(3),
+            Dirtied {
+                resources: Some(1),
+                ..Dirtied::default()
+            },
+        ),
+        (
+            run(4),
+            Dirtied {
+                inside_resources: Some(2),
+                ..Dirtied::default()
+            },
+        ),
+        (
+            run(5),
+            Dirtied {
+                inside_resources: Some(9),
+                ..Dirtied::default()
+            },
+        ),
+        (
+            run(6),
+            Dirtied {
+                steps: Some(0),
+                ..Dirtied::default()
+            },
+        ),
+        (
+            Target::Row(LedgerKind::Session, "s".to_owned()),
+            Dirtied {
+                resources: Some(0),
+                ..Dirtied::default()
+            },
+        ),
+    ] {
+        builder.marks.insert(target.clone());
+        builder.dirtied.insert(target, dirtied);
+    }
+    builder.failed.insert(run(6));
+    let before = builder.clone();
+    assert_eq!(
+        builder.holding_r(10),
+        [run(2), run(3), run(4), task(1), task(2), node.clone()]
+    );
+    // Fewer asked: the events' earliest first, then the cursors in turn.
+    assert_eq!(builder.holding_r(3), [run(2), task(1), node.clone()]);
+    assert_eq!(builder.holding_r(1), [task(1)]);
+    assert_eq!(builder, before);
+
+    // With no event marked, the other cursors' are taken first anyway,
+    // whatever the round's rank.
+    let mut builder = Builder::default();
+    builder.marks.extend((0..20).map(queue));
+    builder.mark_samples(&[sample(1, start + 10)]);
+    let at = builder.rows_written().unwrap();
+    builder.mark_samples(&[sample(2, start + 20)]);
+    builder.resume_taking(5);
+    assert_eq!(builder.take(3), [node.clone(), queue(5), queue(6)]);
+    builder.keep(node.clone());
+    builder.keep(queue(5));
+    builder.keep(queue(6));
+    assert_eq!(builder.rows_written().unwrap().samples, at.samples);
+    assert_eq!(builder.take(2)[0], node);
+    let samples = [sample(1, start + 10), sample(2, start + 20)];
+    let open = Inputs::new(&[], (start + 100) * 1000, BUILT, false);
+    let row = build(&node, &open, &samples).unwrap();
+    builder.track(&node, &row);
+    builder.keep(node);
+    assert_eq!(builder.rows_written().unwrap().samples, 2);
+}
+
 /// A run on its way is not written; one ended, one pending on its push and
 /// a legacy one are, and only a legacy one or one ended past its grace is
 /// settled. A task on its way is written, not settled.

@@ -4901,7 +4901,8 @@ fn lagging_rows_have_an_input_after(
 /// the cursors.
 #[test]
 fn every_row_a_store_lacks_has_an_input_after_r() {
-    let (mut log, samples) = every_kind_of_row();
+    let (mut log, mut samples) = every_kind_of_row();
+    one_more_hour(&mut samples);
     for task in 1_000..1_000 + i64::try_from(WRITES_PER_PASS).unwrap() {
         log.add(Some(task), None, "task_created", json!({}), 3_300);
     }
@@ -4919,8 +4920,7 @@ fn every_row_a_store_lacks_has_an_input_after_r() {
     assert_eq!(built.failure, None);
     assert!(built.backlog > 0);
     let r = r_of(&memory);
-    assert_eq!(r.samples, 0);
-    assert!(builder.samples > 0);
+    assert!(r.samples < builder.samples);
     let lagging = lagging_rows_have_an_input_after(&memory, &whole, r);
     for kind in [LedgerKind::Task, LedgerKind::Queue, LedgerKind::Node] {
         assert!(lagging.contains(&kind), "{kind:?}: {lagging:?}");
@@ -4935,6 +4935,15 @@ fn every_row_a_store_lacks_has_an_input_after_r() {
     drain(&memory, &mut builder, LATER);
     assert!(lagging_rows_have_an_input_after(&memory, &whole, r_of(&memory)).is_empty());
     assert_eq!(r_of(&memory), builder.cursors());
+}
+
+/// `samples` with one more of the node's next hour: a pass takes first
+/// the hour holding R's samples earliest ([`HOLDING_R_PER_PASS`]), so this
+/// one waits in the round, past the bound of writes when more rows than
+/// it are marked before it.
+fn one_more_hour(samples: &mut Vec<NodeSample>) {
+    let last = samples.last().expect("a sample").clone();
+    samples.push(sample(last.id + 1, last.sample.unix + 3600));
 }
 
 /// A run id of `n`, past what [`run_id`] gives.
