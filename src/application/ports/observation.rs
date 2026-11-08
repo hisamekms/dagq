@@ -422,23 +422,58 @@ pub trait LedgerStore {
     /// (no other waits on a push) their `push_failed` and
     /// `run_phase_changed`.
     fn ledger_push_records(&self) -> Result<Vec<RunEvent>> {
-        use crate::domain::ledger::builder::pushes::{cut, is_push_record};
+        use crate::domain::ledger::builder::pushes::page::records_of_row;
         let mut records: Vec<RunEvent> = self
             .ledger_rows(LedgerKind::Run)?
-            .into_iter()
-            .flat_map(|row| {
-                let failed = row
-                    .records
-                    .iter()
-                    .any(|event| event.kind == EventKind::PushFailed);
-                row.records.into_iter().filter(move |event| {
-                    is_push_record(event) && (failed || event.kind == EventKind::PushFinished)
-                })
-            })
-            .map(|event| cut(&event))
+            .iter()
+            .flat_map(records_of_row)
             .collect();
         records.sort_by_key(|event| event.id);
         Ok(records)
+    }
+    /// A page of [`Self::ledger_push_records`] by the run rows' keys
+    /// ([`crate::domain::ledger::builder::pushes::page::PushRecordsRead`]):
+    /// the push records of the rows `read` names alone, the rows read with
+    /// [`Self::ledger_rows_after`] and [`Self::ledger_row`], no other row.
+    /// Gathered by
+    /// [`crate::domain::ledger::builder::pushes::page::gather`], the pages
+    /// are the records [`Self::ledger_push_records`] gives.
+    fn ledger_push_records_page(
+        &self,
+        read: &crate::domain::ledger::builder::pushes::page::PushRecordsRead,
+    ) -> Result<crate::domain::ledger::builder::pushes::page::PushRecordsPage> {
+        use crate::domain::ledger::builder::pushes::page::{
+            PushRecordsPage, PushRecordsRead, records_of_row,
+        };
+        Ok(match read {
+            PushRecordsRead::Rows { after, rows } => PushRecordsPage::of_rows(
+                &self.ledger_rows_after(LedgerKind::Run, after.as_deref(), *rows)?,
+            ),
+            PushRecordsRead::FirstOfRow { after, records } => {
+                match self
+                    .ledger_rows_after(LedgerKind::Run, after.as_deref(), 1)?
+                    .first()
+                {
+                    Some(row) => {
+                        PushRecordsPage::in_row(row.key.clone(), 1, records_of_row(row), *records)
+                    }
+                    None => PushRecordsPage::default(),
+                }
+            }
+            PushRecordsRead::RestOfRow {
+                key,
+                after,
+                records,
+            } => {
+                let row = self.ledger_row(LedgerKind::Run, key)?;
+                let rest = row
+                    .iter()
+                    .flat_map(records_of_row)
+                    .filter(|record| record.id > *after)
+                    .collect();
+                PushRecordsPage::in_row(key.clone(), usize::from(row.is_some()), rest, *records)
+            }
+        })
     }
     /// The heads of the run and task rows not settled at `through` and the
     /// cursor `resources` of the runs' windows measured from outside

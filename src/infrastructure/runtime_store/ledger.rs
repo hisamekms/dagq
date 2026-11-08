@@ -527,21 +527,67 @@ fn last_event_naming_supervisor_sql(dialect: SqlDialect) -> String {
 /// outer statement and evaluates the mark again for each record, so the
 /// subquery of the keys is the one kept.
 fn push_records_sql(dialect: SqlDialect) -> String {
+    push_records_of_sql(dialect, "", "", "")
+}
+
+/// The push records of [`push_records_sql`] of the run rows `rows` keeps
+/// alone, by their ids: `rows` is a condition on the row's alias with
+/// `{t}` in place of it, put on the rows read (`r`) and on those picked for
+/// holding a `push_failed` (`g`) alike, so neither reads a row outside it;
+/// `kept` is a condition on the records kept (`j`, its id `{id}`) and
+/// `tail` follows the order (a `LIMIT`).
+fn push_records_of_sql(dialect: SqlDialect, rows: &str, kept: &str, tail: &str) -> String {
+    let id = dialect.json_field_spaced("j.value", "$.id", JsonType::Integer);
     format!(
         "SELECT {record} FROM ledger_rows r, {records} j
-              WHERE r.kind=?1
+              WHERE r.kind=?1{r_rows}
                 AND ({kind}=?2
                      OR ({kind} IN (?3, ?4)
                          AND r.key IN (SELECT g.key FROM ledger_rows g, {failed_records} f
-                                        WHERE g.kind=?1 AND {failed}=?3)))
-              ORDER BY {id}",
+                                        WHERE g.kind=?1{g_rows} AND {failed}=?3))){kept}
+              ORDER BY {id}{tail}",
         record = dialect.json_element("j.value", JsonType::Text),
         records = dialect.json_elements("r.records"),
         kind = dialect.json_field_spaced("j.value", "$.kind", JsonType::Text),
         failed_records = dialect.json_elements("g.records"),
         failed = dialect.json_field_spaced("f.value", "$.kind", JsonType::Text),
-        id = dialect.json_field_spaced("j.value", "$.id", JsonType::Integer),
+        r_rows = rows.replace("{t}", "r"),
+        g_rows = rows.replace("{t}", "g"),
+        kept = kept.replace("{id}", &id),
     )
+}
+
+/// The push records of the run rows of keys after `?5` up to `?6` (`after`
+/// false: up to `?5`, from the first), by id: a page of whole rows, both
+/// ends of the range on the primary key so that no other row is read.
+fn push_records_range_sql(dialect: SqlDialect, after: bool) -> String {
+    let rows = if after {
+        " AND {t}.key > ?5 AND {t}.key <= ?6"
+    } else {
+        " AND {t}.key <= ?5"
+    };
+    push_records_of_sql(dialect, rows, "", "")
+}
+
+/// The push records of the run row of key `?5` alone, after the record
+/// `?6` when `after` (from its first otherwise), at most `?7` (`?6` without
+/// `after`) of them, by id: a part of one row.
+fn push_records_in_row_sql(dialect: SqlDialect, after: bool) -> String {
+    if after {
+        push_records_of_sql(dialect, " AND {t}.key = ?5", " AND {id} > ?6", " LIMIT ?7")
+    } else {
+        push_records_of_sql(dialect, " AND {t}.key = ?5", "", " LIMIT ?6")
+    }
+}
+
+/// The keys of at most `?3` (`?2` without `after`) run rows (`?1`) after
+/// the key `?2` when `after`, by key: no column but the key read.
+fn row_keys_after_sql(after: bool) -> &'static str {
+    if after {
+        "SELECT key FROM ledger_rows WHERE kind=?1 AND key > ?2 ORDER BY key LIMIT ?3"
+    } else {
+        "SELECT key FROM ledger_rows WHERE kind=?1 ORDER BY key LIMIT ?2"
+    }
 }
 
 impl SqliteQueue {
@@ -1021,6 +1067,118 @@ impl LedgerStore for SqliteQueue {
                 Ok(crate::domain::ledger::builder::pushes::cut(&event))
             })
             .collect()
+    }
+
+    /// The keys of the page's rows are read first (the key alone, by the
+    /// primary key), then the push records of those rows alone
+    /// ([`push_records_range_sql`], [`push_records_in_row_sql`]), both in
+    /// one read transaction: no row outside the page is read, and of a row
+    /// read in parts only its records after the part before are sent.
+    fn ledger_push_records_page(
+        &self,
+        read: &crate::domain::ledger::builder::pushes::page::PushRecordsRead,
+    ) -> Result<crate::domain::ledger::builder::pushes::page::PushRecordsPage> {
+        use crate::domain::ledger::builder::pushes::page::{
+            PushRecordsAt, PushRecordsPage, PushRecordsRead,
+        };
+        let tx = self.read_entry("ledger_push_records_page")?;
+        let dialect = SqlRead::dialect(&tx);
+        let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+        let keys = |after: Option<&str>, rows: usize| -> Result<Vec<String>> {
+            let statement = row_keys_after_sql(after.is_some());
+            let read = match after {
+                Some(after) => SqlRead::query_map(
+                    &tx,
+                    statement,
+                    sql_params![LedgerKind::Run.as_str(), after, count(rows)],
+                    |r| r.get::<_, String>(0),
+                )?,
+                None => SqlRead::query_map(
+                    &tx,
+                    statement,
+                    sql_params![LedgerKind::Run.as_str(), count(rows)],
+                    |r| r.get::<_, String>(0),
+                )?,
+            };
+            Ok(read)
+        };
+        let records = |statement: &str, rest: Vec<SqlValue>| -> Result<Vec<RunEvent>> {
+            use crate::domain::EventKind;
+            let mut params = vec![
+                LedgerKind::Run.as_str().to_sql_value(),
+                EventKind::PushFinished.as_str().to_sql_value(),
+                EventKind::PushFailed.as_str().to_sql_value(),
+                EventKind::RunPhaseChanged.as_str().to_sql_value(),
+            ];
+            params.extend(rest);
+            SqlRead::query_map(&tx, statement, &params, |r| r.get::<_, String>(0))?
+                .into_iter()
+                .map(|row| {
+                    let event: RunEvent = serde_json::from_str(&row)?;
+                    Ok(crate::domain::ledger::builder::pushes::cut(&event))
+                })
+                .collect()
+        };
+        let in_row = |key: String, after: Option<EventId>, limit: usize| -> Result<_> {
+            // One more than the part asked for says whether the row goes on.
+            let more = count(limit.max(1)).saturating_add(1);
+            let part = match after {
+                Some(after) => records(
+                    &push_records_in_row_sql(dialect, true),
+                    vec![
+                        key.as_str().to_sql_value(),
+                        after.as_i64().to_sql_value(),
+                        more.to_sql_value(),
+                    ],
+                )?,
+                None => records(
+                    &push_records_in_row_sql(dialect, false),
+                    vec![key.as_str().to_sql_value(), more.to_sql_value()],
+                )?,
+            };
+            Ok(PushRecordsPage::in_row(key, 1, part, limit))
+        };
+        let page = match read {
+            PushRecordsRead::Rows { after, rows } => {
+                let keys = keys(after.as_deref(), *rows)?;
+                match (keys.last(), after) {
+                    (None, _) => PushRecordsPage::default(),
+                    (Some(last), after) => {
+                        let records = match after {
+                            Some(after) => records(
+                                &push_records_range_sql(dialect, true),
+                                vec![after.as_str().to_sql_value(), last.as_str().to_sql_value()],
+                            )?,
+                            None => records(
+                                &push_records_range_sql(dialect, false),
+                                vec![last.as_str().to_sql_value()],
+                            )?,
+                        };
+                        PushRecordsPage {
+                            records,
+                            rows: keys.len(),
+                            at: Some(PushRecordsAt {
+                                key: last.clone(),
+                                cut: None,
+                            }),
+                        }
+                    }
+                }
+            }
+            PushRecordsRead::FirstOfRow { after, records } => {
+                match keys(after.as_deref(), 1)?.into_iter().next() {
+                    Some(key) => in_row(key, None, *records)?,
+                    None => PushRecordsPage::default(),
+                }
+            }
+            PushRecordsRead::RestOfRow {
+                key,
+                after,
+                records,
+            } => in_row(key.clone(), Some(*after), *records)?,
+        };
+        drop(tx);
+        Ok(page)
     }
 
     /// SQLite picks by their columns the run and task rows that may not be
@@ -3460,6 +3618,191 @@ mod tests {
         assert!(new.contains("LIST SUBQUERY"), "{new}");
         let old = plan(PUSH_RECORDS_OLD_SQL);
         assert!(old.contains("CORRELATED SCALAR SUBQUERY"), "{old}");
+    }
+
+    /// Each page of the push records of the run rows the store answers
+    /// ([`LedgerStore::ledger_push_records_page`]) holds the records, cut
+    /// and by id, of the rows it names alone, on rows of every mix
+    /// ([`mixed_push_rows`]) and a row of a `push_failed` with nine
+    /// records: a page of whole rows counts the rows without a push record
+    /// and ends at its last row, so the pages of any number of rows after
+    /// one another hold the whole read once; a part of one row holds at most
+    /// the records asked after where it starts and ends cut after its last
+    /// one only when the row goes on, and a row past the last is no row.
+    #[test]
+    fn the_pages_of_the_push_records_hold_the_records_of_their_rows() {
+        use crate::domain::EventKind;
+        use crate::domain::ledger::builder::pushes::page::{
+            PushRecordsAt, PushRecordsPage, PushRecordsRead,
+        };
+        let (_dir, queue, _) = mixed_push_rows();
+        let mut many = ledger::testkit::run_row("bb", None, Vec::new());
+        many.records = (0..9)
+            .map(|n| RunEvent {
+                id: EventId::new(100 + n),
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: if n == 4 {
+                    EventKind::PushFailed
+                } else {
+                    EventKind::RunPhaseChanged
+                }
+                .into(),
+                payload: serde_json::json!({"phase": "p", "extra": n}),
+                created_at: "2026-11-01T00:00:00Z".to_owned(),
+                actor: None,
+            })
+            .collect();
+        queue.write_ledger_row(&many).unwrap();
+        let whole = queue.ledger_push_records().unwrap();
+        let held: [(&str, Vec<i64>); 5] = [
+            ("a", vec![5]),
+            ("b", vec![6, 10, 13, 14]),
+            ("bb", (100..109).collect()),
+            ("c", vec![]),
+            ("d", vec![]),
+        ];
+        let records_of = |ids: &[i64]| -> Vec<RunEvent> {
+            whole
+                .iter()
+                .filter(|record| ids.contains(&record.id.as_i64()))
+                .cloned()
+                .collect()
+        };
+        let all: Vec<i64> = held.iter().flat_map(|(_, ids)| ids.clone()).collect();
+        assert_eq!(records_of(&all), whole);
+        assert_eq!(whole.len(), 14);
+        for rows in [1, 2, 3, 1_000] {
+            let (mut after, mut from, mut read) = (None::<String>, 0, Vec::new());
+            loop {
+                let page = queue
+                    .ledger_push_records_page(&PushRecordsRead::Rows {
+                        after: after.clone(),
+                        rows,
+                    })
+                    .unwrap();
+                let named = &held[from..(from + rows).min(held.len())];
+                let ids: Vec<i64> = named.iter().flat_map(|(_, ids)| ids.clone()).collect();
+                assert_eq!(
+                    page.records,
+                    records_of(&ids),
+                    "rows {rows} after {after:?}"
+                );
+                assert_eq!(page.rows, named.len(), "rows {rows} after {after:?}");
+                assert_eq!(
+                    page.at,
+                    named.last().map(|(key, _)| PushRecordsAt {
+                        key: (*key).to_owned(),
+                        cut: None
+                    })
+                );
+                read.extend(page.records);
+                if page.rows < rows {
+                    break;
+                }
+                (after, from) = (page.at.map(|at| at.key), from + rows);
+            }
+            read.sort_by_key(|record| record.id);
+            assert_eq!(read, whole, "rows {rows}");
+        }
+        let part = |read: PushRecordsRead| queue.ledger_push_records_page(&read).unwrap();
+        let at = |key: &str, cut: Option<i64>| {
+            Some(PushRecordsAt {
+                key: key.to_owned(),
+                cut: cut.map(EventId::new),
+            })
+        };
+        let page = |ids: &[i64], key: &str, cut: Option<i64>| PushRecordsPage {
+            records: records_of(ids),
+            rows: 1,
+            at: at(key, cut),
+        };
+        let first = |after: Option<&str>, records| PushRecordsRead::FirstOfRow {
+            after: after.map(str::to_owned),
+            records,
+        };
+        let rest = |key: &str, after: i64, records| PushRecordsRead::RestOfRow {
+            key: key.to_owned(),
+            after: EventId::new(after),
+            records,
+        };
+        assert_eq!(part(first(None, 1)), page(&[5], "a", None));
+        assert_eq!(part(first(Some("a"), 4)), page(&[6, 10, 13, 14], "b", None));
+        assert_eq!(
+            part(first(Some("b"), 4)),
+            page(&[100, 101, 102, 103], "bb", Some(103))
+        );
+        assert_eq!(
+            part(rest("bb", 103, 4)),
+            page(&[104, 105, 106, 107], "bb", Some(107))
+        );
+        assert_eq!(part(rest("bb", 107, 4)), page(&[108], "bb", None));
+        assert_eq!(part(rest("b", 10, 1)), page(&[13], "b", Some(13)));
+        assert_eq!(part(first(Some("bb"), 4)), page(&[], "c", None));
+        assert_eq!(part(first(Some("d"), 4)), PushRecordsPage::default());
+    }
+
+    /// A page of the push records reads the run rows of its keys alone: on
+    /// the schema `SqliteQueue::init` lays down, with no statistics, the
+    /// rows read and those picked for a `push_failed` are searched by the
+    /// primary key's range or key, and no statement of a page scans the
+    /// rows.
+    #[test]
+    fn a_page_of_the_push_records_searches_its_rows_by_key() {
+        let (_dir, queue, _) = mixed_push_rows();
+        let plan = |sql: &str, rest: &[&dyn rusqlite::ToSql]| -> String {
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![
+                &"run",
+                &"push_finished",
+                &"push_failed",
+                &"run_phase_changed",
+            ];
+            params.extend_from_slice(rest);
+            queue
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(params.as_slice(), |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Each of `r` and `g` searched by the key of the rows (the primary
+        // key's index) on `condition`.
+        let searched = |plan: &str, condition: &str| {
+            for alias in ["r", "g"] {
+                assert!(
+                    plan.lines()
+                        .any(|line| line.starts_with(&format!("SEARCH {alias} USING "))
+                            && line.contains("ledger_rows")
+                            && line.ends_with(condition)),
+                    "{alias} {condition}: {plan}"
+                );
+            }
+        };
+        let range = plan(
+            &push_records_range_sql(SqlDialect::Sqlite, true),
+            &[&"a", &"c"],
+        );
+        searched(&range, "(kind=? AND key>? AND key<?)");
+        let first = plan(&push_records_range_sql(SqlDialect::Sqlite, false), &[&"c"]);
+        searched(&first, "(kind=? AND key<?)");
+        let rest = plan(
+            &push_records_in_row_sql(SqlDialect::Sqlite, true),
+            &[&"b", &5, &3],
+        );
+        searched(&rest, "(kind=? AND key=?)");
+        let row = plan(
+            &push_records_in_row_sql(SqlDialect::Sqlite, false),
+            &[&"b", &3],
+        );
+        searched(&row, "(kind=? AND key=?)");
+        for sql in [&range, &first, &rest, &row] {
+            assert!(!sql.contains("SCAN r") && !sql.contains("SCAN g"), "{sql}");
+            assert!(!sql.contains("CORRELATED"), "{sql}");
+        }
     }
 
     /// The push records, the heads of the rows not settled at a position

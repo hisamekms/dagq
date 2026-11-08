@@ -287,7 +287,7 @@ fn opened_for(
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes by those who read this; the connection a
 /// request runs on goes by the wider [`needs::only_reads`].
-const READ_OPS: [&str; 102] = [
+const READ_OPS: [&str; 103] = [
     "diagnosis_owners",
     "candidates",
     "build_waits",
@@ -385,6 +385,7 @@ const READ_OPS: [&str; 102] = [
     "ledger_runs_claimed",
     "ledger_runs_past_their_rows",
     "ledger_push_records",
+    "ledger_push_records_page",
     "ledger_heads_open_at",
     "ledger_runs_without_row",
     "ledger_sessions_written",
@@ -955,7 +956,7 @@ const RUN_RESOURCE_OPS: [&str; 4] = [
 /// folds): the supervisor principal's only, refused to a landing's
 /// integrator by the policy and to a control-side command whatever its
 /// principal holds ([`control::answer`]), as [`RUN_RESOURCE_OPS`].
-const LEDGER_OPS: [&str; 36] = [
+const LEDGER_OPS: [&str; 37] = [
     "ledger_row",
     "ledger_rows_of",
     "ledger_rows",
@@ -977,6 +978,7 @@ const LEDGER_OPS: [&str; 36] = [
     "ledger_runs_claimed",
     "ledger_runs_past_their_rows",
     "ledger_push_records",
+    "ledger_push_records_page",
     "ledger_heads_open_at",
     "ledger_runs_without_row",
     "write_ledger_row_over",

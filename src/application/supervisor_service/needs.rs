@@ -215,6 +215,7 @@ pub(super) const READS: &[&str] = &[
     "ledger_runs_claimed",
     "ledger_runs_past_their_rows",
     "ledger_push_records",
+    "ledger_push_records_page",
     "ledger_heads_open_at",
     "ledger_runs_without_row",
     "ledger_sessions_written",
@@ -706,12 +707,58 @@ mod tests {
             "ledger_runs_claimed",
             "ledger_runs_past_their_rows",
             "ledger_push_records",
+            "ledger_push_records_page",
             "ledger_heads_open_at",
             "ledger_runs_without_row",
         ] {
             assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead));
             assert!(super::super::LEDGER_OPS.contains(&op));
             assert!(super::super::reads_only(op));
+        }
+    }
+
+    /// The pages of the push records by the rows' keys are answered to
+    /// whom the pages by record id are: the same capability whatever page
+    /// they name, both operations of the ledger (refused to a landing's
+    /// integrator and to a control-side command) that only read, of the
+    /// supervisor's use case, which needs `scheduler.supervise`: the policy
+    /// grants it to the supervisor, and to neither a worker nor an
+    /// integrator.
+    #[test]
+    fn the_pages_of_the_push_records_by_row_are_allowed_as_those_by_record_id() {
+        use crate::domain::EventId;
+        use crate::domain::ledger::builder::pushes::page::PushRecordsRead;
+        let by_id = supervisor_needs("ledger_push_records", &[json!(null), json!(1_000)]);
+        assert_eq!(by_id, Ok(C::QueueRead));
+        for page in [
+            PushRecordsRead::Rows {
+                after: None,
+                rows: 1_000,
+            },
+            PushRecordsRead::FirstOfRow {
+                after: Some("r1".to_owned()),
+                records: 10,
+            },
+            PushRecordsRead::RestOfRow {
+                key: "r1".to_owned(),
+                after: EventId::new(3),
+                records: 10,
+            },
+        ] {
+            let args = [serde_json::to_value(&page).unwrap()];
+            assert_eq!(
+                supervisor_needs("ledger_push_records_page", &args),
+                by_id,
+                "{page:?}"
+            );
+        }
+        for op in ["ledger_push_records", "ledger_push_records_page"] {
+            assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
+            assert!(super::super::reads_only(op), "{op}");
+        }
+        assert!(grants(ActorRole::Supervisor).contains(&C::Supervise));
+        for role in [ActorRole::Worker, ActorRole::Integrator] {
+            assert!(!grants(role).contains(&C::Supervise), "{role:?}");
         }
     }
 

@@ -40,8 +40,9 @@
 //!
 //! `pushes <dir>` reads the statement's plan and times by stage the read of
 //! the push records of the run rows on a copy of that queue, and of a
-//! supervisor started through the queue service each
-//! `ledger_push_records` request's sender and time ([`pushes`],
+//! supervisor started through the queue service the number and the sum of
+//! its `ledger_push_records_page` requests beside the statement over every
+//! row once ([`pushes`], [`pages_and_whole`],
 //! docs/plans/ledger-push-records-spike.md). Before those it times the
 //! statement beside the one it replaced ([`old_and_new`]); `pushes <dir>
 //! dup` does so as well on copies whose run rows hold their records two
@@ -1325,7 +1326,7 @@ fn main() {
 struct CountedCalls {
     inner: Arc<dyn ServiceCaller>,
     calls: Mutex<BTreeMap<(String, &'static str), usize>>,
-    /// Of each `ledger_push_records` request, in the order sent: the label
+    /// Of each `ledger_push_records_page` request, in the order sent: the label
     /// of the work that sent it, its milliseconds through the service
     /// (request and answer made and read back as on the socket) and the
     /// bytes of its answer's text ([`pushes`]).
@@ -1348,7 +1349,7 @@ impl CountedCalls {
 impl ServiceCaller for CountedCalls {
     fn call(&self, use_case: UseCase, params: Value) -> anyhow::Result<Value> {
         self.note(&params);
-        if params["op"] != "ledger_push_records" {
+        if params["op"] != "ledger_push_records_page" {
             return self.inner.call(use_case, params);
         }
         let started = Instant::now();
@@ -1498,8 +1499,8 @@ const DUPLICATE_RUN_RECORDS: &str =
   (SELECT value v FROM json_each(records) UNION ALL SELECT value FROM json_each(records)))
   WHERE kind='run'";
 
-/// The page the service's `ledger_push_records` answers at most and the
-/// client asks first (`LEDGER_PUSHES_PAGE` of the supervisor's queue).
+/// The page by record id the service's `ledger_push_records` answers at
+/// most, as a supervisor of the build before asks it.
 const PUSHES_PAGE: usize = 1_000;
 
 fn median(mut values: Vec<f64>) -> f64 {
@@ -1515,12 +1516,10 @@ fn median(mut values: Vec<f64>) -> f64 {
 /// and turned to JSON as the service does), the transfer (each page's text
 /// written and read back to the records) and the store's whole read
 /// directly, and two other ways to write the statement
-/// ([`PUSH_RECORDS_VARIANTS`]). Then it starts a supervisor from the marks
-/// (`start_builder`) through the queue service and says, of each
-/// `ledger_push_records` request, the work that sent it, its time and its
-/// answer's bytes, and what the start's requests took beyond a statement
-/// and an answer each and one transfer. Before those it prints the
-/// statement's plan on the schema `SqliteQueue::init` lays down.
+/// ([`PUSH_RECORDS_VARIANTS`]). Then it times a start from the marks
+/// through the queue service beside the statement over every row once
+/// ([`pages_and_whole`]). Before those it prints the statement's plan on
+/// the schema `SqliteQueue::init` lays down.
 fn pushes(dir: &Path, duplicate: bool) {
     use dagq::domain::RunEvent;
     use dagq::domain::ledger::builder::pushes::cut;
@@ -1671,27 +1670,84 @@ fn pushes(dir: &Path, duplicate: bool) {
         );
     }
 
-    println!("| round | request | caller | ms | answer bytes |");
-    println!("| --- | ---: | --- | ---: | ---: |");
-    let mut beyond = Vec::new();
-    for round in 1..=ROUNDS {
-        let db = copy_of(dir, "pushes-start");
-        let (counted, store) = through_the_service(&db);
-        let builder = start_builder(&*store, now_ms).unwrap();
-        drop(builder);
+    pages_and_whole(dir, &db, now_ms, ROUNDS);
+}
+
+/// The sum of a start's `ledger_push_records_page` requests of the Spike's
+/// queues by their run rows (docs/plans/ledger-push-records-spike.md
+/// "表", the requests of the pages by record id), on its host: a column
+/// for reference only.
+const SPIKE_REQUESTS_MS: [(i64, f64); 3] = [(957, 484.5), (1_914, 3_359.2), (3_828, 10_346.9)];
+
+/// Times, `rounds` times, the two in turn and the one run first swapped
+/// each round: [`PUSH_RECORDS_SQL`] over every run row once on the copy at
+/// `db` (until every answer row is read out as text), and a start from the
+/// marks (`start_builder`) through the queue service on a fresh copy of
+/// the queue at `dir`, of which it sums the `ledger_push_records_page`
+/// requests and their milliseconds. Prints the row of their medians, with
+/// the sum over the whole read: a start whose pages read every row again
+/// would grow it with the requests.
+fn pages_and_whole(dir: &Path, db: &Path, now_ms: i64, rounds: usize) {
+    let params = params!["run", "push_finished", "push_failed", "run_phase_changed"];
+    let (events, rows): (i64, i64) = Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT count(*) FROM run_events), count(*) FROM ledger_rows WHERE kind='run'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let whole = || -> f64 {
+        let read = Connection::open(db).unwrap();
+        let started = Instant::now();
+        let texts: Vec<String> = read
+            .prepare(PUSH_RECORDS_SQL)
+            .unwrap()
+            .query_map(params, |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        std::hint::black_box(texts);
+        started.elapsed().as_secs_f64() * 1000.0
+    };
+    let start = || -> (usize, f64) {
+        let copy = copy_of(dir, "pushes-start");
+        let (counted, store) = through_the_service(&copy);
+        drop(start_builder(&*store, now_ms).unwrap());
         let sent = std::mem::take(&mut *counted.pushes.lock().unwrap());
-        let requests = sent.len();
-        let total: f64 = sent.iter().map(|(_, ms, _)| ms).sum();
-        for (n, (label, ms, bytes)) in sent.into_iter().enumerate() {
-            println!("| {round} | {} | {label} | {ms:.1} | {bytes} |", n + 1);
-        }
-        // Each request runs the statement and makes the whole answer again.
-        beyond.push(total - requests as f64 * (statement + answer) - transfer);
-        println!("| {round} | all {requests} | | {total:.1} | |");
+        (sent.len(), sent.iter().map(|(_, ms, _)| ms).sum())
+    };
+    let (mut requests, mut sums, mut wholes) = (Vec::new(), Vec::new(), Vec::new());
+    for round in 0..rounds {
+        let ((sent, sum), once) = if round % 2 == 0 {
+            let once = whole();
+            (start(), once)
+        } else {
+            let started = start();
+            (started, whole())
+        };
+        println!(
+            "round {}: requests {sent}, their sum {sum:.1} ms, the whole read {once:.1} ms",
+            round + 1
+        );
+        requests.push(sent);
+        sums.push(sum);
+        wholes.push(once);
     }
+    requests.sort_unstable();
+    let (sum, once) = (median(sums), median(wholes));
+    let spike = SPIKE_REQUESTS_MS
+        .iter()
+        .find(|(of, _)| *of == rows)
+        .map_or("-".to_owned(), |(_, ms)| format!("{ms:.1}"));
     println!(
-        "beyond the statement and the answer of each request and the transfer, a start's requests: median {:.1} ms",
-        median(beyond)
+        "| events | run rows | requests | requests' sum ms | whole read ms | sum / whole | Spike's requests' sum ms |"
+    );
+    println!("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+    println!(
+        "| {events} | {rows} | {} | {sum:.1} | {once:.1} | {:.2} | {spike} |",
+        requests[requests.len() / 2],
+        sum / once
     );
 }
 

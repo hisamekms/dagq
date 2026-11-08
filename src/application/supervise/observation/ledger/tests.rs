@@ -3502,11 +3502,24 @@ struct WaitRowsService {
     events: Vec<RunEvent>,
     received: std::sync::Mutex<Vec<(String, usize)>>,
     callers: std::sync::Mutex<Vec<(String, Option<&'static str>)>>,
+    /// The bytes of a page of the push records' answer past which it is
+    /// refused as too large to answer.
+    largest: usize,
+    /// Of each page of the push records asked, the run rows the store read
+    /// for it, counted as it read them, and whether the page was refused
+    /// as past `largest` (its rows read all the same).
+    push_pages: std::sync::Mutex<Vec<(usize, bool)>>,
 }
 
 /// The rows of a store, read through [`LedgerStore`]'s own readings of
-/// them.
-struct HeldRows<'a>(&'a [LedgerRow]);
+/// them, counting the rows each read gives.
+struct HeldRows<'a>(&'a [LedgerRow], &'a std::sync::atomic::AtomicUsize);
+
+impl HeldRows<'_> {
+    fn count(&self, rows: usize) {
+        self.1.fetch_add(rows, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 impl LedgerStore for HeldRows<'_> {
     fn ledger_run_events(&self, _: &RunId) -> Result<Vec<RunEvent>> {
@@ -3541,19 +3554,41 @@ impl LedgerStore for HeldRows<'_> {
         unreachable!("no mark here")
     }
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
-        Ok(self
+        let row = self
             .0
             .iter()
             .find(|row| row.kind == kind && row.key == key)
-            .cloned())
+            .cloned();
+        self.count(usize::from(row.is_some()));
+        Ok(row)
     }
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>> {
-        Ok(self
+        let rows: Vec<LedgerRow> = self
             .0
             .iter()
             .filter(|row| row.kind == kind)
             .cloned()
-            .collect())
+            .collect();
+        self.count(rows.len());
+        Ok(rows)
+    }
+    fn ledger_rows_after(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        let mut rows: Vec<LedgerRow> = self
+            .0
+            .iter()
+            .filter(|row| row.kind == kind)
+            .filter(|row| after.is_none_or(|after| row.key.as_str() > after))
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| a.key.cmp(&b.key));
+        rows.truncate(limit);
+        self.count(rows.len());
+        Ok(rows)
     }
     fn remove_node_rows(&self, _: i64) -> Result<usize> {
         unreachable!("no retention here")
@@ -3562,17 +3597,26 @@ impl LedgerStore for HeldRows<'_> {
 
 impl WaitRowsService {
     fn of(memory: &Memory) -> std::sync::Arc<Self> {
+        Self::paged(memory, usize::MAX)
+    }
+
+    /// [`Self::of`], refusing a page of the push records whose answer is
+    /// past `largest` bytes.
+    fn paged(memory: &Memory, largest: usize) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             rows: memory.rows.borrow().values().cloned().collect(),
             events: memory.events.borrow().clone(),
             received: std::sync::Mutex::default(),
             callers: std::sync::Mutex::default(),
+            largest,
+            push_pages: std::sync::Mutex::default(),
         })
     }
 
     fn answer(&self, op: &str, args: &[serde_json::Value]) -> Result<(serde_json::Value, usize)> {
         let arg = |n: usize| args[n].clone();
-        let store = HeldRows(&self.rows);
+        let read_here = std::sync::atomic::AtomicUsize::new(0);
+        let store = HeldRows(&self.rows, &read_here);
         Ok(match op {
             "ledger_tasks_open_since" => {
                 (serde_json::to_value(store.ledger_tasks_open_since()?)?, 1)
@@ -3631,6 +3675,19 @@ impl WaitRowsService {
                 .take(page)
                 .collect();
                 (serde_json::to_value(&read)?, read.len())
+            }
+            "ledger_push_records_page" => {
+                let page = store.ledger_push_records_page(&serde_json::from_value(arg(0))?)?;
+                let answer = serde_json::to_value(&page)?;
+                let refused = serde_json::to_vec(&answer)?.len() > self.largest;
+                self.push_pages.lock().unwrap().push((
+                    read_here.load(std::sync::atomic::Ordering::Relaxed),
+                    refused,
+                ));
+                if refused {
+                    anyhow::bail!("the page is past the answer's limit (response_too_large)");
+                }
+                (answer, page.records.len())
             }
             "ledger_heads_open_at" => {
                 let kind: LedgerKind = serde_json::from_value(arg(0))?;
@@ -5125,7 +5182,8 @@ fn the_ports_start_of_the_tasks_for_a_position_is_no_later_than_the_one_there() 
     let (log, position, at) = waits_across();
     let events = &log.events[..position];
     let rows = built_and_settled(events, ms(at));
-    let store = HeldRows(&rows);
+    let read = std::sync::atomic::AtomicUsize::new(0);
+    let store = HeldRows(&rows, &read);
     let p = events.last().unwrap().id;
     assert_eq!(
         store.ledger_tasks_open_since_at(p).unwrap(),
@@ -5367,7 +5425,10 @@ fn the_pushes_made_again_through_the_service_cross_no_row_of_a_settled_run() {
         assert_eq!(pushes_of(&made).0, pushes_of(&builder).0);
         let ops = service.received.lock().unwrap().clone();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-        for (op, _) in ops.iter().filter(|(op, _)| op != "ledger_push_records") {
+        for (op, _) in ops
+            .iter()
+            .filter(|(op, _)| op != "ledger_push_records_page")
+        {
             *counts.entry(op.clone()).or_default() += 1;
         }
         counts
@@ -5391,6 +5452,79 @@ fn the_pushes_made_again_through_the_service_cross_no_row_of_a_settled_run() {
             "{op}"
         );
     }
+}
+
+/// Made again through the queue service in pages of the run rows, the
+/// push records are read with every run row read once by the pages
+/// answered, whatever their number: with a few runs settled or four times
+/// as many, a page of more than two rows' answer refused as past the
+/// answer's limit, the pages grow with the rows, and the rows they read add
+/// up to the run rows, not to the run rows a page. Every read counts, the
+/// pages refused too (the store reads their rows before the answer is
+/// found too large): they are the steps of asking again with a quarter of
+/// the rows, at most five from 1,000 rows to one, so what they read again
+/// is a few times the rows at most and does not grow with the pages. The
+/// summaries are those of the store read directly.
+#[test]
+fn the_push_records_made_again_in_pages_read_each_run_row_once() {
+    use crate::domain::ledger::builder::pushes::page::PushRecordsPage;
+    let read = |settled: usize| {
+        let (log, now) = pushes_across(settled);
+        let memory = Memory::of(&log);
+        let mut builder = Builder::default();
+        drain(&memory, &mut builder, now);
+        pass(&memory, &mut builder, now);
+        let runs: Vec<LedgerRow> = memory
+            .rows
+            .borrow()
+            .values()
+            .filter(|row| row.kind == LedgerKind::Run)
+            .cloned()
+            .collect();
+        let row_bytes = runs
+            .iter()
+            .map(|row| {
+                serde_json::to_vec(&PushRecordsPage::of_rows(std::slice::from_ref(row)))
+                    .unwrap()
+                    .len()
+            })
+            .max()
+            .unwrap();
+        let service = WaitRowsService::paged(&memory, 2 * row_bytes);
+        let mut made = builder.clone();
+        restore_pushes(&through(service.clone()), &mut made, ms(now)).unwrap();
+        let mut direct = builder.clone();
+        restore_pushes(&memory, &mut direct, ms(now)).unwrap();
+        assert_eq!(pushes_of(&made), pushes_of(&direct));
+        let pages = service.push_pages.lock().unwrap().clone();
+        (runs.len(), pages)
+    };
+    let (few, many) = (read(10), read(40));
+    assert!(many.0 >= 3 * few.0, "{} {}", few.0, many.0);
+    let mut answered_pages = Vec::new();
+    for (runs, pages) in [&few, &many] {
+        let answered: Vec<usize> = pages.iter().filter(|(_, r)| !r).map(|(n, _)| *n).collect();
+        let refused: Vec<usize> = pages.iter().filter(|(_, r)| *r).map(|(n, _)| *n).collect();
+        assert!(answered.len() >= 2, "{runs} rows: {pages:?}");
+        assert_eq!(
+            answered.iter().sum::<usize>(),
+            *runs,
+            "{runs} rows: {pages:?}"
+        );
+        assert!(refused.len() <= 5, "{runs} rows: {pages:?}");
+        assert!(refused.iter().all(|n| n <= runs), "{runs} rows: {pages:?}");
+        let total: usize = pages.iter().map(|(n, _)| n).sum();
+        assert!(total <= 6 * runs, "{runs} rows: {total} read, {pages:?}");
+        answered_pages.push(answered.len());
+    }
+    assert!(answered_pages[1] > answered_pages[0], "{answered_pages:?}");
+    // A page that read every row again would read the rows once a page.
+    let (runs, pages) = &many;
+    let total: usize = pages.iter().map(|(n, _)| n).sum();
+    assert!(
+        total * 2 < answered_pages[1] * runs,
+        "{runs} rows: {total} read, {pages:?}"
+    );
 }
 
 /// The summaries of the pushes `builder` holds, its pushes kept and the
@@ -6283,7 +6417,7 @@ fn ledger_reads_name_the_work_that_issued_them() {
     let seen = service.callers.lock().unwrap();
     assert!(
         seen.iter()
-            .any(|(op, c)| op == "ledger_push_records" && *c == Some("ledger.restore_pushes")),
+            .any(|(op, c)| op == "ledger_push_records_page" && *c == Some("ledger.restore_pushes")),
         "{seen:?}"
     );
     assert_eq!(

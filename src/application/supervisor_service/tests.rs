@@ -3410,3 +3410,212 @@ fn last_turn_page_fits_the_request_and_answer_at_worst_escape_width() {
     assert!(request_reads_only(UseCase::Supervisor, &request.params));
     assert!(needs::only_reads("last_turns_of"));
 }
+
+/// A service that answers the pages of the push records of `rows` by
+/// their keys as a store does, and refuses as too large to answer a page
+/// whose answer's text is past `largest` bytes; it notes each page asked,
+/// and of each the rows read for it and whether it was refused (its rows
+/// read all the same).
+struct PagedPushRecords {
+    rows: Vec<crate::domain::ledger::LedgerRow>,
+    largest: usize,
+    asked: std::sync::Mutex<Vec<crate::domain::ledger::builder::pushes::page::PushRecordsRead>>,
+    read: std::sync::Mutex<Vec<(usize, bool)>>,
+}
+
+impl PagedPushRecords {
+    /// Run rows `r000` to `r039`, each with its claim and a
+    /// `push_finished`, and `r017` with a `push_failed` and 300 phases
+    /// besides: more than a page holds alone.
+    fn new(largest: usize) -> Self {
+        use crate::domain::EventKind;
+        let record = |id: i64, kind: EventKind| crate::domain::RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: Some(RunId::new("00000000-1111-4111-8111-111111111111").unwrap()),
+            kind: kind.into(),
+            payload: serde_json::json!({"phase": "p", "remote": "o", "branch": "b"}),
+            created_at: "2026-11-01T00:00:00Z".to_owned(),
+            actor: None,
+        };
+        let rows = (0..40_i64)
+            .map(|n| {
+                let mut row =
+                    crate::domain::ledger::testkit::run_row(&format!("r{n:03}"), None, Vec::new());
+                row.records = vec![
+                    record(n, EventKind::RunClaimed),
+                    record(1_000 - n, EventKind::PushFinished),
+                ];
+                if n == 17 {
+                    row.records.push(record(2_000, EventKind::PushFailed));
+                    row.records
+                        .extend((0..300).map(|k| record(3_000 + k, EventKind::RunPhaseChanged)));
+                }
+                row
+            })
+            .collect();
+        Self {
+            rows,
+            largest,
+            asked: std::sync::Mutex::default(),
+            read: std::sync::Mutex::default(),
+        }
+    }
+
+    /// Every push record of the rows, by id, as the whole read gives them.
+    fn whole(&self) -> Vec<crate::domain::RunEvent> {
+        let mut records: Vec<_> = self
+            .rows
+            .iter()
+            .flat_map(crate::domain::ledger::builder::pushes::page::records_of_row)
+            .collect();
+        records.sort_by_key(|record| record.id);
+        records
+    }
+}
+
+impl ServiceCaller for PagedPushRecords {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        use crate::domain::ledger::builder::pushes::page::{
+            PushRecordsPage, PushRecordsRead, records_of_row,
+        };
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        assert_eq!(params.op, "ledger_push_records_page");
+        let (page,): (PushRecordsRead,) = serde_json::from_value(Value::Array(params.args))?;
+        self.asked.lock().unwrap().push(page.clone());
+        let after = |key: &str, after: &Option<String>| after.as_deref().is_none_or(|a| key > a);
+        let answer = match &page {
+            PushRecordsRead::Rows { after: from, rows } => {
+                let held: Vec<_> = self
+                    .rows
+                    .iter()
+                    .filter(|row| after(&row.key, from))
+                    .take(*rows)
+                    .cloned()
+                    .collect();
+                PushRecordsPage::of_rows(&held)
+            }
+            PushRecordsRead::FirstOfRow {
+                after: from,
+                records,
+            } => match self.rows.iter().find(|row| after(&row.key, from)) {
+                Some(row) => {
+                    PushRecordsPage::in_row(row.key.clone(), 1, records_of_row(row), *records)
+                }
+                None => PushRecordsPage::default(),
+            },
+            PushRecordsRead::RestOfRow {
+                key,
+                after,
+                records,
+            } => {
+                let row = self.rows.iter().find(|row| row.key == *key).unwrap();
+                let rest = records_of_row(row)
+                    .into_iter()
+                    .filter(|record| record.id > *after)
+                    .collect();
+                PushRecordsPage::in_row(key.clone(), 1, rest, *records)
+            }
+        };
+        let answer = serde_json::to_value(&answer)?;
+        let refused = serde_json::to_vec(&answer)?.len() > self.largest;
+        self.read
+            .lock()
+            .unwrap()
+            .push((answer["rows"].as_u64().unwrap() as usize, refused));
+        if refused {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+                rejected: false,
+                held: None,
+            }));
+        }
+        Ok(answer)
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// The push records of the run rows are read a page of rows at a time:
+/// a page past the answer's limit is asked again with fewer rows, and the
+/// row past it alone is read in parts, each from where the part before
+/// ended, after which pages of whole rows go on; gathered, the records are
+/// the whole read's, by id, and each row is read once by the pages
+/// answered but for the parts, the pages refused counted apart.
+/// With no page past the limit, one page reads every row.
+#[test]
+fn the_push_records_past_the_answers_limit_are_read_by_rows_and_in_parts() {
+    use crate::application::LedgerStore;
+    use crate::domain::ledger::builder::pushes::page::PushRecordsRead;
+    for largest in [usize::MAX, 12_000] {
+        let service = Arc::new(PagedPushRecords::new(largest));
+        let queue = SupervisorQueues::new(
+            service.clone(),
+            ActorContext::instance(ActorRole::Supervisor, 7),
+        )
+        .queue();
+        assert_eq!(queue.ledger_push_records().unwrap(), service.whole());
+        let asked = service.asked.lock().unwrap().clone();
+        let parts = asked
+            .iter()
+            .filter(|page| matches!(page, PushRecordsRead::RestOfRow { .. }))
+            .count();
+        let pages = service.read.lock().unwrap().clone();
+        let read: usize = pages.iter().filter(|(_, r)| !r).map(|(n, _)| n).sum();
+        let refused: Vec<usize> = pages.iter().filter(|(_, r)| *r).map(|(n, _)| *n).collect();
+        if largest == usize::MAX {
+            assert_eq!(
+                asked,
+                [PushRecordsRead::Rows {
+                    after: None,
+                    rows: 1_000
+                }]
+            );
+            assert_eq!(read, 40);
+            assert!(refused.is_empty());
+            continue;
+        }
+        assert!(parts > 0, "{asked:?}");
+        assert!(
+            asked.iter().any(|page| matches!(
+                page,
+                PushRecordsRead::FirstOfRow { after: Some(after), .. } if after == "r016"
+            )),
+            "{asked:?}"
+        );
+        assert!(
+            asked.iter().any(|page| matches!(
+                page,
+                PushRecordsRead::RestOfRow { key, .. } if key == "r017"
+            )),
+            "{asked:?}"
+        );
+        // The pages answered read each row once but the row in parts; the
+        // pages refused, read before they are found too large, are the
+        // steps of asking again with fewer rows or records, and read the
+        // rows again a few times at most.
+        assert_eq!(read, 40 + parts, "{asked:?}");
+        assert!(!refused.is_empty(), "{asked:?}");
+        assert!(
+            refused.iter().sum::<usize>() <= 5 * 40,
+            "{refused:?} {asked:?}"
+        );
+    }
+}

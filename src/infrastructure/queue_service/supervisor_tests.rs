@@ -585,6 +585,31 @@ fn only_the_supervisor_principal_reads_the_heads_and_anchors() {
     assert_eq!(events(&backend, "authorization_denied").len(), 2);
 }
 
+/// A worker's request for a page of the push records by the rows' keys
+/// is refused in the service's own transaction on the queue's DB: the
+/// answer is `authorization_denied`, and the refusal is the one event the
+/// DB records of it (which roles reach the operation is the policy's and
+/// `needs`' decision, tested there).
+#[test]
+fn a_workers_page_of_the_push_records_is_refused_and_recorded() {
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let worker = Principal::worker(&RunId::new(RUN).unwrap(), crate::domain::TaskId::new(1));
+    let worker_token = token_of(&backend, &worker);
+    let denied = call(
+        &backend,
+        &worker_token,
+        "ledger_push_records_page",
+        json!([{"rows": {"after": null, "rows": 10}}]),
+    );
+    assert_eq!(
+        denied.error.as_ref().map(|error| error.code),
+        Some(ServiceErrorCode::AuthorizationDenied),
+        "{denied:?}"
+    );
+    assert_eq!(events(&backend, "authorization_denied").len(), 1);
+}
+
 /// The service's clock fixed at one time, and random ids.
 fn fixed_time() -> crate::application::Generators {
     struct At;
@@ -1407,12 +1432,25 @@ fn the_runs_the_summaries_of_the_pushes_read_whole_cross_as_the_queues_own() {
             "ledger_legacy_runs_without_row",
             "ledger_runs_claimed",
             "ledger_runs_past_their_rows",
-            "ledger_push_records",
+            "ledger_push_records_page",
             "ledger_heads_open_at",
             "ledger_heads_open_at",
             "ledger_runs_without_row",
         ]
     );
+    // The operation of the pages by record id answers as it did, for a
+    // supervisor of the build before.
+    let by_id = |args: Value| {
+        let answer = call(
+            &service.backend,
+            &service.token,
+            "ledger_push_records",
+            args,
+        );
+        serde_json::from_value::<Vec<crate::domain::RunEvent>>(answer.result.unwrap()).unwrap()
+    };
+    assert_eq!(by_id(json!([null, 1_000])), records);
+    assert!(by_id(json!([records[0].id, 1_000])).is_empty());
     let page = |args: Value| {
         let answer = call(
             &service.backend,

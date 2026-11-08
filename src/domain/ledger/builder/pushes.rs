@@ -28,6 +28,8 @@ use crate::domain::ledger::{LEDGER_V, LedgerHead, LedgerKind, LedgerRow, window}
 use crate::domain::pre_claim::PreClaimInterval;
 use crate::domain::{EventId, EventKind, RunEvent, TaskId};
 
+pub mod page;
+
 /// Whether `event` is one the summaries of the pushes are a fold of: any
 /// `push_finished`, a run's or not, and a run's `push_failed` or
 /// `run_phase_changed`.

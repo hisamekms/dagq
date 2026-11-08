@@ -145,6 +145,7 @@ whole!(
     crate::domain::ledger::LedgerRow,
     crate::domain::ledger::LedgerHead,
     crate::domain::ledger::LedgerKind,
+    crate::domain::ledger::builder::pushes::page::PushRecordsPage,
     crate::domain::ledger::queue::QueueHead,
     crate::domain::ledger::session::written::SessionsWritten,
     crate::domain::ledger::session::written::Marks,

@@ -2635,6 +2635,17 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                     .collect::<Vec<_>>()
             }))
         }
+        // A page of the push records of the run rows by the rows' keys
+        // ([`crate::domain::ledger::builder::pushes::page::PushRecordsRead`]):
+        // the store reads the rows the page names alone, and the answer
+        // says how many rows it read and where it ended, so a row without
+        // a push record ends no read and a row past one answer is read in
+        // parts.
+        "ledger_push_records_page" => {
+            let (page,): (crate::domain::ledger::builder::pushes::page::PushRecordsRead,) =
+                read(op, args)?;
+            answer(LedgerStore::ledger_push_records_page(&*store, &page))
+        }
         // A page of the heads of the rows of `kind` not settled at a
         // position: at most `page` after the key `after` (none: from the
         // first), no record's body read or sent.

@@ -3456,20 +3456,28 @@ impl LedgerStore for SupervisorQueue {
             Ok((read, pushes, last))
         })
     }
-    // As the pushes of no run, a page after the last record of the page
-    // before: the service picks the records out of the run rows and sends
-    // them alone, cut, and no run row crosses.
+    // A page of rows by key at a time ([`Self::ledger_push_records_page`],
+    // [`crate::domain::ledger::builder::pushes::page::gather`]): the service
+    // reads the rows of each page alone, so a start reads each run row once
+    // whatever the number of pages, and the records are put in the order of
+    // their ids here once all are read. A page past the answer's limit is
+    // asked again at a quarter of its rows, and a row past it alone in
+    // parts of its records.
     fn ledger_push_records(&self) -> Result<Vec<RunEvent>> {
-        self.ledger_pages(LEDGER_PUSHES_PAGE, |after, page| {
-            let after = after.map(str::parse::<i64>).transpose()?.map(EventId::new);
-            let read: Vec<RunEvent> = self.remote(
-                "ledger_push_records",
-                vec![to_value(after)?, to_value(page)?],
-            )?;
-            let records = read.len();
-            let last = read.last().map(|record| record.id.as_i64().to_string());
-            Ok((read, records, last))
-        })
+        crate::domain::ledger::builder::pushes::page::gather(
+            LEDGER_PUSH_ROWS_PAGE,
+            LEDGER_PUSH_ROW_PART,
+            |page| self.ledger_push_records_page(page),
+            super::too_large,
+        )
+    }
+    // The supervisor's operation `ledger_push_records_page`: one page as
+    // `read` names it, the store's own page.
+    fn ledger_push_records_page(
+        &self,
+        read: &crate::domain::ledger::builder::pushes::page::PushRecordsRead,
+    ) -> Result<crate::domain::ledger::builder::pushes::page::PushRecordsPage> {
+        self.remote("ledger_push_records_page", vec![to_value(read)?])
     }
     // Each kind's heads in pages after the last key of the page before: the
     // service picks the rows, and only the ids of their records cross.
@@ -3535,9 +3543,30 @@ const LEDGER_WAIT_ROWS_PAGE: usize = 500;
 /// past the answer's limit.
 const LEDGER_STOPS_PAGE: usize = 1_000;
 
-/// How many push records a read asks for at a time, a quarter of it for a
-/// page past the answer's limit: a record crosses cut.
+/// How many pushes of no run a read asks for at a time, a quarter of it
+/// for a page past the answer's limit: a push crosses cut.
 const LEDGER_PUSHES_PAGE: usize = 1_000;
+
+/// The bytes of a push record's text cut ([`crate::domain::ledger::builder::pushes::cut`])
+/// the pages of the run rows' push records are sized by: a little more than
+/// the records measured (a full page of 1,000 of them is 199 to 201 KB).
+const PUSH_RECORD_BYTES: usize = 256;
+
+/// How many run rows a page of their push records asks for at a time
+/// ([`crate::domain::ledger::builder::pushes::page::PushRecordsRead::Rows`]),
+/// a quarter of it for a page past the answer's limit: a page of them
+/// holds up to [`crate::domain::queue_service::MAX_ANSWER_BYTES`] / 1,000 / [`PUSH_RECORD_BYTES`] (65)
+/// push records a row on average, and a run row records one or two besides
+/// the phases of a failed push.
+const LEDGER_PUSH_ROWS_PAGE: usize = 1_000;
+
+/// How many push records of one run row a part asks for at a time when the
+/// row past the answer's limit alone
+/// ([`crate::domain::ledger::builder::pushes::page::PushRecordsRead::FirstOfRow`],
+/// `RestOfRow`), a quarter of it for a part past it: half the answer's
+/// limit of records of [`PUSH_RECORD_BYTES`].
+const LEDGER_PUSH_ROW_PART: usize =
+    crate::domain::queue_service::MAX_ANSWER_BYTES / 2 / PUSH_RECORD_BYTES;
 
 /// How many queue rows of waits settled a read asks for at a time, a
 /// quarter of it for a page past the answer's limit: a row comes with no
