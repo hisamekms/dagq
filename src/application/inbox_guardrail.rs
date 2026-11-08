@@ -37,7 +37,8 @@ pub use crate::domain::sessions::GUARDRAIL_HOOK;
 /// and `null` with `reason: no_record` when no inbox was ever recorded
 /// opened. Each but the last names the launch's `provider`, `source` and
 /// requested `model` (null for the provider's default, and for an open
-/// recorded before they were).
+/// recorded before they were). The configured provider, as opposed to
+/// this launch's, is shown by `doctor`'s `roles`.
 pub fn judge(opened: Option<&Value>, reached: bool) -> Value {
     let Some(payload) = opened else {
         return json!({"guardrail": null, "reason": "no_record"});

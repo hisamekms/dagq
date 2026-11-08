@@ -143,7 +143,11 @@ impl SqliteQueue {
     /// writes the same mode once it sees the supervisor it started under
     /// launchd. A supervisor started by hand (no `--mode`) keeps `mode`
     /// unset. The workspace belongs to `in_cmux` mode, which only an
-    /// earlier binary wrote (ADR-t1433-4).
+    /// earlier binary wrote (ADR-t1433-4). launchd supplies the mode on
+    /// login, restart and KeepAlive starts too; a handoff preserves the
+    /// previous mode. This is a property of the process, stored with the
+    /// registration rather than in a queue-directory sidecar; a graceful
+    /// exit removes the whole row (and mode).
     pub fn set_supervisor_mode(
         &self,
         token: &LeaseToken,

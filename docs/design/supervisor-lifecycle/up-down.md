@@ -29,172 +29,103 @@ related:
 ---
 
 # `up` / `down`
-`dagq up`はqueueのruntimeをcold startする1コマンドで、application層の`src/application/lifecycle.rs`の`up`が行う（`down`も同じファイル。[ADR-0013](../../adr/0013-layered-architecture-and-type-function-style.md)）。
-外への口は`lifecycle::Ports`にまとめ、`compose::up` / `compose::down`が組み立てる。
-queueの読み書き（登録・event・run）は呼び出し元のprincipalでqueue serviceの`control`のstepとして送り、DBを開かず、届かなければそのerrorで失敗する。
-`down`がserviceを止める前の記録だけは、届かないか失敗しても警告して止める（呼び出し元は最初のstepで通っている。[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
-冪等で、続けて2回叩けば2回目は`reused`になる。
-外部（launchctl、PIDの生存とsignal）は`LaunchAgent`、`ProcessControl`のtrait越しに呼び、判定はfakeで、実launchdの`up → status → down --wait`はe2eで確かめる（e2eの条件は`tests/e2e.rs`の冒頭のdoc comment）。
-in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の手順を文面に書く（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
 
-1. **preflight**: 何も起動する前に次を確かめ、だめなら理由と案内を付けたerrorでsessionもsupervisorも開かずに止まる。
-   - queueが`init`済みであること（queueはDBの指定かcwdのrepositoryから解決する）と、repositoryのroot。
-   - Claudeと、inboxとruntimeのplannerが読むinstall済みの`claude-dagq`が有効なこと（`lifecycle::require_agent`で、`dagq inbox`も同じ判定を行う。[ADR-t617-2](../../adr/2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md)の決定4）。
-     確かめないときと確かめ方・文言は[plugin integration](../plugin-integration.md#installしたpluginの確認)と`UpEnvironment`のdoc commentにある。
-     `dagq plan`は何も開かずに案内を付けて拒むので（[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）、この確かめを行わない。
-   - Claude Codeがrepository rootを信頼済みであること。
-     run worktreeの信頼はrepository rootから決まるので、未信頼のまま流すと全runがtrust dialogで止まる。
-     未信頼なら、rootで`claude`を一度起動して承認する案内のerrorで止まり、configを書き換えて信頼を代行することはしない（[provider-lifecycle](../provider-lifecycle.md#trust-prompt)）。
-   - main checkoutの`dagq.toml`の`[run.env]`が名指すプログラムが`up`のPATHで解決できること（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定9、[Run environment](run-environment.md#runenvが名指すプログラムの検査)）。
-   - trustを確かめるrepository rootと、`[run.env]`・言語・着地先のbranchを読む`dagq.toml`は、repositoryのmain checkout（main worktree。[Run environment](run-environment.md#main-checkoutの決め方)）のもの。
-     main checkoutが無いrepository（bare、またはlinked worktreeから打った`--separate-git-dir`）では、理由と案内をつけて止まる。
-   - 着地先のbranchの解決（`dagq.toml`の`[repository]`か推定）もpreflightで行い、解決できないときと、pushを無効にしていない（`push = false`でない）のに明示した`remote`が無いときは止まる（[landing branch](integrate.md#landing-branch)）。
-   - 自動更新を頼んだ`up`は、着地先のbranchの解決の後で、queueのrepository（main checkout）がdagqのソースかを確かめ、ソースでなければsupervisorを起動も引き継ぎもせずに止まる（自動更新はrepositoryのソースからdagqをbuildするため。[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Auto-update](auto-update.md#dagqのソースのrepositoryだけ)、[Source repository](source-repository.md)）。
-2. **stale登録の削除**: `supervisors`表のうちPIDが死んでいる行を消し、結果に出す。
-   PIDが生きていてもheartbeatの古い行は、そのPIDを登録したプロセスでないと分かれば同じく消す（判定は`pid_taken_over`のdoc comment）。
-   `run_leases`は触らない（そのrunの復旧は`doctor` / `recover`の仕事）。
-   登録より前に始まったプロセスがPIDにいてheartbeatの古い登録（hang）は消さず、reuseもしない。
-   生きているsupervisorもsweepの中で同じ`prune_supervisor`で消すので、`up` / `down`を待たずに消えている登録もある（その条件はheartbeatの期限切れを足したもので、[Persistence](../persistence.md)が持つ）。
-3. **supervisor**: 生きていてheartbeatが新しい登録があり、その`binary_version`が全部`up`自身のbuild識別子（[Build identifier](build-identifier.md#build-identifier)）と文字列として同じで、launchd modeの登録があれば読めるplistに`up`の書く`ProcessType`があるならreuseし、plistにもlaunchctlにも触らない。
-   1つでもversionが違うか、launchd modeの登録の読めるplistに`ProcessType`が無ければ**入れ替える**（下記）。
-   `ProcessType`はlaunchdがagentを読むときだけ効き、`install`と自動更新は引き継ぎだけでplistを読み直させないので、前のbinaryが書いたplistのsupervisorは、自動更新の後も人かinboxが一度`up --auto-update`を打ってdrainと書き直しをさせるまで制限の下で流れる（判定は`agent_lacks_process_type`のdoc comment）。
-   liveな登録が無ければlaunchd modeで起動する。
-   - **同じqueueの別のlabelのagent**: reuse・引き継ぎ・入れ替え・起動を決める前に、このqueueのDBを指す別のlabelのLaunchAgentを探し（`lifecycle::stray_agents`）、`down`と同じく外して、そのsupervisorはreuseせずにdrainを待つ（`remove_stray_agents_for_up`）。
-     別のqueueのDBを指すagentには触れない。
-     待つ相手と待たない指定での拒み方は、そのdoc commentと`stray_supervisors`のdoc commentにある。
-   - **launchd mode**: LaunchAgentを書いて起動し、登録が現れるまで待つ。
-   - **登録済みのin-cmuxのsupervisor**（ADR-t1433-4決定3）: `up`は新しくin-cmux modeで起動せず、登録にも`session_workspaces`にもin-cmuxの記録を書かない。
-     読むのは前のbinaryが残した登録だけで、引き継ぎ（下記）では同じプロセスのまま続け、drainと`down`ではSIGINTを送る。
-     そのworkspaceはdagqが閉じず人が閉じ、`session_workspaces`の`supervisor`行は消す（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定3・6）。
-     launchdに移すのは人かinboxの一度の`down --wait`と、in-cmuxの指定を外した`up`。
-     起動するsupervisorのmodeは常に`launchd`で、supervisorの起動の印の`mode`になる（[変更の印](commands.md)）。
-   - **待つ相手**: `up`が起動したsupervisorの登録だけを受け取り、既に表にあった登録を取り違えない（`started_registration`のdoc comment）。
-   - **modeの記録**: `supervise`は受けた`--mode`を、登録を作った直後に自分の`supervisors`の行の`mode`へ書く。
-     LaunchAgentの引数が`--mode launchd`を持つので、`up`を通さずlaunchdが起動したsupervisor（ログイン時・再起動後・`KeepAlive`の起動し直し）もlaunchd modeの登録になる。
-     `up`も起動したsupervisorが登録に現れた直後に同じ`mode`を書く。
-     `--mode`の無い`supervise`（手起動）の登録は`mode`を持たず、handoffで引き継いだ登録は前の`mode`を保つ。
-     modeはプロセスの性質なので登録行と寿命を共にし、supervisorがgracefulに終われば行ごと消える（queue dirのsidecar fileにしなかった理由は[persistence](../persistence.md)のRuntime ownership）。
-     `down`はこれを見てSIGTERM（launchd mode / 手起動）とSIGINT（登録済みのin-cmux）を使い分ける。
-   - **並列数・待ちの上限・runtimeのplannerの上限・claimを控えるload**（[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定7、ADR-0041の決定12、[claimを控える](claim-hold.md)）: 明示されたときだけsupervisorの引数に足し、無ければsupervisorがmain checkoutの`dagq.toml`の`[supervisor]`かhostから決める（`up`のhelpと`supervise_arguments`のdoc comment）。
-     supervisorが値と出どころを登録に書く（[人の答えを待つrun](waiting.md)）。
-   - **自動更新**（[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定17）: 自動更新は`up`の指定（`--auto-update`）のときだけ有効で、指定した`up`が起動するsupervisorは自動更新付きで起動し、reuseや引き継ぎで残す登録にも`up`の指定をそろえて書く（書く先は`set_auto_update`のdoc comment、[Auto-update](auto-update.md#auto-update)）。
-   - **buildの違うsupervisorの入れ替え**（[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10・12・15・16）: 登録の`binary_version`は`supervise`プロセス自身が書いた自分のbuild識別子で、`up`はliveな登録のどれか1つでも自分のbuild識別子と違えば（nullを含む。package versionが同じでもcommitやdirtyが違えば違う）入れ替える。
-     liveな登録が全部引き継ぎを受けられるなら**引き継ぎ**、そうでなければ**drain**で入れ替える。
-     launchd modeの登録は、LaunchAgentの`ProgramArguments`の先頭が`up`自身の絶対pathで、`ProcessType`が`up`の書く値のときだけ引き継ぐ（execはplistもlaunchdがprocessに当てる制限も変えないので、pathの違うagentはlaunchdの次の再起動で前のbinaryに戻り、`ProcessType`の無いagentは制限の下で流れ続ける。そのときはdrainし、`up`がplistを書き直してlaunchdが読み直す。判定は`agent_takes_handoff`のdoc comment）。
-     - **migrate**: `up`はqueueに何かを送る前に自分のqueue serviceを入れ替えの口で起動し（[Queue service](../queue-service.md)の「入れ替えの口」）、そのserviceが受け付けの前に未適用の互換のmigrationを適用して、`up`はそれを結果に載せる。
-       `up`のプロセスはmigrateしない。
-       queueが`up`のrepositoryと別のrepositoryに束縛されていれば、serviceは引き継ぐ前に断り、`up`は何も入れ替えもmigrateもせずにerrorで止まる。
-       未適用のものがあって`up`がqueueのbinaryでなければ（[persistence](../persistence.md#database-setup-and-migrations)）、serviceは何も適用せず受け付けず、`up`は何も起動もせずにerrorで止まる。
-       非互換が1つでもあれば、serviceは動いているserviceにも触れずに終わり、`up`は何も起動もsignalもせず、`down --wait` → `dagq migrate` → `up`、または`dagq install --allow-breaking`を案内するerrorで止まる。
-       queueのfloorが`up`のbuildを拒むときも、未適用のものの有無にかかわらず、serviceは動いているserviceに触れずに終わり、`up`は何も起動もせずにerrorで止まる。
-       互換のmigrationの後も、古いbinaryのsupervisorとrunのwrapperはfloor以上なのでそのまま動く（[persistence](../persistence.md#database-setup-and-migrations)）。
-     - **引き継ぎ**（[Handoff](handoff.md#handoff)）: liveな登録それぞれに`up`自身の絶対pathへのexecを頼み、各登録が同じpidのまま`up`のbuild識別子で戻るのを待つ（`lifecycle::hand_off`）。
-       何もsignalせず、LaunchAgentに触らず、走っているrunのsessionもleaseもそのまま。
-       待ちの上限は全員で1つで、supervisorは進行中の検証と着地の区切りまで待ってからexecするので、integrateの検証1回分に及ぶことがある。
-       戻ったと見なす条件・失敗の条件・猶予の見直し・要求の取り消しは`hand_off`と`HANDOFF_GRACE`のdoc commentと[Handoff](handoff.md#handoff)にある。
-       1つの失敗で待ちを止めず、全員の成功か失敗を待つ（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
-       1つでも失敗があっても、`up`はそこで止まらず、残りの段を最後まで行ってから失敗する（出力と失敗したsupervisorのその後は`lifecycle::PartialHandoff`のdoc comment）。
-       fileを差し替えていないので戻すものは無い。
-       launchdへ移すときは`down --wait`と`up`。
-     - **drain**（引き継ぎを受けられない前のbinaryの登録、またはpathの違うlaunchd agentの登録）: live全部をdrainしてから1つ起動し直す。
-       停止は`down --wait`と同じ順序で、手順は`replace_supervisors`と`drain_supervisors`のdoc commentにある。
-       それからlaunchd modeで起動する（入れ替えられる側がin-cmuxでも同じ）。
-       待つ相手の除外集合はdrainの後に取り直すので、生き残った「生きているが黙っている」登録を自分の起動したものと取り違えない。
-       drainに上限は置かない（runはClaude sessionなので待ち時間はrunの長さそのもの）。
-       drainのあいだも答えの済んだ着地の判断は適用され、承認された着地は自分のrunが残るあいだだけ進む（[ADR-t3330-1](../../adr/2026-10-25-t3330-1-stopping-drain-applies-landing-answers-and-lands-only-while-its-own-runs-keep-it-going.md)）。
-       待たない指定は逃げ道で、入れ替える登録がleaseを持つrunが1件でもあれば、件数とrun idと状態を挙げたerrorで止まる（数えるrunと数えないrunは`leased_runs`と`no_wait_refusal`のdoc comment）。
-       判定はsignalもuninstallも何もする前に行うので、止まったときの状態は`up`を打つ前と同じ（PIDの死んだ登録のprune（2）だけは済んでいる）。
-       leaseを持つrunが無ければそのまま入れ替えるが、待たない指定ではdrainの待ちにも上限が付き、超えたら残っているtokenとpidを挙げたerrorで止める（停止は既に頼んであり、agentも外れているので、`status`から消えたら`up`を打ち直す）。
-   - **入れ替えの対象はliveな登録だけ**: 「生きているが黙っている」古いbinaryのsupervisorは入れ替えられず、`up`はその隣に新しいversionのsupervisorを立てる。
-     `status`がstaleとして報告し、同じqueueに生きているsupervisorが他に居ないときだけ、人が`down --force`で止めてから`up`をやり直す。
-     生きているsupervisorが居るときは、`down`がその生きている方も止めるので使わず、人がstaleなsupervisorのプロセスだけを止め、残った登録は生きているsupervisorが片付ける（案内は`status`のattentionの`supervisor_stale`の次の手）。
-     （[ADR-0014](../../adr/0014-up-replaces-a-supervisor-of-another-binary-version.md)のConsequences、[ADR-0073](../../adr/0073-kind-additions-are-compatible.md)の決定16と[ADR-t3134-1](../../adr/2026-10-23-t3134-1-stop-a-hung-supervisor-beside-a-live-one-without-down.md)）
-   - **二重のsupervisorの警告**: 同じqueueに引き継ぎの組でないliveな登録が2つ以上あるか、queueのLaunchAgent（自分のlabelと、同じDBの別のlabel）が2つ以上loadされていれば、`doctor`と`status`が同じ判定（`health::duplicate_supervisors`）でwarningを出し、`status`はinboxのattentionにも載せる。
-     引き継ぎの元の登録とexecが同じpidで作り直した後継の登録は1つのsupervisorと数えて知らせない（意味と直し方は判定のdoc comment）。
-   - plist: `~/Library/LaunchAgents/com.dagq.<queue hash>.plist`で、queue hashの決め方は`QueueLocation::hash`のdoc comment、中身は`src/application/lifecycle.rs`の`LaunchAgentSpec::xml`と`supervise_arguments`と`SupervisorEnvironment`のdoc commentにある。
-     `ProcessType`に`Interactive`を書き、supervisorとその子（着地の検証・worker・review）を、launchdが`ProcessType`の無いjobに当てる既定のCPUとI/Oの制限の下で流さないが、着地の検証の速さへの効果は測りでは見えなかった（[ITの遅さの原因](../../plans/it-slowdown-2026-10-08.md#processtype-interactive-の後)）。
-     `up`が書くplistに`--cmux`は無く、前のbinaryが書いたplistと引き継ぎのexecのargvにある`--cmux`は新しいbinaryが受け付けて無視する（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定6、`src/main.rs`の`RetiredCmux`）。
-     `up`のenvがtestのownerを名指していれば、それもsupervisorに渡し、`KeepAlive`は失敗で終わったときだけ立て直す形にして、ownerが居なくなって止まったsupervisorを立て直し続けない（[Queue service](../queue-service.md)の起動と停止）。
-   - 起動: agentをbootoutしてからbootstrapし直し、既にbootstrap済みでも定義を差し替える。
-     bootoutは即返り、旧プロセスが終わるまでのbootstrapは失敗するので、serviceが消えるまで待ち、消えなければSIGKILLを送る（hangしたsupervisorがlabelを`ExitTimeOut`の間占有しないため）。
-   - macOSの外（launchdの無いhost）: `Launchctl`は`launchctl`を起動しない。
-     `install`は「launchd mode needs macOS」のerrorで止まってplistを書かず、`down`と入れ替えのdrainはagentが載っていないとして進む。
-     そのhostでは人かhostのservice managerが`dagq supervise`をforegroundで動かす（ADR-t1433-4決定4）。
-   - 登録が時間内に現れなければerrorで止め、agentはそのまま残す（`launchd.log`を見る）。
-     preflightに通らない環境ではKeepAliveで再起動を繰り返すので、`down`で外す。
-4. **inbox**: `up`はinboxを開かない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定3）。
-   inboxは人が自分のterminalで`dagq inbox`を打って開く（下の「`dagq inbox`」）。
-   `up`はplannerも開かない（plannerはruntimeが立てる。[`plan` / `planners`](plan-planners.md#plan--planners)）。
-   `up`は`session_workspaces`のうちsupervisor以外のroleの行（前のbinaryが記録したもの）を消す。
-   workspace自体は閉じず、人が閉じる（決定6）。
-   `up`を打った環境の`DAGQ_ROLE`と`DAGQ_QUEUE`は見ない。
-5. **結果**: supervisorの結果に、適用したmigration、inboxを開く案内、消した記録と登録、人が`up`の後に最初に見る未完のrun（`open_work`）を添える。
+`dagq up`はqueueのruntimeをcold startし、`dagq down`はsupervisorを止める。
+入口はapplication層の`src/application/lifecycle.rs`で、外への口と組み立ての境界も同moduleのdoc commentが持つ（[ADR-0013](../../adr/0013-layered-architecture-and-type-function-style.md)）。
+冪等で、続けて起動すれば生きている同じbuildのsupervisorを再利用する。
+外部との境界はtrait越しに呼び、判定はfakeで、実launchdでの起動・状態・停止はe2eで確かめる（条件は`tests/e2e.rs`の冒頭のdoc comment）。
+
+queueの読み書きは呼び出し元のprincipalでqueue serviceの制御のstepとして送り、DBを開かず、届かなければそのerrorで失敗する。
+停止前の記録だけは失敗しても警告して止める（呼び出し元は最初のstepで通っている。[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
+
+## 起動の入口と境界
+
+起動前の検査と結果の読み方は`lifecycle::up`のdoc commentを入口に読む。
+検査を通らなければsupervisorを起動せず、理由と対処を返す。
+信頼を代行するためにClaude Codeのconfigを書き換えない。
+main checkoutを基準にする理由と解決の境界は[Run environment](run-environment.md#main-checkoutの決め方)、信頼の境界は[Provider lifecycle](../provider-lifecycle.md#trust-prompt)にある。
+pluginの検査を省く条件は[Plugin integration](../plugin-integration.md#installしたpluginの確認)と`UpEnvironment`のdoc commentにある（[ADR-t617-2](../../adr/2026-09-27-t617-2-installed-plugin-by-default-plugin-dir-for-development.md)決定4）。
+着地先の解決は[landing branch](integrate.md#landing-branch)、環境のプログラムの検査は[Run environment](run-environment.md#runenvが名指すプログラムの検査)を参照する。
+自動更新はqueueのrepositoryがdagqのソースのときだけ使える（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Source repository](source-repository.md)）。
+
+登録のpruneの判断は`domain::supervisor_prune::pid_taken_over`、生きているsupervisor自身のsweepとの違いは同moduleのdoc commentにある。
+起動はrunのleaseを直さない。
+runの復旧は`doctor` / `recover`の責務である。
+別labelのagentを扱う入口は`lifecycle::remove_stray_agents_for_up`で、別のqueueのagentには触れない。
+
+起動と停止の依存はservice、broker、supervisorの順で、停止は逆になる。
+待たずに停止するときの責任の引き渡しは`lifecycle::down`のdoc commentにある。
+brokerはhostのprocessであり、podmanでは動かさない（[ADR-t2114-1](../../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)、[Queue broker](../queue-broker.md#起動と停止)）。
+`up`のprocess自身はmigrateしない。
+serviceによるmigrationと入れ替えを拒む境界は[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)、具体的な拒否と起動結果は`application::queue_service::ensure_replaced`のdoc commentを参照する。
+
+## supervisorの再利用と入れ替え
+
+再利用と入れ替えの判断の入口は`lifecycle::outdated`で、buildの比較の意味は[Build identifier](build-identifier.md#build-identifier)にある。
+全員が引き継げるかの判断は`lifecycle::takes_handoff`、launchdの定義が引き継ぎを許す条件は`lifecycle::agent_takes_handoff`にある。
+自動更新と引き継ぎではplistが再読込されず、ProcessTypeの無いagentの制限が残る。
+対処の入口は[運用の「ProcessTypeの無いLaunchAgent」](../../development/operations.md#processtypeの無いlaunchagent)にある。
+その判定の入口は`lifecycle::agent_lacks_process_type`である。
+
+引き継ぎの待ちと失敗の判断は`lifecycle::hand_off`、部分的な失敗の出力とその後は`lifecycle::PartialHandoff`にある（[Handoff](handoff.md#handoff)）。
+走っているrunのsessionとleaseはそのままで、検証と着地の区切りを待つため、待ちが検証1回分に及ぶことがある。
+1つの失敗で他の引き継ぎの待ちを打ち切らない（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
+引き継げないときのdrainの入口は`lifecycle::replace_supervisors`、待たない指定の拒否は`lifecycle::no_wait_refusal`にある。
+drainはrunの長さを待つため上限を置かず、待たない指定だけは待ちを制限する。
+拒否の判断はsignalやagentの取り外しより前であり、runが残るため拒まれても停止は頼んでいない。
+drain中も答えの済んだ着地の判断は適用され、承認された着地は自分のrunが残る間だけ進む（[ADR-t3330-1](../../adr/2026-10-25-t3330-1-stopping-drain-applies-landing-answers-and-lands-only-while-its-own-runs-keep-it-going.md)）。
+入れ替えの約束の根拠は[ADR-0014](../../adr/0014-up-replaces-a-supervisor-of-another-binary-version.md)と[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)にある。
+
+生きているがheartbeatの古いsupervisorは起動側では入れ替えず、隣に新しいsupervisorが立つことがある。
+止める判断は人が行い、生きている別のsupervisorを巻き込まないことが必要である（[ADR-0073](../../adr/0073-kind-additions-are-compatible.md)決定16、[ADR-t3134-1](../../adr/2026-10-23-t3134-1-stop-a-hung-supervisor-beside-a-live-one-without-down.md)）。
+具体的な対処は`lifecycle::replace_supervisors`のdoc commentとstatusのattentionにある。
+二重のsupervisorの警告の判定は`health::duplicate_supervisors`にあり、引き継ぎの元と同じpidでの後継は1つとして数える。
+
+## hostでの起動
+
+LaunchAgentの中身は`lifecycle::LaunchAgentSpec::xml`、渡す起動引数は同moduleの`supervise_arguments`を入口に読む。
+modeの記録と寿命は`runtime_store::coordination::set_supervisor_mode`のdoc commentにあり、起動した登録の取り違えを防ぐ判断は`lifecycle::started_registration`にある。
+自動更新の指定を残る登録にそろえる入口は`lifecycle::set_auto_update`（[Auto-update](auto-update.md#auto-update)）、並列数などの出どころは[人の答えを待つrun](waiting.md)と[claimを控える](claim-hold.md)にある。
+plistのpathは`infrastructure::location::launch_agent_path`、queue hashの意味は`QueueLocation::hash`のdoc commentを参照する。
+bootstrapと停止の待ちは`infrastructure::launchd::Launchctl`、起動後の登録待ちは`lifecycle::wait_for_registration`にある。
+登録が時間内に現れなくてもagentは残るため、再起動を繰り返すときはログと停止の判断が必要になる。
+macOSの外では人かhostのservice managerがsupervisorをforegroundで動かす（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)決定4）。
+
+in-cmuxでの新しい起動は何にも触る前に拒む。
+残る登録と引数の互換の扱いは`lifecycle`のmodule docと`main::RetiredCmux`にある（ADR-t1433-4決定3）。
+workspaceを閉じるのは人で、dagqはcmuxを呼ばない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定3・6）。
+`up`はinboxもplannerも開かない。
+plannerはruntimeが立てる（[`plan` / `planners`](plan-planners.md#plan--planners)、[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）。
 
 ## `dagq inbox`
 
-`dagq inbox`は、inboxを打った人のterminal（種類を問わない）の前面で開く（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定2）。
-queueは`up`と同じく解決する。
-providerとmodelはmain checkoutの`dagq.toml`の`[roles.inbox]`を既定に、`dagq inbox`の起動の引数がその起動だけ上書きし、どちらも無ければ今までどおりClaudeで何も渡さずに開く（[ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定1。選び方は`lifecycle::inbox_route`と`actor_model::inbox_launch`）。
-値の誤り（実装の無いprovider、Codexに渡したClaudeのmodelなど）は設定の誤りとして、何も記録せずに止まる。
-`dagq.toml`は`[roles.inbox]`の表だけを読むので（`run_env::load_inbox_role`）、ほかの表の誤りではinboxは止まらない。
-Codexを選ぶと、execの前にCodexの実行ファイルが動くこととloginを確かめ、使えなければ開かずに、理由とClaudeで開く起動の引数を出して0でなく終わる（ADR-t1181-1決定3。`codex_inbox::check_usable`）。
-次に、人のCodexの`config.toml`にCodexのTUIが自分で書き足す欄が無ければ、そのfileの場所と人が足す行を出して止まる（[ADR-t3331-1](../../adr/2026-10-25-t3331-1-codex-inbox-writes-no-person-settings-and-refuses-to-open-when-codex-would.md)）。
-両方が通ればCodexのinboxを開く。
-止まるときはどれもClaudeに替えず、askを開かず（人がterminalの前にいる）、人のfileを読むだけで書かない。
-開いた後にCodexが使えなくなったら（利用上限など）、runtimeは何もせず、人が開き直す。
-人がClaudeの起動を禁じている間（queueの生きているsupervisorが`up --no-claude`で動いている。`lifecycle::claude_forbidden`）は、Claudeのinboxを開かない（ADR-t1181-1決定4）。
-`[roles.inbox]`か既定がClaudeならCodexで開こうとし、Codexが選べなければClaudeを案内せずに理由を出して0でなく終わる。
-起動の引数で選んだClaude（providerかmodelでClaudeを名指したもの）は理由を出して断る。
-runtimeはinboxを起動しないので、providerの控えはinboxを止めない。
-Codexのinboxの起動の中身は[Provider lifecycle](../provider-lifecycle.md)のinboxの起動の節が持つ。
-下の手順はClaudeのinboxのもの。
+inboxは人が自分のterminalで開き、前面で操作する（ADR-t2159-1決定2）。
+起動の入口は`lifecycle::inbox`で、同じinboxの中から別のinboxを開かない。
+providerの選択と拒否は`lifecycle::inbox_route`、inboxの設定だけを読む境界は`run_env::load_inbox_role`にある（[ADR-t1181-1](../../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)）。
+使えないCodexの代わりにClaudeを起動せず、askを開かず、人のfileを読むだけで書かない（[ADR-t3331-1](../../adr/2026-10-25-t3331-1-codex-inbox-writes-no-person-settings-and-refuses-to-open-when-codex-would.md)）。
+開いた後にproviderが使えなくなったら人が開き直す。
+runtimeはinboxを起動しないため、providerの控えもinboxを止めない。
+Claudeの起動を人が禁じたときの境界は`lifecycle::claude_forbidden`にある。
+providerごとの起動は[Provider lifecycle](../provider-lifecycle.md)のinboxの節を参照する。
 
-1. **inboxの中では拒む**: 打った環境が`DAGQ_ROLE=inbox`なら、`DAGQ_QUEUE`がどのqueueを指していても、何も読まず起動も記録もせずに止まる。
-   inboxの中から別のinboxを開かない。
-2. **preflight**: queueが`init`済みで、repositoryにmain checkoutがあること。
-   Claudeとinstall済みのpluginは`up`と同じ判定で確かめ、だめなら`dagq inbox`を打ち直す案内を付けて止まる。
-   言語（`dagq.toml`と利用者の`config.toml`）の間違いも止まる。
-3. **記録とexec**: providerが作るinboxのcommand（inboxのsettings・plugin・inboxのprompt）を、actor executorからinboxの身元の環境付きで受け取り、cwdをmain checkoutにする。
-   その前にqueueのevent `inbox_opened`に起動の記録を残す（ADR-t1181-1決定5。欄は`lifecycle::inbox`のdoc comment）。
-   それから`dagq`のプロセスをそのcommandでexecで置き換え、inboxはそのterminalの前面で動く。
-   execが失敗したときだけerrorで戻る。
-   inboxを閉じるのは人で、`DAGQ_ROLE`は起動したcommandにだけ付くので、閉じたterminalには残らない。
-   - **inboxのsettings**: inboxのcommandを作るたびにqueueのディレクトリへ書き直す。
-     中身はinboxのroleの`permissions.deny`だけで、hook・idle marker・サジェストの設定は入れない（inboxはidleで判定せず、人が打つ）。
-   - **見せる欄**: `status`と`doctor`のinboxのguardrailは、最新の`inbox_opened`で判定し、その起動のproviderとmodelを添える。
-     判定は起動のproviderで分かれ、Claudeのinboxはsettingsを渡したこと、CodexのinboxはPreToolUseのhookを渡したことで判定する（[Authorization](../authorization-guardrail.md)）。
-     Codexのinboxのguardrailはhookなので、渡したことと動いた記録を分けて出す。
-     `[roles.inbox]`に設定したproviderは`doctor`の`roles`が出す。
-     前のbinaryの`up`が開いたinboxの記録も同じく判定する。
-     guardrailが無ければ、引き継ぎを書き、`DAGQ_ROLE`の無いterminalでinboxを終えて`dagq inbox`で開き直すよう案内する（手順の正本はpluginの`dagq-recover`の`reference/up-down.md`の「Open the inbox again」）。
-   - **限界**: settingsはClaude Codeの起動の引数なので、inboxのterminalで`claude`を打ち直したsessionと、`dagq inbox`を通さずに開いたinboxには効かず、見えない（ADR-t2159-1決定5）。
-     Codexのhookはtrustされなければ動かず、起動の記録はhookを渡したことしか持たないので、動いた記録が無いうちはguardrailが効いているか分からない。
-     denyはtoolの呼び出しの綴りでの照合で、絶対path・scriptの中・別のshellからの呼び出しは止めず、enforcementではない（[Security](../security.md)）。
+起動の記録とguardrailの判定は`inbox_guardrail::judge`、Claudeに渡すsettingsは`adapters::ClaudeCode::inbox_command`のdoc commentにある（[ADR-t1228-2](../../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。
+guardrailが無いときの開き直しはpluginのdagq-recoverのreference/up-down.md「Open the inbox again」が正本である。
+settingsは起動の引数なので、人がterminalでagentを打ち直したsessionや、この入口を通さないinboxには効かず見えない。
+Codexのhookはtrustされなければ動かず、起動の記録だけでは効いているか分からない。
+denyはtoolの呼び出しの綴りの照合なので、絶対path・scriptの中・別のshellからの呼び出しを止めるenforcementではない（[Security](../security.md)）。
 
-`dagq down`はsupervisorを止める。
-launchdのものも、登録済みのin-cmuxのものも、手で起動したものも同じ1コマンドで止まる。
-まずPIDの生死で登録を分ける。
-PIDが生きていてもheartbeatの古い登録は、`up`と共通の`pid_taken_over`で別プロセスに取られたと分かれば登録を消して結果に出す。
-このPIDには通常のsignalも強制終了のSIGKILLも送らない。
-プロセス一覧を読めないときとheartbeatが新しいとき、および登録より前に起動した止まったsupervisorはsignalの対象にする。
-次にLaunchAgentを必ず外す（bootoutしてplistも消す。`RunAtLoad`のため残すと次のloginで復活する）。
-同じqueueの別のlabelのagent（`up`の3と同じ探し方）も同じく外し、結果に出す。
-そのsupervisorの登録も他の登録と同じくsignalと待ちの対象になる。
-signalの対象の登録が1件もなければ`not_running`を返す（強制終了での登録行の扱いは`lifecycle::down`のdoc comment）。
-あれば登録ごとにsignalを選ぶ: `mode` が`in_cmux`ならSIGINT（terminalでCtrl-Cを押したのと同じ。runtimeはSIGTERMと同じくdrainに入る。このmodeにはsignalを届けてくれるservice managerがない）、そうでなければSIGTERM——ただしbootoutでlaunchdが外したagentそれぞれのプロセスにSIGTERMを届けるので、そのPIDには送らない（runtimeは1回目のsignalでdispositionを既定に戻すので、2回目は即死になる。`lifecycle::signalled_by_bootout`）。
-外したagentのどれかがloadされているのにPIDが読めないときは誰にも送らない。
-既定は即返り、待つ指定はその登録が消えるかPIDが死ぬまで待ち、強制終了はSIGKILLを送って登録行を消す（leaseはやがてstaleになり、runは`doctor` / `recover`で扱う）。
+## 停止の入口と落とし穴
 
-queueのbroker（[Queue broker](../queue-broker.md#起動と停止)）はqueue serviceと同じ手順で起動・停止し、podmanでは動かさない（[ADR-t2114-1](../../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)）。
-`up`はserviceの後、supervisorより先にbrokerを起動し（生きていればreuse、buildが違えば入れ替え）、起動できなければsupervisorを起動せずに止まる。
-`down`はsupervisorの後、serviceより先にbrokerを止め、drainを待たないときは最後のsupervisorにdrainの終わりで止めさせる。
-
-登録済みのin-cmuxのsupervisor（前のbinaryがそのmodeで登録したもの）が動いていたworkspaceを`down`は閉じず、結果に開いたまま残すと出して人に任せる（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定3・6）。
-`session_workspaces`の`supervisor`行は消す。
-どの経路でも`supervisors`の全登録が対象で、signalの順（in-cmuxにはSIGINT）と登録の後始末は変えない。
-inboxは人のterminalで、`down`は触らない。
+どのmodeで起動したsupervisorも停止の入口は`lifecycle::down`で、inboxのterminalには触れない。
+LaunchAgentは必ず外し、定義も消す。
+残すと次のloginで起動してしまうためである。
+PIDが他のprocessに渡った登録を消しても、そのPIDにsignalは送らない。
+bootoutはagentのprocessにsignalを届けるので、同じPIDへ2回目を送るとdrain中のsupervisorが即死する。
+送信済みの判定とPIDが分からない場合の扱いは`lifecycle::signalled_by_bootout`にある。
+停止の待ちと強制終了後の登録の後始末は`lifecycle::down`のdoc commentを参照する。
+強制終了後のrunの復旧は`doctor` / `recover`が扱う。
 
 ## CIの見張り（ADR-t1920-1）
 
-[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)。
-`[ci_watch]`があれば、`up`のpreflightは`gh`でCIを読めるかを確かめ、だめならsupervisorを起動せず、理由と対処を挙げたerrorで止まる（確かめるものと対処は`infrastructure::ci_watch::preflight`のdoc comment）。
+[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)を参照する。
+CIを読めない環境でsupervisorを起動しないための検査は`infrastructure::ci_watch::preflight`のdoc commentを入口に読む。

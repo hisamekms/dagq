@@ -214,6 +214,12 @@ pub fn print_pid(listing: &str) -> Option<u32> {
 }
 
 impl LaunchAgent for Launchctl {
+    /// Write the definition, bootout any loaded service and wait for its
+    /// process to leave before bootstrap: bootstrap while it exits fails.
+    /// [`Self::wait_unloaded`] forces a hung service with SIGKILL so it
+    /// cannot occupy the label for the whole ExitTimeOut. On a non-macOS
+    /// host, refuse before writing the plist or invoking launchctl;
+    /// uninstall/drain instead see no loaded agent.
     fn install(&self, label: &str, path: &Path, contents: &str) -> Result<()> {
         ensure!(
             path.is_absolute(),

@@ -138,6 +138,13 @@ dagq up --claude ~/.local/bin/claude --codex ~/.local/bin/codex --plugin-dir <�
 - `--claude`と`--codex`の値は上のコマンドのpath。pathで渡す理由、Claude CodeやCodexを更新したときの解決し直し、`codex`が無いときの振る舞いはpluginの`dagq-recover`の`reference/up-down.md`の「up」、`install --allow-breaking`のdrainが起動し直す`up`に渡すものは同じskillの`reference/update.md`の「install」が持つ。
 - `up` / `down`の仕組みは[up / down](../design/supervisor-lifecycle/up-down.md)と[Auto-update](../design/supervisor-lifecycle/auto-update.md)、runのsessionの識別と停止（runはworkspaceを開かない）は[非対話のworker](../design/supervisor-lifecycle/headless-worker.md#workspaceなしのbackgroundのwrapper)と[runの復旧の「後片付け」](../design/supervisor-lifecycle/background-recovery-job.md#後片付け)が持つ。
 
+### ProcessTypeの無いLaunchAgent
+
+ProcessTypeの無いLaunchAgentの制限を解くときは、人かinboxが上の`up`のコマンドを一度打ち直す。
+固定バイナリを使い、`--auto-update`などいつもの引数を保つ。
+`up`がsupervisorのdrainを待ってplistを書き直し、launchdに読み直させる。
+自動更新と引き継ぎだけではplistを再読込しないため、制限は解けない（判定の入口は[up / down](../design/supervisor-lifecycle/up-down.md#supervisorの再利用と入れ替え)）。
+
 ## KPIの読み方と印
 
 KPI・印・レポートの使い方（設定・運用・hostを変えたときの印の打ち方と`kpi --compare`、runtimeが自分で印にするもの）はpluginの`dagq`の`reference/kpi.md`、仕組みは[計測のコマンド](../design/supervisor-lifecycle/commands.md)が持つ。このrepositoryの作業時間の前後比較は`kpi --compare`を`--area runtime`（か`--change <値>`）で読み、`all`で読まない（層で読む汎用の理由はpluginの`dagq`の`reference/kpi.md`の「Raising throughput: the weekly review」。changeの値は[taskの登録](task-registration.md)の「change」）。

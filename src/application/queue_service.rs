@@ -2745,7 +2745,17 @@ pub fn ensure(control: &dyn QueueServiceControl, timeout: Duration) -> Result<Va
 /// decision 2): the service of this build by
 /// [`QueueServiceControl::replace`], reported as [`ensure`] reports it with
 /// what the started service applied (`migrated`). A service that does not
-/// start stops `up`.
+/// start stops `up`. The service applies compatible migrations before
+/// accepting; `up` itself never migrates. Before taking over, the service
+/// refuses a queue bound to another repository, a binary other than the
+/// queue's own, a floor excluding its build (even without pending
+/// migrations), or any pending breaking migration. These refusals leave
+/// the running service untouched and `up` starts or signals no supervisor.
+/// A breaking migration's recovery is `down --wait`, `dagq migrate`, then
+/// `up`, or `dagq install --allow-breaking`. Compatible migrations leave
+/// the old supervisors and run wrappers above the floor, so they can keep
+/// running. See `infrastructure::queue_service::serve` for the checks and
+/// the distinction between failure before and after takeover.
 pub fn ensure_replaced(control: &dyn QueueServiceControl, timeout: Duration) -> Result<Value> {
     let replaced = control
         .replace(false, true, timeout)

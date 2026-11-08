@@ -410,14 +410,35 @@ pub const QUEUE_SERVICE_START_TIMEOUT: Duration = Duration::from_secs(10);
 /// Ensure the supervisor exists and report the queue's open work.
 /// Preflight first ([`require_agent`]: claude and the installed plugin
 /// without `--plugin-dir`; Claude Code's trust of the repository root, an
-/// initialized queue, the repository), then prune registrations whose
-/// process is gone, start the agent only when no live registration of
-/// this binary's version remains — draining and replacing a live
-/// supervisor of any other version. `up` opens no inbox (ADR-t2159-1
+/// initialized queue, the repository), then prune abandoned registrations
+/// and reuse, hand off or drain the live supervisors before starting an
+/// agent when needed. `up` opens no inbox (ADR-t2159-1
 /// decision 3): its result says to open it with `dagq inbox`. The
 /// workspaces an earlier binary recorded (the inbox's, the retired
 /// maintainer's and resident planner's) are forgotten without cmux; the
 /// workspaces themselves are left for a person to close.
+///
+/// Preflight uses the repository's main checkout for trust, run environment,
+/// language and landing configuration. A missing main checkout (a bare
+/// repository, or a linked worktree of `--separate-git-dir`) is refused.
+/// Programs named by `[run.env]` must resolve on this invocation's PATH;
+/// the landing branch must resolve, and an explicitly named remote must
+/// exist unless push is disabled. After resolving that branch,
+/// `--auto-update` requires that checkout to be dagq's source, before any
+/// supervisor is reused or started. Trust is never granted by writing
+/// Claude's config: the error asks the person to start Claude once at the
+/// root and approve it.
+///
+/// Pruning never changes `run_leases`; `doctor` / `recover` own recovery.
+/// Fresh live registrations are reused only when none is [`outdated`];
+/// otherwise all are handed off when [`takes_handoff`] permits, or drained.
+/// The reuse branch rewrites no plist and loads no LaunchAgent.
+/// A null `binary_version` differs from this build too; comparison is of
+/// the full build string, including commit and dirty state even when the
+/// package version matches. The result includes applied migrations, the
+/// inbox's next step, forgotten workspace records, pruned registrations and
+/// [`open_work`]. The caller's `DAGQ_ROLE` and `DAGQ_QUEUE` do not choose
+/// sessions for `up` to open.
 ///
 /// `claude` is the Claude Code the supervisor's sessions and the inbox
 /// start, whose preflight `up` runs.
@@ -800,6 +821,12 @@ pub fn session_actor(role: SessionRole) -> ActorContext {
 /// and reported `stale`; stopping it stays a person's call
 /// (ADR-0014's Consequences).
 ///
+/// For a silent supervisor with no other live supervisor, the person's
+/// recovery is `down --force`, then `up`. Beside a live one, `down` would
+/// stop that one too: stop only the stale process after checking its pid;
+/// the live supervisor prunes its leftover registration. `status`'s
+/// `supervisor_stale` attention gives that next step (ADR-t3134-1).
+///
 /// The supervisors of the queue's agents of another label are gone before
 /// this ([`remove_stray_agents_for_up`]), so only the own agent's bootout
 /// decides who is signalled here.
@@ -872,7 +899,12 @@ fn replace_supervisors(
 /// with them. The drain can end by the process dying with its row intact
 /// (launchd's `ExitTimeOut` SIGKILL, or the heartbeat failure that keeps
 /// the row on purpose because the database may be unreachable); those rows
-/// go the way `down --force` drops them.
+/// go the way `down --force` drops them. With `--no-wait`, the wait is
+/// bounded by `startup_timeout`; a timeout names each remaining token and
+/// pid. The stop has already been requested and the agent unloaded: retry
+/// `up` once `status` shows those supervisors gone. The exclusion tokens
+/// for the next start are read again after this drain so a surviving silent
+/// registration cannot be mistaken for the newly started supervisor.
 fn drain_supervisors(
     up: &Up<impl LifecycleQueue + ?Sized>,
     draining: &[SupervisorRegistration],
@@ -1087,8 +1119,9 @@ fn remove_stray_agents(
 }
 
 /// The pids launchd's bootout of `agents` delivered SIGTERM to, which `down`
-/// and `up`'s replacement do not signal again: a second SIGTERM would end a
-/// draining supervisor at once. `None` when one of them was loaded with its
+/// and `up`'s replacement do not signal again: the runtime restores the
+/// default disposition after the first signal, so a second SIGTERM would
+/// end a draining supervisor at once. `None` when one of them was loaded with its
 /// pid unknown: then which supervisor it signalled cannot be told, and
 /// nothing but an in-cmux supervisor is signalled.
 fn signalled_by_bootout<'a>(
@@ -2332,7 +2365,9 @@ fn started_registration<'a>(
 }
 
 /// Wait until the supervisor `up` has just started registers itself
-/// ([`started_registration`]), up to `startup_timeout`.
+/// ([`started_registration`]), up to `startup_timeout`. On timeout the
+/// agent remains installed: inspect `launchd.log`, and use `down` to
+/// unload it if a failing preflight makes KeepAlive restart it repeatedly.
 fn wait_for_registration(
     up: &Up<impl LifecycleQueue + ?Sized>,
     existing: &HashSet<LeaseToken>,
@@ -2613,6 +2648,14 @@ fn inbox_provider(
 ///   their path in `settings`) or Codex's PreToolUse hook among `hooks`
 ///   (that the hook ran is recorded apart, `inbox_guardrail_reached`).
 ///
+/// The queue must already be initialized and have a main checkout; a bad
+/// language setting in the project or user config also refuses the open.
+/// The caller execs the returned command: only an exec failure returns an
+/// error there. The person closes the foreground inbox; its role environment
+/// belongs only to that command, not to the terminal after it exits.
+/// If the provider becomes unavailable after launch (for example a usage
+/// limit), the runtime does not replace it: the person reopens the inbox.
+///
 /// An inbox opened this way has no workspace. A launch that names a model
 /// or effort ([`AgentProvider::apply_launch`]) starts with it.
 pub fn inbox(
@@ -2828,6 +2871,18 @@ pub struct DownOptions {
 /// like the rest. With no registration to signal it is `not_running`, and
 /// `--force` still drops the rows of the registrations whose pid is dead,
 /// reported in `pruned_supervisors`.
+///
+/// Expired registrations whose living pid another process took over
+/// ([`pid_taken_over`]) are pruned on every path; that pid receives no
+/// signal, including no SIGKILL. Registrations whose pid is dead are kept
+/// by ordinary `down` and `--wait`, and pruned only with `--force`. Among
+/// living pids, a fresh heartbeat, an unavailable process listing, or a
+/// process that predates registration keeps the registration among those
+/// to signal. The default returns immediately; `--wait` waits until
+/// the registration disappears or its pid dies. `--force` sends SIGKILL
+/// and removes registrations, leaving run leases to become stale for
+/// `doctor` / `recover`. All registrations are considered on every path.
+/// Removing the plist too prevents `RunAtLoad` resurrecting it at login.
 ///
 /// `down` closes no cmux workspace (ADR-t2159-1 decision 3): the one an
 /// `in_cmux` supervisor runs in is reported `left_open` for a person to
