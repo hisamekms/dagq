@@ -313,6 +313,14 @@ impl Supervisor<'_> {
     /// `requested_by` when its verdict asked for the escalation
     /// ([`Escalation::requester`], task 782); a failed job's are the
     /// supervisor's own.
+    ///
+    /// `repair`の適用は`RecoveryVerdict::applies()`に加え、終わったrunは`plan_ended`、
+    /// 生きているrunは`check_live`の前提を確かめる。低い確信度や適用できない修復は
+    /// 適用せず推奨としてaskへ送る。終わったrunのjobの失敗は`triage_failed`
+    /// （triage by hand）、生きているrunではalertのask（`reason_category: recovery_failed`）。
+    /// verdictによるescalationの`recovery_finished`と`stalled`の`ask_opened`は
+    /// `Escalation::requester`の`recovery-job:<run>:<alert>:<attempt>`を依頼元にする。
+    /// jobの失敗と`UsedUp`では依頼元を持たない。
     pub(super) fn for_escalation<T>(
         &mut self,
         run: &TaskRun,

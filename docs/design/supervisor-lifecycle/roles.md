@@ -48,176 +48,61 @@ runtimeの中で人が打つ`/exit`や復旧は「人（person）」と書き、
 
 信頼の区分、actorごとのcapabilityの要約、host実行が助言的で隔離ではないこと、containerとqueue serviceへの道筋は[Security](../security.md)にまとめる。
 
-runtimeはactorを型で表す（[ADR-t728-1](../../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定2・4。`src/domain/actor.rs`）。
-
-- `ActorRole`: workspaceを持つ役割の`SessionRole`は`SessionRole::actor_role`で`ActorRole`に写る。
-- `TrustLevel`: roleだけから決まり（`ActorRole::trust`）、promptや名前から推し量らない。
+runtimeのactorの型と信頼の区分は`src/domain/actor.rs`が入口で、信頼はroleだけから決め、promptや名前から推し量らない（[ADR-t728-1](../../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)決定2・4）。
 
 ### 環境変数
 
-runtimeが起動するAI actorは全て、環境にroleとactor idを持つ。
-
-`DAGQ_ROLE`はroleの値（`ActorRole::env_value`）、`DAGQ_ACTOR_ID`は`ActorContext`のconstructor（`ActorContext::instance`の`<role>:<instance>`など）が作る。
-
-| actor | 起動するところ | ほか |
-| --- | --- | --- |
-| worker（resumeも） | runのbackgroundのsession wrapper | `DAGQ_RUN_ID`・`DAGQ_TASK_ID` |
-| planner（runtime・draft・finding） | runtimeのplannerのbackgroundのwrapper（`planner-session`）とそのturn | |
-| inbox | 人のterminalの`dagq inbox` | |
-| supervisor（前のbinaryが登録したin-cmuxのもの） | 前のbinaryのin-cmux mode（新しくは起動しない） | |
-| review job | runのreview | |
-| recovery job | 終わったrunと生きているrunの復旧 | 同じjobの経路で、長期化したtaskの読み取りだけの再計画の診断（label `replan_diagnosis`、triageの権限）も走る（[Triage](triage.md#再計画の診断)） |
-| plan review job | proposalのplan review | |
-| goal review job | goalのgoal review | |
-| throughput review job | 毎時・日次・週次のスループットの見直し | 読むだけ。結論はsupervisorの`throughput-review`コマンドが保存しinboxに知らせる（[スループットの見直し](throughput-review.md)） |
-| setup review job | 人かinboxの`dagq setup-review` | queueは読むだけで、書けるのは一時の場所のfileだけ（[setup-review](setup-review.md)） |
-| observer | `dagq observe`が起動するagent | actor idは`observer_actor`（`src/application/observer/mod.rs`）が決める |
-
-inboxとplanner（と登録済みのin-cmuxのsupervisor）は`DAGQ_QUEUE`（queue DBのpath）も持つ。
-workerとresume、headlessのjob、observerは持たず（`domain::queue_service::client_role`）、agentのプロセスはqueue serviceのsocketの`DAGQ_SERVICE_SOCKET`とtokenのfileの`DAGQ_SERVICE_CREDENTIAL_FILE`を持ち、その`dagq`はクライアントモードで動く（[Queue service](../queue-service.md#クライアントモード)）。
-runのsession wrapperのprocess自体はどちらも持たない。
-`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`は`[run.env]`で上書きできない（`DAGQ_`の予約）。
-環境は`actor_env`（`src/application/actor_executor.rs`）の1か所で作り、runのsession wrapperはその後に`[run.env]`を足す。
-headlessのjobは呼び出し元の変数（reviewの`[run.env]`、observerの`PATH`）の後にこれを足すので、actorの変数は上書きされない。
-登録済みのin-cmuxのsupervisorのworkspaceもAI actorではないが同じ形の環境を持つ。
+AI actorは全てroleとactor idを環境に持ち、組み立ては`src/application/actor_executor.rs`の`actor_env`が入口になる。
+actorごとの起動元、queueの宛てと変数を足す順序もそのdoc commentが持つ。
+`[run.env]`では`DAGQ_`の予約された名前を上書きできない。
+runのsession wrapper自体にはagentのqueueの宛てを渡さず、制御側のprincipalで動かす（[Queue service](../queue-service.md#クライアントモード)）。
+登録済みのin-cmuxのsupervisorのworkspaceはAI actorではないが同じ形の環境を持つ。
 
 ### actorの起動（ActorExecutor）
 
-runtimeが起動するAI actorは全て`ActorExecutor::spawn(ActorExecutionSpec) -> ActorHandle`を通る（`src/application/actor_executor.rs`）。
-
-- `spawn`はまず`ActorExecutionSpec::check`で整合を確かめ、合わなければ起動しない（fail closed）: roleの`TrustLevel`が`UntrustedAgent`でない、programがroleのものでない、`capabilities`がroleの`grants`と違う、workerのactorのrunとprogramのrunが違う。
-- `HostActorExecutor`がただ1つのbackend（下の「実行のbackendとenforcement」）。
-  backgroundのwrapperの`SessionWrappers`、`AgentProvider`、`Spawner`の上に作り、呼び出し元が持つ部品だけを渡す。
-  要る部品の無いprogramは拒む。
-  hostではspecは記録と整合の検査だけで隔離ではなく、プロセスはこのユーザーにできることを全てできる（ADR-t728-1の決定6）。
-  `resources.timeout`もhostではsupervisorのtimerとobserverのdeadlineが守る。
-  sandboxのbackendは同じspecを強制する側になる。
-- Claudeのsettingsは、Claude Code adapter（`src/infrastructure/adapters.rs`）の`agent_settings(role)`の1か所でroleから決まる（Claude Codeの実装のものなのでadapterが持つ。ADR-t1063-1の決定3。headless jobは権限の意図`JobAccess`だけを渡す。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）。
-  workerとruntimeのplannerは非対話のturnで動き、turnのsettingsは`turn_command`が書く（hookなし、`permissions.deny`、サジェストの設定なし）。
-  inboxも`agent_settings`では`None`だが、`dagq inbox`が開くときに`AgentProvider::inbox_command`が`permissions.deny`だけの設定（hookもサジェストの設定も無い）を書いて渡す（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定5、[`up` / `down`](up-down.md)）。
-  設定を書くroleの`permissions.deny`には、roleのpolicyが拒むコマンドの規則（`permission_deny(role)`。[Authorization](../authorization-guardrail.md)）が入る。
-  Claude Code adapterはこれをファイルに書くだけ（[Agent provider lifecycle](../provider-lifecycle.md)）。
-- executorの外でClaudeを起動するのはtestのstubだけ。executorの外で起動するもの（登録済みのin-cmuxのsupervisorのworkspace、session wrapper自身、supervisorが起動する`observe`と`auto-update`のコマンド）はAI actorではなく、信頼する制御側。
+runtimeが起動するAI actorは全て`src/application/actor_executor.rs`の`ActorExecutor`を通り、整合しないspecでは起動しない（fail closed）。
+整合の検査は`ActorExecutionSpec::check`、hostで使う部品と拒否は`HostActorExecutor`が入口になる。
+hostのspecは記録と整合の検査だけで隔離ではなく、プロセスはこのユーザーにできることを全てできる（ADR-t728-1決定6）。
+制限時間もhostでは呼び出し元のtimerとdeadlineが守る。
+Claudeのsettingsをroleから決める入口は`src/infrastructure/adapters.rs`の`agent_settings`で、provider固有の仕組みはadapterが持つ（[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）。
+executorの外で起動する制御側のprocessとtestのstubはAI actorの起動とは区別する（actor_executorのmodule doc）。
+登録済みのin-cmuxのsupervisorのworkspaceも制御側に当たる。
 
 ### 実行のbackendとenforcement
 
-actorをどこで動かし、specをどこまで守らせるかは`src/application/execution.rs`の型が持つ。
-
-値と欄の意味は各定義のdoc commentが持つ。
-
-- `ExecutorBackend`はactorを動かす場所、`EnforcementLevel`はそこでの強制の強さで、隔離は`sandbox`だけである。
-  hostで動くCodexのworkerはOSのsandboxが書き込みと他のプロセスへのsignalを止めるが、隔離ではない（[ADR-t813-3](../../adr/2026-09-28-t813-3-codex-worker-permissions.md)の決定7）。
-  workerのproviderごとの強制は`EnforcementLevel::of_worker`が決める。
-- containerで起動するactorはworkerのturnだけで、runのsession wrapperが`run_container::PodmanActorExecutor`で起動する（[Container runtime](../container-runtime.md#workerの実行)）。
-  integrateのverificationのコマンドはactorでなく、`integrate`がcontainerで流す（[Container runtime](../container-runtime.md#verificationの実行)）。
-  hostのexecutorはcontainerに置いたactorを起動せず`ensure_implemented`がerrorにし、hostに黙って戻さない（fail closed）。
-  知らない名前も`ExecutorBackend::parse`がerrorにする。
-- `HostActorExecutor`は`ExecutionConfig`を持ち（`with_config`）、actorのroleのbackendがhostでなければ起動を拒む。
-  例外はcontainerに置いたworkerのrunのsession wrapperで、制御側としてhostで起動する。
-  `status`・`doctor`とsupervisor・wrapperのactorの起動は`ExecutionConfig::of_runtimes`でworkerを`dagq.toml`のruntimeに置き、他のactorはhostのまま（[Container runtime](../container-runtime.md)）。
-- `status`と`doctor`は`actors`にAI actorごとのbackendと強制を出す（`ExecutionConfig::profiles`）。
-  `dagq.toml`がworkerをcontainerにしない限り全てhostで、host実行がsandboxではないことを実行時にも明示する。
-  roleの行の強制はそのactorへの最も弱い強制で、hostのworkerの行はClaudeのworkerがいつでも動きうるので`advisory`のまま。
-  生きているsupervisorのどれかでCodexが使えるときだけ、workerの行にproviderごとの強制を足す。
-  roleの行を分けずに足すのは、行の並びと各行の強制を読む既存の読み手（testとpluginのskill）を変えないため。
-  適用先ごとのruntimeと強制は`runtimes`が出す（`runtime_executions`）。
+実行場所と強制の型、status・doctorの表示を知る入口は`src/application/execution.rs`で、値と欄の意味は各定義のdoc commentが持つ。
+隔離はsandboxだけで、hostのCodex workerの書き込みとsignalの制限も隔離ではない（[ADR-t813-3](../../adr/2026-09-28-t813-3-codex-worker-permissions.md)決定7）。
+containerへ置いたものをhostへ黙って戻さず、起動できなければ拒む（fail closed）。
+actorとしてcontainerへ置くのはworkerのturnだけで、session wrapperはhostの制御側に残る（[Container runtime](../container-runtime.md#workerの実行)）。
+verificationのコマンドはactorではない（[Container runtime](../container-runtime.md#verificationの実行)）。
+statusとdoctorはhost実行がsandboxでないことを実行時にも示し、その行の互換とprovider別の強制の読み方は`ExecutionConfig::profiles`が持つ。
 
 ### CLIでの解釈
 
-`execute()`は環境のactorを読む前に、次の経路へ順に分岐し、これらでは環境のactor（`ActorContext::from_env`）を決めない。
-
-- relayとreview program: queueを開かずに動く。
-- 宛ての環境（serviceのsocketかqueueのbroker）があればクライアントモード（`client_mode`）で、tokenのprincipalをserviceが認可する（[Queue service](../queue-service.md#クライアントモード)）。
-- plannerのhook（`session-event`）は報告をwrapperに渡す（spool）。
-  inboxのhookは`dagq inbox`が発行を受けたinboxのtokenで区間を`session_record`へ送り、queueを開かない（tokenのprincipalをserviceが認可し、eventはそのprincipalで書く。[eventのactor](#eventのactor)）。
-- session wrapper（`session`・`planner-session`）はwrapperのprincipalで動く。
-
-それ以外のコマンドは`ActorContext::from_env`でactorを決める。
-そのactorが`user`・`inbox`・`planner`でserviceの答えるコマンドならqueue serviceへ送る（[Queue service](../queue-service.md#クライアントモード)）。
-残りは`check_access`で判定し、通ったものだけが次へ進む。
-
-- envにsupervisorの登録（`SUPERVISOR_REGISTRATION_ENV`）があり、supervisorが自分のものとして起動した`observe`（`--history`・`--input`を除く）・`throughput-review`は、そのsupervisorのtokenで同じprincipalとしてserviceを通り、queueを開かない（[`supervise`](supervise.md#queue-serviceの経路)）。
-  envのactorがsupervisorでなければ止まる。
-  serviceでの認可はsupervisorの操作と同じ（[Authorization](../authorization.md#queue-serviceのユースケースservice側)）。
-- `queue-broker serve`は`service.lifecycle`の認可を通った後、brokerのプロセスとしてqueueを開かず、自分の要求をtokenもactorの環境も持たない`user`としてserviceに送る（[Queue broker](../queue-broker.md#起動と停止)）。
-- `up`・`down`・`inbox`・`service start`・`service stop`・`install`と更新のjob（`auto-update`・`release-update`）は認可の後、queueの読み書きを呼び出し元のprincipal（更新のjobは起動したsupervisorのtoken）で制御側のコマンドのstepとしてserviceに送り、queueを開かない（[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
-- `service serve`はserviceとして、DBの無い所への`init`は[DBを開く経路](../queue-service.md#dbを開く経路)の例外としてqueueを開き（`migrate`・`doctor`・既存のqueueへの`init`はserviceのユースケース）、`supervise`はqueueをserviceで扱い、`service status`と`queue-broker`の`status`・`start`・`stop`はqueueを開かない（[statusとdoctor](../queue-service.md#statusとdoctor)、[Queue broker](../queue-broker.md#起動と停止)）。
-- それ以外（宛ての無いworker・job・observerなどの`dagq`）はqueueを開かずに断る（fail closed）。
-
-`ActorContext::from_env`の読み方は次のとおり。
-
-- `DAGQ_ROLE`が無いか空なら`user`（人）。host実行の互換のためで、助言的（advisory）でありsandboxではない（ADR-t728-1の決定6）。
-- `DAGQ_ROLE`がroleの値（`user`と、queue serviceのprincipalだけのrole `executor-telemetry`を除く）でなければerrorで止まり、queueを開かない（fail closed）。
-  `DAGQ_RUN_ID`・`DAGQ_TASK_ID`が読めないときも同じ。
-- 計画系のコマンドは全てのroleについてapplicationの層が判定し、拒んだ試みを`authorization_denied`に記録する（[Authorization](../authorization.md#計画系のコマンドapplication)）。
-  対話と記録のコマンドと、runtimeの操作系のコマンド（[Authorization](../authorization.md#runtimeの操作系のコマンドapplication)）も同じ。
-  runtimeのwrapperとhookは継いだworkerやplannerの環境のactorでなく、wrapperのprincipalでqueue serviceを通るので、workerとplannerはsessionを記録する権限を持たない（[Queue service](../queue-service.md#クライアントモード)）。
-  例外はinboxのhookで、上の分岐のとおり環境のactorを読まずにinboxのtokenでserviceを通る。
-- headlessのjobは読み取りだけの制限を受け、状態を変えるコマンドは拒まれる。
-  判定は`StaticPolicy`（[Authorization](../authorization.md)）で、どのjobにもCLIの書き込みを与えない。
+認証・認可とqueueを開く境界の分岐は`src/main.rs`の`execute`が入口になる。
+環境のactorを読まずtokenのprincipalで動く経路も、そのdoc commentが案内する。
+環境からのactorの読み方は`src/domain/actor.rs`の`ActorContext::from_env`で、読めない環境ではfail closedにする。
+roleが無い環境を人として扱うのはhost実行の互換の約束であり、sandboxではない（ADR-t728-1決定6）。
+宛ての無いworker・job・observerはqueueを開かずに断る（[Queue service](../queue-service.md#クライアントモード)）。
+headlessのjobはCLIの読み取りだけを許し、書き込みを与えない（[Authorization](../authorization.md)）。
+wrapperのprincipalによるsessionの記録はagentの権限ではない。
 
 ### eventのactor
 
-queueに書かれるeventは全て、書いたactorと、headless jobのverdictを適用したときの依頼元を`run_events`の列に持つ（ADR-t728-1の決定4。列は[SQLite persistence](../persistence.md)の`0044_event_actors.sql`）。
-askとanswerが持つ書き手の欄とは別で、それらの値は変えない。
-
-- 仕組み: storeの接続ごとに`EventActors`（`src/infrastructure/event_actor.rs`）がactorを持ち、SQLの関数へSQLiteのadapterは接続の登録で、Postgresのadapterはtransaction内だけの設定で渡す。
-  `INSERT INTO run_events`は全てこの関数で列を埋めるので、書く場所にactorを渡さず、SQLiteでは登録の無い接続での挿入は失敗する。
-- 既定のactorはプロセスのactor（`set_process_actor`。`main`がコマンドの前に1回決める）で、決めていなければ（ライブラリを直接使うtest）`user`。
-  `SqliteQueue::with_actor`で接続ごとに変えられる。
-- プロセスのactorは呼び出し元の`ActorContext`（`DAGQ_ROLE`が無ければ`user`）。
-  例外は制御側のプロセス（`supervise`、runとplannerのsession wrapper、session hook）で、eventはsessionのactorでなくsupervisorかwrapperのactorになる（`main.rs`の`event_actor`）。
-  inboxのhookのeventは、hookのプロセスでなくserviceがtokenのinboxのprincipalで書くので、wrapperのactorにならない。
-  supervisorが起動する`observe`と`auto-update`には`supervisor:<pid>`の環境を渡すので、そのeventもsupervisorになる（observerのagentはobserverのactorのまま）。
-- 着地（rebase・検証・squash・mainの更新・push）のeventはactorがIntegratorで、`requested_by`が依頼者。
-  依頼と`integration_started`の記録の主は[Authorization](../authorization.md#着地とpushintegrator)と`IntegrationRequest`のdoc commentが持つ。
-- review・recovery（終わったrunと生きているrun）・plan review・goal reviewのverdictをsupervisorが適用する間（`Supervisor::for_job`）、書かれるeventはactorがsupervisorのまま、`requested_by`にjobのactor idを持つ。
-  抜けるときは（適用が失敗しても）入る前の値に戻すので、`for_job`が入れ子になっても内側を抜けた後の外側のeventは外側のjobの`requested_by`を持ち、外側を抜けると元の値（ふつうは無し）に戻る（Integratorの着地も同じく依頼者を入る前の値に戻す）。
-  生きているrunのrecovery jobのverdictが適用されずにescalateするとき（`escalate`・confidence lowの`repair`・適用の時点で前提を満たさない`repair`）も、そのescalationの`recovery_finished`と開く ask（`stalled`）の`ask_opened`は`Supervisor::for_escalation`の中で書かれ、`requested_by`にjobのactor id（`recovery-job:<run>:<alert>:<attempt>`）を持つ（`Escalation::requester`）。
-  jobの失敗と、alertのjobを使い切ったとき（`UsedUp`）のescalationはjobの依頼ではないので`requested_by`を持たない。
-  再計画の診断jobのverdictの適用（継続・保留・人へのaskと、前提が古く捨てたものを含む`replan_diagnosed`）も`for_job`の中で書かれ、`requested_by`に診断jobのactor id（`recovery-job:<run>:replan_diagnosis:<attempt>`）を持つ。
-  jobの失敗と、jobを使い切って人に聞くaskと、人の回答の適用は他のaskの回答の適用と同じくsupervisorのeventで、`requested_by`を持たない。
-  review passの後の着地のeventは上のとおりIntegratorのactorで、`requested_by`が依頼したsupervisor。
-- 読み方: `RunEvent.actor`で、migrationより前の行と古いバイナリが書いた行は`None`（JSONでは`actor`の欄が無い）。
-  secretやpromptの全文は入れない（入るのはroleとidだけ）。
+eventは全て書いたactorを持ち、askとanswerの書き手の欄とは別に記録する（ADR-t728-1決定4）。
+接続とSQLへの受け渡しは`src/infrastructure/event_actor.rs`、制御側のeventをsessionのactorにしない境界は`src/main.rs`の`event_actor`が入口になる。
+着地のactorと依頼元は[Authorization](../authorization.md#着地とpushintegrator)と`IntegrationRequest`のdoc commentが持つ。
+verdictの適用中はactorがsupervisor、依頼元がjobで、範囲を抜けると適用が失敗しても入る前の依頼元に戻す（`Supervisor::for_job`）。
+recoveryのescalationの依頼元は`Supervisor::for_escalation`、reviewの終了後のaskと引き継ぎは`AfterExit`のdoc commentが入口になる。
+jobの失敗と、判定の適用後のsupervisor自身の判断にはjobの依頼元を付けない。
+古い行の`RunEvent.actor`は`None`で、JSONには欄を出さない。
+actorにはroleとidだけを入れ、secretやpromptの全文を入れない。
 
 ### headlessのjobのverdictと遷移
 
-review・recovery・plan review・goal reviewのjobは、jobごとに別のroleのactorで（1つのroleにまとめない）、出力は型付きのverdict（`ReviewVerdict`など）として読むデータにすぎない。
-遷移を決めるのはverdictを受けたsupervisorのRustのコードで（ADR-t728-1、ADR-t728-2の決定3）、写像は次のとおり決定的。
-
-| job | verdict | supervisorが行うこと |
-| --- | --- | --- |
-| review-job（runの差分の判定） | `pass` | 衝突の事前検査のあと、sessionの終了を待って着地の段（`AfterExit::Land`）へ進めるだけ。着地の関数は呼ばない。着地は別のthreadの`land_integrating`が、rebase後の検証コマンドを含む自分の検査を通したときだけ行い、落ちればrunは`needs_session`になる |
-| review-job（runの差分の判定） | `revise` / `concern` | 生きているsessionへの差し戻し（sessionが終わっていれば`approve_landing`のask） / `approve_landing`のask。runを通した`revise`の上限の後の差し戻しは収束の判定（`revise_limit_judged`）に通し、コードの指摘が無ければaskを開かずにpassの道で着地して理由をfollow_upのdraftにし、あれば`approve_landing`のask（[Review](review.md)の4a） |
-| review-job（`already_satisfied`の主張の判定） | `pass`（`confidence: high`） | 着地の段へは進めない。閉じる時点のmainのheadを判定したsnapshotと確かめ直し、同じなら人に聞かずに[ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)の閉じ方（runは`succeeded`、taskはcommitなしの`completed`）で閉じ、着地しない。進んでいれば古い判定では閉じずに新しいheadでverifyと判定をやり直し、やり直しの上限を超えたら`approve_close`のask（`satisfied_judgment::decide`、[Review](review.md#already_satisfiedの主張の判定)） |
-| review-job（`already_satisfied`の主張の判定） | `pass`（`low`・確信度の欠落か未知の値）/ `revise` / `concern` | `approve_close`のask（理由は`scope`）にverdict・確信度・推奨・理由を載せて人に上げるだけで、taskを閉じない |
-| review-job（`already_satisfied`の主張の判定） | jobの失敗（答えが無い） | 1回だけやり直し、それも答えが無ければ理由`recovery_failed`の`approve_close`のask（下の「壊れた出力はfail closed」） |
-| recovery-job | `repair`（`confidence: high`） | `RecoveryVerdict::applies()`を通り、さらにalertごとの前提（終わったrunは`plan_ended`、生きているrunは`check_live`）を今も満たすactionだけを適用する。満たさなければaskにする |
-| recovery-job | `repair`（`low`）/ `escalate` | 適用せず、actionを推奨として`decide`などのaskにする |
-| recovery-job（再計画の診断、label `replan_diagnosis`） | `continue` / 外因だけの`replan`（`confidence: high`） | 操作の版と状態・taskとrunの今を確かめ直し、runのHEADがjobの読んだままで、移動のtransactionで前提を満たすときだけ操作を`continuing`にする。崩れていれば適用せず（`replan_diagnosed`の`discarded`）、runが着地したかtaskが終わっていれば操作を閉じ、ほかは次に診断し直す。継続の後の次の候補は`continue_reviews`件のpassでないreviewの後のもう1件。理由・進展・未達の項目数の無い継続、未達が減らない継続、人の依頼への継続は適用せずaskにする |
-| recovery-job（再計画の診断） | 作業単位の原因の`replan`（`high`） | 同じ確かめの後に操作を`pause_requested`にして保留の経路へ進める。系統の自動の保留が`max_auto_parks`に達していれば（移動が断られた後に達したときも）askにする |
-| recovery-job（再計画の診断） | `ask` / `high`でない確信度 / jobの失敗（3回）・run dirが無いなど | 適用せず、runでなくtaskについての`decide`のask（`asked_by: replan-diagnosis`、options `continue` / `replan`）にする。verdictからのaskも移動と同じ前提を同じtransactionで確かめ、崩れていればaskを開かず診断し直す。答えはsupervisorが前提を確かめ直して適用する（[taskの再計画](../../plans/task-replanning.md)の「実装の状態」） |
-| plan-review-job | `pass` / `revise` / `concern` | 1つのtransactionで`ready`・plannerへの差し戻し・`approve_plan`のask。再計画の置換proposalの`pass`は承認だけを記録し、子を`ready`にせず`submitted`に留める（[Plan review](plan-review.md#不変条件)）。`concern`の`high`で`reason_category`が`null`の`ready` / `send_back`はpass / reviseとして適用する（[Plan review](plan-review.md#aiが決めるconcern未実装)、ADR-t451-1決定4）。`actions`は`pass`（と適用した`ready`）のときだけ許された3種を適用し、`reopen`はverdictに関わらず検査して適用し、上限を超えれば1件も適用せず、最終の判定でproposalを差し戻すかconcernのaskにする（passはrevise、reviseの上限を過ぎていればconcern）。`pass`での優先度の扱いは各taskの記録の由来と優先度の出どころで分かれる（[Plan review](plan-review.md#verdictと適用)） |
-| goal-review-job | `achieved` / `gaps` / `ask` | goalを閉じる・gapをdraftにする・`approve_goal`のask（`gaps`の連続が上限を超えたら`ask`） |
-
-`already_satisfied`の主張の判定のverdictは専用の入口（`ClaimJudgment::parse`）で読み、`pass`でも確信度を保つ。
-通常のrunのreviewのverdictの読み取りはこの入口で変わらない（[Review](review.md)の「verdictの欄」）。
-
-- 未知の欄を拒む: 4つのverdictと入れ子の型は`#[serde(deny_unknown_fields)]`で、未知の欄・未知のactionを含む出力は読めない出力として扱う。
-- 例外は`PlanReviewVerdict`の`predictions`で、`serde_json::Value`のまま持つ。型にするとtaskの重さの見積もりの形が崩れただけでverdict全体が読めず、plan reviewが失敗するが、見積もりは記録するだけで遷移を変えない（ADR-0079決定2）ため。supervisorは`parse_predictions`で型付きの`TaskWeightPrediction`にしてから記録し、読めなければ記録しないだけで、生の値から遷移を決めない。
-- 壊れた出力はfail closed: 読めないverdictで何かが着地・retry・`ready`・goalのcloseになることはない。
-  reviewは答えの無いjobをそのjobだけ1回同じ入力でやり直し（`review_job_finished`）、それも答えが無ければ`review_failed`と`approve_landing`のask。
-  `already_satisfied`の主張の判定も1回だけやり直し、それも答えが無ければ`recovery_failed`の`approve_close`のask。
-  recoveryは`triage_failed`（`triage by hand`）。
-  生きているrunのjobの失敗はそのalertのask（`reason_category: recovery_failed`。ADR-t609-1）。
-  plan reviewは`plan_review_failed`（`plan review by hand`）でproposalは`submitted`のまま。
-  goal reviewは`goal_review_failed`（`goal review by hand`）でgoalは開いたまま。
-- 記録: verdictを適用したeventは上の「eventのactor」のとおりactorがsupervisor、`requested_by`がjobのactor id。
-  reviewの`concern`と差し戻せない`revise`（上限の後に収束していない・sessionが終わっていた・切り替えられなかった・送れなかった）と、`pass`の後の衝突の事前検査が上限で人に聞く`approve_landing`のaskは、sessionの終了の後に開くが、`AfterExit::Ask`がverdictを返したreview jobのactor（`requested_by`）を持ち、askを開くときだけ`for_job`で包むので、その`ask_opened`もactorがsupervisor、`requested_by`が`review-job:<run>:<attempt>`になる。
-  askの後にleaseを返すなどのeventは`for_job`の外で、`requested_by`を持たない。
-  supervisorの引き継ぎ（`adopt.rs`）が履歴から`AfterExit::Ask`を組み立て直すときは、引き継ぐ（か直前の）`review_finished`のpayloadの`attempt`から同じjobを復元し、`attempt`が無ければ別のjobを名指ししないよう`requested_by`を付けない。
-  引き継いだpassのrunの衝突の事前検査も同じjobの`for_job`の中で行うので、その`conflict_precheck`も生きている経路と同じく`requested_by`を持つ。
-  差し戻しや衝突の依頼を生きているsessionが果たさなかった後（sessionが終わった・receiptの直しを送れなかった）のaskは、verdictを適用し終えた後のsupervisor自身の判断なので`requested_by`を持たない。
-  jobの失敗のeventはjobの依頼ではないので`requested_by`を持たない（どのjobかはpayloadの`attempt`で分かる）。
-  jobが開くaskの`asked_by`（`plan_review`・`goal_review`など）は変えない。
+jobはそれぞれ別のroleのactorで、verdictはデータにすぎず、遷移を決めるのはsupervisorのRustのコードである（ADR-t728-1、[ADR-t728-2](../../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)決定3）。
+判定から適用への入口は[Review](review.md)、[Triage](triage.md)、[Plan review](plan-review.md)、[Goal review](goal-review.md)が案内し、場面ごとの写像は適用する定義のdoc commentが持つ。
+再計画の診断の写像は`src/application/supervise/execution/replan_diagnosis.rs`の`apply_verdict`、already_satisfiedの主張の判定は`ClaimReviewWatch`が入口になる（[ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)）。
+通常のreview・recovery・plan review・goal reviewのverdictは、未知の欄やactionを含む出力を拒む。
+読めないverdictで着地・retry・ready・goalのcloseが起こることはない（fail closed）。
+見積もりの形が壊れたために判定全体を失敗させない例外は`PlanReviewVerdict::predictions`のdoc commentが持つ（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)決定2）。

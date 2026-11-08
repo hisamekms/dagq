@@ -1280,6 +1280,11 @@ impl Supervisor<'_> {
     }
 
     /// [`Self::apply_diagnosis`] with the job recorded as the requester.
+    /// 判定の適用:
+    ///
+    /// - `continue` / 外因だけの`replan`（`confidence: high`）: 操作の版と状態・taskとrunの今を確かめ直し、runのHEADがjobの読んだままで、移動のtransactionで前提を満たすときだけ操作を`continuing`にする。崩れていれば適用せず（`replan_diagnosed`の`discarded`）、runが着地したかtaskが終わっていれば操作を閉じ、ほかは次に診断し直す。継続の後の次の候補は`continue_reviews`件のpassでないreviewの後のもう1件。理由・進展・未達の項目数の無い継続、未達が減らない継続、人の依頼への継続は適用せずaskにする
+    /// - 作業単位の原因の`replan`（`high`）: 同じ確かめの後に操作を`pause_requested`にして保留の経路へ進める。系統の自動の保留が`max_auto_parks`に達していれば（移動が断られた後に達したときも）askにする
+    /// - `ask` / `high`でない確信度 / jobの失敗（3回）・run dirが無いなど: 適用せず、runでなくtaskについての`decide`のask（`asked_by: replan-diagnosis`、options `continue` / `replan`）にする。verdictからのaskも移動と同じ前提を同じtransactionで確かめ、崩れていればaskを開かず診断し直す。答えはsupervisorが前提を確かめ直して適用する（taskの再計画の「実装の状態」）
     fn apply_verdict(
         &mut self,
         job: &DiagnosisRead,

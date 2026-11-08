@@ -167,6 +167,9 @@ impl ExecutionConfig {
     /// when one of them can run a Codex worker, the worker's row lists
     /// each usable provider with its own enforcement (`providers`);
     /// otherwise the row is as before, with no `providers`.
+    /// 行のenforcementはそのactorへの最も弱い強制で、hostのworkerはClaudeも
+    /// いつでも動きうるため`advisory`のまま。providerの強制は行を分けずに足す。
+    /// 行の並びと各行の強制を読む既存のtestとpluginのskillとの互換を保つためである。
     pub fn profiles(&self, checks: &[ProviderCheck]) -> Result<Vec<ActorExecution>> {
         let workers = worker_providers(checks);
         ai_actor_roles()

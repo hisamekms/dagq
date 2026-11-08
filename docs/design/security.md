@@ -45,7 +45,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
   pjのscriptがrun dirに書く手元の検証の記録もworkerが偽りうるdataで、runtimeは古いtreeと壊れた記録を弾くだけで改ざんを検出せず、記録を着地の安全の根拠にしない（advisory、[ADR-t2589-1](../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)決定4）
   wrapperがexecutor-telemetryのtokenで送り直すstepの番号と未送信のstepはrun dirに置かず、tokenのfileの隣（queueの`service/`、agentのsandboxが書けずcontainerにmountされない）に対象ごとに置くので、workerはそのstepを仕込めない
 - review・recovery・plan review・goal reviewのjob: 型付きのverdict。
-  supervisorが写像の表どおりに適用し、読めない出力は何も進めない（[Roles](supervisor-lifecycle/roles.md#headlessのjobのverdictと遷移)）
+  supervisorが決定的に遷移へ写し、読めない出力は何も進めない（[Roles](supervisor-lifecycle/roles.md#headlessのjobのverdictと遷移)）
 - observer: findingと、findingに紐づく`blocked`のaskだけ
 - planner: draftのtaskとproposal。
   `ready`にするのは通常はplan reviewのverdictをsupervisorが適用するとき（と人の明示の`ready --bypass-review`）

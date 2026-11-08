@@ -1888,6 +1888,24 @@ struct SessionRef {
 
 /// What the supervisor does once the session exited and its workspace
 /// closed.
+///
+/// verdictを適用したeventはactorがsupervisor、`requested_by`がjobのactor id。
+///   reviewの`concern`と差し戻せない`revise`（上限の後に収束していない・sessionが終わっていた・切り替えられなかった・送れなかった）と、`pass`の後の衝突の事前検査が上限で人に聞く`approve_landing`のaskは、sessionの終了の後に開くが、`AfterExit::Ask`がverdictを返したreview jobのactor（`requested_by`）を持ち、askを開くときだけ`for_job`で包むので、その`ask_opened`もactorがsupervisor、`requested_by`が`review-job:<run>:<attempt>`になる。
+///   askの後にleaseを返すなどのeventは`for_job`の外で、`requested_by`を持たない。
+///   supervisorの引き継ぎ（`adopt.rs`）が履歴から`AfterExit::Ask`を組み立て直すときは、引き継ぐ（か直前の）`review_finished`のpayloadの`attempt`から同じjobを復元し、`attempt`が無ければ別のjobを名指ししないよう`requested_by`を付けない。
+///   引き継いだpassのrunの衝突の事前検査も同じjobの`for_job`の中で行うので、その`conflict_precheck`も生きている経路と同じく`requested_by`を持つ。
+///   差し戻しや衝突の依頼を生きているsessionが果たさなかった後（sessionが終わった・receiptの直しを送れなかった）のaskは、verdictを適用し終えた後のsupervisor自身の判断なので`requested_by`を持たない。
+///
+/// jobが開くaskの`asked_by`（`plan_review`・`goal_review`など）は変えない。
+///
+/// 判定の適用:
+///
+/// - `pass`: 衝突の事前検査のあと、sessionの終了を待って着地の段（`AfterExit::Land`）へ進めるだけ。着地の関数は呼ばない。着地は別のthreadの`land_integrating`が、rebase後の検証コマンドを含む自分の検査を通したときだけ行い、落ちればrunは`needs_session`になる
+/// - `revise` / `concern`: 生きているsessionへの差し戻し（sessionが終わっていれば`approve_landing`のask） / `approve_landing`のask。runを通した`revise`の上限の後の差し戻しは収束の判定（`revise_limit_judged`）に通し、コードの指摘が無ければaskを開かずにpassの道で着地して理由をfollow_upのdraftにし、あれば`approve_landing`のask（`docs/design/supervisor-lifecycle/review.md`の「Review」）
+///
+/// 読めないreviewの出力は答えの無いjobだけを同じ入力で1回やり直し
+/// （`review_job_finished`）、それも無ければ`review_failed`と`approve_landing`のask。
+/// 失敗のeventはjobの依頼ではなく、payloadの`attempt`でjobを識別する。
 enum AfterExit {
     /// Wait for the integration slot and land (a passed review, or an
     /// approved resolved resume).
@@ -2082,6 +2100,12 @@ impl Supervisor<'_> {
     /// `requested_by` (ADR-t728-1 decision 1, task 730). On the way out,
     /// whether `apply` failed or not, `requested_by` goes back to what it
     /// was, so a nested `for_job` leaves the outer job's (task 783).
+    /// 再計画の診断verdictもこの範囲で適用する。継続・保留・ask、前提が古く捨てた
+    /// `replan_diagnosed`を含め、`requested_by`は
+    /// `recovery-job:<run>:replan_diagnosis:<attempt>`。
+    /// jobの失敗、jobを使い切ったask、人の回答の適用はjobの依頼ではなく、
+    /// `requested_by`を持たない。review passの後の着地はIntegratorが行い、依頼元は
+    /// supervisorである。Integratorも抜けるときに入る前の依頼元へ戻す。
     pub(in crate::application) fn for_job<T>(
         &mut self,
         job: &ActorContext,

@@ -58,6 +58,8 @@ use crate::domain::satisfied_judgment::{self, ClaimJudgment, JudgmentStep};
 /// A claim's judgment in the run's slot: its `attempt` (from 1, by the
 /// run's `run_satisfied_review_started`), the verification that passed on
 /// the head it judges, its prompt and its one job.
+/// snapshotを確かめて閉じるときはrunを`succeeded`、taskをcommitなしの
+/// `completed`にし、着地しない。判定と再判定の経路はmodule docのとおり。
 pub(super) struct ClaimReviewWatch {
     pub(super) attempt: usize,
     pub(super) verification: SnapshotVerification,

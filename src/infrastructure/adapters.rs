@@ -4462,7 +4462,7 @@ pub fn headless_worker_settings(deny: &[String]) -> Result<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentSettings {
     /// None of these: the inbox, whose settings are its denials alone
-    /// ([`inbox_settings`], written when `up` opens it), and the headless
+    /// ([`inbox_settings`], written when `dagq inbox` opens it), and the headless
     /// jobs other than the review, which their allowed tools
     /// ([`claude_tools`]) restrict.
     None,
@@ -4479,6 +4479,13 @@ pub enum AgentSettings {
 /// terminal (only a person's, ADR-t1433-2 decision 3), the review's, and
 /// none for the rest. A worker and a planner of the runtime's run headless
 /// turns, whose settings [`AgentProvider::turn_command`] writes.
+/// Claudeのsettingsはこのadapterでroleから決める（ADR-t1063-1決定3）。
+/// headless jobは権限の意図`JobAccess`だけを渡す。
+/// workerとruntimeのplannerのturnは`turn_command`が設定を書く（hookなし、
+/// `permissions.deny`、サジェストの設定なし）。inboxもこの関数では`None`だが、
+/// `dagq inbox`の`AgentProvider::inbox_command`はdenyだけの設定を書く
+/// （ADR-t2159-1決定5）。設定を書くroleにはpolicyから作る`permission_deny(role)`を
+/// 入れ、このadapterはファイルに書くだけである。
 pub fn agent_settings(role: ActorRole) -> AgentSettings {
     match role {
         ActorRole::Planner => AgentSettings::Session,

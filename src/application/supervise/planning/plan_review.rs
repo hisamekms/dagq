@@ -994,6 +994,12 @@ impl PlanningState {
     /// [`MAX_PLAN_REVISES`] is a concern; the precedents it names are
     /// quoted), applied in one transaction; the inbox is told of a new
     /// `approve_plan` ask.
+    /// 判定の適用:
+    ///
+    /// - `pass` / `revise` / `concern`: 1つのtransactionで`ready`・plannerへの差し戻し・`approve_plan`のask。再計画の置換proposalの`pass`は承認だけを記録し、子を`ready`にせず`submitted`に留める（Plan review）。`concern`の`high`で`reason_category`が`null`の`ready` / `send_back`はpass / reviseとして適用する（Plan review、ADR-t451-1決定4）。`actions`は`pass`（と適用した`ready`）のときだけ許された3種を適用し、`reopen`はverdictに関わらず検査して適用し、上限を超えれば1件も適用せず、最終の判定でproposalを差し戻すかconcernのaskにする（passはrevise、reviseの上限を過ぎていればconcern）。`pass`での優先度の扱いは各taskの記録の由来と優先度の出どころで分かれる（Plan review）
+    ///
+    /// 読めない出力は`plan_review_failed`（plan review by hand）にし、proposalは
+    /// `submitted`のままにする。
     fn apply_plan_verdict(
         env: &mut PassEnv<'_>,
         job: &PlanReviewJob,

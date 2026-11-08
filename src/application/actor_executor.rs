@@ -422,6 +422,30 @@ pub fn local_checks_env(run: &TaskRun) -> Result<(String, String)> {
 /// the kind of span a session's hook records (the inbox's, a planner's by
 /// its origin), a planner's origin and id, and the model it starts with.
 /// Every workspace and headless job of an actor gets exactly this.
+///
+/// | actor | 起動するところ | ほか |
+/// | --- | --- | --- |
+/// | worker（resumeも） | runのbackgroundのsession wrapper | `DAGQ_RUN_ID`・`DAGQ_TASK_ID` |
+/// | planner（runtime・draft・finding） | runtimeのplannerのbackgroundのwrapper（`planner-session`）とそのturn | |
+/// | inbox | 人のterminalの`dagq inbox` | |
+/// | supervisor（前のbinaryが登録したin-cmuxのもの） | 前のbinaryのin-cmux mode（新しくは起動しない） | |
+/// | review job | runのreview | |
+/// | recovery job | 終わったrunと生きているrunの復旧 | 同じjobの経路で、長期化したtaskの読み取りだけの再計画の診断（label `replan_diagnosis`、triageの権限）も走る（Triage） |
+/// | plan review job | proposalのplan review | |
+/// | goal review job | goalのgoal review | |
+/// | throughput review job | 毎時・日次・週次のスループットの見直し | 読むだけ。結論はsupervisorの`throughput-review`コマンドが保存しinboxに知らせる（スループットの見直し） |
+/// | setup review job | 人かinboxの`dagq setup-review` | queueは読むだけで、書けるのは一時の場所のfileだけ（setup-review） |
+/// | observer | `dagq observe`が起動するagent | actor idは`observer_actor`（`src/application/observer/mod.rs`）が決める |
+///
+/// `DAGQ_ROLE`は`ActorRole::env_value`、`DAGQ_ACTOR_ID`は`ActorContext`の
+/// constructor（`instance`の`<role>:<instance>`など）が作る。
+/// inboxとplanner（と登録済みのin-cmuxのsupervisor）は`DAGQ_QUEUE`（queue DBのpath）も持つ。
+/// workerとresume、headlessのjob、observerは持たず（`domain::queue_service::client_role`）、agentのプロセスはqueue serviceのsocketの`DAGQ_SERVICE_SOCKET`とtokenのfileの`DAGQ_SERVICE_CREDENTIAL_FILE`を持ち、その`dagq`はクライアントモードで動く（Queue service）。
+/// runのsession wrapperのprocess自体はどちらも持たない。
+/// `DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`は`[run.env]`で上書きできない（`DAGQ_`の予約）。
+/// 環境は`actor_env`（`src/application/actor_executor.rs`）の1か所で作り、runのsession wrapperはその後に`[run.env]`を足す。
+/// headlessのjobは呼び出し元の変数（reviewの`[run.env]`、observerの`PATH`）の後にこれを足すので、actorの変数は上書きされない。
+/// 登録済みのin-cmuxのsupervisorのworkspaceもAI actorではないが同じ形の環境を持つ。
 pub fn actor_env(
     queue: &Path,
     actor: &ActorContext,

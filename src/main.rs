@@ -3185,6 +3185,9 @@ fn role_denied_message(role: ActorRole) -> Option<&'static str> {
 /// caller, except the processes of the control plane the runtime starts in
 /// an actor's environment: the supervisor, and the session wrappers and
 /// hooks, whose events are the wrapper's rather than the session's.
+/// inboxのhookはこの関数より先にserviceへ送り、tokenのinbox principalでeventを
+/// 書くのでwrapperにはならない。supervisorが起動する`observe`と`auto-update`は
+/// `supervisor:<pid>`の環境を受け、eventもsupervisorになる（observer agentはobserver）。
 fn event_actor(actor: &ActorContext, command: &Command) -> ActorContext {
     match command {
         Command::Supervise { .. } => {
@@ -4724,6 +4727,34 @@ fn resolve_observe_interval(interval: Option<u64>, once: bool) -> Duration {
     Duration::from_secs(interval.unwrap_or(if once { 0 } else { 10800 }))
 }
 
+/// `execute()`は環境のactorを読む前に、次の経路へ順に分岐し、これらでは環境のactor（`ActorContext::from_env`）を決めない。
+///
+/// - relayとreview program: queueを開かずに動く。
+/// - Codex inboxのhook（`CodexInboxHook`）はstdin/stdoutで応答して終了する。
+///   statusと区間の記録は、hookが呼ぶ`dagq`を通してinboxのprincipalでserviceへ送る。
+/// - 宛ての環境（serviceのsocketかqueueのbroker）があればクライアントモード（`client_mode`）で、tokenのprincipalをserviceが認可する（Queue service）。
+/// - plannerのhook（`session-event`）は報告をwrapperに渡す（spool）。
+///   inboxのhookは`dagq inbox`が発行を受けたinboxのtokenで区間を`session_record`へ送り、queueを開かない（tokenのprincipalをserviceが認可し、eventはそのprincipalで書く。eventのactor）。
+/// - session wrapper（`session`・`planner-session`）はwrapperのprincipalで動く。
+///
+/// それ以外のコマンドは`ActorContext::from_env`でactorを決める。
+/// そのactorが`user`・`inbox`・`planner`でserviceの答えるコマンドならqueue serviceへ送る（Queue service）。
+/// 残りは`check_access`で判定し、通ったものだけが次へ進む。
+///
+/// - envにsupervisorの登録（`SUPERVISOR_REGISTRATION_ENV`）があり、supervisorが自分のものとして起動した`observe`（`--history`・`--input`を除く）・`throughput-review`は、そのsupervisorのtokenで同じprincipalとしてserviceを通り、queueを開かない（`supervise`）。
+///   envのactorがsupervisorでなければ止まる。
+///   serviceでの認可はsupervisorの操作と同じ（Authorization）。
+/// - `queue-broker serve`は`service.lifecycle`の認可を通った後、brokerのプロセスとしてqueueを開かず、自分の要求をtokenもactorの環境も持たない`user`としてserviceに送る（Queue broker）。
+/// - `up`・`down`・`inbox`・`service start`・`service stop`・`install`と更新のjob（`auto-update`・`release-update`）は認可の後、queueの読み書きを呼び出し元のprincipal（更新のjobは起動したsupervisorのtoken）で制御側のコマンドのstepとしてserviceに送り、queueを開かない（hostのCLI）。
+/// - `service serve`はserviceとして、DBの無い所への`init`はDBを開く経路の例外としてqueueを開き（`migrate`・`doctor`・既存のqueueへの`init`はserviceのユースケース）、`supervise`はqueueをserviceで扱い、`service status`と`queue-broker`の`status`・`start`・`stop`はqueueを開かない（statusとdoctor、Queue broker）。
+/// - それ以外（宛ての無いworker・job・observerなどの`dagq`）はqueueを開かずに断る（fail closed）。
+///
+/// - 計画系のコマンドは全てのroleについてapplicationの層が判定し、拒んだ試みを`authorization_denied`に記録する（Authorization）。
+///   対話と記録のコマンドと、runtimeの操作系のコマンド（Authorization）も同じ。
+///   runtimeのwrapperとhookは継いだworkerやplannerの環境のactorでなく、wrapperのprincipalでqueue serviceを通るので、workerとplannerはsessionを記録する権限を持たない（Queue service）。
+///   例外はinboxのhookで、上の分岐のとおり環境のactorを読まずにinboxのtokenでserviceを通る。
+/// - headlessのjobは読み取りだけの制限を受け、状態を変えるコマンドは拒まれる。
+///   判定は`StaticPolicy`（Authorization）で、どのjobにもCLIの書き込みを与えない。
 fn execute(cli: Cli) -> Result<Value> {
     // The relay and the forwarder of a run's container carry bytes and open
     // no queue (ADR-t2114-3): they run whatever the environment names,
