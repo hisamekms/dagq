@@ -255,6 +255,8 @@ migrationを足すtaskの規則（リリース済みは変えない）は[migrat
 - 落とし穴: `run_events`の式のindex（`events_by_opened_event`）の式の列は、queryが同じ式でaffinityの掛からない値（bindした値か`+o.id`）と比べるときだけ使われ、先頭列の`kind`だけでも選ばれうる。
   `run_id IS NULL`は`+run_id`と書いて`events_by_run`を避けるが、`goal_id IS NULL`も絞ると`events_by_goal`を辿りうるので、lockの下は`INDEXED BY events_by_kind`（か3列とも`+`）で固定する。
 
+`run_events`の読みのplanはlibのtestが入口で検査し、例外は理由つきで一覧に載せる。
+
 ## 全文検索（search）
 
 `dagq search`の索引（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)決定1〜3）。

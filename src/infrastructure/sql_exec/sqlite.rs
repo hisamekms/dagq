@@ -281,6 +281,8 @@ fn visit_rows_on(
     params: &[SqlValue],
     visit: &mut dyn FnMut(&SqlRow<'_>) -> SqlResult<bool>,
 ) -> SqlResult<()> {
+    #[cfg(test)]
+    super::run_events_read_plans::check(conn, sql)?;
     let mut statement = conn.prepare_cached(sql)?;
     let mut rows = statement.query(params_from_iter(params))?;
     while let Some(row) = rows.next()? {

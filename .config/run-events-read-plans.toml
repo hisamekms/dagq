@@ -1,0 +1,44 @@
+# Existing violations only. Reductions lower this budget as well.
+# New exceptions go in run-events-read-plans.d/t<task ID>.toml with a reason.
+# Each entry identifies normalized SQL by SHA-256; head helps locate it.
+budget = 8
+
+[[exception]]
+hash = "16cc01e3aaa39b229eb0b663bc5c909a6b8828316352067416596e7ef928e342"
+head = "SELECT * FROM run_events ORDER BY id DESC LIMIT 1"
+reason = "The row adapter test reads its latest fixture event to compare native and port decoding; this limited scan is test-only."
+
+[[exception]]
+hash = "28454165b51adfc689299c6a76ff6f26fed1738eb0120d26dd3443efc1952bc1"
+head = "SELECT kind , payload FROM run_events ORDER BY id"
+reason = "The savepoint adapter test compares all events in its small fixture to verify the event and session span commit together; this scan is test-only."
+
+[[exception]]
+hash = "4418613bebb36ed5727e11c66d6df735c0bb2a0d22a00628a04add5973abf6ce"
+head = "SELECT * FROM run_events ORDER BY id"
+reason = "all_events returns complete ordered history for existing consumers, including ledger tests; preserve this API while exposing its scan to the ratchet."
+
+[[exception]]
+hash = "d739c9cdc5ad10af1b37aebd3f3bd0e502e487a2fe96b0d5ec8db7c47c4f431b"
+head = "SELECT created_at FROM run_events WHERE julianday ( created_at ) IS NOT NULL ORDER BY julianday ( created_at ) , id"
+reason = "earliest_event_at compares parsed timestamps across history; retain the existing read while introducing the guard, with query changes outside this task."
+
+[[exception]]
+hash = "f3c578fea5146bbf4573e664d713bbb4eebc638a0c0fe0e4f1747b347b6250a4"
+head = "SELECT created_at FROM run_events WHERE id > ?1 AND id < = ?2"
+reason = "stats_window reads timestamps across its selected event interval without paging; preserve its current result and leave bounded reads to a separate change."
+
+[[exception]]
+hash = "5bf46716faca9f3d0e8f1e790cd2c892cf07d371ca80973dda67138bc47fd4bb"
+head = "SELECT * FROM run_events WHERE task_id = ?1 AND kind IN ( 'task_created' , 'task_status_changed' , 'run_claimed' , 'dependency_added' , 'dependency_removed' , '"
+reason = "task_ready_at unions task and goal history, and its goal branch selects task_id IS NULL through events_by_task; retain its semantics for the separate ready_at query repair."
+
+[[exception]]
+hash = "fb4a59d167d96e4d04f4f2bda43f6bc947f50a3498e6947421e98b74aaba982a"
+head = "SELECT kind FROM run_events ORDER BY id"
+reason = "The savepoint adapter test checks fixture event kinds after rollback or commit; reading every fixture event is intentional and test-only."
+
+[[exception]]
+hash = "fd5fad16b2195110d8f8cb609c7a632858687aaa3d1f9efc0b2a307d702b91d6"
+head = "SELECT id , task_id , goal_id , run_id , kind , payload , created_at FROM run_events"
+reason = "The row adapter test omits actor columns to verify absent actor decoding against its fixture event; this scan is test-only."

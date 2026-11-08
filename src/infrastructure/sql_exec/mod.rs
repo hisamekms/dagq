@@ -26,6 +26,8 @@
 //! has moved.
 
 pub(crate) mod commit_actions;
+#[cfg(test)]
+mod run_events_read_plans;
 pub mod sqlite;
 use commit_actions::CommitState;
 pub(crate) use commit_actions::{CommitActions, flush_after_commit};

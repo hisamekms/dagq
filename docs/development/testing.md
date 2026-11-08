@@ -52,6 +52,8 @@ testは`src/lib.rs`のunit testと`tests/it`・`tests/e2e.rs`・`tests/plugin.rs
 
 ## testの書き方
 
+- `run_events`を読む文はlibのtestでSQLiteの読みの入口のplan検査を通し、例外は理由を付けて[一覧](../../.config/run-events-read-plans.toml)に載せ、新しい項目は`.config/run-events-read-plans.d/t<task ID>.toml`に足す。
+
 - 関門ではtestは1件ずつ別processになるので、binaryの中の他のtestとprocessの状態（staticや一度だけの初期化）を共有することに頼るtestを書かない。
 - `cargo test`では同じprocessのthreadで走るので、process全体の状態（env・cwd）を変えるtestを書かない。
 - testのshellに渡る文字列（stubのagent・reviewerのscript、taskの`verification_commands`、wrapperのscriptなど）にfilesystemのpathを埋めるときは、`'{}'`と単引用符で直接囲まず、`tests/common`の`shell_path`（`dagq::infrastructure::adapters::shell_quote`を包む）で引用する。runtimeのtestのfixtureはqueueとrepositoryを`queue's data.db`・`repo's directory`とapostropheを含む名前で作るので、その下のpathを単引用符で直接埋めると引用が途中で閉じてshellがsyntax errorで終わり、testが意図を確かめないまま通るか不安定に落ちる。SQL・TOMLの文字列リテラルとpathでない文字列は対象外。
