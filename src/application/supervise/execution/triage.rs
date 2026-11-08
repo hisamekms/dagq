@@ -9,6 +9,7 @@ use super::recovery::JobEnd;
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, JobStartRoute, ModelRole};
+use crate::domain::full_disk::{FullDiskStep, full_disk_step};
 use crate::domain::landing_release::{self, ProcessesStep};
 use crate::domain::recovery::{
     ENDED_ACTIONS, HandOffFacts, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo,
@@ -443,6 +444,15 @@ impl Supervisor<'_> {
             {
                 continue;
             }
+            // A session that ended on a full disk is the runtime's to
+            // resume once there is room, never the job's
+            // ([`Self::resume_full_disks`]).
+            if matches!(
+                self.full_disk_step_of(&run, &events)?,
+                FullDiskStep::Resume { .. } | FullDiskStep::WaitForRoom
+            ) {
+                continue;
+            }
             if waits && !self.ended_round(&run, &events)?.used_up {
                 continue;
             }
@@ -457,6 +467,65 @@ impl Supervisor<'_> {
             due_runs.push(run);
         }
         Ok(due_runs)
+    }
+    /// Resume the runs whose worker's session ended on a full disk (goal
+    /// 260), each as [`full_disk_step`] says: with room, the run becomes
+    /// `needs_session` at once, its recovery job never started and no ask
+    /// opened, so the resumes of this pass may take it; while the free
+    /// space holds the claims it rests, and [`Self::triage_candidates`]
+    /// passes it over. A run in this supervisor's slot, one someone leases
+    /// and one whose task a hold guards wait, as for a recovery round; the
+    /// queue checks them again in its transaction.
+    pub(super) fn resume_full_disks(&mut self) -> Result<()> {
+        for run in self.queue.runs_to_triage()? {
+            if self.in_slot(run.id()) {
+                continue;
+            }
+            let events = self.queue.run_events(run.id())?;
+            let (evidence, exhausted) = match self.full_disk_step_of(&run, &events)? {
+                FullDiskStep::Resume { evidence } => (evidence, false),
+                FullDiskStep::Exhausted { evidence } => (evidence, true),
+                FullDiskStep::Recover | FullDiskStep::WaitForRoom => continue,
+            };
+            if self.held_out(
+                run.task_id(),
+                Some(run.id()),
+                crate::domain::task_replan::GuardedStep::Recover,
+            )? {
+                continue;
+            }
+            match self.queue.resume_on_full_disk(run.id(), self.resume.config) {
+                Ok(Some(ended)) if exhausted => {
+                    warn!(run_id = %ended.id(), task_id = %ended.task_id(), "run {} of task {} ended on a full disk ({evidence}) with its resumes used up; it goes to the recovery job (resume_exhausted)", ended.id(), ended.task_id());
+                }
+                Ok(Some(resumed)) => {
+                    info!(run_id = %resumed.id(), task_id = %resumed.task_id(), "run {} of task {} ended on a full disk ({evidence}); there is room again, so it is resumed without its recovery job", resumed.id(), resumed.task_id());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {} ended on a full disk and could not be resumed: {error:#}", run.id());
+                }
+            }
+        }
+        Ok(())
+    }
+    /// [`full_disk_step`] of `run`, which ended with `events`, against the
+    /// room this pass read ([`Self::claims_short_of_disk`], read only for
+    /// a run that ended on a full disk). A run without the worktree and
+    /// the receipt path a session resumes in is its recovery job's.
+    fn full_disk_step_of(&mut self, run: &TaskRun, events: &[RunEvent]) -> Result<FullDiskStep> {
+        if crate::domain::full_disk::ended_on_full_disk(run.status(), events).is_none() {
+            return Ok(FullDiskStep::Recover);
+        }
+        let worktree = run
+            .worktree_path()
+            .is_some_and(|path| self.files.is_dir(Path::new(path)));
+        if !worktree || run.receipt_path().is_none() {
+            return Ok(FullDiskStep::Recover);
+        }
+        let short = self.claims_short_of_disk()?;
+        let exhausted = ResumeCount::of(events).exhausted(self.resume.config);
+        Ok(full_disk_step(run.status(), events, short, exhausted))
     }
     /// The round of `run`, which ended, as its `events` read now.
     fn ended_round(&mut self, run: &TaskRun, events: &[RunEvent]) -> Result<EndedRound> {

@@ -40,6 +40,7 @@ related:
 supervisorは新しいrunをclaimする前に、今claimしてよいかを決める。
 hostの負荷・空き容量・providerの壁で止まるときはqueue全体のclaimを控え、衝突やbuildの待ちのように1つのtaskだけが進めないときはそのtaskだけを飛ばして次の候補を取る。
 走っているrun（sessionの監視・validation・review・resume・triage・着地）には触れない。
+例外は空き容量で、workerのsessionが容量不足で落ちたrunのresumeも控える。
 
 ## 流れ
 
@@ -62,7 +63,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 ## 不変条件
 
-- 控えが止めるのは新しいclaimと、空き容量では着地の開始、providerの控えではそのproviderで始めるheadless jobとrunのreviewだけで、走っているrunとleaseを持つrunには触れない。
+- 控えが止めるのは新しいclaimと、空き容量では着地の開始と容量不足で落ちたrunのresumeの開始、providerの控えではそのproviderで始めるheadless jobとrunのreviewだけで、走っているrunとleaseを持つrunには触れない。
 - queue全体の控えの記録は判定が前回の記録と変わったときだけ書き、同じqueueの2つのsupervisorが交互に書き直さない。
 - 候補ごとの控えは始まりと終わりをtaskのeventに残し、`candidates`と`graph`はその記録だけを読むので、表示と実際のclaimが一致する。
 - 控えたtaskも、効く優先度が`interrupt`ならhotspotでは控えないが、workerとbuildと実行区分の上限では控える。
@@ -119,6 +120,7 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 - claim: 空きとclaimの閾値を`ClaimHold::judge`に渡し、足りなければ理由`disk_space`で控える。
 - 着地: 着地slotを待つrunは、空きが着地の閾値を下回る間integrationを始めず、leaseを持ったままrebaseも検証もしない。
   `approve_landing`の`land`のanswerは足りない間もその場で適用して列に並べ、列の着地の開始（`start_approved_landings`）だけが待つ（[Review](review.md#review-supervisor)）。
+- resume: workerのsessionが容量不足で落ちたrunは、claimが控える間は復旧jobもaskも無しに`failed`か`interrupted`のまま待ち、控えが解けたpassで同じrunでresumeする（[Triage](triage.md)）。
 - 落とし穴: 着地の控えはhostのものでなく記録したsupervisorのslotのものなので、別の生きているsupervisorはその控えを終えない（`domain::claim_hold::LANDINGS`）。
 - 止めるdrainも、空き容量の掃除と残りのjobが終わるまでleaseを持って待ち、その後の容量で足りれば着地へ進み、足りなければleaseを返し[拾い直し](supervise.md#leaseの解放)に任せる。
   待ちの時間上限は設けず、既に選んだ有限の候補の処理を待つ。
@@ -174,7 +176,6 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 - 間隔が効くときは1つのpassで新しくclaimするのは1本で、間隔が過ぎた後のpassはqueue全体の控えでloadを判定し直す。
 - 対象は新しいclaimだけで、resume・待ちからの戻り・着地・triage・headless jobは間隔を見ない。
 - 間隔の待ちは`claim_held` / `claim_resumed`にせず、observerと`stats`の控えの数え方に混ぜない。
-  待ちの区間は`spaced_since`のcomment、`run_claimed`に載る値は`domain::measure::ClaimAttributes`が持つ。
 - `--once`のsupervisorは、runが無く次のclaimが間隔を待つpassで終わる。
 
 ## 着地待ちが空けた軽い枠
@@ -238,7 +239,6 @@ Spikeがclaimされたgoal（goalの無いSpikeはそれ自体）は、未完了
 - containerで動かすときはproviderの経路より先にcontainerを見て（`Supervisor::container_deferral`、[Container runtime](../container-runtime.md)）、hostでは動かさない。
 - containerを使えても、machineのメモリにworkerのcontainerの上限が入らないか、メモリを待つcontainerが在れば`container_memory_wait`で控える（`Supervisor::container_memory_deferral`）。
   resumeと着地はこの控えで止めず、次のturnとverificationが自分で待つ（[Container runtime](../container-runtime.md#dagq専用のmachine)の「メモリの予約」）。
-- 理由の値と意味は`domain::claim_defer::worker_deferred`と各理由の定数、理由の変わり方は`worker_step`が持つ。
 - 両方のproviderが使えないpassはqueue全体の控えがclaimを止めるが、その前に候補をこの判定にかけて控えを記録する。
 - claimの後戻り（`claim_for_supervisor_holding`）にも経路の一覧を渡すので、経路の無いworkerのtaskは取らない。
 
@@ -278,7 +278,6 @@ Spikeは実装とworkerの総枠を共有し、枠を予約しない（[ADR-t148
 - `candidates`と`graph`は記録を`application::claim_view`で読み、開いている控えのtaskを順から除いて別に出す（[ADR-t1992-1](../../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)）。
   CLIは控えを判定し直さず、記録を閉じたり足したりもしない。
 - 落とし穴: 控えが閉じるのはsupervisorが次に判定したときだけで、slotが無いpassとclaimを止めているpass（両方のproviderが使えないpassを除く）では判定せず、hotspotの入力もcacheするので、その間は前の判定の控えが開いたまま出る（遅れの上限は無い）。
-- `show --full`は控えを出さず、控えはeventsで読む。
 - `stats`は空きslotがあり控えているとき、空きslotのalertの代わりに控えのalertを出し、控えによる空きと依存の詰まりによる空きを区別する（[`status`と`stats`](commands.md)）。
 
 ## taskのhold

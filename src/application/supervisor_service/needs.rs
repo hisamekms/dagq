@@ -266,6 +266,7 @@ const SUPERVISE: &[&str] = &[
     "finish_approved_resume",
     "skip_resume",
     "exhaust_resumes",
+    "resume_on_full_disk",
     "note_hold_deferred",
     "end_holds_of_ended_tasks",
     "heartbeat_leases",

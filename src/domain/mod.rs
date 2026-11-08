@@ -1263,6 +1263,7 @@ pub mod e2e_quarantine;
 pub mod environment;
 mod error;
 pub mod event_kind;
+pub mod full_disk;
 pub use event_kind::{EventKind, RecordedKind};
 pub mod execution_class;
 pub mod exit;

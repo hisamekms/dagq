@@ -1762,6 +1762,16 @@ impl RunRecovery for SupervisorQueue {
             ],
         )
     }
+    fn resume_on_full_disk(
+        &mut self,
+        id: &RunId,
+        config: crate::domain::resume::ResumeConfig,
+    ) -> Result<Option<TaskRun>> {
+        self.remote(
+            "resume_on_full_disk",
+            vec![to_value(id)?, to_value(config)?],
+        )
+    }
     fn hold_guard(&self, task: TaskId) -> Result<Option<crate::domain::task_hold::HoldGuard>> {
         self.remote("hold_guard", vec![to_value(task)?])
     }

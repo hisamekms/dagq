@@ -94,6 +94,17 @@ pub(super) fn died_at_once(_: &RunId, _: &Path, _: &FakeGit) -> Result<Value> {
     Ok(died())
 }
 
+/// What a worker's turn does whose session dies on a full disk: its
+/// process ends with 7 on Claude's error result, whose errors say the OS
+/// had no space left, writing no receipt.
+pub(super) fn died_on_a_full_disk(_: &RunId, _: &Path, _: &FakeGit) -> Result<Value> {
+    let mut died = died();
+    died["wiring_session_says"] = json!(
+        "error: failed to write target/debug/deps/libx.rlib: No space left on device (os error 28)"
+    );
+    Ok(died)
+}
+
 /// The receipt that stands for a turn's process dying ([`committed_and_died`]).
 fn died() -> Value {
     json!({"wiring_session_dies": 7})
@@ -833,11 +844,14 @@ impl Turn {
         if let Some((receipt, worktree, path)) = self.receipt {
             let receipt = receipt(&self.run, &worktree, &self.git)?;
             if let Some(code) = receipt["wiring_session_dies"].as_i64() {
-                let result = json!({
+                let mut result = json!({
                     "type": "result", "subtype": "error_during_execution", "is_error": true,
                     "num_turns": 1, "duration_ms": 5, "session_id": self.session,
                     "usage": {"input_tokens": 7, "output_tokens": 3},
                 });
+                if let Some(says) = receipt.get("wiring_session_says") {
+                    result["errors"] = json!([says]);
+                }
                 return Ok((format!("{result}\n"), i32::try_from(code)?));
             }
             if !receipt.is_null() {

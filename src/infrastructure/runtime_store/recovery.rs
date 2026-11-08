@@ -1329,6 +1329,94 @@ impl SqliteQueue {
         Ok(Some(result.relocated(&self.runs_dir)))
     }
 
+    /// Resume a `failed` or `interrupted` run whose worker's session ended
+    /// on a full disk (goal 260), with no recovery job: in one transaction,
+    /// check that it is still its `in_progress` task's latest run, that
+    /// nobody leases it but stale (the stale lease goes), that neither a
+    /// hold nor a replanning guards its task, that it can still come back
+    /// under its own ID, and that its events still make it one to resume
+    /// with room ([`full_disk::full_disk_step`]); make it `needs_session`
+    /// as [`full_disk::record_full_disk_resume`] records, or, with its
+    /// resumes used up under `config`, record
+    /// [`full_disk::exhausted_request`] for its recovery job and leave it
+    /// where it is. The caller judged the room. `Ok(None)` means it
+    /// changed or is guarded.
+    pub fn resume_on_full_disk(
+        &mut self,
+        id: &RunId,
+        config: resume::ResumeConfig,
+    ) -> Result<Option<TaskRun>> {
+        use crate::domain::full_disk::{self, FullDiskStep};
+        // The spans it closes read their transcripts first (task 543).
+        let _read = self.read_before(Closing::Run(id, &[EventKind::TriageFinished]))?;
+        let tx = self.write_tx("resume_on_full_disk")?;
+        let now = self.generators.clock.now();
+        let run = SqlRead::query_row(
+            &tx,
+            &format!("SELECT r.* FROM task_runs r JOIN tasks t ON t.id=r.task_id
+                 WHERE r.id=?1 AND r.status IN ('failed','interrupted') AND t.status='in_progress'
+                 AND {insert_order_r}=(SELECT MAX({insert_order}) FROM task_runs WHERE task_id=r.task_id)", insert_order_r = SqlRead::dialect(&tx).insertion_order("r"), insert_order = SqlRead::dialect(&tx).insertion_order("")),
+            sql_params![id],
+            run_row(&self.runs_dir),
+        )
+        .optional()?;
+        let Some(run) = run else {
+            return Ok(None);
+        };
+        if crate::infrastructure::task_holds::guard_of(&tx, run.task_id())?.is_some()
+            || replanning(&tx, id, GuardedStep::Recover)?
+            || !revivable(&tx, id)?
+        {
+            return Ok(None);
+        }
+        let lease = SqlRead::query_row(
+            &tx,
+            "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
+            sql_params![id],
+            lease_row,
+        )
+        .optional()?;
+        if lease
+            .as_ref()
+            .is_some_and(|lease| !lease_is_stale(lease, now))
+        {
+            return Ok(None);
+        }
+        let events = run_events_of(&tx, id)?;
+        let resumes = ResumeCount::of(&events);
+        let evidence = match full_disk::full_disk_step(
+            run.status(),
+            &events,
+            false,
+            resumes.exhausted(config),
+        ) {
+            FullDiskStep::Resume { evidence } => evidence,
+            FullDiskStep::Exhausted { evidence } => {
+                let request =
+                    full_disk::exhausted_request(run.status(), &events, resumes, &evidence);
+                record_events(&tx, id, vec![request])?;
+                tx.commit()?;
+                return Ok(Some(run.relocated(&self.runs_dir)));
+            }
+            FullDiskStep::Recover | FullDiskStep::WaitForRoom => return Ok(None),
+        };
+        SqlWrite::execute(
+            &tx,
+            "DELETE FROM run_leases WHERE run_id=?1",
+            sql_params![id],
+        )?;
+        let result = apply_recorded(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            None,
+            || format!("run {id} changed"),
+            |run| full_disk::record_full_disk_resume(run, &evidence),
+        )?;
+        tx.commit()?;
+        Ok(Some(result.relocated(&self.runs_dir)))
+    }
+
     /// Apply the answer of a triage's `decide` ask to its `failed` or
     /// `interrupted` run that nobody leases and that is still its task's
     /// latest run, and close the ask, in one transaction
@@ -1915,6 +2003,13 @@ impl RunRecovery for SqliteQueue {
         config: resume::ResumeConfig,
     ) -> Result<Option<TaskRun>> {
         SqliteQueue::exhaust_resumes(self, id, exhaustion, reason, config)
+    }
+    fn resume_on_full_disk(
+        &mut self,
+        id: &RunId,
+        config: resume::ResumeConfig,
+    ) -> Result<Option<TaskRun>> {
+        SqliteQueue::resume_on_full_disk(self, id, config)
     }
     fn hold_guard(&self, task: TaskId) -> Result<Option<HoldGuard>> {
         SqliteQueue::hold_guard(self, task)

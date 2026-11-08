@@ -138,6 +138,18 @@ impl VerifyFailure {
     }
 }
 
+/// Whether `line` carries the OS's mark of a full disk: the text of
+/// `ENOSPC` (`No space left on device`), its name, or its errno as Rust's
+/// I/O errors print it (`os error 28`). The errno's words, not a tool's,
+/// so the mark holds whatever the language or the tool; a failed
+/// verification's `disk_full` ([`classify`]) and a worker's session that
+/// ended on a full disk ([`crate::domain::full_disk`]) read it alike.
+pub fn out_of_space(line: &str) -> bool {
+    line.contains("No space left on device")
+        || line.contains("os error 28")
+        || line.contains("ENOSPC")
+}
+
 /// The longest evidence kept, in characters.
 pub const EVIDENCE_CHARS: usize = 300;
 
@@ -167,11 +179,7 @@ pub fn classify(
         profile,
     };
 
-    if let Some(at) = lines.iter().position(|line| {
-        line.contains("No space left on device")
-            || line.contains("os error 28")
-            || line.contains("ENOSPC")
-    }) {
+    if let Some(at) = lines.iter().position(|line| out_of_space(line)) {
         return found(FailureClass::DiskFull, lines[at], None);
     }
     let shell_signal = exit_code
@@ -344,7 +352,7 @@ fn signal_name(signal: i32) -> &'static str {
     }
 }
 
-fn shorten(line: &str) -> String {
+pub(crate) fn shorten(line: &str) -> String {
     let line = line.trim();
     match line.char_indices().nth(EVIDENCE_CHARS) {
         Some((cut, _)) => format!("{}…", &line[..cut]),

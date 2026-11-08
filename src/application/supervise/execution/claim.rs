@@ -106,6 +106,14 @@ impl Supervisor<'_> {
         // before anything takes it again (ADR-t1662-1 decision 6).
         self.claim
             .note_slots_full(&*self.queue, self.registration.token(), parallel);
+        // A session that ended on a full disk is resumed once there is
+        // room, before the resumes below take it into a free slot (goal
+        // 260).
+        if self.used_slots() < parallel
+            && let Err(error) = self.resume_full_disks()
+        {
+            warn!(error = %format_args!("{error:#}"), "the runs that ended on a full disk could not all be resumed: {error:#}");
+        }
         // Resumes and triage read the landing branch: they wait with the
         // claims until it resolves (ADR-t615-1). A resumed session gets
         // `[run.env]` like a claimed run, so it waits with the claims for a
@@ -538,6 +546,13 @@ impl Supervisor<'_> {
             }
         });
         self.on_observation(|observation, env| observation.record_candidates(env, sample));
+    }
+    /// Whether the free disk space this pass read is short of what a claim
+    /// needs, so that [`Self::hold_claims`] holds the claims for it (a
+    /// space or a need that could not be read is not short).
+    pub(super) fn claims_short_of_disk(&mut self) -> Result<bool> {
+        let needed = self.on_host(|host, env| host.disk_needs(env))?.claim;
+        Ok(matches!((self.host.free(), needed), (Some(free), Some(needed)) if free < needed))
     }
     /// Judge whether new claims are held now ([`ClaimHold::judge`]: the
     /// free disk space this pass read against what a claim needs (task

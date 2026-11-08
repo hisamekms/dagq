@@ -17,6 +17,9 @@ related:
 
 終わった run の復旧 job は failed / interrupted / resume_exhausted を扱い、生きている worker の stalled と非対話の idle_process は [生きているsessionの復旧job](background-recovery-job.md) が扱う。
 復旧jobは判断を返す読み取りだけのjobで、状態を動かす責務はsupervisorにある。
+workerのsessionが容量不足で落ちたrun（最後のturnの出力に検証の`disk_full`と同じerrnoの印があり、復旧がまだ始まっていない）は復旧jobに回らずaskも開かない。
+空き容量がclaimを控える間は`failed`か`interrupted`のまま置き、控えが解けたpassで同じrunのままresumeする。
+resumeは通常の回数に数え、使い切れば`resume_exhausted`で復旧jobに回る（`domain::full_disk`、`Supervisor::resume_full_disks`）。
 
 ## 候補と開始
 

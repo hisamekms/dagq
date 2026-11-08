@@ -778,6 +778,10 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 config,
             ))
         }
+        "resume_on_full_disk" => {
+            let (id, config): (RunId, crate::domain::resume::ResumeConfig) = read(op, args)?;
+            answer(RunRecovery::resume_on_full_disk(&mut *store, &id, config))
+        }
         "hold_guard" => {
             let (task,): (TaskId,) = read(op, args)?;
             answer(RunRecovery::hold_guard(&*store, task))

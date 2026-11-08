@@ -67,6 +67,22 @@ const TICK: Duration = Duration::from_millis(20);
 /// Where the repository of a test is checked out: made nowhere.
 const CHECKOUT: &str = "/wiring/repo";
 
+thread_local! {
+    /// The free bytes the supervisor started on this thread reads
+    /// ([`Wiring::free`]); a thread that set none reads all the room
+    /// there is. Per thread, so no two tests share it.
+    static FREE: std::cell::RefCell<Option<Arc<AtomicU64>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The supervisor's reading of the free space: its thread's [`FREE`].
+fn free_space(_: &Path) -> Option<u64> {
+    Some(FREE.with(|free| {
+        free.borrow().as_ref().map_or(u64::MAX, |free| {
+            free.load(std::sync::atomic::Ordering::SeqCst)
+        })
+    }))
+}
+
 /// The memdb URI of the queue named `name`: one shared by every connection
 /// of the process that opens the same name while one of them is open.
 fn memdb(name: &str) -> PathBuf {
@@ -154,6 +170,10 @@ pub(super) struct Wiring {
     /// The CI watch's port; none by default, as `--once` without it.
     ci_watch: Option<supervise::CiWatchPort>,
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
+    /// The free bytes the supervisors read; all there is by default.
+    pub(super) free: Arc<AtomicU64>,
+    /// `[disk]`; the production's default (no threshold) by default.
+    disk: crate::domain::disk::DiskConfig,
 }
 
 impl Wiring {
@@ -214,7 +234,16 @@ impl Wiring {
             sessions,
             ci_watch: None,
             pass_probe: None,
+            free: Arc::new(AtomicU64::new(u64::MAX)),
+            disk: Default::default(),
         }
+    }
+
+    /// The supervisors started from now on hold the claims while fewer
+    /// than `bytes` are free ([`Self::free`]).
+    pub(super) fn with_min_free(mut self, bytes: u64) -> Self {
+        self.disk.min_free_bytes = Some(bytes);
+        self
     }
 
     /// Drive bounded, clock-controlled passes while counting this queue's reads.
@@ -631,6 +660,8 @@ impl Wiring {
                 pass_probe: self.pass_probe.clone(),
                 planning: self.planning.get(),
                 stop: stop.clone(),
+                free: self.free.clone(),
+                disk: self.disk,
             };
             std::thread::Builder::new()
                 .name(format!("{} supervisor", self.name))
@@ -713,6 +744,8 @@ struct Parts {
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
     planning: (Option<usize>, Duration),
     stop: Arc<AtomicBool>,
+    free: Arc<AtomicU64>,
+    disk: crate::domain::disk::DiskConfig,
 }
 
 impl Parts {
@@ -720,6 +753,7 @@ impl Parts {
     /// root wires the binary's (`compose::supervisor`), each port that
     /// reaches the host a fake.
     fn supervise(self) -> Result<Value> {
+        FREE.with(|free| *free.borrow_mut() = Some(self.free.clone()));
         let clock = self.generators.clock.clone();
         // Bounded by the end's deadline, behind the holding of the records
         // not taken, as the binary's.
@@ -817,7 +851,7 @@ impl Parts {
             generators: self.generators.clone(),
             review_material: &review_material,
             load_average: || None,
-            free_space: |_| Some(u64::MAX),
+            free_space,
             scratchpad_roots: Arc::new(Vec::new),
             host_versions: |_, _, _| Default::default(),
             worker_plugin: Arc::new(|_| crate::domain::instructions::NO_PLUGIN.to_owned()),
@@ -861,6 +895,7 @@ impl Parts {
         settings.slot_flags.runtime_planners = self.planning.0;
         settings.limits = SlotLimits::resolve(settings.slot_flags, &Default::default());
         settings.planner_timeout = self.planning.1;
+        settings.disk = self.disk;
         supervise::supervise(&ports, &settings)
     }
 }

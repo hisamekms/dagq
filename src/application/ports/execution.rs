@@ -1808,6 +1808,15 @@ pub trait RunRecovery {
         reason: &str,
         config: crate::domain::resume::ResumeConfig,
     ) -> Result<Option<TaskRun>>;
+    /// Resume a run that ended on a full disk without its recovery job,
+    /// once the caller found room (goal 260), or request its recovery job
+    /// as `resume_exhausted` when its resumes are used up under `config`;
+    /// `None` when it changed or is guarded.
+    fn resume_on_full_disk(
+        &mut self,
+        id: &RunId,
+        config: crate::domain::resume::ResumeConfig,
+    ) -> Result<Option<TaskRun>>;
     /// The guard the open hold of `task` puts on its steps
     /// (ADR-t1879-1), if any.
     fn hold_guard(&self, task: TaskId) -> Result<Option<crate::domain::task_hold::HoldGuard>>;
