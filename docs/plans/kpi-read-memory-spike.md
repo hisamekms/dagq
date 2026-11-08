@@ -45,6 +45,8 @@ related:
 
 example は `examples/kpi_read_memory.rs`。
 
+この Spike の `kpi` は台帳の全行の読み（`KpiQuery::default()` が全行を読んだ形）を測った。今の `kpi::kpi` は期間の問いなら `KpiQuery::default()` でも読む範囲を決め、範囲より前に終わった行を読まないので、下の手順を今の example で流し直しても `kpi` は全行の読みにならず、表の数値にならない。今の example で全行の読みに当たるのは `whole <dir> kpi-whole` で、問いは毎時の review のもの（`--period day --last 2`）なので答えの digest は表と違う。`measure` と候補の切り替えは今の example に無い（「配線の後」）。
+
 ```sh
 cargo build --release --example kpi_read_memory
 E=target/release/examples/kpi_read_memory
@@ -406,7 +408,7 @@ $E measure "$TMPDIR/k/q20k" observer
 
 ## 配線の後
 
-`lean` を runtime に配線した。`LedgerStore::ledger_window` が `WindowRows`（`src/domain/ledger/window.rs`）で `ledger_rows_after` の頁を 50 行ずつ読みながら畳む。`select_moving_records`・`select_of_records`・`read_lean` と example の `measure` と candidate の切り替えは消した（Spike の測定の example は commit `70b44f049` にある）。今の example の `whole` は runtime の読み（`kpi::kpi` と、`report::window` と `of_window` と `observer_input`）をそのまま測る。
+`lean` を runtime に配線した。`LedgerStore::ledger_window` が `WindowRows`（`src/domain/ledger/window.rs`）で `ledger_rows_after` の頁を 50 行ずつ読みながら畳む。`select_moving_records`・`select_of_records`・`read_lean` と example の `measure` と candidate の切り替えは消した（Spike の測定の example は commit `70b44f049` にある）。下の表は、配線の commit の example の `whole` が runtime の読み（`kpi::kpi` と、`report::window` と `of_window` と `observer_input`）をそのまま測ったもので、当時の `whole <dir> kpi` は Spike と同じ全行の読みだった。今の `kpi::kpi` は期間の問いで読む範囲を決めるので、今の `whole <dir> kpi`（`KpiQuery::default()`）は範囲を読み、下の手順を流し直しても表の数値にならない。今の example で全行の読みに当たるのは `whole <dir> kpi-whole`（問いは `--period day --last 2`）で、範囲を読む同じ問いは `whole <dir> kpi-range`。
 
 比はどの組も 1.05 以下で、答えの digest は Spike の今の形と `lean` と同じだった。`stats` と `report` と filter のある窓は example で測らず、答えの一致を unit test（`application::window_read_tests`）で確かめた。
 
