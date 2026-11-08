@@ -23,6 +23,9 @@
 //! ports they read and their part of the host's sources
 //! ([`PlanningSources`], [`ObservationSources`]).
 //!
+//! 読み取りのparamsの名前はCLIのlong option名、既定値もCLIと共通。
+//! CLIのparserが拒む値はserviceでもbad_requestで、時刻を使う読み取りの「今」は要求を受けた時刻。
+//!
 //! [Queue service]: ../../docs/design/queue-service.md
 
 #[cfg(test)]

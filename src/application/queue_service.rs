@@ -463,6 +463,7 @@ fn admin_of(backend: &dyn ServiceBackend, actor: &ActorContext, admin: &Admin) -
 /// as that principal's `authorization_denied`. Dialogue uses `Dialogue`;
 /// `show` asks `Gate` for `queue.read` on the task, proposal list/show for
 /// `queue.read` on the queue, and `watch_poll` for `queue.watch`.
+/// finding_recordの合流と根拠の検査はCLIと同じrecord_findingの1つのtransaction。
 /// Whole-queue reads ask the same capability as the CLI (`ci.read` for
 /// `ci failures`, `queue.read` otherwise).
 /// Wrappers need `session.run`/`session.record` on their own run or planner;
@@ -513,6 +514,10 @@ pub enum Peer {
 
 impl QueueService<'_> {
     /// Answer `request` from a peer that is not the user's ([`Peer::Other`]).
+    /// 検査はAPI version、宛てのqueue、token、ユースケースの順。
+    /// Gate・StaticPolicyの拒否はprincipalのactorでauthorization_deniedに記録し、
+    /// 同じrole・capability・reasonを応答のdeniedにも載せる。
+    /// 古いclientは知らない欄を読み飛ばすため、deniedの追加でAPI versionは上げない。
     pub fn handle(&self, request: &ServiceRequest) -> ServiceResponse {
         self.handle_from(request, Peer::Other)
     }
@@ -901,6 +906,8 @@ fn connection(use_case: UseCase, params: &Value) -> Connection {
 /// a fenced write as retryable `not_leader`, and any other failure as `failed`, with its
 /// [`crate::domain::queue_service::FailureKind`] when the caller
 /// tells it apart.
+/// storeの型付き拒否はPlanningがrollback後にauthorization_deniedを記録するが、
+/// この応答はfailedでdeniedを持たない。
 pub fn respond(result: Result<Value>) -> ServiceResponse {
     match result {
         Ok(value) => ServiceResponse::success(value),
@@ -1943,6 +1950,11 @@ pub(super) fn take_place(
 /// Run `use_case` as `actor` on `queue`. What reads once it is authorized
 /// takes a place among `heavy_reads` first, when it is a heavy read, and a
 /// refusal reads nothing; the place and what it met go in `notes`.
+/// TelemetryReportはtelemetry.reportを持つprincipalだけが到達し、他のroleはparamsを読む前に拒む。
+/// executor-telemetryは他の全ユースケースをparamsの前に拒む。
+/// 報告の対象とsessionの登録先をResource::Telemetryで認可し、未登録や別対象はauthorization_denied。
+/// 版・上限・不正なseqや負の値・別対象で受けたsessionはbad_requestで、何も記録しない。
+/// 記録の答えはstepとsampleそれぞれの追加数と重複数。
 fn run(
     queue: &mut dyn ServiceQueue,
     actor: &ActorContext,
@@ -2584,6 +2596,27 @@ impl Issued {
 /// claim and the resume and a job's at its start, and no command of an AI
 /// actor's issues one. The supervisor revokes a worker's token when its run
 /// ends, and sweeps those whose runs ended while it did not look.
+///
+/// 依頼はactorの起動で（`ServiceAccess`）:
+/// - supervisor: 登録の前にuser（socketのpeer）として
+/// - workerとrunのwrapper: supervisorがclaimとresumeでrunのleaseの下に
+/// - plannerとそのwrapper: supervisorがplannerのwrapperを起動する前に
+/// - inbox: `dagq inbox`がuserとして
+/// - job: supervisorが起動のときに依頼し、jobのプロセスの終わりに失効させる。
+///   jobのコマンド（`observe`など）が起動するもの（telemetryも）は呼び出し元のprincipalで依頼する（telemetryは開始の親とプロセスだけ、`issue_token`と`control`は未発行のみ）
+/// - integrator: 着地のslotを取る`begin_landing`と同じtransactionで、runのleaseの下に（supervisorは登録の生存も。人とinboxの`integrate`はそのコマンドが。[integrate](../../docs/design/supervisor-lifecycle/integrate.md)）
+/// - wrapperは依頼せず、自分のactor idで引いたfileを使い、agentのturnにはworkerかplannerのもののpathを渡す（envとargvに値もpathも無い）
+///
+/// plannerのhookは報告をwrapperへ渡し、inboxのhookはinboxのtokenで送る。
+/// wrapperは継いだ環境のactorを使わず、自分のprincipalで送る。
+///
+/// 失効: `queue_service::revoke`（`Principal::credential_key`）が値と記録を消す。
+///   inboxのtokenはsessionの終わりと開き直しで、plannerとそのwrapperのものはplannerを閉じたときに失効し、serviceは消える前でも断る。
+///   supervisorのtokenは登録の終わり（execは除く）にserviceが消す。
+///   加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（`run_holds_token`）。
+///   workerのtokenは、supervisorがrunの終わり（slotのrunが着地・failed・interruptedで休むとき）に`ServiceAccess::revoke`で消す。
+///   残りはsupervisorが起動の最初のpassとrunの終わりのsweepでserviceの`revoke_principal`に頼み、fileが置き換わった記録も消す。
+///   resumeを待つrun（`needs_session`）はtokenを保つので消さず、resumeは発行し直す
 pub trait ServiceAccess: Send + Sync {
     /// The socket of the service of the queue at `db`.
     fn socket(&self, db: &std::path::Path) -> std::path::PathBuf;
@@ -5817,7 +5850,7 @@ pub(crate) mod tests {
     }
 
     /// The report's own version, its bounds and the fields it does not
-    /// know (docs/design/queue-service.md).
+    /// know ([`crate::domain::telemetry::read`]).
     #[test]
     fn a_report_of_an_unknown_version_or_past_its_bounds_is_refused_and_unknown_fields_dropped() {
         let backend = backend(RunStatus::Running);

@@ -204,6 +204,7 @@ pub const CLIENT_ENV: [&str; 3] = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV];
 /// refuses a longer one before it sends it, with
 /// [`ServiceErrorCode::RequestTooLarge`]; one through the queue broker
 /// does not check it before it sends.
+/// 1つの接続に1つの要求で、要求も答えも1行のJSON、答えた後に閉じる。
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 /// The longest answer line, its newline included, the service writes and a
 /// client-mode `dagq` reads, by the socket or through the broker: the
@@ -722,6 +723,10 @@ impl UseCase {
     /// command the service does not answer (the rest of the control
     /// side's, `watch`, whose looks only the host's `dagq` sends as
     /// [`Self::WatchPoll`], `locate`, `doctor`, ...).
+    /// graphのSVGはhostのd2を起動するので読み取りでは受けず、jsonとd2を答える。
+    /// watchはworker・jobのpolicyに無く、promptとskillはSVGも名指さない。
+    /// locate・service status・queue-broker status・doctorはjobのpromptが名指さず、
+    /// service_statusが答えるのはattentionだけ。
     pub fn of_command(words: &[&str]) -> Option<Self> {
         let has = |flag: &str| {
             words

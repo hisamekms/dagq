@@ -421,6 +421,8 @@ pub const QUEUE_SERVICE_START_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// `claude` is the Claude Code the supervisor's sessions and the inbox
 /// start, whose preflight `up` runs.
+/// preflightの後にqueue serviceを入れ替えの口で起動し、失敗すればsupervisorを起動しない。
+/// 結果は出力のqueue_serviceに載せ、起動・入れ替えをqueue_service_startedに記録する。
 pub fn up(
     ports: &Ports,
     claude: &dyn AgentProvider,

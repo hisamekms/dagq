@@ -28,6 +28,9 @@
 //! them never interleave; `issues.lock` the one each issue of the service
 //! holds from before its transaction to the end of its undo.
 //!
+//! 生存中のserviceはlockの排他flockを保持し、statusとsupervisorは共有で試す。
+//! 共有を取れればserviceは居ない。
+//!
 //! [Queue service]: ../../docs/design/queue-service.md
 
 use std::fs::{self, File, OpenOptions};
@@ -133,6 +136,7 @@ pub fn service_dir(queue_dir: &Path) -> PathBuf {
 /// given, a host client from the DB it resolved, an inbox's hook from its
 /// token's file (a link, or macOS's `/var` and `/tmp`, can put one form
 /// under the length a socket takes and the other over it).
+/// 退避先がsymlinkでないことの検査は[`prepare_socket_dir`]が行う。
 pub fn socket_path(queue_dir: &Path) -> PathBuf {
     let real = fs::canonicalize(queue_dir).unwrap_or_else(|_| queue_dir.to_path_buf());
     let socket = service_dir(&real).join(SOCKET_FILE);
@@ -2007,7 +2011,7 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// not sent; the service's `busy`: a heavy read it refused unread, which may
 /// be sent again in a little while; `no_credential`: the
 /// token's file does not read; `control_side_command`: the command is one of the control
-/// side's (`doctor`, `service status`), which a person or the
+/// side's (`doctor`, `service status`, `queue-broker status`), which a person or the
 /// inbox runs on the host; `no_use_case`: any other command that is none
 /// of the service's;
 /// `queue_named`: the command names a queue to open; `wrong_queue`: the
@@ -2454,6 +2458,11 @@ fn answer_of(response: ServiceResponse) -> Result<Value> {
 /// is among them (`api_compatible`; a service that does not take it
 /// answers `api_version_mismatch` with its versions), or `reachable:
 /// false` with the `reason` (nothing answers, or the broker refused).
+/// locateはDBのpathや有無を返さず、socketかbrokerの宛てを返す。
+/// helloをstatusと同じ短い待ちで送り、brokerでtokenを読めなければ送らない。
+/// 到達できなくてもlocateは成功する。
+/// pluginの--resolveが最初にこれを呼び、DBが無いと分かったときだけskillがinitを案内するため、
+/// workerとjobはinitを試みない。
 fn reach_of(response: Result<ServiceResponse>) -> Value {
     let response = match response {
         Ok(response) => response,
@@ -3085,6 +3094,7 @@ pub(crate) fn owner_gone(owner: Option<u32>) -> bool {
 /// step in [`ServeOptions::report`]. Any service records whether its build
 /// found migrations pending once it held the lock, which decides whether
 /// `up` keeps it ([`replacement_due`]).
+/// SIGINT・SIGTERMでも受け付けを止めて終わる。
 pub fn serve(options: &ServeOptions) -> Result<Value> {
     let config = super::deployment_config::DeploymentConfig::from_process()?;
     config.store.check_usable(cfg!(feature = "postgres"))?;
@@ -3666,6 +3676,8 @@ fn refused_as_not_leader(answer: &LineAnswer) -> bool {
 /// [`on_line`], so a record is there when its request answers, unless the
 /// line is too full for that. A `migrate` runs on the line's thread on a
 /// connection of its own, which its copy and its checks hold apart.
+/// 書き込みは1つずつ確定し、読み取りは列を待たない。
+/// not_leaderを受けたらその要求と列の残りに同じ答えを返す。
 pub struct ServiceWriteLine {
     line: WriteLine<LineAnswer>,
     connection: WriteConnection,
@@ -5254,6 +5266,7 @@ impl ServiceQueue for ServiceSqlite {
 /// and stderr with an explicit deployment store. The service is started
 /// through a second fork, so it is no child of its starter's: a
 /// supervisor that execs another binary leaves no service to reap.
+/// 起動する子の環境からactorを名指す変数を外す。
 #[derive(Debug, Clone)]
 pub struct SystemQueueService {
     pub db: PathBuf,

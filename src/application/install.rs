@@ -21,6 +21,9 @@
 //! failure is ignored), so it works whether the queue is older or newer
 //! than this binary.
 //!
+//! 未適用のmigrationがあるか使えるserviceが無ければ差し替えの前に新buildのserviceを起動し、
+//! 引き継ぎの後に配置したbinaryのものへ替える。それ以外は引き継いだsupervisorが替える。
+//!
 //! The binaries are built, run and moved through [`Binaries`], the queue
 //! is read through [`QueueOpener`]; [`crate::compose`] builds the adapters.
 

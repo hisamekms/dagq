@@ -4000,6 +4000,13 @@ fn queue_write(command: &Command) -> Result<Option<QueueWrite>> {
     }))
 }
 
+/// clapの検査を通ったコマンドを、引数のとおりユースケースとparamsに写す。
+/// 読み取りのlong option名とCLIの既定値はqueue_readsのparamsにも共通。
+/// クライアントはcredential fileから読んだtokenを要求ごとに送り、resultをCLIと同じに出す。
+/// service・broker・client自身の断りはいずれもqueue_service.codeを持つerrorで終了コード1。
+/// authorization_deniedはローカルと同じdeniedと、observer・jobそれぞれのerror文を出す。
+/// client自身のno_use_case・queue_namedなどの拒否はdeniedを持たない。
+/// どの拒否でもDBを開くことに戻らない。
 fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
     if let Some(read) = queue_read(command) {
         return Ok(Some(read.request()));
