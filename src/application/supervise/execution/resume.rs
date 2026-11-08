@@ -436,6 +436,12 @@ impl Supervisor<'_> {
     /// ([`crate::application::inherit::carried_head`]), kept under
     /// `refs/dagq/runs/<run-id>` so that it outlives the branch. `None`
     /// when the branch holds nothing on top of the run's base.
+    /// Prefer result_commit; otherwise read the worktree HEAD, refusing a
+    /// rebase in progress. A host worktree with broken registration uses the
+    /// receipt-checked branch head (crate::application::run_git::host_head);
+    /// container heads use crate::application::inherit::container_head.
+    /// Keep the chosen head before requesting the retry; an unreadable or
+    /// unkeepable head refuses inheritance rather than discarding the work.
     pub(super) fn inherited_head(&mut self, run: &TaskRun) -> Result<Option<CommitSha>> {
         use crate::application::inherit::{carried_head, keep_carried_head};
         let Some(head) = carried_head(run, &*self.files, &*self.repository, &*self.run_containers)?
@@ -457,6 +463,9 @@ impl Supervisor<'_> {
     /// `triage_finished` (`action: retry_inherit`) and `auto_repaired`
     /// (`repair: inherit_retry`); the workspaces the run left open are
     /// closed as after a triage.
+    /// SqliteQueue::exhaust_resumes rechecks the latest run, exhausted
+    /// resumes, conflict-only history and once-per-task allowance in its
+    /// transaction before moving either the run or task.
     fn retry_inheriting(&mut self, run: &TaskRun, head: CommitSha, reason: &str) -> Result<()> {
         let exhaustion = Exhaustion::Inherit {
             branch: run.branch().map(str::to_owned),

@@ -979,6 +979,11 @@ pub(super) const RECOVERY_LIVE_OPTIONS_RULE: &str = "Each option declares its ki
 /// still leave language room within RECOVERY_PROMPT_LIMIT.
 /// recovery_action_help describes hand_off to check an already-satisfied base,
 /// requiring commit_mismatch from a receipt with no commit past the base.
+/// The fixed-binary section immediately follows alert facts and includes
+/// RECOVERY_BINARY_RULE for ended retries. Ended material keeps its prefix
+/// when cut. RECOVERY_ENDED_OPTIONS_RULE follows the verdict schema: a job
+/// sure of an already-satisfied base chooses hand_off directly; a verify
+/// fix is recommended in the question, never added as the job's option.
 pub fn recovery_prompt(
     task: &Task,
     run: &TaskRun,

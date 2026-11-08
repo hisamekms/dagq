@@ -339,6 +339,14 @@ impl Supervisor<'_> {
     /// closed with it. An ask whose task is no longer in progress, or has a
     /// newer run, has nothing left to apply and is closed. A free answer is
     /// a person's to read.
+    /// The resume reason appends the person's choice to the latest round's
+    /// reason (or last_error). A refused resume stays open until a later fill
+    /// pass closes it if its task moved on. A marked job option also matches
+    /// its unmarked text; its answer is recorded as triage_decided/recover,
+    /// which makes triage_state pending for the same alert and counts the next
+    /// round toward its limit. The next prompt reads the unmarked choice.
+    /// An answer matching an offered option is recorded as runtime-delivered,
+    /// so it is not attention for the inbox to deliver.
     pub(super) fn apply_triage_answers(&mut self) -> Result<()> {
         for ask in self.queue.triage_answers()? {
             let Some(run_id) = ask.run_id.clone() else {
@@ -412,6 +420,9 @@ impl Supervisor<'_> {
     /// (ADR-t1063-1 decision 5) unless `[provider_fallback] jobs` is off
     /// (ADR-t1857-1). A run whose alert got its jobs starts none and is due
     /// meanwhile ([`round_start`]).
+    /// A run already in this supervisor's slot is excluded even if its lease
+    /// moved to another token and became stale: the next tick removes that slot
+    /// and stops its job before any later pass may start another round.
     pub(super) fn triage_candidates(&mut self) -> Result<Vec<TaskRun>> {
         let waits = self.recovery_route().is_none();
         let now = self.generators.clock.now();
@@ -482,6 +493,10 @@ impl Supervisor<'_> {
     /// the `launch` of `triage_started` the job is started from; under
     /// `--no-claude` with no provider for it, the round fails to a person
     /// told why.
+    /// An exhausted round records no new recovery_requested; its launch
+    /// is the route's launch, or the role's while that route waits. A granted
+    /// verify-fix job uses the next request number even past the limit, and
+    /// the inherited run's integration reads the task's current verify.
     pub(super) fn triage_run(&mut self, run: TaskRun) -> Result<()> {
         let events = self.queue.run_events(run.id())?;
         let EndedRound {
@@ -626,6 +641,9 @@ impl Supervisor<'_> {
     /// git state and earlier repairs).
     /// The outer error is the job's own preparation, the inner one the
     /// start of its provider's process ([`super::recovery::start_job`]).
+    /// The directory falls back to `runs/<run-id>/` when the run has none.
+    /// [`super::recovery::start_job`] owns the prompt, binary facts and output
+    /// files and the read-only actor environment; the job has the review timeout.
     fn spawn_ended(
         &mut self,
         run: &TaskRun,
@@ -844,6 +862,19 @@ impl Supervisor<'_> {
     /// [`TRIAGE_RETRY_FAILURES`] times, `retry_inherit` only for one with
     /// commits and once per task, `resume` only with resumes left and a
     /// worktree, `wait` for at most [`MAX_RECHECK_SECS`].
+    /// `retry_inherit` keeps the chosen head in `refs/dagq/runs/<run-id>`;
+    /// the next run records `run_inherited` and receives the prompt's
+    /// "Carried over from run" section. Manual inheritance does not consume
+    /// this once-per-task allowance; the apply transaction rechecks it.
+    /// A resume needs both a worktree and a receipt path. Its `last_error`
+    /// is the trimmed action instruction, or the diagnosis if that is empty;
+    /// the normal needs-session resolution request carries it as a triage
+    /// return. The resume shares the cumulative limit and the peak-context
+    /// rule that can carry the request into a new session.
+    /// A wait changes nothing, then becomes due again at its bounded recheck
+    /// time, consuming another alert attempt. All live-session-only actions
+    /// (including send_instruction, stop_processes, answer_known_dialog and
+    /// close_and_proceed) refuse an ended run.
     fn plan_ended(
         &mut self,
         run: &TaskRun,
@@ -1061,6 +1092,16 @@ impl Supervisor<'_> {
     /// the job's reason category; recorded as `triage_finished` (action
     /// `ask`) and `recovery_finished`. The supervisor applies the answer
     /// ([`Self::apply_triage_answers`]).
+    /// Only a run with `integration_deferred` / `verification_failed` gets
+    /// `VERIFY_FIX_OPTION`, including an exhausted alert's ask. The question
+    /// explains each option and the need for a user or inbox to edit verify
+    /// before answering it; [`verify_fix_round`] grants the extra round.
+    /// [`sort_job_options`] merges runtime answers into recommendations and
+    /// keeps marked job options that move nothing until the next job; merged
+    /// and dropped choices and their reasons go in the round and question.
+    /// If recording the round fails after this pass opened the ask, that ask
+    /// is withdrawn and closed before the error fails the round, so the person
+    /// is not asked twice. The inbox watch reports the opened ask.
     #[allow(clippy::too_many_arguments)]
     fn escalate_ended(
         &mut self,
@@ -1154,6 +1195,12 @@ impl Supervisor<'_> {
     /// The end of a round whose outcome is recorded: the workspaces the run
     /// left open are closed and the lease is released. What fails here is
     /// logged, not a failed round.
+    /// [`close_open_workspaces`] stops only wrappers still running by their
+    /// handles, records wrapper_stopped and workspace_closed, and closes
+    /// stuck_exit asks if any wrapper closed. Legacy workspace sessions are
+    /// not closed (ADR-t1433-3); a stop failure records cleanup_failed without
+    /// changing last_error. The lease is then released. These post-verdict
+    /// errors never become triage_failed.
     fn end_round(&mut self, run: &TaskRun) -> Result<TaskRun> {
         if let Err(error) = close_open_workspaces(
             &mut *self.queue,
@@ -1246,6 +1293,10 @@ impl Supervisor<'_> {
             warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: could not release the lease: {error:#}", run.id());
         }
     }
+    /// Record the completed round's rest and close obsolete approve_landing
+    /// asks when the run failed or its task ended, including after round/resume
+    /// exhaustion. Answer application does the same cleanup through
+    /// [`Self::apply_triage_answers`].
     pub(super) fn note_triaged(&mut self, run: &TaskRun) {
         self.record_rest(run.id(), None, EventKind::TriageFinished.as_str());
         close_ended_landing_asks(&mut *self.queue, Some(run.task_id()));

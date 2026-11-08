@@ -162,6 +162,13 @@ pub fn rests_after(event: &RunEvent) -> Option<bool> {
 /// claim's course (`triage_finished` with action `hand_off`, ADR-t1818-2
 /// decision 3): the run is `validating` from then on, accepted as a claim
 /// whose verification has not started.
+/// The next free slot starts verification on a snapshot of current main,
+/// then the review judges it: a high-confidence pass closes the task;
+/// anything else opens approve_close. The judgment prompt states that the
+/// worker made no claim and carries triage_finished.reason (the recovery
+/// job's diagnosis) alongside the receipt evidence. A subsequent failed or
+/// interrupted run becomes due for recovery again unless a person's answer
+/// moved its task (crate::domain::triage_state).
 pub fn handed_off(event: &RunEvent) -> bool {
     event.kind == EventKind::TriageFinished
         && event.payload["action"] == super::recovery::HAND_OFF_KIND

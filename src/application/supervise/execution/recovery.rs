@@ -1355,6 +1355,19 @@ fn ordered_history(run_events: &[RunEvent], task_events: &[RunEvent]) -> Result<
 /// preparation (its prompt and files), the inner one the start of its
 /// provider's process: only the latter says whether the provider can be
 /// used.
+/// Files are `recovery-<alert>-<attempt>.prompt.txt`, `.out`, `.err` and
+/// `.binary.json`. The binary file keeps the full bounded binary facts,
+/// including replacements since claim and the count not read beyond the
+/// read limit; writing the prompt records recovery_prompt_written.
+/// The actor starts with DAGQ_ROLE=recovery-job, a queue-service socket
+/// and job token file, without DAGQ_QUEUE. Its CLI has review's read-only
+/// permissions. Codex uses a profile inheriting :read-only with access to
+/// that socket, no writable roots, sandbox bypass flags or supplied session
+/// id. Its reply is the final agent_message text (AgentProvider::job_reply);
+/// its thread and rollout model (AgentProvider::job_session) are recorded
+/// in triage_finished/triage_failed, recovery_finished and session_closed.
+/// On timeout the runtime stops the job and descendants by pid, including
+/// those in other process groups.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start_job(
     sv: &mut Supervisor<'_>,

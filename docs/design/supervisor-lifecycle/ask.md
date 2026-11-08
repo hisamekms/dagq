@@ -50,7 +50,7 @@ related:
   claim と job の保留、done の続行の依頼、cancel_affected の適用は [queue-hold](queue-hold.md) の共通処理を使う。
 - `dagq answer`はopenなaskに答えを書き、`ask_opened`と同じtask / runに`ask_answered`を書く。
   回答済みかcloseされたaskにはerror。
-  復旧jobの`decide`のask（`asked_by: supervisor`、runが`failed` / `interrupted`）に、optionsのどれとも一致しないruntimeの操作の名前だけを答えると、何も書かずにerrorで断り、askは開いたまま残る（名前を含むoptionの原文と、`retry_inherit`なら手での引き継ぎをmessageに示す。[Triage](triage.md)の9）。
+  復旧jobの`decide`のask（`asked_by: supervisor`、runが`failed` / `interrupted`）に、optionsのどれとも一致しないruntimeの操作の名前だけを答えると、何も書かずにerrorで断り、askは開いたまま残る（名前を含むoptionの原文と、`retry_inherit`なら手での引き継ぎをmessageに示す。[Triage](triage.md#escalateとaskの回答)）。
   回答した者・選んだ選択肢と、`approve_plan`と`approve_landing`の`<option>: <理由>`の形の答えが名指す選択肢の残し方は、`Ask`の欄のdoc commentと`domain::reasoned_option`が持つ。
   その2つのkindでsupervisorは`send_back: <理由>`を`send_back`として適用し人の理由を差し戻し先に渡す（`approve_plan`は`PlanAnswer`、`approve_landing`は`LandingAnswer`）。
   `approve_landing`の`send_back`（理由なしも理由付きも）は、runの最新の`review_finished`のverdictとsubagentの判断から、askの問いが示したのと同じ指摘（routeを決めたsubagentの指摘はagent名つき。親のverdictがpassで親の理由が無くても）をreviewの指摘として人の理由の後に続けてresumeに渡す。

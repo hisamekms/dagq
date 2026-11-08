@@ -62,7 +62,7 @@ runの異常を、runtimeの自動修正、復旧job、人へのaskの3段で扱
 runtimeの自動修正が直さなかったものをjobが状況を読んで許された操作で直し、直せないか自信が無いときだけ、そのalertのaskでinboxに上げる（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定39・40）。
 
 - alertは`stalled`（receiptの無いturn、権限拒否の上限）、`idle_process`（CPU時間が伸びないプロセス）、終わったrunの`failed`で、alertごとに許す操作は`recovery`とtriageのverdictの検査が持つ。
-  終わったrunの操作は、commitの無いreceiptで落ちたrunをbaseがすでに受け入れ条件を満たすことの確かめに渡す`hand_off`を含み、前提と適用は[Triage](triage.md)の5が持つ。
+  終わったrunの操作は、commitの無いreceiptで落ちたrunをbaseがすでに受け入れ条件を満たすことの確かめに渡す`hand_off`を含み、前提と適用は[Triage](triage.md#verdictの適用)が持つ。
   生きているsessionには当てはまらず、verdictにあれば拒んでescalateする。
 - 対話の経路のalert（workerの画面に由来するもの、idle markerの対話の`background_tasks`に由来するもの）は無い。
   過去のそれらのevent・ask・復旧jobは履歴として読める。
@@ -101,7 +101,7 @@ runtimeの自動修正が直さなかったものをjobが状況を読んで許�
 - `escalate`、`confidence: low`の`repair`、前提の崩れた`repair`、試行の使い切りは、inbox宛てのそのalertのaskにする（決定40のkind）。
   使い切りはjobを起動しないので、行き先（下の「Codexで動かす」）が待つあいだも待たずにaskにする（`domain::recovery::round_start`）。
 - askの選択肢の組み立ては`recovery::ask_options`が持ち、askはそのkindのものに、jobの選択肢のうち残るものを足すので、人はjobの見立てと元のaskの答えの両方から選べる。
-- jobの選択肢は終わったrunと同じ規則で寄せるか外す（[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)の決定1、[Triage](triage.md)の6、`domain::recovery::sort_job_options`）。
+- jobの選択肢は終わったrunと同じ規則で寄せるか外す（[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)の決定1、[Triage](triage.md#escalateとaskの回答)、`domain::recovery::sort_job_options`）。
   `stalled`のaskでは`wait` / `stop`がruntimeの答えで、引き渡しを頼むoptionは出さない。
   残るjobの選択肢は、印でoptionごとに復旧jobにもう一度渡りruntimeは何も動かさないことを示し、寄せたものと外したものは理由とともにjobの終わりの記録とquestionに残す。
 - 印の付いたoptionの答え（印の無い文だけでもよい）は、runのslotの中で`StallWatch`がaskを閉じて記録し、sessionには何も送らない。

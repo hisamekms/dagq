@@ -1843,6 +1843,11 @@ impl Supervisor<'_> {
     /// as `continuing`, `replan` moves it past the pause's fence, both
     /// recorded as a person's decision. An ask whose operation moved on is
     /// closed; any other answer is a person's to read.
+    /// The trusted supervisor applies a task-scoped decide ask, not a run's
+    /// recovery ask. Recheck diagnosing and the ask's generation, the task in
+    /// progress and this run still latest and not landed; wait during landing.
+    /// The answers continue and replan choose continuation and formal replanning
+    /// pause respectively; the move transaction rechecks the premise.
     fn apply_diagnosis_answers(&mut self) -> Result<bool> {
         let mut applied = false;
         let answered: Vec<Ask> = self

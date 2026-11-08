@@ -132,7 +132,9 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
 6. **打ち切りとerror**: 試行を使い切った後の`resume_finished`が未解消で、次の`resume_candidates`でそのrunにstaleでないleaseも生きているwrapperも無ければ（slotの空きに関わらず）、supervisorは次の**引き継ぐretry**か、復旧jobに渡すかを決める。
 
    **引き継ぐretry**（ADR-0047の決定24）: runが今も衝突だけで`needs_session`（上の(a)(b)がすべてのイベントについて成り立つ）で、同じtaskのどのrunもこのretryをしていなければ（taskごとに1回まで。人の手での引き継ぎ（[Triage](triage.md#人の手での引き継ぎ)）は数えない。`inherits_on_exhaustion`）、人に聞かずにretryする。
-   runの`result_commit`（着地するcommit（5）。無ければ、rebaseの途中でないworktreeのHEAD。登録の壊れたworktreeのrunは[triageの`retry`の前提](triage.md#triage-supervisor)と同じく読む）がbaseと違えば、それを`refs/dagq/runs/<run-id>`に向け（branchを消されても残るように）、1トランザクションで下と同じ確認と、衝突だけで止まっていることとtaskごとに1回までであることの再確認をしてrunを`failed`にし、taskを`in_progress`から`ready`に戻し（中身は変えないのでplan reviewにはかけない）、`auto_repaired`と`triage_finished`を記録する。
+   commitの選び方と保持は `Supervisor::inherited_head`、再試行への引き渡しは同じmoduleの `Supervisor::retry_inheriting`（`src/application/supervise/execution/resume.rs`）のdoc commentが持つ。
+   適用時の再検査と記録は `SqliteQueue::exhaust_resumes`（`src/infrastructure/runtime_store/recovery.rs`）のdoc commentが持つ。
+   成果を保った新しいrunへ引き継ぎ、taskの中身を変えないためplan reviewにはかけない。
    askは開かない。
    残したresumeのwrapperはtriageと同じく止め、worktreeとbranchはtaskが`ready`なので残る。
    次のrunのclaimでsupervisorは、前のrunのうち最も新しい引き継ぐretryで終わったrunがあれば（直前のrunが早くに失敗してtriageでretryされても引き継ぐ）、その引き継ぎを新しいrunのworker promptに持ち越し、`run_inherited`を記録する（節の中身と理由は`Inheritance`、復旧jobの`retry_inherit`は[Triage](triage.md#triage-supervisor)）。

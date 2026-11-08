@@ -1059,6 +1059,8 @@ impl SqliteQueue {
     /// (`attempt`, `status`, the session id of a Claude job and `launch`).
     /// `Ok(None)` means another process took it, it changed, or a
     /// replanning operation guards its task.
+    /// The write transaction is BEGIN IMMEDIATE; concurrent supervisors
+    /// cannot both acquire the same run.
     pub fn begin_triage(
         &mut self,
         id: &RunId,
@@ -1149,6 +1151,10 @@ impl SqliteQueue {
     /// An action that moves on a task its hold guards (ADR-t1879-1
     /// decision 6), read in the same transaction, is kept instead
     /// ([`keep_held_verdict`]). The lease stays for the workspace's close.
+    /// HandOff clears result_commit and last_error and rests as an accepted
+    /// claim before verification starts (crate::domain::satisfied::handed_off).
+    /// Resume's revivability guard prevents restarting the session numbering
+    /// of a run whose unsent telemetry steps the sweep may already have removed.
     pub fn finish_triage(
         &mut self,
         id: &RunId,
@@ -1226,6 +1232,12 @@ impl SqliteQueue {
     /// `auto_repaired` (`repair: inherit_retry`), so no round takes it.
     /// `Ok(None)` means it changed, or a hold or a replanning guards its
     /// task.
+    /// Inherit rechecks inherits_on_exhaustion in this same transaction:
+    /// the run is still parked by conflicts alone and no automatic inherited
+    /// retry was recorded for the task. Manual inheritance does not consume
+    /// that allowance. The task's transition back to ready and the run's
+    /// failure and repair events commit together; no task content changes
+    /// and no plan review is opened.
     pub fn exhaust_resumes(
         &mut self,
         id: &RunId,
@@ -1321,6 +1333,12 @@ impl SqliteQueue {
     /// `interrupted` run that nobody leases and that is still its task's
     /// latest run, and close the ask, in one transaction
     /// ([`decide_triage_in`]).
+    /// Recheck that the ask is answered and unclosed as well as the run's
+    /// latest status. Remove a stale lease in this transaction: the old round
+    /// cannot renew it and apply anything afterward (ADR-0039 decision 7).
+    /// Resume rechecks revivability here; retry is a person's choice and may
+    /// discard commits. Record triage_decided together with the transition and
+    /// ask close, so concurrent supervisors cannot apply an answer twice.
     pub fn decide_triage(
         &mut self,
         id: &RunId,

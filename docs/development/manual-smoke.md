@@ -602,7 +602,7 @@ machine が止まっている間の close は、次に machine が動いた回�
 ### 止める経路
 
 1. turn の終わりごと: worker の turn と turn の間（例: `worker_question` の答えを待つ間）に `podman --connection dagq ps -a` に `dagq-<key>-run-<run>` が無い。
-2. stop と cancel は別の task の run で 1 本ずつ起こす（runtime が session を止める経路は[Container runtime](../design/container-runtime.md#workerの実行)の「止める」、答えごとの扱いは[生きているrunの復旧job](../design/supervisor-lifecycle/background-recovery-job.md#escalate)と[Triage](../design/supervisor-lifecycle/triage.md)の 6・9）。
+2. stop と cancel は別の task の run で 1 本ずつ起こす（runtime が session を止める経路は[Container runtime](../design/container-runtime.md#workerの実行)の「止める」、答えごとの扱いは[生きているrunの復旧job](../design/supervisor-lifecycle/background-recovery-job.md#escalate)と[Triage](../design/supervisor-lifecycle/triage.md#escalateとaskの回答)）。
    relay は記録の run が queue の上でもう生きていない（task が進行中でない・後の run に代わった）ときに見張りが片付けるので（[Container runtime](../design/container-runtime.md#brokerへの経路)の「見張り」）、relay の期待する結果は task が先へ進んだ後に見る。
    triage か答えを待つ run は machine を使わず relay を休ませるので、その間に machine が止まり得て、止まった machine の relay の close は次に machine が動くまで延期される。
    どちらも、期待する結果は次のとおり（machine の状態ごとの見方は上の「後片付けの見方」）。
@@ -627,7 +627,7 @@ machine が止まっている間の close は、次に machine が動いた回�
    - `sleep` の間に `tq doctor` の wrapper の pid を `kill -KILL` する（[故障経路のスモーク](#故障経路のスモーク)の 4 と同じ）。
      自動の `recover` が container の生きている間に拒んだか、run を `interrupted` にしたかを記録する。
    - triage の復旧 job が escalate すると `decide` の ask が開く。
-     job が `retry`・`resume` を適用したときは記録し、続く run か turn で wrapper をもう一度止める（同じ run の alert の回数を使い切れば job を起動せずに `decide` の ask になる。[Triage](../design/supervisor-lifecycle/triage.md)の 3）。
+     job が `retry`・`resume` を適用したときは記録し、続く run か turn で wrapper をもう一度止める（同じ run の alert の回数を使い切れば job を起動せずに `decide` の ask になる。[Triage](../design/supervisor-lifecycle/triage.md#候補と開始)）。
    - `tq answer <id> --text cancel` と答える。
      `tq events --all --full --run RUN` に `triage_decided` があり、`tq show ID` の task が `canceled` で、2 の結果になる（残った turn の container は triage の session の停止が消す）。
 
