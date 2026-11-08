@@ -23,6 +23,19 @@
 //! on the execution port; those of the same name here take rusqlite's types
 //! for a module that has not moved to it, and only hand on to them, as do
 //! those here of [`super::store_writes`], the writes they share.
+//!
+//! Only init creates a DB (and binds `queue_repository` for a cwd queue);
+//! init on an existing queue goes through the queue service. Ordinary
+//! operations never implicitly create a missing DB. [`SqliteQueue::state`]
+//! checks `application_id` and refuses another application's DB without
+//! rewriting it. The schema version is the applied migration count in
+//! `PRAGMA user_version` (see [`schema::MIGRATIONS`]).
+//!
+//! Service reads and doctor open read-only connections and write nothing.
+//! They do not read a schema older than this binary; doctor reports just its
+//! schema and the reason. A breaking migration's user check, backup and
+//! application share one transaction ([`SqliteQueue::migrate`]).
+
 use super::sql_exec::sqlite::{
     attach_event_actors, attach_event_bodies, is_contention, native_error, port_tx, with_row,
 };
@@ -2078,6 +2091,8 @@ impl TaskStore for SqliteQueue {
         Ok(result)
     }
 
+    /// Store a person's or planner's note as a `run_events` observation,
+    /// not in a separate notes table.
     fn add_note(&mut self, note: NewNote) -> Result<RunEvent> {
         note.validate()?;
 

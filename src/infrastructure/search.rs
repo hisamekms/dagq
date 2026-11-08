@@ -2,6 +2,14 @@
 //! index and the triggers that keep it current are migration 0026's; this
 //! module only reads it, and fills the landed commits whose message the
 //! `run_integrated` payload lacked.
+//!
+//! Tasks, goals, notes and landed commits share one FTS5 table: splitting
+//! it would split bm25 statistics and make rankings across kinds incomparable.
+//! The trigram tokenizer supports Japanese and path substrings; short terms
+//! are handled by `domain::search`. A `run_integrated` trigger writes
+//! `landed_commits`, skipping a row with missing payload rather than blocking
+//! landing; migrate fills missing messages from Git.
+
 use anyhow::{Result, ensure};
 use rusqlite::{Row, params, params_from_iter, types::Value};
 use serde_json::{Map, json};

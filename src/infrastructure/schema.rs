@@ -6,7 +6,8 @@
 //! adds what an older binary can ignore (a table, a nullable or defaulted
 //! column, an index), so a binary that stops before it still reads and
 //! writes the migrated queue. Anything else is breaking, and the queue then
-//! refuses binaries older than it through its floor.
+//! refuses binaries older than it through its floor. Unit tests check each
+//! compatible declaration with [`compatibility_violations`].
 
 /// The line every migration file starts with.
 const DECLARATION: &str = "-- dagq-schema:";

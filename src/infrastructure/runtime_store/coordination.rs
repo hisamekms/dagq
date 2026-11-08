@@ -13,9 +13,21 @@
 //! supervisor of the same queue pruning a registration a dead one left
 //! behind remove registrations, each writing `supervisor_stopped` in the
 //! same transaction (the prune's conditions are in
-//! `docs/design/persistence.md`); `status`, `doctor`, `recover` and
+//! `crate::application::supervise::host_ops::sweep::prune_left_supervisors`);
+//! `status`, `doctor`, `recover` and
 //! `integrate` never do, and a supervisor that ends on a failed heartbeat
 //! leaves its row to show as stale until one of those prunes it.
+//!
+//! `supervisor_token` names the supervisor currently running the run; the
+//! original claimant remains in the `run_adopted` event. Registration stores
+//! the settings in use and their sources. A breaking install passes only the
+//! drained registration's flag-sourced values to the restarted up (see
+//! `application::install::install_breaking`). Only the registering process
+//! writes its own `binary_version`; supervise records its received `--mode`.
+//! The live supervisor prunes other registrations at sweep intervals only
+//! when their heartbeat is past `HEARTBEAT_TIMEOUT_SECS` and their PID is dead
+//! or reused. A failed heartbeat or stop record leaves the row stale for a
+//! later prune.
 
 use super::*;
 use crate::domain::worker::ProviderCheck;

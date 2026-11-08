@@ -2,6 +2,23 @@
 //! their resource samples (`session_resources`, [`SessionResourceStore`])
 //! and their owners (`session_owners`, [`SessionOwners`]).
 //! Its boundary on a real queue.db is `tests/it/session_steps.rs`.
+//!
+//! The UNIQUE `(session_id, seq)` keeps the first step received when delivery
+//! repeats. Gaps are the missing seqs from 1 to the largest received, excluding
+//! retained removal ranges. AUTOINCREMENT IDs never reuse a removed row's ID,
+//! so a cursor ordered by receipt ID survives retention.
+//! The ledger builder's pass selects steps received over 90 days ago outside
+//! the lock, then rechecks and deletes them in row-bounded transactions.
+//! Sessions with steps left keep contiguous removed seq ranges in
+//! `session_step_removed`: those are not gaps and cannot be reinserted.
+//! With no steps left, a marker written with the last step's deletion voids
+//! all ranges at once before their batched removal ([`VOID_FROM`]); older
+//! binaries read interrupted remnants until this retention removes them.
+//! Executor resource samples use the same `(session_id, seq)` key and retention.
+//! Control-side owner registrations, steps and samples must all name the same
+//! target; a mismatch rejects each registration, step or sample call.
+//! Retention removes owners registered over 90 days ago only when neither
+//! steps nor samples remain.
 
 use super::*;
 use crate::application::{SessionOwners, SessionResourceStore, SessionStepStore};

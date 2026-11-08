@@ -94,15 +94,11 @@ runのファイル・台帳の行・古いeventは通さない。
 
 - taskごとに未完了のrunは1つ、`integrated`のrunは1つ、queue全体で`integrating`のrunは1つ（部分UNIQUE index）。
 - taskごとに開いた再計画の操作は高々1つで、保護しない操作はtaskの最新のrunにあり、保護する操作は保留したrunに残る（indexでなく書き込みのtransactionが守る）。
-  開く書き込みはtaskに開いた操作が無いときだけ足し、保護しない状態から開いたまま進める書き込みはtaskにほかの開いた操作があれば拒む。
-  claimと最新のrunへの依頼は前のrunに開いた保護しない操作を新しいrunへ引き継ぎ（`replan_carried`）、重なった保護しない操作だけを閉じ、保護する操作は閉じずに元のrunに残して、どのrunへの依頼もそれに合流させる（`task_replan::carry`）。
 - eventと所属の判断は追記だけで、eventは知らないkindも落とさずに読む。
 
 ## 表
 
 表ごとの役割と列の意味は、表を作るmigrationのコメントと表を持つstoreと`src/domain/`の型のdoc commentが持つ。
-`replan_plans`は置換計画をsubmitごとの版と承認の時の子の版で持ち、plan reviewと`ready`は最新の版だけを、適用は子の版も検査する。
-`replan_replacements`は適用した置換の子と子が引き継ぐ部分を持ち、goalは置換先を再置換も辿って待つ。
 
 ## 集約の読み書き
 
@@ -110,69 +106,34 @@ runのファイル・台帳の行・古いeventは通さない。
 
 - 入口: task・goal・依存・claim・一覧は`src/infrastructure/sqlite.rs`、runと計測はportごとの`runtime_store/`。
 - 読む: 行から`TaskRecord`などを組んで`restore`で復元し、復元が拒んだ行は変換エラーになる（既定値に読み替えない）。
-- IDの入口は実行のportの`SqlRead::next_id`で、SQLiteでは拒否によるrollbackでIDを消費しない。
 - 変える: 読んだ集約をdomainのコマンドに渡し、返った値を書く。
   `WHERE status=<読んだstatus>`や`AND supervisor_token=<token>`は並行の変更を見つける条件で、どの遷移を許すかの判断ではない。
 - 認可の後の変化: 計画系のコマンドは認可に使ったtaskの状態を渡し、storeはトランザクションを開いた直後に照合して、変わっていれば何も書かずに拒む（[Authorization](authorization.md)）。
   supervisor（`supervisor_needs`）と着地のintegrator（`integrator_scope`）の操作はserviceがcapabilityで認可し、taskの状態は照合しない。
-- 遷移に付くevent: domainの記録つきのコマンド（`src/domain/run/recorded.rs`）が更新後のrunとeventの列を返し、storeは同じトランザクションで書くだけにする。
-  storeが足すのは自分の表から読むもの（resumeの作業の内訳とtoken）とleaseの解放だけ。
 - runのdomainの拒否は、トランザクションが巻き戻ってeventに残せないので、run directoryの`refusals.log`に1行で残す（`runtime_store::REFUSALS_LOG`）。
-- 循環は、依存のグラフ（[domain-model](domain-model.md#不変条件)）の辺の上の再帰CTE（`waits_for`）で見つけるので、goalを経る循環も拒む。
-- note（人とplannerのメモ）は表を持たず、`run_events`のkind `observation`として書く。
 
 ## asks
 
 `asks`は人の判断を要る相談を1行で持つ（[ADR-0022](../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、[ask](supervisor-lifecycle/ask.md)）。
 入口は`src/infrastructure/asks.rs`と`runtime_store/ask_store.rs`、行の型は`src/domain/`の`Ask`と`NewAsk`。
 
-- openは回答もcloseも無い行で、部分UNIQUE index `asks_open`が同じaskのopenな行を1件に限る。
-  同じaskを開こうとすると既存の行を返して何も書かない。
-- 登録・回答・close・運んだ印は、それぞれ行とeventを1トランザクションで書くので、`watch`のcursorに乗る。
-- askを終えるeventは`ask_answered`だけで、`stats`はそれで未回答を判定する。
-  未回答のaskはcloseできない。
-- runtimeが自分で書く回答の`answered_by`は`runtime`で、権限の出どころは`answer_authority`が別に持つ（[Authorization](authorization.md)）。
-- 回答をsupervisorが適用するaskは、`ask_answered`に`runtime_delivers`を書く。
-- 計画の依頼の`planner_question`は、`request_id`に加えて`subject`に依頼を書く。
-  `asks_open`は`request_id`を含まず、unique indexの作り直しは互換のmigrationにならないため（`asks::request_ask_subject`）。
-- `queue_hold`のaskは止めたrunとjobを`affected`に足していく（[認証と利用上限のaskの待ちとanswer](supervisor-lifecycle/queue-hold.md)）。
-- 誰が動かすかは列から導く（`Ask::waits_for`）: openか回答済みで閉じていないものはinbox、閉じたものは誰も待たない。
+未回答のaskはcloseできない。
+行とeventの整合・回答の配送印・同じaskの判定は`src/infrastructure/asks.rs`のdoc commentが持つ。
 
 ### draft planners（`draft_planners.rs`）
 
 runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](supervisor-lifecycle/draft-planners.md)、[domain-model](domain-model.md#draft-planners)）。
 入口は`src/infrastructure/draft_planners.rs`（port `DraftPlannerStore`）。
 
-- 出どころ: `draft_origins`は登録のとき1回だけ書き、`draft_reopens`はproposalの取り下げだけが書く。
-  `draft_reopens`の行は、材料の`proposal_id`がtaskの今の所属と同じときだけ効く。
-- receiptのfollow_upsの登録は1つのreceiptを1トランザクションで書き、途中で失敗すれば全部を巻き戻す。
-- 対象（`planner_drafts`）は、閉じていないplannerも未closeの質問も依頼の参照も無く、使い切っていないdraftをID順に返す。
-  同じ束の鍵を持つdraftは、その束のplannerが閉じるまで待つ。
-- 立てるのは、対象であることをトランザクションの中で再検査してから行を作るので、2つのsupervisorが同じdraftに立てない。
-- 結末: plannerを閉じたトランザクションの中で、束のdraftごとに今のtaskの状態から結末を決めて書く。
-- 人の答え待ちの印はaskが未回答か配送に失敗したときだけ書き、印の付いた行は回答の行き先とdraft・finding・依頼の上限の数から外れる（ADR-t1704-1）。
-- 回答の行き先は、生きているplanner・新しいplanner・人・閉じるのどれかで、`answer`も同じ判定で`runtime_delivers`を書く。
-  依頼のplannerが作り由来もproposalも持たないdraftの回答は、依頼の回答の経路に乗せる（作成のeventのactorで依頼を引く、ADR-t2015-1）。
-
 ### planning requests（`plan_requests.rs`）
 
 人がinboxに頼んだ計画の依頼と、依頼ごとに立てるruntimeのplanner（ADR-t1394-1、[inboxからの計画の依頼](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)）。
 入口は`src/infrastructure/plan_requests.rs`。
 
-- 依頼のeventはtask・goal・runに付かないqueueのeventで、payloadに`request_id`を持つ。
-- 立てる（`open_request_planner`）は対象であることをトランザクションの中で再検査し、上限に達した依頼を`exhausted`にする。
-- 却下と`ask --request`は依頼のplanner自身だけが打て、却下は判定に使ったplannerがまだその依頼のものかをトランザクションの中で確かめる。
-- 依頼のaskの回答は、依頼のplannerが生きていればそのplannerへ、いなければ新しいplannerか閉じるで、人へは回さない（`route_of`）。
-  依頼のplannerが作ったdraftの回答は、依頼が`open`でなくても新しいplannerにする（`draft_route_of`）。
-
 ## findings
 
 `findings`はobserverが見つけた問題を1行で持つ（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)、[Observer](supervisor-lifecycle/observer.md)）。
 入口は`src/infrastructure/findings.rs`、判断と一覧の絞りは`src/domain/finding.rs`。
-
-- 記録は同じkind・対象・subjectの行に統合し（`finding::merge`）、何も変わらなければ何も書かない。
-  `resolved`の問題がまた起きれば`open`に戻す。
-- eventは対象のtask・run・goalに付き、queueのfindingはどれにも付かない。
 
 ## Runtime ownership
 
@@ -185,20 +146,13 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
   heartbeatの古さは拒む理由にしない（hostのsleepの後も、引き継がれるまでは自分のもの）。
 - 動いているrunのleaseを奪うのは引き継ぎ（`adopt_run`）だけで、他のtokenのstaleなleaseでwrapperが生きているか終了を記録したrunだけを対象にする。
   自分の更新と引き継ぎはどちらもlease行への書き込みなので、SQLiteが直列化して片方だけが通る。
-- `supervisor_token`は今そのrunを動かしているsupervisorで、claimしたsupervisorは`run_adopted`のeventに残る。
 - `integrate`は登録せずにleaseだけを持つので、`run_leases.token`から`supervisors`へ外部キーを張らない。
 - `supervisors`の行はそのプロセスの性質を持ち、行と寿命を共にする。
-  supervisorは使う設定の値と出どころを自分の登録に書き、`install --allow-breaking`はdrainした登録のflag由来の値だけを起動し直す`up`に渡す（`install_breaking`のdoc comment）。
-  `binary_version`は登録するプロセス自身だけが書き、`mode`は`supervise`が受けた`--mode`を自分の登録に書く（[`up` / `down`](supervisor-lifecycle/up-down.md)のmodeの記録）。
-- 登録の行を消すのは`supervise`自身の終了と、`up`・`down`と生きているsupervisorの掃除（`prune_supervisor`）だけで、どれも同じトランザクションで`supervisor_stopped`を書く。
-  生きているsupervisorはsweepの間隔ごとに、自分以外でheartbeatが`HEARTBEAT_TIMEOUT_SECS`を過ぎ、PIDが死んだか別プロセスに取られた登録だけを消す。
-  heartbeatか停止の記録に失敗したときは消さず、staleとして次の掃除に任せる。
-  `status`・`doctor`・`recover`は消さない。
+  登録の削除は停止のeventと不可分で、決まった経路だけが行う（`coordination.rs`）。
+  掃除の条件は`src/application/supervise/host_ops/sweep.rs`の`prune_left_supervisors`、登録の値の寿命は`coordination.rs`のdoc commentが持つ。
 - `recover`だけがtokenなしで未完了のrunを止め、同じトランザクションでleaseとプロセスを再検査する。
 - 着地（`integrate`）は自分のtokenでlease行を持ち、`integrating`から出る遷移はどれもそのlease行を要する。
   Gitの操作はトランザクションの外で行い、mainを進める前のエラーではrunを元のstatusに戻す。
-- sessionを止めた時刻（`workspace_closed_at`）はeventから導かず列に持ち、止めていないsessionを1つの問いで拾えるようにする。
-  失敗すれば列はnullのまま`cleanup_failed`を書く。
 - receiptの内容は読んだ時点でevent（`validation_finished`・`integration_receipt`）に写すので、worktreeとrun dirが消えた後も`show`で辿れる。
   `needs_session`をsessionが解消した後のreceiptは、そのrunの最後の`integration_receipt`が持つ。
 - backendの呼び出しの失敗とsessionの終了の依頼は、runのstatusを変えずeventだけで表す（[backendの呼び出しの失敗](supervisor-lifecycle/backend-call-failures.md)、[receiptとsessionの終わり](supervisor-lifecycle/headless-worker.md#receiptとsessionの終わり)）。
@@ -214,17 +168,8 @@ queue DBを開くのはqueue service（[Queue service](queue-service.md)）と[�
 `session_steps`はSessionStepStore（[計測](measurement.md#ssotとビュー)）の表で、sessionのstepを1行ずつ持つ。
 入口は`runtime_store/session_steps.rs`、型は`domain::session_step`。
 
-- `(session_id, seq)`をUNIQUEにし、同じstepを2度受けても1行で、先に受けた中身を保つ。
-- seqの抜けは埋めず、読むときに1から最大のseqまでのうち、持つstepにも保持で消したseqにも無い区間として数える。
-- `id`はAUTOINCREMENTで、保持で消えた行の番号を使い直さないので、受けた順のidのカーソルは保持の後も成り立つ。
-- 保持は台帳を作る係の周回が受けてから90日を過ぎたstepをロックの外で選び、行数に上限のあるトランザクションで確かめて消す。
-- stepの残るsessionは消したseqを連続する区間ごとに`session_step_removed`に持ち、それを抜けと数えず、届き直しても足さない。
-  stepの残らないsessionは最後のstepと同じトランザクションの1行の印で区間を一度に無効にし、分けて消す。
-  旧い版は、止まった削除の残りをこの版の保持が消すまで有効に読む。
-- `session_resources`はexecutorが中から測った資源のsampleを、stepと同じく`(session_id, seq)`ごとに1行で持ち、保持もstepと同じに消す。
-- `session_owners`は制御側が登録したsessionの対象を持つ（時点は[計測](measurement.md#送る口)）。
-  登録・step・sampleのどれかが別の対象のsessionは、登録もstepもsampleも呼び出しごと拒む。
-  保持は、登録が90日より前でstepもsampleも残らないsessionの行を消す。
+保持で消したseqを配送の抜けと数えない。
+保持と再配送の整合の入口は`runtime_store/session_steps.rs`のdoc comment。
 
 ## runの資源
 
@@ -233,8 +178,6 @@ queue DBを開くのはqueue service（[Queue service](queue-service.md)）と[�
 ## follow-upの所属の判断
 
 follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`BEGIN IMMEDIATE`のトランザクションで行う。
-登録のトランザクションで元のtaskのgoalと状態を読み直し、`draft_origins`の材料に残す。
-out_of_scopeの判断が名指した所属先の受け入れ条件の項目は、追記の判断の行に判断の記録として残り、その行と同じトランザクションで書く。
 行・遷移・必須の情報・旧schemaの読み方は[所属の判断](follow-up-membership.md)、入口は`src/infrastructure/follow_up_membership.rs`。
 
 ## Transactions and constraints
@@ -245,13 +188,11 @@ out_of_scopeの判断が名指した所属先の受け入れ条件の項目は�
 
 - ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#起動とheartbeat)）。
-- queue DBのtransactionは`WriteTx`（`infrastructure::sqlite`）の入口`write`（immediate）か`read`（deferred）で始まる。
-  書き込みと終わりの経路によらず、閾値を超えてwrite lockを握ればwarnし、queueのevent（`queue_write_held_long`）に記録する。
-  eventはlockを放した後に同じ接続で別に短く書き、その失敗は元のtransactionを変えない。
+
+queue DBのtransactionの入口は`infrastructure::sqlite::WriteTx`（境界の検査は`src/context_boundaries/write_tx.rs`）。
+
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
-  taskをcompletedかcanceledにするトランザクションは、開いたholdの行を閉じて`task_hold_ended`を書き、holdが残した結果を捨てる（`task_holds::end_with_task`）。
-  終わったtaskに開いたまま残った行は、supervisorのpassが同じ形で閉じ、taskは変えない。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒む。
 - NULLになる列を含む主キーはSQLiteではその行の一意を保たないので、その一意は書く関数がトランザクションの中で読んでから検査する（再計画の条件の対応の削除の行は`replans.rs`の`write_mappings`）。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。
@@ -286,8 +227,6 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
 ```
 
 - `<hash>`はcanonicalizeしたGit common directoryのhashなので、symlink経由やworktreeからでも同じqueueになる。
-- `--db PATH`は明示のoverrideで、run dirとlog dirはそのDBの隣に置く。
-  LaunchAgentのlabelはrepositoryのqueueのDBならディレクトリ名、他は正規化したDBのpathのhash（`QueueLocation::label`）。
 - repositoryを移すとhashが変わり、新しいqueueに解決される。
   付け替えは明示の`rebind`だけが行う（[ADR-0020](../adr/0020-rebind-queue-to-a-moved-repository.md)、[コマンドをまたぐ約束](supervisor-lifecycle/commands.md)）。
 - queueのディレクトリは丸ごと移せる: runのpathは開いた場所から解決し直し、worktreeのGitの管理情報は`integrate`が直す（[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。
@@ -300,26 +239,17 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
 ## Database setup and migrations
 
 入口は`src/infrastructure/schema.rs`（`MIGRATIONS`と互換の判定）と`src/infrastructure/sqlite.rs`の`SqliteQueue`。
+migrationの登録と順序は[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)、互換の宣言と判定は`schema.rs`のdoc commentが持つ。
 migrationを足すtaskの規則（リリース済みは変えない）は[migrations.md](../development/migrations.md)が持つ。
 
-- `init`だけがDBを作る（cwdのqueueなら`queue_repository`も束縛する）。
-  既存のqueueへの`init`はqueue serviceに送る。
-  通常の操作は存在しないDBを暗黙に作らない。
-- `application_id`でdagqのDBを見分け、他のアプリのDBは書き換えずに拒む。
-- schemaの版は適用したmigrationの数（`PRAGMA user_version`）で、`migrations/`の`NNNN_<name>.sql`を置くだけで`build.rs`が一覧に足す（[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)）。
 - queueを開いただけではmigrateしない。
   migrationを適用するのは空のファイルへの`init`と、`dagq migrate`の依頼か[`up`](supervisor-lifecycle/up-down.md)・[install](supervisor-lifecycle/install.md#install)・[自動更新](supervisor-lifecycle/auto-update.md#auto-update)の入れ替えの口（受け付けの前）のqueue serviceだけ（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)、ADR-t3102-2決定2）。
   serviceを起動できるのはqueueのbinary（DBの隣の`queue-binary.json`が名指すpath。`init`は作ったbinaryを、installは置いたpathを名指す）だけ（決定3）。
   記録の無いqueueを名指すのはinstallか、serviceの動いていないときの最初の起動で、動いているserviceを止める・入れ替える起動はinstallのgrantが無ければ断る。
-- 互換の宣言: 各migrationは先頭行で`compatible`か`breaking`を宣言し、互換と言える文の範囲は`schema.rs`のunit testが検査する。
-  下限（`schema_floor`）は最後に適用した非互換のmigrationの版である。
 - open: 下限がバイナリより新しければ止まり、`user_version`がバイナリより古ければ`dagq migrate`を案内して止まる。
   バイナリより新しくても下限以下なら動く。
   このため`INSERT`は必ず列を列挙し、行は列名で読む。
   claimのときに写したバイナリ（`runs/<id>/runner`）も互換のmigrationの後に動き続ける。
-- 読み取り専用のopen: serviceの読み取りと`doctor`は読み取り専用の接続で開き、何も書かない（ADR-0045決定18）。
-  queueがバイナリより古ければ読まず、`doctor`はschemaと理由だけを示す。
-- 非互換のmigration: 使用中のsupervisor・run・wrapperの判定と`backups/`への複製と適用を1つのtransactionで行い、使用中なら何も適用せずに挙げて止まる。
 - 表の作り直し: 全ての列を列挙してrowidと`sqlite_sequence`も写し（消した行のIDを再び払い出さない）、`foreign_keys`はrunnerがトランザクションの外でOFFにしてcommitの前に`pragma_foreign_key_check`を確かめる。
   `run_events`を作り直すときは、actorの列・検索のtrigger・`run_events`のindexも作り直す。
 - 落とし穴: `run_events`の式のindex（`events_by_opened_event`）の式の列は、queryが同じ式でaffinityの掛からない値（bindした値か`+o.id`）と比べるときだけ使われ、先頭列の`kind`だけでも選ばれうる。
@@ -331,12 +261,8 @@ migrationを足すtaskの規則（リリース済みは変えない）は[migrat
 計画の記録と独立したport `SearchIndex`を通す。
 SQLite adapterは`src/infrastructure/search.rs`、索引とtriggerは`migrations/0026_search.sql`、問い合わせの解釈と抜粋は`src/domain/search.rs`。
 
-- 1つのFTS5の表にtask・goal・note・着地のcommitをまとめる（表を分けると`bm25`の統計が分かれ、kindをまたいで順位を比べられない）。
-- tokenizerは`trigram`で、空白で語を区切らない日本語とpathの部分一致を引く。
-  短い語の制約は`src/domain/search.rs`が持つ。
 - 索引はDBのtriggerが同じトランザクションで保つので、索引を知らない古いバイナリの書き込みにも追いつく。
   `tasks` / `goals` / `run_events`を作り直すmigrationはtriggerを作り直す。
-- `landed_commits`は`run_integrated`のeventからtriggerが書き（欠けたpayloadは着地を止めずに行を飛ばす）、messageの無い行は`dagq migrate`がGitから埋める。
 
 ## 関連（related）
 
@@ -344,14 +270,7 @@ SQLite adapterは`src/infrastructure/search.rs`、索引とtriggerは`migrations
 `SearchIndex`が関連のtaskと着地のcommitを読む。
 SQLite adapterは`src/infrastructure/related.rs`、手がかりと点数と重みは`src/domain/related.rs`。
 
-- 点数は手がかりの重みの和で、多くのtaskが共有する手がかりほど割り引く（`rarity`）。
-- 重みはADR-0063を置き換えずに変えてよく、変えたら`tests/it/related.rs`の確かめと合わせる。
-
 ## CIの見張り
 
 [ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)。
 入口は`src/infrastructure/ci_watch_store.rs`。
-
-- 既に落ちているtestの一覧は表を持たず、`ci_checked`のeventから求めるビューである。
-- 実行1件の記録（event・finding・runtimeの解決）は1つの書き込みトランザクションで、最新の`ci_checked`を読み直し、他のsupervisorが先に記録していれば何も書かない。
-- findingの`covered_by_task`は外部キーを持たず、runtimeは読んだばかりのtaskのIDだけを書く。

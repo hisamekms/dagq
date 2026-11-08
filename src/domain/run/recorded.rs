@@ -2,7 +2,8 @@
 //! domain events): each returns the changed run and the `run_events` rows,
 //! kind and payload, that the store writes in the same transaction. Which
 //! event a transition records, and what its payload says, is decided here;
-//! the store only saves them.
+//! the store only saves them. Store additions are limited to facts read
+//! from its own tables (resume work details and tokens) and lease release.
 
 use crate::domain::EventKind;
 use serde_json::{Value, json};

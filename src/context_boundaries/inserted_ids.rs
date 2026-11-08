@@ -1,8 +1,8 @@
 //! The rule X4 of docs/design/architecture.md: the store takes the ID of a
 //! row it inserted only from the adapter's public inserts (`insert_id`,
-//! `insert_id_if_inserted`, `WriteTx::insert_id`; docs/design/persistence.md,
-//! "Transactions and constraints"), so that another adapter can read it its
-//! own way (a `RETURNING`). Checked on the sources of `src/` as syntax:
+//! `insert_id_if_inserted`, `WriteTx::insert_id` in `infrastructure::sqlite`),
+//! so that another adapter can read it its own way (a `RETURNING`).
+//! Checked on the sources of `src/` as syntax:
 //! outside test code (see [`source`](super::source)), the name
 //! `last_insert_rowid` (rusqlite's `Connection::last_insert_rowid`) is used
 //! only in [`IMPLEMENTATION`], the internal fn under those inserts; a public

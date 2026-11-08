@@ -436,7 +436,8 @@ impl<'a> RelatedIndex<'a> {
 }
 
 /// The tasks related to `target`, best first: every other task scoring
-/// above zero, kept to `statuses` (empty: all) and cut to `limit`.
+/// above zero, kept to `statuses` (empty: all) and cut to `limit`. The score
+/// is the sum of its clues' weights, discounted by [`rarity`] where shared.
 /// `search` holds, per task, how strongly the index matched the target's
 /// title against it relative to the target itself (0 to 1).
 pub fn rank(

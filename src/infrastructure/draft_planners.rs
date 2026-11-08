@@ -9,6 +9,22 @@
 //! each draft when the planner ended). Opening a planner is one write
 //! transaction that re-checks the drafts first, so two supervisors never
 //! open one for the same draft.
+//!
+//! Origins are written once at registration; only proposal withdrawal writes
+//! `draft_reopens`, whose entry applies only while its proposal is the task's
+//! current proposal. Registering one receipt's follow-ups is one transaction:
+//! a failure rolls back the whole receipt. Eligible drafts are returned in ID
+//! order, with no open planner, unclosed question or request reference, and
+//! with attempts left; a matching bundle waits until its planner closes.
+//! [`settle_bundle`] decides each bundle member's outcome from its current task
+//! state in the same transaction that closes the planner.
+//! The answer-wait mark is written only for an unanswered ask or a failed
+//! delivery; marked planners are excluded from answer routes and the draft,
+//! finding and request slot limits. [`route_of`] is also the decision used by
+//! answer to set `runtime_delivers`. A draft created by a request's planner
+//! with neither origin nor proposal uses the request answer route, finding
+//! the request through the creation event's actor.
+
 use super::sql_dialect::JsonType;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
 
@@ -182,6 +198,8 @@ impl SqliteQueue {
     /// Register a receipt's or review judgment's still-unregistered entries
     /// in one write transaction: a planning pass sees all of that batch or
     /// none. Categories and membership proposals are kept in origin material.
+    /// Reread the source task's goal and that goal's state in this transaction
+    /// and preserve them in `draft_origins` material.
     pub fn register_follow_ups(
         &mut self,
         run: &RunId,

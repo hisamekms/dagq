@@ -9,6 +9,12 @@
 //! The watch's events have no run, task or goal and most reads hold the
 //! write lock, so every read names `events_by_kind` (why:
 //! [`super::kpi_push`]).
+//!
+//! Known failing tests are a view derived from `ci_checked`, not a table.
+//! Recording one run's events, finding and runtime resolution is one write
+//! transaction: it rereads the latest `ci_checked` and writes nothing if
+//! another supervisor already recorded the run. A finding's `covered_by_task`
+//! has no foreign key; the runtime writes only a task ID it just read.
 
 use super::sql_dialect::{JsonType, SqlDialect};
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};

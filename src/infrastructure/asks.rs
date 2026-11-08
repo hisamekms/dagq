@@ -1,6 +1,21 @@
 //! Asks (ADR-0022): questions for a person kept as queue rows. Registering
 //! and answering one also writes `ask_opened` / `ask_answered` to
 //! `run_events`, so the change rides the cursor `status` and `watch` hand out.
+//!
+//! An open row has neither answer nor close; the partial UNIQUE index
+//! `asks_open` permits only one of the same ask, and opening it again returns
+//! that row without writing. Register, answer, close and delivery marks each
+//! write their row and event together. Only `ask_answered` ends the question
+//! for stats; an unanswered ask cannot close. Runtime answers use
+//! `answered_by=runtime`, with their authorization source in `answer_authority`.
+//! An `ask_answered` whose answer the supervisor applies carries `runtime_delivers`.
+//! Planning-request questions include the request in their subject as well as
+//! `request_id`: `asks_open` does not include that column, and rebuilding a
+//! unique index would not be a compatible migration ([`request_ask_subject`]).
+//! A queue hold accumulates its stopped runs and jobs in `affected` ([`SqliteQueue::hold`]).
+//! The inbox acts on open or answered-but-unclosed asks; closed asks wait for
+//! nobody ([`Ask::waits_for`]).
+
 use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlWrite, sql_params};
 use super::store_rows::{enum_col, json_col};
 use crate::domain::event_kind::EventKind;

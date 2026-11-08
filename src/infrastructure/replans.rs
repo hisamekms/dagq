@@ -15,6 +15,13 @@
 //! acceptance item, and a deletion of an item a child task holds, inside
 //! the writing transaction: the table's key does not compare a deletion's
 //! NULL child task.
+//!
+//! `replan_plans` keeps each submitted revision of a replacement plan and
+//! its children's versions at approval. Plan review and ready use only the
+//! latest revision; application also checks the children's versions.
+//! `replan_replacements` records the applied children and what they inherit;
+//! a goal follows replacements transitively when waiting for them.
+
 use super::sql_dialect::JsonType;
 use super::store_writes::event;
 use anyhow::{Context, Result, ensure};

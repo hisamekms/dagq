@@ -270,6 +270,9 @@ impl TaskRun {
         self.last_error.as_deref()
     }
 
+    /// When the session was stopped, kept as a column rather than derived
+    /// from events so one query can find sessions not yet stopped. A failed
+    /// close leaves this null and records `cleanup_failed` in the store.
     pub fn workspace_closed_at(&self) -> Option<i64> {
         self.workspace_closed_at
     }

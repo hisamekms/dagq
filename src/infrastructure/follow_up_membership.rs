@@ -1,4 +1,9 @@
 //! Append-only membership decisions and transactional membership changes.
+//!
+//! The destination acceptance items named by an out-of-scope judgement
+//! are kept on its append-only judgement row and written in that same
+//! transaction.
+
 use super::sql_dialect::JsonType;
 use super::sql_exec::{
     OptionalRow, SqlError, SqlRead, SqlResult, SqlRow, SqlWrite, ValueKind, sql_params,

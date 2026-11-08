@@ -5,6 +5,17 @@
 //! (`asks.request_id`). Opening a planner is one write transaction that
 //! re-checks the request first, so two supervisors never open one for the
 //! same request. A request's events are the queue's.
+//!
+//! Request events have no task, run or goal and carry `request_id` in their
+//! payload. Opening rechecks eligibility inside the transaction and marks a
+//! request `exhausted` at its attempt limit. Only the request's own planner
+//! may decline it or ask on it; decline rechecks that the planner used in the
+//! decision still belongs to that request inside the transaction.
+//! Answers use [`route_of`] or [`draft_route_of`], never a route to a person:
+//! a live planner receives them, otherwise the request question starts a new
+//! planner only for an open request, while its draft's question starts one
+//! even after the request ended; a finished request's own question closes.
+
 use super::sql_dialect::JsonType;
 use super::sql_exec::{
     OptionalRow, SqlError, SqlRead, SqlResult, SqlRow, SqlWrite, ValueKind, sql_params,
