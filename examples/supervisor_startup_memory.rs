@@ -38,6 +38,12 @@
 //! the `ledger_row` requests by the label of the work that sent them
 //! ([`callers`], docs/plans/ledger-row-reads-spike.md).
 //!
+//! `pushes <dir>` reads the statement's plan and times by stage the read of
+//! the push records of the run rows on a copy of that queue, and of a
+//! supervisor started through the queue service each
+//! `ledger_push_records` request's sender and time ([`pushes`],
+//! docs/plans/ledger-push-records-spike.md).
+//!
 //! An allocator that counts for the whole process is set here only: the
 //! library's tests count per thread, and neither they nor the integration
 //! tests carry this one (it would count every other
@@ -1298,9 +1304,10 @@ fn main() {
         Some("measure") if args.len() == 3 => measure(Path::new(&args[2])),
         Some("check") if args.len() == 2 => check(),
         Some("callers") if args.len() == 3 => callers(Path::new(&args[2])),
+        Some("pushes") if args.len() == 3 => pushes(Path::new(&args[2])),
         _ => {
             eprintln!(
-                "usage: supervisor_startup_memory prepare <dir> <events> [<pad bytes>] | measure <dir> | check | callers <dir>"
+                "usage: supervisor_startup_memory prepare <dir> <events> [<pad bytes>] | measure <dir> | check | callers <dir> | pushes <dir>"
             );
             std::process::exit(2);
         }
@@ -1314,6 +1321,11 @@ fn main() {
 struct CountedCalls {
     inner: Arc<dyn ServiceCaller>,
     calls: Mutex<BTreeMap<(String, &'static str), usize>>,
+    /// Of each `ledger_push_records` request, in the order sent: the label
+    /// of the work that sent it, its milliseconds through the service
+    /// (request and answer made and read back as on the socket) and the
+    /// bytes of its answer's text ([`pushes`]).
+    pushes: Mutex<Vec<(&'static str, f64, usize)>>,
 }
 
 impl CountedCalls {
@@ -1332,7 +1344,16 @@ impl CountedCalls {
 impl ServiceCaller for CountedCalls {
     fn call(&self, use_case: UseCase, params: Value) -> anyhow::Result<Value> {
         self.note(&params);
-        self.inner.call(use_case, params)
+        if params["op"] != "ledger_push_records" {
+            return self.inner.call(use_case, params);
+        }
+        let started = Instant::now();
+        let answer = self.inner.call(use_case, params)?;
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let bytes = serde_json::to_vec(&answer)?.len();
+        let label = caller::current().unwrap_or("-");
+        self.pushes.lock().unwrap().push((label, ms, bytes));
+        Ok(answer)
     }
     fn call_now(&self, use_case: UseCase, params: Value) -> anyhow::Result<Value> {
         self.note(&params);
@@ -1358,22 +1379,11 @@ impl ServiceCaller for CountedCalls {
     }
 }
 
-/// Minutes of steady passes after the catch-up, one pass a minute: the
-/// first 15 minutes of a start that production's service log records.
-const STEADY_PASSES: i64 = 15;
-
-/// The restarted supervisor on the queue at `dir` through the queue
-/// service, as in production (`SupervisorPorts` over the service, here
-/// answered in this process): `start_builder`, the passes until no mark
-/// waits, then [`STEADY_PASSES`] passes a minute apart, and then a
-/// builder from the cursors' start on the same store. Prints, of each
-/// stage, how many `ledger_row` requests each caller sent, and the
-/// settled events and the rows the store holds to divide them by. It
-/// counts on a copy of the queue at `<dir>/callers/queue.db`.
-fn callers(dir: &Path) {
-    // A copy of the queue for each count, so that the queue `prepare` laid
-    // down stays as the earlier supervisor left it and the count repeats.
-    let copy = dir.join("callers");
+/// A copy of the queue `prepare` laid down at `dir`, at
+/// `<dir>/<name>/queue.db`, so that the queue stays as the earlier
+/// supervisor left it and a count or a timing on the copy repeats.
+fn copy_of(dir: &Path, name: &str) -> std::path::PathBuf {
+    let copy = dir.join(name);
     let _ = std::fs::remove_dir_all(&copy);
     std::fs::create_dir_all(&copy).unwrap();
     let db = copy.join("queue.db");
@@ -1381,21 +1391,18 @@ fn callers(dir: &Path) {
         .unwrap()
         .execute("VACUUM INTO ?1", [db.to_str().unwrap()])
         .unwrap();
-    let now_ms = now_ms(dir);
-    let (events, rows) = {
-        let read = Connection::open(&db).unwrap();
-        let count = |sql: &str| -> usize {
-            read.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap() as usize
-        };
-        (
-            count("SELECT count(*) FROM run_events"),
-            count("SELECT count(*) FROM ledger_rows"),
-        )
-    };
+    db
+}
+
+/// The restarted supervisor's store on the queue at `db` through the queue
+/// service, as in production (`SupervisorPorts` over the service, here
+/// answered in this process), and the requests it sends counted
+/// ([`CountedCalls`], nothing counted yet).
+fn through_the_service(db: &Path) -> (Arc<CountedCalls>, Box<dyn LedgerQueue + Send>) {
     let generators = dagq::infrastructure::clock::system();
     let counted = Arc::new(CountedCalls {
         inner: Arc::new(dagq::infrastructure::queue_service::InProcessCaller::new(
-            &db,
+            db,
             generators,
             dagq::compose::service_reads(),
             dagq::compose::service_writes(),
@@ -1403,6 +1410,7 @@ fn callers(dir: &Path) {
             dagq::compose::service_commands(),
         )),
         calls: Mutex::default(),
+        pushes: Mutex::default(),
     });
     let pid = std::process::id();
     let queues = SupervisorQueues::new(
@@ -1428,6 +1436,249 @@ fn callers(dir: &Path) {
     .open()
     .unwrap();
     counted.take();
+    std::mem::take(&mut *counted.pushes.lock().unwrap());
+    (counted, store)
+}
+
+/// The statement `SqliteQueue`'s `ledger_push_records` runs, in SQLite's
+/// words: written out here to read its plan and time it apart from the
+/// parse of its answer (docs/plans/ledger-push-records-spike.md).
+const PUSH_RECORDS_SQL: &str = "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+  WHERE r.kind=?1
+    AND (json_extract(j.value, '$.kind')=?2
+         OR (json_extract(j.value, '$.kind') IN (?3, ?4)
+             AND EXISTS (SELECT 1 FROM json_each(r.records) f
+                          WHERE json_extract(f.value, '$.kind')=?3)))
+  ORDER BY json_extract(j.value, '$.id')";
+
+/// Two other ways to write [`PUSH_RECORDS_SQL`], timed beside it: the
+/// `push_finished` records alone (what it reads of a row without a
+/// `push_failed`), and the rows with a `push_failed` picked once by an
+/// uncorrelated subquery instead of an `EXISTS` evaluated again for every
+/// `push_failed` and `run_phase_changed` record.
+const PUSH_RECORDS_VARIANTS: [(&str, &str); 2] = [
+    (
+        "push_finished alone",
+        "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+  WHERE r.kind=?1 AND json_extract(j.value, '$.kind')=?2 AND ?3 IS NOT ?4
+  ORDER BY json_extract(j.value, '$.id')",
+    ),
+    (
+        "failed rows picked once",
+        "SELECT j.value FROM ledger_rows r, json_each(r.records) j
+  WHERE r.kind=?1
+    AND (json_extract(j.value, '$.kind')=?2
+         OR (json_extract(j.value, '$.kind') IN (?3, ?4)
+             AND r.key IN (SELECT g.key FROM ledger_rows g, json_each(g.records) f
+                            WHERE g.kind=?1 AND json_extract(f.value, '$.kind')=?3)))
+  ORDER BY json_extract(j.value, '$.id')",
+    ),
+];
+
+/// The page the service's `ledger_push_records` answers at most and the
+/// client asks first (`LEDGER_PUSHES_PAGE` of the supervisor's queue).
+const PUSHES_PAGE: usize = 1_000;
+
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    values[values.len() / 2]
+}
+
+/// Times, on copies of the queue at `dir`, the read of the push records of
+/// the run rows a restarted supervisor sends (`ledger_push_records`) by
+/// stage, `ROUNDS` times, and prints each stage's median: the statement
+/// alone (rows read out of SQLite as text), the answer made of them (each
+/// parsed and cut as the store does, then each page picked out of the whole
+/// and turned to JSON as the service does), the transfer (each page's text
+/// written and read back to the records) and the store's whole read
+/// directly, and two other ways to write the statement
+/// ([`PUSH_RECORDS_VARIANTS`]). Then it starts a supervisor from the marks
+/// (`start_builder`) through the queue service and says, of each
+/// `ledger_push_records` request, the work that sent it, its time and its
+/// answer's bytes, and what the start's requests took beyond a statement
+/// and an answer each and one transfer. Before those it prints the
+/// statement's plan on the schema `SqliteQueue::init` lays down.
+fn pushes(dir: &Path) {
+    use dagq::domain::RunEvent;
+    use dagq::domain::ledger::builder::pushes::cut;
+    const ROUNDS: usize = 3;
+    let now_ms = now_ms(dir);
+    let db = copy_of(dir, "pushes");
+    let params = params!["run", "push_finished", "push_failed", "run_phase_changed"];
+    {
+        let read = Connection::open(&db).unwrap();
+        let (rows, records, bytes): (i64, i64, i64) = read
+            .query_row(
+                "SELECT count(*), sum(json_array_length(records)), sum(length(records))
+                   FROM ledger_rows WHERE kind='run'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let events: i64 = read
+            .query_row("SELECT count(*) FROM run_events", [], |row| row.get(0))
+            .unwrap();
+        let version: String = read
+            .query_row("SELECT sqlite_version()", [], |row| row.get(0))
+            .unwrap();
+        println!(
+            "SQLite {version}; events {events}, run rows {rows}, records in them {records}, their text {:.1} MiB",
+            mib(bytes as usize)
+        );
+        let mut plan = read
+            .prepare(&format!("EXPLAIN QUERY PLAN {PUSH_RECORDS_SQL}"))
+            .unwrap();
+        let lines = plan
+            .query_map(params, |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap();
+        println!("plan:");
+        for line in lines {
+            let (id, parent, detail) = line.unwrap();
+            println!("  {id} {parent} {detail}");
+        }
+    }
+    let direct = SqliteQueue::open(&db).unwrap();
+    let (mut statement, mut answer, mut transfer, mut store_ms, mut records) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0);
+    for _ in 0..ROUNDS {
+        let read = Connection::open(&db).unwrap();
+        let started = Instant::now();
+        let texts: Vec<String> = read
+            .prepare(PUSH_RECORDS_SQL)
+            .unwrap()
+            .query_map(params, |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        statement.push(started.elapsed().as_secs_f64() * 1000.0);
+        let started = Instant::now();
+        let read: Vec<RunEvent> = texts
+            .iter()
+            .map(|text| cut(&serde_json::from_str(text).unwrap()))
+            .collect();
+        let (mut after, mut pages) = (None, Vec::new());
+        loop {
+            let page: Vec<&RunEvent> = read
+                .iter()
+                .filter(|record| after.is_none_or(|after| record.id > after))
+                .take(PUSHES_PAGE)
+                .collect();
+            let full = page.len() == PUSHES_PAGE;
+            after = page.last().map(|record| record.id);
+            pages.push(serde_json::to_value(&page).unwrap());
+            if !full {
+                break;
+            }
+        }
+        answer.push(started.elapsed().as_secs_f64() * 1000.0);
+        // The answers' texts written and read back to the records, as the
+        // socket and the supervisor's queue do.
+        let started = Instant::now();
+        for page in &pages {
+            let text = serde_json::to_vec(page).unwrap();
+            let back: Value = serde_json::from_slice(&text).unwrap();
+            std::hint::black_box(serde_json::from_value::<Vec<RunEvent>>(back).unwrap());
+        }
+        transfer.push(started.elapsed().as_secs_f64() * 1000.0);
+        records = read.len();
+        let started = Instant::now();
+        let whole = LedgerStore::ledger_push_records(&direct).unwrap();
+        store_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(whole, read, "the statement written out is the store's");
+    }
+    let variants: Vec<(&str, f64, usize)> = PUSH_RECORDS_VARIANTS
+        .iter()
+        .map(|(name, sql)| {
+            let read = Connection::open(&db).unwrap();
+            let mut got = 0;
+            let times = (0..ROUNDS)
+                .map(|_| {
+                    let started = Instant::now();
+                    got = read
+                        .prepare(sql)
+                        .unwrap()
+                        .query_map(params, |row| row.get::<_, String>(0))
+                        .unwrap()
+                        .count();
+                    started.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            (*name, median(times), got)
+        })
+        .collect();
+    let (statement, answer, transfer) = (median(statement), median(answer), median(transfer));
+    println!("push records {records}");
+    println!("| stage | median ms | ms per record |");
+    println!("| --- | ---: | ---: |");
+    let per = |ms: f64| ms / records.max(1) as f64;
+    println!("| statement | {statement:.1} | {:.4} |", per(statement));
+    println!("| answer | {answer:.1} | {:.4} |", per(answer));
+    println!("| transfer | {transfer:.1} | {:.4} |", per(transfer));
+    let store_ms = median(store_ms);
+    println!("| store's read | {store_ms:.1} | {:.4} |", per(store_ms));
+    for (name, ms, got) in variants {
+        println!(
+            "| statement, {name} ({got} records) | {ms:.1} | {:.4} |",
+            per(ms)
+        );
+    }
+
+    println!("| round | request | caller | ms | answer bytes |");
+    println!("| --- | ---: | --- | ---: | ---: |");
+    let mut beyond = Vec::new();
+    for round in 1..=ROUNDS {
+        let db = copy_of(dir, "pushes-start");
+        let (counted, store) = through_the_service(&db);
+        let builder = start_builder(&*store, now_ms).unwrap();
+        drop(builder);
+        let sent = std::mem::take(&mut *counted.pushes.lock().unwrap());
+        let requests = sent.len();
+        let total: f64 = sent.iter().map(|(_, ms, _)| ms).sum();
+        for (n, (label, ms, bytes)) in sent.into_iter().enumerate() {
+            println!("| {round} | {} | {label} | {ms:.1} | {bytes} |", n + 1);
+        }
+        // Each request runs the statement and makes the whole answer again.
+        beyond.push(total - requests as f64 * (statement + answer) - transfer);
+        println!("| {round} | all {requests} | | {total:.1} | |");
+    }
+    println!(
+        "beyond the statement and the answer of each request and the transfer, a start's requests: median {:.1} ms",
+        median(beyond)
+    );
+}
+
+/// Minutes of steady passes after the catch-up, one pass a minute: the
+/// first 15 minutes of a start that production's service log records.
+const STEADY_PASSES: i64 = 15;
+
+/// The restarted supervisor on the queue at `dir` through the queue
+/// service, as in production (`SupervisorPorts` over the service, here
+/// answered in this process): `start_builder`, the passes until no mark
+/// waits, then [`STEADY_PASSES`] passes a minute apart, and then a
+/// builder from the cursors' start on the same store. Prints, of each
+/// stage, how many `ledger_row` requests each caller sent, and the
+/// settled events and the rows the store holds to divide them by. It
+/// counts on a copy of the queue at `<dir>/callers/queue.db`.
+fn callers(dir: &Path) {
+    let db = copy_of(dir, "callers");
+    let now_ms = now_ms(dir);
+    let (events, rows) = {
+        let read = Connection::open(&db).unwrap();
+        let count = |sql: &str| -> usize {
+            read.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap() as usize
+        };
+        (
+            count("SELECT count(*) FROM run_events"),
+            count("SELECT count(*) FROM ledger_rows"),
+        )
+    };
+    let (counted, store) = through_the_service(&db);
 
     println!("settled events {events}, ledger rows {rows}");
     println!("| stage | op | caller | requests | per event | per row |");
