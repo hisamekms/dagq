@@ -2386,6 +2386,12 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             let (kind, key): (crate::domain::ledger::LedgerKind, String) = read(op, args)?;
             answer(LedgerStore::ledger_row(&*store, kind, &key))
         }
+        // The rows of a list of kinds and keys, those the store holds, in
+        // one read: a share of what builds the ledger sweeps.
+        "ledger_rows_of" => {
+            let (keys,): (Vec<(crate::domain::ledger::LedgerKind, String)>,) = read(op, args)?;
+            answer(LedgerStore::ledger_rows_of(&*store, &keys))
+        }
         // A page of the rows of `kind`, by key: at most `page` after the
         // key `after` (none: from the first).
         "ledger_rows" => {

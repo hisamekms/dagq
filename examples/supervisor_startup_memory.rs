@@ -1756,8 +1756,9 @@ const STEADY_PASSES: i64 = 15;
 /// answered in this process): `start_builder`, the passes until no mark
 /// waits, then [`STEADY_PASSES`] passes a minute apart, and then a
 /// builder from the cursors' start on the same store. Prints, of each
-/// stage, how many `ledger_row` requests each caller sent, and the
-/// settled events and the rows the store holds to divide them by. It
+/// stage, how many `ledger_row` and `ledger_rows_of` requests each
+/// caller sent, and the settled events and the rows the store holds to
+/// divide them by. It
 /// counts on a copy of the queue at `<dir>/callers/queue.db`.
 fn callers(dir: &Path) {
     let db = copy_of(dir, "callers");
@@ -1779,7 +1780,7 @@ fn callers(dir: &Path) {
     println!("| --- | --- | --- | ---: | ---: | ---: |");
     let print = |stage: &str| {
         for ((op, label), n) in counted.take() {
-            if op == "ledger_row" {
+            if op == "ledger_row" || op == "ledger_rows_of" {
                 println!(
                     "| {stage} | {op} | {label} | {n} | {:.4} | {:.4} |",
                     n as f64 / events.max(1) as f64,

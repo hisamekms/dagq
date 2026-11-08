@@ -172,7 +172,7 @@ pub struct Built {
 }
 
 /// Work measured by stage. Page totals include all page sweeps; final
-/// sweep reads count ledger_row calls inside fold_rows, not restoration.
+/// sweep reads count the stored rows fold_rows read, not restoration.
 /// Durations are monotonic elapsed time and do not affect folding.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PassWork {
@@ -926,7 +926,9 @@ fn sweep_page(
 /// mark each share's rows that read an input after `after`
 /// ([`Builder::mark_rows_after`]), every share before any read of the
 /// store, so that a read that fails leaves every mark; then with `sweeps`
-/// sweep those still marked: those the store holds settled and up to date
+/// sweep those still marked, the stored rows of a share's in one read
+/// ([`crate::application::LedgerStore::ledger_rows_of`]), so that a sweep
+/// asks as many reads as it has shares, not rows: those the store holds settled and up to date
 /// are settled now, past [`CHECKS_PER_PASS`], so that the records [`Kept`]
 /// read of every event from its cursors' start do not
 /// wait for the marks of every run and task before them.
@@ -958,14 +960,23 @@ fn fold_rows(
     }
     for share in rows.chunks(CHECKS_PER_PASS) {
         let inputs = Inputs::of(builder.kept(), now_ms, built_at, &share_of(share));
-        for target in builder.rows_to_sweep(inputs.rows.keys()) {
-            let (kind, key) = target.row_key();
+        let targets = builder.rows_to_sweep(inputs.rows.keys());
+        if targets.is_empty() {
+            continue;
+        }
+        let keys: Vec<(LedgerKind, String)> = targets.iter().map(Target::row_key).collect();
+        let mut stored: BTreeMap<(LedgerKind, String), LedgerRow> = store
+            .ledger_rows_of(&keys)?
+            .into_iter()
+            .map(|row| ((row.kind, row.key.clone()), row))
+            .collect();
+        for (target, key) in targets.iter().zip(keys) {
             counts.reads += 1;
-            let stored = store.ledger_row(kind, &key)?;
+            let stored = stored.remove(&key);
             counts.record(builder.sweep(
-                &target,
+                target,
                 stored.as_ref(),
-                build(&target, &inputs, &[]).as_ref(),
+                build(target, &inputs, &[]).as_ref(),
             ));
         }
     }

@@ -190,6 +190,7 @@ pub(super) const READS: &[&str] = &[
     "node_samples",
     "node_samples_after",
     "ledger_row",
+    "ledger_rows_of",
     "ledger_rows",
     "steps_after",
     "target_steps",
@@ -676,6 +677,20 @@ mod tests {
         ] {
             assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
             assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
+            assert!(super::super::reads_only(op), "{op}");
+        }
+    }
+
+    /// The read of the rows of a list of keys is a read of the ledger as
+    /// the read of one row is: the supervisor's alone, which needs
+    /// `scheduler.supervise` that a worker's policy does not grant, and
+    /// refused to a landing's integrator and to a control-side command.
+    #[test]
+    fn the_rows_of_a_list_of_keys_are_read_as_one_row_is() {
+        for op in ["ledger_row", "ledger_rows_of"] {
+            assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
+            assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
+            assert!(super::super::READ_OPS.contains(&op), "{op}");
             assert!(super::super::reads_only(op), "{op}");
         }
     }

@@ -2427,6 +2427,137 @@ fn a_row_past_an_answer_is_read_in_parts_again_once_another_writer_wrote_it() {
     assert_eq!(queue(service).ledger_rows(LedgerKind::Run).unwrap(), [then]);
 }
 
+/// The service of a ledger of run rows whose answer holds at most
+/// `largest` bytes: a list of rows past it, and a row past it alone, is
+/// refused as past the answer's limit, and a row's text is answered a part
+/// at a time. It keeps how many keys each `ledger_rows_of` asked for.
+struct RowsOfLedger {
+    rows: Vec<crate::domain::ledger::LedgerRow>,
+    largest: usize,
+    asked: std::sync::Mutex<Vec<usize>>,
+}
+
+impl ServiceCaller for RowsOfLedger {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        use crate::domain::ledger::LedgerKind;
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        let held = |kind: LedgerKind, key: &str| {
+            self.rows
+                .iter()
+                .find(|row| row.kind == kind && row.key == key)
+                .cloned()
+        };
+        let answer = match params.op.as_str() {
+            "ledger_rows_of" => {
+                let keys: Vec<(LedgerKind, String)> =
+                    serde_json::from_value(params.args[0].clone())?;
+                self.asked.lock().unwrap().push(keys.len());
+                let rows: Vec<_> = keys
+                    .iter()
+                    .filter_map(|(kind, key)| held(*kind, key))
+                    .collect();
+                serde_json::to_value(rows)?
+            }
+            "ledger_row_part" => {
+                let kind: LedgerKind = serde_json::from_value(params.args[0].clone())?;
+                let key = params.args[1].as_str().unwrap();
+                let offset = usize::try_from(params.args[2].as_u64().unwrap()).unwrap();
+                let part = held(kind, key)
+                    .map(|row| {
+                        let text = serde_json::to_string(&row)?;
+                        super::large::part_at(&text, super::large::digest(&text), offset, 100)
+                    })
+                    .transpose()?;
+                return Ok(serde_json::to_value(part)?);
+            }
+            op => panic!("no {op} here"),
+        };
+        if serde_json::to_string(&answer)?.len() > self.largest {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+                rejected: false,
+                held: None,
+            }));
+        }
+        Ok(answer)
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// The rows of a list of keys are one request while the answer holds
+/// them: past the answer's limit the list is asked again in halves, and a
+/// row past it alone is read in parts, so the rows read are those the
+/// store holds, in the order of the keys; a key of no row gives none, and
+/// the rows of the other keys come back.
+#[test]
+fn the_rows_of_a_list_past_the_answers_limit_are_asked_again_in_halves_and_in_parts() {
+    use crate::application::LedgerStore;
+    use crate::domain::ledger::{LedgerKind, LedgerRow};
+    let row = |key: usize, pad: usize| -> LedgerRow {
+        let mut row = PagedLedger::row(key);
+        row["detail"] = serde_json::json!({"pad": "x".repeat(pad)});
+        serde_json::from_value(row).unwrap()
+    };
+    let one = serde_json::to_string(&row(1, 0)).unwrap().len();
+    let mut rows: Vec<LedgerRow> = (1..=8).map(|key| row(key, 0)).collect();
+    rows[5] = row(6, 3 * one);
+    let keys: Vec<(LedgerKind, String)> = (1..=9)
+        .map(|key| (LedgerKind::Run, format!("r{key:05}")))
+        .collect();
+    let read = |largest: usize| {
+        let service = Arc::new(RowsOfLedger {
+            rows: rows.clone(),
+            largest,
+            asked: std::sync::Mutex::default(),
+        });
+        let queue = SupervisorQueues::new(
+            service.clone(),
+            ActorContext::instance(ActorRole::Supervisor, 7),
+        )
+        .queue();
+        let read = queue.ledger_rows_of(&keys).unwrap();
+        (read, std::mem::take(&mut *service.asked.lock().unwrap()))
+    };
+    // The answer holds every row: one request, r00009 of no row left out.
+    let (whole, asked) = read(usize::MAX);
+    assert_eq!(whole, rows);
+    assert_eq!(asked, [9]);
+    // It holds two short rows at most, and the padded one not alone.
+    let (halves, asked) = read(2 * one + 10);
+    assert_eq!(halves, rows);
+    assert_eq!(asked, [9, 4, 2, 2, 5, 2, 1, 1, 3]);
+    // No key, no request.
+    let service = Arc::new(RowsOfLedger {
+        rows: rows.clone(),
+        largest: 0,
+        asked: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        ActorContext::instance(ActorRole::Supervisor, 7),
+    )
+    .queue();
+    assert_eq!(queue.ledger_rows_of(&[]).unwrap(), []);
+    assert!(service.asked.lock().unwrap().is_empty());
+}
+
 /// A service of the binary before a handoff: it refuses `diagnosis_owners`
 /// and a start that names its owner by more than a pid as requests it
 /// does not read, and answers the owners as pids; it keeps each call's op.

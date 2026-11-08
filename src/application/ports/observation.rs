@@ -196,6 +196,17 @@ pub trait LedgerStore {
     }
     /// The row of `kind` and `key`, if there is one.
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
+    /// The rows of `keys` the store holds, each as [`Self::ledger_row`]
+    /// reads it, in the order of `keys`; a key of no row gives none. What
+    /// builds the ledger reads the rows of a share of its sweep so, in one
+    /// read, rather than one read a row.
+    fn ledger_rows_of(&self, keys: &[(LedgerKind, String)]) -> Result<Vec<LedgerRow>> {
+        let mut rows = Vec::new();
+        for (kind, key) in keys {
+            rows.extend(self.ledger_row(*kind, key)?);
+        }
+        Ok(rows)
+    }
     /// Every row of `kind`, by key.
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>>;
     /// At most `limit` rows of `kind` after the key `after` (`None`: from

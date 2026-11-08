@@ -407,6 +407,7 @@ fn only_a_supervisor_reads_and_writes_what_builds_the_ledger() {
     let ops = [
         ("ledger_row", json!(["run", run.as_str()])),
         ("ledger_rows", json!(["run", null, 10])),
+        ("ledger_rows_of", json!([[["run", run.as_str()]]])),
         ("write_ledger_row_over", json!([row, null])),
         ("stage_ledger_row", json!(["d", 0, 1, "{}"])),
         ("write_staged_ledger_row_over", json!(["d", null])),

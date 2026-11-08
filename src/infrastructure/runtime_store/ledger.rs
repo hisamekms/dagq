@@ -53,6 +53,22 @@ fn text(value: &impl serde::Serialize) -> Result<String> {
 }
 
 /// The row of `kind` and `key` `conn` holds, if there is one.
+/// The rows of a JSON list of `{"kind", "key"}`, in the order of the
+/// list: the list is the outer loop (`CROSS JOIN` keeps it so in SQLite)
+/// and each of its items finds its row by the primary key; an item of no
+/// row gives none.
+fn rows_of_sql(dialect: SqlDialect) -> String {
+    format!(
+        "SELECT r.* FROM {items} CROSS JOIN ledger_rows r
+          WHERE r.kind = {kind} AND r.key = {key}
+          ORDER BY {index}",
+        items = dialect.json_elements_numbered("?1", "j"),
+        kind = dialect.json_field_spaced("j.value", "$.kind", JsonType::Text),
+        key = dialect.json_field_spaced("j.value", "$.key", JsonType::Text),
+        index = dialect.json_element_index("j"),
+    )
+}
+
 fn held_row(conn: &impl SqlRead, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
     SqlRead::query_row(
         conn,
@@ -894,6 +910,27 @@ impl LedgerStore for SqliteQueue {
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
         let tx = self.read_entry("ledger_row")?;
         held_row(&tx, kind, key)
+    }
+
+    /// One statement over the list sent as JSON ([`rows_of_sql`]): each
+    /// row found by its primary key, none of the kind's keys walked.
+    fn ledger_rows_of(&self, keys: &[(LedgerKind, String)]) -> Result<Vec<LedgerRow>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let list: Vec<Value> = keys
+            .iter()
+            .map(|(kind, key)| json!({"kind": kind.as_str(), "key": key}))
+            .collect();
+        let tx = self.read_entry("ledger_rows_of")?;
+        let statement = rows_of_sql(SqlRead::dialect(&tx));
+        let rows = SqlRead::query_map(
+            &tx,
+            &statement,
+            sql_params![serde_json::to_string(&list)?],
+            ledger_row,
+        )?;
+        rows.into_iter().collect()
     }
 
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>> {
@@ -1740,6 +1777,74 @@ mod tests {
             .conn
             .query_row("SELECT count(*) FROM ledger_rows", [], |r| r.get(0))
             .unwrap()
+    }
+
+    /// The rows of a list of keys are those [`LedgerStore::ledger_row`]
+    /// reads one by one, in the order of the keys: a key of no row, of
+    /// another kind's key among them, gives none and the others are read;
+    /// the one statement finds each row by the primary key.
+    #[test]
+    fn the_rows_of_a_list_of_keys_are_those_read_one_by_one_and_none_of_a_key_of_no_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let session = |id: i64, kind: &str, payload: Value| RunEvent {
+            task_id: None,
+            run_id: None,
+            ..event(id, kind, payload, id)
+        };
+        let events: Vec<RunEvent> = (0..3)
+            .flat_map(|planner| {
+                let opened = 2 * planner + 1;
+                [
+                    session(
+                        opened,
+                        "session_opened",
+                        json!({"kind": "runtime_planner", "planner_id": planner}),
+                    ),
+                    session(
+                        opened + 1,
+                        "session_closed",
+                        json!({"opened_event_id": opened, "session_id": format!("s{planner}")}),
+                    ),
+                ]
+            })
+            .collect();
+        let rows = ledger::session::session_rows(&events, "2030-01-01T00:00:00.000Z");
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            queue.write_ledger_row(row).unwrap();
+        }
+        let key = |row: &LedgerRow| (row.kind, row.key.clone());
+        let keys = vec![
+            key(&rows[2]),
+            (LedgerKind::Session, "no such session".to_owned()),
+            (LedgerKind::Run, rows[0].key.clone()),
+            key(&rows[0]),
+        ];
+        let one_by_one: Vec<LedgerRow> = keys
+            .iter()
+            .filter_map(|(kind, key)| queue.ledger_row(*kind, key).unwrap())
+            .collect();
+        assert_eq!(one_by_one, [rows[2].clone(), rows[0].clone()]);
+        assert_eq!(queue.ledger_rows_of(&keys).unwrap(), one_by_one);
+        assert!(queue.ledger_rows_of(&[]).unwrap().is_empty());
+        let plan: Vec<String> = queue
+            .conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                rows_of_sql(SqlDialect::Sqlite)
+            ))
+            .unwrap()
+            .query_map(["[]"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let plan = plan.join("\n");
+        assert!(
+            plan.contains("SEARCH r USING INDEX sqlite_autoindex_ledger_rows_1 (kind=? AND key=?)"),
+            "{plan}"
+        );
+        assert!(!plan.contains("SCAN r"), "{plan}");
     }
 
     /// The heads read back what the rows hold of them and the ids of their

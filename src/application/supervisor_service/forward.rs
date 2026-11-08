@@ -3138,6 +3138,29 @@ impl LedgerStore for SupervisorQueue {
             read => read,
         }
     }
+    // One request for every key; an answer past the limit asked again in
+    // halves, and a row past it alone read in parts.
+    fn ledger_rows_of(
+        &self,
+        keys: &[(crate::domain::ledger::LedgerKind, String)],
+    ) -> Result<Vec<crate::domain::ledger::LedgerRow>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self.remote("ledger_rows_of", vec![to_value(keys)?]) {
+            Err(error) if super::too_large(&error) && keys.len() > 1 => {
+                let (first, second) = keys.split_at(keys.len() / 2);
+                let mut rows = self.ledger_rows_of(first)?;
+                rows.extend(self.ledger_rows_of(second)?);
+                Ok(rows)
+            }
+            Err(error) if super::too_large(&error) => {
+                let (kind, key) = &keys[0];
+                Ok(self.ledger_row_in_parts(*kind, key)?.into_iter().collect())
+            }
+            read => read,
+        }
+    }
     // In pages after the last key of the page before, a page past the
     // answer's limit asked again at a quarter of its size, and a row past
     // it alone read in parts (the pages after it of the first size again).

@@ -71,6 +71,9 @@ struct Memory {
     /// Gives no wait settled to a task's fold: a builder that reads only
     /// the book made again from the rows.
     no_settled_waits: Cell<bool>,
+    /// Answers [`LedgerStore::ledger_rows_of`] with one
+    /// [`LedgerStore::ledger_row`] a key, as a store of no such read does.
+    rows_one_by_one: Cell<bool>,
     /// Refuses every write of a row.
     refuses: Cell<bool>,
     /// The row whose read fails, as a stored row that does not parse.
@@ -292,6 +295,27 @@ impl EventStore for Memory {
     }
 }
 
+impl Memory {
+    /// The row of `kind` and `key`, counted as one row read.
+    fn held_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
+        self.row_reads.set(self.row_reads.get() + 1);
+        let row = (kind, key.to_owned());
+        ensure!(
+            self.broken.borrow().as_ref() != Some(&row),
+            "the stored row does not parse"
+        );
+        let held = self.rows.borrow().get(&row).cloned();
+        if kind == LedgerKind::Queue && held.is_some() {
+            self.queue_read.borrow_mut().push(key.to_owned());
+        }
+        self.count_cut(|reads| {
+            reads.rows += 1;
+            reads.row_events += held.as_ref().map_or(0, |row| row.records.len());
+        });
+        Ok(held)
+    }
+}
+
 impl LedgerStore for Memory {
     fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
         let events = EventStore::run_events(self, run)?;
@@ -475,25 +499,30 @@ impl LedgerStore for Memory {
         }))
     }
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
-        self.row_reads.set(self.row_reads.get() + 1);
         self.callers.borrow_mut().push((
             "ledger_row",
             crate::application::supervisor_service::caller::current(),
         ));
-        let row = (kind, key.to_owned());
-        ensure!(
-            self.broken.borrow().as_ref() != Some(&row),
-            "the stored row does not parse"
-        );
-        let held = self.rows.borrow().get(&row).cloned();
-        if kind == LedgerKind::Queue && held.is_some() {
-            self.queue_read.borrow_mut().push(key.to_owned());
+        self.held_row(kind, key)
+    }
+    /// One request for every key, unless [`Memory::rows_one_by_one`]: then
+    /// one [`LedgerStore::ledger_row`] a key, as a store of no such read.
+    fn ledger_rows_of(&self, keys: &[(LedgerKind, String)]) -> Result<Vec<LedgerRow>> {
+        if !self.rows_one_by_one.get() {
+            self.callers.borrow_mut().push((
+                "ledger_rows_of",
+                crate::application::supervisor_service::caller::current(),
+            ));
         }
-        self.count_cut(|reads| {
-            reads.rows += 1;
-            reads.row_events += held.as_ref().map_or(0, |row| row.records.len());
-        });
-        Ok(held)
+        let mut rows = Vec::new();
+        for (kind, key) in keys {
+            rows.extend(if self.rows_one_by_one.get() {
+                self.ledger_row(*kind, key)?
+            } else {
+                self.held_row(*kind, key)?
+            });
+        }
+        Ok(rows)
     }
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>> {
         if matches!(kind, LedgerKind::Session | LedgerKind::Node) {
@@ -2968,6 +2997,7 @@ mod pushes_mixed;
 mod queue_waits;
 mod start;
 mod stream_waits;
+mod sweep_reads;
 mod waits;
 
 /// The source `row` holds for its interval of `phase`.
@@ -3636,6 +3666,11 @@ impl WaitRowsService {
                 } else {
                     memory.ledger_legacy_runs_without_row()?
                 };
+                (serde_json::to_value(&read)?, read.len())
+            }
+            "ledger_rows_of" => {
+                let keys: Vec<(LedgerKind, String)> = serde_json::from_value(arg(0))?;
+                let read = store.ledger_rows_of(&keys)?;
                 (serde_json::to_value(&read)?, read.len())
             }
             "ledger_row" => {
@@ -6229,7 +6264,11 @@ fn ledger_reads_name_the_work_that_issued_them() {
         row_callers.contains("ledger.fold_and_write"),
         "{row_callers:?}"
     );
-    assert!(row_callers.contains("ledger.fold_rows"), "{row_callers:?}");
+    assert!(
+        seen.iter()
+            .any(|(op, c)| *op == "ledger_rows_of" && *c == Some("ledger.fold_rows")),
+        "{seen:?}"
+    );
     assert!(
         seen.iter()
             .any(|(_, c)| *c == Some("ledger.start_builder_timed"))
