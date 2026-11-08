@@ -1,6 +1,6 @@
 //! Shared task, goal, event and note SQL on the execution port. Native
 //! transaction entries and compatibility wrappers live in `sqlite`.
-use super::sql_dialect::JsonType;
+use super::sql_dialect::{JsonType, SqlDialect};
 use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlValue, sql_params};
 use super::store_rows::{
     RecordedCancel, cancel_of, enum_col, event_row, goal_row, optional_enum_col,
@@ -728,6 +728,18 @@ pub(super) fn claim_task(
 /// judges it): the events that move it in and out of the candidates, read
 /// here in one query.
 pub(super) fn task_ready_at(conn: &impl SqlRead, task: TaskId) -> Result<Option<String>> {
+    let events = conn.query_map(
+        &task_ready_at_sql(conn.dialect()),
+        sql_params![task],
+        event_row,
+    )?;
+    Ok(claim_facts::claimable_since(task, &events))
+}
+
+/// Events for the readiness replay, oldest first. A claim holds the write
+/// lock here: name each index so NULL task IDs cannot make the goal branch
+/// walk unrelated events when the queue has no planner statistics.
+fn task_ready_at_sql(dialect: SqlDialect) -> String {
     let own = [
         EventKind::TaskCreated,
         EventKind::TaskStatusChanged,
@@ -748,46 +760,38 @@ pub(super) fn task_ready_at(conn: &impl SqlRead, task: TaskId) -> Result<Option<
     ]
     .map(|kind| format!("'{}'", kind.as_str()))
     .join(",");
-    let events = conn.query_map(
-        &format!(
-            "SELECT * FROM run_events WHERE task_id=?1 AND kind IN ({own})
-             UNION
-             SELECT * FROM run_events WHERE kind='{status}' AND task_id IN (
-               SELECT {predecessor_id} FROM run_events
-                WHERE task_id=?1 AND kind IN ('{added}','{removed}'))
-             UNION
-             SELECT * FROM run_events WHERE task_id IS NULL AND kind IN ({goals}) AND goal_id IN (
-               SELECT {goal_id} FROM run_events
-                WHERE task_id=?1 AND kind IN ('{goal_added}','{goal_removed}','{created}')
-               UNION SELECT {from} FROM run_events
-                WHERE task_id=?1 AND kind='{moved}'
-               UNION SELECT {to} FROM run_events
-                WHERE task_id=?1 AND kind='{moved}')
-             ORDER BY id",
-            status = EventKind::TaskStatusChanged.as_str(),
-            added = EventKind::DependencyAdded.as_str(),
-            removed = EventKind::DependencyRemoved.as_str(),
-            goal_added = EventKind::GoalDependencyAdded.as_str(),
-            goal_removed = EventKind::GoalDependencyRemoved.as_str(),
-            created = EventKind::TaskCreated.as_str(),
-            moved = EventKind::TaskGoalChanged.as_str(),
-            predecessor_id =
-                conn.dialect()
-                    .json_field("payload", "$.predecessor_id", JsonType::Integer),
-            goal_id = conn
-                .dialect()
-                .json_field("payload", "$.goal_id", JsonType::Integer),
-            from = conn
-                .dialect()
-                .json_field("payload", "$.from", JsonType::Integer),
-            to = conn
-                .dialect()
-                .json_field("payload", "$.to", JsonType::Integer),
-        ),
-        sql_params![task],
-        event_row,
-    )?;
-    Ok(claim_facts::claimable_since(task, &events))
+    format!(
+        "SELECT * FROM run_events INDEXED BY events_by_task WHERE task_id=?1 AND kind IN ({own})
+         UNION
+         SELECT * FROM run_events INDEXED BY events_by_task WHERE kind='{status}' AND task_id IN (
+           SELECT {predecessor_id} FROM run_events INDEXED BY events_by_task
+            WHERE task_id=?1 AND kind IN ('{added}','{removed}'))
+         UNION
+         SELECT * FROM run_events INDEXED BY events_by_kind WHERE task_id IS NULL AND kind IN ({goals}) AND goal_id IN (
+           SELECT {goal_id} FROM run_events INDEXED BY events_by_task
+            WHERE task_id=?1 AND kind IN ('{goal_added}','{goal_removed}','{created}')
+           UNION SELECT {from} FROM run_events INDEXED BY events_by_task
+            WHERE task_id=?1 AND kind='{moved}'
+           UNION SELECT {to} FROM run_events INDEXED BY events_by_task
+            WHERE task_id=?1 AND kind='{moved}')
+         ORDER BY id",
+        status = EventKind::TaskStatusChanged.as_str(),
+        added = EventKind::DependencyAdded.as_str(),
+        removed = EventKind::DependencyRemoved.as_str(),
+        goal_added = EventKind::GoalDependencyAdded.as_str(),
+        goal_removed = EventKind::GoalDependencyRemoved.as_str(),
+        created = EventKind::TaskCreated.as_str(),
+        moved = EventKind::TaskGoalChanged.as_str(),
+        predecessor_id =
+            dialect
+                .json_field("payload", "$.predecessor_id", JsonType::Integer),
+        goal_id = dialect
+            .json_field("payload", "$.goal_id", JsonType::Integer),
+        from = dialect
+            .json_field("payload", "$.from", JsonType::Integer),
+        to = dialect
+            .json_field("payload", "$.to", JsonType::Integer),
+    )
 }
 
 /// What the trial chooses a claim's worker session from: every
@@ -2188,3 +2192,6 @@ impl<T: SqlRead> Store<'_, T> {
         Ok(NotePage { notes, cursor })
     }
 }
+
+#[cfg(test)]
+mod tests;
