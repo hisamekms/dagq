@@ -80,6 +80,10 @@ impl WaitPhase {
 /// which this implementation adds: a silent wrapper's session is sent
 /// `/exit` from its slot, and a run rebuilt in another phase after a
 /// handoff or an adoption no longer waits).
+/// The live supervisor does not emit LeaseLost or RunEnded: a process
+/// without its lease must not erase a wait its adopter continues. They
+/// remain readable for past records. PhaseChanged also covers adoption
+/// over the waiting limit, besides a rebuilt phase that cannot wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitCause {
@@ -159,6 +163,9 @@ pub struct WaitState {
 impl WaitState {
     /// The run's latest wait, from its events (ascending): `None` without
     /// one, or once it is back in a slot or left the run.
+    /// LeaseAcquired, LeaseReleased, RunRecovered or RuntimeError after
+    /// the latest start invalidate it: its owner lost the run. Adoption and
+    /// handoff emit none of these and preserve the same ongoing wait.
     pub fn of(events: &[RunEvent]) -> Option<Self> {
         let start = events
             .iter()

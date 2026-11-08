@@ -43,6 +43,10 @@ pub(super) fn held_worktrees(
 }
 
 /// The wait of one slot's run.
+/// This is a mark on the slot, not a change to the run status or phase:
+/// Session, Exiting, Revise and Resume watches continue where they stopped.
+/// Revise/Resume clocks alone restart on return. Waiting slots stay in the
+/// table, so the drive loop, including drain, continues while they remain.
 pub(super) struct Waiting {
     /// The asks the wait holds, oldest first.
     pub(super) asks: Vec<(AskId, AskKind)>,
@@ -96,8 +100,8 @@ impl Slot {
     /// The phase a run may wait in (decision 1): the first session before
     /// any `/exit`, with a heartbeating wrapper and no recovery job running
     /// (nor a dialog its receipt ended that its next poll closes, task 239);
-    /// the `/exit` after a verdict, with a session; a revise with a
-    /// heartbeating wrapper and no recovery job running; or a resume
+    /// a revise with a heartbeating wrapper and no recovery job running;
+    /// or a resume
     /// before its `/exit`, likewise.
     fn wait_phase(&self) -> Option<WaitPhase> {
         match &self.phase {
@@ -177,6 +181,10 @@ fn asked_since(asked_at: i64) -> SystemTime {
 impl Supervisor<'_> {
     /// The slots in use: every run but the waiting ones and those waiting
     /// to go back (decision 5).
+    /// Landing and landing-queue runs still count here; only the light
+    /// claim allowance excludes landing-queue runs (`Slot::in_landing_queue`).
+    /// Status and stats use the same occupied set, with status showing the
+    /// landing queue separately (ADR-t610-1, ADR-t1591-1).
     pub(super) fn used_slots(&self) -> usize {
         self.claim.slots.used()
     }
@@ -213,6 +221,16 @@ impl Supervisor<'_> {
     /// oldest ask first, while the limit allows (decision 7); a run past
     /// the limit stays in its slot and records `run_waiting_deferred` once
     /// per ask ([`wait_move`]).
+    /// Called at the start of a tick, except the handoff drain (`tick(true)`).
+    /// `wait_phase` excludes exit-requested Session/Resume watches, silent
+    /// wrappers and active recovery jobs. `wait_candidate` requires a live
+    /// wrapper, no queue hold, and an open, unconsumed worker_question or
+    /// stalled ask allowed by `waits_for` (stalled only in Session).
+    /// Revise questions must also pass `Slot::follows`: questions predating
+    /// its request or passed by a rewritten receipt stay out of this wait.
+    /// Both ongoing and returning waits consume the limit: both keep a session.
+    /// A deferred run keeps progressing in its phase and can wait next tick
+    /// once room opens; `run_waiting_started` records an admitted wait.
     pub(super) fn start_waits(&mut self) {
         // No run waits without a limit: its asks are not read.
         if wait_move(self.claim.max_waiting, 0, true) == WaitMove::Stay {
@@ -341,8 +359,42 @@ impl Supervisor<'_> {
     /// One look at a run out of the slots (decision 6). Nothing is sent to
     /// its session and its status does not change: the lease, the session
     /// (its end, a dead or silent wrapper), its asks (an answer, one more
-    /// of the table), its markers (a session that moved) and, for a dialog,
-    /// its screen. A run waiting to go back only keeps its lease checked.
+    /// of the table) and its markers (a session that moved). A run waiting
+    /// to go back only keeps its lease checked.
+    /// A lost lease disowns the slot without writing to the queue; the new
+    /// owner restores its wait. Parking for hold/replan precedes observation.
+    /// Returning waits only check ownership; a cleanup reservation freezes
+    /// an ongoing wait before wrapper checks, answers or reopening.
+    ///
+    /// A dead wrapper records heartbeat expiry once before reopening. A
+    /// headless Session without a receipt and with an unclosed question or
+    /// stall may reopen in the background (`reopen_lost_session`), keeping
+    /// the wait through retries and the lost turn's bounded completion.
+    /// When reopening is inapplicable or exhausted, stuck_exit asks close;
+    /// Session also closes stalled as ended, but worker_question stays open.
+    /// SessionExited ends the wait; the returned phase handles the exit
+    /// (including `finish_lost_session` if reopening removed the process row).
+    /// A live silent wrapper instead ends it as WrapperSilent so its phase
+    /// can request exit. The silent mark prevents duplicate expiry records
+    /// in Revise and ExitWatch; recovered heartbeat before exit clears it,
+    /// permitting a later wait and a fresh expiry record.
+    ///
+    /// After wrapper checks, queue hold ends the wait, then newly opened
+    /// eligible asks join it. Answered/closed worker questions end it as
+    /// Answered, and an unseen Session receipt as SessionMoved for any kind.
+    /// A headless stall's deliverable answer (stop or instruction, not wait,
+    /// propose or intervene) also ends it: this session cannot move itself.
+    /// The unclosed stall need not have joined the wait: an intervene may
+    /// reopen an ask answered before the next pass could add it.
+    /// Answers are delivered by the returned slot's SessionWatch/StallWatch.
+    ///
+    /// A Session stall without a receipt is polled quietly: wait closes its
+    /// ask and restarts timing; a new threshold opens another ask without a
+    /// prompt. A Revise receipt rewritten since its request returns at once
+    /// even with an open question (ADR-t583-1). Otherwise Revise/Resume with
+    /// a question stay out: returning without an answer would block a slot
+    /// until it arrived, since the ended ask is consumed (ADR-0071).
+    /// A stall ends on an idle marker or receipt newer than Waiting::since.
     pub(super) fn watch_waiting(&mut self, slot: &mut Slot) -> Result<Step> {
         if !self
             .queue
@@ -577,6 +629,12 @@ impl Supervisor<'_> {
     /// End the slot's wait: record `run_waiting_ended` and, when a person
     /// already moved the session, put the run back in its slot at once;
     /// otherwise it waits for a free slot ([`Self::return_waiting_runs`]).
+    /// Every held ask becomes consumed. `ask_id`/`ask_kind` identify the
+    /// answered or moved ask, or are null for other causes; `ask_ids` always
+    /// contains the whole held set, including asks added during the wait.
+    /// Answered and SessionExited queue for a free slot; SessionMoved,
+    /// QueueHold, WrapperSilent, PhaseChanged and legacy DialogCleared
+    /// return at once (`WaitCause::returns_at_once`).
     fn end_wait(
         &mut self,
         slot: &mut Slot,
@@ -641,6 +699,9 @@ impl Supervisor<'_> {
     /// Put the runs whose wait ended back in the slots, the earliest end
     /// first, while a slot is free (decision 8): before any new work, and
     /// also while the supervisor drains, whose end waits for them.
+    /// The drive loop calls this each pass before handoff and fill_slots,
+    /// even with claiming stopped. The current phase resumes; a worker
+    /// question's answer is submitted as the next turn after return.
     pub(super) fn return_waiting_runs(&mut self) {
         let mut returning: Vec<(i64, usize)> = self
             .claim
@@ -680,6 +741,11 @@ impl Supervisor<'_> {
     /// the run cannot keep (its phase was rebuilt as another, or, with
     /// `as_waiting` false, the limit is reached) ends as `phase_changed`
     /// and the run is in its slot.
+    /// Start time comes from the event; no run_waiting_started is repeated.
+    /// A latest start with no end is ongoing, an end with no regained event
+    /// is returning (`WaitState::of`). Handoff keeps waits even over the
+    /// limit; new waits then wait for room. Adoption over the limit instead
+    /// regains a slot, without consuming asks, so they may wait again later.
     pub(super) fn restore_waiting(&mut self, slot: &mut Slot, as_waiting: bool) -> Result<()> {
         let events = self.queue.run_events(slot.run.id())?;
         slot.consumed = consumed_asks(&events);

@@ -1334,6 +1334,17 @@ pub(super) const EXHAUSTED_OPTIONS: &[&str] = &["retry", "cancel"];
 /// process recovery remains active. Registration, the resume timeout from
 /// the request (or last input), and the exit timeout use the injected
 /// monotonic `Clock`; receipt freshness uses the files' wall clock.
+/// Live answer delivery uses its SessionWatch from the resolution request
+/// until exit is requested, including needs_session before exit.
+/// Each answer is a next turn; request_exit records exit_requested before
+/// writing the exit input. Open worker_question gates precede idle,
+/// resume_timeout and stale-receipt nudges (ADR-0071 decision 16), even
+/// with max_waiting zero or a deferred wait still occupying its slot.
+/// Delivery restarts timing from the send; a manually delivered answer's
+/// close in a later second than the last input becomes that input and
+/// restarts timing too. Only newer idle markers count thereafter.
+/// A fresh session after large context still follows this run's files and
+/// asks: pre-request receipt and idle markers cannot finish its new turn.
 pub(super) struct ResumeWatch {
     pub(super) workspace: String,
     pub(super) attempt: usize,

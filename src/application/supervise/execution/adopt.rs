@@ -24,6 +24,10 @@ impl Supervisor<'_> {
     /// purpose and is never adopted. The staleness is judged here and again
     /// inside `adopt_run`, so two supervisors racing for one run take it
     /// exactly once.
+    /// Slot capacity is checked per run, not as an early loop cutoff:
+    /// a recorded wait below max_waiting needs no free slot. With no room
+    /// for a wait, adoption waits for a slot and restore_waiting ends that
+    /// wait as phase_changed, leaving its ask eligible to wait again.
     pub(super) fn adopt_stale_runs(&mut self, parallel: usize) -> Result<()> {
         for candidate in self
             .queue
@@ -226,6 +230,10 @@ impl Supervisor<'_> {
     /// `receipt_observed` ([`Self::instant_of`]). It waits for no wrapper
     /// registration: the wrapper of a `running` run registered before the
     /// adoption, since `claimed` and `starting` runs are never adopted.
+    /// Revise is rebuilt from the review_anchor events on both adoption
+    /// and handoff. Resume uses handoff.json when present, otherwise the
+    /// event reconstruction used by adoption (`handoff_slots::Takeover`).
+    /// After reconstructing the phase, restore_waiting restores its wait.
     pub(super) fn resume(&self, run: &TaskRun) -> Result<Phase> {
         Ok(match run.status() {
             RunStatus::Validating => {

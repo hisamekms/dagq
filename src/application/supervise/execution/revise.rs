@@ -7,6 +7,16 @@ use crate::domain::AskConfidence;
 /// A `revise` verdict, or a conflict the precheck found, sent to the live
 /// session: it is waited for until the session rewrites its receipt and
 /// goes idle.
+/// Open questions since this request suppress idle-without-receipt and
+/// timeout, even if max_waiting is zero or the outside wait was deferred.
+/// Unlike ResumeWatch, a receipt rewritten since the request passes older
+/// questions and can finish on idle without their close (ADR-t583-1).
+/// Answer delivery restarts the stage clock at its send; manual delivery
+/// uses a close later than the last input as new input and restarts it too.
+/// Only idle markers newer than that input finish the turn. Starting a
+/// fresh session after large context keeps the run's files and asks, but
+/// receipt, idle markers and questions before the request cannot finish
+/// this stage or start its wait.
 pub(super) struct ReviseWatch {
     pub(super) session: SessionRef,
     pub(super) attempt: usize,

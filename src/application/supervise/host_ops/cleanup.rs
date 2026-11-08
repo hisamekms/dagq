@@ -749,6 +749,10 @@ fn leave_pruned(
 /// ([`WorktreeCleanup::Waiting`]): only once its last turn finished after
 /// the last one requested ([`turn_idle`]), for the oldest ask its wait
 /// holds that is still `open`. Its task goes on, as the run is leased.
+/// The wait may begin before the turn finishes, so its start is not
+/// evidence of quiescence. WorktreeCleanup::Waiting retains the open ask.
+/// The supervisor offers only its headless ongoing waits, not returning
+/// runs: queue listings omit leased runs (`Supervisor::waiting_worktrees`).
 fn waiting_candidate(
     run: &WaitingRun,
     events: &[RunEvent],
@@ -1748,6 +1752,14 @@ fn session_pids(events: &[RunEvent]) -> SessionPids {
 /// it reserved, so it stays so while its build outputs go. The lease is
 /// the loop's: this live process keeps heartbeating it, so no other
 /// supervisor takes the run meanwhile.
+/// Wrapper and last-agent PIDs were sampled from the latest wrapper_started
+/// and turn_started events. The host-operation queue port cannot read leases
+/// or run_processes; lease ownership is maintained by the live loop instead.
+/// A live last agent or an unreadable process listing counts as busy; the
+/// wrapper alone waits between turns in run_dir/runner and is not busy.
+/// Waiting candidates precede other cleanup candidates to avoid delaying
+/// answers. Their reservation also prevents reopening a lost session;
+/// after release the normal watch, slot return and answer delivery resume.
 fn still_waiting(
     queue: &(dyn HostOpsQueue + Send),
     ports: &JobPorts,
