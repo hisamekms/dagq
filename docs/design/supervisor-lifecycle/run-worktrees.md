@@ -63,6 +63,7 @@ containerの`/tmp`はcontainerと一緒に消えるが、run_dirは同じpathで
 ## loopの外で掃除する
 
 数GBのビルド成果物の計測と削除はloopの外のthreadが行い、loopは通常は完了を待たないので、生きているrunのidle・receipt・stallの検知が遅れない。
+着地したrunのworktreeも、loopではなく着地のthreadが消す前に丸ごと量って記録し、量れなければその理由を記録に残して消す（入口は `integrate::remove_landed_worktree`）。
 1件の削除だけで数十秒かかりうり、件数や時間の予算では途中で止められないため、周回ごとの予算では区切らない。
 jobは同時に1つだけで、予約のlockと削除前の読み直しにより、掃除とleaseの取得のどちらが先でも掃除中のworktreeのrunはclaimされない（入口は `cleanup::CleanupWatch`）。
 予約で先送りしたrunと空き容量のためのjobはloopがrunと同じく待つので、`supervise --once`も掃除後のtriage・resume・claimへ進める。

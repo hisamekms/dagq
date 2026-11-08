@@ -724,6 +724,24 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     assert!(!kinds.contains(&"integration_verification_skipped"));
     assert!(position("run_integrated") < position("worktree_removed"));
     assert!(!kinds.contains(&"cleanup_failed"));
+    // Measured before it went: what the worktree held, nothing unmeasured.
+    let removed = detail
+        .events
+        .iter()
+        .find(|e| e.kind == EventKind::WorktreeRemoved)
+        .unwrap();
+    assert!(
+        removed.payload["bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "{}",
+        removed.payload
+    );
+    assert!(
+        removed.payload.get("unmeasured").is_none(),
+        "{}",
+        removed.payload
+    );
     let integrated = detail
         .events
         .iter()

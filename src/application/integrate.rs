@@ -4011,14 +4011,17 @@ fn remove_landed_worktree<Q: EventStore + RunTransitions + ?Sized>(
             ),
         }
     }
-    let recorded = match super::run_git::remove(repository, run, branch) {
-        Ok(()) => {
-            let mut payload = json!({"path": worktree, "branch": branch});
-            if !stopped.is_empty() {
-                payload["stopped_processes"] = json!(stopped);
-            }
-            queue.record_runtime_event(run.id(), EventKind::WorktreeRemoved, payload)
-        }
+    let removed = measured_removal(
+        || files.tree_size(path),
+        path,
+        || super::run_git::remove(repository, run, branch),
+    );
+    let recorded = match removed {
+        Ok(size) => queue.record_runtime_event(
+            run.id(),
+            EventKind::WorktreeRemoved,
+            removed_worktree_payload(worktree, branch, &stopped, size),
+        ),
         Err(error) => {
             let mut message = format!("landed worktree {worktree} could not be removed: {error:#}");
             if own.is_some() {
@@ -4037,6 +4040,50 @@ fn remove_landed_worktree<Q: EventStore + RunTransitions + ?Sized>(
             run.id()
         );
     }
+}
+
+/// Measure the landed worktree at `path` (`measure`), then `remove` it
+/// whatever the measure gave: the size, or why it could not be measured,
+/// once the removal succeeded. It runs on the landing's own thread, never
+/// the supervise loop's, after the worktree's processes stopped.
+fn measured_removal(
+    measure: impl FnOnce() -> std::io::Result<Option<u64>>,
+    path: &Path,
+    remove: impl FnOnce() -> Result<()>,
+) -> Result<std::result::Result<Option<u64>, String>> {
+    let size = measure().map_err(|error| format!("measure {}: {error}", path.display()));
+    remove().map(|()| size)
+}
+
+/// The `worktree_removed` of a landed run's worktree, with the bytes it
+/// took as `size` measured it before its removal, in the form the
+/// cleanup's removals take: a worktree that could not be measured has
+/// `bytes` 0 and why in `unmeasured`, so its record reads apart from a
+/// measured 0; none there (gone, or a link) is `worktree_missing`.
+fn removed_worktree_payload(
+    worktree: &str,
+    branch: &str,
+    stopped: &[Value],
+    size: std::result::Result<Option<u64>, String>,
+) -> Value {
+    let mut payload = json!({"path": worktree, "branch": branch});
+    match size {
+        Ok(Some(bytes)) => payload["bytes"] = json!(bytes),
+        // As the cleanup's: a worktree gone before (or a link) is no
+        // run's size.
+        Ok(None) => {
+            payload["bytes"] = json!(0);
+            payload["worktree_missing"] = json!(true);
+        }
+        Err(why) => {
+            payload["bytes"] = json!(0);
+            payload["unmeasured"] = json!([why]);
+        }
+    }
+    if !stopped.is_empty() {
+        payload["stopped_processes"] = json!(stopped);
+    }
+    payload
 }
 
 /// The resolved path of `worktree` when it is the run's own worktree under
@@ -4150,6 +4197,72 @@ mod tests {
                 "{status:?}: {refused:#}"
             );
         }
+    }
+
+    /// A landed run's `worktree_removed` holds the bytes measured before
+    /// the removal; one that could not be measured has `bytes` 0 and why
+    /// in `unmeasured`, which a measured 0 has not; none there is
+    /// `worktree_missing`.
+    #[test]
+    fn a_landed_worktree_is_recorded_with_its_size_or_why_it_was_unmeasured() {
+        let payload = |size| removed_worktree_payload("/q/r/worktree", "dagq/r", &[], size);
+        let measured = payload(Ok(Some(9_000)));
+        assert_eq!(measured["bytes"], 9_000);
+        assert_eq!(measured["path"], "/q/r/worktree");
+        assert_eq!(measured["branch"], "dagq/r");
+        assert!(measured.get("unmeasured").is_none(), "{measured}");
+        assert!(measured.get("stopped_processes").is_none(), "{measured}");
+        let zero = payload(Ok(Some(0)));
+        assert_eq!(zero["bytes"], 0);
+        assert!(zero.get("unmeasured").is_none(), "{zero}");
+        assert!(zero.get("worktree_missing").is_none(), "{zero}");
+        let missing = payload(Ok(None));
+        assert_eq!(missing["bytes"], 0);
+        assert_eq!(missing["worktree_missing"], true);
+        assert!(missing.get("unmeasured").is_none(), "{missing}");
+        let why = "measure /q/r/worktree: Too many open files".to_owned();
+        let unmeasured = payload(Err(why.clone()));
+        assert_eq!(unmeasured["bytes"], 0);
+        assert_eq!(unmeasured["unmeasured"], json!([why]));
+        let stopped = [json!({"pid": 7})];
+        let with_stopped =
+            removed_worktree_payload("/q/r/worktree", "dagq/r", &stopped, Ok(Some(1)));
+        assert_eq!(with_stopped["stopped_processes"], json!(stopped));
+    }
+
+    /// The landed worktree is measured before its removal and removed even
+    /// when it cannot be measured; a failed removal gives its error.
+    #[test]
+    fn a_landed_worktree_is_measured_first_and_removed_even_unmeasured() {
+        let path = Path::new("/q/r/worktree");
+        let calls = RefCell::new(Vec::new());
+        let measured = measured_removal(
+            || {
+                calls.borrow_mut().push("measure");
+                Ok(Some(9))
+            },
+            path,
+            || {
+                calls.borrow_mut().push("remove");
+                Ok(())
+            },
+        );
+        assert_eq!(measured.unwrap(), Ok(Some(9)));
+        assert_eq!(*calls.borrow(), ["measure", "remove"]);
+        calls.borrow_mut().clear();
+        let unmeasured = measured_removal(
+            || Err(std::io::Error::from_raw_os_error(libc::EMFILE)),
+            path,
+            || {
+                calls.borrow_mut().push("remove");
+                Ok(())
+            },
+        );
+        let why = unmeasured.unwrap().unwrap_err();
+        assert!(why.starts_with("measure /q/r/worktree: "), "{why}");
+        assert_eq!(*calls.borrow(), ["remove"]);
+        let failed = measured_removal(|| Ok(Some(9)), path, || anyhow::bail!("git failed"));
+        assert!(failed.unwrap_err().to_string().contains("git failed"));
     }
 
     /// The landing stops processes under and removes only the run's own
