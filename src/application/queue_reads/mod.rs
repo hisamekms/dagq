@@ -577,24 +577,6 @@ fn run_id(what: &str, run: Option<&String>) -> Result<()> {
         None => Ok(()),
     }
 }
-/// The axes `kpi --by` takes.
-pub const KPI_AXES: [&str; 15] = [
-    "change",
-    "area",
-    "build",
-    "parallel",
-    "slot",
-    "load",
-    "toolchain",
-    "claude",
-    "provider",
-    "route",
-    "codex",
-    "group",
-    "model",
-    "effort",
-    "nature",
-];
 
 /// What makes a read's params not the command line's: what clap refuses
 /// before the command runs.
@@ -805,7 +787,7 @@ impl QueueRead {
                     return Err(bad("kpi's window is 1 to 365"));
                 }
                 for axis in &read.by {
-                    one_of("kpi's by", axis, &KPI_AXES)?;
+                    parse_kpi_layer(axis).map_err(|error| bad(format!("kpi's by: {error}")))?;
                 }
                 for change in &read.changes {
                     parse_kpi_change(change)
@@ -1242,7 +1224,7 @@ mod tests {
             (UseCase::Kpi, json!({"last": 0})),
             (UseCase::Kpi, json!({"at": "1", "since": "2"})),
             (UseCase::Kpi, json!({"window": 0})),
-            (UseCase::Kpi, json!({"by": ["colour"]})),
+            (UseCase::Kpi, json!({"by": ["a=b"]})),
             (UseCase::Kpi, json!({"compare": "a..b"})),
             (UseCase::Kpi, json!({"compare": true})),
             (UseCase::Forecast, json!({"parallel": 300})),
@@ -1380,5 +1362,28 @@ mod tests {
                 .to_string()
                 .contains("toolchain")
         );
+    }
+
+    #[test]
+    fn kpi_params_take_any_attribute_key_as_by_and_refuse_a_malformed_one() {
+        for key in ["pair_group", "instructions_prompt", "nope", "change"] {
+            let Some(QueueRead::Kpi(read)) =
+                QueueRead::parse(UseCase::Kpi, &json!({"by": [key]})).unwrap()
+            else {
+                panic!("no kpi read for {key}");
+            };
+            assert_eq!(kpi_query(&read).unwrap().by[0].as_str(), key);
+        }
+        for key in ["a=b", "", "kind"] {
+            let error = QueueRead::parse(UseCase::Kpi, &json!({"by": [key]})).unwrap_err();
+            assert!(
+                error.downcast_ref::<BadRead>().is_some(),
+                "{key:?}: {error}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("kpi's by: {}", parse_kpi_layer(key).unwrap_err())
+            );
+        }
     }
 }
