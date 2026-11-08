@@ -280,6 +280,36 @@ pub struct LoopSettings {
     /// 1046); a `--once` call names its records by it
     /// ([`run_loop::note_once_goes_on`]).
     pub passes: Arc<AtomicU64>,
+    /// Counts the cleanup jobs of ended runs' worktrees the loop started
+    /// and joined. Tests read it between passes to wait for a cleanup
+    /// to end instead of a fixed sleep.
+    pub cleanup_jobs: Arc<CleanupJobs>,
+}
+
+/// How many cleanup jobs of ended runs' worktrees the loop started and
+/// joined ([`LoopSettings::cleanup_jobs`]). The loop alone moves both
+/// counts, so between two of its passes they say whether a job runs.
+#[derive(Debug, Default)]
+pub struct CleanupJobs {
+    started: AtomicU64,
+    joined: AtomicU64,
+}
+
+impl CleanupJobs {
+    /// Every job the loop started it also joined, so what each settled is
+    /// cached and none reads the queue now. Read between two passes: a
+    /// request no job took yet starts one in the same call.
+    pub fn all_joined(&self) -> bool {
+        self.started.load(Ordering::SeqCst) == self.joined.load(Ordering::SeqCst)
+    }
+    /// The loop started a job.
+    pub(in crate::application::supervise) fn started(&self) {
+        self.started.fetch_add(1, Ordering::SeqCst);
+    }
+    /// The loop joined a job.
+    pub(in crate::application::supervise) fn joined(&self) {
+        self.joined.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Where the supervisor works and what it starts: the queue database and

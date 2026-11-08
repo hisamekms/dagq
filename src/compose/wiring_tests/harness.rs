@@ -881,6 +881,10 @@ impl Parts {
         };
         let mut settings = LoopSettings {
             once: self.pass_probe.is_none(),
+            cleanup_jobs: self
+                .pass_probe
+                .as_ref()
+                .map_or_else(Arc::default, |probe| probe.cleanup_jobs.clone()),
             retry_unreadable_review: self.retry_review,
             ..settings(
                 self.stop,
@@ -1012,6 +1016,7 @@ fn settings(
         owner_gone_grace: supervise::OWNER_GONE_GRACE,
         lease_lost_grace: supervise::LEASE_LOST_GRACE,
         passes,
+        cleanup_jobs: Arc::default(),
     }
 }
 

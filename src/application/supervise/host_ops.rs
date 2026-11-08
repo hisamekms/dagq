@@ -104,7 +104,7 @@ impl HostOpsState {
             scratchpad_roots: ports.scratchpad_roots.clone(),
             disk: disk::DiskWatch::default(),
             free: None,
-            cleanup: cleanup::CleanupWatch::default(),
+            cleanup: cleanup::CleanupWatch::counting(settings.cleanup_jobs.clone()),
             sweep: sweep::SweepWatch::default(),
             max_load: settings.max_load,
             load_average: ports.load_average,

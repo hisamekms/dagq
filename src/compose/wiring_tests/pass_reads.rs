@@ -1,7 +1,9 @@
 //! Read-count regression at the supervisor's service port. The ledger's
-//! real builder is driven synchronously at pass boundaries so its startup
-//! catch-up cannot race the measured pass; host ports remain the harness's
-//! fakes. Counts belong to this caller and include the builder's reads.
+//! real builder is driven synchronously at pass boundaries, and the
+//! measured pass waits for the startup cleanup job to be joined, so
+//! neither catch-up races it; host ports remain the harness's fakes.
+//! Counts belong to this caller and include the builder's and the
+//! cleanup job's reads.
 
 use std::{
     collections::BTreeMap,
@@ -20,7 +22,7 @@ use super::{agent::Script, harness::Wiring};
 use crate::{
     application::{
         Clock, TaskStore,
-        supervise::{Retain, build_pass, start_builder},
+        supervise::{CleanupJobs, Retain, build_pass, start_builder},
         supervisor_service::{ServiceCaller, SupervisorQueues, request_reads_only},
     },
     domain::{
@@ -56,6 +58,8 @@ struct Counts {
 /// while executing the production builder against the same service port.
 pub(super) struct PassProbe {
     pub(super) clock: Arc<AdvancedClock>,
+    /// The loop's cleanup jobs, which the measured pass waits for.
+    pub(super) cleanup_jobs: Arc<CleanupJobs>,
     counts: Mutex<Counts>,
     builder: Mutex<Option<Builder>>,
     pass: AtomicU64,
@@ -69,6 +73,7 @@ impl PassProbe {
                 base: clock,
                 seconds: AtomicU64::new(0),
             }),
+            cleanup_jobs: Arc::default(),
             counts: Mutex::default(),
             builder: Mutex::default(),
             pass: AtomicU64::new(0),
@@ -191,8 +196,14 @@ impl ServiceCaller for ProbedCaller {
         } else if !self.probe.finished.load(Ordering::SeqCst) {
             // Fold startup and the preceding pass before taking the count.
             self.build_ledger()?;
-            if self.probe.counts.lock().unwrap().initial_sweeps > 0 {
-                // The first sweep returned before this pass boundary.
+            if self.probe.counts.lock().unwrap().initial_sweeps > 0
+                && self.probe.cleanup_jobs.all_joined()
+            {
+                // The first sweep returned before this pass boundary, and
+                // the cleanup it asked for was joined: what that job
+                // settled is cached, and none of its rechecks is left to
+                // fall in the measured pass. Until then the clock stays,
+                // so no sweep is due in the passes between.
                 self.probe.clock.seconds.store(61, Ordering::SeqCst);
                 self.probe.counts.lock().unwrap().measuring = true;
                 self.build_ledger()?;
@@ -284,21 +295,20 @@ fn steady_pass_reads(history: usize) -> BTreeMap<String, usize> {
         reads.contains_key("run_resources_after") && reads.contains_key("steps_after"),
         "include the caught-up ledger's reads: {reads:?}"
     );
-    // Exception: cleanup-ended-run-rechecks (required follow-up for goal
-    // acceptance 2). The first asynchronous cleanup can still be checking
-    // ended_run_worktree while this pass runs. Its ended_run_worktrees
-    // listing is skipped while that job runs. Settled candidates are cached
-    // by cleanup; the follow-up must deterministically drain its startup
-    // job and include both reads here, preserving deletion's revalidation.
-    // All other operations, including run_events, remain in the comparison.
-    let mut reads = reads;
-    reads.remove("ended_run_worktree");
-    reads.remove("ended_run_worktrees");
+    assert_eq!(
+        reads.get("ended_run_worktrees"),
+        Some(&1),
+        "the measured sweep must list the ended runs' worktrees for cleanup: {reads:?}"
+    );
+    assert!(
+        !reads.contains_key("ended_run_worktree"),
+        "the startup cleanup must have settled every ended run: {reads:?}"
+    );
     reads
 }
 
 /// Increasing ended history must not add queue reads to a caught-up pass,
-/// including its due sweep, apart from the named cleanup follow-up above.
+/// including its due sweep and the cleanup it asks for.
 #[test]
 fn ended_history_does_not_increase_a_caught_up_sweep_pass_reads() {
     let small = steady_pass_reads(20);

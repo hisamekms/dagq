@@ -588,6 +588,7 @@ impl SuperviseOptions {
             disk,
             resume,
             passes: self.passes.clone(),
+            cleanup_jobs: Arc::default(),
             owner: self.owner,
             owner_gone_grace: self.owner_gone_grace,
             lease_lost_grace: self.lease_lost_grace,

@@ -212,6 +212,8 @@ impl Request {
 #[derive(Default)]
 pub(in crate::application::supervise) struct CleanupWatch {
     job: Option<Job>,
+    /// The jobs started and joined, which a caller of the loop may read.
+    jobs: Arc<CleanupJobs>,
     pending: Request,
     /// The runs the job picked and has not passed yet, and the runs
     /// settled. The loop holds the lock while it leases an ended run.
@@ -236,6 +238,13 @@ struct Job {
 }
 
 impl CleanupWatch {
+    /// A watch that counts its jobs in `jobs`.
+    pub(in crate::application::supervise) fn counting(jobs: Arc<CleanupJobs>) -> Self {
+        Self {
+            jobs,
+            ..Self::default()
+        }
+    }
     /// A job runs.
     pub(in crate::application::supervise) const fn running(&self) -> bool {
         self.job.is_some()
@@ -1230,6 +1239,7 @@ impl HostOpsState {
             warn!("the cleanup of ended runs' worktrees panicked");
             Vec::new()
         });
+        self.cleanup.jobs.joined();
         // Whatever the job left reserved, offered or reached (it could not
         // open the queue, or panicked) is free again.
         lock_cleaning(&self.cleanup.cleaning).release();
@@ -1407,6 +1417,7 @@ impl HostOpsState {
             }),
         };
         let handle = spawn_traced(move || run_job(&ports, candidates));
+        self.cleanup.jobs.started();
         self.cleanup.job = Some(Job {
             handle,
             disk: request.disk,
