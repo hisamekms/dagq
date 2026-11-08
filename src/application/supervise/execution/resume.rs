@@ -34,6 +34,12 @@ impl Supervisor<'_> {
     /// attempts is handed on here, and one whose ended session left a
     /// stuck_exit ask has it closed, whether or not a slot is free; the
     /// fill pass resumes the rest in the order of its line (ADR-t1850-1).
+    /// A run already in this supervisor's slot is excluded even after its
+    /// lease went stale and its wrapper exited: the next tick removes the
+    /// lost slot before another pass may resume it. Wrapper liveness uses
+    /// its PID and recorded exit, not heartbeat freshness. Holds and replan
+    /// guards also prevent exhaustion cleanup; container deferral prevents
+    /// starting a resume, but does not prevent handing an exhausted run on.
     pub(super) fn resume_candidates(&mut self) -> Result<Vec<ResumeCandidate>> {
         let candidates = self.queue.runs_needing_session()?;
         // A resumed session let go after the exit timeout raised a
@@ -127,6 +133,11 @@ impl Supervisor<'_> {
     }
     /// Resume `candidate`, one of [`Self::resume_candidates`], in a free
     /// slot: the fill pass calls it in the order of its line (ADR-t1850-1).
+    /// Close recorded wrappers left by earlier attempts before testing
+    /// whether the receipt already resolves the run. An unrecorded wrapper
+    /// is not found here; while its registered process lives, candidates
+    /// exclude the run. After `begin_resume`, startup errors are handed to
+    /// `give_up_resume`, keeping the original park reason.
     pub(super) fn resume_run(&mut self, candidate: ResumeCandidate) -> Result<()> {
         let ResumeCandidate { run, resumes, .. } = candidate;
         self.close_left_resume_workspaces(&run)?;
@@ -334,6 +345,11 @@ impl Supervisor<'_> {
     /// a session or using an attempt: record `resume_skipped` and, under
     /// its lease, land it when its integrate was approved, or validate and
     /// review it (with no session to keep) otherwise.
+    /// Path scope is checked only by the validation or landing that follows.
+    /// An approved skip queues the landing even if `landing_queued` was not
+    /// written; `RunHistory::queued_after_resume` keeps it queued across
+    /// reconstruction until a later landing, review, resume, landing decision
+    /// or landing ask. A skipped resume is not itself an attention item.
     pub(super) fn skip_resume(
         &mut self,
         run: &TaskRun,
@@ -383,6 +399,9 @@ impl Supervisor<'_> {
     /// (ADR-0047 decision 39): resuming is no longer one of its options. The
     /// workspaces it left open are closed as after a recovery round. A run
     /// of a task that moved on is left alone.
+    /// No new commit on the base, failure to keep the inherited ref, or a
+    /// second automatic inheritance exhaustion falls back to recovery.
+    /// A hand-made inheritance retry does not spend the automatic one.
     pub(super) fn exhaust_resumes(&mut self, run: &TaskRun, resumes: ResumeCount) -> Result<()> {
         let detail = self.queue.show(run.task_id())?;
         if detail.task.status() != TaskStatus::InProgress
@@ -557,6 +576,15 @@ impl Supervisor<'_> {
     /// the worker ran may predate `session --resume`) and start the resume
     /// wrapper in the background with the same settings and `run_env` as
     /// the worker's.
+    /// The full request includes the current task, verification and park
+    /// reason. `session_request` bounds it and carries it into a fresh
+    /// session when the previous turn's peak context exceeds the configured
+    /// threshold; `session_renewed` is recorded before launching. The saved
+    /// `resume-<attempt>.txt` is also the adopter's handoff/request source.
+    /// The background handle is recorded as `workspace_created`, then
+    /// `wrapper_launched`, before `ResumeWatch` waits for registration.
+    /// If recording the handle fails, stop it and return the error; a
+    /// failed spawn records `backend_call_failed` through the actor launcher.
     pub(super) fn start_resume(
         &mut self,
         run: &TaskRun,
@@ -814,6 +842,13 @@ impl Supervisor<'_> {
     /// for the start: a receipt no newer is from before the resume), and
     /// whether the request was queued (`resume_request_sent`) and exit requested
     /// (`exit_requested` of the attempt) since.
+    /// Adoption requires the attempt's recorded workspace and a wrapper
+    /// whose process still lives and has no recorded exit. Otherwise a
+    /// later resume replaces the stale lease. A wrapper launched before its
+    /// handle was recorded cannot be adopted, but blocks another resume
+    /// while alive. Without `resume_request_sent` (including older records),
+    /// send the saved request again: death between delivery and recording
+    /// may deliver it twice.
     pub(super) fn adopt_resume(&mut self, run: &TaskRun) -> Result<ResumeWatch> {
         let events = self.queue.run_events(run.id())?;
         let (started, attempt, workspace) =
@@ -874,6 +909,9 @@ impl Supervisor<'_> {
     /// `failed` receipt ends the run; anything else leaves it
     /// `needs_session` for the next attempt, or for the recovery job after the
     /// last.
+    /// Once a resolved approved resume waits for a landing slot, its finish
+    /// is already recorded: an error during that wait only releases the
+    /// lease, rather than finishing the same attempt twice.
     pub(super) fn finish_resumed_session(
         &mut self,
         slot: &mut Slot,
@@ -1121,6 +1159,10 @@ fn exhausted_reason(resumed: &str, last_error: &str) -> String {
     }
 }
 
+/// The attempts and their limits in exhaustion's `last_error`, recovery
+/// request and recovery prompt: counted, conflict-only (with precheck
+/// requests), kill-only, held and provider-only. `config` is the snapshot
+/// the supervisor read at startup, also used for the exhaustion decision.
 fn resumed_text(resumes: ResumeCount, config: ResumeConfig) -> String {
     let limit = config.conflict_only_limit;
     let mut killed = if resumes.kill_only == 0 {
@@ -1281,10 +1323,14 @@ pub(super) fn landed_since(
 /// same way.
 pub(super) const EXHAUSTED_OPTIONS: &[&str] = &["retry", "cancel"];
 
-/// Watches one resumed session: its wrapper registration, the resolution
-/// request once its input box is ready and whether the session took it
-/// (task 285), the rewritten receipt and the idle marker, the single
-/// `/exit`, and the wrapper's exit.
+/// Watches one resumed session: wrapper registration, the resolution
+/// request queued as the next turn once registered, the rewritten receipt
+/// and turn end, the exit request, and the wrapper's exit. There is no
+/// interactive input box or fixed paste delay. Worker-question answers
+/// arrive as next turns; stalled waits live outside the slot, and idle
+/// process recovery remains active. Registration, the resume timeout from
+/// the request (or last input), and the exit timeout use the injected
+/// monotonic `Clock`; receipt freshness uses the files' wall clock.
 pub(super) struct ResumeWatch {
     pub(super) workspace: String,
     pub(super) attempt: usize,

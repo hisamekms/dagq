@@ -1620,6 +1620,10 @@ impl Supervisor<'_> {
     /// (`resuming`): for a run handed on otherwise (its resumes used up) the
     /// restore fails, its clone there or not, unless the executor answered
     /// it already.
+    /// Restore the latest saved operation first, then the latest reopened
+    /// unsaved operation on that work. This reconciliation precedes both a
+    /// resume and exhaustion cleanup. Untaken answers are carried by the
+    /// continuation's resume, including ones a fence prevented delivering.
     pub(super) fn restore_parked(&mut self, run: &TaskRun, resuming: bool) -> Result<bool> {
         let ops = self.queue.replans_of_run(run.id())?;
         // The latest operation that saved the run's work comes back first,

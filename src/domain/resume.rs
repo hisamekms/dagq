@@ -653,6 +653,12 @@ pub struct ResumeStart {
 /// attempt, whether it is counted, and the repair that records it when it
 /// is not. A conflict-only park wins over a hold's, and a hold's over a
 /// kill-only one.
+/// Kill-only and hold-only exceptions apply to the first resume
+/// after that park only. If the session ends unresolved without a new park,
+/// or parks for a different reason, the next resume is classified from that
+/// reason anew; a kill does not exempt later verification failures or conflicts.
+/// A counted send-back resume spends that exception; a provider-only finish
+/// restores it because no counted attempt actually ran.
 pub fn resume_start_plan(events: &[RunEvent], main: &CommitSha) -> ResumeStart {
     let resumes = ResumeCount::of(events);
     let attempt = resumes.total() + 1;

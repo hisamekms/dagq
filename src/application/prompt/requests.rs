@@ -107,15 +107,24 @@ pub(crate) enum ResumeKind {
     /// A run that waited to land, parked by the landing recheck after
     /// another landing moved main (ADR-0068 decision 3): rebase, like
     /// `Landing`, and run the failed recheck command again.
+    /// If its landing ask is still open after resolution, validation is
+    /// followed by closing the session and waiting for that answer, without
+    /// another review (ADR-0068 decision 4).
     Recheck,
     /// A passed run whose `/exit` never reached its session, and whose
     /// workspace an adopter found gone while the run could not land as it
     /// stood (task 960): do what the reason says holds it, and rewrite the
-    /// receipt, which validation and review check again.
+    /// receipt, which validation and review check again. Read-only
+    /// compatibility for `session_gone_parked`: no current supervisor
+    /// rejudges a missed exit to write that park. Resume counting, retry
+    /// statistics and the last-error explanation still read it as a park.
     SessionGone,
     /// The e2e the runtime ran on the host after the review failed
     /// (ADR-t1233-2 decision 3): fix the failed tests the reason names,
-    /// and the run is validated, reviewed and its e2e run again.
+    /// and the run is validated, reviewed and its e2e run again. The request
+    /// asks to read the reason's log, fix and commit, and reproduce only one
+    /// named failed test at a time, never the full e2e. `run_e2e_failed`
+    /// selects this kind; the resume is counted but does not raise the model.
     E2e,
     /// The trusted runtime parked the run at a turn's end for a replanning
     /// and saved its work (ADR-t1521-2); the operation ended in a

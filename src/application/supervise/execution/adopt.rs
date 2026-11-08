@@ -983,6 +983,11 @@ struct AdoptionSeen {
 }
 
 /// [`Supervisor::adoptable`] of what the adopter saw.
+/// An unapproved skipped resume is adopted through validation/review
+/// without a session, even when its wrapper is absent or no longer lives.
+/// A `needs_session` resume instead needs its recorded workspace and a
+/// living wrapper with no recorded exit; other parked runs are resumed
+/// with a new lease, not adopted as an ongoing attempt.
 fn adoptable(seen: &AdoptionSeen) -> bool {
     match seen.status {
         RunStatus::NeedsSession => {

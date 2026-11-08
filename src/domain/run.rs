@@ -716,6 +716,12 @@ fn leave_integration(
 
 /// The landing needs a session (a conflict or a failed re-validation):
 /// `integrating` → `needs_session`.
+/// The integrator records `integration_deferred` with the detailed reason,
+/// removes the lease and frees the slot. A conflict leaves the worktree at
+/// its validated head; failed re-validation (including undeclared paths)
+/// leaves it at the rebased head. The task remains occupied. Host-classified
+/// failures retry once in the same integration attempt, then use
+/// [`hold_integration`] and notify the inbox without spending a resume.
 pub fn defer_integration(run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
     leave_integration(
         run,

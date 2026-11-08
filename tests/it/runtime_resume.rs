@@ -854,8 +854,8 @@ fn a_skipped_run_whose_supervisor_died_is_adopted() {
 /// line), but a `--once` call makes another pass while a slot, a job or a
 /// pass that progressed keeps its loop going, and a resume that ended as
 /// an `error` leaves the run a candidate of that pass while it has
-/// attempts left, as intended (`needs-session.md`, 6). The call here makes
-/// one pass: when it errs twice, the message gives the call's passes, the
+/// attempts left, as intended (`Supervisor::give_up_resume`). The call here
+/// makes one pass: when it errs twice, the message gives the call's passes, the
 /// supervisor's records of its resumes and of why a pass went on to the
 /// next (its slots, the jobs it waited for, whether it progressed; logged
 /// when that changed), in order and each with its pass, and every event of

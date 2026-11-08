@@ -264,6 +264,23 @@ pub fn ends_run(facts: ReleaseFacts, choice: &ReleaseChoice) -> bool {
 /// How the release of a task at `facts` with `choice` goes on;
 /// `own_commits` says whether the run's branch holds commits of its own on
 /// top of its base, read only when the run ends ([`ends_run`]).
+/// `Resume` keeps the current run on its own path, including a run already
+/// resting before the hold or a stopped run continuing by its kept result.
+/// When resuming a session from `hold_parked`, it carries unconsumed answers
+/// into the next resolution request; approval and passed review from before
+/// that park cannot authorize its landing, so validation and review run again.
+/// For that parked run on the same provider, the release only removes the
+/// hold; the next pass begins the resume, including its fresh-session decision.
+/// Approval is invalidated by the recorded park, not by `Resume` itself
+/// (`RunHistory::approved` and `RunHistory::review_lets_land`).
+/// `RetryInherit` and `RetryFresh` carry
+/// no answers into a resume; human decisions go into the next run's prompt.
+/// The meaning of a usable session excludes a provider-reported missing
+/// conversation with no answered turn, named session or interrupted turn;
+/// launching a wrapper alone does not establish one. Saved work and release refusals
+/// are defined by `application::inherit::released_work` and
+/// `application::commands::holds::Holds::release`; [`ProgressVersion`]
+/// protects the read outside the transaction against concurrent progress.
 pub fn release_decision(
     facts: ReleaseFacts,
     choice: &ReleaseChoice,
