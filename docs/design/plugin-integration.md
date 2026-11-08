@@ -48,7 +48,8 @@ pluginはruntimeのDB schemaを直接操作しない。
 ## 配布
 
 binary releaseとchecksumはruntime側の責務なので（[ADR-0005](../adr/0005-binary-and-plugin-distribution.md)）、releaseはGitHub Actionsの`.github/workflows/release.yml`が`v*`のtag pushで作る。
-targetは`aarch64-apple-darwin`だけ（他のplatformは未対応）。
+binaryのtargetは`aarch64-apple-darwin`だけ（他は未対応）。
+releaseはlinuxのcontainer image（制御側とrunのbase）もGHCRに版のtagとdigestで出す。
 
 ### tagとversionの一致規則
 

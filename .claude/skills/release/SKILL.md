@@ -1,11 +1,11 @@
 ---
 name: release
-description: dagq 自身のリリース手順。version を上げる、tag v* を切る、GitHub Release と crates.io に出す、release.yml の成功と crates.io の自動 publish（Trusted Publishing）を確認するときに使う。利用者向けではなく、この repository を開発する session 用。
+description: dagq 自身のリリース手順。version を上げる、tag v* を切る、GitHub Release と crates.io と GHCR に出す、release.yml の成功と crates.io の自動 publish（Trusted Publishing）と container image の digest を確認するときに使う。利用者向けではなく、この repository を開発する session 用。
 ---
 
 # dagq をリリースする
 
-根拠は [README の Release 節](../../../README.md#release) と [ADR-0030](../../../docs/adr/0030-publish-to-crates-io-on-tag-push-with-trusted-publishing.md)。tag `vX.Y.Z` の push で `.github/workflows/release.yml` が、tag と `Cargo.toml` の version の一致を検査し、`aarch64-apple-darwin` の `dagq` のバイナリを build して tar と `SHA256SUMS` を GitHub Release に添付し、`dagq` の crate を crates.io に publish する（crates.io に既にその version があれば skip）。`Cargo.toml` と `plugin.json` の version の一致は `scripts/check-plugin-version.sh` が検査する。
+根拠は [README の Release 節](../../../README.md#release) と [ADR-0030](../../../docs/adr/0030-publish-to-crates-io-on-tag-push-with-trusted-publishing.md)、image は [ADR-t3990-3](../../../docs/adr/2026-11-04-t3990-3-team-version-release-publishes-multi-arch-images-to-ghcr-pinned-by-digest.md)。tag `vX.Y.Z` の push で `.github/workflows/release.yml` が、tag と `Cargo.toml` の version の一致を検査し、`aarch64-apple-darwin` の `dagq` のバイナリを build して tar と `SHA256SUMS` を GitHub Release に添付し、`dagq` の crate を crates.io に publish する（crates.io に既にその version があれば skip）。その後の job が、制御側の `dagq-control`（`containers/control.Containerfile`。binary と CA の証明書だけ）と run の base の `dagq-run-base` を `linux/arm64`・`linux/amd64` の 1 つの manifest にして GHCR に版の tag だけで出し（`latest` や `main` を置かない）、build の出どころの証明を添え、2 つの digest を release notes に書く。`Cargo.toml` と `plugin.json` の version の一致は `scripts/check-plugin-version.sh` が検査する。
 
 main の version はリリースの直後に次の開発版 `X.Y.Z-dev` へ上げてあり（今は `0.4.0-dev`）、main のビルドは `dagq --version` で build 識別子 `X.Y.Z-dev+<commit>`（worktree が dirty なら `.dirty` が付く）を名乗る。リリースは `-dev` を外した `X.Y.Z` で、build 識別子も `X.Y.Z` だけになる（[ADR-0073](../../../docs/adr/0073-kind-additions-are-compatible.md) 決定 1・2。ADR-0045 を置き換えた。`build.rs` が埋め込む）。
 
@@ -37,7 +37,7 @@ git push origin vX.Y.Z
 
 ## 4. 確認
 
-`release.yml` の run の成功、GitHub Release の asset、crates.io の `dagq` の `max_version` を確かめる。`release.yml` の成功の後、使い捨ての `HOME` で `claude plugin marketplace add hisamekms/dagq` と `claude plugin install claude-dagq@dagq` を行い、入った plugin の version が `X.Y.Z` であることを確かめる。コマンドは [reference/publish.md](reference/publish.md) の「4. 確認」。
+`release.yml` の run の成功（image の job を含む）、GitHub Release の asset、release notes の 2 つの image の digest、crates.io の `dagq` の `max_version` を確かめる。`release.yml` の成功の後、使い捨ての `HOME` で `claude plugin marketplace add hisamekms/dagq` と `claude plugin install claude-dagq@dagq` を行い、入った plugin の version が `X.Y.Z` であることを確かめる。コマンドは [reference/publish.md](reference/publish.md) の「4. 確認」。
 
 ## 5. 初回の自動 publish の確認（Trusted Publishing に切り替えて最初のリリースだけ）
 
@@ -45,7 +45,7 @@ Authenticate と Publish の step の成功と、rerun で publish が skip さ�
 
 ### 失敗したときの見どころ
 
-tag と version の不一致・Trusted Publisher の不一致・id-token 権限・crates.io の API の失敗の見分け方と直し方は [reference/publish.md](reference/publish.md) の「失敗したときの見どころ」。
+tag と version の不一致・Trusted Publisher の不一致・id-token 権限・crates.io の API の失敗・image の job の失敗の見分け方と直し方は [reference/publish.md](reference/publish.md) の「失敗したときの見どころ」。
 
 ## 6. 次の開発版へ上げる
 

@@ -15,6 +15,15 @@ curl -sS -A 'dagq-release (https://github.com/hisamekms/dagq)' \
 # X.Y.Z が出ること
 ```
 
+```sh
+gh release view vX.Y.Z --json body --jq .body | grep -F '@sha256:'
+# ghcr.io/hisamekms/dagq-control:X.Y.Z@sha256:... と dagq-run-base の同じ形の 2 行が出ること
+docker buildx imagetools inspect ghcr.io/hisamekms/dagq-control@sha256:...   # linux/amd64 と linux/arm64 が出ること（dagq-run-base も）
+gh attestation verify oci://ghcr.io/hisamekms/dagq-control@sha256:... --repo hisamekms/dagq   # 成功すること（dagq-run-base も）
+```
+
+GHCR の package は最初の publish で非公開のことがある。最初のリリースでは 2 つの package の Package settings で visibility を public にする（ADR-t3987-1 決定 4 の公開の registry）。
+
 crates.io の API は User-Agent の無い request を拒むので `-A` を付ける。publish するのは `dagq` の crate だけで、crates.io に既に出た broker の crate の版は残る。
 
 `release.yml` が成功したら、使い捨ての `HOME` で公式の手順の plugin が `X.Y.Z` で入ることを確かめる（ADR-t617-1。自分の `~/.claude` は変えない）:
@@ -60,3 +69,4 @@ gh run view <run-id> --log | grep -E 'Authenticate to crates.io|Publish to crate
 - **id-token 権限**: OIDC token が取れないエラー（`ACTIONS_ID_TOKEN_REQUEST_URL` が無い等）は、`release.yml` の `permissions:` に `id-token: write` が無いか、fork からの run。workflow の変更は dagq の task にする
 - **crates.io の API の失敗**: `crates.io answered HTTP <status>` で止まったら、時間を置いて rerun する
 - GitHub Release が出た後に crates.io だけ失敗しても、原因を直して rerun すれば Release は上書き、crates.io は publish される（ADR-0030 の Consequences）
+- **image の job の失敗**: `image-build`・`image-publish`・`image-record` のどれかが落ちると run が失敗する。binary と crates.io の step は先に終わっているので、原因を直せるものなら `gh run rerun <run-id> --failed` で続ける。tag の付いた manifest は rerun でも動かない。`Containerfile` を直すには次の version を出す

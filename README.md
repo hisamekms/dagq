@@ -6,7 +6,7 @@ You describe a problem to a planner session, which writes it down as a goal and 
 
 ## Requirements
 
-- **macOS on Apple Silicon (`aarch64-apple-darwin`).** No other platform is built, released, or tested.
+- **macOS on Apple Silicon (`aarch64-apple-darwin`).** No other platform is built, released, or tested as a host. Only the team version's Linux images are released for another platform ([Release](#release)).
 - **A terminal for the inbox.** You open the inbox with `dagq inbox` in any terminal or IDE. Workers and planners run in the background, and their output is read with `dagq run log` and `dagq planner log`.
 - **Claude Code**, signed in, on PATH. The inbox, the planners and the headless jobs (plan review, run review, recovery, goal review, observer) are Claude Code sessions, and workers are too unless a task asks for Codex. The Codex CLI is optional (`up --codex`, `add --provider codex`).
 - **Git.** The repository needs at least one commit on the branch dagq lands on ([Landing branch, remote and push](#landing-branch-remote-and-push)).
@@ -207,7 +207,7 @@ To use the plugin from the checkout instead of the installed one, pass `--plugin
 
 ### Release
 
-Releases are cut by a tag, following [`.claude/skills/release/SKILL.md`](.claude/skills/release/SKILL.md). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the GitHub Release (the `dagq` archive and `SHA256SUMS`) and publishes the `dagq` crate to crates.io. The plugin's marketplace is pinned to the release tag ([ADR-t617-1](docs/adr/2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md)):
+Releases are cut by a tag, following [`.claude/skills/release/SKILL.md`](.claude/skills/release/SKILL.md). [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the GitHub Release (the `dagq` archive and `SHA256SUMS`) and publishes the `dagq` crate to crates.io. After those, it publishes two container images to GHCR as one `linux/arm64` and `linux/amd64` manifest each: `dagq-control` (the control side: the binary and CA certificates only) and `dagq-run-base` (the base of runs). Each is tagged with the release's version only, has a build provenance attestation, and has its digest in the release notes. Pin an image by that digest ([ADR-t3990-3](docs/adr/2026-11-04-t3990-3-team-version-release-publishes-multi-arch-images-to-ghcr-pinned-by-digest.md)). The plugin's marketplace is pinned to the release tag ([ADR-t617-1](docs/adr/2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md)):
 
 1. The release change drops `-dev` from the version in `Cargo.toml`, `plugins/claude-dagq/.claude-plugin/plugin.json` and `Cargo.lock`. The same change points the `claude-dagq` entry of `.claude-plugin/marketplace.json` at the tag to come: `"source": {"source": "git-subdir", "url": "hisamekms/dagq", "path": "plugins/claude-dagq", "ref": "vX.Y.Z"}`, with no `version` in the entry. `sh scripts/check-plugin-version.sh` checks both.
 2. As soon as that change lands, push the tag `vX.Y.Z`. Until then the marketplace on main points at a tag that does not exist, and `claude plugin install` and `claude plugin update` fail. `release.yml` runs `scripts/check-plugin-version.sh --tag` and stops if the tag's marketplace entry does not point at the tag itself.
