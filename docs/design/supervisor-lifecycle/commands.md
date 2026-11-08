@@ -99,6 +99,7 @@ related:
 - 常駐・着地・jobのprocessと、queueがあるときの`up`・`down`・`rebind`はprocessごとのJSON Linesのファイルに書き、ほかのコマンドはstderrだけに出す。
 - logのファイルが開けない・書けないときもprocessは止めず、stderrだけで続ける。
 - 古いlogのファイルは、次にファイルを開くprocessが日数で消し、生きているprocessのファイルとruntimeが書かない名前のファイルは消さない。
+- このファイルの出力と保持はローカルの動きで、配置の設定でstoreを選んだ制御側はlogのファイルを作らず標準出力と標準エラーに出し、集めて保つのは配置の側である（[計測のOpenTelemetryとの対応](../measurement-otel.md)）。
 
 ## 復旧と束縛と依存図のコマンドをまたぐ約束
 

@@ -168,6 +168,7 @@ wrapperもDBを開かず、届かなければそのerrorで終わる。
 起動するprocessとbinaryは`infrastructure::queue_service::SystemQueueService`、終了条件は同moduleの`serve`が持つ。
 入れ替えの口は`application::queue_service::ensure_replaced`、supervisorの見張りは`application::supervise::host_ops::queue_service`のmodule doc、停止とdrainの境界は`application::lifecycle::down`を入口に読む。
 手で起動・停止する入口は`application::queue_service::start_by_hand`と同moduleの`stop_by_hand`。
+ローカルではserviceの出力を`service.log`に足すが、配置の設定でstoreを選んだ制御側はlogのファイルを作らず標準出力と標準エラーに出し、集めて保つのは配置の側である（[計測のOpenTelemetryとの対応](measurement-otel.md)）。
 更新の境界は[install](supervisor-lifecycle/install.md)を参照する。
 
 serviceが居ない間、supervisorは新しいclaimとqueueのjobの起動を控える。
@@ -183,6 +184,7 @@ supervisorが起動し直せないか、上限に達したか、届かないと�
 不在の間はqueueにattentionが無い。
 attentionの次の手は`dagq service status`。
 人はそれと`service.log`を見て、`up`か`service start`を打ち直す。
+`service.log`はローカルの動きで、配置の設定でstoreを選んだ制御側は標準出力と標準エラーに出すので、配置の側が集めたlogを見る（[計測のOpenTelemetryとの対応](measurement-otel.md)）。
 生きているsupervisorも居ないときは`restart supervisor`が出る。
 
 `status`と`watch`は届かないとき記録をDBを開かずに読んで添える（返し方は[hostのCLI](queue-service-host-cli.md#届かないとき)）。
