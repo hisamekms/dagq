@@ -1,7 +1,7 @@
 //! The check of an OIDC issuer's JWT with its keys remembered and fetched
 //! (ADR-t3985-1 decision 1): [`OidcVerifier::verify_jwt`] runs the decisions of
 //! [`crate::domain::oidc`] in order and fetches through
-//! [`OidcDocumentSource`]. No entry calls it yet.
+//! [`OidcDocumentSource`]. The HTTP human-token exchange calls it before writing.
 
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;

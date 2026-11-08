@@ -110,6 +110,11 @@ pub(super) const OPENERS: &[Opener] = &[
     row("src/compose/host.rs", "init_queue", Why::Init),
     row(
         "src/infrastructure/queue_service.rs",
+        "SqliteServiceBackend::principal",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service.rs",
         "SqliteServiceBackend::admin",
         Why::Service,
     ),

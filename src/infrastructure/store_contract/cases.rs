@@ -457,3 +457,63 @@ pub fn backend_parallel<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Res
     ensure!(parallel(Some("contract-backend-missing"))?.is_none());
     Ok(())
 }
+
+/// Registry CRUD, uniqueness of the identity pair, and disabled rows survive
+/// reopening on both real adapters. No authentication decisions live here.
+pub fn members<
+    S: ContractStore + crate::application::queue_service::MemberStore,
+    F: Fn() -> Result<S>,
+>(
+    open: &F,
+) -> Result<()> {
+    use crate::domain::{
+        oidc::OidcIdentity,
+        queue_service::{Member, TeamRole},
+    };
+    let store = open()?;
+    let identity = OidcIdentity {
+        issuer: "https://contract.example".into(),
+        subject: "person".into(),
+    };
+    let member = Member {
+        identity: identity.clone(),
+        role: TeamRole::Admin,
+        on_call: true,
+        display_name: Some("Registry Name".into()),
+        created_at: 100,
+        disabled_at: None,
+    };
+    ensure!(store.member(&identity)?.is_none());
+    store.add_member(&member)?;
+    ensure!(open()?.member(&identity)? == Some(member.clone()));
+    ensure!(store.add_member(&member).is_err());
+    let other = Member {
+        identity: OidcIdentity {
+            issuer: "https://other.example".into(),
+            ..identity.clone()
+        },
+        role: TeamRole::Member,
+        on_call: false,
+        display_name: None,
+        ..member.clone()
+    };
+    store.add_member(&other)?;
+    ensure!(open()?.member(&other.identity)? == Some(other.clone()));
+    ensure!(store.disable_member(&identity, 200)?);
+    ensure!(!store.disable_member(&identity, 201)?);
+    ensure!(
+        open()?.member(&identity)?
+            == Some(Member {
+                disabled_at: Some(200),
+                ..member
+            })
+    );
+    ensure!(open()?.member(&other.identity)? == Some(other));
+    let tx = store.write_entry("contract_members_cleanup")?;
+    tx.execute(
+        "DELETE FROM members WHERE subject = ?1",
+        sql_params!["person"],
+    )?;
+    S::commit(tx)?;
+    Ok(())
+}

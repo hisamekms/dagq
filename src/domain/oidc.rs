@@ -19,7 +19,7 @@ use ring::signature::{
     ECDSA_P256_SHA256_FIXED, ED25519, RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents,
     UnparsedPublicKey,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// The clock difference allowed on `exp`, `nbf` and `iat`: 60 seconds.
@@ -104,7 +104,7 @@ impl OidcConfig {
 }
 
 /// Who a token says it is, the whole of a person's identity.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OidcIdentity {
     pub issuer: String,
     pub subject: String,

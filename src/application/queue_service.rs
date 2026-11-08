@@ -60,6 +60,13 @@ use crate::domain::{
 /// What the issue's transaction reads of the queue for a token held
 /// already ([`ServiceQueue::issuing`], ADR-t3102-1 decision 2).
 pub trait IssueFacts {
+    /// Read in the issue transaction, before writing a human token record.
+    fn member(
+        &self,
+        _identity: &crate::domain::oidc::OidcIdentity,
+    ) -> Result<Option<crate::domain::queue_service::Member>> {
+        Ok(None)
+    }
     /// Whether the supervisor's registration `token` is kept, which tells
     /// whether a supervisor kept as a token's parent is still there
     /// ([`crate::domain::queue_service::TokenIssuer::there`]).
@@ -187,8 +194,28 @@ pub trait ServiceQueue:
     fn write(&mut self, write: &QueueWrite, actor: &ActorContext) -> Result<Value>;
 }
 
+/// Registry operations are store ports, not commands exposed to a caller.
+pub trait MemberStore {
+    fn member(
+        &self,
+        identity: &crate::domain::oidc::OidcIdentity,
+    ) -> Result<Option<crate::domain::queue_service::Member>>;
+    fn add_member(&self, member: &crate::domain::queue_service::Member) -> Result<()>;
+    fn disable_member(&self, identity: &crate::domain::oidc::OidcIdentity, at: i64)
+    -> Result<bool>;
+}
+
 /// What the service runs its use cases on.
 pub trait ServiceBackend: Send + Sync {
+    /// Write only a hashed record; the value is returned, never a credential file.
+    fn issue_human(&self, _principal: &Principal, _expires: i64) -> Result<(String, String)> {
+        anyhow::bail!("human tokens unavailable")
+    }
+    /// Remove only expired records, after a successful exchange COMMIT.
+    fn clean_human_tokens(&self, _now: i64) -> Result<()> {
+        Ok(())
+    }
+
     /// The principal `token` was issued for; `None` for a token the
     /// control side did not issue or has revoked.
     fn principal(&self, token: &str) -> Result<Option<Principal>>;
@@ -505,7 +532,7 @@ pub enum Peer {
     /// Anything else, or a peer that could not be read.
     Other,
     /// No peer to read: a transport that carries the request from elsewhere
-    /// (the HTTP entrance). Only the token says who it is, and every use case
+    /// (the HTTP entrance). Only the token says who it is, and every ordinary use case
     /// asks for one: `hello`, which a local caller's look answers with none,
     /// tells this service's build and pid to no one it has not identified.
     /// The checks run in the same order as for the other peers.
@@ -564,6 +591,9 @@ impl QueueService<'_> {
                 ),
             );
         }
+        if request.use_case == UseCase::ExchangeToken {
+            return refuse_human(self.backend); // Only the HTTP composition calls exchange_human.
+        }
         let hello = || {
             ServiceResponse::success(json!({
                 "service": "dagq-queue-service",
@@ -573,7 +603,7 @@ impl QueueService<'_> {
                 "min_api_version": MIN_API_VERSION,
             }))
         };
-        if request.use_case == UseCase::Hello && peer != Peer::Absent {
+        if request.use_case == UseCase::Hello && peer != Peer::Absent && request.token.is_none() {
             return hello();
         }
         let connection = connection(request.use_case, &request.params);
@@ -762,6 +792,12 @@ impl QueueService<'_> {
                 ));
             }
         };
+        if principal.human.is_some() && peer != Peer::Absent {
+            return Err(refuse(
+                "unknown_token",
+                "human tokens require the HTTP entrance",
+            ));
+        }
         if let Some(session) = &principal.session
             && !self.backend.session_alive(session)
         {
@@ -2010,7 +2046,7 @@ fn run(
         UseCase::Supervisor | UseCase::Control => {
             unreachable!("a supervisor's and a control-side command's requests are answered apart")
         }
-        UseCase::IssueToken | UseCase::RevokeToken => {
+        UseCase::ExchangeToken | UseCase::IssueToken | UseCase::RevokeToken => {
             unreachable!("an issue and a revocation are answered apart")
         }
         UseCase::Migrate | UseCase::CommitMessages | UseCase::Init | UseCase::Doctor => {
@@ -2968,6 +3004,107 @@ pub fn stop_by_hand(
     Ok(report)
 }
 
+/// Uniform refusal: neither failed JWT verification nor registry state is revealed.
+pub fn human_refusal() -> ServiceResponse {
+    ServiceResponse::failure(
+        ServiceErrorCode::Unauthenticated,
+        "human authentication failed",
+    )
+}
+
+/// The one reason [`refuse_human`] records for every refused exchange: a
+/// JWT that does not verify, an entrance with no configured issuer, a
+/// person not registered or disabled, and the socket's refusal. Like the
+/// answer, the record tells none of them from another.
+pub const EXCHANGE_REFUSED: &str = "exchange_refused";
+
+/// [`human_refusal`], recorded as `queue_service_unauthenticated` with the
+/// use case and [`EXCHANGE_REFUSED`] alone, never the JWT, its claims nor a
+/// token, as [`QueueService::authenticate`] records its refusals. A record
+/// that fails is logged and leaves the answer as it is.
+pub fn refuse_human(backend: &dyn ServiceBackend) -> ServiceResponse {
+    let payload = json!({"use_case": UseCase::ExchangeToken, "reason": EXCHANGE_REFUSED});
+    if let Err(error) = backend.record_unauthenticated(payload) {
+        warn!("could not record the refused token exchange: {error:#}");
+    }
+    human_refusal()
+}
+
+/// The HTTP exchange's answer once its JWT is `verified`, or refused
+/// (`None`: no configured issuer, no JWT, or one that does not verify),
+/// run on the service's write line: [`exchange_human`], or
+/// [`refuse_human`].
+pub fn exchange_verified(
+    backend: &dyn ServiceBackend,
+    verified: Option<&crate::domain::oidc::VerifiedJwt>,
+) -> ServiceResponse {
+    match verified {
+        Some(verified) => exchange_human(backend, verified),
+        None => refuse_human(backend),
+    }
+}
+
+/// Called only by HTTP after verification (including network key fetching),
+/// and on the service's write line. Registration and role are read under
+/// `issuing`'s write transaction; a failed COMMIT undoes the hashed record.
+/// A person not registered or disabled is refused by [`refuse_human`].
+pub fn exchange_human(
+    backend: &dyn ServiceBackend,
+    verified: &crate::domain::oidc::VerifiedJwt,
+) -> ServiceResponse {
+    use crate::domain::queue_service::{HumanToken, exchange_member};
+    let run = || -> Result<Value> {
+        let mut queue = backend.open(&Principal::user().actor())?;
+        let now = backend.now_ms() / 1000;
+        let principal = Principal::human(verified.identity.clone());
+        let result = issuing_undone(
+            || backend.hold_issues(),
+            |held, then| queue.issuing(held, now * 1000, then),
+            &IssueHeld::Nothing,
+            &mut |facts| {
+                let member = facts.member(&verified.identity)?;
+                let Some((member, expires_at)) =
+                    exchange_member(Ok(verified), member.as_ref(), now)
+                else {
+                    return Err(HumanRefused.into());
+                };
+                let (token, record) = backend.issue_human(&principal, expires_at)?;
+                // Serialization of this fixed shape cannot fail after writing.
+                let value = serde_json::to_value(HumanToken {
+                    token,
+                    issuer: member.identity.issuer.clone(),
+                    subject: member.identity.subject.clone(),
+                    role: member.role,
+                    on_call: member.on_call,
+                    display_name: member.display_name.clone(),
+                    expires_at,
+                })
+                .expect("human token JSON");
+                Ok((value, Some(record)))
+            },
+            |record| backend.revoke_record(&principal, record),
+        )?;
+        if let Err(error) = backend.clean_human_tokens(now) {
+            warn!("could not remove expired human token records: {error:#}");
+        }
+        Ok(result)
+    };
+    match run() {
+        Ok(value) => ServiceResponse::success(value),
+        Err(error) if error.is::<HumanRefused>() => refuse_human(backend),
+        Err(error) => respond(Err(error)),
+    }
+}
+
+#[derive(Debug)]
+struct HumanRefused;
+impl std::fmt::Display for HumanRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("human authentication failed")
+    }
+}
+impl std::error::Error for HumanRefused {}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::cell::RefCell;
@@ -3077,6 +3214,7 @@ pub(crate) mod tests {
     /// One queue: task 1 with run `r1` in `status`; everything it was
     /// asked to write is kept.
     struct Queue {
+        human: std::sync::Arc<Mutex<HumanMemory>>,
         status: RunStatus,
         log: std::sync::Arc<Mutex<Vec<Value>>>,
         denials: RefCell<Vec<Value>>,
@@ -3371,9 +3509,16 @@ pub(crate) mod tests {
             &mut self,
             _: &crate::domain::queue_service::IssueHeld,
             _: i64,
-            _: &mut dyn FnMut(&dyn IssueFacts) -> Result<Value>,
+            then: &mut dyn FnMut(&dyn IssueFacts) -> Result<Value>,
         ) -> Result<Value> {
-            unimplemented!("these tests issue no token")
+            self.human.lock().unwrap().in_transaction = true;
+            let result = then(&HumanFacts(self.human.clone()));
+            let mut memory = self.human.lock().unwrap();
+            memory.in_transaction = false;
+            if memory.fail_commit {
+                anyhow::bail!("COMMIT failed");
+            }
+            result
         }
         fn begin_landing(
             &mut self,
@@ -3424,6 +3569,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) struct Backend {
+        human: std::sync::Arc<Mutex<HumanMemory>>,
         status: RunStatus,
         pub(crate) log: std::sync::Arc<Mutex<Vec<Value>>>,
         /// The queue is at an older schema: as the SQLite backend, it
@@ -3447,15 +3593,50 @@ pub(crate) mod tests {
                 log: self.log.clone(),
                 denials: RefCell::default(),
                 reading: self.reading.clone(),
+                human: self.human.clone(),
             }))
         }
     }
 
     impl ServiceBackend for Backend {
+        fn issue_human(&self, principal: &Principal, expires: i64) -> Result<(String, String)> {
+            let mut memory = self.human.lock().unwrap();
+            assert!(
+                memory.in_transaction,
+                "record written while transaction held"
+            );
+            memory.counter += 1;
+            let token = format!("human-token-{}", memory.counter);
+            memory
+                .records
+                .insert(token.clone(), (principal.clone(), Some(expires)));
+            Ok((token.clone(), token))
+        }
+        fn clean_human_tokens(&self, now: i64) -> Result<()> {
+            let mut memory = self.human.lock().unwrap();
+            assert!(!memory.in_transaction, "cleanup after COMMIT");
+            if memory.fail_cleanup {
+                anyhow::bail!("cleanup failed");
+            }
+            memory
+                .records
+                .retain(|_, (_, expires)| !expires.is_some_and(|e| now >= e));
+            Ok(())
+        }
         fn heavy_reads(&self) -> Option<&HeavyReads> {
             self.heavy_reads.as_ref()
         }
         fn principal(&self, token: &str) -> Result<Option<Principal>> {
+            let memory = self.human.lock().unwrap();
+            if let Some((principal, expires)) = memory.records.get(token) {
+                return Ok(crate::domain::queue_service::human_token_live(
+                    *expires,
+                    memory.member.as_ref(),
+                    memory.now,
+                )
+                .then(|| principal.clone()));
+            }
+            drop(memory);
             let run = RunId::new("r1")?;
             Ok(match token {
                 "worker" => Some(Principal::worker(&run, TaskId::new(1))),
@@ -3540,7 +3721,7 @@ pub(crate) mod tests {
             Ok(())
         }
         fn now_ms(&self) -> i64 {
-            0
+            self.human.lock().unwrap().now * 1000
         }
         fn db(&self) -> &std::path::Path {
             std::path::Path::new("queue.db")
@@ -3589,14 +3770,16 @@ pub(crate) mod tests {
         ) -> Result<Vec<(String, crate::domain::queue_service::HeldToken)>> {
             Ok(Vec::new())
         }
-        fn revoke_record(&self, _: &Principal, _: &str) -> Result<bool> {
-            unimplemented!("these tests revoke no token")
+        fn revoke_record(&self, _: &Principal, name: &str) -> Result<bool> {
+            let mut memory = self.human.lock().unwrap();
+            assert!(!memory.in_transaction, "undo after transaction completion");
+            Ok(memory.records.remove(name).is_some())
         }
         fn written_record(&self, _: &str) -> Result<Option<String>> {
             unimplemented!("these tests issue no token")
         }
         fn hold_issues(&self) -> Result<Box<dyn std::any::Any>> {
-            unimplemented!("these tests issue no token")
+            Ok(Box::new(()))
         }
         fn issue_telemetry_as(
             &self,
@@ -3618,7 +3801,305 @@ pub(crate) mod tests {
             opened: Mutex::default(),
             heavy_reads: None,
             reading: std::sync::Arc::default(),
+            human: std::sync::Arc::default(),
         }
+    }
+
+    #[derive(Default)]
+    struct HumanMemory {
+        member: Option<crate::domain::queue_service::Member>,
+        records: std::collections::HashMap<String, (Principal, Option<i64>)>,
+        counter: usize,
+        now: i64,
+        in_transaction: bool,
+        fail_commit: bool,
+        fail_cleanup: bool,
+    }
+
+    struct HumanFacts(std::sync::Arc<Mutex<HumanMemory>>);
+    impl IssueFacts for HumanFacts {
+        fn member(
+            &self,
+            _: &crate::domain::oidc::OidcIdentity,
+        ) -> Result<Option<crate::domain::queue_service::Member>> {
+            let memory = self.0.lock().unwrap();
+            assert!(
+                memory.in_transaction,
+                "registry and role read in write transaction"
+            );
+            Ok(memory.member.clone())
+        }
+        fn registered(&self, token: &crate::domain::LeaseToken) -> bool {
+            Kept.registered(token)
+        }
+        fn job(
+            &self,
+            held: &crate::domain::queue_service::HeldToken,
+            starting: Option<&crate::domain::queue_service::TokenIssuer>,
+        ) -> crate::domain::queue_service::JobState {
+            Kept.job(held, starting)
+        }
+        fn target_start(
+            &self,
+            target: &StepTarget,
+        ) -> Result<Option<crate::domain::queue_service::TargetStart>> {
+            Kept.target_start(target)
+        }
+    }
+
+    fn human_fixture() -> (Backend, crate::domain::oidc::VerifiedJwt) {
+        use crate::domain::{
+            oidc::{OidcIdentity, VerifiedJwt},
+            queue_service::{Member, TeamRole},
+        };
+        let backend = backend(RunStatus::Running);
+        let identity = OidcIdentity {
+            issuer: "https://idp.example".into(),
+            subject: "person".into(),
+        };
+        backend.human.lock().unwrap().member = Some(Member {
+            identity: identity.clone(),
+            role: TeamRole::Admin,
+            on_call: true,
+            display_name: Some("Registry Name".into()),
+            created_at: 0,
+            disabled_at: None,
+        });
+        (
+            backend,
+            VerifiedJwt {
+                identity,
+                claims: serde_json::Map::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn human_exchange_returns_registry_display_and_authenticates_only_over_http() {
+        let (backend, mut jwt) = human_fixture();
+        for name in ["IdP Name", "changed"] {
+            jwt.claims.insert("name".into(), json!(name));
+            let response = exchange_human(&backend, &jwt);
+            assert!(response.ok, "{response:?}");
+            let result = response.result.unwrap();
+            assert_eq!(result["display_name"], "Registry Name");
+            assert_eq!(result["issuer"], jwt.identity.issuer);
+            assert_eq!(result["subject"], jwt.identity.subject);
+            assert_eq!(result["role"], "admin");
+            assert_eq!(result["on_call"], true);
+            assert_eq!(result["expires_at"], 900);
+            let token = result["token"].as_str().unwrap();
+            let service = QueueService {
+                backend: &backend,
+                build: "b",
+                pid: 1,
+            };
+            let hello = request(Some(token), UseCase::Hello, json!({}));
+            assert!(service.handle_from(&hello, Peer::Absent).ok);
+            let show = request(Some(token), UseCase::Show, json!({"id": 1}));
+            for peer in [Peer::Owner, Peer::Other] {
+                assert_eq!(
+                    code(&service.handle_from(&hello, peer)),
+                    Some(ServiceErrorCode::Unauthenticated)
+                );
+                assert_eq!(
+                    code(&service.handle_from(&show, peer)),
+                    Some(ServiceErrorCode::Unauthenticated)
+                );
+            }
+            assert!(
+                !serde_json::to_string(&*backend.log.lock().unwrap())
+                    .unwrap()
+                    .contains(token)
+            );
+        }
+        backend
+            .human
+            .lock()
+            .unwrap()
+            .member
+            .as_mut()
+            .unwrap()
+            .display_name = None;
+        assert!(
+            exchange_human(&backend, &jwt)
+                .result
+                .unwrap()
+                .get("display_name")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn human_registration_refusals_are_indistinguishable_and_commit_failure_undoes_record() {
+        let (backend, jwt) = human_fixture();
+        let original = backend.human.lock().unwrap().member.clone();
+        for row in [
+            None,
+            original.map(|mut m| {
+                m.disabled_at = Some(1);
+                m
+            }),
+        ] {
+            backend.human.lock().unwrap().member = row;
+            assert_eq!(
+                serde_json::to_value(exchange_human(&backend, &jwt)).unwrap(),
+                serde_json::to_value(human_refusal()).unwrap()
+            );
+            assert!(backend.human.lock().unwrap().records.is_empty());
+        }
+        let (backend, jwt) = human_fixture();
+        backend.human.lock().unwrap().fail_commit = true;
+        assert!(!exchange_human(&backend, &jwt).ok);
+        assert!(backend.human.lock().unwrap().records.is_empty());
+        assert!(backend.principal("human-token-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn human_expiry_disabling_and_lost_records_refuse_the_next_call() {
+        let (backend, jwt) = human_fixture();
+        let response = exchange_human(&backend, &jwt).result.unwrap();
+        let token = response["token"].as_str().unwrap();
+        for (now, disabled, lost, live) in [
+            (899, false, false, true),
+            (900, false, false, false),
+            (0, true, false, false),
+            (0, false, true, false),
+        ] {
+            let mut memory = backend.human.lock().unwrap();
+            memory.now = now;
+            memory.member.as_mut().unwrap().disabled_at = disabled.then_some(1);
+            if lost {
+                memory.records.remove(token);
+            }
+            drop(memory);
+            assert_eq!(backend.principal(token).unwrap().is_some(), live);
+            let service = QueueService {
+                backend: &backend,
+                build: "b",
+                pid: 1,
+            };
+            let response = service.handle_from(
+                &request(Some(token), UseCase::Show, json!({"id": 1})),
+                Peer::Absent,
+            );
+            assert_eq!(
+                code(&response) == Some(ServiceErrorCode::Unauthenticated),
+                !live
+            );
+        }
+    }
+
+    #[test]
+    fn human_exchange_cleans_only_expired_records_after_commit_and_cleanup_failure_is_nonfatal() {
+        let (backend, jwt) = human_fixture();
+        for (name, expires) in [
+            ("expired", Some(0)),
+            ("other-device", Some(900)),
+            ("worker-record", None),
+        ] {
+            backend.human.lock().unwrap().records.insert(
+                name.into(),
+                (Principal::human(jwt.identity.clone()), expires),
+            );
+        }
+        assert!(exchange_human(&backend, &jwt).ok);
+        let memory = backend.human.lock().unwrap();
+        assert!(!memory.records.contains_key("expired"));
+        for key in ["other-device", "worker-record", "human-token-1"] {
+            assert!(memory.records.contains_key(key));
+        }
+        drop(memory);
+        backend.human.lock().unwrap().fail_cleanup = true;
+        assert!(exchange_human(&backend, &jwt).ok);
+        assert!(
+            backend
+                .human
+                .lock()
+                .unwrap()
+                .records
+                .contains_key("human-token-1")
+        );
+    }
+
+    #[test]
+    fn every_refused_exchange_is_recorded_with_one_reason_and_no_credential() {
+        let (backend, jwt) = human_fixture();
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let socket = request(
+            None,
+            UseCase::ExchangeToken,
+            json!({"jwt": "secret.jwt.value"}),
+        );
+        assert_eq!(
+            code(&service.handle_from(&socket, Peer::Owner)),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        // No issuer, no JWT, or a JWT that does not verify.
+        assert_eq!(
+            code(&exchange_verified(&backend, None)),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        let original = backend.human.lock().unwrap().member.clone();
+        let disabled = original.clone().map(|mut member| {
+            member.disabled_at = Some(1);
+            member
+        });
+        for row in [None, disabled] {
+            backend.human.lock().unwrap().member = row;
+            assert_eq!(
+                code(&exchange_verified(&backend, Some(&jwt))),
+                Some(ServiceErrorCode::Unauthenticated)
+            );
+        }
+        backend.human.lock().unwrap().member = original;
+        let issued = exchange_verified(&backend, Some(&jwt)).result.unwrap();
+        let refused = json!({"use_case": "exchange_token", "reason": EXCHANGE_REFUSED});
+        assert_eq!(
+            *backend.log.lock().unwrap(),
+            vec![refused; 4],
+            "an issue records no refusal"
+        );
+        let log = serde_json::to_string(&*backend.log.lock().unwrap()).unwrap();
+        let token = issued["token"].as_str().unwrap();
+        for credential in ["secret.jwt.value", &jwt.identity.subject, token] {
+            assert!(!log.contains(credential), "{credential}");
+        }
+    }
+
+    #[test]
+    fn socket_exchange_and_jwt_bearers_never_authenticate() {
+        let (backend, _) = human_fixture();
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        for peer in [Peer::Owner, Peer::Other, Peer::Absent] {
+            let exchange = request(
+                None,
+                UseCase::ExchangeToken,
+                json!({"jwt": "secret.jwt.value"}),
+            );
+            assert_eq!(
+                code(&service.handle_from(&exchange, peer)),
+                Some(ServiceErrorCode::Unauthenticated)
+            );
+            let show = request(Some("secret.jwt.value"), UseCase::Show, json!({"id": 1}));
+            assert_eq!(
+                code(&service.handle_from(&show, peer)),
+                Some(ServiceErrorCode::Unauthenticated)
+            );
+        }
+        assert!(
+            !serde_json::to_string(&*backend.log.lock().unwrap())
+                .unwrap()
+                .contains("secret.jwt.value")
+        );
     }
 
     /// The issue's facts with every registration kept and no job's
@@ -6161,6 +6642,7 @@ pub(crate) mod tests {
                 log: Default::default(),
                 denials: RefCell::default(),
                 reading: std::sync::Arc::default(),
+                human: std::sync::Arc::default(),
             };
             let error = authorize_supervisor(&mut queue, &actor, false).unwrap_err();
             let refused = error.downcast_ref::<AuthorizationError>().unwrap();
@@ -6189,6 +6671,7 @@ pub(crate) mod tests {
             log: Default::default(),
             denials: RefCell::default(),
             reading: std::sync::Arc::default(),
+            human: std::sync::Arc::default(),
         };
         let supervisor = ActorContext::instance(ActorRole::Supervisor, 7);
         authorize_supervisor(&mut queue, &supervisor, true).unwrap();

@@ -320,9 +320,18 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 // --- Tokens (ADR-t1233-4 decision 4) ---------------------------------------
 
-/// What a token's record holds: its principal and when it was issued.
+/// A hashed token record, `tokens/<sha256 of the value>.json`: the
+/// principal and the issue's time, with the lease or the parent it was
+/// issued under. Human tokens also carry an absolute Unix-second expiry
+/// ([`crate::domain::queue_service::HUMAN_TOKEN_SECONDS`] after the
+/// exchange), but never roles. Their values are returned only in the response;
+/// no credentials file is written. These records live only on the control
+/// side's filesystem: replacing its container may lose even unexpired
+/// tokens, which then authenticate as unknown_token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TokenRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at: Option<i64>,
     principal: Principal,
     issued_at: i64,
     /// The lease (the supervisor's token) an executor's telemetry token was
@@ -452,6 +461,47 @@ pub fn issue_by(
     write_token(queue_dir, principal, None, Some(issuer), now)
 }
 
+/// Write only the record; an independent login never replaces another.
+fn write_human_token(
+    queue_dir: &Path,
+    principal: &Principal,
+    expires: i64,
+    now: i64,
+) -> Result<(String, String)> {
+    ensure!(
+        principal.human.is_some() && principal.check().is_ok(),
+        "human identity required"
+    );
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|_| anyhow!("draw human token random bytes"))?;
+    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let record = TokenRecord {
+        principal: principal.clone(),
+        issued_at: now,
+        expires_at: Some(expires),
+        issued_by: None,
+        issued_under: None,
+    };
+    private_dir(&service_dir(queue_dir).join(TOKENS_DIR))?;
+    let path = record_path(queue_dir, &token);
+    write_private(&path, &serde_json::to_vec(&record)?)?;
+    Ok((
+        token,
+        path.file_stem().unwrap().to_string_lossy().into_owned(),
+    ))
+}
+
+fn clean_human_tokens(queue_dir: &Path, now: i64) -> Result<()> {
+    for (path, record) in records(queue_dir)? {
+        if record.expires_at.is_some_and(|expires| now >= expires)
+            && let Err(error) = fs::remove_file(path)
+        {
+            warn!("could not remove expired human token record: {error}");
+        }
+    }
+    Ok(())
+}
+
 /// The token the file of `key` ([`Principal::credential_key`]) holds, its
 /// principal and who asked for it; `None` for no token.
 pub fn held(queue_dir: &Path, key: &str) -> Result<Option<HeldToken>> {
@@ -550,6 +600,10 @@ fn write_token(
     issued_by: Option<&TokenIssuer>,
     now: i64,
 ) -> Result<IssuedToken> {
+    ensure!(
+        principal.human.is_none(),
+        "human tokens require the HTTP exchange"
+    );
     principal.check().map_err(anyhow::Error::msg)?;
     let key = principal.credential_key();
     // Two inboxes opened at once revoke and write one after the other, so
@@ -572,6 +626,7 @@ fn write_token(
         private_dir(&service_dir(queue_dir).join(dir))?;
     }
     let record = TokenRecord {
+        expires_at: None,
         principal: principal.clone(),
         issued_at: now,
         issued_under: issued_under.cloned(),
@@ -937,6 +992,14 @@ fn sweep_one(queue_dir: &Path, record: &Path, principal: &Principal) -> Result<(
 /// The principal `token` was issued for, `None` for one never issued or
 /// revoked.
 pub fn lookup(queue_dir: &Path, token: &str) -> Result<Option<Principal>> {
+    // Human token validation also needs the registry; only the backend may
+    // authenticate it. Host-side lookup deliberately accepts no humans.
+    Ok(lookup_record(queue_dir, token)?
+        .filter(|r| r.principal.human.is_none())
+        .map(|r| r.principal))
+}
+
+fn lookup_record(queue_dir: &Path, token: &str) -> Result<Option<TokenRecord>> {
     // A hex value of the issued length only: no other text names a file.
     if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Ok(None);
@@ -948,7 +1011,7 @@ pub fn lookup(queue_dir: &Path, token: &str) -> Result<Option<Principal>> {
         Err(error) => return Err(error).context("read a token's record"),
     };
     let record: TokenRecord = serde_json::from_slice(&bytes).context("a token's record")?;
-    Ok(Some(record.principal))
+    Ok(Some(record))
 }
 
 /// The value of the token in `file`, as a caller reads the file it was
@@ -3102,8 +3165,48 @@ pub(crate) fn owner_gone(owner: Option<u32>) -> bool {
 pub fn serve(options: &ServeOptions) -> Result<Value> {
     let config = super::deployment_config::DeploymentConfig::from_process()?;
     config.store.check_usable(cfg!(feature = "postgres"))?;
+    let oidc = deployment_verifier(
+        config.value("DAGQ_OIDC_ISSUER"),
+        config.value("DAGQ_OIDC_AUDIENCE"),
+        HUMAN_EXCHANGE_OPEN,
+    )?;
     let http = config.http.map(HttpStart::Deployment);
-    serve_on(options, http)
+    serve_on(options, http, oidc)
+}
+
+/// Whether the production entry [`serve`] opens the human exchange to a
+/// deployment that names its issuer. It stays shut until a human
+/// principal's registry role is mapped onto its authorization: until then a
+/// human token would be authorized as the unrestricted user, past what
+/// ADR-t3985-1 decision 3 gives a member. The change that maps the role
+/// opens it. A test opens the exchange with [`serve_with_http_oidc`].
+const HUMAN_EXCHANGE_OPEN: bool = false;
+
+/// The verifier [`serve`] gives the HTTP exchange from the deployment's
+/// `issuer` and `audience`, which fetches the issuer's keys with the HTTPS
+/// adapter: `None`, so that the exchange refuses as with no issuer, when
+/// either is unset or the exchange is not `open` ([`HUMAN_EXCHANGE_OPEN`]).
+/// An issuer that is not `https` or an empty audience is refused either way.
+fn deployment_verifier(
+    issuer: Option<&str>,
+    audience: Option<&str>,
+    open: bool,
+) -> Result<Option<Arc<dyn HumanVerifier>>> {
+    let (Some(issuer), Some(audience)) = (issuer, audience) else {
+        return Ok(None);
+    };
+    let config = crate::domain::oidc::OidcConfig::new(issuer, audience)?;
+    if !open {
+        warn!(
+            "the deployment names an OIDC issuer, but the human token exchange is shut: \
+             it refuses every JWT until a human's role is mapped onto authorization"
+        );
+        return Ok(None);
+    }
+    Ok(Some(Arc::new(crate::application::oidc::OidcVerifier::new(
+        config,
+        super::oidc_keys::HttpsDocumentSource::default(),
+    ))))
 }
 
 /// [`serve`] that also takes requests on `http`, the HTTP entrance
@@ -3112,7 +3215,7 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
 /// listener entry is for callers that already decided their configuration;
 /// the production entry [`serve`] reads the deployment settings.
 pub fn serve_with_http(options: &ServeOptions, http: TcpListener) -> Result<Value> {
-    serve_on(options, Some(HttpStart::Bound(http)))
+    serve_on(options, Some(HttpStart::Bound(http)), None)
 }
 
 enum HttpStart {
@@ -3120,7 +3223,44 @@ enum HttpStart {
     Deployment(super::deployment_config::HttpConfig),
 }
 
-fn serve_on(options: &ServeOptions, http: Option<HttpStart>) -> Result<Value> {
+/// An explicitly composed HTTP entrance with its exchange open: tests
+/// provide a document source. The production entry [`serve`] composes the
+/// HTTPS adapter, and keeps the exchange shut ([`HUMAN_EXCHANGE_OPEN`]). No
+/// environment switch injects keys.
+pub fn serve_with_http_oidc<S: crate::application::oidc::OidcDocumentSource + 'static>(
+    options: &ServeOptions,
+    http: TcpListener,
+    config: crate::domain::oidc::OidcConfig,
+    source: S,
+) -> Result<Value> {
+    let verifier = Arc::new(crate::application::oidc::OidcVerifier::new(config, source));
+    serve_on(options, Some(HttpStart::Bound(http)), Some(verifier))
+}
+
+trait HumanVerifier: Send + Sync {
+    fn verify(
+        &self,
+        jwt: &str,
+        now: i64,
+    ) -> Result<crate::domain::oidc::VerifiedJwt, crate::domain::oidc::JwtRefusal>;
+}
+impl<S: crate::application::oidc::OidcDocumentSource> HumanVerifier
+    for crate::application::oidc::OidcVerifier<S>
+{
+    fn verify(
+        &self,
+        jwt: &str,
+        now: i64,
+    ) -> Result<crate::domain::oidc::VerifiedJwt, crate::domain::oidc::JwtRefusal> {
+        self.verify_jwt(jwt, now)
+    }
+}
+
+fn serve_on(
+    options: &ServeOptions,
+    http: Option<HttpStart>,
+    oidc: Option<Arc<dyn HumanVerifier>>,
+) -> Result<Value> {
     let queue_dir = queue_dir_of(&options.db);
     ensure!(options.db.is_file(), "no queue at {}", options.db.display());
     let dir = service_dir(&queue_dir);
@@ -3285,7 +3425,7 @@ accepts: schema {} to {}",
         .map(|(listener, tls)| {
             super::queue_service_http::open_tls(
                 listener,
-                http_answerer(backend.clone(), pid, reads.clone()),
+                http_answerer(backend.clone(), pid, reads.clone(), oidc.clone()),
                 options.poll,
                 tls,
             )
@@ -3444,14 +3584,46 @@ fn answer_request(
     Ok(answer_read(read, backend, pid, (peer, process), reads)?.line)
 }
 
+/// Only this HTTP exchange calls JWT verification; with no configured
+/// issuer or with any verification failure it reveals the same refusal.
+fn exchange_identity(
+    oidc: Option<&dyn HumanVerifier>,
+    params: &Value,
+    now: i64,
+) -> Option<crate::domain::oidc::VerifiedJwt> {
+    let verifier = oidc?;
+    let jwt = params.get("jwt")?.as_str()?;
+    verifier.verify(jwt, now).ok()
+}
+
 /// How the HTTP entrance has its requests answered: with no peer, by the
 /// service of `backend`.
 fn http_answerer(
     backend: Arc<SqliteServiceBackend>,
     pid: u32,
     reads: Arc<super::startup_reads::StartupReads>,
+    oidc: Option<Arc<dyn HumanVerifier>>,
 ) -> HttpAnswerer {
-    Arc::new(move |request| answer_read(Ok(request), &backend, pid, (Peer::Absent, None), &reads))
+    Arc::new(move |request| {
+        if request.use_case == UseCase::ExchangeToken {
+            let verified =
+                exchange_identity(oidc.as_deref(), &request.params, backend.now_ms() / 1000);
+            let on = backend.clone();
+            let exchange = move || LineAnswer {
+                response: crate::application::queue_service::exchange_verified(
+                    &*on,
+                    verified.as_ref(),
+                ),
+                notes: RequestNotes::default(),
+            };
+            let answer = match &backend.write_line {
+                Some(line) => line.line.run(exchange)?,
+                None => exchange(),
+            };
+            return Ok(answered_of(&answer.response, Some(request.use_case))?.0);
+        }
+        answer_read(Ok(request), &backend, pid, (Peer::Absent, None), &reads)
+    })
 }
 
 /// The answer to a request as its transport read it (`Err`: the refusal of
@@ -3873,7 +4045,30 @@ impl ServiceBackend for SqliteServiceBackend {
     }
 
     fn principal(&self, token: &str) -> Result<Option<Principal>> {
-        lookup(&self.queue_dir, token)
+        let Some(record) = lookup_record(&self.queue_dir, token)? else {
+            return Ok(None);
+        };
+        if let Some(identity) = &record.principal.human {
+            use crate::application::queue_service::MemberStore;
+            let queue = SqliteQueue::open_read_only(&self.db)?;
+            let member = queue.member(identity)?;
+            if !crate::domain::queue_service::human_token_live(
+                record.expires_at,
+                member.as_ref(),
+                self.now_ms() / 1000,
+            ) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(record.principal))
+    }
+
+    fn issue_human(&self, principal: &Principal, expires: i64) -> Result<(String, String)> {
+        write_human_token(&self.queue_dir, principal, expires, self.now_ms() / 1000)
+    }
+
+    fn clean_human_tokens(&self, now: i64) -> Result<()> {
+        clean_human_tokens(&self.queue_dir, now)
     }
 
     /// The same file as the service's DB, by both paths resolved: a path
@@ -4865,6 +5060,13 @@ struct IssueQueue<'a> {
 }
 
 impl crate::application::queue_service::IssueFacts for IssueQueue<'_> {
+    fn member(
+        &self,
+        identity: &crate::domain::oidc::OidcIdentity,
+    ) -> Result<Option<crate::domain::queue_service::Member>> {
+        // This borrowed connection is inside ServiceQueue::issuing's write transaction.
+        super::members::read(&*self.queue.conn, identity)
+    }
     fn registered(&self, token: &LeaseToken) -> bool {
         self.registrations
             .iter()
@@ -7119,6 +7321,7 @@ mod tests {
         // the two removals of a revoke leaves.
         let orphan = "b".repeat(64);
         let record = TokenRecord {
+            expires_at: None,
             principal: ended.clone(),
             issued_at: 0,
             issued_under: None,
@@ -7140,6 +7343,7 @@ mod tests {
         write_private(
             &record_path(dir.path(), &stale),
             &serde_json::to_vec(&TokenRecord {
+                expires_at: None,
                 principal: old.clone(),
                 issued_at: 0,
                 issued_under: None,
@@ -7517,6 +7721,111 @@ mod tests {
         assert_eq!(
             silent,
             json!({"reachable": false, "reason": "nothing listens"})
+        );
+    }
+}
+
+#[cfg(test)]
+mod human_tests {
+    use super::*;
+    use crate::domain::oidc::{JwtRefusal, OidcIdentity, VerifiedJwt};
+
+    #[test]
+    fn human_records_contain_no_value_have_no_credentials_and_cleanup_preserves_other_logins() {
+        let dir = tempfile::tempdir().unwrap();
+        let principal = Principal::human(OidcIdentity {
+            issuer: "https://idp.example".into(),
+            subject: "person".into(),
+        });
+        assert!(
+            issue(dir.path(), &principal, 0).is_err(),
+            "parent issue cannot create human credentials"
+        );
+        let (expired, _) = write_human_token(dir.path(), &principal, 100, 0).unwrap();
+        let (live, record_name) = write_human_token(dir.path(), &principal, 101, 1).unwrap();
+        let worker = Principal::worker(&RunId::new("run").unwrap(), TaskId::new(1));
+        let issued = issue(dir.path(), &worker, 0).unwrap();
+        let worker_value = read_token(&issued.file).unwrap();
+        for (token, expires) in [(&expired, 100), (&live, 101)] {
+            let bytes = fs::read(record_path(dir.path(), token)).unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains(token));
+            let record: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(record["expires_at"], expires);
+            assert!(record.get("role").is_none());
+            assert!(record["principal"].get("role").is_some()); // user actor, no team role
+            assert!(record["principal"].get("on_call").is_none());
+        }
+        let credentials: Vec<_> = fs::read_dir(service_dir(dir.path()).join(CREDENTIALS_DIR))
+            .unwrap()
+            .collect();
+        assert_eq!(credentials.len(), 1, "only the worker has a value file");
+        assert_eq!(record_name, sha256_hex(live.as_bytes()));
+        clean_human_tokens(dir.path(), 100).unwrap();
+        assert!(lookup_record(dir.path(), &expired).unwrap().is_none());
+        assert!(lookup_record(dir.path(), &live).unwrap().is_some());
+        assert!(lookup(dir.path(), &worker_value).unwrap().is_some());
+        assert!(
+            lookup(dir.path(), &live).unwrap().is_none(),
+            "host lookup accepts no humans"
+        );
+        assert!(revoke_record(dir.path(), &principal, &record_name).unwrap());
+        assert!(
+            lookup_record(dir.path(), &live).unwrap().is_none(),
+            "undo uses the hash without a credentials file"
+        );
+    }
+
+    struct RefusedVerifier;
+    impl HumanVerifier for RefusedVerifier {
+        fn verify(&self, jwt: &str, now: i64) -> Result<VerifiedJwt, JwtRefusal> {
+            assert_eq!(jwt, "secret.jwt.value");
+            assert_eq!(now, 100);
+            Err(JwtRefusal::BadSignature)
+        }
+    }
+
+    #[test]
+    fn the_production_entry_keeps_the_exchange_shut_while_it_names_an_issuer() {
+        let (issuer, audience) = (Some("https://idp.example"), Some("dagq"));
+        assert!(
+            deployment_verifier(issuer, audience, HUMAN_EXCHANGE_OPEN)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            deployment_verifier(issuer, audience, true)
+                .unwrap()
+                .is_some()
+        );
+        for (issuer, audience) in [(None, audience), (issuer, None)] {
+            assert!(
+                deployment_verifier(issuer, audience, true)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for open in [false, true] {
+            assert!(deployment_verifier(Some("http://idp.example"), audience, open).is_err());
+        }
+    }
+
+    #[test]
+    fn no_configured_issuer_bad_jwt_and_missing_jwt_have_no_exchange_identity() {
+        let params = json!({"jwt": "secret.jwt.value"});
+        assert!(exchange_identity(None, &params, 100).is_none());
+        assert!(exchange_identity(Some(&RefusedVerifier), &params, 100).is_none());
+        for params in [json!({}), json!({"jwt": 1})] {
+            assert!(exchange_identity(Some(&RefusedVerifier), &params, 100).is_none());
+        }
+        let refusal = crate::application::queue_service::human_refusal();
+        assert_eq!(
+            refusal.error.as_ref().unwrap().code,
+            ServiceErrorCode::Unauthenticated
+        );
+        assert!(
+            !serde_json::to_string(&refusal)
+                .unwrap()
+                .contains("secret.jwt.value")
         );
     }
 }

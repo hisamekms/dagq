@@ -45,6 +45,7 @@ pub mod kpi_push;
 pub mod language;
 pub mod launchd;
 pub mod location;
+pub mod members;
 pub mod observer;
 pub mod oidc_keys;
 pub mod passed_env;

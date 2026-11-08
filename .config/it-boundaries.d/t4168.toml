@@ -4,6 +4,6 @@
 [[boundary]]
 id = "queue-service-http-loopback-carries-a-use-case"
 kind = "プロセス"
-test = "queue_service_http::a_request_over_loopback_reaches_the_service_and_passes_by_its_token"
-reason = "実の TCP の loopback の接続で HTTP の要求が serve の受けに届き、bearer の token の principal で実の SQLite の queue のユースケースに答え、token の run の読みと書き込みが実の書き込みの列のそばと上で通ることは、実の listener と service の起動の経路でしか確かめられない（既存の id は unix socket の経路だけを代表する）。要求の検査・上限・header の読みの判断は infrastructure::queue_service_http の unit test"
+test = "queue_service_http::a_jwt_over_loopback_is_exchanged_and_its_human_token_carries_a_use_case"
+reason = "実の TCP の loopback で HTTP の JWT 交換が登録簿から人の token を発行し、その token で実の SQLite の queue の読み書きが通る境界を代表する。discovery と公開鍵は取得の port の偽物が返し、実の取得の境界は OIDC の鍵の代表が持つ。JWT・登録・期限と bearer の判断は unit test が持つ。"
 task = 4168

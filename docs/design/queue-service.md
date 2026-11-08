@@ -47,11 +47,13 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 
 ファイルの配置と排他、生存の判定は`infrastructure::queue_service`のmodule doc、socketの実pathの決め方は同moduleの`socket_path`。
 止めるsignalはserviceが答えたpidか、同moduleの`serves`が確かめた記録のpidにだけ送る。
-tokenはworktreeとrun dirの外に置き、呼び出し元にはfileのpathを渡し、値はenvにもargvにも置かない（ADR-t1233-4決定4）。
+hostのtokenはworktreeとrun dirの外に置き、呼び出し元にはfileのpathを渡し、値はenvにもargvにも置かない（ADR-t1233-4決定4）。
+
+tokenの記録`tokens/<値のsha256>.json`の欄と、人のtokenの期限は同moduleの`TokenRecord`のdoc comment。
 
 要求のcallerは呼び手の自己申告であり、認可にも答えの内容にも使わない。
 
-HTTPの受けはsocketと同じ確かめの順を通り、識別はbearerのtokenだけで、peerにも送り元のIPにも転送のheaderにも依らない。
+交換後のHTTPの受けはsocketと同じ確かめの順を通り、識別はbearerのtokenだけで、peerにも送り元のIPにも転送のheaderにも依らない。
 
 接続と要求・応答の形と上限は`domain::queue_service::MAX_REQUEST_BYTES`のdoc comment。
 上限を超えてもsupervisorのpassは止めず、育つ読み取りは区切る。
@@ -72,6 +74,10 @@ serviceの書き込みは1本の列で1つずつ確定し、読み取りは列�
 - 古い版の呼び出し元が読めない変更（欄の意味の変更・ユースケースの削除）で`API_VERSION`を上げ、新しい版の呼び出し元を断るまでの間は`MIN_API_VERSION`を据え置く
 
 ## principalとtoken
+
+入口はHTTPの`exchange_token`（`application::queue_service::exchange_human`）。
+外向きの入口だけが発行元のJWTを人の短いtokenに替え、hostのsocketの入口は人のtokenを発行も受けもしない。
+人のtokenの記録は制御側の手元のファイルだけにあり、制御側の入れ替えで失われると期限の内でもunauthenticatedになる。
 
 serviceは呼び出しのprincipal（`Principal`）をtokenから決め（tokenの無い人は[hostのCLI](queue-service-host-cli.md#principal)）、クライアントが名乗るrole（`DAGQ_ROLE`）は認可に使わない（ADR-t1233-1決定4、ADR-t1233-4決定4）。
 

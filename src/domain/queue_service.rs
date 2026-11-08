@@ -373,6 +373,7 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::SessionRecord
         | UseCase::DenialRecord
         | UseCase::IssueToken
+        | UseCase::ExchangeToken
         | UseCase::RevokeToken
         | UseCase::Add
         | UseCase::Edit
@@ -584,6 +585,8 @@ string_enum!(UseCase {
     // children's as the `issue_token` operation of [`Self::Supervisor`],
     // which issues them the same way. No command line goes to it.
     IssueToken => "issue_token",
+    /// HTTP only: exchange an issuer JWT for a human token.
+    ExchangeToken => "exchange_token",
     // The revocation of a supervisor's token once its registration ended
     // (ADR-t3102-1 decision 2), at the request of `up` or `down` after they
     // pruned it, for a caller that may run them (`service.lifecycle`),
@@ -1219,6 +1222,10 @@ pub const fn understands(response: &ServiceResponse) -> bool {
 /// service acts as this principal and never as the role a caller names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
+    /// The registered human identity; absent on every local principal.
+    /// Roles are deliberately not copied into a token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human: Option<super::oidc::OidcIdentity>,
     pub role: ActorRole,
     pub actor_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1288,9 +1295,21 @@ impl Principal {
 
     /// The user: a request with no token and no role from a peer of the
     /// service's own OS user on its socket (ADR-t3102-1 decision 1). No
-    /// token is ever issued for it ([`Self::check`] refuses it).
+    /// token is ever issued for this local identity ([`Self::check`] refuses it).
     pub fn user() -> Self {
         Self::of(&ActorContext::user())
+    }
+
+    /// An HTTP human's actor id encodes the full pair as JSON, avoiding
+    /// ambiguous concatenation and collisions with local actor ids.
+    pub fn human(identity: super::oidc::OidcIdentity) -> Self {
+        let mut principal = Self::user();
+        principal.actor_id = format!(
+            "human:{}",
+            serde_json::to_string(&identity).expect("identity JSON")
+        );
+        principal.human = Some(identity);
+        principal
     }
 
     /// The inbox of the session `session` (ADR-t3102-1 decisions 2 and 3):
@@ -1344,6 +1363,7 @@ impl Principal {
             registration: None,
             session: None,
             landing: None,
+            human: None,
         }
     }
 
@@ -1404,6 +1424,7 @@ impl Principal {
             registration: None,
             session: None,
             landing: None,
+            human: None,
         }
     }
 
@@ -1422,6 +1443,7 @@ impl Principal {
             registration: None,
             session: None,
             landing: None,
+            human: None,
         }
     }
 
@@ -1435,8 +1457,19 @@ impl Principal {
     /// 3), and the integrator of one run's landing, whose one target is
     /// the run and whose registration is the slot's lease ([`Self::integrator`]).
     /// No other principal has a target, a registration or a session. The
-    /// user takes no token (decision 1).
+    /// local user takes no token (decision 1); a human identity is HTTP-only.
     pub fn check(&self) -> Result<(), DomainError> {
+        if let Some(identity) = &self.human {
+            let expected = Self::human(identity.clone());
+            return if self == &expected {
+                Ok(())
+            } else {
+                Err(DomainError::UnknownValue {
+                    kind: "human principal",
+                    value: "invalid binding".into(),
+                })
+            };
+        }
         let refuse = |value: String| {
             Err(DomainError::UnknownValue {
                 kind: "Principal role",
@@ -2659,6 +2692,65 @@ pub const QUEUE_SERVICE_ATTENTION_KINDS: [&str; 4] = [
 /// [`QUEUE_SERVICE_ATTENTION_KINDS`] is [`QUEUE_SERVICE_DOWN`].
 pub fn attention_stands(latest: Option<&RecordedKind>) -> bool {
     latest.is_some_and(|kind| *kind == EventKind::QueueServiceDown)
+}
+
+/// Registry role, independent of the user actor's authorization policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamRole {
+    Admin,
+    Member,
+}
+
+/// The registry owns the display name; an IdP name claim is never used.
+/// `disabled_at` and `created_at` are Unix seconds. The identity pair is
+/// unique, and on-call is an overlay on either role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub identity: super::oidc::OidcIdentity,
+    pub role: TeamRole,
+    pub on_call: bool,
+    pub display_name: Option<String>,
+    pub created_at: i64,
+    pub disabled_at: Option<i64>,
+}
+
+/// Human token lifetime in seconds; no clock skew extends its validity.
+pub const HUMAN_TOKEN_SECONDS: i64 = 15 * 60;
+
+/// Exchange result JSON: `token` is the opaque value (response only),
+/// `issuer` and `subject` the identity, `role` is `admin` or `member`,
+/// `on_call` a boolean, and `expires_at` absolute Unix seconds.
+/// `display_name` is omitted when the registry has none. Roles are a
+/// display snapshot at issue time, never part of the token record.
+#[derive(Serialize)]
+pub struct HumanToken {
+    pub token: String,
+    pub issuer: String,
+    pub subject: String,
+    pub role: TeamRole,
+    pub on_call: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub expires_at: i64,
+}
+
+/// All identity/registration failures have the same outward refusal.
+pub fn exchange_member<'a>(
+    verified: Result<&super::oidc::VerifiedJwt, super::oidc::JwtRefusal>,
+    member: Option<&'a Member>,
+    now: i64,
+) -> Option<(&'a Member, i64)> {
+    let verified = verified.ok()?;
+    let member = member.filter(|m| m.disabled_at.is_none() && m.identity == verified.identity)?;
+    Some((member, now.checked_add(HUMAN_TOKEN_SECONDS)?))
+}
+
+/// A human token requires a live registry row and an unexpired record.
+/// Missing records are rejected by lookup before this decision is reached.
+pub fn human_token_live(expires_at: Option<i64>, member: Option<&Member>, now: i64) -> bool {
+    expires_at.is_some_and(|expires| now < expires)
+        && member.is_some_and(|m| m.disabled_at.is_none())
 }
 
 #[cfg(test)]
@@ -4767,5 +4859,88 @@ mod tests {
         ] {
             assert_eq!(UseCase::of_command(words), None, "{words:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod human_tests {
+    use super::*;
+    use crate::domain::oidc::{JwtRefusal, OidcIdentity, VerifiedJwt};
+
+    #[test]
+    fn exchange_requires_verified_matching_active_registration_and_a_representable_expiry() {
+        let identity = OidcIdentity {
+            issuer: "https://idp.example".into(),
+            subject: "person".into(),
+        };
+        let jwt = VerifiedJwt {
+            identity: identity.clone(),
+            claims: Default::default(),
+        };
+        let mut principal = Principal::human(identity.clone());
+        assert!(principal.check().is_ok());
+        principal.actor_id.push('x');
+        assert!(principal.check().is_err());
+        let member = Member {
+            identity,
+            role: TeamRole::Member,
+            on_call: false,
+            display_name: None,
+            created_at: 0,
+            disabled_at: None,
+        };
+        assert_eq!(
+            exchange_member(Ok(&jwt), Some(&member), 100),
+            Some((&member, 1000))
+        );
+        for refusal in [
+            JwtRefusal::BadSignature,
+            JwtRefusal::Expired,
+            JwtRefusal::AudienceMissing,
+            JwtRefusal::IssuerMismatch,
+            JwtRefusal::KeysUnavailable,
+        ] {
+            assert_eq!(exchange_member(Err(refusal), Some(&member), 100), None);
+        }
+        assert_eq!(exchange_member(Ok(&jwt), None, 100), None);
+        assert_eq!(
+            exchange_member(
+                Ok(&jwt),
+                Some(&Member {
+                    disabled_at: Some(0),
+                    ..member.clone()
+                }),
+                100
+            ),
+            None
+        );
+        let other = OidcIdentity {
+            issuer: "https://other.example".into(),
+            ..member.identity.clone()
+        };
+        assert_eq!(
+            exchange_member(
+                Ok(&jwt),
+                Some(&Member {
+                    identity: other,
+                    ..member.clone()
+                }),
+                100
+            ),
+            None
+        );
+        assert_eq!(exchange_member(Ok(&jwt), Some(&member), i64::MAX), None);
+        assert!(human_token_live(Some(1000), Some(&member), 999));
+        assert!(!human_token_live(Some(1000), Some(&member), 1000));
+        assert!(!human_token_live(None, Some(&member), 1));
+        assert!(!human_token_live(Some(1000), None, 1));
+        assert!(!human_token_live(
+            Some(1000),
+            Some(&Member {
+                disabled_at: Some(0),
+                ..member
+            }),
+            1
+        ));
     }
 }

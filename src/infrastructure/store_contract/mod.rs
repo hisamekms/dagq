@@ -16,7 +16,9 @@ use anyhow::{Context, Result};
 /// The adapter's ownership operations around the execution and leader ports.
 /// Opening another connection retains its own identity, as a second service
 /// would. This is test plumbing, not an alternative transaction entry.
-pub trait ContractStore: TransactionEntries + WriteLeaderStore + Sized {
+pub trait ContractStore:
+    TransactionEntries + WriteLeaderStore + crate::application::queue_service::MemberStore + Sized
+{
     fn with_identity(self, identity: WriteIdentity) -> Self;
     fn set_actor(&self, actor: crate::domain::actor::ActorContext);
     fn request(&self, requested_by: Option<String>) -> Option<String>;
@@ -70,6 +72,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("event bodies", event_bodies::<S, F>),
         ("typed conditions", typed_conditions::<S, F>),
         ("backend parallel", backend_parallel::<S, F>),
+        ("members", members::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

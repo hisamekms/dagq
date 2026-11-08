@@ -4,7 +4,7 @@
 use crate::common;
 use common::cli::ok;
 use common::service::OwnedByTest;
-use common::service::{events, queue, token};
+use common::service::{queue, token};
 use common::{Bounded, WithoutActor};
 
 use std::{
@@ -77,12 +77,92 @@ impl Drop for Serving {
     }
 }
 
+/// Supplies only discovery and this test's public key; no issuer server or
+/// production key injection flag is involved.
+struct IdentityDocuments {
+    discovery: Vec<u8>,
+    jwks: Vec<u8>,
+}
+impl dagq::application::oidc::OidcDocumentSource for IdentityDocuments {
+    fn get(
+        &self,
+        url: &str,
+    ) -> Result<dagq::application::oidc::OidcDocument, dagq::domain::oidc::KeyFetchFailure> {
+        let body = match url {
+            "https://idp.example/.well-known/openid-configuration" => self.discovery.clone(),
+            "https://idp.example/jwks" => self.jwks.clone(),
+            _ => panic!("unexpected document URL"),
+        };
+        Ok(dagq::application::oidc::OidcDocument {
+            body,
+            cache_control: None,
+        })
+    }
+}
+fn signed_identity(identity: &dagq::domain::oidc::OidcIdentity) -> (String, IdentityDocuments) {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ring::{
+        rand::SystemRandom,
+        signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair},
+    };
+    let rng = SystemRandom::new();
+    let alg = &ECDSA_P256_SHA256_FIXED_SIGNING;
+    let der = EcdsaKeyPair::generate_pkcs8(alg, &rng).unwrap();
+    let key = EcdsaKeyPair::from_pkcs8(alg, der.as_ref(), &rng).unwrap();
+    let point = key.public_key().as_ref();
+    let jwks = json!({"keys": [{"kty": "EC", "crv": "P-256", "kid": "test",
+        "x": URL_SAFE_NO_PAD.encode(&point[1..33]), "y": URL_SAFE_NO_PAD.encode(&point[33..])}]})
+    .to_string()
+    .into_bytes();
+    let discovery = json!({"issuer": identity.issuer, "jwks_uri": "https://idp.example/jwks"})
+        .to_string()
+        .into_bytes();
+    let header = json!({"alg": "ES256", "kid": "test"});
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let claims = json!({"iss": identity.issuer, "sub": identity.subject, "aud": "dagq", "exp": expires, "name": "Ignored IdP Name"});
+    let input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header.to_string()),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    let signature = key.sign(&rng, input.as_bytes()).unwrap();
+    (
+        format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref())),
+        IdentityDocuments { discovery, jwks },
+    )
+}
+
 #[test]
-fn a_request_over_loopback_reaches_the_service_and_passes_by_its_token() {
+fn a_jwt_over_loopback_is_exchanged_and_its_human_token_carries_a_use_case() {
     let _test = common::test();
     let queue = queue();
     let task = queue.run.task_id();
-    let worker = token(&queue, &Principal::worker(queue.run.id(), task));
+    use dagq::application::queue_service::MemberStore;
+    use dagq::domain::{
+        oidc::{OidcConfig, OidcIdentity},
+        queue_service::{Member, TeamRole},
+    };
+    let identity = OidcIdentity {
+        issuer: "https://idp.example".into(),
+        subject: "person-1".into(),
+    };
+    dagq::infrastructure::sqlite::SqliteQueue::open(&queue.db)
+        .unwrap()
+        .add_member(&Member {
+            identity: identity.clone(),
+            role: TeamRole::Member,
+            on_call: false,
+            display_name: Some("Registered Person".into()),
+            created_at: 0,
+            disabled_at: None,
+        })
+        .unwrap();
+    let (jwt, source) = signed_identity(&identity);
+    let config = OidcConfig::new(&identity.issuer, "dagq").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
@@ -105,37 +185,49 @@ fn a_request_over_loopback_reaches_the_service_and_passes_by_its_token() {
     let serving = Serving {
         stop,
         thread: Some(std::thread::spawn(move || {
-            service::serve_with_http(&options, listener)
+            service::serve_with_http_oidc(&options, listener, config, source)
         })),
     };
 
+    let exchange =
+        json!({"api_version": API_VERSION, "use_case": "exchange_token", "params": {"jwt": jwt}});
+    let (status, exchanged) = post(address, "exchange_token", None, &exchange);
+    assert_eq!(status, 200, "{exchanged}");
+    let human = exchanged["result"]["token"].as_str().unwrap();
     let show = json!({"api_version": API_VERSION, "use_case": "show", "params": {"id": task}});
-    let (status, shown) = post(address, "show", Some(&worker), &show);
+    let (status, shown) = post(address, "show", Some(human), &show);
     assert_eq!(status, 200, "{shown}");
-    assert_eq!(shown["ok"], true, "{shown}");
     assert_eq!(shown["result"], ok(&queue.db, &["show", &task.to_string()]));
-    // No header: refused, though this process is the service's own OS user.
-    let (status, refused) = post(address, "show", None, &show);
-    assert_eq!(status, 401, "{refused}");
-    assert_eq!(refused["error"]["code"], "unauthenticated", "{refused}");
-    let recorded = events(&queue.db, "queue_service_unauthenticated");
-    assert_eq!(
-        recorded[0]["payload"]["reason"], "missing_token",
-        "{recorded:?}"
-    );
-
-    // The real service has one write line: what a token's run is read on off
-    // the line, and a write on it, both pass.
-    let hello = json!({"api_version": API_VERSION, "use_case": "hello"});
-    let (status, answered) = post(address, "hello", Some(&worker), &hello);
-    assert_eq!(status, 200, "{answered}");
-    assert_eq!(answered["result"]["service"], "dagq-queue-service");
     let note = json!({"api_version": API_VERSION, "use_case": "note",
         "params": {"task": task, "text": "over http"}});
-    let (status, noted) = post(address, "note", Some(&worker), &note);
+    let (status, noted) = post(address, "note", Some(human), &note);
     assert_eq!(status, 200, "{noted}");
-    assert_eq!(noted["result"]["actor"]["role"], "worker", "{noted}");
-
+    assert_eq!(noted["result"]["actor"]["role"], "user");
+    assert_eq!(
+        noted["result"]["actor"]["id"],
+        dagq::domain::queue_service::Principal::human(identity).actor_id
+    );
+    // The only server-side persistence of either credential is the hash-named
+    // record. Check all service files (including the startup-read records).
+    fn no_plaintext(path: &Path, secrets: &[&str]) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                no_plaintext(&path, secrets);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                for secret in secrets {
+                    assert!(
+                        !bytes
+                            .windows(secret.len())
+                            .any(|part| part == secret.as_bytes()),
+                        "plaintext in {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    no_plaintext(&queue.dir().join("service"), &[human, &jwt]);
     assert_eq!(serving.stopped()["outcome"], "stopped");
 }
 

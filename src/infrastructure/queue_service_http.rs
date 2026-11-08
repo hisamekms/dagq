@@ -10,6 +10,10 @@
 //! - The request is `POST` [`USE_CASE_PATH`]`<use case>`, with the socket's
 //!   request line as its body. The path's name and the body's must be the
 //!   same ([`carried_request`]): the name is what a proxy and a log see.
+//! - Human login is `POST /api/use-case/exchange_token`, whose matching
+//!   body has `params: {"jwt": "<issuer JWT>"}`. This is the only JWT
+//!   entrance and requires no bearer token. The HTTP composition verifies
+//!   before joining the write line; the socket refuses this use case.
 //! - A token is read from `Authorization: Bearer` alone ([`bearer_of`]). The
 //!   query is cut from the path unread, cookies are not looked at, and a
 //!   `token` or `env_role` of the body goes before the body is read.
@@ -740,6 +744,16 @@ mod tests {
             let carried = carried(&post("/api/use-case/show", "", &body.to_string()));
             assert_eq!(carried.given[0].queue, None);
         }
+    }
+
+    #[test]
+    fn exchange_carries_a_jwt_without_bearer_and_logs_neither_credential() {
+        let body = json!({"api_version": API_VERSION, "use_case": "exchange_token", "params": {"jwt": "secret.jwt.value"}}).to_string();
+        let result = carried(&post("/api/use-case/exchange_token", "", &body));
+        assert_eq!(result.given[0].use_case, UseCase::ExchangeToken);
+        assert_eq!(result.given[0].params["jwt"], "secret.jwt.value");
+        assert!(result.given[0].token.is_none());
+        assert!(!result.line.contains("secret.jwt.value"));
     }
 
     #[test]

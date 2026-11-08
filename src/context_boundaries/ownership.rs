@@ -354,6 +354,7 @@ pub(super) const TABLES: &[Table] = &[
     table("supervisors", Host),
     table("queue_repository", Host),
     table("schema_floor", Host),
+    table("members", Host), // the service's human registry
     table("dagq_schema", Host), // the Postgres series' schema_floor and user_version
     table("binary_updates", Host),
     table("headless_jobs", Host),
@@ -406,6 +407,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/asks.rs", Shared), // AskStore
     store("src/infrastructure/runtime_store/ask_store.rs", Shared), // AskStore
     store("src/infrastructure/event_actor.rs", Shared), // EventStore
+    store("src/infrastructure/members.rs", Host),
     store("src/infrastructure/write_leader.rs", Shared), // WriteLeaderStore
     store("src/infrastructure/postgres/migrate.rs", Host), // the Postgres series' version
 ];
@@ -667,6 +669,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/install.rs", "Binaries", Some(Host), Internal),
     outer_port("src/application/install.rs", "ReleaseInstaller", Some(Host), Internal),
     outer_port("src/application/queue_service.rs", "ServiceQueue", Some(Host), Internal),
+    outer_port("src/application/queue_service.rs", "MemberStore", Some(Host), Internal),
     outer_port("src/application/queue_service.rs", "IssueFacts", Some(Host), Internal), // what a token's issue reads in its transaction (the registrations, a job's records); the queue service's store gives it
     outer_port("src/application/queue_service.rs", "ServiceBackend", Some(Host), Internal),
     outer_port("src/application/queue_service.rs", "QueueServiceControl", Some(Host), Internal),
