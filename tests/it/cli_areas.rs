@@ -279,6 +279,12 @@ fn served_as_on_the_db(dir: &Path, repo: &Path, db: &Path, run: &TaskRun) -> (Va
         assert!(ledger.get("fields").is_some(), "{ledger}");
     }
     let kpi = served(db, &config, &["kpi", "--last", "1"]);
+    // The ledger moves on between two reads here, so the whole answers are
+    // compared where it stands still (`cli_kpi`).
+    assert_eq!(
+        served(db, &config, &["kpi", "--last", "1", "--read-whole-ledger"])["periods"][0]["kpis"]["landings"],
+        kpi["periods"][0]["kpis"]["landings"]
+    );
     assert_eq!(
         fs::read_to_string(&git_log).unwrap(),
         "",

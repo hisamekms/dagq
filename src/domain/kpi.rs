@@ -480,6 +480,10 @@ pub struct KpiQuery {
     /// `slot_usage` divides by and the CPU `cpu_per_landing` counts stay
     /// the whole queue's and host's.
     pub goal_id: Option<GoalId>,
+    /// Read every row of the ledger, whatever [`read_from_ms`] would leave
+    /// out: the same answer by the read it is checked against.
+    #[serde(default)]
+    pub read_whole_ledger: bool,
 }
 
 impl Default for KpiQuery {
@@ -497,6 +501,7 @@ impl Default for KpiQuery {
             compare: None,
             window_days: DEFAULT_WINDOW_DAYS,
             goal_id: None,
+            read_whole_ledger: false,
         }
     }
 }
@@ -586,6 +591,9 @@ pub struct KpiInput<'a> {
     /// tokens and cost per side in the provider pair's set ([`pair`]);
     /// none leaves that set's tokens and cost without samples.
     pub executions: Option<&'a [super::stats::executions::Execution]>,
+    /// What the folds that look back keep of the rows a read left out
+    /// ([`super::ledger::window::Earlier`]); none when none was.
+    pub earlier: Option<&'a super::ledger::window::Earlier>,
 }
 
 /// One KPI over one stratum of one window: how many samples, and the value
@@ -937,6 +945,46 @@ fn period_count(query: &KpiQuery, config: &KpiConfig) -> usize {
     query.last + query.period.lookback().max(2 * breach_after)
 }
 
+/// The start of the period `back` periods before the one that holds
+/// `anchor` (unix ms).
+fn period_start_back(period: Period, anchor: i64, offset_ms: i64, back: usize) -> i64 {
+    let back = i64::try_from(back).unwrap_or(i64::MAX);
+    period
+        .start(anchor, offset_ms)
+        .saturating_sub(back.saturating_mul(period.length()))
+}
+
+/// Where the read of the ledger for `query` may start (unix ms): the start
+/// of the oldest period [`kpi`] computes at `now` (unix seconds) with
+/// `config`, for [`super::ledger::window::WindowQuery::read_from_ms`].
+/// `None` reads every row: the windows of `--since` and `--until` and a
+/// comparison take their spans from anywhere in the events, an event id as
+/// `at` is only a time once the events are read, `--goal` counts by the goal
+/// of every task an event names, whatever its time, and
+/// [`KpiQuery::read_whole_ledger`] asks for it.
+pub fn read_from_ms(
+    query: &KpiQuery,
+    config: &KpiConfig,
+    now: i64,
+    utc_offset_secs: i64,
+) -> Option<i64> {
+    let anchor = match query.at {
+        Some(Cursor::Time(ms)) => ms,
+        Some(Cursor::Event(_)) => return None,
+        None => now * 1000,
+    };
+    let whole = query.since.is_some()
+        || query.until.is_some()
+        || query.compare.is_some()
+        || query.goal_id.is_some()
+        || query.read_whole_ledger
+        || query.last == 0;
+    (!whole).then(|| {
+        let oldest = period_count(query, config) - 1;
+        period_start_back(query.period, anchor, utc_offset_secs * 1000, oldest)
+    })
+}
+
 /// The commits landed (`run_integrated`, [`super::areas::landed_commits`])
 /// in the periods [`kpi`] reads for `query`, a period's, at `now` (unix
 /// seconds) with `config`: after the start of the oldest and up to the end
@@ -959,10 +1007,17 @@ pub fn landed_in_periods(
         },
         None => now * 1000,
     };
-    let latest = query.period.start(anchor, utc_offset_secs * 1000);
-    let back = i64::try_from(period_count(query, config).saturating_sub(1)).unwrap_or(i64::MAX);
-    let oldest = latest.saturating_sub(back.saturating_mul(query.period.length()));
-    let end = latest.saturating_add(query.period.length());
+    let offset_ms = utc_offset_secs * 1000;
+    let oldest = period_start_back(
+        query.period,
+        anchor,
+        offset_ms,
+        period_count(query, config).saturating_sub(1),
+    );
+    let end = query
+        .period
+        .start(anchor, offset_ms)
+        .saturating_add(query.period.length());
     let within: Vec<RunEvent> = events
         .iter()
         .filter(|event| event.kind == EventKind::RunIntegrated)
@@ -1049,12 +1104,11 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
             Some(at) => cursor_ms(at, input.events).ok_or("--at names no event")?,
             None => now_ms,
         };
-        let latest = query.period.start(anchor, offset_ms);
         let count = period_count(query, config);
         (0..count)
             .rev()
             .map(|back| {
-                let start = latest - i64::try_from(back).unwrap_or(0) * query.period.length();
+                let start = period_start_back(query.period, anchor, offset_ms, back);
                 // A week's length never changes, but a day read at a fixed
                 // offset does not either: the period ends where the next starts.
                 let end = start + query.period.length();
@@ -1103,8 +1157,9 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
             end: marks::utc_text(span.end),
             partial: partial(span),
             window: current.clone(),
-            marks: marks::marks(
+            marks: marks::marks_with_earlier(
                 input.events,
+                input.earlier.map_or(&[], |earlier| &earlier.claims),
                 Some(Cursor::Time(span.start)),
                 Some(Cursor::Time(span.end)),
             ),

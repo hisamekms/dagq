@@ -37,7 +37,7 @@ use crate::domain::{
         cancel_reasons,
         executions::{Coverage, ExecutionTotals},
         landing::PHASES,
-        landing_utilization::landing_utilization,
+        landing_utilization::{self, landing_utilization},
         measures::verification_durations,
         timestamp_millis,
     },
@@ -170,6 +170,10 @@ struct SupervisorLife {
 /// What every window reads, derived once.
 pub(super) struct Context<'a> {
     pub events: &'a [RunEvent],
+    /// What the landings' attempts and waits read
+    /// ([`landing_utilization::reads`]) of `events` and of the runs a read
+    /// from a time left out, ascending id; none when it left out none.
+    landings: Option<Vec<RunEvent>>,
     goals: &'a HashMap<TaskId, Option<GoalId>>,
     changes: &'a HashMap<TaskId, Option<TaskChange>>,
     /// The landed runs' areas; `None` without `[areas]`.
@@ -451,10 +455,7 @@ impl<'a> Context<'a> {
                 None => {}
             }
             // A run's end ([`Occupancy`]).
-            let status = event.payload.get("status").and_then(Value::as_str);
-            if (event.kind == EventKind::RunIntegrated
-                || event.kind == EventKind::RunSatisfiedClosed
-                || matches!(status, Some("succeeded" | "failed" | "interrupted")))
+            if ledger::window::ends_run_occupancy(event)
                 && let Some(at) = at
             {
                 ends.entry(run_id.clone()).or_insert(at);
@@ -478,8 +479,23 @@ impl<'a> Context<'a> {
             })
             .collect();
         let supervisors = supervisor_lives(events, input.heartbeats, input.now);
+        let earlier = input.earlier;
+        let earlier_claims: &[RunEvent] = earlier.map_or(&[], |earlier| &earlier.claims);
+        let landings = earlier
+            .filter(|earlier| !earlier.landings.is_empty())
+            .map(|earlier| {
+                let mut landings: Vec<RunEvent> = events
+                    .iter()
+                    .filter(|event| landing_utilization::reads(event))
+                    .chain(&earlier.landings)
+                    .cloned()
+                    .collect();
+                landings.sort_by_key(|event| event.id);
+                landings
+            });
         let mut context = Self {
             events,
+            landings,
             goals: input.goals,
             changes: input.changes,
             areas: input.areas,
@@ -491,6 +507,8 @@ impl<'a> Context<'a> {
                 draft_origins: input.draft_origins.clone(),
                 utc_offset_secs: input.utc_offset_secs,
                 ledger: input.ledger.cloned(),
+                earlier_executions: earlier
+                    .map_or_else(Vec::new, |earlier| earlier.executions.clone()),
                 ..LiveSnapshot::default()
             },
             now: input.now,
@@ -504,7 +522,7 @@ impl<'a> Context<'a> {
             supervisors,
             occupancy,
             person_waits,
-            marks: marks::marks(events, None, None),
+            marks: marks::marks_with_earlier(events, earlier_claims, None, None),
             min_samples: input.config.min_samples,
             forecast: Scoring::default(),
             host: input.host,
@@ -1126,9 +1144,13 @@ impl<'a> Context<'a> {
         // the `integrate` attempts held it, landed or not, its busiest
         // hour, each attempt's time and the runs waiting for it, as
         // `stats`' `landing_utilization` derives them over this window.
-        let landing = landing_utilization(events, start, end, self.now * 1000, |task| {
-            self.counts(task)
-        });
+        let landing = landing_utilization(
+            self.landings.as_deref().unwrap_or(events),
+            start,
+            end,
+            self.now * 1000,
+            |task| self.counts(task),
+        );
         let peak = landing.peak_hour.as_ref().map(|hour| hour.utilization);
         let mut utilization = Measure::total(landing.utilization, landing.attempts);
         utilization.max = peak;

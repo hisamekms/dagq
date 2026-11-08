@@ -304,6 +304,9 @@ pub struct KpiRead {
     pub window: i64,
     #[serde(default)]
     pub goal: Option<i64>,
+    /// [`crate::domain::kpi::KpiQuery::read_whole_ledger`].
+    #[serde(default)]
+    pub read_whole_ledger: bool,
     /// What the queue service's client read with Git for it, as
     /// [`StatsRead::git`].
     #[serde(default)]
@@ -953,6 +956,11 @@ impl QueueRead {
                        "by": read.by, "cross": read.cross,
                        "compare": read.compare.map(CompareSpec::text), "window": read.window,
                        "goal": read.goal});
+                // Only when asked, so a service that does not know it still
+                // serves `kpi`.
+                if read.read_whole_ledger {
+                    params["read_whole_ledger"] = json!(true);
+                }
                 if let Some(git) = &read.git {
                     params["git"] = json!(git);
                 }
@@ -1163,6 +1171,7 @@ mod tests {
                                    "area": ["runtime"], "by": ["provider"], "cross": true,
                                    "compare": "1..2,3..4", "window": 9, "goal": 2}),
             ),
+            (UseCase::Kpi, json!({"read_whole_ledger": true})),
             (
                 UseCase::Forecast,
                 json!({"task": 3, "parallel": 2, "trials": 50}),

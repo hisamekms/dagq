@@ -166,6 +166,35 @@ impl AskRef {
     }
 }
 
+/// The time an event's payload writes as its own (`at`), as it is written:
+/// what [`crate::domain::ledger::window::RowsFrom::leaves_out`] reads a record's
+/// time of beside when it was recorded.
+#[derive(Debug, Default, Deserialize)]
+pub struct AtOf {
+    #[serde(default, deserialize_with = "kept")]
+    at: Option<Value>,
+}
+
+/// [`AtOf`]'s time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayloadAt {
+    /// No `at`, or `null`.
+    None,
+    Text(String),
+    /// A value of another type.
+    Other,
+}
+
+impl AtOf {
+    pub fn at(&self) -> PayloadAt {
+        match &self.at {
+            None | Some(Value::Null) => PayloadAt::None,
+            Some(Value::String(text)) => PayloadAt::Text(text.clone()),
+            Some(_) => PayloadAt::Other,
+        }
+    }
+}
+
 /// A key kept with whatever value it has, `null` too (`Some(Value::Null)`).
 fn kept<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
     Value::deserialize(deserializer).map(Some)
@@ -200,9 +229,16 @@ pub(super) struct HeadRewritten<'a> {
 /// The `status` an event moved the run to (`landing_decided`,
 /// `resume_finished`, any event that parked it for a session).
 #[derive(Debug, Default, Deserialize)]
-pub(super) struct StatusOf<'a> {
+pub struct StatusOf<'a> {
     #[serde(default, borrow, deserialize_with = "typed")]
     pub(super) status: Option<&'a str>,
+}
+
+impl<'a> StatusOf<'a> {
+    /// The `status` as text; none when it is not there or not text.
+    pub const fn status(&self) -> Option<&'a str> {
+        self.status
+    }
 }
 
 /// `resume_finished`.

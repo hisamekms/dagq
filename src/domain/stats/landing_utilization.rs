@@ -44,12 +44,37 @@ const WAIT_ENDS: [EventKind; 5] = [
     EventKind::RunRecovered,
 ];
 
+/// The statuses that end a wait or an attempt whatever event carries them.
+pub const LEAVING_STATUSES: [&str; 4] = ["needs_session", "failed", "interrupted", "canceled"];
+
 /// A status that ends a wait or an attempt whatever event carries it.
 fn leaves(payload: &Value) -> bool {
-    matches!(
-        payload_status(payload),
-        Some("needs_session" | "failed" | "interrupted" | "canceled")
-    )
+    payload_status(payload).is_some_and(|status| LEAVING_STATUSES.contains(&status))
+}
+
+/// The kinds [`spans`] reads of a run besides those of [`LEAVING_STATUSES`]:
+/// an attempt's start and ends, a wait's start and ends.
+pub const KINDS: [EventKind; 13] = [
+    EventKind::IntegrationStarted,
+    EventKind::LandingQueued,
+    EventKind::ReviseRequested,
+    EventKind::RunIntegrated,
+    EventKind::IntegrationDeferred,
+    EventKind::IntegrationError,
+    EventKind::IntegrationHeld,
+    EventKind::IntegrationFailed,
+    EventKind::IntegrationHandedOver,
+    EventKind::RuntimeError,
+    EventKind::RunAdopted,
+    EventKind::RunRecovered,
+    EventKind::ResumeStarted,
+];
+
+/// Whether [`spans`] reads `event`: one of no run or of another kind and
+/// status changes neither an attempt nor a wait, so the attempts and waits of
+/// only those it reads are those of every event.
+pub fn reads(event: &RunEvent) -> bool {
+    event.run_id.is_some() && (event.kind.is_in(&KINDS) || leaves(&event.payload))
 }
 
 /// One `integrate` attempt, in unix ms.

@@ -1,14 +1,58 @@
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
-use std::{path::Path, process::Command};
+use std::{
+    path::Path,
+    process::Command,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use dagq::{
+    application::{Clock, Generators},
     domain::{ClaimOutcome, CommitSha, DraftOrigin, TaskId},
+    domain::{kpi::KpiQuery, stats::Cursor},
     infrastructure::sqlite::SqliteQueue,
 };
 use serde_json::{Value, json};
 
 use crate::common::{Bounded, WithoutActor, cli::*};
+
+/// A clock stopped at one instant.
+struct StoppedClock(SystemTime);
+
+impl Clock for StoppedClock {
+    fn system_time(&self) -> SystemTime {
+        self.0
+    }
+
+    fn monotonic(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+/// Claim and land the next `count` tasks of `db`.
+fn land(db: &Path, count: usize) {
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
+    for _ in 0..count {
+        let ClaimOutcome::Claimed { run } = queue
+            .claim_for_supervisor(&base, &LeaseToken::new("t"))
+            .unwrap()
+        else {
+            panic!("nothing to claim");
+        };
+        for (kind, payload) in [
+            (EventKind::ReceiptObserved, json!({})),
+            (
+                EventKind::ValidationFinished,
+                json!({"status": "awaiting_integration"}),
+            ),
+            (EventKind::RunIntegrated, json!({"status": "integrated"})),
+        ] {
+            queue.record_runtime_event(run.id(), kind, payload).unwrap();
+        }
+    }
+}
 
 /// `dagq kpi` in UTC, with the host-wide `host.toml` read from `config`
 /// rather than the home of the person running the tests.
@@ -61,26 +105,7 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
     ok(&db, &["ready", "1", "--bypass-review"]);
     ok(&db, &["ready", "2", "--bypass-review"]);
     let mark = ok(&db, &["mark", "sccache"])["id"].as_i64().unwrap();
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let base = CommitSha::try_from("0123456789abcdef0123456789abcdef01234567").unwrap();
-    for _ in 0..2 {
-        let ClaimOutcome::Claimed { run } = queue
-            .claim_for_supervisor(&base, &LeaseToken::new("t"))
-            .unwrap()
-        else {
-            panic!("nothing to claim");
-        };
-        for (kind, payload) in [
-            (EventKind::ReceiptObserved, json!({})),
-            (
-                EventKind::ValidationFinished,
-                json!({"status": "awaiting_integration"}),
-            ),
-            (EventKind::RunIntegrated, json!({"status": "integrated"})),
-        ] {
-            queue.record_runtime_event(run.id(), kind, payload).unwrap();
-        }
-    }
+    land(&db, 2);
 
     let report = kpi_ok(&db, &config, &["--last", "2", "--by", "parallel"]);
     assert_eq!(report["period"], "day");
@@ -158,6 +183,69 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
         window["periods"][0]["kpis"]["landings"]["all"]["value"],
         0.0
     );
+
+    // A landing of days ago, read in a period over. The command line's now
+    // cannot be fixed and its answer moves with it (the time since a period's
+    // end), so it shows that the question is taken; at one now, the two reads
+    // answer the same to the byte.
+    let (_old_dir, old) = queue();
+    ok(&old, &["add", "old"]);
+    ok(&old, &["ready", "1", "--bypass-review"]);
+    land(&old, 1);
+    rusqlite::Connection::open(&old)
+        .unwrap()
+        .execute(
+            "UPDATE run_events SET created_at =
+               strftime('%Y-%m-%dT%H:%M:%fZ', created_at, '-3 days')",
+            [],
+        )
+        .unwrap();
+    let days_ago = SystemTime::now() - Duration::from_secs(3 * 86_400);
+    let at = format!(
+        "@{}",
+        days_ago.duration_since(UNIX_EPOCH).unwrap().as_secs()
+    );
+    let question = ["--last", "2", "--at", &at];
+    let plain = kpi_ok(&old, &config, &question);
+    assert_eq!(
+        plain["periods"][1]["kpis"]["landings"]["all"]["value"], 1.0,
+        "{}",
+        plain["periods"][1]["kpis"]["landings"]
+    );
+    let whole = kpi_ok(
+        &old,
+        &config,
+        &["--last", "2", "--at", &at, "--read-whole-ledger"],
+    );
+    assert_eq!(
+        whole["periods"][1]["kpis"]["landings"],
+        plain["periods"][1]["kpis"]["landings"]
+    );
+    let stopped = dagq::runtime::OneShot {
+        generators: Generators {
+            clock: Arc::new(StoppedClock(SystemTime::now())),
+            ids: dagq::infrastructure::clock::system().ids,
+        },
+        ..dagq::runtime::OneShot::system()
+    };
+    let read = |read_whole_ledger| {
+        stopped
+            .kpi_of(
+                &SqliteQueue::open(&old).unwrap(),
+                &old,
+                &KpiQuery {
+                    last: 2,
+                    at: Some(Cursor::Time(
+                        i64::try_from(days_ago.duration_since(UNIX_EPOCH).unwrap().as_millis())
+                            .unwrap(),
+                    )),
+                    read_whole_ledger,
+                    ..KpiQuery::default()
+                },
+            )
+            .unwrap()
+    };
+    assert_eq!(read(true), read(false));
 
     // The observer and the jobs read it, in client mode.
     for role in ["observer", "reviewer"] {

@@ -158,6 +158,7 @@ pub fn of_window(
         utc_offset_secs: sources.utc_offset_secs,
         judged: Some(window.judgments()),
         ledger: Some(window.run_times()),
+        earlier_executions: window.earlier().executions.clone(),
     };
     let mut stats = aggregate(events, &goals, now, SlotSnapshot::default(), query, &live);
     if let Some(known) = &attributes {

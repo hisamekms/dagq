@@ -2,11 +2,14 @@
 //! layer by layer, measured in the process
 //! (docs/plans/kpi-read-memory-spike.md).
 //!
-//! `prepare <dir> <events>` lays down a queue at `<dir>/queue.db` of about
-//! `<events>` events, with its runs' session steps and the host's samples,
-//! and builds its ledger as a supervisor does, page by page behind the
-//! events. `whole <dir> <kpi|observer>` makes the read as the runtime does
-//! and prints one line of JSON: its peak and its answer's digest. `parts
+//! `prepare <dir> <events> [days]` lays down a queue at `<dir>/queue.db` of
+//! about `<events>` events (over `<days>` days without production's rate),
+//! with its runs' session steps and the host's samples, and builds its ledger
+//! as a supervisor does, page by page behind the events. `whole <dir>
+//! <kpi|observer|kpi-range|kpi-whole>` makes the read as the runtime does and
+//! prints one line of JSON: its peak, its time and its answer's digest.
+//! `kpi-range` and `kpi-whole` are the hourly review's question (`--period
+//! day --last 2`), read from where it needs and from every row. `parts
 //! <dir>` reads the rows the store holds and prints what a copy of each of
 //! their parts takes, in a process of its own so that the copies count in no
 //! read's peak.
@@ -18,6 +21,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use dagq::application::kpi::{self, Host};
 use dagq::application::supervise::{Retain, build_pass};
@@ -133,11 +137,12 @@ fn max_rss() -> i64 {
 }
 
 const T0: i64 = 1_900_000_000;
-/// Seconds between two events: production's 1.2 million in about six weeks.
+/// Seconds between two events by default: production's 1.2 million in about
+/// six weeks.
 const STEP: i64 = 3;
 /// The seconds of the host's samples: production samples every 30 s and
 /// keeps 30 days, about one sample per 14 of its events.
-const SAMPLE_EVERY_SECS: i64 = 14 * STEP;
+const SAMPLES_EVERY_EVENTS: i64 = 14;
 /// The events written between two builds of the ledger.
 const EVENTS_PER_BUILD: usize = 10_000;
 /// The steps of a finished run's session.
@@ -158,6 +163,8 @@ struct Writer<'a> {
     db: &'a Connection,
     insert: rusqlite::Statement<'a>,
     at: i64,
+    /// Seconds between two events.
+    step: i64,
     events: usize,
     payload_bytes: usize,
     kinds: std::collections::BTreeMap<&'static str, (usize, usize)>,
@@ -165,7 +172,7 @@ struct Writer<'a> {
 
 impl Writer<'_> {
     fn push(&mut self, task: Option<i64>, run: Option<&str>, kind: &'static str, payload: &Value) {
-        self.at += STEP;
+        self.at += self.step;
         let text = payload.to_string();
         self.payload_bytes += text.len();
         self.insert
@@ -437,7 +444,11 @@ fn catch_up(queue: &SqliteQueue, builder: &mut Builder, now_ms: i64) -> usize {
     }
 }
 
-fn prepare(dir: &Path, target: usize) {
+fn prepare(dir: &Path, target: usize, days: Option<i64>) {
+    let step = days.map_or(STEP, |days| {
+        (days * 86_400 / i64::try_from(target).unwrap()).max(1)
+    });
+    let sample_every = SAMPLES_EVERY_EVENTS * step;
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join("queue.db");
     drop(SqliteQueue::init(&path).unwrap());
@@ -460,7 +471,7 @@ fn prepare(dir: &Path, target: usize) {
     let mut first = true;
     let rate = NodeRate {
         per_second: Default::default(),
-        interval: std::time::Duration::from_secs(SAMPLE_EVERY_SECS.unsigned_abs()),
+        interval: std::time::Duration::from_secs(sample_every.unsigned_abs()),
     };
     while events < target {
         let tx = db.transaction().unwrap();
@@ -473,6 +484,7 @@ fn prepare(dir: &Path, target: usize) {
                 )
                 .unwrap(),
             at,
+            step,
             events: 0,
             payload_bytes: 0,
             kinds: std::collections::BTreeMap::new(),
@@ -542,7 +554,7 @@ fn prepare(dir: &Path, target: usize) {
                     1,
                 )
                 .unwrap();
-            next_sample += SAMPLE_EVERY_SECS;
+            next_sample += sample_every;
         }
         passes += catch_up(&queue, &mut builder, at * 1000);
     }
@@ -650,20 +662,27 @@ fn whole(dir: &Path, read: &str) {
     let base = in_use();
     reset_peak();
     let (config, areas) = (KpiConfig::default(), areas());
-    let answer = match read {
-        "kpi" => serde_json::to_value(
-            kpi::kpi(
-                &queue,
-                now,
-                host(),
-                &config,
-                Some(&areas),
-                &KpiQuery::default(),
-            )
-            .unwrap(),
-        )
-        .unwrap(),
-        _ => {
+    let hourly = |read_whole_ledger| KpiQuery {
+        period: Period::Day,
+        last: 2,
+        read_whole_ledger,
+        ..KpiQuery::default()
+    };
+    let query = match read {
+        "kpi" => Some(KpiQuery::default()),
+        "kpi-range" => Some(hourly(false)),
+        "kpi-whole" => Some(hourly(true)),
+        _ => None,
+    };
+    let mut elapsed_ms = None;
+    let answer = match query {
+        Some(query) => {
+            let started = Instant::now();
+            let answer = kpi::kpi(&queue, now, host(), &config, Some(&areas), &query).unwrap();
+            elapsed_ms = Some(started.elapsed().as_millis());
+            serde_json::to_value(answer).unwrap()
+        }
+        None => {
             let window = dagq::application::report::window(&queue, now).unwrap();
             fold(&window, now, read, &queue)
         }
@@ -677,6 +696,7 @@ fn whole(dir: &Path, read: &str) {
             "read": read,
             "events": queue.latest_event_id().unwrap().as_i64(),
             "whole_peak": whole_peak,
+            "elapsed_ms": elapsed_ms,
             "answer_digest": digest.to_string(),
             "answer_bytes": answer_bytes,
             "max_rss": max_rss(),
@@ -758,14 +778,15 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |at: usize| args[at].as_str();
     match args.get(1).map(String::as_str) {
-        Some("prepare") if args.len() == 4 => {
-            prepare(Path::new(arg(2)), arg(3).parse().unwrap());
+        Some("prepare") if args.len() == 4 || args.len() == 5 => {
+            let days = args.get(4).map(|days| days.parse().unwrap());
+            prepare(Path::new(arg(2)), arg(3).parse().unwrap(), days);
         }
         Some("whole") if args.len() == 4 => whole(Path::new(arg(2)), arg(3)),
         Some("parts") if args.len() == 3 => parts(Path::new(arg(2))),
         _ => {
             eprintln!(
-                "usage: kpi_read_memory prepare <dir> <events> | whole <dir> <kpi|observer> | parts <dir>"
+                "usage: kpi_read_memory prepare <dir> <events> [days] | whole <dir> <kpi|observer|kpi-range|kpi-whole> | parts <dir>"
             );
             std::process::exit(2);
         }

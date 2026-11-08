@@ -1,6 +1,8 @@
 //! The lives of runs as the tests of what builds and compares the ledger
 //! lay them down: events with ids in order, at seconds from [`T0`].
 
+use std::collections::HashMap;
+
 use serde_json::{Value, json};
 
 use crate::domain::marks::utc_text;
@@ -1010,4 +1012,429 @@ pub(crate) fn pushes_across_with(settled: usize, of_open_task: usize) -> (Log, i
         .integrated(6, &f, base + 4900)
         .pushed_to(6, &f, "late", base + 5130);
     (log, base + 5130 + 300)
+}
+
+/// One day in seconds, for [`reads_from_a_time`].
+pub(crate) const DAY: i64 = 86_400;
+
+/// What a read of `kpi`'s periods at [`READ_AT_DAY`] must still answer of,
+/// from days before every period of a day and of a week: a run landed long
+/// ago, a task retried across the time, a first Execution and a claim of an
+/// earlier build, old findings and baselines, supervisors stopped long ago,
+/// a record after a run's end, what a plan review predicted, a planner's
+/// session, a follow-up's draft, a plan's change on an old forecast's task,
+/// a run that holds its slot to this day, one with an ask still open and one
+/// with a session never closed.
+pub(crate) const READ_AT_DAY: i64 = 200;
+
+pub(crate) fn reads_from_a_time() -> Log {
+    let mut log = log_of_a_time();
+    log.events.sort_by_key(|event| event.created_at.clone());
+    numbered(log)
+}
+
+/// [`reads_from_a_time`] with records of a clock that was turned back, each
+/// id as it was given, none put in the order of the times; each row below
+/// would be left out by what one of its id and its time says, not the other:
+///
+/// - A turn finished in the periods, past its run's end, and then a record
+///   of the queue from long ago with a later id.
+/// - A run of long ago with tokens of a time in the periods: the time its
+///   Execution counts by is not the time it was recorded.
+/// - A run of long ago with a record after the last one before a listed
+///   period, and so past every record of the queue of the read's time: that
+///   period's first event id is that record's, and the landing recorded
+///   before it, of a time in that period, is in none.
+/// - A landing of long ago, before the time of a day's read, and after it the
+///   start of another run's landing of a time before its end, which lands in
+///   the periods: its attempt starts at the end of the one before.
+pub(crate) fn reads_from_a_clock_turned_back() -> Log {
+    let at = |day: i64| day * DAY;
+    let near = at(READ_AT_DAY - 1);
+    let hour = 3600;
+    // The start of the oldest period of a day's read.
+    let from = at(READ_AT_DAY - 9) + (DAY - T0.rem_euclid(DAY));
+    let mut landings = Log::default();
+    landings
+        .worked(45, &run_id(45), from - 6 * hour)
+        .add(
+            Some(45),
+            Some(&run_id(45)),
+            "integration_started",
+            json!({}),
+            from - 3 * hour,
+        )
+        .add(
+            Some(45),
+            Some(&run_id(45)),
+            "run_integrated",
+            json!({"from": "validating", "to": "integrated", "status": "integrated"}),
+            from - hour,
+        )
+        .pushed(45, &run_id(45), from - hour + 10)
+        .worked(46, &run_id(46), from - 7 * hour)
+        .add(
+            Some(46),
+            Some(&run_id(46)),
+            "integration_started",
+            json!({}),
+            from - 2 * hour,
+        );
+    let tokens = json!({"input": 11, "output": 13, "cache_read": 0, "cache_creation": 0});
+    let mut late = Log::default();
+    late.landed(40, &run_id(40), at(5))
+        .add(
+            Some(40),
+            Some(&run_id(40)),
+            "turn_finished",
+            json!({"turn": 1, "provider": "claude", "tokens": tokens,
+                   "tokens_source": "model_usage", "tokens_by_model": []}),
+            near + 500,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s1"}),
+            at(6),
+        )
+        .landed(44, &run_id(44), at(6))
+        .add(
+            Some(44),
+            Some(&run_id(44)),
+            "session_tokens",
+            json!({"kind": "inbox", "at": utc_text(ms(near + 600)), "final": true,
+                   "tokens": tokens, "tokens_source": "transcript", "tokens_by_model": []}),
+            at(6) + 10,
+        );
+    let mut past_the_queue = Log::default();
+    past_the_queue
+        .landed(41, &run_id(41), at(7))
+        .landed(43, &run_id(43), near + 1500)
+        .add(
+            Some(41),
+            Some(&run_id(41)),
+            "note_added",
+            json!({}),
+            at(7) + 2000,
+        );
+    // Run 46 lands in the periods before another landing starts.
+    let mut landed = Log::default();
+    landed
+        .add(
+            Some(46),
+            Some(&run_id(46)),
+            "run_integrated",
+            json!({"from": "validating", "to": "integrated", "status": "integrated"}),
+            near + 2500,
+        )
+        .pushed(46, &run_id(46), near + 2600);
+    landed.events.append(&mut past_the_queue.events);
+    let past_the_queue = landed;
+    let mut log = log_of_a_time();
+    log.events.sort_by_key(|event| event.created_at.clone());
+    let index = |events: &[RunEvent], secs: i64| {
+        let text = utc_text(ms(secs));
+        events.partition_point(|event| event.created_at <= text)
+    };
+    // Each place in the events in the order of the times, the latest first.
+    let last = index(&log.events, at(READ_AT_DAY - 2));
+    let landing = index(&log.events, from - 6 * hour - 1800);
+    let first = index(&log.events, at(10));
+    log.events.splice(last..last, past_the_queue.events);
+    log.events.splice(landing..landing, landings.events);
+    log.events.splice(first..first, late.events);
+    numbered(log)
+}
+
+/// `log` with the ids of the places of its events, and each close of a session
+/// naming the last open of the kind before it.
+fn numbered(mut log: Log) -> Log {
+    for (index, event) in log.events.iter_mut().enumerate() {
+        event.id = EventId::new(i64::try_from(index).unwrap() + 1);
+    }
+    let mut opened: HashMap<String, i64> = HashMap::new();
+    for event in &mut log.events {
+        let kind = event.payload["kind"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        match event.kind.as_str() {
+            "session_opened" => {
+                opened.insert(kind, event.id.as_i64());
+            }
+            "session_closed" | "session_tokens" => {
+                event.payload["opened_event_id"] = json!(opened.get(&kind));
+            }
+            _ => {}
+        }
+    }
+    log
+}
+
+/// The events of [`reads_from_a_time`], in the order they were added.
+fn log_of_a_time() -> Log {
+    let mut log = Log::default();
+    let at = |day: i64| day * DAY;
+    let tokens = json!({"input": 5, "output": 7, "cache_read": 0, "cache_creation": 0});
+    let alive = |log: &mut Log, supervisor: &str, secs: i64| {
+        log.add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": supervisor}),
+            secs,
+        );
+    };
+    log.add(None, None, "attributes_baseline", json!({}), 0)
+        .add(None, None, "finding_baseline", json!({}), 1)
+        .add(
+            None,
+            None,
+            "finding_recorded",
+            finding_record("open"),
+            at(2),
+        );
+    log.add(
+        None,
+        None,
+        "supervisor_started",
+        json!({"supervisor": "s1", "parallel": 2}),
+        2,
+    )
+    .add(
+        None,
+        None,
+        "supervisor_stopped",
+        json!({"supervisor": "s1"}),
+        at(9),
+    );
+    log.add(None, None, "inbox_watcher_absent", json!({}), at(4));
+    log.landed(1, &run_id(1), at(2));
+    log.add(
+        Some(1),
+        Some(&run_id(1)),
+        "turn_finished",
+        json!({"turn": 1, "provider": "claude", "tokens": tokens,
+               "tokens_source": "model_usage", "tokens_by_model": []}),
+        at(2) + 20,
+    )
+    .add(
+        Some(1),
+        Some(&run_id(1)),
+        "follow_up_registered",
+        json!({"task_id": 6, "category": "defect", "index": 0}),
+        at(2) + 30,
+    );
+    // A retry across the time.
+    log.add(
+        Some(2),
+        None,
+        "task_status_changed",
+        json!({"from": "draft", "to": "ready"}),
+        at(3),
+    );
+    log.worked(2, &run_id(2), at(3));
+    log.add(
+        Some(2),
+        Some(&run_id(2)),
+        "validation_finished",
+        json!({"status": "failed"}),
+        at(3) + 700,
+    );
+    log.phase(2, &run_id(2), at(3) + 700, Phase::Ended, "failed");
+    log.add(
+        None,
+        None,
+        "forecast_recorded",
+        json!({"at_secs": T0 + at(3), "method": 1, "goals": [],
+               "tasks": [{"id": 2, "p50_secs": 3600, "p90_secs": 7200},
+                         {"id": 1, "p50_secs": 3600, "p90_secs": 7200}]}),
+        at(3),
+    );
+    log.add(
+        Some(1),
+        None,
+        "task_priority_changed",
+        json!({"priority": "high"}),
+        at(4),
+    );
+    // A record after the end of a run of long ago.
+    log.landed(3, &run_id(3), at(4));
+    // What a plan review predicted of a task claimed long after, and the
+    // planner's session.
+    log.add(
+        Some(4),
+        None,
+        "task_weight_predicted",
+        json!({"plan_review_id": 9,
+               "prediction": {"nature": "mechanical", "expected_output_tokens": 100}}),
+        at(8),
+    )
+    .add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 5}),
+        at(8),
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"kind": "runtime_planner", "planner_id": 5, "session_id": "p-5"}),
+        at(9),
+    )
+    .add(
+        None,
+        None,
+        "plan_review_finished",
+        json!({"plan_review_id": 9}),
+        at(9),
+    );
+    // A draft of long ago whose follow-up was registered on run 1.
+    log.add(
+        Some(6),
+        None,
+        "task_created",
+        json!({"status": "draft"}),
+        at(2) + 31,
+    );
+    // A run that never ended, of a task that did: it holds its slot to now.
+    log.add(Some(7), None, "task_created", json!({}), at(5))
+        .add(
+            Some(7),
+            Some(&run_id(7)),
+            "run_claimed",
+            json!({"from": "ready", "to": "in_progress", "provider": "claude"}),
+            at(5),
+        )
+        .add(
+            Some(7),
+            None,
+            "task_status_changed",
+            json!({"from": "in_progress", "to": "canceled"}),
+            at(5) + 9,
+        );
+    // A run ended with an ask still open, while the watcher was away.
+    log.landed(8, &run_id(8), at(5));
+    log.add(
+        Some(8),
+        Some(&run_id(8)),
+        "ask_opened",
+        json!({"ask_id": 77, "kind": "worker_question"}),
+        at(5) + 940,
+    );
+    log.legacy(9, &run_id(9), at(5));
+    // A run ended with its session never closed: it counts as open to now.
+    log.landed(10, &run_id(10), at(5));
+    log.add(
+        Some(10),
+        Some(&run_id(10)),
+        "session_opened",
+        json!({"kind": "resume", "provider": "claude"}),
+        at(5) + 1,
+    );
+    // From here on is the periods'.
+    for day in 10..=READ_AT_DAY {
+        alive(&mut log, "s2", at(day));
+    }
+    log.add(
+        None,
+        None,
+        "supervisor_started",
+        json!({"supervisor": "s2", "parallel": 4}),
+        at(10),
+    );
+    let near = at(READ_AT_DAY - 1);
+    log.add(
+        Some(3),
+        Some(&run_id(3)),
+        "note_added",
+        json!({"late": true}),
+        near,
+    );
+    log.add(None, None, "inbox_watcher_returned", json!({}), near);
+    log.landed(2, &run_id(12), near + 100);
+    log.add(
+        Some(2),
+        None,
+        "task_status_changed",
+        json!({"from": "in_progress", "to": "completed"}),
+        near + 1100,
+    );
+    log.landed(4, &run_id(14), near + 200);
+    log.add(
+        Some(6),
+        None,
+        "task_status_changed",
+        json!({"from": "draft", "to": "ready"}),
+        near + 300,
+    );
+    log.landed(6, &run_id(16), near + 400);
+    log.add(
+        Some(6),
+        None,
+        "task_status_changed",
+        json!({"from": "in_progress", "to": "completed"}),
+        near + 1400,
+    );
+    let from_near = utc_text(ms(near));
+    for event in &mut log.events {
+        if event.kind.as_str() == "run_claimed" {
+            let build = if event.created_at >= from_near {
+                "v2"
+            } else {
+                "v1"
+            };
+            event.payload["dagq_version"] = json!(build);
+        }
+    }
+    log
+}
+
+/// The rows of [`reads_from_a_time`] at [`READ_AT_DAY`], with a run row of a
+/// time missing each way and the host's load of long ago and of now.
+pub(crate) fn rows_read_from_a_time() -> Vec<super::LedgerRow> {
+    rows_at_the_read(&reads_from_a_time().events)
+}
+
+/// The rows of [`reads_from_a_clock_turned_back`], as
+/// [`rows_read_from_a_time`]'s.
+pub(crate) fn rows_read_from_a_clock_turned_back() -> Vec<super::LedgerRow> {
+    rows_at_the_read(&reads_from_a_clock_turned_back().events)
+}
+
+fn rows_at_the_read(events: &[RunEvent]) -> Vec<super::LedgerRow> {
+    use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
+    let now = T0 + READ_AT_DAY * DAY;
+    let mut rows = super::build(events, now * 1000, "2030-01-01T00:00:00.000Z");
+    let no_time = |run: u8| {
+        let mut row = run_row(&run_id(run), None, Vec::new());
+        row.started_at = None;
+        row.ended_at = None;
+        row
+    };
+    let mut no_start = no_time(30);
+    no_start.ended_at = Some(ms(DAY));
+    let mut no_end = no_time(31);
+    no_end.started_at = Some(ms(DAY));
+    rows.extend([no_start, no_end]);
+    let sample = |id: i64, unix: i64| {
+        let mut sample = HostSample::new(unix);
+        sample.set("load1", Some(1.5));
+        NodeSample {
+            resources: Default::default(),
+            id,
+            node_id: HOST_NODE.to_owned(),
+            local_day: unix / DAY,
+            source: SampleSource::Sampled,
+            sample,
+        }
+    };
+    rows.extend(super::node::node_rows(
+        &[sample(1, T0 + DAY), sample(2, now - 3600)],
+        "2030-01-01T00:00:00.000Z",
+    ));
+    rows
 }

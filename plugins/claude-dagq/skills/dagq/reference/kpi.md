@@ -12,6 +12,7 @@ Each command below prints JSON; `"$DAGQ" <command> --help` lists its flags (and 
 "$DAGQ" kpi --since CURSOR --until CURSOR    # one window, beside the window of the same length before it
 ```
 
+- `kpi --read-whole-ledger` answers the same question from every row of the ledger: compare its JSON with the plain read's when you doubt which rows the plain read needs.
 - A missing value is no record, not zero. A period not over yet and a value with too few samples are not judged: read no trend from them.
 - Compare work time only within one `area=` or `change=` stratum (which one is the repository's rule): tasks differ by an order of magnitude, so `all` moves with the mix of tasks.
 - **Time by tag.** Each period's `breakdown` holds its finished runs' time and slot time by blocker, holds and attempt, in `all` and per `change=` and `area=` stratum (`--change` and `--area` keep only theirs), each axis adding up to 100% with `unattributed`; the daily report shows it as "Time by tag". `unattributed_ratio` is the share of the time no record accounts for, a KPI of every stratum (judged only against a target set for it): when it is high, the split is not to be trusted, and the fix is a missing record, not the work.

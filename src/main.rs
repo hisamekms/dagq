@@ -1642,6 +1642,10 @@ enum Command {
         /// Only the runs, asks and findings of tasks in this goal.
         #[arg(long = "goal")]
         goal_id: Option<i64>,
+        /// Read every row of the ledger instead of those the periods asked for need: the same
+        /// answer, to check the two against each other.
+        #[arg(long)]
+        read_whole_ledger: bool,
     },
     // ADR-0070.
     /// When the open tasks (ready and in progress, outside a draft goal) and the open goals are
@@ -3293,6 +3297,7 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             compare,
             window,
             goal_id,
+            read_whole_ledger,
         } => QueueRead::Kpi(reads::KpiRead {
             period,
             last,
@@ -3306,6 +3311,7 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             compare,
             window,
             goal: goal_id,
+            read_whole_ledger,
             git: None,
         }),
         Command::Forecast {
@@ -6978,6 +6984,35 @@ mod tests {
                 .map(|(use_case, _)| use_case),
             Some(UseCase::ReadyInherit)
         );
+    }
+
+    /// The words on the command line reach what the queue service's client
+    /// sends: without them a worker's or a job's read would answer from the
+    /// period's rows, however it was asked.
+    #[test]
+    fn kpi_sends_the_question_of_reading_every_row_to_the_service() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let _ = done.send(std::panic::catch_unwind(|| {
+                    let sent = |argv: &[&str]| {
+                        let cli = Cli::try_parse_from(argv).unwrap();
+                        client_request(&cli.command).unwrap().unwrap()
+                    };
+                    let (use_case, params) = sent(&["dagq", "kpi", "--read-whole-ledger"]);
+                    assert_eq!(use_case, UseCase::Kpi);
+                    assert_eq!(params["read_whole_ledger"], true);
+                    assert!(sent(&["dagq", "kpi"]).1.get("read_whole_ledger").is_none());
+                }));
+            })
+            .unwrap();
+        if let Err(panic) = finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the read of the command line did not end within 60 seconds")
+        {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     /// The refusal comes before the command: the queue of `--db` stays

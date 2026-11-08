@@ -279,6 +279,7 @@ fn compares_two_explicit_windows() {
             rows: &[],
             post_landing: None,
             executions: None,
+            earlier: None,
         },
         &KpiQuery {
             compare: Some(backwards),

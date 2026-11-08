@@ -251,6 +251,18 @@ impl Mark {
 /// [`cursor_millis`] reads off `events`, so a caller that passes only those
 /// kinds passes its cursors as times.
 pub fn marks(events: &[RunEvent], since: Option<Cursor>, until: Option<Cursor>) -> Vec<Mark> {
+    marks_with_earlier(events, &[], since, until)
+}
+
+/// [`marks`] of `events` whose read left out the runs of the claims `earlier`:
+/// a derived mark compares a claim with the one before it, read or not
+/// ([`crate::domain::ledger::window::Earlier`]).
+pub fn marks_with_earlier(
+    events: &[RunEvent],
+    earlier: &[RunEvent],
+    since: Option<Cursor>,
+    until: Option<Cursor>,
+) -> Vec<Mark> {
     let retracted = retractions(events);
     let mut marks: Vec<Mark> = events
         .iter()
@@ -279,7 +291,7 @@ pub fn marks(events: &[RunEvent], since: Option<Cursor>, until: Option<Cursor>) 
             detail: event.payload.clone(),
         })
         .collect();
-    marks.extend(derived_marks(events));
+    marks.extend(derived_marks(events, earlier));
     let bound = |cursor: Option<Cursor>| cursor.map(|cursor| cursor_millis(cursor, events));
     let (since, until) = (bound(since), bound(until));
     marks.retain(|mark| {
@@ -436,11 +448,13 @@ fn claim_value(payload: &Value, attribute: &str) -> Option<String> {
 /// a first value is no mark. A change a supervisor's start between the two
 /// claims already announces (the same new build or `parallel`) is that
 /// start's mark and derives none.
-fn derived_marks(events: &[RunEvent]) -> Vec<Mark> {
-    let claims: Vec<&RunEvent> = events
+fn derived_marks(events: &[RunEvent], earlier: &[RunEvent]) -> Vec<Mark> {
+    let mut claims: Vec<&RunEvent> = events
         .iter()
+        .chain(earlier)
         .filter(|event| event.kind == EventKind::RunClaimed && event.run_id.is_some())
         .collect();
+    claims.sort_by_key(|event| event.id);
     let starts: Vec<&RunEvent> = events
         .iter()
         .filter(|event| event.kind == EventKind::SupervisorStarted && is_queue_event(event))

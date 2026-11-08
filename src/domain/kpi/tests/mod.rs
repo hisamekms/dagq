@@ -303,6 +303,7 @@ impl Queue {
                 rows: &rows,
                 post_landing: Some(&post_landing),
                 executions: Some(&executions),
+                earlier: None,
             },
             query,
         )

@@ -502,9 +502,52 @@ pub fn window(
     until: i64,
     counts: impl Fn(&Execution) -> bool,
 ) -> ExecutionStats {
+    window_after(all, &[], from, until, counts)
+}
+
+/// When a read left out an actor's Executions on a provider, the first of
+/// them: what [`window_after`] takes for `recorded_from` and `coverage`, which
+/// are the queue's and not the rows' read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstExecution {
+    pub actor: &'static str,
+    pub provider: String,
+    pub at: i64,
+}
+
+impl FirstExecution {
+    /// The first of a row's entry as a store reads it: none for an actor
+    /// [`Execution::from_entry`] would not read either.
+    pub fn of(actor: &str, provider: String, at: i64) -> Option<Self> {
+        let actor = crate::domain::sessions::KINDS
+            .into_iter()
+            .find(|kind| *kind == actor)?;
+        Some(Self {
+            actor,
+            provider,
+            at,
+        })
+    }
+}
+
+/// [`window`] of `all` where a read left out the Executions `earlier` gives
+/// the first of.
+pub fn window_after(
+    all: &[Execution],
+    earlier: &[FirstExecution],
+    from: Option<i64>,
+    until: i64,
+    counts: impl Fn(&Execution) -> bool,
+) -> ExecutionStats {
     let text = |millis: i64| crate::domain::marks::utc_text(millis);
     let mut first: HashMap<(&str, &str), i64> = HashMap::new();
     for execution in all {
+        first
+            .entry((execution.actor, execution.provider.as_str()))
+            .and_modify(|at| *at = (*at).min(execution.at))
+            .or_insert(execution.at);
+    }
+    for execution in earlier {
         first
             .entry((execution.actor, execution.provider.as_str()))
             .and_modify(|at| *at = (*at).min(execution.at))

@@ -208,6 +208,7 @@ fn report_with_host(
             rows: &[],
             post_landing: None,
             executions: None,
+            earlier: None,
         },
         &KpiQuery {
             period,

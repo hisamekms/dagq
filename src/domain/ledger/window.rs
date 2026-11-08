@@ -10,7 +10,8 @@
 //! choose among the rows of a task, a goal or a run; the folds that carry
 //! state into a window (the attributes, the findings, main's history, the
 //! judgments of now, the reverts and CI's failures after the landings)
-//! read every row's records up to the window's end whatever the filters;
+//! read the records of every row read up to the window's end whatever the
+//! filters ("A read from a time" below says which a read may leave out);
 //! the reverts and failures are given for the runs the filters chose
 //! ([`LedgerWindow::post_landing`]). Each read says why it has no value instead of a
 //! 0 or an empty list: [`FoldedJudgments`]' states, [`MainMissing`],
@@ -26,6 +27,41 @@
 //! its life ended); [`runs_on_their_way`] names those its task rows not
 //! ended give, and their rows are folded at the read by the same fold
 //! ([`run_on_its_way`]) before [`WindowRows`] takes them.
+//!
+//! # A read from a time
+//!
+//! [`WindowQuery::read_from_ms`] leaves out of the store's read the rows the
+//! periods of `kpi` from that time need nothing of ([`RowsFrom`]); without it
+//! every row is read. The queue rows are always read, whole: most of what
+//! the folds that carry state read is theirs. A run, session or task row is
+//! left out when it ended before the time and each of its records stands
+//! before it, in time and in id ([`RowsFrom::leaves_out`]); a row with no
+//! time, a legacy one and a node row that reaches the time are read. A time
+//! does not follow an id (a clock turned back has no limit), so neither is
+//! read from the other. By time: what counts by when it happened, as an
+//! Execution does, finds nothing in the periods among the rows left out. By
+//! id: every record left out stands at or before a queue record of the time
+//! or before it, so a period's first event id is the same with them or without.
+//! What looks back past the time still comes, so that the answer is that of
+//! every row:
+//!
+//! - A task row and every run it names come with a row of that task or a
+//!   record of it from the time on ([`WindowRows::rows_wanted`]): a run's
+//!   retries, a task's first `ready`.
+//! - A run row comes when it holds a slot, an ask or a session to this day
+//!   ([`WindowRows::take_earlier`]).
+//! - The records of the task and session rows left out are among
+//!   [`LedgerWindow::events`] still (a store gives them without their rows,
+//!   and they are few beside the run rows' records): what a plan review
+//!   predicted, a proposal's planner and judge, the routes of a planner.
+//! - Of the run rows left out, what is read past their end
+//!   ([`EARLIER_RUN_KINDS`]) comes the same way, and their claims
+//!   ([`Earlier::claims`]), first Executions ([`Earlier::executions`]) and
+//!   what the landings' attempts read ([`Earlier::landings`]) apart.
+//!
+//! All of this is read of one state of the rows
+//! ([`crate::application::LedgerStore::ledger_read_snapshot`]): a row that
+//! the builder moves between two of its reads would be in neither.
 //!
 //! # Where each value comes from
 //!
@@ -163,14 +199,16 @@ use super::{
     session::row_executions,
 };
 use crate::domain::{
-    EventId, GoalId, RunEvent, RunId, TaskChange, TaskId,
+    EventId, EventKind, GoalId, RunEvent, RunId, TaskChange, TaskId,
     areas::{AreaMap, run_areas},
     host_metrics::HostSummary,
     live_alerts::{self, FoldedJudgments},
+    run::{AskRef, AtOf, PayloadAt, StatusOf, restore_payload},
     stats::{
         Cursor, History,
         context::{self, ContextRecord},
         executions::{self, Execution, ExecutionStats},
+        landing_utilization,
         ledger_times::LedgerTimes,
         main_log::{MainLog, MainMissing, fold_main_log},
         timestamp_millis,
@@ -189,6 +227,162 @@ pub struct WindowQuery {
     pub area: Option<String>,
     pub areas: Option<AreaMap>,
     pub now_ms: i64,
+    /// Read no row the periods from this time need nothing of (unix ms;
+    /// module doc): none reads every row. Apart from `since`, which is the
+    /// window `stats` answers of and moves its answer.
+    pub read_from_ms: Option<i64>,
+}
+
+/// Which rows a read from a time leaves out of the store's read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowsFrom {
+    /// A run, session or task row that ended before this (unix ms); a node
+    /// row (its end exclusive, [`node::covers`]) that holds no sample of its
+    /// second on.
+    pub ended_before_ms: i64,
+    /// A run, session or task row whose inputs stop at this event or before
+    /// it, a record of the queue's of the time or before it: a row counts the
+    /// records that arrive after its end, by their ids. Taken among the
+    /// queue's records ([`WindowRows::rows_from`]), so no row but the ledger's
+    /// is read for it.
+    pub inputs_through: EventId,
+}
+
+/// The form of the time a record writes and [`RowsFrom::time_text`] has, as a
+/// SQL `LIKE` pattern: a text of this form orders as its time. One in another
+/// form, which [`crate::domain::stats::timestamp_millis`] may still read, is not
+/// taken as before anything.
+pub const RECORD_TIME_FORM: &str = "____-__-__T__:__:__.___Z";
+
+impl RowsFrom {
+    /// A node row that ends at this (unix ms) or before is left out.
+    pub const fn node_ended_by_ms(&self) -> i64 {
+        self.ended_before_ms.div_euclid(1000) * 1000
+    }
+
+    /// The time, as a record writes its time.
+    pub fn time_text(&self) -> String {
+        crate::domain::marks::utc_text(self.ended_before_ms)
+    }
+
+    /// Whether `record` stands before the time ([`Self::time_text`]) in all
+    /// it tells of when it happened: when it was recorded, and the time an
+    /// Execution of it counts by ([`executions::executions`]).
+    fn before_the_time(record: &RunEvent, time: &str) -> bool {
+        let in_form = |text: &str| {
+            text.len() == RECORD_TIME_FORM.len()
+                && text
+                    .bytes()
+                    .zip(RECORD_TIME_FORM.bytes())
+                    .all(|(of, form)| form == b'_' || of.eq_ignore_ascii_case(&form))
+        };
+        let before = |text: &str| in_form(text) && text < time;
+        before(&record.created_at)
+            && match restore_payload::<AtOf>(&record.payload).at() {
+                PayloadAt::None => true,
+                PayloadAt::Text(at) => before(&at),
+                PayloadAt::Other => false,
+            }
+    }
+
+    /// Whether the read leaves `row` out, as a store's condition on the row
+    /// does.
+    pub fn leaves_out(&self, row: &LedgerRow) -> bool {
+        match row.kind {
+            LedgerKind::Queue => false,
+            LedgerKind::Node => row
+                .ended_at
+                .is_some_and(|end| end <= self.node_ended_by_ms()),
+            LedgerKind::Run | LedgerKind::Task | LedgerKind::Session => {
+                let time = self.time_text();
+                !row.is_legacy()
+                    && row.started_at.is_some()
+                    && row.ended_at.is_some_and(|end| end < self.ended_before_ms)
+                    && row.inputs_through.events <= self.inputs_through
+                    && row
+                        .records
+                        .iter()
+                        .all(|record| Self::before_the_time(record, &time))
+            }
+        }
+    }
+}
+
+/// The kinds a read from a time still picks from the run rows it leaves out
+/// ([`LedgerStore`](crate::application::LedgerStore)'s `ledger_earlier`),
+/// with those [`ends_run_occupancy`] reads. `run_claimed` for
+/// [`Earlier::claims`]. A follow-up's registration names its draft on the
+/// source run, the plan's changes on a task count on a forecast's samples
+/// after their snapshot however old, a proposal's tasks and how they ended
+/// count on it whenever that was: each is read by its payload and its task,
+/// so these go among the window's records without their run
+/// ([`WindowRows::take_earlier`]), which would stand for a run with no claim.
+/// The asks say which runs may still hold one open: one with no answer is
+/// read with its run, closed or not, as the alert of an unanswered ask reads it.
+/// So do the sessions: one with no close counts as open in every period.
+pub const EARLIER_RUN_KINDS: [EventKind; 20] = [
+    EventKind::RunClaimed,
+    EventKind::RunIntegrated,
+    EventKind::RunSatisfiedClosed,
+    EventKind::AskOpened,
+    EventKind::AskAnswered,
+    EventKind::SessionOpened,
+    EventKind::SessionClosed,
+    EventKind::FollowUpRegistered,
+    EventKind::TaskPriorityChanged,
+    EventKind::DependencyAdded,
+    EventKind::DependencyRemoved,
+    EventKind::GoalDependencyAdded,
+    EventKind::GoalDependencyRemoved,
+    EventKind::TaskSubmitted,
+    EventKind::TaskReopened,
+    EventKind::TaskStatusChanged,
+    EventKind::GoalSubmitted,
+    EventKind::ProposalWithdrawn,
+    EventKind::PlanDecided,
+    EventKind::ProposalSettled,
+];
+
+/// The `status` values with which an event ends its run's occupancy of a slot.
+pub const RUN_END_STATUSES: [&str; 3] = ["succeeded", "failed", "interrupted"];
+
+/// Whether `event` ends its run's occupancy of a slot in `kpi`
+/// ([`crate::domain::kpi`]'s `slot_usage`): a run with no such event holds
+/// its slot up to now, so a read leaves none of those out.
+pub fn ends_run_occupancy(event: &RunEvent) -> bool {
+    event.kind == EventKind::RunIntegrated
+        || event.kind == EventKind::RunSatisfiedClosed
+        || restore_payload::<StatusOf>(&event.payload)
+            .status()
+            .is_some_and(|status| RUN_END_STATUSES.contains(&status))
+}
+
+/// What a store gives of the rows a read from a time leaves out, and what
+/// the window keeps of it apart from its rows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Earlier {
+    /// The claims of the runs left out, ascending id: a claim among
+    /// [`LedgerWindow::events`] would stand for a run the read does not hold.
+    pub claims: Vec<RunEvent>,
+    /// The first Execution of each actor and provider of the run rows left
+    /// out, by their entries.
+    pub executions: Vec<executions::FirstExecution>,
+    /// What the landings' attempts and waits read of the runs left out
+    /// ([`landing_utilization::reads`]), ascending id and with their runs: an
+    /// attempt starts after the one before it, of any run, and ends with the
+    /// next start ([`landing_utilization::Attempts::add`]).
+    pub landings: Vec<RunEvent>,
+}
+
+/// What a store reads of the rows a read from a time leaves out, whole: not
+/// the rows, which hold far more than their records.
+#[derive(Debug, Default)]
+pub struct EarlierRecords {
+    /// Every record of the task and session rows, and those of
+    /// [`EARLIER_RUN_KINDS`], [`RUN_END_STATUSES`] and
+    /// [`landing_utilization::reads`] of the run rows.
+    pub records: Vec<RunEvent>,
+    pub executions: Vec<executions::FirstExecution>,
 }
 
 /// The rows of a window and what is folded of them.
@@ -214,8 +408,8 @@ pub struct LedgerWindow {
     /// The rows in the window the filters chose, by their first input, as
     /// [`WindowRows`] leaves them: of no queue row and no records.
     pub rows: Vec<LedgerRow>,
-    /// Every row's records, each once and only here, the window and the
-    /// filters aside: what the
+    /// The records of every row read, each once and only here, the window
+    /// and the filters aside: what the
     /// folds that carry state read, each to [`Self::end`] (a baseline's
     /// group is taken only with its mark, which may come after the
     /// window).
@@ -224,6 +418,8 @@ pub struct LedgerWindow {
     held: Held,
     /// The filters, as the counts of the tokens read them.
     filters: Filters,
+    /// What the rows a read from a time left out still give.
+    earlier: Earlier,
 }
 
 /// The runs the task row `row` names ([`super::fold::TaskLife::runs`]),
@@ -319,6 +515,64 @@ pub struct WindowRows {
     records: Vec<RunEvent>,
     rows: Vec<LedgerRow>,
     goals: RecordGoals,
+    earlier: Earlier,
+    /// The records [`Self::take_earlier`] puts among the window's. After the
+    /// rows' when the window is made: a record of a row taken too counts as
+    /// the row holds it.
+    earlier_records: Vec<RunEvent>,
+    /// [`WindowQuery::read_from_ms`] and, for it, what the rows taken so far
+    /// make of it.
+    from: Option<ReadFrom>,
+}
+
+/// What a read from a time keeps track of as it takes the rows.
+#[derive(Debug, Default)]
+struct ReadFrom {
+    ms: i64,
+    /// The latest of the queue's records of the time or before it: a
+    /// period's first event id is at or past it, whatever else is read.
+    queue_before: EventId,
+    /// The rows taken or asked for, and those their rows and records name.
+    asked: BTreeSet<(LedgerKind, String)>,
+    wanted: BTreeSet<(LedgerKind, String)>,
+}
+
+impl ReadFrom {
+    /// Note what `row` names and how far the queue's records reach before
+    /// the time.
+    fn note(&mut self, row: &LedgerRow) {
+        self.asked.insert((row.kind, row.key.clone()));
+        if row.kind == LedgerKind::Node {
+            return;
+        }
+        // A queue row's task is only that of the wait it stands for.
+        if row.kind != LedgerKind::Queue
+            && let Some(task) = row.task_id
+        {
+            self.wanted.insert((LedgerKind::Task, task.to_string()));
+        }
+        for event in &row.records {
+            let at = timestamp_millis(&event.created_at);
+            if row.kind == LedgerKind::Queue && at.is_some_and(|at| at <= self.ms) {
+                self.queue_before = self.queue_before.max(event.id);
+            }
+            if let Some(task) = event.task_id
+                && at.is_none_or(|at| at >= self.ms)
+            {
+                self.wanted.insert((LedgerKind::Task, task.to_string()));
+            }
+        }
+        if row.kind == LedgerKind::Task {
+            let named = row
+                .detail
+                .get("runs")
+                .or_else(|| row.legacy.as_ref()?.get("runs"))
+                .and_then(serde_json::Value::as_array);
+            for run in named.into_iter().flatten().filter_map(|run| run.as_str()) {
+                self.wanted.insert((LedgerKind::Run, run.to_owned()));
+            }
+        }
+    }
 }
 
 impl WindowRows {
@@ -330,11 +584,121 @@ impl WindowRows {
             records: Vec::with_capacity(events.saturating_add(EVENTS_DURING_A_READ)),
             rows: Vec::new(),
             goals: RecordGoals::new(),
+            earlier: Earlier::default(),
+            earlier_records: Vec::new(),
+            from: query.read_from_ms.map(|ms| ReadFrom {
+                ms,
+                ..ReadFrom::default()
+            }),
+        }
+    }
+
+    /// Which rows a read from a time leaves out, once the queue's rows are
+    /// taken: the inputs left out stop at the queue's last record of the time
+    /// or before it, so with none of them no row is left out by its inputs.
+    pub fn rows_from(&self) -> Option<RowsFrom> {
+        self.from.as_ref().map(|from| RowsFrom {
+            ended_before_ms: from.ms,
+            inputs_through: from.queue_before,
+        })
+    }
+
+    /// The rows not taken yet of the tasks the rows taken name and of the
+    /// runs those tasks name, each asked for once: take those the store has
+    /// and ask again until none is left.
+    pub fn rows_wanted(&mut self) -> Vec<(LedgerKind, String)> {
+        let Some(from) = &mut self.from else {
+            return Vec::new();
+        };
+        let wanted: Vec<(LedgerKind, String)> = std::mem::take(&mut from.wanted)
+            .into_iter()
+            .filter(|row| !from.asked.contains(row))
+            .collect();
+        from.asked.extend(wanted.iter().cloned());
+        wanted
+    }
+
+    /// Take what the rows left out still give (module doc), in any order:
+    /// a record of a row taken too counts once, and a run that holds a slot
+    /// (a claim with no end), an ask or a session to this day is wanted whole.
+    /// A close the rows left out do not give may be among the rows read: that
+    /// run is read whole too, as its session may count in the periods.
+    pub fn take_earlier(&mut self, earlier: EarlierRecords) {
+        self.earlier.executions = earlier.executions;
+        let mut claimed = BTreeSet::new();
+        let mut ended = BTreeSet::new();
+        let mut asks: HashMap<(RunId, Option<String>), bool> = HashMap::new();
+        // Paired as `stats` pairs an ask's events.
+        let ask = |event: &RunEvent, run: &RunId| {
+            (run.clone(), restore_payload::<AskRef>(&event.payload).key())
+        };
+        let closed: BTreeSet<EventId> = earlier
+            .records
+            .iter()
+            .filter(|event| event.kind == EventKind::SessionClosed)
+            .filter_map(|event| crate::domain::sessions::SpanRef::of(event).opened_event_id)
+            .collect();
+        let mut open_sessions = BTreeSet::new();
+        for mut event in earlier.records {
+            let Some(run) = event.run_id.clone() else {
+                self.earlier_records.push(event);
+                continue;
+            };
+            if landing_utilization::reads(&event) {
+                self.earlier.landings.push(event.clone());
+            }
+            if ends_run_occupancy(&event) {
+                ended.insert(run.clone());
+            }
+            match event.kind.known() {
+                Some(EventKind::RunClaimed) => {
+                    claimed.insert(run);
+                    self.earlier.claims.push(event);
+                }
+                Some(EventKind::AskOpened) => {
+                    asks.entry(ask(&event, &run)).or_insert(true);
+                }
+                Some(EventKind::AskAnswered) => {
+                    asks.insert(ask(&event, &run), false);
+                }
+                Some(EventKind::SessionOpened) => {
+                    if !closed.contains(&event.id) {
+                        open_sessions.insert(run);
+                    }
+                }
+                Some(
+                    EventKind::RunIntegrated
+                    | EventKind::RunSatisfiedClosed
+                    | EventKind::SessionClosed,
+                ) => {}
+                Some(kind) if EARLIER_RUN_KINDS.contains(&kind) => {
+                    event.run_id = None;
+                    self.earlier_records.push(event);
+                }
+                _ => {}
+            }
+        }
+        if let Some(from) = &mut self.from {
+            let open_asks = asks
+                .into_iter()
+                .filter(|(_, open)| *open)
+                .map(|((run, _), _)| run);
+            from.wanted.extend(
+                claimed
+                    .into_iter()
+                    .filter(|run| !ended.contains(run))
+                    .chain(open_asks)
+                    .chain(open_sessions)
+                    .map(|run| (LedgerKind::Run, run.as_str().to_owned())),
+            );
         }
     }
 
     /// Take `row`, folded to what the window keeps of it.
     pub fn take(&mut self, mut row: LedgerRow) {
+        if let Some(from) = &mut self.from {
+            from.note(&row);
+        }
         if self.picks_goals && row.kind == LedgerKind::Session {
             self.goals
                 .insert((row.kind, row.key.clone()), record_goals(&row));
@@ -351,6 +715,13 @@ impl WindowRows {
             _ => {}
         }
         self.rows.push(row);
+    }
+
+    /// Take a row asked for by its key, if the store has it.
+    pub fn take_row(&mut self, row: Option<LedgerRow>) {
+        if let Some(row) = row {
+            self.take(row);
+        }
     }
 
     /// Take every row `page` gives, asked for [`ROWS_PER_PAGE`] at a time
@@ -384,10 +755,31 @@ impl WindowRows {
     /// ended before its start, then those of the filters.
     pub fn into_window(mut self, query: &WindowQuery) -> LedgerWindow {
         self.rows.shrink_to_fit();
+        self.records.append(&mut self.earlier_records);
+        self.earlier_records = Vec::new();
         self.records.shrink_to_fit();
         self.records.sort_by_key(|event| event.id);
         self.records.dedup_by_key(|event| event.id);
-        of_records(self.records, self.rows, &self.goals, query)
+        let mut earlier = self.earlier;
+        earlier.claims.sort_by_key(|event| event.id);
+        earlier.claims.dedup_by_key(|event| event.id);
+        earlier.claims.retain(|event| {
+            self.records
+                .binary_search_by_key(&event.id, |read| read.id)
+                .is_err()
+        });
+        earlier.claims.shrink_to_fit();
+        earlier.landings.sort_by_key(|event| event.id);
+        earlier.landings.dedup_by_key(|event| event.id);
+        earlier.landings.retain(|event| {
+            self.records
+                .binary_search_by_key(&event.id, |read| read.id)
+                .is_err()
+        });
+        earlier.landings.shrink_to_fit();
+        let mut window = of_records(self.records, self.rows, &self.goals, query);
+        window.earlier = earlier;
+        window
     }
 }
 
@@ -402,6 +794,69 @@ pub(crate) fn select(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow 
         read.take(row);
     }
     read.into_window(query)
+}
+
+/// The window `query` asks of `rows` read as a store reads them: what
+/// [`crate::application::LedgerStore::ledger_window`] does, of rows in memory,
+/// with [`RowsFrom::leaves_out`] for the store's condition.
+#[cfg(test)]
+pub(crate) fn select_from_time(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
+    let mut read = WindowRows::new(query, 0);
+    let (queue, others): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .partition(|row| row.kind == LedgerKind::Queue);
+    for row in queue {
+        read.take(row);
+    }
+    let Some(from) = read.rows_from() else {
+        for row in others {
+            read.take(row);
+        }
+        return read.into_window(query);
+    };
+    let (out, kept): (Vec<_>, Vec<_>) = others.into_iter().partition(|row| from.leaves_out(row));
+    for row in kept {
+        read.take(row);
+    }
+    let mut earlier = EarlierRecords::default();
+    for row in out.iter().filter(|row| row.kind != LedgerKind::Node) {
+        if row.kind == LedgerKind::Run {
+            earlier.executions.extend(
+                row_executions(row).iter().filter_map(|e| {
+                    executions::FirstExecution::of(e.actor, e.provider.clone(), e.at)
+                }),
+            );
+            earlier.records.extend(
+                row.records
+                    .iter()
+                    .filter(|event| {
+                        event
+                            .kind
+                            .known()
+                            .is_some_and(|kind| EARLIER_RUN_KINDS.contains(&kind))
+                            || ends_run_occupancy(event)
+                            || landing_utilization::reads(event)
+                    })
+                    .cloned(),
+            );
+        } else {
+            earlier.records.extend(row.records.iter().cloned());
+        }
+    }
+    read.take_earlier(earlier);
+    loop {
+        let wanted = read.rows_wanted();
+        if wanted.is_empty() {
+            return read.into_window(query);
+        }
+        for (kind, key) in wanted {
+            read.take_row(
+                out.iter()
+                    .find(|row| row.kind == kind && row.key == key)
+                    .cloned(),
+            );
+        }
+    }
 }
 
 /// The window [`select`] gives, in the form that keeps all it is given:
@@ -480,6 +935,7 @@ fn of_records(
         held: Held::of(&all, end),
         records: all,
         filters: Filters::default(),
+        earlier: Earlier::default(),
     };
     let filters = Filters::of(&window, query);
     let mut chosen: Vec<LedgerRow> = rows
@@ -776,6 +1232,11 @@ impl LedgerWindow {
         }
     }
 
+    /// What the rows a read from a time left out still give.
+    pub const fn earlier(&self) -> &Earlier {
+        &self.earlier
+    }
+
     /// The window's end in unix seconds.
     pub const fn end_secs(&self) -> i64 {
         self.end_ms.div_euclid(1000)
@@ -874,9 +1335,13 @@ impl LedgerWindow {
     /// times and pass its filters ([`executions::window`]).
     pub fn execution_tokens(&self) -> ExecutionStats {
         let all = executions::executions(&self.records);
-        executions::window(&all, self.start_ms, self.end_ms, |execution| {
-            self.filters.counts(execution)
-        })
+        executions::window_after(
+            &all,
+            &self.earlier.executions,
+            self.start_ms,
+            self.end_ms,
+            |execution| self.filters.counts(execution),
+        )
     }
 
     /// The Executions of the window's chosen run and session rows (their

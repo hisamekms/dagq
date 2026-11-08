@@ -286,6 +286,7 @@ fn one_window_of_any_length() {
             rows: &[],
             post_landing: None,
             executions: None,
+            earlier: None,
         },
         &KpiQuery {
             since: query.until,
@@ -388,4 +389,102 @@ fn a_reports_landed_commits_are_the_ones_of_the_periods_it_reads() {
         ..query
     };
     assert!(landed_in_periods(&queue.events, &nowhere, now, JST, &config).is_empty());
+}
+
+/// The read of a period's question starts where the oldest period `kpi`
+/// computes does: what it lists at its largest, the breach's lookback too. Every
+/// other question reads every row.
+#[test]
+fn the_read_starts_at_the_oldest_period_computed() {
+    let config = KpiConfig {
+        breach_periods: 8,
+        breach_weeks: 5,
+        ..KpiConfig::default()
+    };
+    let now = MONDAY + 2 * DAY + 12 * HOUR;
+    let at = Cursor::Time((now - 40 * DAY) * 1000);
+    for (period, breach, length, lookback) in
+        [(Period::Day, 8, DAY, 7), (Period::Week, 5, 7 * DAY, 2)]
+    {
+        for anchor in [None, Some(at)] {
+            let query = KpiQuery {
+                period,
+                last: 2,
+                at: anchor,
+                ..KpiQuery::default()
+            };
+            let read_from = read_from_ms(&query, &config, now, JST).unwrap();
+            let held = (now - if anchor.is_some() { 40 * DAY } else { 0 }) * 1000;
+            let periods = 2 + 2 * breach;
+            assert!(lookback < 2 * breach);
+            assert_eq!(
+                read_from,
+                period.start(held, JST * 1000) - (i64::from(periods) - 1) * length * 1000,
+            );
+            // What `kpi` lists of as many as it computes starts there.
+            let all = KpiQuery {
+                last: 1 + 2 * usize::try_from(breach).unwrap() + 1,
+                ..query.clone()
+            };
+            let mut queue = Queue::default();
+            let listed = queue.kpi(
+                now,
+                &KpiConfig {
+                    breach_periods: 0,
+                    breach_weeks: 0,
+                    ..config.clone()
+                },
+                &all,
+            );
+            let oldest = marks_ms(&listed.periods[0].start);
+            assert_eq!(read_from, oldest, "{period:?}");
+        }
+    }
+    let day = KpiQuery {
+        last: 2,
+        ..KpiQuery::default()
+    };
+    let lookback_only = read_from_ms(
+        &day,
+        &KpiConfig {
+            breach_periods: 1,
+            ..config.clone()
+        },
+        now,
+        JST,
+    );
+    assert_eq!(
+        lookback_only,
+        Some(Period::Day.start(now * 1000, JST * 1000) - 8 * DAY * 1000),
+    );
+    let cursor = Cursor::Time(now * 1000);
+    let whole = [
+        KpiQuery {
+            since: Some(cursor),
+            ..day.clone()
+        },
+        KpiQuery {
+            until: Some(cursor),
+            ..day.clone()
+        },
+        KpiQuery {
+            compare: Some(CompareSpec::At(cursor)),
+            ..day.clone()
+        },
+        KpiQuery {
+            at: Some(Cursor::Event(EventId::new(5))),
+            ..day.clone()
+        },
+        KpiQuery {
+            read_whole_ledger: true,
+            ..day.clone()
+        },
+        KpiQuery {
+            goal_id: Some(GoalId::new(1)),
+            ..day.clone()
+        },
+    ];
+    for query in whole {
+        assert_eq!(read_from_ms(&query, &config, now, JST), None, "{query:?}");
+    }
 }

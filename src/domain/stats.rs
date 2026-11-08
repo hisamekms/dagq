@@ -1005,6 +1005,10 @@ pub struct LiveSnapshot {
     /// row's (null for a run without one), not the events'. Unset, they are
     /// made of the events and `land_phases` is null.
     pub ledger: Option<LedgerTimes>,
+    /// The first Executions of the rows the read left out, for
+    /// `execution_tokens`' `recorded_from` and `coverage`
+    /// ([`executions::window_after`]).
+    pub earlier_executions: Vec<executions::FirstExecution>,
 }
 
 impl Default for LiveSnapshot {
@@ -1022,6 +1026,7 @@ impl Default for LiveSnapshot {
             utc_offset_secs: 0,
             judged: None,
             ledger: None,
+            earlier_executions: Vec::new(),
         }
     }
 }
@@ -1428,8 +1433,9 @@ pub fn stats(
             .find(|event| event.id == window_start)
             .and_then(|event| timestamp_millis(&event.created_at))
     });
-    let execution_tokens = executions::window(
+    let execution_tokens = executions::window_after(
         &all_executions,
+        &live.earlier_executions,
         tokens_from,
         window_until,
         |execution| match (execution.task_id, execution.goal_id) {

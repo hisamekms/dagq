@@ -3,11 +3,16 @@
 use super::*;
 use crate::application::LedgerStore;
 use crate::domain::ledger::session::written::{self, Marks, RowsWritten, SessionsWritten};
+use crate::domain::ledger::window::{
+    EARLIER_RUN_KINDS, EarlierRecords, RECORD_TIME_FORM, RUN_END_STATUSES, RowsFrom,
+};
 use crate::domain::ledger::{
     InputsThrough, LedgerHead, LedgerKind, LedgerRow, Measure, Subject, Totals, node,
 };
 use crate::domain::pre_claim::rows::Since;
 use crate::domain::run_phase::{Blocker, Holds};
+use crate::domain::stats::executions::FirstExecution;
+use crate::domain::stats::landing_utilization;
 use crate::infrastructure::sql_dialect::{JsonType, SqlDialect};
 use crate::infrastructure::sql_exec::{
     OptionalRow, SqlRead, SqlResult, SqlRow, SqlValue, SqlWrite, ToSqlValue, sql_params,
@@ -316,6 +321,45 @@ fn rows_after_sql(after: bool) -> &'static str {
     } else {
         "SELECT * FROM ledger_rows WHERE kind=?1 ORDER BY key LIMIT ?2"
     }
+}
+
+/// The condition on `ledger_rows r` that keeps what
+/// [`RowsFrom::leaves_out`] leaves out, with the time and the event as the
+/// parameters `?{time}` and `?{event}` and the time's text ([`RowsFrom::time_text`])
+/// as the one after them.
+fn rows_kept_sql(dialect: SqlDialect, time: usize, event: usize) -> String {
+    let through = dialect.json_field_spaced("r.inputs_through", "$.events", JsonType::Integer);
+    let record = record_not_before_sql(dialect, time + 2);
+    format!(
+        "(r.legacy = TRUE OR r.started_at IS NULL OR r.ended_at IS NULL
+          OR r.ended_at >= ?{time} OR {through} > ?{event} OR {record})"
+    )
+}
+
+/// The same condition's opposite, for the rows left out.
+fn rows_left_out_sql(dialect: SqlDialect, time: usize, event: usize) -> String {
+    let through = dialect.json_field_spaced("r.inputs_through", "$.events", JsonType::Integer);
+    let record = record_not_before_sql(dialect, time + 2);
+    format!(
+        "r.legacy = FALSE AND r.started_at IS NOT NULL AND r.ended_at < ?{time}
+         AND {through} <= ?{event} AND NOT {record}"
+    )
+}
+
+/// Whether a record of the row does not stand before the time, the text
+/// `?{text}` ([`RowsFrom::leaves_out`]), last in the conditions above: only
+/// the rows the columns would leave out have their records walked.
+fn record_not_before_sql(dialect: SqlDialect, text: usize) -> String {
+    let before = |time: &str| format!("({time} LIKE '{RECORD_TIME_FORM}' AND {time} < ?{text})");
+    let recorded = dialect.json_field_spaced("t.value", "$.created_at", JsonType::Text);
+    let at = dialect.json_field_spaced("t.value", "$.payload.at", JsonType::Text);
+    format!(
+        "EXISTS (SELECT 1 FROM {records} t
+                  WHERE NOT {recorded_before} OR ({at} IS NOT NULL AND NOT {at_before}))",
+        records = dialect.json_elements("r.records"),
+        recorded_before = before(&recorded),
+        at_before = before(&at),
+    )
 }
 
 /// The read of the queue rows' heads (the kind `?1`), their columns and the
@@ -665,6 +709,153 @@ impl LedgerStore for SqliteQueue {
             )?,
         };
         rows.into_iter().collect()
+    }
+
+    /// A read transaction on this connection: it takes no lock, and what the
+    /// builder writes meanwhile is not seen until it ends.
+    fn ledger_read_snapshot(&self, read: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        let tx = self.read_tx("ledger_read_snapshot")?;
+        read()?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// One statement's condition on the row, walking the kind's keys: of a
+    /// row left out SQLite reads its columns and the times of its records,
+    /// and nothing of it is parsed here.
+    fn ledger_rows_from(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+        from: &RowsFrom,
+    ) -> Result<Vec<LedgerRow>> {
+        if kind == LedgerKind::Queue {
+            return self.ledger_rows_after(kind, after, limit);
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        // By the primary key's range from `after`, as [`rows_after_sql`]:
+        // a page walks only the rows it goes over, each once in the read.
+        let mut values = vec![kind.as_str().to_sql_value()];
+        let mut key = "";
+        if let Some(after) = after {
+            values.push(after.to_sql_value());
+            key = "AND r.key > ?2";
+        }
+        let next = values.len() + 1;
+        let kept = if kind == LedgerKind::Node {
+            values.push(from.node_ended_by_ms().to_sql_value());
+            format!("(r.ended_at IS NULL OR r.ended_at > ?{next})")
+        } else {
+            values.push(from.ended_before_ms.to_sql_value());
+            values.push(from.inputs_through.as_i64().to_sql_value());
+            values.push(from.time_text().to_sql_value());
+            rows_kept_sql(SqlRead::dialect(&*self.conn), next, next + 1)
+        };
+        values.push(limit.to_sql_value());
+        let rows = SqlRead::query_map(
+            &*self.conn,
+            &format!(
+                "SELECT r.* FROM ledger_rows r WHERE r.kind=?1 {key} AND {kept}
+                 ORDER BY r.key LIMIT ?{}",
+                values.len()
+            ),
+            &values,
+            ledger_row,
+        )?;
+        rows.into_iter().collect()
+    }
+
+    /// The records of the task and session rows are parsed whole; SQLite
+    /// picks those of the run rows out of their stored arrays and sums the
+    /// entries of their Executions: no other record is parsed.
+    fn ledger_earlier(&self, from: &RowsFrom) -> Result<EarlierRecords> {
+        let dialect = SqlRead::dialect(&*self.conn);
+        let left_out = rows_left_out_sql(dialect, 2, 3);
+        let bound = (
+            from.ended_before_ms,
+            from.inputs_through.as_i64(),
+            from.time_text(),
+        );
+        let mut records: Vec<RunEvent> = Vec::new();
+        for kind in [LedgerKind::Task, LedgerKind::Session] {
+            let read = SqlRead::query_map(
+                &*self.conn,
+                &format!("SELECT r.records FROM ledger_rows r WHERE r.kind=?1 AND {left_out}"),
+                sql_params![kind.as_str(), bound.0, bound.1, bound.2.as_str()],
+                |r| {
+                    Ok(serde_json::from_str::<Vec<RunEvent>>(
+                        &r.get::<_, String>(0)?,
+                    ))
+                },
+            )?;
+            for row in read {
+                records.extend(row?);
+            }
+        }
+        let quoted = |values: &mut dyn Iterator<Item = &str>| {
+            values
+                .map(|value| format!("'{value}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let picked = SqlRead::query_map(
+            &*self.conn,
+            &format!(
+                "SELECT {record} FROM ledger_rows r, {records} j
+                  WHERE r.kind=?1 AND {left_out}
+                    AND ({kind} IN ({kinds}) OR {status} IN ({statuses}))",
+                record = dialect.json_element("j.value", JsonType::Text),
+                records = dialect.json_elements("r.records"),
+                kind = dialect.json_field_spaced("j.value", "$.kind", JsonType::Text),
+                status = dialect.json_field_spaced("j.value", "$.payload.status", JsonType::Text),
+                kinds = quoted(
+                    &mut EARLIER_RUN_KINDS
+                        .iter()
+                        .chain(&landing_utilization::KINDS)
+                        .map(|kind| kind.as_str())
+                ),
+                statuses = quoted(
+                    &mut RUN_END_STATUSES
+                        .iter()
+                        .chain(&landing_utilization::LEAVING_STATUSES)
+                        .copied()
+                ),
+            ),
+            sql_params![LedgerKind::Run.as_str(), bound.0, bound.1, bound.2.as_str()],
+            |r| Ok(serde_json::from_str::<RunEvent>(&r.get::<_, String>(0)?)),
+        )?;
+        for event in picked {
+            records.push(event?);
+        }
+        let executions = SqlRead::query_map(
+            &*self.conn,
+            &format!(
+                "SELECT {actor}, {provider}, MIN({at})
+                   FROM ledger_rows r, {executions} j
+                  WHERE r.kind=?1 AND {left_out}
+                  GROUP BY {actor}, {provider}",
+                executions = dialect.json_elements_at_spaced("r.detail", "$.executions"),
+                actor = dialect.json_field_spaced("j.value", "$.actor", JsonType::Text),
+                provider = dialect.json_field_spaced("j.value", "$.provider", JsonType::Text),
+                at = dialect.json_field_spaced("j.value", "$.at", JsonType::Integer),
+            ),
+            sql_params![LedgerKind::Run.as_str(), bound.0, bound.1, bound.2.as_str()],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )?
+        .into_iter()
+        .filter_map(|(actor, provider, at)| FirstExecution::of(&actor?, provider?, at?))
+        .collect();
+        Ok(EarlierRecords {
+            records,
+            executions,
+        })
     }
 
     /// The ids of the records come from SQLite's JSON functions over the
@@ -1433,6 +1624,9 @@ fn ledger_row(r: &SqlRow<'_>) -> SqlResult<Result<LedgerRow>> {
         })
     })())
 }
+
+#[cfg(test)]
+mod read_from_tests;
 
 #[cfg(test)]
 mod tests {

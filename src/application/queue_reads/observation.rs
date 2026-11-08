@@ -285,6 +285,7 @@ pub(super) fn kpi_query(read: &KpiRead) -> Result<KpiQuery> {
         compare: read.compare,
         window_days: read.window,
         goal_id: read.goal.map(GoalId::new),
+        read_whole_ledger: read.read_whole_ledger,
     })
 }
 
@@ -316,7 +317,37 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::application::queue_reads::QueueRead;
     use crate::application::queue_reads::fakes::Records;
+    use crate::domain::queue_service::UseCase;
+
+    /// The read the command line builds, sent as the queue service's client
+    /// sends it and read back as the service reads it, still asks whether to
+    /// read every row; one that does not ask does not name it, so a service
+    /// that does not know the option still answers.
+    #[test]
+    fn the_question_of_reading_every_row_reaches_the_query() {
+        let sent = |read_whole_ledger| {
+            let Some(QueueRead::Kpi(read)) = QueueRead::parse(UseCase::Kpi, &json!({})).unwrap()
+            else {
+                panic!("no kpi read");
+            };
+            QueueRead::Kpi(KpiRead {
+                read_whole_ledger,
+                ..read
+            })
+            .request()
+        };
+        let query = |(use_case, params): (UseCase, Value)| {
+            let Some(QueueRead::Kpi(read)) = QueueRead::parse(use_case, &params).unwrap() else {
+                panic!("no kpi read");
+            };
+            kpi_query(&read).unwrap().read_whole_ledger
+        };
+        assert!(query(sent(true)));
+        assert!(!query(sent(false)));
+        assert!(sent(false).1.get("read_whole_ledger").is_none());
+    }
 
     /// The host's sources with only the improvements, which read as
     /// `improvements` says.

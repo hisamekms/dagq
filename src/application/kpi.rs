@@ -4,7 +4,9 @@ use anyhow::{Result, anyhow};
 
 use super::LedgerStore;
 use crate::domain::areas::{AreaMap, run_areas};
-use crate::domain::kpi::{HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive};
+use crate::domain::kpi::{
+    HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive, read_from_ms,
+};
 use crate::domain::ledger::attributes::Folded;
 use crate::domain::ledger::window::{LedgerWindow, WindowQuery};
 
@@ -28,7 +30,9 @@ pub struct Host {
 /// their own records, each window's host load of the node rows, and the
 /// reverts and CI failures after the landings the window's common read
 /// matches to the runs ([`LedgerWindow::post_landing_book`]), and the
-/// Executions its rows keep ([`LedgerWindow::executions`]).
+/// Executions its rows keep ([`LedgerWindow::executions`]). The periods `query`
+/// asks for say which rows the read may leave out
+/// ([`crate::domain::kpi::read_from_ms`]); the answer is the same.
 pub fn kpi(
     queue: &(impl LedgerStore + ?Sized),
     now: i64,
@@ -39,12 +43,14 @@ pub fn kpi(
 ) -> Result<Kpi> {
     let window = queue.ledger_window(&WindowQuery {
         now_ms: super::stats::now_ms(now),
+        read_from_ms: read_from_ms(query, config, now, host.utc_offset_secs),
         ..WindowQuery::default()
     })?;
     of_window(&window, now, host, config, areas, query)
 }
 
-/// [`kpi`] of `window`, the whole ledger up to `now`.
+/// [`kpi`] of `window`, the ledger up to `now` (all of it, or read from the
+/// time of [`read_from_ms`] for `query`).
 pub fn of_window(
     window: &LedgerWindow,
     now: i64,
@@ -88,6 +94,7 @@ pub fn of_window(
             rows: &rows,
             post_landing: Some(&post_landing),
             executions: Some(&executions),
+            earlier: Some(window.earlier()),
         },
         query,
     )
@@ -414,5 +421,128 @@ mod tests {
             kpis[pair::SWITCHED_REVIEW]["pair_group=treatment"].value,
             Some(0.0)
         );
+    }
+
+    /// A read from a time answers as the read of every row, a day's and a
+    /// week's, with strata and without, of what looks back past the time:
+    /// the rows left out alone hold the first Execution, the claim before a
+    /// change of build, a retried task's first run and what a plan review
+    /// predicted.
+    #[test]
+    fn a_read_from_a_time_answers_as_a_read_of_every_row() {
+        use crate::domain::kpi::{Period, read_from_ms};
+        use crate::domain::ledger::LedgerRow;
+        use crate::domain::ledger::testkit::{
+            DAY, READ_AT_DAY, rows_read_from_a_clock_turned_back, rows_read_from_a_time,
+        };
+        use crate::domain::ledger::window::select_from_time;
+        let now = T0 + READ_AT_DAY * DAY;
+        let host = Host {
+            utc_offset_secs: 0,
+            cores: Some(4),
+            rust_toolchain: false,
+        };
+        let config = KpiConfig::default();
+        let answer_of = |rows: &[LedgerRow], query: &KpiQuery| {
+            let window = select_from_time(
+                rows.to_vec(),
+                &WindowQuery {
+                    now_ms: crate::application::stats::now_ms(now),
+                    read_from_ms: read_from_ms(query, &config, now, host.utc_offset_secs),
+                    ..WindowQuery::default()
+                },
+            );
+            serde_json::to_value(of_window(&window, now, host, &config, None, query).unwrap())
+                .unwrap()
+        };
+        let rows = rows_read_from_a_time();
+        let turned_back = rows_read_from_a_clock_turned_back();
+        let answer = |query: &KpiQuery| answer_of(&rows, query);
+        let day_two = KpiQuery {
+            period: Period::Day,
+            last: 2,
+            ..KpiQuery::default()
+        };
+        let questions = [
+            day_two.clone(),
+            KpiQuery {
+                period: Period::Week,
+                last: 2,
+                ..KpiQuery::default()
+            },
+            KpiQuery {
+                by: vec!["nature".parse().unwrap(), "provider".parse().unwrap()],
+                changes: vec!["unknown".to_owned()],
+                ..day_two.clone()
+            },
+            KpiQuery {
+                period: Period::Week,
+                last: 2,
+                by: vec!["nature".parse().unwrap()],
+                changes: vec!["unknown".to_owned()],
+                ..KpiQuery::default()
+            },
+            KpiQuery {
+                at: Some(Cursor::Time((now - 2 * DAY) * 1000)),
+                ..day_two.clone()
+            },
+        ];
+        for query in questions {
+            assert!(read_from_ms(&query, &config, now, 0).is_some(), "{query:?}");
+            let whole = answer(&KpiQuery {
+                read_whole_ledger: true,
+                ..query.clone()
+            });
+            assert_eq!(answer(&query), whole, "{query:?}");
+            let whole = answer_of(
+                &turned_back,
+                &KpiQuery {
+                    read_whole_ledger: true,
+                    ..query.clone()
+                },
+            );
+            assert_eq!(answer_of(&turned_back, &query), whole, "{query:?}");
+        }
+        // What only the times of the rows of long ago put in the periods is
+        // counted, and what only the ids put out of them is not: the landing
+        // recorded before the first event id of its period, and the landing
+        // whose attempt starts at the end of one of long ago.
+        let yesterday = answer_of(&turned_back, &day_two)["periods"][0].clone();
+        let by_actor = &yesterday["details"]["tokens"]["by_actor"];
+        assert_eq!(by_actor["worker"]["input"], 11, "{by_actor}");
+        assert_eq!(by_actor["inbox"]["input"], 11, "{by_actor}");
+        let landings = |answer: &serde_json::Value| answer["kpis"]["landings"]["all"]["n"].as_u64();
+        assert_eq!(
+            landings(&yesterday),
+            landings(&answer(&day_two)["periods"][0])
+        );
+        let answered = answer(&day_two);
+        let tokens = &answered["periods"][1]["details"]["tokens"];
+        assert_eq!(tokens["coverage"], json!("full"), "{tokens}");
+        assert_eq!(
+            tokens["recorded_from"],
+            json!(crate::domain::marks::utc_text(ms(2 * DAY + 20)))
+        );
+        // Three completed, one of them retried across the time.
+        let first_pass = &answered["periods"][0]["kpis"]["first_pass_rate"]["all"];
+        assert_eq!(first_pass["n"], 3, "{first_pass}");
+        assert!(first_pass["value"].as_f64().unwrap() < 1.0, "{first_pass}");
+        let marks: Vec<&str> = answered["periods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|period| period["marks"].as_array().unwrap())
+            .filter_map(|mark| mark["label"].as_str())
+            .collect();
+        assert!(
+            marks.iter().any(|label| label.contains("v1 → v2")),
+            "{marks:?}"
+        );
+        let by_nature = answer(&KpiQuery {
+            by: vec!["nature".parse().unwrap()],
+            ..day_two
+        });
+        let landings = &by_nature["periods"][0]["kpis"]["landings"];
+        assert!(landings.get("nature=mechanical").is_some(), "{landings}");
     }
 }

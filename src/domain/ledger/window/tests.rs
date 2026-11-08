@@ -1839,3 +1839,243 @@ fn todays_names_are_the_rows_and_a_legacy_run_without_one_is_missing() {
     assert_eq!(alert(&new)["phase"], "ask");
     assert_eq!(alert(&waiting)["phase"], "ask");
 }
+
+/// A row is left out only ended and with its last input before the time and
+/// the queue's bound: a legacy row, one with a time missing, a later record
+/// and a node row that reaches the time are read, a queue row always.
+#[test]
+fn a_read_from_a_time_leaves_out_only_what_ended_and_took_its_last_input_before() {
+    use crate::domain::ledger::testkit::run_row;
+    let from = RowsFrom {
+        ended_before_ms: 10 * MIN + 500,
+        inputs_through: EventId::new(100),
+    };
+    let row = |started: Option<i64>, ended: Option<i64>, through: i64| {
+        let mut row = run_row(RUN, None, Vec::new());
+        row.started_at = started;
+        row.ended_at = ended;
+        row.inputs_through.events = EventId::new(through);
+        row
+    };
+    let before = from.ended_before_ms - 1;
+    assert!(from.leaves_out(&row(Some(0), Some(before), 100)));
+    assert!(!from.leaves_out(&row(Some(0), Some(from.ended_before_ms), 100)));
+    assert!(!from.leaves_out(&row(Some(0), Some(before), 101)));
+    assert!(!from.leaves_out(&row(None, Some(before), 1)));
+    assert!(!from.leaves_out(&row(Some(0), None, 1)));
+    let mut legacy = row(Some(0), Some(before), 1);
+    legacy.legacy = Some(json!({}));
+    assert!(!from.leaves_out(&legacy));
+    let mut queue = row(Some(0), Some(before), 1);
+    queue.kind = LedgerKind::Queue;
+    assert!(!from.leaves_out(&queue));
+    // A node row's end is exclusive, the time to its second.
+    let mut node = row(Some(0), Some(10 * MIN), 1);
+    node.kind = LedgerKind::Node;
+    assert!(from.leaves_out(&node));
+    node.ended_at = Some(10 * MIN + 1);
+    assert!(!from.leaves_out(&node));
+    // By the times of its records, whatever its ids say, and only of times
+    // whose text orders them.
+    let earlier = crate::domain::marks::utc_text(from.ended_before_ms - 1);
+    let time = from.time_text();
+    let recorded = |created_at: &str, at: Option<Value>| {
+        let mut log = crate::domain::ledger::testkit::Log::default();
+        let payload = at.map_or_else(|| json!({}), |at| json!({"at": at}));
+        log.add(None, None, "session_tokens", payload, 0);
+        log.events[0].created_at = created_at.to_owned();
+        let mut row = row(Some(0), Some(before), 1);
+        row.records = log.events;
+        row
+    };
+    assert!(from.leaves_out(&recorded(&earlier, None)));
+    assert!(from.leaves_out(&recorded(&earlier, Some(json!(earlier)))));
+    assert!(from.leaves_out(&recorded(&earlier, Some(Value::Null))));
+    assert!(!from.leaves_out(&recorded(&time, None)));
+    assert!(!from.leaves_out(&recorded(&earlier, Some(json!(time)))));
+    assert!(!from.leaves_out(&recorded("1970-01-01T00:00:00Z", None)));
+    assert!(!from.leaves_out(&recorded("1970-01-01 00:00:00.000Z", None)));
+    assert!(!from.leaves_out(&recorded(&earlier, Some(json!(1)))));
+}
+
+/// Of the earlier records a run with no end, one with an ask open and one with
+/// a session not closed are wanted whole; a claim is held apart and what is read
+/// past a run's end loses its run; a session's records stay with its run; a
+/// record of a row taken too counts as the row holds it.
+#[test]
+fn what_the_rows_left_out_give_is_held_apart_or_without_its_run() {
+    let mut log = crate::domain::ledger::testkit::Log::default();
+    let run = |n: u8| crate::domain::ledger::testkit::run_id(n);
+    let claim = json!({"from": "ready", "to": "in_progress"});
+    let (one, two, three, four) = (run(1), run(2), run(3), run(4));
+    log.add(None, None, "supervisor_alive", json!({}), 0)
+        .add(Some(1), Some(&one), "run_claimed", claim.clone(), 1)
+        .add(Some(1), Some(&one), "run_integrated", json!({}), 2)
+        .add(
+            Some(1),
+            Some(&one),
+            "follow_up_registered",
+            json!({"task_id": 9}),
+            3,
+        )
+        .add(Some(2), Some(&two), "run_claimed", claim.clone(), 4)
+        .add(Some(3), Some(&three), "run_claimed", claim, 5)
+        .add(
+            Some(3),
+            Some(&three),
+            "validation_finished",
+            json!({"status": "failed"}),
+            6,
+        )
+        .add(Some(3), Some(&three), "ask_opened", json!({"ask_id": 1}), 7)
+        .add(Some(1), None, "task_created", json!({}), 8)
+        .add(Some(1), Some(&one), "session_opened", json!({}), 9);
+    let closed = log.last().as_i64();
+    log.add(
+        Some(1),
+        Some(&one),
+        "session_closed",
+        json!({"opened_event_id": closed}),
+        10,
+    )
+    .add(Some(4), Some(&four), "session_opened", json!({}), 11)
+    .add(
+        Some(4),
+        Some(&four),
+        "validation_finished",
+        json!({"status": "failed"}),
+        12,
+    );
+    let query = WindowQuery {
+        now_ms: crate::domain::ledger::testkit::ms(100),
+        read_from_ms: Some(crate::domain::ledger::testkit::ms(50)),
+        ..WindowQuery::default()
+    };
+    let mut read = WindowRows::new(&query, 0);
+    read.take_earlier(EarlierRecords {
+        records: log.events.clone(),
+        executions: Vec::new(),
+    });
+    let wanted = read.rows_wanted();
+    assert_eq!(
+        wanted,
+        vec![
+            (LedgerKind::Run, two.clone()),
+            (LedgerKind::Run, three.clone()),
+            (LedgerKind::Run, four.clone())
+        ]
+    );
+    assert!(read.rows_wanted().is_empty(), "each is asked for once");
+    let window = read.into_window(&query);
+    assert_eq!(window.earlier().claims.len(), 3);
+    let kept: Vec<(&str, bool)> = window
+        .events()
+        .iter()
+        .map(|event| (event.kind.as_str(), event.run_id.is_some()))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            ("supervisor_alive", false),
+            ("follow_up_registered", false),
+            ("task_created", false)
+        ]
+    );
+}
+
+/// The queue's rows bound the inputs left out: its last record of the time or
+/// before it, none without one; and a row names the rows that
+/// come with it: its task, the task's runs and the task of a record from the
+/// time on.
+#[test]
+fn the_rows_taken_say_what_is_left_out_and_what_comes_with_them() {
+    use crate::domain::ledger::testkit::{Log, ms, run_id};
+    let mut log = Log::default();
+    log.add(None, None, "supervisor_alive", json!({}), 0)
+        .add(Some(7), None, "claim_deferred", json!({}), 5)
+        .add(None, None, "supervisor_alive", json!({}), 950)
+        .add(Some(8), None, "claim_deferred", json!({}), 1000)
+        .add(None, None, "supervisor_alive", json!({}), 1001);
+    let query = WindowQuery {
+        now_ms: ms(2000),
+        read_from_ms: Some(ms(1000)),
+        ..WindowQuery::default()
+    };
+    let mut read = WindowRows::new(&query, 0);
+    assert_eq!(read.rows_from().unwrap().inputs_through, EventId::new(0));
+    let mut queue = crate::domain::ledger::testkit::run_row("q", None, Vec::new());
+    queue.kind = LedgerKind::Queue;
+    queue.task_id = Some(TaskId::new(6));
+    queue.records = log.events.clone();
+    read.take(queue);
+    assert_eq!(read.rows_from().unwrap().inputs_through, EventId::new(4));
+    let mut task = crate::domain::ledger::testkit::run_row("3", None, Vec::new());
+    task.kind = LedgerKind::Task;
+    task.detail = json!({"runs": [run_id(1)]});
+    read.take(task);
+    let mut run =
+        crate::domain::ledger::testkit::run_row(&run_id(2), Some(TaskId::new(4)), Vec::new());
+    run.kind = LedgerKind::Run;
+    read.take(run);
+    assert_eq!(
+        read.rows_wanted(),
+        vec![
+            (LedgerKind::Run, run_id(1)),
+            (LedgerKind::Task, "4".to_owned()),
+            (LedgerKind::Task, "8".to_owned()),
+        ]
+    );
+    let whole = WindowRows::new(&WindowQuery::default(), 0);
+    assert_eq!(whole.rows_from(), None);
+}
+
+/// Of the rows left out a read keeps what looks back at them: the runs of a
+/// task it reads, one that holds its slot or an ask to this day; a run landed
+/// long ago gives only its claim, apart, and what is read past its end,
+/// without its run.
+#[test]
+fn a_read_from_a_time_holds_of_the_rows_left_out_what_looks_back_at_them() {
+    use crate::domain::ledger::testkit::{DAY, READ_AT_DAY, ms, rows_read_from_a_time, run_id};
+    let window = select_from_time(
+        rows_read_from_a_time(),
+        &WindowQuery {
+            now_ms: ms(READ_AT_DAY * DAY),
+            read_from_ms: Some(ms((READ_AT_DAY - 9) * DAY)),
+            ..WindowQuery::default()
+        },
+    );
+    let held: BTreeSet<&str> = window
+        .of(LedgerKind::Run)
+        .map(|row| row.key.as_str())
+        .collect();
+    let first = run_id(1);
+    assert!(!held.contains(first.as_str()), "{held:?}");
+    for kept in [2, 7, 8] {
+        assert!(held.contains(run_id(kept).as_str()), "{kept}: {held:?}");
+    }
+    assert!(window.events().iter().all(|event| {
+        event
+            .run_id
+            .as_ref()
+            .is_none_or(|run| run.as_str() != first)
+    }));
+    assert!(
+        window
+            .events()
+            .iter()
+            .any(|event| { event.kind == EventKind::FollowUpRegistered && event.run_id.is_none() })
+    );
+    assert!(window.earlier().claims.iter().any(|claim| {
+        claim
+            .run_id
+            .as_ref()
+            .is_some_and(|run| run.as_str() == first)
+    }));
+    assert!(
+        window
+            .earlier()
+            .executions
+            .iter()
+            .any(|execution| execution.provider == "claude")
+    );
+}
