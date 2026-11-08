@@ -38,6 +38,12 @@ impl E2eSource {
 /// `validation_finished` (as `e2e_requirement`), read by the runtime's e2e
 /// after the review (ADR-t1233-2) and by `stats`. The worker's receipt
 /// never backs it.
+/// A task requirement wins without reading the diff. Otherwise the same
+/// diff as the scope check decides it. Early rejection before that diff
+/// leaves no requirement; `evidence_missing` copies it when required.
+/// The receipt's e2e check is always non-required: a failure or blank
+/// explanation rejects the receipt structurally, even though execution
+/// belongs to the runtime. `stats` groups runs by this recorded decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct E2eRequirement {
     pub required: bool,
@@ -178,6 +184,10 @@ pub enum Fact {
     /// The paths changed from where the head forked from main to the head,
     /// asked only when the task declares paths or the diff decides the
     /// e2e: `scope_violation` for a path outside the task's.
+    /// The fork is the merge-base of current main and receipt head, so a
+    /// session rebased on main is checked from that main, not its old base.
+    /// Other tasks' landed changes are excluded; deletions and both sides
+    /// of renames are included.
     Changes,
 }
 
@@ -331,6 +341,14 @@ fn reject(code: ReasonCode, reason: String, commit: Option<&CommitSha>) -> Judge
 /// runtime runs itself after the review (ADR-t1233-2 decision 1); whether
 /// the run needs it is read from the task and, when the repository names
 /// `[e2e] paths`, from the diff, and recorded with the verdict.
+///
+/// `Status` must be empty even of untracked files (`git status --porcelain
+/// --untracked-files=all`). A task without declared paths has no scope
+/// check; otherwise scope wins over missing evidence, so a resumed run
+/// fixes its paths before validation asks for evidence. Spike completeness
+/// is checked last, after required evidence; both gaps share the park.
+/// Validation runs no verification commands: no `verification_command`
+/// event or `verify-N.log` is produced here (ADR-0040 decision 1).
 pub fn judge(facts: &ReceiptFacts<'_>) -> Judgement {
     let receipt = match &facts.receipt {
         None => return Judgement::Need(Fact::Receipt),

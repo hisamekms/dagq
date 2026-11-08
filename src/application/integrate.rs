@@ -263,6 +263,13 @@ pub fn check_receipt(
 /// bundle or state file that is missing or cannot be read or imported, or
 /// a state whose `HEAD` is not the bundle's head: the session's to put
 /// right, never read with git in the clone instead.
+/// Branch and status come from the state file; ancestry, diff and scope
+/// use the imported branch in the control side's objects. Missing, broken
+/// or symlinked files, a bundle with foreign refs or unavailable prerequisite
+/// commits, and mismatched heads return `commit_mismatch` to the session.
+/// Before validation the previous landing worktree is removed; landing
+/// later uses only the accepted commit. A failed control-side guard reads
+/// nothing and instead fails with `git_failed` for recovery/triage.
 fn clone_of<'a>(
     repository: &dyn Repository,
     run: &TaskRun,
@@ -888,6 +895,10 @@ impl Integrator {
     /// restore the prior state (no needs_session or spent resume), and put
     /// variables, values and PATH in last_error. No commands means no check.
     /// Container verification removes the host wrapper instead.
+    /// This checks only `required_of` receipt evidence and runs no e2e
+    /// (ADR-t963-1 decision 4). A person landing a run directly bypasses the
+    /// runtime's e2e: before landing one requiring it, inspect the run's
+    /// `e2e-*.log` and `run_e2e_finished` for the commit.
     pub fn land(
         &self,
         ctx: &mut Integration<'_>,

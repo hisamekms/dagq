@@ -12,6 +12,9 @@ use crate::domain::{
 
 /// The checks a resumed session's receipt must back: the task's but
 /// `e2e`, which the runtime runs itself after the review (ADR-t1233-2).
+/// A resolved ordinary resume re-enters validation and recomputes e2e
+/// from its new diff. An `integration_approved` landing resume bypasses
+/// validation and uses its previous requirement for e2e on the new commit.
 fn resume_required(task: &Task, run: &TaskRun) -> Vec<EvidenceCheck> {
     required_of(task.required_evidence(), run.actual_provider())
 }

@@ -88,7 +88,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   値は`dagq.toml`、各ラベルの意味と付け方は[taskの登録](../../development/task-registration.md#goal-の優先度とラベル)が持つ。
 - `[e2e]`は`paths`だけを持ち、変えるとrunに`e2e`のevidenceを求めるpathをglobの1行の配列で書く（ADR-t963-1決定2）。
   読むのはsupervisorがvalidatingとworkerのpromptを作るたびのmain checkoutの作業ファイルで、読めなければ警告を出して空として扱う（本番を守るのは[Auto-update](auto-update.md)の入れ替え前のe2eの関門）。
-  使い方と無いときの扱い、この repositoryの範囲は[Validation](validation.md)の8と「この repository で置く範囲」。
+  要否と実行の境界は[Validation](validation.md#runtimeが流すe2e)、このrepositoryが指定する範囲と理由は`dagq.toml`のe2eのコメントが持つ。
 - `[local_checks]`と`[local_checks.gates.<name>]`は手元の関門の宣言で、reviewがmainのcommitから読む（ADR-t2589-1決定6）。
 - `[areas]`は`stats`と`kpi`がrunを分けるareaの名前→globの1行の配列（ADR-t980-1。`domain::areas::AreaMap`）。
   書式は上の型、求め方は`application::areas::AreaReader`のdoc commentが持つ。

@@ -23,181 +23,88 @@ related:
 
 # Validation
 
-`validating`のrunに対して、supervisorがセッションと同じleaseの下で、runごとのthreadで次を順に確認する。
-sessionは開いたまま（[turnの後の扱い](headless-worker.md#turnの後の扱い)）のことも、終了済みのこともある。
-最初に外れた項目が`failed`の理由（`last_error`）になり、以降は確認しない。
+`validating`のrunのreceiptとGitの照合は、sessionと同じleaseの下でrunごとのthreadが行う。
+sessionは開いたまま（[turnの後の扱い](headless-worker.md#turnの後の扱い)）でも終了済みでもよい。
+受理条件と確認の順は`domain::validation::judge`、receiptの構造の約束は`Receipt::check_requiring`を入口にする。
+最初に外れた項目が`last_error`になり、以降は確認しない。
 
-1. receiptが存在し、`Receipt`として解釈できる。
-2. receiptの受理条件は`Receipt::check_requiring`のdoc commentを参照する（[baseがすでに満たすときの約束](worker-receipt.md#baseがすでに満たすときalready_satisfied)）。
-3. worktreeのHEADがrun branch `dagq/<run-id>`を指し、そのcommitがreceiptの`commit`と一致する。
-4. commitがbase commitと異なり（commitなしを拒む）、base commitの子孫である。
-   `already_satisfied`では逆にcommitがbase commitであることを求め、5と8だけを見て7を読まずに下の「already_satisfiedの検証」へ進む。
-5. `git status --porcelain --untracked-files=all`が空である。untracked fileもdirtyとみなす。
-6. （欠番）taskの`verification_commands`はここでは実行しない。
-   同じcommitに対する実行は`integrate`のrebase後の1回だけ（[ADR-0040](../../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定1、[`integrate`](integrate.md#検証のコマンド)）なので、validatingの所要時間はreceiptとGitの照合だけで、`verification_command`イベントも`<run-dir>/verify-N.log`も作らない。
-   検証コマンドで壊れるcommitもここでは`awaiting_integration`になり、`integrate`で`needs_session`になって自動resumeされる。
-   `already_satisfied`のrunは着地しないので、検証は下の「already_satisfiedの検証」がmainのsnapshotで流す。
-7. **宣言パス**（[ADR-0029](../../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）: taskの`paths`が空でなければ、run branchが今のmainから分かれた点（今のmainとreceiptの`commit`のmerge-base。rebaseしていなければbase commit、resumeしたsessionがrebaseしていればそのmain）からreceiptの`commit`までに変わったパスのうち、どのglobにも合わないもの（`domain::scope::out_of_scope`）を探す。
-   他のtaskがmainに着地したパスは数えず、renameは両側、削除も含む。
-   1–5をすべて通ったrunだけをここで見る。
-   見つかればrunを`failed`ではなく`needs_session`にし、`validation_finished`の後に`scope_violation`イベントを記録する。
-   8より先に見るので、両方が欠けていれば先にこちらを直させ、resume後の再validationで8を見る。
-   後の扱い（終了の依頼、close、自動resume）は8と同じで、resumeの依頼は宣言外のパスをrun branchから外す文面になる。
-   `paths`の無いtaskでは7は何もしない。
-8. **要求evidence**（ADR-0019の決定5）: taskの`required_evidence`のうちworkerが裏付けるcheckの各checkについて、receiptのそのcheckの`status`が`passed`で`evidence_or_reason`が空白でないこと（`Receipt::missing_evidence`）。
-   `e2e`はruntimeがreviewのpassの後に流すので（下の[runtimeが流すe2e](#runtimeが流すe2e)）、receiptには求めず、要否だけを決めて記録する。
-   1–5をすべて通ったrunだけをここで見るので、receiptやGitの不整合は`failed`になる。
-   要求されたcheckに限り、2の「`failed`でない」と「evidence_or_reasonが空でない」はここに回す（`Receipt::check_requiring`）ので、`failed`・`not_applicable`・空のevidenceはどれも`failed`ではなくここで欠落になる。
-   要求されていないcheckの`failed`は2で`failed`になる。
-   欠けていればrunを`failed`ではなく`needs_session`にし、`validation_finished`の後に`evidence_missing`イベントを記録する（`domain::run::recorded::finish_validation`）。
-   runのsessionには終了を依頼し、終わったらbackgroundのwrapperの残りを止める（resumeは自分のwrapperをbackgroundで起動する。runはworkspaceを開かない。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
-   supervisorはこのrunを[`needs_session`](needs-session.md#needs_session)の手順で自動resumeし、不足しているcheckの実行とreceiptの書き直しを依頼する。
-   要求の無いtaskでは8は何もしない。
-9. Spikeの結果の検査の入口は`domain::execution_class::missing_spike_result`（[結果の約束](worker-receipt.md#spikeの結果)、[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定3）。
-   否定的な結果と未解決は欠けではなく、中身が判定を支えるかは見ない。
+宣言外のパスは`failed`でなく`needs_session`に戻す（[ADR-0029](../../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）。
+差分の境界は`validation::Fact::Changes`、要求evidenceの欠けと結果の記録は`run::recorded::finish_validation`を入口にする。
+evidenceの欠けも自動resumeで直させ、receiptやGitの不整合と区別する（ADR-0019決定5）。
+Spikeの結果の欠けの入口は`execution_class::missing_spike_result`で、否定的な結果や未解決は欠けではなく、判定を支える中身までは検査しない（[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定3、[結果の約束](worker-receipt.md#spikeの結果)）。
+検証の後の行き先とsessionの終了・closeの扱いは`run::history::AfterValidation`を入口にする。
+成功しても着地まではtaskを`in_progress`のまま保持し、依存taskを解放しない。
 
-containerで動くrunでは、3〜5の事実をcloneでgitを走らせずに得る（[ADR-t2179-1](../../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定2〜4、[Container runtime](../container-runtime.md#git)）。
-3のbranchと5のstatusはrunの状態のファイル、3〜4と7のheadはrun branchのbundleを制御側のrun branchへ取り込んだcommitで、祖先・差分・pathsは今と同じく制御側のobjectsで判定する。
-bundleか状態のファイルが無い・壊れている・symlinkである・前提のcommitが無い、bundleにrun branch以外のrefがある、状態のファイルのHEADがbundleのheadと食い違うときは、`commit_mismatch`でsessionに返す。
-検証は前の着地用のworktreeを先に消し、着地は検証が受け入れたcommitで行う。
-制御側のgitのguard（決定8）が成り立たなければ、何も読まずに`git_failed`で拒み、runは`failed`になって復旧jobとtriageから人に届く（sessionには返さない）。
+containerのrunでは制御側がcloneでGitを走らせずに事実を得る（[ADR-t2179-1](../../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定2〜4、[Container runtime](../container-runtime.md#git)）。
+事実の出どころは`application::run_git`、受け入れと拒否の境界は`application::integrate::check_receipt`を入口にする。
+制御側のGitのguardが成り立たなければ、何も読まずに拒み、sessionに返さず復旧jobとtriageへ回す。
+hostのworktreeの登録が壊れたときも、後のpassでは読めないためrunを失敗にして復旧へ回す。
+登録が壊れていないworktreeでGitが失敗したときは検証のエラーで、次のpassがやり直す。
 
-hostで動くrunのworktreeの登録が壊れている（`.git`が名指すadmin dirがpruneで消えたか、別のworktreeのものになっている。`run_git::registration_broken`）ときは、3のbranchが読めないか別のbranchを読むので、3で`git_failed`で拒み、runは`failed`になって復旧jobとtriageに回る（sessionには返さない）。
-後のpassでも読めないので、supervisorのエラーにしてrunを止めたままにはしない。
-登録が壊れていないworktreeでgitが失敗したときは検証のエラーで、次のpassが検証をやり直す。
+validatingはtaskの検証コマンドを流さず、testを含む検証は`integrate`のrebase後の1回だけにする（[ADR-0040](../../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)決定1、[検証のコマンド](integrate.md#検証のコマンド)）。
+したがって検証コマンドで壊れるcommitもreviewに進み、着地の検証でsessionに戻る。
+着地しないrunは下の[already_satisfiedの検証](#already_satisfiedの検証)でmainのsnapshotに検証を流す。
 
-結果は`validation_finished`イベント（欄は`domain::validation::Validation`）と`task_runs.result_commit`/`last_error`に保存する。
-4以降で拒否した場合もcommitは確認済みなので`result_commit`を残す。
-成功しても`awaiting_integration`はTaskを`in_progress`のまま保持し、着地まで依存taskを解放しない。
-
-その後: `awaiting_integration`のrunは[Review](review.md#review-supervisor)に進む（leaseとsessionはそのまま）。`integration_approved`のあるrun（`integrate`が呼ばれた後にresumeしたrun）はreviewを待たずに終了の依頼→close→着地する（ADR-0027の決定3）。`needs_session`（宣言外のパス、evidenceかSpikeの結果の欠落）は終了の依頼→closeしてleaseを外す。`failed`は終了を依頼し、workspaceは調査のため閉じずにleaseを外す。
-
-reviewの段の順は、先頭の[プログラムのreview](review-programs.md)、その後のagentのreview、passの後の[着地の前のe2e](integrate.md#着地の前のe2e)である。
-プログラムのreviewはtestを含まない速い形式の検査で、validatingと同じくtaskのverifyのコマンドを流さない。
-着地するrunのtestを含む検証は下の着地の検証（`integrate`のrebase後の1回）だけで、プログラムのreviewとは二重にしない。
-`integrate`はその検証のコマンドの前に、同じプログラムを着地する差分で流し直す（安い関門で、testを含む検証ではない。[`integrate`](integrate.md#reviewのプログラム)）。
-着地しない`already_satisfied`のrunは、下の「already_satisfiedの検証」でmainのsnapshotに流す。
+reviewの段の順は、[プログラムのreview](review-programs.md)、agentのreview、passの後の[着地の前のe2e](integrate.md#着地の前のe2e)である。
+プログラムのreviewはtestを含まない速い形式の検査で、taskのverifyとは二重にしない。
+`integrate`も検証コマンドの前に同じプログラムを着地する差分で流し直す（[reviewのプログラム](integrate.md#reviewのプログラム)）。
 
 ## already_satisfiedの検証
 
 [ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)の、workerが「baseがすでに受け入れ条件を満たす」と書いたrunの経路。
-verifyが通ればreview jobが同じheadで主張を判定し、`high`のpassならmainのheadをsnapshotと確かめ直して閉じ、それ以外は人のaskに上げて人の答えで閉じる。
-復旧jobの`hand_off`が`validating`に戻した`failed`のrun（commitの無いreceiptで落ちたもの。[Triage](triage.md#verdictの適用)）も、下のvalidatingの受理の後と同じところから同じ経路を通る。
+復旧jobの`hand_off`で戻ったcommitの無いrunも同じ経路を通る（[Triage](triage.md#verdictの適用)）。
+主張はmainのsnapshotで検証し、同じheadでreviewが判定する（[Review](review.md#already_satisfiedの主張の判定)）。
+着地もe2eも行わず、閉じたrunは着地とは別に集計する（[stats](commands.md)）。
 
-- **validating**: 受理してもrunは`awaiting_integration`にせず`validating`のまま残し、`result_commit`を持たない（`AfterValidation::Satisfied`）。
-  sessionに終了を依頼してworkspaceを閉じる。
-- **snapshot**: 検証の時点のmainのheadを1つ決めて`run_satisfied_snapshot`に残し、そのheadでtaskの`verification_commands`を流す（`integrate::verify_snapshot`）。
-  [着地の検証](#着地の検証)と同じく`[landing_verification]`がcoverageの関門をその`command`に置き換え（[ADR-t2740-1](../../adr/2026-10-22-t2740-1-snapshot-verification-replaces-the-coverage-gate-as-the-landing-does.md)、`integrate::SnapshotPlan`）、置き換えたコマンドには着地の検証と同じ材料をsnapshotのheadをbaseにして渡し、`[landing_verification]`が無ければ登録のまま流す。
-  差分が無いので、絞るITは差分の無い着地と同じ選び方になり、行カバレッジと全部のtestはmainのCIが見る。
-  hostでは流す場所はqueueの`satisfied/`のrunごとのscratch worktreeで、runのworktreeはreceiptの名指すbaseのままにする。
-  その置き場はrun directoryの外のworkerが書けない場所で、検証のたびにそこにあるものを（`.git`もlinkも）worktreeとして信用せずに消し（linkは辿らずlinkだけを消す）、snapshotのheadで作り直す（`integrate::fresh_satisfied_scratch`）。
-  verificationのruntimeがcontainerなら、着地の検証と同じ部品で、snapshotのheadのcloneを置いたverificationごとのcontainerで流す（[container runtime](../container-runtime.md#verificationの実行)、tokenはsnapshotの検証のもの）。
-  rebase・commit・push・e2eは無い。
-  結果は同じheadとともに`run_satisfied_verified`に残す（欄の意味は`event_kind`のdoc comment）。
-  流す間はslotとleaseを持ち、handoffはこれを待つ。
-  verificationのruntimeがcontainerで使えない間は、hostで流さずに検証を始めず、runは受理のまま休み、使えるようになった後のpassが始める（[container runtime](../container-runtime.md#fail-closedの境界)、`satisfied::awaits_verification`）。
-- **判定**: 最初のverifyか、下の判定による閉じのやり直しのverifyが通ったら、同じslotとleaseのままreview jobがsnapshotのheadの木で主張を判定する（[Review](review.md#already_satisfiedの主張の判定)）。
-  落ちたverifyと、`close`の答えのために流し直したverifyは判定しない。
-- **判定による閉じ**: `high`のpassは、閉じる時点のmainのheadが判定したsnapshotと同じときだけ人に聞かずに閉じる。
-  進んでいれば古い判定では閉じず、新しいheadでverifyと判定をやり直し、やり直しが上限（`satisfied_judgment::MAX_JUDGMENT_RETRIES`）を超えたら閉じずに人のaskにする。
-- **ask**: 判定が閉じなかったとき（verifyが落ちたときはverifyの後）に`approve_close`のask（理由は`scope`、判定のjobが答えなければ`recovery_failed`）を開き、questionにsnapshotのheadと判定を載せ、leaseを外してrunを`validating`のまま休ませる。
-  verifyが落ちていればoptionsから`close`を外し、questionに落ちたことを書く。
-  休む間は開いたask（検証の前ならcontainerの知らせ）がattentionで、supervisorの死んだrunの回収も、人の`recover`と`doctor`も、このrunを取らない（`satisfied::blocks_recovery`）。
-- **答えの適用**（`apply_satisfied_answers`、passごと）: `retry`はrunを`failed`にしてtaskを`ready`に、`cancel`はrunを`failed`にしてtaskを`canceled`にする。
-  `close`は今のmainのheadを最後の`run_satisfied_verified`と比べる（`satisfied::close_step`）。
-  同じheadで通っていれば、runを`succeeded`（commitなし）、taskを`completed`にし、依存するtaskがclaimの候補になる（`run_satisfied_closed`）。
-  進んでいれば古い結果では閉じず、空いたslotでrunをleaseし直して新しいheadをsnapshotにverifyを1回流し直す。
-  通ればその間にmainがさらに進んでも閉じ、落ちれば閉じずに答えたaskを閉じて、落ちたことを書いたaskを開き直す。
-  人の答えは受け入れ条件の意味の判断なので、通った流し直しの後に聞き直さず、reviewも判定し直さない。
-- **再起動**: snapshotと結果はeventから読むので、askの後にsupervisorが替わっても、答えの前にmainが進んでも同じ比較になる。
-  流し直しの途中で死んだrunは、adopterの再validationが開いたaskを見て休ませ、次のpassの答えの適用がもう一度流し直す。
-  最初の検証か判定の途中で死んだrun（askはまだ無い）は、判定を記録した後に閉じる前に死んだものも含め、adopterの再validationからverifyと判定をやり直し、記録された古い判定では閉じない。
-  検証のコマンドは自分のprocess groupで動き、supervisorが死んでも残りうる。
-  そこでscratch worktreeを使い直す前に、そこで動く前の検証のprocessを止め（`auto_repaired`の`satisfied_verification_stopped`）、止まらないか一覧が読めなければ検証せず、askに落ちたことを書く。
-  containerで流すときは、verificationのcloneの親のdirに残るそのrunのverificationのcontainer・buildの出力のvolume・dirを先に消し（同じ`auto_repaired`）、消せなければ同じく検証しない。
-  検証の途中で死んだsupervisorが残したscratch worktreeは、次の検証の作り直しか、runが終わった後の掃除がGitの登録ごと消す。
-- **再計画**: taskを再計画の操作が保護する間は、検証と判定の結果でaskを開かずtaskも閉じず、答えも適用せず、closeのtransactionも拒む。
-  走っている判定のjobは終わりを待ってから結果を保留する（[Review](review.md#再計画の操作が保護するrun)）。
-  休むrunもそのまま保留され、開いた`approve_close`は閉じる（[taskの再計画](../../plans/task-replanning.md#実装の状態)）。
-  holdの開いたtaskも同じく検証と判定の結果でaskを開かずtaskも閉じず、答えは解除まで残し、休むrunはそのまま待つ。
-- **集計**: 閉じたrunは着地（`run_integrated`）に数えず、`stats`の`already_satisfied`で別に数える（[stats](commands.md)）。
+snapshotの検証の入口は`application::integrate::verify_snapshot`で、着地と同じ検証の置き換えを使う（[ADR-t2740-1](../../adr/2026-10-22-t2740-1-snapshot-verification-replaces-the-coverage-gate-as-the-landing-does.md)）。
+workerのworktreeを変えず、workerが書けない場所で検証し、scratchは既存のGit登録やlinkを信用せず作り直す。
+containerでの検証はhostに代替せず、使えない間は受理したrunを休ませる（[fail-closedの境界](../container-runtime.md#fail-closedの境界)）。
+
+自動で閉じる判断は`domain::satisfied_judgment::decide`を入口にする。
+`high`のpassでもmainが進めば古い判定で閉じず、やり直しの上限を超えたら人に上げる。
+人の答えの適用は`domain::satisfied::close_step`を入口にする。
+人の答えは受け入れ条件の意味の判断なので、新しいheadで検証が通った後には聞き直さず、reviewも判定し直さない。
+
+snapshotと結果はeventから読むので、supervisorが替わっても同じ比較になる。
+再起動時のやり直しと残ったprocessの停止は`application::supervise::execution::satisfied`のmodule docを入口にする。
+検証中はslotとleaseを持ち、handoffはこれを待つ。
+askやcontainerの知らせで休むrunを死んだrunとして回収しない（`domain::satisfied::blocks_recovery`）。
+
+再計画やholdが保護するtaskは、検証と判定の結果でaskを開かずtaskも閉じず、答えも適用しない。
+再計画の保留とholdの解除待ちの違いは[再計画](../../plans/task-replanning.md#実装の状態)、判定のjobの終わりを待つ約束は[Review](review.md#再計画の操作が保護するrun)を参照する。
 
 ## 着地の検証
 
-[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)で、着地の検証を軽くし、最終関門をCIにする。
-置き換えと材料の受け渡しはruntimeにあり、repositoryの`dagq.toml`が設定を持つときだけ働く。
-validatingは今と同じく検証のコマンドを流さず、置き換えも`integrate`のrebase後の1回の検証の中で起きる（[`integrate`](integrate.md#検証のコマンド)）。
-着地しない`already_satisfied`のrunでは、同じ置き換えが上の「already_satisfiedの検証」のsnapshotの検証の中で起きる。
+[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)に従い、着地の検証を軽くし、最終関門をmainのCIにする。
+置き換えと材料の受け渡しはruntimeの汎用の仕組みで、repositoryの設定があるときだけ働く。
+登録のコマンドは書き換えず着地ごとに決め直すので、設定を外せば登録のコマンドに戻る。
+設定・置き換え・材料の意味は`domain::landing_verification`、設定の読み手は`infrastructure::run_env`、材料の用意は`application::integrate`を入口にする。
+何を置き換え、どのtestを選ぶかはrepositoryの設定とscriptが持ち、runtimeはtestの構成や対応表の形を知らない。
+失敗の分類は`domain::verify_failure`と[Toolchain profiles](../toolchain-profiles.md)を入口にする。
 
-- **置き換えの流れ**: 設定があるときだけ、runtimeはtaskの検証のコマンドのうち設定が名指すもの（coverageの関門）を、設定の着地の検証のコマンドに置き換えて流す。
-  当たるコマンドがいくつあっても置き換えたコマンドは1回だけ流し、他のコマンドは登録の順のまま流す。
-  当たるコマンドを持たないtaskでは何も置き換わらない。
-  登録済みのtaskの検証のコマンドは書き換えず、着地のたびにmain checkoutの設定から決め直すので、設定を外せば登録のコマンドに戻る。
-  置き換えたコマンドの`verification_command`のeventと検証のlogの先頭に、元のコマンドが残る。
-  hostの失敗のやり直しと不安定なtestの着地のやり直し（[`integrate`](integrate.md)）は、置き換えたコマンドにも同じく効く。
-- **失敗の読み方**: 置き換えたコマンドも登録のままのコマンドも、失敗の言語・道具に固有の分類と落ちたtestの名前とflakyのやり直しのenvは、repositoryが`dagq.toml`で宣言したtoolchainのprofileが読む（[Toolchain profiles](../toolchain-profiles.md)）。
-  容量の不足・signal・時間切れの終了コード・コマンド全体の上限はruntimeの共通の分類が宣言に依らず読むので、hostの失敗のやり直しはどのrepositoryでも効く。
-  宣言したprofileも共通の分類も読まない出力でも、`dagq.toml`の`[verify_marks.<name>]`が宣言したprojectの印に当たれば印の分類になる（このrepositoryの`within`の行は`timeout`で、落ちたtestの名前も残る）。
-  どれにも当たらない出力だけが`unknown`になり、不安定なtestの着地のやり直しは起きない。
-- **分担**: 置き換えと、着地の検証のコマンドに渡す材料（base commit、既に落ちているtestの一覧、CIの修正taskのrunか）はruntimeの汎用の仕組みである。
-  何を置き換えるか、ITの選び方、対応表の取り方、閾値・共通のファイル・古さの上限の値は、repositoryの設定とscriptが持つ。
-  runtimeはrepositoryのtestの構成と対応表の形を知らない。
-  材料は置き換えたコマンドにだけenvで渡し、登録のまま流すコマンドには渡さない。
-- **コードの入口**: 設定の型・置き換えの判断・envとファイルの名前は`domain::landing_verification`にあり、設定の書式と渡すenvの意味はそこのdoc commentが持つ。
-  設定は`infrastructure::run_env`が読む。
-  材料は`application::integrate`が用意する。
-- **中身**: このrepositoryの着地の検証は、fmt・clippy・レイヤーの依存の検査・taskに固有の軽い検査・unit test全件・影響範囲で絞ったITで、行カバレッジの関門はCIだけが見る。
-- **絞ったITに必ず含めるもの**: 差分で足した・変えたtestのファイルが定めるITと、対応表に無いIT（表の生成の後に他の着地が足したか名前が変わったtest）。
-  表は差分の前のmainから作られているので、足したtestと他の着地が足したtestを知らない。
-- **CIに任せるもの**: 表のcommitのtreeに無いsrcのファイル（差分が足したファイル）と、表が多くのITに当てるファイル（広い項目）は、表からITを選ばない。
-  それらを通るITのうち上の必ず含めるものに入らないものはCIで初めて流れ、着地の検証は任せたファイルを出力に残す（[ADR-t2892-1](../../adr/2026-10-20-t2892-1-landing-it-leaves-added-sources-and-broad-entries-to-ci.md)）。
-- **古い表**: 生成から一定の時間を超えた表も上限までは使い、古さだけではITを全部流さない。
-  古い表では、表が知らないファイル（表のtreeに無いsrcのファイルと、表のcommitの後にmainで変わったファイル）を同じdirectoryとそれを宣言するmoduleの項目のITに広げ、広げたITも閾値に数え、出力に古い表と広げたファイルを残す（[ADR-t3920-1](../../adr/2026-11-01-t3920-1-landing-it-keeps-using-an-old-table-and-widens-the-files-it-does-not-know.md)）。
-- **OSの条件を持つファイル**: Linuxの表では、ファイルが結びついていてもmacOSだけのコードを通るITの結びつきが欠ける。
-  広げる対象と除外の入口は[scripts/landing-it.py](../../../scripts/landing-it.py)の`files_to_widen`、選択と閾値は`choose`、出力は`report`（[ADR-t3927-1](../../adr/2026-11-07-t3927-1-landing-it-widens-platform-gated-files-at-any-table-age.md)）。
-  該当ファイルの記録が無い旧形式の表の選び方は変えない。
-- **testのhelper**: 差分がITの共通のhelperを変えたら、着地の検証はcheckoutしたtreeのtestのソースを静的に読み、そのhelperを使うtestのmoduleのITを選ぶ。
-  使うmoduleのITが多いhelper（helperの集まりの入口と共通のfixture）は、壊れの見逃しが大半のITに及ぶのでCIに任せず全部流す（[ADR-t3761-1](../../adr/2026-10-31-t3761-1-landing-it-selects-the-modules-a-changed-test-helper-reaches.md)）。
-- **ITを全部流す条件**: 絞ったITの見込みの時間が上限を超えるとき、共通のファイルに触れたとき、使うmoduleのITが多いhelperを変えたとき、表が取れないか読めないか上限を超えて古いとき、表のcommitがrepositoryに無いとき（古さに関わらない）、古い表で表のcommitの後にmainで変わったファイルが取れないとき。
-  広い項目と全部流す条件の値と根拠は[着地のITの絞り込みの測定](../../plans/landing-it-selection.md)の「決めたこと」にある。
-- **既に落ちているtest**: [CI watch](ci-watch.md)の一覧のtestは着地の検証から外す。
-  CIの修正taskのrunでは、そのfindingのtestを外さない（他のfindingのtestは外す）。
-  runtimeはrunのtaskについて読んだ一覧（修正taskのrunではそのfindingの項目を外す対象から除いたもの）を渡し、外す適用は設定のコマンドとscriptが受け持つ。
-- **containerのverification**: verificationがcontainerなら、置き換えたコマンドも登録のままのコマンドもそのcontainerで流れ、既に落ちているtestの一覧は材料のdirに置く（[Container runtime](../container-runtime.md#verificationの実行)）。
-  containerはLinuxなので、OSに固有のtestは着地の検証で流れない。
-  このrepositoryのmacOSに固有のtestは、mainのCIのmacOSのjobだけが流す（[ADR-t2182-1](../../adr/2026-10-14-t2182-1-macos-specific-tests-are-left-to-the-ci-macos-job-not-the-container-verification.md)）。
-- **最終関門**: 着地の検証が見逃した壊れはmainのCIが拾い、CIの見張りが修正taskにする。
-  mainの前でCIを通す仕組みと着地のrevertは無く、自動更新にもCIの確かめや全testを足さない。
-  全部のe2eの関門（下の節と[Auto-update](auto-update.md)）と固定バイナリを前のものに戻す手順は変わらない。
+このrepositoryの検証はfmt・clippy・レイヤーの依存の検査・task固有の軽い検査・unit test全件と影響範囲で絞ったITを含み、行カバレッジと全部のtestはmainのCIが見る。
+ITを選ぶ条件、古い表・OSの条件・helperの扱いとCIへ任せる範囲は[scripts/landing-it.sh](../../../scripts/landing-it.sh)の冒頭、値の根拠は[着地のITの絞り込みの測定](../../plans/landing-it-selection.md#決めたこと段-3b-の-adr-と-design-が使う)を入口にする。
+この境界の決定は[ADR-t2892-1](../../adr/2026-10-20-t2892-1-landing-it-leaves-added-sources-and-broad-entries-to-ci.md)、[ADR-t3920-1](../../adr/2026-11-01-t3920-1-landing-it-keeps-using-an-old-table-and-widens-the-files-it-does-not-know.md)、[ADR-t3927-1](../../adr/2026-11-07-t3927-1-landing-it-widens-platform-gated-files-at-any-table-age.md)、[ADR-t3761-1](../../adr/2026-10-31-t3761-1-landing-it-selects-the-modules-a-changed-test-helper-reaches.md)にある。
+[CI watch](ci-watch.md)の既に落ちているtestは着地の検証から外すが、修正task自身のtestは外さない。
+一覧の渡し方は`landing_verification::KNOWN_FAILURES_ENV`を入口にする。
+
+containerの検証では、置き換えたコマンドも登録のままのコマンドも同じcontainerで流す（[verificationの実行](../container-runtime.md#verificationの実行)）。
+Linuxで流れないmacOS固有のtestはmainのCIのmacOSのjobだけに任せる（[ADR-t2182-1](../../adr/2026-10-14-t2182-1-macos-specific-tests-are-left-to-the-ci-macos-job-not-the-container-verification.md)）。
+見逃した壊れはmainのCIが拾い、CIの見張りが修正taskにする。
+mainの前でCIを通す仕組みと着地のrevertは無く、自動更新にもCIの確かめや全testを足さない。
+全部のe2eの関門と固定バイナリを前のものに戻す手順は[Auto-update](auto-update.md)が持つ。
 
 ## runtimeが流すe2e
 
-関門（自動更新と`install`の関門。[Auto-update](auto-update.md)の「e2eの関門」。[着地の前のe2e](integrate.md#着地の前のe2e)）は全部のe2eを流して判定し、hostの道具の有無で流さないe2eを持たない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7、[testの制約](../../development/testing.md#e2e)）。
-関門の後始末は、`ps`で列挙したprocessのうちe2eの`TMPDIR`の中を指すものを止めてそのdirectoryを消すだけである。
-launchdの`up` / `down`のe2eは追加の環境変数なしに本文まで流れ、使い捨てのHOMEとLaunchAgentのlabelで動き、launchdを使えないhostでは落ちる（黙ってskipもpassもしない。[`up` / `down`](up-down.md)）。
+自動更新・install・[着地の前のe2e](integrate.md#着地の前のe2e)の関門は全部のe2eを流し、hostの道具の有無で流さないe2eを持たない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7、[testの制約](../../development/testing.md#e2e)）。
+関門の後始末は`application::install::E2eSettings`、launchdの実行条件は`tests/e2e.rs`のmodule docを入口にする。
 
-[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2・3が決めたe2eの要否を、validatingが決めて記録する。
-e2eを流すのはworkerではなく、reviewのpassの後にruntimeがhostで流す工程で（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)。流し方は[着地の前のe2e](integrate.md#着地の前のe2e)）、workerのreceiptは`e2e`を裏付けない（`domain::required_of`が`e2e`を落とす）。
-そこで落ちたe2e（上限の内に終わり、流し直しても印で通らない）だけがrunを`needs_session`に戻し、上限切れや始められないe2eは変更のせいとせずruntimeが流し直す。
+要否の判定と記録は`domain::validation::E2eRequirement`を入口にする（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定2・3）。
+設定の読み直しと読めないときの扱いは`Supervisor::e2e_paths`、このrepositoryが指定する範囲と理由は`dagq.toml`のe2eのコメントが持つ。
+workerのreceiptはe2eを裏付けず、workerは理由つきの`not_applicable`を書く。
+流すのはreviewのpassの後にhostで動くruntimeの工程である（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)）。
+上限内に終わり、流し直しても印で通らない失敗だけをsessionに返し、上限切れや始められないe2eは変更のせいとせずruntimeが流し直す。
 
-- **設定**: main checkoutの`dagq.toml`の`[e2e]`の`paths`（globの配列。書式は[Run environment](run-environment.md)）。無ければ空で、差分からは何も求めない（taskの`--evidence e2e`だけで決まる）。supervisorはvalidatingを始めるたびとworkerのpromptを作るたびに読み直す（`Verifier::e2e_paths`）。読めなければ警告を出して空として扱う。
-- **判定**（`domain::validation::E2eRequirement`）: taskの`required_evidence`に`e2e`があれば要り、差分は見ない（`paths`の無いtaskは7の差分も読まない）。
-  無く、`[e2e] paths`があれば、7と同じ差分を読み、どれかのglobに合うpathがあれば要る。
-  無ければ要らない。
-  receiptの`e2e`は、どの場合も要らないcheckとして2で検査する（`failed`か空の理由なら`failed`）。
-  workerは`not_applicable`と理由（runtimeが流す）を書く。
-- **記録**: `validation_finished`にe2eの要否（`domain::validation::E2eRequirement`）を載せる。
-  差分を読む前に外れた（1–5で拒んだ）runで、差分が要否を決めるときは載せない。
-  `evidence_missing`にも、要るときは同じ要否を載せる。
-  着地の前のe2eは最後の`validation_finished`のこれを読む（`domain::run_e2e::due`）。
-  `stats`もこれでe2eの群を作る（[stats](commands.md)）。
-- **resume**: resumeが書き直したreceiptの解決の判定も`e2e`を含めない（`resume_required`）。
-  解決したresumeは、`integrate`が呼ばれていないrunならもう一度validatingを通り、そこで差分から要否を決め直す。
-  `integration_approved`のあるrun（着地のresume）はvalidatingを通らずに着地へ進み、前のvalidatingの要否で、着地の前のe2eを新しいcommitに流す。
-- **integrateの検査**: `integrate`のreceiptの検査（[`integrate`](integrate.md)）も`required_of`のcheckだけを見て、`e2e`を求めない。e2eは`integrate`では流さない（ADR-t963-1決定4）。人が`dagq integrate`で手で着地させるrunにはruntimeのe2eが流れないので、e2eを要るrunを手で着地させる前は、run dirの`e2e-*.log`と`run_e2e_finished`を確かめる。
-- **workerに知らせる**: workerのprompt（[Prompt](prompt.md)）は、runがe2eを要りうるとき（taskが`e2e`を要るか、`[e2e] paths`がある）に、e2eを自分で流さないこと、要るならruntimeがreviewのpassの後にhostで流し、落ちればsessionに戻すこと、receiptの`e2e`は理由つきの`not_applicable`にすることを1行で書く（`prompt::e2e_line`）。
-  e2eのコマンド・`[e2e] paths`の一覧・関門の印・Codexのworkerの除外は載せない。
-  `Required evidence:`の行にも`e2e`は出ない。
-- **この repository で置く範囲**: `dagq.toml`の`[e2e] paths`が、実プロセス・launchd・Gitとの境目（外の道具のadapter、process、launchd、lifecycleと引き継ぎ、integrate、install、updateとe2eの関門、actorの起動）とe2eそのものを、理由のコメントつきで持つ。
-  `src/application/supervise/`の判断の部分は含めない（ADR-t963-1決定3）。
-
+commitごとの実行の要否は`domain::run_e2e::due`、resume後の扱いは`execution::resume::resume_required`を入口にする。
+workerへの案内は`prompt::worker::e2e_line`のdoc commentが持つ。
+手で着地させる場合にe2eを代行しない境界と確認する記録は`application::integrate::Integrator::land`のdoc commentが持つ。

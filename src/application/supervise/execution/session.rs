@@ -33,6 +33,8 @@ impl Supervisor<'_> {
     /// cannot be read leaves `e2e` to the task, as without the table, with
     /// a warning: the gate before the fixed binary is replaced still runs
     /// every e2e.
+    /// Read main checkout's working configuration anew for each validation
+    /// and each worker prompt; absent paths are empty, not a diff mandate.
     pub(super) fn e2e_paths(&self) -> Vec<String> {
         self.verifier.e2e_paths().unwrap_or_else(|error| {
             warn!("[e2e] paths of dagq.toml could not be read; e2e is required by the task only: {error:#}");

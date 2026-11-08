@@ -4,7 +4,18 @@
 //! unleased between the ask and its answer; everything the answer needs
 //! (the snapshot, what its verification found) is read from the run's
 //! events, so a supervisor started after the ask applies it the same way.
-
+//!
+//! With an open ask, adoption revalidates then rests; answer application
+//! retries a verification interrupted while applying `close`. Without an
+//! ask, death during verification or judgment (even after recording a
+//! judgment but before close) restarts verification and judgment: an old
+//! judgment cannot close the task. Before rebuilding the host scratch,
+//! stop its surviving command process groups; before container verification,
+//! remove the old container, build volume and directory beside its clone.
+//! Failure to list/stop/remove them prevents verification and is put in the
+//! ask. The next rebuild or ended-run sweep removes leftover scratch Git
+//! registrations. Snapshot/result events survive a supervisor restart.
+//!
 use super::*;
 use crate::domain::Ask;
 use crate::domain::satisfied::{
@@ -312,6 +323,8 @@ impl Supervisor<'_> {
     /// Not called while a replanning guards the task (ADR-t1521-2): the
     /// run's slot holds the result for the park, which withholds it, or
     /// for the operation's end.
+    /// Review keeps the verification's slot and lease. A failed verify
+    /// is never judged; neither is a verify rerun for a person's `close`.
     pub(super) fn satisfied_verified(
         &mut self,
         run: &TaskRun,
@@ -394,6 +407,9 @@ impl Supervisor<'_> {
     /// Open the `approve_close` ask of `run` with `question` and
     /// `options`, why a person is needed, and what the review that asks
     /// recommends with its confidence.
+    /// Verification failure asks with reason `scope`, names its snapshot
+    /// and failure, and omits `close`. A judgment asks with the same reason
+    /// and its snapshot/verdict, or `recovery_failed` if its job gave none.
     pub(super) fn open_close_ask(
         &mut self,
         run: &TaskRun,
@@ -425,6 +441,9 @@ impl Supervisor<'_> {
 
     /// Close the task of `run` on `verified` for the answer `ask`, giving
     /// back `token` when the run holds it, and close the ask.
+    /// The run succeeds without a commit, the task completes and its
+    /// dependents become claim candidates; `run_satisfied_closed` records
+    /// this separately from `run_integrated`.
     fn close_satisfied(
         &mut self,
         run: &TaskRun,
@@ -452,6 +471,9 @@ impl Supervisor<'_> {
     /// run and cancels the task. Any other answer is left to the inbox; an
     /// error is noted and the ask tried again on a later pass. No answer is
     /// applied while a replanning guards the task.
+    /// Replanning parks resting runs and closes their open `approve_close`
+    /// ask; its close transaction also refuses closure. A hold keeps the
+    /// answer pending until released, with resting runs left waiting.
     pub(super) fn apply_satisfied_answers(&mut self, parallel: usize) -> Result<()> {
         let asks: Vec<Ask> = self
             .queue

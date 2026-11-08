@@ -94,6 +94,9 @@ pub fn end_session(
 /// `scope_violation` (which wins) or `evidence_missing`; those carry no
 /// status, since `validation_finished` already reports the park and
 /// `stats` counts it once.
+/// The verdict stores `task_runs.result_commit` and `last_error` as well
+/// as the event: rejection after the head was verified retains that commit
+/// for inspection. Acceptance keeps the task in progress until landing.
 pub fn finish_validation(run: TaskRun, validation: &Validation) -> Result<Recorded, DomainError> {
     // An `already_satisfied` claim stays `validating` with no commit while
     // the runtime verifies it on main (ADR-t1818-1).

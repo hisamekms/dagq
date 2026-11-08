@@ -2135,6 +2135,9 @@ pub(super) const SPIKE_LINES: &str = "Spike: this task is a Spike (execution cla
 /// The line asks for e2e not_applicable in the receipt. Only a resume after
 /// failed host e2e asks to reproduce the named failed tests, following the
 /// repository instructions; it embeds no repository-specific command.
+/// It lists no e2e command, path globs, quarantine marks or provider
+/// exemption. `Required evidence:` likewise omits e2e, which the runtime
+/// owns rather than asking the worker to back it.
 pub(super) fn e2e_line(task: &Task, e2e_paths: &[String]) -> String {
     if e2e_paths.is_empty() && !task.required_evidence().contains(&EvidenceCheck::E2e) {
         return String::new();

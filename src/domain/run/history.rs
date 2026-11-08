@@ -838,6 +838,13 @@ pub fn decide_revise(history: &RunHistory<'_>) -> ReviseDecision {
 }
 
 /// Where a run goes once its validation finished in `status`.
+/// Review keeps the session and lease; other destinations first request
+/// session exit and stop the background wrapper's remainder once it ends
+/// (ADR-t1433-3). Land closes the workspace before landing; Rest closes it
+/// for `needs_session` and releases the lease, but leaves a failed run's
+/// workspace for inspection. Automatic resume starts its own background
+/// wrapper, requesting removal of out-of-scope paths or completion of the
+/// missing evidence/Spike fields. No run opens a workspace for its wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AfterValidation {
     /// An approved run (its integrate was called) lands without a review
@@ -848,6 +855,7 @@ pub enum AfterValidation {
     /// A run whose `already_satisfied` claim validation found sound stays
     /// `validating`: its session exits and the runtime verifies the claim
     /// on main (ADR-t1818-1).
+    /// The workspace closes after session exit; no result commit is stored.
     Satisfied,
     /// Anything else rests; `close` gives up the session's workspace (a run
     /// parked for a session, since a resume opens one of its own, or one

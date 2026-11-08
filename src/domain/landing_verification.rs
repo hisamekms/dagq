@@ -6,6 +6,10 @@
 //! at each landing. How the command chooses the tests, and which commands
 //! it replaces, are the repository's: the runtime knows neither its tests
 //! nor its tables.
+//!
+//! Replacement commands retain the landing's environmental retry and
+//! flaky-test landing retry. Only replaced commands receive the extra
+//! material environment; commands run as registered do not.
 
 use serde_json::{Value, json};
 

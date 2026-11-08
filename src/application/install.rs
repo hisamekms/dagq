@@ -163,6 +163,8 @@ pub const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
 /// The e2e a build of dagq's source passes before it is put in place
 /// (ADR-t963-1 decision 1): `cargo test --locked --test e2e -- --ignored`
 /// in the checkout.
+/// Gate cleanup lists processes with `ps`, stops only those pointing
+/// inside the e2e's TMPDIR, then removes that directory.
 #[derive(Debug, Clone)]
 pub struct E2eSettings {
     /// A shell command in place of `cargo test --locked --test e2e --
