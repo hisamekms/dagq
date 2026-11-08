@@ -19,6 +19,7 @@
 //! target; a mismatch rejects each registration, step or sample call.
 //! Retention removes owners registered over 90 days ago only when neither
 //! steps nor samples remain.
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::*;
 use crate::application::{SessionOwners, SessionResourceStore, SessionStepStore};
@@ -567,8 +568,9 @@ fn remove_session_rows(
 impl SqliteQueue {
     /// The steps `filter` (a `WHERE` clause and its order) keeps.
     fn read_steps(&self, filter: &str, params: &[SqlValue]) -> Result<Vec<SessionStep>> {
+        let tx = self.read_entry("read_steps")?;
         let steps = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!("SELECT {COLUMNS} FROM session_steps WHERE {filter}"),
             params,
             step_row,
@@ -642,13 +644,14 @@ impl SessionStepStore for SqliteQueue {
     }
 
     fn session_gaps(&self, session_id: &str) -> Result<Vec<SeqRange>> {
-        let seqs = self.conn.query_map(
+        let tx = self.read_entry("session_gaps")?;
+        let seqs = tx.query_map(
             "SELECT seq FROM session_steps WHERE session_id=?1 ORDER BY seq",
             sql_params![session_id],
             |row| row.get(0),
         )?;
         let mut covered = ranges(seqs);
-        covered.extend(removed(&*self.conn, session_id)?);
+        covered.extend(removed(&tx, session_id)?);
         Ok(gaps(covered))
     }
 
@@ -679,7 +682,7 @@ impl SessionStepStore for SqliteQueue {
     fn remove_steps(&self, before: i64) -> Result<usize> {
         let sessions: Vec<String> = {
             SqlRead::query_map(
-                &*self.conn,
+                &self.read_entry("remove_steps")?,
                 "SELECT session_id FROM session_steps WHERE received_at < ?1
                  UNION SELECT session_id FROM session_resources WHERE received_at < ?1
                  UNION SELECT session_id FROM session_owners o WHERE registered_at < ?1
@@ -707,7 +710,7 @@ impl SessionStepStore for SqliteQueue {
             let mut planned = 0;
             while reach < sessions.len() && planned < ROWS_PER_TRANSACTION {
                 let session = candidates[reach].get_or_insert_with(Candidates::default);
-                session.fill(&*self.conn, &sessions[reach], before)?;
+                session.fill(&self.read_entry("remove_steps")?, &sessions[reach], before)?;
                 planned += session.rows();
                 reach += 1;
             }
@@ -795,8 +798,9 @@ impl SessionResourceStore for SqliteQueue {
     }
 
     fn target_resources(&self, target: &StepTarget) -> Result<Vec<SessionResource>> {
+        let tx = self.read_entry("target_resources")?;
         let samples = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT {RESOURCE_COLUMNS} FROM session_resources
              WHERE target_kind=?1 AND target_id=?2 ORDER BY id"
@@ -808,8 +812,9 @@ impl SessionResourceStore for SqliteQueue {
     }
 
     fn resources_after(&self, after: i64, limit: usize) -> Result<Vec<SessionResource>> {
+        let tx = self.read_entry("resources_after")?;
         let samples = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT {RESOURCE_COLUMNS} FROM session_resources WHERE id > ?1 ORDER BY id LIMIT ?2"
             ),
@@ -843,8 +848,9 @@ impl SessionOwners for SqliteQueue {
     }
 
     fn session_owner(&self, session_id: &str) -> Result<Option<SessionOwner>> {
+        let tx = self.read_entry("session_owner")?;
         let owner = SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT target_kind, target_id, registered_at FROM session_owners
                  WHERE session_id=?1",
             sql_params![session_id],
@@ -888,123 +894,8 @@ impl SqliteQueue {
     /// start, its `timeout_secs` and the margin, and its `pid`. A target
     /// the queue does not have has ended, and so does a run's.
     pub fn telemetry_target(&self, target: &StepTarget) -> Result<TargetFacts> {
-        let Ok(id) = target.id.parse::<i64>() else {
-            return Ok(TargetFacts::Ended);
-        };
-        let job = |table: &str, ended: &str, only: &str| -> Result<TargetFacts> {
-            let row = SqlRead::query_row(
-                &*self.conn,
-                &format!(
-                    "SELECT r.{ended}, s.pid, {now} - s.heartbeat_at FROM {table} r
-                         LEFT JOIN supervisors s ON s.token = r.supervisor_token
-                         WHERE r.id = ?1{only}",
-                    now = SqlRead::dialect(&*self.conn).unix_epoch_now(),
-                ),
-                sql_params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<i64>>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-            Ok(row.map_or(TargetFacts::Ended, |(ended, pid, age)| {
-                supervised_job(ended, pid, age)
-            }))
-        };
-        let command = |started: EventKind, finished: EventKind| -> Result<TargetFacts> {
-            let row = SqlRead::query_row(
-                &*self.conn,
-                &format!(
-                    "SELECT {},
-                            {},
-                            {},
-                            EXISTS (SELECT 1 FROM run_events f
-                                    WHERE f.kind = ?3 AND f.id > s.id
-                                      AND {}
-                                          = {})
-                     FROM run_events s WHERE s.id = ?1 AND s.kind = ?2",
-                    SqlRead::dialect(&*self.conn).time_value("s.created_at", TimeForm::EpochMillis),
-                    SqlRead::dialect(&*self.conn).json_field_spaced(
-                        "s.payload",
-                        "$.timeout_secs",
-                        JsonType::Integer
-                    ),
-                    SqlRead::dialect(&*self.conn).json_field_spaced(
-                        "s.payload",
-                        "$.pid",
-                        JsonType::Integer
-                    ),
-                    SqlRead::dialect(&*self.conn).json_field_spaced(
-                        "f.payload",
-                        "$.dir",
-                        JsonType::Text
-                    ),
-                    SqlRead::dialect(&*self.conn).json_field_spaced(
-                        "s.payload",
-                        "$.dir",
-                        JsonType::Text
-                    ),
-                ),
-                sql_params![id, started.as_str(), finished.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Option<i64>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                        row.get::<_, bool>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-            Ok(match row {
-                Some((started_ms, timeout_secs, pid, false)) => TargetFacts::StartedCommand {
-                    ends_by_ms: started_ms.saturating_add(timeout_secs.map_or(
-                        crate::domain::throughput_review::RUNNING_MS,
-                        |secs| {
-                            secs.saturating_mul(1000)
-                                .saturating_add(crate::domain::telemetry::COMMAND_MARGIN_MS)
-                        },
-                    )),
-                    pid: pid.and_then(|pid| u32::try_from(pid).ok()),
-                },
-                _ => TargetFacts::Ended,
-            })
-        };
-        match target.kind {
-            TargetKind::Run => Ok(TargetFacts::Ended),
-            TargetKind::Planner => {
-                let closed = SqlRead::query_row(
-                    &*self.conn,
-                    "SELECT closed_at IS NOT NULL FROM planners WHERE id = ?1",
-                    sql_params![id],
-                    |row| row.get::<_, bool>(0),
-                )
-                .optional()?;
-                Ok(if closed == Some(false) {
-                    TargetFacts::OpenPlanner
-                } else {
-                    TargetFacts::Ended
-                })
-            }
-            TargetKind::PlanReview => job("plan_reviews", "finished_at", ""),
-            TargetKind::GoalReview => job("goal_reviews", "finished_at", ""),
-            TargetKind::EvalJob => job(
-                "headless_jobs",
-                "ended_at",
-                &format!(
-                    " AND r.run_id IS NULL AND r.kind = '{}'",
-                    crate::domain::headless_job::AGENT_EVAL
-                ),
-            ),
-            TargetKind::ThroughputReview => command(
-                EventKind::ThroughputReviewStarted,
-                EventKind::ThroughputReviewFinished,
-            ),
-            TargetKind::Observer => command(EventKind::ObserveStarted, EventKind::ObserveFinished),
-        }
+        let tx = self.read_entry("telemetry_target")?;
+        telemetry_target(&tx, target)
     }
 
     /// Who started `target`, a target of no run
@@ -1016,65 +907,8 @@ impl SqliteQueue {
         &self,
         target: &StepTarget,
     ) -> Result<Option<crate::domain::queue_service::TargetStart>> {
-        use crate::domain::queue_service::TargetStart;
-        let Ok(id) = target.id.parse::<i64>() else {
-            return Ok(None);
-        };
-        let command = |started: EventKind| -> Result<Option<TargetStart>> {
-            let row = SqlRead::query_row(
-                &*self.conn,
-                &format!(
-                    "SELECT actor_role, actor_id, {}
-                     FROM run_events WHERE id = ?1 AND kind = ?2",
-                    SqlRead::dialect(&*self.conn).json_field_spaced(
-                        "payload",
-                        "$.pid",
-                        JsonType::Integer
-                    ),
-                ),
-                sql_params![id, started.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-            Ok(row.map(|(role, actor_id, pid)| TargetStart::Command {
-                actor: role
-                    .and_then(|role| role.parse::<crate::domain::ActorRole>().ok())
-                    .zip(actor_id),
-                pid: pid.and_then(|pid| u32::try_from(pid).ok()),
-            }))
-        };
-        let row = |table: &str, only: &str| -> Result<Option<TargetStart>> {
-            let supervisor = SqlRead::query_row(
-                &*self.conn,
-                &format!("SELECT supervisor_token FROM {table} r WHERE r.id = ?1{only}"),
-                sql_params![id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?;
-            Ok(supervisor.map(|supervisor| TargetStart::Supervised {
-                supervisor: supervisor.map(LeaseToken::new),
-            }))
-        };
-        match target.kind {
-            TargetKind::Run | TargetKind::Planner => Ok(None),
-            TargetKind::PlanReview => row("plan_reviews", ""),
-            TargetKind::GoalReview => row("goal_reviews", ""),
-            TargetKind::EvalJob => row(
-                "headless_jobs",
-                &format!(
-                    " AND r.run_id IS NULL AND r.kind = '{}'",
-                    crate::domain::headless_job::AGENT_EVAL
-                ),
-            ),
-            TargetKind::ThroughputReview => command(EventKind::ThroughputReviewStarted),
-            TargetKind::Observer => command(EventKind::ObserveStarted),
-        }
+        let tx = self.read_entry("target_start")?;
+        target_start(&tx, target)
     }
 
     /// What the queue holds of each record of a job's
@@ -1089,119 +923,291 @@ impl SqliteQueue {
         &self,
         records: &crate::domain::queue_service::JobRecords,
     ) -> Result<Vec<crate::domain::queue_service::JobRecord>> {
-        use crate::domain::queue_service::{JobRecord, JobRecords, RowLabel};
-        // Each record's id and whose it is: a row's registration, a
-        // start's process.
-        type Whose = (i64, Option<String>, Option<i64>);
-        let rows = |sql: &str, values: &[SqlValue]| -> Result<Vec<Whose>> {
-            let rows = SqlRead::query_map(&*self.conn, sql, values, |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
-            Ok(rows)
-        };
-        let of = |kind: TargetKind, rows: Vec<Whose>| -> Result<Vec<JobRecord>> {
-            rows.into_iter()
-                .map(|(id, supervisor, pid)| {
-                    Ok(JobRecord {
-                        facts: self.telemetry_target(&StepTarget::of(kind, id))?,
-                        supervisor: supervisor.map(LeaseToken::new),
-                        pid: pid.and_then(|pid| u32::try_from(pid).ok()),
-                    })
+        let tx = self.read_entry("job_facts")?;
+        job_facts(&tx, records)
+    }
+}
+
+/// Read inside the caller's transaction so issuing never opens a nested entry.
+pub(crate) fn job_facts(
+    conn: &impl SqlRead,
+    records: &crate::domain::queue_service::JobRecords,
+) -> Result<Vec<crate::domain::queue_service::JobRecord>> {
+    use crate::domain::queue_service::{JobRecord, JobRecords, RowLabel};
+    // Each record's id and whose it is: a row's registration, a
+    // start's process.
+    type Whose = (i64, Option<String>, Option<i64>);
+    let rows = |sql: &str, values: &[SqlValue]| -> Result<Vec<Whose>> {
+        let rows = SqlRead::query_map(conn, sql, values, |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        Ok(rows)
+    };
+    let of = |kind: TargetKind, rows: Vec<Whose>| -> Result<Vec<JobRecord>> {
+        rows.into_iter()
+            .map(|(id, supervisor, pid)| {
+                Ok(JobRecord {
+                    facts: telemetry_target(conn, &StepTarget::of(kind, id))?,
+                    supervisor: supervisor.map(LeaseToken::new),
+                    pid: pid.and_then(|pid| u32::try_from(pid).ok()),
                 })
-                .collect()
-        };
-        let started = &format!(
-            "SELECT id, NULL, {} FROM run_events
+            })
+            .collect()
+    };
+    let started = &format!(
+        "SELECT id, NULL, {} FROM run_events
                        WHERE kind = ?1",
-            SqlRead::dialect(&*self.conn).json_field_spaced("payload", "$.pid", JsonType::Integer),
-        );
-        match records {
-            JobRecords::PlanReview { proposal, attempt } => of(
-                TargetKind::PlanReview,
-                rows(
-                    "SELECT id, supervisor_token, NULL FROM plan_reviews
+        SqlRead::dialect(conn).json_field_spaced("payload", "$.pid", JsonType::Integer),
+    );
+    match records {
+        JobRecords::PlanReview { proposal, attempt } => of(
+            TargetKind::PlanReview,
+            rows(
+                "SELECT id, supervisor_token, NULL FROM plan_reviews
                      WHERE proposal_id = ?1 AND attempt = ?2",
-                    sql_params![proposal, attempt],
-                )?,
-            ),
-            JobRecords::GoalReview { goal, attempt } => of(
-                TargetKind::GoalReview,
-                rows(
-                    "SELECT id, supervisor_token, NULL FROM goal_reviews
+                sql_params![proposal, attempt],
+            )?,
+        ),
+        JobRecords::GoalReview { goal, attempt } => of(
+            TargetKind::GoalReview,
+            rows(
+                "SELECT id, supervisor_token, NULL FROM goal_reviews
                      WHERE goal_id = ?1 AND attempt = ?2",
-                    sql_params![goal, attempt],
-                )?,
-            ),
-            JobRecords::ThroughputReview { mode, period } => of(
-                TargetKind::ThroughputReview,
-                rows(
-                    &format!(
-                        "{started} AND {} = ?2
+                sql_params![goal, attempt],
+            )?,
+        ),
+        JobRecords::ThroughputReview { mode, period } => of(
+            TargetKind::ThroughputReview,
+            rows(
+                &format!(
+                    "{started} AND {} = ?2
                            AND {} = ?3",
-                        SqlRead::dialect(&*self.conn).json_field_spaced(
-                            "payload",
-                            "$.mode",
-                            JsonType::Text
-                        ),
-                        SqlRead::dialect(&*self.conn).json_field_spaced(
-                            "payload",
-                            "$.period",
-                            JsonType::Text
-                        ),
-                    ),
-                    sql_params![EventKind::ThroughputReviewStarted.as_str(), mode, period],
-                )?,
-            ),
-            JobRecords::Observation { session_id } => of(
-                TargetKind::Observer,
-                rows(
+                    SqlRead::dialect(conn).json_field_spaced("payload", "$.mode", JsonType::Text),
+                    SqlRead::dialect(conn).json_field_spaced("payload", "$.period", JsonType::Text),
+                ),
+                sql_params![EventKind::ThroughputReviewStarted.as_str(), mode, period],
+            )?,
+        ),
+        JobRecords::Observation { session_id } => of(
+            TargetKind::Observer,
+            rows(
+                &format!(
+                    "{started} AND {} = ?2",
+                    SqlRead::dialect(conn).json_field_spaced(
+                        "payload",
+                        "$.session_id",
+                        JsonType::Text
+                    )
+                ),
+                sql_params![EventKind::ObserveStarted.as_str(), session_id],
+            )?,
+        ),
+        JobRecords::RunJob {
+            kinds,
+            run,
+            label,
+            attempt,
+        } => {
+            let (operator, label) = match label {
+                RowLabel::Is(label) => ("IS", label.as_str()),
+                RowLabel::Not(label) => ("IS NOT", *label),
+            };
+            let mut records = Vec::new();
+            for kind in *kinds {
+                let rows = SqlRead::query_map(
+                    conn,
                     &format!(
-                        "{started} AND {} = ?2",
-                        SqlRead::dialect(&*self.conn).json_field_spaced(
-                            "payload",
-                            "$.session_id",
-                            JsonType::Text
-                        )
-                    ),
-                    sql_params![EventKind::ObserveStarted.as_str(), session_id],
-                )?,
-            ),
-            JobRecords::RunJob {
-                kinds,
-                run,
-                label,
-                attempt,
-            } => {
-                let (operator, label) = match label {
-                    RowLabel::Is(label) => ("IS", label.as_str()),
-                    RowLabel::Not(label) => ("IS NOT", *label),
-                };
-                let mut records = Vec::new();
-                for kind in *kinds {
-                    let rows = SqlRead::query_map(
-                        &*self.conn,
-                        &format!(
-                            "SELECT r.ended_at, s.pid, {now} - s.heartbeat_at, r.supervisor_token
+                        "SELECT r.ended_at, s.pid, {now} - s.heartbeat_at, r.supervisor_token
                          FROM headless_jobs r
                          LEFT JOIN supervisors s ON s.token = r.supervisor_token
                          WHERE r.kind = ?1 AND r.run_id = ?2 AND r.attempt = ?3
                            AND r.label {operator} ?4",
-                            now = SqlRead::dialect(&*self.conn).unix_epoch_now(),
-                        ),
-                        sql_params![kind, run, attempt, label],
-                        |row| {
-                            Ok(JobRecord {
-                                facts: supervised_job(row.get(0)?, row.get(1)?, row.get(2)?),
-                                supervisor: Some(LeaseToken::new(row.get::<_, String>(3)?)),
-                                pid: None,
-                            })
-                        },
-                    )?;
-                    records.extend(rows);
-                }
-                Ok(records)
+                        now = SqlRead::dialect(conn).unix_epoch_now(),
+                    ),
+                    sql_params![kind, run, attempt, label],
+                    |row| {
+                        Ok(JobRecord {
+                            facts: supervised_job(row.get(0)?, row.get(1)?, row.get(2)?),
+                            supervisor: Some(LeaseToken::new(row.get::<_, String>(3)?)),
+                            pid: None,
+                        })
+                    },
+                )?;
+                records.extend(rows);
             }
+            Ok(records)
         }
+    }
+}
+
+/// Read inside the caller's transaction so issuing never opens a nested entry.
+pub(crate) fn target_start(
+    conn: &impl SqlRead,
+    target: &StepTarget,
+) -> Result<Option<crate::domain::queue_service::TargetStart>> {
+    use crate::domain::queue_service::TargetStart;
+    let Ok(id) = target.id.parse::<i64>() else {
+        return Ok(None);
+    };
+    let command = |started: EventKind| -> Result<Option<TargetStart>> {
+        let row = SqlRead::query_row(
+            conn,
+            &format!(
+                "SELECT actor_role, actor_id, {}
+                     FROM run_events WHERE id = ?1 AND kind = ?2",
+                SqlRead::dialect(conn).json_field_spaced("payload", "$.pid", JsonType::Integer),
+            ),
+            sql_params![id, started.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+        Ok(row.map(|(role, actor_id, pid)| TargetStart::Command {
+            actor: role
+                .and_then(|role| role.parse::<crate::domain::ActorRole>().ok())
+                .zip(actor_id),
+            pid: pid.and_then(|pid| u32::try_from(pid).ok()),
+        }))
+    };
+    let row = |table: &str, only: &str| -> Result<Option<TargetStart>> {
+        let supervisor = SqlRead::query_row(
+            conn,
+            &format!("SELECT supervisor_token FROM {table} r WHERE r.id = ?1{only}"),
+            sql_params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+        Ok(supervisor.map(|supervisor| TargetStart::Supervised {
+            supervisor: supervisor.map(LeaseToken::new),
+        }))
+    };
+    match target.kind {
+        TargetKind::Run | TargetKind::Planner => Ok(None),
+        TargetKind::PlanReview => row("plan_reviews", ""),
+        TargetKind::GoalReview => row("goal_reviews", ""),
+        TargetKind::EvalJob => row(
+            "headless_jobs",
+            &format!(
+                " AND r.run_id IS NULL AND r.kind = '{}'",
+                crate::domain::headless_job::AGENT_EVAL
+            ),
+        ),
+        TargetKind::ThroughputReview => command(EventKind::ThroughputReviewStarted),
+        TargetKind::Observer => command(EventKind::ObserveStarted),
+    }
+}
+
+/// Read inside the caller's transaction so issuing never opens a nested entry.
+pub(crate) fn telemetry_target(conn: &impl SqlRead, target: &StepTarget) -> Result<TargetFacts> {
+    let Ok(id) = target.id.parse::<i64>() else {
+        return Ok(TargetFacts::Ended);
+    };
+    let job = |table: &str, ended: &str, only: &str| -> Result<TargetFacts> {
+        let row = SqlRead::query_row(
+            conn,
+            &format!(
+                "SELECT r.{ended}, s.pid, {now} - s.heartbeat_at FROM {table} r
+                         LEFT JOIN supervisors s ON s.token = r.supervisor_token
+                         WHERE r.id = ?1{only}",
+                now = SqlRead::dialect(conn).unix_epoch_now(),
+            ),
+            sql_params![id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+        Ok(row.map_or(TargetFacts::Ended, |(ended, pid, age)| {
+            supervised_job(ended, pid, age)
+        }))
+    };
+    let command = |started: EventKind, finished: EventKind| -> Result<TargetFacts> {
+        let row = SqlRead::query_row(
+            conn,
+            &format!(
+                "SELECT {},
+                            {},
+                            {},
+                            EXISTS (SELECT 1 FROM run_events f
+                                    WHERE f.kind = ?3 AND f.id > s.id
+                                      AND {}
+                                          = {})
+                     FROM run_events s WHERE s.id = ?1 AND s.kind = ?2",
+                SqlRead::dialect(conn).time_value("s.created_at", TimeForm::EpochMillis),
+                SqlRead::dialect(conn).json_field_spaced(
+                    "s.payload",
+                    "$.timeout_secs",
+                    JsonType::Integer
+                ),
+                SqlRead::dialect(conn).json_field_spaced("s.payload", "$.pid", JsonType::Integer),
+                SqlRead::dialect(conn).json_field_spaced("f.payload", "$.dir", JsonType::Text),
+                SqlRead::dialect(conn).json_field_spaced("s.payload", "$.dir", JsonType::Text),
+            ),
+            sql_params![id, started.as_str(), finished.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+        Ok(match row {
+            Some((started_ms, timeout_secs, pid, false)) => TargetFacts::StartedCommand {
+                ends_by_ms: started_ms.saturating_add(timeout_secs.map_or(
+                    crate::domain::throughput_review::RUNNING_MS,
+                    |secs| {
+                        secs.saturating_mul(1000)
+                            .saturating_add(crate::domain::telemetry::COMMAND_MARGIN_MS)
+                    },
+                )),
+                pid: pid.and_then(|pid| u32::try_from(pid).ok()),
+            },
+            _ => TargetFacts::Ended,
+        })
+    };
+    match target.kind {
+        TargetKind::Run => Ok(TargetFacts::Ended),
+        TargetKind::Planner => {
+            let closed = SqlRead::query_row(
+                conn,
+                "SELECT closed_at IS NOT NULL FROM planners WHERE id = ?1",
+                sql_params![id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?;
+            Ok(if closed == Some(false) {
+                TargetFacts::OpenPlanner
+            } else {
+                TargetFacts::Ended
+            })
+        }
+        TargetKind::PlanReview => job("plan_reviews", "finished_at", ""),
+        TargetKind::GoalReview => job("goal_reviews", "finished_at", ""),
+        TargetKind::EvalJob => job(
+            "headless_jobs",
+            "ended_at",
+            &format!(
+                " AND r.run_id IS NULL AND r.kind = '{}'",
+                crate::domain::headless_job::AGENT_EVAL
+            ),
+        ),
+        TargetKind::ThroughputReview => command(
+            EventKind::ThroughputReviewStarted,
+            EventKind::ThroughputReviewFinished,
+        ),
+        TargetKind::Observer => command(EventKind::ObserveStarted, EventKind::ObserveFinished),
     }
 }
 

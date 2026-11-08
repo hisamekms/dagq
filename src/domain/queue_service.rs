@@ -3736,6 +3736,18 @@ mod tests {
             registration_expired: None,
             ..live
         };
+        // A missing registration takes precedence even when the lease is lost.
+        assert!(
+            not_held(
+                &leased,
+                &HeldFacts {
+                    leased: false,
+                    ..gone
+                }
+            )
+            .unwrap()
+            .contains("not registered")
+        );
         let expired = HeldFacts {
             registration_expired: Some(true),
             ..live
@@ -3799,6 +3811,18 @@ mod tests {
             ..open
         };
         assert_eq!(not_held(&held, &live), None);
+        // A live registration cannot keep an ended target open.
+        assert!(
+            not_held(
+                &held,
+                &HeldFacts {
+                    target_open: false,
+                    ..live
+                }
+            )
+            .unwrap()
+            .contains("has ended")
+        );
 
         for role in [ActorRole::User, ActorRole::Inbox, ActorRole::Supervisor] {
             assert_eq!(telemetry_issue_refusal(role, &child), None, "{role:?}");

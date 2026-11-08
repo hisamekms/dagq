@@ -16,6 +16,7 @@
 //! it settled in its own, so a release while `settling` is refused and a
 //! park after a release writes nothing.
 use super::sql_dialect::JsonType;
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::store_writes::event;
 use anyhow::{Context, Result};
@@ -131,19 +132,20 @@ impl SqliteQueue {
     /// [`ProgressVersion`] and whether it has a session a resume goes on in
     /// ([`task_hold::session_to_resume`]).
     pub fn release_view(&self, target: &HoldTarget) -> Result<ReleaseView> {
-        let task = read_task(&*self.conn, resolve(&*self.conn, target)?)?;
+        let tx = self.read_entry("release_view")?;
+        let task = read_task(&tx, resolve(&tx, target)?)?;
         // The hold before the run: a hold that settles in between is read
         // as settling, never as held with the version from before.
-        let hold = open_hold_of(&*self.conn, task.id())?;
-        let run = latest_task_run(&*self.conn, &self.runs_dir, task.id())?;
+        let hold = open_hold_of(&tx, task.id())?;
+        let run = latest_task_run(&tx, &self.runs_dir, task.id())?;
         let (version, session, kept) = match &run {
             Some(run) => (
-                Some(progress_version(&*self.conn, task.id(), run.id())?),
+                Some(progress_version(&tx, task.id(), run.id())?),
                 task_hold::session_to_resume(&super::runtime_store::run_events_of_port(
-                    &*self.conn,
+                    &tx,
                     run.id(),
                 )?),
-                kept_unsettled(&*self.conn, run.id())?,
+                kept_unsettled(&tx, run.id())?,
             ),
             None => (None, false, false),
         };
@@ -417,13 +419,15 @@ impl SqliteQueue {
 
     /// The open hold of `task`, if any.
     pub fn task_hold(&self, task: TaskId) -> Result<Option<TaskHold>> {
-        open_hold_of(&*self.conn, task)
+        let tx = self.read_entry("task_hold")?;
+        open_hold_of(&tx, task)
     }
 
     /// Every open hold of a task that has not ended, oldest first.
     pub fn task_holds(&self) -> Result<Vec<TaskHold>> {
+        let tx = self.read_entry("task_holds")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
                  WHERE h.released_at IS NULL AND t.status NOT IN ('completed','canceled')
                  ORDER BY h.id",
@@ -437,10 +441,12 @@ impl SqliteQueue {
     /// Every open hold of a task that has not ended, oldest first, each
     /// with its task's latest run and that run's status now.
     pub fn held_tasks(&self) -> Result<Vec<task_hold::HeldTask>> {
-        self.task_holds()?
+        let holds = self.task_holds()?;
+        let tx = self.read_entry("held_tasks")?;
+        holds
             .into_iter()
             .map(|hold| {
-                let run = latest_run(&*self.conn, hold.task_id)?
+                let run = latest_run(&tx, hold.task_id)?
                     .map(|(run, status)| Ok::<_, anyhow::Error>((run, status.parse()?)))
                     .transpose()?;
                 Ok((hold, run))
@@ -502,9 +508,10 @@ impl SqliteQueue {
     /// What fences `task`'s run at its turn's boundary now
     /// ([`crate::domain::task_replan::TaskGuards::fence`]).
     pub fn turn_fence(&self, task: TaskId) -> Result<Option<crate::domain::task_replan::Fence>> {
+        let tx = self.read_entry("turn_fence")?;
         Ok(crate::domain::task_replan::TaskGuards {
-            replan: super::replans::guard_of(&*self.conn, task)?,
-            hold: guard_of(&*self.conn, task)?,
+            replan: super::replans::guard_of(&tx, task)?,
+            hold: guard_of(&tx, task)?,
         }
         .fence())
     }
@@ -512,8 +519,9 @@ impl SqliteQueue {
     /// The open holds of tasks that have not ended whose run has not
     /// settled for them yet, oldest first.
     pub fn settling_holds(&self) -> Result<Vec<TaskHold>> {
+        let tx = self.read_entry("settling_holds")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
                  WHERE h.released_at IS NULL AND h.settled_at IS NULL
                    AND t.status NOT IN ('completed','canceled')
@@ -566,7 +574,7 @@ const HOLD_ENDER: &str = "runtime";
 /// in one transaction, which a pass with none to close does not open. The
 /// tasks whose hold was closed.
 pub(super) fn end_holds_of_ended(queue: &SqliteQueue, now: i64) -> Result<Vec<TaskId>> {
-    if ended_with_open_hold(&*queue.conn)?.is_empty() {
+    if ended_with_open_hold(&queue.read_entry("end_holds_of_ended")?)?.is_empty() {
         return Ok(Vec::new());
     }
     let tx = queue.write_tx("end_holds_of_ended")?;
@@ -879,8 +887,9 @@ impl crate::application::commands::holds::HoldStore for SqliteQueue {
     }
 
     fn run_task(&self, run: &RunId) -> Result<Option<TaskId>> {
+        let tx = self.read_entry("run_task")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT task_id FROM task_runs WHERE id=?1",
             sql_params![run],
             |r| r.get(0),

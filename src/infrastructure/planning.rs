@@ -1,6 +1,7 @@
 //! The queue the planning commands work on
 //! ([`crate::application::commands::planning`]): the ports of the task
 //! store, and what the authorization reads before them.
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -16,11 +17,13 @@ use crate::domain::{
 
 impl PlanningStore for SqliteQueue {
     fn task_authorization(&self, task: TaskId) -> Result<TaskAuthorization> {
-        super::sqlite::task_authorization(&self.conn, task)
+        let tx = self.read_entry("task_authorization")?;
+        super::task_store::task_authorization(&tx, task)
     }
 
     fn proposal_owner(&self, proposal: ProposalId) -> Result<Option<String>> {
-        super::proposals::owner_actor(&*self.conn, proposal)
+        let tx = self.read_entry("proposal_owner")?;
+        super::proposals::owner_actor(&tx, proposal)
     }
 
     fn record_denial(&self, payload: Value) -> Result<()> {

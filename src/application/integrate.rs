@@ -1143,7 +1143,7 @@ fn begin(
 }
 
 /// Whether the approval to land run `id` of `payload` is recorded now,
-/// read on `queue` in the approval's own write
+/// from the run, lease and events read in the approval's own write
 /// ([`RunTransitions::approve_integration`]): `false` for a run approved
 /// already. Refused is a run whose status is not the one `payload` names
 /// (it changed since the caller read it), one that awaits neither
@@ -1151,15 +1151,21 @@ fn begin(
 /// supervisor's review, ADR-0027, or its resume): a call that cannot land
 /// it does not approve it.
 pub fn approvable(
-    queue: &(impl super::RunReads + super::CoordinationReads + EventStore + ?Sized),
-    id: &RunId,
+    run: &TaskRun,
+    lease: Option<&crate::domain::RunLease>,
+    events: &[crate::domain::RunEvent],
     payload: &Value,
     held: &dyn Fn(&crate::domain::RunLease) -> bool,
 ) -> Result<bool> {
-    let status = super::RunReads::run(queue, id)?.status();
-    let leased = super::CoordinationReads::run_lease(queue, id)?.is_some_and(|lease| held(&lease));
-    let approved = RunHistory::from_events(&EventStore::run_events(queue, id)?).approved();
-    approval_due(id, status, payload["status"].as_str(), leased, approved)
+    let leased = lease.is_some_and(held);
+    let approved = RunHistory::from_events(events).approved();
+    approval_due(
+        run.id(),
+        run.status(),
+        payload["status"].as_str(),
+        leased,
+        approved,
+    )
 }
 
 /// [`approvable`]'s decision on what it read of run `id`: its `status`,

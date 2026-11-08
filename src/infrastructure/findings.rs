@@ -5,6 +5,7 @@
 //! measurement folds after the change ([`finding_event`]).
 use crate::domain::event_kind::EventKind;
 use crate::domain::ledger::findings as findings_fold;
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
@@ -108,16 +109,16 @@ impl SqliteQueue {
     /// ([`finding::by_impact`]). A pure read. The list is small, so the SQL
     /// reads every row and the domain filters them ([`FindingQuery::admits`]).
     pub fn findings(&self, query: &FindingQuery) -> Result<Vec<FindingView>> {
+        let tx = self.read_entry("findings")?;
         let target = query
             .target
             .as_ref()
-            .map(|target| resolve_target(&*self.conn, target).map(|ids| (target.name(), ids)))
+            .map(|target| resolve_target(&tx, target).map(|ids| (target.name(), ids)))
             .transpose()?;
         if let Some(id) = query.id {
-            read_finding(&*self.conn, id)?;
+            read_finding(&tx, id)?;
         }
-        let mut findings: Vec<Finding> = self
-            .conn
+        let mut findings: Vec<Finding> = tx
             .query_map("SELECT * FROM findings ORDER BY id", &[], finding_row)?
             .into_iter()
             .filter(|f| query.admits(f))
@@ -138,14 +139,14 @@ impl SqliteQueue {
                     .proposal_id
                     .map(|id| {
                         SqlRead::query_row(
-                            &*self.conn,
+                            &tx,
                             "SELECT status FROM proposals WHERE id=?1",
                             sql_params![id],
                             |r| enum_col(r, "status"),
                         )
                     })
                     .transpose()?;
-                let open_asks = self.conn.query_map(
+                let open_asks = tx.query_map(
                     "SELECT id FROM asks WHERE finding_id=?1
                          AND answered_at IS NULL AND closed_at IS NULL ORDER BY id",
                     sql_params![finding.id],
@@ -153,7 +154,7 @@ impl SqliteQueue {
                 )?;
                 let evidence_events = query
                     .full
-                    .then(|| evidence_events(&*self.conn, &finding.evidence))
+                    .then(|| evidence_events(&tx, &finding.evidence))
                     .transpose()?;
                 Ok(FindingView {
                     finding,

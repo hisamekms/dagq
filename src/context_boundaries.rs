@@ -52,6 +52,7 @@ mod rusqlite_names;
 mod setuid_tools;
 mod source;
 mod sql;
+mod store_entries;
 mod write_tx;
 
 use ownership::{Allowed, Context, Fix, Store, Table, Transaction};

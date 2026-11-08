@@ -1,6 +1,7 @@
 //! Reports, KPI breaches and forecasts ([`QueueRecords`]), and the
 //! replanning `status` and `doctor` read
 //! ([`crate::application::health::ReplanSource`]).
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::*;
 use crate::infrastructure::sql_dialect::JsonType;
@@ -10,11 +11,12 @@ impl SqliteQueue {
     /// The reports recorded as written: (period, label) of every
     /// `report_written` (ADR-0051 decision 20).
     pub fn reports_written(&self) -> Result<std::collections::HashSet<(String, String)>> {
-        let dialect = SqlRead::dialect(&*self.conn);
+        let tx = self.read_entry("reports_written")?;
+        let dialect = SqlRead::dialect(&tx);
         let period = dialect.json_field("payload", "$.period", JsonType::Text);
         let label = dialect.json_field("payload", "$.label", JsonType::Text);
         let rows = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT {period}, {label}
              FROM run_events WHERE kind=?1",

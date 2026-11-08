@@ -618,8 +618,13 @@ pub trait LedgerStore {
     /// Make the reads of `read` of one state of the rows, whatever is written
     /// meanwhile. A store whose [`Self::ledger_rows_from`] leaves nothing out
     /// has nothing to hold together.
-    fn ledger_read_snapshot(&self, read: &mut dyn FnMut() -> Result<()>) -> Result<()> {
-        read()
+    /// The callback reads through the supplied port, which shares the open
+    /// snapshot; calling the store's ordinary entries would begin nested reads.
+    fn ledger_read_snapshot(
+        &self,
+        read: &mut dyn FnMut(&dyn LedgerWindowRead) -> Result<()>,
+    ) -> Result<()> {
+        read(&self)
     }
     /// The window `query` asks of the rows of every kind: the one entry
     /// the statistics read the ledger by. The rows are read by pages and
@@ -640,54 +645,107 @@ pub trait LedgerStore {
             for kind in LedgerKind::ALL {
                 read.take_pages(|after, limit| self.ledger_rows_after(kind, after, limit))?;
             }
-            return ledger_window_with_runs_on_their_way(self, read, query);
+            return ledger_window_with_runs_on_their_way(&self, read, query);
         }
         // Which rows a read leaves out and what they still give must be of
         // one state of the rows, or a row moved between them is in neither.
         let mut window = None;
-        self.ledger_read_snapshot(&mut || {
+        self.ledger_read_snapshot(&mut |snapshot| {
             // A read from a time has no use for room for every event.
             let mut read = WindowRows::new(query, 0);
             // The queue's rows first: they tell which of the others to leave out.
-            read.take_pages(|after, limit| {
-                self.ledger_rows_after(LedgerKind::Queue, after, limit)
-            })?;
+            read.take_pages(|after, limit| snapshot.rows_after(LedgerKind::Queue, after, limit))?;
             let others = LedgerKind::ALL
                 .into_iter()
                 .filter(|kind| *kind != LedgerKind::Queue);
             if let Some(from) = read.rows_from() {
                 for kind in others {
-                    read.take_pages(|after, limit| {
-                        self.ledger_rows_from(kind, after, limit, &from)
-                    })?;
+                    read.take_pages(|after, limit| snapshot.rows_from(kind, after, limit, &from))?;
                 }
-                read.take_earlier(self.ledger_earlier(&from)?);
+                read.take_earlier(snapshot.earlier(&from)?);
                 loop {
                     let wanted = read.rows_wanted();
                     if wanted.is_empty() {
                         break;
                     }
                     for (kind, key) in wanted {
-                        read.take_row(self.ledger_row(kind, &key)?);
+                        read.take_row(snapshot.row(kind, &key)?);
                     }
                 }
             }
-            window = Some(ledger_window_with_runs_on_their_way(self, read, query)?);
+            window = Some(ledger_window_with_runs_on_their_way(snapshot, read, query)?);
             Ok(())
         })?;
         window.ok_or_else(|| anyhow::anyhow!("the ledger's snapshot read nothing"))
     }
 }
 
+/// The reads needed to fold a ledger window, borrowed from a store or its
+/// open snapshot. It exposes domain values, so snapshot callbacks share the
+/// caller's transaction without knowing the SQL execution port.
+pub trait LedgerWindowRead {
+    fn rows_after(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>>;
+    fn rows_from(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+        from: &crate::domain::ledger::window::RowsFrom,
+    ) -> Result<Vec<LedgerRow>>;
+    fn earlier(
+        &self,
+        from: &crate::domain::ledger::window::RowsFrom,
+    ) -> Result<crate::domain::ledger::window::EarlierRecords>;
+    fn row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
+    fn run_events(&self, run: &RunId) -> Result<Vec<RunEvent>>;
+}
+
+impl<T: LedgerStore + ?Sized> LedgerWindowRead for &T {
+    fn rows_after(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        self.ledger_rows_after(kind, after, limit)
+    }
+    fn rows_from(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+        from: &crate::domain::ledger::window::RowsFrom,
+    ) -> Result<Vec<LedgerRow>> {
+        self.ledger_rows_from(kind, after, limit, from)
+    }
+    fn earlier(
+        &self,
+        from: &crate::domain::ledger::window::RowsFrom,
+    ) -> Result<crate::domain::ledger::window::EarlierRecords> {
+        self.ledger_earlier(from)
+    }
+    fn row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
+        self.ledger_row(kind, key)
+    }
+    fn run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
+        self.ledger_run_events(run)
+    }
+}
+
 /// The window of the rows `read` took, with the rows of the runs on their
 /// way folded at `query`'s now.
 fn ledger_window_with_runs_on_their_way(
-    store: &(impl LedgerStore + ?Sized),
+    store: &(impl LedgerWindowRead + ?Sized),
     mut read: crate::domain::ledger::window::WindowRows,
     query: &WindowQuery,
 ) -> Result<LedgerWindow> {
     for run in read.runs_on_their_way() {
-        let events = store.ledger_run_events(&run)?;
+        let events = store.run_events(&run)?;
         if let Some(row) =
             crate::domain::ledger::window::run_on_its_way(&run, &events, query.now_ms)
         {

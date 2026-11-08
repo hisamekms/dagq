@@ -7,6 +7,7 @@
 use super::sql_dialect::JsonType;
 use super::sql_exec::sql_params;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::{Result, ensure};
 
 use super::sqlite::SqliteQueue;
@@ -96,21 +97,18 @@ impl SqliteQueue {
     /// decision 3): its notes and the drafts it created or edited that are
     /// still drafts. `None` when no planner ended so for it.
     pub fn planner_handover(&self, ask: AskId) -> Result<Option<PlannerHandover>> {
+        let tx = self.read_entry("planner_handover")?;
         let planner: Option<PlannerId> = SqlRead::query_row(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT {planner_id} FROM run_events e,
                      {asks} j WHERE e.kind='{}' AND {asked}=?1
                      ORDER BY e.id DESC LIMIT 1",
                 event_kind::PLANNER_ANSWER_WAIT,
-                asks = self.conn.dialect().json_elements_at("e.payload", "$.asks"),
-                asked = self
-                    .conn
-                    .dialect()
-                    .json_element("j.value", JsonType::Integer),
+                asks = tx.dialect().json_elements_at("e.payload", "$.asks"),
+                asked = tx.dialect().json_element("j.value", JsonType::Integer),
                 planner_id =
-                    self.conn
-                        .dialect()
+                    tx.dialect()
                         .json_field("e.payload", "$.planner_id", JsonType::Integer),
             ),
             sql_params![ask],
@@ -122,21 +120,18 @@ impl SqliteQueue {
         };
         let actor = format!("planner:{planner}");
         let notes = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT id, coalesce({text}, '') FROM run_events
                  WHERE kind='{}' AND actor_id=?1 ORDER BY id",
                 event_kind::OBSERVATION,
-                text = self
-                    .conn
-                    .dialect()
-                    .json_field("payload", "$.text", JsonType::Text),
+                text = tx.dialect().json_field("payload", "$.text", JsonType::Text),
             ),
             sql_params![&actor],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let ids: Vec<crate::domain::TaskId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT DISTINCT e.task_id FROM run_events e JOIN tasks t ON t.id=e.task_id
                  WHERE e.kind IN ('{}','{}') AND e.actor_id=?1 AND t.status='draft'
@@ -149,7 +144,7 @@ impl SqliteQueue {
         )?;
         let mut drafts = Vec::new();
         for id in ids {
-            let task = super::store_rows::read_task(&*self.conn, id)?;
+            let task = super::store_rows::read_task(&tx, id)?;
             if task.status() != TaskStatus::Draft {
                 continue;
             }
@@ -227,8 +222,9 @@ impl SqliteQueue {
     }
 
     pub fn planner(&self, id: PlannerId) -> Result<PlannerSession> {
+        let tx = self.read_entry("planner")?;
         SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT * FROM planners WHERE id=?1",
             sql_params![id],
             planner_row_port,
@@ -239,8 +235,9 @@ impl SqliteQueue {
 
     /// The planners not closed, oldest first; with `all`, every planner.
     pub fn planners(&self, all: bool) -> Result<Vec<PlannerSession>> {
+        let tx = self.read_entry("planners")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM planners WHERE ?1 OR closed_at IS NULL ORDER BY id",
             sql_params![all],
             planner_row_port,
@@ -268,9 +265,10 @@ impl SqliteQueue {
     /// queue's `turn_*` events that name it, and its waits for a provider
     /// (`provider_waiting`, decision 5), oldest first.
     pub fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>> {
+        let tx = self.read_entry("planner_turn_events")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
-            &planner_turn_events_sql(self.conn.dialect()),
+            &tx,
+            &planner_turn_events_sql(tx.dialect()),
             sql_params![id],
             super::store_rows::event_row,
         )?)

@@ -19,6 +19,7 @@
 use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlWrite, sql_params};
 use super::store_rows::{enum_col, json_col};
 use crate::domain::event_kind::EventKind;
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::{Context, Result, ensure};
 
 use serde_json::json;
@@ -173,16 +174,17 @@ impl SqliteQueue {
     /// disk's `cost` ask (task 377) lists the runs whose landing waited,
     /// and holds no session: it is not one.
     pub fn hold_of(&self, run_id: &RunId) -> Result<Option<Ask>> {
+        let tx = self.read_entry("hold_of")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT * FROM asks WHERE kind='queue_hold'
                  AND ifnull(subject,'') <> 'disk'
                  AND answered_at IS NULL AND closed_at IS NULL
                  AND EXISTS (SELECT 1 FROM {affected} WHERE {run}=?1)
                  ORDER BY id LIMIT 1",
-                affected = SqlRead::dialect(&*self.conn).json_elements("asks.affected"),
-                run = SqlRead::dialect(&*self.conn).json_element("value", JsonType::Text),
+                affected = SqlRead::dialect(&tx).json_elements("asks.affected"),
+                run = SqlRead::dialect(&tx).json_element("value", JsonType::Text),
             ),
             sql_params![run_id],
             ask_row,
@@ -193,14 +195,15 @@ impl SqliteQueue {
     /// Whether a `queue_hold` ask (not the disk's) that holds the run is
     /// unclosed: open, or answered and not yet applied.
     pub fn hold_unclosed(&self, run_id: &RunId) -> Result<bool> {
+        let tx = self.read_entry("hold_unclosed")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT EXISTS (SELECT 1 FROM asks WHERE kind='queue_hold'
              AND ifnull(subject,'') <> 'disk' AND closed_at IS NULL
              AND EXISTS (SELECT 1 FROM {affected} WHERE {run}=?1))",
-                affected = SqlRead::dialect(&*self.conn).json_elements("asks.affected"),
-                run = SqlRead::dialect(&*self.conn).json_element("value", JsonType::Text),
+                affected = SqlRead::dialect(&tx).json_elements("asks.affected"),
+                run = SqlRead::dialect(&tx).json_element("value", JsonType::Text),
             ),
             sql_params![run_id],
             |row| row.get(0),
@@ -509,8 +512,9 @@ impl SqliteQueue {
 
     /// Asks matching `query`, oldest first. A pure read.
     pub fn asks(&self, query: AskQuery) -> Result<Vec<Ask>> {
+        let tx = self.read_entry("asks")?;
         let asks: Vec<Ask> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM asks WHERE (?1 OR closed_at IS NULL)
                  AND (NOT ?2 OR answered_at IS NULL) ORDER BY id",
             sql_params![query.all, query.open],
@@ -700,12 +704,13 @@ impl SqliteQueue {
     /// The payload of the `ask_opened` of the ask `id`; null when there is
     /// none.
     pub fn ask_opened_payload(&self, id: AskId) -> Result<serde_json::Value> {
+        let tx = self.read_entry("ask_opened_payload")?;
         let payload: Option<String> = SqlRead::query_row(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT payload FROM run_events WHERE kind=?1
                  AND {}=?2 ORDER BY id DESC LIMIT 1",
-                SqlRead::dialect(&*self.conn).json_field("payload", "$.ask_id", JsonType::Integer),
+                SqlRead::dialect(&tx).json_field("payload", "$.ask_id", JsonType::Integer),
             ),
             sql_params![EventKind::AskOpened.as_str(), id],
             |r| r.get(0),
@@ -721,8 +726,9 @@ impl SqliteQueue {
     /// nobody closed yet, oldest first: answers the supervisor still has to
     /// apply.
     pub fn update_answers(&self, kind: &AskKind) -> Result<Vec<Ask>> {
+        let tx = self.read_entry("update_answers")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM asks WHERE kind=?1 AND task_id IS NULL
                  AND answered_at IS NOT NULL AND closed_at IS NULL ORDER BY id",
             sql_params![kind.as_str()],
@@ -734,8 +740,9 @@ impl SqliteQueue {
     /// oldest first: answers the supervisor still has to type into the
     /// worker's terminal.
     pub fn undelivered_answers(&self, run_id: &RunId) -> Result<Vec<Ask>> {
+        let tx = self.read_entry("undelivered_answers")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM asks WHERE run_id=?1 AND kind='worker_question'
                  AND answered_at IS NOT NULL AND closed_at IS NULL ORDER BY id",
             sql_params![run_id],
@@ -756,8 +763,9 @@ impl SqliteQueue {
         run_id: &RunId,
         created_from: i64,
     ) -> Result<bool> {
+        let tx = self.read_entry("has_unclosed_worker_question_since")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT EXISTS(SELECT 1 FROM asks WHERE run_id=?1 AND kind='worker_question'
              AND closed_at IS NULL AND created_at>=?2)",
             sql_params![run_id, created_from],
@@ -768,8 +776,9 @@ impl SqliteQueue {
     /// When the run's `worker_question` closed last (unix seconds): its
     /// answer was delivered, by the supervisor or by hand.
     pub fn last_worker_question_closed(&self, run_id: &RunId) -> Result<Option<i64>> {
+        let tx = self.read_entry("last_worker_question_closed")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT MAX(closed_at) FROM asks WHERE run_id=?1 AND kind='worker_question'",
             sql_params![run_id],
             |r| r.get(0),
@@ -778,8 +787,9 @@ impl SqliteQueue {
 
     /// Whether the run has an ask of `kind` nobody closed, answered or not.
     pub fn has_unclosed_ask(&self, run_id: &RunId, kind: AskKind) -> Result<bool> {
+        let tx = self.read_entry("has_unclosed_ask")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT EXISTS(SELECT 1 FROM asks WHERE run_id=?1 AND kind=?2
              AND closed_at IS NULL)",
             sql_params![run_id, kind.as_str()],
@@ -790,8 +800,9 @@ impl SqliteQueue {
     /// The answered `approve_landing` asks about a run that nobody closed,
     /// oldest first: the answers the supervisor applies (ADR-0027).
     pub fn landing_answers(&self) -> Result<Vec<Ask>> {
+        let tx = self.read_entry("landing_answers")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM asks WHERE kind='approve_landing' AND run_id IS NOT NULL
                  AND answered_at IS NOT NULL AND closed_at IS NULL ORDER BY id",
             sql_params![],
@@ -830,8 +841,9 @@ impl SqliteQueue {
     /// is open, and an answered one the supervisor has not applied yet
     /// comes first (ADR-0043 decision 1).
     pub fn unclosed_stalled_ask(&self, run_id: &RunId) -> Result<Option<Ask>> {
+        let tx = self.read_entry("unclosed_stalled_ask")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM asks WHERE run_id=?1 AND kind='stalled' AND closed_at IS NULL
                  ORDER BY id LIMIT 1",
             sql_params![run_id],
@@ -1047,7 +1059,8 @@ impl SqliteQueue {
     }
 
     pub fn read_ask(&self, id: AskId) -> Result<Ask> {
-        read_ask(&*self.conn, id)
+        let tx = self.read_entry("read_ask")?;
+        read_ask(&tx, id)
     }
 }
 

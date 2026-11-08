@@ -28,6 +28,7 @@
 //! when their heartbeat is past `HEARTBEAT_TIMEOUT_SECS` and their PID is dead
 //! or reused. A failed heartbeat or stop record leaves the row stale for a
 //! later prune.
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::*;
 use crate::domain::worker::ProviderCheck;
@@ -268,8 +269,9 @@ impl SqliteQueue {
 
     /// The binary the supervisor `token` was asked to exec, if any.
     pub fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
+        let tx = self.read_entry("handoff_request")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT handoff_binary FROM supervisors WHERE token=?1",
             sql_params![token],
             |r| r.get(0),
@@ -402,7 +404,8 @@ impl SqliteQueue {
     /// Every registered supervisor, oldest registration first, whether its
     /// process is alive or not.
     pub fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
-        supervisors_of(&*self.conn)
+        let tx = self.read_entry("supervisors")?;
+        supervisors_of(&tx)
     }
 
     /// Give up ownership of a run the supervisor stops driving. The lease is
@@ -441,12 +444,8 @@ impl SqliteQueue {
     /// Whether this process still holds the run's lease. An adopted-away or
     /// recovered run answers `false`, and its former owner must not touch it.
     pub fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
-        Ok(SqlRead::query_row(
-            &*self.conn,
-            "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1 AND token=?2)",
-            sql_params![id, token],
-            |r| r.get(0),
-        )?)
+        let tx = self.read_entry("holds_lease")?;
+        holds_lease(&tx, id, token)
     }
 
     /// Bind the queue to a repository before any run exists, as `init` does for a
@@ -510,8 +509,9 @@ impl SqliteQueue {
     /// Git common directory the queue is bound to, recorded by `init` for a
     /// repository queue or by the first `supervise` otherwise.
     pub fn repository_binding(&self) -> Result<Option<String>> {
+        let tx = self.read_entry("repository_binding")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
             sql_params![],
             |r| r.get(0),
@@ -521,11 +521,12 @@ impl SqliteQueue {
 
     /// Every lease in the queue, oldest run first.
     pub fn run_leases(&self) -> Result<Vec<RunLease>> {
+        let tx = self.read_entry("run_leases")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT l.run_id,l.token,l.pid,l.heartbeat_at FROM run_leases l JOIN task_runs r ON r.id=l.run_id ORDER BY {insert_order_r}",
-                insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r")
+                insert_order_r = SqlRead::dialect(&tx).insertion_order("r")
             ),
             sql_params![],
             lease_row,
@@ -533,7 +534,8 @@ impl SqliteQueue {
     }
 
     pub fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>> {
-        run_lease_of(&*self.conn, id)
+        let tx = self.read_entry("run_lease")?;
+        run_lease_of(&tx, id)
     }
 
     /// The slots held and the slots offered when a backend call failed:
@@ -542,16 +544,15 @@ impl SqliteQueue {
     /// registered supervisor. `parallel` is `None` when no supervisor is
     /// registered (under `token`).
     pub fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)> {
+        let tx = self.read_entry("backend_slots")?;
         let slots = SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT count(*) FROM run_leases WHERE CAST(?1 AS TEXT) IS NULL OR token=?1",
             sql_params![token],
             |r| r.get(0),
         )?;
         let parallel =
-            SqlRead::query_row(&*self.conn, BACKEND_PARALLEL_SQL, sql_params![token], |r| {
-                r.get(0)
-            })?;
+            SqlRead::query_row(&tx, BACKEND_PARALLEL_SQL, sql_params![token], |r| r.get(0))?;
         Ok((slots, parallel))
     }
 
@@ -750,8 +751,10 @@ impl SqliteQueue {
     }
 
     pub fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()> {
+        let tx = self.read_entry("heartbeat_wrapper")?;
         // Registration is immutable and a run ID is never reused.
-        assert_wrapper(&*self.conn, id, pid)?;
+        assert_wrapper(&tx, id, pid)?;
+        drop(tx);
         self.write_sql(
             "heartbeat_wrapper",
             "UPDATE run_processes SET heartbeat_at=?2 WHERE run_id=?1 AND exited_at IS NULL",
@@ -782,8 +785,9 @@ impl SqliteQueue {
     }
 
     pub fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>> {
+        let tx = self.read_entry("processes")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM run_processes WHERE run_id=?1 ORDER BY role",
             sql_params![id],
             process_row,
@@ -1027,6 +1031,16 @@ impl crate::application::SupervisorReads for SqliteQueue {
     fn repository_binding(&self) -> Result<Option<String>> {
         SqliteQueue::repository_binding(self)
     }
+}
+
+/// Read inside the caller's transaction so issuing never opens a nested entry.
+pub(crate) fn holds_lease(conn: &impl SqlRead, id: &RunId, token: &LeaseToken) -> Result<bool> {
+    Ok(SqlRead::query_row(
+        conn,
+        "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1 AND token=?2)",
+        sql_params![id, token],
+        |r| r.get(0),
+    )?)
 }
 
 #[cfg(test)]

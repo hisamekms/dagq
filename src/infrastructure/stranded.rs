@@ -6,6 +6,7 @@
 //! waiting tasks: that is the plan's call.
 use super::sql_exec::SqlWrite;
 use crate::domain::EventKind;
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -160,14 +161,14 @@ pub(super) fn record_upstream(
 impl SqliteQueue {
     /// Every stranded dependency in the queue now, by task ID.
     pub fn stranded_dependencies(&self) -> Result<Vec<StrandedDependency>> {
+        let tx = self.read_entry("stranded_dependencies")?;
         let tasks: Vec<TaskId> =
-            self.conn
-                .query_map(&format!("{UNFINISHED_OF_CLOSED} ORDER BY t.id"), &[], |r| {
-                    r.get(0)
-                })?;
+            tx.query_map(&format!("{UNFINISHED_OF_CLOSED} ORDER BY t.id"), &[], |r| {
+                r.get(0)
+            })?;
         let mut all = Vec::new();
         for task in tasks {
-            all.extend(stranded(&*self.conn, task)?);
+            all.extend(stranded(&tx, task)?);
         }
         Ok(all)
     }

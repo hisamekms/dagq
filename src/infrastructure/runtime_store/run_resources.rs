@@ -1,6 +1,7 @@
 //! The runs' resources the supervisor measured from outside in queue.db
 //! (`run_resources`, [`RunResourceStore`]). Its boundary on a real
 //! queue.db is `tests/it/run_resources.rs`.
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::*;
 use crate::application::RunResourceStore;
@@ -61,8 +62,9 @@ impl RunResourceStore for SqliteQueue {
     }
 
     fn run_resources(&self, run: &RunId) -> Result<Vec<RunResource>> {
+        let tx = self.read_entry("run_resources")?;
         let rows = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!("SELECT {COLUMNS} FROM run_resources WHERE run_id=?1 ORDER BY id"),
             sql_params![run.as_str()],
             resource_row,
@@ -71,8 +73,9 @@ impl RunResourceStore for SqliteQueue {
     }
 
     fn run_resources_after(&self, after: i64, limit: usize) -> Result<Vec<RunResource>> {
+        let tx = self.read_entry("run_resources_after")?;
         let rows = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!("SELECT {COLUMNS} FROM run_resources WHERE id > ?1 ORDER BY id LIMIT ?2"),
             sql_params![after, i64::try_from(limit)?],
             resource_row,
@@ -81,8 +84,9 @@ impl RunResourceStore for SqliteQueue {
     }
 
     fn open_attachments(&self) -> Result<Vec<(RunId, i64)>> {
+        let tx = self.read_entry("open_attachments")?;
         let open = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "WITH attached AS (
                  SELECT run_id, MAX(id) AS attachment FROM run_events
                  WHERE kind='environment_attached' AND run_id IS NOT NULL

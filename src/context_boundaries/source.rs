@@ -411,6 +411,22 @@ pub(super) fn production_files(
 pub(super) fn name_uses(file: &syn::File, name: &str) -> BTreeSet<String> {
     let mut reader = NameReader {
         name,
+        fields_only: false,
+        owners: Vec::new(),
+        fns: Vec::new(),
+        found: BTreeSet::new(),
+    };
+    if !is_test(&file.attrs) {
+        reader.visit_file(file);
+    }
+    reader.found
+}
+
+/// Production uses of a named field, including dotted macro tokens.
+pub(super) fn field_uses(file: &syn::File, name: &str) -> BTreeSet<String> {
+    let mut reader = NameReader {
+        name,
+        fields_only: true,
         owners: Vec::new(),
         fns: Vec::new(),
         found: BTreeSet::new(),
@@ -423,6 +439,7 @@ pub(super) fn name_uses(file: &syn::File, name: &str) -> BTreeSet<String> {
 
 struct NameReader<'n> {
     name: &'n str,
+    fields_only: bool,
     /// The self type of each `impl` (or the trait) around, innermost last.
     owners: Vec<String>,
     fns: Vec<String>,
@@ -453,12 +470,18 @@ impl NameReader<'_> {
 
     /// The tokens of a macro, which syn does not parse, in its groups too.
     fn tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        let mut dotted = false;
         for tree in tokens {
             match tree {
-                TokenTree::Group(group) => self.tokens(group.stream()),
-                TokenTree::Ident(ident) if ident == self.name => self.found(),
+                TokenTree::Group(ref group) => self.tokens(group.stream()),
+                TokenTree::Ident(ref ident)
+                    if ident == self.name && (!self.fields_only || dotted) =>
+                {
+                    self.found()
+                }
                 _ => {}
             }
+            dotted = matches!(tree, TokenTree::Punct(ref punct) if punct.as_char() == '.');
         }
     }
 }
@@ -467,9 +490,18 @@ impl<'ast> Visit<'ast> for NameReader<'_> {
     fn visit_attribute(&mut self, _: &'ast syn::Attribute) {}
 
     fn visit_ident(&mut self, ident: &'ast proc_macro2::Ident) {
-        if ident == self.name {
+        if !self.fields_only && ident == self.name {
             self.found();
         }
+    }
+
+    fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+        if self.fields_only
+            && matches!(&field.member, syn::Member::Named(name) if name == self.name)
+        {
+            self.found();
+        }
+        visit::visit_expr_field(self, field);
     }
 
     fn visit_item(&mut self, item: &'ast syn::Item) {

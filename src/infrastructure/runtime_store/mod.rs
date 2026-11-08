@@ -77,6 +77,12 @@ mod session_registry;
 mod session_steps;
 mod transitions;
 
+pub(crate) use coordination::holds_lease as holds_lease_in;
+pub(crate) use session_steps::{
+    job_facts as job_facts_in, target_start as target_start_in,
+    telemetry_target as telemetry_target_in,
+};
+
 // The names the moved functions had beside their rusqlite wrappers: a module
 // on another branch calls them, or takes the wrappers' helpers through this
 // module's glob, whichever landed first (ADR-t3982-1).
@@ -435,7 +441,7 @@ const SUPERVISORS_SELECT: &str = "SELECT *, handoff_accepted=TRUE AS accepts_han
     auto_update=TRUE AS updates_automatically FROM supervisors";
 
 /// Every registered supervisor on `conn`, oldest registration first.
-pub(super) fn supervisors_of(conn: &impl sql_exec::SqlRead) -> Result<Vec<SupervisorRegistration>> {
+pub(crate) fn supervisors_of(conn: &impl sql_exec::SqlRead) -> Result<Vec<SupervisorRegistration>> {
     Ok(conn.query_map(
         &format!(
             "{SUPERVISORS_SELECT} ORDER BY started_at, {}",

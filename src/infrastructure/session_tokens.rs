@@ -11,7 +11,9 @@
 //! transcript: its cut at the close is made here afterwards.
 
 use crate::infrastructure::sql_dialect::JsonType;
-use crate::infrastructure::sql_exec::{OptionalRow, SqlDialect, SqlRead, sql_params};
+use crate::infrastructure::sql_exec::{
+    CommitTransaction, OptionalRow, SqlDialect, SqlRead, TransactionEntries, sql_params,
+};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use tracing::{debug, info};
@@ -21,7 +23,6 @@ use super::{
         HOOK_INTAKE_PENDING, insert_at_port, now_port, open_hook_spans_port, span_closed_port,
         span_task_port,
     },
-    sqlite::SqliteQueue,
     store_rows::json_col,
 };
 use crate::domain::{
@@ -42,14 +43,18 @@ use crate::domain::{
 /// A transcript of an open span that cannot be read or counted now is left
 /// for the next time; one of a closed span is cut as not measured, once. One span
 /// that fails holds back no other. Returns the cuts recorded.
-pub(super) fn record_session_tokens(queue: &SqliteQueue) -> Result<usize> {
-    let now = now_port(&*queue.conn)?;
+pub(super) fn record_session_tokens(queue: &impl TransactionEntries) -> Result<usize> {
+    let now = {
+        let tx = queue.read_entry("session_tokens_now")?;
+        now_port(&tx)?
+    };
     record_at(queue, &now)
 }
 
 /// [`record_session_tokens`] at `now` (in the form of `created_at`).
-fn record_at(queue: &SqliteQueue, now: &str) -> Result<usize> {
-    let conn = &*queue.conn;
+fn record_at(queue: &impl TransactionEntries, now: &str) -> Result<usize> {
+    let tx = queue.read_entry("session_token_cuts")?;
+    let conn = &tx;
     let now = rfc3339_millis(now).context("the time now does not parse")?;
     let mut cuts = Vec::new();
     for span in open_hook_spans_port(conn)? {
@@ -74,6 +79,7 @@ fn record_at(queue: &SqliteQueue, now: &str) -> Result<usize> {
         let since = last_cut_at(conn, span.opened_event_id)?.unwrap_or(start);
         cuts.push((span, start, end.max(since), true));
     }
+    drop(tx);
     let mut recorded = 0;
     for (span, start, at, last) in cuts {
         let Some(cut) = prepare(queue, span, start, at, last) else {
@@ -113,10 +119,16 @@ struct Cut {
 /// Read and analyse the transcript of `span` from `start` to `at`, never
 /// under a write lock. `None` when an open span's transcript cannot be read
 /// now.
-fn prepare(queue: &SqliteQueue, span: OpenSpan, start: i64, at: i64, last: bool) -> Option<Cut> {
+fn prepare(
+    queue: &impl TransactionEntries,
+    span: OpenSpan,
+    start: i64,
+    at: i64,
+    last: bool,
+) -> Option<Cut> {
     // Its tokens name no test: no profile is looked for.
     let none = &mut Some(crate::domain::toolchain::Toolchains::none());
-    let totals = match queue.span_transcript(&span, none) {
+    let totals = match super::sessions::read_from_entries(queue, &span, none) {
         Ok(transcript) => match SpanTotals::of(&transcript.records, start, at) {
             // Its totals run from its start, so this would recur hourly:
             // only its close records why.
@@ -157,8 +169,8 @@ fn prepare(queue: &SqliteQueue, span: OpenSpan, start: i64, at: i64, last: bool)
 /// span's cut that adds nothing is not recorded (an idle inbox writes no
 /// event each hour), so the next pass tries again. `false` when nothing was
 /// recorded.
-fn write(queue: &SqliteQueue, cut: &Cut) -> Result<bool> {
-    let tx = queue.write_tx("session_tokens_cut")?;
+fn write(queue: &impl TransactionEntries, cut: &Cut) -> Result<bool> {
+    let tx = queue.write_entry("session_tokens_cut")?;
     let opened = cut.span.opened_event_id;
     let earlier = recorded_cuts(&tx, opened)?;
     let stale = if cut.last {
@@ -312,12 +324,7 @@ mod tests {
     use super::*;
     use rusqlite::{Connection, params};
 
-    fn identity(conn: &Connection) -> super::super::write_leader::WriteIdentity {
-        super::super::write_leader::WriteIdentity::read(conn).unwrap()
-    }
-
     use crate::infrastructure::sql_dialect::json_field;
-    use crate::infrastructure::sqlite::WRITE_HOLD_WARN;
     use crate::{
         domain::{
             RunEvent,
@@ -410,13 +417,7 @@ mod tests {
         let db = dir.path().join("q.db");
         let queue = SqliteQueue::init(&db).unwrap();
         let conn = &*queue.conn;
-        let opened = record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), true, INBOX, "s"),
-        )
-        .unwrap()["opened"]
+        let opened = record_hook(conn, &hook(dir.path(), true, INBOX, "s")).unwrap()["opened"]
             .as_i64()
             .unwrap();
         set_time(conn, opened, "2026-10-01T22:00:00.000Z");
@@ -460,13 +461,7 @@ mod tests {
         assistant(dir.path(), "s", "m4", "2026-10-02T00:50:00.000Z", (1, 1));
         READS.set(0);
         let analysed = crate::domain::transcript::ANALYSED.get();
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), false, INBOX, "s"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), false, INBOX, "s")).unwrap();
         assert_eq!(READS.get(), 0);
         assert_eq!(crate::domain::transcript::ANALYSED.get(), analysed);
         assert_eq!(cuts(conn).len(), 2);
@@ -515,8 +510,7 @@ mod tests {
     /// The tokens of the final `session_turns` the supervisor's intake of
     /// the hook's closes writes, in order.
     fn final_turns_tokens(conn: &Connection) -> Vec<(i64, i64)> {
-        crate::infrastructure::sessions::record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn))
-            .unwrap();
+        crate::infrastructure::sessions::record_open_turns(conn).unwrap();
         conn.prepare(&format!(
             "SELECT * FROM run_events WHERE kind='session_turns'
                AND {}=1 ORDER BY id",
@@ -537,13 +531,7 @@ mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &*queue.conn;
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), true, PLANNER, "p"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), true, PLANNER, "p")).unwrap();
         assistant(dir.path(), "p", "m1", "2099-01-01T00:00:00.000Z", (3, 4));
         let span = open_hook_spans(conn).unwrap().remove(0);
         let start = span.opened_ms.unwrap();
@@ -575,24 +563,12 @@ mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &*queue.conn;
-        let opened = record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), true, INBOX, "gone"),
-        )
-        .unwrap()["opened"]
+        let opened = record_hook(conn, &hook(dir.path(), true, INBOX, "gone")).unwrap()["opened"]
             .as_i64()
             .unwrap();
         set_time(conn, opened, "2026-10-01T00:00:00.000Z");
         assert_eq!(record_at(&queue, "2026-10-01T02:00:00.000Z").unwrap(), 0);
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), false, INBOX, "gone"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), false, INBOX, "gone")).unwrap();
         let closed: i64 = conn
             .query_row("SELECT max(id) FROM run_events", [], |r| r.get(0))
             .unwrap();
@@ -623,15 +599,10 @@ mod tests {
         let conn = &*queue.conn;
         let mut closes = Vec::new();
         for session in ["a", "b", "c"] {
-            let opened = record_hook(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                &hook(dir.path(), true, INBOX, session),
-            )
-            .unwrap()["opened"]
-                .as_i64()
-                .unwrap();
+            let opened =
+                record_hook(conn, &hook(dir.path(), true, INBOX, session)).unwrap()["opened"]
+                    .as_i64()
+                    .unwrap();
             set_time(conn, opened, "2026-10-01T00:00:00.000Z");
             assistant(
                 dir.path(),
@@ -654,13 +625,7 @@ mod tests {
                 let at = rfc3339_millis("2026-10-01T03:00:00.000Z").unwrap();
                 assert!(write(&queue, &prepare(&queue, b, start, at, false).unwrap()).unwrap());
             }
-            record_hook(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                &hook(dir.path(), false, INBOX, session),
-            )
-            .unwrap();
+            record_hook(conn, &hook(dir.path(), false, INBOX, session)).unwrap();
             closes.push(
                 conn.query_row("SELECT max(id) FROM run_events", [], |r| r.get::<_, i64>(0))
                     .unwrap(),

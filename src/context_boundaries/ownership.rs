@@ -608,6 +608,7 @@ pub(super) const PORTS: &[Port] = &[
     port("ObserverLog", Internal),
     port("ObservationQueue", Internal),
     port("LedgerStore", Internal), // the ledger is read through ledger::read
+    port("LedgerWindowRead", Internal), // the reads borrowed from the ledger's snapshot
     port("NodeSampleStore", Partial), // the measurement reads it; host records the host's load
     port("LedgerQueue", Internal), // what builds the ledger reads and writes
     port("SessionStepStore", Internal), // the measurement's store of the sessions' steps

@@ -22,6 +22,7 @@ use super::sql_exec::{
 };
 use super::store_rows::{enum_col, event_row, json_col};
 use super::store_writes::record_queue_event_in;
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::store_writes;
 use crate::domain::event_kind::EventKind;
@@ -223,14 +224,16 @@ impl SqliteQueue {
     /// The request `request`, whatever its status; a missing one is an
     /// error.
     pub fn request_by_id(&self, request: RequestId) -> Result<PlanRequest> {
-        read_request(&*self.conn, request)
+        let tx = self.read_entry("request_by_id")?;
+        read_request(&tx, request)
     }
 
     /// The requests, oldest first: the `open` ones, or every one with
     /// `all`.
     pub fn plan_requests(&self, all: bool) -> Result<Vec<PlanRequest>> {
+        let tx = self.read_entry("plan_requests")?;
         let ids: Vec<RequestId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             if all {
                 "SELECT id FROM plan_requests ORDER BY id"
             } else {
@@ -239,29 +242,27 @@ impl SqliteQueue {
             sql_params![],
             |r| r.get(0),
         )?;
-        ids.into_iter()
-            .map(|id| read_request(&*self.conn, id))
-            .collect()
+        ids.into_iter().map(|id| read_request(&tx, id)).collect()
     }
 
     /// The `open` requests waiting for a planner of the runtime's
     /// ([`targets`]), oldest first.
     pub fn planner_requests(&self) -> Result<Vec<PlanRequest>> {
+        let tx = self.read_entry("planner_requests")?;
         let ids: Vec<RequestId> = SqlRead::query_map(
-            &*self.conn,
-            &format!("{} ORDER BY r.id", targets(&*self.conn)),
+            &tx,
+            &format!("{} ORDER BY r.id", targets(&tx)),
             sql_params![],
             |r| r.get(0),
         )?;
-        ids.into_iter()
-            .map(|id| read_request(&*self.conn, id))
-            .collect()
+        ids.into_iter().map(|id| read_request(&tx, id)).collect()
     }
 
     /// The asks about `request`, oldest first: its planners' questions.
     pub fn request_asks(&self, request: RequestId) -> Result<Vec<Ask>> {
+        let tx = self.read_entry("request_asks")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM asks WHERE request_id=?1 ORDER BY id",
             sql_params![request],
             ask_row,
@@ -271,7 +272,8 @@ impl SqliteQueue {
     /// The planner of the runtime's open for `request`, if any: the one
     /// that may decline it.
     pub fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
-        open_planner_of(&*self.conn, request).map(|planner| planner.map(|planner| planner.id))
+        let tx = self.read_entry("request_planner")?;
+        open_planner_of(&tx, request).map(|planner| planner.map(|planner| planner.id))
     }
 
     /// Decline the `open` `request` with `reason` (ADR-t1394-1 decision 6):
@@ -422,7 +424,8 @@ impl PlanRequestStore for SqliteQueue {
     }
 
     fn plan_request(&self, request: RequestId) -> Result<PlanRequest> {
-        read_request(&*self.conn, request)
+        let tx = self.read_entry("plan_request")?;
+        read_request(&tx, request)
     }
 
     fn request_asks(&self, request: RequestId) -> Result<Vec<Ask>> {
@@ -430,8 +433,9 @@ impl PlanRequestStore for SqliteQueue {
     }
 
     fn event_by_id(&self, id: EventId) -> Result<Option<RunEvent>> {
+        let tx = self.read_entry("event_by_id")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT * FROM run_events WHERE id=?1",
             sql_params![id],
             event_row,
@@ -1039,7 +1043,9 @@ impl crate::application::commands::requests::RequestStore for SqliteQueue {
     }
 
     fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
-        read_request(&*self.conn, request)?;
+        let tx = self.read_entry("request_planner")?;
+        read_request(&tx, request)?;
+        drop(tx);
         SqliteQueue::request_planner(self, request)
     }
 

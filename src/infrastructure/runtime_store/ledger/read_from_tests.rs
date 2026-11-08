@@ -245,8 +245,17 @@ struct WrittenOverAfterThePages<'a> {
 }
 
 impl LedgerStore for WrittenOverAfterThePages<'_> {
-    fn ledger_read_snapshot(&self, read: &mut dyn FnMut() -> Result<()>) -> Result<()> {
-        self.queue.ledger_read_snapshot(read)
+    fn ledger_read_snapshot(
+        &self,
+        read: &mut dyn FnMut(&dyn crate::application::LedgerWindowRead) -> Result<()>,
+    ) -> Result<()> {
+        self.queue.ledger_read_snapshot(&mut |snapshot| {
+            read(&WrittenSnapshot {
+                snapshot,
+                writer: self.writer,
+                row: &self.row,
+            })
+        })
     }
     fn ledger_rows_after(
         &self,
@@ -308,6 +317,42 @@ impl LedgerStore for WrittenOverAfterThePages<'_> {
     }
     fn last_event_naming_supervisor(&self, _: &str, _: EventId) -> Result<Option<RunEvent>> {
         unreachable!("only the reads of a window here")
+    }
+}
+
+struct WrittenSnapshot<'a> {
+    snapshot: &'a dyn crate::application::LedgerWindowRead,
+    writer: &'a SqliteQueue,
+    row: &'a LedgerRow,
+}
+
+impl crate::application::LedgerWindowRead for WrittenSnapshot<'_> {
+    fn rows_after(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        self.snapshot.rows_after(kind, after, limit)
+    }
+    fn rows_from(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+        from: &RowsFrom,
+    ) -> Result<Vec<LedgerRow>> {
+        self.snapshot.rows_from(kind, after, limit, from)
+    }
+    fn earlier(&self, from: &RowsFrom) -> Result<EarlierRecords> {
+        assert!(self.writer.write_ledger_row(self.row).unwrap());
+        self.snapshot.earlier(from)
+    }
+    fn row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
+        self.snapshot.row(kind, key)
+    }
+    fn run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
+        self.snapshot.run_events(run)
     }
 }
 

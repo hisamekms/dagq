@@ -11,6 +11,7 @@
 //! a goal, and `+run_id` alone does not change that. Naming the index keeps
 //! the read to the events of the two kinds whatever statistics or new
 //! indexes the queue gets, and a lost index fails the prepare.
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
@@ -93,7 +94,8 @@ impl SqliteQueue {
     /// The breaches started and not resolved, each its
     /// `kpi_breach_started` payload.
     pub fn kpi_breaches_open(&self) -> Result<Vec<Value>> {
-        Ok(open_in(&*self.conn)?
+        let tx = self.read_entry("kpi_breaches_open")?;
+        Ok(open_in(&tx)?
             .into_iter()
             .map(|(_, payload)| payload)
             .collect())
@@ -103,7 +105,8 @@ impl SqliteQueue {
     /// id: the evidence of the observer's `kpi` finding (ADR-0051
     /// decision 24).
     pub fn kpi_breach_events_open(&self) -> Result<Vec<(EventId, Value)>> {
-        open_in(&*self.conn)
+        let tx = self.read_entry("kpi_breach_events_open")?;
+        open_in(&tx)
     }
 
     /// Record `kind` (`kpi_breach_started` / `kpi_breach_resolved`) with

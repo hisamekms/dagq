@@ -27,6 +27,7 @@
 
 use super::sql_dialect::JsonType;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::sql_exec::sql_params;
 use super::store_writes::{self};
@@ -351,7 +352,8 @@ impl SqliteQueue {
     }
 
     pub fn draft_origin(&self, task: TaskId) -> Result<Option<(DraftOrigin, Value)>> {
-        draft_origin(&*self.conn, task)
+        let tx = self.read_entry("draft_origin")?;
+        draft_origin(&tx, task)
     }
 
     /// Set, change or clear the revisit time of the draft `task`
@@ -459,8 +461,9 @@ impl SqliteQueue {
     /// Where every draft with an origin came from; an origin this binary
     /// does not know is left out.
     pub fn draft_origins(&self) -> Result<HashMap<TaskId, DraftOrigin>> {
+        let tx = self.read_entry("draft_origins")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT task_id, origin FROM draft_origins",
             sql_params![],
             |r| Ok((r.get(0)?, r.get::<_, String>(1)?)),
@@ -471,17 +474,18 @@ impl SqliteQueue {
     }
 
     pub fn planner_drafts(&self) -> Result<Vec<DraftTarget>> {
+        let tx = self.read_entry("planner_drafts")?;
         let now = self.generators.clock.now();
         let ids: Vec<TaskId> = SqlRead::query_map(
-            &*self.conn,
-            &format!("{} ORDER BY t.id", targets_in(self.conn.dialect(), now)),
+            &tx,
+            &format!("{} ORDER BY t.id", targets_in(tx.dialect(), now)),
             sql_params![],
             |r| r.get(0),
         )?;
-        let open = open_bundle_keys(&*self.conn)?;
+        let open = open_bundle_keys(&tx)?;
         Ok(ids
             .into_iter()
-            .map(|id| target(&*self.conn, id, now))
+            .map(|id| target(&tx, id, now))
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .filter(|target| !open.contains(&target.bundle_key()))
@@ -651,8 +655,9 @@ impl SqliteQueue {
     /// The drafts a planner of the runtime's works on: its bundle's, or the
     /// draft it was opened for before bundles.
     pub fn planner_draft_tasks(&self, planner: PlannerId) -> Result<Vec<TaskId>> {
+        let tx = self.read_entry("planner_draft_tasks")?;
         let members: Vec<TaskId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT task_id FROM draft_bundle_members WHERE planner_id=?1 ORDER BY task_id",
             sql_params![planner],
             |r| r.get(0),
@@ -660,23 +665,27 @@ impl SqliteQueue {
         if !members.is_empty() {
             return Ok(members);
         }
+        drop(tx);
         Ok(self.planner(planner)?.draft_task_id.into_iter().collect())
     }
 
     /// The bundle `planner` was opened for, with what became of each draft.
     pub fn draft_bundle(&self, planner: PlannerId) -> Result<Option<DraftBundleView>> {
-        bundle_view(&*self.conn, planner)
+        let tx = self.read_entry("draft_bundle")?;
+        bundle_view(&tx, planner)
     }
 
     /// Where the task came from, if the runtime or a job made it
     /// (ADR-t807-1).
     pub fn task_origin(&self, task: TaskId) -> Result<Option<TaskOrigin>> {
-        task_origin(&*self.conn, task)
+        let tx = self.read_entry("task_origin")?;
+        task_origin(&tx, task)
     }
 
     pub fn planner_answers(&self) -> Result<Vec<Ask>> {
+        let tx = self.read_entry("planner_answers")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM asks WHERE kind='planner_question'
                  AND answered_at IS NOT NULL AND closed_at IS NULL ORDER BY id",
             sql_params![],
@@ -685,7 +694,8 @@ impl SqliteQueue {
     }
 
     pub fn planner_answer_route(&self, ask: &Ask) -> Result<PlannerAnswerRoute> {
-        route_of(&*self.conn, ask)
+        let tx = self.read_entry("planner_answer_route")?;
+        route_of(&tx, ask)
     }
 
     /// The `planner_question`s a planner asked and nobody closed about the
@@ -698,15 +708,16 @@ impl SqliteQueue {
     /// ([`route_of`] sends its answer the same way).
     pub fn proposal_questions(&self, proposal: ProposalId) -> Result<Vec<Ask>> {
         let parked = serde_json::to_string(&self.replaced_tasks(proposal)?)?;
+        let tx = self.read_entry("proposal_questions")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT a.* FROM asks a JOIN tasks t ON t.id=a.task_id
                  WHERE (t.proposal_id=?1 OR t.id IN (SELECT {parked} FROM {elements}))
                  AND a.kind='planner_question' AND a.run_id IS NULL
                  AND a.asked_by='planner' AND a.closed_at IS NULL ORDER BY a.id",
-                parked = SqlRead::dialect(&*self.conn).json_element("value", JsonType::Integer),
-                elements = SqlRead::dialect(&*self.conn).json_elements("?2"),
+                parked = SqlRead::dialect(&tx).json_element("value", JsonType::Integer),
+                elements = SqlRead::dialect(&tx).json_elements("?2"),
             ),
             sql_params![proposal, parked],
             ask_row,
@@ -716,8 +727,9 @@ impl SqliteQueue {
     /// The parked tasks whose replacement proposal is `proposal`
     /// ([`parked_tasks`]).
     pub fn replaced_tasks(&self, proposal: ProposalId) -> Result<Vec<TaskId>> {
+        let tx = self.read_entry("replaced_tasks")?;
         Ok(parked_tasks(
-            &replan_links(&*self.conn, "proposal_id", proposal.as_i64())?,
+            &replan_links(&tx, "proposal_id", proposal.as_i64())?,
             proposal,
         ))
     }
@@ -822,8 +834,9 @@ impl SqliteQueue {
     }
 
     pub fn exhausted_drafts(&self) -> Result<Vec<Task>> {
+        let tx = self.read_entry("exhausted_drafts")?;
         let ids: Vec<TaskId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT t.id FROM tasks t WHERE t.status='draft' AND EXISTS(
                      SELECT 1 FROM run_events e WHERE e.task_id=t.id
@@ -833,13 +846,12 @@ impl SqliteQueue {
             sql_params![],
             |r| r.get(0),
         )?;
-        ids.into_iter()
-            .map(|id| read_task(&*self.conn, id))
-            .collect()
+        ids.into_iter().map(|id| read_task(&tx, id)).collect()
     }
 
     pub fn follow_up_depth(&self, task: TaskId) -> Result<i64> {
-        depth(&*self.conn, task)
+        let tx = self.read_entry("follow_up_depth")?;
+        depth(&tx, task)
     }
 
     pub fn set_follow_up_depth(&mut self, task: TaskId, depth: i64) -> Result<()> {
@@ -911,7 +923,8 @@ impl DraftPlannerStore for SqliteQueue {
         SqliteQueue::replaced_tasks(self, proposal)
     }
     fn answer_request(&self, ask: &Ask) -> Result<Option<RequestId>> {
-        answer_request(&*self.conn, ask)
+        let tx = self.read_entry("answer_request")?;
+        answer_request(&tx, ask)
     }
     fn claim_planner_answer(
         &mut self,

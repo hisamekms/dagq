@@ -188,7 +188,7 @@ impl<'q> LeaderRow<'q> {
     fn at_db_clock(queue: &'q SqliteQueue) -> Self {
         Self {
             queue,
-            now: queue.conn.dialect().now_millis(),
+            now: super::sql_dialect::SqlDialect::Sqlite.now_millis(),
         }
     }
 

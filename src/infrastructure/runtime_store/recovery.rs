@@ -1,5 +1,6 @@
 //! The run aggregate moved by recovery: triage, resumes and adoption
 //! ([`RunRecovery`]).
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::*;
 use crate::application::KeptOutcome;
@@ -20,12 +21,13 @@ impl SqliteQueue {
     /// The runs whose lease carries `token`, oldest first: what a supervisor
     /// that exec'd another binary under the same token picks up again.
     pub fn runs_leased_by(&self, token: &LeaseToken) -> Result<Vec<TaskRun>> {
+        let tx = self.read_entry("runs_leased_by")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT r.* FROM task_runs r JOIN run_leases l ON l.run_id=r.id
                  WHERE l.token=?1 ORDER BY {insert_order_r}",
-                insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r")
+                insert_order_r = SqlRead::dialect(&tx).insertion_order("r")
             ),
             sql_params![token],
             run_row(&self.runs_dir),
@@ -34,8 +36,9 @@ impl SqliteQueue {
 
     /// The unclosed asks of the run, answered or not, oldest first.
     pub fn unclosed_run_asks(&self, run_id: &RunId) -> Result<Vec<crate::domain::Ask>> {
+        let tx = self.read_entry("unclosed_run_asks")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM asks WHERE run_id=?1 AND closed_at IS NULL ORDER BY id",
             sql_params![run_id],
             crate::infrastructure::asks::ask_row,
@@ -50,12 +53,13 @@ impl SqliteQueue {
     /// `needs_session` one while it is resumed or waits to land (task 356). Runs in other statuses
     /// and runs without a lease are not adoptable, so they are not listed.
     pub fn runs_leased_by_others(&self, token: &LeaseToken) -> Result<Vec<LeasedRun>> {
+        let tx = self.read_entry("runs_leased_by_others")?;
         let rows = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!("SELECT r.*, l.token, l.pid, l.heartbeat_at FROM task_runs r
              JOIN run_leases l ON l.run_id=r.id
              WHERE r.status IN ('running','validating','awaiting_integration','needs_session') AND l.token<>?1
-             ORDER BY {insert_order_r}", insert_order_r = SqlRead::dialect(&*self.conn).insertion_order("r")),
+             ORDER BY {insert_order_r}", insert_order_r = SqlRead::dialect(&tx).insertion_order("r")),
             sql_params![token],
             |r| {
                 let run = run_row(&self.runs_dir)(r)?;
@@ -71,7 +75,7 @@ impl SqliteQueue {
         rows.into_iter()
             .map(|(run, lease)| {
                 let wrapper = SqlRead::query_row(
-                    &*self.conn,
+                    &tx,
                     "SELECT * FROM run_processes WHERE run_id=?1 AND role='wrapper'",
                     sql_params![&run.id()],
                     process_row,
@@ -767,17 +771,18 @@ impl SqliteQueue {
     /// were started: what the supervisor judges for a resume (ADR-0019).
     pub fn runs_needing_session(&self) -> Result<Vec<ResumeCandidate>> {
         let runs = self.runs_with_status(crate::domain::RunStatus::NeedsSession)?;
+        let tx = self.read_entry("runs_needing_session")?;
         runs.into_iter()
             .map(|run| {
-                let lease = self.run_lease(run.id())?;
+                let lease = run_lease_of(&tx, run.id())?;
                 let wrapper = SqlRead::query_row(
-                    &*self.conn,
+                    &tx,
                     "SELECT * FROM run_processes WHERE run_id=?1 AND role='wrapper'",
                     sql_params![&run.id()],
                     process_row,
                 )
                 .optional()?;
-                let resumes = resume_count(&*self.conn, run.id())?;
+                let resumes = resume_count(&tx, run.id())?;
                 Ok(ResumeCandidate {
                     run,
                     lease,
@@ -1449,12 +1454,14 @@ impl SqliteQueue {
 
     /// The guard the open hold of `task` puts on its steps, if any.
     pub fn hold_guard(&self, task: TaskId) -> Result<Option<HoldGuard>> {
-        crate::infrastructure::task_holds::guard_of(&*self.conn, task)
+        let tx = self.read_entry("hold_guard")?;
+        crate::infrastructure::task_holds::guard_of(&tx, task)
     }
 
     /// The tasks a claim would take but for their open hold.
     pub fn held_claims(&self) -> Result<Vec<HoldGuard>> {
-        crate::infrastructure::store_rows::held_claims(&*self.conn)
+        let tx = self.read_entry("held_claims")?;
+        crate::infrastructure::store_rows::held_claims(&tx)
     }
 
     /// Record `hold_deferred` once per hold and step (see
@@ -1556,8 +1563,9 @@ impl SqliteQueue {
 
     /// The kept results whose hold is released and that are not settled.
     pub fn released_kept_results(&self) -> Result<Vec<EventId>> {
+        let tx = self.read_entry("released_kept_results")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT e.id FROM run_events e WHERE e.kind=?1
                    AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
@@ -1565,11 +1573,7 @@ impl SqliteQueue {
                    AND NOT EXISTS (SELECT 1 FROM task_holds h WHERE h.task_id=e.task_id
                      AND h.released_at IS NULL)
                  ORDER BY e.id",
-                SqlRead::dialect(&*self.conn).json_field(
-                    "s.payload",
-                    "$.kept_id",
-                    JsonType::Integer
-                ),
+                SqlRead::dialect(&tx).json_field("s.payload", "$.kept_id", JsonType::Integer),
             ),
             sql_params![
                 event_kind::HOLD_RESULT_KEPT,

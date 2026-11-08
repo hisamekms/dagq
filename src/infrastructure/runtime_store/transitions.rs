@@ -1,5 +1,6 @@
 //! The run aggregate saved as it moves: claim, provisioning, supervision,
 //! validation, landing decisions, integration and clean-up ([`RunTransitions`]).
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::*;
 use crate::domain::satisfied::TaskMove;
@@ -1471,7 +1472,10 @@ impl RunTransitions for SqliteQueue {
         SqliteQueue::task_hold(self, task)
     }
     fn latest_run_of(&self, task: crate::domain::TaskId) -> Result<Option<TaskRun>> {
-        match crate::infrastructure::task_holds::latest_run(&*self.conn, task)? {
+        let tx = self.read_entry("latest_run_of")?;
+        let latest = crate::infrastructure::task_holds::latest_run(&tx, task)?;
+        drop(tx);
+        match latest {
             Some((id, _)) => Ok(Some(SqliteQueue::run(self, &id)?)),
             None => Ok(None),
         }
@@ -1687,11 +1691,26 @@ impl RunTransitions for SqliteQueue {
         payload: serde_json::Value,
         held: &dyn Fn(&crate::domain::RunLease) -> bool,
     ) -> Result<bool> {
-        let queue: &SqliteQueue = self;
-        let check = payload.clone();
-        queue.record_runtime_event_if(id, EventKind::IntegrationApproved, payload, &mut || {
-            crate::application::integrate::approvable(queue, id, &check, held)
-        })
+        let kind = EventKind::IntegrationApproved;
+        let _read = self.read_before(Closing::Event(id, kind, &payload))?;
+        let tx = self.write_tx("approve_integration")?;
+        // These reads share the event's write transaction: a store read
+        // would open a nested entry and separate checking from recording.
+        let run = run_log::run_of(&tx, &self.runs_dir, id)?;
+        let lease = run_lease_of(&tx, id)?;
+        let events = run_events_of(&tx, id)?;
+        if !crate::application::integrate::approvable(
+            &run,
+            lease.as_ref(),
+            &events,
+            &payload,
+            held,
+        )? {
+            return Ok(false);
+        }
+        run_event(&tx, id, kind, payload)?;
+        tx.commit()?;
+        Ok(true)
     }
     fn begin_integration(
         &mut self,
@@ -1976,6 +1995,84 @@ mod tests {
     use crate::domain::NewTask;
 
     const RUN: &str = "11111111-1111-4111-8111-111111111111";
+
+    /// Exercise the approval's run, lease and history reads on SQLite,
+    /// which rejects a nested BEGIN. The lease check also verifies that a
+    /// competing writer cannot change the facts before approval is recorded.
+    #[test]
+    fn approval_reads_and_records_in_one_write_transaction() {
+        let uri = format!("file:/approval-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let mut queue = SqliteQueue::init(&uri).unwrap();
+        queue
+            .conn
+            .execute(
+                "INSERT INTO tasks(id,title,description,acceptance,verification_commands,status)
+             VALUES (1,'t','','','[]','in_progress')",
+                [],
+            )
+            .unwrap();
+        queue.conn.execute(
+            "INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit)
+             VALUES (?1,1,'awaiting_integration','claude','claude',?2)",
+            rusqlite::params![RUN, "a".repeat(40)],
+        ).unwrap();
+        queue.conn.execute(
+            "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,'owner',1,1800000000)",
+            [RUN],
+        ).unwrap();
+        let competing = rusqlite::Connection::open(&uri).unwrap();
+        competing.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let checks = std::cell::Cell::new(0);
+        let held = |lease: &RunLease| {
+            assert_eq!(lease.run_id.as_str(), RUN);
+            assert_eq!(lease.token, LeaseToken::new("owner"));
+            assert_eq!(lease.heartbeat_at, 1800000000);
+            checks.set(checks.get() + 1);
+            let error = competing
+                .execute(
+                    "UPDATE task_runs SET status='needs_session' WHERE id=?1",
+                    [RUN],
+                )
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                ),
+                "the approval must hold its write transaction: {error}"
+            );
+            false
+        };
+        let run = RunId::new(RUN).unwrap();
+        let payload = json!({"status": "awaiting_integration", "pid": 1, "push": true});
+        assert!(
+            queue
+                .approve_integration(&run, payload.clone(), &held)
+                .unwrap()
+        );
+        assert!(queue.conn.is_autocommit());
+        // The history is read on that same write: an already-recorded
+        // approval is left alone rather than inserted twice.
+        assert!(
+            !queue
+                .approve_integration(&run, payload.clone(), &held)
+                .unwrap()
+        );
+        assert!(queue.conn.is_autocommit());
+        assert_eq!(checks.get(), 2);
+        let approvals: Vec<_> = queue
+            .run_events(&run)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::IntegrationApproved)
+            .collect();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].payload, payload);
+        assert_eq!(
+            queue.run(&run).unwrap().status(),
+            RunStatus::AwaitingIntegration
+        );
+    }
 
     /// A queue with one run integrating under `token`'s lease, and the
     /// phase recorded before it (the landing's, in a revise's attempt).

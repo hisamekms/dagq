@@ -24,6 +24,7 @@
 
 use super::sql_dialect::JsonType;
 use super::store_writes::event;
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
@@ -189,25 +190,25 @@ impl SqliteQueue {
     /// The operations, oldest first: the open ones, or every one with
     /// `all`.
     pub fn replan_operations(&self, all: bool) -> Result<Vec<ReplanOperation>> {
+        let tx = self.read_entry("replan_operations")?;
         let sql = if all {
             "SELECT * FROM replan_operations ORDER BY id"
         } else {
             OPEN
         };
-        let ops: Vec<ReplanOperation> =
-            SqlRead::query_map(&*self.conn, sql, sql_params![], operation_row)?;
-        ops.into_iter()
-            .map(|op| with_outcome(&*self.conn, op))
-            .collect()
+        let ops: Vec<ReplanOperation> = SqlRead::query_map(&tx, sql, sql_params![], operation_row)?;
+        ops.into_iter().map(|op| with_outcome(&tx, op)).collect()
     }
 
     /// The open operations, oldest first, each with its task's status
     /// now: what `status` and `doctor` show.
     pub fn open_replans(&self) -> Result<Vec<(ReplanOperation, TaskStatus)>> {
-        self.replan_operations(false)?
+        let operations = self.replan_operations(false)?;
+        let tx = self.read_entry("open_replans")?;
+        operations
             .into_iter()
             .map(|op| {
-                let status = read_task(&*self.conn, op.task_id)?.status();
+                let status = read_task(&tx, op.task_id)?.status();
                 Ok((op, status))
             })
             .collect()
@@ -215,7 +216,8 @@ impl SqliteQueue {
 
     /// Operation `id`; a missing one is an error.
     pub fn replan_operation(&self, id: ReplanId) -> Result<ReplanOperation> {
-        read_operation(&*self.conn, id)
+        let tx = self.read_entry("replan_operation")?;
+        read_operation(&tx, id)
     }
 
     /// Move operation `id`, read under `generation`, as `step` says: the
@@ -256,7 +258,7 @@ impl SqliteQueue {
     ) -> Result<(crate::domain::AskOutcome, ReplanOperation)> {
         let mut payload = payload;
         ask.validate()?;
-        let op = read_operation(&*self.conn, id)?;
+        let op = read_operation(&self.read_entry("ask_replan_diagnosis")?, id)?;
         // This path opens the diagnosis's own ask only: a `decide` about the
         // operation's task, holding no run, finding or request.
         ensure!(
@@ -411,12 +413,13 @@ impl SqliteQueue {
     /// `supervisors` row of its token, whose liveness the next start is
     /// told of.
     pub fn running_diagnosis_owners(&self) -> Result<Vec<replan_detect::RunningOwner>> {
-        running_diagnoses(&*self.conn, &[])?
+        let tx = self.read_entry("running_diagnosis_owners")?;
+        running_diagnoses(&tx, &[])?
             .into_iter()
             .map(|job| {
                 let heartbeat_at = match &job.owner.token {
                     Some(token) => SqlRead::query_row(
-                        &*self.conn,
+                        &tx,
                         "SELECT heartbeat_at FROM supervisors WHERE token=?1",
                         sql_params![token],
                         |r| r.get(0),
@@ -458,15 +461,14 @@ impl SqliteQueue {
 
     /// Every operation on run `run`, oldest first, with its outcome.
     pub fn replans_of_run(&self, run: &RunId) -> Result<Vec<ReplanOperation>> {
+        let tx = self.read_entry("replans_of_run")?;
         let ops: Vec<ReplanOperation> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM replan_operations WHERE run_id=?1 ORDER BY id",
             sql_params![run],
             operation_row,
         )?;
-        ops.into_iter()
-            .map(|op| with_outcome(&*self.conn, op))
-            .collect()
+        ops.into_iter().map(|op| with_outcome(&tx, op)).collect()
     }
 
     /// Every operation of `task`'s lineage, oldest first, with its
@@ -474,19 +476,22 @@ impl SqliteQueue {
     /// the first) and of every task that replaced one of them, and theirs,
     /// along `replan_replacements`. A loop in the records is followed once.
     pub fn replan_lineage(&self, task: TaskId) -> Result<Vec<ReplanOperation>> {
-        lineage_in(&*self.conn, task)
+        let tx = self.read_entry("replan_lineage")?;
+        lineage_in(&tx, task)
     }
 
     /// The operation that guards `task` now, if any.
     pub fn replan_guard(&self, task: TaskId) -> Result<Option<ReplanGuard>> {
-        guard_of(&*self.conn, task)
+        let tx = self.read_entry("replan_guard")?;
+        guard_of(&tx, task)
     }
 }
 
 impl crate::application::commands::replans::ReplanStore for SqliteQueue {
     fn run_task(&self, run: &RunId) -> Result<Option<TaskId>> {
+        let tx = self.read_entry("run_task")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT task_id FROM task_runs WHERE id=?1",
             sql_params![run],
             |r| r.get(0),
@@ -1042,11 +1047,12 @@ impl SqliteQueue {
     /// What the planner of operation `id`'s request reads of it
     /// ([`ReplanBrief`]).
     pub fn replan_brief(&self, id: ReplanId) -> Result<ReplanBrief> {
-        let op = read_operation(&*self.conn, id)?;
+        let tx = self.read_entry("replan_brief")?;
+        let op = read_operation(&tx, id)?;
         let mut turns: BTreeMap<String, usize> = BTreeMap::new();
         let mut reviews = Vec::new();
         let rows: Vec<(String, String)> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT kind, payload FROM run_events WHERE run_id=?1
              AND kind IN ('turn_started','review_finished') ORDER BY id",
             sql_params![op.run_id],
@@ -1075,32 +1081,31 @@ impl SqliteQueue {
         }
         let mut successors = Vec::new();
         for &task in &op.conditions.successors {
-            if let Some(read) = plan_task(&*self.conn, task)? {
+            if let Some(read) = plan_task(&tx, task)? {
                 successors.push(SuccessorBrief {
                     task_id: task,
                     status: read.status,
-                    title: read_task(&*self.conn, task)?.title().to_owned(),
+                    title: read_task(&tx, task)?.title().to_owned(),
                 });
             }
         }
-        let plan = latest_plan(&*self.conn, id)?;
+        let plan = latest_plan(&tx, id)?;
         let problems = match &plan {
             Some(latest) => {
-                let members = super::proposals::read(&*self.conn, latest.proposal_id)?
+                let members = super::proposals::read(&tx, latest.proposal_id)?
                     .task_ids()
                     .to_vec();
-                check_replacement(&*self.conn, &op, &latest.plan, &members, &[])?
+                check_replacement(&tx, &op, &latest.plan, &members, &[])?
             }
             None => Vec::new(),
         };
         let mut resolutions = Vec::new();
         let rows: Vec<(i64, String, String)> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT id, created_at, payload FROM run_events WHERE task_id=?1 AND kind=?2
              AND {}=?3 ORDER BY id",
-                self.conn
-                    .dialect()
+                tx.dialect()
                     .json_field("payload", "$.operation_id", JsonType::Integer)
             ),
             sql_params![op.task_id, EventKind::ReplanResolved.as_str(), id],
@@ -1127,9 +1132,10 @@ impl SqliteQueue {
     /// The brief of the operation whose task `proposal` replaces, if it
     /// replaces an open one's ([`Self::replan_brief`]).
     pub fn replacement_brief(&self, proposal: ProposalId) -> Result<Option<ReplanBrief>> {
-        replacing_operation(&*self.conn, proposal)?
-            .map(|op| self.replan_brief(op.id))
-            .transpose()
+        let tx = self.read_entry("replacement_brief")?;
+        let operation = replacing_operation(&tx, proposal)?;
+        drop(tx);
+        operation.map(|op| self.replan_brief(op.id)).transpose()
     }
 
     /// End the planning of each operation with the planner whose request

@@ -1,5 +1,6 @@
 //! The node samples in queue.db (`node_samples` and
 //! `node_sample_imports`, [`NodeSampleStore`]).
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::*;
 use crate::application::NodeSampleStore;
@@ -174,8 +175,9 @@ impl NodeSampleStore for SqliteQueue {
     }
 
     fn imported_files(&self, node: &str) -> Result<std::collections::BTreeMap<String, u64>> {
+        let tx = self.read_entry("imported_files")?;
         let statement = "SELECT file, bytes FROM node_sample_imports WHERE node_id=?1";
-        let files = SqlRead::query_map(&*self.conn, statement, sql_params![node], |row| {
+        let files = SqlRead::query_map(&tx, statement, sql_params![node], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
         files
@@ -195,14 +197,15 @@ impl NodeSampleStore for SqliteQueue {
     /// marks again under its lock, and a retention stopped between batches
     /// is finished by the next.
     fn remove_node_samples(&self, before_day: i64) -> Result<usize> {
+        let tx = self.read_entry("remove_node_samples")?;
         let mut removals: Vec<Removal> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT id FROM node_samples WHERE local_day < ?1 ORDER BY id",
             sql_params![before_day],
             |row| Ok(Removal::Sample(row.get(0)?)),
         )?;
         removals.extend(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT node_id, file FROM node_sample_imports WHERE day < ?1
                      ORDER BY node_id, file",
             sql_params![before_day],
@@ -211,6 +214,7 @@ impl NodeSampleStore for SqliteQueue {
         if removals.is_empty() {
             return Ok(0);
         }
+        drop(tx);
         let mut removed = 0;
         in_batches(self, "node_samples_retention", &removals, |tx, batch, _| {
             for removal in batch {
@@ -261,11 +265,12 @@ impl SqliteQueue {
     /// The rows of `node_samples` `filter` (a `WHERE` clause and its order)
     /// keeps.
     fn read_node_samples(&self, filter: &str, params: &[SqlValue]) -> Result<Vec<NodeSample>> {
+        let tx = self.read_entry("read_node_samples")?;
         let statement = format!(
             "SELECT id,node_id,unix,local_day,source,{} FROM node_samples WHERE {filter}",
             sample_columns()
         );
-        let rows = SqlRead::query_map(&*self.conn, &statement, params, |row| {
+        let rows = SqlRead::query_map(&tx, &statement, params, |row| {
             let source: String = row.get(4)?;
             let mut sample = HostSample::new(row.get(2)?);
             for (index, column) in value_columns().iter().enumerate() {

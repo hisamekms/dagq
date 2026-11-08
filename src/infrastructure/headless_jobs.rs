@@ -1,6 +1,7 @@
 //! The `headless_jobs` rows (task 443): the process of each headless job a
 //! supervisor started, so that another supervisor can stop it once the one
 //! that started it is gone.
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::Result;
 
 use super::sql_exec::{SqlRead, SqlWrite, sql_params};
@@ -62,8 +63,9 @@ impl HeadlessJobStore for SqliteQueue {
         token: &LeaseToken,
         own: bool,
     ) -> Result<Vec<HeadlessJobRecord>> {
+        let tx = self.read_entry("orphaned_headless_jobs")?;
         let now = self.generators.clock.now();
-        Ok(self.conn.query_map(
+        Ok(tx.query_map(
             "SELECT j.id, j.kind, j.label, j.run_id, j.proposal_id, j.goal_id, j.attempt,
                         j.pid, j.process_start, j.supervisor_token, j.started_at, s.pid,
                         j.provider, j.stdout

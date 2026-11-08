@@ -15,6 +15,7 @@
 //! transaction: it rereads the latest `ci_checked` and writes nothing if
 //! another supervisor already recorded the run. A finding's `covered_by_task`
 //! has no foreign key; the runtime writes only a task ID it just read.
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::sql_dialect::{JsonType, SqlDialect};
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
@@ -85,7 +86,8 @@ pub(super) fn freshness_there_sql(dialect: SqlDialect) -> String {
 impl SqliteQueue {
     /// Every event of the watch, oldest first.
     pub fn ci_watch_events(&self) -> Result<Vec<RunEvent>> {
-        Ok(self.conn.query_map(&watch_events_sql(), &[], event_row)?)
+        let tx = self.read_entry("ci_watch_events")?;
+        Ok(tx.query_map(&watch_events_sql(), &[], event_row)?)
     }
 
     /// Write `record` unless the latest `ci_checked` event is no longer the
@@ -140,7 +142,8 @@ impl SqliteQueue {
 
     /// Every `ci_scheduled_checked` event, oldest first.
     pub fn ci_scheduled_events(&self) -> Result<Vec<RunEvent>> {
-        Ok(self.conn.query_map(
+        let tx = self.read_entry("ci_scheduled_events")?;
+        Ok(tx.query_map(
             EVENTS_OF_KIND_SQL,
             sql_params![CI_SCHEDULED_CHECKED],
             event_row,
@@ -189,10 +192,9 @@ impl SqliteQueue {
     /// Every `ci_workflow_stale` and `ci_workflow_fresh` event, oldest
     /// first.
     pub fn ci_freshness_events(&self) -> Result<Vec<RunEvent>> {
+        let tx = self.read_entry("ci_freshness_events")?;
         let [stale, fresh] = FRESHNESS_KINDS.map(EventKind::as_str);
-        Ok(self
-            .conn
-            .query_map(FRESHNESS_EVENTS_SQL, sql_params![stale, fresh], event_row)?)
+        Ok(tx.query_map(FRESHNESS_EVENTS_SQL, sql_params![stale, fresh], event_row)?)
     }
 
     /// Write `record` in one transaction, or nothing (`None`): a stale
@@ -249,7 +251,8 @@ impl SqliteQueue {
     /// task belongs to, or dismissed as covered by it (ADR-t1920-1
     /// decision 5).
     pub fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<FindingId>> {
-        Ok(self.conn.query_map(
+        let tx = self.read_entry("ci_failure_findings_of")?;
+        Ok(tx.query_map(
             "SELECT f.id FROM findings f WHERE f.kind=?2 AND (f.covered_by_task=?1
                    OR (f.proposal_id IS NOT NULL
                        AND f.proposal_id=(SELECT proposal_id FROM tasks WHERE id=?1)))
@@ -263,8 +266,9 @@ impl SqliteQueue {
     /// proposal linked to it and the one it was dismissed as covered by,
     /// canceled ones aside (ADR-t1920-1 decision 5).
     pub fn ci_failure_fix_tasks(&self) -> Result<BTreeMap<i64, Vec<TaskId>>> {
+        let tx = self.read_entry("ci_failure_fix_tasks")?;
         let mut fixes: BTreeMap<i64, Vec<TaskId>> = BTreeMap::new();
-        let rows = self.conn.query_map(
+        let rows = tx.query_map(
             "SELECT f.id, t.id FROM findings f JOIN tasks t
                    ON t.id=f.covered_by_task
                    OR (f.proposal_id IS NOT NULL AND t.proposal_id=f.proposal_id)

@@ -8,6 +8,7 @@ use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::write_rules::{check_at_least, check_non_blank};
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -413,7 +414,8 @@ impl GoalReviewStore for SqliteQueue {
     }
 
     fn goal_review_candidates(&self) -> Result<Vec<GoalId>> {
-        candidates(&*self.conn)
+        let tx = self.read_entry("goal_review_candidates")?;
+        candidates(&tx)
     }
 
     fn begin_goal_review(
@@ -507,8 +509,9 @@ impl GoalReviewStore for SqliteQueue {
     }
 
     fn goal_reviews(&self, goal: GoalId) -> Result<Vec<GoalReviewRecord>> {
+        let tx = self.read_entry("goal_reviews")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT id, attempt, outcome, verdict, error FROM goal_reviews
                  WHERE goal_id=?1 AND finished_at IS NOT NULL ORDER BY id",
             sql_params![goal],
@@ -702,8 +705,9 @@ impl GoalReviewStore for SqliteQueue {
     }
 
     fn goal_answers(&self) -> Result<Vec<Ask>> {
+        let tx = self.read_entry("goal_answers")?;
         let ids: Vec<AskId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT a.id FROM asks a WHERE a.kind='approve_goal' AND a.answered_at IS NOT NULL
                  AND a.closed_at IS NULL AND (SELECT {}
@@ -711,21 +715,18 @@ impl GoalReviewStore for SqliteQueue {
                      AND {} = a.id
                      ORDER BY e.id DESC LIMIT 1) = 1
                  ORDER BY a.id",
-                self.conn.dialect().json_field_spaced(
+                tx.dialect().json_field_spaced(
                     "e.payload",
                     "$.runtime_delivers",
                     JsonType::Boolean
                 ),
-                self.conn
-                    .dialect()
+                tx.dialect()
                     .json_field_spaced("e.payload", "$.ask_id", JsonType::Integer)
             ),
             sql_params![],
             |r| r.get(0),
         )?;
-        ids.into_iter()
-            .map(|id| read_ask(&*self.conn, id))
-            .collect()
+        ids.into_iter().map(|id| read_ask(&tx, id)).collect()
     }
 
     fn decide_goal(&mut self, ask_id: AskId) -> Result<Option<GoalDecided>> {
@@ -826,7 +827,8 @@ impl GoalReviewStore for SqliteQueue {
     }
 
     fn correction_answers(&self) -> Result<Vec<Ask>> {
-        follow_up_membership::correction_answers(&*self.conn)
+        let tx = self.read_entry("correction_answers")?;
+        follow_up_membership::correction_answers(&tx)
     }
 
     fn decide_correction(&mut self, ask: AskId) -> Result<Option<Value>> {
@@ -836,35 +838,36 @@ impl GoalReviewStore for SqliteQueue {
     }
 
     fn goal_review_holds(&self) -> Result<Vec<GoalReviewHold>> {
+        let tx = self.read_entry("goal_review_holds")?;
         let goals: Vec<GoalId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT id FROM goals WHERE status='open' AND closed_at IS NULL ORDER BY id",
             sql_params![],
             |r| r.get(0),
         )?;
         let mut holds = Vec::new();
         for goal in goals {
-            let Some(row) = latest(&*self.conn, goal)? else {
+            let Some(row) = latest(&tx, goal)? else {
                 continue;
             };
             // Its input is read only for a failed review nobody rearmed.
             if row.1 != "failed" || row.3 {
                 continue;
             }
-            let fingerprint = review_input(&*self.conn, goal)?.0;
+            let fingerprint = review_input(&tx, goal)?.0;
             if !goal_review::waits_for_a_person(Some(latest_review(&row)), &fingerprint) {
                 continue;
             }
             let id = row.0;
             let error: Option<String> = SqlRead::query_row(
-                &*self.conn,
+                &tx,
                 "SELECT error FROM goal_reviews WHERE id=?1",
                 sql_params![id],
                 |r| r.get(0),
             )?;
             holds.push(GoalReviewHold {
                 goal_id: goal,
-                anchor: anchor(&*self.conn, goal)?,
+                anchor: anchor(&tx, goal)?,
                 error,
             });
         }
@@ -875,7 +878,8 @@ impl GoalReviewStore for SqliteQueue {
         &self,
         goal: GoalId,
     ) -> Result<crate::domain::replan_apply::GoalReplacements> {
-        super::replan_apply::goal_replacements(&*self.conn, goal)
+        let tx = self.read_entry("goal_replacements")?;
+        super::replan_apply::goal_replacements(&tx, goal)
     }
 
     fn unresolved_replacements(
@@ -886,30 +890,29 @@ impl GoalReviewStore for SqliteQueue {
             crate::domain::replan_apply::UnresolvedReplacement,
         )>,
     > {
-        super::replan_apply::open_unresolved(&*self.conn)
+        let tx = self.read_entry("unresolved_replacements")?;
+        super::replan_apply::open_unresolved(&tx)
     }
 
     fn goal_follow_ups(&self) -> Result<Vec<follow_up::GoalFollowUps>> {
+        let tx = self.read_entry("goal_follow_ups")?;
         let goals: Vec<GoalId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT id FROM goals WHERE status='open' AND closed_at IS NULL ORDER BY id",
             sql_params![],
             |r| r.get(0),
         )?;
         let mut found = Vec::new();
         for goal in goals {
-            let follow_ups = follow_up_membership::waiting_follow_ups(
-                &*self.conn,
-                goal,
-                self.generators.clock.now(),
-            )?;
+            let follow_ups =
+                follow_up_membership::waiting_follow_ups(&tx, goal, self.generators.clock.now())?;
             if follow_ups.is_empty() {
                 continue;
             }
             found.push(follow_up::GoalFollowUps {
                 goal,
-                tasks: own_tasks(&*self.conn, goal)?,
-                replacing: super::replan_apply::goal_replacing(&*self.conn, goal)?,
+                tasks: own_tasks(&tx, goal)?,
+                replacing: super::replan_apply::goal_replacing(&tx, goal)?,
                 follow_ups,
             });
         }

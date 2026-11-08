@@ -34,24 +34,24 @@ pub(super) fn claimed_in_memdb(
     token: &LeaseToken,
     name: &str,
 ) -> (tempfile::TempDir, SqliteQueue, SqliteServiceBackend) {
+    claimed_in_memdb_with(token, name, crate::infrastructure::clock::system())
+}
+
+/// [`claimed_in_memdb`] with the task registration and service both using
+/// the supplied generators, so a fixed test clock covers fixture setup too.
+pub(super) fn claimed_in_memdb_with(
+    token: &LeaseToken,
+    name: &str,
+    generators: crate::application::Generators,
+) -> (tempfile::TempDir, SqliteQueue, SqliteServiceBackend) {
     let dir = tempfile::tempdir().unwrap();
     let db = PathBuf::from(format!("file:/{name}-{}?vfs=memdb", uuid::Uuid::new_v4()));
-    let (backend, kept) = claimed_at(token, &dir, db);
+    let (backend, kept) = claimed_at_with(token, &dir, db, generators);
     (dir, kept, backend)
 }
 
-/// The queue at `db` with the task claimed as [`claimed`] makes it, the
-/// queue's connection, and the backend of its service in `dir`.
-fn claimed_at(
-    token: &LeaseToken,
-    dir: &tempfile::TempDir,
-    db: PathBuf,
-) -> (SqliteServiceBackend, SqliteQueue) {
-    claimed_at_with(token, dir, db, crate::infrastructure::clock::system())
-}
-
-/// [`claimed_at`], the task added and the service's times taken from
-/// `generators`.
+/// The queue at `db` with the task claimed as [`claimed`] makes it, and
+/// its service backend, with all task/service times taken from `generators`.
 fn claimed_at_with(
     token: &LeaseToken,
     dir: &tempfile::TempDir,

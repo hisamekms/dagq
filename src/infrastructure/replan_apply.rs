@@ -15,6 +15,7 @@
 //! ([`replan_apply::ApplyRecovery`]): checked again at each pass, back to a
 //! planner on a new request, or held for a person. A second apply of an
 //! applied operation writes nothing.
+use crate::infrastructure::sql_exec::TransactionEntries;
 
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
@@ -54,8 +55,9 @@ impl SqliteQueue {
     /// restart did not finish), and those a refused apply held `blocked`,
     /// checked again.
     pub fn replacements_to_apply(&self) -> Result<Vec<ReplanOperation>> {
+        let tx = self.read_entry("replacements_to_apply")?;
         let ids: Vec<ReplanId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT o.id FROM replan_operations o
                  WHERE o.closed_at IS NULL AND (o.status='applying'
                    OR (o.status='blocked' AND o.return_phase='applying')
@@ -69,9 +71,7 @@ impl SqliteQueue {
             sql_params![],
             |r| r.get(0),
         )?;
-        ids.into_iter()
-            .map(|id| read_operation(&*self.conn, id))
-            .collect()
+        ids.into_iter().map(|id| read_operation(&tx, id)).collect()
     }
 
     /// Move operation `id`, read under `generation`, from `reviewing` to
@@ -260,7 +260,8 @@ impl SqliteQueue {
     /// What child `task` takes of the saved work of the run its applied
     /// operation replaced, if it takes any ([`ChildCarry`]).
     pub fn child_carry(&self, task: TaskId) -> Result<Option<ChildCarry>> {
-        child_carry(&*self.conn, task)
+        let tx = self.read_entry("child_carry")?;
+        child_carry(&tx, task)
     }
 }
 

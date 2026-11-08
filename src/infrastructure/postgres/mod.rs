@@ -428,6 +428,12 @@ impl<S: PostgresSession> Drop for PostgresTx<'_, S> {
     }
 }
 
+impl<S: PostgresSession> super::sql_exec::CommitTransaction for PostgresTx<'_, S> {
+    fn commit(self) -> Result<()> {
+        PostgresTx::commit(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +441,40 @@ mod tests {
     use crate::infrastructure::schema::BINARY_SCHEMA;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+
+    #[test]
+    fn session_intake_requires_only_transaction_entries() {
+        use crate::domain::sessions::{HookEvent, INBOX, SessionHook};
+        use crate::infrastructure::sessions::{self, Closing};
+        fn intake(entries: &impl TransactionEntries, hook: &SessionHook) {
+            let _read = sessions::read_before(entries, Closing::Spans(&[])).unwrap();
+            assert_eq!(sessions::record_open_turns(entries).unwrap(), 0);
+            assert!(sessions::hook_spans(entries).unwrap().is_empty());
+            assert_eq!(
+                sessions::close_inferred_hook_spans(entries, &[]).unwrap(),
+                0
+            );
+            // This fake returns no clock or headless-planner row. These paths
+            // still compile against the same entry-only boundary.
+            assert!(sessions::record_hook(entries, hook).is_err());
+            assert!(crate::infrastructure::session_tokens::record_session_tokens(entries).is_err());
+        }
+        let session = Recorded::taken();
+        let store = PostgresStore::open(&session).unwrap();
+        let hook = SessionHook {
+            event: HookEvent::Start {
+                source: "startup".into(),
+            },
+            kind: INBOX,
+            model: None,
+            session_id: "s".into(),
+            transcript_path: None,
+            cwd: None,
+            planner_id: None,
+            launch: None,
+        };
+        intake(&store, &hook);
+    }
 
     /// A row of the one column `name`.
     fn one_column(name: &str, value: SqlValue) -> PostgresRow {

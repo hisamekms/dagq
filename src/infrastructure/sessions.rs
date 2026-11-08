@@ -20,13 +20,12 @@ use crate::infrastructure::sql_dialect::{JsonType, TimeForm};
 use std::cell::RefCell;
 
 use super::sql_exec::{
-    CommitTransaction, OptionalRow, SessionConnection, SqlRead, SqlResult, SqlValue, SqlWrite,
+    CommitTransaction, OptionalRow, SqlRead, SqlResult, SqlValue, SqlWrite, TransactionEntries,
     sql_params,
 };
 use super::store_rows::{event_row, json_col};
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::time::Duration;
 use tracing::{debug, info};
 
 use super::{event_bodies::set_event_body_field, run_env, transcripts::ClaudeTranscripts};
@@ -63,16 +62,7 @@ pub(super) use self::{
 impl super::sqlite::SqliteQueue {
     /// Read the closing spans through this queue's execution port.
     pub(super) fn read_before(&self, closing: Closing<'_>) -> Result<ReadBefore> {
-        read_before(&*self.conn, closing)
-    }
-
-    /// Read a span's transcript through this queue's execution port.
-    pub(super) fn span_transcript(
-        &self,
-        span: &OpenSpan,
-        toolchains: &mut Option<Toolchains>,
-    ) -> Result<Transcript, Unreadable> {
-        read(&*self.conn, span, toolchains)
+        read_before(self, closing)
     }
 }
 
@@ -318,86 +308,92 @@ impl Drop for ReadBefore {
 /// write lock kept other processes' writes waiting past the busy timeout.
 /// A span that opens between this and the transaction closes without its
 /// active time ([`TRANSCRIPT_NOT_READ_BEFORE`]). Each transcript is also
-/// analysed for its close as if it closed now (task 1334). Called inside a
-/// transaction it reads nothing.
-pub(super) fn read_before(conn: &impl SqlRead, closing: Closing<'_>) -> Result<ReadBefore> {
-    if conn.in_write_transaction() {
-        debug!("session transcripts not read: a write transaction is open");
-        return Ok(ReadBefore { spans: Vec::new() });
-    }
-    let spans = match closing {
-        Closing::Run(run_id, kinds) => {
-            let kinds: Vec<EventKind> = kinds
-                .iter()
-                .copied()
-                .filter(|kind| scope(*kind) == Some(Scope::Run))
-                .collect();
-            if kinds.is_empty() {
-                Vec::new()
-            } else {
-                let open = open_spans(conn, "o.run_id=?1", "c.run_id=?1", sql_params![run_id])?;
-                let context = SpanContext::default();
-                kinds
+/// analysed for its close as if it closed now (task 1334). Short read entries
+/// load the database inputs; no transaction is held during transcript I/O.
+/// Call before opening the write entry, never from an existing transaction.
+pub(super) fn read_before(
+    entries: &impl TransactionEntries,
+    closing: Closing<'_>,
+) -> Result<ReadBefore> {
+    let spans = {
+        let tx = entries.read_entry("session_closing_spans")?;
+        let conn = &tx;
+        match closing {
+            Closing::Run(run_id, kinds) => {
+                let kinds: Vec<EventKind> = kinds
                     .iter()
-                    .flat_map(|kind| changes(*kind, &Value::Null, &open, &context))
-                    .filter_map(closed_span)
-                    .collect()
+                    .copied()
+                    .filter(|kind| scope(*kind) == Some(Scope::Run))
+                    .collect();
+                if kinds.is_empty() {
+                    Vec::new()
+                } else {
+                    let open = open_spans(conn, "o.run_id=?1", "c.run_id=?1", sql_params![run_id])?;
+                    let context = SpanContext::default();
+                    kinds
+                        .iter()
+                        .flat_map(|kind| changes(*kind, &Value::Null, &open, &context))
+                        .filter_map(closed_span)
+                        .collect()
+                }
             }
-        }
-        Closing::Event(run_id, kind, payload) => {
-            if scope(kind) == Some(Scope::Run) {
-                let open = open_spans(conn, "o.run_id=?1", "c.run_id=?1", sql_params![run_id])?;
-                // A revise's closes end when it was sent, as `write_changes`
-                // ends them when that was before the event.
-                let sent = crate::domain::request_sent_at_millis(payload)
-                    .filter(|_| kind == EventKind::ReviseRequested);
-                changes(kind, payload, &open, &SpanContext::default())
-                    .into_iter()
-                    .filter_map(closed_span)
-                    .map(|(span, reason, _)| (span, reason, sent))
-                    .collect()
-            } else {
-                Vec::new()
+            Closing::Event(run_id, kind, payload) => {
+                if scope(kind) == Some(Scope::Run) {
+                    let open = open_spans(conn, "o.run_id=?1", "c.run_id=?1", sql_params![run_id])?;
+                    // A revise's closes end when it was sent, as `write_changes`
+                    // ends them when that was before the event.
+                    let sent = crate::domain::request_sent_at_millis(payload)
+                        .filter(|_| kind == EventKind::ReviseRequested);
+                    changes(kind, payload, &open, &SpanContext::default())
+                        .into_iter()
+                        .filter_map(closed_span)
+                        .map(|(span, reason, _)| (span, reason, sent))
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             }
-        }
-        Closing::Queue(kind, payload) => {
-            if let Some(open) = queue_open_spans(conn, kind)? {
-                let context = SpanContext {
-                    at_ms: rfc3339_millis(&now(conn)?),
-                    ..SpanContext::default()
-                };
-                changes(kind, payload, &open, &context)
-                    .into_iter()
-                    .filter_map(closed_span)
-                    .collect()
-            } else {
-                Vec::new()
+            Closing::Queue(kind, payload) => {
+                if let Some(open) = queue_open_spans(conn, kind)? {
+                    let context = SpanContext {
+                        at_ms: rfc3339_millis(&now(conn)?),
+                        ..SpanContext::default()
+                    };
+                    changes(kind, payload, &open, &context)
+                        .into_iter()
+                        .filter_map(closed_span)
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             }
-        }
-        Closing::PlanReviews(plan_review_id, inferred) => open_spans(
-            conn,
-            &format!(
-                "o.run_id IS NULL AND {}=?1
+            Closing::PlanReviews(plan_review_id, inferred) => open_spans(
+                conn,
+                &format!(
+                    "o.run_id IS NULL AND {}=?1
              AND (CAST(?2 AS BIGINT) IS NULL OR {}=?2)",
-                conn.dialect()
-                    .json_field("o.payload", "$.kind", JsonType::Text),
-                conn.dialect()
-                    .json_field("o.payload", "$.plan_review_id", JsonType::Integer),
-            ),
-            "c.run_id IS NULL",
-            sql_params![PLAN_REVIEW, plan_review_id],
-        )?
-        .into_iter()
-        .map(|span| (span, Some(job_close_reason(inferred)), None))
-        .collect(),
-        Closing::GoalReviews(goal_review_id, inferred) => open_goal_reviews(conn, goal_review_id)?
+                    conn.dialect()
+                        .json_field("o.payload", "$.kind", JsonType::Text),
+                    conn.dialect()
+                        .json_field("o.payload", "$.plan_review_id", JsonType::Integer),
+                ),
+                "c.run_id IS NULL",
+                sql_params![PLAN_REVIEW, plan_review_id],
+            )?
             .into_iter()
             .map(|span| (span, Some(job_close_reason(inferred)), None))
             .collect(),
-        Closing::Spans(spans) => spans
-            .iter()
-            .map(|(span, reason)| (span.clone(), Some(*reason), None))
-            .collect(),
+            Closing::GoalReviews(goal_review_id, inferred) => {
+                open_goal_reviews(conn, goal_review_id)?
+                    .into_iter()
+                    .map(|span| (span, Some(job_close_reason(inferred)), None))
+                    .collect()
+            }
+            Closing::Spans(spans) => spans
+                .iter()
+                .map(|(span, reason)| (span.clone(), Some(*reason), None))
+                .collect(),
+        }
     };
     // Made first, so that what was read is dropped with it when a later
     // span fails.
@@ -409,7 +405,7 @@ pub(super) fn read_before(conn: &impl SqlRead, closing: Closing<'_>) -> Result<R
             continue;
         }
         guard.spans.push(span.opened_event_id);
-        let transcript = read(conn, &span, &mut toolchains);
+        let transcript = read_from_entries(entries, &span, &mut toolchains);
         // A run session's close with its transcript records its work
         // breakdown, whose rules are the repository's `dagq.toml`'s.
         // A Codex worker's breakdown is made from its turns' commands.
@@ -417,13 +413,19 @@ pub(super) fn read_before(conn: &impl SqlRead, closing: Closing<'_>) -> Result<R
         if (transcript.is_ok() || codex) && RUN_SESSION.contains(&span.kind()) {
             let rules = match &rules {
                 Some(rules) => Clone::clone(rules),
-                None => rules.insert(judge_work_rules(conn)).clone(),
+                None => rules
+                    .insert(crate::domain::command_rules::work_rules(
+                        &toolchains_from_entries(entries),
+                    ))
+                    .clone(),
             };
             RULES_BEFORE.with_borrow_mut(|read| read.push((span.opened_event_id, rules)));
         }
         let transcript = match transcript {
             Ok(transcript) => {
                 let mut read = ReadTranscript::new(transcript);
+                let tx = entries.read_entry("session_close_inputs")?;
+                let conn = &tx;
                 let run_id: Option<RunId> = conn.query_row(
                     "SELECT run_id FROM run_events WHERE id=?1",
                     sql_params![span.opened_event_id],
@@ -433,9 +435,9 @@ pub(super) fn read_before(conn: &impl SqlRead, closing: Closing<'_>) -> Result<R
                 // was read.
                 let now = now(conn)?;
                 let at = Closing::at(&now, sent, read.last_at);
-                if let Some(mut want) =
-                    want(conn, &span, run_id.as_ref(), reason, &at, read.last_at)?
-                {
+                let wanted = want(conn, &span, run_id.as_ref(), reason, &at, read.last_at)?;
+                drop(tx);
+                if let Some(mut want) = wanted {
                     // Made past every record, it moves to whatever end the
                     // close has (`Analysis::to`): the clock may say the
                     // close is before a record.
@@ -1445,13 +1447,29 @@ fn judge_work_rules(conn: &impl SqlRead) -> CommandClassifier {
 /// ([`run_env::measured_toolchains`]). Never fails: a binding that cannot
 /// be read reads with no profile, as an unreadable `dagq.toml` does.
 fn measured_toolchains(conn: &impl SqlRead) -> Toolchains {
-    let bound: SqlResult<Option<String>> = conn
-        .query_row(
-            "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
-            &[],
-            |r| r.get(0),
-        )
-        .optional();
+    toolchains_for_binding(toolchains_binding(conn).map_err(|error| error.to_string()))
+}
+
+fn toolchains_binding(conn: &impl SqlRead) -> SqlResult<Option<String>> {
+    conn.query_row(
+        "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
+        &[],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// Resolve repository files only after the binding's read snapshot is gone.
+fn toolchains_from_entries(entries: &impl TransactionEntries) -> Toolchains {
+    let bound = (|| -> Result<Option<String>> {
+        let tx = entries.read_entry("transcript_toolchains")?;
+        Ok(toolchains_binding(&tx)?)
+    })()
+    .map_err(|error| error.to_string());
+    toolchains_for_binding(bound)
+}
+
+fn toolchains_for_binding(bound: Result<Option<String>, String>) -> Toolchains {
     match bound {
         Ok(None) => run_env::measured_toolchains(None),
         Ok(Some(dir)) => match super::adapters::main_checkout_of(std::path::Path::new(&dir)) {
@@ -1491,10 +1509,44 @@ pub(super) fn read(
             ),
         });
     }
-    #[cfg(test)]
-    tests::READS.with(|reads| reads.set(reads.get() + 1));
-    let text = |key: &str| span.payload[key].as_str().map(str::to_owned);
     let toolchains = toolchains.get_or_insert_with(|| measured_toolchains(conn));
+    read_transcript(span, toolchains)
+}
+
+/// Load the profiles through a short read entry, then release its snapshot and
+/// connection before reading a possibly megabyte-sized transcript.
+pub(super) fn read_from_entries(
+    entries: &impl TransactionEntries,
+    span: &OpenSpan,
+    toolchains: &mut Option<Toolchains>,
+) -> Result<Transcript, Unreadable> {
+    if !span.claude() {
+        return Err(Unreadable {
+            code: TRANSCRIPT_NOT_CLAUDE,
+            version: None,
+            detail: format!(
+                "the session is {}'s, which has no Claude Code transcript",
+                span.payload["provider"]
+                    .as_str()
+                    .unwrap_or("another provider")
+            ),
+        });
+    }
+    let toolchains = toolchains.get_or_insert_with(|| toolchains_from_entries(entries));
+    read_transcript(span, toolchains)
+}
+
+fn read_transcript(span: &OpenSpan, toolchains: &Toolchains) -> Result<Transcript, Unreadable> {
+    #[cfg(test)]
+    {
+        tests::READS.with(|reads| reads.set(reads.get() + 1));
+        tests::ON_READ.with_borrow(|check| {
+            if let Some(check) = check {
+                check();
+            }
+        });
+    }
+    let text = |key: &str| span.payload[key].as_str().map(str::to_owned);
     ClaudeTranscripts::from_env().read(
         &TranscriptSource {
             session_id: text("session_id"),
@@ -1649,11 +1701,7 @@ fn hook_intake_finished_sql(dialect: super::sql_exec::SqlDialect) -> String {
 /// Finish closed hook spans once, including their last (not necessarily
 /// followed by another input) turn. An append-only final session_turns event
 /// carries the measurements; even an unreadable transcript gets a final marker.
-fn record_closed_hook_turns(
-    conn: &impl SessionConnection,
-    write_hold_warn: Duration,
-    identity: &super::write_leader::WriteIdentity,
-) -> Result<usize> {
+fn record_closed_hook_turns(entries: &impl TransactionEntries) -> Result<usize> {
     fn pending(conn: &impl SqlRead) -> Result<Vec<(OpenSpan, String)>> {
         Ok(
             conn.query_map(&pending_hook_intakes_sql(conn.dialect()), &[], |r| {
@@ -1669,10 +1717,14 @@ fn record_closed_hook_turns(
         )
     }
     let mut recorded = 0;
-    for (span, end) in pending(conn)? {
+    let pending = {
+        let tx = entries.read_entry("pending_hook_intakes")?;
+        pending(&tx)?
+    };
+    for (span, end) in pending {
         // One span that cannot be finalized does not hold back the others
         // nor the open spans' turns: it is tried again next time.
-        match finalize_hook_intake(conn, write_hold_warn, identity, &span, &end) {
+        match finalize_hook_intake(entries, &span, &end) {
             Ok(true) => recorded += 1,
             Ok(false) => {}
             Err(error)
@@ -1696,18 +1748,16 @@ fn record_closed_hook_turns(
 /// its remaining turns and its final `session_turns` with its
 /// measurements. `false` when another intake finished it first.
 fn finalize_hook_intake(
-    conn: &impl SessionConnection,
-    write_hold_warn: Duration,
-    identity: &super::write_leader::WriteIdentity,
+    entries: &impl TransactionEntries,
     span: &OpenSpan,
     end: &str,
 ) -> Result<bool> {
-    let _read = read_before(conn, Closing::Spans(&[(span.clone(), DEFERRED)]))?;
-    let tx = conn.session_write("finalize_hook_intake", write_hold_warn, identity)?;
+    let _read = read_before(entries, Closing::Spans(&[(span.clone(), DEFERRED)]))?;
+    let tx = entries.write_entry("finalize_hook_intake")?;
     // Another intake may have finished while this one read the transcript.
     let finished: bool = SqlRead::query_row(
         &tx,
-        &hook_intake_finished_sql(conn.dialect()),
+        &hook_intake_finished_sql(tx.dialect()),
         sql_params![span.opened_event_id],
         |r| r.get(0),
     )?;
@@ -1741,15 +1791,14 @@ fn finalize_hook_intake(
 /// finalized too, once. The transcript is read outside the write lock;
 /// the span is checked again under it, since the process that closes it
 /// (a session's wrapper) records its remaining turns itself.
-pub(super) fn record_open_turns(
-    conn: &impl SessionConnection,
-    write_hold_warn: Duration,
-    identity: &super::write_leader::WriteIdentity,
-) -> Result<usize> {
-    let open = open_spans(conn, "1=1", "1=1", sql_params![])?;
+pub(super) fn record_open_turns(entries: &impl TransactionEntries) -> Result<usize> {
+    let open = {
+        let tx = entries.read_entry("open_session_turns")?;
+        open_spans(&tx, "1=1", "1=1", sql_params![])?
+    };
     // The closed hook spans' intake failing does not hold back the open
     // spans' turns.
-    let mut recorded = match record_closed_hook_turns(conn, write_hold_warn, identity) {
+    let mut recorded = match record_closed_hook_turns(entries) {
         Ok(recorded) => recorded,
         Err(error)
             if error
@@ -1766,7 +1815,7 @@ pub(super) fn record_open_turns(
     let mut toolchains = None;
     for span in open {
         // A headless span's turns are its run's (ADR-t813-2 decision 7).
-        let read = (!span.headless()).then(|| read(conn, &span, &mut toolchains));
+        let read = (!span.headless()).then(|| read_from_entries(entries, &span, &mut toolchains));
         let transcript = match read {
             None => None,
             Some(Ok(transcript)) => Some(transcript),
@@ -1781,7 +1830,7 @@ pub(super) fn record_open_turns(
                 continue;
             }
         };
-        let tx = conn.session_write("record_open_turns", write_hold_warn, identity)?;
+        let tx = entries.write_entry("record_open_turns")?;
         if span_closed(&tx, span.opened_event_id)? {
             continue;
         }
@@ -2011,13 +2060,12 @@ pub(super) fn span_task(conn: &impl SqlRead, span: &OpenSpan) -> Result<Option<T
 /// replaced span count it once. A runtime planner's span is on the first task of
 /// its proposal, with the proposal and its goals; the others are on no
 /// task. Only the spans are written: no run, proposal or planner changes.
-pub(super) fn record_hook(
-    conn: &impl SessionConnection,
-    write_hold_warn: Duration,
-    identity: &super::write_leader::WriteIdentity,
-    hook: &SessionHook,
-) -> Result<Value> {
-    if headless_planner_hook(conn, hook)? {
+pub(super) fn record_hook(entries: &impl TransactionEntries, hook: &SessionHook) -> Result<Value> {
+    let headless = {
+        let tx = entries.read_entry("headless_planner_hook")?;
+        headless_planner_hook(&tx, hook)?
+    };
+    if headless {
         return Ok(json!({
             "kind": hook.kind,
             "session_id": hook.session_id,
@@ -2026,7 +2074,7 @@ pub(super) fn record_hook(
             "skipped": "headless_planner",
         }));
     }
-    let tx = conn.session_write("record_hook", write_hold_warn, identity)?;
+    let tx = entries.write_entry("record_hook")?;
     let (task_id, context) = planner_context(&tx, hook)?;
     let open = open_hook_spans(&tx)?;
     let changes = hook_changes(hook, &open, &context);
@@ -2129,8 +2177,9 @@ fn planner_anchor(
 
 /// The open spans the hook recorded, oldest first: what the supervisor
 /// judges for [`crate::domain::sessions::inferred_hook_closes`].
-pub(super) fn hook_spans(conn: &impl SqlRead) -> Result<Vec<OpenSpan>> {
-    open_hook_spans(conn)
+pub(super) fn hook_spans(entries: &impl TransactionEntries) -> Result<Vec<OpenSpan>> {
+    let tx = entries.read_entry("hook_spans")?;
+    open_hook_spans(&tx)
 }
 
 /// Close, as `inferred`, the spans the hook recorded that are among
@@ -2140,12 +2189,10 @@ pub(super) fn hook_spans(conn: &impl SqlRead) -> Result<Vec<OpenSpan>> {
 /// when it cannot be read, ADR-0048 decision 7). Returns how many it
 /// closed.
 pub(super) fn close_inferred_hook_spans(
-    conn: &impl SessionConnection,
-    write_hold_warn: Duration,
-    identity: &super::write_leader::WriteIdentity,
+    entries: &impl TransactionEntries,
     ended: &[EventId],
 ) -> Result<usize> {
-    let spans: Vec<OpenSpan> = open_hook_spans(conn)?
+    let spans: Vec<OpenSpan> = hook_spans(entries)?
         .into_iter()
         .filter(|span| ended.contains(&span.opened_event_id))
         .collect();
@@ -2154,8 +2201,8 @@ pub(super) fn close_inferred_hook_spans(
     }
     let closing: Vec<(OpenSpan, &'static str)> =
         spans.iter().map(|span| (span.clone(), INFERRED)).collect();
-    let _read = read_before(conn, Closing::Spans(&closing))?;
-    let tx = conn.session_write("close_inferred_hook_spans", write_hold_warn, identity)?;
+    let _read = read_before(entries, Closing::Spans(&closing))?;
+    let tx = entries.write_entry("close_inferred_hook_spans")?;
     let now = now(&tx)?;
     let mut closed = 0;
     // Found outside the write lock; checked again under it one by one, so a
@@ -2380,16 +2427,13 @@ pub(super) mod tests {
         super::insert_at(&port_tx(conn), task_id, run_id, kind, payload, created_at)
     }
     use super::*;
-    fn identity(conn: &Connection) -> super::super::write_leader::WriteIdentity {
-        super::super::write_leader::WriteIdentity::read(conn).unwrap()
-    }
 
     use crate::domain::LeaseToken;
     use crate::infrastructure::git_binary::git_executable;
-    use crate::infrastructure::sqlite::WRITE_HOLD_WARN;
     use rusqlite::{Transaction, TransactionBehavior};
 
     thread_local! {
+        pub(super) static ON_READ: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
         /// The transcripts read on this thread.
         pub(in crate::infrastructure) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         /// The transcripts analysed for a close on this thread.
@@ -2900,14 +2944,8 @@ pub(super) mod tests {
             record(EventKind::TurnStarted, json!({"turn": 2})),
             base + 40_000,
         );
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            1
-        );
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            0
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
         at(
             record(
                 EventKind::TurnFinished,
@@ -3265,14 +3303,8 @@ pub(super) mod tests {
             base + 40_000,
         );
         assert_eq!(of_kind(&queue, SESSION_OPENED).len(), 2);
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            2
-        );
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            0
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 2);
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
         queue
             .close_planner(crate::domain::PlannerId::new(4), Some("gone"))
             .unwrap();
@@ -3294,15 +3326,9 @@ pub(super) mod tests {
             planner_id: Some(5),
             ..hook(dir.path(), event, RUNTIME_PLANNER, "s-5")
         };
-        let skipped = record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &planner5(Some("startup")),
-        )
-        .unwrap();
+        let skipped = record_hook(conn, &planner5(Some("startup"))).unwrap();
         assert_eq!(skipped["skipped"], "headless_planner");
-        record_hook(conn, WRITE_HOLD_WARN, &identity(conn), &planner5(None)).unwrap();
+        record_hook(conn, &planner5(None)).unwrap();
         assert_eq!(of_kind(&queue, SESSION_OPENED).len(), 2);
         assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
         assert!(open_hook_spans(conn).unwrap().is_empty());
@@ -3326,15 +3352,9 @@ pub(super) mod tests {
         let start = retime(conn, 0, 100);
         // The first turn is finished (the next input came); the second not.
         transcript(dir.path(), start, &[(5, 25), (40, 50)], None);
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            1
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
         // Nothing new: nothing written.
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            0
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
         let recorded = of_kind(&queue, SESSION_TURNS);
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].payload["kind"], "worker");
@@ -3523,10 +3543,7 @@ pub(super) mod tests {
             json!({"session_id": RUN}),
         )
         .unwrap();
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            0
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
     }
 
     /// The `dagq.toml` of a repository that declares the Rust profile, as
@@ -4658,28 +4675,6 @@ pub(super) mod tests {
             TRANSCRIPT_NOT_READ_BEFORE
         );
         assert_eq!(of_kind(&queue, "session_exited").len(), 2);
-        // Called inside a transaction, `read_before` reads nothing, not
-        // even the transcript of a span open.
-        event(
-            conn,
-            task_id,
-            Some(&run),
-            EventKind::AgentStarted,
-            json!({"session_id": RUN}),
-        )
-        .unwrap();
-        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).unwrap();
-        let read = read_before_port(&*tx, Closing::Run(&run, &[EventKind::RunRecovered])).unwrap();
-        assert!(read.spans.is_empty());
-        drop(read);
-        let read = read_before(
-            &port_tx(&tx),
-            Closing::Run(&run, &[EventKind::RunRecovered]),
-        )
-        .unwrap();
-        assert!(read.spans.is_empty());
-        drop(read);
-        tx.rollback().unwrap();
         assert_eq!(READS.get(), 4);
     }
 
@@ -4752,66 +4747,34 @@ pub(super) mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &*queue.conn;
-        let started = record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), Some("startup"), INBOX, "s-1"),
-        )
-        .unwrap();
+        let started = record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "s-1")).unwrap();
         assert_eq!(started["closed"], json!([]));
         let opened = started["opened"].as_i64().unwrap();
         let start = retime(conn, 0, 100);
         hook_transcript(dir.path(), "s-1", start, &[(5, 25), (40, 50)], 60);
         // Finished turns of the open span, recorded as they come.
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            1
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
         assert_eq!(of_kind(&queue, SESSION_TURNS)[0].payload["kind"], "inbox");
         // A compaction keeps the session id: the span goes on.
-        let compacted = record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), Some("compact"), INBOX, "s-1"),
-        )
-        .unwrap();
+        let compacted =
+            record_hook(conn, &hook(dir.path(), Some("compact"), INBOX, "s-1")).unwrap();
         assert_eq!(compacted["opened"], Value::Null);
         assert_eq!(compacted["closed"], json!([]));
         // A /clear whose SessionStart comes first: the new session id
         // closes the span of its kind as inferred.
         READS.set(0);
-        let cleared = record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), Some("clear"), INBOX, "s-2"),
-        )
-        .unwrap();
+        let cleared = record_hook(conn, &hook(dir.path(), Some("clear"), INBOX, "s-2")).unwrap();
         assert_eq!(READS.get(), 0);
         assert_eq!(cleared["closed"], json!([opened]));
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
         assert_eq!(closed.payload["reason"], INFERRED);
         assert_eq!(closed.payload["active_unavailable"], "hook_intake_pending");
         assert_eq!(closed.task_id, None);
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            1
-        );
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            0
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
         // Its SessionEnd, late, and a second one: closed once.
         for _ in 0..2 {
-            let ended = record_hook(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                &hook(dir.path(), None, INBOX, "s-1"),
-            )
-            .unwrap();
+            let ended = record_hook(conn, &hook(dir.path(), None, INBOX, "s-1")).unwrap();
             assert_eq!(ended["closed"], json!([]));
         }
         assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
@@ -4854,13 +4817,10 @@ pub(super) mod tests {
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &*queue.conn;
         let start_hook = hook(dir.path(), Some("startup"), INBOX, "s");
-        record_hook(conn, WRITE_HOLD_WARN, &identity(conn), &start_hook).unwrap();
+        record_hook(conn, &start_hook).unwrap();
         let start = retime(conn, 0, 100);
         hook_transcript(dir.path(), "s", start, &[(5, 25), (40, 50)], 60);
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            1
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
         // Append the final assistant without another input: open intake
         // must leave this turn for the close, clipping it at that boundary.
         let path = dir.path().join("s.jsonl");
@@ -4875,13 +4835,7 @@ pub(super) mod tests {
         text.push_str(&format!("\n{}\n{}", assistant(80_000), assistant(150_000)));
         std::fs::write(&path, text).unwrap();
         READS.set(0);
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), None, INBOX, "s"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), None, INBOX, "s")).unwrap();
         assert_eq!(READS.get(), 0);
         let closed = of_kind(&queue, SESSION_CLOSED)[0].clone();
         let end = start + 100_000;
@@ -4890,15 +4844,9 @@ pub(super) mod tests {
             params![millis_text(end), closed.id],
         )
         .unwrap();
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            1
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
         assert_eq!(READS.get(), 1);
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            0
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
         assert_eq!(READS.get(), 1);
         let opened = of_kind(&queue, SESSION_OPENED)[0].id;
         let recorded = recorded_turns(conn, opened).unwrap();
@@ -4921,13 +4869,7 @@ pub(super) mod tests {
         assert!(!spans[0].active_unavailable);
         assert_eq!(spans[0].end, Some(end));
         // Finalized even if intake is called again or SessionEnd is duplicated.
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), None, INBOX, "s"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), None, INBOX, "s")).unwrap();
         assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
         assert_eq!(
             of_kind(&queue, SESSION_TURNS)
@@ -4945,27 +4887,12 @@ pub(super) mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &*queue.conn;
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), Some("startup"), INBOX, "missing"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "missing")).unwrap();
         READS.set(0);
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), None, INBOX, "missing"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), None, INBOX, "missing")).unwrap();
         assert_eq!(READS.get(), 0);
         assert!(open_hook_spans(conn).unwrap().is_empty());
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            1
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 1);
         let final_turns = of_kind(&queue, SESSION_TURNS);
         assert_eq!(final_turns.len(), 1);
         assert_eq!(final_turns[0].payload["active"], "unavailable");
@@ -4973,10 +4900,7 @@ pub(super) mod tests {
             final_turns[0].payload["active_unavailable"],
             "transcript_missing"
         );
-        assert_eq!(
-            record_open_turns(conn, WRITE_HOLD_WARN, &identity(conn)).unwrap(),
-            0
-        );
+        assert_eq!(record_open_turns(conn).unwrap(), 0);
         assert_eq!(READS.get(), 1);
         assert!(open_hook_spans(conn).unwrap().is_empty());
     }
@@ -4989,24 +4913,12 @@ pub(super) mod tests {
         let conn = &*queue.conn;
         let start = |kind, session| hook(dir.path(), Some("startup"), kind, session);
         for (kind, session) in [(INBOX, "i"), (PLANNER, "p"), (RUNTIME_PLANNER, "r")] {
-            record_hook(
-                conn,
-                WRITE_HOLD_WARN,
-                &identity(conn),
-                &start(kind, session),
-            )
-            .unwrap();
+            record_hook(conn, &start(kind, session)).unwrap();
         }
         READS.set(0);
-        record_hook(conn, WRITE_HOLD_WARN, &identity(conn), &start(INBOX, "i")).unwrap();
+        record_hook(conn, &start(INBOX, "i")).unwrap();
         assert!(of_kind(&queue, SESSION_CLOSED).is_empty());
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &start(INBOX, "i-next"),
-        )
-        .unwrap();
+        record_hook(conn, &start(INBOX, "i-next")).unwrap();
         assert_eq!(READS.get(), 0);
         let closed = of_kind(&queue, SESSION_CLOSED);
         assert_eq!(closed.len(), 1);
@@ -5058,38 +4970,14 @@ pub(super) mod tests {
             planner_id: planner,
             ..hook(dir.path(), Some("startup"), kind, session)
         };
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &planner(RUNTIME_PLANNER, "p-3", Some(3)),
-        )
-        .unwrap();
+        record_hook(conn, &planner(RUNTIME_PLANNER, "p-3", Some(3))).unwrap();
         // Its end closes it on the same task.
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), None, RUNTIME_PLANNER, "p-3"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), None, RUNTIME_PLANNER, "p-3")).unwrap();
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
         assert_eq!(closed.task_id, Some(first));
         assert_eq!(closed.payload["reason"], crate::domain::sessions::EXITED);
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &planner(RUNTIME_PLANNER, "p-4", Some(4)),
-        )
-        .unwrap();
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &planner(PLANNER, "p-5", Some(3)),
-        )
-        .unwrap();
+        record_hook(conn, &planner(RUNTIME_PLANNER, "p-4", Some(4))).unwrap();
+        record_hook(conn, &planner(PLANNER, "p-5", Some(3))).unwrap();
         let opened = of_kind(&queue, SESSION_OPENED);
         assert_eq!(opened[0].task_id, Some(first));
         assert_eq!(opened[0].payload["proposal_id"], 5);
@@ -5112,20 +5000,8 @@ pub(super) mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &*queue.conn;
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), Some("startup"), INBOX, "s-1"),
-        )
-        .unwrap();
-        record_hook(
-            conn,
-            WRITE_HOLD_WARN,
-            &identity(conn),
-            &hook(dir.path(), Some("startup"), PLANNER, "s-2"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "s-1")).unwrap();
+        record_hook(conn, &hook(dir.path(), Some("startup"), PLANNER, "s-2")).unwrap();
         let start = retime(conn, 0, 100);
         hook_transcript(dir.path(), "s-2", start, &[(5, 25)], 30);
         let spans = hook_spans(conn).unwrap();
@@ -5134,18 +5010,9 @@ pub(super) mod tests {
             [INBOX, PLANNER]
         );
         let ended = [spans[1].opened_event_id];
-        assert_eq!(
-            close_inferred_hook_spans(conn, WRITE_HOLD_WARN, &identity(conn), &ended).unwrap(),
-            1
-        );
-        assert_eq!(
-            close_inferred_hook_spans(conn, WRITE_HOLD_WARN, &identity(conn), &ended).unwrap(),
-            0
-        );
-        assert_eq!(
-            close_inferred_hook_spans(conn, WRITE_HOLD_WARN, &identity(conn), &[]).unwrap(),
-            0
-        );
+        assert_eq!(close_inferred_hook_spans(conn, &ended).unwrap(), 1);
+        assert_eq!(close_inferred_hook_spans(conn, &ended).unwrap(), 0);
+        assert_eq!(close_inferred_hook_spans(conn, &[]).unwrap(), 0);
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
         assert_eq!(closed.payload["kind"], "planner");
         assert_eq!(closed.payload["reason"], INFERRED);
@@ -5287,11 +5154,7 @@ pub(super) mod tests {
                 ClaudeTranscripts::use_config_dir_in_test(&config);
                 let other = SqliteQueue::open(&db).unwrap();
                 if between == Between::RecordsTurns {
-                    assert_eq!(
-                        record_open_turns(&*other.conn, WRITE_HOLD_WARN, &identity(&other.conn))
-                            .unwrap(),
-                        1
-                    );
+                    assert_eq!(record_open_turns(&*other.conn).unwrap(), 1);
                 } else {
                     event(
                         &other.conn,
@@ -5827,5 +5690,65 @@ pub(super) mod tests {
         assert_eq!(spans[1].payload["active"], "recorded");
         assert_eq!(spans[1].payload["active_secs"], 20);
         assert_eq!(spans[1].created_at, millis_text(sent * 1000));
+    }
+
+    /// Registry entry methods release every read snapshot before transcript
+    /// I/O or opening the next fenced write, on the very same SQLite connection.
+    #[test]
+    fn registry_intake_reads_transcripts_without_an_open_transaction() {
+        use crate::application::SessionRegistry;
+        use std::rc::Rc;
+        let dir = tempfile::tempdir().unwrap();
+        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
+        let uri = format!("file:/session-entries-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let queue = Rc::new(SqliteQueue::init(uri).unwrap());
+        let check_queue = Rc::clone(&queue);
+        ON_READ.set(Some(Box::new(move || {
+            assert!(check_queue.conn.is_autocommit())
+        })));
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                ON_READ.set(None);
+            }
+        }
+        let _clear = Clear;
+        let read = queue.read_entry("read_mode").unwrap();
+        assert!(!SqlRead::in_write_transaction(&read));
+        drop(read);
+        let write = queue.write_entry("write_mode").unwrap();
+        assert!(SqlRead::in_write_transaction(&write));
+        write.commit().unwrap();
+
+        let opened = queue
+            .record_session_hook(&hook(dir.path(), Some("startup"), sessions::INBOX, "s"))
+            .unwrap()["opened"]
+            .as_i64()
+            .unwrap();
+        queue
+            .conn
+            .execute(
+                "UPDATE run_events SET created_at='2026-10-01T00:00:00.000Z' WHERE id=?1",
+                [opened],
+            )
+            .unwrap();
+        let base = rfc3339_millis("2026-10-01T00:00:00.000Z").unwrap();
+        hook_transcript(dir.path(), "s", base, &[(5, 25)], 40);
+        assert_eq!(queue.record_session_turns().unwrap(), 1);
+        queue.record_session_tokens().unwrap();
+        assert_eq!(
+            queue
+                .close_inferred_sessions(&[EventId::new(opened)])
+                .unwrap(),
+            1
+        );
+        let closed = of_kind(&queue, SESSION_CLOSED);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].payload["active"], "recorded");
+        assert_ne!(
+            closed[0].payload["active_unavailable"],
+            TRANSCRIPT_NOT_READ_BEFORE
+        );
+        assert!(queue.conn.is_autocommit());
     }
 }

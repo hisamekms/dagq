@@ -18,6 +18,7 @@
 //! source-goal facts, membership judgement and automatic adoption gate.
 use super::sql_dialect::JsonType;
 use super::sql_exec::{OptionalRow, SqlRead, sql_params};
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::Result;
 
 use super::{
@@ -122,14 +123,15 @@ impl SqliteQueue {
     /// When each of `items` is registered next, from the queue's history
     /// of its key.
     pub fn recurring_schedule(&self, items: &[RecurringDraft]) -> Result<Vec<RecurringSchedule>> {
+        let tx = self.read_entry("recurring_schedule")?;
         items
             .iter()
             .map(|item| {
                 Ok(RecurringSchedule::of(
                     &item.key,
                     item.interval_days,
-                    last_registration(&*self.conn, &item.key)?,
-                    open_task(&*self.conn, &item.key)?,
+                    last_registration(&tx, &item.key)?,
+                    open_task(&tx, &item.key)?,
                 ))
             })
             .collect()

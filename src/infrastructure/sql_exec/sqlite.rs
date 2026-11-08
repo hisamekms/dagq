@@ -36,9 +36,8 @@ use rusqlite::{
 };
 
 use super::{
-    CommitActions, CommitState, CommitTransaction, RowValues, SessionConnection, SqlDialect,
-    SqlError, SqlRead, SqlResult, SqlRow, SqlSavepoint, SqlSavepoints, SqlValue, SqlWrite,
-    ValueKind,
+    CommitActions, CommitState, CommitTransaction, RowValues, SqlDialect, SqlError, SqlRead,
+    SqlResult, SqlRow, SqlSavepoint, SqlSavepoints, SqlValue, SqlWrite, ValueKind,
 };
 use crate::application::EventBodies;
 use crate::domain::actor::ActorContext;
@@ -314,7 +313,7 @@ impl SqlRead for Connection {
 
 impl SqlRead for WriteTx<'_> {
     fn in_write_transaction(&self) -> bool {
-        !self.is_autocommit()
+        self.is_write_entry()
     }
 
     fn dialect(&self) -> SqlDialect {
@@ -605,7 +604,8 @@ mod tests {
                 let calls = Rc::new(RefCell::new(Vec::new()));
                 let mut tx = read_tx(&conn);
                 SqlWrite::execute(&tx, "INSERT INTO t(v) VALUES ('write')", &[]).unwrap();
-                assert!(SqlRead::in_write_transaction(&tx));
+                // The entry's mode stays read even if compatibility SQL writes.
+                assert!(!SqlRead::in_write_transaction(&tx));
                 let called = calls.clone();
                 tx.after_commit(Box::new(move || called.borrow_mut().push("before")))
                     .unwrap();
@@ -1063,6 +1063,7 @@ mod tests {
         let sql = "UPDATE goals SET title='x' WHERE id=?1";
         let tx = queue.write_tx("sql_exec_write_entry").unwrap();
         assert_eq!(SqlRead::dialect(&tx), SqlDialect::Sqlite);
+        assert!(SqlRead::in_write_transaction(&tx));
         assert_eq!(SqlWrite::execute(&tx, sql, sql_params![1_i64]).unwrap(), 0);
         let generation: i64 =
             SqlRead::query_row(&tx, "SELECT generation FROM write_leader", &[], |r| {
@@ -1082,7 +1083,12 @@ mod tests {
         drop(reader);
         let reader = queue.read_entry("sql_exec_read_entry").unwrap();
         assert_eq!(SqlRead::dialect(&reader), SqlDialect::Sqlite);
+        assert!(!SqlRead::in_write_transaction(&reader));
+        assert!(port_tx(&reader).in_write_transaction());
         drop(reader);
+        let leader = WriteTx::leader(&queue.conn, "leader_mode", Duration::from_secs(60)).unwrap();
+        assert!(SqlRead::in_write_transaction(&leader));
+        drop(leader);
         queue
             .write_entry("sql_exec_write_entry")
             .unwrap()
@@ -1274,17 +1280,6 @@ mod tests {
     }
 }
 
-impl SessionConnection for Connection {
-    type Write<'c> = WriteTx<'c>;
-    fn session_write(
-        &self,
-        name: &'static str,
-        warn: std::time::Duration,
-        identity: &crate::infrastructure::write_leader::WriteIdentity,
-    ) -> anyhow::Result<WriteTx<'_>> {
-        Ok(WriteTx::write(self, name, warn, identity)?.recorded())
-    }
-}
 impl CommitTransaction for WriteTx<'_> {
     fn commit(self) -> anyhow::Result<()> {
         Ok(WriteTx::commit(self)?)
@@ -1391,4 +1386,25 @@ pub(super) fn next_id_sql(table: &str) -> String {
         &format!("coalesce((SELECT max(id) FROM {table}), 0)"),
     );
     format!("SELECT {maximum} + 1")
+}
+
+#[cfg(test)]
+impl super::TransactionEntries for Connection {
+    type Write<'c> = WriteTx<'c>;
+    type Read<'c> = WriteTx<'c>;
+    fn write_entry(&self, name: &'static str) -> anyhow::Result<WriteTx<'_>> {
+        WriteTx::write(
+            self,
+            name,
+            crate::infrastructure::sqlite::WRITE_HOLD_WARN,
+            &crate::infrastructure::write_leader::WriteIdentity::read(self)?,
+        )
+    }
+    fn read_entry(&self, name: &'static str) -> anyhow::Result<WriteTx<'_>> {
+        Ok(WriteTx::read(
+            self,
+            name,
+            crate::infrastructure::sqlite::WRITE_HOLD_WARN,
+        )?)
+    }
 }

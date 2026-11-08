@@ -36,6 +36,7 @@
 //! schema and the reason. A breaking migration's user check, backup and
 //! application share one transaction ([`SqliteQueue::migrate`]).
 
+use super::sql_exec::TransactionEntries;
 use super::sql_exec::sqlite::{
     attach_event_actors, attach_event_bodies, is_contention, native_error, port_tx, with_row,
 };
@@ -267,6 +268,9 @@ pub fn held_long_payload(
 /// just before it ends), is held from its `BEGIN`
 /// ([`WriteTxTimes::locked`]).
 pub struct WriteTx<'c> {
+    // The entry's mode, independent of SQLite's autocommit state: a read
+    // snapshot must never be mistaken for the writer that forbids transcript I/O.
+    write_entry: bool,
     tx: Option<rusqlite::Transaction<'c>>,
     conn: &'c Connection,
     name: &'static str,
@@ -280,6 +284,10 @@ pub struct WriteTx<'c> {
 }
 
 impl<'c> WriteTx<'c> {
+    pub(super) fn is_write_entry(&self) -> bool {
+        self.write_entry
+    }
+
     /// The write entry: begin `name` on `conn` as `BEGIN IMMEDIATE`, which
     /// has the write lock when it returns, so a writer that loses the race
     /// waits (or is told busy) at its `BEGIN` and not at its first write.
@@ -341,6 +349,7 @@ impl<'c> WriteTx<'c> {
             matches!(behavior, TransactionBehavior::Immediate).then(std::time::Instant::now);
         Ok(Self {
             tx: Some(tx),
+            write_entry: matches!(behavior, TransactionBehavior::Immediate),
             conn,
             name,
             threshold,
@@ -2149,8 +2158,8 @@ impl TaskReads for SqliteQueue {
     fn build_waits(
         &self,
     ) -> Result<std::collections::HashMap<TaskId, Vec<crate::domain::Landing>>> {
-        let tx = &*self.conn;
-        let result = self.store(tx).build_waits().map_err(native_error)?;
+        let tx = self.read_entry("build_waits")?;
+        let result = self.store(&tx).build_waits().map_err(native_error)?;
         Ok(result)
     }
 
@@ -2161,15 +2170,18 @@ impl TaskReads for SqliteQueue {
     }
 
     fn predecessors(&self, task_id: TaskId) -> Result<Vec<Predecessor>> {
-        let tx = &*self.conn;
-        let result = self.store(tx).predecessors(task_id).map_err(native_error)?;
+        let tx = self.read_entry("predecessors")?;
+        let result = self
+            .store(&tx)
+            .predecessors(task_id)
+            .map_err(native_error)?;
         Ok(result)
     }
 
     fn goal_predecessors(&self, task_id: TaskId) -> Result<Vec<GoalPredecessor>> {
-        let tx = &*self.conn;
+        let tx = self.read_entry("goal_predecessors")?;
         let result = self
-            .store(tx)
+            .store(&tx)
             .goal_predecessors(task_id)
             .map_err(native_error)?;
         Ok(result)
@@ -2179,14 +2191,14 @@ impl TaskReads for SqliteQueue {
         Ok(SqliteQueue::turn_fence(self, task)?.is_some())
     }
     fn tasks_in_progress(&self) -> Result<Vec<Task>> {
-        let tx = &*self.conn;
-        let result = self.store(tx).tasks_in_progress().map_err(native_error)?;
+        let tx = self.read_entry("tasks_in_progress")?;
+        let result = self.store(&tx).tasks_in_progress().map_err(native_error)?;
         Ok(result)
     }
 
     fn list_goals(&self) -> Result<Vec<GoalSummary>> {
-        let tx = &*self.conn;
-        let result = self.store(tx).list_goals().map_err(native_error)?;
+        let tx = self.read_entry("list_goals")?;
+        let result = self.store(&tx).list_goals().map_err(native_error)?;
         Ok(result)
     }
 
@@ -2214,8 +2226,8 @@ impl TaskReads for SqliteQueue {
     }
 
     fn notes(&self, query: &NoteQuery) -> Result<NotePage> {
-        let tx = &*self.conn;
-        let result = self.store(tx).notes(query).map_err(native_error)?;
+        let tx = self.read_entry("notes")?;
+        let result = self.store(&tx).notes(query).map_err(native_error)?;
         Ok(result)
     }
 }
@@ -2377,12 +2389,6 @@ pub(super) fn cancel_of(
 #[allow(dead_code)]
 pub(super) fn read_task(conn: &Connection, task_id: TaskId) -> Result<Task> {
     store_rows::read_task(&port_tx(conn), task_id).map_err(native_error)
-}
-
-/// The status of `task` and the proposal it is in, as a planning command
-/// is authorized with them; a missing task is an error.
-pub(super) fn task_authorization(conn: &Connection, task: TaskId) -> Result<TaskAuthorization> {
-    super::task_store::task_authorization(&port_tx(conn), task).map_err(native_error)
 }
 
 /// [`store_writes::record_queue_event_in`] on a rusqlite connection.

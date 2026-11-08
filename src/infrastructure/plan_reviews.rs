@@ -12,6 +12,7 @@ use crate::domain::actor_model::{ActorLaunch, LIVE_PLANNER_NOT_RAISED};
 use crate::domain::headless_job::{ReviewTakeover, review_owner_gone};
 use crate::domain::write_rules::check_at_least;
 use crate::domain::{LeaseToken, event_kind};
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -491,8 +492,9 @@ impl SqliteQueue {
     /// task is (`dagq related`), and how often plan review sent it back.
     /// `None` when it does not exist.
     fn proposal_features(&self, proposal_id: ProposalId) -> Result<Option<ProposalFeatures>> {
+        let tx = self.read_entry("proposal_features")?;
         let exists: bool = SqlRead::query_row(
-            &*self.conn,
+            &tx,
             "SELECT count(*) > 0 FROM proposals WHERE id=?1",
             sql_params![proposal_id],
             |r| r.get(0),
@@ -500,11 +502,11 @@ impl SqliteQueue {
         if !exists {
             return Ok(None);
         }
-        let proposal = proposals::read(&*self.conn, proposal_id)?;
+        let proposal = proposals::read(&tx, proposal_id)?;
         let members = proposal.task_ids();
         let has = |sql: &str| -> Result<bool> {
             Ok(SqlRead::query_row(
-                &*self.conn,
+                &tx,
                 sql,
                 sql_params![proposal_id],
                 |r| r.get(0),
@@ -523,9 +525,14 @@ impl SqliteQueue {
             proposal.owner().origin,
         );
         let mut follow_up = 0;
+        for &task in members {
+            follow_up = follow_up.max(follow_up_depth(&tx, task)?);
+        }
+        // The FTS adapter uses the connection directly; finish this snapshot
+        // before calling it, just as when calling another named read entry.
+        drop(tx);
         let mut related: Option<f64> = None;
         for &task in members {
-            follow_up = follow_up.max(follow_up_depth(&*self.conn, task)?);
             let page = self.related(task.as_i64(), &[], members.len() + 1)?;
             let best = page
                 .related
@@ -578,7 +585,8 @@ impl PlanReviewStore for SqliteQueue {
     }
 
     fn plan_review_candidates(&self) -> Result<Vec<PlanReviewCandidate>> {
-        candidates(&*self.conn)
+        let tx = self.read_entry("plan_review_candidates")?;
+        candidates(&tx)
     }
 
     fn take_over_plan_review(
@@ -1007,8 +1015,9 @@ impl PlanReviewStore for SqliteQueue {
     }
 
     fn plan_reviews_finished_before(&self, before: i64) -> Result<Vec<i64>> {
+        let tx = self.read_entry("plan_reviews_finished_before")?;
         SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT id FROM plan_reviews
                  WHERE finished_at IS NOT NULL AND finished_at <= ?1 ORDER BY id",
             sql_params![before],
@@ -1076,8 +1085,9 @@ impl PlanReviewStore for SqliteQueue {
     }
 
     fn revise_goal_wait(&self, proposal_id: ProposalId) -> Result<ReviseGoalWait> {
+        let tx = self.read_entry("revise_goal_wait")?;
         let (waiting, ended) = SqlRead::query_row(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT {}, {} FROM proposals WHERE id=?1",
                 super::plan_requests::REVISE_WAITS_FOR_GOAL,
@@ -1274,16 +1284,15 @@ impl PlanReviewStore for SqliteQueue {
     }
 
     fn plan_answers(&self) -> Result<Vec<Ask>> {
+        let tx = self.read_entry("plan_answers")?;
         let ids: Vec<AskId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT id FROM asks WHERE kind='approve_plan' AND answered_at IS NOT NULL
                  AND closed_at IS NULL ORDER BY id",
             sql_params![],
             |r| r.get(0),
         )?;
-        ids.into_iter()
-            .map(|id| read_ask(&*self.conn, id))
-            .collect()
+        ids.into_iter().map(|id| read_ask(&tx, id)).collect()
     }
 
     fn decide_plan(&mut self, ask_id: AskId) -> Result<Option<PlanDecided>> {
@@ -1403,8 +1412,9 @@ impl PlanReviewStore for SqliteQueue {
     }
 
     fn applies_plan_answer(&self, ask: &Ask) -> Result<bool> {
+        let tx = self.read_entry("applies_plan_answer")?;
         match &ask.answer {
-            Some(text) if ask.closed_at.is_none() => plan_answer_applies(&*self.conn, ask, text),
+            Some(text) if ask.closed_at.is_none() => plan_answer_applies(&tx, ask, text),
             _ => Ok(false),
         }
     }
@@ -1414,8 +1424,9 @@ impl PlanReviewStore for SqliteQueue {
     }
 
     fn plan_review_holds(&self) -> Result<Vec<PlanReviewHold>> {
+        let tx = self.read_entry("plan_review_holds")?;
         let rows: Vec<(ProposalId, bool, Option<String>)> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT p.id, p.status='submitted',
                         (SELECT error FROM plan_reviews r WHERE r.proposal_id = p.id
                          ORDER BY r.id DESC LIMIT 1)
@@ -1434,7 +1445,7 @@ impl PlanReviewStore for SqliteQueue {
             .into_iter()
             .filter_map(|(proposal_id, failed, error)| {
                 // A proposal with no task left has nothing to show on.
-                let anchor = anchor(&*self.conn, proposal_id).ok()?;
+                let anchor = anchor(&tx, proposal_id).ok()?;
                 Some(PlanReviewHold {
                     proposal_id,
                     anchor,
@@ -1450,16 +1461,15 @@ impl PlanReviewStore for SqliteQueue {
     }
 
     fn answered_asks(&self, limit: usize) -> Result<Vec<Ask>> {
+        let tx = self.read_entry("answered_asks")?;
         let ids: Vec<AskId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT id FROM asks WHERE answered_at IS NOT NULL ORDER BY answered_at DESC, id DESC
                  LIMIT ?1",
             sql_params![i64::try_from(limit)?],
             |r| r.get(0),
         )?;
-        ids.into_iter()
-            .map(|id| read_ask(&*self.conn, id))
-            .collect()
+        ids.into_iter().map(|id| read_ask(&tx, id)).collect()
     }
 }
 

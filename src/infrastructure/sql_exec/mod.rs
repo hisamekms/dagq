@@ -333,7 +333,7 @@ pub trait SqlSavepoint: SqlWrite {
 /// transaction begins is the adapter's and no caller's to choose.
 pub trait TransactionEntries {
     /// The transaction of a write entry.
-    type Write<'store>: SqlSavepoints
+    type Write<'store>: SqlSavepoints + CommitTransaction
     where
         Self: 'store;
     /// The transaction of a read entry, which reads one snapshot.
@@ -349,23 +349,8 @@ pub trait TransactionEntries {
 }
 
 /// A transaction whose owner can finish it after writing shared SQL.
-pub(crate) trait CommitTransaction: SqlWrite {
+pub trait CommitTransaction: SqlWrite {
     fn commit(self) -> anyhow::Result<()>;
-}
-
-/// The connection used by transcript intake: read before opening each short
-/// fenced write, and commit that write before reading the next transcript.
-/// The adapter owns the concrete transaction and its lock accounting.
-pub(crate) trait SessionConnection: SqlRead {
-    type Write<'c>: CommitTransaction
-    where
-        Self: 'c;
-    fn session_write(
-        &self,
-        name: &'static str,
-        warn: std::time::Duration,
-        identity: &crate::infrastructure::write_leader::WriteIdentity,
-    ) -> anyhow::Result<Self::Write<'_>>;
 }
 
 /// The arguments of a statement of the port, each bound as its

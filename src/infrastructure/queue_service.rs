@@ -5049,23 +5049,25 @@ struct ServiceSqlite {
     commands: ServiceCommands,
 }
 
-/// What the issue's transaction reads of `queue` for a token held already
+/// What the issue's already-open transaction reads for a token held already
 /// ([`crate::application::queue_service::IssueFacts`]): the supervisors'
 /// registrations, and a job's records, whose processes the host is asked
 /// about at `now_ms`.
-struct IssueQueue<'a> {
-    queue: &'a SqliteQueue,
+struct IssueQueue<'a, T: super::sql_exec::SqlRead> {
+    tx: &'a T,
     registrations: Vec<crate::domain::SupervisorRegistration>,
     now_ms: i64,
 }
 
-impl crate::application::queue_service::IssueFacts for IssueQueue<'_> {
+impl<T: super::sql_exec::SqlRead> crate::application::queue_service::IssueFacts
+    for IssueQueue<'_, T>
+{
     fn member(
         &self,
         identity: &crate::domain::oidc::OidcIdentity,
     ) -> Result<Option<crate::domain::queue_service::Member>> {
-        // This borrowed connection is inside ServiceQueue::issuing's write transaction.
-        super::members::read(&*self.queue.conn, identity)
+        // Membership is read on issuing's already-open write transaction.
+        super::members::read(self.tx, identity)
     }
     fn registered(&self, token: &LeaseToken) -> bool {
         self.registrations
@@ -5083,7 +5085,8 @@ impl crate::application::queue_service::IssueFacts for IssueQueue<'_> {
         let principal = &held.principal;
         let alive = |pid| super::adapters::SystemProcesses.alive(pid);
         // A job of a kind the queue keeps no record of has none.
-        let records = match job_records_of(principal).map(|records| self.queue.job_facts(&records))
+        let records = match job_records_of(principal)
+            .map(|records| super::runtime_store::job_facts_in(self.tx, &records))
         {
             None => Vec::new(),
             Some(Ok(records)) => records,
@@ -5111,7 +5114,7 @@ impl crate::application::queue_service::IssueFacts for IssueQueue<'_> {
         &self,
         target: &StepTarget,
     ) -> Result<Option<crate::domain::queue_service::TargetStart>> {
-        self.queue.target_start(target)
+        super::runtime_store::target_start_in(self.tx, target)
     }
 }
 
@@ -5148,7 +5151,7 @@ impl ServiceSqlite {
     /// when it is ([`ServiceQueue::issuing`],
     /// [`crate::domain::queue_service::not_held`]).
     fn unheld(
-        &self,
+        tx: &impl super::sql_exec::SqlRead,
         held: &crate::domain::queue_service::IssueHeld,
         now: i64,
         registrations: &[crate::domain::SupervisorRegistration],
@@ -5158,14 +5161,14 @@ impl ServiceSqlite {
         let mut facts = HeldFacts::default();
         let lease = match held {
             IssueHeld::Lease { run, lease } => {
-                facts.leased = self.queue.holds_lease(run, lease)?;
+                facts.leased = super::runtime_store::holds_lease_in(tx, run, lease)?;
                 Some(lease)
             }
             IssueHeld::OpenPlanner { planner, lease } => {
                 let target =
                     StepTarget::of(crate::domain::session_step::TargetKind::Planner, *planner);
-                facts.planner_open =
-                    self.queue.telemetry_target(&target)? == TargetFacts::OpenPlanner;
+                facts.planner_open = super::runtime_store::telemetry_target_in(tx, &target)?
+                    == TargetFacts::OpenPlanner;
                 Some(lease)
             }
             IssueHeld::Registered(lease) => Some(lease),
@@ -5173,7 +5176,8 @@ impl ServiceSqlite {
                 target,
                 registration,
             } => {
-                facts.target_open = self.queue.telemetry_target(target)? != TargetFacts::Ended;
+                facts.target_open =
+                    super::runtime_store::telemetry_target_in(tx, target)? != TargetFacts::Ended;
                 registration.as_ref()
             }
             IssueHeld::Nothing | IssueHeld::Registration(_) => None,
@@ -5413,11 +5417,11 @@ impl ServiceQueue for ServiceSqlite {
             .queue
             .write_tx("issuing")
             .map_err(super::sqlite::tag_busy)?;
-        let registrations = crate::application::SupervisorReads::supervisors(&self.queue);
+        let registrations = super::runtime_store::supervisors_of(&tx);
         let result = registrations.and_then(|registrations| {
-            match self.unheld(held, now_ms / 1000, &registrations)? {
+            match Self::unheld(&tx, held, now_ms / 1000, &registrations)? {
                 None => then(&IssueQueue {
-                    queue: &self.queue,
+                    tx: &tx,
                     registrations,
                     now_ms,
                 }),
@@ -5985,6 +5989,8 @@ mod write_line;
 #[cfg(test)]
 mod supervisor_tests;
 
+#[cfg(test)]
+mod issuing_tests;
 #[cfg(test)]
 mod write_line_tests;
 

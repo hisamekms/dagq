@@ -11,6 +11,7 @@ use super::sql_dialect::JsonType;
 use super::sql_exec::sql_params;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
 use crate::domain::event_kind::{self, EventKind};
+use crate::infrastructure::sql_exec::TransactionEntries;
 use anyhow::{Context, Result};
 use serde_json::json;
 
@@ -109,18 +110,17 @@ impl SqliteQueue {
     /// The findings waiting for a planner of the runtime's, the oldest
     /// mark first, then by ID.
     pub fn planner_findings(&self) -> Result<Vec<Finding>> {
+        let tx = self.read_entry("planner_findings")?;
         let ids: Vec<FindingId> = SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "{} ORDER BY f.propose_requested_at, f.id",
-                targets(self.conn.dialect())
+                targets(tx.dialect())
             ),
             sql_params![],
             |r| r.get(0),
         )?;
-        ids.into_iter()
-            .map(|id| read_finding(&*self.conn, id))
-            .collect()
+        ids.into_iter().map(|id| read_finding(&tx, id)).collect()
     }
 
     /// Record a planner of the runtime's for `finding`
@@ -226,15 +226,17 @@ impl SqliteQueue {
     /// decision 25). A proposal of the runtime's that a person submits again
     /// becomes the person's, and is no longer counted.
     pub fn improvements(&self, limit: usize) -> Result<ImprovementLimit> {
-        improvement_limit(&*self.conn, limit)
+        let tx = self.read_entry("improvements")?;
+        improvement_limit(&tx, limit)
     }
 
     /// The asks about `finding`, oldest first: the observer's `blocked`
     /// ones, the asks a person answered `propose` or `dismiss` about it,
     /// and its planners' questions.
     pub fn finding_asks(&self, finding: FindingId) -> Result<Vec<Ask>> {
+        let tx = self.read_entry("finding_asks")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             "SELECT * FROM asks WHERE finding_id=?1 ORDER BY id",
             sql_params![finding],
             ask_row,
@@ -250,7 +252,7 @@ impl SqliteQueue {
     pub fn settle_findings(&mut self) -> Result<Vec<(FindingId, FindingStatus)>> {
         // Most passes have nothing to settle: no write lock for them.
         let any: bool = SqlRead::query_row(
-            &*self.conn,
+            &self.read_entry("settle_findings")?,
             "SELECT EXISTS(SELECT 1 FROM findings WHERE status='proposed')",
             sql_params![],
             |r| r.get(0),
@@ -312,8 +314,9 @@ impl SqliteQueue {
     /// Findings still `open` and marked whose planners since the mark were
     /// used up (`finding_planner_exhausted`), by ID.
     pub fn exhausted_findings(&self) -> Result<Vec<Finding>> {
+        let tx = self.read_entry("exhausted_findings")?;
         Ok(SqlRead::query_map(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT * FROM findings f WHERE f.status='open' AND f.propose_reason IS NOT NULL
                  AND EXISTS(SELECT 1 FROM run_events e WHERE e.kind='{}'
@@ -322,13 +325,11 @@ impl SqliteQueue {
                  ORDER BY f.id",
                 event_kind::FINDING_PLANNER_EXHAUSTED,
                 finding_id =
-                    self.conn
-                        .dialect()
+                    tx.dialect()
                         .json_field("e.payload", "$.finding_id", JsonType::Integer),
-                marked_at =
-                    self.conn
-                        .dialect()
-                        .json_field("e.payload", "$.marked_at", JsonType::Integer),
+                marked_at = tx
+                    .dialect()
+                    .json_field("e.payload", "$.marked_at", JsonType::Integer),
             ),
             sql_params![],
             finding_row,
@@ -342,7 +343,7 @@ impl SqliteQueue {
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()> {
-        let current = read_finding(&*self.conn, finding)?;
+        let current = read_finding(&self.read_entry("record_finding_event")?, finding)?;
         {
             let tx = self.write_tx("finding_planner_event")?;
             finding_event(&tx, &current, kind, payload)?;
@@ -354,21 +355,20 @@ impl SqliteQueue {
     /// Whether the supervisor typed the answer of `ask` into `workspace`
     /// (`ask_delivered`).
     pub fn ask_delivered_to(&self, ask: AskId, workspace: &str) -> Result<bool> {
+        let tx = self.read_entry("ask_delivered_to")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
              AND {ask_id}=?1
              AND {workspace_id}=?2)",
                 event_kind::ASK_DELIVERED,
-                ask_id = self
-                    .conn
+                ask_id = tx
                     .dialect()
                     .json_field("payload", "$.ask_id", JsonType::Integer),
-                workspace_id =
-                    self.conn
-                        .dialect()
-                        .json_field("payload", "$.workspace_id", JsonType::Text),
+                workspace_id = tx
+                    .dialect()
+                    .json_field("payload", "$.workspace_id", JsonType::Text),
             ),
             sql_params![ask, workspace],
             |r| r.get(0),
@@ -380,25 +380,23 @@ impl SqliteQueue {
     /// typed it, as an older one is taken over only when its supervisor
     /// ended before typing.
     pub fn answer_claimed_at(&self, ask: AskId, workspace: &str) -> Result<Option<i64>> {
+        let tx = self.read_entry("answer_claimed_at")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT MAX({claimed_at}) FROM run_events WHERE kind='{}'
              AND {ask_id}=?1
              AND {workspace_id}=?2",
                 event_kind::PLANNER_ANSWER_CLAIMED,
-                claimed_at =
-                    self.conn
-                        .dialect()
-                        .json_field("payload", "$.claimed_at", JsonType::Integer),
-                ask_id = self
-                    .conn
+                claimed_at = tx
+                    .dialect()
+                    .json_field("payload", "$.claimed_at", JsonType::Integer),
+                ask_id = tx
                     .dialect()
                     .json_field("payload", "$.ask_id", JsonType::Integer),
-                workspace_id =
-                    self.conn
-                        .dialect()
-                        .json_field("payload", "$.workspace_id", JsonType::Text),
+                workspace_id = tx
+                    .dialect()
+                    .json_field("payload", "$.workspace_id", JsonType::Text),
             ),
             sql_params![ask, workspace],
             |r| r.get(0),
@@ -408,20 +406,19 @@ impl SqliteQueue {
     /// Whether sending the answer of `ask` to `planner` ever failed
     /// (`ask_delivery_failed`).
     pub fn ask_delivery_failed(&self, ask: AskId, planner: PlannerId) -> Result<bool> {
+        let tx = self.read_entry("ask_delivery_failed")?;
         Ok(SqlRead::query_row(
-            &*self.conn,
+            &tx,
             &format!(
                 "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
              AND {ask_id}=?1 AND {planner_id}=?2)",
                 event_kind::ASK_DELIVERY_FAILED,
-                ask_id = self
-                    .conn
+                ask_id = tx
                     .dialect()
                     .json_field("payload", "$.ask_id", JsonType::Integer),
-                planner_id =
-                    self.conn
-                        .dialect()
-                        .json_field("payload", "$.planner_id", JsonType::Integer),
+                planner_id = tx
+                    .dialect()
+                    .json_field("payload", "$.planner_id", JsonType::Integer),
             ),
             sql_params![ask, planner],
             |r| r.get(0),
