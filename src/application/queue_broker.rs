@@ -190,6 +190,8 @@ pub fn host_status(
 /// broker of this build that answers is reused, one of another build or
 /// one that does not answer is replaced), recorded as
 /// `queue_broker_started` (`by: queue-broker start`) when it started one.
+/// An unreachable service starts nothing. If the start's record fails,
+/// the command fails while the broker remains running.
 pub fn start_by_hand(
     log: &dyn super::QueueOpener<dyn super::RunLog + Send>,
     control: &dyn QueueBrokerControl,

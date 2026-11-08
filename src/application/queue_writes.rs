@@ -17,6 +17,13 @@
 //! head with Git between a read and a record (ADR-t3102-3 decision 5,
 //! ADR-t3294-1), so it is a [`super::queue_commands::QueueCommand`].
 //!
+//! `request add` reads its words from the client's file or stdin before
+//! sending. A role whose policy lacks `request.record` sends that request
+//! without reading its input, for the service to refuse and record as the
+//! authenticated principal. Separately, `submit --replacement` reads its
+//! replacement plan from the client's file before sending; that read is
+//! not conditional on `request.record`.
+//!
 //! [Queue service]: ../../docs/design/queue-service.md
 
 use anyhow::{Context, Result};
@@ -37,6 +44,8 @@ use crate::domain::{
 };
 
 /// A planning command, as one write use case of the service takes it.
+/// Use case names join the command and subcommand with `_`; params use
+/// the long option names, and the answer is the command's output.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueueWrite {
     Add(AddWrite),

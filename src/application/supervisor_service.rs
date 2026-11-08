@@ -620,7 +620,9 @@ impl<P: ?Sized> QueueOpener<P> for SupervisorPorts<P> {
 }
 
 /// The supervisor's queue: each of its operations one request to the
-/// service.
+/// service. `all_events` is stopped: its service use case refuses before
+/// reading the store, and this client returns the same refusal without
+/// sending a request or substituting pages of the log (ADR-t3745-1).
 pub struct SupervisorQueue {
     service: Arc<dyn ServiceCaller>,
     actor: ActorContext,

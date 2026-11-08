@@ -24,12 +24,11 @@
 //! reads no queue for that. The answer of `graph --out` is the d2 source
 //! and the tasks it shows; the client draws it with its own d2 and writes
 //! the file, as no service draws (`graph --format svg`). No Git and no
-//! program runs in the service (ADR-t3102-3 decision 5), so three are sent
+//! program runs in the service (ADR-t3102-3 decision 5), so these are sent
 //! with what the client read with them: `report` after
 //! [`QueueCommand::ReportInputs`] (the near-term diagram's d2 source, the
-//! bound repository and the commits landed in the report's periods, whose
-//! areas the client reads in its main checkout and whose diagram it
-//! draws), `release` after
+//! bound repository, with no landed commits or client Git reads for
+//! areas; the client draws only the diagram), `release` after
 //! [`QueueCommand::ReleaseRead`] (the run whose work the client reads and
 //! keeps, which the release's transaction checks again), `ready --inherit`
 //! after [`QueueCommand::ReadyInheritRead`] (the latest run whose head the
@@ -40,6 +39,16 @@
 //! worktrees `rebind`'s answer lists.
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
+//!
+//! [`QueueCommand::authorization`] selects the capability checked by Gate
+//! before running; commands it leaves to the application authorize against
+//! the queue there. `replan resolve` first reads the snapshot ref and saved
+//! head with `replan_resolve_read`; the client checks them with Git in the
+//! bound repository. `compose::run_command` compares that result with the
+//! manifest and files beside the queue, then the store transaction checks
+//! the operation's generation and children again. `planner request`'s two
+//! events commit together in that transaction. A role lacking
+//! `planner.request` sends without reading the caller's file or stdin.
 
 use std::path::{Path, PathBuf};
 

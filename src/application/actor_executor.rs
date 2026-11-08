@@ -529,6 +529,9 @@ enum Events<'a> {
 /// the spawner, and the inbox's command for its caller's terminal.
 /// Each part is given where the caller has it, and a program that needs a
 /// part the executor was not given is refused.
+/// For a planner, the supervisor asks the service for the planner's token
+/// before starting its wrapper; the wrapper hands its file to the turn
+/// and never asks to issue that token itself.
 pub struct HostActorExecutor<'a> {
     queue: &'a Path,
     sessions: Option<&'a dyn SessionWrappers>,

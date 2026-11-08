@@ -904,8 +904,9 @@ pub struct ServiceRequest {
     /// (ADR-t3102-1 decision 1). Not what the service authorizes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_role: Option<String>,
-    /// The queue DB the caller resolved (the host's `dagq`, from `--db` or
-    /// its working directory), which the service compares with its own
+    /// The absolute path of the queue DB the caller resolved (the host's
+    /// `dagq`, from `--db` or its working directory, links resolved to their
+    /// targets), which the service compares with its own
     /// before anything else and refuses as [`ServiceErrorCode::WrongQueue`]
     /// when they differ, opening neither. `None` from a caller that names
     /// no queue (a worker's or a job's, given only the socket), and on the

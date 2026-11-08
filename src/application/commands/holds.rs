@@ -281,6 +281,11 @@ pub type WithBranches<'a> =
 /// only when there are some, whether the work was read or not: when both
 /// fail, the read's error is the release's and the records' is logged;
 /// when only the records fail, theirs is.
+/// The host client runs the container's facts-only turn itself without
+/// opening the DB; failed image records use the service's recording time.
+/// A client-mode caller that knows no queue directory starts no container:
+/// when the facts are not of the last turn's end and need that turn, it
+/// refuses and asks for the host's `dagq` instead.
 pub fn prepare_release(
     params: &mut ReleaseParams,
     client: &ReleaseClient<'_>,

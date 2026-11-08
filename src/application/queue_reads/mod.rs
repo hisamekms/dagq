@@ -101,8 +101,8 @@ pub enum JobRead {
     ObserverKpi {
         git: Option<crate::application::stats::StatsGitReads>,
     },
-    /// The inputs the job reads Git with for the others
-    /// ([`QueueRead::StatsInputs`]).
+    /// The bound checkout and latest-event version for the other reads,
+    /// with no client Git inputs ([`QueueRead::StatsInputs`]).
     StatsInputs,
 }
 
@@ -261,16 +261,16 @@ pub struct StatsRead {
     /// Today's `stats` beside the ledger's (`--ledger`).
     #[serde(default)]
     pub ledger: bool,
-    /// What the queue service's client read with Git for it
-    /// ([`crate::application::stats::prepare_read`]); the service takes
-    /// none as nothing read, and a caller on the DB reads Git itself.
+    /// Git inputs sent by an older client, accepted for compatibility
+    /// and ignored ([`crate::application::stats::StatsGitReads`]).
     #[serde(default)]
     pub git: Option<crate::application::stats::StatsGitReads>,
 }
 
 /// `stats_inputs`' read: no option. Its answer is the
 /// [`crate::application::stats::StatsInputs`] the client of `stats` and
-/// `kpi` reads Git with.
+/// `kpi` can receive without reading Git; it names no commits or history
+/// to read, only the bound checkout and latest-event version.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatsInputsRead {}

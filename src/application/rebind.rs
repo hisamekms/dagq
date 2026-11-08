@@ -1,5 +1,15 @@
 //! `rebind` (ADR-0020): bind the queue to the repository it moved to, the
 //! only way the binding changes.
+//!
+//! The host client sends this use case without a repository binding, since
+//! the queue is bound to another repository. It reads the checkout's Git
+//! common directory and the destination queue directory its data home gives
+//! that repository (`move_to`), and sends them to the service. The client
+//! writes the `logs/` record from the answer and repairs the listed run
+//! worktrees with Git; the service does no Git. A live supervisor refuses
+//! the rebind: start only the service first, since `down` also stops it and
+//! `up` starts a supervisor (the operational steps are in the dagq plugin's
+//! `reference/locate.md`).
 
 use anyhow::{Result, bail};
 use serde_json::{Value, json};

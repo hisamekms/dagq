@@ -37,6 +37,41 @@
 //! `authorization_denied`, recorded. The
 //! events are the principal's own, the landing's the integrator's at its
 //! request.
+//!
+//! Lifecycle ordering stays on the caller: `up` and `service start` send
+//! steps after starting the service; `down` and `service stop` send them
+//! before stopping it. `service start` sends its first step even on reuse.
+//! `queue-broker start|stop` likewise send their first step before acting;
+//! their failure and unrecorded-stop cases are documented by
+//! [`crate::application::queue_broker::start_by_hand`] and its stop function.
+//!
+//! Update jobs use the launching supervisor registration's token file.
+//! For `install` (rollback and release too) and update jobs, an unanswered
+//! service or `CommandUnknown` makes `install::install_built` start the
+//! install source binary's service as a replacement before retrying the
+//! queue steps. With an existing queue, `update::install_watched` delegates
+//! the whole install to the source binary only if `sends_install_steps`
+//! is false (its `install --sends-steps` probe fails), before reading the
+//! registrations; a checkout's e2e gate and its record stay with the
+//! caller. `install`
+//! hands over the installed fixed binary's path; `up` is restricted by
+//! [`handoff_refusal`].
+//!
+//! Lifecycle commands (`up`, `down`, `inbox`, service and broker start/stop)
+//! do not resend: a failed step fails the command. The pre-stop record is
+//! the exception: `down` warns and stops; `service stop` uses
+//! [`crate::application::queue_service::stop_record`], distinguishing a
+//! refusal from an unreachable service or failed record. During
+//! `down --wait`, if the last drained supervisor stops the service, only
+//! the supervisor processes are used to decide when draining ended.
+//!
+//! `install` and update jobs resend records; after any step was answered,
+//! even an untaken step is retried up to the limit ([`super::across`]),
+//! bridging replacement and drain to the next service that accepts.
+//! Landing token revocation is accepted only after its run leaves
+//! `integrating`, never for another task's run or a supervisor's landing.
+//! Agent job tokens are issued by the service at the caller principal's
+//! request; telemetry targets with no run have no lease.
 
 use std::sync::Arc;
 
@@ -68,7 +103,9 @@ pub const CONTROL_QUEUE: &str = "control_queue";
 /// ([`crate::application::RunTransitions::approve_integration`]): the run's
 /// status, its lease and its approvals are read again in the approval's
 /// own write (ADR-t3102-3 decision 4), a lease held as the service's own
-/// processes and clock see it.
+/// processes and clock see it. The run must still be awaiting integration
+/// or a session as read by the caller, without a live lease. An existing
+/// approval writes nothing; `integration_approved` is written only here.
 pub const APPROVE_INTEGRATION: &str = "approve_integration";
 
 /// The steps of the telemetry of a command's agent or verification: the

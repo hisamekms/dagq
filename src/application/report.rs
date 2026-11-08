@@ -9,6 +9,25 @@
 //! and shown as an image of its own bytes, or why it is not drawn; the rest is written either way. The supervisor writes the reports it owes once a day
 //! ([`write_due`]); a person writes any with `dagq report`. No LLM, no run
 //! slot, nothing sent outside the queue's directory.
+//!
+//! Through the queue service, `report_inputs` is read once for the d2
+//! source and bound repository; `landed` is empty and no client Git is read
+//! for areas. The client draws the diagram and fits the request with
+//! [`fit_request`]: omit an oversized SVG with a reason, then refuse if the
+//! request still does not fit. The service builds the report with its own
+//! `TZ` and `host.toml`. Without `--out` it writes only under the queue's
+//! `reports/`; with `--out` it returns JSON, HTML and retention settings for
+//! the client to write, prune and index with its own rights. Params naming
+//! `out` are refused before writing anything on the service side.
+//!
+//! Only the bound main checkout accepted by [`accept_checkout`] supplies
+//! `dagq.toml`, as for stats and KPI. Its text is read by
+//! `crate::infrastructure::run_env`'s `read_config`: bounded in size and only
+//! from a regular file, refusing devices and FIFOs even through symlinks.
+//! Malformed SVG is omitted; well-formed XML rooted at `svg` is embedded as
+//! an image data URL, whose scripts, external reads and styles cannot act
+//! on the page (see `crate::domain::kpi::report::svg`).
+
 use crate::domain::LeaseToken;
 use std::collections::{BTreeMap, HashSet};
 use std::io;
