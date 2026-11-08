@@ -1,0 +1,5 @@
+[[doc]]
+path = "docs/design/security.md"
+
+[[doc]]
+path = "docs/design/security-enforcement.md"

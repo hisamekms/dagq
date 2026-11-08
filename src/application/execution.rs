@@ -404,6 +404,9 @@ const IDENTITY_ENV: [&str; 4] = [ROLE_ENV, ACTOR_ID_ENV, RUN_ID_ENV, TASK_ID_ENV
 /// (the full turn order is `adapters::headless_worker_settings`). Review
 /// job settings contain only role denials; inbox settings contain only
 /// `permissions.deny` with role denials and no `SIGNAL_BY_NAME_DENIED`.
+/// Planner settings are written by the runtime; `dagq inbox` writes its
+/// Claude settings into the queue directory when opening the inbox.
+/// A person's plain terminal (`DAGQ_ROLE` absent) has no such settings.
 /// `DAGQ_COMMANDS` agrees with `main.rs::requests` under unit tests; in
 /// particular a role without `ci.read` denies `Bash(dagq ci failures:*)`.
 pub fn permission_deny(role: ActorRole) -> Vec<String> {

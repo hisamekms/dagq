@@ -36,7 +36,13 @@ string_enum!(Capability {
     /// looked at again) is one of them rather than a capability of its
     /// own, since the roles allowed it are the same.
     TaskWrite => "task.write",
+    /// Record a follow-up's membership judgment in any state: user, inbox
+    /// and planner only. A membership move still needs draft or ready;
+    /// this judgment is the planner's exception to its task-state rule.
     FollowUpJudge => "follow_up.judge",
+    /// User and inbox may correct only the verification of an in-progress
+    /// task whose latest run ended and which has no live run (ADR-t883-1).
+    /// A planner, worker or job has no such capability.
     TaskVerifyEdit => "task.verify_edit",
     TaskCancel => "task.cancel",
     TaskReady => "task.ready",
@@ -798,7 +804,11 @@ pub fn opens_ask(role: ActorRole, kind: &AskKind) -> bool {
     }
 }
 
-/// The resource rules on top of the allowlist.
+/// The resource rules on top of the allowlist. Review and triage submits
+/// belong to the job's own run. Neither has a CLI command: the supervisor
+/// reads verdicts as data. Headless job environments carry no
+/// `DAGQ_RUN_ID`, so a context read from that environment cannot resolve
+/// the owner and is refused (fail closed).
 fn resource_permits(actor: &ActorContext, capability: Capability, resource: &Resource) -> bool {
     if capability == C::TokenIssue {
         return matches!(resource, Resource::Principal(child) if starts(actor.role(), *child));
