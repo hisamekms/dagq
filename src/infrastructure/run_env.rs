@@ -180,13 +180,13 @@ const GOALS_TABLE: &str = "goals";
 const GOALS_TAGS: &str = "tags";
 /// The Spike/replanning cycle limit of a goal, read only by submit.
 const GOALS_SPIKE_CYCLES: &str = "max_spike_cycles";
-/// `[e2e]`: `paths`, the globs whose change requires `e2e` of a run
-/// (ADR-t963-1 decision 2). The globs are written as `add --paths` takes
-/// them ([`crate::domain::scope`]: from the repository root, `*` within one
-/// segment, `**` at any depth), and the same glob written twice is kept
-/// once.
+/// `[e2e]` accepts `paths`, the repository-relative globs whose change
+/// requires e2e (ADR-t963-1 decision 2; [`crate::domain::scope`]),
+/// `command`, a non-blank single-line shell string, and `timeout_secs`,
+/// a positive integer of seconds requiring `command`. Without a timeout,
+/// [`crate::application::install::E2E_TIMEOUT`] applies. Repeated keys and
+/// unknown keys are errors; repeated path globs are kept once.
 const E2E_TABLE: &str = "e2e";
-/// The one key of `[e2e]`.
 const E2E_PATHS: &str = "paths";
 /// The tables of the removed resource broker (ADR-t2125-1): accepted
 /// without looking into them, however many times they come, so a
@@ -646,6 +646,8 @@ pub struct Config {
     pub max_spike_cycles: Option<usize>,
     /// `[e2e] paths` (ADR-t963-1 decision 2); empty without it.
     pub e2e_paths: Vec<String>,
+    /// The declared command and resolved time limit; none without a command.
+    pub e2e_command: Option<crate::application::install::E2eCommand>,
     /// `[review.subagents.<agent>]` in file order (ADR-t1453-1 decision
     /// 1); empty without any.
     pub review_subagents: Vec<ReviewSubagent>,
@@ -828,7 +830,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut recurring = RecurringTables::default();
     let mut freshness = super::ci_freshness_config::FreshnessTables::default();
     let mut areas: Option<Vec<(String, Vec<String>)>> = None;
-    let mut e2e_paths_seen: Option<usize> = None;
+    let mut e2e_keys = Vec::new();
+    let mut e2e_command = None;
+    let mut e2e_timeout = None;
     let mut review_code_seen: Option<usize> = None;
     let mut egress_seen = false;
     let mut recheck_paths_seen = false;
@@ -1554,18 +1558,35 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             Some(E2E_TABLE) => {
                 ensure!(
-                    key == E2E_PATHS,
-                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{E2E_TABLE}]; the key is {E2E_PATHS}"
+                    matches!(key, E2E_PATHS | "command" | "timeout_secs"),
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{E2E_TABLE}]"
                 );
                 ensure!(
-                    e2e_paths_seen.is_none(),
+                    !e2e_keys.contains(&key),
                     "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
                 );
-                e2e_paths_seen = Some(number);
+                e2e_keys.push(key);
                 let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
-                let globs = parse_string_array(rest.trim()).with_context(with)?;
-                validate_path_globs(&globs).with_context(with)?;
-                config.e2e_paths = dedup_globs(&globs);
+                match key {
+                    E2E_PATHS => {
+                        let globs = parse_string_array(rest.trim()).with_context(with)?;
+                        validate_path_globs(&globs).with_context(with)?;
+                        config.e2e_paths = dedup_globs(&globs);
+                    }
+                    "command" => {
+                        let command = parse_string(rest.trim()).with_context(with)?;
+                        ensure!(
+                            !command.trim().is_empty() && !command.contains(['\n', '\r']),
+                            "{CONFIG_FILE_NAME}:{number}: command must be a non-empty single line"
+                        );
+                        e2e_command = Some(command);
+                    }
+                    _ => {
+                        let secs =
+                            parse_positive(rest.trim(), "number of seconds").with_context(with)?;
+                        e2e_timeout = Some(Duration::from_secs(secs as u64));
+                    }
+                }
             }
             Some(CONTAINER_BUILD_OUTPUT_TABLE) => {
                 ensure!(
@@ -2571,6 +2592,14 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 .with_context(|| format!("{CONFIG_FILE_NAME}:{line}: value of light_changes"))?,
         );
     }
+    ensure!(
+        e2e_timeout.is_none() || e2e_command.is_some(),
+        "{CONFIG_FILE_NAME}: [e2e] timeout_secs requires command"
+    );
+    config.e2e_command = e2e_command.map(|command| crate::application::install::E2eCommand {
+        command,
+        timeout: e2e_timeout.unwrap_or(crate::application::install::E2E_TIMEOUT),
+    });
     Ok(config)
 }
 
@@ -3409,6 +3438,17 @@ pub fn load_e2e_paths(root: &Path) -> Result<Vec<String>> {
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
         .e2e_paths)
+}
+
+/// Read the main checkout's working file for each e2e start. Missing
+/// configuration is no declaration; read and parse failures stay errors.
+pub fn load_e2e_command(root: &Path) -> Result<Option<crate::application::install::E2eCommand>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    read_config(&path)?
+        .map(|text| parse_config(&text).map(|config| config.e2e_command))
+        .transpose()
+        .map(Option::flatten)
+        .with_context(|| format!("read e2e command of {}", path.display()))
 }
 
 /// `[[recurring]]` of the `dagq.toml` in `root` (ADR-0072 decision 1); no
@@ -5436,6 +5476,79 @@ mod tests {
             assert_eq!(past.decision, PlanReviewDecision::Concern, "{limit}");
         }
         assert_eq!(MAX_PLAN_REVISES, 2);
+    }
+
+    /// Declarations resolve their time limit and reject ambiguous or
+    /// unusable commands without changing paths-only configuration.
+    #[test]
+    fn parses_the_e2e_command_and_timeout() {
+        let config =
+            parse_config("[e2e]\ntimeout_secs = 42\ncommand = 'sh check.sh'\npaths = ['src/**']\n")
+                .unwrap();
+        let declared = config.e2e_command.unwrap();
+        assert_eq!(declared.command, "sh check.sh");
+        assert_eq!(declared.timeout, Duration::from_secs(42));
+        assert_eq!(config.e2e_paths, ["src/**"]);
+        assert_eq!(
+            parse_config("[e2e]\ncommand = 'check'\n")
+                .unwrap()
+                .e2e_command
+                .unwrap()
+                .timeout,
+            crate::application::install::E2E_TIMEOUT
+        );
+        assert!(
+            parse_config("[e2e]\npaths = ['src/**']\n")
+                .unwrap()
+                .e2e_command
+                .is_none()
+        );
+        assert_eq!(
+            parse_config("[e2e]\ncommand = 'check'\ntimeout_secs = 9223372036854775807\n")
+                .unwrap()
+                .e2e_command
+                .unwrap()
+                .timeout,
+            Duration::from_secs(i64::MAX as u64)
+        );
+        for fields in [
+            "command = ''",
+            "command = '   '",
+            "command = \"a\\nb\"",
+            "command = \"a\\rb\"",
+            "command = 1",
+            "command = 'check'\ntimeout_secs = 0",
+            "timeout_secs = 42",
+            "command = 'a'\ncommand = 'b'",
+            "command = 'a'\ntimeout_secs = 1\ntimeout_secs = 2",
+            "unknown = 'x'",
+        ] {
+            assert!(
+                parse_config(&format!("[e2e]\n{fields}\n")).is_err(),
+                "{fields}"
+            );
+        }
+    }
+
+    /// Every start reads the current working file; invalid or unreadable
+    /// files do not turn into an absent declaration.
+    #[test]
+    fn reloads_the_e2e_declaration_and_preserves_read_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        assert!(load_e2e_command(dir.path()).unwrap().is_none());
+        for command in ["first", "second"] {
+            fs::write(&path, format!("[e2e]\ncommand = '{command}'\n")).unwrap();
+            assert_eq!(
+                load_e2e_command(dir.path()).unwrap().unwrap().command,
+                command
+            );
+        }
+        fs::write(&path, "[e2e]\ncommand = ''\n").unwrap();
+        assert!(load_e2e_command(dir.path()).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(load_e2e_command(dir.path()).is_err());
     }
 
     /// `[e2e] paths` names the globs whose change requires e2e

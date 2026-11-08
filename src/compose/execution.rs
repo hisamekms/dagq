@@ -43,14 +43,15 @@ use crate::{
 /// How the supervisor runs the e2e of a run after its review (ADR-t1233-2):
 /// in dagq's source `cargo test --locked --test e2e -- --ignored` in the
 /// run's worktree, with the `[run.env]` of the main checkout, the host's
-/// e2e lock and [`installation::E2E_TIMEOUT`]. Elsewhere there is none
-/// unless `command` gives one.
+/// e2e lock. A repository declaration is resolved at each start, with a
+/// test command taking precedence.
 #[derive(Debug, Clone, Default)]
 pub struct RunE2eOptions {
     /// A shell command in place of the e2e (tests): it runs in any
     /// repository.
     pub command: Option<String>,
-    /// How long it may run; `None` is [`installation::E2E_TIMEOUT`].
+    /// Override its time limit (tests); `None` uses the declaration or
+    /// [`installation::E2E_TIMEOUT`] when no command is declared.
     pub timeout: Option<Duration>,
     /// How long a run waits before its e2e that could not run is tried
     /// again; `None` is [`crate::domain::run_e2e::RETRY_SECS`] (tests
@@ -826,10 +827,9 @@ impl OneShot {
     }
 }
 
-/// The e2e the supervisor runs of a run after its review (ADR-t1233-2):
-/// in dagq's source `checkout`, or anywhere `options` gives a command in
-/// its place, with the `[run.env]` of `checkout` and the host's e2e lock
-/// of the queue at `db`; none elsewhere.
+/// Wire the local e2e port. It reads the main checkout's working
+/// configuration for each start, keeping read failures for the unavailable
+/// path even when the repository has no declaration.
 pub(super) fn run_e2e_port(
     db: &Path,
     checkout: &Path,
@@ -838,10 +838,22 @@ pub(super) fn run_e2e_port(
     let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
     let command = options.command.clone();
     let stub = command.is_some();
-    if !stub && !crate::infrastructure::adapters::is_dagq_source(checkout) {
-        return None;
-    }
+    let root = checkout.to_path_buf();
+    let timeout = options.timeout;
     Some(crate::application::supervise::RunE2ePort {
+        prepare: Arc::new(move |settings| {
+            let declaration = if settings.command.is_some() {
+                Ok(None)
+            } else {
+                crate::infrastructure::run_env::load_e2e_command(&root)
+            };
+            supervisor::RunE2ePort::select(
+                settings,
+                declaration,
+                crate::infrastructure::adapters::is_dagq_source(&root),
+                timeout,
+            )
+        }),
         settings: installation::E2eSettings {
             command,
             timeout: options.timeout.unwrap_or(installation::E2E_TIMEOUT),

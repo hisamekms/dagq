@@ -23,6 +23,14 @@
 //! - The repository has no e2e the runtime knows: `run_e2e_finished`
 //!   (`outcome: not_configured`) and the run lands without it.
 //!
+//! The local port rereads `[e2e]` from the main checkout's working
+//! `dagq.toml` before every start, as for paths. Its declared command and
+//! timeout apply in any repository; without a declaration dagq's source
+//! uses the fixed gate and other repositories are not configured. Missing
+//! files mean no declaration; unreadable or invalid files are unavailable
+//! and cannot permit landing. Test command overrides win. Custom commands
+//! receive failed test names for reruns through `DAGQ_E2E_RERUN`.
+//!
 //! One run of this supervisor runs its e2e at a time; another waits in its
 //! slot (`run_e2e_waiting`, once per wait). Across processes (another
 //! queue's, the automatic update's gate, `install`) the e2e's lock waits.
@@ -36,9 +44,15 @@ use std::collections::HashSet;
 /// Runs the e2e of a worktree with the settings.
 pub type RunE2e = Arc<dyn Fn(&Path, &E2eSettings) -> Result<E2eOutcome> + Send + Sync>;
 
+/// Resolve the settings from trusted configuration before a start.
+pub type PrepareE2e = Arc<dyn Fn(&E2eSettings) -> Result<Option<E2eSettings>> + Send + Sync>;
+
 /// How the supervisor runs the e2e of a run.
 #[derive(Clone)]
 pub struct RunE2ePort {
+    /// Resolve configuration afresh before each start. Errors run through
+    /// the unavailable outcome; `None` permits landing without e2e.
+    pub prepare: PrepareE2e,
     /// The e2e's settings: its command, timeout, `[run.env]`,
     /// scratch directory and the host's lock. The log is the run's
     /// and the time zone the supervisor's, set for each e2e.
@@ -49,6 +63,93 @@ pub struct RunE2ePort {
     /// How long a run waits before its e2e that could not run is tried
     /// again ([`run_e2e::RETRY_SECS`]; tests shorten it).
     pub retry: Duration,
+}
+
+impl RunE2ePort {
+    /// Choose the command without side effects. A test command wins over
+    /// the declaration; otherwise a declaration runs in any repository.
+    /// Without one only dagq's source uses the fixed gate command. Read
+    /// errors remain errors even in an otherwise unconfigured repository.
+    pub fn select(
+        settings: &E2eSettings,
+        declaration: Result<Option<crate::application::install::E2eCommand>>,
+        dagq_source: bool,
+        timeout_override: Option<Duration>,
+    ) -> Result<Option<E2eSettings>> {
+        let mut settings = settings.clone();
+        if settings.command.is_some() {
+            return Ok(Some(settings));
+        }
+        match declaration? {
+            Some(declared) => {
+                settings.command = Some(declared.command);
+                settings.timeout = timeout_override.unwrap_or(declared.timeout);
+                Ok(Some(settings))
+            }
+            None => Ok(dagq_source.then_some(settings)),
+        }
+    }
+}
+
+/// The preparation's decision, before any command or worker thread runs.
+/// A failed read is a completion that keeps the run awaiting its e2e,
+/// never the absent configuration that permits landing.
+enum E2ePreparation {
+    NotConfigured,
+    Ready(E2eSettings),
+    Unavailable(E2eUnavailable),
+}
+
+fn preparation_decision(prepared: Option<Result<Option<E2eSettings>>>) -> E2ePreparation {
+    match prepared {
+        None | Some(Ok(None)) => E2ePreparation::NotConfigured,
+        Some(Ok(Some(settings))) => E2ePreparation::Ready(settings),
+        Some(Err(error)) => E2ePreparation::Unavailable(unavailable_decision(format!("{error:#}"))),
+    }
+}
+
+/// The event and next state of an e2e that could not run. Preparation
+/// errors and execution errors use this same decision and retry policy.
+struct E2eUnavailable {
+    kind: EventKind,
+    outcome: &'static str,
+    error: String,
+    next: E2eUnavailableNext,
+}
+
+#[derive(Clone, Copy)]
+enum E2eUnavailableNext {
+    Retry,
+}
+
+impl E2eUnavailableNext {
+    fn phase(self) -> Phase {
+        match self {
+            Self::Retry => Phase::AwaitingSlot,
+        }
+    }
+}
+
+fn unavailable_decision(error: String) -> E2eUnavailable {
+    E2eUnavailable {
+        kind: EventKind::RunE2eFinished,
+        outcome: run_e2e::UNAVAILABLE,
+        error,
+        next: E2eUnavailableNext::Retry,
+    }
+}
+
+impl E2eUnavailable {
+    fn payload(&self, mut base: Value, in_a_row: usize, retry: Duration) -> Value {
+        base["outcome"] = json!(self.outcome);
+        base["error"] = json!(self.error);
+        base["in_a_row"] = json!(in_a_row);
+        base["retry_secs"] = json!(retry.as_secs());
+        if in_a_row >= run_e2e::UNAVAILABLE_ATTENTION {
+            base["attention"] = json!(true);
+        }
+        base
+    }
 }
 
 /// The e2e stage's state: how it runs the e2e, the runs waiting for it,
@@ -79,9 +180,12 @@ fn retry_waits(since_unavailable: Duration, retry: Duration) -> bool {
     since_unavailable < retry
 }
 
-/// The e2e of a run in progress on a thread.
+/// The e2e of a run: an executor thread or a preparation failure ready
+/// to finish.
 pub(super) struct E2eWatch {
     handle: Option<thread::JoinHandle<Result<E2eOutcome>>>,
+    /// A preparation error is already a completion; no executor is run.
+    unavailable: Option<E2eUnavailable>,
     attempt: usize,
     commit: CommitSha,
     settings: E2eSettings,
@@ -96,7 +200,7 @@ pub(super) struct E2eWatch {
 }
 
 impl E2eWatch {
-    /// Whether its thread ended (or it was taken already).
+    /// Whether preparation failed, its thread ended or it was taken already.
     pub(super) fn finished(&self) -> bool {
         self.handle
             .as_ref()
@@ -139,7 +243,10 @@ impl Supervisor<'_> {
             .result_commit()
             .context("a run due its e2e has a result commit")?
             .clone();
-        let Some(port) = self.e2e.port.clone() else {
+        let port = self.e2e.port.clone();
+        let prepared =
+            preparation_decision(port.as_ref().map(|port| (port.prepare)(&port.settings)));
+        if matches!(prepared, E2ePreparation::NotConfigured) {
             self.queue.record_runtime_event(
                 run.id(),
                 EventKind::RunE2eFinished,
@@ -152,6 +259,12 @@ impl Supervisor<'_> {
             )?;
             info!(run_id = %run.id(), "run {} needs the e2e, but the repository has no e2e the runtime knows; it lands without one", run.id());
             return Ok(None);
+        };
+        let port = port.expect("a configured e2e has a port");
+        let (selected, unavailable) = match prepared {
+            E2ePreparation::Ready(settings) => (settings, None),
+            E2ePreparation::Unavailable(decision) => (port.settings.clone(), Some(decision)),
+            E2ePreparation::NotConfigured => unreachable!("handled above"),
         };
         // A handoff starts no e2e: the next process runs it. One asked
         // after this pass read none is refused by the start's write below.
@@ -193,7 +306,7 @@ impl Supervisor<'_> {
             log: run_dir.join(format!("e2e-{}.log", due.attempt)),
             utc_offset_secs: (self.utc_offset)(now),
             git_env: crate::application::run_git::tree_env(&*self.repository, run, &worktree)?,
-            ..port.settings.clone()
+            ..selected
         };
         let started = json!({
             "attempt": due.attempt,
@@ -252,9 +365,12 @@ impl Supervisor<'_> {
                 },
             )));
         }
-        let handle = spawn_traced(move || (port.run)(&worktree, &thread_settings));
+        let handle = unavailable
+            .is_none()
+            .then(|| spawn_traced(move || (port.run)(&worktree, &thread_settings)));
         Ok(Some(Phase::E2e(E2eWatch {
-            handle: Some(handle),
+            handle,
+            unavailable,
             attempt: due.attempt,
             commit,
             settings,
@@ -290,8 +406,8 @@ impl Supervisor<'_> {
         &mut self,
         slot: &mut Slot,
         (run, events): (TaskRun, &[RunEvent]),
-        mut payload: Value,
-        error: String,
+        payload: Value,
+        decision: E2eUnavailable,
     ) -> Result<Step> {
         let retry = self
             .e2e
@@ -299,25 +415,15 @@ impl Supervisor<'_> {
             .as_ref()
             .map_or(Duration::from_secs(run_e2e::RETRY_SECS), |port| port.retry);
         let in_a_row = run_e2e::unavailable_in_a_row(events) + 1;
-        payload["outcome"] = json!(run_e2e::UNAVAILABLE);
-        payload["error"] = json!(error);
-        payload["in_a_row"] = json!(in_a_row);
-        payload["retry_secs"] = json!(retry.as_secs());
-        if in_a_row >= run_e2e::UNAVAILABLE_ATTENTION {
-            payload["attention"] = json!(true);
-        }
+        let payload = decision.payload(payload, in_a_row, retry);
         self.queue
-            .record_runtime_event(run.id(), EventKind::RunE2eFinished, payload)?;
-        warn!(run_id = %run.id(), "run {}: its e2e could not run ({in_a_row} in a row); trying again in {}s: {error}", run.id(), retry.as_secs());
+            .record_runtime_event(run.id(), decision.kind, payload)?;
+        warn!(run_id = %run.id(), "run {}: its e2e could not run ({in_a_row} in a row); trying again in {}s: {}", run.id(), retry.as_secs(), decision.error);
         self.e2e
             .retry
             .insert(run.id().clone(), (self.generators.clock.monotonic(), retry));
         slot.run = run;
-        slot.transition(
-            Phase::AwaitingSlot,
-            EventKind::RunE2eFinished.as_str(),
-            &*self.queue,
-        );
+        slot.transition(decision.next.phase(), decision.kind.as_str(), &*self.queue);
         Ok(Step::Continue)
     }
 
@@ -333,10 +439,15 @@ impl Supervisor<'_> {
         events: &[RunEvent],
         history: &[RunEvent],
     ) -> Result<Step> {
-        let outcome = match watch.handle.take().map(thread::JoinHandle::join) {
-            Some(Ok(outcome)) => outcome,
-            Some(Err(_)) => Err(anyhow!("the e2e's thread panicked")),
-            None => Err(anyhow!("the e2e was not running")),
+        let outcome = if let Some(decision) = watch.unavailable.take() {
+            Err(decision)
+        } else {
+            match watch.handle.take().map(thread::JoinHandle::join) {
+                Some(Ok(outcome)) => outcome,
+                Some(Err(_)) => Err(anyhow!("the e2e's thread panicked")),
+                None => Err(anyhow!("the e2e was not running")),
+            }
+            .map_err(|error| unavailable_decision(format!("{error:#}")))
         };
         let base = json!({
             "attempt": watch.attempt,
@@ -348,7 +459,7 @@ impl Supervisor<'_> {
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                return self.e2e_unavailable(slot, (run, events), base, format!("{error:#}"));
+                return self.e2e_unavailable(slot, (run, events), base, error);
             }
         };
         // What its commands' steps left is sent now, again at the sweeps.
@@ -409,7 +520,7 @@ impl Supervisor<'_> {
                 }
                 payload["rerun"] = value;
             }
-            return self.e2e_unavailable(slot, (run, events), payload, why);
+            return self.e2e_unavailable(slot, (run, events), payload, unavailable_decision(why));
         }
         // The marks of the landing branch's committed tree, not those of
         // the run's worktree the gate read (ADR-t1233-2 decision 5).
@@ -516,6 +627,165 @@ fn e2e_command(custom: Option<&str>, rerun: Option<&[String]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settings() -> E2eSettings {
+        E2eSettings {
+            command: None,
+            timeout: crate::application::install::E2E_TIMEOUT,
+            run_env_root: None,
+            queue_dir: None,
+            scratch: PathBuf::new(),
+            log: PathBuf::new(),
+            utc_offset_secs: 0,
+            lock: None,
+            git_env: Vec::new(),
+            ended: None,
+        }
+    }
+
+    /// A fake executor receives the declaration in any repository and
+    /// produces the same completion payload as the existing gate.
+    #[test]
+    fn a_declared_e2e_runs_through_the_port() {
+        for dagq_source in [false, true] {
+            let port = RunE2ePort {
+                settings: settings(),
+                prepare: Arc::new(move |settings| {
+                    RunE2ePort::select(
+                        settings,
+                        Ok(Some(crate::application::install::E2eCommand {
+                            command: "sh check.sh".to_owned(),
+                            timeout: Duration::from_secs(42),
+                        })),
+                        dagq_source,
+                        None,
+                    )
+                }),
+                run: Arc::new(|_, settings| {
+                    assert_eq!(settings.command.as_deref(), Some("sh check.sh"));
+                    assert_eq!(settings.timeout, Duration::from_secs(42));
+                    Ok(E2eOutcome {
+                        passed: true,
+                        secs: 7,
+                        ..Default::default()
+                    })
+                }),
+                retry: Duration::from_secs(1),
+            };
+            let selected = (port.prepare)(&port.settings).unwrap().unwrap();
+            let outcome = (port.run)(Path::new("reviewed-tree"), &selected).unwrap();
+            assert!(outcome.passed);
+            assert_eq!(
+                ran_payload(json!({"attempt": 1}), &outcome),
+                json!({
+                    "attempt": 1, "secs": 7, "lock_wait_secs": 0,
+                    "timed_out": false, "failed_tests": [], "cleanup": null,
+                })
+            );
+        }
+    }
+
+    /// Absence alone permits the external repository to skip e2e.
+    /// Configuration errors stay unavailable and test commands win.
+    #[test]
+    fn selection_preserves_fallbacks_overrides_and_errors() {
+        let base = settings();
+        assert!(
+            RunE2ePort::select(&base, Ok(None), false, None)
+                .unwrap()
+                .is_none()
+        );
+        let fixed = RunE2ePort::select(&base, Ok(None), true, None)
+            .unwrap()
+            .unwrap();
+        assert!(fixed.command.is_none());
+        assert_eq!(fixed.timeout, crate::application::install::E2E_TIMEOUT);
+        for source in [false, true] {
+            assert!(
+                RunE2ePort::select(&base, Err(anyhow!("unreadable dagq.toml")), source, None)
+                    .is_err()
+            );
+        }
+        let mut overridden = base;
+        overridden.command = Some("test override".to_owned());
+        overridden.timeout = Duration::from_secs(3);
+        let selected = RunE2ePort::select(
+            &overridden,
+            Ok(Some(crate::application::install::E2eCommand {
+                command: "declaration".to_owned(),
+                timeout: Duration::from_secs(42),
+            })),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.command, overridden.command);
+        assert_eq!(selected.timeout, overridden.timeout);
+    }
+
+    /// A read error chooses the unavailable event and a waiting state,
+    /// including its retry and attention, and cannot complete the e2e due
+    /// for this commit. Actual file reads are covered by run_env's tests.
+    #[test]
+    fn a_preparation_read_error_records_unavailable_and_keeps_landing_waiting() {
+        let retry = Duration::from_secs(17);
+        for dagq_source in [false, true] {
+            let read_error = Err(anyhow!(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            )))
+            .context("read main/dagq.toml");
+            let selected = RunE2ePort::select(&settings(), read_error, dagq_source, None);
+            let E2ePreparation::Unavailable(decision) = preparation_decision(Some(selected)) else {
+                panic!("an unreadable configuration must neither run nor permit landing");
+            };
+            assert_eq!(decision.kind, EventKind::RunE2eFinished);
+            assert!(matches!(decision.next.phase(), Phase::AwaitingSlot));
+            let payload = decision.payload(json!({"attempt": 1, "commit": "reviewed"}), 1, retry);
+            assert_eq!(payload["outcome"], "unavailable");
+            assert_eq!(payload["retry_secs"], 17);
+            assert_eq!(payload["in_a_row"], 1);
+            assert!(
+                payload["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("read main/dagq.toml")
+            );
+            assert!(payload.get("attention").is_none());
+            let attention = decision.payload(json!({}), run_e2e::UNAVAILABLE_ATTENTION, retry);
+            assert_eq!(attention["attention"], true);
+            let event = |kind: EventKind, payload| RunEvent {
+                id: crate::domain::EventId::new(1),
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: kind.into(),
+                payload,
+                created_at: String::new(),
+                actor: None,
+            };
+            let events = [
+                event(
+                    EventKind::ValidationFinished,
+                    json!({"e2e_requirement": {"required": true}}),
+                ),
+                event(decision.kind, payload),
+            ];
+            assert!(run_e2e::due(&events, "reviewed").is_some());
+        }
+        assert!(matches!(
+            preparation_decision(None),
+            E2ePreparation::NotConfigured
+        ));
+        assert!(matches!(
+            preparation_decision(Some(Ok(None))),
+            E2ePreparation::NotConfigured
+        ));
+        assert!(matches!(
+            preparation_decision(Some(Ok(Some(settings())))),
+            E2ePreparation::Ready(_)
+        ));
+    }
 
     /// The e2e's commands, each a verification's step, as the gate runs
     /// them: a custom command as it is, its rerun too; the gate's, its

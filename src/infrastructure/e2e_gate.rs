@@ -323,6 +323,13 @@ struct Ran {
     cleanup: Value,
 }
 
+/// Compare elapsed time instead of adding the limit to an `Instant`:
+/// every accepted timeout must remain safe after the child has started,
+/// including durations larger than the platform's clock can represent.
+fn timeout_reached(elapsed: Duration, timeout: Duration) -> bool {
+    elapsed >= timeout
+}
+
 /// Run the e2e once as `how` says in a `TMPDIR` of its own, within the
 /// timeout, and clean up after it; an error is one that could not start.
 fn pass(
@@ -401,12 +408,11 @@ fn pass(
             return Err(error).context("start the e2e");
         }
     };
-    let deadline = started + settings.timeout;
     let mut timed_out = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() >= deadline => {
+            Ok(None) if timeout_reached(started.elapsed(), settings.timeout) => {
                 timed_out = true;
                 break stop_group(&mut child, STOP_GRACE);
             }
@@ -1003,6 +1009,27 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
                 }
             }
         }
+    }
+
+    /// Even the largest declared timeout cannot overflow or expire early;
+    /// the exact limit expires, including the final representable duration.
+    #[test]
+    fn timeout_comparison_handles_the_largest_limits() {
+        let tick = Duration::from_nanos(1);
+        for timeout in [
+            Duration::from_secs(1),
+            crate::application::install::E2E_TIMEOUT,
+            Duration::from_secs(i64::MAX as u64),
+            Duration::MAX,
+        ] {
+            assert!(!timeout_reached(Duration::ZERO, timeout));
+            assert!(!timeout_reached(timeout - tick, timeout));
+            assert!(timeout_reached(timeout, timeout));
+            if let Some(after) = timeout.checked_add(tick) {
+                assert!(timeout_reached(after, timeout));
+            }
+        }
+        assert!(timeout_reached(Duration::ZERO, Duration::ZERO));
     }
 
     const GUARD: &str = crate::domain::sccache::GUARD_NAME;

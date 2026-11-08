@@ -160,7 +160,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - 自動更新の関門（[Auto-update](auto-update.md)）と同じ`e2e_gate`で、hostで1本ずつ流す。
   隔離の印はlanding branchのcommitから読むので、workerが足した印は効かない。
 - 印で通らない失敗は`needs_session`のresumeになり、流せなかったときは変更のせいとせず、slotとleaseを持ったまま待って流し直す（[`needs_session`](needs-session.md#needs_session)）。
-- dagqのsourceでなければ流さずに着地するのは今の実装の制約で、決まった形は`dagq.toml`が宣言したコマンドを流す（ADR-t2257-1決定4）。
+- repositoryが宣言したe2eのコマンドを、宣言があればrepositoryによらず流す（ADR-t2257-1決定4）。
 - 落とし穴: e2eに渡すenvは許す名前に絞るので、足りない版が固定バイナリになると全てのrunのe2eが始まらないか落ち続ける（見分け方と戻し方は`infrastructure::e2e_gate::PASSED_ENV`）。
 
 ## landing recheck

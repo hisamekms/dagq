@@ -160,6 +160,14 @@ pub const E2E_COMMAND: &str = "cargo test --locked --test e2e -- --ignored";
 /// (ADR-t963-1 decision 1).
 pub const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
 
+/// A repository's declared shell command and its time limit, ready to
+/// carry to an executor without reading the repository again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct E2eCommand {
+    pub command: String,
+    pub timeout: Duration,
+}
+
 /// The e2e a build of dagq's source passes before it is put in place
 /// (ADR-t963-1 decision 1): `cargo test --locked --test e2e -- --ignored`
 /// in the checkout.
@@ -168,7 +176,7 @@ pub const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
 #[derive(Debug, Clone)]
 pub struct E2eSettings {
     /// A shell command in place of `cargo test --locked --test e2e --
-    /// --ignored` (tests).
+    /// --ignored` (a repository declaration or a test override).
     pub command: Option<String>,
     /// How long it may run; past it the e2e is stopped and failed.
     pub timeout: Duration,
