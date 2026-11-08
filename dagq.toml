@@ -413,6 +413,10 @@ max = 0.6
 max = 0.02
 
 [e2e]
+# この repository の host で流す Rust の e2e と 30 分の上限を宣言する（ADR-t2257-1 決定 1・4）。
+# 失敗した test の再実行は DAGQ_E2E_RERUN を --exact の名前の引数に展開する（ADR-t1165-1）。
+command = "cargo test --locked --test e2e -- --ignored ${DAGQ_E2E_RERUN:+--exact $DAGQ_E2E_RERUN}"
+timeout_secs = 1800
 # 差分がこの glob に触れる run にだけ、review が pass した後、着地の前に runtime が host で全部の e2e を流す
 # （ADR-t963-1 の決定 2・3、ADR-t1233-2。worker は e2e を流さず、validating は要否を validation_finished の e2e_requirement に記録するだけ。
 # 要否の判定は docs/design/supervisor-lifecycle/validation.md の「runtimeが流すe2e」、流し方は integrate.md の「着地の前のe2e」）。
