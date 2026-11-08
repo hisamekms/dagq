@@ -44,7 +44,7 @@ fn rows(store: &dyn LedgerQueue) -> Vec<LedgerRow> {
         .collect()
 }
 
-/// The lines of the queue service's record of its first requests
+/// The lines of the queue service's lifetime aggregates and startup summary
 /// (`logs/service-<time>-<pid>.jsonl` beside the queue at `db`).
 fn service_records(db: &std::path::Path) -> Vec<serde_json::Value> {
     std::fs::read_dir(db.parent().unwrap().join("logs"))
@@ -91,9 +91,9 @@ fn passes(store: &dyn LedgerQueue, now_ms: i64, retain: Retain) -> (Built, Built
 /// queue's and the node's rows and removes the node rows and the steps past their retention as the
 /// same passes on the queue's own connection do, while this process
 /// refuses to open the queue. A write over a row another writer wrote
-/// since it was read writes nothing. The service records each of these
-/// reads of its first minutes with the operation, the supervisor's role
-/// and the bytes of its answer, and its summary as it stops. Once the
+/// since it was read writes nothing. The production Resending → EndBound
+/// wrapper stack carries real ledger caller labels to the service's
+/// periodic aggregates and its startup summary as it stops. Once the
 /// service stops, the pass fails as out of reach, still without opening
 /// the queue, and writes nothing.
 #[test]
@@ -101,7 +101,22 @@ fn the_ledger_is_built_only_through_the_service_as_on_the_queues_own_connection(
     let (fixture, repo, db) = fixture();
     let served = common::service::Served::start(&db);
     let pid = 4244;
-    let caller: Arc<dyn ServiceCaller> = Arc::new(SocketCaller::new(&db));
+    let generators = dagq::infrastructure::clock::system();
+    let caller: Arc<dyn ServiceCaller> = Arc::new(
+        dagq::application::supervisor_service::resend::Resending::new(
+            Arc::new(
+                dagq::application::supervisor_service::end_bound::EndBound::new(
+                    Arc::new(SocketCaller::new(&db)),
+                    generators.clock.clone(),
+                    Arc::new(
+                        dagq::application::supervisor_service::end_bound::EndDeadline::default(),
+                    ),
+                ),
+            ),
+            dagq::application::supervisor_service::resend::Resend::Hold,
+            generators,
+        ),
+    );
     let queues = SupervisorQueues::new(
         caller.clone(),
         ActorContext::instance(ActorRole::Supervisor, pid),
@@ -305,10 +320,22 @@ fn the_ledger_is_built_only_through_the_service_as_on_the_queues_own_connection(
         )
         .unwrap();
     assert_eq!(page.as_array().map(Vec::len), Some(1), "{page}");
-    // The service recorded the reads it forwarded, by their operation.
-    let page_read = service_records(&db)
-        .into_iter()
-        .rfind(|line| line["record"] == "request" && line["op"] == "ledger_rows")
+    drop(served);
+    // Shutdown flushes the actual caller labels sent across the socket,
+    // after the production wrapper stack crossed EndBound's thread.
+    let records = service_records(&db);
+    let ledger_read = records
+        .iter()
+        .find(|line| {
+            line["record"] == "by_caller"
+                && line["op"] == "ledger_row"
+                && line["caller"] == "ledger.fold_and_write"
+        })
+        .expect("a real ledger caller reaches the service through both wrappers");
+    assert!(ledger_read["calls"].as_u64().unwrap() > 0, "{ledger_read}");
+    let page_read = records
+        .iter()
+        .rfind(|line| line["record"] == "by_caller" && line["op"] == "ledger_rows")
         .expect("the ledger's read of the rows is recorded");
     assert_eq!(
         (&page_read["use_case"], &page_read["role"]),
@@ -319,12 +346,11 @@ fn the_ledger_is_built_only_through_the_service_as_on_the_queues_own_connection(
         "{page_read}"
     );
     assert!(page_read["bytes"].as_u64().unwrap() > 0, "{page_read}");
-    assert_eq!(page_read["rows"], 1, "{page_read}");
+    assert!(page_read["rows"].as_u64().unwrap() >= 1, "{page_read}");
     // What the supervisor does not send is refused on its side.
     let error = store.write_ledger_row(&over).unwrap_err();
     assert!(format!("{error:#}").contains("no operation"), "{error:#}");
 
-    drop(served);
     let summary = service_records(&db)
         .into_iter()
         .find(|line| line["record"] == "summary")

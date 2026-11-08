@@ -893,6 +893,10 @@ string_enum!(ServiceState {
 /// One request to the service.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceRequest {
+    /// Self-reported observation label only; never authentication,
+    /// authorization or answer input. Missing labels remain compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
     pub api_version: u32,
     /// The token the control side issued for the caller; `None` for
     /// [`UseCase::Hello`] and a person's (ADR-t3102-1 decision 1).
@@ -3914,6 +3918,7 @@ mod tests {
         // A service of version 1 answered that version only.
         let answered_before = |version: u32| (1..HOST_CLIENT_API_VERSION).contains(&version);
         let host = ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             token: None,
             env_role: None,
@@ -4620,6 +4625,7 @@ mod tests {
         // A request names the role and the queue only when given, which an
         // older service never sees.
         let request = ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             token: None,
             env_role: None,

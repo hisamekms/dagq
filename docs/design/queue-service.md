@@ -49,6 +49,8 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 止めるsignalはserviceが答えたpidか、同moduleの`serves`が確かめた記録のpidにだけ送る。
 tokenはworktreeとrun dirの外に置き、呼び出し元にはfileのpathを渡し、値はenvにもargvにも置かない（ADR-t1233-4決定4）。
 
+要求のcallerは呼び手の自己申告であり、認可にも答えの内容にも使わない。
+
 HTTPの受けはsocketと同じ確かめの順を通り、識別はbearerのtokenだけで、peerにも送り元のIPにも転送のheaderにも依らない。
 
 接続と要求・応答の形と上限は`domain::queue_service::MAX_REQUEST_BYTES`のdoc comment。

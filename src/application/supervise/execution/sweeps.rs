@@ -242,6 +242,8 @@ impl Supervisor<'_> {
     /// wrappers kept of the steps of targets that ended
     /// ([`telemetry_tokens::sweep_kept_steps`]).
     pub(super) fn sweep_telemetry(&mut self) {
+        const CALLER: &str = "sweeps.sweep_telemetry";
+        let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         self.register_held_sessions();
         self.resend_kept_steps();
         let processes = &self.processes;
@@ -485,6 +487,8 @@ impl Supervisor<'_> {
     /// ended runs still running are stopped
     /// ([`sweep::SweepWatch::sweep_ended_sessions`]).
     pub(super) fn sweep_ended_runs(&mut self, interval: Duration) -> Result<()> {
+        const CALLER: &str = "sweeps.sweep_ended_runs";
+        let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         if !self
             .host
             .sweep_due(self.generators.clock.monotonic(), interval)

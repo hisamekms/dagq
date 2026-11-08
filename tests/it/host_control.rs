@@ -969,6 +969,7 @@ fn a_command_naming_another_commands_process_neither_begins_nor_ends_its_landing
     let deferred = service::call(
         &service::socket_path(db.parent().unwrap()),
         &dagq::domain::queue_service::ServiceRequest {
+            caller: None,
             api_version: dagq::domain::queue_service::API_VERSION,
             token: Some(token),
             env_role: None,
@@ -1071,6 +1072,7 @@ fn integrate_step(db: &Path, task: i64, pid: u32, op: &str, args: Value) -> Valu
     let response = service::call(
         &service::socket_path(db.parent().unwrap()),
         &dagq::domain::queue_service::ServiceRequest {
+            caller: None,
             api_version: dagq::domain::queue_service::API_VERSION,
             token: None,
             env_role: None,
@@ -1163,6 +1165,7 @@ fn a_landing_of_another_tasks_run_is_neither_begun_nor_ended() {
     let deferred = service::call(
         &service::socket_path(db.parent().unwrap()),
         &dagq::domain::queue_service::ServiceRequest {
+            caller: None,
             api_version: dagq::domain::queue_service::API_VERSION,
             token: Some(token),
             env_role: None,

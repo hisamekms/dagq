@@ -29,6 +29,8 @@ impl Supervisor<'_> {
     /// for a wait, adoption waits for a slot and restore_waiting ends that
     /// wait as phase_changed, leaving its ask eligible to wait again.
     pub(super) fn adopt_stale_runs(&mut self, parallel: usize) -> Result<()> {
+        const CALLER: &str = "adopt.adopt_stale_runs";
+        let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         for candidate in self
             .queue
             .runs_leased_by_others(self.registration.token())?

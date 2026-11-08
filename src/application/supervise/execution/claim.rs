@@ -49,6 +49,8 @@ impl Supervisor<'_> {
     /// `main` is reread per claim so a task released by
     /// `integrate` starts from the main that contains its predecessor.
     pub(super) fn fill_slots(&mut self, parallel: usize, sweep_interval: Duration) -> Result<bool> {
+        const CALLER: &str = "claim.fill_slots";
+        let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         // A run that waits for a person is adopted without a free slot
         // (ADR-0062 decision 11): the check is per run.
         self.adopt_stale_runs(parallel)?;

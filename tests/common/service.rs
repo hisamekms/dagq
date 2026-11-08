@@ -566,6 +566,7 @@ fn request(
     let response = service::call(
         &service::socket_path(queue.dir()),
         &ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             token: token.map(str::to_owned),
             env_role: env_role.map(str::to_owned),

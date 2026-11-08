@@ -1435,6 +1435,7 @@ fn show_with(queue_dir: &Path, token: &str) -> Value {
     let response = service::call(
         &service::socket_path(queue_dir),
         &ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             token: Some(token.to_owned()),
             env_role: None,

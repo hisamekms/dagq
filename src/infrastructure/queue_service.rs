@@ -1977,6 +1977,7 @@ pub fn hello(socket: &Path, timeout: Duration) -> Result<Value> {
     let response = call(
         socket,
         &ServiceRequest {
+            caller: None,
             api_version: crate::domain::queue_service::request_version(UseCase::Hello),
             token: None,
             env_role: None,
@@ -2255,6 +2256,7 @@ impl Client {
                 // a request whose environment names one for the user's.
                 let env_role = self.env_role.clone().filter(|_| token.is_none());
                 let request = ServiceRequest {
+                    caller: None,
                     api_version: API_VERSION,
                     token,
                     env_role,
@@ -2270,6 +2272,7 @@ impl Client {
                 // The token goes as the `Bearer` only: the broker puts the
                 // one it checked in the request it passes on.
                 let request = ServiceRequest {
+                    caller: None,
                     api_version: API_VERSION,
                     token: None,
                     env_role: None,
@@ -2362,6 +2365,7 @@ impl Client {
     /// finds (fail closed).
     pub fn reach(&self) -> Value {
         let request = ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             token: None,
             env_role: None,
@@ -3237,7 +3241,7 @@ accepts: schema {} to {}",
         migrated: migrated.map(serde_json::to_value).transpose()?,
     })?;
     info!(pid, socket = %socket.display(), "the queue service listens");
-    // What it answers in its first minutes, and its memory then.
+    // Lifetime answer aggregates, plus the startup summary and memory.
     let reads = Arc::new(super::startup_reads::StartupReads::open(
         &queue_dir,
         options.generators.clock.clone(),
@@ -3451,8 +3455,8 @@ fn http_answerer(
 }
 
 /// The answer to a request as its transport read it (`Err`: the refusal of
-/// one that does not read) from `peer`; recorded in `reads` while its window
-/// is open. The record never changes the answer.
+/// one that does not read) from `peer`; aggregated in `reads` throughout
+/// the service's lifetime. The record never changes the answer.
 fn answer_read(
     read: Result<ServiceRequest, ServiceResponse>,
     backend: &Arc<SqliteServiceBackend>,
@@ -3463,10 +3467,12 @@ fn answer_read(
     let began = reads.begin();
     let mut use_case = None;
     let mut op = None;
+    let mut caller = None;
     let mut notes = RequestNotes::default();
     let response = match read {
         Ok(request) => {
             use_case = Some(request.use_case);
+            caller = request.caller.clone();
             if began.is_some() {
                 op = super::startup_reads::Answered::op_of(
                     request.use_case.as_str(),
@@ -3486,6 +3492,7 @@ fn answer_read(
             &super::startup_reads::Answered {
                 use_case: use_case.map(|use_case| use_case.as_str().to_owned()),
                 op,
+                caller,
                 role: notes.role.map(|role| role.as_str().to_owned()),
                 heavy_read: notes.heavy_read,
                 bytes: built,
@@ -4141,6 +4148,7 @@ impl SignedIn {
     ) -> Result<()> {
         let principal = Principal::supervisor(registration, pid);
         let request = ServiceRequest {
+            caller: None,
             api_version: crate::domain::queue_service::request_version(UseCase::IssueToken),
             token: None,
             env_role: None,
@@ -4297,17 +4305,25 @@ fn supervisor_answer(use_case: UseCase, response: ServiceResponse) -> Result<Val
     }
 }
 
+/// Assemble the supervisor's forwarded request on the sending thread.
+/// EndBound restores the source thread's captured caller scope here;
+/// observation never changes the request's params.
+fn supervisor_request(use_case: UseCase, params: Value, token: Option<String>) -> ServiceRequest {
+    ServiceRequest {
+        caller: crate::application::supervisor_service::caller::current().map(str::to_owned),
+        api_version: crate::domain::queue_service::request_version(use_case),
+        token,
+        env_role: None,
+        queue: None,
+        binding: None,
+        use_case,
+        params,
+    }
+}
+
 impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
-        let request = ServiceRequest {
-            api_version: crate::domain::queue_service::request_version(use_case),
-            token: self.signed_in.token(),
-            env_role: None,
-            queue: None,
-            binding: None,
-            use_case,
-            params,
-        };
+        let request = supervisor_request(use_case, params, self.signed_in.token());
         let response = call(&self.socket, &request, self.timeout).map_err(|error| {
             use crate::application::supervisor_service::ServiceUnreachable;
             if let Some(past) = error.downcast_ref::<RequestPastLimit>() {
@@ -4470,15 +4486,7 @@ impl InProcessCaller {
 #[cfg(feature = "test-paths")]
 impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
-        let request = ServiceRequest {
-            api_version: crate::domain::queue_service::request_version(use_case),
-            token: self.signed_in.token(),
-            env_role: None,
-            queue: None,
-            binding: None,
-            use_case,
-            params,
-        };
+        let request = supervisor_request(use_case, params, self.signed_in.token());
         // Through the request's text and the answer's, as on the socket,
         // a request past its limit refused as there.
         let line = match request_line(&request) {
@@ -4667,6 +4675,7 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
             None => None,
         };
         let request = ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             env_role: self.client.env_role.clone().filter(|_| token.is_none()),
             token,
@@ -4788,6 +4797,7 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessControlC
         let step = serde_json::from_value(params)
             .context("a control-side command's step does not read")?;
         let request = ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             token: None,
             env_role: None,
@@ -5975,6 +5985,7 @@ mod tests {
         assert!(unreachable(&small), "{small:#}");
         // A client-mode command's is refused so too.
         let request = ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             token: None,
             env_role: None,
@@ -6015,11 +6026,37 @@ mod tests {
         assert_eq!(failure.code, "request_too_large", "{failure}");
     }
 
+    #[test]
+    fn forwarded_requests_carry_the_innermost_scope_and_restore_it() {
+        use crate::application::supervisor_service::caller::scope;
+        let forwarded = || {
+            supervisor_request(
+                UseCase::Supervisor,
+                json!({"op": "ledger_row"}),
+                Some("same-token".into()),
+            )
+        };
+        assert_eq!(forwarded().caller, None);
+        {
+            let _outer = scope("sweep");
+            assert_eq!(forwarded().caller.as_deref(), Some("sweep"));
+            {
+                let _inner = scope("ledger.restore");
+                let request = forwarded();
+                assert_eq!(request.caller.as_deref(), Some("ledger.restore"));
+                assert_eq!(request.token.as_deref(), Some("same-token"));
+                assert_eq!(request.params, json!({"op": "ledger_row"}));
+            }
+            assert_eq!(forwarded().caller.as_deref(), Some("sweep"));
+        }
+        assert_eq!(forwarded().caller, None);
+    }
+
     /// The record of the service's first requests never changes an
     /// answer: a request is answered the same whether it is recorded, its
     /// line cannot be written and the memory cannot be read, or the window
-    /// is over; a recorded one names its use case and the bytes of the
-    /// answer written, and past the window no line is written.
+    /// is over; startup request lines and the lifetime aggregates name
+    /// the bytes of the answer without affecting its contents.
     #[test]
     fn the_record_of_the_first_requests_changes_no_answer() {
         use super::super::startup_reads::{MemoryReading, ResidentMemory, StartupReads};
@@ -6035,13 +6072,17 @@ mod tests {
                 Ok(())
             }
         }
-        struct Broken;
+        struct Broken(bool);
         impl Write for Broken {
-            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if !self.0 {
+                    self.0 = true;
+                    return Ok(bytes.len());
+                }
                 Err(io::Error::other("disk full"))
             }
             fn flush(&mut self) -> io::Result<()> {
-                Err(io::Error::other("disk full"))
+                Ok(())
             }
         }
         struct Memory(Option<u64>);
@@ -6084,6 +6125,7 @@ mod tests {
         };
         let backend = Arc::new(backend);
         let hello = serde_json::to_vec(&ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             token: None,
             env_role: None,
@@ -6095,20 +6137,47 @@ mod tests {
         .unwrap();
         let requests: [&[u8]; 2] = [&hello, b"not a request\n"];
         let recorded = Buffer::default();
+        let aggregate = Buffer::default();
+        let disabled =
+            super::super::startup_reads::load_request_lines_with(dir.path(), None, |_| {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            });
+        assert!(!disabled);
         let records = [
-            StartupReads::new(
+            StartupReads::configured(
                 Some(Box::new(recorded.clone())),
                 clock.clone(),
                 Box::new(Memory(Some(5))),
                 Duration::from_secs(600),
+                true,
+            ),
+            StartupReads::configured(
+                Some(Box::new(Broken(false))),
+                clock.clone(),
+                Box::new(Memory(None)),
+                Duration::from_secs(600),
+                true,
+            ),
+            StartupReads::configured(
+                None,
+                clock.clone(),
+                Box::new(Memory(None)),
+                Duration::ZERO,
+                false,
+            ),
+            StartupReads::configured(
+                Some(Box::new(aggregate.clone())),
+                clock.clone(),
+                Box::new(Memory(Some(5))),
+                Duration::from_secs(600),
+                disabled,
             ),
             StartupReads::new(
-                Some(Box::new(Broken)),
+                Some(Box::new(Broken(false))),
                 clock.clone(),
                 Box::new(Memory(None)),
                 Duration::from_secs(600),
             ),
-            StartupReads::new(None, clock.clone(), Box::new(Memory(None)), Duration::ZERO),
         ];
         for request in requests {
             let answers: Vec<_> = records
@@ -6119,10 +6188,32 @@ mod tests {
                 .collect();
             assert!(answers.iter().all(|answer| *answer == answers[0]));
         }
-        let lines: Vec<Value> = String::from_utf8(recorded.0.lock().unwrap().clone())
+        for reads in &records {
+            reads.stopped("stopped");
+        }
+        // The default writer failed on a by_caller flush; subsequent
+        // answers remain identical too, as after a host setting read failed.
+        let after_flush: Vec<_> = records
+            .iter()
+            .map(|reads| answer_request(&hello, &backend, 7, (Peer::Other, None), reads).unwrap())
+            .collect();
+        assert!(after_flush.iter().all(|answer| *answer == after_flush[0]));
+        let aggregates: Vec<Value> = String::from_utf8(aggregate.0.lock().unwrap().clone())
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            aggregates
+                .iter()
+                .any(|line| line["record"] == "by_caller" && line["use_case"] == "hello")
+        );
+        assert!(aggregates.iter().all(|line| line["record"] != "request"));
+        let lines: Vec<Value> = String::from_utf8(recorded.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|line| line["record"] == "start" || line["record"] == "request")
             .collect();
         let answered =
             answer_request(&hello, &backend, 7, (Peer::Other, None), &records[2]).unwrap();
@@ -6133,13 +6224,14 @@ mod tests {
         assert_eq!(lines[1]["bytes"], answered.len());
         assert_eq!(lines[1]["resident_after"], 5);
         assert_eq!(lines[2]["use_case"], Value::Null);
-        // Past its window a record writes no line.
+        // Past its window a record writes no per-request line.
         let over = Buffer::default();
-        let reads = StartupReads::new(
+        let reads = StartupReads::configured(
             Some(Box::new(over.clone())),
             clock,
             Box::new(Memory(Some(5))),
             Duration::ZERO,
+            false,
         );
         answer_request(&hello, &backend, 7, (Peer::Other, None), &reads).unwrap();
         let text = String::from_utf8(over.0.lock().unwrap().clone()).unwrap();
@@ -6190,14 +6282,16 @@ mod tests {
         });
         let backend = Arc::new(backend);
         let buffer = Buffer::default();
-        let reads = StartupReads::new(
+        let reads = StartupReads::configured(
             Some(Box::new(buffer.clone())),
             clock,
             Box::new(NoMemory),
             Duration::from_secs(600),
+            true,
         );
         let line_of = |use_case: UseCase| {
             serde_json::to_vec(&ServiceRequest {
+                caller: None,
                 api_version: API_VERSION,
                 token: None,
                 env_role: None,
@@ -6275,6 +6369,7 @@ mod tests {
             let mut notes = RequestNotes::default();
             let response = service.handle_noting(
                 &ServiceRequest {
+                    caller: None,
                     api_version: API_VERSION,
                     token: Some(token.clone()),
                     env_role: None,
@@ -6298,6 +6393,7 @@ mod tests {
         let mut notes = RequestNotes::default();
         let response = service.handle_noting(
             &ServiceRequest {
+                caller: None,
                 api_version: API_VERSION,
                 token: Some(token.clone()),
                 env_role: None,

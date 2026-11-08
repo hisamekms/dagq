@@ -185,6 +185,7 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
     let response = service::call(
         &socket,
         &ServiceRequest {
+            caller: None,
             api_version: API_VERSION + 1,
             token: Some(worker_token.clone()),
             env_role: None,
@@ -203,6 +204,7 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
         &service::call(
             &socket,
             &ServiceRequest {
+                caller: None,
                 api_version: API_VERSION,
                 token: None,
                 env_role: None,
@@ -239,6 +241,7 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
         service::call(
             &socket,
             &ServiceRequest {
+                caller: None,
                 api_version: API_VERSION,
                 token: Some(worker_token),
                 env_role: None,

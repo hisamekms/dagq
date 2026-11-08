@@ -682,6 +682,7 @@ mod tests {
         assert!(report.steps.len() <= MAX_STEPS_PER_REPORT);
         assert_eq!(check(&report), Ok(()));
         let request = crate::domain::queue_service::ServiceRequest {
+            caller: None,
             api_version: u32::MAX,
             token: Some("f".repeat(64)),
             env_role: None,

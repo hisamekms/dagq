@@ -98,6 +98,8 @@ impl Supervisor<'_> {
         previous: RunStatus,
         main: CommitSha,
     ) -> Result<thread::JoinHandle<Result<IntegrationOutcome>>> {
+        const CALLER: &str = "landing.spawn_landing";
+        let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         // The verification is the run's executor too (ADR-t1662-3 decision
         // 11).
         self.ready_run_telemetry(&run);
@@ -158,6 +160,8 @@ impl Supervisor<'_> {
             "integrate",
         ));
         Ok(spawn_traced(move || {
+            const CALLER: &str = "landing.integrate";
+            let _caller = crate::application::supervisor_service::caller::scope(CALLER);
             let mut queue = queues.open()?;
             // As `check_disk` reads it, for the retry of a command that
             // failed on a full disk (task 639).

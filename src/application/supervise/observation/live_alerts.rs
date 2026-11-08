@@ -34,6 +34,8 @@ impl LiveAlertWatch {
         signals: &dyn AgentSignals,
         interval: Duration,
     ) {
+        const CALLER: &str = "live_alerts.pass";
+        let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         let at = env.generators.clock.monotonic();
         if self
             .observed
@@ -82,6 +84,8 @@ impl AttributesBaseline {
     /// the next interval; the findings' are tried when the tasks' and
     /// goals' could not be.
     pub(in crate::application::supervise) fn pass(&mut self, env: &mut ObservationEnv<'_>) {
+        const CALLER: &str = "live_alerts.pass";
+        let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         let now = env.generators.clock.monotonic();
         let at = now.saturating_duration_since(*self.origin.get_or_insert(now));
         let queue = &*env.queue;
@@ -132,6 +136,8 @@ fn observe(
     now: i64,
     history: &mut LiveHistory,
 ) -> Observation {
+    const CALLER: &str = "live_alerts.observe";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let mut read = || -> Result<Observation> {
         let no_file = || Ok(None);
         let sources = LiveSources {

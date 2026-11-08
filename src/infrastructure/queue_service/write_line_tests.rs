@@ -128,6 +128,7 @@ fn no_commands(_: Arc<ServiceWriteLine>) -> ServiceCommands {
 
 fn request(token: Option<String>, use_case: UseCase, params: Value) -> ServiceRequest {
     ServiceRequest {
+        caller: None,
         api_version: API_VERSION,
         token,
         env_role: None,

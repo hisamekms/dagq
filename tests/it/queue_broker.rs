@@ -46,6 +46,7 @@ impl Drop for Stop {
 
 fn request(use_case: UseCase, params: Value) -> ServiceRequest {
     ServiceRequest {
+        caller: None,
         api_version: API_VERSION,
         token: None,
         env_role: None,
@@ -175,6 +176,7 @@ fn the_broker_passes_a_run_s_own_requests_to_the_service_and_refuses_the_rest() 
     let direct = service::call(
         &service::socket_path(queue.dir()),
         &ServiceRequest {
+            caller: None,
             token: Some(own.clone()),
             env_role: None,
             ..show.clone()

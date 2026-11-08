@@ -84,8 +84,9 @@ hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候
   - OSのprocess（fseventsdなど）が候補のときは、人がhostでそのprocessを再起動する。fseventsdはlaunchdが起こし直すので`sudo killall fseventsd`で、それで直らなければOSを再起動する。再起動の前と後の`host/metrics`の`swap_used_mb`（と`vm.swapusage`）を比べ、下がればそれが原因と確かめ、下がらなければ次の候補を見る。
   - `dagq supervise`が大きいときは、数時間の`footprint`の推移を取り、増え続けるならinboxがrequestで修正を頼む。
 - queue serviceの起動の直後のピーク:
-  - serviceは起動から決まった間、受けた要求ごとの読みの量と自分のRSSをqueue dirの`logs/service-<UTC時刻>-<pid>.jsonl`に書き、間の終わりか止まったときに要約の行（`"record":"summary"`）を1行書く（項目と間の長さは`infrastructure::startup_reads`のmodule doc）。
-  - `jq -c 'select(.record == "summary") | {at, max_resident, max_resident_at, peak, top: [.top_by_bytes[] | {use_case, op, role, bytes, rows}]}' <queue dir>/logs/service-*.jsonl`で、起動ごとにRSSの最大とその時刻、bytesの多い上位の要求を読む。どの要求がピークの時刻に重なったかは、その時刻の前後の`"record":"request"`の行（`resident_before`・`resident_after`）で見る。
+  - localのserviceは読みの回数・bytes・所要を呼び手ごとに周期で集計し、queue dirの`logs/service-<UTC時刻>-<pid>.jsonl`へ起動後も書き続ける。起動から決まった間の終わりか止まったときには要約の行（`"record":"summary"`）を一度書く（細部は`infrastructure::startup_reads`のmodule doc）。チームの版は[配置側の標準出力と標準エラー](../design/measurement-otel.md)で集める。
+  - `summary`の`max_resident`・`max_resident_at`・`peak`で起動のRSSの最大と時刻を、`top_by_bytes`でbytesの多い要求を、`top_by_calls`で呼び手ごとの回数の多い組とbytes・所要の合計を読む。周期の`"record":"period"`のRSS最大とpeakでピークに当たる周期を探し、同じ`at`の`"record":"by_caller"`で呼び手ごとの回数・bytes・所要の合計と最大を見る。毎分止まる動きは回数の谷と最大の所要で追う。
+  - 個別の要求を調べるときだけ、queue dirの`host.toml`に`[service_log]`とその下の`startup_requests = true`を置いてserviceを起動し直す。queueにこのtableが無ければhost全体の`host.toml`の値を使う。起動から決まった間だけcaller付きの`"record":"request"`が加わる。調査後はこの設定を削除するか`false`に戻し、serviceを起動し直す。戻し忘れると起動ごとに100 MB超えが増えることがある。
   - ある着地の前と後を比べるときは、その着地を入れた自動更新の前の起動のfileと後の起動のfileの要約を並べ、`max_resident`と上位の要求の`op`・`bytes`の違いを見る。比べた結果は、その着地の目的のgoalかtaskのnoteに残す。
 
 ## containerのmachineの資源（`host.toml`）

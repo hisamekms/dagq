@@ -34,6 +34,7 @@ const BUILT: &str = "2030-01-01T00:00:00.000Z";
 /// many events were read and how often all of them.
 #[derive(Default)]
 struct Memory {
+    callers: RefCell<Vec<(&'static str, Option<&'static str>)>>,
     events: RefCell<Vec<RunEvent>>,
     samples: RefCell<Vec<NodeSample>>,
     steps: RefCell<Vec<SessionStep>>,
@@ -153,6 +154,10 @@ impl Memory {
 
     /// Note the read `name`, none of those [`assert_reads_allowed`] allows.
     fn other_read(&self, name: &'static str) {
+        self.callers.borrow_mut().push((
+            name,
+            crate::application::supervisor_service::caller::current(),
+        ));
         self.other_reads.borrow_mut().push(name);
     }
 
@@ -257,6 +262,10 @@ impl EventStore for Memory {
         filter: &EventFilter,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
+        self.callers.borrow_mut().push((
+            "events_between",
+            crate::application::supervisor_service::caller::current(),
+        ));
         assert_eq!(filter, &EventFilter::default());
         let read: Vec<RunEvent> = self
             .events
@@ -466,6 +475,10 @@ impl LedgerStore for Memory {
     }
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
         self.row_reads.set(self.row_reads.get() + 1);
+        self.callers.borrow_mut().push((
+            "ledger_row",
+            crate::application::supervisor_service::caller::current(),
+        ));
         let row = (kind, key.to_owned());
         ensure!(
             self.broken.borrow().as_ref() != Some(&row),
@@ -3452,6 +3465,7 @@ struct WaitRowsService {
     rows: Vec<LedgerRow>,
     events: Vec<RunEvent>,
     received: std::sync::Mutex<Vec<(String, usize)>>,
+    callers: std::sync::Mutex<Vec<(String, Option<&'static str>)>>,
 }
 
 /// The rows of a store, read through [`LedgerStore`]'s own readings of
@@ -3516,6 +3530,7 @@ impl WaitRowsService {
             rows: memory.rows.borrow().values().cloned().collect(),
             events: memory.events.borrow().clone(),
             received: std::sync::Mutex::default(),
+            callers: std::sync::Mutex::default(),
         })
     }
 
@@ -3644,6 +3659,10 @@ impl crate::application::supervisor_service::ServiceCaller for WaitRowsService {
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
         let op = params["op"].as_str().unwrap().to_owned();
+        self.callers.lock().unwrap().push((
+            op.clone(),
+            crate::application::supervisor_service::caller::current(),
+        ));
         let args = params["args"].as_array().cloned().unwrap_or_default();
         let (answer, held) = self.answer(&op, &args)?;
         self.received.lock().unwrap().push((op, held));
@@ -6141,4 +6160,165 @@ fn finish_wait_reaps_completed_passes_even_at_the_boundary() {
             assert_eq!(finish_wait(true, elapsed, end), FinishWait::Reap);
         }
     }
+}
+
+/// Port fakes observe the label at the actual read, rather than inferring
+/// it from the operation, including nested restore reads and push records.
+#[test]
+fn ledger_reads_name_the_work_that_issued_them() {
+    let (log, now) = pushes_across(3);
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    drain(&memory, &mut builder, now);
+    let _restarted = start_builder(&memory, ms(now)).unwrap();
+    read_by_id(&memory, &[log.events[0].id]).unwrap();
+    let (sessions, position) = sessions_across();
+    let session_memory = drained_to(&sessions, position);
+    let mut resumed = Builder::default();
+    resumed.events = id_at(&sessions, position);
+    restore_sessions(&session_memory, &mut resumed).unwrap();
+    let wanted = [(
+        LedgerKind::Session,
+        "runtime_planner/1/session/1".to_owned(),
+    )]
+    .into();
+    super::restore(&session_memory, &mut resumed, &wanted).unwrap();
+    let session_seen = session_memory.callers.borrow();
+    assert!(
+        session_seen
+            .iter()
+            .any(|(op, c)| *op == "ledger_row" && *c == Some("ledger.restore")),
+        "{session_seen:?}"
+    );
+    assert!(
+        session_seen
+            .iter()
+            .any(|(op, c)| *op == "ledger_row" && *c == Some("ledger.restore_sessions")),
+        "{session_seen:?}"
+    );
+    let seen = memory.callers.borrow();
+    let row_callers: BTreeSet<_> = seen
+        .iter()
+        .filter(|(op, _)| *op == "ledger_row")
+        .filter_map(|(_, caller)| *caller)
+        .collect();
+    assert!(
+        row_callers.contains("ledger.fold_and_write"),
+        "{row_callers:?}"
+    );
+    assert!(row_callers.contains("ledger.fold_rows"), "{row_callers:?}");
+    assert!(
+        seen.iter()
+            .any(|(_, c)| *c == Some("ledger.start_builder_timed"))
+    );
+    assert!(
+        seen.iter()
+            .any(|(op, c)| *op == "events_between" && *c == Some("ledger.read_by_id"))
+    );
+    drop(seen);
+    let service = WaitRowsService::of(&memory);
+    restore_pushes(&through(service.clone()), &mut builder, ms(now)).unwrap();
+    let seen = service.callers.lock().unwrap();
+    assert!(
+        seen.iter()
+            .any(|(op, c)| op == "ledger_push_records" && *c == Some("ledger.restore_pushes")),
+        "{seen:?}"
+    );
+    assert_eq!(
+        crate::application::supervisor_service::caller::current(),
+        None
+    );
+}
+
+/// Check only the reads made by the operation under test, after fixture
+/// setup: an empty path or an inherited enclosing label cannot pass.
+#[track_caller]
+fn assert_ledger_row_callers(memory: &Memory, expected: &[&str]) {
+    let seen = memory.callers.borrow();
+    let callers: BTreeSet<_> = seen
+        .iter()
+        .filter(|(op, _)| *op == "ledger_row")
+        .map(|(_, caller)| *caller)
+        .collect();
+    assert_eq!(
+        callers,
+        expected.iter().map(|caller| Some(*caller)).collect(),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn session_folds_name_their_ledger_row_reads() {
+    let (log, position) = sessions_across();
+    let memory = drained_to(&log, position);
+    let mut builder = Builder::default();
+    builder.events = id_at(&log, position);
+    restore_sessions(&memory, &mut builder).unwrap();
+    memory.callers.borrow_mut().clear();
+    let folded = fold_sessions(
+        &memory,
+        &builder,
+        (ms(LATER), BUILT),
+        &[Target::Row(
+            LedgerKind::Session,
+            "runtime_planner/1/session/1".into(),
+        )],
+    )
+    .unwrap();
+    assert_eq!(
+        folded.write.len() + folded.held.len() + folded.behind.len(),
+        1
+    );
+    assert_ledger_row_callers(&memory, &["ledger.fold_sessions"]);
+}
+
+#[test]
+fn older_wait_folds_name_their_ledger_row_reads() {
+    let mut log = Log::default();
+    let supervisor = json!({"supervisor": "s", "class": "heavy"});
+    log.add(None, None, "slots_full_started", supervisor.clone(), 0)
+        .add(None, None, "slots_full_ended", supervisor, 10);
+    let memory = Memory::of(&log);
+    drain(&memory, &mut Builder::default(), LATER);
+    for row in memory.rows.borrow_mut().values_mut() {
+        if row.kind == LedgerKind::Queue {
+            row.ledger_v = LEDGER_V - 1;
+        }
+    }
+    let mut builder = Builder::default();
+    builder.events = log.last();
+    assert!(builder.restore_queue_rows(queue_book(&memory, &builder).unwrap()));
+    assert!(!builder.older_waits().is_empty());
+    memory.callers.borrow_mut().clear();
+    fold_older_waits(&memory, &mut builder).unwrap();
+    assert_ledger_row_callers(&memory, &["ledger.fold_older_waits"]);
+}
+
+#[test]
+fn queue_book_cuts_name_their_ledger_row_reads() {
+    let (log, position) = queue_across();
+    let memory = Memory::of(&log);
+    drain(&memory, &mut Builder::default(), LATER);
+    memory.callers.borrow_mut().clear();
+    // The stored finding has a record after this position, so cutting
+    // its head must read its row's records through the port.
+    books_at(&memory, id_at(&log, position), ms(LATER)).unwrap();
+    assert_ledger_row_callers(&memory, &["ledger.books_of_heads"]);
+}
+
+#[test]
+fn push_restoration_names_its_own_and_task_runs_ledger_row_reads() {
+    let (log, now) = pushes_across(3);
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    drain(&memory, &mut builder, now);
+    let expected = pushes_of(&builder);
+    builder.restore_pushes(PushesHeld::default(), Vec::new());
+    memory.callers.borrow_mut().clear();
+    restore_pushes(&memory, &mut builder, ms(now)).unwrap();
+    assert_eq!(pushes_of(&builder), expected);
+    assert_ledger_row_callers(
+        &memory,
+        &["ledger.restore_pushes", "ledger.run_and_task_records"],
+    );
 }

@@ -478,6 +478,7 @@ fn report_out_through_the_service_is_written_by_the_client() {
     let response = service::call(
         &service::socket_path(queue_dir),
         &ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             token: None,
             env_role: None,

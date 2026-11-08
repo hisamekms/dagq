@@ -180,7 +180,15 @@ impl EndBound {
         send: impl FnOnce(Arc<dyn ServiceCaller>) -> Result<Value> + Send + 'static,
     ) -> Result<Value> {
         let inner = self.inner.clone();
-        within(&self.deadline, &*self.clock, move || send(inner)).unwrap_or_else(|unsent| {
+        // Capture on the supervisor's thread: the transport assembles the
+        // request on the sending thread, whose TLS starts empty. Both
+        // call and call_now pass through here, behind Resending too.
+        let caller = super::caller::current();
+        within(&self.deadline, &*self.clock, move || {
+            let _caller = caller.map(super::caller::scope);
+            send(inner)
+        })
+        .unwrap_or_else(|unsent| {
             Err(match unsent {
                 Unsent::NotSent => ServiceUnreachable::not_done(format!(
                     "the supervisor's end is past its deadline: {op} is not sent"
@@ -345,7 +353,10 @@ mod tests {
     impl ServiceCaller for Counted {
         fn call(&self, _: UseCase, _: Value) -> Result<Value> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Null)
+            Ok(serde_json::json!({
+                "caller": super::super::caller::current(),
+                "thread": format!("{:?}", std::thread::current().id()),
+            }))
         }
         fn with_token(&self, _: &Path) -> Result<Arc<dyn ServiceCaller>> {
             unreachable!()
@@ -377,6 +388,96 @@ mod tests {
         }
         fn steps_file(&self, _: &Path, _: &StepTarget) -> Option<PathBuf> {
             None
+        }
+    }
+
+    /// The production wrapper order crosses a thread before the socket
+    /// caller builds its request. Observe on that thread, through both
+    /// entry points, including the resending branch for result records.
+    #[test]
+    fn scoped_callers_cross_end_bound_and_the_resending_stack() {
+        let (done, completion) = mpsc::channel();
+        let checking = std::thread::spawn(move || {
+            check_scoped_callers();
+            done.send(()).unwrap();
+        });
+        completion.recv_timeout(Duration::from_secs(10)).expect(
+            "scoped_callers_cross_end_bound_and_the_resending_stack: waiting for call/call_now",
+        );
+        checking.join().unwrap();
+    }
+
+    fn check_scoped_callers() {
+        use super::super::{
+            caller,
+            resend::{Resend, Resending},
+        };
+        use crate::application::{Generators, IdGenerator};
+        struct Ids;
+        impl IdGenerator for Ids {
+            fn uuid(&self) -> String {
+                "record-for-caller-test".into()
+            }
+        }
+        let origin = format!("{:?}", std::thread::current().id());
+        for resending in [false, true] {
+            let clock = Arc::new(Stepped(Mutex::new(Instant::now())));
+            let inner = Arc::new(Counted::default());
+            let bound: Arc<dyn ServiceCaller> = Arc::new(EndBound::new(
+                inner,
+                clock.clone(),
+                Arc::new(EndDeadline::default()),
+            ));
+            let sending: Arc<dyn ServiceCaller> = if resending {
+                Arc::new(
+                    Resending::new(
+                        bound,
+                        Resend::Hold,
+                        Generators {
+                            clock,
+                            ids: Arc::new(Ids),
+                        },
+                    )
+                    .pausing_with(Arc::new(|_| panic!("every send is answered"))),
+                )
+            } else {
+                bound
+            };
+            let check = |expected: Option<&str>| {
+                for op in ["ledger_row", "record_queue_event"] {
+                    for now in [false, true] {
+                        let params = serde_json::json!({"op": op, "args": ["event", {}]});
+                        let response = if now {
+                            sending.call_now(UseCase::Supervisor, params)
+                        } else {
+                            sending.call(UseCase::Supervisor, params)
+                        }
+                        .unwrap();
+                        assert_eq!(
+                            response["caller"],
+                            serde_json::json!(expected),
+                            "resending={resending}, now={now}, op={op}"
+                        );
+                        assert_ne!(response["thread"], origin);
+                        assert_eq!(
+                            caller::current(),
+                            expected,
+                            "sending cannot change the source scope"
+                        );
+                    }
+                }
+            };
+            check(None);
+            {
+                let _outer = caller::scope("ledger.build_pass_timed");
+                check(Some("ledger.build_pass_timed"));
+                {
+                    let _inner = caller::scope("ledger.restore");
+                    check(Some("ledger.restore"));
+                }
+                check(Some("ledger.build_pass_timed"));
+            }
+            check(None);
         }
     }
 

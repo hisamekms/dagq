@@ -171,6 +171,7 @@ fn a_report_naming_another_directory_than_the_main_checkout_is_refused_unread() 
         let response = service::call(
             &service::socket_path(&queue_dir),
             &ServiceRequest {
+                caller: None,
                 api_version: API_VERSION,
                 token: None,
                 env_role: None,
@@ -400,6 +401,7 @@ fn a_conflict_between_the_inputs_and_stats_is_read_again_not_mixed() {
             service::call(
                 &socket,
                 &ServiceRequest {
+                    caller: None,
                     api_version: API_VERSION,
                     token: None,
                     env_role: None,

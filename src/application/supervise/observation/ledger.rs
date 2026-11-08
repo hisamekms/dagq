@@ -404,6 +404,8 @@ fn build_pass_limited(
     (per_read, per_pass, session_bytes): (usize, usize, usize),
     timing: Timing<'_>,
 ) -> Built {
+    const CALLER: &str = "ledger.build_pass_timed";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let started = timing.start();
     let mut built = Built::default();
     let read = (classifier, per_read, per_pass, session_bytes, timing);
@@ -716,6 +718,8 @@ fn fold_sessions(
     (now_ms, built_at): (i64, &str),
     targets: &[Target],
 ) -> Result<SessionsFolded> {
+    const CALLER: &str = "ledger.fold_sessions";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let mut folded = SessionsFolded::default();
     let keys: BTreeSet<(LedgerKind, String)> = targets.iter().map(Target::row_key).collect();
     let inputs = Inputs::of(builder.kept(), now_ms, built_at, &keys);
@@ -894,6 +898,8 @@ fn sweep_page(
     at: (i64, &str),
     counts: &mut SweepCounts,
 ) -> Result<()> {
+    const CALLER: &str = "ledger.sweep_page";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let rows = builder.page_rows(builder.kept());
     restore(store, builder, &rows)?;
     let after = builder.take_rows_after();
@@ -922,6 +928,8 @@ fn fold_rows(
     sweeps: bool,
     counts: &mut SweepCounts,
 ) -> Result<()> {
+    const CALLER: &str = "ledger.fold_rows";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let rows: Vec<&(LedgerKind, String)> = rows.iter().collect();
     let share_of = |share: &[&(LedgerKind, String)]| -> BTreeSet<(LedgerKind, String)> {
         share.iter().map(|row| (*row).clone()).collect()
@@ -961,6 +969,8 @@ fn restore(
     builder: &mut Builder,
     rows: &BTreeSet<(LedgerKind, String)>,
 ) -> Result<()> {
+    const CALLER: &str = "ledger.restore";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     for (kind, key) in builder.to_restore(rows) {
         let records = store
             .ledger_row(kind, &key)?
@@ -986,6 +996,8 @@ fn restore(
 /// ([`Builder::older_waits`]), one row read at a time and none of its records
 /// kept, before any task's fold reads it.
 fn fold_older_waits(store: &dyn LedgerQueue, builder: &mut Builder) -> Result<()> {
+    const CALLER: &str = "ledger.fold_older_waits";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     for key in builder.older_waits() {
         let stored = store.ledger_row(LedgerKind::Queue, &key)?;
         let mut read = read_by_id(store, &builder.older_inputs(&key, stored.as_ref()))?;
@@ -1088,6 +1100,8 @@ fn books_of_heads(
     at: EventId,
     closed_to: i64,
 ) -> Result<(QueueBook, Lives, PreClaimBook)> {
+    const CALLER: &str = "ledger.books_of_heads";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let needs = cut::Needs::of(heads, at);
     let stops = store.ledger_supervisor_stops()?;
     let mut last = Vec::new();
@@ -1172,6 +1186,8 @@ pub fn rows_written(
 /// writes the marks again once it has caught up; at a cursor past W, or
 /// with no W, it writes none.
 pub fn restore_sessions(store: &dyn LedgerQueue, builder: &mut Builder) -> Result<()> {
+    const CALLER: &str = "ledger.restore_sessions";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let heads = store.ledger_heads(LedgerKind::Session)?;
     let anchors = store.ledger_session_anchors()?;
     let w = written_through(store.sessions_written()?.as_ref(), &heads);
@@ -1229,6 +1245,8 @@ pub fn restore_sessions(store: &dyn LedgerQueue, builder: &mut Builder) -> Resul
 /// the rows record every input up to they do not say, and finding it is
 /// for the caller, not for this.
 pub fn restore_pushes(store: &dyn LedgerQueue, builder: &mut Builder, now_ms: i64) -> Result<()> {
+    const CALLER: &str = "ledger.restore_pushes";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let (through, resources) = (builder.events, builder.resources);
     let now_ms = builder.folds_at(now_ms);
     let heads = store.ledger_heads_open_at(through, resources)?;
@@ -1310,6 +1328,8 @@ fn run_and_task_records(
     row: &LedgerRow,
     whole: &BTreeMap<RunId, Vec<RunEvent>>,
 ) -> Result<Vec<RunEvent>> {
+    const CALLER: &str = "ledger.run_and_task_records";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let mut events = row.records.clone();
     if row.kind == LedgerKind::Task {
         let runs: Vec<String> = match row.task_id.filter(|_| row.is_legacy()) {
@@ -1336,6 +1356,8 @@ fn run_and_task_records(
 
 /// The events of `ids`, each read by its id.
 fn read_by_id(store: &dyn LedgerQueue, ids: &[EventId]) -> Result<Vec<RunEvent>> {
+    const CALLER: &str = "ledger.read_by_id";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let mut read = Vec::new();
     for id in ids {
         let before = EventId::new(id.as_i64() - 1);
@@ -1388,6 +1410,8 @@ fn start_builder_timed(
     now_ms: i64,
     timing: Timing<'_>,
 ) -> Result<Builder> {
+    const CALLER: &str = "ledger.start_builder_timed";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let started = timing.start();
     let mut builder = Builder::default();
     let heads = store.ledger_heads(LedgerKind::Session)?;
@@ -1495,6 +1519,8 @@ fn fold_and_write(
     ),
     built: &mut Built,
 ) -> Result<bool> {
+    const CALLER: &str = "ledger.fold_and_write";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let (kind, key) = target.row_key();
     let stored = store.ledger_row(kind, &key)?;
     let mut samples = Vec::new();
@@ -1645,6 +1671,8 @@ fn pass_of_watch_timed(
     classifier: Option<&crate::domain::command_rules::CommandClassifier>,
     timing: Timing<'_>,
 ) -> (Option<Builder>, Built) {
+    const CALLER: &str = "ledger.pass_of_watch_timed";
+    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let failed = |what: &str, error: &anyhow::Error| Built {
         failure: Some(format!("{what}: {error:#}")),
         ..Built::default()

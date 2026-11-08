@@ -3902,6 +3902,7 @@ pub(crate) mod tests {
 
     fn request(token: Option<&str>, use_case: UseCase, params: Value) -> ServiceRequest {
         ServiceRequest {
+            caller: None,
             api_version: API_VERSION,
             token: token.map(str::to_owned),
             env_role: None,
@@ -4050,6 +4051,46 @@ pub(crate) mod tests {
         assert_eq!(recorded["state"], "unreachable");
         assert_eq!(recorded["outage"], json!(outage));
         assert_eq!(recorded["next"], UNREACHED_NEXT);
+    }
+
+    #[test]
+    fn caller_labels_change_neither_answers_nor_authorization() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "test",
+            pid: 7,
+        };
+        for (use_case, params, allowed) in [
+            (UseCase::Show, json!({"id": 1}), true),
+            (
+                UseCase::BrokerRecord,
+                json!({"kind": "queue_broker_denied", "payload": {}}),
+                false,
+            ),
+        ] {
+            let original = request(Some("worker"), use_case, params);
+            let expected = serde_json::to_value(service.handle(&original)).unwrap();
+            assert_eq!(expected["ok"], allowed);
+            if !allowed {
+                assert_eq!(expected["error"]["code"], "authorization_denied");
+            }
+            let wire = serde_json::to_value(&original).unwrap();
+            assert!(wire.get("caller").is_none());
+            let old: ServiceRequest = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                serde_json::to_value(service.handle(&old)).unwrap(),
+                expected
+            );
+            for caller in ["sweep", "ledger.restore", "supervisor", "bad\ncaller"] {
+                let mut changed = original.clone();
+                changed.caller = Some(caller.into());
+                assert_eq!(
+                    serde_json::to_value(service.handle(&changed)).unwrap(),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]

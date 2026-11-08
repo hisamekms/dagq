@@ -3255,6 +3255,7 @@ fn last_turn_page_fits_the_request_and_answer_at_worst_escape_width() {
         record: None,
     };
     let request = ServiceRequest {
+        caller: None,
         api_version: API_VERSION,
         token: Some("token".into()),
         env_role: None,

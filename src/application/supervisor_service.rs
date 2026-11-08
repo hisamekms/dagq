@@ -42,6 +42,7 @@
 //! [Queue service]: ../../docs/design/queue-service.md
 
 pub mod across;
+pub mod caller;
 pub mod control;
 mod dispatch;
 pub mod end_bound;
