@@ -651,8 +651,14 @@ fn write_taken(
         .map(Target::row_key)
         .collect();
     let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, &rows_taken);
+    let mut first = builder.taken_first();
+    // The first write that failed of the marks taken first: the round goes
+    // on past it, as a new process takes those marks first again each pass.
+    let mut failed_first = None;
     let mut targets = taken.into_iter();
     while let Some(target) = targets.next() {
+        let taken_first = first > 0;
+        first = first.saturating_sub(1);
         // The next pass starts at what this one did not look at.
         if built.written >= WRITES_PER_PASS {
             builder.put_back(target, targets);
@@ -660,8 +666,12 @@ fn write_taken(
         }
         if let Err(error) = write(store, builder, &target, (&mut inputs, classifier), built) {
             // Its turn comes again after the rest: one failing each pass
-            // stops no other.
-            builder.keep(target);
+            // stops no other, nor is it taken first again.
+            builder.keep_failed(target);
+            if taken_first {
+                failed_first.get_or_insert(error);
+                continue;
+            }
             if let Some(next) = targets.next() {
                 builder.put_back(next, targets);
             }
@@ -671,6 +681,9 @@ fn write_taken(
     }
     drop(inputs);
     aside.into_iter().for_each(|target| builder.keep(target));
+    if let Some(error) = failed_first {
+        return Err(error);
+    }
     let left: BTreeSet<(LedgerKind, String)> = builder
         .rows_to_sweep(rows)
         .iter()

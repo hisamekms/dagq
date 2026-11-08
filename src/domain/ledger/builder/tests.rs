@@ -86,6 +86,79 @@ fn a_take_starts_where_the_last_pass_left_off_and_goes_round() {
     assert_eq!(builder.take(10), [task(2)]);
 }
 
+/// The marks holding R's events back are those of a run, task, queue or
+/// node row with a position of the events, the earliest as many as asked
+/// in the marks' order; a session's, one taken already and one with no position are
+/// not, and naming them changes nothing.
+#[test]
+fn the_marks_holding_r_are_named_earliest_first() {
+    let mut log = Log::default();
+    for task in [3, 1, 2] {
+        log.add(Some(task), None, "task_created", json!({}), task);
+    }
+    let mut builder = Builder::default();
+    for event in &log.events {
+        builder.mark_events(std::slice::from_ref(event));
+    }
+    let session = Target::Row(LedgerKind::Session, "s".to_owned());
+    let at = builder.read_to();
+    builder.marks.insert(session.clone());
+    builder.dirtied.insert(
+        session,
+        Dirtied::events(ReadTo {
+            event: EventId::new(0),
+            ..at
+        }),
+    );
+    let queue = Target::Row(LedgerKind::Queue, "q".to_owned());
+    builder.marks.insert(queue);
+    let before = builder.clone();
+    let task = |id| Target::Task(TaskId::new(id));
+    assert_eq!(builder.holding_r(10), [task(1), task(2), task(3)]);
+    assert_eq!(builder.holding_r(2), [task(1), task(3)]);
+    assert_eq!(builder.holding_r(0), []);
+    assert_eq!(builder, before);
+    // One taken and not looked at yet is not a mark left.
+    builder.marks.remove(&task(3));
+    assert_eq!(builder.holding_r(10), [task(1), task(2)]);
+}
+
+/// A take takes first the mark holding R, whatever rank the round goes on
+/// from; kept without its row recording its input it holds R and is taken
+/// first again, and once tracked R moves past it. The round's rank counts
+/// only the round, a put back too.
+#[test]
+fn a_take_takes_the_mark_holding_r_first_whatever_the_rank() {
+    let mut log = Log::default();
+    log.add(Some(1), None, "task_created", json!({}), 1);
+    let mut builder = Builder::default();
+    let queue = |id: usize| Target::Row(LedgerKind::Queue, format!("q{id:02}"));
+    builder.marks.extend((0..20).map(queue));
+    let before = builder.events;
+    builder.mark_events(&log.events);
+    builder.resume_taking(10);
+    let task = Target::Task(TaskId::new(1));
+    // The round's rank 10 is of every mark, the task's (0) too.
+    let taken = builder.take(3);
+    assert_eq!(taken, [task.clone(), queue(9), queue(10)]);
+    assert_eq!(builder.take_offset, 12);
+    // Not looked at: it holds R, and is taken first again.
+    builder.keep(task.clone());
+    builder.keep(queue(9));
+    builder.keep(queue(10));
+    assert_eq!(builder.rows_written().unwrap().events, before);
+    assert_eq!(builder.take(3), [task.clone(), queue(11), queue(12)]);
+    builder.put_back(queue(11), [queue(12)]);
+    assert_eq!(builder.take_offset, 12);
+    builder.keep(task.clone());
+    assert_eq!(builder.take(2), [task.clone(), queue(11)]);
+    let row = build(&task, &inputs(&log, 2), &[]).unwrap();
+    builder.track(&task, &row);
+    builder.keep(task);
+    assert_eq!(builder.rows_written().unwrap().events, log.last());
+    assert_eq!(builder.take(2), [queue(12), queue(13)]);
+}
+
 /// A run on its way is not written; one ended, one pending on its push and
 /// a legacy one are, and only a legacy one or one ended past its grace is
 /// settled. A task on its way is written, not settled.

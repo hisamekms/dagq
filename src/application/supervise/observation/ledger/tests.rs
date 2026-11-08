@@ -7,6 +7,7 @@ use crate::application::{
 };
 use crate::domain::environment::{Resources, RunResource};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
+use crate::domain::ledger::builder::HOLDING_R_PER_PASS;
 use crate::domain::ledger::queue::QueueBook;
 use crate::domain::ledger::read::read;
 use crate::domain::ledger::session::SessionBook;
@@ -2093,7 +2094,11 @@ fn the_retention_keeps_the_steps_of_the_runs_a_pass_did_not_write_yet() {
                 .is_none()
         })
         .count();
-    assert_eq!(unwritten, 1);
+    // The tasks taken first ([`HOLDING_R_PER_PASS`]) are among the writes.
+    assert!(
+        (1..=1 + HOLDING_R_PER_PASS).contains(&unwritten),
+        "{unwritten}"
+    );
     let mut built = build_pass(&memory, &mut builder, (ms(LATER + 1), BUILT), retain, None);
     while built.backlog > 0 {
         built = build_pass(&memory, &mut builder, (ms(LATER + 2), BUILT), retain, None);
@@ -2740,9 +2745,9 @@ fn tasks_ready_marked_again_past_the_bound_each_pass_leave_no_other_row_unwritte
 }
 
 /// A target whose write fails each pass (its stored row does not read)
-/// stops no other: the pass that fails keeps it in its turn and the next
-/// pass starts at the targets after it, so those are written while it
-/// stays marked.
+/// stops no other: taken first as it holds R, the pass goes on past it to
+/// the others, and keeps it in its turn of the round, so those are written
+/// while it stays marked.
 #[test]
 fn a_target_that_fails_each_pass_leaves_the_others_written() {
     let mut log = Log::default();
@@ -2763,7 +2768,7 @@ fn a_target_that_fails_each_pass_leaves_the_others_written() {
     for secs in 10..13 {
         let built = pass(&memory, &mut builder, secs);
         assert!(built.failure.is_some(), "{secs}: {built:?}");
-        assert_eq!(built.backlog, if secs == 10 { 3 } else { 1 }, "{secs}");
+        assert_eq!(built.backlog, 1, "{secs}");
     }
     assert_eq!(memory.count(LedgerKind::Task), 2);
     assert!(
@@ -2957,6 +2962,7 @@ fn a_run_measured_from_inside_only_folds_its_executors_samples() {
     assert_eq!(row.inputs_through.resources, None);
 }
 
+mod oldest_first;
 mod pages;
 mod pushes_mixed;
 mod queue_waits;
@@ -4899,6 +4905,12 @@ fn every_row_a_store_lacks_has_an_input_after_r() {
     for task in 1_000..1_000 + i64::try_from(WRITES_PER_PASS).unwrap() {
         log.add(Some(task), None, "task_created", json!({}), 3_300);
     }
+    // More queue rows than a pass takes first ([`HOLDING_R_PER_PASS`]):
+    // all hold R from where the page's rows were marked, and those past
+    // the marks taken first wait in the round past the bound.
+    for _ in 0..HOLDING_R_PER_PASS + 3 {
+        log.add(None, None, "authorization_denied", json!({}), 3_300);
+    }
     let memory = Memory::of(&log);
     memory.samples.replace(samples);
     let whole = rows_of_every_input(&memory, LATER);
@@ -4997,7 +5009,9 @@ fn completed_tasks_left_unwritten_and_runs_stale_by_their_steps_have_an_input_af
     let mut builder = Builder::default();
     let built = pass(&memory, &mut builder, LATER);
     assert_eq!(built.failure, None);
-    assert_eq!(memory.count(LedgerKind::Task), 0);
+    // Only those holding R taken first ([`HOLDING_R_PER_PASS`]) are
+    // written of the tasks.
+    assert!(memory.count(LedgerKind::Task) <= HOLDING_R_PER_PASS);
     assert_eq!(sessions_written_through(&memory).unwrap(), Some(log.last()));
     let r = r_of(&memory);
     assert!(r.events < log.last());

@@ -136,7 +136,12 @@
 //!   goes round ([`Builder::take`]), so that no mark waits behind those
 //!   marked again each pass (more tasks ready under a slots full than a
 //!   pass writes, which each event of its supervisor marks and makes
-//!   dirty). The session rows are not bounded so: a pass folds every one
+//!   dirty). Ahead of the round each pass takes the marks of the earliest
+//!   positions holding R back ([`HOLDING_R_PER_PASS`],
+//!   [`Builder::holding_r`]), whatever the round's place: a new process
+//!   goes on from the round's rank kept with R, and with more marks than
+//!   the round comes back to before the process ends, R would stay where
+//!   those marks hold it. The session rows are not bounded so: a pass folds every one
 //!   marked ([`Builder::take_sessions`]) and writes all those that changed,
 //!   after the other rows, [`SESSION_ROWS_PER_WRITE`] rows and
 //!   [`SESSION_BYTES_PER_WRITE`] a transaction, the last with the store's
@@ -296,6 +301,18 @@ pub const SESSION_BYTES_PER_WRITE: usize = 32 << 20;
 /// How many marks one pass looks at at most (a mark of a row the store
 /// already holds up to date is looked at and not written).
 pub const CHECKS_PER_PASS: usize = 2_000;
+
+/// How many of the marks holding R's events back a pass takes first, the
+/// earliest positions first ([`Builder::holding_r`]), before its round of
+/// the rest ([`Builder::take`]): the round goes on from a rank a new
+/// process restores, and marks that grow past what a pass looks at (rows
+/// of an older version kept for their rewrite) would keep it from coming
+/// back to the mark that holds R, which each new process makes again from
+/// R. These are within [`CHECKS_PER_PASS`] and taken before the rest, so
+/// that the bound of writes ([`WRITES_PER_PASS`], far above it) reaches
+/// them first; a few, so that marks of rows behind the stored ones, which
+/// hold R until a later pass, leave the round its share.
+pub const HOLDING_R_PER_PASS: usize = 16;
 
 /// How many events after the cursor a pass reads at a time: a builder from
 /// its cursors' start reads every event once, a page at a time.
@@ -1130,6 +1147,17 @@ pub struct Builder {
     next: Option<Target>,
     take_offset: usize,
     take_size: usize,
+    /// The rank in the marks of each the last [`Self::take`]'s round
+    /// took, as it took them: [`Self::put_back`] sets the round's rank
+    /// back to that of the first it puts back.
+    round_ranks: BTreeMap<Target, usize>,
+    /// The marks whose write failed ([`Self::keep_failed`]), which wait
+    /// for their turn in the round rather than being taken first: one that
+    /// fails each pass is looked at once a round, as the others are, and
+    /// stops none of those that hold R after it.
+    failed: BTreeSet<Target>,
+    /// [`Self::taken_first`].
+    taken_first: usize,
     resume_offset: Option<usize>,
     time_pending: Option<i64>,
     /// Session and queue rows with an input after this event are to be
@@ -1318,6 +1346,9 @@ impl Default for Builder {
             next: None,
             take_offset: 0,
             take_size: 0,
+            round_ranks: BTreeMap::new(),
+            failed: BTreeSet::new(),
+            taken_first: 0,
             resume_offset: None,
             time_pending: None,
             rows_after: None,
@@ -1914,71 +1945,133 @@ impl Builder {
         !self.marks.is_empty() || self.rows_after.is_some()
     }
 
-    /// Take up to `limit` marks in their order (runs first), from where the
-    /// last pass left off and round: the marks a pass left past its bounds
-    /// are taken before those it looked at, which may be marked again
-    /// before the next pass. A restart rotates the restored set by the rank
-    /// persisted with R, so an unchanged prefix cannot monopolize checks.
+    /// The marks, at most `limit`, that hold R's events back
+    /// ([`Self::rows_mark`]: a run, task, queue or node row's with a
+    /// position of the events) but those whose write failed
+    /// ([`Self::failed`]), those of the earliest positions, in the
+    /// marks' order (runs first). Nothing changes: [`Self::take`] takes
+    /// them first.
+    pub fn holding_r(&self, limit: usize) -> Vec<Target> {
+        let mut held: Vec<(ReadTo, &Target)> = self
+            .dirtied
+            .iter()
+            .filter(|(target, _)| {
+                !matches!(target, Target::Row(LedgerKind::Session, _))
+                    && self.marks.contains(*target)
+                    && !self.failed.contains(*target)
+            })
+            .filter_map(|(target, dirtied)| dirtied.events.map(|at| (at, target)))
+            .collect();
+        if held.len() > limit {
+            held.select_nth_unstable(limit);
+            held.truncate(limit);
+        }
+        let mut held: Vec<Target> = held.into_iter().map(|(_, target)| target.clone()).collect();
+        held.sort_unstable();
+        held
+    }
+
+    /// Take up to `limit` marks: first those holding R's events back
+    /// ([`Self::holding_r`], [`HOLDING_R_PER_PASS`] at most), whatever the
+    /// round's place, and then the others in their order (runs first),
+    /// from where the last pass left off and round: the marks a pass left
+    /// past its bounds are taken before those it looked at, which may be
+    /// marked again before the next pass. A restart rotates the restored
+    /// set by the rank persisted with R, so an unchanged prefix cannot
+    /// monopolize checks. The round's rank is of every mark, those taken
+    /// first among them (passed over), so that it is the same rank of the
+    /// set a later start makes again with them in it.
     pub fn take(&mut self, limit: usize) -> Vec<Target> {
-        self.take_size = self.marks.len();
-        self.take_offset = match &self.next {
-            Some(from) => self.marks.range(..from).count(),
-            None => self.resume_offset.take().unwrap_or_default(),
-        };
-        self.take_offset = if self.take_size == 0 {
-            0
-        } else {
-            self.take_offset % self.take_size
-        };
-        let taken: Vec<Target> = match self.next.take() {
-            Some(from) => self
-                .marks
-                .range(&from..)
-                .chain(self.marks.range(..&from))
-                .take(limit)
-                .cloned()
-                .collect(),
-            None => self
-                .marks
-                .iter()
-                .cycle()
-                .skip(self.take_offset)
-                .take(limit.min(self.take_size))
-                .cloned()
-                .collect(),
-        };
-        self.take_offset = if self.take_size == 0 {
-            0
-        } else {
-            (self.take_offset + taken.len()) % self.take_size
-        };
-        for target in &taken {
+        let first = self.holding_r(HOLDING_R_PER_PASS.min(limit));
+        let round = self.take_round(limit - first.len(), &first);
+        for target in &first {
             self.marks.remove(target);
         }
-        // Those not taken go on after the last taken (none after it: at
-        // the first).
-        self.next = taken.last().and_then(|last| {
+        // Those not taken go on after the last of the round (none after
+        // it: at the first).
+        self.next = round.last().and_then(|last| {
             self.marks
                 .range((Bound::Excluded(last), Bound::Unbounded))
                 .next()
                 .cloned()
         });
+        self.taken_first = first.len();
+        first.into_iter().chain(round).collect()
+    }
+
+    /// How many of the marks the last [`Self::take`] took were those
+    /// holding R taken first, ahead of its round.
+    pub const fn taken_first(&self) -> usize {
+        self.taken_first
+    }
+
+    /// Take up to `limit` marks but those of `first`, in their order from
+    /// where the last pass left off and round ([`Self::take`]), noting the
+    /// rank of each ([`Self::round_ranks`]).
+    fn take_round(&mut self, limit: usize, first: &[Target]) -> Vec<Target> {
+        self.take_size = self.marks.len();
+        self.round_ranks.clear();
+        if self.take_size == 0 {
+            self.take_offset = 0;
+            self.next = None;
+            self.resume_offset = None;
+            return Vec::new();
+        }
+        let start = match self.next.take() {
+            Some(from) => self.marks.range(..from).count(),
+            None => self.resume_offset.take().unwrap_or_default(),
+        } % self.take_size;
+        let mut taken = Vec::new();
+        let mut walked = 0;
+        for (step, target) in self
+            .marks
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(self.take_size)
+            .enumerate()
+        {
+            if taken.len() == limit {
+                break;
+            }
+            walked = step + 1;
+            if first.contains(target) {
+                continue;
+            }
+            self.round_ranks
+                .insert(target.clone(), (start + step) % self.take_size);
+            self.failed.remove(target);
+            taken.push(target.clone());
+        }
+        self.take_offset = (start + walked) % self.take_size;
+        for target in &taken {
+            self.marks.remove(target);
+        }
         taken
     }
 
     /// Put back the marks a pass took and did not look at (past its bound
     /// of writes, or after the write before them failed), `first` and then
-    /// `rest` in the order taken: the next pass starts at `first`.
+    /// `rest` in the order taken: the next pass starts at `first`, and the
+    /// round's rank goes back to that of the first of them its round took.
     pub fn put_back(&mut self, first: Target, rest: impl IntoIterator<Item = Target>) {
-        self.marks.insert(first.clone());
         let rest: Vec<_> = rest.into_iter().collect();
-        if self.take_size > 0 {
-            self.take_offset = (self.take_offset + self.take_size
-                - (rest.len() + 1) % self.take_size)
-                % self.take_size;
+        if let Some(rank) = std::iter::once(&first)
+            .chain(&rest)
+            .find_map(|target| self.round_ranks.get(target))
+        {
+            self.take_offset = *rank;
         }
+        self.marks.insert(first.clone());
         self.marks.extend(rest);
         self.next = Some(first);
+    }
+
+    /// Put back `target`, whose write failed, to be looked at in its turn
+    /// of the round ([`Self::failed`]), not first: it holds R still.
+    pub fn keep_failed(&mut self, target: Target) {
+        self.failed.insert(target.clone());
+        self.marks.insert(target);
     }
 
     /// Put `target` back to be looked at next pass in its turn (another
@@ -1994,6 +2087,7 @@ impl Builder {
     pub fn track(&mut self, target: &Target, row: &LedgerRow) {
         // Its inputs up to now are in the row.
         self.dirtied.remove(target);
+        self.failed.remove(target);
         match target {
             Target::Row(kind, key) if row.is_final => {
                 self.settled.insert((*kind, key.clone()));
