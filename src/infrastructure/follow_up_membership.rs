@@ -218,6 +218,10 @@ impl SqliteQueue {
     /// returned row, which is the `follow_up_judged` payload and the output
     /// (the stored `follow_up_judgements` row has none); the goal is not
     /// reopened and the follow_up does not move.
+    /// The ask is on the follow-up task with no run, asked_by supervisor,
+    /// reason scope and CORRECTION_OPTIONS; the inbox receives ask_opened via
+    /// watch. Its question includes the judgement and released dependents with
+    /// their runs, without stopping them or altering the closed goal's history.
     pub fn judge_follow_up(
         &mut self,
         task: TaskId,
@@ -499,7 +503,23 @@ pub(super) fn correction_answers(conn: &impl SqlRead) -> Result<Vec<Ask>> {
 /// not be moved into the reopened goal and stays where it is; no running
 /// task is stopped and no event is rewritten. `None` when the answer is
 /// not one the runtime applies now (left for the inbox); a goal no longer
-/// closed as achieved closes the ask without a change.
+/// closed as achieved closes the ask with only ask_closed.
+/// Reopen clears closed_at/verdict and restores open status. A follow-up
+/// past draft/ready, or one whose goal dependency refuses the move, stays
+/// outside. It blocks closing as achieved only while it is an unfinished
+/// required outside follow-up: SourceFollowUp::unsettled_reason excludes
+/// completed and canceled tasks even when they were not moved. Other unclosed
+/// correct_goal asks for the same goal and old approve_goal asks are closed
+/// by asks::close_by_runtime, with the reason that the goal was reopened
+/// (unanswered ones get a runtime ask_answered with runtime_closed: true;
+/// answered ones get ask_closed).
+/// Their IDs are recorded in closed_asks; membership can then be corrected
+/// or moved to an open goal. Unclaimed dependents wait for the reopened goal
+/// to close again. Correct_verdict records the mistaken achievement while
+/// leaving the goal closed; the planner finds or creates a goal for the fix.
+/// Keep_achieved records the person's judgement that acceptance was met;
+/// the follow-up is treated as out of scope and the planner may record its
+/// corrected out-of-scope destination.
 pub(super) fn decide_correction(
     queue: &SqliteQueue,
     ask_id: AskId,

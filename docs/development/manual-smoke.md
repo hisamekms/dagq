@@ -259,7 +259,7 @@ Claude Code の版を上げたとき、または読み手（`ClaudeTurnReader`�
 
 ## Codex の goal review のスモーク
 
-`[roles.goal_review]` の `provider = "codex"` の goal review（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)、[Goal review](../design/supervisor-lifecycle/goal-review.md) の 3、[provider-lifecycle](../design/provider-lifecycle.md#codexのheadless-job)）は、spike の JSONL と rollout を書く stub の `codex` でだけ自動 test される。
+`[roles.goal_review]` の `provider = "codex"` の goal review（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)、[Goal review](../design/supervisor-lifecycle/goal-review.md#起動とprovider) の「起動とprovider」、[provider-lifecycle](../design/provider-lifecycle.md#codexのheadless-job)）は、spike の JSONL と rollout を書く stub の `codex` でだけ自動 test される。
 実 Codex の出力の形・read-only の sandbox の中の `dagq` の読み取り・rollout の model・認証の失敗の文言は stub では確かめられないので、codex-cli の版を上げたとき、Codex の job の起動（`Codex::headless_command`・`apply_launch`）か読み手（`last_message`・`job_session`・`job_failure`）を変えたときに、使い捨て repository で 1 回流す。
 人か inbox が行う（worker は使い捨ての queue を作れない。[隔離](#隔離)）。
 

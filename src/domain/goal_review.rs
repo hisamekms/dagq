@@ -69,7 +69,8 @@ pub struct GoalReviewVerdict {
 }
 
 impl GoalReviewVerdict {
-    /// The verdict in the job's stdout, found the way the run review's is.
+    /// The verdict in the job's final reply text, found the way the run
+    /// review's is: the last JSON object, independent of provider.
     /// `gaps` needs a gap, each with a title.
     pub fn parse(stdout: &str) -> Result<Self, String> {
         let verdict: Self = parse_json_object(stdout)
@@ -183,7 +184,10 @@ pub fn fingerprint(tasks: &[(TaskId, TaskStatus)]) -> String {
 /// goal's tasks ([`fingerprint`]), then the acceptance version when it
 /// changed from the first, and each follow-up whose source is the goal
 /// with its current judgement. A goal with neither keeps the fingerprint
-/// of its tasks alone; one with a follow-up (ended ones included) or an
+/// of its tasks alone. A follow-up's status outside the goal is excluded:
+/// progress on out-of-scope work must not invalidate the review. Registration
+/// and recording/correcting a judgement do change the input.
+/// One with a follow-up (ended ones included) or an
 /// acceptance version above 1 is reviewed once more after this changed,
 /// as its input now has them.
 pub fn review_fingerprint(

@@ -91,7 +91,7 @@ acceptanceを変えると判定時の版が古くなり、同じ分類を記録�
 この検査は`close_goal_in`の中にあるので、人の`goal close --verdict achieved`
 （人の言葉による代行を含む）、goal reviewの`achieved`の適用、`approve_goal`の
 answerの`achieved`が同じtransactionで同じ条件を使う。goal reviewの起動の条件と
-fingerprintにも入る（[Goal review](supervisor-lifecycle/goal-review.md)の2・5）。
+fingerprintにも入る（[Goal review](supervisor-lifecycle/goal-review.md#起動の条件と入力)の「起動の条件と入力」と「verdictの適用と失敗」）。
 
 所属taskが全て終わり（`goal_review::tasks_done`）、この検査だけでgoal reviewが起動しないopenのGは、`status`のattentionに`goal_follow_ups_unsettled`として1件出る。
 止めているfollow-upのtask IDと理由の分類（`SourceFollowUp::unsettled_reason`）を並べ、runtimeのplannerが扱う途中の判断の無いfollow_upのdraft、`draft_planner_exhausted`のdraft、closeされていないaskのあるtaskは数えず、`goal_review_failed`で人を待つGには出さない（判定は`follow_up::unshown_unsettled`）。
@@ -128,7 +128,7 @@ abandonedで閉じたgoalへのrequiredはaskを開かない。
 
 askが閉じるまで、そのfollow_upの`judge-follow-up`と`set-goal`は拒む。askの中身と
 答えの適用は
-[Goal review](supervisor-lifecycle/goal-review.md)の9が持つ。
+[Goal review](supervisor-lifecycle/goal-review.md#answerと達成の訂正)の「answerと達成の訂正」が持つ。
 
 ## 旧schemaの移行
 

@@ -3,7 +3,8 @@
 //! verdict (closes the goal as achieved, registers its gaps as drafts of
 //! the goal, or asks the inbox) and applies a person's answer to its
 //! `approve_goal` ask. None of this takes a run slot; a failure is logged
-//! and tried again on a later pass.
+//! and retried after input changes or a person rearms it, unless an unusable
+//! provider leaves it eligible for another route immediately.
 
 use super::*;
 use super::{VerdictSent, verdict_sent};
@@ -140,6 +141,12 @@ impl PlanningState {
     }
 
     /// Start the goal review of the first candidate, when none runs.
+    /// Launch comes from roles.goal_review (no model/effort without a table).
+    /// Begin records the start before the actor executor starts the job.
+    /// An undone queue-service start leaves the row for interruption/retry
+    /// without goal_review_failed, a kept end, or a new attempt. A maybe-done
+    /// or rejected request is a failure. Preparation errors (directory or
+    /// prompt) do not classify the provider; provider-start errors do.
     fn start_goal_review(&mut self, env: &mut PlanningEnv<'_>) -> Result<()> {
         if self.goal_review.is_some() || !self.held_goal_reviews.is_empty() {
             return Ok(());
@@ -254,6 +261,13 @@ impl PlanningState {
     }
 
     /// Start the provider's process of the goal review.
+    /// HeadlessProgram::Job uses GOAL_REVIEW_ACCESS and actor_env: no DAGQ_QUEUE,
+    /// and CLI reads go through the queue-service socket. The actor executor
+    /// uses the discovered/version-checked Codex when routed there, supplies
+    /// its prompt on stdin and replaces its read-only sandbox with the socket
+    /// permission profile. Claude receives begin's session UUID unchanged;
+    /// Codex does not receive it. The headless_jobs provider is the routed
+    /// provider; the job timeout is review_timeout.
     fn start_goal_review_job(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -321,7 +335,13 @@ impl PlanningState {
     }
 
     /// The goal review prompt of the job's goal from the queue as it is
-    /// now, held to its limits (task 1571).
+    /// now, held to its limits. It includes the goal fields, source follow-ups
+    /// with judgement history, own tasks and their landed receipts, replacement
+    /// lineage and tasks now outside the goal, selected goal events, previous
+    /// reviews and the consecutive gaps count. The prompt excludes out-of-scope
+    /// follow-ups from achievement and gaps, and includes required ones as own
+    /// tasks; the job can read remaining source/docs in the main checkout
+    /// and use the read-only CLI to obtain the rest of its material.
     fn goal_review_material(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -432,7 +452,11 @@ impl PlanningState {
     }
 
     /// Reap the job once it ended and apply its verdict, or record its
-    /// failure.
+    /// failure. Both providers supply final reply text to the same verdict
+    /// parser and transactional finish path. Failure/session metadata is read
+    /// by the provider that ran it; Codex end events include its thread session
+    /// and model when readable. Only a failed job without a parsed verdict is
+    /// classified for provider unavailability, never a successful verdict's text.
     pub(in crate::application::supervise) fn poll_goal_review(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -632,7 +656,10 @@ impl PlanningState {
 
     /// What the runtime makes of the verdict (a `gaps` past the limit in a
     /// row is an `ask`), applied in one transaction; the inbox is told of
-    /// a new `approve_goal` ask.
+    /// a new `approve_goal` ask through watch, with no push notification.
+    /// The ask anchors to the first task, has no run, and uses discard only
+    /// when the verdict says discard, otherwise scope. Its options are
+    /// GOAL_OPTIONS plus the verdict's options, deduplicated.
     fn apply_goal_verdict(
         env: &mut PassEnv<'_>,
         job: &GoalReviewJob,
@@ -695,7 +722,13 @@ impl PlanningState {
     /// (`goal_review_failed`) and is not reviewed again by itself until its
     /// tasks change, unless its provider could not be used and it moves
     /// (ADR-t1063-1 decision 4). A failure the queue does not take is held
-    /// as a verdict is.
+    /// as a verdict is. Ordinary failures (nonzero exit, timeout, missing or
+    /// invalid verdict, model errors) leave the goal unchanged, mark failed,
+    /// and expose goal_review_holds as inbox attention on its first task.
+    /// With an explicit role provider, an unusable provider marks interrupted
+    /// with provider_unusable instead: no manual-review attention, and the
+    /// next pass routes a new row with the same attempt. With no explicit
+    /// provider, a Claude wall marks failed; completing its hold ask rearms it.
     fn fail_goal_review(
         &mut self,
         env: &mut PlanningEnv<'_>,

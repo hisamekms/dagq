@@ -23,7 +23,7 @@ related:
   権限の判定は[Authorization](../authorization.md#対話と記録のコマンドapplication)のとおり（worker は worker_question だけ）。
   `follow_up`はfollow-up triageのaskで、新しく作られない（残ったものは人が読む）。
   `planner_question`はruntimeのplannerがtaskについて作り、supervisorがanswerをそのplannerに届ける（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)）。
-  `correct_goal`はachievedで閉じたgoalのfollow_upにrequiredが記録されたときにruntimeがそのfollow_upのtaskについて作り、supervisorがanswerを適用する（[Goal review](goal-review.md)の9、ADR-t1504-2決定9）。
+  `correct_goal`による達成の訂正は人が判断し、処理の入口は[Goal review](goal-review.md#answerと達成の訂正)が持つ（ADR-t1504-2決定9）。
   CLIの`ask`の`--kind`には無い（ほかのaskと同じく、inboxは`watch`の`ask_opened`で受ける。[人への通知](ask-push.md)）。
   findingのために立ったplannerは`--finding ID`で作り、taskもrunも無くてよい（[Finding planners (supervisor)](finding-planners.md)）。
   計画の依頼のために立ったplannerは`--request ID`で作り（`planner_question`だけ。開けるのはその依頼のplanner自身だけで、他のplannerは拒まれる）、taskもrunも無くてよい（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)の5）。
@@ -63,7 +63,7 @@ related:
 - `dagq ask close`は回答済みのaskに`closed_at`を書き、`ask_closed`を記録する。
   inboxが回答を読んで従った印（supervisorが答えを適用して閉じるときも同じ`close_ask`）で、`stats`の`asks.times`は回答の適用として読む。
   runtimeが回答済みのaskを適用せずに閉じるとき（回答が当たらなくなった`approve_plan` / `approve_goal`、proposalの取り下げで閉じる`approve_plan`、適用の時にgoalがもうachievedで閉じていない`correct_goal`、`correct_goal`の`reopen`が閉じる同じgoalのほかの`correct_goal`と残った`approve_goal`、runが`failed`になったかtaskが`completed`・`canceled`になったrunの`approve_landing`（[Review](review.md#review-supervisor)の6）、着地したrunのkindを問わないask（[integrate](integrate.md#着地とpush)））も同じ`ask_closed`をcloseと同じトランザクションで書く。
-  `reopen`が閉じるそれらのうち未回答のものは、runtimeがgoalを開き直した旨を答えて（`ask_answered`の`runtime_closed: true`）閉じる（[Goal review](goal-review.md)の9）。
+  達成の訂正に伴うaskの終了処理は`infrastructure::follow_up_membership::decide_correction`のdoc commentが持つ。
   attentionではない。
   未回答のaskはcloseできず（error）、取り下げは`answer`で取り下げた旨を書いてからcloseする。
   run_eventsでaskを終えるのは`ask_answered`だけで（`worker_question`の送信の`ask_delivered` / `ask_delivery_failed`は`stats`の対には使わない）、`stats`はこの2つを`ask_id`で対にして未回答のaskを数えるため、closeだけで閉じたaskが`stats`に残り続けないようにする。
