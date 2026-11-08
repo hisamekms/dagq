@@ -33,6 +33,11 @@
 //! "台帳を作る係". The peak of the first pass of the judgments of now is
 //! judged by itself ([`CAP_FIRST_PASS_PEAK`]), as the ledger's peaks hide it.
 //!
+//! `callers <dir>` restarts a supervisor on a copy of the queue `prepare`
+//! laid down through the queue service, as production's does, and counts
+//! the `ledger_row` requests by the label of the work that sent them
+//! ([`callers`], docs/plans/ledger-row-reads-spike.md).
+//!
 //! An allocator that counts for the whole process is set here only: the
 //! library's tests count per thread, and neither they nor the integration
 //! tests carry this one (it would count every other
@@ -40,14 +45,18 @@
 //! their register).
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use dagq::application::LedgerStore;
 use dagq::application::live_inputs::{LiveSources, carried_live_inputs};
 use dagq::application::supervise::{Retain, build_pass, start_builder};
-use dagq::domain::EventFilter;
+use dagq::application::supervisor_service::{
+    ServiceCaller, SupervisorPorts, SupervisorQueues, caller,
+};
+use dagq::application::{LedgerQueue, LedgerStore, QueueOpener, SupervisorRegistry};
 use dagq::domain::ledger::LedgerKind;
 use dagq::domain::ledger::builder::{Builder, EVENTS_PER_READ, Inputs, Part};
 use dagq::domain::ledger::session::written::{Cursors, rows_written_through};
@@ -55,6 +64,9 @@ use dagq::domain::live_alerts::{
     LiveHistory, SeededFold, WORK_EVENTS_PER_READ, first_pass_reads, judge,
 };
 use dagq::domain::marks::utc_text;
+use dagq::domain::queue_service::UseCase;
+use dagq::domain::slot_limits::{SlotFlags, SlotLimits, SupervisorConfig};
+use dagq::domain::{ActorContext, ActorRole, EventFilter, LeaseToken};
 use dagq::infrastructure::adapters::{ClaudeCode, SystemProcesses};
 use dagq::infrastructure::run_files::LocalRunFiles;
 use dagq::infrastructure::sqlite::SqliteQueue;
@@ -616,7 +628,7 @@ fn now_ms(dir: &Path) -> i64 {
 }
 
 /// Passes of the ledger at `now_ms` until no mark waits; how many.
-fn catch_up(queue: &SqliteQueue, builder: &mut Builder, now_ms: i64) -> usize {
+fn catch_up(queue: &dyn LedgerQueue, builder: &mut Builder, now_ms: i64) -> usize {
     let built_at = utc_text(now_ms);
     let mut passes = 0;
     loop {
@@ -1285,11 +1297,174 @@ fn main() {
         }
         Some("measure") if args.len() == 3 => measure(Path::new(&args[2])),
         Some("check") if args.len() == 2 => check(),
+        Some("callers") if args.len() == 3 => callers(Path::new(&args[2])),
         _ => {
             eprintln!(
-                "usage: supervisor_startup_memory prepare <dir> <events> [<pad bytes>] | measure <dir> | check"
+                "usage: supervisor_startup_memory prepare <dir> <events> [<pad bytes>] | measure <dir> | check | callers <dir>"
             );
             std::process::exit(2);
         }
     }
+}
+
+/// The requests a supervisor's queue sends to the queue service, each
+/// counted by its operation and by the label of the work that sent it
+/// ([`caller::current`] at the send): what the service's periodic
+/// aggregates record of them by caller.
+struct CountedCalls {
+    inner: Arc<dyn ServiceCaller>,
+    calls: Mutex<BTreeMap<(String, &'static str), usize>>,
+}
+
+impl CountedCalls {
+    fn note(&self, params: &Value) {
+        let op = params["op"].as_str().unwrap_or("-").to_owned();
+        let label = caller::current().unwrap_or("-");
+        *self.calls.lock().unwrap().entry((op, label)).or_default() += 1;
+    }
+
+    /// The counts so far, and none counted from now.
+    fn take(&self) -> BTreeMap<(String, &'static str), usize> {
+        std::mem::take(&mut *self.calls.lock().unwrap())
+    }
+}
+
+impl ServiceCaller for CountedCalls {
+    fn call(&self, use_case: UseCase, params: Value) -> anyhow::Result<Value> {
+        self.note(&params);
+        self.inner.call(use_case, params)
+    }
+    fn call_now(&self, use_case: UseCase, params: Value) -> anyhow::Result<Value> {
+        self.note(&params);
+        self.inner.call_now(use_case, params)
+    }
+    fn with_token(&self, file: &Path) -> anyhow::Result<Arc<dyn ServiceCaller>> {
+        self.inner.with_token(file)
+    }
+    fn sign_in(&self, registration: &LeaseToken, pid: u32) -> anyhow::Result<()> {
+        self.inner.sign_in(registration, pid)
+    }
+    fn take_back(&self, registration: &LeaseToken, pid: u32) -> anyhow::Result<()> {
+        self.inner.take_back(registration, pid)
+    }
+    fn hand_over(&self) {
+        self.inner.hand_over();
+    }
+    fn sign_out(&self) {
+        self.inner.sign_out();
+    }
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        self.inner.credential()
+    }
+}
+
+/// Minutes of steady passes after the catch-up, one pass a minute: the
+/// first 15 minutes of a start that production's service log records.
+const STEADY_PASSES: i64 = 15;
+
+/// The restarted supervisor on the queue at `dir` through the queue
+/// service, as in production (`SupervisorPorts` over the service, here
+/// answered in this process): `start_builder`, the passes until no mark
+/// waits, then [`STEADY_PASSES`] passes a minute apart, and then a
+/// builder from the cursors' start on the same store. Prints, of each
+/// stage, how many `ledger_row` requests each caller sent, and the
+/// settled events and the rows the store holds to divide them by. It
+/// counts on a copy of the queue at `<dir>/callers/queue.db`.
+fn callers(dir: &Path) {
+    // A copy of the queue for each count, so that the queue `prepare` laid
+    // down stays as the earlier supervisor left it and the count repeats.
+    let copy = dir.join("callers");
+    let _ = std::fs::remove_dir_all(&copy);
+    std::fs::create_dir_all(&copy).unwrap();
+    let db = copy.join("queue.db");
+    Connection::open(dir.join("queue.db"))
+        .unwrap()
+        .execute("VACUUM INTO ?1", [db.to_str().unwrap()])
+        .unwrap();
+    let now_ms = now_ms(dir);
+    let (events, rows) = {
+        let read = Connection::open(&db).unwrap();
+        let count = |sql: &str| -> usize {
+            read.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap() as usize
+        };
+        (
+            count("SELECT count(*) FROM run_events"),
+            count("SELECT count(*) FROM ledger_rows"),
+        )
+    };
+    let generators = dagq::infrastructure::clock::system();
+    let counted = Arc::new(CountedCalls {
+        inner: Arc::new(dagq::infrastructure::queue_service::InProcessCaller::new(
+            &db,
+            generators,
+            dagq::compose::service_reads(),
+            dagq::compose::service_writes(),
+            dagq::compose::service_detail(),
+            dagq::compose::service_commands(),
+        )),
+        calls: Mutex::default(),
+    });
+    let pid = std::process::id();
+    let queues = SupervisorQueues::new(
+        counted.clone(),
+        ActorContext::instance(ActorRole::Supervisor, pid),
+    );
+    let token = LeaseToken::new("supervisor-counting-ledger-row");
+    counted.sign_in(&token, pid).unwrap();
+    queues
+        .queue()
+        .register_supervisor(
+            &token,
+            pid,
+            SlotLimits::resolve(SlotFlags::default(), &SupervisorConfig::default()),
+            &[],
+            "0.0.0-callers",
+        )
+        .unwrap();
+    let store = SupervisorPorts {
+        queues,
+        keep: |queue| -> Box<dyn LedgerQueue + Send> { Box::new(queue) },
+    }
+    .open()
+    .unwrap();
+    counted.take();
+
+    println!("settled events {events}, ledger rows {rows}");
+    println!("| stage | op | caller | requests | per event | per row |");
+    println!("| --- | --- | --- | ---: | ---: | ---: |");
+    let print = |stage: &str| {
+        for ((op, label), n) in counted.take() {
+            if op == "ledger_row" {
+                println!(
+                    "| {stage} | {op} | {label} | {n} | {:.4} | {:.4} |",
+                    n as f64 / events.max(1) as f64,
+                    n as f64 / rows.max(1) as f64
+                );
+            }
+        }
+    };
+    let mut builder = start_builder(&*store, now_ms).unwrap();
+    print("start_builder");
+    let passes = catch_up(&*store, &mut builder, now_ms);
+    print(&format!("catch-up ({passes} passes)"));
+    for minute in 1..=STEADY_PASSES {
+        let at = now_ms + minute * 60_000;
+        let built = build_pass(
+            &*store,
+            &mut builder,
+            (at, &utc_text(at)),
+            Retain::default(),
+            None,
+        );
+        assert_eq!(built.failure, None);
+    }
+    print(&format!("{STEADY_PASSES} passes a minute apart"));
+    drop(builder);
+
+    // The other way a start goes, on the same store: from its cursors'
+    // start, as a store whose marks give no R (none, or of another
+    // ledger_v) starts, where every settled event is read again.
+    let mut builder = Builder::default();
+    let passes = catch_up(&*store, &mut builder, now_ms);
+    print(&format!("from the cursors' start ({passes} passes)"));
 }
