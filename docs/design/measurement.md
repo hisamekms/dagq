@@ -7,6 +7,7 @@ created: 2026-10-04
 scope: runtime
 related:
   - adr-t1662-1
+  - adr-t4644-1
   - adr-t1662-2
   - adr-t1662-3
   - adr-0049
@@ -120,7 +121,8 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 区切りの値は列、フローで形が変わるものはJSON。
 行の項目と種類ごとの中身は`LedgerRow`と`domain::ledger`の各moduleのdoc comment、作り直しの規則は`ledger::rebuilds`が持つ。
 
-- どのeventも、どれか1つの行の記録になり（`domain::ledger::owner`）、読み手は行だけから今の統計の関数の入力を戻せる。
+- eventはどれか1つの行の記録になるが、写さないkindのうちqueue行に属し被覆の始まりより後のeventは、省略が有効な間はどの行の記録にもならず窓の端だけに効き、共通の読み取り関数が補う（[ADR-t4644-1](../adr/2026-11-09-t4644-1-omit-unread-queue-events-and-read-window-edges.md)）。
+  run・task・sessionに属する同じkindのeventは今どおりその行の記録で、行の持ち主の入口は`domain::ledger::owner`、写さないkindの一覧の入口は`domain::ledger::queue`。
 
 ## 畳む関数
 
@@ -137,7 +139,9 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 
 - 着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - runは終わりから猶予の後で、telemetryのtokenの失効と資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
-- storeの印は、その位置までの全入力を行が記録する約束で、Wはsession行、Rはほかの行のカーソルごとの位置（予定: Rはqueueの行とrun・task・session・nodeの行で分かれ、Wの約束は保ち、queueの遅れはほかの読み直しを増やさない）。
+- storeの印は、その位置までの全入力が行の記録か写さないqueueのeventの被覆で記録済みである約束で、Wはsession行、Rはほかの行のカーソルごとの位置（予定: Rはqueueの行とrun・task・session・nodeの行で分かれ、Wの約束は保ち、queueの遅れはほかの読み直しを増やさない）。
+- 写さないkindのeventも読んだ入力としてRを進め、被覆の始まりC・到達点Sと要約をR・Wと同じ書き込みで同じ範囲(C, S]を覆う形で下げずに保ち、停止の条件の間は据え置いて今どおり写す。
+  停止の条件と値の保証は[窓の端の補いの決定](../adr/2026-11-09-t4644-1-omit-unread-queue-events-and-read-window-edges.md)が持つ。
 - 入力を記録済みなら確定待ちと版の更新はRを押さえず、追いつきの印と確認の順番を起動をまたいで保つ。
 - 増分の走査はRより後だけを読み、対象別・id指定の読みはRより前に及ぶが確定済みの履歴に比例しない（起動時のpushの要約は除く。`builder`のdoc）。
 - 古い版の作り直しは`builder`のdocが持つ。
@@ -149,6 +153,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 ## 共通の読み取り関数
 
 stats・kpi・reportの全ての欄は、行を窓と絞り込みで選んで返す1つの関数（`domain::ledger::window`）だけから作る。
+窓の端の補いは(C, S]の写さないqueueのeventを越えず、ほかの値の取り方を変えず、読む量は端の近くに限る（入口は`domain::ledger::window`）。
 統計のmoduleはこの関数が返す値だけを取り、StateStore・run dir・process・Gitを読まない。
 窓の当て方・絞り込み・旧方式と走っているrunの扱い・欄ごとの元の行は`domain::ledger::window`、今の名前の意味の違いは`ledger::read`のdoc commentが持つ。
 
@@ -157,17 +162,7 @@ stats・kpi・reportの全ての欄は、行を窓と絞り込みで選んで返
 
 ### 欠測と集約の契約
 
-値の無い窓は0や空でなく、理由つきの欠測として返す。
-
-- 今の判定: 窓の終わりで猶予内の最も新しい成功した観測を持つ流れ1つの入力を窓の終わりで判定し、流れを足さず、開閉の記録から値を作らない。
-  選べなければ「観測が無い」で、理由は`domain::live_alerts::Missing`のdoc commentが持つ。
-- mainの履歴: 到達点（観測の到達時刻で、commitの時刻ではない）から猶予より後の窓は「記録が無い」（Gitの読み取りの失敗・supervisorの停止・到達点が古い・取り込みより前）。
-- 着地の後の品質: 記録の前の着地は「記録より前」、読めない線の取り込みの前は「不明」で、窓の終わりまでの経過と到達を添える。
-- 属性とfinding: 基準のeventより前の窓は「基準より前」。
-- providerの控えと切り替え: 記録より前は「記録なし」、旧方式も畳む。
-- Executionのcontext: 記録が無い（欄の無い前の記録）と未計測（nullと理由）を分ける。
-- 失敗の原因の判定: 判定の記録の無いrunは不明で、環境が原因でないとは断定しない（ADR-t4163-1決定4）。
-- token: Executionの終わった時刻（対話は区切りの時刻）で日に振り分け、actor × provider × modelで足す（[Execution tokens](execution-tokens.md)）。
+値の無い窓と入力ごとの集約の約束は[欠測と集約の契約](measurement-missing.md)が持つ。
 
 ## 並走の比較と照合
 

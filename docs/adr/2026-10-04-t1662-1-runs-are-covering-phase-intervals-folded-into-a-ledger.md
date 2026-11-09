@@ -11,6 +11,7 @@ amends:
   - adr-0051 decision 1
 amended_by:
   - adr-t4652-1
+  - adr-t4644-1
 owners:
   - hisamekms
 tags:
