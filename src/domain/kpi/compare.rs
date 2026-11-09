@@ -11,6 +11,9 @@
 //! `--compare A..B,C..D`.
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+mod read_contract;
+
 use serde::Serialize;
 
 use super::{
