@@ -1,0 +1,335 @@
+# The output of cargo nextest run --lib queue_rows_spike --no-capture (the comparison's values; see the plan's 「比べの test」)
+## ["candidates_sampled"] bounds
+| value | now | ["candidates_sampled"] bounds | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141728 bytes, fnv cbea28b75a8a8ed4 | false |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45833 bytes, fnv 2a6e11249d6cf231 | false |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295641 bytes, fnv 35c1d16aadad7ccd | false |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+- kpi.periods[0].details.candidates: {"starved_secs":0} → null
+- kpi.periods[0].kpis.candidates.all.max: 1.0 → null
+- kpi.periods[0].kpis.candidates.all.n: 1 → 0
+- kpi.periods[0].kpis.candidates.all.value: 1.0 → null
+- kpi.periods[0].unavailable.candidates: null → "no_samples"
+- kpi.periods[1].comparison.candidates.all.baseline_7d: 1.0 → null
+- kpi --since --until.periods[0].comparison.candidates.all.previous: 1.0 → null
+- report.periods[4].details.candidates: {"starved_secs":0} → null
+- report.periods[4].kpis.candidates.all.max: 1.0 → null
+- report.periods[4].kpis.candidates.all.n: 1 → 0
+- report.periods[4].kpis.candidates.all.value: 1.0 → null
+- report.periods[4].unavailable.candidates: null → "no_samples"
+- report.periods[5].comparison.candidates.all.baseline_7d: 1.0 → null
+## ["candidates_sampled"] bounds and range
+| value | now | ["candidates_sampled"] bounds and range | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141814 bytes, fnv d37cea893b1aac25 | true |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45833 bytes, fnv 2a6e11249d6cf231 | false |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295727 bytes, fnv 4151d49e412832f6 | true |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+- kpi --since --until.periods[0].comparison.candidates.all.previous: 1.0 → null
+["candidates_sampled"]: bounds {"kpi", "kpi --since --until", "report"}; bounds and range {"kpi --since --until"}
+## ["update_started", "update_installed"] bounds
+| value | now | ["update_started", "update_installed"] bounds | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48104 bytes, fnv 07eb251414c3d049 | false |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141811 bytes, fnv 5f4c2b62a5c6fda2 | false |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45832 bytes, fnv e0edbfea3ecc9a1a | false |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295724 bytes, fnv 0252166bfd7271b1 | false |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+- stats[0].updates.by_kind.update_installed: 1 → null
+- stats[0].updates.by_kind.update_started: 2 → null
+- stats[0].updates.count: 3 → 0
+- stats[0].updates.installed: ["1.0.1"] → []
+- kpi.periods[0].comparison.slot_usage.all.delta: 0.005 → 0.001
+- kpi.periods[0].comparison.slot_usage.all.ratio: 1.01 → 1.002
+- kpi.periods[0].details.slot_check.occupied: 0.751 → 0.743
+- kpi.periods[0].details.slot_check.ratio: 72.111 → 71.333
+- kpi.periods[0].kpis.slot_usage.all.value: 0.505 → 0.501
+- kpi.periods[1].comparison.slot_usage.all.baseline_7d: 0.502 → 0.5
+- kpi --since --until.periods[0].comparison.slot_usage.all.previous: 0.504 → 0.501
+- report.periods[4].comparison.slot_usage.all.delta: 0.005 → 0.001
+- report.periods[4].comparison.slot_usage.all.ratio: 1.01 → 1.002
+- report.periods[4].details.slot_check.occupied: 0.751 → 0.743
+- report.periods[4].details.slot_check.ratio: 72.111 → 71.333
+- report.periods[4].kpis.slot_usage.all.value: 0.505 → 0.501
+- report.periods[5].comparison.slot_usage.all.baseline_7d: 0.502 → 0.5
+## ["update_started", "update_installed"] bounds and range
+| value | now | ["update_started", "update_installed"] bounds and range | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141814 bytes, fnv d37cea893b1aac25 | true |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45832 bytes, fnv e0edbfea3ecc9a1a | false |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295727 bytes, fnv 4151d49e412832f6 | true |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+- kpi --since --until.periods[0].comparison.slot_usage.all.previous: 0.504 → 0.501
+["update_started", "update_installed"]: bounds {"kpi", "kpi --since --until", "report", "stats[0]"}; bounds and range {"kpi --since --until"}
+## ["main_commits_recorded", "main_observed"] bounds
+| value | now | ["main_commits_recorded", "main_observed"] bounds | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141946 bytes, fnv d1fd15204e0b83f5 | false |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45948 bytes, fnv 9cd1b81f21f6eb7f | false |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295967 bytes, fnv a4a5b1f5113b12d6 | false |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+- kpi.periods[0].comparison.post_landing.revert_rate.all.baseline_7d: 0.0 → null
+- kpi.periods[0].comparison.post_landing.revert_rate.all.delta: 0.0 → null
+- kpi.periods[0].comparison.post_landing.revert_rate.all.judged: true → false
+- kpi.periods[0].comparison.post_landing.revert_rate.all.previous: 0.0 → null
+- kpi.periods[0].comparison.post_landing.revert_rate.all.reason: null → "no_value"
+- kpi.periods[0].comparison.post_landing.revert_rate.all.verdict: "unchanged" → null
+- kpi --since --until.periods[0].comparison.post_landing.revert_rate.all.delta: 0.0 → null
+- kpi --since --until.periods[0].comparison.post_landing.revert_rate.all.judged: true → false
+- kpi --since --until.periods[0].comparison.post_landing.revert_rate.all.previous: 0.0 → null
+- kpi --since --until.periods[0].comparison.post_landing.revert_rate.all.reason: null → "no_value"
+- kpi --since --until.periods[0].comparison.post_landing.revert_rate.all.verdict: "unchanged" → null
+- kpi --since --until.periods[0].comparison.post_landing.revert_rate.change=unknown.delta: 0.0 → null
+- report.periods[3].details.post_landing.all.reverts.not_recorded: 0 → 2
+- report.periods[3].details.post_landing.all.reverts.reach_at: 1900260150000 → null
+- report.periods[3].details.post_landing.all.reverts.reach_before_end_ms: 3050999 → null
+- report.periods[3].details.post_landing.all.reverts.reason: null → "not_recorded"
+- report.periods[3].details.post_landing.all.reverts.recorded: 2 → 0
+- report.periods[3].details.post_landing.change=unknown.reverts.not_recorded: 0 → 2
+## ["main_commits_recorded", "main_observed"] bounds and range
+| value | now | ["main_commits_recorded", "main_observed"] bounds and range | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141814 bytes, fnv d37cea893b1aac25 | true |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45832 bytes, fnv 93ab5e383b139007 | true |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295727 bytes, fnv 4151d49e412832f6 | true |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+["main_commits_recorded", "main_observed"]: bounds {"kpi", "kpi --since --until", "report"}; bounds and range {}
+## ["supervisor_alive", "supervisor_started"] bounds
+| value | now | ["supervisor_alive", "supervisor_started"] bounds | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141463 bytes, fnv 65afa59e38daa7af | false |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45832 bytes, fnv 316f5a86b5f3e847 | false |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295151 bytes, fnv 7e0c87aacf45b918 | false |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+- kpi.periods[0].comparison.slot_usage.all.baseline_7d: 0.5 → null
+- kpi.periods[0].comparison.slot_usage.all.delta: 0.005 → null
+- kpi.periods[0].comparison.slot_usage.all.judged: true → false
+- kpi.periods[0].comparison.slot_usage.all.previous: 0.5 → null
+- kpi.periods[0].comparison.slot_usage.all.ratio: 1.01 → null
+- kpi.periods[0].comparison.slot_usage.all.reason: null → "no_value"
+- kpi --since --until.periods[0].comparison.candidates.all.previous: 1.0 → null
+- kpi --since --until.periods[0].comparison.slot_usage.all.previous: 0.504 → null
+- report.periods[3].details.slot_check.occupied: 0.201 → null
+- report.periods[3].details.slot_check.reason: "no_phases" → "no_supervisor"
+- report.periods[3].kpis.slot_usage.all.n: 1 → 0
+- report.periods[3].kpis.slot_usage.all.value: 0.5 → null
+- report.periods[3].marks: [{"at":"2030-03-17T17:46:46.000Z","detail":{"supervisor":"s3"},"id":8,"kind":"supervisor_stopped","label":"supervisor st → [{"at":"2030-03-17T17:46:46.000Z","detail":{"supervisor":"s3"},"id":8,"kind":"supervisor_stopped","label":"supervisor st
+- report.periods[4].comparison.slot_usage.all.baseline_7d: 0.5 → null
+## ["supervisor_alive", "supervisor_started"] bounds and range
+| value | now | ["supervisor_alive", "supervisor_started"] bounds and range | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141814 bytes, fnv d37cea893b1aac25 | true |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45832 bytes, fnv 316f5a86b5f3e847 | false |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295727 bytes, fnv 4151d49e412832f6 | true |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+- kpi --since --until.periods[0].comparison.candidates.all.previous: 1.0 → null
+- kpi --since --until.periods[0].comparison.slot_usage.all.previous: 0.504 → null
+["supervisor_alive", "supervisor_started"]: bounds {"kpi", "kpi --since --until", "report"}; bounds and range {"kpi --since --until"}
+## ["queue_service_running"] bounds
+| value | now | ["queue_service_running"] bounds | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141814 bytes, fnv d37cea893b1aac25 | true |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45832 bytes, fnv 93ab5e383b139007 | true |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295727 bytes, fnv 4151d49e412832f6 | true |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+## ["queue_service_running"] bounds and range
+| value | now | ["queue_service_running"] bounds and range | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141814 bytes, fnv d37cea893b1aac25 | true |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45832 bytes, fnv 93ab5e383b139007 | true |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295727 bytes, fnv 4151d49e412832f6 | true |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+["queue_service_running"]: bounds {}; bounds and range {}
+## ["finding"] bounds
+| value | now | ["finding"] bounds | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141817 bytes, fnv eea1c9de85c8188e | false |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45833 bytes, fnv bcf7e1ac87381b66 | false |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295731 bytes, fnv edb1243dd573674c | false |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | "Findings(Findings { findings: {} })" | false |
+- kpi.periods[0].comparison.findings_open.all.previous: 1.0 → 0.0
+- kpi.periods[0].comparison.findings_open.all.ratio: 1.0 → null
+- kpi.periods[0].kpis.findings_open.all.n: 1 → 0
+- kpi.periods[0].kpis.findings_open.all.value: 1.0 → 0.0
+- kpi.periods[1].comparison.findings_open.all.previous: 1.0 → 0.0
+- kpi.periods[1].comparison.findings_open.all.ratio: 1.0 → null
+- kpi --since --until.periods[0].comparison.findings_open.all.previous: 1.0 → 0.0
+- kpi --since --until.periods[0].comparison.findings_open.all.ratio: 1.0 → null
+- kpi --since --until.periods[0].kpis.findings_open.all.n: 1 → 0
+- kpi --since --until.periods[0].kpis.findings_open.all.value: 1.0 → 0.0
+- report.periods[3].comparison.findings_open.all.delta: 1.0 → 0.0
+- report.periods[3].comparison.findings_open.all.verdict: "worsened" → "unchanged"
+- report.periods[3].details.findings.recorded: 2 → 0
+- report.periods[3].kpis.findings_open.all.n: 1 → 0
+- report.periods[3].kpis.findings_open.all.value: 1.0 → 0.0
+- report.periods[4].comparison.findings_open.all.previous: 1.0 → 0.0
+- findings: "Findings(Findings { findings: {FindingId(1): FindingAttributes { id: FindingId(1), target: \"queue\", task_id: None, ru → "Findings(Findings { findings: {} })"
+## ["finding"] bounds and range
+| value | now | ["finding"] bounds and range | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141814 bytes, fnv d37cea893b1aac25 | true |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45833 bytes, fnv bcf7e1ac87381b66 | false |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295727 bytes, fnv 4151d49e412832f6 | true |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+- kpi --since --until.periods[0].comparison.findings_open.all.previous: 1.0 → 0.0
+- kpi --since --until.periods[0].comparison.findings_open.all.ratio: 1.0 → null
+- kpi --since --until.periods[0].kpis.findings_open.all.n: 1 → 0
+- kpi --since --until.periods[0].kpis.findings_open.all.value: 1.0 → 0.0
+["finding"]: bounds {"findings", "kpi", "kpi --since --until", "report"}; bounds and range {"kpi --since --until"}
+## shape A
+| value | now | shape A | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv 07cdd9ed266ef07a | false |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv f433ed6577712763 | false |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv c70e119e1d148723 | false |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv b5a56bf0d282aada | false |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 790 bytes, fnv a724f3984bd21f02 | false |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141814 bytes, fnv d37cea893b1aac25 | true |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45832 bytes, fnv 93ab5e383b139007 | true |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295727 bytes, fnv 4151d49e412832f6 | true |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |
+- stats[0].landing_utilization.peak_hour.start: "2030-03-18T17:45:00.000Z" → "2030-03-18T17:46:40.000Z"
+- stats[0].landing_utilization.window_secs: 263300 → 263200
+- stats[0].position.host.first: 1899999950 → 1900086500
+- stats[0].position.host.from: 1899999900 → 1900000000
+- stats[0].position.host.metrics.load1.mean: 3.0 → 3.5
+- stats[0].position.host.metrics.load1.min: 2.0 → 3.0
+- stats[0].position.host.metrics.load1.samples: 3 → 2
+- stats[0].position.host.samples: 3 → 2
+- stats[1].sessions.window.after: 73 → 68
+- stats[2].execution_tokens.until: "2030-03-19T18:03:10.000Z" → "2030-03-19T18:02:50.000Z"
+- stats[2].landing_utilization.window_secs: 87290 → 87270
+- stats[2].position.host.last: 1900086500 → 1900259300
+- stats[2].position.host.metrics.load1.max: 3.0 → 4.0
+- stats[2].position.host.metrics.load1.mean: 3.0 → 3.5
+- stats[2].position.host.metrics.load1.p90: 3.0 → 4.0
+- stats[2].position.host.metrics.load1.samples: 1 → 2
+- stats[2].position.host.samples: 1 → 2
+## shape B
+| value | now | shape B | same |
+| stats[0] | 48150 bytes, fnv bbf17c4d7e41a756 | 48150 bytes, fnv bbf17c4d7e41a756 | true |
+| stats[0].position | 792 bytes, fnv 044a33929611bdb7 | 792 bytes, fnv 044a33929611bdb7 | true |
+| stats[1] | 40182 bytes, fnv 1ea9edb1a994ef1b | 40182 bytes, fnv 1ea9edb1a994ef1b | true |
+| stats[1].position | 717 bytes, fnv 68678f904b1cda35 | 717 bytes, fnv 68678f904b1cda35 | true |
+| stats[2] | 41772 bytes, fnv ad59c0efb4b79571 | 41772 bytes, fnv ad59c0efb4b79571 | true |
+| stats[2].position | 792 bytes, fnv 3f7c46d8313c40a7 | 792 bytes, fnv 3f7c46d8313c40a7 | true |
+| kpi | 141814 bytes, fnv d37cea893b1aac25 | 141814 bytes, fnv d37cea893b1aac25 | true |
+| kpi --since --until | 45832 bytes, fnv 93ab5e383b139007 | 45832 bytes, fnv 93ab5e383b139007 | true |
+| kpi.targets day (目標割れ) | 334 bytes, fnv 81d7ee5228a18ec5 | 334 bytes, fnv 81d7ee5228a18ec5 | true |
+| kpi.targets week (目標割れ) | 339 bytes, fnv a48450eb23dfc53b | 339 bytes, fnv a48450eb23dfc53b | true |
+| report | 295727 bytes, fnv 4151d49e412832f6 | 295727 bytes, fnv 4151d49e412832f6 | true |
+| report.diagram | 69 bytes, fnv 344b68f1b3abbbe4 | 69 bytes, fnv 344b68f1b3abbbe4 | true |
+| judgments (live alert) | 429 bytes, fnv b3fae0846a4e69ae | 429 bytes, fnv b3fae0846a4e69ae | true |
+| findings | 286 bytes, fnv 86967ead4e5e2ac0 | 286 bytes, fnv 86967ead4e5e2ac0 | true |

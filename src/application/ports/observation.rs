@@ -1221,3 +1221,6 @@ impl<
 > ObservationQueue for T
 {
 }
+
+#[cfg(test)]
+mod queue_rows_spike;

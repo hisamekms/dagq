@@ -86,3 +86,4 @@ tags:
 - [goal 3 の受け入れ条件 (6) の証拠（全タスク着地後の main の CI と TOTAL 行、60d992ca 後の回帰テストの差分、e2e の根拠）](goal-3-acceptance-ci.md)（goal 3、task 2135）
 - [PostgreSQL の pg_trgm・pg_bigm で dagq search と related の検索の手がかりが今の FTS5 trigram と同じ結果を返せるかの実測（does_not_hold、順位が揃わない）](team-version-search-spike.md)（goal 250、task 3991）
 - [スパイク：起動ごとの ledger_row の要求を呼び手ごとに数え、回数が確定済みの履歴に比例する呼び手と減らし方を判定する](ledger-row-reads-spike.md)（goal 266、task 4447）
+- [スパイク：台帳の queue 行の kind ごとの読み手と、単発の event の kind を台帳に写さず EventStore の読みで同じ値を出せるか（kind で分かれる、読み手の無い kind は holds）](ledger-queue-rows-readers-spike.md)（goal 273、task 4616）

@@ -1,0 +1,413 @@
+agent_cases_built	read	domain/agent_eval/production.rs::sets	
+agent_cases_decided	read	domain/agent_eval/production.rs::sets	
+agent_cases_labeled	read	domain/agent_eval/production.rs::sets	
+agent_cases_prepared	read	domain/agent_eval/production.rs::sets	
+agent_cases_refused	read	domain/agent_eval/production.rs::sets	
+agent_cases_requested	read	domain/agent_eval/production.rs::sets	
+agent_cases_taken	read	domain/agent_eval/production.rs::sets	
+agent_eval_case_checked	read	domain/agent_eval/record.rs::rounds_at	
+agent_eval_finished	read	domain/agent_eval/record.rs::rounds_at	
+agent_eval_refused	read	domain/agent_eval/record.rs::rounds_at	
+agent_eval_requested	read	domain/agent_eval/record.rs::rounds_at	
+agent_eval_run_finished	read	domain/agent_eval/record.rs::rounds_at	
+agent_eval_run_started	read	domain/agent_eval/record.rs::rounds_at	
+agent_eval_started	read	domain/agent_eval/record.rs::rounds_at,domain/agent_eval/watch.rs::agent_marks	
+agent_eval_taken_up	read	domain/agent_eval/record.rs::rounds_at	
+agent_eval_waiting	read	domain/agent_eval/record.rs::rounds_at	
+agent_eval_watch_skipped	read	domain/agent_eval/watch.rs::agent_marks	
+agent_started	read	domain/machine_memory.rs::standing_wait,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats.rs::runs,domain/stats.rs::starts_a_session,domain/stats.rs::starts_a_turn,domain/stats.rs::watched_phase	
+approve_withheld	unnamed		
+ask_answered	read	domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/run/history.rs::run_attention_of,domain/satisfied.rs::answer_awaited,domain/stats.rs::open_asks,domain/stats.rs::question_wait,domain/stats/asks.rs::asks,domain/stats/asks.rs::tracks,domain/stats/drafts.rs::draft_flow,domain/stats/follow_up_categories.rs::follow_up_categories,domain/stats/landing_waits.rs::walk,domain/stats/recommendations.rs::recommendations,domain/stats/review_reasons.rs::ask_times,domain/stats/thresholds.rs::detections,domain/stats/thresholds.rs::run_ended_resolutions,domain/stats/thresholds.rs::waits_for_a_person,domain/stats/worker_question_topics.rs::worker_question_topics	domain/ledger/window.rs::EARLIER_RUN_KINDS,domain/mod.rs::ASK_EVENT_KINDS,domain/stats/asks.rs::NOT_APPLYING
+ask_closed	read	domain/run/history.rs::run_attention_of,domain/satisfied.rs::answer_awaited,domain/stats.rs::question_wait,domain/stats/asks.rs::tracks,domain/stats/landing_waits.rs::walk	domain/mod.rs::ASK_EVENT_KINDS
+ask_delivered	read	domain/run/history.rs::run_attention_of,domain/stats.rs::question_wait	domain/mod.rs::ASK_EVENT_KINDS
+ask_delivery_failed	read	domain/run/history.rs::failed_deliveries,domain/run/history.rs::run_attention_of,domain/stats/asks.rs::tracks	domain/mod.rs::ASK_EVENT_KINDS,domain/stats/asks.rs::NOT_APPLYING
+ask_opened	read	domain/kpi/push.rs::as_str,domain/kpi/window.rs::window,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/run/history.rs::moved_on_after,domain/run/history.rs::run_attention_of,domain/satisfied.rs::answer_awaited,domain/stats.rs::open_asks,domain/stats.rs::question_wait,domain/stats/ask_seen.rs::seen_waits,domain/stats/asks.rs::asks,domain/stats/asks.rs::tracks,domain/stats/auto_repairs.rs::auto_repairs,domain/stats/follow_up_categories.rs::follow_up_categories,domain/stats/landing_waits.rs::walk,domain/stats/planner_routes.rs::planner_routes,domain/stats/recommendations.rs::recommendations,domain/stats/review_reasons.rs::ask_times,domain/stats/thresholds.rs::detections,domain/stats/thresholds.rs::preemptions,domain/stats/thresholds.rs::run_ended_resolutions,domain/stats/thresholds.rs::waits_for_a_person,domain/stats/worker_question_topics.rs::worker_question_topics,domain/waiting.rs::waiting_stats	domain/ledger/window.rs::EARLIER_RUN_KINDS,domain/mod.rs::ASK_EVENT_KINDS,domain/stats/asks.rs::NOT_APPLYING
+ask_request_taken	unnamed		
+ask_updated	read	domain/stats/asks.rs::tracks	domain/stats/asks.rs::NOT_APPLYING
+attributes_baseline	read	domain/ledger/attributes.rs::apply_goal,domain/ledger/attributes.rs::apply_task,domain/ledger/attributes.rs::fold_within,domain/ledger/attributes.rs::is_baseline	
+auth_required	unnamed		
+authorization_denied	unnamed		
+auto_repaired	read	domain/run/recorded.rs::record_exhausted_resumes,domain/stats/auto_repairs.rs::auto_repairs	
+backend_call_failed	read	domain/stats.rs::backend_failures,domain/stats.rs::reason_codes	domain/reason.rs::REPEATED_CODE_KINDS
+build_cache_removed	unnamed		
+build_outputs_removed	unnamed		
+candidates_sampled	read	domain/kpi/window.rs::candidates	
+ci_check_failed	unnamed		
+ci_checked	read	domain/ledger/post_landing.rs::fold	
+ci_jobs_missing	unnamed		
+ci_scheduled_checked	unnamed		
+ci_turned_green	unnamed		
+ci_turned_red	read	domain/ledger/post_landing.rs::fold	
+ci_watch_available	unnamed		
+ci_watch_held	unnamed		
+ci_watch_resumed	unnamed		
+ci_watch_unavailable	unnamed		
+ci_workflow_fresh	unnamed		
+ci_workflow_stale	unnamed		
+claim_deferral_ended	read	domain/claim_defer.rs::decide,domain/claim_defer.rs::deferral_end,domain/claim_defer.rs::deferrals_in_place,domain/claim_defer.rs::left,domain/claim_defer.rs::worker_deferral_ended,domain/live_alerts/history.rs::first_pass_reads	
+claim_deferred	read	domain/claim_defer.rs::decide,domain/claim_defer.rs::deferral_end,domain/claim_defer.rs::deferral_spans,domain/claim_defer.rs::deferrals_in_place,domain/claim_defer.rs::of,domain/claim_defer.rs::worker_deferrals_in_place,domain/claim_defer.rs::worker_deferred,domain/live_alerts/history.rs::first_pass_reads,domain/live_alerts/history.rs::observe,domain/pre_claim.rs::add,domain/stats.rs::slot_alert	
+repository_config_held	unnamed		
+repository_config_resumed	unnamed		
+claim_held	read	domain/run_phase.rs::name,domain/stats.rs::slot_alert	
+claim_resumed	unnamed		
+cleanup_failed	read	domain/reason.rs::explains_last_error	
+concern_decided	read	domain/replan_detect.rs::window	
+concern_send_back_escalated	unnamed		
+conflict_precheck	read	domain/recheck.rs::judged_against,domain/replan_detect.rs::count_turns_where,domain/stats.rs::watched_phase,domain/stats/retries.rs::retries	domain/stats/retries.rs::PARKING
+conflict_receipt_rejected	unnamed		
+conflict_resolved	read	domain/stats.rs::watched_phase	
+conflicts_config_changed	unnamed		
+container_image_built	unnamed		
+container_image_failed	unnamed		
+container_memory_wait_ended	read	domain/machine_memory.rs::standing_wait	domain/machine_memory.rs::WAIT_KINDS
+container_memory_wait_long	read	domain/machine_memory.rs::standing_wait	domain/machine_memory.rs::WAIT_KINDS
+container_memory_waiting	read	domain/machine_memory.rs::standing_wait	domain/machine_memory.rs::WAIT_KINDS
+container_runtime_available	unnamed		
+container_runtime_unavailable	unnamed		
+dependency_added	read	domain/forecast/score.rs::score,domain/forecast/snapshot.rs::trigger,domain/ledger/attributes.rs::apply_task,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier	domain/forecast/score.rs::TASK_MARK_KINDS,domain/forecast/snapshot.rs::TASK_MARK_KINDS,domain/ledger/window.rs::EARLIER_RUN_KINDS
+dependency_removed	read	domain/forecast/score.rs::score,domain/forecast/snapshot.rs::trigger,domain/ledger/attributes.rs::apply_task,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier	domain/forecast/score.rs::TASK_MARK_KINDS,domain/forecast/snapshot.rs::TASK_MARK_KINDS,domain/ledger/window.rs::EARLIER_RUN_KINDS
+dependency_stranded	unnamed		
+draft_adopted	unnamed		
+draft_origin_recorded	read	domain/ledger/attributes.rs::apply_task	
+draft_planner_exhausted	read	domain/stats/follow_up_categories.rs::follow_up_categories	
+draft_planner_opened	read	domain/plan_quality.rs::new,domain/stats/cancel_reasons.rs::cancel_reasons,domain/stats/drafts.rs::draft_flow,domain/stats/planner_routes.rs::planner_routes	
+draft_planner_settled	read	domain/stats/follow_up_categories.rs::follow_up_categories,domain/stats/planner_routes.rs::planner_routes	
+draft_revisit_cleared	unnamed		
+draft_revisit_due	unnamed		
+draft_revisit_set	unnamed		
+environment_attached	unnamed		
+evidence_missing	read	domain/run/history.rs::last_park,domain/run/history.rs::unresolved_since_park,domain/run/recorded.rs::finish_validation,domain/stats.rs::reason_codes,domain/stats/retries.rs::retries	domain/reason.rs::REPEATED_CODE_KINDS,domain/run/history.rs::PARKING,domain/run/history.rs::RESOLVABLE_PARKING,domain/stats/retries.rs::PARKING
+exit_request_timed_out	read	domain/run/history.rs::exit_pending	
+exit_requested	unnamed		
+exit_retried	unnamed		
+exit_unsent	unnamed		
+finding_baseline	read	domain/ledger/findings.rs::fold_within	domain/ledger/findings.rs::KINDS
+finding_planner_exhausted	unnamed		
+finding_planner_opened	read	domain/stats/planner_routes.rs::planner_routes	
+finding_recorded	read	domain/kpi/window.rs::findings,domain/kpi/window.rs::improvement_proposals,domain/ledger/findings.rs::fold_within	domain/ledger/findings.rs::KINDS
+finding_status_changed	read	domain/kpi/window.rs::findings,domain/kpi/window.rs::improvement_proposals,domain/ledger/findings.rs::fold_within,domain/stats/planner_routes.rs::planner_routes	domain/ledger/findings.rs::KINDS
+finding_updated	read	domain/ledger/findings.rs::fold_within	domain/ledger/findings.rs::KINDS
+first_commit_observed	read	domain/stats.rs::runs	
+follow_up_judged	unnamed		
+follow_up_adopted	unnamed		
+follow_up_registered	read	domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/plan_quality.rs::plan_quality,domain/run/history.rs::registered_follow_ups,domain/run/history.rs::registered_review_follow_ups,domain/stats/cancel_reasons.rs::cancel_reasons,domain/stats/drafts.rs::draft_flow,domain/stats/follow_up_categories.rs::follow_up_categories	domain/ledger/window.rs::EARLIER_RUN_KINDS
+forecast_recorded	read	domain/forecast/score.rs::score	
+goal_closed	read	domain/forecast/history.rs::history,domain/forecast/score.rs::score,domain/ledger/attributes.rs::apply_goal	
+goal_correction_decided	unnamed		
+goal_created	read	domain/ledger/attributes.rs::apply_goal	
+goal_decided	unnamed		
+goal_dependency_added	read	domain/forecast/score.rs::score,domain/forecast/snapshot.rs::trigger,domain/ledger/attributes.rs::apply_task,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier	domain/forecast/score.rs::TASK_MARK_KINDS,domain/forecast/snapshot.rs::TASK_MARK_KINDS,domain/ledger/window.rs::EARLIER_RUN_KINDS
+goal_dependency_removed	read	domain/forecast/score.rs::score,domain/forecast/snapshot.rs::trigger,domain/ledger/attributes.rs::apply_task,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier	domain/forecast/score.rs::TASK_MARK_KINDS,domain/forecast/snapshot.rs::TASK_MARK_KINDS,domain/ledger/window.rs::EARLIER_RUN_KINDS
+goal_reopened	read	domain/ledger/attributes.rs::apply_goal	
+goal_review_failed	read	domain/headless_job.rs::end_kinds,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/executions.rs::actor_of,domain/stats/jobs.rs::end_of	
+goal_review_finished	read	domain/headless_job.rs::end_kinds,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/executions.rs::actor_of,domain/stats/jobs.rs::end_of	
+goal_review_rearmed	unnamed		
+goal_review_started	read	domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/jobs.rs::start_of	
+goal_status_changed	read	domain/ledger/attributes.rs::apply_goal	
+goal_submitted	read	domain/kpi/window.rs::improvement_proposals,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier	domain/ledger/window.rs::EARLIER_RUN_KINDS
+goal_updated	read	domain/ledger/attributes.rs::apply_goal	
+headless_job_stopped	read	domain/headless_job.rs::ending_kinds,domain/headless_job.rs::execution_recorded,domain/stats/executions.rs::actor_of	
+hold_answer_applied	unnamed		
+hold_continue_sent	unnamed		
+hold_deferred	read	domain/task_hold.rs::of	domain/task_hold.rs::NOT_PROGRESS
+hold_parked	read	domain/reason.rs::explains_last_error,domain/run/history.rs::last_park,domain/run/history.rs::owed_answers,domain/run/history.rs::since_fence_park,domain/run/history.rs::unresolved_since_park,domain/run/recorded.rs::record_hold_park	domain/run/history.rs::FENCE_PARKS,domain/run/history.rs::PARKING,domain/run/history.rs::RESOLVABLE_PARKING
+hold_result_applied	read	domain/task_hold.rs::of	domain/task_hold.rs::NOT_PROGRESS
+hold_result_discarded	read	domain/task_hold.rs::of	domain/task_hold.rs::NOT_PROGRESS
+hold_result_kept	read	domain/task_hold.rs::of,domain/task_hold.rs::of_event	domain/task_hold.rs::NOT_PROGRESS
+hold_result_withheld	unnamed		
+idle_inferred	unnamed		
+inbox_guardrail_reached	read	domain/sessions.rs::hook_mark,domain/stats/sessions.rs::inbox_launches	
+inbox_nudge_failed	unnamed		
+inbox_nudged	unnamed		
+inbox_opened	read	domain/stats/sessions.rs::inbox_launches	
+inbox_watcher_absent	read	domain/stats/ask_seen.rs::seen_waits	
+inbox_watcher_returned	read	domain/stats/ask_seen.rs::seen_waits	
+incremental_sessions_removed	unnamed		
+input_not_ready	unnamed		
+install_e2e_finished	read	domain/stats/updates.rs::add_tests,domain/stats/updates.rs::updates	
+integrate_programs_finished	unnamed		
+integration_approved	read	domain/run/history.rs::approved,domain/run/history.rs::approved_by_ask,domain/run/history.rs::landing_pushes,domain/run/history.rs::queued_approval	
+integration_deferred	read	domain/plan_quality.rs::rework,domain/reason.rs::explains_last_error,domain/recheck.rs::judged_against,domain/recovery.rs::verification_failed,domain/run/history.rs::last_park,domain/run/history.rs::unresolved_since_park,domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/landing_waits.rs::walk,domain/stats/measures.rs::verification_failures,domain/stats/retries.rs::retries	domain/run/history.rs::PARKING,domain/run/history.rs::RESOLVABLE_PARKING,domain/stats/landing_utilization.rs::ENDS,domain/stats/landing_utilization.rs::KINDS,domain/stats/retries.rs::PARKING
+integration_error	read	domain/reason.rs::explains_last_error,domain/run/history.rs::last_park,domain/run/history.rs::unresolved_since_park,domain/stats.rs::runs,domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/measures.rs::verification_failures,domain/stats/retries.rs::retries	domain/run/history.rs::PARKING,domain/run/history.rs::RESOLVABLE_PARKING,domain/stats/landing_utilization.rs::ENDS,domain/stats/landing_utilization.rs::KINDS,domain/stats/retries.rs::PARKING
+integration_failed	read	domain/reason.rs::explains_last_error,domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/measures.rs::verification_failures	domain/stats/landing_utilization.rs::ENDS,domain/stats/landing_utilization.rs::KINDS
+integration_handed_over	read	domain/run/history.rs::handed_over,domain/stats.rs::runs,domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/retries.rs::retries	domain/stats/landing_utilization.rs::ENDS,domain/stats/landing_utilization.rs::KINDS
+integration_held	read	domain/reason.rs::explains_last_error,domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/landing_waits.rs::walk,domain/stats/measures.rs::verification_failures	domain/stats/landing_utilization.rs::ENDS,domain/stats/landing_utilization.rs::KINDS
+integration_rebase_aborted	unnamed		
+integration_rebased	read	domain/run/history.rs::landing_rewrote	
+integration_receipt	unnamed		
+integration_retried	read	domain/stats/measures.rs::verification_failures	
+integration_started	read	domain/run/history.rs::handed_over,domain/run/history.rs::moved_on_after,domain/stats.rs::runs,domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/landing_utilization.rs::spans,domain/stats/landing_waits.rs::walk,domain/stats/retries.rs::retries	domain/stats/landing_utilization.rs::KINDS
+job_restarted	unnamed		
+known_dialog_unanswered	unnamed		
+kpi_breach_checked	unnamed		
+kpi_breach_resolved	unnamed		
+kpi_breach_started	unnamed		
+kpi_push_abandoned	unnamed		
+kpi_push_failed	unnamed		
+kpi_push_sent	unnamed		
+landing_decided	read	domain/reason.rs::explains_last_error,domain/replan_detect.rs::count_turns_where,domain/run/history.rs::last_park,domain/run/history.rs::moved_on_after,domain/run/history.rs::unresolved_since_park,domain/run/recorded.rs::record_landing_decision,domain/stats/retries.rs::retries	domain/run/history.rs::PARKING,domain/run/history.rs::RESOLVABLE_PARKING,domain/stats/retries.rs::PARKING
+landing_branch_resolved	unnamed		
+landing_branch_unresolved	unnamed		
+landing_held	unnamed		
+landing_queued	read	domain/run/history.rs::queued_after_resume,domain/stats/landing_utilization.rs::reads,domain/stats/landing_utilization.rs::spans	domain/stats/landing_utilization.rs::KINDS
+landing_release_stuck	unnamed		
+landing_release_waiting	unnamed		
+landing_recheck_clean	read	domain/recheck.rs::judged_against	
+landing_recheck_failed	read	domain/recheck.rs::held_against,domain/recheck.rs::judged_against,domain/recheck.rs::parks,domain/replan_detect.rs::count_turns_where,domain/run/history.rs::last_park,domain/run/history.rs::unresolved_since_park,domain/run/recorded.rs::record_recheck_park,domain/stats.rs::landing_rechecks,domain/stats/landing_waits.rs::walk,domain/stats/retries.rs::retries	domain/run/history.rs::RESOLVABLE_PARKING,domain/stats/retries.rs::PARKING
+landing_recheck_finished	read	domain/stats.rs::landing_rechecks	
+landing_recheck_target_unwritable	read	domain/recheck.rs::transition	
+landing_recheck_target_writable	read	domain/recheck.rs::transition	
+landing_recheck_main_failed	read	domain/recheck.rs::attention_main_log,domain/recheck.rs::transition	
+landing_recheck_main_passed	read	domain/recheck.rs::transition	
+landing_resumed	unnamed		
+lease_acquired	read	domain/claim_defer.rs::owner_waiting_since,domain/task_hold.rs::of,domain/waiting.rs::of	domain/task_hold.rs::NOT_PROGRESS
+lease_released	read	domain/claim_defer.rs::owner_waiting_since,domain/stats/landing_waits.rs::walk,domain/task_hold.rs::of,domain/waiting.rs::of	domain/task_hold.rs::NOT_PROGRESS
+ledger_build_failed	unnamed		
+live_alert_baseline	read	domain/live_alerts.rs::fold_within,domain/live_alerts.rs::observe	domain/live_alerts.rs::RECORD_KINDS
+live_alert_ended	read	domain/live_alerts.rs::fold_within,domain/live_alerts.rs::observe,domain/live_alerts.rs::of	domain/live_alerts.rs::RECORD_KINDS
+live_alert_input_changed	read	domain/live_alerts.rs::fold_within,domain/live_alerts.rs::observe	domain/live_alerts.rs::RECORD_KINDS
+live_alert_reached	read	domain/live_alerts.rs::fold_within,domain/live_alerts.rs::observe	domain/live_alerts.rs::RECORD_KINDS
+live_alert_started	read	domain/live_alerts.rs::fold_within,domain/live_alerts.rs::observe,domain/live_alerts.rs::of	domain/live_alerts.rs::RECORD_KINDS
+main_commits_recorded	read	domain/ledger/post_landing.rs::fold,domain/stats/main_log.rs::fold_main_log,domain/stats/main_log.rs::import_heads	
+main_observed	read	domain/ledger/post_landing.rs::fold,domain/stats/main_log.rs::fold_main_log	
+main_paths_recorded	read	domain/stats/main_log.rs::fold_main_log	
+main_read_failed	read	domain/stats/main_log.rs::fold_main_log,domain/stats/main_log.rs::of	
+main_read_recovered	read	domain/stats/main_log.rs::fold_main_log	
+main_reverts_imported	read	domain/ledger/post_landing.rs::fold	
+main_rewritten	read	domain/stats/main_log.rs::fold_main_log,domain/stats/main_log.rs::import_heads	
+mark_recorded	read	domain/forecast/snapshot.rs::trigger,domain/marks.rs::marks_with_earlier,domain/marks.rs::retraction_payload	domain/forecast/snapshot.rs::QUEUE_MARK_KINDS,domain/marks.rs::RECORDED_KINDS,domain/marks.rs::RETRACTABLE_KINDS
+mark_retracted	read	domain/forecast/score.rs::score,domain/forecast/snapshot.rs::trigger,domain/kpi/compare.rs::splitting,domain/marks.rs::marks_with_earlier,domain/marks.rs::recorded_label,domain/marks.rs::retractions	domain/forecast/snapshot.rs::QUEUE_MARK_KINDS,domain/marks.rs::RECORDED_KINDS
+migration_renumbered	read	domain/run/history.rs::landing_rewrote	
+observation	unnamed		
+observe_finished	read	domain/sessions.rs::changes,domain/sessions.rs::queue_span_kind,domain/sessions.rs::scope,domain/stats/executions.rs::actor_of,domain/stats/jobs.rs::end_of,domain/stats/recommendations.rs::recommendations	
+observe_started	read	domain/sessions.rs::changes,domain/sessions.rs::queue_span_kind,domain/sessions.rs::scope,domain/stats/jobs.rs::start_of	
+plan_concern_decided	unnamed		
+plan_decided	read	domain/forecast/snapshot.rs::trigger,domain/kpi/window.rs::improvement_proposals,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier	domain/ledger/window.rs::EARLIER_RUN_KINDS
+plan_review_discarded	read	domain/headless_job.rs::end_kinds,domain/stats/executions.rs::actor_of,domain/stats/jobs.rs::end_of	
+plan_review_failed	read	domain/headless_job.rs::end_kinds,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/executions.rs::actor_of,domain/stats/jobs.rs::end_of	
+plan_review_finished	read	domain/forecast/snapshot.rs::trigger,domain/headless_job.rs::end_kinds,domain/plan_quality.rs::plan_quality,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/executions.rs::actor_of,domain/stats/jobs.rs::end_of,domain/stats/review_reasons.rs::plan_verdicts	
+plan_review_outcome	read	domain/stats/review_reasons.rs::plan_verdicts	
+plan_review_started	read	domain/plan_quality.rs::before,domain/plan_quality.rs::new,domain/plan_quality.rs::plan_quality,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/cancel_reasons.rs::cancel_reasons,domain/stats/jobs.rs::start_of,domain/stats/planner_routes.rs::planner_routes,domain/stats/review_reasons.rs::plan_verdicts	
+plan_revise_lost	unnamed		
+plan_revise_sent	read	domain/plan_quality.rs::before,domain/plan_quality.rs::new,domain/stats/planner_routes.rs::planner_routes	
+planner_answer_claimed	read	domain/stats/asks.rs::tracks	domain/stats/asks.rs::NOT_APPLYING
+planner_answer_closed	unnamed		
+planner_answer_wait	unnamed		
+planner_closed	read	domain/sessions.rs::changes,domain/sessions.rs::scope	
+planner_prompt_written	unnamed		
+planner_released	unnamed		
+planner_request_handed	unnamed		
+planner_unresponsive	unnamed		
+prompt_cleared	read	domain/recovery.rs::clears,domain/stats.rs::judge_running_alerts,domain/stats/thresholds.rs::waits_for_a_person	
+prompt_waiting	read	domain/stats.rs::judge_running_alerts,domain/stats/thresholds.rs::waits_for_a_person	
+provider_executable_relocated	unnamed		
+provider_held	read	domain/stats/providers.rs::provider_switches	
+provider_released	unnamed		
+provider_switched	read	domain/after_claim.rs::observe,domain/stats.rs::starts_a_turn,domain/stats/measures.rs::observe,domain/stats/providers.rs::provider_switches,domain/stats/routes.rs::route_health,domain/waiting.rs::waiting_stats	
+provider_waiting	read	domain/stats.rs::waits_for_provider	
+proposal_resubmitted	read	domain/plan_quality.rs::before,domain/plan_quality.rs::new	
+proposal_settled	read	domain/kpi/window.rs::improvement_proposals,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier	domain/ledger/window.rs::EARLIER_RUN_KINDS
+proposal_submitted	read	domain/plan_quality.rs::before,domain/plan_quality.rs::new	
+proposal_withdrawn	read	domain/kpi/window.rs::improvement_proposals,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier	domain/ledger/window.rs::EARLIER_RUN_KINDS
+push_failed	read	domain/ledger/post_landing.rs::fold,domain/run/history.rs::push_failure,domain/run_phase.rs::after_push	
+push_finished	read	domain/ledger/post_landing.rs::fold	
+push_skipped	read	domain/ledger/post_landing.rs::fold,domain/run_phase.rs::after_push	
+queue_broker_denied	unnamed		
+queue_broker_down	unnamed		
+queue_broker_running	unnamed		
+queue_broker_started	unnamed		
+queue_broker_stop_requested	unnamed		
+queue_broker_stopped	unnamed		
+queue_broker_tokens_swept	unnamed		
+queue_hold_applied	unnamed		
+queue_relay_down	unnamed		
+queue_relay_running	unnamed		
+queue_relay_started	unnamed		
+queue_service_down	read	domain/kpi/push.rs::as_str,domain/queue_service.rs::attention_stands	
+queue_service_running	unnamed		
+queue_service_started	unnamed		
+queue_service_stop_requested	unnamed		
+queue_service_stopped	unnamed		
+queue_service_unauthenticated	unnamed		
+queue_write_held_long	unnamed		
+receipt_observed	read	domain/live_alerts/history.rs::first_pass_reads,domain/recovery.rs::clears,domain/stats.rs::observe,domain/stats/measures.rs::observe,domain/stats/thresholds.rs::preemptions	
+recovery_failed	read	domain/recovery.rs::failed_live	
+recovery_finished	read	domain/headless_job.rs::end_kinds,domain/stats/auto_repairs.rs::auto_repairs,domain/stats/executions.rs::actor_of,domain/stats/jobs.rs::end_of,domain/stats/thresholds.rs::detections,domain/stats/thresholds.rs::recovery_finished	
+recovery_parked	read	domain/run/history.rs::last_park,domain/run/recorded.rs::record_live_park	domain/run/history.rs::PARKING
+recovery_prompt_written	unnamed		
+recovery_requested	read	domain/reason.rs::explains_last_error,domain/recovery.rs::attempts,domain/recovery.rs::ended_request,domain/recovery.rs::live_pass_back,domain/replan_detect.rs::window,domain/run/recorded.rs::record_exhausted_resumes,domain/stats/jobs.rs::start_of,domain/stats/routes.rs::route_health,domain/stats/thresholds.rs::detections,domain/stats/thresholds.rs::idle_job_detected,domain/stats/thresholds.rs::recovery_requested,domain/stats/thresholds.rs::run_ended_resolutions	
+release_check_failed	unnamed		
+release_checked	unnamed		
+replan_applied	unnamed		
+replan_apply_rechecked	unnamed		
+replan_carried	unnamed		
+replan_carry_ended	read	domain/task_hold.rs::of_event	
+replan_carry_failed	unnamed		
+replan_children_released	unnamed		
+replan_diagnosed	read	domain/replan_detect.rs::kept_verdict,domain/replan_detect.rs::of,domain/stats/replans.rs::replans	
+replan_diagnosis_failed	read	domain/replan_detect.rs::job_failures,domain/replan_detect.rs::kept_verdict,domain/replan_detect.rs::of,domain/stats/replans.rs::replans	
+replan_diagnosis_started	read	domain/replan_detect.rs::of,domain/stats/replans.rs::replans	
+replan_parked	read	domain/reason.rs::explains_last_error,domain/run/history.rs::last_park,domain/run/history.rs::owed_answers,domain/run/history.rs::since_fence_park,domain/run/history.rs::unresolved_since_park,domain/run/recorded.rs::record_replan_park,domain/stats/retries.rs::retries	domain/run/history.rs::FENCE_PARKS,domain/run/history.rs::PARKING,domain/run/history.rs::RESOLVABLE_PARKING,domain/stats/retries.rs::PARKING
+replan_plan_approved	unnamed		
+replan_plan_submitted	unnamed		
+replan_requested	read	domain/stats/replans.rs::replans	
+replan_resolved	unnamed		
+replan_restore_failed	unnamed		
+replan_restored	unnamed		
+replan_result_withheld	unnamed		
+replan_status_changed	read	domain/stats/replans.rs::replans	
+report_written	unnamed		
+request_declined	read	domain/stats/planner_routes.rs::planner_routes	
+request_planner_exhausted	unnamed		
+request_planner_opened	read	domain/stats/planner_routes.rs::planner_routes	
+request_proposed	read	domain/stats/planner_routes.rs::planner_routes	
+request_recorded	unnamed		
+resume_finished	read	domain/reason.rs::explains_last_error,domain/run.rs::run_workspaces,domain/run/history.rs::last_resume_skipped,domain/run/history.rs::resolved_to_land,domain/run/history.rs::resumed_session,domain/run/history.rs::unresolved_since_park,domain/run/recorded.rs::record_exhausted_resumes,domain/run/recorded.rs::resume_finished,domain/stats.rs::judge_running_alerts,domain/stats.rs::runs,domain/stats.rs::watched_phase,domain/stats/retries.rs::retries,domain/stats/review_reasons.rs::run_verdicts	domain/run/history.rs::RESUMES
+resume_request_sent	unnamed		
+resume_skipped	read	domain/run/history.rs::last_resume_skipped,domain/run/history.rs::resolved_to_land,domain/run/history.rs::resumed_session,domain/run/history.rs::unresolved_since_park,domain/stats.rs::watched_phase	domain/run/history.rs::RESUMES
+resume_started	read	domain/machine_memory.rs::standing_wait,domain/recovery.rs::current_alert,domain/recovery.rs::hand_off_refusal,domain/recovery.rs::pending_request,domain/replan_detect.rs::count_turns_where,domain/run/history.rs::last_resume_skipped,domain/run/history.rs::moved_on_after,domain/run/history.rs::resumed_session,domain/run/history.rs::session_left_open,domain/satisfied.rs::handed_off_since_resume,domain/stats.rs::runs,domain/stats.rs::starts_a_session,domain/stats.rs::starts_a_turn,domain/stats.rs::watched_phase,domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/landing_utilization.rs::spans,domain/stats/landing_waits.rs::walk,domain/stats/retries.rs::retries,domain/stats/review_reasons.rs::run_verdicts,domain/worker_model.rs::openings	domain/run/history.rs::RESUMES,domain/stats/landing_utilization.rs::ENDS,domain/stats/landing_utilization.rs::KINDS,domain/stats/landing_utilization.rs::WAIT_ENDS,domain/worker_model.rs::SESSION_EVENTS
+review_bypassed	unnamed		
+review_failed	read	domain/headless_job.rs::end_kinds,domain/run/history.rs::run_attention_of,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/executions.rs::actor_of,domain/stats/jobs.rs::end_of,domain/stats/landing_waits.rs::walk	
+review_finished	read	domain/agent_eval/production.rs::candidates,domain/agent_eval/production.rs::in_flight,domain/agent_eval/watch.rs::review_reads,domain/headless_job.rs::end_kinds,domain/plan_quality.rs::rework,domain/replan_detect.rs::non_pass,domain/run/history.rs::review_lets_land,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats.rs::runs,domain/stats.rs::stats,domain/stats.rs::watched_phase,domain/stats/executions.rs::actor_of,domain/stats/jobs.rs::end_of,domain/stats/landing_waits.rs::walk,domain/stats/review_reasons.rs::run_verdicts,domain/stats/worker_question_topics.rs::worker_question_topics	
+review_job_finished	read	domain/headless_job.rs::end_kinds,domain/headless_job.rs::execution_recorded,domain/stats/executions.rs::actor_of	
+review_job_started	unnamed		
+review_outcome	read	domain/stats.rs::stats,domain/stats/review_reasons.rs::run_verdicts	
+review_program_finished	unnamed		
+review_programs_finished	unnamed		
+review_programs_started	read	domain/run/history.rs::queued_review_retry,domain/run/history.rs::revise_limit	
+review_retried	read	domain/headless_job.rs::end_kinds,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/executions.rs::actor_of	
+review_retry_queued	read	domain/run/history.rs::queued_review_retry,domain/run/history.rs::review_retry_queued_by_ask	
+review_started	read	domain/agent_eval/production.rs::candidates,domain/agent_eval/production.rs::in_flight,domain/agent_eval/watch.rs::review_reads,domain/run/history.rs::moved_on_after,domain/run/history.rs::review_attempts,domain/run/history.rs::revise_limit,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats.rs::watched_phase,domain/stats/jobs.rs::start_of	
+revise_finished	read	domain/stats.rs::stats,domain/stats.rs::watched_phase,domain/stats/review_reasons.rs::run_verdicts	
+revise_limit_judged	read	domain/review_reason.rs::judged_converged	
+revise_receipt_rejected	read	domain/stats.rs::watched_phase	
+revise_requested	read	domain/kpi/window.rs::new,domain/plan_quality.rs::rework,domain/run/history.rs::decide_revise,domain/run/history.rs::revise_attempts,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats.rs::stats,domain/stats.rs::watched_phase,domain/stats/landing_utilization.rs::reads,domain/stats/landing_utilization.rs::spans,domain/stats/retries.rs::retries,domain/stats/review_reasons.rs::run_verdicts,domain/worker_model.rs::openings	domain/stats/landing_utilization.rs::KINDS,domain/stats/landing_utilization.rs::WAIT_ENDS,domain/worker_model.rs::SESSION_EVENTS
+revise_unsent	read	domain/run/history.rs::revise_attempts,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats.rs::watched_phase,domain/stats/retries.rs::retries,domain/worker_model.rs::openings	
+revise_withheld	unnamed		
+run_adopted	read	domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/landing_utilization.rs::spans	domain/stats/landing_utilization.rs::ENDS,domain/stats/landing_utilization.rs::KINDS,domain/stats/landing_utilization.rs::WAIT_ENDS
+run_agent_eval_finished	unnamed		
+run_agent_eval_requested	unnamed		
+run_agent_eval_waiting	unnamed		
+worker_mode_converted	unnamed		
+run_claimed	read	domain/after_claim.rs::observe,domain/claim_defer.rs::deferral_end,domain/kpi/window.rs::new,domain/kpi/window.rs::window,domain/ledger/attributes.rs::apply_task,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/live_alerts/history.rs::first_pass_reads,domain/marks.rs::derived_marks,domain/plan_quality.rs::plan_quality,domain/provider_trial.rs::choose,domain/provider_trial.rs::of_run,domain/stats.rs::judge_running_alerts,domain/stats.rs::observe,domain/stats.rs::runs,domain/stats.rs::watched_phase,domain/stats/cancel_reasons.rs::cancel_reasons,domain/stats/claim_waits.rs::claim_waits,domain/stats/measures.rs::observe,domain/stats/routes.rs::route_health,domain/stats/worker_question_topics.rs::worker_question_topics,domain/waiting.rs::waiting_stats,domain/worker_model.rs::choose,domain/worker_model.rs::of_run,domain/worker_model.rs::openings	domain/ledger/window.rs::EARLIER_RUN_KINDS,domain/worker_model.rs::SESSION_EVENTS
+run_e2e_failed	read	domain/reason.rs::explains_last_error,domain/replan_detect.rs::count_turns_where,domain/run/history.rs::last_park,domain/run/history.rs::unresolved_since_park,domain/run/recorded.rs::record_e2e_park,domain/stats/retries.rs::retries	domain/run/history.rs::PARKING,domain/run/history.rs::RESOLVABLE_PARKING,domain/stats/retries.rs::PARKING
+run_e2e_finished	unnamed		
+run_e2e_started	unnamed		
+run_e2e_waiting	unnamed		
+run_env_changed	read	domain/forecast/snapshot.rs::trigger,domain/marks.rs::marks_with_earlier,domain/marks.rs::recorded_label,domain/marks.rs::retraction_payload	domain/forecast/snapshot.rs::QUEUE_MARK_KINDS,domain/marks.rs::RECORDED_KINDS,domain/marks.rs::RETRACTABLE_KINDS
+run_env_program_found	unnamed		
+run_env_program_missing	unnamed		
+run_inherited	unnamed		
+run_integrated	read	domain/areas.rs::landed_commits,domain/forecast/history.rs::history,domain/forecast/snapshot.rs::trigger,domain/kpi.rs::landed_in_periods,domain/ledger/post_landing.rs::fold,domain/ledger/window.rs::ends_run_occupancy,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/live_alerts/history.rs::first_pass_reads,domain/machine_memory.rs::standing_wait,domain/stats.rs::observe,domain/stats.rs::open_asks,domain/stats.rs::runs,domain/stats/cancel_reasons.rs::cancel_reasons,domain/stats/drafts.rs::draft_flow,domain/stats/follow_up_categories.rs::follow_up_categories,domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/landing_utilization.rs::spans,domain/stats/landing_waits.rs::landing_waits,domain/stats/measures.rs::verification_failures,domain/stats/retries.rs::retries,domain/stats/thresholds.rs::ends_session,domain/stats/window.rs::ends_run,domain/stats/worker_question_topics.rs::worker_question_topics	domain/ledger/window.rs::EARLIER_RUN_KINDS,domain/stats/landing_utilization.rs::ENDS,domain/stats/landing_utilization.rs::KINDS,domain/stats/landing_utilization.rs::WAIT_ENDS
+run_phase_changed	read	domain/forecast/history.rs::running,domain/run_phase.rs::held_unreleased,domain/run_phase.rs::last_recorded,domain/run_phase.rs::of_event	
+run_planned	unnamed		
+run_recovered	read	domain/machine_memory.rs::standing_wait,domain/reason.rs::explains_last_error,domain/recovery.rs::clears,domain/run/history.rs::recovered_landing,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/landing_utilization.rs::spans,domain/stats/landing_waits.rs::walk,domain/stats/thresholds.rs::ends_session,domain/stats/thresholds.rs::preemptions,domain/waiting.rs::of	domain/stats/landing_utilization.rs::ENDS,domain/stats/landing_utilization.rs::KINDS,domain/stats/landing_utilization.rs::WAIT_ENDS
+run_satisfied_closed	read	domain/ledger/window.rs::ends_run_occupancy,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/live_alerts/history.rs::first_pass_reads,domain/run/recorded.rs::record_satisfied_close,domain/stats.rs::observe,domain/stats.rs::runs,domain/stats/window.rs::ends_run	domain/ledger/window.rs::EARLIER_RUN_KINDS
+run_satisfied_decided	read	domain/run/recorded.rs::record_satisfied_decision	
+run_satisfied_judged	read	domain/satisfied.rs::rests_after	
+run_satisfied_review_job_finished	read	domain/headless_job.rs::end_kinds,domain/headless_job.rs::execution_recorded,domain/stats/executions.rs::actor_of	
+run_satisfied_review_job_started	unnamed		
+run_satisfied_review_started	read	domain/satisfied.rs::judgments,domain/satisfied.rs::rests_after	
+run_satisfied_snapshot	read	domain/satisfied.rs::rests_after,domain/stats/asks.rs::tracks	domain/stats/asks.rs::NOT_APPLYING
+run_satisfied_verified	read	domain/satisfied.rs::latest_verified,domain/satisfied.rs::rests_after,domain/stats/asks.rs::tracks	domain/stats/asks.rs::NOT_APPLYING
+run_slot_regained	read	domain/kpi/window.rs::new,domain/stats/asks.rs::tracks,domain/waiting.rs::of,domain/waiting.rs::waiting_stats	domain/stats/asks.rs::NOT_APPLYING
+run_tmp_removed	unnamed		
+run_unfinished_changed	read	domain/ledger/attributes.rs::apply_task,domain/run/recorded.rs::unfinished_change	
+run_waiting_ask_added	read	domain/stats/asks.rs::tracks,domain/waiting.rs::consumed_asks,domain/waiting.rs::of	domain/stats/asks.rs::NOT_APPLYING
+run_waiting_deferred	read	domain/stats/asks.rs::tracks,domain/waiting.rs::deferred_asks,domain/waiting.rs::waiting_stats	domain/stats/asks.rs::NOT_APPLYING
+run_waiting_ended	read	domain/stats/asks.rs::tracks,domain/waiting.rs::consumed_asks,domain/waiting.rs::of,domain/waiting.rs::waiting_stats	domain/stats/asks.rs::NOT_APPLYING
+run_waiting_started	read	domain/kpi/window.rs::new,domain/stats/asks.rs::tracks,domain/waiting.rs::consumed_asks,domain/waiting.rs::of,domain/waiting.rs::waiting_stats	domain/stats/asks.rs::NOT_APPLYING
+runtime_error	read	domain/reason.rs::explains_last_error,domain/recovery.rs::clears,domain/run/history.rs::run_attention_of,domain/stats/landing_utilization.rs::add,domain/stats/landing_utilization.rs::reads,domain/stats/landing_waits.rs::walk,domain/waiting.rs::of	domain/stats/landing_utilization.rs::ENDS,domain/stats/landing_utilization.rs::KINDS
+sccache_container_server_start_failed	unnamed		
+sccache_container_server_started	unnamed		
+sccache_server_start_failed	unnamed		
+sccache_server_detected	unnamed		
+sccache_server_unhealthy	unnamed		
+sccache_server_restart_failed	unnamed		
+sccache_server_started	unnamed		
+sccache_wrapper_removed	unnamed		
+scope_violation	read	domain/run/history.rs::last_park,domain/run/history.rs::unresolved_since_park,domain/run/recorded.rs::finish_validation,domain/stats.rs::reason_codes,domain/stats/retries.rs::retries	domain/reason.rs::REPEATED_CODE_KINDS,domain/run/history.rs::PARKING,domain/run/history.rs::RESOLVABLE_PARKING,domain/stats/retries.rs::PARKING
+scratchpad_removed	unnamed		
+screen_capture_failed	unnamed		
+screen_input_sent	unnamed		
+screen_read	unnamed		
+session_closed	read	domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/plan_quality.rs::new,domain/plan_quality.rs::plan_quality,domain/stats/jobs.rs::session_models,domain/stats/sessions.rs::spans	domain/ledger/window.rs::EARLIER_RUN_KINDS
+session_compacted	read	domain/sessions.rs::hook_mark	
+session_exited	read	domain/background_wrapper.rs::last_session_ended,domain/recovery.rs::clears,domain/run/history.rs::exit_pending,domain/run/history.rs::session_left_open,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats.rs::session_after_end,domain/waiting.rs::as_str	
+session_gone_parked	read	domain/reason.rs::explains_last_error,domain/run/history.rs::last_park,domain/stats/retries.rs::retries	domain/run/history.rs::PARKING,domain/stats/retries.rs::PARKING
+session_idle_observed	unnamed		
+session_opened	read	domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/plan_quality.rs::new,domain/plan_quality.rs::plan_quality,domain/stats/executions.rs::executions,domain/stats/planner_routes.rs::planner_route_map,domain/stats/sessions.rs::inbox_launches,domain/stats/sessions.rs::spans	domain/ledger/window.rs::EARLIER_RUN_KINDS
+session_renewed	read	domain/stats.rs::starts_a_session,domain/stats.rs::starts_a_turn	
+session_reopen_failed	unnamed		
+session_tokens	read	domain/stats/executions.rs::actor_of,domain/stats/executions.rs::executions,domain/stats/executions.rs::provider_of	
+session_turns	read	domain/stats/sessions.rs::spans	
+stale_receipt_nudged	unnamed		
+stale_receipt_resolved	unnamed		
+stall_config_loaded	read	domain/live_alerts/history.rs::first_pass_reads,domain/live_alerts/history.rs::observe,domain/stall.rs::loaded	
+stall_nudged	read	domain/stats.rs::judge_running_alerts,domain/stats/routes.rs::route_health,domain/stats/thresholds.rs::detections,domain/stats/thresholds.rs::preemptions,domain/stats/thresholds.rs::run_ended_resolutions	
+stall_preempted	read	domain/stats/thresholds.rs::preemptions	
+stall_resolved	read	domain/recovery.rs::clears,domain/recovery.rs::live_pass_back,domain/stats/thresholds.rs::resolution	
+submit_not_started	read	domain/stats/thresholds.rs::detections	
+submit_resent	read	domain/stats/thresholds.rs::detections	
+submit_retried	read	domain/stats/thresholds.rs::detections	
+submit_unconfirmed	read	domain/stats/thresholds.rs::detections	
+slots_full_ended	read	domain/pre_claim.rs::heavy_slots_free,domain/pre_claim.rs::slots_full_changes,domain/pre_claim.rs::slots_full_of	
+slots_full_started	read	domain/pre_claim.rs::add,domain/pre_claim.rs::record_slots_full,domain/pre_claim.rs::slots_full_changes,domain/pre_claim.rs::slots_full_of	
+supervision_finished	read	domain/reason.rs::explains_last_error,domain/recovery.rs::clears,domain/run/recorded.rs::end_session,domain/stats.rs::judge_running_alerts,domain/stats/thresholds.rs::ends_session	
+supervisor_config_changed	unnamed		
+supervisor_draining	unnamed		
+supervisor_handed_off	unnamed		
+supervisor_heartbeat_failed	unnamed		
+supervisor_heartbeat_retried	unnamed		
+supervisor_alive	unnamed		
+supervisor_started	read	domain/forecast/snapshot.rs::trigger,domain/kpi/compare.rs::routine,domain/kpi/window.rs::supervisor_lives,domain/marks.rs::derived_marks,domain/marks.rs::marks_with_earlier,domain/marks.rs::recorded_label,domain/stats/main_log.rs::supervisor_alive_at	domain/forecast/snapshot.rs::QUEUE_MARK_KINDS,domain/marks.rs::RECORDED_KINDS
+supervisor_stopped	read	domain/claim_hold.rs::hold_end,domain/forecast/snapshot.rs::trigger,domain/kpi/compare.rs::routine,domain/kpi/window.rs::supervisor_lives,domain/live_alerts/history.rs::first_pass_reads,domain/marks.rs::marks_with_earlier,domain/marks.rs::recorded_label,domain/pre_claim/rows.rs::books,domain/supervisor_life.rs::read	domain/forecast/snapshot.rs::QUEUE_MARK_KINDS,domain/marks.rs::RECORDED_KINDS
+task_canceled_as_duplicate	read	domain/plan_quality.rs::plan_quality	
+task_created	read	domain/ledger/attributes.rs::apply_task,domain/plan_quality.rs::plan_quality,domain/stats/cancel_reasons.rs::cancel_reasons,domain/stats/drafts.rs::draft_flow,domain/stats/follow_up_categories.rs::follow_up_categories	
+task_edited	read	domain/ledger/attributes.rs::apply_task,domain/recovery.rs::verify_fix_round	
+task_goal_changed	read	domain/ledger/attributes.rs::apply_task	
+task_held	read	domain/task_hold.rs::of,domain/task_hold.rs::task_hold_spans	domain/task_hold.rs::NOT_PROGRESS
+task_hold_ended	read	domain/task_hold.rs::ends_hold,domain/task_hold.rs::of	domain/task_hold.rs::NOT_PROGRESS
+task_hold_reminded	read	domain/task_hold.rs::of	domain/task_hold.rs::NOT_PROGRESS
+task_paths_changed	unnamed		
+task_priority_changed	read	domain/forecast/score.rs::score,domain/forecast/snapshot.rs::trigger,domain/ledger/attributes.rs::apply_task,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier	domain/forecast/score.rs::TASK_MARK_KINDS,domain/forecast/snapshot.rs::TASK_MARK_KINDS,domain/ledger/window.rs::EARLIER_RUN_KINDS
+task_released	read	domain/task_hold.rs::ends_hold,domain/task_hold.rs::of,domain/task_hold.rs::of_event,domain/worker_model.rs::opened_by	domain/task_hold.rs::NOT_PROGRESS
+task_reopened	read	domain/kpi/window.rs::improvement_proposals,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/stats/cancel_reasons.rs::cancel_reasons	domain/ledger/window.rs::EARLIER_RUN_KINDS
+task_status_changed	read	domain/forecast/score.rs::score,domain/kpi/window.rs::improvement_proposals,domain/kpi/window.rs::new,domain/ledger/attributes.rs::apply_task,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/plan_quality.rs::plan_quality,domain/stats.rs::duplicate_cancels,domain/stats/cancel_reasons.rs::cancel_reasons,domain/stats/drafts.rs::draft_flow,domain/stats/follow_up_categories.rs::follow_up_categories	domain/ledger/window.rs::EARLIER_RUN_KINDS
+task_submitted	read	domain/kpi/window.rs::improvement_proposals,domain/ledger/window.rs::select_from_time,domain/ledger/window.rs::take_earlier,domain/plan_quality.rs::before,domain/plan_quality.rs::new,domain/plan_quality.rs::plan_quality,domain/stats/cancel_reasons.rs::cancel_reasons	domain/ledger/window.rs::EARLIER_RUN_KINDS
+task_weight_predicted	read	domain/kpi/window.rs::new,domain/stats/predictions.rs::attach,domain/worker_model.rs::choose	
+telemetry_token_issued	unnamed		
+telemetry_token_revoked	unnamed		
+throughput_review_finished	read	domain/sessions.rs::changes,domain/sessions.rs::queue_span_kind,domain/sessions.rs::scope,domain/stats/executions.rs::actor_of,domain/stats/jobs.rs::end_of	
+throughput_review_reported	unnamed		
+throughput_review_started	read	domain/sessions.rs::changes,domain/sessions.rs::queue_span_kind,domain/sessions.rs::scope,domain/stats/jobs.rs::start_of	
+triage_decided	read	domain/reason.rs::explains_last_error,domain/recovery.rs::verify_fix_round,domain/run/history.rs::last_park,domain/stats/retries.rs::retries	domain/run/history.rs::PARKING,domain/stats/retries.rs::PARKING
+triage_failed	read	domain/sessions.rs::changes,domain/sessions.rs::scope	
+triage_finished	read	domain/reason.rs::explains_last_error,domain/run/history.rs::last_park,domain/run/recorded.rs::record_exhausted_resumes,domain/satisfied.rs::handed_off,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/retries.rs::retries	domain/run/history.rs::PARKING,domain/stats/retries.rs::PARKING
+triage_started	read	domain/recovery.rs::pending_request,domain/recovery.rs::verify_fix_round,domain/run/history.rs::triage_attempts,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats/jobs.rs::start_of	
+turn_finished	read	domain/after_claim.rs::observe,domain/replan_detect.rs::count_turns_where,domain/replan_detect.rs::turn_in_flight,domain/stats/executions.rs::actor_of,domain/stats/measures.rs::observe,domain/stats/planner_routes.rs::planner_route_map,domain/stats/planner_routes.rs::planner_routes,domain/stats/routes.rs::route_health,domain/turn.rs::codex_span_turns,domain/turn.rs::counted_rollout_turns,domain/turn.rs::of,domain/turn.rs::request_read,domain/turn.rs::restore,domain/turn.rs::thread_total_own,domain/turn.rs::turn_own_cost,domain/turn.rs::turn_own_models,domain/turn.rs::turns_model	
+turn_requested	read	domain/replan_detect.rs::turn_in_flight,domain/stats/planner_routes.rs::planner_route_map	
+turn_session_identified	read	domain/run/history.rs::turns_run,domain/stats/planner_routes.rs::planner_route_map,domain/turn.rs::restore	
+turn_started	read	domain/background_wrapper.rs::background_turn,domain/background_wrapper.rs::last_planner_turn,domain/background_wrapper.rs::last_turn_of,domain/machine_memory.rs::standing_wait,domain/replan_detect.rs::count_turns_where,domain/replan_detect.rs::turn_in_flight,domain/run/history.rs::turns_run,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats.rs::starts_a_turn,domain/stats/measures.rs::observe,domain/stats/planner_routes.rs::planner_route_map,domain/turn.rs::codex_span_turns,domain/turn.rs::of,domain/turn.rs::request_read,domain/turn.rs::request_to_retry,domain/turn.rs::restore,domain/turn.rs::resumed,domain/turn.rs::turn_awaited,domain/turn.rs::wall_answered	
+turn_withheld	unnamed		
+update_answered	read	domain/stats/updates.rs::updates	domain/mod.rs::UPDATE_EVENT_KINDS
+update_awaiting_approval	read	domain/stats/updates.rs::updates	domain/mod.rs::UPDATE_EVENT_KINDS
+update_built	read	domain/stats/updates.rs::updates	domain/mod.rs::UPDATE_EVENT_KINDS
+update_dropped	read	domain/stats/updates.rs::updates	domain/mod.rs::UPDATE_EVENT_KINDS
+update_e2e_passed	read	domain/stats/updates.rs::updates	domain/mod.rs::UPDATE_EVENT_KINDS
+update_failed	read	domain/stats/updates.rs::add_tests,domain/stats/updates.rs::updates	domain/mod.rs::UPDATE_EVENT_KINDS
+update_installed	read	domain/stats/updates.rs::updates	domain/mod.rs::UPDATE_EVENT_KINDS
+update_restored	read	domain/stats/updates.rs::updates	domain/mod.rs::UPDATE_EVENT_KINDS
+update_retry	read	domain/stats/updates.rs::updates	domain/mod.rs::UPDATE_EVENT_KINDS
+update_started	read	domain/stats/updates.rs::updates	domain/mod.rs::UPDATE_EVENT_KINDS
+usage_limited	unnamed		
+validation_finished	read	domain/reason.rs::explains_last_error,domain/recovery.rs::hand_off_refusal,domain/replan_detect.rs::count_turns_where,domain/run/recorded.rs::finish_validation,domain/satisfied.rs::awaits_verification,domain/satisfied.rs::rests_after,domain/stats.rs::runs,domain/stats.rs::watched_phase,domain/stats/landing_waits.rs::walk,domain/stats/measures.rs::observe	
+verification_command	read	domain/kpi/window.rs::new,domain/machine_memory.rs::standing_wait,domain/stats/measures.rs::integration_commands,domain/stats/measures.rs::observe,domain/stats/measures.rs::of,domain/stats/measures.rs::retried_class,domain/stats/retries.rs::retries	
+workspace_closed	read	domain/background_wrapper.rs::last_session_ended,domain/recovery.rs::clears,domain/run.rs::run_workspaces,domain/run/history.rs::resumed_session,domain/run/history.rs::session_left_open,domain/sessions.rs::changes,domain/sessions.rs::scope,domain/stats.rs::judge_running_alerts,domain/stats.rs::session_after_end,domain/stats/thresholds.rs::ends_session,domain/task_hold.rs::of	domain/task_hold.rs::NOT_PROGRESS
+workspace_created	read	domain/background_wrapper.rs::background_turn,domain/background_wrapper.rs::current_background_session,domain/background_wrapper.rs::last_session,domain/background_wrapper.rs::last_session_ended,domain/background_wrapper.rs::last_session_events,domain/background_wrapper.rs::last_turn_of,domain/run.rs::run_workspaces,domain/stats.rs::starts_a_session,domain/stats.rs::starts_a_turn	
+worktree_created	unnamed		
+worktree_removed	read	domain/disk.rs::reading	
+wrapper_heartbeat_expired	unnamed		
+wrapper_launched	read	domain/background_wrapper.rs::current_background_session,domain/background_wrapper.rs::last_background_session,domain/background_wrapper.rs::last_session,domain/background_wrapper.rs::last_session_ended,domain/background_wrapper.rs::last_turn_of,domain/background_wrapper.rs::launch_of,domain/background_wrapper.rs::launched_as,domain/machine_memory.rs::standing_wait,domain/stats.rs::starts_a_session,domain/stats.rs::starts_a_turn	
+wrapper_started	unnamed		
+wrapper_stopped	read	domain/stats.rs::session_after_end	
