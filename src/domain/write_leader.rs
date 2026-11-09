@@ -29,6 +29,21 @@ pub const TAKEOVER_RETRY: Duration = Duration::from_secs(5);
 /// leader releases the row: inside ECS's default stop grace of 30 seconds.
 pub const RELEASE_DRAIN_LIMIT: Duration = Duration::from_secs(20);
 
+/// Stop callers allow the whole drain plus five seconds for release and
+/// cleanup, still inside the deployment's thirty-second stop grace.
+pub const SERVICE_STOP_GRACE: Duration = RELEASE_DRAIN_LIMIT.saturating_add(Duration::from_secs(5));
+
+/// A caller's start/probe timeout must never shorten an accepted write's drain.
+pub fn stop_grace(requested: Duration) -> Duration {
+    requested.max(SERVICE_STOP_GRACE)
+}
+
+/// The DB clock and committed lease decide whether a renewal is needed.
+/// Refused requests do not change this clock; a committed write does.
+pub fn lease_renewal_due(lease_until_ms: i64, now_ms: i64) -> bool {
+    lease_until_ms.saturating_sub(now_ms) <= (LEASE - RENEW_INTERVAL).as_millis() as i64
+}
+
 const _: () = assert!(LEASE.as_millis() >= 3 * RENEW_INTERVAL.as_millis());
 const _: () = assert!(RELEASE_DRAIN_LIMIT.as_secs() < 30);
 
@@ -72,9 +87,49 @@ pub fn takeover(row: &WriteLeader, now_ms: i64, local_proof: bool) -> Takeover {
     }
 }
 
+/// Compatible migrations retain the running leader; initial schema creation
+/// has no row yet. Only a breaking change of an existing row takes it over.
+pub fn migration_takes_leader(breaking: bool, row_exists: bool) -> bool {
+    breaking && row_exists
+}
+
+/// Inspect the lease periodically even while requests queue up. Only the DB
+/// lease decides whether that inspection needs a renewal transaction.
+pub fn renewal_due(since_check: Duration) -> bool {
+    since_check >= RENEW_INTERVAL
+}
+
+/// A planned stop releases only after every accepted write has finished.
+/// On a drain timeout the process exits without releasing; takeover fences
+/// any write still in flight. A fenced process never releases another leader.
+pub fn release_after_stop(drained: bool, refused: bool) -> bool {
+    drained && !refused
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renewal_and_release_follow_the_line() {
+        assert!(!renewal_due(RENEW_INTERVAL - Duration::from_millis(1)));
+        assert!(renewal_due(RENEW_INTERVAL));
+        assert!(renewal_due(RENEW_INTERVAL + Duration::from_secs(1)));
+        assert!(release_after_stop(true, false));
+        assert!(!release_after_stop(false, false));
+        assert!(!release_after_stop(true, true));
+        assert!(!release_after_stop(false, true));
+        assert!(SERVICE_STOP_GRACE > RELEASE_DRAIN_LIMIT);
+        assert_eq!(stop_grace(Duration::from_secs(10)), SERVICE_STOP_GRACE);
+        assert_eq!(stop_grace(Duration::from_secs(40)), Duration::from_secs(40));
+        assert!(!lease_renewal_due(30_000, 9_999));
+        assert!(lease_renewal_due(30_000, 10_000));
+        assert!(lease_renewal_due(30_000, 40_000));
+        assert!(!lease_renewal_due(40_000, 10_000));
+        assert!(!migration_takes_leader(false, true));
+        assert!(!migration_takes_leader(true, false));
+        assert!(migration_takes_leader(true, true));
+    }
 
     fn row(generation: i64, lease_until_ms: i64) -> WriteLeader {
         WriteLeader {

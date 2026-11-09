@@ -1044,7 +1044,19 @@ impl SqliteQueue {
         alive: Option<&dyn Fn(u32) -> bool>,
         now: i64,
     ) -> Result<MigrationReport> {
-        let path = path.as_ref();
+        Self::migrate_with_proof(path.as_ref(), alive, now, false)
+    }
+
+    /// The service holds this SQLite queue's lock file. Breaking migrations
+    /// take and release a fresh generation inside their transaction; only
+    /// this entry may bypass an unreleased local lease. Compatible ones
+    /// retain the current holder, generation and lease.
+    pub(crate) fn migrate_with_proof(
+        path: &Path,
+        alive: Option<&dyn Fn(u32) -> bool>,
+        now: i64,
+        local_proof: bool,
+    ) -> Result<MigrationReport> {
         let mut queue = Self::connect(path, false)?;
         let state = queue
             .state()?
@@ -1060,6 +1072,7 @@ impl SqliteQueue {
                     alive,
                     db: path,
                     now,
+                    local_proof,
                 }),
             )?;
             applied_from = version;
@@ -1438,6 +1451,15 @@ impl SqliteQueue {
             }
             backup = Some(back_up(guard.db, version, guard.now)?);
         }
+        // The row is already locked by migration_tx. Advance the generation
+        // only for a breaking change, after drain and backup, before applying
+        // any schema statement. Bootstrap has no leader row yet.
+        let leadership = super::write_leader::take_for_migration(
+            &tx,
+            guard.is_some() && pending.iter().any(|m| !m.compatible),
+            has_table(&tx, "write_leader")?,
+            guard.is_some_and(|guard| guard.local_proof),
+        )?;
         for (index, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
             tx.execute_batch(migration)
                 .with_context(|| format!("apply queue migration {}", index + 1))?;
@@ -1457,6 +1479,9 @@ impl SqliteQueue {
             violations == 0,
             "queue migration would break {violations} foreign key references"
         );
+        if let Some((holder, generation)) = leadership {
+            super::write_leader::release(&tx, &holder, generation)?;
+        }
         tx.commit()?;
         Ok((backup, version))
     }
@@ -1471,6 +1496,8 @@ struct BreakingGuard<'a> {
     db: &'a Path,
     /// What names the copy.
     now: i64,
+    /// Proof from the service's local lock, never inferred by the store.
+    local_proof: bool,
 }
 
 /// Copy the queue at `db`, at schema `version`, to `backups/` next to it,

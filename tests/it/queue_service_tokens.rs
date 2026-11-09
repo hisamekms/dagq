@@ -95,8 +95,14 @@ fn tokens_are_issued_by_the_service_at_the_request_of_their_parent() {
 
     let worker = Principal::worker(queue.run.id(), queue.run.task_id());
     let worker_token = token(&queue, &worker);
-    // A supervisor whose registration is not in the queue.
-    let gone_token = token(&queue, &Principal::supervisor(&gone, std::process::id()));
+    // A live supervisor signed in before its registration is in the queue.
+    // Use the service's issue so the credential keeps this asking process;
+    // a synthetic legacy token dated before this PID started is expired.
+    let gone_token = issued_for(&issue(
+        None,
+        &Principal::supervisor(&gone, std::process::id()),
+    ))
+    .1;
     let wrapper = Principal::wrapper(
         &dagq::domain::session_step::StepTarget::run(queue.run.id()),
         Some(queue.run.task_id()),

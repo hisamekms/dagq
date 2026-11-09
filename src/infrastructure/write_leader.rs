@@ -154,6 +154,31 @@ pub(super) fn take(
     Ok(Some(tx.query_row(TAKEN_SQL, &[], |r| r.get(0))?))
 }
 
+/// A breaking migration owns a fresh generation while it applies schema;
+/// a compatible migration only locks the row, without changing its lease.
+/// The caller has already checked drain under that lock. Bootstrap has no
+/// row to take, so it creates the leader table with the rest of the schema.
+pub(super) fn take_for_migration(
+    tx: &impl SqlWrite,
+    breaking: bool,
+    row_exists: bool,
+    local_proof: bool,
+) -> Result<Option<(String, i64)>> {
+    if !crate::domain::write_leader::migration_takes_leader(breaking, row_exists) {
+        return Ok(None);
+    }
+    let holder = uuid::Uuid::new_v4().to_string();
+    let generation = take(
+        tx,
+        &tx.dialect().now_millis(),
+        &holder,
+        crate::domain::write_leader::LEASE,
+        local_proof,
+    )?
+    .ok_or(crate::application::NotLeader)?;
+    Ok(Some((holder, generation)))
+}
+
 /// Conditional lease extension in an unfenced transaction.
 pub(super) fn renew(
     tx: &impl SqlWrite,
@@ -282,6 +307,45 @@ mod tests {
 
     /// [`LEASE`] in milliseconds.
     const LEASE_MS: i64 = LEASE.as_millis() as i64;
+
+    #[test]
+    fn breaking_migration_takes_applies_and_releases_but_compatible_only_locks() {
+        let queue = queue();
+        let generation = queue
+            .take_write_leader("old", LEASE, true)
+            .unwrap()
+            .unwrap();
+        let before = queue.write_leader().unwrap().0;
+        let identity = WriteIdentity::read(&*queue.conn).unwrap();
+        let tx = WriteTx::leader(&queue.conn, "migration_test", queue.write_hold_warn).unwrap();
+        assert!(lock_migration(&tx, &identity).unwrap());
+        assert!(
+            take_for_migration(&tx, false, true, true)
+                .unwrap()
+                .is_none()
+        );
+        tx.commit().unwrap();
+        assert_eq!(queue.write_leader().unwrap().0, before);
+        let tx = WriteTx::leader(&queue.conn, "migration_test", queue.write_hold_warn).unwrap();
+        assert!(lock_migration(&tx, &identity).unwrap());
+        let (holder, taken) = take_for_migration(&tx, true, true, true).unwrap().unwrap();
+        assert_eq!(taken, generation + 1);
+        tx.execute_batch("CREATE TABLE migrated_under_leader(value INTEGER)")
+            .unwrap();
+        assert!(release(&tx, &holder, taken).unwrap());
+        tx.commit().unwrap();
+        let row = queue.write_leader().unwrap().0;
+        assert_eq!(row.generation, taken);
+        assert_eq!(row.lease_until_ms, 0);
+        assert_eq!(
+            queue
+                .conn
+                .query_row("SELECT count(*) FROM migrated_under_leader", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
 
     #[test]
     fn the_migration_leaves_one_row_no_process_has_led() {

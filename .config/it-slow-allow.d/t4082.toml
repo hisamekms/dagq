@@ -1,0 +1,4 @@
+[[test]]
+name = "queue_service_http::a_jwt_over_loopback_is_exchanged_and_its_human_token_carries_a_use_case"
+reason = "実serviceとSQLiteの境界: lockの証の無いDBで実際にleaseを待ち、認証を拒否し続けた後、serviceの引き継ぎの間隔で取得してHTTPの書き込みと停止まで通す。"
+task = 4082

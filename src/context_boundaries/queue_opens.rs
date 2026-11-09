@@ -43,7 +43,7 @@ use syn::{Attribute, Meta};
 const DEFINER: &str = "src/infrastructure/sqlite.rs";
 
 /// The associated fns of `SqliteQueue` that open the DB at a path.
-const OPENS: [&str; 12] = [
+const OPENS: [&str; 13] = [
     "write_connection",
     "init",
     "create",
@@ -54,6 +54,7 @@ const OPENS: [&str; 12] = [
     "schema",
     "binding_at",
     "migrate",
+    "migrate_with_proof",
     "migrate_compatible",
     "refuse_breaking_in_use",
 ];
@@ -165,7 +166,17 @@ pub(super) const OPENERS: &[Opener] = &[
     ),
     row(
         "src/infrastructure/queue_service.rs",
-        "ServiceWriteLine::start",
+        "ServiceWriteLine::waiting",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service.rs",
+        "ServiceWriteLine::take",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service.rs",
+        "ServiceWriteLine::stop_within",
         Why::Service,
     ),
 ];

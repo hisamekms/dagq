@@ -758,12 +758,32 @@ pub fn migrate_through(
     let filled = if messages.is_empty() {
         0
     } else {
-        client.call(UseCase::CommitMessages, json!({"messages": messages}))?["filled"]
-            .as_u64()
-            .unwrap_or_default()
+        migration_backfill(client.call(UseCase::CommitMessages, json!({"messages": messages})))?
     };
     report["commit_messages_filled"] = json!(filled);
     Ok(report)
+}
+
+/// Schema is already committed when backfill runs. A compatible migration
+/// must succeed beside the old leader; a refused cache write stays missing
+/// for the next migrate instead of failing the completed schema change.
+fn migration_backfill(answer: Result<Value>) -> Result<u64> {
+    match answer {
+        Ok(answer) => Ok(answer["filled"].as_u64().unwrap_or_default()),
+        Err(error)
+            if error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<service::ClientFailure>()
+                    .is_some_and(|failure| {
+                        failure.code
+                            == crate::domain::queue_service::ServiceErrorCode::NotLeader.as_str()
+                    })
+            }) =>
+        {
+            Ok(0)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Whether `error` says no service answered: none runs, or it does not
@@ -1975,6 +1995,19 @@ pub fn service_commands() -> crate::infrastructure::queue_service::ServiceComman
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_completed_migration_defers_backfill_only_when_its_writer_is_not_leader() {
+        assert_eq!(migration_backfill(Ok(json!({"filled": 3}))).unwrap(), 3);
+        let waiting = service::ClientFailure::new("not_leader", "takeover waits");
+        assert_eq!(
+            migration_backfill(Err(anyhow::Error::new(waiting).context("backfill"))).unwrap(),
+            0
+        );
+        let refused = service::ClientFailure::new("authorization_denied", "not allowed");
+        assert!(migration_backfill(Err(refused.into())).is_err());
+        assert!(migration_backfill(Err(anyhow::anyhow!("transport failed"))).is_err());
+    }
 
     /// The `up` an update's job or `install` starts a supervisor again with
     /// is given its providers and plugin directory, and no `--cmux`

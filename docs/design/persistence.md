@@ -141,6 +141,9 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 
 ## Runtime ownership
 
+書き込みの係のlifecycleの入口は`infrastructure::queue_service::serve`と`ServiceWriteLine`。
+serviceは起動で係を引き継ぎ、予定した停止で列を空にしてから手放し、`not_leader`を受けた係は終わり、lockのファイルを証にできるローカルのSQLiteは期限を待たない。
+
 runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)、[ADR-0039](../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)）。
 入口は`src/infrastructure/runtime_store/coordination.rs`と`transitions.rs`、`recovery.rs`。
 

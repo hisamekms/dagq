@@ -262,7 +262,10 @@ impl HostOpsState {
         if !self.last_supervisor_asked(env, QUEUE_SERVICE_STOP_REQUESTED) {
             return;
         }
-        match port.control.stop(port.start_timeout) {
+        match port
+            .control
+            .stop(crate::domain::write_leader::stop_grace(port.start_timeout))
+        {
             Ok(Some(pid)) => {
                 info!(
                     pid,

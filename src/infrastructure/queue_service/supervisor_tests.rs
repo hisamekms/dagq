@@ -110,8 +110,24 @@ fn claimed_at_with(
     (backend, queue)
 }
 
-/// A token of `principal`'s for the queue of `backend`.
+/// A token of `principal`'s for the queue of `backend`. A supervisor's
+/// fixture keeps its registration: these fake pids name no live process.
 pub(super) fn token_of(backend: &SqliteServiceBackend, principal: &Principal) -> String {
+    if let Some(registration) = &principal.registration {
+        let mut queue = SqliteQueue::open(&backend.db)
+            .unwrap()
+            .with_generators(backend.generators.clone());
+        if !queue
+            .supervisors()
+            .unwrap()
+            .iter()
+            .any(|row| row.token == *registration)
+        {
+            queue
+                .register_supervisor(registration, 7, 1, "test")
+                .unwrap();
+        }
+    }
     let issued = issue(&backend.queue_dir, principal, 0).unwrap();
     read_token(&issued.file).unwrap()
 }
@@ -243,7 +259,7 @@ fn a_supervisor_prunes_another_registration_only_once_its_heartbeat_expired() {
         .map(|registration| registration.token.to_string())
         .collect();
     left.sort();
-    assert_eq!(left, ["live"]);
+    assert_eq!(left, ["live", "owner"]);
 }
 
 /// Only a supervisor's principal reaches the use case: a worker's token is

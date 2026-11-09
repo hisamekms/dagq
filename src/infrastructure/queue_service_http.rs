@@ -40,8 +40,8 @@
 use std::cell::RefCell;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -502,12 +502,45 @@ fn serve_connection(
     }
 }
 
-/// The open entrance: its listener's thread takes connections until this goes,
-/// each on a thread of its own, as the socket's are. A connection being
-/// answered then is left to end, as the socket's is.
+/// Accepted connections, held through reading, dispatch and the final write.
+/// Stopping acceptance does not discard their replies. All waits share the
+/// service's one drain deadline, so slow peers cannot multiply its grace.
+#[derive(Clone, Default)]
+pub(super) struct InFlight(Arc<(Mutex<usize>, Condvar)>);
+
+pub(super) struct InFlightRequest(InFlight);
+
+impl InFlight {
+    pub(super) fn begin(&self) -> InFlightRequest {
+        *self.0.0.lock().unwrap() += 1;
+        InFlightRequest(self.clone())
+    }
+
+    pub(super) fn wait(&self, limit: Duration) -> bool {
+        let count = self.0.0.lock().unwrap();
+        let (count, _) = self
+            .0
+            .1
+            .wait_timeout_while(count, limit, |count| *count != 0)
+            .unwrap();
+        *count == 0
+    }
+}
+
+impl Drop for InFlightRequest {
+    fn drop(&mut self) {
+        let (count, changed) = &*self.0.0;
+        *count.lock().unwrap() -= 1;
+        changed.notify_all();
+    }
+}
+
+/// An HTTP listener with accepted requests tracked through their final write.
+/// The service stops acceptance, then drains these requests before its line.
 pub struct HttpEntrance {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    requests: InFlight,
 }
 
 /// Take requests on `listener` with `answer`, looking for a stop every `poll`.
@@ -525,22 +558,35 @@ pub fn open_tls(
     listener.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));
     let stopping = stop.clone();
+    let requests = InFlight::default();
+    let accepted = requests.clone();
     let thread = thread::Builder::new()
         .name("queue-service-http".to_owned())
-        .spawn(move || accept_until(&listener, &stopping, &answer, poll, tls))
+        .spawn(move || accept_until(&listener, &stopping, &answer, poll, tls, &accepted))
         .context("start the queue service's HTTP entrance")?;
     Ok(HttpEntrance {
         stop,
         thread: Some(thread),
+        requests,
     })
 }
 
-impl Drop for HttpEntrance {
-    fn drop(&mut self) {
+impl HttpEntrance {
+    pub(super) fn stop_accepting(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+
+    pub(super) fn wait(&self, limit: Duration) -> bool {
+        self.requests.wait(limit)
+    }
+}
+
+impl Drop for HttpEntrance {
+    fn drop(&mut self) {
+        self.stop_accepting();
     }
 }
 
@@ -550,17 +596,22 @@ fn accept_until(
     answer: &HttpAnswerer,
     poll: Duration,
     tls: Option<Arc<rustls::ServerConfig>>,
+    requests: &InFlight,
 ) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
                 let answer = answer.clone();
                 let tls = tls.clone();
+                let request = requests.begin();
                 let started = thread::Builder::new()
                     .name("queue-service-http-request".to_owned())
-                    .spawn(move || match serve_connection(&stream, &answer, tls) {
-                        Ok(line) => info!("{line}"),
-                        Err(error) => warn!("a queue service HTTP request failed: {error:#}"),
+                    .spawn(move || {
+                        let _request = request;
+                        match serve_connection(&stream, &answer, tls) {
+                            Ok(line) => info!("{line}"),
+                            Err(error) => warn!("a queue service HTTP request failed: {error:#}"),
+                        }
                     });
                 if let Err(error) = started {
                     warn!("the queue service could not take an HTTP request: {error}");
@@ -586,7 +637,18 @@ mod tests {
     use crate::domain::RunStatus;
     use crate::domain::queue_service::{API_VERSION, MIN_API_VERSION, UseCase};
     use serde_json::json;
-    use std::sync::Mutex;
+
+    #[test]
+    fn accepted_connections_live_until_their_final_write_finishes() {
+        let requests = InFlight::default();
+        let first = requests.begin();
+        let second = requests.begin();
+        assert!(!requests.wait(Duration::ZERO));
+        drop(first);
+        assert!(!requests.wait(Duration::ZERO));
+        drop(second);
+        assert!(requests.wait(Duration::ZERO));
+    }
 
     /// What a request made of: what the stub service was given, the bytes
     /// written, and the log's line.

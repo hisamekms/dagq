@@ -696,6 +696,92 @@ fn an_administration_that_reads_authenticates_off_the_line() {
     assert!(!message.contains("off its write line"), "{message}");
 }
 
+/// The service's complete migration dispatch must commit and report a
+/// compatible schema without taking the still-live remote holder's row.
+#[test]
+fn compatible_migration_reports_success_while_another_holder_keeps_its_lease() {
+    let (_dir, mut backend) = claimed_with(&LeaseToken::new("owner"), still());
+    use crate::infrastructure::schema::{MIGRATIONS, floor_for};
+    // Build a real earlier schema, with only compatible migrations pending.
+    // Keep the leader table in that prefix so the old holder's lease exists.
+    let leader_version = MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE write_leader ("))
+        .unwrap()
+        + 1;
+    let version = floor_for(SqliteQueue::SCHEMA_VERSION).max(leader_version as i64);
+    assert!(
+        version < SqliteQueue::SCHEMA_VERSION,
+        "a compatible tail is needed"
+    );
+    backend.db = backend.db.with_file_name("before-compatible.db");
+    let raw = rusqlite::Connection::open(&backend.db).unwrap();
+    for sql in &MIGRATIONS[..version as usize] {
+        raw.execute_batch(sql).unwrap();
+    }
+    raw.pragma_update(None, "application_id", 0x43545131)
+        .unwrap();
+    raw.pragma_update(None, "user_version", version).unwrap();
+    raw.execute(
+        "INSERT INTO schema_floor(singleton,floor) VALUES(1,?1)",
+        [floor_for(version)],
+    )
+    .unwrap();
+    raw.execute("UPDATE write_leader SET holder='old-service', generation=7, lease_until_ms=9223372036854775807, acquired_at_ms=1", []).unwrap();
+    raw.execute("INSERT INTO landed_commits(run_id,task_id,commit_sha,landed_at) VALUES (?1,1,'abc','then')", [RUN]).unwrap();
+    let leader = || {
+        raw.query_row(
+            "SELECT holder,generation,lease_until_ms,acquired_at_ms FROM write_leader",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .unwrap()
+    };
+    let before = leader();
+    assert!(
+        SqliteQueue::schema(&backend.db)
+            .unwrap()
+            .pending
+            .iter()
+            .all(|m| m.compatible)
+    );
+    backend.queue_dir = backend.queue_dir.join("different-queue");
+    fs::create_dir(&backend.queue_dir).unwrap();
+    let line = Arc::new(ServiceWriteLine::waiting(&backend.db).unwrap());
+    assert!(!line.take(&backend.db, "new-service", false).unwrap());
+    assert!(line.bootstrap.load(Ordering::SeqCst));
+    backend.write_line = Some(line.clone());
+    let backend = Arc::new(backend);
+    let response = answered(&backend, request(None, UseCase::Migrate, json!({})));
+    assert!(response.ok, "{response:?}");
+    let report = response.result.unwrap();
+    assert_eq!(report["schema_version"], SqliteQueue::SCHEMA_VERSION);
+    assert_eq!(
+        report["applied"].as_array().unwrap().len() as i64,
+        SqliteQueue::SCHEMA_VERSION - version
+    );
+    let missing = report["commit_messages_missing"].as_array().unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0]["commit"], "abc");
+    assert!(SqliteQueue::schema(&backend.db).unwrap().pending.is_empty());
+    assert_eq!(leader(), before);
+    assert!(!line.leading());
+    assert!(
+        !line.line.refused(),
+        "successful migration must leave standby serving"
+    );
+    assert!(!line.bootstrap.load(Ordering::SeqCst));
+    line.stop(&backend.db).unwrap();
+    assert_eq!(leader(), before);
+}
+
 /// Nothing writes beside the line: its connection is lent on its thread alone.
 #[test]
 fn the_line_s_queue_is_refused_off_its_thread() {
@@ -708,4 +794,145 @@ fn the_line_s_queue_is_refused_off_its_thread() {
         let _ = answer.send(on_line(Some(&line), move || on.queue().map(drop)));
     });
     recorded.recv_timeout(BOUND).unwrap().unwrap();
+}
+
+/// Waiting serves health and rejects writes. Lock proof takes an unexpired
+/// lease; the line drains accepted writes before releasing the acquired row.
+#[test]
+fn takeover_health_and_drain_use_the_services_identity() {
+    let lease = LeaseToken::new("owner");
+    let (_dir, mut backend) = claimed_with(&lease, still());
+    let queue = open(&backend.db);
+    let first = queue
+        .take_write_leader("crashed", crate::domain::write_leader::LEASE, true)
+        .unwrap()
+        .unwrap();
+    let line = Arc::new(ServiceWriteLine::waiting(&backend.db).unwrap());
+    backend.write_line = Some(line.clone());
+    let backend = Arc::new(backend);
+    let health = || {
+        answered_from(
+            &backend,
+            ServiceRequest {
+                caller: None,
+                api_version: API_VERSION,
+                token: None,
+                env_role: None,
+                queue: None,
+                binding: None,
+                use_case: UseCase::Hello,
+                params: Value::Null,
+            },
+            Peer::Owner,
+        )
+    };
+    let waiting = health();
+    assert!(waiting.ok);
+    assert_eq!(waiting.result.unwrap()["leader"], false);
+    assert!(!line.take(&backend.db, "new", false).unwrap());
+    assert!(line.take(&backend.db, "new", true).unwrap());
+    // Migration completion and the startup retry share one acquisition.
+    assert!(line.take(&backend.db, "a racing retry", true).unwrap());
+    assert_eq!(queue.write_leader().unwrap().0.generation, first + 1);
+    assert_eq!(health().result.unwrap()["leader"], true);
+    let on = line.clone();
+    let wrote = line
+        .line
+        .enqueue(move || {
+            let queue = on.queue().unwrap();
+            let tx = queue.write_tx("drained_write").unwrap();
+            tx.execute_batch(
+                "CREATE TABLE drained_write(value INTEGER); INSERT INTO drained_write VALUES (1)",
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            LineAnswer {
+                response: ServiceResponse::success(Value::Null),
+                notes: RequestNotes::default(),
+            }
+        })
+        .unwrap();
+    line.stop(&backend.db).unwrap();
+    assert!(wrote.recv_timeout(BOUND).unwrap().response.ok);
+    assert_eq!(
+        queue
+            .conn
+            .query_row("SELECT value FROM drained_write", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(queue.write_leader().unwrap().0.lease_until_ms, 0);
+    assert_eq!(health().result.unwrap()["leader"], false);
+    let next = ServiceWriteLine::waiting(&backend.db).unwrap();
+    assert!(next.take(&backend.db, "next", false).unwrap());
+    next.stop(&backend.db).unwrap();
+}
+
+/// API refusals never enter a write transaction, and cannot keep postponing
+/// renewal inspections. The committed DB lease, rather than request traffic,
+/// controls whether the inspection extends it.
+#[test]
+fn refused_requests_do_not_postpone_the_lease_renewal() {
+    let fixture = service(no_commands);
+    let line = fixture.line();
+    let queue = open(&fixture.backend.db);
+    for _ in 0..3 {
+        queue
+            .conn
+            .execute("UPDATE write_leader SET lease_until_ms=1", [])
+            .unwrap();
+        let held = HeldLine::of(&fixture);
+        let refused: Vec<_> = (0..8)
+            .map(|_| {
+                let mut request = write();
+                request.api_version = API_VERSION + 1;
+                sent_from(&fixture.backend, request, Peer::Owner)
+            })
+            .collect();
+        assert_eq!(queue.write_leader().unwrap().0.lease_until_ms, 1);
+        // Inspection is queued while non-writing work still holds the line.
+        line.renew_if_idle_after(crate::domain::write_leader::RENEW_INTERVAL)
+            .unwrap();
+        held.let_go();
+        for response in refused {
+            assert_eq!(
+                response
+                    .recv_timeout(BOUND)
+                    .unwrap()
+                    .unwrap()
+                    .response
+                    .error
+                    .unwrap()
+                    .code,
+                ServiceErrorCode::ApiVersionMismatch
+            );
+        }
+        line.line
+            .enqueue(|| LineAnswer {
+                response: ServiceResponse::success(Value::Null),
+                notes: RequestNotes::default(),
+            })
+            .unwrap()
+            .recv_timeout(BOUND)
+            .unwrap();
+        assert!(queue.write_leader().unwrap().0.lease_until_ms > 1);
+    }
+    // An already fresh lease is left alone by the inspection.
+    queue
+        .conn
+        .execute("UPDATE write_leader SET lease_until_ms=?1", [i64::MAX])
+        .unwrap();
+    line.renew_if_idle_after(crate::domain::write_leader::RENEW_INTERVAL)
+        .unwrap();
+    line.line
+        .enqueue(|| LineAnswer {
+            response: ServiceResponse::success(Value::Null),
+            notes: RequestNotes::default(),
+        })
+        .unwrap()
+        .recv_timeout(BOUND)
+        .unwrap();
+    assert_eq!(queue.write_leader().unwrap().0.lease_until_ms, i64::MAX);
+    line.stop(&fixture.backend.db).unwrap();
 }

@@ -216,8 +216,16 @@ pub trait ServiceBackend: Send + Sync {
         Ok(())
     }
 
+    /// Health stays successful while takeover waits. `leader` in hello's
+    /// result distinguishes that state from a process accepting writes.
+    fn is_write_leader(&self) -> bool {
+        true
+    }
+
     /// The principal `token` was issued for; `None` for a token the
-    /// control side did not issue or has revoked.
+    /// control side did not issue, has revoked, or whose supervisor's
+    /// registration and issuing process have ended. This check must not
+    /// depend on startup having acquired leadership or swept token files.
     fn principal(&self, token: &str) -> Result<Option<Principal>>;
     /// The queue, written as `actor`. A service with a write line answers
     /// this on the line's thread alone ([`on_write_line`]).
@@ -576,6 +584,31 @@ impl QueueService<'_> {
         process: Option<u32>,
         notes: &mut RequestNotes,
     ) -> ServiceResponse {
+        self.handle_noting_with_wait(request, peer, process, notes, false)
+    }
+
+    /// Answer while takeover waits, using the ordinary boundary checks.
+    /// Authentication reads on a read-only connection, then a write is
+    /// refused before its use case runs. This snapshot stays waiting even
+    /// if acquisition finishes meanwhile, so no write runs off the line.
+    pub fn handle_waiting(
+        &self,
+        request: &ServiceRequest,
+        peer: Peer,
+        process: Option<u32>,
+        notes: &mut RequestNotes,
+    ) -> ServiceResponse {
+        self.handle_noting_with_wait(request, peer, process, notes, true)
+    }
+
+    fn handle_noting_with_wait(
+        &self,
+        request: &ServiceRequest,
+        peer: Peer,
+        process: Option<u32>,
+        notes: &mut RequestNotes,
+        waiting: bool,
+    ) -> ServiceResponse {
         if !answers(request.api_version) {
             return ServiceResponse::version_mismatch(request.api_version.into());
         }
@@ -597,6 +630,7 @@ impl QueueService<'_> {
         let hello = || {
             ServiceResponse::success(json!({
                 "service": "dagq-queue-service",
+                "leader": self.backend.is_write_leader(),
                 "build": self.build,
                 "pid": self.pid,
                 "api_version": API_VERSION,
@@ -607,7 +641,13 @@ impl QueueService<'_> {
             return hello();
         }
         let connection = connection(request.use_case, &request.params);
-        let (principal, checked) = match self.authenticate(request, peer, connection) {
+        let waiting = waiting && on_write_line(request.use_case, &request.params);
+        let authentication = if waiting {
+            Connection::Read
+        } else {
+            connection
+        };
+        let (principal, checked) = match self.authenticate(request, peer, authentication) {
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
@@ -637,6 +677,9 @@ impl QueueService<'_> {
                     );
                 }
             }
+        }
+        if waiting {
+            return respond(Err(crate::application::NotLeader.into()));
         }
         let actor = principal.actor();
         // Each of these opens the queue itself: what the token was read on
@@ -1130,7 +1173,7 @@ pub fn revoke_ended_sign_ins(backend: &dyn ServiceBackend) -> Result<Vec<String>
 /// ([`crate::domain::queue_service::supervisor_token_ended`]), its
 /// registration as `registered` reads it and the processes as `backend`
 /// does; `None` for any other principal's.
-pub(super) fn supervisor_ended(
+pub(crate) fn supervisor_ended(
     backend: &dyn ServiceBackend,
     held: &crate::domain::queue_service::HeldToken,
     registered: impl Fn(&crate::domain::LeaseToken) -> bool,
@@ -4601,6 +4644,49 @@ pub(crate) mod tests {
         let mut older = request(Some("worker"), UseCase::Show, json!({"id": 1}));
         older.api_version = MIN_API_VERSION;
         assert!(service.handle(&older).ok);
+    }
+
+    /// Standby preserves the protocol boundary before refusing a write, and
+    /// authentication never opens a write connection or runs the use case.
+    #[test]
+    fn waiting_checks_version_destination_and_token_before_leadership() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "test",
+            pid: 7,
+        };
+        let mut note = request(Some("unknown"), UseCase::Note, json!({}));
+        note.api_version = API_VERSION + 1;
+        note.queue = Some("/another/queue.db".into());
+        let answer = |request: &ServiceRequest| {
+            service.handle_waiting(request, Peer::Other, None, &mut RequestNotes::default())
+        };
+        assert_eq!(
+            code(&answer(&note)),
+            Some(ServiceErrorCode::ApiVersionMismatch)
+        );
+        assert!(backend.opened.lock().unwrap().is_empty());
+        note.api_version = API_VERSION;
+        assert_eq!(code(&answer(&note)), Some(ServiceErrorCode::WrongQueue));
+        assert!(backend.opened.lock().unwrap().is_empty());
+        note.queue = Some("/q/queue.db".into());
+        assert_eq!(
+            code(&answer(&note)),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        assert!(backend.opened.lock().unwrap().is_empty());
+        note.token = Some("worker".into());
+        assert_eq!(code(&answer(&note)), Some(ServiceErrorCode::NotLeader));
+        assert_eq!(*backend.opened.lock().unwrap(), ["read"]);
+        assert!(
+            !backend
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|value| value.get("written").is_some())
+        );
     }
 
     /// The broker's own requests, sent as the user with no token: the

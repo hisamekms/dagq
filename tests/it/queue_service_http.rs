@@ -2,9 +2,8 @@
 //! (`infrastructure::queue_service_http`, ADR-t3990-1 decisions 1 and 2).
 
 use crate::common;
-use common::cli::ok;
 use common::service::OwnedByTest;
-use common::service::{queue, token};
+use common::service::{events, queue, token};
 use common::{Bounded, WithoutActor};
 
 use std::{
@@ -139,7 +138,14 @@ fn signed_identity(identity: &dagq::domain::oidc::OidcIdentity) -> (String, Iden
 #[test]
 fn a_jwt_over_loopback_is_exchanged_and_its_human_token_carries_a_use_case() {
     let _test = common::test();
-    let queue = queue();
+    let mut queue = queue();
+    // A DB-only symlink supplies no local lock proof. This actual service
+    // starts as a healthy standby and cannot sweep by writing yet.
+    let stored = queue.db.clone();
+    let entrance = queue.dir().join("entrance");
+    std::fs::create_dir(&entrance).unwrap();
+    queue.db = entrance.join("queue.db");
+    std::os::unix::fs::symlink(&stored, &queue.db).unwrap();
     let task = queue.run.task_id();
     use dagq::application::queue_service::MemberStore;
     use dagq::domain::{
@@ -163,6 +169,30 @@ fn a_jwt_over_loopback_is_exchanged_and_its_human_token_carries_a_use_case() {
         .unwrap();
     let (jwt, source) = signed_identity(&identity);
     let config = OidcConfig::new(&identity.issuer, "dagq").unwrap();
+    let worker = token(&queue, &Principal::worker(queue.run.id(), task));
+    let dead = common::lifecycle::dead_pid();
+    let ended = Principal::supervisor(&dagq::domain::LeaseToken::new("ended"), dead);
+    let stale = service::issue_by(
+        queue.dir(),
+        &ended,
+        &dagq::domain::queue_service::TokenIssuer {
+            parent: "user".into(),
+            process: Some(dagq::domain::queue_service::SessionProcess {
+                pid: dead,
+                start: "ended".into(),
+            }),
+            registration: None,
+        },
+        1,
+    )
+    .unwrap();
+    let stale_token = service::read_token(&stale.file).unwrap();
+    let raw = rusqlite::Connection::open(&stored).unwrap();
+    raw.execute(
+        "UPDATE write_leader SET holder='elsewhere', lease_until_ms=9223372036854775807",
+        [],
+    )
+    .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
@@ -189,15 +219,122 @@ fn a_jwt_over_loopback_is_exchanged_and_its_human_token_carries_a_use_case() {
         })),
     };
 
+    let show = json!({"api_version": API_VERSION, "use_case": "show", "params": {"id": task}});
+    let hello = json!({"api_version": API_VERSION, "use_case": "hello"});
+    let (status, waiting) = post(address, "hello", Some(&worker), &hello);
+    assert_eq!(status, 200, "{waiting}");
+    assert_eq!(waiting["result"]["leader"], false, "{waiting}");
+    let (_, refused_write) = post(
+        address,
+        "note",
+        Some(&worker),
+        &json!({
+            "api_version": API_VERSION, "use_case": "note",
+            "params": {"task": task, "text": "waiting"}
+        }),
+    );
+    assert_eq!(
+        refused_write["error"]["code"], "not_leader",
+        "{refused_write}"
+    );
+    assert!(stale.file.exists(), "the waiting service has not swept");
+    let (status, refused) = post(address, "show", Some(&stale_token), &show);
+    assert_eq!(status, 401, "{refused}");
+    assert_eq!(refused["error"]["code"], "unauthenticated", "{refused}");
+    // A schema the service cannot read must fail closed too, before a
+    // migrate can make the deferred startup sweep possible.
+    raw.pragma_update(
+        None,
+        "user_version",
+        dagq::infrastructure::sqlite::SqliteQueue::SCHEMA_VERSION - 1,
+    )
+    .unwrap();
+    let (status, refused) = post(address, "show", Some(&stale_token), &show);
+    assert_eq!(status, 422, "{refused}");
+    assert_eq!(refused["ok"], false, "{refused}");
+    raw.pragma_update(
+        None,
+        "user_version",
+        dagq::infrastructure::sqlite::SqliteQueue::SCHEMA_VERSION,
+    )
+    .unwrap();
+    raw.execute("UPDATE write_leader SET lease_until_ms=0", [])
+        .unwrap();
+    // The retry must wait for this transaction's write lock. Keep probing
+    // the Unix entrance across the retry interval: a synchronous takeover
+    // would block accept for SQLite's 5s busy timeout, beyond hello's 2s.
+    raw.execute_batch("BEGIN IMMEDIATE").unwrap();
+    {
+        let _waiting = common::within(TIMEOUT, "Unix health while takeover waits for a DB lock");
+        let began = std::time::Instant::now();
+        let held = dagq::domain::write_leader::TAKEOVER_RETRY + Duration::from_secs(1);
+        while began.elapsed() < held {
+            let health = service::hello(&service::socket_path(queue.dir()), Duration::from_secs(2))
+                .expect("DB lock wait must not block socket health");
+            assert_eq!(health["leader"], false, "{health}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    raw.execute_batch("ROLLBACK").unwrap();
+    {
+        let _waiting = common::within(TIMEOUT, "standby to acquire the released lease");
+        loop {
+            let (_, health) = post(address, "hello", Some(&worker), &hello);
+            assert_eq!(health["ok"], true, "{health}");
+            if health["result"]["leader"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    // Acquisition does not give a leftover credential its access back,
+    // even though it is still stored after the skipped startup sweep.
+    assert!(stale.file.exists());
+    let (status, refused) = post(address, "show", Some(&stale_token), &show);
+    assert_eq!(status, 401, "{refused}");
+    let (status, shown) = post(address, "show", Some(&worker), &show);
+    assert_eq!(status, 200, "{shown}");
+    assert_eq!(shown["ok"], true, "{shown}");
+    let over_socket = common::service::call(
+        &queue,
+        Some(&worker),
+        dagq::domain::queue_service::UseCase::Show,
+        json!({"id": task}),
+    );
+    assert_eq!(shown["result"], over_socket["result"], "{shown}");
+    // No header: refused, though this process is the service's own OS user.
+    let (status, refused) = post(address, "show", None, &show);
+    assert_eq!(status, 401, "{refused}");
+    assert_eq!(refused["error"]["code"], "unauthenticated", "{refused}");
+    let recorded = events(&queue.db, "queue_service_unauthenticated");
+    assert_eq!(
+        recorded.last().unwrap()["payload"]["reason"],
+        "missing_token",
+        "{recorded:?}"
+    );
+
+    // The real service has one write line: what a token's run is read on off
+    // the line, and a write on it, both pass.
+    let (status, answered) = post(address, "hello", Some(&worker), &hello);
+    assert_eq!(status, 200, "{answered}");
+    assert_eq!(answered["result"]["service"], "dagq-queue-service");
     let exchange =
         json!({"api_version": API_VERSION, "use_case": "exchange_token", "params": {"jwt": jwt}});
     let (status, exchanged) = post(address, "exchange_token", None, &exchange);
     assert_eq!(status, 200, "{exchanged}");
     let human = exchanged["result"]["token"].as_str().unwrap();
-    let show = json!({"api_version": API_VERSION, "use_case": "show", "params": {"id": task}});
-    let (status, shown) = post(address, "show", Some(human), &show);
-    assert_eq!(status, 200, "{shown}");
-    assert_eq!(shown["result"], ok(&queue.db, &["show", &task.to_string()]));
+    let (status, human_shown) = post(address, "show", Some(human), &show);
+    assert_eq!(status, 200, "{human_shown}");
+    // The CLI fixture canonicalizes a DB symlink and would start another
+    // service with local lock proof there. Compare the complete host-user
+    // response through this service's Unix entrance instead.
+    let as_user = common::service::call(
+        &queue,
+        None,
+        dagq::domain::queue_service::UseCase::Show,
+        json!({"id": task}),
+    );
+    assert_eq!(human_shown["result"], as_user["result"]);
     let note = json!({"api_version": API_VERSION, "use_case": "note",
         "params": {"task": task, "text": "over http"}});
     let (status, noted) = post(address, "note", Some(human), &note);
@@ -228,7 +365,39 @@ fn a_jwt_over_loopback_is_exchanged_and_its_human_token_carries_a_use_case() {
         }
     }
     no_plaintext(&queue.dir().join("service"), &[human, &jwt]);
-    assert_eq!(serving.stopped()["outcome"], "stopped");
+    // The 100 response proves this connection was accepted before shutdown,
+    // while its body is still pending. It must finish dispatch AND sending
+    // after acceptance stops, rather than finding a closed write line.
+    let body = note.to_string();
+    let mut pending = TcpStream::connect(address).unwrap();
+    pending.set_read_timeout(Some(TIMEOUT)).unwrap();
+    pending.set_write_timeout(Some(TIMEOUT)).unwrap();
+    write!(pending, "POST /api/use-case/note HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {human}\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+    let mut interim = Vec::new();
+    while !interim.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        pending.read_exact(&mut byte).unwrap();
+        interim.push(byte[0]);
+        assert!(interim.len() < 1024);
+    }
+    assert!(String::from_utf8(interim).unwrap().contains("100 Continue"));
+    let stopped = std::thread::spawn(move || serving.stopped());
+    let _waiting = common::within(TIMEOUT, "acceptance to stop before the HTTP body is sent");
+    while std::os::unix::net::UnixStream::connect(service::socket_path(queue.dir())).is_ok() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    pending.write_all(body.as_bytes()).unwrap();
+    let mut replied = String::new();
+    pending.read_to_string(&mut replied).unwrap();
+    let (_, answer) = replied
+        .split_once("\r\n\r\n")
+        .expect("a complete HTTP reply");
+    assert_eq!(
+        serde_json::from_str::<Value>(answer).unwrap()["ok"],
+        true,
+        "{replied}"
+    );
+    assert_eq!(stopped.join().unwrap()["outcome"], "stopped");
 }
 
 /// Exercise the CLI's actual process environment without changing the test's.

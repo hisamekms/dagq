@@ -2,15 +2,15 @@
 //! service puts its writes on ([`super::ServiceWriteLine`]): work runs one at
 //! a time in the order it came, and each caller waits for its own answer.
 //!
-//! An answer `refused` calls refused ends what waits behind it: it goes to
-//! the work in the channel at that moment, none of which runs, without waiting
-//! for each to find out, and work no one waits for any more is logged as lost. Work that comes later runs, and is refused in its
-//! own turn. Work that panics answers nothing, its caller is told, and the
-//! line goes on: it serves every later write of the process.
+//! A refused answer ends what waits behind it without running it. The same
+//! answer is retained for later work until the service closes the line and
+//! exits. Work no one waits for any more is logged as lost. Work that panics
+//! answers nothing and its caller is told; the line goes on after a panic.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::Duration;
 
@@ -26,6 +26,7 @@ pub(super) struct WriteLine<A> {
     /// Taken by [`Self::finish`]: what comes after is refused.
     sender: Mutex<Option<Sender<Queued<A>>>>,
     thread: ThreadId,
+    refused: Arc<AtomicBool>,
     /// Disconnected when the thread ends.
     ended: Mutex<Receiver<()>>,
 }
@@ -34,11 +35,13 @@ impl<A: Clone + Send + 'static> WriteLine<A> {
     pub(super) fn start(refused: fn(&A) -> bool) -> Result<Self> {
         let (sender, queued) = channel();
         let (ending, ended) = channel::<()>();
+        let refused_state = Arc::new(AtomicBool::new(false));
+        let state = refused_state.clone();
         let thread = thread::Builder::new()
             .name("queue-service-writes".to_owned())
             .spawn(move || {
                 let _ending = ending;
-                work_through(&queued, refused);
+                work_through(&queued, refused, &state);
             })
             .context("start the queue service's write line")?
             .thread()
@@ -46,6 +49,7 @@ impl<A: Clone + Send + 'static> WriteLine<A> {
         Ok(Self {
             sender: Mutex::new(Some(sender)),
             thread,
+            refused: refused_state,
             ended: Mutex::new(ended),
         })
     }
@@ -68,11 +72,14 @@ impl<A: Clone + Send + 'static> WriteLine<A> {
     /// Put `work` in the line: where its answer comes.
     pub(super) fn enqueue(&self, work: impl FnOnce() -> A + Send + 'static) -> Result<Receiver<A>> {
         let (answer, answered) = channel();
-        self.sender
+        let held = self
+            .sender
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sender = held
             .as_ref()
-            .context("the queue service is stopping: its write line takes no more")?
+            .context("the queue service is stopping: its write line takes no more")?;
+        sender
             .send(Queued {
                 work: Box::new(work),
                 answer,
@@ -82,38 +89,47 @@ impl<A: Clone + Send + 'static> WriteLine<A> {
     }
 
     /// Take no more, and wait up to `wait` for the work in the line to be
-    /// answered.
-    pub(super) fn finish(&self, wait: Duration) {
+    /// answered. True means its worker has ended; false leaves the leader
+    /// unreleased so a timed-out write cannot race a planned release.
+    pub(super) fn finish(&self, wait: Duration) -> bool {
         drop(
             self.sender
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take(),
         );
-        let _ = self
-            .ended
+        self.ended
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .recv_timeout(wait);
+            .recv_timeout(wait)
+            != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    }
+
+    pub(super) fn refused(&self) -> bool {
+        self.refused.load(Ordering::SeqCst)
     }
 }
 
-fn work_through<A: Clone>(queued: &Receiver<Queued<A>>, refused: fn(&A) -> bool) {
+fn work_through<A: Clone>(
+    queued: &Receiver<Queued<A>>,
+    refused: fn(&A) -> bool,
+    state: &AtomicBool,
+) {
+    let mut refusal: Option<A> = None;
     while let Ok(Queued { work, answer }) = queued.recv() {
-        let Ok(answered) = catch_unwind(AssertUnwindSafe(work)) else {
-            continue;
+        let answered = match &refusal {
+            Some(answered) => Ok(answered.clone()),
+            None => catch_unwind(AssertUnwindSafe(work)),
         };
-        let refuses = refused(&answered);
-        if refuses {
-            for behind in queued.try_iter() {
-                // Only a record whose request stopped waiting has no one to
-                // tell ([`super::on_line`]).
-                if behind.answer.send(answered.clone()).is_err() {
-                    warn!("work no one waited for any more was refused with what was ahead of it");
-                }
+        if let Ok(answered) = answered {
+            if refused(&answered) {
+                state.store(true, Ordering::SeqCst);
+                refusal = Some(answered.clone());
+            }
+            if answer.send(answered).is_err() && refusal.is_some() {
+                warn!("work no one waited for any more was refused with what was ahead of it");
             }
         }
-        let _ = answer.send(answered);
     }
 }
 
@@ -174,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_answers_what_waits_behind_it_and_later_work_runs() {
+    fn a_refusal_answers_what_waits_behind_it_and_all_later_work() {
         let line = line();
         let (first, go) = held(&line, REFUSED);
         let (ran, runs) = channel();
@@ -196,8 +212,15 @@ mod tests {
             assert_eq!(answered.recv_timeout(BOUND).unwrap(), REFUSED);
         }
         assert!(runs.try_recv().is_err());
-        // The line itself goes on: what comes later meets the fence itself.
-        assert_eq!(line.enqueue(|| 7).unwrap().recv_timeout(BOUND).unwrap(), 7);
+        // Later work is refused without running it, until the process exits.
+        assert_eq!(
+            line.enqueue(|| panic!("must not run"))
+                .unwrap()
+                .recv_timeout(BOUND)
+                .unwrap(),
+            REFUSED
+        );
+        assert!(line.refused());
     }
 
     /// [`WriteLine::run`], bounded: `line` waits for no one but its work.

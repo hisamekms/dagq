@@ -2983,7 +2983,9 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
         ) {
             tracing::warn!(error = %format_args!("{error:#}"), "the queue service's stop could not be recorded: {error:#}");
         }
-        match service.stop(QUEUE_SERVICE_START_TIMEOUT) {
+        match service.stop(crate::domain::write_leader::stop_grace(
+            QUEUE_SERVICE_START_TIMEOUT,
+        )) {
             Ok(Some(pid)) => Some(json!({"outcome": "stopped", "pid": pid})),
             // The last supervisor stopped it at the end of its drain.
             Ok(None) => Some(json!({"outcome": "not_running"})),

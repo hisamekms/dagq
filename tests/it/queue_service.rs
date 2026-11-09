@@ -10,7 +10,7 @@
 
 use crate::common::{self, Bounded, WithoutActor};
 use crate::runtime_support::service::{Running, idle_queue, request_stop, supervisor_token};
-use common::service::{call, call_as_role, events, queue, start, token};
+use common::service::{OwnedByTest, call, call_as_role, events, queue, start, token};
 
 use std::{
     fs,
@@ -38,9 +38,30 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
+    if let Some(dir) = std::env::var_os("DAGQ_SERVICE_DRAIN_PROBE") {
+        serve_drain_probe(Path::new(&dir));
+        return;
+    }
     let queue = queue();
+    // A crashed service left a lease far beyond this test's bounded start.
+    // Acquiring this queue's real lock must make the deadline irrelevant.
+    let raw = rusqlite::Connection::open(&queue.db).unwrap();
+    raw.execute("UPDATE write_leader SET holder='crashed', generation=11, lease_until_ms=9223372036854775807", []).unwrap();
     let started = start(&queue);
     assert_eq!(started["outcome"], "started", "{started}");
+    let leader = || {
+        raw.query_row(
+            "SELECT generation, lease_until_ms FROM write_leader",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(leader().0, 12);
+    assert_eq!(
+        service::hello(&service::socket_path(queue.dir()), TIMEOUT).unwrap()["leader"],
+        true
+    );
     assert_eq!(started["service"]["state"], "running");
     assert_eq!(started["service"]["build"], dagq::VERSION);
     // Once running, another start reuses it, and a second service of the
@@ -267,6 +288,182 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
     .map(|event| event["payload"]["by"].clone())
     .collect();
     assert_eq!(by, [json!("service start"), json!("service stop")]);
+    assert_eq!(leader(), (12, 0));
+    // A separate service process holds a real write transaction across
+    // SIGTERM for twelve seconds, beyond the callers' former ten-second
+    // grace. Its accepted request must commit and send its answer first.
+    use dagq::application::queue_service::QueueServiceControl;
+    use std::process::{Command, Stdio};
+    let mut child = common::KillOnDrop::new(
+        Command::new(std::env::current_exe().unwrap())
+            .owned_by_test()
+            .args(["--exact", "queue_service::the_service_answers_its_principals_and_refuses_the_rest_on_its_side"])
+            .env("DAGQ_SERVICE_DRAIN_PROBE", queue.dir())
+            .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap(),
+        "the service draining an accepted write",
+    );
+    wait_for_file_or_service(queue.dir(), None);
+    assert_eq!(leader().0, 13);
+    let mut held = socket_request(queue.dir(), UseCase::AskClose, json!({"id": 1}));
+    wait_for_file_or_service(queue.dir(), Some("write-began"));
+    let control = SystemQueueService::new(&queue.db, Path::new(env!("CARGO_BIN_EXE_dagq")));
+    let stopping = std::thread::spawn(move || control.stop(TIMEOUT));
+    wait_for_file_or_service(queue.dir(), Some("term-received"));
+    // This delay is the work under test: it must exceed the old grace.
+    std::thread::sleep(Duration::from_secs(12));
+    fs::write(queue.dir().join("finish-write"), "").unwrap();
+    assert_eq!(socket_response(&mut held)["ok"], true);
+    let _joining = common::within(
+        Duration::from_secs(30),
+        "the drain and service process to finish",
+    );
+    assert!(stopping.join().unwrap().unwrap().is_some());
+    assert!(child.child().wait().unwrap().success());
+    assert_eq!(
+        raw.query_row("SELECT value FROM drained_before_release", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(leader(), (13, 0));
+    drop(_joining);
+    start(&queue);
+    // Accept several requests while a DB write holds the line. Once the
+    // generation changes, every connection must get a complete not_leader
+    // answer before the actual service process exits.
+    raw.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut waiting: Vec<_> = (0..24)
+        .map(|_| {
+            socket_request(
+                queue.dir(),
+                UseCase::Note,
+                json!({"task": task, "text": "fenced", "kind": "observation"}),
+            )
+        })
+        .collect();
+    service::hello(&service::socket_path(queue.dir()), TIMEOUT).unwrap();
+    raw.execute("UPDATE write_leader SET holder='successor', generation=generation+1, lease_until_ms=9223372036854775807", []).unwrap();
+    raw.execute_batch("COMMIT").unwrap();
+    for stream in &mut waiting {
+        let refused = socket_response(stream);
+        assert_eq!(refused["error"]["code"], "not_leader", "{refused}");
+    }
+    let _waiting = common::within(TIMEOUT, "the fenced service to exit");
+    while service::probe(queue.dir()).state != dagq::domain::queue_service::ServiceState::Stopped {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(leader(), (15, i64::MAX));
+}
+
+/// A full request whose reply can be read after shutdown, across the process
+/// boundary. The socket deadlines also bound a truncated/missing answer.
+fn socket_request(dir: &Path, use_case: UseCase, params: Value) -> std::os::unix::net::UnixStream {
+    use std::io::Write;
+    let mut stream = std::os::unix::net::UnixStream::connect(service::socket_path(dir)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream.set_write_timeout(Some(TIMEOUT)).unwrap();
+    let request = ServiceRequest {
+        caller: None,
+        api_version: API_VERSION,
+        token: None,
+        env_role: None,
+        queue: None,
+        binding: None,
+        use_case,
+        params,
+    };
+    serde_json::to_writer(&mut stream, &request).unwrap();
+    stream.write_all(b"\n").unwrap();
+    stream
+}
+
+fn socket_response(stream: &mut std::os::unix::net::UnixStream) -> Value {
+    use std::io::BufRead;
+    let mut line = String::new();
+    std::io::BufReader::new(stream)
+        .read_line(&mut line)
+        .unwrap();
+    serde_json::from_str(&line)
+        .unwrap_or_else(|error| panic!("incomplete service reply: {error}: {line:?}"))
+}
+
+fn wait_for_file_or_service(dir: &Path, file: Option<&str>) {
+    let _waiting = common::within(
+        Duration::from_secs(30),
+        format!("the drain probe: {file:?}"),
+    );
+    while match file {
+        Some(file) => !dir.join(file).is_file(),
+        None => service::probe(dir).state.as_str() != "running",
+    } {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Run only in the child invocation of the representative socket test.
+/// Its first command holds a transaction until the parent lets it commit.
+fn serve_drain_probe(dir: &Path) {
+    let _test = common::test();
+    use std::sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    };
+    static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+    extern "C" fn stop(_: libc::c_int) {
+        if let Some(stop) = STOP.get() {
+            stop.store(true, Ordering::SeqCst);
+        }
+    }
+    let stopping = STOP
+        .get_or_init(|| Arc::new(AtomicBool::new(false)))
+        .clone();
+    // SAFETY: this child owns the handler; it only stores an atomic flag.
+    unsafe {
+        libc::signal(libc::SIGTERM, stop as extern "C" fn(libc::c_int) as usize);
+    }
+    let notified = stopping.clone();
+    let notification_dir = dir.to_owned();
+    let notifier = std::thread::spawn(move || {
+        let _waiting = common::within(Duration::from_secs(30), "the drain probe's SIGTERM");
+        while !notified.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fs::write(notification_dir.join("term-received"), "").unwrap();
+    });
+    let command_dir = dir.to_owned();
+    let commands: service::ServiceCommands = std::sync::Arc::new(move |queue, _, _| {
+        let tx = queue.write_tx("drained_process_write")?;
+        tx.execute_batch("CREATE TABLE drained_before_release(value INTEGER); INSERT INTO drained_before_release VALUES (1)")?;
+        fs::write(command_dir.join("write-began"), "")?;
+        wait_for_file_or_service(&command_dir, Some("finish-write"));
+        tx.commit()?;
+        Ok(Value::Null)
+    });
+    // The parent PID is captured before spawn, so even an early parent
+    // SIGKILL cannot make this child adopt init as its owner.
+    let owner = service::owner_from_env(|name| std::env::var(name).ok())
+        .expect("the drain probe's owning test process");
+    service::serve(&service::ServeOptions {
+        db: dir.join("queue.db"),
+        generators: dagq::infrastructure::clock::system(),
+        reads: dagq::compose::service_reads(),
+        writes: dagq::compose::service_writes(),
+        detail: dagq::compose::service_detail(),
+        commands,
+        doctor: dagq::compose::service_doctor(),
+        stop: stopping,
+        poll: Duration::from_millis(10),
+        owner: Some(owner),
+        start: dagq::domain::queue_service::ServiceStart::ByHand,
+        report: None,
+        executable: PathBuf::from(env!("CARGO_BIN_EXE_dagq")),
+        binding: None,
+    })
+    .unwrap();
+    let _joining = common::within(Duration::from_secs(30), "the signal notification to finish");
+    notifier.join().unwrap();
 }
 
 #[test]

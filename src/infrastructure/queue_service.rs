@@ -42,8 +42,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -70,7 +70,7 @@ use crate::application::queue_service::{
 use crate::application::session::{AgentStart, ReasonParams, SessionOp, WrapperStore};
 use crate::application::{
     EventStore, Exit, Generators, RunNotFound, RunReads, SessionOwners, SessionResourceStore,
-    SessionStepStore, Spawned, TaskReads, TelemetrySink,
+    SessionStepStore, Spawned, TaskReads, TelemetrySink, WriteLeaderStore,
 };
 use crate::domain::queue_service::wrapper_actor_id;
 use crate::domain::queue_service::{
@@ -117,7 +117,7 @@ const QUEUE_CHECK: Duration = Duration::from_secs(2);
 /// How long a service that stops waits for its write line to answer what it
 /// took: a write that takes longer is left behind, as a process's exit
 /// leaves it.
-const LINE_STOP_WAIT: Duration = Duration::from_secs(2);
+const LINE_STOP_WAIT: Duration = crate::domain::write_leader::RELEASE_DRAIN_LIMIT;
 /// How long a request off the write line waits for its record's turn
 /// ([`on_line`]): past it the request answers, its record still in the line.
 const LINE_RECORD_WAIT: Duration = Duration::from_secs(5);
@@ -999,6 +999,7 @@ pub fn lookup(queue_dir: &Path, token: &str) -> Result<Option<Principal>> {
         .map(|r| r.principal))
 }
 
+/// Read this exact credential record, including one a later issue replaced.
 fn lookup_record(queue_dir: &Path, token: &str) -> Result<Option<TokenRecord>> {
     // A hex value of the issued length only: no other text names a file.
     if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -3130,7 +3131,13 @@ fn apply_start_migrations(
             if SqliteQueue::schema(db)?.pending.is_empty() {
                 return Ok(None);
             }
-            SqliteQueue::migrate(db, Some(&alive), now).map(Some)
+            SqliteQueue::migrate_with_proof(
+                db,
+                Some(&alive),
+                now,
+                local_lock_proof(db, &queue_dir_of(db)),
+            )
+            .map(Some)
         }
     }
 }
@@ -3161,8 +3168,8 @@ pub(crate) fn owner_gone(owner: Option<u32>) -> bool {
     !found && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
-/// Run the queue's service until `stop` is set, its queue goes or its
-/// owner does (`owner`, a test's process): take
+/// Run the queue's service until `stop` is set, its queue or owner goes
+/// (`owner`, a test's process), or the write line is fenced with `not_leader`: take
 /// the queue's lock (a second service of the queue is refused), bind the
 /// configured TCP entrance and the socket, record itself, and answer each
 /// connection on its own thread. A TCP bind failure is reported as Refused
@@ -3178,7 +3185,21 @@ pub(crate) fn owner_gone(owner: Option<u32>) -> bool {
 /// step in [`ServeOptions::report`]. Any service records whether its build
 /// found migrations pending once it held the lock, which decides whether
 /// `up` keeps it ([`replacement_due`]).
-/// SIGINT・SIGTERMでも受け付けを止めて終わる。
+///
+/// Startup gives [`ServiceWriteLine`] a random holder identity and takes the
+/// write leader immediately with [`local_lock_proof`], or retries through
+/// [`TakeoverWorker`] while takeover waits. A waiting service still answers
+/// health successfully; a pending schema remains available for migration.
+///
+/// A planned stop (SIGINT/SIGTERM set `stop`) first stops socket and HTTP
+/// acceptance, waits for their in-flight requests through the final reply,
+/// joins takeover, then drains the write line. Replies and the line drain
+/// share [`LINE_STOP_WAIT`]; the takeover connection's busy timeout bounds
+/// its join. [`ServiceWriteLine::stop_within`] releases the row only
+/// after the line drained without a fence. The service lock remains held
+/// through takeover completion and release. A `not_leader` exit sends the
+/// same refusal to queued requests and waits for replies within that limit,
+/// without releasing the successor's row.
 pub fn serve(options: &ServeOptions) -> Result<Value> {
     let config = super::deployment_config::DeploymentConfig::from_process()?;
     config.store.check_usable(cfg!(feature = "postgres"))?;
@@ -3404,6 +3425,17 @@ accepts: schema {} to {}",
         options.generators.clock.clone(),
         Box::new(super::startup_reads::OwnMemory),
     ));
+    let holder = uuid::Uuid::new_v4().to_string();
+    let write_line = Arc::new(ServiceWriteLine::waiting(&options.db)?);
+    // This lock was taken above for queue_dir_of(db); no other local
+    // service can still own this SQLite file. Never infer proof from a pid.
+    let local_proof = local_lock_proof(&options.db, &queue_dir);
+    write_line.bootstrap.store(pending, Ordering::SeqCst);
+    if local_proof {
+        write_line.take(&options.db, &holder, true)?;
+    }
+    let mut takeover =
+        TakeoverWorker::start(write_line.clone(), options.db.clone(), holder, local_proof)?;
     let backend = Arc::new(SqliteServiceBackend {
         heavy_reads: Some(crate::application::heavy_reads::HeavyReads::of_service(
             options.generators.clock.clone(),
@@ -3418,27 +3450,33 @@ accepts: schema {} to {}",
         at_stop: Some(AtStop::default()),
         stands_for: None,
         doctor: Some(options.doctor.clone()),
-        write_line: Some(Arc::new(ServiceWriteLine::start(&options.db)?)),
+        write_line: Some(write_line.clone()),
     });
     let starting = backend.clone();
-    let swept = on_line(backend.write_line.as_ref(), move || {
-        // The identity the line keeps is the one of the service's start.
-        if let Some(line) = &starting.write_line {
-            let _ = line.queue();
-        }
-        match crate::application::queue_service::revoke_ended_sign_ins(&*starting) {
-            Ok(revoked) if !revoked.is_empty() => {
-                info!("revoked the tokens of supervisors whose registration ended: {revoked:?}");
+    let swept = if write_line.leading() {
+        on_line(backend.write_line.as_ref(), move || {
+            // The identity the line keeps is the one of the service's start.
+            if let Some(line) = &starting.write_line {
+                let _ = line.queue();
             }
-            Ok(_) => {}
-            Err(error) => warn!("the supervisors' tokens could not be swept: {error:#}"),
-        }
+            match crate::application::queue_service::revoke_ended_sign_ins(&*starting) {
+                Ok(revoked) if !revoked.is_empty() => {
+                    info!(
+                        "revoked the tokens of supervisors whose registration ended: {revoked:?}"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => return Err(error),
+            }
+            Ok(())
+        })
+    } else {
         Ok(())
-    });
+    };
     if let Err(error) = swept {
         warn!("the supervisors' tokens could not be swept: {error:#}");
     }
-    let http = http
+    let mut http = http
         .map(|(listener, tls)| {
             super::queue_service_http::open_tls(
                 listener,
@@ -3448,11 +3486,18 @@ accepts: schema {} to {}",
             )
         })
         .transpose()?;
+    let connections = super::queue_service_http::InFlight::default();
     let mut served = 0u64;
     let mut checked = Instant::now();
     let outcome = loop {
         if options.stop.load(Ordering::SeqCst) {
             break "stopped";
+        }
+        if write_line.line.refused() {
+            break "not_leader";
+        }
+        if let Err(error) = write_line.renew_if_idle() {
+            warn!("the write leader could not be renewed: {error:#}");
         }
         reads.tick();
         if checked.elapsed() >= QUEUE_CHECK {
@@ -3469,7 +3514,9 @@ accepts: schema {} to {}",
                 served += 1;
                 let backend = backend.clone();
                 let reads = reads.clone();
+                let connection = connections.begin();
                 thread::spawn(move || {
+                    let _connection = connection;
                     if let Err(error) = answer(stream, &backend, pid, &reads) {
                         warn!("a queue service connection failed: {error:#}");
                     }
@@ -3485,10 +3532,30 @@ accepts: schema {} to {}",
             }
         }
     };
-    drop(http);
+    let deadline = Instant::now() + LINE_STOP_WAIT;
+    drop(listener);
+    if let Some(http) = &mut http {
+        http.stop_accepting();
+    }
+    // Keep the line open until every accepted request has sent its reply.
+    // This includes a request accepted just before SIGTERM that has not
+    // enqueued yet, and every not_leader reply after a fence.
+    if let Some(http) = &http {
+        http.wait(deadline.saturating_duration_since(Instant::now()));
+    }
+    connections.wait(deadline.saturating_duration_since(Instant::now()));
+    // A pending DB lock wait must finish before release or dropping local
+    // lock proof. The connection's busy timeout bounds this join; its time
+    // shares the drain deadline rather than granting writes another window.
+    takeover.stop();
     reads.stopped(outcome);
-    if let Some(line) = &backend.write_line {
-        line.line.finish(LINE_STOP_WAIT);
+    if let Some(line) = &backend.write_line
+        && let Err(error) = line.stop_within(
+            &options.db,
+            deadline.saturating_duration_since(Instant::now()),
+        )
+    {
+        warn!("the write leader could not be released: {error:#}");
     }
     // The tokens asked to go as it stops go before the lock is let go, so a
     // supervisor that waits for the stop finds them gone.
@@ -3511,6 +3578,75 @@ accepts: schema {} to {}",
     info!(pid, outcome, "the queue service stopped: {outcome}");
     drop(lock);
     Ok(json!({"outcome": outcome, "pid": pid, "served": served}))
+}
+
+/// Acquisition can wait for the DB's write lock. Keep it off the socket's
+/// accept thread so an otherwise healthy standby still answers hello within
+/// the probe timeout. At most one attempt runs, retrying at TAKEOVER_RETRY.
+/// Shutdown joins the bounded DB wait before releasing the service lock.
+struct TakeoverWorker {
+    stop: std::sync::mpsc::Sender<()>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl TakeoverWorker {
+    fn start(
+        line: Arc<ServiceWriteLine>,
+        db: PathBuf,
+        holder: String,
+        proof: bool,
+    ) -> Result<Self> {
+        use std::sync::mpsc::{RecvTimeoutError, channel};
+        let (stop, stopping) = channel();
+        let thread = thread::Builder::new()
+            .name("queue-service-takeover".into())
+            .spawn(move || {
+                loop {
+                    if stopping.try_recv().is_ok() {
+                        break;
+                    }
+                    match line.take(&db, &holder, proof) {
+                        Ok(true) => break,
+                        Ok(false) => {}
+                        Err(error) => warn!("the write leader could not be taken: {error:#}"),
+                    }
+                    if stopping.recv_timeout(crate::domain::write_leader::TAKEOVER_RETRY)
+                        != Err(RecvTimeoutError::Timeout)
+                    {
+                        break;
+                    }
+                }
+            })
+            .context("start the queue service's takeover worker")?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn stop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            warn!("the queue service's takeover worker panicked");
+        }
+    }
+}
+
+impl Drop for TakeoverWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// The caller holds the service lock under `queue_dir`. A DB symlink into
+/// another queue is not proof for that DB; a symlink of the whole directory is.
+fn local_lock_proof(db: &Path, queue_dir: &Path) -> bool {
+    match (fs::canonicalize(db), fs::canonicalize(queue_dir.join("."))) {
+        (Ok(db), Ok(dir)) => db.parent() == Some(dir.as_path()),
+        _ => false,
+    }
 }
 
 /// Take the queue's lock in the service's `dir`, waiting up to `wait`: a
@@ -3717,18 +3853,29 @@ fn handled(
     peer: Peer,
     process: Option<u32>,
 ) -> Result<LineAnswer> {
+    let waiting = backend
+        .write_line
+        .as_ref()
+        .is_some_and(|line| !line.leading() && !line.bootstrap.load(Ordering::SeqCst));
     let handle = move |backend: &SqliteServiceBackend, request: &ServiceRequest| {
         let mut notes = RequestNotes::default();
-        let response = QueueService {
+        let service = QueueService {
             backend,
             build: crate::VERSION,
             pid,
-        }
-        .handle_noting(request, peer, process, &mut notes);
+        };
+        let response = if waiting {
+            service.handle_waiting(request, peer, process, &mut notes)
+        } else {
+            service.handle_noting(request, peer, process, &mut notes)
+        };
         LineAnswer { response, notes }
     };
     match &backend.write_line {
         Some(line) if on_write_line(request.use_case, &request.params) => {
+            if waiting {
+                return Ok(handle(backend, &request));
+            }
             let on = backend.clone();
             line.line.run(move || handle(&on, &request))
         }
@@ -3879,14 +4026,39 @@ pub struct ServiceWriteLine {
     connection: WriteConnection,
     /// [`LINE_RECORD_WAIT`], unless a test lowers it.
     record_wait: Duration,
+    identity: Mutex<Option<super::write_leader::WriteIdentity>>,
+    /// Startup retries and migration completion may race to acquire; only
+    /// one tries, while health can still read identity without waiting on DB.
+    acquiring: Mutex<()>,
+    /// Time of the last renewal inspection, not the last request's completion.
+    renewal_checked: Mutex<Instant>,
+    /// A pending schema must still answer migrate, even before the leader
+    /// table exists. Its existing schema checks refuse ordinary reads and
+    /// writes until migration; health reports no leader during bootstrap.
+    bootstrap: AtomicBool,
 }
 
 impl ServiceWriteLine {
+    #[cfg(test)]
     fn start(db: &Path) -> Result<Self> {
+        let line = Self::waiting(db)?;
+        let (row, _) = SqliteQueue::open(db)?.write_leader()?;
+        *line.identity.lock().unwrap() = Some(super::write_leader::WriteIdentity {
+            holder: row.holder,
+            generation: row.generation,
+        });
+        Ok(line)
+    }
+
+    fn waiting(db: &Path) -> Result<Self> {
         Ok(Self {
             line: WriteLine::start(refused_as_not_leader)?,
             connection: SqliteQueue::write_connection(db),
             record_wait: LINE_RECORD_WAIT,
+            identity: Mutex::new(None),
+            acquiring: Mutex::new(()),
+            renewal_checked: Mutex::new(Instant::now()),
+            bootstrap: AtomicBool::new(false),
         })
     }
 
@@ -3897,7 +4069,107 @@ impl ServiceWriteLine {
             self.line.here(),
             "a write of the queue service off its write line"
         );
-        self.connection.lend()
+        let identity = self.identity.lock().unwrap().clone();
+        match identity {
+            Some(identity) => Ok(self.connection.lend()?.with_write_identity(identity)),
+            None if self.bootstrap.load(Ordering::SeqCst) => self.connection.lend(),
+            None => Err(crate::application::NotLeader.into()),
+        }
+    }
+
+    /// A random identity belongs to this process, never a pid. The caller
+    /// supplies local proof only while holding the lock of this SQLite DB's
+    /// queue directory. Shared stores must pass false and retry at TAKEOVER_RETRY.
+    fn take(&self, db: &Path, holder: &str, local_proof: bool) -> Result<bool> {
+        use crate::domain::write_leader::{LEASE, Takeover, takeover};
+        // A migration can hold this guard for its whole transaction. A
+        // retry must remain cancellable rather than waiting on that work.
+        let _acquiring = match self.acquiring.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => bail!("the acquisition lock was poisoned"),
+        };
+        if self.identity.lock().unwrap().is_some() {
+            return Ok(true);
+        }
+        if SqliteQueue::schema(db)?.schema_version < SqliteQueue::SCHEMA_VERSION {
+            self.bootstrap.store(true, Ordering::SeqCst);
+            return Ok(false);
+        }
+        self.bootstrap.store(false, Ordering::SeqCst);
+        let queue = SqliteQueue::open(db)?;
+        let (row, now) = queue.write_leader()?;
+        if takeover(&row, now, local_proof) != Takeover::Take {
+            return Ok(false);
+        }
+        let Some(generation) = queue.take_write_leader(holder, LEASE, local_proof)? else {
+            return Ok(false);
+        };
+        *self.identity.lock().unwrap() = Some(super::write_leader::WriteIdentity {
+            holder: Some(holder.to_owned()),
+            generation,
+        });
+        self.bootstrap.store(false, Ordering::SeqCst);
+        Ok(true)
+    }
+
+    fn leading(&self) -> bool {
+        self.identity.lock().unwrap().is_some() && !self.line.refused()
+    }
+
+    /// Release on a separate connection only after the line ended; no
+    /// outstanding loan or timed-out write may race a release.
+    #[cfg(test)]
+    fn stop(&self, db: &Path) -> Result<()> {
+        self.stop_within(db, LINE_STOP_WAIT)
+    }
+
+    fn stop_within(&self, db: &Path, limit: Duration) -> Result<()> {
+        let drained = self.line.finish(limit);
+        if crate::domain::write_leader::release_after_stop(drained, self.line.refused())
+            && let Some(identity) = self.identity.lock().unwrap().take()
+            && let Some(holder) = identity.holder
+        {
+            SqliteQueue::open(db)?.release_write_leader(&holder, identity.generation)?;
+        }
+        Ok(())
+    }
+
+    /// Periodic inspections follow accepted work on the line, including
+    /// refusals that write nothing. Only an old DB lease needs a renewal
+    /// transaction; a recent fenced write makes it unnecessary. A refusal
+    /// of the renewal itself ends service.
+    fn renew_if_idle(self: &Arc<Self>) -> Result<()> {
+        let elapsed = self.renewal_checked.lock().unwrap().elapsed();
+        self.renew_if_idle_after(elapsed)
+    }
+
+    fn renew_if_idle_after(self: &Arc<Self>, elapsed: Duration) -> Result<()> {
+        if self.leading() && crate::domain::write_leader::renewal_due(elapsed) {
+            *self.renewal_checked.lock().unwrap() = Instant::now();
+            let on = self.clone();
+            self.line.enqueue(move || LineAnswer {
+                response: crate::application::queue_service::respond((|| {
+                    let queue = on.queue()?;
+                    let (row, now) = queue.write_leader()?;
+                    let identity = on
+                        .identity
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or(crate::application::NotLeader)?;
+                    if row.holder != identity.holder || row.generation != identity.generation {
+                        return Err(crate::application::NotLeader.into());
+                    }
+                    if crate::domain::write_leader::lease_renewal_due(row.lease_until_ms, now) {
+                        queue.write_tx("renew_service_leader")?.commit()?;
+                    }
+                    Ok(Value::Null)
+                })()),
+                notes: RequestNotes::default(),
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -3924,6 +4196,9 @@ fn on_line(
     let Some(line) = line.filter(|line| !line.line.here()) else {
         return write();
     };
+    if !line.leading() && !line.bootstrap.load(Ordering::SeqCst) {
+        return Err(crate::application::NotLeader.into());
+    }
     let answered = line.line.enqueue(move || {
         let wrote = write();
         if let Err(error) = &wrote {
@@ -4057,6 +4332,10 @@ impl SqliteServiceBackend {
 }
 
 impl ServiceBackend for SqliteServiceBackend {
+    fn is_write_leader(&self) -> bool {
+        self.write_line.as_ref().is_none_or(|line| line.leading())
+    }
+
     fn heavy_reads(&self) -> Option<&crate::application::heavy_reads::HeavyReads> {
         self.heavy_reads.as_ref()
     }
@@ -4077,7 +4356,28 @@ impl ServiceBackend for SqliteServiceBackend {
                 return Ok(None);
             }
         }
-        Ok(Some(record.principal))
+        let held = HeldToken {
+            principal: record.principal,
+            issued_by: record.issued_by,
+            issued_at: record.issued_at,
+        };
+        // Startup can wait for a lease or migration before its sweep can
+        // write. Never let a leftover sign-in authenticate in that window,
+        // or after a later acquisition. A living process needs no DB read.
+        if crate::application::queue_service::supervisor_ended(self, &held, |_| false) == Some(true)
+        {
+            // Failure to read an old schema refuses authentication too;
+            // neither a migration nor leadership is needed to fail closed.
+            let queue = SqliteQueue::open_read_only(&self.db)?;
+            let registrations = crate::application::SupervisorReads::supervisors(&queue)?;
+            if crate::application::queue_service::supervisor_ended(self, &held, |token| {
+                registrations.iter().any(|row| row.token == *token)
+            }) == Some(true)
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(held.principal))
     }
 
     fn issue_human(&self, principal: &Principal, expires: i64) -> Result<(String, String)> {
@@ -4116,8 +4416,41 @@ impl ServiceBackend for SqliteServiceBackend {
                 // service an `install` grants or one of another build
                 // started before the queue named it may not be.
                 queue_binary::check(&self.db, &std::env::current_exe()?, &alive)?;
-                let report =
-                    SqliteQueue::migrate(&self.db, Some(&alive), self.generators.clock.now())?;
+                let breaking = SqliteQueue::schema(&self.db)?
+                    .pending
+                    .iter()
+                    .any(|m| !m.compatible);
+                // Do not publish bootstrap or an identity from a stale schema
+                // snapshot while migration commits. Retry uses try_lock, so
+                // shutdown never waits for a long migration on this mutex.
+                let acquiring = self
+                    .write_line
+                    .as_ref()
+                    .map(|line| line.acquiring.lock().unwrap());
+                let report = SqliteQueue::migrate_with_proof(
+                    &self.db,
+                    Some(&alive),
+                    self.generators.clock.now(),
+                    self.write_line.is_some() && local_lock_proof(&self.db, &self.queue_dir),
+                )?;
+                if let Some(line) = &self.write_line {
+                    // Completion and its report do not require leadership.
+                    // Compatible migrations leave the old service's row alone;
+                    // the independent startup worker may acquire it later.
+                    line.bootstrap.store(false, Ordering::SeqCst);
+                    if breaking {
+                        // The migration released a newer generation.
+                        *line.identity.lock().unwrap() = None;
+                    }
+                }
+                drop(acquiring);
+                if breaking && let Some(line) = &self.write_line {
+                    line.take(
+                        &self.db,
+                        &uuid::Uuid::new_v4().to_string(),
+                        local_lock_proof(&self.db, &self.queue_dir),
+                    )?;
+                }
                 if !report.applied.is_empty() {
                     info!(
                         pid = std::process::id(),
@@ -4140,8 +4473,7 @@ migrate's request: schema {} to {}",
                         &serde_json::to_vec(&record)?,
                     )?;
                 }
-                let missing =
-                    write_queue(self.write_line.as_ref(), &self.db)?.missing_commit_messages()?;
+                let missing = SqliteQueue::open_read_only(&self.db)?.missing_commit_messages()?;
                 let mut value = serde_json::to_value(report)?;
                 value["commit_messages_missing"] = serde_json::to_value(missing)?;
                 Ok(value)
@@ -5760,7 +6092,7 @@ impl SystemQueueService {
         // The services signalled to make way, and when: one that does not
         // stop within the grace is killed, as `stop` kills it.
         let mut signalled: Vec<(u32, Instant)> = Vec::new();
-        let grace = timeout.min(TAKE_OVER_WAIT / 2);
+        let grace = crate::domain::write_leader::SERVICE_STOP_GRACE;
         let mut accepted: Option<Instant> = None;
         let read = || {
             fs::read(report)
@@ -5986,7 +6318,7 @@ again once it ends"
             }
         };
         signal(pid, libc::SIGTERM);
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + crate::domain::write_leader::stop_grace(timeout);
         while lock_held(&queue_dir) {
             if Instant::now() >= deadline {
                 warn!(pid, "the queue service did not stop on SIGTERM: killing it");
