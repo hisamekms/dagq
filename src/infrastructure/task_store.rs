@@ -1,5 +1,6 @@
 //! Shared task, goal, event and note SQL on the execution port. Native
 //! transaction entries and compatibility wrappers live in `sqlite`.
+use super::search_writes;
 use super::sql_dialect::{JsonType, SqlDialect};
 use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlValue, sql_params};
 use super::store_rows::{
@@ -236,6 +237,7 @@ pub(super) fn close_goal_in(
         ],
     )?;
     ensure!(changed == 1, "goal {goal_id} was closed concurrently");
+    search_writes::goal(conn, goal_id, None)?;
     let mut payload = json!({"verdict": verdict, "tasks": counts});
     if let (Some(payload), Some(extra)) = (payload.as_object_mut(), extra.as_object()) {
         payload.extend(extra.clone());
@@ -644,6 +646,7 @@ pub(super) fn claim_task_filtered(
         "task {} changed concurrently",
         task.id()
     );
+    search_writes::task(tx, task.id())?;
     tx.execute(
         "INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,worker_mode,base_commit,created_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -910,6 +913,7 @@ pub(super) fn complete_task(
         )? == 1,
         "task {task_id} is not in progress"
     );
+    search_writes::task(conn, task_id)?;
     event(
         conn,
         task_id,
@@ -943,6 +947,7 @@ pub(super) fn replace_task(
         )? == 1,
         "task {task_id} is not in progress"
     );
+    search_writes::task(conn, task_id)?;
     event(
         conn,
         task_id,
@@ -1098,6 +1103,7 @@ pub(super) fn apply_transition(
         sql_params![task.status().as_str(), now, task_id, from.as_str()],
     )?;
     ensure!(changed == 1, "task {task_id} changed concurrently");
+    search_writes::task(conn, task_id)?;
     if action == TaskAction::BypassReview {
         // A person readied the task past plan review: its follow-ups count
         // again from 1 (ADR-0037 decision 6, kept by ADR-0041 decision 16).
@@ -1222,6 +1228,7 @@ pub(super) fn change_priority(
             priority_by.map(PriorityBy::as_str)
         ],
     )?;
+    search_writes::task(conn, task_id)?;
     // The own priority and who set it as stored, for the measurement's fold.
     let mut payload = json!({"from": from, "to": task.priority(),
         "from_source": from_source, "to_source": task.priority_source(),
@@ -1329,6 +1336,7 @@ pub(super) fn set_goal_in(
                 owner_subject
             ],
         )?;
+        search_writes::task(conn, task_id)?;
         event(
             conn,
             task_id,
@@ -1507,6 +1515,7 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
                     task_id
                 ],
             )?;
+            search_writes::task(tx, task_id)?;
             event(
                 tx,
                 task_id,
@@ -1624,6 +1633,7 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
                     new.execution_class().as_str(),
                 ],
             )?;
+            search_writes::task(tx, task_id)?;
             event(
                 tx,
                 task_id,
@@ -1705,6 +1715,7 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
                 origin.request_id
             ],
         )?;
+        search_writes::goal(tx, id, None)?;
         let result = read_goal(tx, id)?;
         goal_event(tx, id, EventKind::GoalCreated, json!({"goal": result}))?;
 
@@ -1731,6 +1742,7 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
             }
             _ => old.priority_by(),
         };
+        let previous_acceptance = old.acceptance().to_owned();
         let new = goal::edit(old, edit)?;
         tx.execute(
             "UPDATE goals SET title=?1, description=?2, acceptance=?3, constraints=?4, doc=?5,
@@ -1748,6 +1760,8 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
                 priority_by.as_str()
             ],
         )?;
+        // Before the event, which records the version the edit leaves.
+        search_writes::goal(tx, goal_id, Some(&previous_acceptance))?;
         goal_event(
             tx,
             goal_id,
@@ -1790,6 +1804,7 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
                 goal_id
             ],
         )?;
+        search_writes::goal(tx, goal_id, None)?;
         goal_event(
             tx,
             goal_id,
@@ -1825,6 +1840,7 @@ impl<T: crate::infrastructure::sql_exec::SqlWrite> Store<'_, T> {
                 goal_event_id(tx, *goal_id, EventKind::Observation, payload)?
             }
         };
+        search_writes::note(tx, id)?;
         let result = tx.query_row(
             "SELECT * FROM run_events WHERE id=?1",
             sql_params![id],

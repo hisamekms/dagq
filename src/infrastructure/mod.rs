@@ -44,6 +44,7 @@ mod investigations;
 pub mod job_reads;
 pub mod kpi_config;
 pub mod kpi_push;
+pub mod landed_commits;
 pub mod language;
 pub mod launchd;
 pub mod location;

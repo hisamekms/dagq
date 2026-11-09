@@ -10,7 +10,7 @@ mod search_writes;
 pub use cases::*;
 pub use goal_owners::*;
 pub use runner_leases::*;
-pub use search_writes::postgres_search_writes;
+pub use search_writes::{postgres_search_writes, source_search_writes};
 
 use super::sql_exec::TransactionEntries;
 use super::sqlite::WriteIdentity;
@@ -90,6 +90,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("image digests", image_digests::<S, F>),
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),
+        ("source search writes", source_search_writes::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

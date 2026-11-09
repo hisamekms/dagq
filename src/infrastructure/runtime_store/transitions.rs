@@ -1310,7 +1310,19 @@ impl SqliteQueue {
             |r| r.get::<_, bool>(0),
         )
         .unwrap_or(false);
-        run_event(&tx, id, EventKind::RunIntegrated, payload)?;
+        // Its landed commit is the trigger's on SQLite, the index's write on
+        // Postgres, in this transaction either way.
+        let integrated = crate::infrastructure::store_writes::event_id(
+            &tx,
+            run.task_id(),
+            Some(id),
+            EventKind::RunIntegrated,
+            payload,
+        )?;
+        crate::infrastructure::search_writes::maintain(
+            &tx,
+            crate::infrastructure::search_writes::SearchWrite::Integrated(integrated.as_i64()),
+        )?;
         phase_event(
             &tx,
             id,

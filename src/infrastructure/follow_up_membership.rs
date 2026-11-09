@@ -571,6 +571,7 @@ pub(super) fn decide_correction(
             "UPDATE goals SET status=?2, closed_at=NULL, verdict=NULL, updated_at=?3 WHERE id=?1",
             sql_params![goal_id, reopened.status().as_str(), reopened.updated_at()],
         )?;
+        super::search_writes::goal(&tx, goal_id, None)?;
         super::task_store::goal_event(
             &tx,
             goal_id,

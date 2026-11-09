@@ -108,7 +108,7 @@ runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`
 
 `tasks`・`goals`・`task_runs`の行はdomainの集約`Task` / `Goal` / `TaskRun`と行き来する（[domain-model](domain-model.md#集約-taskとgoal)、[集約: TaskRun](domain-model.md#集約-taskrun)）。
 
-- 入口: task・goal・依存・claim・一覧は`src/infrastructure/sqlite.rs`、runと計測はportごとの`runtime_store/`。
+- 入口: task・goal・依存・claim・一覧は`src/infrastructure/task_store.rs`、runと計測はportごとの`runtime_store/`。
 - 読む: 行から`TaskRecord`などを組んで`restore`で復元し、復元が拒んだ行は変換エラーになる（既定値に読み替えない）。
 - 変える: 読んだ集約をdomainのコマンドに渡し、返った値を書く。
   `WHERE status=<読んだstatus>`や`AND supervisor_token=<token>`は並行の変更を見つける条件で、どの遷移を許すかの判断ではない。
@@ -203,7 +203,7 @@ queue DBのtransactionの入口は`infrastructure::sqlite::WriteTx`（境界の�
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒む。
-- NULLになる列を含む主キーはSQLiteではその行の一意を保たないので、その一意は書く関数がトランザクションの中で読んでから検査する（再計画の条件の対応の削除の行は`replans.rs`の`write_mappings`）。
+- NULLになる列を含む主キーはSQLiteではその行の一意を保たないので、その一意は書く関数がトランザクションの中で読んでから検査する。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。
 
 ### CHECK制約を使わない
@@ -271,8 +271,9 @@ migrationを足すtaskの規則（リリース済みは変えない）は[migrat
 計画の記録と独立したport `SearchIndex`を通す。
 SQLite adapterは`src/infrastructure/search.rs`、索引とtriggerは`migrations/0026_search.sql`、問い合わせの解釈と抜粋は`src/domain/search.rs`。
 
-- 索引はDBのtriggerが同じトランザクションで保つので、索引を知らない古いバイナリの書き込みにも追いつく。
+- 索引はSQLiteではtriggerが同じトランザクションで保ち、索引を知らない古いバイナリの書き込みにも追いつく。
   `tasks` / `goals` / `run_events`を作り直すmigrationはtriggerを作り直す。
+  Postgresはtriggerを置かず、元の行を書くadapterが同じトランザクションで保つ（ADR-t3986-1決定6）。
 
 ## 関連（related）
 

@@ -121,6 +121,7 @@ pub(super) fn insert_task(
                 origin.kind.map(|kind| kind.as_str()), origin.request_id,
                 task.execution_class().as_str()],
         )?;
+    super::search_writes::task(tx, id)?;
     // The attributes the measurement folds (`domain::ledger::attributes`)
     // as stored: its own priority and who set it, none to inherit.
     event(
@@ -305,7 +306,7 @@ pub(super) fn touch(tx: &impl SqlWrite, task_id: TaskId, now: &str) -> Result<()
         "UPDATE tasks SET updated_at=?1 WHERE id=?2",
         sql_params![now, task_id],
     )?;
-    Ok(())
+    super::search_writes::task(tx, task_id)
 }
 
 /// Insert an event of the queue itself (one of [`EventKind::is_queue`]) in

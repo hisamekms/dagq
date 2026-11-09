@@ -11,7 +11,6 @@ const ADAPTERS: &[(&str, &str)] = &[
     ("src/infrastructure/related.rs", "SqliteQueue::related_docs"),
     ("src/infrastructure/related.rs", "SqliteQueue::related_landed_commits"),
     ("src/infrastructure/related.rs", "SqliteQueue::title_matches"),
-    ("src/infrastructure/search.rs", "SqliteQueue::missing_commit_messages"),
     ("src/infrastructure/search.rs", "SqliteQueue::search"),
     ("src/infrastructure/sqlite.rs", "QueueConnection::deref"),
     ("src/infrastructure/sqlite.rs", "QueueConnection::deref_mut"),

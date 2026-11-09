@@ -1216,19 +1216,6 @@ impl SqliteQueue {
 
     /// A single-statement write still uses the named, fenced transaction
     /// entry, with exactly the statement's affected-row result.
-    pub(super) fn write_statement<P: rusqlite::Params>(
-        &self,
-        name: &'static str,
-        sql: &str,
-        params: P,
-    ) -> Result<usize> {
-        let tx = self.write_tx(name)?;
-        let changed = tx.execute(sql, params)?;
-        tx.commit()?;
-        Ok(changed)
-    }
-
-    /// [`Self::write_statement`] with the arguments of the execution port.
     pub(super) fn write_sql(
         &self,
         name: &'static str,
@@ -3209,6 +3196,10 @@ mod store_contract_tests {
     #[test]
     fn large_ids() {
         contract(|open| store_contract::large_ids(&open));
+    }
+    #[test]
+    fn source_search_writes() {
+        contract(|open| store_contract::source_search_writes(&open));
     }
     /// The store's shared spellings are the operators they replace: the
     /// comparisons compile to the same program, so a statement selects the

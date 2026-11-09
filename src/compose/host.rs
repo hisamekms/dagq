@@ -741,7 +741,7 @@ pub fn migrate_through(
         )?);
     }
     let mut report = client.call(UseCase::Migrate, json!({}))?;
-    let missing: Vec<crate::infrastructure::search::MissingCommitMessage> =
+    let missing: Vec<crate::infrastructure::landed_commits::MissingCommitMessage> =
         serde_json::from_value(report["commit_messages_missing"].take()).unwrap_or_default();
     if let Some(fields) = report.as_object_mut() {
         fields.remove("commit_messages_missing");

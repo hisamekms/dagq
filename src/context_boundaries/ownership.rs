@@ -336,8 +336,8 @@ pub(super) const TABLES: &[Table] = &[
     table("draft_bundles", Planning),
     table("draft_bundle_members", Planning),
     table("follow_up_judgements", Planning),
-    table("search_index", Planning), // the search index; migration triggers write it
-    table("landed_commits", Planning), // the search index; migration triggers write it
+    table("search_index", Planning), // the search index; SQLite's triggers or the adapter's search writes keep it
+    table("landed_commits", Planning), // the search index; SQLite's triggers or the adapter's search writes keep it
     table("task_runs", Execution),
     table("run_leases", Execution),
     table("run_processes", Execution),
@@ -391,6 +391,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/finding_planners.rs", Planning),
     store("src/infrastructure/follow_up_membership.rs", Planning),
     store("src/infrastructure/search.rs", Planning),
+    store("src/infrastructure/landed_commits.rs", Planning),
     store("src/infrastructure/postgres/search_write.rs", Planning),
     store("src/infrastructure/runtime_store/planning_records.rs", Planning),
     store("src/infrastructure/runtime_store/mod.rs", Execution),

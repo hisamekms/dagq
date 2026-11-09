@@ -406,6 +406,7 @@ pub(super) fn approve(conn: &impl SqlWrite, id: ProposalId, now: &str) -> Result
                 "UPDATE goals SET status=?1, updated_at=?2 WHERE id=?3",
                 sql_params![opened.status().as_str(), now, goal_id],
             )?;
+            super::search_writes::goal(conn, goal_id, None)?;
             super::task_store::goal_event(
                 conn,
                 goal_id,

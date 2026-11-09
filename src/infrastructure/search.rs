@@ -1,7 +1,7 @@
 //! `dagq search` on the queue's FTS5 index (ADR-0063 decisions 1–3). The
 //! index and the triggers that keep it current are migration 0026's; this
-//! module only reads it, and fills the landed commits whose message the
-//! `run_integrated` payload lacked.
+//! module only reads it. The landed commits whose message the
+//! `run_integrated` payload lacked are filled by [`super::landed_commits`].
 //!
 //! Tasks, goals, notes and landed commits share one FTS5 table: splitting
 //! it would split bm25 statistics and make rankings across kinds incomparable.
@@ -11,7 +11,7 @@
 //! landing; migrate fills missing messages from Git.
 
 use anyhow::{Result, ensure};
-use rusqlite::{Row, params, params_from_iter, types::Value};
+use rusqlite::{Row, params_from_iter, types::Value};
 use serde_json::{Map, json};
 
 use crate::application::SearchIndex;
@@ -166,62 +166,6 @@ impl SqliteQueue {
             total: usize::try_from(total)?,
         })
     }
-
-    /// Fill the message of each landed commit recorded without one, read by
-    /// `read(git_common_dir, commit)` (the Git directory the landing
-    /// recorded, if any). Returns how many were filled; a commit `read`
-    /// cannot find keeps waiting.
-    pub fn fill_commit_messages(
-        &mut self,
-        read: impl Fn(Option<&str>, &str) -> Option<String>,
-    ) -> Result<usize> {
-        let mut filled = 0;
-        for missing in self.missing_commit_messages()? {
-            if let Some(message) = read(missing.git_common_dir.as_deref(), &missing.commit) {
-                filled += self.fill_commit_message(missing.id, &message)?;
-            }
-        }
-        Ok(filled)
-    }
-
-    /// The landed commits recorded without their message (ADR-0063
-    /// decision 3), oldest first: what `migrate`'s client reads with Git
-    /// and sends back ([`Self::fill_commit_message`]).
-    pub fn missing_commit_messages(&self) -> Result<Vec<MissingCommitMessage>> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT id, commit_sha, git_common_dir FROM landed_commits
-                 WHERE message IS NULL ORDER BY id",
-            )?
-            .query_map([], |row| {
-                Ok(MissingCommitMessage {
-                    id: row.get(0)?,
-                    commit: row.get(1)?,
-                    git_common_dir: row.get(2)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// Fill the message of the landed commit `id` when it still has none:
-    /// how many were filled (0 or 1).
-    pub fn fill_commit_message(&mut self, id: i64, message: &str) -> Result<usize> {
-        self.write_statement(
-            "fill_commit_message",
-            "UPDATE landed_commits SET message = ?2 WHERE id = ?1 AND message IS NULL",
-            params![id, message],
-        )
-    }
-}
-
-/// A landed commit recorded without its message
-/// ([`SqliteQueue::missing_commit_messages`]).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct MissingCommitMessage {
-    pub id: i64,
-    pub commit: String,
-    pub git_common_dir: Option<String>,
 }
 
 fn marks(n: usize) -> String {
@@ -344,6 +288,7 @@ mod tests {
     use crate::application::TaskStore;
     use crate::domain::search::any_word_query;
     use crate::domain::{NewTask, Priority, TaskId};
+    use rusqlite::params;
 
     // Keep the complete migration's FTS declaration, including UNINDEXED
     // metadata: kind must not affect either document length or term frequency.
