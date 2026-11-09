@@ -99,7 +99,7 @@ runのファイル・台帳の行・古いeventは通さない。
 ## 表
 
 `members`: 人の登録簿。
-runnerの登録とleaseの表: `src/domain/runner_lease.rs`
+runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`image_publish.rs`
 
 表ごとの役割と列の意味は、表を作るmigrationのコメントと表を持つstoreと`src/domain/`の型のdoc commentが持つ。
 

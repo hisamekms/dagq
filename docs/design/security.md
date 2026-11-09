@@ -33,6 +33,7 @@ dagqのセキュリティの模型の全体を1か所にまとめる。決定の
 | 区分 | actor | 性質 |
 | --- | --- | --- |
 | 信頼しない実行側（`UntrustedAgent`） | runner | 持ち主の人に結びつき、報告は制御側が照合するデータ |
+| 信頼しない実行側（`UntrustedAgent`） | image-publisher（mainに縛ったCI） | digestは制御側が検査するデータ。mainを書けない |
 | 人（`Human`） | user | `DAGQ_ROLE`の無い呼び出し。host実行の互換のためにそう扱う（下の「host実行は助言的」） |
 | 信頼する制御側（`TrustedControlPlane`） | supervisor・wrapper・integrator・executor-telemetry（agentを動かす側のqueue serviceのprincipalだけ） | 決定的なRustのコード。AIを含まない |
 | 信頼しないAI actor（`UntrustedAgent`） | inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・throughput-review-job・setup-review-job・observer | Claude（とCodex）のsession / job。出力はデータ |
@@ -65,7 +66,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 resourceの持ち主や状態が分からないときも拒む（fail closed）。
 列はcapabilityの群（入口は[Authorization](authorization.md#capability)）で、○は許す、△はresourceの規則つきで許す、—は拒む。
 
-| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose` / `replan resolve`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push | telemetryの送信（`telemetry_report`） | runnerの申告・共有承認・一覧 |
+| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose` / `replan resolve`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push | telemetryの送信（`telemetry_report`） | runnerの申告・共有承認・一覧・`image.publish` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — / ○ | ○ | ○ | ○ | ○ | — | — | `runner.share`（管理者）・`runner.list`（所有者か管理者） |
 | inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — / ○ | ○ | ○（`--yes`は—） | ○ | ○ | — | — | `runner.list`（親の人の範囲） |
@@ -79,6 +80,7 @@ resourceの持ち主や状態が分からないときも拒む（fail closed）�
 | wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | △ 自分のrunかplannerだけ | — | — | — | — | — | — |
 | integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | ○ | — | — |
 | runner | — | — | — | — | — | — | — | — | — | — | — | — | — | — | `runner.declare`（自分） |
+| image-publisher | — | — | — | — | — | — | — | — | — | — | — | — | — | — | `image.publish`だけ |
 | executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ | — |
 
 権限ごとの持ち主とresourceの条件は[AuthorizationのPolicy](authorization.md#policy)、判定の入口は`StaticPolicy`が持つ。
@@ -142,7 +144,6 @@ containerに置いたworkerのturnを除き、actorは全て同じユーザー�
 - 古いバイナリへの戻し: 未知の`DAGQ_ROLE`を拒まないバイナリへ戻すと、新しいバイナリが起動したjobのroleを制限しない窓ができる（[Authorization](authorization.md#固定バイナリを戻したときの窓)）
 
 `status`と`doctor`は、AI actorごとのbackendとenforcement（containerの適用先は[Container runtime](container-runtime.md)）を出し、隔離していないことを実行時にも明示する（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）。
-ActorExecutorのspecもhostでは記録と整合の検査だけで、プロセスはこのユーザーにできることを全てできる。
 
 
 ### Codexのworkerのsandbox
@@ -162,8 +163,6 @@ ADR-t728-1決定6の強制の最初のものだが、隔離ではない: 同じ�
   依頼者の認可と承認の検査は`integrate::landing_refusal`、着地の記録と依頼者の区別は`IntegrationRequest`のdoc commentを入口にする。
 - 収束はコードの指摘が1件も無い差し戻しだけで、securityのreviewのagentの指摘はいつもコードの指摘に数えるので、それが残る差し戻しは収束せず人の`approve_landing`に上がる（ADR-t2599-1決定3・ADR-t1906-1、[Review](supervisor-lifecycle/review.md#reviewの流れ)の4a）
 - `push_main`はIntegratorだけが作れる`PushGrant`を要る
-
-host実行ではIntegratorもsupervisorや`integrate`と同じプロセスとユーザーで動き、この境界も論理的なもの。
 
 ## answerと代行の記録
 

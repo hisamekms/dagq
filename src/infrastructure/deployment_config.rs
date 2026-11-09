@@ -29,12 +29,14 @@ use std::{
 /// Enterprise includes its /api/v3 prefix. No credentials, query or fragment.
 /// GITHUB_REPOSITORY and IMAGE_CI_REPOSITORY are `owner/name`;
 /// IMAGE_CI_WORKFLOW is the workflow path, IMAGE_CI_REF its full `refs/...`.
+/// The five IMAGE_CI_ settings are one group, all or none
+/// ([`DeploymentConfig::image_publish`]).
 /// ANTHROPIC_API_KEY is optional: absent disables the team's API key.
 /// TIMEZONE is an IANA zone name, default UTC; LISTEN is a numeric socket
 /// address, default 0.0.0.0:8080. TLS_CERT and TLS_KEY are an optional pair
 /// of PEM certificate chain and private key (normally `_FILE`).
 /// Postgres requires DB, all object store destinations, OIDC, both Apps,
-/// repository and all three CI constraints. Timezone and listen have defaults.
+/// repository and all five CI settings. Timezone and listen have defaults.
 pub const NAMES: &[&str] = &[
     "DAGQ_ACTIONS_ISSUER",
     "DAGQ_ACTIONS_AUDIENCE",
@@ -59,6 +61,8 @@ pub const NAMES: &[&str] = &[
     "DAGQ_GITHUB_REPOSITORY",
     "DAGQ_GITHUB_API_BASE_URL",
     "DAGQ_ANTHROPIC_API_KEY",
+    "DAGQ_IMAGE_CI_ISSUER",
+    "DAGQ_IMAGE_CI_AUDIENCE",
     "DAGQ_IMAGE_CI_REPOSITORY",
     "DAGQ_IMAGE_CI_WORKFLOW",
     "DAGQ_IMAGE_CI_REF",
@@ -135,6 +139,26 @@ impl DeploymentConfig {
             },
         })
     }
+    /// The binding of the CI that hands over image digests, when its five
+    /// settings are set (startup refuses some without the others). The
+    /// issuer is GitHub's Actions issuer; the audience is the one the CI asks
+    /// its JWT for, another than the standby runners'; the workflow is the
+    /// repository's `.github/workflows/` file, run at IMAGE_CI_REF, a
+    /// `refs/heads/` ref naming main. The JWT's `workflow_ref` is compared
+    /// with `<repository>/<workflow>@<ref>`, which must differ from the
+    /// runners' DAGQ_ACTIONS_WORKFLOW_REF.
+    pub fn image_publish(&self) -> Option<crate::domain::image_publish::PublishBinding> {
+        let repository = self.value("DAGQ_IMAGE_CI_REPOSITORY")?;
+        let workflow = self.value("DAGQ_IMAGE_CI_WORKFLOW")?;
+        let git_ref = self.value("DAGQ_IMAGE_CI_REF")?;
+        Some(crate::domain::image_publish::PublishBinding {
+            issuer: self.value("DAGQ_IMAGE_CI_ISSUER")?.into(),
+            audience: self.value("DAGQ_IMAGE_CI_AUDIENCE")?.into(),
+            repository: repository.into(),
+            workflow_ref: format!("{repository}/{workflow}@{git_ref}"),
+            git_ref: git_ref.into(),
+        })
+    }
     pub fn read(
         env: impl Fn(&str) -> Option<OsString>,
         file: impl Fn(&std::path::Path) -> Result<Vec<u8>, ()>,
@@ -205,6 +229,8 @@ impl DeploymentConfig {
                 "DAGQ_GITHUB_MAIN_APP_ID",
                 "DAGQ_GITHUB_MAIN_APP_KEY",
                 "DAGQ_GITHUB_REPOSITORY",
+                "DAGQ_IMAGE_CI_ISSUER",
+                "DAGQ_IMAGE_CI_AUDIENCE",
                 "DAGQ_IMAGE_CI_REPOSITORY",
                 "DAGQ_IMAGE_CI_WORKFLOW",
                 "DAGQ_IMAGE_CI_REF",
@@ -212,6 +238,44 @@ impl DeploymentConfig {
                 if get(name).is_none() {
                     errors.insert(name.to_owned());
                 }
+            }
+        }
+        let images: Vec<_> = NAMES
+            .iter()
+            .copied()
+            .filter(|name| name.starts_with("DAGQ_IMAGE_CI_"))
+            .collect();
+        if images.iter().any(|name| get(name).is_some()) {
+            for name in images {
+                if get(name).is_none() {
+                    errors.insert(name.to_owned());
+                }
+            }
+            if get("DAGQ_IMAGE_CI_ISSUER")
+                != Some(crate::domain::runner_registration::ACTIONS_ISSUER)
+            {
+                errors.insert("DAGQ_IMAGE_CI_ISSUER".into());
+            }
+            if get("DAGQ_IMAGE_CI_WORKFLOW").is_some_and(|w| {
+                w.strip_prefix(".github/workflows/")
+                    .is_none_or(|file| file.is_empty() || file.contains(['/', '@']))
+            }) {
+                errors.insert("DAGQ_IMAGE_CI_WORKFLOW".into());
+            }
+            // The runners' identity never hands over a digest.
+            if get("DAGQ_ACTIONS_AUDIENCE").is_some()
+                && get("DAGQ_ACTIONS_AUDIENCE") == get("DAGQ_IMAGE_CI_AUDIENCE")
+            {
+                errors.insert("DAGQ_IMAGE_CI_AUDIENCE".into());
+            }
+            if let (Some(repo), Some(workflow), Some(git_ref), Some(runners)) = (
+                get("DAGQ_IMAGE_CI_REPOSITORY"),
+                get("DAGQ_IMAGE_CI_WORKFLOW"),
+                get("DAGQ_IMAGE_CI_REF"),
+                get("DAGQ_ACTIONS_WORKFLOW_REF"),
+            ) && format!("{repo}/{workflow}@{git_ref}") == runners
+            {
+                errors.insert("DAGQ_IMAGE_CI_WORKFLOW".into());
             }
         }
         let actions: Vec<_> = NAMES
@@ -296,7 +360,10 @@ impl DeploymentConfig {
         if get("DAGQ_GITHUB_RUNNER_APP_ID").is_some() && get("DAGQ_GITHUB_REPOSITORY").is_none() {
             errors.insert("DAGQ_GITHUB_REPOSITORY".to_owned());
         }
-        if get("DAGQ_IMAGE_CI_REF").is_some_and(|s| !s.starts_with("refs/") || s.len() == 5) {
+        if get("DAGQ_IMAGE_CI_REF").is_some_and(|s| {
+            s.strip_prefix("refs/heads/")
+                .is_none_or(|branch| branch.is_empty() || branch.contains('@'))
+        }) {
             errors.insert("DAGQ_IMAGE_CI_REF".to_owned());
         }
         for name in ["DAGQ_GITHUB_RUNNER_APP_KEY", "DAGQ_GITHUB_MAIN_APP_KEY"] {
@@ -328,6 +395,7 @@ impl DeploymentConfig {
         }
         let http = get("DAGQ_OIDC_ISSUER")
             .or_else(|| get("DAGQ_ACTIONS_ISSUER"))
+            .or_else(|| get("DAGQ_IMAGE_CI_ISSUER"))
             .map(|_| HttpConfig {
                 address: address.unwrap(),
                 tls,

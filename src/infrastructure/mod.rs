@@ -38,6 +38,7 @@ mod goal_reviews;
 mod headless_jobs;
 pub mod held_records;
 pub mod host_metrics;
+mod image_publish;
 pub mod inbox_watchers;
 mod investigations;
 pub mod job_reads;

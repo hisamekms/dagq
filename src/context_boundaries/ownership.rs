@@ -361,6 +361,8 @@ pub(super) const TABLES: &[Table] = &[
     table("runner_tokens", Execution),
     table("runner_leases", Execution),
     table("runner_lease_records", Execution),
+    table("image_publishers", Execution), // the image publisher's token hashes
+    table("image_digests", Execution), // main's digests per architecture, appended
     table("dagq_schema", Host), // the Postgres series' schema_floor and user_version
     table("binary_updates", Host),
     table("headless_jobs", Host),
@@ -416,6 +418,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/members.rs", Host),
     store("src/infrastructure/runner_registration.rs", Execution),
     store("src/infrastructure/runner_leases.rs", Execution),
+    store("src/infrastructure/image_publish.rs", Execution),
     store("src/infrastructure/write_leader.rs", Shared), // WriteLeaderStore
     store("src/infrastructure/postgres/migrate.rs", Host), // the Postgres series' version
 ];
@@ -607,6 +610,7 @@ pub(super) const PORTS: &[Port] = &[
     port("RecordingQueue", Internal),
     port("RunnerStore", Internal),
     port("RunnerLeaseStore", Internal),
+    port("ImageStore", Internal),
     port("RunFiles", Public(All)), // not classified by architecture.md; public to the contexts that use it today
     port("AgentProvider", Public(All)), // not classified by architecture.md; public to the contexts that use it today
     port("TurnReader", Internal),

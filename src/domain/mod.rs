@@ -1280,6 +1280,7 @@ pub mod heavy_turn;
 pub mod host_metrics;
 pub mod idle_process;
 pub mod ids;
+pub mod image_publish;
 pub mod inherit_by_hand;
 mod input;
 pub mod instructions;

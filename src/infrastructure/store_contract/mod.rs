@@ -87,6 +87,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("goal owner move undone", goal_owner_move_undone::<S, F>),
         ("runner credentials", runner_credentials::<S, F>),
         ("runner leases", runner_leases::<S, F>),
+        ("image digests", image_digests::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

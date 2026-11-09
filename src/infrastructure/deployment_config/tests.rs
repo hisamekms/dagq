@@ -37,6 +37,11 @@ fn postgres(app_key: &str) -> Vec<(&'static str, &str)> {
         ("DAGQ_GITHUB_MAIN_APP_ID", "2"),
         ("DAGQ_GITHUB_MAIN_APP_KEY", app_key),
         ("DAGQ_GITHUB_REPOSITORY", "owner/repo"),
+        (
+            "DAGQ_IMAGE_CI_ISSUER",
+            "https://token.actions.githubusercontent.com",
+        ),
+        ("DAGQ_IMAGE_CI_AUDIENCE", "dagq-images"),
         ("DAGQ_IMAGE_CI_REPOSITORY", "owner/images"),
         ("DAGQ_IMAGE_CI_WORKFLOW", ".github/workflows/release.yml"),
         ("DAGQ_IMAGE_CI_REF", "refs/heads/main"),
@@ -139,6 +144,8 @@ fn postgres_reports_all_missing_names_in_one_secret_free_error() {
         "DAGQ_GITHUB_MAIN_APP_ID",
         "DAGQ_GITHUB_MAIN_APP_KEY",
         "DAGQ_GITHUB_REPOSITORY",
+        "DAGQ_IMAGE_CI_ISSUER",
+        "DAGQ_IMAGE_CI_AUDIENCE",
         "DAGQ_IMAGE_CI_REPOSITORY",
         "DAGQ_IMAGE_CI_WORKFLOW",
         "DAGQ_IMAGE_CI_REF",
@@ -228,7 +235,7 @@ fn invalid_values_and_contradictions_are_collected_without_values() {
         ("DAGQ_LISTEN", "secret-not-an-address"),
     ]);
     let error = refused(&pairs);
-    assert_eq!(error.0.len(), 15);
+    assert_eq!(error.0.len(), 17);
     assert!(!error.to_string().contains("secret"));
     for (name, value) in [
         ("DAGQ_STORE", "secret"),
@@ -409,4 +416,84 @@ fn actions_configuration_is_optional_complete_and_validated_before_startup() {
         changed[index].1 = bad;
         assert!(read(&changed).is_err());
     }
+}
+
+#[test]
+fn image_ci_configuration_is_optional_complete_and_validated_before_startup() {
+    let values = [
+        (
+            "DAGQ_IMAGE_CI_ISSUER",
+            "https://token.actions.githubusercontent.com",
+        ),
+        ("DAGQ_IMAGE_CI_AUDIENCE", "dagq-images"),
+        ("DAGQ_IMAGE_CI_REPOSITORY", "org/repo"),
+        ("DAGQ_IMAGE_CI_WORKFLOW", ".github/workflows/image.yml"),
+        ("DAGQ_IMAGE_CI_REF", "refs/heads/main"),
+    ];
+    // No setting: today's start, socket only and no binding.
+    let none = read(&[]).unwrap();
+    assert!(none.image_publish().is_none() && none.http.is_none());
+    let config = read(&values).unwrap();
+    assert!(config.http.is_some());
+    let binding = config.image_publish().unwrap();
+    assert_eq!(
+        binding.workflow_ref,
+        "org/repo/.github/workflows/image.yml@refs/heads/main"
+    );
+    assert_eq!(
+        (binding.audience.as_str(), binding.git_ref.as_str()),
+        ("dagq-images", "refs/heads/main")
+    );
+    for missing in 0..values.len() {
+        let partial: Vec<_> = values
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != missing)
+            .map(|(_, pair)| *pair)
+            .collect();
+        assert!(refused(&partial).0.contains(values[missing].0));
+        assert!(read(&[values[missing]]).is_err());
+        let mut empty = values;
+        empty[missing].1 = "";
+        assert!(read(&empty).is_err());
+    }
+    for (index, bad) in [
+        (0, "https://other.example"),
+        (2, "repo"),
+        (3, "release.yml"),
+        (3, ".github/workflows/"),
+        (3, ".github/workflows/a@refs/heads/x"),
+        (4, "main"),
+        (4, "refs/tags/v1"),
+        (4, "refs/heads/"),
+    ] {
+        let mut changed = values;
+        changed[index].1 = bad;
+        assert!(refused(&changed).0.contains(values[index].0), "{bad}");
+    }
+    // Distinct from the standby runners' binding: neither the audience
+    // nor the workflow is shared.
+    let runners = [
+        (
+            "DAGQ_ACTIONS_ISSUER",
+            "https://token.actions.githubusercontent.com",
+        ),
+        ("DAGQ_ACTIONS_AUDIENCE", "dagq"),
+        ("DAGQ_ACTIONS_REPOSITORY", "org/repo"),
+        (
+            "DAGQ_ACTIONS_WORKFLOW_REF",
+            "org/repo/.github/workflows/runner.yml@refs/heads/main",
+        ),
+        ("DAGQ_ACTIONS_REF", "refs/heads/main"),
+        ("DAGQ_ACTIONS_OWNER_ISSUER", "https://idp.example"),
+        ("DAGQ_ACTIONS_OWNER_SUBJECT", "person"),
+    ];
+    let both: Vec<_> = values.iter().chain(&runners).copied().collect();
+    assert!(read(&both).is_ok());
+    let mut same_audience = both.clone();
+    same_audience[1].1 = "dagq";
+    assert!(refused(&same_audience).0.contains("DAGQ_IMAGE_CI_AUDIENCE"));
+    let mut same_workflow = both.clone();
+    same_workflow[3].1 = ".github/workflows/runner.yml";
+    assert!(refused(&same_workflow).0.contains("DAGQ_IMAGE_CI_WORKFLOW"));
 }

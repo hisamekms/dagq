@@ -3263,6 +3263,10 @@ mod store_contract_tests {
         contract(|open| store_contract::runner_leases(&open));
     }
     #[test]
+    fn image_digests() {
+        contract(|open| store_contract::image_digests(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

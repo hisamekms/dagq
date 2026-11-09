@@ -74,10 +74,11 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 
 | role | 許すcapability | resourceの規則 |
 | --- | --- | --- |
-| user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report` `runner.declare`を除く全て | なし |
+| user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report` `runner.declare` `image.publish`を除く全て | なし |
 | user（続き） | `runner.register`・`runner.revoke` | OIDCの人自身。登録は自分のrunner、失効は持ち主か管理者だけ |
 | user（続き） | `runner.share`・`runner.list` | 共有は管理者だけ。一覧はmemberが自分、管理者が全て |
 | runner | `runner.declare` | 自分の申告だけ |
+| image-publisher | `image.publish`だけ | なし |
 | inbox（続き） | `runner.list` | 親の人の一覧の範囲だけ |
 | inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`・`runner.share`・`runner.declare`は持たない | なし。人自身の操作との区別は記録が持つ |
 | planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくaskは`request.decline`と同じ所有の規則。 |
@@ -87,7 +88,7 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | worker | 読み取り・`ask.open`・`note.write`・`replan.propose`・`eval.request`・`eval.read` | evalと`replan.propose`は自分のrunの分だけ。読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない） |
 | review-job | 読み取り・`review.submit` | `review.submit`は自分のrunだけ |
 | recovery-job | 読み取り・`triage.submit` | `triage.submit`は自分のrunだけ |
-| plan-review-job・goal-review-job・throughput-review-job | 読み取りだけ | throughput-review-jobは[スループットの見直し](supervisor-lifecycle/throughput-review.md)（ADR-t996-1） |
+| plan-review-job・goal-review-job・throughput-review-job | 読み取りだけ | throughput-review-jobは[スループットの見直し](supervisor-lifecycle/throughput-review.md) |
 | setup-review-job | 読み取りだけ | なし（[setup-review](supervisor-lifecycle/setup-review.md)） |
 | observer | 読み取り・`queue.watch`・`ci.read`・`finding.record`・`finding.resolve`・`finding.ask`・`eval.read` | `finding.resolve`と`finding.ask`はfindingだけ |
 | supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss` | なし。`queue.admin`は自動更新の確認のため（下の`auto-update`）。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
@@ -206,7 +207,7 @@ wrapperの操作と制御側のコマンドの判定は`QueueService`のdoc comm
   CLIは届かなくてもDBを開かない（[hostのCLI](queue-service-host-cli.md)）。
 - 残り（3つのroleのserviceが答えないものと、ほかのrole）は`check_access`が（default deny）`requests`の全てで`StaticPolicy`に通す。
   拒んだときだけ`ServiceDenials`でserviceが呼び出し元のprincipalの`authorization_denied`に記録する。
-  通った後、supervisorが起動した`observe`・`throughput-review`はsupervisorのtokenでserviceを通り、送る経路の無いもの（宛ての環境の無いworker・job・observerなど）はCLIが拒みDBを開かない（制御側のコマンドとDBの例外を含め[CLIでの解釈](supervisor-lifecycle/roles.md#cliでの解釈)）。
+  通った後、supervisorが起動した`observe`・`throughput-review`はsupervisorのtokenでserviceを通り、送る経路の無いものはCLIが拒みDBを開かない（制御側のコマンドとDBの例外を含め[CLIでの解釈](supervisor-lifecycle/roles.md#cliでの解釈)）。
 
 ## Claudeのpermissions.deny（guardrail）
 

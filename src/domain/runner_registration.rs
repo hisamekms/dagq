@@ -105,24 +105,54 @@ pub fn github_owner<'a>(
     jwt: &super::oidc::VerifiedJwt,
 ) -> Option<&'a OidcIdentity> {
     let c = config?;
-    let claims = &jwt.claims;
-    let aud = claims.get("aud")?;
-    let audience = aud.as_str() == Some(&c.audience)
-        || aud
-            .as_array()
-            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(&c.audience)));
-    (c.issuer == "https://token.actions.githubusercontent.com"
-        && jwt.identity.issuer == c.issuer
-        && claims.get("iss").and_then(serde_json::Value::as_str) == Some(&c.issuer)
-        && audience
-        && claims.get("repository").and_then(serde_json::Value::as_str) == Some(&c.repository)
-        && claims
-            .get("workflow_ref")
-            .and_then(serde_json::Value::as_str)
-            == Some(&c.workflow_ref)
-        && claims.get("ref").and_then(serde_json::Value::as_str) == Some(&c.git_ref))
+    actions_claims_match(
+        ActionsClaims {
+            issuer: &c.issuer,
+            audience: &c.audience,
+            repository: &c.repository,
+            workflow_ref: &c.workflow_ref,
+            git_ref: &c.git_ref,
+        },
+        jwt,
+    )
     .then_some(&c.owner)
 }
+
+/// The values a deployment binds a GitHub Actions JWT to. Each binding (the
+/// standby runners', the image publisher's) passes its own values.
+#[derive(Clone, Copy)]
+pub struct ActionsClaims<'a> {
+    pub issuer: &'a str,
+    pub audience: &'a str,
+    pub repository: &'a str,
+    pub workflow_ref: &'a str,
+    pub git_ref: &'a str,
+}
+
+/// Whether a verified Actions JWT matches every value of `c`: the issuer is
+/// GitHub's public one (in the configuration, the verified identity and the
+/// `iss` claim), `audience` is in `aud`, and `repository`, `workflow_ref` and
+/// `ref` compare exactly.
+pub fn actions_claims_match(c: ActionsClaims<'_>, jwt: &super::oidc::VerifiedJwt) -> bool {
+    let claims = &jwt.claims;
+    let claim = |name: &str| claims.get(name).and_then(serde_json::Value::as_str);
+    let audience = claims.get("aud").is_some_and(|aud| {
+        aud.as_str() == Some(c.audience)
+            || aud
+                .as_array()
+                .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(c.audience)))
+    });
+    c.issuer == ACTIONS_ISSUER
+        && jwt.identity.issuer == c.issuer
+        && claim("iss") == Some(c.issuer)
+        && audience
+        && claim("repository") == Some(c.repository)
+        && claim("workflow_ref") == Some(c.workflow_ref)
+        && claim("ref") == Some(c.git_ref)
+}
+
+/// GitHub Actions' public OIDC issuer, the only one an Actions binding takes.
+pub const ACTIONS_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// Absolute expiry in Unix seconds and the consumption time. Consumed records
 /// remain stored to distinguish refresh replay from an unknown credential.

@@ -3048,3 +3048,26 @@ pub trait RunnerLeaseStore {
         run_id: &str,
     ) -> Result<Option<crate::domain::runner_lease::VerifiedRef>>;
 }
+
+/// The image publisher's tokens and the digests it hands over
+/// (`domain::image_publish`). Each write is one fenced transaction with its
+/// queue event; only token hashes cross this port.
+pub trait ImageStore {
+    /// Write the token's record and its `image_publisher_token_issued`.
+    fn issue_image_publisher(
+        &self,
+        token: &crate::domain::image_publish::PublisherToken,
+    ) -> Result<()>;
+    /// The publisher id of a live token's hash.
+    fn image_publisher(&self, hash: &str, now: i64) -> Result<Option<String>>;
+    /// Record a publication by a live token, with its `image_published`
+    /// when it adds a row; a resend writes nothing.
+    fn publish_image(
+        &self,
+        hash: &str,
+        publication: &crate::domain::image_publish::Publication,
+        now: i64,
+    ) -> Result<crate::domain::image_publish::PublishOutcome>;
+    /// Each architecture's main digest now.
+    fn current_images(&self) -> Result<Vec<crate::domain::image_publish::ImageDigest>>;
+}

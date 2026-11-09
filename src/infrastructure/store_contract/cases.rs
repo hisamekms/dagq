@@ -846,3 +846,92 @@ pub fn runner_credentials<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> R
     S::commit(tx)?;
     Ok(())
 }
+
+/// The image digests' rows, without their events (the event's insert is the
+/// SQLite adapter's until the Postgres event functions land): appended per
+/// architecture, the latest is main's digest now, a resend of a pair
+/// recorded before adds no row, and who handed it over stays on the row.
+pub fn image_digests<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
+    use crate::domain::image_publish::{Publication, PublishOutcome, Publisher, PublisherToken};
+    use crate::infrastructure::image_publish::{current, publish_rows, token_rows};
+    let publisher = Publisher {
+        repository: "org/repo".into(),
+        workflow_ref: "org/repo/.github/workflows/image.yml@refs/heads/main".into(),
+        commit: "0123456789abcdef0123456789abcdef01234567".into(),
+    };
+    {
+        let store = open()?;
+        let tx = store.write_entry("contract_image_publisher")?;
+        token_rows(
+            &tx,
+            &PublisherToken {
+                id: "contract-publisher".into(),
+                hash: "contract-image-token".into(),
+                publisher: publisher.clone(),
+                expires_at: 1_000,
+            },
+        )?;
+        S::commit(tx)?;
+    }
+    let publish = |hash: &str, arch: &str, digest: char, now: i64| -> Result<PublishOutcome> {
+        let store = open()?;
+        let tx = store.write_entry("contract_image_publish")?;
+        let publication = Publication {
+            arch: arch.into(),
+            tag: format!("tag-{digest}"),
+            digest: format!("sha256:{}", digest.to_string().repeat(64)),
+        };
+        let outcome = publish_rows(&tx, hash, &publication, now)?;
+        S::commit(tx)?;
+        Ok(outcome)
+    };
+    let rows = || -> Result<(i64, Vec<_>)> {
+        let store = open()?;
+        let tx = store.read_entry("contract_image_rows")?;
+        let count = tx.query_row("SELECT count(*) FROM image_digests", sql_params![], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        Ok((count, current(&tx)?))
+    };
+    let PublishOutcome::Recorded(first) = publish("contract-image-token", "arm64", 'a', 100)?
+    else {
+        anyhow::bail!("the first publication is recorded");
+    };
+    ensure!(first.publisher == publisher && first.published_at == 100);
+    ensure!(rows()? == (1, vec![first.clone()]));
+    ensure!(
+        publish("contract-image-token", "arm64", 'a', 101)?
+            == PublishOutcome::Resent(first.clone())
+    );
+    ensure!(rows()?.0 == 1, "a resend adds no row");
+    let PublishOutcome::Recorded(amd) = publish("contract-image-token", "amd64", 'c', 102)? else {
+        anyhow::bail!("another arch is recorded");
+    };
+    let PublishOutcome::Recorded(next) = publish("contract-image-token", "arm64", 'b', 103)? else {
+        anyhow::bail!("a new digest is recorded");
+    };
+    let (count, now) = rows()?;
+    ensure!(count == 3);
+    ensure!(now == vec![amd.clone(), next.clone()], "{now:?}");
+    // A, B, then A again: a resend of the first A, which adds no row and
+    // leaves B the arch's digest now.
+    ensure!(
+        publish("contract-image-token", "arm64", 'a', 104)?
+            == PublishOutcome::Resent(first.clone())
+    );
+    ensure!(rows()? == (3, vec![amd.clone(), next.clone()]));
+    for (hash, now) in [
+        ("contract-image-token", 1_000),
+        ("unknown-image-token", 105),
+    ] {
+        ensure!(publish(hash, "amd64", 'd', now)? == PublishOutcome::Unauthenticated);
+    }
+    ensure!(rows()?.0 == 3);
+    let store = open()?;
+    let tx = store.write_entry("contract_image_cleanup")?;
+    for table in ["image_digests", "image_publishers"] {
+        tx.execute(&format!("DELETE FROM {table}"), sql_params![])?;
+    }
+    S::commit(tx)?;
+    Ok(())
+}

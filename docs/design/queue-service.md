@@ -107,6 +107,8 @@ hostではtokenは誤りを止めるもので、security boundaryではない（
 
 ユースケースの一覧とCLIからの対応は`domain::queue_service::UseCase::of_command`、paramsと答えは`application::queue_service`の各params型を入口に読む。
 認可は[Authorization](authorization.md#queue-serviceのユースケースservice側)、hostのコマンドの範囲は[hostのCLI](queue-service-host-cli.md)を参照する。
+imageのdigestの受け取りの入口はHTTPの`application::queue_service::image_publisher_exchange`と`image_publish`。
+imageのdigestは、配置の設定で縛ったmainのCIの識別からだけ受ける。
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（capabilityは`finding.ask`）で送る。
 findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactorで通るので、eventの書き手は`observer`、eventのactorはjobのactor idで、拒否の`authorization_denied`もobserverのものとして残る。
@@ -125,7 +127,7 @@ queue全体の読み取り（ADR-t1233-5決定1〜3）。
 CLIとserviceは同じ`application::queue_reads::answer`で答える。
 paramsの解釈と受け付ける値は同moduleの`QueueRead`、注入する読み取りの境界は`infrastructure::queue_service::ServiceReads`が持つ。
 認可はCLIがそのコマンドに求めるのと同じcapabilityをprincipalに通す。
-executor-telemetryとrunner以外の全role（workerとjobを含む）がqueue全体を読める（ADR-t1233-5決定3）。
+executor-telemetry・runner・image-publisher以外の全role（workerとjobを含む）がqueue全体を読める（ADR-t1233-5決定3）。
 
 ユースケースの一覧は`domain::queue_service::UseCase`、CLIと違うparamsは`application::queue_reads`の各optionの型のdoc commentが持つ。
 

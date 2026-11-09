@@ -30,6 +30,9 @@ string_enum!(Capability {
     RunnerShare => "runner.share",
     /// Humans and their inboxes list runners within registry ownership scope.
     RunnerList => "runner.list",
+    /// The CI bound to main hands over an image's digest
+    /// (`domain::image_publish`): the image publisher's one capability.
+    ImagePublish => "image.publish",
     // Reading.
     QueueRead => "queue.read",
     QueueWatch => "queue.watch",
@@ -157,7 +160,8 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 71] = [
+    pub const ALL: [Self; 72] = [
+        Self::ImagePublish,
         Self::RunnerDeclare,
         Self::RunnerShare,
         Self::RunnerList,
@@ -835,6 +839,7 @@ pub const fn grants(role: ActorRole) -> &'static [Capability] {
         ActorRole::Wrapper => WRAPPER,
         ActorRole::Integrator => INTEGRATOR,
         ActorRole::ExecutorTelemetry => EXECUTOR_TELEMETRY,
+        ActorRole::ImagePublisher => &[C::ImagePublish],
     }
 }
 
@@ -903,7 +908,8 @@ fn wrapper_owns(actor: &ActorContext, resource: &Resource) -> bool {
 /// [`super::queue_service::telemetry_issue_refusal`] checks). No
 /// parent asks for the integrator's here: it is issued inside the
 /// supervisor's operation that takes the landing slot (`begin_landing`),
-/// under the run's lease. No principal is started by itself.
+/// under the run's lease. No principal is started by itself, and no token
+/// starts a runner or an image publisher: each comes from its own exchange.
 pub fn starts(parent: ActorRole, child: ActorRole) -> bool {
     use ActorRole as R;
     let within = || {
@@ -926,7 +932,7 @@ pub fn starts(parent: ActorRole, child: ActorRole) -> bool {
             R::User | R::Inbox => within(),
             _ => false,
         },
-        R::Runner | R::Integrator | R::User => false,
+        R::Runner | R::ImagePublisher | R::Integrator | R::User => false,
     }
 }
 
@@ -1368,15 +1374,19 @@ mod tests {
         }
     }
 
-    /// Runner and executor-telemetry principals cannot read the queue. The
-    /// latter sends only its target's steps (ADR-t1662-3 decision 9).
+    /// Runner, executor-telemetry and image publisher principals cannot read
+    /// the queue. Executor-telemetry sends only its target's steps
+    /// (ADR-t1662-3 decision 9).
     #[test]
     fn every_role_reads_and_is_refused_what_it_was_not_granted() {
         for role_ in ActorRole::ALL {
             let actor = role(role_);
             assert_eq!(
                 allowed(&actor, C::QueueRead, &Resource::Queue),
-                !matches!(role_, ActorRole::Runner | ActorRole::ExecutorTelemetry),
+                !matches!(
+                    role_,
+                    ActorRole::Runner | ActorRole::ExecutorTelemetry | ActorRole::ImagePublisher
+                ),
                 "{role_:?}"
             );
             for capability in Capability::ALL {

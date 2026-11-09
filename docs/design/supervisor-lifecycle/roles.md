@@ -82,6 +82,7 @@ statusとdoctorはhost実行がsandboxでないことを実行時にも示し、
 認証・認可とqueueを開く境界の分岐は`src/main.rs`の`execute`が入口になる。
 環境のactorを読まずtokenのprincipalで動く経路も、そのdoc commentが案内する。
 環境からのactorの読み方は`src/domain/actor.rs`の`ActorContext::from_env`で、読めない環境ではfail closedにする。
+queue serviceのprincipalだけのrole（runner・executor-telemetry・image-publisher）は`DAGQ_ROLE`の値として受けない。
 roleが無い環境を人として扱うのはhost実行の互換の約束であり、sandboxではない（ADR-t728-1決定6）。
 宛ての無いworker・job・observerはqueueを開かずに断る（[Queue service](../queue-service.md#クライアントモード)）。
 headlessのjobはCLIの読み取りだけを許し、書き込みを与えない（[Authorization](../authorization.md)）。

@@ -234,6 +234,8 @@ event_kinds! {
     HoldResultKept => "hold_result_kept",
     HoldResultWithheld => "hold_result_withheld",
     IdleInferred => "idle_inferred",
+    ImagePublished => "image_published",
+    ImagePublisherTokenIssued => "image_publisher_token_issued",
     InboxGuardrailReached => "inbox_guardrail_reached",
     InboxNudgeFailed => "inbox_nudge_failed",
     InboxNudged => "inbox_nudged",
@@ -575,6 +577,10 @@ impl EventKind {
                 // a run's are on the run.
                 | TelemetryTokenIssued
                 | TelemetryTokenRevoked
+                // The image publisher's token issued, and the digest it
+                // handed over recorded (ADR-t3987-1 decision 4), by `arch`.
+                | ImagePublisherTokenIssued
+                | ImagePublished
                 // The throughput review (ADR-t996-1) is about the queue.
                 | ThroughputReviewStarted
                 | ThroughputReviewFinished
@@ -1759,6 +1765,11 @@ mod tests {
             (EventKind::HoldResultKept, "hold_result_kept"),
             (EventKind::HoldResultWithheld, "hold_result_withheld"),
             (EventKind::IdleInferred, "idle_inferred"),
+            (EventKind::ImagePublished, "image_published"),
+            (
+                EventKind::ImagePublisherTokenIssued,
+                "image_publisher_token_issued",
+            ),
             (EventKind::InboxNudgeFailed, "inbox_nudge_failed"),
             (EventKind::InboxNudged, "inbox_nudged"),
             (EventKind::InboxOpened, "inbox_opened"),

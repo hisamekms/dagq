@@ -688,6 +688,8 @@ impl QueueRead {
             | UseCase::RunnerShare
             | UseCase::RunnerList
             | UseCase::RunnerGithub
+            | UseCase::ImagePublisherExchange
+            | UseCase::ImagePublish
             | UseCase::RunnerCode | UseCase::RunnerEnroll | UseCase::RunnerRefresh | UseCase::RunnerRevoke
             | UseCase::ExchangeToken
             | UseCase::RevokeToken

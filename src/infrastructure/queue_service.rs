@@ -3217,8 +3217,17 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
             Ok((binding, verifier))
         })
         .transpose()?;
+    let images = config
+        .image_publish()
+        .map(|binding| -> Result<_> {
+            let verifier =
+                deployment_verifier(Some(&binding.issuer), Some(&binding.audience), true)?
+                    .expect("complete image CI settings");
+            Ok((binding, verifier))
+        })
+        .transpose()?;
     let http = config.http.map(HttpStart::Deployment);
-    serve_on(options, http, oidc, actions)
+    serve_on(options, http, oidc, Exchanges { actions, images })
 }
 
 /// Whether the production entry [`serve`] opens the human exchange to a
@@ -3262,7 +3271,12 @@ fn deployment_verifier(
 /// listener entry is for callers that already decided their configuration;
 /// the production entry [`serve`] reads the deployment settings.
 pub fn serve_with_http(options: &ServeOptions, http: TcpListener) -> Result<Value> {
-    serve_on(options, Some(HttpStart::Bound(http)), None, None)
+    serve_on(
+        options,
+        Some(HttpStart::Bound(http)),
+        None,
+        Exchanges::default(),
+    )
 }
 
 enum HttpStart {
@@ -3281,7 +3295,12 @@ pub fn serve_with_http_oidc<S: crate::application::oidc::OidcDocumentSource + 's
     source: S,
 ) -> Result<Value> {
     let verifier = Arc::new(crate::application::oidc::OidcVerifier::new(config, source));
-    serve_on(options, Some(HttpStart::Bound(http)), Some(verifier), None)
+    serve_on(
+        options,
+        Some(HttpStart::Bound(http)),
+        Some(verifier),
+        Exchanges::default(),
+    )
 }
 
 trait HumanVerifier: Send + Sync {
@@ -3308,11 +3327,24 @@ type ActionsExchange = (
     Arc<dyn HumanVerifier>,
 );
 
+type ImageExchange = (
+    crate::domain::image_publish::PublishBinding,
+    Arc<dyn HumanVerifier>,
+);
+
+/// The GitHub Actions exchanges a deployment binds, each with its own
+/// verifier: the standby runners' and the image publisher's.
+#[derive(Clone, Default)]
+struct Exchanges {
+    actions: Option<ActionsExchange>,
+    images: Option<ImageExchange>,
+}
+
 fn serve_on(
     options: &ServeOptions,
     http: Option<HttpStart>,
     oidc: Option<Arc<dyn HumanVerifier>>,
-    actions: Option<ActionsExchange>,
+    exchanges: Exchanges,
 ) -> Result<Value> {
     let queue_dir = queue_dir_of(&options.db);
     ensure!(options.db.is_file(), "no queue at {}", options.db.display());
@@ -3500,7 +3532,7 @@ accepts: schema {} to {}",
                     pid,
                     reads.clone(),
                     oidc.clone(),
-                    actions.clone(),
+                    exchanges.clone(),
                 ),
                 options.poll,
                 tls,
@@ -3777,9 +3809,43 @@ fn http_answerer(
     pid: u32,
     reads: Arc<super::startup_reads::StartupReads>,
     oidc: Option<Arc<dyn HumanVerifier>>,
-    actions: Option<ActionsExchange>,
+    Exchanges { actions, images }: Exchanges,
 ) -> HttpAnswerer {
     Arc::new(move |request| {
+        if request.use_case == UseCase::ImagePublisherExchange {
+            let verified = exchange_identity(
+                images.as_ref().map(|(_, verifier)| &**verifier),
+                &request.params,
+                backend.now_ms() / 1000,
+            );
+            let binding = images.as_ref().map(|(binding, _)| binding.clone());
+            let on = backend.clone();
+            let exchange = move || LineAnswer {
+                response: crate::application::queue_service::image_publisher_exchange(
+                    &*on,
+                    binding.as_ref(),
+                    verified.as_ref(),
+                ),
+                notes: RequestNotes::default(),
+            };
+            let answer = match &backend.write_line {
+                Some(line) => line.line.run(exchange)?,
+                None => exchange(),
+            };
+            return Ok(answered_of(&answer.response, Some(request.use_case))?.0);
+        }
+        if request.use_case == UseCase::ImagePublish {
+            let on = backend.clone();
+            let publish = move || LineAnswer {
+                response: crate::application::queue_service::image_publish(&*on, &request),
+                notes: RequestNotes::default(),
+            };
+            let answer = match &backend.write_line {
+                Some(line) => line.line.run(publish)?,
+                None => publish(),
+            };
+            return Ok(answered_of(&answer.response, Some(UseCase::ImagePublish))?.0);
+        }
         if request.use_case == UseCase::RunnerGithub {
             let verified = exchange_identity(
                 actions.as_ref().map(|(_, verifier)| &**verifier),
@@ -4425,6 +4491,31 @@ impl ServiceBackend for SqliteServiceBackend {
         queue.change_runner(action, now)
     }
 
+    fn image_publisher_issue(
+        &self,
+        token: &crate::domain::image_publish::PublisherToken,
+    ) -> Result<()> {
+        use crate::application::ImageStore;
+        write_queue(self.write_line.as_ref(), &self.db)?
+            .with_generators(self.generators.clone())
+            .with_actor(Principal::image_publisher(&token.id).actor())
+            .issue_image_publisher(token)
+    }
+
+    fn image_publish(
+        &self,
+        actor: &ActorContext,
+        hash: &str,
+        publication: &crate::domain::image_publish::Publication,
+        now: i64,
+    ) -> Result<crate::domain::image_publish::PublishOutcome> {
+        use crate::application::ImageStore;
+        write_queue(self.write_line.as_ref(), &self.db)?
+            .with_generators(self.generators.clone())
+            .with_actor(actor.clone())
+            .publish_image(hash, publication, now)
+    }
+
     fn runner_listing_owner(
         &self,
         token: &str,
@@ -4452,7 +4543,8 @@ impl ServiceBackend for SqliteServiceBackend {
     fn principal(&self, token: &str) -> Result<Option<Principal>> {
         let Some(mut record) = lookup_record(&self.queue_dir, token)? else {
             // Host tokens retain their file-only lookup, including on an older
-            // schema. No runner credential exists before its schema is applied.
+            // schema. No runner or image publisher credential exists before
+            // its schema is applied.
             use crate::application::RunnerStore;
             if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Ok(None);
@@ -4461,9 +4553,14 @@ impl ServiceBackend for SqliteServiceBackend {
             if queue.schema_version()? < SqliteQueue::SCHEMA_VERSION {
                 return Ok(None);
             }
-            return Ok(queue
-                .runner_token(&sha256_hex(token.as_bytes()), self.now_ms() / 1000)?
-                .map(|runner| Principal::runner(&runner.id)));
+            let (hash, now) = (sha256_hex(token.as_bytes()), self.now_ms() / 1000);
+            if let Some(runner) = queue.runner_token(&hash, now)? {
+                return Ok(Some(Principal::runner(&runner.id)));
+            }
+            return Ok(
+                crate::application::ImageStore::image_publisher(&queue, &hash, now)?
+                    .map(|id| Principal::image_publisher(&id)),
+            );
         };
         if let Some(identity) = &record.principal.human {
             use crate::application::queue_service::MemberStore;

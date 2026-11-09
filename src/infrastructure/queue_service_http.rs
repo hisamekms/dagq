@@ -819,6 +819,24 @@ mod tests {
     }
 
     #[test]
+    fn the_image_publishers_jwt_and_token_reach_the_service_and_not_the_log() {
+        let body = json!({"api_version": API_VERSION, "use_case": "image_publisher_exchange", "params": {"jwt": "ci.jwt.value"}}).to_string();
+        let result = carried(&post("/api/use-case/image_publisher_exchange", "", &body));
+        assert_eq!(result.given[0].use_case, UseCase::ImagePublisherExchange);
+        assert_eq!(result.given[0].params["jwt"], "ci.jwt.value");
+        assert!(!result.line.contains("ci.jwt.value"));
+        let body = json!({"api_version": API_VERSION, "use_case": "image_publish", "token": "forged", "params": {"arch": "arm64"}}).to_string();
+        let result = carried(&post(
+            "/api/use-case/image_publish",
+            "Authorization: Bearer publisher-secret\r\n",
+            &body,
+        ));
+        assert_eq!(result.given[0].use_case, UseCase::ImagePublish);
+        assert_eq!(result.given[0].token.as_deref(), Some("publisher-secret"));
+        assert!(!result.line.contains("publisher-secret"));
+    }
+
+    #[test]
     fn runner_credentials_travel_in_the_body_without_bearer_or_log_values() {
         for (name, field) in [("runner_enroll", "code"), ("runner_refresh", "refresh")] {
             let body = json!({"api_version": API_VERSION, "use_case": name, "params": {field: "one-time-secret"}}).to_string();

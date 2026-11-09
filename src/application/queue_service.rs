@@ -223,6 +223,27 @@ pub trait ServiceBackend: Send + Sync {
         anyhow::bail!("runner credentials unavailable")
     }
 
+    /// Write an image publisher's token record and its event in one
+    /// transaction ([`crate::application::ImageStore`]).
+    fn image_publisher_issue(
+        &self,
+        _token: &crate::domain::image_publish::PublisherToken,
+    ) -> Result<()> {
+        anyhow::bail!("image publishing unavailable")
+    }
+
+    /// Record a publication as `actor` by the token of `hash`, read again in
+    /// the write's transaction.
+    fn image_publish(
+        &self,
+        _actor: &ActorContext,
+        _hash: &str,
+        _publication: &crate::domain::image_publish::Publication,
+        _now: i64,
+    ) -> Result<crate::domain::image_publish::PublishOutcome> {
+        anyhow::bail!("image publishing unavailable")
+    }
+
     /// Resolve a human directly, or the authenticated inbox's recorded human
     /// parent. No identity is accepted from request parameters.
     fn runner_listing_owner(
@@ -666,6 +687,12 @@ impl QueueService<'_> {
         ) {
             return runner_refusal();
         }
+        if matches!(
+            request.use_case,
+            UseCase::ImagePublisherExchange | UseCase::ImagePublish
+        ) {
+            return image_refusal(); // Only the HTTP composition answers them.
+        }
         let hello = || {
             ServiceResponse::success(json!({
                 "service": "dagq-queue-service",
@@ -690,6 +717,32 @@ impl QueueService<'_> {
             Ok(authenticated) => authenticated,
             Err(response) => return response,
         };
+        if principal.role == ActorRole::ImagePublisher {
+            // Its one use case is answered apart ([`image_publish`]): every
+            // use case here, `hello` included, is refused, and recorded, as
+            // a read of the queue, which it does not hold.
+            notes.role = Some(principal.role);
+            drop(checked);
+            let actor = principal.actor();
+            let refused = Gate {
+                actor: &actor,
+                authorizer: &StaticPolicy,
+            }
+            .authorize(
+                &OwnDenials {
+                    backend: self.backend,
+                    actor: &actor,
+                },
+                Capability::QueueRead,
+                &Resource::Queue,
+            )
+            .and_then(|()| {
+                Err(anyhow!(
+                    "an image publisher's token answers image_publish alone"
+                ))
+            });
+            return respond(refused);
+        }
         if request.use_case == UseCase::Hello {
             return hello();
         }
@@ -874,12 +927,16 @@ impl QueueService<'_> {
                 ));
             }
         };
-        if (principal.human.is_some() || principal.role == ActorRole::Runner)
+        if (principal.human.is_some()
+            || matches!(
+                principal.role,
+                ActorRole::Runner | ActorRole::ImagePublisher
+            ))
             && peer != Peer::Absent
         {
             return Err(refuse(
                 "unknown_token",
-                "human and runner tokens require the HTTP entrance",
+                "human, runner and image publisher tokens require the HTTP entrance",
             ));
         }
         if let Some(session) = &principal.session
@@ -2097,7 +2154,11 @@ fn run(
         actor,
         authorizer: &StaticPolicy,
     };
-    if actor.role() == ActorRole::ExecutorTelemetry && use_case != UseCase::TelemetryReport {
+    if actor.role() == ActorRole::ExecutorTelemetry && use_case != UseCase::TelemetryReport
+        || actor.role() == ActorRole::ImagePublisher
+    {
+        // The image publisher's one use case is answered apart
+        // ([`image_publish`]), so it reaches none here.
         gate.authorize(&store, Capability::QueueRead, &Resource::Queue)?;
     }
     if use_case == UseCase::TelemetryReport
@@ -2138,6 +2199,8 @@ fn run(
         | UseCase::RunnerShare
         | UseCase::RunnerList
         | UseCase::RunnerGithub
+        | UseCase::ImagePublisherExchange
+        | UseCase::ImagePublish
         | UseCase::RunnerCode
         | UseCase::RunnerEnroll
         | UseCase::RunnerRefresh
@@ -3448,6 +3511,124 @@ pub fn runner_github_verified(
     }
 }
 
+/// One refusal for an image publisher's exchange or token that does not
+/// authenticate: no binding, a JWT that does not match it, an unknown or
+/// expired token, or the use case on the socket.
+pub fn image_refusal() -> ServiceResponse {
+    ServiceResponse::failure(
+        ServiceErrorCode::Unauthenticated,
+        "image publisher authentication failed",
+    )
+}
+
+/// The exchange of the CI's JWT, verified (signature, issuer, audience)
+/// before the write line, for an image publisher's token: only when every
+/// claim the deployment binds matches ([`crate::domain::image_publish::publisher`]).
+/// The token is good for `image_publish` alone for
+/// [`crate::domain::image_publish::TOKEN_SECONDS`], with no refresh
+/// credential; its hash and its `image_publisher_token_issued` event are
+/// written in one transaction, and with no event no token is returned.
+pub fn image_publisher_exchange(
+    backend: &dyn ServiceBackend,
+    binding: Option<&crate::domain::image_publish::PublishBinding>,
+    jwt: Option<&crate::domain::oidc::VerifiedJwt>,
+) -> ServiceResponse {
+    use crate::domain::image_publish::{PublisherToken, TOKEN_SECONDS, publisher};
+    let run = || -> Result<ServiceResponse> {
+        let Some(publisher) = jwt.and_then(|jwt| publisher(binding, jwt)) else {
+            return Ok(image_refusal());
+        };
+        let Some(expires_at) = (backend.now_ms() / 1000).checked_add(TOKEN_SECONDS) else {
+            return Ok(image_refusal());
+        };
+        let (token, hash) = backend.runner_secret()?;
+        let (_, id) = backend.runner_secret()?;
+        backend.image_publisher_issue(&PublisherToken {
+            id,
+            hash,
+            publisher,
+            expires_at,
+        })?;
+        Ok(ServiceResponse::success(
+            json!({"token": token, "expires_at": expires_at}),
+        ))
+    };
+    match run() {
+        Ok(answer) => answer,
+        Err(error) if error.is::<super::NotLeader>() => respond(Err(super::NotLeader.into())),
+        Err(_) => {
+            ServiceResponse::failure(ServiceErrorCode::Failed, "image publisher exchange failed")
+        }
+    }
+}
+
+/// An image publisher hands over one architecture's digest
+/// ([`crate::domain::image_publish::publication`]) with its bearer token,
+/// on the write line. Every other principal (a runner's too) is refused
+/// `authorization_denied` through [`Gate`], which records the refusal as
+/// that actor (a record that cannot be written keeps the refusal); a
+/// request with no token or one the control side did not issue is
+/// `unauthenticated`, recorded as `queue_service_unauthenticated`; a
+/// request that does not read is `bad_request` and records nothing. The
+/// answer is the architecture's row, the same for a resend.
+pub fn image_publish(backend: &dyn ServiceBackend, request: &ServiceRequest) -> ServiceResponse {
+    use crate::domain::image_publish::{PublishOutcome, publication};
+    let unauthenticated = |reason: &str| {
+        let payload = json!({"use_case": UseCase::ImagePublish, "reason": reason});
+        if let Err(error) = backend.record_unauthenticated(payload) {
+            warn!("could not record the unauthenticated request ({reason}): {error:#}");
+        }
+        image_refusal()
+    };
+    let run = || -> Result<ServiceResponse> {
+        let Some(token) = request.token.as_deref().filter(|t| !t.is_empty()) else {
+            return Ok(unauthenticated("missing_token"));
+        };
+        let Some(principal) = backend.principal(token)?.filter(|p| p.check().is_ok()) else {
+            return Ok(unauthenticated("unknown_token"));
+        };
+        let actor = principal.actor();
+        if let Err(refused) = (Gate {
+            actor: &actor,
+            authorizer: &StaticPolicy,
+        })
+        .authorize(
+            &OwnDenials {
+                backend,
+                actor: &actor,
+            },
+            Capability::ImagePublish,
+            &Resource::Queue,
+        ) {
+            return Ok(respond(Err(refused)));
+        }
+        let publication = match publication(&request.params) {
+            Ok(publication) => publication,
+            Err(refusal) => {
+                return Ok(ServiceResponse::failure(
+                    ServiceErrorCode::BadRequest,
+                    refusal.message(),
+                ));
+            }
+        };
+        let hash = backend.runner_hash(token)?;
+        let now = backend.now_ms() / 1000;
+        Ok(
+            match backend.image_publish(&actor, &hash, &publication, now)? {
+                PublishOutcome::Recorded(row) | PublishOutcome::Resent(row) => {
+                    ServiceResponse::success(serde_json::to_value(row)?)
+                }
+                PublishOutcome::Unauthenticated => image_refusal(),
+            },
+        )
+    };
+    match run() {
+        Ok(answer) => answer,
+        Err(error) if error.is::<super::NotLeader>() => respond(Err(super::NotLeader.into())),
+        Err(_) => ServiceResponse::failure(ServiceErrorCode::Failed, "image publishing failed"),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::cell::RefCell;
@@ -3631,6 +3812,9 @@ pub(crate) mod tests {
 
     impl DenialLog for Queue {
         fn record_denial(&self, payload: Value) -> Result<()> {
+            if self.human.lock().unwrap().fail_denials {
+                anyhow::bail!("the refusal could not be recorded");
+            }
             self.denials.borrow_mut().push(payload.clone());
             self.log.lock().unwrap().push(payload);
             Ok(())
@@ -3942,6 +4126,46 @@ pub(crate) mod tests {
     }
 
     impl ServiceBackend for Backend {
+        fn image_publisher_issue(
+            &self,
+            token: &crate::domain::image_publish::PublisherToken,
+        ) -> Result<()> {
+            let mut memory = self.human.lock().unwrap();
+            if memory.fail_commit {
+                anyhow::bail!("the event could not be written");
+            }
+            memory.images.insert(token.hash.clone(), token.clone());
+            Ok(())
+        }
+        fn image_publish(
+            &self,
+            actor: &ActorContext,
+            hash: &str,
+            publication: &crate::domain::image_publish::Publication,
+            now: i64,
+        ) -> Result<crate::domain::image_publish::PublishOutcome> {
+            use crate::domain::image_publish::{ImageDigest, PublishOutcome, resent};
+            self.log
+                .lock()
+                .unwrap()
+                .push(json!({"publish": actor.actor_id(), "hash": hash}));
+            let mut memory = self.human.lock().unwrap();
+            let Some(token) = memory.images.get(hash).cloned() else {
+                return Ok(PublishOutcome::Unauthenticated);
+            };
+            if let Some(row) = resent(&memory.image_rows, publication) {
+                return Ok(PublishOutcome::Resent(row.clone()));
+            }
+            let row = ImageDigest {
+                arch: publication.arch.clone(),
+                tag: publication.tag.clone(),
+                digest: publication.digest.clone(),
+                publisher: token.publisher,
+                published_at: now,
+            };
+            memory.image_rows.push(row.clone());
+            Ok(PublishOutcome::Recorded(row))
+        }
         fn runner_secret(&self) -> Result<(String, String)> {
             let mut memory = self.human.lock().unwrap();
             memory.counter += 1;
@@ -4095,6 +4319,10 @@ pub(crate) mod tests {
                     memory.member.as_ref(),
                     memory.now,
                 ));
+            }
+            let hash = self.runner_hash(token)?;
+            if let Some(publisher) = memory.images.get(&hash) {
+                return Ok(Some(Principal::image_publisher(&publisher.id)));
             }
             drop(memory);
             let run = RunId::new("r1")?;
@@ -4275,6 +4503,12 @@ pub(crate) mod tests {
         in_transaction: bool,
         fail_commit: bool,
         fail_cleanup: bool,
+        /// Refusals cannot be recorded.
+        fail_denials: bool,
+        /// The image publisher's tokens issued, by hash, and the rows
+        /// recorded, as the store keeps them.
+        images: std::collections::HashMap<String, crate::domain::image_publish::PublisherToken>,
+        image_rows: Vec<crate::domain::image_publish::ImageDigest>,
     }
 
     struct HumanFacts(std::sync::Arc<Mutex<HumanMemory>>);
@@ -4566,6 +4800,236 @@ pub(crate) mod tests {
             code(&runner_github_verified(&backend, Some(&config), Some(&jwt))),
             Some(ServiceErrorCode::Unauthenticated)
         );
+    }
+
+    fn image_binding() -> (
+        crate::domain::image_publish::PublishBinding,
+        crate::domain::oidc::VerifiedJwt,
+    ) {
+        use crate::domain::{
+            image_publish::PublishBinding,
+            oidc::{OidcIdentity, VerifiedJwt},
+        };
+        let binding = PublishBinding {
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            audience: "dagq-images".into(),
+            repository: "org/repo".into(),
+            workflow_ref: "org/repo/.github/workflows/image.yml@refs/heads/main".into(),
+            git_ref: "refs/heads/main".into(),
+        };
+        let claims = json!({"iss": binding.issuer, "aud": binding.audience,
+            "repository": binding.repository, "workflow_ref": binding.workflow_ref,
+            "ref": binding.git_ref, "sha": "0123456789abcdef0123456789abcdef01234567"});
+        let jwt = VerifiedJwt {
+            identity: OidcIdentity {
+                issuer: binding.issuer.clone(),
+                subject: "repo:org/repo:ref:refs/heads/main".into(),
+            },
+            claims: claims.as_object().unwrap().clone(),
+        };
+        (binding, jwt)
+    }
+
+    fn image_params(digest: char) -> Value {
+        json!({"arch": "arm64", "tag": "t1",
+            "digest": format!("sha256:{}", digest.to_string().repeat(64)),
+            "client_api_version": API_VERSION})
+    }
+
+    #[test]
+    fn image_publisher_exchange_returns_a_short_token_only_for_the_bound_main_ci() {
+        let backend = backend(RunStatus::Running);
+        let (binding, jwt) = image_binding();
+        let answer = image_publisher_exchange(&backend, Some(&binding), Some(&jwt))
+            .result
+            .unwrap();
+        assert_eq!(
+            answer["expires_at"],
+            backend.now_ms() / 1000 + crate::domain::image_publish::TOKEN_SECONDS
+        );
+        let token = answer["token"].as_str().unwrap().to_owned();
+        assert_eq!(
+            answer.as_object().unwrap().len(),
+            2,
+            "no refresh credential: {answer}"
+        );
+        let memory = backend.human.lock().unwrap();
+        let record = memory.images.values().next().unwrap();
+        assert_eq!(record.hash, backend.runner_hash(&token).unwrap());
+        assert_eq!(
+            record.publisher.commit,
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        drop(memory);
+        let mut feature = jwt.clone();
+        feature
+            .claims
+            .insert("ref".into(), json!("refs/heads/feature"));
+        for (binding, jwt) in [
+            (None, Some(&jwt)),
+            (Some(&binding), None),
+            (Some(&binding), Some(&feature)),
+        ] {
+            assert_eq!(
+                code(&image_publisher_exchange(&backend, binding, jwt)),
+                Some(ServiceErrorCode::Unauthenticated)
+            );
+        }
+        assert_eq!(backend.human.lock().unwrap().images.len(), 1);
+        // With no event written no token is handed out.
+        backend.human.lock().unwrap().fail_commit = true;
+        let failed = image_publisher_exchange(&backend, Some(&binding), Some(&jwt));
+        assert_eq!(code(&failed), Some(ServiceErrorCode::Failed));
+        assert!(failed.result.is_none());
+        // The socket answers neither use case.
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        for case in [UseCase::ImagePublisherExchange, UseCase::ImagePublish] {
+            let answer = service.handle_from(&request(Some(&token), case, json!({})), Peer::Owner);
+            assert_eq!(code(&answer), Some(ServiceErrorCode::Unauthenticated));
+        }
+    }
+
+    #[test]
+    fn only_the_image_publisher_hands_over_a_checked_digest_and_a_resend_is_the_same() {
+        let backend = backend(RunStatus::Running);
+        let (binding, jwt) = image_binding();
+        let token = image_publisher_exchange(&backend, Some(&binding), Some(&jwt))
+            .result
+            .unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let publish = |token: &str, params: Value| {
+            image_publish(
+                &backend,
+                &request(Some(token), UseCase::ImagePublish, params),
+            )
+        };
+        for other in [
+            "runner",
+            "worker",
+            "planner",
+            "inbox",
+            "review",
+            "observer",
+            "supervisor",
+            "telemetry",
+            "wrapper",
+        ] {
+            assert_eq!(
+                code(&publish(other, image_params('a'))),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{other}"
+            );
+            // The refusal is recorded as the refused actor.
+            let denial = backend.log.lock().unwrap().last().unwrap().clone();
+            assert_eq!(denial["event"], "authorization_denied", "{other}");
+            assert_eq!(denial["capability"], "image.publish", "{other}");
+            assert_ne!(denial["role"], "image-publisher", "{other}");
+        }
+        {
+            let log = backend.log.lock().unwrap();
+            assert_eq!(log[log.len() - 9]["role"], "runner");
+        }
+        for (token, reason) in [
+            (Some("not-issued"), "unknown_token"),
+            (None, "missing_token"),
+        ] {
+            let answer = image_publish(
+                &backend,
+                &request(token, UseCase::ImagePublish, image_params('a')),
+            );
+            assert_eq!(code(&answer), Some(ServiceErrorCode::Unauthenticated));
+            assert_eq!(
+                *backend.log.lock().unwrap().last().unwrap(),
+                json!({"use_case": "image_publish", "reason": reason})
+            );
+        }
+        for (field, bad) in [
+            ("digest", json!("sha256:short")),
+            ("arch", json!("s390x")),
+            ("client_api_version", json!(API_VERSION + 1)),
+        ] {
+            let mut params = image_params('a');
+            params[field] = bad;
+            assert_eq!(
+                code(&publish(&token, params)),
+                Some(ServiceErrorCode::BadRequest),
+                "{field}"
+            );
+        }
+        assert!(backend.human.lock().unwrap().image_rows.is_empty());
+        let first = publish(&token, image_params('a')).result.unwrap();
+        assert_eq!(first["publisher"]["repository"], "org/repo");
+        assert_eq!(publish(&token, image_params('a')).result.unwrap(), first);
+        assert_eq!(backend.human.lock().unwrap().image_rows.len(), 1);
+        // A, B, then A again: the same answer as the first A, no row.
+        assert!(publish(&token, image_params('b')).result.is_some());
+        assert_eq!(publish(&token, image_params('a')).result.unwrap(), first);
+        assert_eq!(backend.human.lock().unwrap().image_rows.len(), 2);
+        assert_eq!(
+            backend.log.lock().unwrap().last().unwrap()["publish"],
+            json!(format!(
+                "image-publisher:{}",
+                backend
+                    .human
+                    .lock()
+                    .unwrap()
+                    .images
+                    .values()
+                    .next()
+                    .unwrap()
+                    .id
+            ))
+        );
+        // The token reaches no other use case: `hello` and a read are
+        // refused, each recorded as the image publisher.
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        for (case, params) in [
+            (UseCase::Hello, json!({})),
+            (UseCase::Show, json!({"id": 1})),
+            (UseCase::IssueToken, json!({})),
+            (UseCase::Supervisor, json!({})),
+        ] {
+            let answer = service.handle_from(&request(Some(&token), case, params), Peer::Absent);
+            assert_eq!(
+                code(&answer),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{case:?}"
+            );
+            assert!(answer.result.is_none(), "{case:?}");
+            let denial = backend.log.lock().unwrap().last().unwrap().clone();
+            assert_eq!(
+                (denial["role"].as_str(), denial["capability"].as_str()),
+                (Some("image-publisher"), Some("queue.read")),
+                "{case:?}"
+            );
+        }
+        // A refusal whose record cannot be written is still a refusal.
+        backend.human.lock().unwrap().fail_denials = true;
+        let hello = service.handle_from(
+            &request(Some(&token), UseCase::Hello, json!({})),
+            Peer::Absent,
+        );
+        assert_eq!(code(&hello), Some(ServiceErrorCode::AuthorizationDenied));
+        assert_eq!(
+            code(&publish("runner", image_params('a'))),
+            Some(ServiceErrorCode::AuthorizationDenied)
+        );
+        assert_eq!(backend.human.lock().unwrap().image_rows.len(), 2);
+        let on_socket = service.handle_from(
+            &request(Some(&token), UseCase::Show, json!({"id": 1})),
+            Peer::Owner,
+        );
+        assert_eq!(code(&on_socket), Some(ServiceErrorCode::Unauthenticated));
     }
 
     #[test]

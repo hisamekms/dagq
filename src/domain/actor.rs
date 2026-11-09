@@ -77,6 +77,16 @@ string_enum!(
     /// side issues for one target, good for `telemetry_report` alone. A
     /// queue service's principal only: no process runs as it.
     ExecutorTelemetry => "executor-telemetry",
+    /// The principal of the one CI the deployment binds to main
+    /// (`domain::image_publish::PublishBinding`), good for handing over an
+    /// image's digest alone (ADR-t3987-1 decision 4). Named `image-publisher`
+    /// for what it does, not for the CI it runs on. Untrusted: the CI runs
+    /// the repository's code outside the control side, and what it hands
+    /// over is data the control side checks; it holds no credential that
+    /// writes main. A queue service's principal only, as executor-telemetry:
+    /// no process runs as it, no `DAGQ_ROLE` names it, and no token issues it
+    /// as a child.
+    ImagePublisher => "image-publisher",
 });
 
 // How far an actor is trusted (ADR-t728-1 decision 1): a person, the
@@ -88,7 +98,7 @@ string_enum!(TrustLevel {
 });
 
 impl ActorRole {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::User,
         Self::Runner,
         Self::Inbox,
@@ -105,6 +115,7 @@ impl ActorRole {
         Self::Wrapper,
         Self::Integrator,
         Self::ExecutorTelemetry,
+        Self::ImagePublisher,
     ];
 
     /// The trust of the role: fixed by the role, never inferred from a
@@ -116,6 +127,7 @@ impl ActorRole {
                 TrustLevel::TrustedControlPlane
             }
             Self::Runner
+            | Self::ImagePublisher
             | Self::Inbox
             | Self::Planner
             | Self::Worker
@@ -147,10 +159,11 @@ impl ActorRole {
     }
 
     /// `DAGQ_ROLE` of the role; the user has none, and neither has the
-    /// runner and executor's telemetry roles, queue service principals only.
+    /// runner, executor's telemetry and image publisher roles, queue service
+    /// principals only.
     pub const fn env_value(self) -> Option<&'static str> {
         match self {
-            Self::User | Self::Runner | Self::ExecutorTelemetry => None,
+            Self::User | Self::Runner | Self::ExecutorTelemetry | Self::ImagePublisher => None,
             other => Some(other.as_str()),
         }
     }
@@ -320,8 +333,8 @@ impl ActorContext {
     /// that is not a role other than the user is an error, and so is an
     /// unreadable run or task id: nothing runs as an actor it cannot name.
     /// The legacy `reviewer` is read as a review job. The executor's
-    /// telemetry role is a queue service's principal only, so it is
-    /// refused as unknown, as the user is. Without
+    /// telemetry, runner and image publisher roles are queue service
+    /// principals only, so each is refused as unknown, as the user is. Without
     /// `DAGQ_ACTOR_ID` (a session opened before it) the id is the value of
     /// `DAGQ_ROLE`.
     pub fn from_env(env: impl Fn(&str) -> Option<String>) -> Result<Self, DomainError> {
@@ -331,7 +344,13 @@ impl ActorContext {
         let role = match value.as_str() {
             LEGACY_REVIEWER_ROLE => ActorRole::ReviewJob,
             other => match other.parse::<ActorRole>() {
-                Ok(ActorRole::User | ActorRole::Runner | ActorRole::ExecutorTelemetry) | Err(_) => {
+                Ok(
+                    ActorRole::User
+                    | ActorRole::Runner
+                    | ActorRole::ExecutorTelemetry
+                    | ActorRole::ImagePublisher,
+                )
+                | Err(_) => {
                     return Err(DomainError::UnknownValue {
                         kind: ROLE_ENV,
                         value,
@@ -528,6 +547,7 @@ mod tests {
             "person",
             "human",
             "executor-telemetry",
+            "image-publisher",
         ] {
             let error = parse(&[("DAGQ_ROLE", value)]).unwrap_err();
             assert_eq!(error.to_string(), format!("unknown DAGQ_ROLE: {value}"));
