@@ -72,6 +72,21 @@ fn every_setting_accepts_a_mounted_file_and_rejects_both_forms() {
         ("DAGQ_TLS_CERT", cert.as_str()),
         ("DAGQ_TLS_KEY", key.as_str()),
     ]);
+    pairs.extend([
+        (
+            "DAGQ_ACTIONS_ISSUER",
+            "https://token.actions.githubusercontent.com",
+        ),
+        ("DAGQ_ACTIONS_AUDIENCE", "dagq"),
+        ("DAGQ_ACTIONS_REPOSITORY", "org/repo"),
+        (
+            "DAGQ_ACTIONS_WORKFLOW_REF",
+            "org/repo/.github/workflows/runner.yml@refs/heads/main",
+        ),
+        ("DAGQ_ACTIONS_REF", "refs/heads/main"),
+        ("DAGQ_ACTIONS_OWNER_ISSUER", "https://idp.example"),
+        ("DAGQ_ACTIONS_OWNER_SUBJECT", "person"),
+    ]);
     for &name in NAMES {
         let file_name = format!("{name}_FILE");
         let original = pairs.iter().find(|(n, _)| *n == name).unwrap().1;
@@ -347,4 +362,51 @@ fn database_ca_refuses_misplacement_unreadable_empty_and_invalid_files_without_s
     }
     let error = refused(&[(DATABASE_CA_FILE, "private-path")]);
     assert!(error.to_string().contains("requires the postgres store"));
+}
+
+#[test]
+fn actions_configuration_is_optional_complete_and_validated_before_startup() {
+    let values = [
+        (
+            "DAGQ_ACTIONS_ISSUER",
+            "https://token.actions.githubusercontent.com",
+        ),
+        ("DAGQ_ACTIONS_AUDIENCE", "dagq"),
+        ("DAGQ_ACTIONS_REPOSITORY", "org/repo"),
+        (
+            "DAGQ_ACTIONS_WORKFLOW_REF",
+            "org/repo/.github/workflows/runner.yml@refs/heads/main",
+        ),
+        ("DAGQ_ACTIONS_REF", "refs/heads/main"),
+        ("DAGQ_ACTIONS_OWNER_ISSUER", "https://idp.example"),
+        ("DAGQ_ACTIONS_OWNER_SUBJECT", "person"),
+    ];
+    assert!(read(&[]).unwrap().github_actions().is_none());
+    let config = read(&values).unwrap();
+    assert!(config.http.is_some());
+    assert_eq!(config.github_actions().unwrap().owner.subject, "person");
+    for missing in 0..values.len() {
+        let partial: Vec<_> = values
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != missing)
+            .map(|(_, pair)| *pair)
+            .collect();
+        assert!(read(&partial).is_err());
+        assert!(read(&[values[missing]]).is_err());
+        let mut bad = values;
+        bad[missing].1 = "";
+        assert!(read(&bad).is_err());
+    }
+    for (index, bad) in [
+        (0, "https://other.example"),
+        (2, "repo"),
+        (3, "other/workflow"),
+        (4, "main"),
+        (5, "http://idp.example"),
+    ] {
+        let mut changed = values;
+        changed[index].1 = bad;
+        assert!(read(&changed).is_err());
+    }
 }

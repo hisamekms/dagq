@@ -374,6 +374,10 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::DenialRecord
         | UseCase::IssueToken
         | UseCase::ExchangeToken
+        | UseCase::RunnerDeclare
+        | UseCase::RunnerShare
+        | UseCase::RunnerList
+        | UseCase::RunnerGithub
         | UseCase::RunnerCode
         | UseCase::RunnerEnroll
         | UseCase::RunnerRefresh
@@ -591,6 +595,10 @@ string_enum!(UseCase {
     IssueToken => "issue_token",
     /// HTTP only: exchange an issuer JWT for a human token.
     ExchangeToken => "exchange_token",
+    RunnerDeclare => "runner_declare",
+    RunnerShare => "runner_share",
+    RunnerList => "runner_list",
+    RunnerGithub => "runner_github",
     RunnerCode => "runner_code",
     RunnerEnroll => "runner_enroll",
     RunnerRefresh => "runner_refresh",

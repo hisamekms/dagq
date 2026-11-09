@@ -24,6 +24,12 @@ string_enum!(Capability {
     RunnerRegister => "runner.register",
     /// A human owner or administrator revokes a runner and its credentials.
     RunnerRevoke => "runner.revoke",
+    /// A runner replaces only its own scheduling hints.
+    RunnerDeclare => "runner.declare",
+    /// An administrator approves or removes a runner's shared registration.
+    RunnerShare => "runner.share",
+    /// Humans and their inboxes list runners within registry ownership scope.
+    RunnerList => "runner.list",
     // Reading.
     QueueRead => "queue.read",
     QueueWatch => "queue.watch",
@@ -151,7 +157,10 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 68] = [
+    pub const ALL: [Self; 71] = [
+        Self::RunnerDeclare,
+        Self::RunnerShare,
+        Self::RunnerList,
         Self::RunnerRegister,
         Self::RunnerRevoke,
         Self::QueueRead,
@@ -580,7 +589,8 @@ fn human_role_permits(role: super::actor::HumanRole, capability: Capability) -> 
     use super::queue_service::TeamRole;
     role.role == TeamRole::Admin
         || match capability {
-            C::BinaryInstall
+            C::RunnerShare
+            | C::BinaryInstall
             | C::QueueAdmin
             | C::ReviewSetup
             | C::ReviewSetupApprove
@@ -601,6 +611,7 @@ use Capability as C;
 /// own ([`USER`]). It alone (with the person) holds and releases a task and
 /// generates the review's settings (`setup-review`).
 const INBOX: &[Capability] = &[
+    C::RunnerList,
     C::QueueRead,
     C::QueueWatch,
     C::ExportFile,
@@ -654,12 +665,12 @@ const INBOX: &[Capability] = &[
     C::TokenIssue,
 ];
 
-/// The number of [`USER`]'s capabilities: the inbox's and four more.
-const USER_LEN: usize = INBOX.len() + 4;
+/// The number of [`USER`]'s capabilities: the inbox's and five more.
+const USER_LEN: usize = INBOX.len() + 5;
 
 /// [`INBOX`]'s capabilities, the approval of `setup-review`'s changes
 /// beforehand ([`C::ReviewSetupApprove`]) and the queue broker's records
-/// ([`C::QueueBrokerRecord`]), and human runner registration and revocation.
+/// ([`C::QueueBrokerRecord`]), and human runner registration, revocation and sharing.
 const USER_CAPABILITIES: [Capability; USER_LEN] = {
     let mut all = [C::ReviewSetupApprove; USER_LEN];
     let mut at = 0;
@@ -670,6 +681,7 @@ const USER_CAPABILITIES: [Capability; USER_LEN] = {
     all[at + 1] = C::QueueBrokerRecord;
     all[at + 2] = C::RunnerRegister;
     all[at + 3] = C::RunnerRevoke;
+    all[at + 4] = C::RunnerShare;
     all
 };
 
@@ -807,7 +819,7 @@ const EXECUTOR_TELEMETRY: &[Capability] = &[C::TelemetryReport];
 /// changes beforehand; the record tells the two apart.
 pub const fn grants(role: ActorRole) -> &'static [Capability] {
     match role {
-        ActorRole::Runner => &[],
+        ActorRole::Runner => &[C::RunnerDeclare],
         ActorRole::User => USER,
         ActorRole::Inbox => INBOX,
         ActorRole::Planner => PLANNER,
@@ -1057,6 +1069,7 @@ mod tests {
     fn human_role_table_narrows_user_grants_and_on_call_restores_only_recovery() {
         use crate::domain::{actor::HumanRole, queue_service::TeamRole};
         let denied = [
+            C::RunnerShare,
             C::BinaryInstall,
             C::QueueAdmin,
             C::ReviewSetup,
@@ -1241,6 +1254,7 @@ mod tests {
         inbox.push(C::QueueBrokerRecord);
         inbox.push(C::RunnerRegister);
         inbox.push(C::RunnerRevoke);
+        inbox.push(C::RunnerShare);
         assert_eq!(inbox, grants(ActorRole::User));
         assert_eq!(grants(ActorRole::SetupReviewJob), [C::QueueRead]);
         let job = ActorContext::setup_review_job("s1");

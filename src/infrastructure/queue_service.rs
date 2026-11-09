@@ -3208,8 +3208,17 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         config.value("DAGQ_OIDC_AUDIENCE"),
         HUMAN_EXCHANGE_OPEN,
     )?;
+    let actions = config
+        .github_actions()
+        .map(|binding| -> Result<_> {
+            let verifier =
+                deployment_verifier(Some(&binding.issuer), Some(&binding.audience), true)?
+                    .expect("complete Actions settings");
+            Ok((binding, verifier))
+        })
+        .transpose()?;
     let http = config.http.map(HttpStart::Deployment);
-    serve_on(options, http, oidc)
+    serve_on(options, http, oidc, actions)
 }
 
 /// Whether the production entry [`serve`] opens the human exchange to a
@@ -3253,7 +3262,7 @@ fn deployment_verifier(
 /// listener entry is for callers that already decided their configuration;
 /// the production entry [`serve`] reads the deployment settings.
 pub fn serve_with_http(options: &ServeOptions, http: TcpListener) -> Result<Value> {
-    serve_on(options, Some(HttpStart::Bound(http)), None)
+    serve_on(options, Some(HttpStart::Bound(http)), None, None)
 }
 
 enum HttpStart {
@@ -3272,7 +3281,7 @@ pub fn serve_with_http_oidc<S: crate::application::oidc::OidcDocumentSource + 's
     source: S,
 ) -> Result<Value> {
     let verifier = Arc::new(crate::application::oidc::OidcVerifier::new(config, source));
-    serve_on(options, Some(HttpStart::Bound(http)), Some(verifier))
+    serve_on(options, Some(HttpStart::Bound(http)), Some(verifier), None)
 }
 
 trait HumanVerifier: Send + Sync {
@@ -3294,10 +3303,16 @@ impl<S: crate::application::oidc::OidcDocumentSource> HumanVerifier
     }
 }
 
+type ActionsExchange = (
+    crate::domain::runner_registration::GithubActions,
+    Arc<dyn HumanVerifier>,
+);
+
 fn serve_on(
     options: &ServeOptions,
     http: Option<HttpStart>,
     oidc: Option<Arc<dyn HumanVerifier>>,
+    actions: Option<ActionsExchange>,
 ) -> Result<Value> {
     let queue_dir = queue_dir_of(&options.db);
     ensure!(options.db.is_file(), "no queue at {}", options.db.display());
@@ -3480,7 +3495,13 @@ accepts: schema {} to {}",
         .map(|(listener, tls)| {
             super::queue_service_http::open_tls(
                 listener,
-                http_answerer(backend.clone(), pid, reads.clone(), oidc.clone()),
+                http_answerer(
+                    backend.clone(),
+                    pid,
+                    reads.clone(),
+                    oidc.clone(),
+                    actions.clone(),
+                ),
                 options.poll,
                 tls,
             )
@@ -3756,17 +3777,43 @@ fn http_answerer(
     pid: u32,
     reads: Arc<super::startup_reads::StartupReads>,
     oidc: Option<Arc<dyn HumanVerifier>>,
+    actions: Option<ActionsExchange>,
 ) -> HttpAnswerer {
     Arc::new(move |request| {
+        if request.use_case == UseCase::RunnerGithub {
+            let verified = exchange_identity(
+                actions.as_ref().map(|(_, verifier)| &**verifier),
+                &request.params,
+                backend.now_ms() / 1000,
+            );
+            let binding = actions.as_ref().map(|(binding, _)| binding.clone());
+            let on = backend.clone();
+            let exchange = move || LineAnswer {
+                response: crate::application::queue_service::runner_github_verified(
+                    &*on,
+                    binding.as_ref(),
+                    verified.as_ref(),
+                ),
+                notes: RequestNotes::default(),
+            };
+            let answer = match &backend.write_line {
+                Some(line) => line.line.run(exchange)?,
+                None => exchange(),
+            };
+            return Ok(answered_of(&answer.response, Some(request.use_case))?.0);
+        }
         if matches!(
             request.use_case,
-            UseCase::RunnerCode
+            UseCase::RunnerDeclare
+                | UseCase::RunnerShare
+                | UseCase::RunnerList
+                | UseCase::RunnerCode
                 | UseCase::RunnerEnroll
                 | UseCase::RunnerRefresh
                 | UseCase::RunnerRevoke
         ) {
             let on = backend.clone();
-            let configured = oidc.is_some();
+            let configured = oidc.is_some() || actions.is_some();
             let use_case = request.use_case;
             let operation = move || LineAnswer {
                 response: crate::application::queue_service::runner_http(
@@ -4376,6 +4423,26 @@ impl ServiceBackend for SqliteServiceBackend {
         use crate::application::RunnerStore;
         let queue = write_queue(self.write_line.as_ref(), &self.db)?;
         queue.change_runner(action, now)
+    }
+
+    fn runner_listing_owner(
+        &self,
+        token: &str,
+        principal: &Principal,
+    ) -> Result<Option<crate::domain::oidc::OidcIdentity>> {
+        // Principal authentication checked the inbox token and its process.
+        // This binding was written by the service at its parent's request.
+        let parent = if principal.role == ActorRole::Inbox {
+            lookup_record(&self.queue_dir, token)?
+                .and_then(|r| r.issued_by)
+                .map(|by| by.parent)
+        } else {
+            None
+        };
+        Ok(crate::domain::runner_registration::listing_identity(
+            principal,
+            parent.as_deref(),
+        ))
     }
 
     fn heavy_reads(&self) -> Option<&crate::application::heavy_reads::HeavyReads> {

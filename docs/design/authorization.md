@@ -66,7 +66,7 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | 人の役割 | userの許可からの狭め |
 | --- | --- |
 | 管理者 | なし |
-| member | `service.install`・`queue.admin`・`review.setup`・`review.setup_approve`・`task.ready_bypass_review`・`workspace.cleanup`・`run.recover`・`service.lifecycle`を拒む |
+| member | `service.install`・`queue.admin`・`review.setup`・`review.setup_approve`・`task.ready_bypass_review`・`workspace.cleanup`・`run.recover`・`service.lifecycle`・`runner.share`を拒む |
 | 当番（管理者かmemberに重ねる） | 重ねた役割に`run.recover`を戻す。grantsに無い許可は足さない |
 | 役割なし（hostのsocketのpeer） | なし |
 
@@ -74,14 +74,16 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 
 | role | 許すcapability | resourceの規則 |
 | --- | --- | --- |
-| user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report`を除く全て | なし |
+| user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report` `runner.declare`を除く全て | なし |
 | user（続き） | `runner.register`・`runner.revoke` | OIDCの人自身。登録は自分のrunner、失効は持ち主か管理者だけ |
-| runner | なし | なし |
-| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`は持たない | なし。人自身の操作との区別は記録が持つ |
-| planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくもの（`ask --request ID`）はその依頼の閉じていないruntimeのplannerのactor idが自分のときだけ（`request.decline`と同じ規則。plannerが分からなければ拒む）。 |
+| user（続き） | `runner.share`・`runner.list` | 共有は管理者だけ。一覧はmemberが自分、管理者が全て |
+| runner | `runner.declare` | 自分の申告だけ |
+| inbox（続き） | `runner.list` | 親の人の一覧の範囲だけ |
+| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`・`runner.share`・`runner.declare`は持たない | なし。人自身の操作との区別は記録が持つ |
+| planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくaskは`request.decline`と同じ所有の規則。 |
 | planner（続き） | `task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss` | taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）で、`revising`のproposalのtaskは持ち主だけ（不明なら拒む）。 |
-| planner（続き） | `planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install` | `revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。 |
-| planner（続き） | `queue.admin` | `follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
+| planner（続き） | `planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install` | `revisit`（`task.write`）はdraftだけで、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。 |
+| planner（続き） | `queue.admin` | `follow_up.judge`は全状態に記録でき、移動はdraft・readyだけ。noteは全状態に書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`request.decline`はそのplannerが立てられた依頼（閉じていないplanner本人）だけで、plannerが分からなければ拒む |
 | worker | 読み取り・`ask.open`・`note.write`・`replan.propose`・`eval.request`・`eval.read` | evalと`replan.propose`は自分のrunの分だけ。読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない） |
 | review-job | 読み取り・`review.submit` | `review.submit`は自分のrunだけ |
 | recovery-job | 読み取り・`triage.submit` | `triage.submit`は自分のrunだけ |

@@ -36,6 +36,13 @@ use std::{
 /// Postgres requires DB, all object store destinations, OIDC, both Apps,
 /// repository and all three CI constraints. Timezone and listen have defaults.
 pub const NAMES: &[&str] = &[
+    "DAGQ_ACTIONS_ISSUER",
+    "DAGQ_ACTIONS_AUDIENCE",
+    "DAGQ_ACTIONS_REPOSITORY",
+    "DAGQ_ACTIONS_WORKFLOW_REF",
+    "DAGQ_ACTIONS_REF",
+    "DAGQ_ACTIONS_OWNER_ISSUER",
+    "DAGQ_ACTIONS_OWNER_SUBJECT",
     "DAGQ_STORE",
     "DAGQ_DATABASE_URL",
     "DAGQ_OBJECT_STORE_ENDPOINT",
@@ -108,6 +115,24 @@ impl DeploymentConfig {
             "DAGQ_TIMEZONE" => Some("UTC"),
             "DAGQ_LISTEN" => Some("0.0.0.0:8080"),
             _ => None,
+        })
+    }
+    /// Actions settings are optional as a group. Each accepts `_FILE`, like
+    /// other deployment values. Owner issuer/subject name a registry human;
+    /// workflow_ref includes the repository path and pinned refs/... suffix.
+    /// The Actions issuer is fixed to GitHub's public OIDC issuer.
+    pub fn github_actions(&self) -> Option<crate::domain::runner_registration::GithubActions> {
+        use crate::domain::{oidc::OidcIdentity, runner_registration::GithubActions};
+        Some(GithubActions {
+            issuer: self.value("DAGQ_ACTIONS_ISSUER")?.into(),
+            audience: self.value("DAGQ_ACTIONS_AUDIENCE")?.into(),
+            repository: self.value("DAGQ_ACTIONS_REPOSITORY")?.into(),
+            workflow_ref: self.value("DAGQ_ACTIONS_WORKFLOW_REF")?.into(),
+            git_ref: self.value("DAGQ_ACTIONS_REF")?.into(),
+            owner: OidcIdentity {
+                issuer: self.value("DAGQ_ACTIONS_OWNER_ISSUER")?.into(),
+                subject: self.value("DAGQ_ACTIONS_OWNER_SUBJECT")?.into(),
+            },
         })
     }
     pub fn read(
@@ -189,6 +214,41 @@ impl DeploymentConfig {
                 }
             }
         }
+        let actions: Vec<_> = NAMES
+            .iter()
+            .copied()
+            .filter(|name| name.starts_with("DAGQ_ACTIONS_"))
+            .collect();
+        if actions.iter().any(|name| get(name).is_some()) {
+            for name in actions {
+                if get(name).is_none() {
+                    errors.insert(name.to_owned());
+                }
+            }
+            if get("DAGQ_ACTIONS_ISSUER") != Some("https://token.actions.githubusercontent.com") {
+                errors.insert("DAGQ_ACTIONS_ISSUER".into());
+            }
+            if get("DAGQ_ACTIONS_OWNER_ISSUER").is_some_and(|s| !valid_url(s, &["https"])) {
+                errors.insert("DAGQ_ACTIONS_OWNER_ISSUER".into());
+            }
+            if get("DAGQ_ACTIONS_REPOSITORY")
+                .is_some_and(|s| !super::github_app::valid_repository(s))
+            {
+                errors.insert("DAGQ_ACTIONS_REPOSITORY".into());
+            }
+            if get("DAGQ_ACTIONS_REF").is_some_and(|s| !s.starts_with("refs/") || s.len() == 5) {
+                errors.insert("DAGQ_ACTIONS_REF".into());
+            }
+            if let (Some(repo), Some(workflow), Some(git_ref)) = (
+                get("DAGQ_ACTIONS_REPOSITORY"),
+                get("DAGQ_ACTIONS_WORKFLOW_REF"),
+                get("DAGQ_ACTIONS_REF"),
+            ) && (!workflow.starts_with(&format!("{repo}/.github/workflows/"))
+                || !workflow.ends_with(&format!("@{git_ref}")))
+            {
+                errors.insert("DAGQ_ACTIONS_WORKFLOW_REF".into());
+            }
+        }
         for (a, b) in [
             (
                 "DAGQ_OBJECT_STORE_ACCESS_KEY_ID",
@@ -266,10 +326,12 @@ impl DeploymentConfig {
         if !errors.is_empty() {
             return Err(InvalidSettings(errors, ca_error));
         }
-        let http = get("DAGQ_OIDC_ISSUER").map(|_| HttpConfig {
-            address: address.unwrap(),
-            tls,
-        });
+        let http = get("DAGQ_OIDC_ISSUER")
+            .or_else(|| get("DAGQ_ACTIONS_ISSUER"))
+            .map(|_| HttpConfig {
+                address: address.unwrap(),
+                tls,
+            });
         Ok(Self {
             store: store.expect("checked store"),
             values,

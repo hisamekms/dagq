@@ -223,6 +223,16 @@ pub trait ServiceBackend: Send + Sync {
         anyhow::bail!("runner credentials unavailable")
     }
 
+    /// Resolve a human directly, or the authenticated inbox's recorded human
+    /// parent. No identity is accepted from request parameters.
+    fn runner_listing_owner(
+        &self,
+        _token: &str,
+        principal: &Principal,
+    ) -> Result<Option<crate::domain::oidc::OidcIdentity>> {
+        Ok(principal.human.clone())
+    }
+
     /// Write only a hashed record; the value is returned, never a credential file.
     fn issue_human(&self, _principal: &Principal, _expires: i64) -> Result<(String, String)> {
         anyhow::bail!("human tokens unavailable")
@@ -645,7 +655,11 @@ impl QueueService<'_> {
         }
         if matches!(
             request.use_case,
-            UseCase::RunnerCode
+            UseCase::RunnerDeclare
+                | UseCase::RunnerShare
+                | UseCase::RunnerList
+                | UseCase::RunnerGithub
+                | UseCase::RunnerCode
                 | UseCase::RunnerEnroll
                 | UseCase::RunnerRefresh
                 | UseCase::RunnerRevoke
@@ -2120,7 +2134,11 @@ fn run(
         UseCase::Supervisor | UseCase::Control => {
             unreachable!("a supervisor's and a control-side command's requests are answered apart")
         }
-        UseCase::RunnerCode
+        UseCase::RunnerDeclare
+        | UseCase::RunnerShare
+        | UseCase::RunnerList
+        | UseCase::RunnerGithub
+        | UseCase::RunnerCode
         | UseCase::RunnerEnroll
         | UseCase::RunnerRefresh
         | UseCase::RunnerRevoke
@@ -3194,9 +3212,11 @@ pub fn runner_refusal() -> ServiceResponse {
     )
 }
 
-/// HTTP-only runner use cases, on the service's write line. Human operations
-/// require a token bound to an OIDC identity and the user-only capability;
-/// the store rechecks membership and ownership inside its write transaction.
+/// HTTP-only runner use cases, on the service's write line. Human registry
+/// changes require an OIDC human and a user-only capability; listing also
+/// accepts an inbox bound to that human. The store rechecks membership and
+/// ownership inside its write transaction. Declarations bind to the runner
+/// token's id, never an id supplied in the request.
 ///
 /// Refusal auditing (authorization_denied and queue_service_unauthenticated)
 /// is deferred to task 4075 by the decision in ask 1585. Ask StaticPolicy
@@ -3218,9 +3238,14 @@ pub fn runner_http(
     };
     let run = || -> Result<ServiceResponse> {
         let mut human = None;
+        let mut runner_id = None;
         if matches!(
             request.use_case,
-            UseCase::RunnerCode | UseCase::RunnerRevoke
+            UseCase::RunnerCode
+                | UseCase::RunnerRevoke
+                | UseCase::RunnerDeclare
+                | UseCase::RunnerShare
+                | UseCase::RunnerList
         ) {
             let Some(token) = request.token.as_deref() else {
                 return Ok(runner_refusal());
@@ -3231,10 +3256,13 @@ pub fn runner_http(
             if principal.check().is_err() {
                 return Ok(runner_refusal());
             }
-            let capability = if request.use_case == UseCase::RunnerCode {
-                Capability::RunnerRegister
-            } else {
-                Capability::RunnerRevoke
+            let capability = match request.use_case {
+                UseCase::RunnerCode => Capability::RunnerRegister,
+                UseCase::RunnerRevoke => Capability::RunnerRevoke,
+                UseCase::RunnerDeclare => Capability::RunnerDeclare,
+                UseCase::RunnerShare => Capability::RunnerShare,
+                UseCase::RunnerList => Capability::RunnerList,
+                _ => unreachable!(),
             };
             if StaticPolicy
                 .authorize(&principal.actor(), capability, &Resource::Queue)
@@ -3242,9 +3270,23 @@ pub fn runner_http(
             {
                 return Ok(denied());
             }
-            human = principal.human;
-            if human.is_none() {
-                return Ok(runner_refusal());
+            if request.use_case == UseCase::RunnerDeclare {
+                runner_id = principal
+                    .actor_id
+                    .strip_prefix("runner:")
+                    .map(str::to_owned);
+                if runner_id.is_none() {
+                    return Ok(denied());
+                }
+            } else {
+                human = if request.use_case == UseCase::RunnerList {
+                    backend.runner_listing_owner(token, &principal)?
+                } else {
+                    principal.human
+                };
+                if human.is_none() {
+                    return Ok(runner_refusal());
+                }
             }
         }
         let now = backend.now_ms() / 1000;
@@ -3259,6 +3301,38 @@ pub fn runner_http(
         let input = |name| request.params.get(name).and_then(Value::as_str);
         let mut values = None;
         let action = match request.use_case {
+            UseCase::RunnerDeclare => {
+                let Some(declaration) = request
+                    .params
+                    .get("declaration")
+                    .and_then(crate::domain::runner_registration::Declaration::parse)
+                else {
+                    return Ok(ServiceResponse::failure(
+                        ServiceErrorCode::BadRequest,
+                        "invalid runner declaration",
+                    ));
+                };
+                Change::Declare {
+                    runner_id: runner_id.unwrap(),
+                    declaration,
+                }
+            }
+            UseCase::RunnerShare => {
+                let (Some(id), Some(shared)) = (
+                    input("runner_id"),
+                    request.params.get("shared").and_then(Value::as_bool),
+                ) else {
+                    return Ok(denied());
+                };
+                Change::Share {
+                    caller: human.unwrap(),
+                    runner_id: id.into(),
+                    shared,
+                }
+            }
+            UseCase::RunnerList => Change::List {
+                caller: human.unwrap(),
+            },
             UseCase::RunnerCode => {
                 let (value, hash) = backend.runner_secret()?;
                 values = Some((value, String::new()));
@@ -3316,6 +3390,8 @@ pub fn runner_http(
                     json!({"runner_id": id, "refresh": refresh, "token": token, "expires_at": expires_at, "refresh_expires_at": refresh_expires_at}),
                 )
             }
+            Outcome::Updated => ServiceResponse::success(json!({"updated": true})),
+            Outcome::Listed(rows) => ServiceResponse::success(json!({"runners": rows})),
             Outcome::Revoked => ServiceResponse::success(json!({"revoked": true})),
             Outcome::Unauthenticated => runner_refusal(),
             Outcome::Denied => denied(),
@@ -3325,6 +3401,48 @@ pub fn runner_http(
         Ok(answer) => answer,
         // SQL errors can carry parameters: no diagnostic from this boundary
         // may contain an input credential or a freshly generated value.
+        Err(error) if error.is::<super::NotLeader>() => respond(Err(super::NotLeader.into())),
+        Err(_) => ServiceResponse::failure(ServiceErrorCode::Failed, "runner operation failed"),
+    }
+}
+
+/// Actions exchanges have signature/issuer/audience verified before entering
+/// the write line. Registry membership is rechecked by the same transaction
+/// that creates the runner and its single short-lived token. No refresh issued.
+pub fn runner_github_verified(
+    backend: &dyn ServiceBackend,
+    config: Option<&crate::domain::runner_registration::GithubActions>,
+    jwt: Option<&crate::domain::oidc::VerifiedJwt>,
+) -> ServiceResponse {
+    use crate::domain::runner_registration::{Change, Outcome, SHORT_SECONDS, github_owner};
+    let run = || -> Result<ServiceResponse> {
+        let Some(owner) = jwt.and_then(|jwt| github_owner(config, jwt)) else {
+            return Ok(runner_refusal());
+        };
+        let now = backend.now_ms() / 1000;
+        let Some(expiry) = now.checked_add(SHORT_SECONDS) else {
+            return Ok(runner_refusal());
+        };
+        let (token, hash) = backend.runner_secret()?;
+        let (_, runner_id) = backend.runner_secret()?;
+        Ok(
+            match backend.runner_change(
+                &Change::Github {
+                    owner: owner.clone(),
+                    runner_id,
+                    token: hash,
+                },
+                now,
+            )? {
+                Outcome::Issued(id) => ServiceResponse::success(
+                    json!({"runner_id": id, "token": token, "expires_at": expiry}),
+                ),
+                _ => runner_refusal(),
+            },
+        )
+    };
+    match run() {
+        Ok(answer) => answer,
         Err(error) if error.is::<super::NotLeader>() => respond(Err(super::NotLeader.into())),
         Err(_) => ServiceResponse::failure(ServiceErrorCode::Failed, "runner operation failed"),
     }
@@ -3834,6 +3952,23 @@ pub(crate) mod tests {
             use sha2::{Digest, Sha256};
             Ok(format!("{:x}", Sha256::digest(value.as_bytes())))
         }
+        fn runner_listing_owner(
+            &self,
+            _token: &str,
+            principal: &Principal,
+        ) -> Result<Option<crate::domain::oidc::OidcIdentity>> {
+            let parent = self
+                .human
+                .lock()
+                .unwrap()
+                .member
+                .as_ref()
+                .map(|m| Principal::human(m.identity.clone()).actor_id);
+            Ok(crate::domain::runner_registration::listing_identity(
+                principal,
+                parent.as_deref(),
+            ))
+        }
         fn runner_change(
             &self,
             change: &crate::domain::runner_registration::Change,
@@ -3885,7 +4020,43 @@ pub(crate) mod tests {
                         Outcome::Unauthenticated
                     }
                 }
-                Change::Revoke { .. } => Outcome::Denied,
+                Change::Declare {
+                    runner_id,
+                    declaration,
+                } => {
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push(json!({"runner_id": runner_id, "declaration": declaration}));
+                    Outcome::Updated
+                }
+                Change::List { caller } => {
+                    self.log.lock().unwrap().push(json!({"caller": caller}));
+                    Outcome::Listed(vec![])
+                }
+                Change::Github {
+                    owner,
+                    runner_id,
+                    token,
+                } => {
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push(json!({"owner": owner, "hash": token}));
+                    if self
+                        .human
+                        .lock()
+                        .unwrap()
+                        .member
+                        .as_ref()
+                        .is_some_and(|m| &m.identity == owner && m.disabled_at.is_none())
+                    {
+                        Outcome::Issued(runner_id.clone())
+                    } else {
+                        Outcome::Unauthenticated
+                    }
+                }
+                Change::Revoke { .. } | Change::Share { .. } => Outcome::Denied,
             })
         }
 
@@ -4201,6 +4372,200 @@ pub(crate) mod tests {
         );
         // Refusal records are deliberately deferred to the auditing use case.
         assert_eq!(*backend.log.lock().unwrap(), before_refusals);
+    }
+
+    #[test]
+    fn runner_management_authorizes_roles_and_binds_declarations_to_authenticated_runner() {
+        let (backend, human_jwt) = human_fixture();
+        let hints = json!({"os": "linux", "arch": "aarch64", "container": true, "credentials": ["team_api_key"]});
+        assert!(
+            runner_http(
+                &backend,
+                &request(
+                    Some("runner"),
+                    UseCase::RunnerDeclare,
+                    json!({"runner_id": "victim", "declaration": hints})
+                ),
+                true
+            )
+            .result
+            .is_some()
+        );
+        assert_eq!(
+            backend.log.lock().unwrap().last().unwrap()["runner_id"],
+            "registered-runner"
+        );
+        let mut bad = hints.clone();
+        bad["value"] = json!("secret");
+        assert_eq!(
+            code(&runner_http(
+                &backend,
+                &request(
+                    Some("runner"),
+                    UseCase::RunnerDeclare,
+                    json!({"declaration": bad})
+                ),
+                true
+            )),
+            Some(ServiceErrorCode::BadRequest)
+        );
+        for token in [
+            "worker",
+            "planner",
+            "inbox",
+            "review",
+            "recovery",
+            "observer",
+            "supervisor",
+            "telemetry",
+        ] {
+            for case in [
+                UseCase::RunnerDeclare,
+                UseCase::RunnerShare,
+                UseCase::RunnerList,
+            ] {
+                if token == "inbox" && case == UseCase::RunnerList {
+                    continue;
+                }
+                assert_eq!(
+                    code(&runner_http(
+                        &backend,
+                        &request(
+                            Some(token),
+                            case,
+                            json!({"declaration": hints, "runner_id": "r", "shared": true})
+                        ),
+                        true
+                    )),
+                    Some(ServiceErrorCode::AuthorizationDenied),
+                    "{token} {case:?}"
+                );
+            }
+        }
+        backend.human.lock().unwrap().member.as_mut().unwrap().role =
+            crate::domain::queue_service::TeamRole::Member;
+        let human = exchange_human(&backend, &human_jwt).result.unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            code(&runner_http(
+                &backend,
+                &request(
+                    Some(&human),
+                    UseCase::RunnerDeclare,
+                    json!({"declaration": hints})
+                ),
+                true
+            )),
+            Some(ServiceErrorCode::AuthorizationDenied)
+        );
+        assert_eq!(
+            code(&runner_http(
+                &backend,
+                &request(
+                    Some(&human),
+                    UseCase::RunnerShare,
+                    json!({"runner_id": "r", "shared": true})
+                ),
+                true
+            )),
+            Some(ServiceErrorCode::AuthorizationDenied)
+        );
+        assert!(
+            runner_http(
+                &backend,
+                &request(
+                    Some(&human),
+                    UseCase::RunnerList,
+                    json!({"caller": "forged"})
+                ),
+                true
+            )
+            .result
+            .is_some()
+        );
+        assert!(
+            runner_http(
+                &backend,
+                &request(
+                    Some("inbox"),
+                    UseCase::RunnerList,
+                    json!({"caller": "forged-admin"})
+                ),
+                true
+            )
+            .result
+            .is_some()
+        );
+        assert_eq!(
+            backend.log.lock().unwrap().last().unwrap()["caller"],
+            serde_json::to_value(human_jwt.identity).unwrap()
+        );
+    }
+
+    #[test]
+    fn actions_exchange_returns_short_token_only_and_refuses_missing_or_disabled_owner() {
+        use crate::domain::{oidc::VerifiedJwt, runner_registration::GithubActions};
+        let (backend, human_jwt) = human_fixture();
+        let config = GithubActions {
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            audience: "dagq".into(),
+            repository: "org/repo".into(),
+            workflow_ref: "org/repo/.github/workflows/runner.yml@refs/heads/main".into(),
+            git_ref: "refs/heads/main".into(),
+            owner: human_jwt.identity.clone(),
+        };
+        let claims = json!({"iss": config.issuer, "aud": config.audience, "repository": config.repository, "workflow_ref": config.workflow_ref, "ref": config.git_ref});
+        let jwt = VerifiedJwt {
+            identity: crate::domain::oidc::OidcIdentity {
+                issuer: config.issuer.clone(),
+                subject: "job".into(),
+            },
+            claims: claims.as_object().unwrap().clone(),
+        };
+        // The fake starts with an active registry member, as the store contract
+        // independently checks the transaction's membership and no-refresh rule.
+        let active_member = backend.human.lock().unwrap().member.clone().unwrap();
+        let answer = runner_github_verified(&backend, Some(&config), Some(&jwt))
+            .result
+            .unwrap();
+        assert_eq!(answer["expires_at"], backend.now_ms() / 1000 + 900);
+        assert!(
+            answer["token"].is_string()
+                && answer.get("refresh").is_none()
+                && answer.get("refresh_expires_at").is_none()
+        );
+        let record = backend.log.lock().unwrap().last().unwrap().clone();
+        assert_eq!(
+            record["owner"],
+            serde_json::to_value(&config.owner).unwrap()
+        );
+        assert_eq!(
+            record["hash"],
+            backend
+                .runner_hash(answer["token"].as_str().unwrap())
+                .unwrap()
+        );
+        for (binding, jwt) in [(None, Some(&jwt)), (Some(&config), None)] {
+            assert_eq!(
+                code(&runner_github_verified(&backend, binding, jwt)),
+                Some(ServiceErrorCode::Unauthenticated)
+            );
+        }
+        backend.human.lock().unwrap().member = None;
+        assert_eq!(
+            code(&runner_github_verified(&backend, Some(&config), Some(&jwt))),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        backend.human.lock().unwrap().member = Some(crate::domain::queue_service::Member {
+            disabled_at: Some(1),
+            ..active_member
+        });
+        assert_eq!(
+            code(&runner_github_verified(&backend, Some(&config), Some(&jwt))),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
     }
 
     #[test]

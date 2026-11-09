@@ -65,21 +65,21 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 resourceの持ち主や状態が分からないときも拒む（fail closed）。
 列はcapabilityの群（入口は[Authorization](authorization.md#capability)）で、○は許す、△はresourceの規則つきで許す、—は拒む。
 
-| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose` / `replan resolve`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push | telemetryの送信（`telemetry_report`） |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — / ○ | ○ | ○ | ○ | ○ | — | — |
-| inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — / ○ | ○ | ○（`--yes`は—） | ○ | ○ | — | — |
-| planner | ○ | △ draft・submitted・readyのtask（`revising`のproposalのtaskは持ち主だけ、`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — / — | — | ○（setup-reviewは—） | — | — | — | — |
-| worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / —・— / △ 自分のrunだけ / — | — | — | — | — | — | — |
-| review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — |
-| recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — |
-| plan-review-job・goal-review-job・throughput-review-job・setup-review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — |
-| observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ recordとresolve（dismissは—） | — / —・— / — / — | — | — | — | — | — | — |
-| supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / — / —（保留と置換は○） | ○（recordは—） | ○（setup-reviewは—） | ○ | ○ | — | — |
-| wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | △ 自分のrunかplannerだけ | — | — | — | — | — |
-| integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | ○ | — |
-| runner | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ |
+| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose` / `replan resolve`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push | telemetryの送信（`telemetry_report`） | runnerの申告・共有承認・一覧 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — / ○ | ○ | ○ | ○ | ○ | — | — | `runner.share`（管理者）・`runner.list`（所有者か管理者） |
+| inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — / ○ | ○ | ○（`--yes`は—） | ○ | ○ | — | — | `runner.list`（親の人の範囲） |
+| planner | ○ | △ task・proposalの所有・状態はPolicyの規則。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（所有はPolicyの規則）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — / — | — | ○（setup-reviewは—） | — | — | — | — | — |
+| worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / —・— / △ 自分のrunだけ / — | — | — | — | — | — | — | — |
+| review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — | — |
+| recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — | — |
+| plan-review-job・goal-review-job・throughput-review-job・setup-review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | — | — |
+| observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ recordとresolve（dismissは—） | — / —・— / — / — | — | — | — | — | — | — | — |
+| supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / — / —（保留と置換は○） | ○（recordは—） | ○（setup-reviewは—） | ○ | ○ | — | — | — |
+| wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | △ 自分のrunかplannerだけ | — | — | — | — | — | — |
+| integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | ○ | — | — |
+| runner | — | — | — | — | — | — | — | — | — | — | — | — | — | — | `runner.declare`（自分） |
+| executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ | — |
 
 権限ごとの持ち主とresourceの条件は[AuthorizationのPolicy](authorization.md#policy)、判定の入口は`StaticPolicy`が持つ。
 

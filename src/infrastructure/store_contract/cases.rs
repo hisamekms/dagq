@@ -553,6 +553,138 @@ pub fn runner_credentials<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> R
     ensure!(store.change_runner(&enroll, 101)? == Outcome::Issued("contract-runner".into()));
     ensure!(open()?.change_runner(&enroll, 102)? == Outcome::Unauthenticated);
     ensure!(open()?.runner_token("token-hash", 102)?.is_some());
+    // Declaration replacement persists independently of registry approval.
+    let declaration = crate::domain::runner_registration::Declaration {
+        os: "linux".into(),
+        arch: "aarch64".into(),
+        container: true,
+        credentials: vec!["team_api_key".into()],
+    };
+    let declare = |declaration| Change::Declare {
+        runner_id: "contract-runner".into(),
+        declaration,
+    };
+    ensure!(store.change_runner(&declare(declaration.clone()), 102)? == Outcome::Updated);
+    let admin = OidcIdentity {
+        subject: "runner-admin".into(),
+        ..owner.clone()
+    };
+    store.add_member(&Member {
+        identity: admin.clone(),
+        role: TeamRole::Admin,
+        on_call: false,
+        display_name: None,
+        created_at: 0,
+        disabled_at: None,
+    })?;
+    let share = |caller, shared| Change::Share {
+        caller,
+        runner_id: "contract-runner".into(),
+        shared,
+    };
+    ensure!(store.change_runner(&share(owner.clone(), true), 102)? == Outcome::Denied);
+    ensure!(store.change_runner(&share(admin.clone(), true), 102)? == Outcome::Updated);
+    let replacement = crate::domain::runner_registration::Declaration {
+        container: false,
+        ..declaration
+    };
+    ensure!(open()?.change_runner(&declare(replacement.clone()), 102)? == Outcome::Updated);
+    let stored = open()?.runner_token("token-hash", 102)?.unwrap();
+    ensure!(stored.declaration == Some(replacement));
+    ensure!(stored.shared && stored.approved_by == Some(admin.clone()));
+    ensure!(store.change_runner(&share(admin.clone(), true), 102)? == Outcome::Denied);
+    if let Outcome::Listed(rows) = store.change_runner(
+        &Change::List {
+            caller: owner.clone(),
+        },
+        102,
+    )? {
+        ensure!(rows.len() == 1 && rows[0] == stored);
+    } else {
+        anyhow::bail!("owner listing refused");
+    }
+    ensure!(store.change_runner(&share(admin.clone(), false), 102)? == Outcome::Updated);
+    ensure!(!open()?.runner_token("token-hash", 102)?.unwrap().shared);
+    // Standby runner receives no refresh credential and never starts shared.
+    let github = Change::Github {
+        owner: owner.clone(),
+        runner_id: "actions-runner".into(),
+        token: "actions-token-hash".into(),
+    };
+    ensure!(store.change_runner(&github, 102)? == Outcome::Issued("actions-runner".into()));
+    let actions = open()?.runner_token("actions-token-hash", 102)?.unwrap();
+    ensure!(actions.owner == owner && !actions.shared && actions.approved_by.is_none());
+    let tx = store.read_entry("actions_no_refresh")?;
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM runner_refresh WHERE runner_id = ?1",
+        sql_params!["actions-runner"],
+        |r| r.get(0),
+    )?;
+    ensure!(count == 0);
+    drop(tx);
+    if let Outcome::Listed(rows) = store.change_runner(
+        &Change::List {
+            caller: admin.clone(),
+        },
+        102,
+    )? {
+        ensure!(rows.len() == 2);
+    } else {
+        anyhow::bail!("admin listing refused");
+    }
+    if let Outcome::Listed(rows) = store.change_runner(
+        &Change::List {
+            caller: owner.clone(),
+        },
+        102,
+    )? {
+        ensure!(rows.len() == 2);
+    } else {
+        anyhow::bail!("owner listing refused");
+    }
+    ensure!(
+        store.change_runner(
+            &Change::Github {
+                owner: OidcIdentity {
+                    subject: "absent".into(),
+                    ..owner.clone()
+                },
+                runner_id: "absent-runner".into(),
+                token: "absent-token".into()
+            },
+            102
+        )? == Outcome::Unauthenticated
+    );
+    ensure!(
+        store.change_runner(
+            &Change::Github {
+                owner: admin.clone(),
+                runner_id: "admin-runner".into(),
+                token: "admin-token".into()
+            },
+            102
+        )? == Outcome::Issued("admin-runner".into())
+    );
+    if let Outcome::Listed(rows) = store.change_runner(
+        &Change::List {
+            caller: owner.clone(),
+        },
+        102,
+    )? {
+        ensure!(rows.len() == 2 && rows.iter().all(|r| r.owner == owner));
+    } else {
+        anyhow::bail!("owner listing refused");
+    }
+    if let Outcome::Listed(rows) = store.change_runner(
+        &Change::List {
+            caller: admin.clone(),
+        },
+        102,
+    )? {
+        ensure!(rows.len() == 3);
+    } else {
+        anyhow::bail!("admin listing refused");
+    }
     // Duplicate hash fails after consumption: transaction rollback leaves the
     // original refresh current and creates no replacement.
     let failed = Change::Refresh {
@@ -603,6 +735,17 @@ pub fn runner_credentials<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> R
             == Outcome::Issued("second-runner".into())
     );
     store.disable_member(&owner, 203)?;
+    ensure!(
+        store.change_runner(
+            &Change::Github {
+                owner: owner.clone(),
+                runner_id: "disabled-runner".into(),
+                token: "disabled-token".into()
+            },
+            203
+        )? == Outcome::Unauthenticated
+    );
+
     ensure!(open()?.runner_token("second-token", 203)?.is_none());
     ensure!(
         store.change_runner(

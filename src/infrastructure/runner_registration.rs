@@ -6,23 +6,25 @@ use crate::domain::{oidc::OidcIdentity, runner_registration::*};
 use anyhow::Result;
 
 fn runner(tx: &impl SqlRead, id: &str) -> Result<Option<Runner>> {
-    tx.query_row(
-        "SELECT owner_issuer, owner_subject, created_at, revoked_at FROM runners WHERE id = ?1",
+    let row = tx.query_row(
+        "SELECT owner_issuer, owner_subject, created_at, revoked_at, declaration, shared, approved_by FROM runners WHERE id = ?1",
         sql_params![id],
-        |r| {
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, Option<String>>(4)?, r.get::<_, i64>(5)?, r.get::<_, Option<String>>(6)?)),
+    ).optional()?;
+    row.map(
+        |(issuer, subject, created_at, revoked_at, declaration, shared, approved_by)| {
             Ok(Runner {
                 id: id.into(),
-                owner: OidcIdentity {
-                    issuer: r.get(0)?,
-                    subject: r.get(1)?,
-                },
-                created_at: r.get(2)?,
-                revoked_at: r.get(3)?,
+                owner: OidcIdentity { issuer, subject },
+                created_at,
+                revoked_at,
+                declaration: declaration.map(|v| serde_json::from_str(&v)).transpose()?,
+                shared: shared != 0,
+                approved_by: approved_by.map(|v| serde_json::from_str(&v)).transpose()?,
             })
         },
     )
-    .optional()
-    .map_err(Into::into)
+    .transpose()
 }
 
 fn credentials(
@@ -59,6 +61,82 @@ fn revoke(tx: &impl SqlWrite, id: &str, now: i64) -> Result<()> {
 
 fn change(tx: &impl SqlWrite, action: &Change, now: i64) -> Result<Outcome> {
     match action {
+        Change::Declare {
+            runner_id,
+            declaration,
+        } => {
+            let Some(r) = runner(tx, runner_id)? else {
+                return Ok(Outcome::Denied);
+            };
+            if !declaration.valid()
+                || !runner_live(&r, super::members::read(tx, &r.owner)?.as_ref())
+            {
+                return Ok(Outcome::Denied);
+            }
+            tx.execute(
+                "UPDATE runners SET declaration = ?2 WHERE id = ?1",
+                sql_params![runner_id, serde_json::to_string(declaration)?],
+            )?;
+            Ok(Outcome::Updated)
+        }
+        Change::Share {
+            caller,
+            runner_id,
+            shared,
+        } => {
+            let Some(caller) = super::members::read(tx, caller)? else {
+                return Ok(Outcome::Denied);
+            };
+            let Some(r) = runner(tx, runner_id)? else {
+                return Ok(Outcome::Denied);
+            };
+            if !may_share(&caller, &r, *shared) {
+                return Ok(Outcome::Denied);
+            }
+            let approval = shared
+                .then(|| serde_json::to_string(&caller.identity))
+                .transpose()?;
+            tx.execute(
+                "UPDATE runners SET shared = ?2, approved_by = ?3 WHERE id = ?1",
+                sql_params![runner_id, i64::from(*shared), approval],
+            )?;
+            Ok(Outcome::Updated)
+        }
+        Change::List { caller } => {
+            let Some(caller) =
+                super::members::read(tx, caller)?.filter(|m| m.disabled_at.is_none())
+            else {
+                return Ok(Outcome::Denied);
+            };
+            let ids = tx.query_map("SELECT id FROM runners ORDER BY id", sql_params![], |r| {
+                r.get::<_, String>(0)
+            })?;
+            let mut rows = Vec::new();
+            for id in ids {
+                if let Some(r) = runner(tx, &id)?.filter(|r| visible(&caller, r)) {
+                    rows.push(r);
+                }
+            }
+            Ok(Outcome::Listed(rows))
+        }
+        Change::Github {
+            owner,
+            runner_id,
+            token,
+        } => {
+            if !super::members::read(tx, owner)?.is_some_and(|m| m.disabled_at.is_none()) {
+                return Ok(Outcome::Unauthenticated);
+            }
+            let expiry = now
+                .checked_add(SHORT_SECONDS)
+                .ok_or_else(|| anyhow::anyhow!("credential expiry overflow"))?;
+            tx.execute("INSERT INTO runners(id, owner_issuer, owner_subject, created_at) VALUES (?1, ?2, ?3, ?4)", sql_params![runner_id, owner.issuer, owner.subject, now])?;
+            tx.execute(
+                "INSERT INTO runner_tokens(hash, runner_id, expires_at) VALUES (?1, ?2, ?3)",
+                sql_params![token, runner_id, expiry],
+            )?;
+            Ok(Outcome::Issued(runner_id.clone()))
+        }
         Change::Code { owner, hash } => {
             if !super::members::read(tx, owner)?.is_some_and(|m| m.disabled_at.is_none()) {
                 return Ok(Outcome::Unauthenticated);

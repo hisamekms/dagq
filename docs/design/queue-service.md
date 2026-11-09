@@ -80,6 +80,8 @@ serviceの書き込みは1本の列で1つずつ確定し、読み取りは列�
 入口はHTTPの`exchange_token`（`application::queue_service::exchange_human`）。
 runnerの登録・交換・更新・失効の入口はHTTPの`application::queue_service::runner_http`。
 通常の登録の経路では、runnerの資格は人が発行した1回きりの値から始まり、値はハッシュだけを持つ。
+例外として、GitHub Actionsの控えのrunnerは登録の値の代わりに配置の設定が縛るOIDCのJWTで識別され、短いtokenだけを得て更新の資格を持たない。
+申告は割り当てにだけ使い、権限は登録の印が決める。
 外向きの入口だけが発行元のJWTを人の短いtokenに替え、hostのsocketの入口は人のtokenを発行も受けもしない。
 人のtokenの記録は制御側の手元のファイルだけにあり、制御側の入れ替えで失われると期限の内でもunauthenticatedになる。
 

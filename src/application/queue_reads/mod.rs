@@ -684,6 +684,10 @@ impl QueueRead {
             | UseCase::SessionRecord
             | UseCase::DenialRecord
             | UseCase::IssueToken
+            | UseCase::RunnerDeclare
+            | UseCase::RunnerShare
+            | UseCase::RunnerList
+            | UseCase::RunnerGithub
             | UseCase::RunnerCode | UseCase::RunnerEnroll | UseCase::RunnerRefresh | UseCase::RunnerRevoke
             | UseCase::ExchangeToken
             | UseCase::RevokeToken
