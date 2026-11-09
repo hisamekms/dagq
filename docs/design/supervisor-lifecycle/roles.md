@@ -77,6 +77,8 @@ actorとしてcontainerへ置くのはworkerのturnだけで、session wrapper�
 verificationのコマンドはactorではない（[Container runtime](../container-runtime.md#verificationの実行)）。
 statusとdoctorはhost実行がsandboxでないことを実行時にも示し、その行の互換とprovider別の強制の読み方は`ExecutionConfig::profiles`が持つ。
 
+runnerのcapabilityと所有の規則は[Authorization](../authorization.md#capability)のCapability・Policyが入口になる。
+
 ### CLIでの解釈
 
 認証・認可とqueueを開く境界の分岐は`src/main.rs`の`execute`が入口になる。

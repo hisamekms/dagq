@@ -233,7 +233,7 @@ fn change(tx: &impl SqlWrite, action: &Change, now: i64) -> Result<Outcome> {
     }
 }
 
-fn authenticate(tx: &impl SqlRead, hash: &str, now: i64) -> Result<Option<Runner>> {
+pub(super) fn authenticate(tx: &impl SqlRead, hash: &str, now: i64) -> Result<Option<Runner>> {
     let row = tx
         .query_row(
             "SELECT runner_id, expires_at FROM runner_tokens WHERE hash = ?1",

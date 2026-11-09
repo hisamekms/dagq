@@ -215,6 +215,28 @@ pub trait ServiceBackend: Send + Sync {
         anyhow::bail!("runner hashing unavailable")
     }
 
+    /// Main's head comes from the control side's GitHub port, never a
+    /// runner's request. No host git fallback; an unconfigured port fails closed.
+    fn runner_main_head(&self) -> Result<crate::domain::CommitSha> {
+        anyhow::bail!("main head port is not configured")
+    }
+    /// Accepted repository rules for runner claims: max_spikes,
+    /// max_investigations and waiting_owner_grace_secs. Like the main-head
+    /// port this fails closed until configured; never substitute unlimited
+    /// defaults for a missing rules snapshot.
+    fn runner_claim_limits(&self) -> Result<crate::domain::runner_assignment::ClaimLimits> {
+        anyhow::bail!("runner claim rules are not configured")
+    }
+    /// Authenticate and perform the whole operation in one fenced transaction.
+    fn runner_operation(
+        &self,
+        _hash: &str,
+        _operation: &crate::domain::runner_assignment::Operation,
+        _claim: Option<&crate::domain::runner_assignment::ClaimInputs>,
+    ) -> Result<crate::domain::runner_assignment::Outcome> {
+        anyhow::bail!("runner assignment unavailable")
+    }
+
     fn runner_change(
         &self,
         _change: &crate::domain::runner_registration::Change,
@@ -676,7 +698,11 @@ impl QueueService<'_> {
         }
         if matches!(
             request.use_case,
-            UseCase::RunnerDeclare
+            UseCase::RunnerPoll
+                | UseCase::RunnerHeartbeat
+                | UseCase::RunnerReport
+                | UseCase::RunnerRelease
+                | UseCase::RunnerDeclare
                 | UseCase::RunnerShare
                 | UseCase::RunnerList
                 | UseCase::RunnerGithub
@@ -2195,7 +2221,11 @@ fn run(
         UseCase::Supervisor | UseCase::Control => {
             unreachable!("a supervisor's and a control-side command's requests are answered apart")
         }
-        UseCase::RunnerDeclare
+        UseCase::RunnerPoll
+        | UseCase::RunnerHeartbeat
+        | UseCase::RunnerReport
+        | UseCase::RunnerRelease
+        | UseCase::RunnerDeclare
         | UseCase::RunnerShare
         | UseCase::RunnerList
         | UseCase::RunnerGithub
@@ -4165,6 +4195,47 @@ pub(crate) mod tests {
             };
             memory.image_rows.push(row.clone());
             Ok(PublishOutcome::Recorded(row))
+        }
+        fn runner_main_head(&self) -> Result<crate::domain::CommitSha> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(json!({"main_head_port": true}));
+            Ok(crate::domain::CommitSha::parse("a".repeat(40), "base")?)
+        }
+        fn runner_claim_limits(&self) -> Result<crate::domain::runner_assignment::ClaimLimits> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(json!({"claim_rules_port": true}));
+            Ok(crate::domain::runner_assignment::ClaimLimits {
+                max_spikes: Some(1),
+                investigations: crate::domain::investigation::InvestigationLimit {
+                    max: Some(2),
+                    grace_secs: 60,
+                },
+            })
+        }
+        fn runner_operation(
+            &self,
+            hash: &str,
+            operation: &crate::domain::runner_assignment::Operation,
+            claim: Option<&crate::domain::runner_assignment::ClaimInputs>,
+        ) -> Result<crate::domain::runner_assignment::Outcome> {
+            use crate::domain::runner_assignment::{Operation, Outcome};
+            assert_eq!(hash, self.runner_hash("runner")?);
+            match operation {
+                Operation::Poll(_) => {
+                    let claim = claim.unwrap();
+                    assert_eq!(claim.base.as_str(), "a".repeat(40));
+                    assert_eq!(claim.limits.max_spikes, Some(1));
+                    assert_eq!(claim.limits.investigations.max, Some(2));
+                    assert_eq!(claim.limits.investigations.grace_secs, 60);
+                    self.log.lock().unwrap().push(json!({"runner_poll": true}));
+                    Ok(Outcome::Assignment(None))
+                }
+                _ => Ok(Outcome::LeaseLost),
+            }
         }
         fn runner_secret(&self) -> Result<(String, String)> {
             let mut memory = self.human.lock().unwrap();
@@ -8415,6 +8486,54 @@ pub(crate) mod tests {
             assert_eq!(notes.heavy_read, None);
         }
     }
+    #[test]
+    fn runner_pull_reads_the_main_head_port_and_reports_transport_lease_lost() {
+        let backend = backend(RunStatus::Running);
+        let pull = request(Some("runner"), UseCase::RunnerPoll, json!({}));
+        let answer = runner_work_http(&backend, &pull);
+        assert!(answer.error.is_none(), "{answer:?}");
+        let log = backend.log.lock().unwrap().clone();
+        assert_eq!(
+            log,
+            vec![
+                json!({"main_head_port": true}),
+                json!({"claim_rules_port": true}),
+                json!({"runner_poll": true})
+            ]
+        );
+        for params in [json!({"run_id":"chosen"}), json!({"now_ms": 1})] {
+            assert_eq!(
+                code(&runner_work_http(
+                    &backend,
+                    &request(Some("runner"), UseCase::RunnerPoll, params)
+                )),
+                Some(ServiceErrorCode::BadRequest)
+            );
+        }
+        for token in ["planner", "worker", "inbox", "supervisor"] {
+            assert_eq!(
+                code(&runner_work_http(
+                    &backend,
+                    &request(Some(token), UseCase::RunnerPoll, json!({}))
+                )),
+                Some(ServiceErrorCode::AuthorizationDenied)
+            );
+        }
+        let report = request(
+            Some("runner"),
+            UseCase::RunnerHeartbeat,
+            json!({"run_id":"run", "generation":1}),
+        );
+        assert_eq!(
+            code(&runner_work_http(&backend, &report)),
+            Some(ServiceErrorCode::LeaseLost)
+        );
+        assert_eq!(
+            backend.log.lock().unwrap().len(),
+            3,
+            "reports do not read main or claim rules"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -8429,5 +8548,95 @@ mod write_leader_tests {
         let error = response.error.unwrap();
         assert_eq!(error.code, ServiceErrorCode::NotLeader);
         assert!(error.message.contains("may be resent"));
+    }
+}
+
+/// HTTP-only runner work use cases, called on the writer's line. Poll accepts
+/// only an empty object; all report targets are checked again against the
+/// authenticated runner inside the store transaction. Return shares heartbeat's
+/// capability: it can only relinquish the caller's own assignment.
+pub fn runner_work_http(backend: &dyn ServiceBackend, request: &ServiceRequest) -> ServiceResponse {
+    use crate::domain::runner_assignment::{LeaseReport, Operation, Outcome, Poll, ResultReport};
+    let execute = || -> Result<ServiceResponse> {
+        let Some(token) = request.token.as_deref() else {
+            return Ok(runner_refusal());
+        };
+        let Some(principal) = backend.principal(token)? else {
+            return Ok(runner_refusal());
+        };
+        if principal.check().is_err() {
+            return Ok(runner_refusal());
+        }
+        let capability = match request.use_case {
+            UseCase::RunnerPoll => Capability::RunnerClaim,
+            UseCase::RunnerReport => Capability::RunnerReport,
+            _ => Capability::RunnerHeartbeat,
+        };
+        if !crate::domain::authorization::grants(principal.role).contains(&capability) {
+            return Ok(ServiceResponse::failure(
+                ServiceErrorCode::AuthorizationDenied,
+                "runner capability denied",
+            ));
+        }
+        let params = request.params.clone();
+        let operation = match request.use_case {
+            UseCase::RunnerPoll => serde_json::from_value::<Poll>(params).map(Operation::Poll),
+            UseCase::RunnerHeartbeat => {
+                serde_json::from_value::<LeaseReport>(params).map(Operation::Heartbeat)
+            }
+            UseCase::RunnerReport => {
+                serde_json::from_value::<ResultReport>(params).map(Operation::Report)
+            }
+            UseCase::RunnerRelease => {
+                serde_json::from_value::<LeaseReport>(params).map(Operation::Release)
+            }
+            _ => {
+                return Ok(ServiceResponse::failure(
+                    ServiceErrorCode::BadRequest,
+                    "not a runner work use case",
+                ));
+            }
+        };
+        let operation = match operation {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(ServiceResponse::failure(
+                    ServiceErrorCode::BadRequest,
+                    "invalid runner work parameters",
+                ));
+            }
+        };
+        let claim = if matches!(operation, Operation::Poll(_)) {
+            Some(crate::domain::runner_assignment::ClaimInputs {
+                base: backend.runner_main_head()?,
+                limits: backend.runner_claim_limits()?,
+            })
+        } else {
+            None
+        };
+        let outcome =
+            backend.runner_operation(&backend.runner_hash(token)?, &operation, claim.as_ref())?;
+        Ok(match outcome {
+            Outcome::Assignment(work) => ServiceResponse::success(json!({"assignment": work})),
+            Outcome::Renewed { remaining_seconds } => {
+                ServiceResponse::success(json!({"remaining_seconds": remaining_seconds}))
+            }
+            Outcome::Released => ServiceResponse::success(json!({"released": true})),
+            Outcome::Denied => ServiceResponse::failure(
+                ServiceErrorCode::AuthorizationDenied,
+                "run is not assigned to this runner",
+            ),
+            Outcome::LeaseLost => {
+                ServiceResponse::failure(ServiceErrorCode::LeaseLost, "runner lease lost")
+            }
+            Outcome::Unauthenticated => runner_refusal(),
+        })
+    };
+    match execute() {
+        Ok(answer) => answer,
+        Err(error) if error.is::<super::NotLeader>() => respond(Err(super::NotLeader.into())),
+        Err(_) => {
+            ServiceResponse::failure(ServiceErrorCode::Failed, "runner work operation failed")
+        }
     }
 }

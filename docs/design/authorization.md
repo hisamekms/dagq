@@ -70,14 +70,14 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | 当番（管理者かmemberに重ねる） | 重ねた役割に`run.recover`を戻す。grantsに無い許可は足さない |
 | 役割なし（hostのsocketのpeer） | なし |
 
-同じroleの「続き」の行は、許可とresourceの規則を全て合わせて読む。
+同じroleの行を併読する。
 
 | role | 許すcapability | resourceの規則 |
 | --- | --- | --- |
-| user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report` `runner.declare` `image.publish`を除く全て | なし |
-| user（続き） | `runner.register`・`runner.revoke` | OIDCの人自身。登録は自分のrunner、失効は持ち主か管理者だけ |
-| user（続き） | `runner.share`・`runner.list` | 共有は管理者だけ。一覧はmemberが自分、管理者が全て |
-| runner | `runner.declare` | 自分の申告だけ |
+| user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report` runnerの行と`image.publish`を除く全て | なし |
+| user（続き） | `runner.register`・`runner.revoke` | OIDCの人。登録は自分、失効は持ち主か管理者 |
+| user（続き） | `runner.share`・`runner.list` | 共有は管理者、一覧はmemberが自分、管理者が全て |
+| runner | `runner.declare`・`runner.claim`・`runner.heartbeat`・`runner.report` | 申告・pullは自分、報告・返却は割り当てrun |
 | image-publisher | `image.publish`だけ | なし |
 | inbox（続き） | `runner.list` | 親の人の一覧の範囲だけ |
 | inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`・`runner.share`・`runner.declare`は持たない | なし。人自身の操作との区別は記録が持つ |

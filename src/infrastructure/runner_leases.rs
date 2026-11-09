@@ -8,7 +8,7 @@ use crate::application::RunnerLeaseStore;
 use crate::domain::runner_lease::*;
 use anyhow::{Context, Result};
 
-fn lease(tx: &impl SqlRead, run_id: &str) -> Result<Option<RunnerLease>> {
+pub(super) fn lease(tx: &impl SqlRead, run_id: &str) -> Result<Option<RunnerLease>> {
     let row = tx
         .query_row(
             "SELECT generation, runner_id, expires_at_ms, state FROM runner_leases WHERE run_id = ?1",
@@ -36,7 +36,7 @@ fn lease(tx: &impl SqlRead, run_id: &str) -> Result<Option<RunnerLease>> {
     .transpose()
 }
 
-fn records(tx: &impl SqlRead, run_id: &str) -> Result<Vec<GenerationRecord>> {
+pub(super) fn records(tx: &impl SqlRead, run_id: &str) -> Result<Vec<GenerationRecord>> {
     Ok(tx.query_map(
         "SELECT generation, accepted_head, verified_ref_head FROM runner_lease_records WHERE run_id = ?1",
         sql_params![run_id],
@@ -73,7 +73,12 @@ pub(crate) fn extend_held(
     )?)
 }
 
-fn grant_lease(tx: &impl SqlWrite, run_id: &str, runner_id: &str, now_ms: i64) -> Result<Grant> {
+pub(super) fn grant_lease(
+    tx: &impl SqlWrite,
+    run_id: &str,
+    runner_id: &str,
+    now_ms: i64,
+) -> Result<Grant> {
     let current = lease(tx, run_id)?;
     let decision = grant(current.as_ref(), now_ms);
     let Grant::Grant {
@@ -102,7 +107,7 @@ fn grant_lease(tx: &impl SqlWrite, run_id: &str, runner_id: &str, now_ms: i64) -
     Ok(decision)
 }
 
-fn report_lease(
+pub(super) fn report_lease(
     tx: &impl SqlWrite,
     run_id: &str,
     report: Report<'_>,
@@ -127,7 +132,7 @@ fn report_lease(
     Ok(verdict)
 }
 
-fn release_lease(
+pub(super) fn release_lease(
     tx: &impl SqlWrite,
     run_id: &str,
     report: Report<'_>,

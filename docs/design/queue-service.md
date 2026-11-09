@@ -102,6 +102,9 @@ hostではtokenは誤りを止めるもので、security boundaryではない（
 
 ## ユースケース
 
+runnerの割り当てと報告の入口は`application::queue_service::runner_work_http`。
+runnerの仕事は制御側が選んで渡し、runnerはrunを指定できない。
+
 検査の順と拒否の記録・応答は`application::queue_service::QueueService::handle`、storeの型付き拒否の応答は同moduleの`respond`が持つ。
 認可はCLIと同じapplicationの境界をprincipalのactorでservice側で通す。
 

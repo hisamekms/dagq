@@ -24,6 +24,12 @@ string_enum!(Capability {
     RunnerRegister => "runner.register",
     /// A human owner or administrator revokes a runner and its credentials.
     RunnerRevoke => "runner.revoke",
+    /// Pull an assignment chosen by the control side.
+    RunnerClaim => "runner.claim",
+    /// Renew or return only a lease assigned to this runner.
+    RunnerHeartbeat => "runner.heartbeat",
+    /// Report a turn only on an assigned lease.
+    RunnerReport => "runner.report",
     /// A runner replaces only its own scheduling hints.
     RunnerDeclare => "runner.declare",
     /// An administrator approves or removes a runner's shared registration.
@@ -160,8 +166,11 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 72] = [
+    pub const ALL: [Self; 75] = [
         Self::ImagePublish,
+        Self::RunnerClaim,
+        Self::RunnerHeartbeat,
+        Self::RunnerReport,
         Self::RunnerDeclare,
         Self::RunnerShare,
         Self::RunnerList,
@@ -257,6 +266,11 @@ impl fmt::Display for Capability {
 pub enum Resource {
     /// The queue as a whole: reads, and what names nothing smaller.
     Queue,
+    /// A runner report's owner, read from the current stored lease.
+    RunnerRun {
+        id: RunId,
+        runner_id: Option<String>,
+    },
     Goal(GoalId),
     /// A task and its status when known, with the proposal it is in when
     /// the caller read its status (`None` for a task in no proposal, or one
@@ -419,6 +433,9 @@ impl Resource {
         use serde_json::json;
         match self {
             Self::Queue => json!({"kind": "queue"}),
+            Self::RunnerRun { id, runner_id } => {
+                json!({"kind": "runner_run", "id": id, "runner_id": runner_id})
+            }
             Self::Goal(id) => json!({"kind": "goal", "id": id}),
             Self::Task {
                 id,
@@ -823,7 +840,12 @@ const EXECUTOR_TELEMETRY: &[Capability] = &[C::TelemetryReport];
 /// changes beforehand; the record tells the two apart.
 pub const fn grants(role: ActorRole) -> &'static [Capability] {
     match role {
-        ActorRole::Runner => &[C::RunnerDeclare],
+        ActorRole::Runner => &[
+            C::RunnerDeclare,
+            C::RunnerClaim,
+            C::RunnerHeartbeat,
+            C::RunnerReport,
+        ],
         ActorRole::User => USER,
         ActorRole::Inbox => INBOX,
         ActorRole::Planner => PLANNER,
@@ -866,6 +888,13 @@ fn resource_permits(actor: &ActorContext, capability: Capability, resource: &Res
         return matches!(resource, Resource::Principal(child) if starts(actor.role(), *child));
     }
     match actor.role() {
+        ActorRole::Runner => match capability {
+            C::RunnerDeclare | C::RunnerClaim => matches!(resource, Resource::Queue),
+            C::RunnerHeartbeat | C::RunnerReport => matches!(resource,
+                Resource::RunnerRun { runner_id: Some(owner), .. }
+                if actor.actor_id() == format!("runner:{owner}")),
+            _ => false,
+        },
         ActorRole::Worker => capability == C::QueueRead || worker_owns(actor, resource),
         ActorRole::Planner => planner_permits(actor, capability, resource),
         ActorRole::ReviewJob | ActorRole::RecoveryJob => {
@@ -1345,6 +1374,28 @@ mod tests {
             Resource::Principal(R::Worker).record(),
             serde_json::json!({"kind": "principal", "role": "worker"})
         );
+    }
+
+    #[test]
+    fn only_runners_pull_and_report_only_on_their_stored_assignment() {
+        use crate::domain::ActorRole as R;
+        let actor = ActorContext::instance(R::Runner, "a");
+        for capability in [C::RunnerClaim, C::RunnerHeartbeat, C::RunnerReport] {
+            for role in R::ALL {
+                assert_eq!(grants(role).contains(&capability), role == R::Runner);
+            }
+        }
+        assert!(allowed(&actor, C::RunnerClaim, &Resource::Queue));
+        for capability in [C::RunnerHeartbeat, C::RunnerReport] {
+            for owner in [Some("a"), Some("b"), None] {
+                let resource = Resource::RunnerRun {
+                    id: RunId::new("run").unwrap(),
+                    runner_id: owner.map(str::to_owned),
+                };
+                assert_eq!(allowed(&actor, capability, &resource), owner == Some("a"));
+            }
+            assert!(!allowed(&actor, capability, &Resource::Queue));
+        }
     }
 
     #[test]

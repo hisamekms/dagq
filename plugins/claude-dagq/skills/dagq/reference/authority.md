@@ -33,7 +33,8 @@ HTTP-authenticated people remain `user`; the registry role narrows user grants b
 | Role | Runner capabilities |
 | --- | --- |
 | user | `runner.register` for oneself; `runner.revoke` as owner or administrator, with human authentication |
-| runner | Only `runner.declare`, for itself |
+| runner | `runner.declare` and `runner.claim` for itself; `runner.heartbeat` (also return) and `runner.report` only for its assigned runs |
+| Every other role | `runner.claim`, `runner.heartbeat` and `runner.report` are refused |
 | user | `runner.share` as administrator; `runner.list` for one's own runners or all as administrator |
 | inbox | `runner.list` within its human parent's scope |
 | planner, worker, all jobs, observer, supervisor, wrapper, integrator, executor-telemetry | `runner.declare`, `runner.share`, `runner.list` are refused |

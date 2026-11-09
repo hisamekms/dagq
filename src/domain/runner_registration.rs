@@ -585,7 +585,15 @@ mod tests {
         use crate::domain::authorization::{Authorizer, Resource, StaticPolicy, grants};
         use crate::domain::{ActorRole, Capability, TrustLevel};
         assert_eq!(ActorRole::Runner.trust(), TrustLevel::UntrustedAgent);
-        assert_eq!(grants(ActorRole::Runner), &[Capability::RunnerDeclare]);
+        assert_eq!(
+            grants(ActorRole::Runner),
+            &[
+                Capability::RunnerDeclare,
+                Capability::RunnerClaim,
+                Capability::RunnerHeartbeat,
+                Capability::RunnerReport,
+            ]
+        );
         for role in ActorRole::ALL {
             for cap in [Capability::RunnerRegister, Capability::RunnerRevoke] {
                 assert_eq!(

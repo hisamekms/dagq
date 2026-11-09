@@ -100,7 +100,7 @@ use self::{
 use super::sql_exec::sqlite::{native_error, port_tx, with_row};
 
 /// The run as stored (its paths not relocated), for a command to start from.
-fn stored_run(conn: &impl sql_exec::SqlRead, id: &RunId) -> Result<Option<TaskRun>> {
+pub(super) fn stored_run(conn: &impl sql_exec::SqlRead, id: &RunId) -> Result<Option<TaskRun>> {
     Ok(conn
         .query_row(
             "SELECT * FROM task_runs WHERE id=?1",
@@ -131,7 +131,7 @@ fn supervised_run(
 /// decided the move. Whether a row was updated. The record the domain
 /// gives a move into or out of the unfinished statuses
 /// ([`run::unfinished_change`]) is written in the same transaction.
-fn save_run(
+pub(super) fn save_run(
     conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     run: &TaskRun,
     from: RunStatus,
@@ -275,7 +275,7 @@ fn apply_recorded(
 }
 
 /// Write the events a transition returned for run `id`.
-fn record_events(
+pub(super) fn record_events(
     conn: &impl crate::infrastructure::sql_exec::SqlWrite,
     id: &RunId,
     events: Vec<run::NewRunEvent>,

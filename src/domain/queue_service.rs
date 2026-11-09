@@ -374,6 +374,10 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::DenialRecord
         | UseCase::IssueToken
         | UseCase::ExchangeToken
+        | UseCase::RunnerPoll
+        | UseCase::RunnerHeartbeat
+        | UseCase::RunnerReport
+        | UseCase::RunnerRelease
         | UseCase::RunnerDeclare
         | UseCase::RunnerShare
         | UseCase::RunnerList
@@ -597,6 +601,10 @@ string_enum!(UseCase {
     IssueToken => "issue_token",
     /// HTTP only: exchange an issuer JWT for a human token.
     ExchangeToken => "exchange_token",
+    RunnerPoll => "runner_poll",
+    RunnerHeartbeat => "runner_heartbeat",
+    RunnerReport => "runner_report",
+    RunnerRelease => "runner_release",
     RunnerDeclare => "runner_declare",
     RunnerShare => "runner_share",
     RunnerList => "runner_list",
@@ -875,6 +883,8 @@ string_enum!(
     /// `failed`: the use case failed (a missing task, a bad option, ...),
     /// or the broker could not read a token or a run.
     Failed => "failed",
+    /// The report no longer holds the current fencing generation.
+    LeaseLost => "lease_lost",
     /// Leadership changed before the write. No change was committed; the
     /// caller may resend to the current service.
     NotLeader => "not_leader",

@@ -304,6 +304,7 @@ pub fn status_of(code: Option<ServiceErrorCode>) -> u16 {
     match code {
         None => 200,
         Some(Code::ApiVersionMismatch | Code::BadRequest | Code::WrongQueue) => 400,
+        Some(Code::LeaseLost) => 409,
         Some(Code::Unauthenticated) => 401,
         Some(Code::AuthorizationDenied | Code::ForbiddenDestination) => 403,
         Some(Code::RequestTooLarge) => 413,
@@ -320,6 +321,7 @@ pub fn status_of(code: Option<ServiceErrorCode>) -> u16 {
 fn response_bytes(status: u16, body: &[u8]) -> Vec<u8> {
     let (reason, extra) = match status {
         200 => ("OK", ""),
+        409 => ("Conflict", ""),
         400 => ("Bad Request", ""),
         401 => ("Unauthorized", "WWW-Authenticate: Bearer\r\n"),
         403 => ("Forbidden", ""),
@@ -1224,6 +1226,7 @@ mod tests {
             (Some(Code::AuthorizationDenied), 403),
             (Some(Code::ForbiddenDestination), 403),
             (Some(Code::RequestTooLarge), 413),
+            (Some(Code::LeaseLost), 409),
             (Some(Code::Failed), 422),
             (Some(Code::ResponseTooLarge), 500),
             (Some(Code::Unreachable), 502),

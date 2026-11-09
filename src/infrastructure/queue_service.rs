@@ -3870,6 +3870,25 @@ fn http_answerer(
         }
         if matches!(
             request.use_case,
+            UseCase::RunnerPoll
+                | UseCase::RunnerHeartbeat
+                | UseCase::RunnerReport
+                | UseCase::RunnerRelease
+        ) {
+            let on = backend.clone();
+            let use_case = request.use_case;
+            let operation = move || LineAnswer {
+                response: crate::application::queue_service::runner_work_http(&*on, &request),
+                notes: RequestNotes::default(),
+            };
+            let answer = match &backend.write_line {
+                Some(line) => line.line.run(operation)?,
+                None => operation(),
+            };
+            return Ok(answered_of(&answer.response, Some(use_case))?.0);
+        }
+        if matches!(
+            request.use_case,
             UseCase::RunnerDeclare
                 | UseCase::RunnerShare
                 | UseCase::RunnerList
@@ -4481,6 +4500,22 @@ impl ServiceBackend for SqliteServiceBackend {
     fn runner_hash(&self, value: &str) -> Result<String> {
         Ok(sha256_hex(value.as_bytes()))
     }
+    fn runner_operation(
+        &self,
+        hash: &str,
+        operation: &crate::domain::runner_assignment::Operation,
+        claim: Option<&crate::domain::runner_assignment::ClaimInputs>,
+    ) -> Result<crate::domain::runner_assignment::Outcome> {
+        use crate::application::RunnerStore;
+        let queue = write_queue(self.write_line.as_ref(), &self.db)?;
+        let Some(runner) = queue.runner_token(hash, self.now_ms() / 1000)? else {
+            return Ok(crate::domain::runner_assignment::Outcome::Unauthenticated);
+        };
+        queue
+            .with_actor(Principal::runner(&runner.id).actor())
+            .runner_operation(hash, operation, claim, &self.generators)
+    }
+
     fn runner_change(
         &self,
         action: &crate::domain::runner_registration::Change,

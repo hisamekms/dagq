@@ -66,7 +66,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 resourceの持ち主や状態が分からないときも拒む（fail closed）。
 列はcapabilityの群（入口は[Authorization](authorization.md#capability)）で、○は許す、△はresourceの規則つきで許す、—は拒む。
 
-| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose` / `replan resolve`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push | telemetryの送信（`telemetry_report`） | runnerの申告・共有承認・一覧・`image.publish` |
+| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose` / `replan resolve`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push | telemetryの送信（`telemetry_report`） | runner・image |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — / ○ | ○ | ○ | ○ | ○ | — | — | `runner.share`（管理者）・`runner.list`（所有者か管理者） |
 | inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — / ○ | ○ | ○（`--yes`は—） | ○ | ○ | — | — | `runner.list`（親の人の範囲） |
@@ -79,7 +79,7 @@ resourceの持ち主や状態が分からないときも拒む（fail closed）�
 | supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / — / —（保留と置換は○） | ○（recordは—） | ○（setup-reviewは—） | ○ | ○ | — | — | — |
 | wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | △ 自分のrunかplannerだけ | — | — | — | — | — | — |
 | integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | ○ | — | — |
-| runner | — | — | — | — | — | — | — | — | — | — | — | — | — | — | `runner.declare`（自分） |
+| runner | — | — | — | — | — | — | — | — | — | — | — | — | — | — | `runner.declare`・`runner.claim`・`runner.heartbeat`・`runner.report`（自分） |
 | image-publisher | — | — | — | — | — | — | — | — | — | — | — | — | — | — | `image.publish`だけ |
 | executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ | — |
 

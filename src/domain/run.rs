@@ -373,6 +373,19 @@ pub fn start_provisioning(mut run: TaskRun, plan: &RunPlan) -> Result<TaskRun, D
     Ok(run)
 }
 
+/// Bind a runner assignment to its generation's branch. The control side
+/// chooses the name; a successor never updates an earlier generation's ref.
+/// GitHub ref creation and verification are the hand-over port's responsibility.
+pub fn assign_runner_branch(mut run: TaskRun, generation: i64) -> Result<TaskRun, DomainError> {
+    require_status(
+        &run,
+        &[RunStatus::Starting, RunStatus::Running],
+        "assign a runner branch to",
+    )?;
+    run.branch = Some(format!("dagq/{}/{generation}", run.id));
+    Ok(run)
+}
+
 /// A starting run gets its session's handle (its background wrapper's)
 /// once.
 pub fn attach_workspace(mut run: TaskRun, workspace_id: String) -> Result<TaskRun, DomainError> {

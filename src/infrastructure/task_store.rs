@@ -487,7 +487,37 @@ pub(super) fn claim_task(
     trial: &WorkerTrial,
     routes: &[WorkerRoute],
 ) -> Result<ClaimOutcome> {
+    claim_task_filtered(
+        tx,
+        runs_dir,
+        ids,
+        at,
+        base_commit,
+        order,
+        held,
+        attributes,
+        trial,
+        routes,
+        |_| true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn claim_task_filtered(
+    tx: &impl crate::infrastructure::sql_exec::SqlWrite,
+    runs_dir: &Path,
+    ids: &dyn IdGenerator,
+    at: SystemTime,
+    base_commit: &CommitSha,
+    order: &[TaskId],
+    held: &crate::domain::claim_order::ClaimHolds,
+    attributes: Option<&serde_json::Value>,
+    trial: &WorkerTrial,
+    routes: &[WorkerRoute],
+    allowed: impl Fn(&Task) -> bool,
+) -> Result<ClaimOutcome> {
     let mut ready = ready_tasks(tx)?;
+    ready.retain(allowed);
     // The pair the trial of the provider pair assigns each ready task
     // (ADR-t4005-1), whose worker it requests; none with the trial off.
     let mut pairs = std::collections::HashMap::new();

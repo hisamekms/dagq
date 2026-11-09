@@ -419,6 +419,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/members.rs", Host),
     store("src/infrastructure/runner_registration.rs", Execution),
     store("src/infrastructure/runner_leases.rs", Execution),
+    store("src/infrastructure/runner_assignment.rs", Execution),
     store("src/infrastructure/image_publish.rs", Execution),
     store("src/infrastructure/write_leader.rs", Shared), // WriteLeaderStore
     store("src/infrastructure/postgres/migrate.rs", Host), // the Postgres series' version
@@ -426,6 +427,8 @@ pub(super) const STORES: &[Store] = &[
 
 #[rustfmt::skip]
 pub(super) const TRANSACTIONS: &[Transaction] = &[
+    transaction("T1", Execution, "src/infrastructure/runner_assignment.rs", "runner_operation", "runner claim and fenced lease share one write entry"),
+    transaction("T1", Execution, "src/infrastructure/task_store.rs", "claim_task_filtered", "claim with additional runner restrictions; the local claim passes every candidate"),
     transaction("T1", Execution, "src/infrastructure/task_store.rs", "claim_task", "claim: no run without its owner, no in_progress without its run (ADR-0054); runtime_store::transitions calls it"),
     transaction("T1", Execution, "src/infrastructure/runtime_store/transitions.rs", "claim_for_supervisor_holding", "claim, the supervisor's side"),
     transaction("T2", Execution, "src/infrastructure/runtime_store/transitions.rs", "finish_integration", "the landing on main and the task's completion agree"),
