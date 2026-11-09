@@ -17,6 +17,8 @@ tags:
 - [計測](measurement.md)（計測の作り直し。冒頭の「SSOTとビュー」が記録の論理ストアと材料の区分を持ち、計測の層のストアと共有の記録を足すtaskはそこに区分を書く。区間とタグ・台帳の形・畳む関数・台帳を作る係・送る口。ADR-t1662-1〜3、一部だけ実装済みのdraft）
   コマンドの形と分類は[計測のコマンドの形と分類](measurement-commands.md)が持つ。
   記録とOpenTelemetryのspan・attribute・resourceの対応は[計測のOpenTelemetryとの対応](measurement-otel.md)が持つ。
+  共通の読み取り関数が返す欠測と集約の約束は[計測の欠測と集約の契約](measurement-missing.md)が持つ。
+  runが動く環境とrun・nodeの資源の記録は[計測の実行環境と資源](measurement-environment.md)が持つ。
 - [taskとgoalとfindingの属性の記録](attribute-records.md)（stats・kpi・reportが状態の表から読む属性を状態の変更と同じtransactionでeventに書く項目ごとの元・記録より前のtaskとgoalとfindingと古いbinaryの書き込みを直す基準と照合・畳む関数）
 - [mainの履歴の記録](main-history.md)（supervisorが記録するmainのfirst-parentの履歴の流れ・commitの時刻と観測したheadと到達時刻の区別・到達点の間隔と猶予・取り込みの範囲・畳む関数と欠測の理由）
 - [agentのeval](agent-eval.md)（agentの定義とケースの置き場`.dagq/agents/<name>/`・built-inのagentの同梱のケースとbaselineから作る独立のtree・ケースの欄とpatchの共有・採点と漏れの検査・queue serviceのユースケースとしての依頼と認可・eventだけから作り直す記録・費用の上限・hold-outの1回の制限・runのslotを使わないevalの枠・本番のagentのjobと共有する起動経路・道具の宣言とproviderごとの変換・programのreviewの当て方・本番のreviewから作りqueue側に置くproductionのケースの集合・定義を変えるrunの着地の前の採用の判定・採用した定義の見張りのfinding。ADR-t1728-1・2、ADR-t1869-1）
