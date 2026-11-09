@@ -2968,3 +2968,18 @@ pub trait ReviewProgramBackend: Send + Sync {
         scratch: &Path,
     ) -> Result<CommandSpec>;
 }
+
+/// Runner records are execution ports. Changes and their replacements commit
+/// atomically; only hashes cross this port, and refusals disclose no credential.
+pub trait RunnerStore {
+    fn change_runner(
+        &self,
+        change: &crate::domain::runner_registration::Change,
+        now: i64,
+    ) -> Result<crate::domain::runner_registration::Outcome>;
+    fn runner_token(
+        &self,
+        hash: &str,
+        now: i64,
+    ) -> Result<Option<crate::domain::runner_registration::Runner>>;
+}

@@ -32,6 +32,7 @@ dagqのセキュリティの模型の全体を1か所にまとめる。決定の
 
 | 区分 | actor | 性質 |
 | --- | --- | --- |
+| 信頼しない実行側（`UntrustedAgent`） | runner | 持ち主の人に結びつき、報告は制御側が照合するデータ |
 | 人（`Human`） | user | `DAGQ_ROLE`の無い呼び出し。host実行の互換のためにそう扱う（下の「host実行は助言的」） |
 | 信頼する制御側（`TrustedControlPlane`） | supervisor・wrapper・integrator・executor-telemetry（agentを動かす側のqueue serviceのprincipalだけ） | 決定的なRustのコード。AIを含まない |
 | 信頼しないAI actor（`UntrustedAgent`） | inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・throughput-review-job・setup-review-job・observer | Claude（とCodex）のsession / job。出力はデータ |
@@ -75,11 +76,10 @@ resourceの持ち主や状態が分からないときも拒む（fail closed）�
 | supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / — / —（保留と置換は○） | ○（recordは—） | ○（setup-reviewは—） | ○ | ○ | — | — |
 | wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | △ 自分のrunかplannerだけ | — | — | — | — | — |
 | integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | ○ | — |
+| runner | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 | executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ |
 
 権限ごとの持ち主とresourceの条件は[AuthorizationのPolicy](authorization.md#policy)、判定の入口は`StaticPolicy`が持つ。
-人の出どころの優先度はuserとinboxだけが変える（[ADR-t1975-1](../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)）。
-所属を動かしたときに優先度を残す判断は`task::set_goal`を入口にする（[ADR-t2373-1](../adr/2026-10-12-t2373-1-out-of-scope-follow-up-move-takes-the-destination-goals-priority.md)）。
 
 - plannerの運用の権限はADR-t728-1（上）の決定7に従う（`dagq-planner` skillの「Where your authority ends」はこの行と一致させる。規則は[文書の規則](../development/documents.md)の「権限の表を写す文書」）
 - sessionの画面とlogを読む・送る`screen.read`・`screen.send`（[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定7）はuserとinboxだけが持つ。
@@ -106,9 +106,9 @@ resourceの持ち主や状態が分からないときも拒む（fail closed）�
   hostのGitが作業するscratch worktree（`already_satisfied`のsnapshotの検証のもの）はrun dirに置かず、queueの`satisfied/`のrunごとのdirに置き、使うたびにそこにある`.git`もlinkも信用せずに消して（linkは辿らない）作り直す（[Validation](supervisor-lifecycle/validation.md#already_satisfiedの検証)）。
   拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、拒否のerrorを返す
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
-- queue serviceは、[ユースケース](queue-service.md#ユースケース)と読み取りを、principalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（`DAGQ_ROLE`は使わない）。
+- queue serviceは、[ユースケース](queue-service.md#ユースケース)と読み取りを、principalのactorで`StaticPolicy`に通す（`DAGQ_ROLE`は使わない）。
   principalはtokenから、tokenもroleも無い要求ではhostのsocketのpeerの資格からuserとして決める（[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)決定1）。
-  拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。
+  拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す（runner_httpの拒否記録は未実装）。
   worker（resumeも）・headlessのjob・observerはserviceだけを使い（[クライアントモード](queue-service.md#クライアントモード)）、人・inbox・plannerはserviceが答えるコマンドをDBを開かず送る（[hostのCLI](queue-service-host-cli.md#送る範囲)）。
   閉じたのはCLIの経路で、同じユーザーのプロセスはDBもtokenも読め、userとしてもつなげるので、hostでは助言的なまま（ADR-t3102-1決定5）
 - serviceへ送らない状態を変えないコマンド（制御側の診断・fileを書く読み取りと、supervisorなどのもの）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny）。

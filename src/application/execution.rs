@@ -233,11 +233,12 @@ fn worker_providers(checks: &[ProviderCheck]) -> Vec<(Provider, Vec<WorkerMode>)
         .collect()
 }
 
-/// The roles the runtime starts as AI actors.
+/// The roles the runtime starts as AI actors. Principal-only roles have no
+/// `DAGQ_ROLE` and are not started as AI actors, regardless of their trust.
 pub fn ai_actor_roles() -> impl Iterator<Item = ActorRole> {
     ActorRole::ALL
         .into_iter()
-        .filter(|role| role.trust() == TrustLevel::UntrustedAgent)
+        .filter(|role| role.trust() == TrustLevel::UntrustedAgent && role.env_value().is_some())
 }
 
 /// How one actor runs. `enforcement` is the weakest hold on it; a worker
@@ -491,6 +492,7 @@ mod tests {
         assert!(roles.contains(&ActorRole::Worker));
         assert!(!roles.contains(&ActorRole::Supervisor));
         assert!(!roles.contains(&ActorRole::User));
+        assert!(!roles.contains(&ActorRole::Runner));
         for profile in &profiles {
             assert_eq!(profile.backend, ExecutorBackend::Host);
             assert_eq!(profile.enforcement, EnforcementLevel::Advisory);

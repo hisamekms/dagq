@@ -57,6 +57,7 @@ string_enum!(
     /// refused as unknown.
     ActorRole {
     User => "user",
+    Runner => "runner",
     Inbox => "inbox",
     Planner => "planner",
     Worker => "worker",
@@ -87,8 +88,9 @@ string_enum!(TrustLevel {
 });
 
 impl ActorRole {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::User,
+        Self::Runner,
         Self::Inbox,
         Self::Planner,
         Self::Worker,
@@ -113,7 +115,8 @@ impl ActorRole {
             Self::Supervisor | Self::Wrapper | Self::Integrator | Self::ExecutorTelemetry => {
                 TrustLevel::TrustedControlPlane
             }
-            Self::Inbox
+            Self::Runner
+            | Self::Inbox
             | Self::Planner
             | Self::Worker
             | Self::ReviewJob
@@ -144,10 +147,10 @@ impl ActorRole {
     }
 
     /// `DAGQ_ROLE` of the role; the user has none, and neither has the
-    /// executor's telemetry role, a queue service's principal only.
+    /// runner and executor's telemetry roles, queue service principals only.
     pub const fn env_value(self) -> Option<&'static str> {
         match self {
-            Self::User | Self::ExecutorTelemetry => None,
+            Self::User | Self::Runner | Self::ExecutorTelemetry => None,
             other => Some(other.as_str()),
         }
     }
@@ -304,7 +307,7 @@ impl ActorContext {
         let role = match value.as_str() {
             LEGACY_REVIEWER_ROLE => ActorRole::ReviewJob,
             other => match other.parse::<ActorRole>() {
-                Ok(ActorRole::User | ActorRole::ExecutorTelemetry) | Err(_) => {
+                Ok(ActorRole::User | ActorRole::Runner | ActorRole::ExecutorTelemetry) | Err(_) => {
                     return Err(DomainError::UnknownValue {
                         kind: ROLE_ENV,
                         value,

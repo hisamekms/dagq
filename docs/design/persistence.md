@@ -99,6 +99,7 @@ runのファイル・台帳の行・古いeventは通さない。
 ## 表
 
 `members`: 人の登録簿。
+runnerの登録は[migration](../../migrations/0100_runner_registration.sql)を参照。
 
 表ごとの役割と列の意味は、表を作るmigrationのコメントと表を持つstoreと`src/domain/`の型のdoc commentが持つ。
 

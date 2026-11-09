@@ -819,6 +819,18 @@ mod tests {
     }
 
     #[test]
+    fn runner_credentials_travel_in_the_body_without_bearer_or_log_values() {
+        for (name, field) in [("runner_enroll", "code"), ("runner_refresh", "refresh")] {
+            let body = json!({"api_version": API_VERSION, "use_case": name, "params": {field: "one-time-secret"}}).to_string();
+            let result = carried(&post(&format!("/api/use-case/{name}"), "", &body));
+            assert_eq!(result.given[0].use_case.as_str(), name);
+            assert_eq!(result.given[0].params[field], "one-time-secret");
+            assert!(result.given[0].token.is_none());
+            assert!(!result.line.contains("one-time-secret"));
+        }
+    }
+
+    #[test]
     fn no_token_value_reaches_the_log_line() {
         let raw = post(
             "/api/use-case/show?token=from-query",

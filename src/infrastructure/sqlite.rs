@@ -3255,6 +3255,10 @@ mod store_contract_tests {
         contract(|open| store_contract::goal_owner_move_undone(&open));
     }
     #[test]
+    fn runner_credentials() {
+        contract(|open| store_contract::runner_credentials(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

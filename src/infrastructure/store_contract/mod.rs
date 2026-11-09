@@ -19,7 +19,11 @@ use anyhow::{Context, Result};
 /// Opening another connection retains its own identity, as a second service
 /// would. This is test plumbing, not an alternative transaction entry.
 pub trait ContractStore:
-    TransactionEntries + WriteLeaderStore + crate::application::queue_service::MemberStore + Sized
+    TransactionEntries
+    + WriteLeaderStore
+    + crate::application::queue_service::MemberStore
+    + crate::application::RunnerStore
+    + Sized
 {
     fn with_identity(self, identity: WriteIdentity) -> Self;
     fn set_actor(&self, actor: crate::domain::actor::ActorContext);
@@ -78,6 +82,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("goal owner records", goal_owner_records::<S, F>),
         ("goal owner moves", goal_owner_moves::<S, F>),
         ("goal owner move undone", goal_owner_move_undone::<S, F>),
+        ("runner credentials", runner_credentials::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

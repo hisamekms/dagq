@@ -52,9 +52,9 @@ use crate::domain::session_step::{StepError, StepTarget};
 use crate::domain::telemetry::{ReportRecorded, TargetFacts, TelemetryReport};
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, AskKind, AskReason, AuthorizationError,
-    Capability, EventId, Finding, FindingId, FindingOutcome, FindingStatus, FindingTarget, GoalId,
-    NewAsk, NewFinding, NewNote, NoteTarget, PlannerId, ProposalId, RequestId, Resource, RunEvent,
-    RunId, RunStatus, SessionRole, StaticPolicy, TaskId,
+    Authorizer, Capability, EventId, Finding, FindingId, FindingOutcome, FindingStatus,
+    FindingTarget, GoalId, NewAsk, NewFinding, NewNote, NoteTarget, PlannerId, ProposalId,
+    RequestId, Resource, RunEvent, RunId, RunStatus, SessionRole, StaticPolicy, TaskId,
 };
 
 /// What the issue's transaction reads of the queue for a token held
@@ -207,6 +207,22 @@ pub trait MemberStore {
 
 /// What the service runs its use cases on.
 pub trait ServiceBackend: Send + Sync {
+    /// Generate a response-only secret and its persistence hash.
+    fn runner_secret(&self) -> Result<(String, String)> {
+        anyhow::bail!("runner randomness unavailable")
+    }
+    fn runner_hash(&self, _value: &str) -> Result<String> {
+        anyhow::bail!("runner hashing unavailable")
+    }
+
+    fn runner_change(
+        &self,
+        _change: &crate::domain::runner_registration::Change,
+        _now: i64,
+    ) -> Result<crate::domain::runner_registration::Outcome> {
+        anyhow::bail!("runner credentials unavailable")
+    }
+
     /// Write only a hashed record; the value is returned, never a credential file.
     fn issue_human(&self, _principal: &Principal, _expires: i64) -> Result<(String, String)> {
         anyhow::bail!("human tokens unavailable")
@@ -627,6 +643,15 @@ impl QueueService<'_> {
         if request.use_case == UseCase::ExchangeToken {
             return refuse_human(self.backend); // Only the HTTP composition calls exchange_human.
         }
+        if matches!(
+            request.use_case,
+            UseCase::RunnerCode
+                | UseCase::RunnerEnroll
+                | UseCase::RunnerRefresh
+                | UseCase::RunnerRevoke
+        ) {
+            return runner_refusal();
+        }
         let hello = || {
             ServiceResponse::success(json!({
                 "service": "dagq-queue-service",
@@ -835,10 +860,12 @@ impl QueueService<'_> {
                 ));
             }
         };
-        if principal.human.is_some() && peer != Peer::Absent {
+        if (principal.human.is_some() || principal.role == ActorRole::Runner)
+            && peer != Peer::Absent
+        {
             return Err(refuse(
                 "unknown_token",
-                "human tokens require the HTTP entrance",
+                "human and runner tokens require the HTTP entrance",
             ));
         }
         if let Some(session) = &principal.session
@@ -2091,7 +2118,13 @@ fn run(
         UseCase::Supervisor | UseCase::Control => {
             unreachable!("a supervisor's and a control-side command's requests are answered apart")
         }
-        UseCase::ExchangeToken | UseCase::IssueToken | UseCase::RevokeToken => {
+        UseCase::RunnerCode
+        | UseCase::RunnerEnroll
+        | UseCase::RunnerRefresh
+        | UseCase::RunnerRevoke
+        | UseCase::ExchangeToken
+        | UseCase::IssueToken
+        | UseCase::RevokeToken => {
             unreachable!("an issue and a revocation are answered apart")
         }
         UseCase::Migrate | UseCase::CommitMessages | UseCase::Init | UseCase::Doctor => {
@@ -3150,6 +3183,151 @@ impl std::fmt::Display for HumanRefused {
 }
 impl std::error::Error for HumanRefused {}
 
+/// One indistinguishable refusal for unknown, expired, consumed or revoked
+/// credentials. No submitted value is included in errors or diagnostics.
+pub fn runner_refusal() -> ServiceResponse {
+    ServiceResponse::failure(
+        ServiceErrorCode::Unauthenticated,
+        "runner authentication failed",
+    )
+}
+
+/// HTTP-only runner use cases, on the service's write line. Human operations
+/// require a token bound to an OIDC identity and the user-only capability;
+/// the store rechecks membership and ownership inside its write transaction.
+///
+/// Refusal auditing (authorization_denied and queue_service_unauthenticated)
+/// is deferred to task 4075 by the decision in ask 1585. Ask StaticPolicy
+/// directly here; Gate will also record refusals when that auditing is added.
+pub fn runner_http(
+    backend: &dyn ServiceBackend,
+    request: &ServiceRequest,
+    configured: bool,
+) -> ServiceResponse {
+    use crate::domain::runner_registration::{Change, Outcome, REFRESH_SECONDS, SHORT_SECONDS};
+    if !configured {
+        return runner_refusal();
+    }
+    let denied = || {
+        ServiceResponse::failure(
+            ServiceErrorCode::AuthorizationDenied,
+            "runner operation denied",
+        )
+    };
+    let run = || -> Result<ServiceResponse> {
+        let mut human = None;
+        if matches!(
+            request.use_case,
+            UseCase::RunnerCode | UseCase::RunnerRevoke
+        ) {
+            let Some(token) = request.token.as_deref() else {
+                return Ok(runner_refusal());
+            };
+            let Some(principal) = backend.principal(token)? else {
+                return Ok(runner_refusal());
+            };
+            if principal.check().is_err() {
+                return Ok(runner_refusal());
+            }
+            let capability = if request.use_case == UseCase::RunnerCode {
+                Capability::RunnerRegister
+            } else {
+                Capability::RunnerRevoke
+            };
+            if StaticPolicy
+                .authorize(&principal.actor(), capability, &Resource::Queue)
+                .is_err()
+            {
+                return Ok(denied());
+            }
+            human = principal.human;
+            if human.is_none() {
+                return Ok(runner_refusal());
+            }
+        }
+        let now = backend.now_ms() / 1000;
+        // Overflow refuses before a write so an issued credential always has
+        // exactly the same expiry in the response and in persistence.
+        let Some(expires_at) = now.checked_add(SHORT_SECONDS) else {
+            return Ok(runner_refusal());
+        };
+        let Some(refresh_expires_at) = now.checked_add(REFRESH_SECONDS) else {
+            return Ok(runner_refusal());
+        };
+        let input = |name| request.params.get(name).and_then(Value::as_str);
+        let mut values = None;
+        let action = match request.use_case {
+            UseCase::RunnerCode => {
+                let (value, hash) = backend.runner_secret()?;
+                values = Some((value, String::new()));
+                Change::Code {
+                    owner: human.unwrap(),
+                    hash,
+                }
+            }
+            UseCase::RunnerEnroll | UseCase::RunnerRefresh => {
+                let Some(value) = input(if request.use_case == UseCase::RunnerEnroll {
+                    "code"
+                } else {
+                    "refresh"
+                }) else {
+                    return Ok(runner_refusal());
+                };
+                let (refresh, refresh_hash) = backend.runner_secret()?;
+                let (token, token_hash) = backend.runner_secret()?;
+                values = Some((refresh, token));
+                let hash = backend.runner_hash(value)?;
+                if request.use_case == UseCase::RunnerEnroll {
+                    let (_, runner_id) = backend.runner_secret()?;
+                    Change::Enroll {
+                        hash,
+                        runner_id,
+                        refresh: refresh_hash,
+                        token: token_hash,
+                    }
+                } else {
+                    Change::Refresh {
+                        hash,
+                        refresh: refresh_hash,
+                        token: token_hash,
+                    }
+                }
+            }
+            UseCase::RunnerRevoke => {
+                let Some(id) = input("runner_id") else {
+                    return Ok(denied());
+                };
+                Change::Revoke {
+                    caller: human.unwrap(),
+                    runner_id: id.into(),
+                }
+            }
+            _ => return Ok(runner_refusal()),
+        };
+        Ok(match backend.runner_change(&action, now)? {
+            Outcome::Code => ServiceResponse::success(
+                json!({"code": values.unwrap().0, "expires_at": expires_at}),
+            ),
+            Outcome::Issued(id) => {
+                let (refresh, token) = values.unwrap();
+                ServiceResponse::success(
+                    json!({"runner_id": id, "refresh": refresh, "token": token, "expires_at": expires_at, "refresh_expires_at": refresh_expires_at}),
+                )
+            }
+            Outcome::Revoked => ServiceResponse::success(json!({"revoked": true})),
+            Outcome::Unauthenticated => runner_refusal(),
+            Outcome::Denied => denied(),
+        })
+    };
+    match run() {
+        Ok(answer) => answer,
+        // SQL errors can carry parameters: no diagnostic from this boundary
+        // may contain an input credential or a freshly generated value.
+        Err(error) if error.is::<super::NotLeader>() => respond(Err(super::NotLeader.into())),
+        Err(_) => ServiceResponse::failure(ServiceErrorCode::Failed, "runner operation failed"),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::cell::RefCell;
@@ -3644,6 +3822,71 @@ pub(crate) mod tests {
     }
 
     impl ServiceBackend for Backend {
+        fn runner_secret(&self) -> Result<(String, String)> {
+            let mut memory = self.human.lock().unwrap();
+            memory.counter += 1;
+            let value = format!("runner-secret-{}", memory.counter);
+            Ok((value.clone(), self.runner_hash(&value)?))
+        }
+        fn runner_hash(&self, value: &str) -> Result<String> {
+            use sha2::{Digest, Sha256};
+            Ok(format!("{:x}", Sha256::digest(value.as_bytes())))
+        }
+        fn runner_change(
+            &self,
+            change: &crate::domain::runner_registration::Change,
+            _now: i64,
+        ) -> Result<crate::domain::runner_registration::Outcome> {
+            use crate::domain::runner_registration::{Change, Outcome};
+            Ok(match change {
+                Change::Code { owner, hash } => {
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push(json!({"owner": owner, "hash": hash}));
+                    Outcome::Code
+                }
+                Change::Enroll {
+                    hash,
+                    refresh,
+                    token,
+                    runner_id,
+                } => {
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push(json!({"hash": hash, "refresh": refresh, "token": token}));
+                    if hash == &self.runner_hash("failure")? {
+                        anyhow::bail!("sensitive adapter diagnostic")
+                    }
+                    if hash == &self.runner_hash("not-leader")? {
+                        return Err(crate::application::NotLeader.into());
+                    }
+                    if hash == &self.runner_hash("valid-code")? {
+                        Outcome::Issued(runner_id.clone())
+                    } else {
+                        Outcome::Unauthenticated
+                    }
+                }
+                Change::Refresh {
+                    hash,
+                    refresh,
+                    token,
+                } => {
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push(json!({"hash": hash, "refresh": refresh, "token": token}));
+                    if hash == &self.runner_hash("current-refresh")? {
+                        Outcome::Issued("runner-id".into())
+                    } else {
+                        Outcome::Unauthenticated
+                    }
+                }
+                Change::Revoke { .. } => Outcome::Denied,
+            })
+        }
+
         fn issue_human(&self, principal: &Principal, expires: i64) -> Result<(String, String)> {
             let mut memory = self.human.lock().unwrap();
             assert!(
@@ -3684,6 +3927,7 @@ pub(crate) mod tests {
             drop(memory);
             let run = RunId::new("r1")?;
             Ok(match token {
+                "runner" => Some(Principal::runner("registered-runner")),
                 "worker" => Some(Principal::worker(&run, TaskId::new(1))),
                 "review" => Some(Principal::of(&ActorContext::review_job(&run, 1))),
                 "observer" => Some(Principal::of(&ActorContext::instance(
@@ -3890,6 +4134,143 @@ pub(crate) mod tests {
         ) -> Result<Option<crate::domain::queue_service::TargetStart>> {
             Kept.target_start(target)
         }
+    }
+
+    #[test]
+    fn runner_code_requires_http_oidc_human_token_and_returns_only_hashes_to_store() {
+        let (backend, jwt) = human_fixture();
+        let human = exchange_human(&backend, &jwt).result.unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let req = request(Some(&human), UseCase::RunnerCode, json!({}));
+        let answer = runner_http(&backend, &req, true).result.unwrap();
+        assert_eq!(answer["expires_at"], backend.now_ms() / 1000 + 900);
+        let value = answer["code"].as_str().unwrap();
+        let log = backend.log.lock().unwrap();
+        let record = log.last().unwrap();
+        assert_eq!(
+            record["owner"],
+            serde_json::to_value(&jwt.identity).unwrap()
+        );
+        assert_eq!(record["hash"], backend.runner_hash(value).unwrap());
+        assert!(!serde_json::to_string(record).unwrap().contains(value));
+        drop(log);
+        assert_eq!(
+            code(&runner_http(&backend, &req, false)),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        assert_eq!(
+            code(
+                &QueueService {
+                    backend: &backend,
+                    build: "build",
+                    pid: 1
+                }
+                .handle_from(&req, Peer::Owner)
+            ),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        let before_refusals = backend.log.lock().unwrap().clone();
+        for token in [
+            "runner",
+            "inbox",
+            "planner",
+            "worker",
+            "review",
+            "observer",
+            "supervisor",
+        ] {
+            for use_case in [UseCase::RunnerCode, UseCase::RunnerRevoke] {
+                assert_eq!(
+                    code(&runner_http(
+                        &backend,
+                        &request(Some(token), use_case, json!({"runner_id": "r"})),
+                        true
+                    )),
+                    Some(ServiceErrorCode::AuthorizationDenied),
+                    "{token}"
+                );
+            }
+        }
+        let local = request(None, UseCase::RunnerCode, json!({}));
+        assert_eq!(
+            code(&runner_http(&backend, &local, true)),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        // Refusal records are deliberately deferred to the auditing use case.
+        assert_eq!(*backend.log.lock().unwrap(), before_refusals);
+    }
+
+    #[test]
+    fn runner_exchange_and_refresh_return_secrets_only_in_responses_and_uniform_refusals() {
+        let backend = backend(RunStatus::Running);
+        for (use_case, field, value) in [
+            (UseCase::RunnerEnroll, "code", "valid-code"),
+            (UseCase::RunnerRefresh, "refresh", "current-refresh"),
+        ] {
+            let answer = runner_http(
+                &backend,
+                &request(None, use_case, json!({field: value})),
+                true,
+            )
+            .result
+            .unwrap();
+            assert!(answer["runner_id"].is_string());
+            assert_eq!(answer["expires_at"], backend.now_ms() / 1000 + 900);
+            assert_eq!(
+                answer["refresh_expires_at"],
+                backend.now_ms() / 1000 + 30 * 24 * 60 * 60
+            );
+            let log = backend.log.lock().unwrap();
+            let record = log.last().unwrap();
+            for name in ["refresh", "token"] {
+                assert_eq!(
+                    record[name],
+                    backend.runner_hash(answer[name].as_str().unwrap()).unwrap()
+                );
+                assert!(
+                    !serde_json::to_string(record)
+                        .unwrap()
+                        .contains(answer[name].as_str().unwrap())
+                );
+            }
+            drop(log);
+            let expected = serde_json::to_value(runner_refusal()).unwrap();
+            for refused in ["unknown", "expired", "used", "revoked", "disabled-owner"] {
+                assert_eq!(
+                    serde_json::to_value(runner_http(
+                        &backend,
+                        &request(None, use_case, json!({field: refused})),
+                        true
+                    ))
+                    .unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runner_store_errors_are_scrubbed_and_fencing_refusals_keep_their_code() {
+        let backend = backend(RunStatus::Running);
+        let failed = runner_http(
+            &backend,
+            &request(None, UseCase::RunnerEnroll, json!({"code": "failure"})),
+            true,
+        );
+        assert_eq!(code(&failed), Some(ServiceErrorCode::Failed));
+        assert!(
+            !serde_json::to_string(&failed)
+                .unwrap()
+                .contains("sensitive")
+        );
+        let fenced = runner_http(
+            &backend,
+            &request(None, UseCase::RunnerEnroll, json!({"code": "not-leader"})),
+            true,
+        );
+        assert_eq!(code(&fenced), Some(ServiceErrorCode::NotLeader));
     }
 
     fn human_fixture() -> (Backend, crate::domain::oidc::VerifiedJwt) {

@@ -517,3 +517,189 @@ pub fn members<
     S::commit(tx)?;
     Ok(())
 }
+
+/// Code consumption, runner creation and rotation survive reopening together;
+/// failed replacement writes roll back consumption. Replay commits revocation.
+pub fn runner_credentials<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
+    use crate::domain::{
+        oidc::OidcIdentity,
+        queue_service::{Member, TeamRole},
+        runner_registration::{Change, Outcome},
+    };
+    let store = open()?;
+    let owner = OidcIdentity {
+        issuer: "https://runner-contract.example".into(),
+        subject: "runner-owner".into(),
+    };
+    store.add_member(&Member {
+        identity: owner.clone(),
+        role: TeamRole::Member,
+        on_call: false,
+        display_name: None,
+        created_at: 0,
+        disabled_at: None,
+    })?;
+    let code = Change::Code {
+        owner: owner.clone(),
+        hash: "code-hash".into(),
+    };
+    ensure!(store.change_runner(&code, 100)? == Outcome::Code);
+    let enroll = Change::Enroll {
+        hash: "code-hash".into(),
+        runner_id: "contract-runner".into(),
+        refresh: "refresh-hash".into(),
+        token: "token-hash".into(),
+    };
+    ensure!(store.change_runner(&enroll, 101)? == Outcome::Issued("contract-runner".into()));
+    ensure!(open()?.change_runner(&enroll, 102)? == Outcome::Unauthenticated);
+    ensure!(open()?.runner_token("token-hash", 102)?.is_some());
+    // Duplicate hash fails after consumption: transaction rollback leaves the
+    // original refresh current and creates no replacement.
+    let failed = Change::Refresh {
+        hash: "refresh-hash".into(),
+        refresh: "refresh-hash".into(),
+        token: "unused-token".into(),
+    };
+    ensure!(store.change_runner(&failed, 102).is_err());
+    ensure!(open()?.runner_token("unused-token", 103)?.is_none());
+    let rotate = Change::Refresh {
+        hash: "refresh-hash".into(),
+        refresh: "next-refresh-hash".into(),
+        token: "next-token-hash".into(),
+    };
+    ensure!(open()?.change_runner(&rotate, 103)? == Outcome::Issued("contract-runner".into()));
+    ensure!(open()?.runner_token("next-token-hash", 104)?.is_some());
+    ensure!(store.change_runner(&rotate, 104)? == Outcome::Unauthenticated);
+    for token in ["token-hash", "next-token-hash"] {
+        ensure!(open()?.runner_token(token, 105)?.is_none());
+    }
+    ensure!(
+        store.change_runner(
+            &Change::Refresh {
+                hash: "next-refresh-hash".into(),
+                refresh: "never".into(),
+                token: "never".into()
+            },
+            105
+        )? == Outcome::Unauthenticated
+    );
+    // A failed enroll must restore its code, as well as omit its runner row.
+    store.change_runner(
+        &Change::Code {
+            owner: owner.clone(),
+            hash: "second-code".into(),
+        },
+        200,
+    )?;
+    let second = |refresh: &str| Change::Enroll {
+        hash: "second-code".into(),
+        runner_id: "second-runner".into(),
+        refresh: refresh.into(),
+        token: "second-token".into(),
+    };
+    ensure!(store.change_runner(&second("refresh-hash"), 201).is_err());
+    ensure!(
+        open()?.change_runner(&second("second-refresh"), 202)?
+            == Outcome::Issued("second-runner".into())
+    );
+    store.disable_member(&owner, 203)?;
+    ensure!(open()?.runner_token("second-token", 203)?.is_none());
+    ensure!(
+        store.change_runner(
+            &Change::Refresh {
+                hash: "second-refresh".into(),
+                refresh: "disabled-refresh".into(),
+                token: "disabled-token".into()
+            },
+            203
+        )? == Outcome::Unauthenticated
+    );
+
+    // A persisted revocation refuses the very next token lookup and refresh.
+    store.change_runner(
+        &Change::Code {
+            owner: owner.clone(),
+            hash: "third-code".into(),
+        },
+        200,
+    )?;
+    // Re-enable only within this store fixture; runtime mutations use ports.
+    {
+        let tx = store.write_entry("contract_owner_restore")?;
+        tx.execute(
+            "UPDATE members SET disabled_at = NULL WHERE issuer = ?1 AND subject = ?2",
+            sql_params![owner.issuer, owner.subject],
+        )?;
+        S::commit(tx)?;
+    }
+    store.change_runner(
+        &Change::Code {
+            owner: owner.clone(),
+            hash: "third-code".into(),
+        },
+        200,
+    )?;
+    ensure!(
+        store.change_runner(
+            &Change::Enroll {
+                hash: "third-code".into(),
+                runner_id: "third-runner".into(),
+                refresh: "third-refresh".into(),
+                token: "third-token".into()
+            },
+            201
+        )? == Outcome::Issued("third-runner".into())
+    );
+    let other = OidcIdentity {
+        subject: "other".into(),
+        ..owner.clone()
+    };
+    store.add_member(&Member {
+        identity: other.clone(),
+        role: TeamRole::Member,
+        on_call: false,
+        display_name: None,
+        created_at: 0,
+        disabled_at: None,
+    })?;
+    ensure!(
+        store.change_runner(
+            &Change::Revoke {
+                caller: other,
+                runner_id: "third-runner".into()
+            },
+            202
+        )? == Outcome::Denied
+    );
+    ensure!(open()?.runner_token("third-token", 202)?.is_some());
+    ensure!(
+        store.change_runner(
+            &Change::Revoke {
+                caller: owner.clone(),
+                runner_id: "third-runner".into()
+            },
+            203
+        )? == Outcome::Revoked
+    );
+    ensure!(open()?.runner_token("third-token", 203)?.is_none());
+    ensure!(
+        store.change_runner(
+            &Change::Refresh {
+                hash: "third-refresh".into(),
+                refresh: "revoked-refresh".into(),
+                token: "revoked-token".into()
+            },
+            203
+        )? == Outcome::Unauthenticated
+    );
+    let tx = store.write_entry("contract_runner_cleanup")?;
+    for table in ["runner_tokens", "runner_refresh", "runner_codes", "runners"] {
+        tx.execute(&format!("DELETE FROM {table}"), sql_params![])?;
+    }
+    tx.execute(
+        "DELETE FROM members WHERE issuer = ?1",
+        sql_params![owner.issuer],
+    )?;
+    S::commit(tx)?;
+    Ok(())
+}

@@ -1281,6 +1281,8 @@ fn status_and_doctor_show_the_codex_worker_confined() {
         .register_supervisor(&token, std::process::id(), 1, "v")
         .unwrap();
     let before = ok(&db, &["status"])["actors"].clone();
+    // The first CLI call starts the service and acquires a new writer generation.
+    let mut store = SqliteQueue::open(&db).unwrap();
     // A registration a dead supervisor left behind does not count.
     let mut child = std::process::Command::new("true").spawn().unwrap();
     let dead = child.id();

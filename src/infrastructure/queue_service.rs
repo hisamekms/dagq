@@ -601,8 +601,8 @@ fn write_token(
     now: i64,
 ) -> Result<IssuedToken> {
     ensure!(
-        principal.human.is_none(),
-        "human tokens require the HTTP exchange"
+        principal.human.is_none() && principal.role != ActorRole::Runner,
+        "human and runner tokens require the HTTP exchange"
     );
     principal.check().map_err(anyhow::Error::msg)?;
     let key = principal.credential_key();
@@ -3758,6 +3758,28 @@ fn http_answerer(
     oidc: Option<Arc<dyn HumanVerifier>>,
 ) -> HttpAnswerer {
     Arc::new(move |request| {
+        if matches!(
+            request.use_case,
+            UseCase::RunnerCode
+                | UseCase::RunnerEnroll
+                | UseCase::RunnerRefresh
+                | UseCase::RunnerRevoke
+        ) {
+            let on = backend.clone();
+            let configured = oidc.is_some();
+            let use_case = request.use_case;
+            let operation = move || LineAnswer {
+                response: crate::application::queue_service::runner_http(
+                    &*on, &request, configured,
+                ),
+                notes: RequestNotes::default(),
+            };
+            let response = match &backend.write_line {
+                Some(line) => line.line.run(operation)?,
+                None => operation(),
+            };
+            return Ok(answered_of(&response.response, Some(use_case))?.0);
+        }
         if request.use_case == UseCase::ExchangeToken {
             let verified =
                 exchange_identity(oidc.as_deref(), &request.params, backend.now_ms() / 1000);
@@ -4336,13 +4358,45 @@ impl ServiceBackend for SqliteServiceBackend {
         self.write_line.as_ref().is_none_or(|line| line.leading())
     }
 
+    fn runner_secret(&self) -> Result<(String, String)> {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).map_err(|_| anyhow!("draw runner random bytes"))?;
+        let value: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let hash = sha256_hex(value.as_bytes());
+        Ok((value, hash))
+    }
+    fn runner_hash(&self, value: &str) -> Result<String> {
+        Ok(sha256_hex(value.as_bytes()))
+    }
+    fn runner_change(
+        &self,
+        action: &crate::domain::runner_registration::Change,
+        now: i64,
+    ) -> Result<crate::domain::runner_registration::Outcome> {
+        use crate::application::RunnerStore;
+        let queue = write_queue(self.write_line.as_ref(), &self.db)?;
+        queue.change_runner(action, now)
+    }
+
     fn heavy_reads(&self) -> Option<&crate::application::heavy_reads::HeavyReads> {
         self.heavy_reads.as_ref()
     }
 
     fn principal(&self, token: &str) -> Result<Option<Principal>> {
         let Some(record) = lookup_record(&self.queue_dir, token)? else {
-            return Ok(None);
+            // Host tokens retain their file-only lookup, including on an older
+            // schema. No runner credential exists before its schema is applied.
+            use crate::application::RunnerStore;
+            if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Ok(None);
+            }
+            let queue = SqliteQueue::open_read_only(&self.db)?;
+            if queue.schema_version()? < SqliteQueue::SCHEMA_VERSION {
+                return Ok(None);
+            }
+            return Ok(queue
+                .runner_token(&sha256_hex(token.as_bytes()), self.now_ms() / 1000)?
+                .map(|runner| Principal::runner(&runner.id)));
         };
         if let Some(identity) = &record.principal.human {
             use crate::application::queue_service::MemberStore;
@@ -8216,5 +8270,144 @@ mod human_tests {
                 .unwrap()
                 .contains("secret.jwt.value")
         );
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+    use crate::application::queue_service::{MemberStore, runner_http};
+    use crate::domain::{
+        oidc::OidcIdentity,
+        queue_service::{Member, TeamRole},
+    };
+
+    #[test]
+    fn runner_values_stay_out_of_files_and_database_and_revocation_refuses_the_next_call() {
+        struct At;
+        impl crate::application::Clock for At {
+            fn system_time(&self) -> std::time::SystemTime {
+                std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
+            }
+            fn monotonic(&self) -> Instant {
+                panic!("no monotonic clock used")
+            }
+        }
+        let generators = Generators {
+            clock: Arc::new(At),
+            ids: Arc::new(super::super::clock::UuidGenerator),
+        };
+        let (dir, kept, backend) = super::supervisor_tests::claimed_in_memdb_with(
+            &LeaseToken::new("owner"),
+            "runner-secrets",
+            generators,
+        );
+        let identity = OidcIdentity {
+            issuer: "https://idp.example".into(),
+            subject: "person".into(),
+        };
+        kept.add_member(&Member {
+            identity: identity.clone(),
+            role: TeamRole::Member,
+            on_call: false,
+            display_name: None,
+            created_at: 0,
+            disabled_at: None,
+        })
+        .unwrap();
+        let (human, _) = backend
+            .issue_human(&Principal::human(identity), 1_800_000_900)
+            .unwrap();
+        let request = |use_case, params, token: Option<&str>| ServiceRequest {
+            caller: None,
+            api_version: API_VERSION,
+            token: token.map(str::to_owned),
+            env_role: None,
+            queue: None,
+            binding: None,
+            use_case,
+            params,
+        };
+        let call = |use_case, params, token| {
+            runner_http(&backend, &request(use_case, params, token), true)
+        };
+        let code = call(UseCase::RunnerCode, json!({}), Some(&human))
+            .result
+            .unwrap()["code"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let enrolled = call(UseCase::RunnerEnroll, json!({"code": code}), None)
+            .result
+            .unwrap();
+        let token = enrolled["token"].as_str().unwrap();
+        let refresh = enrolled["refresh"].as_str().unwrap();
+        let id = enrolled["runner_id"].as_str().unwrap();
+        assert_eq!(
+            backend.principal(token).unwrap(),
+            Some(Principal::runner(id))
+        );
+        assert_ne!(token, refresh);
+        assert_ne!(token, code);
+        assert_eq!(
+            call(UseCase::RunnerEnroll, json!({"code": code}), None)
+                .error
+                .unwrap()
+                .code,
+            ServiceErrorCode::Unauthenticated
+        );
+        let socket = QueueService {
+            backend: &backend,
+            build: "test",
+            pid: 1,
+        }
+        .handle_from(
+            &request(UseCase::Hello, json!({}), Some(token)),
+            Peer::Owner,
+        );
+        assert_eq!(
+            socket.error.unwrap().code,
+            ServiceErrorCode::Unauthenticated
+        );
+        for (table, secret) in [
+            ("runner_codes", code.as_str()),
+            ("runner_refresh", refresh),
+            ("runner_tokens", token),
+        ] {
+            let stored: String = kept
+                .conn
+                .query_row(&format!("SELECT hash FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(stored, sha256_hex(secret.as_bytes()));
+            assert!(!stored.contains(secret));
+        }
+        assert!(!service_dir(dir.path()).join(CREDENTIALS_DIR).exists());
+        for entry in std::fs::read_dir(service_dir(dir.path()).join(TOKENS_DIR)).unwrap() {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            for secret in [code.as_str(), token, refresh] {
+                assert!(!path.to_string_lossy().contains(secret));
+                assert!(!text.contains(secret), "{}", path.display());
+            }
+        }
+        assert!(
+            call(
+                UseCase::RunnerRevoke,
+                json!({"runner_id": id}),
+                Some(&human)
+            )
+            .ok
+        );
+        assert!(backend.principal(token).unwrap().is_none());
+        assert_eq!(
+            call(UseCase::RunnerRefresh, json!({"refresh": refresh}), None)
+                .error
+                .unwrap()
+                .code,
+            ServiceErrorCode::Unauthenticated
+        );
+        // Ordinary parent issuance cannot write a runner credential file.
+        assert!(issue(dir.path(), &Principal::runner(id), 1_800_000_000).is_err());
     }
 }

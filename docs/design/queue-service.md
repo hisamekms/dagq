@@ -76,6 +76,8 @@ serviceの書き込みは1本の列で1つずつ確定し、読み取りは列�
 ## principalとtoken
 
 入口はHTTPの`exchange_token`（`application::queue_service::exchange_human`）。
+runnerの登録・交換・更新・失効の入口はHTTPの`application::queue_service::runner_http`。
+通常の登録の経路では、runnerの資格は人が発行した1回きりの値から始まり、値はハッシュだけを持つ。
 外向きの入口だけが発行元のJWTを人の短いtokenに替え、hostのsocketの入口は人のtokenを発行も受けもしない。
 人のtokenの記録は制御側の手元のファイルだけにあり、制御側の入れ替えで失われると期限の内でもunauthenticatedになる。
 
@@ -119,7 +121,7 @@ queue全体の読み取り（ADR-t1233-5決定1〜3）。
 CLIとserviceは同じ`application::queue_reads::answer`で答える。
 paramsの解釈と受け付ける値は同moduleの`QueueRead`、注入する読み取りの境界は`infrastructure::queue_service::ServiceReads`が持つ。
 認可はCLIがそのコマンドに求めるのと同じcapabilityをprincipalに通す。
-executor-telemetry以外の全role（workerとjobを含む）がqueue全体を読める（ADR-t1233-5決定3）。
+executor-telemetryとrunner以外の全role（workerとjobを含む）がqueue全体を読める（ADR-t1233-5決定3）。
 
 ユースケースの一覧は`domain::queue_service::UseCase`、CLIと違うparamsは`application::queue_reads`の各optionの型のdoc commentが持つ。
 

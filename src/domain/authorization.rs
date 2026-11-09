@@ -20,6 +20,10 @@ use super::{
 use super::{DomainError, Priority, TaskId, TaskStatus, error::require, plan_request::PriorityBy};
 
 string_enum!(Capability {
+    /// A human issues a one-use enrollment code owned by that identity.
+    RunnerRegister => "runner.register",
+    /// A human owner or administrator revokes a runner and its credentials.
+    RunnerRevoke => "runner.revoke",
     // Reading.
     QueueRead => "queue.read",
     QueueWatch => "queue.watch",
@@ -147,7 +151,9 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 66] = [
+    pub const ALL: [Self; 68] = [
+        Self::RunnerRegister,
+        Self::RunnerRevoke,
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -622,12 +628,12 @@ const INBOX: &[Capability] = &[
     C::TokenIssue,
 ];
 
-/// The number of [`USER`]'s capabilities: the inbox's and two more.
-const USER_LEN: usize = INBOX.len() + 2;
+/// The number of [`USER`]'s capabilities: the inbox's and four more.
+const USER_LEN: usize = INBOX.len() + 4;
 
 /// [`INBOX`]'s capabilities, the approval of `setup-review`'s changes
 /// beforehand ([`C::ReviewSetupApprove`]) and the queue broker's records
-/// ([`C::QueueBrokerRecord`]).
+/// ([`C::QueueBrokerRecord`]), and human runner registration and revocation.
 const USER_CAPABILITIES: [Capability; USER_LEN] = {
     let mut all = [C::ReviewSetupApprove; USER_LEN];
     let mut at = 0;
@@ -636,6 +642,8 @@ const USER_CAPABILITIES: [Capability; USER_LEN] = {
         at += 1;
     }
     all[at + 1] = C::QueueBrokerRecord;
+    all[at + 2] = C::RunnerRegister;
+    all[at + 3] = C::RunnerRevoke;
     all
 };
 
@@ -773,6 +781,7 @@ const EXECUTOR_TELEMETRY: &[Capability] = &[C::TelemetryReport];
 /// changes beforehand; the record tells the two apart.
 pub const fn grants(role: ActorRole) -> &'static [Capability] {
     match role {
+        ActorRole::Runner => &[],
         ActorRole::User => USER,
         ActorRole::Inbox => INBOX,
         ActorRole::Planner => PLANNER,
@@ -879,7 +888,7 @@ pub fn starts(parent: ActorRole, child: ActorRole) -> bool {
             R::User | R::Inbox => within(),
             _ => false,
         },
-        R::Integrator | R::User => false,
+        R::Runner | R::Integrator | R::User => false,
     }
 }
 
@@ -1147,6 +1156,8 @@ mod tests {
         let mut inbox = grants(ActorRole::Inbox).to_vec();
         inbox.push(C::ReviewSetupApprove);
         inbox.push(C::QueueBrokerRecord);
+        inbox.push(C::RunnerRegister);
+        inbox.push(C::RunnerRevoke);
         assert_eq!(inbox, grants(ActorRole::User));
         assert_eq!(grants(ActorRole::SetupReviewJob), [C::QueueRead]);
         let job = ActorContext::setup_review_job("s1");
@@ -1260,15 +1271,15 @@ mod tests {
         }
     }
 
-    /// Every role but the executor's telemetry principal reads: it sends
-    /// the steps of its target only (ADR-t1662-3 decision 9).
+    /// Runner and executor-telemetry principals cannot read the queue. The
+    /// latter sends only its target's steps (ADR-t1662-3 decision 9).
     #[test]
     fn every_role_reads_and_is_refused_what_it_was_not_granted() {
         for role_ in ActorRole::ALL {
             let actor = role(role_);
             assert_eq!(
                 allowed(&actor, C::QueueRead, &Resource::Queue),
-                role_ != ActorRole::ExecutorTelemetry,
+                !matches!(role_, ActorRole::Runner | ActorRole::ExecutorTelemetry),
                 "{role_:?}"
             );
             for capability in Capability::ALL {
