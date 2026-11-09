@@ -9,7 +9,23 @@
 //! <kpi|observer|kpi-range|kpi-whole>` makes the read as the runtime does and
 //! prints one line of JSON: its peak, its time and its answer's digest.
 //! `kpi-range` and `kpi-whole` are the hourly review's question (`--period
-//! day --last 2`), read from where it needs and from every row. `parts
+//! day --last 2`), read from where it needs and from every row; `kpi-since`,
+//! `stats` and `stats-since` are `kpi --since` and `stats` without and with
+//! `--since`, the since 7 days before the last event. `whole <dir> <read>
+//! text` makes the same read with its records' payloads held as text
+//! (`dagq::domain::ledger::window::payload_text`,
+//! docs/plans/ledger-window-payload-text-spike.md): it reads the window
+//! so, then decodes every payload for today's folds and folds it;
+//! `whole_peak` is the process's peak over all of it, and the stages are
+//! printed apart, with `decode_on_read_estimate`, the larger of the read's
+//! peak and the window's held bytes with the folds' peak: an estimate, not
+//! measured, of a form that decodes a payload only where a fold reads it.
+//! `text-parts` makes the read only and prints what its records take as
+//! text. `text-kinds` decodes only the payloads of the kinds the folds read
+//! (all but [`UNREAD_KINDS`]) and keeps the others' records without one,
+//! `text-kinds-synthetic` all but [`SYNTHETIC_UNREAD_KINDS`];
+//! `text-without:<kind>` leaves out the payloads of `<kind>` alone, to check
+//! that no read's answer changes without them. `parts
 //! <dir>` reads the rows the store holds and prints what a copy of each of
 //! their parts takes, in a process of its own so that the copies count in no
 //! read's peak.
@@ -24,6 +40,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use dagq::application::kpi::{self, Host};
+use dagq::application::stats::{self, StatsSources};
 use dagq::application::supervise::{Retain, build_pass};
 use dagq::application::{LedgerStore, NodeSampleStore, SessionStepStore};
 use dagq::domain::RunId;
@@ -37,6 +54,7 @@ use dagq::domain::ledger::window::{LedgerWindow, WindowQuery, run_on_its_way, ru
 use dagq::domain::ledger::{LedgerKind, LedgerRow};
 use dagq::domain::marks::utc_text;
 use dagq::domain::session_step::{Step, StepKind, StepTarget};
+use dagq::domain::stats::{Cursor, StatsQuery};
 use dagq::infrastructure::sqlite::SqliteQueue;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -619,16 +637,91 @@ fn answer_digest(answer: &impl serde::Serialize) -> (u64, usize) {
     (hasher.finish(), text.len())
 }
 
-/// The folds of `read` over `window`, as `kpi` and `observer_kpi_read` make
-/// them, with the setup they read beside it: the answer's value.
-fn fold(window: &LedgerWindow, now: i64, read: &str, queue: &SqliteQueue) -> Value {
+/// The `--since` of `kpi-since` and `stats-since`: 7 days before the last
+/// event of the queue whose last event is at `now`.
+fn since_of(now: i64) -> Cursor {
+    Cursor::Time((now - 7 * 86_400) * 1000)
+}
+
+/// What `read` asks: the window's and the question its folds answer.
+enum Read {
+    Kpi(KpiQuery),
+    Observer,
+    Stats(StatsQuery),
+}
+
+fn read_of(read: &str, now: i64) -> Read {
+    let hourly = |read_whole_ledger| KpiQuery {
+        period: Period::Day,
+        last: 2,
+        read_whole_ledger,
+        ..KpiQuery::default()
+    };
+    match read {
+        "kpi" => Read::Kpi(KpiQuery::default()),
+        "kpi-range" => Read::Kpi(hourly(false)),
+        "kpi-whole" => Read::Kpi(hourly(true)),
+        "kpi-since" => Read::Kpi(KpiQuery {
+            since: Some(since_of(now)),
+            ..KpiQuery::default()
+        }),
+        "observer" => Read::Observer,
+        "stats" => Read::Stats(StatsQuery::default()),
+        "stats-since" => Read::Stats(StatsQuery {
+            since: Some(since_of(now)),
+            ..StatsQuery::default()
+        }),
+        other => panic!("no read {other}"),
+    }
+}
+
+/// The window `read` asks of the ledger, as the runtime asks it.
+fn window_query(read: &Read, now: i64) -> WindowQuery {
+    match read {
+        Read::Kpi(query) => WindowQuery {
+            now_ms: stats::now_ms(now),
+            read_from_ms: dagq::domain::kpi::read_from_ms(
+                query,
+                &KpiConfig::default(),
+                now,
+                host().utc_offset_secs,
+            ),
+            ..WindowQuery::default()
+        },
+        Read::Observer => WindowQuery {
+            now_ms: stats::now_ms(now),
+            ..WindowQuery::default()
+        },
+        Read::Stats(query) => stats::window_query(query, now),
+    }
+}
+
+/// The sources `stats` reads beside the ledger: no `dagq.toml`, the
+/// example's areas and host.
+fn with_stats_sources<T>(areas: &AreaMap, then: impl FnOnce(&StatsSources<'_>) -> T) -> T {
+    let none_stall = || Ok(None);
+    let none_conflicts = || Ok(None);
+    then(&StatsSources {
+        config_file: &none_stall,
+        conflicts_file: &none_conflicts,
+        areas: Some(areas),
+        utc_offset_secs: host().utc_offset_secs,
+        counts_checks: true,
+        rust_toolchain: true,
+    })
+}
+
+/// The folds of `read` over `window`, as `kpi`, `observer_kpi_read` and
+/// `stats` make them, with the setup they read beside it: the answer's
+/// value.
+fn fold(window: &LedgerWindow, now: i64, read: &Read, queue: &SqliteQueue) -> Value {
     let (config, areas) = (KpiConfig::default(), areas());
     let of = |query: &KpiQuery| {
         kpi::of_window(window, now, host(), &config, Some(&areas), query).unwrap()
     };
     match read {
-        "kpi" => serde_json::to_value(of(&KpiQuery::default())).unwrap(),
-        "observer" => {
+        Read::Kpi(query) => serde_json::to_value(of(query)).unwrap(),
+        Read::Observer => {
             let at = |period, last| KpiQuery {
                 period,
                 last,
@@ -637,7 +730,9 @@ fn fold(window: &LedgerWindow, now: i64, read: &str, queue: &SqliteQueue) -> Val
             let (day, week) = (of(&at(Period::Day, 7)), of(&at(Period::Week, 4)));
             observe::observer_input(&day, &week, &queue.kpi_breach_events_open().unwrap())
         }
-        other => panic!("no read {other}"),
+        Read::Stats(query) => with_stats_sources(&areas, |sources| {
+            serde_json::to_value(stats::of_window(window, now, query, sources).unwrap()).unwrap()
+        }),
     }
 }
 
@@ -655,47 +750,154 @@ fn read_rows(queue: &SqliteQueue, query: &WindowQuery) -> Vec<LedgerRow> {
     rows
 }
 
-/// The read as the runtime makes it, in one piece.
-fn whole(dir: &Path, read: &str) {
+/// The kinds of event of the synthetic queue whose payload no fold of
+/// `kpi`, `stats` or `report` reads, by both checks of
+/// docs/plans/ledger-window-payload-text-spike.md (no reader of its payload
+/// in the folds' code, and every read's answer the same without its
+/// payloads): `text-kinds` decodes every other kind's payload and none of
+/// these.
+const UNREAD_KINDS: &[&str] = &["first_commit_observed"];
+
+/// The kinds of the synthetic queue without whose payloads no read's answer
+/// changes, by that check alone: `text-kinds-synthetic` leaves them all
+/// undecoded, the least a decoding by kind could hold of this queue. The
+/// folds' code reads the payloads of most of them (the spike's document), so
+/// a read that decodes so is not one the runtime could make.
+const SYNTHETIC_UNREAD_KINDS: &[&str] = &[
+    "agent_started",
+    "attributes_baseline",
+    "claim_deferred",
+    "first_commit_observed",
+    "integration_rebased",
+    "integration_started",
+    "landing_queued",
+    "push_finished",
+    "receipt_observed",
+    "run_phase_changed",
+    "session_turns",
+    "slots_full_ended",
+    "slots_full_started",
+    "stall_config_loaded",
+    "supervisor_alive",
+    "validation_finished",
+];
+
+/// The stages of a `text` read, each in counted bytes from the queue's
+/// opening: the read's peak and what it holds after it, the payloads' text,
+/// the peak through decoding and what the decoded window holds, the folds'
+/// peak over what they started with, and the process's peak over them all.
+struct Split {
+    read_peak: usize,
+    held: usize,
+    payload_bytes: usize,
+    decoded_peak: usize,
+    decoded_held: usize,
+    folds_peak: usize,
+    process_peak: usize,
+}
+
+/// The read as the runtime makes it, in one piece (`lean`), or with its
+/// payloads held as text (`text`, the module doc).
+fn whole(dir: &Path, name: &str, candidate: &str) {
     let now = now_of(dir);
     let queue = SqliteQueue::open(dir.join("queue.db")).unwrap();
     let base = in_use();
     reset_peak();
     let (config, areas) = (KpiConfig::default(), areas());
-    let hourly = |read_whole_ledger| KpiQuery {
-        period: Period::Day,
-        last: 2,
-        read_whole_ledger,
-        ..KpiQuery::default()
-    };
-    let query = match read {
-        "kpi" => Some(KpiQuery::default()),
-        "kpi-range" => Some(hourly(false)),
-        "kpi-whole" => Some(hourly(true)),
-        _ => None,
-    };
-    let mut elapsed_ms = None;
-    let answer = match query {
-        Some(query) => {
-            let started = Instant::now();
-            let answer = kpi::kpi(&queue, now, host(), &config, Some(&areas), &query).unwrap();
-            elapsed_ms = Some(started.elapsed().as_millis());
+    let read = read_of(name, now);
+    let started = Instant::now();
+    let mut split = None;
+    let answer = match (candidate, &read) {
+        ("lean", Read::Kpi(query)) => {
+            let answer = kpi::kpi(&queue, now, host(), &config, Some(&areas), query).unwrap();
             serde_json::to_value(answer).unwrap()
         }
-        None => {
+        ("lean", Read::Stats(query)) => with_stats_sources(&areas, |sources| {
+            serde_json::to_value(stats::stats(&queue, now, query, sources).unwrap()).unwrap()
+        }),
+        ("lean", Read::Observer) => {
             let window = dagq::application::report::window(&queue, now).unwrap();
-            fold(&window, now, read, &queue)
+            fold(&window, now, &read, &queue)
         }
+        _ if candidate.starts_with("text") => {
+            let query = window_query(&read, now);
+            let text = dagq::application::ledger_window_payload_text(&queue, &query).unwrap();
+            let read_peak = peak().saturating_sub(base);
+            let held = in_use().saturating_sub(base);
+            let payload_bytes: usize = text.records.iter().map(|event| event.payload.len()).sum();
+            if candidate == "text-parts" {
+                // What the records alone take, as text: the bytes a copy of
+                // them allocates. In a process of its own, so that the copy
+                // counts in no read's peak.
+                let before_copy = in_use();
+                let copy = text.records.clone();
+                let records_bytes = in_use() - before_copy;
+                drop(copy);
+                println!(
+                    "{}",
+                    json!({"mode": "text-parts", "read": name,
+                           "events": queue.latest_event_id().unwrap().as_i64(),
+                           "held_after_read": held, "text_records_bytes": records_bytes,
+                           "payload_text_bytes": payload_bytes})
+                );
+                return;
+            }
+            // Every payload decoded for today's folds (module doc): counted
+            // in the process's peak like any other allocation.
+            let window = match candidate {
+                "text" => text.into_window(&query),
+                "text-kinds" => {
+                    text.into_window_of_kinds(&query, |kind| !UNREAD_KINDS.contains(&kind.as_str()))
+                }
+                "text-kinds-synthetic" => text.into_window_of_kinds(&query, |kind| {
+                    !SYNTHETIC_UNREAD_KINDS.contains(&kind.as_str())
+                }),
+                other => {
+                    // `text-without:<kind>`: the check that the answer does
+                    // not change without the payloads of one kind.
+                    let without = other.strip_prefix("text-without:").expect("a candidate");
+                    text.into_window_of_kinds(&query, |kind| kind.as_str() != without)
+                }
+            };
+            let decoded_peak = peak().saturating_sub(base);
+            let decoded_held = in_use().saturating_sub(base);
+            let before_folds = in_use();
+            reset_peak();
+            let answer = fold(&window, now, &read, &queue);
+            let folds_peak = peak().saturating_sub(before_folds);
+            split = Some(Split {
+                read_peak,
+                held,
+                payload_bytes,
+                decoded_peak,
+                decoded_held,
+                folds_peak,
+                process_peak: decoded_peak.max(decoded_held + folds_peak),
+            });
+            answer
+        }
+        (other, _) => panic!("no candidate {other}"),
     };
-    let whole_peak = peak().saturating_sub(base);
+    let elapsed_ms = started.elapsed().as_millis();
+    let whole_peak = split
+        .as_ref()
+        .map_or_else(|| peak().saturating_sub(base), |split| split.process_peak);
     let (digest, answer_bytes) = answer_digest(&answer);
     println!(
         "{}",
         json!({
             "mode": "whole",
-            "read": read,
+            "read": name,
+            "candidate": candidate,
             "events": queue.latest_event_id().unwrap().as_i64(),
             "whole_peak": whole_peak,
+            "read_peak": split.as_ref().map(|split| split.read_peak),
+            "held_after_read": split.as_ref().map(|split| split.held),
+            "payload_text_bytes": split.as_ref().map(|split| split.payload_bytes),
+            "decoded_peak": split.as_ref().map(|split| split.decoded_peak),
+            "decoded_held": split.as_ref().map(|split| split.decoded_held),
+            "folds_peak": split.as_ref().map(|split| split.folds_peak),
+            "decode_on_read_estimate": split.as_ref().map(|split| split.read_peak.max(split.held + split.folds_peak)),
             "elapsed_ms": elapsed_ms,
             "answer_digest": digest.to_string(),
             "answer_bytes": answer_bytes,
@@ -726,7 +928,7 @@ fn parts(dir: &Path) {
     let now = now_of(dir);
     let queue = SqliteQueue::open(dir.join("queue.db")).unwrap();
     let query = WindowQuery {
-        now_ms: dagq::application::stats::now_ms(now),
+        now_ms: stats::now_ms(now),
         ..WindowQuery::default()
     };
     let base = in_use();
@@ -782,11 +984,17 @@ fn main() {
             let days = args.get(4).map(|days| days.parse().unwrap());
             prepare(Path::new(arg(2)), arg(3).parse().unwrap(), days);
         }
-        Some("whole") if args.len() == 4 => whole(Path::new(arg(2)), arg(3)),
+        Some("whole") if args.len() == 4 || args.len() == 5 => {
+            whole(
+                Path::new(arg(2)),
+                arg(3),
+                args.get(4).map_or("lean", String::as_str),
+            );
+        }
         Some("parts") if args.len() == 3 => parts(Path::new(arg(2))),
         _ => {
             eprintln!(
-                "usage: kpi_read_memory prepare <dir> <events> [days] | whole <dir> <kpi|observer|kpi-range|kpi-whole> | parts <dir>"
+                "usage: kpi_read_memory prepare <dir> <events> [days] | whole <dir> <kpi|kpi-since|kpi-range|kpi-whole|observer|stats|stats-since> [lean|text] | parts <dir>"
             );
             std::process::exit(2);
         }

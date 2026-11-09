@@ -523,6 +523,9 @@ pub struct WindowRows {
     /// [`WindowQuery::read_from_ms`] and, for it, what the rows taken so far
     /// make of it.
     from: Option<ReadFrom>,
+    /// The records as text, of a read that holds them so
+    /// ([`payload_text`]); none of the runtime's reads.
+    text: Option<payload_text::TextRecords>,
 }
 
 /// What a read from a time keeps track of as it takes the rows.
@@ -590,6 +593,7 @@ impl WindowRows {
                 ms,
                 ..ReadFrom::default()
             }),
+            text: None,
         }
     }
 
@@ -692,6 +696,9 @@ impl WindowRows {
                     .map(|run| (LedgerKind::Run, run.as_str().to_owned())),
             );
         }
+        if let Some(text) = &mut self.text {
+            text.take_earlier(&mut self.earlier_records);
+        }
     }
 
     /// Take `row`, folded to what the window keeps of it.
@@ -705,6 +712,9 @@ impl WindowRows {
         }
         self.records.append(&mut row.records);
         row.records = Vec::new();
+        if let Some(text) = &mut self.text {
+            text.take(&mut self.records);
+        }
         match row.kind {
             LedgerKind::Queue => return,
             LedgerKind::Run => {
@@ -754,33 +764,33 @@ impl WindowRows {
     /// nothing), the rows with an input by the window's end that have not
     /// ended before its start, then those of the filters.
     pub fn into_window(mut self, query: &WindowQuery) -> LedgerWindow {
+        debug_assert!(self.text.is_none(), "a read of the payloads as text");
         self.rows.shrink_to_fit();
         self.records.append(&mut self.earlier_records);
         self.earlier_records = Vec::new();
         self.records.shrink_to_fit();
         self.records.sort_by_key(|event| event.id);
         self.records.dedup_by_key(|event| event.id);
-        let mut earlier = self.earlier;
-        earlier.claims.sort_by_key(|event| event.id);
-        earlier.claims.dedup_by_key(|event| event.id);
-        earlier.claims.retain(|event| {
+        let earlier = settled(self.earlier, |id| {
             self.records
-                .binary_search_by_key(&event.id, |read| read.id)
-                .is_err()
+                .binary_search_by_key(&id, |read| read.id)
+                .is_ok()
         });
-        earlier.claims.shrink_to_fit();
-        earlier.landings.sort_by_key(|event| event.id);
-        earlier.landings.dedup_by_key(|event| event.id);
-        earlier.landings.retain(|event| {
-            self.records
-                .binary_search_by_key(&event.id, |read| read.id)
-                .is_err()
-        });
-        earlier.landings.shrink_to_fit();
         let mut window = of_records(self.records, self.rows, &self.goals, query);
         window.earlier = earlier;
         window
     }
+}
+
+/// `earlier` in id order, each once, of none of the records `read` holds.
+fn settled(mut earlier: Earlier, read: impl Fn(EventId) -> bool) -> Earlier {
+    for events in [&mut earlier.claims, &mut earlier.landings] {
+        events.sort_by_key(|event| event.id);
+        events.dedup_by_key(|event| event.id);
+        events.retain(|event| !read(event.id));
+        events.shrink_to_fit();
+    }
+    earlier
 }
 
 /// The window `query` asks of `rows` (every kind's), read all at once: the
@@ -1385,6 +1395,9 @@ pub(crate) fn through_ledger(events: &[RunEvent], until_secs: Option<i64>) -> Le
     };
     select(rows, &query)
 }
+
+#[doc(hidden)]
+pub mod payload_text;
 
 #[cfg(test)]
 mod tests;

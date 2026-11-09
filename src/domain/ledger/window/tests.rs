@@ -2079,3 +2079,46 @@ fn a_read_from_a_time_holds_of_the_rows_left_out_what_looks_back_at_them() {
             .any(|execution| execution.provider == "claude")
     );
 }
+
+/// A read that holds the payloads as text ([`payload_text`]) gives, once
+/// decoded, the window of the read that holds them as values: the same
+/// records, rows and what the rows left out still give, whatever the cursors.
+#[test]
+fn a_read_of_the_payloads_as_text_decodes_to_the_window_of_values() {
+    let now_ms = T0 + 60 * MIN;
+    for log in [queue_log(), two_landings()] {
+        let rows = build(&log.events, now_ms, BUILT);
+        for (since, until) in [
+            (None, None),
+            (Some(Cursor::Event(EventId::new(2))), None),
+            (None, Some(Cursor::Time(T0 + 20 * MIN))),
+        ] {
+            let query = WindowQuery {
+                since,
+                until,
+                now_ms,
+                ..WindowQuery::default()
+            };
+            let mut read = WindowRows::payload_text(&query, 0);
+            for row in rows.clone() {
+                read.take(row);
+            }
+            let text = read.into_text_window();
+            assert!(text.records.windows(2).all(|pair| pair[0].id < pair[1].id));
+            let text = text.into_window(&query);
+            let values = select(rows.clone(), &query);
+            let mut again = WindowRows::payload_text(&query, 0);
+            for row in rows.clone() {
+                again.take(row);
+            }
+            let every_kind = again
+                .into_text_window()
+                .into_window_of_kinds(&query, |_| true);
+            assert_eq!(every_kind.events(), values.events(), "{since:?} {until:?}");
+            assert_eq!(text.events(), values.events(), "{since:?} {until:?}");
+            assert_eq!(text.rows, values.rows, "{since:?} {until:?}");
+            assert_eq!(text.earlier, values.earlier, "{since:?} {until:?}");
+            assert_eq!((text.after, text.upto), (values.after, values.upto));
+        }
+    }
+}

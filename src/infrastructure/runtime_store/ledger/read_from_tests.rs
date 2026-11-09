@@ -386,3 +386,24 @@ fn a_row_written_over_during_the_read_is_not_lost() {
             .all(|record| window.events().iter().any(|event| event.id == record.id))
     );
 }
+
+/// The store's read with the payloads as text
+/// ([`crate::application::ledger_window_payload_text`]) decodes to the
+/// window [`LedgerStore::ledger_window`] gives, read from a time or whole.
+#[test]
+fn the_read_of_the_payloads_as_text_decodes_to_the_stores_window() {
+    let (_dir, queue, _) = queue_of_rows();
+    let whole = WindowQuery {
+        read_from_ms: None,
+        ..read_from()
+    };
+    for query in [read_from(), whole] {
+        let values = queue.ledger_window(&query).unwrap();
+        let text = crate::application::ledger_window_payload_text(&queue, &query)
+            .unwrap()
+            .into_window(&query);
+        assert_eq!(text.events(), values.events(), "{query:?}");
+        assert_eq!(held(&text), held(&values), "{query:?}");
+        assert_eq!(text.rows, values.rows, "{query:?}");
+    }
+}
