@@ -17,7 +17,7 @@
 //! - `reached` (i): R at the last event read; on the way a session write
 //!   that fails (W stays back), a new process started from R, and a
 //!   builder from its cursors' start (reading again from before R).
-//! - `cut` (ii): one pass cut by [`WRITES_PER_PASS`], queue rows of the
+//! - `cut` (ii): one pass cut by [`WRITES_PER_PASS`] rows, queue rows of the
 //!   three kinds ([`THREE`]) and of other kinds held past R.
 //! - `on its way` (iii): a run not ended whose events are before and after R.
 //! - `store ahead` (iv): the EventStore holds events of the three kinds and
@@ -43,8 +43,13 @@ use serde_json::json;
 
 use super::{Log, run_id};
 use crate::domain::EventId;
-use crate::domain::ledger::builder::WRITES_PER_PASS;
 use crate::domain::ledger::owner::{self, Owner};
+
+/// How many rows a pass wrote at most when the values were fixed (a bound
+/// of rows then, of time now: the builder's tests charge each row's write
+/// so that a pass writes as many, [`crate::domain::ledger::builder::PASS_TIME`]).
+/// The inputs are sized by it to cut a pass.
+pub(crate) const WRITES_PER_PASS: usize = 200;
 
 /// The commit of main whose functions gave the values fixed.
 pub(crate) const FIXED_AT: &str = "369d7c62657660606feee3911710a7b0b8e03cf1";

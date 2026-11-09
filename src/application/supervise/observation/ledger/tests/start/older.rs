@@ -569,3 +569,113 @@ fn a_store_with_no_r_starts_from_the_cursors_start_whatever_the_versions_of_its_
     assert_eq!(builder.cursors(), r_of(&legacy));
     assert_eq!(builder.events, log.last());
 }
+
+/// A clock each of whose looks is `step` after the one before: what a pass
+/// does between two looks (a row it builds to mark it, a row it writes)
+/// takes `step`.
+struct Looking(std::sync::Mutex<Instant>, Duration);
+
+impl crate::application::Clock for Looking {
+    fn system_time(&self) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH
+    }
+
+    fn monotonic(&self) -> Instant {
+        let mut next = self.0.lock().unwrap();
+        let at = *next;
+        *next += self.1;
+        at
+    }
+}
+
+/// Queue rows of an older version before R, each marked with no position
+/// as their rewrite reads them, and a supervisor's heartbeat before every
+/// pass, which reaches none of them: their mark stays with no position, so
+/// a pass would build them all again to mark them each time. Building each
+/// takes time here, and a pass builds to mark them only within
+/// [`MARK_TIME`], marking the rest as if they read the heartbeat, so that
+/// no later pass builds those again: every pass writes rows, the rewrite
+/// ends, and the ledger is the build of every input with R at the last
+/// event.
+#[test]
+fn older_rows_of_no_position_are_written_while_an_event_comes_before_each_pass() {
+    use crate::domain::ledger::builder::MARK_TIME;
+    let alive = |log: &mut Log, secs: i64| {
+        log.add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s1"}),
+            secs,
+        );
+    };
+    let mut log = Log::default();
+    alive(&mut log, 0);
+    for secs in 1..=600 {
+        log.add(
+            None,
+            None,
+            "authorization_denied",
+            json!({"event": "authorization_denied", "role": "executor",
+                   "capability": "telemetry.report", "reason": "not_on_resource",
+                   "resource": {"kind": "run", "id": run_id(9)}}),
+            secs,
+        );
+    }
+    let memory = Memory::of(&log);
+    drain(&memory, &mut Builder::default(), LATER);
+    let queue: Vec<(LedgerKind, String)> = memory
+        .rows
+        .borrow()
+        .keys()
+        .filter(|(kind, _)| *kind == LedgerKind::Queue)
+        .cloned()
+        .collect();
+    assert!(queue.len() > 600);
+    for key in &queue {
+        older_and_stale(&memory, key);
+    }
+
+    let step = PASS_TIME / 100;
+    let looking = Looking(std::sync::Mutex::new(Instant::now()), step);
+    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+    let mut passes = 0;
+    let mut secs = 600;
+    loop {
+        secs += 1;
+        alive(&mut log, secs);
+        memory.events.replace(log.events.clone());
+        let built = build_pass_timed(
+            &memory,
+            &mut builder,
+            (ms(LATER), BUILT),
+            Retain::default(),
+            None,
+            (EVENTS_PER_READ, SESSION_BYTES_PER_WRITE),
+            Timing(Some(&looking)),
+        );
+        assert_eq!(built.failure, None);
+        passes += 1;
+        assert!(built.written > 0, "pass {passes}: {built:?}");
+        let marking = usize::try_from(MARK_TIME.as_nanos() / step.as_nanos()).unwrap();
+        assert!(
+            built.work.folded <= marking + built.written + 3,
+            "pass {passes}: {} folded for {} written",
+            built.work.folded,
+            built.written
+        );
+        let older_left = !memory.ledger_older_rows_after(None, 1).unwrap().is_empty();
+        if !older_left && builder.backlog() == 0 {
+            break;
+        }
+        assert!(passes < 100, "{} marks left", builder.backlog());
+    }
+    drain(&memory, &mut builder, LATER);
+    assert_eq!(r_of(&memory).events, log.last());
+    let whole = {
+        let fresh = Memory::of(&log);
+        drain(&fresh, &mut Builder::default(), LATER);
+        fresh.rows.into_inner()
+    };
+    assert_eq!(differing(&memory.rows.borrow(), &whole), Vec::new());
+}

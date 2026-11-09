@@ -6,7 +6,9 @@
 //! folds what they mark, a run's steps and resources into its row, and
 //! writes the rows
 //! [`crate::domain::ledger::builder`] says,
-//! at most [`WRITES_PER_PASS`] a pass. Once a local day it removes the
+//! until the pass has taken [`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME). While a pass leaves R behind
+//! the events, stopped at a bound with work left, the next starts at once
+//! ([`goes_on`]). Once a local day it removes the
 //! node rows past the host's load's retention and the session steps past
 //! [`crate::domain::session_step::RETENTION_DAYS`]
 //! ([`Retain`]). It reads the events of each run and
@@ -46,8 +48,8 @@ use crate::domain::ledger::builder::pushes::{self, PushesHeld};
 use crate::domain::ledger::builder::{
     Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, MarkObservation,
     RESOURCES_PER_READ, ReadTo, RunResources, RunSteps, SESSION_BYTES_PER_WRITE,
-    SESSION_ROWS_PER_WRITE, STEPS_PER_READ, SweepCounts, Target, WRITES_PER_PASS, behind, build,
-    hour, keeps_settled, writes,
+    SESSION_ROWS_PER_WRITE, STEPS_PER_READ, SweepCounts, Target, behind, build, hour,
+    keeps_settled, marking_spent, pass_spent, writes,
 };
 use crate::domain::ledger::queue::{QueueBook, QueueHead, cut};
 use crate::domain::ledger::session::SessionsHeld;
@@ -123,7 +125,7 @@ pub fn logs_kept(last: Option<(Duration, usize)>, bytes: usize) -> bool {
 /// What the supervisor builds the ledger with.
 #[derive(Clone)]
 pub struct LedgerPort {
-    /// How often a pass runs.
+    /// How often a pass runs while the ledger is caught up ([`goes_on`]).
     pub interval: Duration,
     /// How many local days of node rows are kept, as the NodeSampleStore's
     /// samples (`None`: the host's load is not recorded, none removed).
@@ -146,13 +148,17 @@ pub type Classifier =
 /// What one pass did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Built {
-    /// The run, task, queue and node rows written, at most
-    /// [`WRITES_PER_PASS`].
+    /// The run, task, queue and node rows written, until the pass took
+    /// [`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME).
     pub written: usize,
     /// The session rows written, all at once ([`write_sessions`]).
     pub sessions: usize,
     /// The marks left for the next pass.
     pub backlog: usize,
+    /// Whether it stopped at one of its bounds with work left: its time
+    /// ([`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME)), the marks it looks at ([`CHECKS_PER_PASS`]) or the
+    /// events it reads ([`goes_on`]).
+    pub cut: bool,
     /// The node rows the retention removed.
     pub removed: usize,
     /// The session steps the retention removed.
@@ -186,6 +192,11 @@ pub struct PassWork {
     pub latest: i64,
     pub marks_written: Option<Marks>,
     pub no_marks: &'static str,
+    /// The session and queue rows folded to mark them before the writes
+    /// ([`Builder::rows_to_mark`]) and to write them, one at a time as the
+    /// writes come to them ([`Inputs::build_row`]): none of the rows a pass
+    /// leaves marked is folded again for a write it does not make.
+    pub folded: usize,
 }
 
 /// Timing is supplied by the runtime's Clock port. Direct fold callers
@@ -202,6 +213,11 @@ impl Timing<'_> {
         self.0
             .zip(start)
             .map_or(Duration::ZERO, |(clock, start)| clock.since(start))
+    }
+
+    /// How long since `start` on the clock; none without a clock.
+    fn elapsed(self, start: Option<Instant>) -> Option<Duration> {
+        self.0.is_some().then(|| self.since(start))
     }
 }
 
@@ -415,7 +431,13 @@ fn build_pass_limited(
     let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let started = timing.start();
     let mut built = Built::default();
-    let read = (classifier, per_read, per_pass, session_bytes, timing);
+    let read = (
+        classifier,
+        per_read,
+        per_pass,
+        session_bytes,
+        (timing, started),
+    );
     if let Err(error) = pass(store, builder, (now_ms, built_at), read, &mut built) {
         built.failure = Some(format!("{error:#}"));
     }
@@ -501,12 +523,12 @@ fn pass(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
     (now_ms, built_at): (i64, &str),
-    (classifier, per_read, per_pass, session_bytes, timing): (
+    (classifier, per_read, per_pass, session_bytes, (timing, started)): (
         Option<&crate::domain::command_rules::CommandClassifier>,
         usize,
         usize,
         usize,
-        Timing<'_>,
+        (Timing<'_>, Option<Instant>),
     ),
     built: &mut Built,
 ) -> Result<()> {
@@ -579,6 +601,7 @@ fn pass(
         }
     }
     if builder.events < latest {
+        built.cut = true;
         preserve_time_work(store, builder, builder.folds_at(now_ms), built)?;
     }
     let samples = store.node_samples_after(builder.samples)?;
@@ -627,15 +650,17 @@ fn pass(
     let rows = builder.rows_to_build(builder.kept());
     restore(store, builder, &rows)?;
     let after = builder.take_rows_after();
-    fold_rows(
-        store,
-        builder,
-        (now_ms, built_at),
-        &rows,
-        after,
-        false,
-        &mut built.sweep,
-    )?;
+    if let Some(after) = after {
+        let marking = builder.rows_to_mark(&rows);
+        mark_rows_timed(
+            builder,
+            (now_ms, built_at),
+            marking,
+            after,
+            (timing, started),
+            built,
+        );
+    }
     // The session rows wait aside for the write of them all after the
     // other rows, so that none is written alone, a failure of theirs stops
     // no other row, and the marks written with the last of them hold back
@@ -645,7 +670,7 @@ fn pass(
         store,
         builder,
         (now_ms, built_at),
-        (classifier, timing),
+        (classifier, timing, started),
         built,
         &rows,
         aside,
@@ -663,8 +688,38 @@ fn pass(
     sessions.map(drop)
 }
 
+/// Mark those of `rows` that read an input after `after`
+/// ([`Builder::mark_rows_after`]), each built as the pass that started at
+/// `started` comes to it, until it has taken
+/// [`MARK_TIME`](crate::domain::ledger::builder::MARK_TIME)
+/// ([`marking_spent`]); those it has no time left to build are marked as
+/// if each read one ([`Builder::mark_rows_unread`]), so that the writes
+/// keep the rest of the pass and the next pass does not build them again.
+fn mark_rows_timed(
+    builder: &mut Builder,
+    (now_ms, built_at): (i64, &str),
+    rows: BTreeSet<(LedgerKind, String)>,
+    after: ReadTo,
+    (timing, started): (Timing<'_>, Option<Instant>),
+    built: &mut Built,
+) {
+    let mut rows = rows.into_iter();
+    while let Some(row) = rows.next() {
+        if timing.elapsed(started).is_some_and(marking_spent) {
+            builder.mark_rows_unread(after, std::iter::once(row).chain(rows));
+            break;
+        }
+        let inputs = Inputs::of(builder.kept(), now_ms, built_at, &BTreeSet::from([row]));
+        builder.mark_rows_after(Some(after), &inputs.rows);
+        built.work.folded += 1;
+    }
+}
+
 /// Write the marks a pass takes ([`Builder::take`], [`CHECKS_PER_PASS`]
-/// of them) at most [`WRITES_PER_PASS`] rows, the session rows aside
+/// of them, those holding R first) until the pass that started at
+/// `started` has taken [`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME) ([`pass_spent`]; a pass without a
+/// clock writes every one), and put back the rest for the next pass; the
+/// session rows aside
 /// (written after, [`write_sessions`]), then sweep the session and queue rows of `rows`
 /// left marked by a builder that has not swept ([`fold_rows`]). The
 /// session rows taken `aside` are marked again before the sweep, so that
@@ -673,21 +728,21 @@ fn write_taken(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
     (now_ms, built_at): (i64, &str),
-    (classifier, timing): (
+    (classifier, timing, started): (
         Option<&crate::domain::command_rules::CommandClassifier>,
         Timing<'_>,
+        Option<Instant>,
     ),
     built: &mut Built,
     rows: &BTreeSet<(LedgerKind, String)>,
     aside: Vec<Target>,
 ) -> Result<()> {
     let taken = builder.take(CHECKS_PER_PASS);
-    let rows_taken: BTreeSet<(LedgerKind, String)> = taken
-        .iter()
-        .filter(|target| matches!(target, Target::Row(..)))
-        .map(Target::row_key)
-        .collect();
-    let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, &rows_taken);
+    // Marks past those it looks at may be left.
+    built.cut |= taken.len() >= CHECKS_PER_PASS;
+    // Each session or queue row is built as its write comes, after the
+    // time is looked at: what the pass leaves is not folded for nothing.
+    let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, &BTreeSet::new());
     let mut first = builder.taken_first();
     // The first write that failed of the marks taken first: the round goes
     // on past it, as a new process takes those marks first again each pass.
@@ -697,11 +752,17 @@ fn write_taken(
         let taken_first = first > 0;
         first = first.saturating_sub(1);
         // The next pass starts at what this one did not look at.
-        if built.written >= WRITES_PER_PASS {
+        if timing.elapsed(started).is_some_and(pass_spent) {
+            built.cut = true;
             builder.put_back(target, targets);
             break;
         }
-        if let Err(error) = write(store, builder, &target, (&mut inputs, classifier), built) {
+        if inputs.build_row(&target) {
+            built.work.folded += 1;
+        }
+        let written = write(store, builder, &target, (&mut inputs, classifier), built);
+        inputs.drop_row(&target);
+        if let Err(error) = written {
             // Its turn comes again after the rest: one failing each pass
             // stops no other, nor is it taken first again.
             builder.keep_failed(target);
@@ -793,7 +854,7 @@ fn fold_sessions(
 }
 
 /// Fold every session row marked ([`Builder::take_sessions`]), whatever
-/// [`WRITES_PER_PASS`], [`SESSION_ROWS_PER_WRITE`] at a time, and write
+/// [`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME), [`SESSION_ROWS_PER_WRITE`] at a time, and write
 /// those that change in chunks of at most as many rows and `bytes` of them
 /// (each row's text, as it crosses to the queue service; a row past
 /// `bytes` alone is a chunk of its own), each in one transaction
@@ -1894,6 +1955,39 @@ fn pass_of_watch_timed(
     (Some(builder), built)
 }
 
+/// Whether the pass after `built` starts at once rather than after the
+/// interval ([`LedgerPort::interval`]): `built` stopped at one of its
+/// bounds with work left ([`Built::cut`]) and left the ledger behind, R
+/// (its cursor of the events, the earlier of the kinds' R: either kind
+/// behind goes on; a builder of no R is taken as behind) before the
+/// latest event it saw ([`PassWork::latest`]). R need not move:
+/// the rows of one page of events hold it at the same place until the
+/// last of them is written. The passes so go on back to back until R
+/// reaches the events and then come every interval again. A pass that
+/// failed, stopped at no bound (what holds R waits on a write that
+/// failed or a fold behind the stored row), or wrote nothing and read no
+/// event, waits for the interval, so that such a pass does not run passes
+/// back to back.
+fn goes_on(built: &Built) -> bool {
+    // A pass that wrote nothing and read no event stopped before any
+    // progress: the next waits for the interval rather than spin.
+    let moved = built.written > 0 || built.sessions > 0 || built.work.events > 0;
+    built.failure.is_none()
+        && built.cut
+        && moved
+        && built
+            .marks
+            .rows
+            .is_none_or(|rows| rows.through.events.as_i64() < built.work.latest)
+}
+
+/// Whether the watch starts a pass at `at`, the last one having started
+/// at `started` (none: no pass yet): at once when the last one reaped
+/// [`goes_on`], else once `interval` passed since it started.
+fn pass_due(started: Option<Instant>, at: Instant, interval: Duration, goes_on: bool) -> bool {
+    goes_on || started.is_none_or(|started| at.saturating_duration_since(started) >= interval)
+}
+
 /// The builder (none before the first pass that started one), the pass
 /// running now and how the last ones went.
 #[derive(Default)]
@@ -1916,11 +2010,15 @@ pub(in crate::application::supervise) struct LedgerWatch {
     /// When the log last said how much the builder keeps, and its bytes
     /// then ([`logs_kept`]).
     kept_logged: Option<(Instant, usize)>,
+    /// Whether the next pass starts at once ([`goes_on`]).
+    goes_on: bool,
 }
 
 impl LedgerWatch {
-    /// Reap the pass once it ended; start one when the interval passed
-    /// since the last one started.
+    /// Reap the pass once it ended, never waiting for one still running
+    /// (it looks whether it finished); start one when the interval passed
+    /// since the last one started, or at once while the last one left the
+    /// ledger behind ([`pass_due`]).
     pub(in crate::application::supervise) fn pass(
         &mut self,
         env: &mut ObservationEnv<'_>,
@@ -1936,14 +2034,9 @@ impl LedgerWatch {
             }
             self.reap(env, job);
         }
-        let at = env.generators.clock.monotonic();
-        if self
-            .started
-            .is_some_and(|started| at.saturating_duration_since(started) < port.interval)
-        {
+        if !self.starts(env.generators.clock.monotonic(), port.interval) {
             return;
         }
-        self.started = Some(at);
         let now = env.generators.clock.now();
         let built_at = env.generators.clock.timestamp();
         let today = local_day(now, (port.utc_offset)(now));
@@ -1967,6 +2060,23 @@ impl LedgerWatch {
                 Timing(Some(&*clock)),
             )
         }));
+    }
+
+    /// Whether a pass starts at `at` ([`pass_due`]), taken as started then
+    /// when it does: the next one waits for the interval unless this one,
+    /// reaped, goes on ([`Self::reaped`]).
+    fn starts(&mut self, at: Instant, interval: Duration) -> bool {
+        if !pass_due(self.started, at, interval, self.goes_on) {
+            return false;
+        }
+        self.goes_on = false;
+        self.started = Some(at);
+        true
+    }
+
+    /// Whether the pass after `built` goes on at once ([`goes_on`]).
+    fn reaped(&mut self, built: &Built) {
+        self.goes_on = goes_on(built);
     }
 
     /// Wait for the pass still running, as the loop ends, until
@@ -2011,6 +2121,7 @@ impl LedgerWatch {
         let failure = match job.join() {
             Ok((builder, built)) => {
                 self.builder = builder;
+                self.reaped(&built);
                 let at = env.generators.clock.monotonic();
                 // A failed pass's size is not the builder's.
                 if built.failure.is_none()

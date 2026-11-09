@@ -7,7 +7,7 @@ use crate::application::{
 };
 use crate::domain::environment::{Resources, RunResource};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
-use crate::domain::ledger::builder::HOLDING_R_PER_PASS;
+use crate::domain::ledger::builder::{HOLDING_R_PER_PASS, PASS_TIME};
 use crate::domain::ledger::queue::QueueBook;
 use crate::domain::ledger::read::read;
 use crate::domain::ledger::session::SessionBook;
@@ -16,6 +16,8 @@ use crate::domain::ledger::session::written::{
     Cursors, Marks, RowsWritten, SessionsWritten, written_through,
 };
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
+/// How many rows a pass on the store's clock writes ([`Costed`]).
+use crate::domain::ledger::testkit::frozen::WRITES_PER_PASS;
 use crate::domain::ledger::testkit::{
     Log, T0, ms, pushes_across, queue_across, run_id, sessions_across,
 };
@@ -123,6 +125,67 @@ struct Memory {
     /// position, as `ledger_rows` and `ledger_omitted_points` hold them.
     omitted: RefCell<Option<Coverage>>,
     points: RefCell<BTreeMap<(String, EventId), Point>>,
+    /// The clock of a pass on it ([`pass`]), moved by its writes of the run,
+    /// task, queue and node rows.
+    clock: Costed,
+}
+
+/// A clock that moves only as the store writes a run, task, queue or node
+/// row ([`LedgerStore::write_ledger_row_over`]), by [`Self::per_write`]
+/// each: a pass on it stops at [`PASS_TIME`] after as many writes as fit,
+/// [`frozen::WRITES_PER_PASS`] by default (the count the values fixed were
+/// cut by).
+///
+/// [`frozen::WRITES_PER_PASS`]: crate::domain::ledger::testkit::frozen::WRITES_PER_PASS
+struct Costed {
+    base: Instant,
+    spent: std::sync::Mutex<Duration>,
+    per_write: std::sync::Mutex<Duration>,
+    /// What each pass's read of the latest event takes, once a pass
+    /// ([`Self::costs_each_pass`]): a cost every pass pays before it writes.
+    per_pass: std::sync::Mutex<Duration>,
+}
+
+impl Default for Costed {
+    fn default() -> Self {
+        let rows = u32::try_from(crate::domain::ledger::testkit::frozen::WRITES_PER_PASS).unwrap();
+        Self {
+            base: Instant::now(),
+            spent: std::sync::Mutex::default(),
+            per_write: std::sync::Mutex::new(PASS_TIME / rows),
+            per_pass: std::sync::Mutex::default(),
+        }
+    }
+}
+
+impl Costed {
+    /// Each write of a run, task, queue or node row takes `per_write`.
+    fn costs(&self, per_write: Duration) {
+        *self.per_write.lock().unwrap() = per_write;
+    }
+
+    /// Each pass's read of the latest event takes `per_pass`.
+    fn costs_each_pass(&self, per_pass: Duration) {
+        *self.per_pass.lock().unwrap() = per_pass;
+    }
+
+    fn charge_pass(&self) {
+        *self.spent.lock().unwrap() += *self.per_pass.lock().unwrap();
+    }
+
+    fn charge(&self) {
+        *self.spent.lock().unwrap() += *self.per_write.lock().unwrap();
+    }
+}
+
+impl crate::application::Clock for Costed {
+    fn system_time(&self) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH
+    }
+
+    fn monotonic(&self) -> Instant {
+        self.base + *self.spent.lock().unwrap()
+    }
 }
 
 impl Memory {
@@ -255,6 +318,7 @@ impl EventStore for Memory {
         unreachable!()
     }
     fn latest_event_id(&self) -> Result<EventId> {
+        self.clock.charge_pass();
         Ok(self
             .events
             .borrow()
@@ -469,6 +533,7 @@ impl LedgerStore for Memory {
         if held.as_ref() != read {
             return Ok(None);
         }
+        self.clock.charge();
         self.write_ledger_row(row).map(Some)
     }
     /// All or none, as one transaction: a refused write or a batch set to
@@ -962,9 +1027,22 @@ impl RunResourceStore for Memory {
     }
 }
 
-/// One pass at `secs` after [`T0`].
+/// One pass at `secs` after [`T0`], on the store's clock ([`Costed`]).
 fn pass(memory: &Memory, builder: &mut Builder, secs: i64) -> Built {
-    build_pass(memory, builder, (ms(secs), BUILT), Retain::default(), None)
+    timed_pass(memory, builder, ms(secs), Retain::default())
+}
+
+/// [`pass`] at `now_ms`, removing what `retain` says.
+fn timed_pass(memory: &Memory, builder: &mut Builder, now_ms: i64, retain: Retain) -> Built {
+    build_pass_timed(
+        memory,
+        builder,
+        (now_ms, BUILT),
+        retain,
+        None,
+        (EVENTS_PER_READ, SESSION_BYTES_PER_WRITE),
+        Timing(Some(&memory.clock)),
+    )
 }
 
 /// How many passes [`drain`] runs at most.
@@ -2190,7 +2268,7 @@ fn the_retention_keeps_the_steps_of_the_runs_a_pass_did_not_write_yet() {
         steps: Some(2_000),
     };
     let mut builder = Builder::default();
-    let first = build_pass(&memory, &mut builder, (ms(LATER), BUILT), retain, None);
+    let first = timed_pass(&memory, &mut builder, ms(LATER), retain);
     assert_eq!(first.failure, None);
     assert_eq!(first.written, WRITES_PER_PASS);
     assert!(first.backlog > 0);
@@ -2210,9 +2288,9 @@ fn the_retention_keeps_the_steps_of_the_runs_a_pass_did_not_write_yet() {
         (1..=1 + HOLDING_R_PER_PASS).contains(&unwritten),
         "{unwritten}"
     );
-    let mut built = build_pass(&memory, &mut builder, (ms(LATER + 1), BUILT), retain, None);
+    let mut built = timed_pass(&memory, &mut builder, ms(LATER + 1), retain);
     while built.backlog > 0 {
-        built = build_pass(&memory, &mut builder, (ms(LATER + 2), BUILT), retain, None);
+        built = timed_pass(&memory, &mut builder, ms(LATER + 2), retain);
     }
     for run in &runs {
         let row = memory.row(LedgerKind::Run, run);
@@ -2256,7 +2334,7 @@ fn the_retention_keeps_the_samples_from_inside_of_the_runs_a_pass_did_not_write_
         steps: Some(2_000),
     };
     let mut builder = Builder::default();
-    let first = build_pass(&memory, &mut builder, (ms(LATER), BUILT), retain, None);
+    let first = timed_pass(&memory, &mut builder, ms(LATER), retain);
     assert_eq!(first.failure, None);
     assert_eq!(first.written, WRITES_PER_PASS);
     assert!(first.backlog > 0);
@@ -2266,9 +2344,9 @@ fn the_retention_keeps_the_samples_from_inside_of_the_runs_a_pass_did_not_write_
         "a run not written keeps its samples"
     );
     assert_eq!(memory.owners.borrow().len(), runs.len());
-    let mut built = build_pass(&memory, &mut builder, (ms(LATER + 1), BUILT), retain, None);
+    let mut built = timed_pass(&memory, &mut builder, ms(LATER + 1), retain);
     while built.backlog > 0 {
-        built = build_pass(&memory, &mut builder, (ms(LATER + 2), BUILT), retain, None);
+        built = timed_pass(&memory, &mut builder, ms(LATER + 2), retain);
     }
     for run in &runs {
         let row = memory.row(LedgerKind::Run, run);
@@ -3077,6 +3155,7 @@ mod frozen;
 mod oldest_first;
 mod omitted;
 mod pages;
+mod pass_time;
 mod pushes_mixed;
 mod queue_waits;
 mod start;

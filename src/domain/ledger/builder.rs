@@ -126,8 +126,9 @@
 //!   and the waits that move over its time ready after it settled leave it
 //!   as it was ([`keeps_settled`]). A row ended and not settled yet is
 //!   marked again when its grace is over ([`Builder::due`]).
-//! - **Bounds**: at most [`WRITES_PER_PASS`] run, task, queue and node
-//!   rows written and [`CHECKS_PER_PASS`] of their marks looked at per
+//! - **Bounds**: run, task, queue and node rows written until the pass
+//!   has taken [`PASS_TIME`] (its reads, folds and writes), and
+//!   [`CHECKS_PER_PASS`] of their marks looked at per
 //!   pass; the rest stay marked for the next pass, which starts at them and
 //!   goes round ([`Builder::take`]), so that no mark waits behind those
 //!   marked again each pass (more tasks ready under a slots full than a
@@ -252,9 +253,16 @@
 //!   landing slot's attempts, which session or queue row it is a record
 //!   of), and a pass folds of it only the session and queue rows those
 //!   events may have changed and those marked
-//!   ([`Builder::rows_to_build`]); a task's fold reads the pushes and the
-//!   waits where they are kept. Nothing a pass makes grows with the events
-//!   before its new ones.
+//!   ([`Builder::rows_to_build`]): to mark them, not again those marked
+//!   with a position already ([`Builder::rows_to_mark`]) and within
+//!   [`MARK_TIME`], the rest marked as if they read the events read since
+//!   ([`Builder::mark_rows_unread`]), which gives them that position, and
+//!   to write
+//!   them, each as its write comes, after the pass looked at its time
+//!   ([`Inputs::build_row`]), so that what a pass pays before it writes
+//!   does not grow with the marks the passes before left. A task's fold
+//!   reads the pushes and the waits where they are kept. Nothing a pass
+//!   makes grows with the events before its new ones.
 
 use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet};
@@ -286,13 +294,54 @@ use crate::domain::supervisor_life::{Lives, supervisor_of};
 use crate::domain::{EventId, RunEvent, TaskId};
 use pushes::PushesHeld;
 
-/// How often the supervisor's pass builds the ledger.
+/// How often the supervisor's pass builds the ledger while it is caught
+/// up. While a pass leaves it behind (R before the latest event that pass
+/// saw) because it stopped at one of its bounds with work left (its time
+/// [`PASS_TIME`], the marks it looks at [`CHECKS_PER_PASS`], the events it
+/// reads), the next pass starts at once, not after this (`LedgerWatch` of
+/// 観測と分析): the passes go on until R reaches the events, so how much
+/// is written follows the inflow, not this interval. A pass that stopped
+/// at none (what is left waits on a write that failed or a fold behind
+/// the stored row) waits for it.
 pub const INTERVAL_SECS: u64 = 60;
 
-/// How many rows one pass writes at most: a backfill of every run and
-/// task before the switch takes several passes, and no pass holds the
-/// queue long.
-pub const WRITES_PER_PASS: usize = 200;
+/// How long one pass takes at most before it writes no more run, task,
+/// queue or node rows: from its start, its reads, folds and writes all
+/// counted ([`pass_spent`]). A pass past it, the marks it takes first
+/// ([`HOLDING_R_PER_PASS`]) too, leaves those it has not written for the
+/// next pass (none skipped, so R stays before their inputs), which starts
+/// at once (the passes go on while one stops at a bound, see
+/// [`INTERVAL_SECS`]). Its session rows and marks are written after it as
+/// before. About a second: one row is written in
+/// about half a millisecond, so a pass writes some two thousand rows,
+/// and a request of it holds the queue service's line no longer than a
+/// row (docs/plans/ledger-write-budget-spike.md "判定").
+pub const PASS_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether a pass that has taken `elapsed` since its start has reached
+/// [`PASS_TIME`] and writes no more run, task, queue or node rows.
+pub fn pass_spent(elapsed: std::time::Duration) -> bool {
+    elapsed >= PASS_TIME
+}
+
+/// How long since its start a pass builds at most the session and queue
+/// rows it marks before its writes ([`Builder::rows_to_mark`],
+/// [`marking_spent`]), half of [`PASS_TIME`]: the rows it has no time
+/// left to build are marked as if each read an input of the events read
+/// since ([`Builder::mark_rows_unread`]), not built, so that the writes
+/// keep the rest of the time and a later pass does not build them again.
+pub const MARK_TIME: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether a pass that has taken `elapsed` since its start builds no more
+/// rows to mark them ([`MARK_TIME`]).
+pub fn marking_spent(elapsed: std::time::Duration) -> bool {
+    elapsed >= MARK_TIME
+}
+
+/// How many rows of an older [`LEDGER_V`] a pass reads to mark at most,
+/// less the marks waiting ([`Builder::older_rows_to_read`]): their
+/// rewrite goes a share a pass, holding no more of their records at once.
+pub const OLDER_ROWS_PER_PASS: usize = 200;
 
 /// How many session rows one write of them holds at most, each write one
 /// transaction: a pass writes every session row it changed, in as many
@@ -320,8 +369,7 @@ pub const CHECKS_PER_PASS: usize = 2_000;
 /// of an older version kept for their rewrite) would keep it from coming
 /// back to the mark that holds R, which each new process makes again from
 /// R. These are within [`CHECKS_PER_PASS`] and taken before the rest, so
-/// that the bound of writes ([`WRITES_PER_PASS`], far above it) reaches
-/// them first; a few, so that marks of rows behind the stored ones, which
+/// that a pass writes them before the rest until it stops at [`PASS_TIME`]; a few, so that marks of rows behind the stored ones, which
 /// hold R until a later pass, leave the round its share.
 pub const HOLDING_R_PER_PASS: usize = 16;
 
@@ -1678,6 +1726,52 @@ impl Builder {
         rows
     }
 
+    /// Those of `rows` ([`Self::rows_to_build`]) a pass builds to mark the
+    /// ones that read an input after the event the marks started at
+    /// ([`Self::mark_rows_after`]): all but those marked already with a
+    /// position of the events, which that mark leaves as it is (a mark keeps
+    /// the earlier of each position, and theirs is before the events read
+    /// since), so that a pass does not build again each time the rows its
+    /// writes left marked.
+    pub fn rows_to_mark(
+        &self,
+        rows: &BTreeSet<(LedgerKind, String)>,
+    ) -> BTreeSet<(LedgerKind, String)> {
+        rows.iter()
+            .filter(|(kind, key)| {
+                let target = Target::Row(*kind, key.clone());
+                !(self.marks.contains(&target)
+                    && self
+                        .dirtied
+                        .get(&target)
+                        .is_some_and(|dirtied| dirtied.events.is_some()))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Mark `rows`, not built, as [`Self::mark_rows_after`] marks a row
+    /// that read an input after `after`: a pass with no time left to build
+    /// them ([`MARK_TIME`]) does not know which did, so each holds R before
+    /// the events read since until it is written (or looked at and found
+    /// recorded), and with that position no later pass builds it again to
+    /// mark it ([`Self::rows_to_mark`]).
+    pub fn mark_rows_unread(
+        &mut self,
+        after: ReadTo,
+        rows: impl IntoIterator<Item = (LedgerKind, String)>,
+    ) {
+        for (kind, key) in rows {
+            let target = Target::Row(kind, key);
+            mark_dirtied(
+                &mut self.marks,
+                &mut self.dirtied,
+                target,
+                Dirtied::events(after),
+            );
+        }
+    }
+
     /// Mark the session and queue rows of `rows` (those
     /// [`Self::rows_to_build`] names, as [`build`] folds them) that read an
     /// input after the event the marks started at.
@@ -2239,7 +2333,7 @@ impl Builder {
     /// What a pass reads next of the rows of an older version
     /// ([`crate::application::LedgerStore::ledger_older_rows_after`]): those
     /// after the first of the pair, as many as the second, so that with the
-    /// marks waiting they fill one pass's writes ([`WRITES_PER_PASS`]):
+    /// marks waiting they fill [`OLDER_ROWS_PER_PASS`]:
     /// however many are left, it folds them a share at a time, with no more
     /// of their records held at once. None when all were read, or the marks
     /// fill the writes already.
@@ -2247,7 +2341,7 @@ impl Builder {
         let OlderRows::After(after) = &self.older_rows else {
             return None;
         };
-        let limit = WRITES_PER_PASS.saturating_sub(self.marks.len());
+        let limit = OLDER_ROWS_PER_PASS.saturating_sub(self.marks.len());
         (limit > 0).then_some((after.as_ref(), limit))
     }
 
@@ -2469,7 +2563,7 @@ impl Builder {
     }
 
     /// Take every session row marked, whatever [`CHECKS_PER_PASS`] and
-    /// [`WRITES_PER_PASS`]: a pass folds and writes them all,
+    /// [`PASS_TIME`]: a pass folds and writes them all,
     /// [`SESSION_ROWS_PER_WRITE`] a transaction, the last with the mark
     /// ([`Self::sessions_mark`]), so that the store's session rows record
     /// every session event up to the position the mark gives. Those it does not write go back
@@ -2645,7 +2739,7 @@ impl Builder {
     /// The conservative shared R up to which every input made dirty a run, task,
     /// queue or node row that is written, each cursor its own: its
     /// cursor, or the position before the first input that made a mark
-    /// still left with unacknowledged input (past [`WRITES_PER_PASS`], a
+    /// still left with unacknowledged input (past [`PASS_TIME`], a
     /// write that failed, a fold behind) if earlier. Tracking inputs already
     /// recorded clears their position even if version or time work remains. A mark that came with time ([`Self::due`], a
     /// grace over, a supervisor's silence, the rules moved) holds back
@@ -3527,6 +3621,32 @@ impl Inputs {
             .collect();
         if !waits.is_empty() {
             self.waits.insert(task, waits);
+        }
+    }
+
+    /// Build the session or queue row of `target` from what it keeps, as
+    /// [`Self::of`] builds those it names, when it has not: so that a pass
+    /// builds the rows it writes one at a time as it comes to them, none
+    /// it leaves to the next pass. Whether it built one (a run, task or
+    /// node target, or a key of no row, builds none).
+    pub fn build_row(&mut self, target: &Target) -> bool {
+        let Target::Row(kind, key) = target else {
+            return false;
+        };
+        if self.rows.contains_key(&(*kind, key.clone())) {
+            return false;
+        }
+        let Some(row) = self.kept.row(*kind, key, self.now_ms, &self.built_at) else {
+            return false;
+        };
+        self.rows.insert((*kind, key.clone()), row);
+        true
+    }
+
+    /// Drop the row [`Self::build_row`] built of `target`, once written.
+    pub fn drop_row(&mut self, target: &Target) {
+        if let Target::Row(kind, key) = target {
+            self.rows.remove(&(*kind, key.clone()));
         }
     }
 

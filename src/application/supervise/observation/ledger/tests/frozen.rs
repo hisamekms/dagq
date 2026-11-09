@@ -21,9 +21,19 @@ fn built(input: &Input) -> Memory {
 fn built_with(
     input: &Input,
     omission: Option<&Omission>,
+    after: impl FnMut(&Memory, &Builder),
+) -> Memory {
+    built_on(Memory::default(), input, omission, after)
+}
+
+/// [`built_with`] on `memory` (its clock's cost of a write set,
+/// [`Costed`]).
+pub(super) fn built_on(
+    memory: Memory,
+    input: &Input,
+    omission: Option<&Omission>,
     mut after: impl FnMut(&Memory, &Builder),
 ) -> Memory {
-    let memory = Memory::default();
     let omit = |mut builder: Builder| {
         if let Some(omission) = omission {
             builder.set_omission(omission.clone());

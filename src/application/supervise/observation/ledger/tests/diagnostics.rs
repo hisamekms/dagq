@@ -182,7 +182,9 @@ fn timed_pass_logs_only_due_first_pass_pages_and_measures_stages() {
             first.work.final_reads > 0,
             "the queue rows remain past the task write bound"
         );
-        assert_eq!(first.work.elapsed, Duration::from_secs(190));
+        // One more tick: the write bound looks at the clock once, and the
+        // pass, past [`PASS_TIME`], writes only the marks taken first.
+        assert_eq!(first.work.elapsed, Duration::from_secs(200));
         let progress = output
             .0
             .lock()
@@ -226,7 +228,10 @@ fn timed_pass_logs_only_due_first_pass_pages_and_measures_stages() {
         assert_eq!(second.work.event_read, Duration::from_secs(30));
         assert_eq!(second.work.page_sweep, Duration::ZERO);
         assert_eq!(second.work.final_sweep, Duration::from_secs(10));
-        assert_eq!(second.work.elapsed, Duration::from_secs(100));
+        // One more tick: the marking before the writes looks at the clock
+        // once and, past `MARK_TIME`, marks the rest as if they read the
+        // events read since, not built.
+        assert_eq!(second.work.elapsed, Duration::from_secs(120));
         assert!(
             !output
                 .0

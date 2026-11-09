@@ -1549,24 +1549,27 @@ fn the_rows_of_an_older_version_are_read_a_share_at_a_time() {
 
     builder.walk_older_rows();
     assert_eq!(builder.backlog(), 1);
-    assert_eq!(builder.older_rows_to_read(), Some((None, WRITES_PER_PASS)));
+    assert_eq!(
+        builder.older_rows_to_read(),
+        Some((None, OLDER_ROWS_PER_PASS))
+    );
 
-    let page: Vec<_> = (1..=WRITES_PER_PASS).map(task).collect();
+    let page: Vec<_> = (1..=OLDER_ROWS_PER_PASS).map(task).collect();
     let last = page.last().cloned().unwrap();
-    builder.mark_older_rows(page, WRITES_PER_PASS);
-    assert_eq!(builder.backlog(), WRITES_PER_PASS + 1);
+    builder.mark_older_rows(page, OLDER_ROWS_PER_PASS);
+    assert_eq!(builder.backlog(), OLDER_ROWS_PER_PASS + 1);
     assert_eq!(builder.older_rows_to_read(), None);
     // Such a mark holds no position.
     assert_eq!(builder.rows_written(), Some(builder.cursors()));
 
-    let taken = builder.take(WRITES_PER_PASS - 3);
-    assert_eq!(taken.len(), WRITES_PER_PASS - 3);
+    let taken = builder.take(OLDER_ROWS_PER_PASS - 3);
+    assert_eq!(taken.len(), OLDER_ROWS_PER_PASS - 3);
     assert_eq!(
         builder.older_rows_to_read(),
-        Some((Some(&last), WRITES_PER_PASS - 3))
+        Some((Some(&last), OLDER_ROWS_PER_PASS - 3))
     );
 
-    builder.mark_older_rows(vec![task(1_000)], WRITES_PER_PASS - 3);
+    builder.mark_older_rows(vec![task(1_000)], OLDER_ROWS_PER_PASS - 3);
     assert_eq!(builder.older_rows_to_read(), None);
     assert_eq!(builder.backlog(), 4);
     builder.take(4);
@@ -1973,4 +1976,13 @@ fn coverage_checks_queue_r_even_when_a_legacy_mark_has_no_event_time() {
             "queue={queue}, core={core}, legacy={legacy}"
         );
     }
+}
+
+/// A pass has taken its time at [`PASS_TIME`], not before.
+#[test]
+fn a_pass_is_spent_at_its_time_and_not_before() {
+    assert!(!pass_spent(std::time::Duration::ZERO));
+    assert!(!pass_spent(PASS_TIME - std::time::Duration::from_nanos(1)));
+    assert!(pass_spent(PASS_TIME));
+    assert!(pass_spent(PASS_TIME * 2));
 }
