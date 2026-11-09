@@ -1,8 +1,9 @@
 //! The free disk space a claim and a landing need (ADR-0047 decision 44,
-//! ADR-t4473-1): on every pass the supervisor reads the free and total
-//! bytes of the queue's directory and, from the recent runs' samples,
-//! the runs moving and whether a landing waits, what a claim and a landing
-//! need ([`crate::domain::disk::DiskState::needs`]). Short of either, it cleans what the ended runs
+//! ADR-t4473-1, ADR-t4542-1): on every pass the supervisor reads the free
+//! and total bytes of the queue's directory and, from the recent runs'
+//! samples, the runs moving, their sizes measured off the loop
+//! ([`super::moving_sizes`]) and whether a landing waits, what a claim and
+//! a landing need ([`crate::domain::disk::DiskState::needs`]). Short of either, it cleans what the ended runs
 //! left ([`HostOpsState::request_cleanup`] and `git worktree prune`,
 //! off the loop: task 405) and reads again once that is done, recording
 //! `auto_repaired` (`repair: disk_cleanup`) when it freed something; the
@@ -170,6 +171,7 @@ impl HostOpsState {
         landings: &[RunId],
         held: &super::cleanup::Held,
         moves: DiskMoves,
+        moving: &[super::moving_sizes::MovingTarget],
     ) -> Result<()> {
         let DiskMoves {
             in_flight,
@@ -185,15 +187,19 @@ impl HostOpsState {
         self.apply_disk_answers(env, &unclosed)?;
         let expected = self.expected_run_size(env)?;
         let free = self.free_bytes(env);
-        // The moving runs' remaining counts 0: their size now is not
-        // measured, and an assumed one held claims far longer than the
-        // records (ADR-t4473-1).
+        // The moving runs' remaining, from their sizes measured off the
+        // loop; one with no size to trust counts the expectation whole
+        // (ADR-t4542-1). This pass's runs are walked for the next.
+        let now = env.generators.clock.monotonic();
+        let remaining = self.moving_sizes.remaining(moving, expected, now);
+        self.moving_sizes
+            .pass(moving, &self.measure_tree, &env.generators.clock, now);
         let state = DiskState {
             free,
             total: self.total_bytes(env).unwrap_or(0),
             expected,
             moving: in_flight,
-            remaining: 0,
+            remaining,
             landing_waiting,
         };
         let needs = state.needs(self.disk_config.reserve);

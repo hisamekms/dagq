@@ -16,6 +16,7 @@ related:
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-throughput-review
   - design-measurement-environment
+  - adr-t4542-1
 ---
 
 # hostの負荷の連続の記録
@@ -107,6 +108,19 @@ macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
   間隔は`dagq.toml`にもflagにも置かない（古い固定バイナリが読めない欄を足さない）。
   runの一覧か`dagq.toml`のprofileが読めなければその回は数えない。
   引き継ぎ（exec）とloopの終わりは数えている途中を待たず、その回の値は書かれない
+
+## 動いているrunの大きさ
+
+claimの空き容量の判断が、動いているrunの残りの見込み（[claim-hold](claim-hold.md#空き容量)）を読むために、動いているrunの今の大きさを量る（[ADR-t4542-1](../../adr/2026-11-09-t4542-1-moving-runs-are-measured-off-the-loop-for-their-remaining.md)）。
+記録の行には書かず、hostの負荷のsampleとは別に動く（[待つrunのビルド成果物](#待つrunのビルド成果物)と同じ形）。
+
+- **対象**: `check_disk`が動いているrunと数えるslotのrun。
+  containerのrunはworktreeを量らず、量っていない値になる。
+- **数え方**: 何を足して量るかと量れないときの扱いは`moving_sizes`のmoduleと`MovingTarget::measure`のdoc commentが持つ。
+- **取り方**: loopは量らず、loopの外のthreadが置いた値を読むだけで、その値は古いことがある（古い値の扱いは[claim-hold](claim-hold.md#空き容量)）。
+  仕組みは`moving_sizes`のmoduleのdoc commentが持つ。
+- **限界**: APFSのクローンなど共有のextentを作る道具では、独占する量より大きく出うる。
+  Linuxと他のファイルシステムでは調べていない（[Spike](../../plans/disk-run-size-measure-spike.md)）。
 
 ## 読み口
 

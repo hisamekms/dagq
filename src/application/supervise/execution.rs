@@ -564,6 +564,10 @@ pub struct Ports<'a> {
     /// The directories Claude Code keeps the sessions' scratchpads under,
     /// read at each cleanup (task 1100).
     pub scratchpad_roots: ScratchpadRoots,
+    /// Measures the bytes on disk of a tree as
+    /// [`RunFiles::tree_size`] does, for the sizes of the runs moving the
+    /// claims count off the loop (ADR-t4542-1).
+    pub measure_tree: super::host_ops::moving_sizes::MeasureTree,
     /// The versions of Claude Code (given `--claude`) and of the host's
     /// `rustc` (run in the given checkout; none without one) a claim
     /// records (task 197).

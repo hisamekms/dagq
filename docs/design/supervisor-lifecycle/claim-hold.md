@@ -98,13 +98,13 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 ## 空き容量
 
 supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイルシステムの空きを確かめ、足りなければclaimと着地を控えて掃除し、それでも足りないときだけinboxに1件知らせる（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44、閾値はADR-t4473-1が改めた）。
-検証が容量不足で落ちる代わりに、容量不足という理由で止まる。
 
 ### 閾値
 
 - 必要量は`domain::disk::DiskState::needs`が最低ラインと直近の標本からの想定で係数なしで決める（[ADR-t4473-1](../../adr/2026-11-08-t4473-1-disk-needs-follow-a-reserve-and-recent-runs-with-no-factor.md)）。
 - 動いているrun（`check_disk`の`in_flight`）が0本なら最低ラインだけを要り、0本で着地待ちがあれば着地が先に始まり、claimは控えのeventなしにそのpassを待つ。
   標本が無ければqueueは1本ずつ進む。
+- 動いているrunの残りの見込みは想定から[loopの外で量った](host-metrics.md#動いているrunの大きさ)今の大きさを引いた和で、信頼できない値（量れない・古い・別のrun）は想定のまま数える。
 - 空き（`statvfs(3)`）が読めないときは控えない。
 - `[disk]`はsupervisorの起動時にmain checkoutの作業ファイルから読み（[Run environment](run-environment.md)）、読めなければ既定値で、廃止したkeyは読み飛ばして、warnを出す。
 - 人の`integrate`と、検証が容量不足で落ちたときのやり直しも、着地と同じ必要量で確かめる。
@@ -135,7 +135,6 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 ### queueのdirのビルドのキャッシュ
 
 - 空き容量の掃除（残りのjobを含む）だけが、runの後片付けの後に`update/target`とlanding recheckの宣言ごとのbuildの出力のdirの中身を消し、通常の掃除は作り直しの時間を払わないよう消さない。
-- recheckのdirは宣言を変えても前の宣言のdirが残らないよう、今の宣言に依らずそれに当たるdirを全て見る（`recheck::build_dirs`）。
 - 使っている間は消さない: recheckのlockと更新のlock（`update::hold_target`）を待たずに取れたときだけ消し、取れなければ何も記録せず次の空き容量の掃除で試す。
 - 消している間は使う側が待つ: recheckは次の回にやり直し（[landing recheck](integrate.md#landing-recheck)）、自動更新・release更新・`install --release`は更新のlockを待つ（[Auto-update](auto-update.md)・[Release update](release-update.md)・[install](install.md)）。
   どのsupervisorの掃除でもCLIの`install`でも同じlockのfileなので、queueの中で安全である。

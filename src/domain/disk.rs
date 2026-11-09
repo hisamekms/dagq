@@ -411,6 +411,98 @@ impl DiskState {
     }
 }
 
+/// How often the supervisor measures the runs moving, off its loop
+/// ([`moving_remaining`]): every 60 s. The worktree and `TMPDIR` of one
+/// run measured in about 0.08 s in the Spike
+/// (`docs/plans/disk-run-size-measure-spike.md`), so this is far shorter
+/// than the measure of the runs that wait (10 min) and still a small load.
+pub const MOVING_SIZE_INTERVAL_SECS: u64 = 60;
+/// How many [`MOVING_SIZE_INTERVAL_SECS`] old a moving run's size may be
+/// for the claims to trust it: 3. A walk that does not end (a slow or
+/// stuck file system) leaves its runs counted as expected, not at a size
+/// they may have outgrown.
+pub const MOVING_SIZE_STALE_INTERVALS: u32 = 3;
+
+/// What a pass knows of the walk of the moving runs ([`moving_walk`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MovingWalkInputs {
+    /// How long since the last walk started; `None` before the first.
+    pub since_started: Option<std::time::Duration>,
+    /// A walk runs now.
+    pub walking: bool,
+    /// A run moves.
+    pub moving: bool,
+    /// A moving run has no measure of the run and directories it has now.
+    pub unmeasured: bool,
+}
+
+/// What a pass does with the walk of the moving runs ([`moving_walk`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovingWalk {
+    /// Start one now.
+    Start,
+    /// Start none this pass.
+    Wait,
+}
+
+/// Whether a pass starts a walk of the moving runs: never while one runs
+/// (walks never overlap) or with no run moving; otherwise once
+/// [`MOVING_SIZE_INTERVAL_SECS`] passed since the last one started (or
+/// before the first), or at once when a moving run has no measure of its
+/// present target, as just after its claim.
+pub fn moving_walk(inputs: &MovingWalkInputs) -> MovingWalk {
+    let interval = std::time::Duration::from_secs(MOVING_SIZE_INTERVAL_SECS);
+    let due = inputs.since_started.is_none_or(|since| since >= interval);
+    if !inputs.walking && inputs.moving && (due || inputs.unmeasured) {
+        MovingWalk::Start
+    } else {
+        MovingWalk::Wait
+    }
+}
+
+/// The latest size measured of a moving run ([`trusted_size`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeMeasure {
+    /// Its worktree and `TMPDIR` together; `None` when either could not be
+    /// measured.
+    pub bytes: Option<u64>,
+    /// How long ago its measure started: the time the walk took counts.
+    pub age: std::time::Duration,
+    /// Whether it was measured of the run, worktree and `TMPDIR` the run
+    /// has now.
+    pub same_target: bool,
+}
+
+/// The size of a moving run now the claims count, from its latest
+/// measure, `interval` the time between measures: the measured bytes when
+/// it is of the same run and directories, measured, and no older than
+/// [`MOVING_SIZE_STALE_INTERVALS`] intervals; otherwise `None`, which
+/// [`moving_remaining`] counts as 0, the expectation whole (the safe side).
+/// No measure yet, as just after the claim, is `None` too.
+pub fn trusted_size(measure: Option<&SizeMeasure>, interval: std::time::Duration) -> Option<u64> {
+    let measure = measure?;
+    let fresh = measure.age <= interval.saturating_mul(MOVING_SIZE_STALE_INTERVALS);
+    (measure.same_target && fresh)
+        .then_some(measure.bytes)
+        .flatten()
+}
+
+/// What the moving runs are expected to take yet, together
+/// ([`DiskState::remaining`]): for each, the expectation less its size now
+/// ([`trusted_size`]; `None` counts as 0), or 0 for a run past it. With no
+/// expectation it is 0: a project with no samples runs one at a time.
+pub fn moving_remaining(
+    expected: Option<u64>,
+    sizes: impl IntoIterator<Item = Option<u64>>,
+) -> u64 {
+    let Some(expected) = expected else {
+        return 0;
+    };
+    sizes.into_iter().fold(0, |remaining: u64, size| {
+        remaining.saturating_add(expected.saturating_sub(size.unwrap_or(0)))
+    })
+}
+
 /// `bytes` in GiB with one decimal, for messages.
 pub fn gib(bytes: f64) -> String {
     format!("{:.1} GiB", bytes / f64::from(1u32 << 30))
@@ -767,6 +859,142 @@ mod tests {
                 landing_waiting: false,
             };
             assert!(state.verdict(DEFAULT_RESERVE_SHARE).claim, "{moving}");
+        }
+    }
+
+    /// A walk starts before the first and at the interval, not 1 ms before
+    /// it, for the same runs all measured; at once for a run not measured;
+    /// never while one runs or with no run moving.
+    #[test]
+    fn a_walk_of_the_moving_runs_starts_at_its_interval_or_for_a_run_not_measured() {
+        use std::time::Duration;
+        let interval = Duration::from_secs(MOVING_SIZE_INTERVAL_SECS);
+        let ms = Duration::from_millis(1);
+        let inputs = |since_started, walking, moving, unmeasured| MovingWalkInputs {
+            since_started,
+            walking,
+            moving,
+            unmeasured,
+        };
+        for (case, given, step) in [
+            (
+                "the first",
+                inputs(None, false, true, false),
+                MovingWalk::Start,
+            ),
+            (
+                "1 ms before the interval",
+                inputs(Some(interval - ms), false, true, false),
+                MovingWalk::Wait,
+            ),
+            (
+                "at the interval",
+                inputs(Some(interval), false, true, false),
+                MovingWalk::Start,
+            ),
+            (
+                "a run not measured",
+                inputs(Some(ms), false, true, true),
+                MovingWalk::Start,
+            ),
+            (
+                "a walk runs",
+                inputs(Some(interval), true, true, true),
+                MovingWalk::Wait,
+            ),
+            (
+                "no run moving",
+                inputs(None, false, false, false),
+                MovingWalk::Wait,
+            ),
+        ] {
+            assert_eq!(moving_walk(&given), step, "{case}");
+        }
+    }
+
+    /// A moving run's size is trusted only measured, of the same run and
+    /// directories, and no older than the stale intervals; everything else
+    /// counts as unmeasured.
+    #[test]
+    fn a_moving_runs_size_is_trusted_only_measured_fresh_and_of_the_same_target() {
+        let interval = std::time::Duration::from_secs(MOVING_SIZE_INTERVAL_SECS);
+        let stale = interval * MOVING_SIZE_STALE_INTERVALS;
+        let measure = |bytes, age, same_target| SizeMeasure {
+            bytes,
+            age,
+            same_target,
+        };
+        let one = std::time::Duration::from_secs(1);
+        for (case, measured, trusted) in [
+            ("measured now", Some(measure(Some(7), one, true)), Some(7)),
+            (
+                "at the stale bound",
+                Some(measure(Some(7), stale, true)),
+                Some(7),
+            ),
+            ("a measured 0", Some(measure(Some(0), one, true)), Some(0)),
+            ("never measured", None, None),
+            (
+                "could not be measured",
+                Some(measure(None, one, true)),
+                None,
+            ),
+            (
+                "past the stale bound",
+                Some(measure(Some(7), stale + one, true)),
+                None,
+            ),
+            (
+                "of another target",
+                Some(measure(Some(7), one, false)),
+                None,
+            ),
+        ] {
+            assert_eq!(trusted_size(measured.as_ref(), interval), trusted, "{case}");
+        }
+    }
+
+    /// The remaining is the sum of the expectation less each run's size
+    /// now, 0 for a run past it, the whole expectation for one unmeasured;
+    /// with no expectation it is 0.
+    #[test]
+    fn the_remaining_is_what_each_moving_run_has_yet_to_take() {
+        let expected = Some(10 * GIB);
+        assert_eq!(moving_remaining(expected, []), 0);
+        assert_eq!(moving_remaining(expected, [Some(4 * GIB)]), 6 * GIB);
+        assert_eq!(moving_remaining(expected, [Some(12 * GIB)]), 0);
+        assert_eq!(moving_remaining(expected, [None]), 10 * GIB);
+        assert_eq!(
+            moving_remaining(expected, [Some(4 * GIB), Some(12 * GIB), None]),
+            16 * GIB
+        );
+        assert_eq!(moving_remaining(None, [None, Some(GIB)]), 0);
+        assert_eq!(moving_remaining(Some(u64::MAX), [None, None]), u64::MAX);
+    }
+
+    /// Acceptance 4 of the task: with no run moving and room above the
+    /// reserve one run is claimed and a landing goes, whatever the
+    /// remaining.
+    #[test]
+    fn with_no_run_moving_a_claim_and_a_landing_go_whatever_the_remaining() {
+        for remaining in [0, 10 * GIB, u64::MAX] {
+            let state = DiskState {
+                free: Some(6 * GIB),
+                total: 0,
+                expected: Some(10 * GIB),
+                moving: 0,
+                remaining,
+                landing_waiting: false,
+            };
+            assert_eq!(
+                state.verdict(DEFAULT_RESERVE_SHARE),
+                DiskVerdict {
+                    claim: true,
+                    landing: true
+                },
+                "{remaining}"
+            );
+            assert_eq!(state.claims(DEFAULT_RESERVE_SHARE), Some(1), "{remaining}");
         }
     }
 

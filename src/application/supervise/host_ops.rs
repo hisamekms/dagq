@@ -14,6 +14,7 @@ pub(super) mod host_metrics;
 pub(super) mod inbox_nudge;
 #[cfg(test)]
 mod job_fakes;
+pub(super) mod moving_sizes;
 pub(super) mod queue_broker;
 pub(super) mod queue_service;
 pub(super) mod release;
@@ -70,6 +71,10 @@ pub(super) struct HostOpsState {
     scratchpad_roots: ScratchpadRoots,
     /// The disk between passes (task 377).
     disk: disk::DiskWatch,
+    /// Measures a tree's bytes on disk, for the runs moving.
+    measure_tree: moving_sizes::MeasureTree,
+    /// The sizes of the runs moving, measured off the loop (ADR-t4542-1).
+    moving_sizes: moving_sizes::MovingSizes,
     /// The free bytes of the queue's directory read this pass.
     free: Option<u64>,
     /// The cleanup of ended runs' worktrees off the loop (task 405).
@@ -119,6 +124,8 @@ impl HostOpsState {
             total_space: ports.total_space,
             scratchpad_roots: ports.scratchpad_roots.clone(),
             disk: disk::DiskWatch::default(),
+            measure_tree: ports.measure_tree.clone(),
+            moving_sizes: moving_sizes::MovingSizes::default(),
             free: None,
             cleanup: cleanup::CleanupWatch::counting(settings.cleanup_jobs.clone()),
             sweep: sweep::SweepWatch::default(),
@@ -231,6 +238,16 @@ impl HostOpsState {
         clock: &dyn crate::application::Clock,
     ) {
         self.host_metrics.finish(deadline, clock);
+    }
+
+    /// Join or leave the walk of the runs moving at the end of the loop
+    /// ([`moving_sizes::MovingSizes::finish`]).
+    pub(super) fn moving_sizes_finish(
+        &mut self,
+        deadline: &EndBy,
+        clock: &dyn crate::application::Clock,
+    ) {
+        self.moving_sizes.finish(deadline, clock);
     }
 
     /// Tell the automatic update which heavy job held its check

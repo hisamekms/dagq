@@ -175,6 +175,9 @@ pub(super) struct Wiring {
     /// The free bytes the supervisors read; `u64::MAX` (the default) reads
     /// none, so the disk holds nothing.
     pub(super) free: Arc<AtomicU64>,
+    /// Measures the trees of the runs moving; by default every one is not
+    /// there, so a moving run counts the expectation whole.
+    pub(super) moving_sizes: supervise::MeasureTree,
     /// `[disk]`; the production's default, whose reserve is its least
     /// (5 GiB) as the supervisors read no volume's size.
     disk: crate::domain::disk::DiskConfig,
@@ -241,6 +244,7 @@ impl Wiring {
             ci_watch: None,
             pass_probe: None,
             free: Arc::new(AtomicU64::new(u64::MAX)),
+            moving_sizes: Arc::new(|_: &Path| Ok(None)),
             disk: Default::default(),
             supervisor_file: None,
             repository_startup_file: None,
@@ -687,6 +691,7 @@ impl Wiring {
                 repository_startup_file: self.repository_startup_file.clone(),
                 stop: stop.clone(),
                 free: self.free.clone(),
+                moving_sizes: self.moving_sizes.clone(),
                 disk: self.disk,
             };
             std::thread::Builder::new()
@@ -773,6 +778,7 @@ struct Parts {
     repository_startup_file: Option<supervise::repository_config::RepositoryStartupFile>,
     stop: Arc<AtomicBool>,
     free: Arc<AtomicU64>,
+    moving_sizes: supervise::MeasureTree,
     disk: crate::domain::disk::DiskConfig,
 }
 
@@ -881,6 +887,7 @@ impl Parts {
             load_average: || None,
             free_space,
             total_space: |_| None,
+            measure_tree: self.moving_sizes.clone(),
             scratchpad_roots: Arc::new(Vec::new),
             host_versions: |_, _, _| Default::default(),
             worker_plugin: Arc::new(|_| crate::domain::instructions::NO_PLUGIN.to_owned()),

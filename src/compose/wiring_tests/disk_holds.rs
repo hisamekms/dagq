@@ -156,3 +156,161 @@ fn below_the_reserve_a_landing_waits_and_with_room_it_lands() {
         .as_i64();
     assert!(held_at < first_id(&detail, "integration_started"));
 }
+
+/// The expectation of the queue's one run size sample: 10 GiB.
+const EXPECTED: u64 = 10 * GIB;
+/// Room above the reserve (5 GiB) for one expectation and a half: with
+/// nothing moving one run is claimed; with one moving a second goes only
+/// once the first's size is measured at the expectation.
+const ONE_AND_A_HALF: u64 = 5 * GIB + EXPECTED + EXPECTED / 2;
+
+/// A first task lands with no disk read, and its run gets a run size
+/// sample of [`EXPECTED`]; two more tasks are ready, the turn of the first
+/// claimed held until `act` says so. Returns the two tasks.
+fn one_sample_and_two_ready(
+    wiring: &Wiring,
+    released: std::sync::mpsc::Receiver<()>,
+) -> (crate::domain::TaskId, crate::domain::TaskId) {
+    let first = wiring.ready_task(&[]);
+    wiring.supervise_once();
+    let mut queue = wiring.queue();
+    let run = queue.show(first).unwrap().runs[0].id().clone();
+    queue
+        .record_runtime_event(
+            &run,
+            crate::domain::EventKind::BuildOutputsRemoved,
+            serde_json::json!({"bytes": EXPECTED}),
+        )
+        .unwrap();
+    wiring.free.store(ONE_AND_A_HALF, Ordering::SeqCst);
+    wiring.agent.hold_next_turn(released);
+    (wiring.ready_task(&[]), wiring.ready_task(&[]))
+}
+
+/// Whether `task`'s first run is running.
+fn running(queue: &mut SqliteQueue, task: crate::domain::TaskId) -> bool {
+    queue
+        .show(task)
+        .unwrap()
+        .runs
+        .first()
+        .is_some_and(|run| run.status() == RunStatus::Running)
+}
+
+/// Whether `task` has a run.
+fn claimed(queue: &mut SqliteQueue, task: crate::domain::TaskId) -> bool {
+    !queue.show(task).unwrap().runs.is_empty()
+}
+
+/// ADR-t4542-1: the size of the run moving, measured off the loop at the
+/// expectation, leaves it nothing to take yet: while its turn is held,
+/// the second task is claimed beside it, which room for one expectation
+/// above the reserve holds.
+#[test]
+fn a_moving_runs_measured_size_lets_the_next_claim_go_beside_it() {
+    let mut wiring = Wiring::new(
+        "a_moving_runs_measured_size_lets_the_next_claim_go_beside_it",
+        Script {
+            receipts: vec![succeeded, succeeded, succeeded],
+            verdicts: vec![
+                verdict("pass", "meets the acceptance"),
+                verdict("pass", "meets the acceptance"),
+                verdict("pass", "meets the acceptance"),
+            ],
+        },
+    );
+    wiring.moving_sizes = std::sync::Arc::new(|_: &std::path::Path| Ok(Some(EXPECTED)));
+    let (release, released) = std::sync::mpsc::channel();
+    let (second, third) = one_sample_and_two_ready(&wiring, released);
+    let mut beside = false;
+    wiring.supervise_once_while(|queue| {
+        let (held, other) = if running(queue, second) {
+            (second, third)
+        } else if running(queue, third) {
+            (third, second)
+        } else {
+            return false;
+        };
+        if !claimed(queue, other) {
+            return false;
+        }
+        beside = running(queue, held);
+        let _ = release.send(());
+        true
+    });
+    assert!(beside);
+    let mut queue = wiring.queue();
+    for task in [second, third] {
+        assert_eq!(
+            queue.show(task).unwrap().runs[0].status(),
+            RunStatus::Integrated
+        );
+    }
+}
+
+/// ADR-t4542-1: a moving run whose size cannot be measured counts the
+/// expectation whole: while its turn is held, the second task is not
+/// claimed and `claim_held` names the reserve and the expectation twice
+/// (the new run's and the moving run's remaining). Once the first run
+/// landed, the second is claimed and lands.
+#[test]
+fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_claim() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut wiring = Wiring::new(
+        "a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_claim",
+        Script {
+            receipts: vec![succeeded, succeeded, succeeded],
+            verdicts: vec![
+                verdict("pass", "meets the acceptance"),
+                verdict("pass", "meets the acceptance"),
+                verdict("pass", "meets the acceptance"),
+            ],
+        },
+    );
+    let measured = calls.clone();
+    wiring.moving_sizes = std::sync::Arc::new(move |_: &std::path::Path| {
+        measured.fetch_add(1, Ordering::SeqCst);
+        Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+    });
+    let (release, released) = std::sync::mpsc::channel();
+    let (second, third) = one_sample_and_two_ready(&wiring, released);
+    let mut after = None;
+    let mut alone = false;
+    wiring.supervise_once_while(|queue| {
+        let (held, other) = if running(queue, second) {
+            (second, third)
+        } else if running(queue, third) {
+            (third, second)
+        } else {
+            return false;
+        };
+        if calls.load(Ordering::SeqCst) == 0 || queue_payloads(queue, "claim_held").is_empty() {
+            return false;
+        }
+        // Some passes after the measure failed, the claim still waits.
+        let passes = *after.get_or_insert(wiring.passes());
+        if wiring.passes() < passes + 5 {
+            return false;
+        }
+        alone = running(queue, held) && !claimed(queue, other);
+        let _ = release.send(());
+        true
+    });
+    assert!(alone);
+    let mut queue = wiring.queue();
+    let held = queue_payloads(&queue, "claim_held");
+    assert!(
+        held.iter().all(|hold| hold["reason"] == "disk_space"),
+        "{held:?}"
+    );
+    assert_eq!(
+        held[0]["threshold"],
+        serde_json::json!((5 * GIB + 2 * EXPECTED) as f64)
+    );
+    for task in [second, third] {
+        assert_eq!(
+            queue.show(task).unwrap().runs[0].status(),
+            RunStatus::Integrated
+        );
+    }
+}

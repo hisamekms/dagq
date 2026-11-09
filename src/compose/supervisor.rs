@@ -1043,6 +1043,10 @@ pub fn supervise_with_reviewer(
     // The container's parts record and read on the queue through the
     // service as the supervisor, opening no DB for them.
     let container_records = super::ContainerRecords::of_service(supervisor_queues(), &db);
+    let files = options.files.as_ref().map_or_else(
+        || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,
+        |port| port.0.clone(),
+    );
     let ports = Ports {
         queues: Arc::new(supervisor_queues()),
         service: service.clone(),
@@ -1136,10 +1140,7 @@ pub fn supervise_with_reviewer(
             ),
         ),
         end,
-        files: options.files.as_ref().map_or_else(
-            || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,
-            |port| port.0.clone(),
-        ),
+        files: files.clone(),
         processes: options.processes.as_ref().map_or_else(
             || Arc::new(SystemProcesses) as Arc<dyn ProcessControl + Send + Sync>,
             |port| port.0.clone(),
@@ -1150,6 +1151,10 @@ pub fn supervise_with_reviewer(
         load_average: options.load_average,
         free_space: options.free_space,
         total_space: options.total_space,
+        measure_tree: {
+            let files = files.clone();
+            Arc::new(move |dir: &Path| files.tree_size(dir))
+        },
         scratchpad_roots: options.scratchpad_roots.clone().map_or_else(
             || {
                 Arc::new(crate::infrastructure::run_files::claude_scratchpad_roots)

@@ -125,6 +125,8 @@ impl Supervisor<'_> {
         }
         self.host
             .host_metrics_finish(&deadline, &*self.generators.clock);
+        self.host
+            .moving_sizes_finish(&deadline, &*self.generators.clock);
         self.on_observation(|observation, env| observation.ledger_finish(env, &deadline));
         self.on_observation(|observation, env| observation.resources_finish(env, &deadline));
         // Why a heartbeat that stopped while those waited did, before the
@@ -442,7 +444,7 @@ impl Supervisor<'_> {
             // while one does, a shortage holds without asking. A run waiting
             // for a person, for its landing turn or for a provider's hold
             // does not.
-            let in_flight = self
+            let moving: Vec<_> = self
                 .claim
                 .slots
                 .iter()
@@ -450,7 +452,14 @@ impl Supervisor<'_> {
                     !slot.out_of_slot()
                         && !matches!(slot.phase, Phase::AwaitingSlot | Phase::ReviewHeld { .. })
                 })
-                .count();
+                .map(|slot| {
+                    super::super::host_ops::moving_sizes::MovingTarget::of(
+                        &slot.run,
+                        &self.layout.runs_dir,
+                    )
+                })
+                .collect();
+            let in_flight = moving.len();
             // Of them, the landings under way: a landing's retry of its
             // verification counts the runs moving besides itself.
             let landing = self
@@ -473,6 +482,7 @@ impl Supervisor<'_> {
                         landing,
                         landing_waiting,
                     },
+                    &moving,
                 )
             })?;
             // Every pass too: the answer of an authentication or usage-limit
