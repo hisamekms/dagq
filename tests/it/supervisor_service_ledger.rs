@@ -420,6 +420,14 @@ fn only_a_supervisor_reads_and_writes_what_builds_the_ledger() {
         ("ledger_tasks_open_since", json!([])),
         ("ledger_wait_rows", json!([{"ms": 0, "id": 0}, null, 10])),
         ("ledger_supervisor_stops", json!([null, 10])),
+        (
+            "ledger_omitted_points_after",
+            json!(["authorization_denied", 0, 10]),
+        ),
+        (
+            "ledger_omitted_point_before_ms",
+            json!(["authorization_denied", 0]),
+        ),
         ("remove_node_rows", json!([30_000])),
         ("steps_after", json!([0, 10])),
         ("target_steps", json!([target, 0, 10])),

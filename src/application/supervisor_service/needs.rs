@@ -220,6 +220,8 @@ pub(super) const READS: &[&str] = &[
     "ledger_heads_open_at",
     "ledger_runs_without_row",
     "ledger_sessions_written",
+    "ledger_omitted_points_after",
+    "ledger_omitted_point_before_ms",
     "run_events_after",
     "task_events_after",
 ];
@@ -781,6 +783,29 @@ mod tests {
             assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
             assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
             assert!(super::super::reads_only(op), "{op}");
+        }
+    }
+
+    /// The reads of the points of the coverage of the omitted queue events
+    /// are the supervisor's reads of the ledger, as the read of the marks
+    /// they are written with: they need `scheduler.supervise`, which the
+    /// policy grants neither a worker nor an integrator, and are refused to
+    /// a control-side command as the ledger's operations are.
+    #[test]
+    fn the_reads_of_the_omitted_points_are_the_supervisors_reads_of_the_ledger() {
+        for op in [
+            "ledger_sessions_written",
+            "ledger_omitted_points_after",
+            "ledger_omitted_point_before_ms",
+        ] {
+            assert_eq!(supervisor_needs(op, &[]), Ok(C::QueueRead), "{op}");
+            assert!(super::super::LEDGER_OPS.contains(&op), "{op}");
+            assert!(super::super::READ_OPS.contains(&op), "{op}");
+            assert!(super::super::reads_only(op), "{op}");
+        }
+        assert!(grants(ActorRole::Supervisor).contains(&C::Supervise));
+        for role in [ActorRole::Worker, ActorRole::Integrator] {
+            assert!(!grants(role).contains(&C::Supervise), "{role:?}");
         }
     }
 

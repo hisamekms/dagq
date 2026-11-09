@@ -1630,15 +1630,16 @@ fn completed_kpi_checks_cross_the_supervisor_service_once() {
     );
 }
 
-/// A service of the version before the coverage of the omitted queue
-/// events: it knows no covered operation, as this service knows no
-/// operation of a name it was not built with.
-struct BeforeCoverage(Arc<InProcess>);
+/// A service of a version before the operations whose names hold its
+/// text: it knows none of them, as this service knows no operation of a
+/// name it was not built with. That of `"covered"` is the one before the
+/// coverage of the omitted queue events.
+struct Before(Arc<InProcess>, &'static str);
 
-impl crate::application::supervisor_service::ServiceCaller for BeforeCoverage {
+impl crate::application::supervisor_service::ServiceCaller for Before {
     fn call(&self, use_case: UseCase, mut params: Value) -> Result<Value> {
         let op = params["op"].as_str().unwrap().to_owned();
-        if op.contains("covered") {
+        if op.contains(self.1) {
             params["op"] = json!("an_operation_this_service_was_not_built_with");
         }
         self.0.call(use_case, params)
@@ -1707,7 +1708,7 @@ fn the_coverage_crosses_by_its_own_operations_and_a_service_before_it_refuses_th
             ops: std::sync::Mutex::default(),
         });
         let caller: Arc<dyn crate::application::supervisor_service::ServiceCaller> = if before {
-            Arc::new(BeforeCoverage(service.clone()))
+            Arc::new(Before(service.clone(), "covered"))
         } else {
             service.clone()
         };
@@ -1772,4 +1773,130 @@ fn the_coverage_crosses_by_its_own_operations_and_a_service_before_it_refuses_th
         );
         assert_eq!(coverage(), Some(EventId::new(9)));
     }
+}
+
+/// The points of the coverage of the omitted queue events cross as the
+/// queue's own adapter seeks them: by position past one and within a
+/// limit, none of a kind of no point, and by time with none before the
+/// first. A service that knows no operation of the points refuses them,
+/// and the read fails rather than answering there are none.
+#[test]
+fn the_omitted_points_cross_as_the_queues_own_and_a_service_before_them_refuses_them() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::session::written::omitted::{Coverage, Omitted, Point};
+    use crate::domain::ledger::session::written::{Marks, SessionsWritten};
+    let kind = "authorization_denied";
+    let point = |at: i64, max_ms: i64| Point {
+        kind: kind.to_owned(),
+        at: EventId::new(at),
+        max_ms: Some(max_ms),
+        last: Some(EventId::new(at - 1)),
+        timed: Some(EventId::new(at - 2)),
+    };
+    let points: Vec<Point> = (1..=8).map(|n| point(5 * n, 1_000 * (n / 2))).collect();
+    let mut coverage = Coverage::start(&[kind.to_owned()], EventId::new(0));
+    coverage.through = EventId::new(40);
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let direct = SqliteQueue::open(&backend.db).unwrap();
+    direct
+        .write_ledger_marks(&Marks {
+            sessions: SessionsWritten::at(EventId::new(40)),
+            rows: None,
+            omitted: Some(Omitted {
+                coverage,
+                points: points.clone(),
+            }),
+        })
+        .unwrap();
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = |caller: Arc<dyn crate::application::supervisor_service::ServiceCaller>| {
+        SupervisorQueues::new(
+            caller,
+            crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+        )
+        .queue()
+    };
+    let current = queue(service.clone());
+    for (after, limit) in [(0, usize::MAX), (0, 3), (15, 2), (35, 9), (40, 9)] {
+        let read = current
+            .ledger_omitted_points_after(kind, EventId::new(after), limit)
+            .unwrap();
+        assert_eq!(
+            read,
+            direct
+                .ledger_omitted_points_after(kind, EventId::new(after), limit)
+                .unwrap(),
+            "{after} {limit}"
+        );
+    }
+    assert_eq!(
+        current
+            .ledger_omitted_points_after(kind, EventId::new(15), 2)
+            .unwrap(),
+        points[3..5]
+    );
+    assert!(
+        current
+            .ledger_omitted_points_after("telemetry_token_revoked", EventId::new(0), 9)
+            .unwrap()
+            .is_empty()
+    );
+    for ms in [0, 1_000, 2_500, i64::MAX] {
+        let read = current.ledger_omitted_point_before_ms(kind, ms).unwrap();
+        assert_eq!(
+            read,
+            direct.ledger_omitted_point_before_ms(kind, ms).unwrap(),
+            "{ms}"
+        );
+    }
+    // No point's M is before the first's: there is none.
+    assert_eq!(
+        current.ledger_omitted_point_before_ms(kind, 0).unwrap(),
+        None
+    );
+    assert_eq!(
+        current.ledger_omitted_point_before_ms(kind, 2_500).unwrap(),
+        Some(points[4].clone())
+    );
+    assert_eq!(
+        current
+            .ledger_omitted_point_before_ms("telemetry_token_revoked", i64::MAX)
+            .unwrap(),
+        None
+    );
+    let ops = std::mem::take(&mut *service.ops.lock().unwrap());
+    assert!(
+        ops.iter().all(|op| op.starts_with("ledger_omitted_point")),
+        "{ops:?}"
+    );
+    assert_eq!(ops.len(), 14, "{ops:?}");
+    let before = queue(Arc::new(Before(service.clone(), "ledger_omitted_point")));
+    let refusals = [
+        before
+            .ledger_omitted_points_after(kind, EventId::new(0), 9)
+            .unwrap_err(),
+        before
+            .ledger_omitted_point_before_ms(kind, 2_500)
+            .unwrap_err(),
+    ];
+    for refusal in refusals {
+        assert!(
+            format!("{refusal:#}").contains("an_operation_this_service_was_not_built_with"),
+            "{refusal:#}"
+        );
+    }
+    assert_eq!(
+        std::mem::take(&mut *service.ops.lock().unwrap()),
+        [
+            "an_operation_this_service_was_not_built_with",
+            "an_operation_this_service_was_not_built_with"
+        ]
+    );
 }

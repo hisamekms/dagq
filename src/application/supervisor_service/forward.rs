@@ -3144,6 +3144,30 @@ impl LedgerStore for SupervisorQueue {
     fn ledger_marks(&self) -> Result<Option<crate::domain::ledger::session::written::Marks>> {
         self.remote("ledger_sessions_written", vec![])
     }
+    // The points cross as the service seeks them: a service built before
+    // them knows no such operation and refuses it, which fails the read as
+    // a store that keeps no points does.
+    fn ledger_omitted_points_after(
+        &self,
+        kind: &str,
+        after: EventId,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::ledger::session::written::omitted::Point>> {
+        self.remote(
+            "ledger_omitted_points_after",
+            vec![to_value(kind)?, to_value(after)?, to_value(limit)?],
+        )
+    }
+    fn ledger_omitted_point_before_ms(
+        &self,
+        kind: &str,
+        ms: i64,
+    ) -> Result<Option<crate::domain::ledger::session::written::omitted::Point>> {
+        self.remote(
+            "ledger_omitted_point_before_ms",
+            vec![to_value(kind)?, to_value(ms)?],
+        )
+    }
     // A row past one answer whole is read in parts.
     fn ledger_row(
         &self,

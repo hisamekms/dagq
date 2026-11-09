@@ -2471,6 +2471,22 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
         // The session rows' mark, R beside it when the store holds one:
         // a reader of the session rows' mark alone reads it too.
         "ledger_sessions_written" => answer(LedgerStore::ledger_marks(&*store)),
+        // At most `limit` points of a kind of the coverage of the omitted
+        // queue events past a position, by position.
+        "ledger_omitted_points_after" => {
+            let (kind, after, limit): (String, EventId, usize) = read(op, args)?;
+            answer(LedgerStore::ledger_omitted_points_after(
+                &*store, &kind, after, limit,
+            ))
+        }
+        // The last point of a kind whose M is before a time (unix ms), if
+        // any.
+        "ledger_omitted_point_before_ms" => {
+            let (kind, ms): (String, i64) = read(op, args)?;
+            answer(LedgerStore::ledger_omitted_point_before_ms(
+                &*store, &kind, ms,
+            ))
+        }
         // A part of the text of a row past one answer whole, from `offset`
         // ([`super::large`]); none for no row.
         "ledger_row_part" => {
