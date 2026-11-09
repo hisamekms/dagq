@@ -25,7 +25,7 @@ use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
 use super::adapters::process_alive;
-use super::sql_dialect::JsonType;
+use super::sql_dialect::{JsonType, SqlDialect};
 use super::sqlite::SqliteQueue;
 use crate::domain::Ask;
 use crate::domain::write_rules::check_run_has_task;
@@ -77,7 +77,7 @@ impl SqliteQueue {
         let open = SqlRead::query_row(
             &tx,
             "SELECT * FROM asks WHERE kind='queue_hold' AND reason_category=?1
-                 AND ifnull(subject,'')=ifnull(?2,'')
+                 AND COALESCE(subject,'')=COALESCE(?2,'')
                  AND answered_at IS NULL AND closed_at IS NULL",
             sql_params![hold.reason_category.as_str(), hold.subject],
             ask_row,
@@ -179,7 +179,7 @@ impl SqliteQueue {
             &tx,
             &format!(
                 "SELECT * FROM asks WHERE kind='queue_hold'
-                 AND ifnull(subject,'') <> 'disk'
+                 AND COALESCE(subject,'') <> 'disk'
                  AND answered_at IS NULL AND closed_at IS NULL
                  AND EXISTS (SELECT 1 FROM {affected} WHERE {run}=?1)
                  ORDER BY id LIMIT 1",
@@ -200,7 +200,7 @@ impl SqliteQueue {
             &tx,
             &format!(
                 "SELECT EXISTS (SELECT 1 FROM asks WHERE kind='queue_hold'
-             AND ifnull(subject,'') <> 'disk' AND closed_at IS NULL
+             AND COALESCE(subject,'') <> 'disk' AND closed_at IS NULL
              AND EXISTS (SELECT 1 FROM {affected} WHERE {run}=?1))",
                 affected = SqlRead::dialect(&tx).json_elements("asks.affected"),
                 run = SqlRead::dialect(&tx).json_element("value", JsonType::Text),
@@ -1000,7 +1000,7 @@ impl SqliteQueue {
         let unclosed: Vec<Ask> = SqlRead::query_map(
             &tx,
             "SELECT * FROM asks WHERE kind='queue_hold' AND reason_category=?1
-                 AND ifnull(subject,'')=ifnull(?2,'') AND closed_at IS NULL ORDER BY id",
+                 AND COALESCE(subject,'')=COALESCE(?2,'') AND closed_at IS NULL ORDER BY id",
             sql_params![reason.as_str(), subject],
             ask_row,
         )?;
@@ -1211,6 +1211,26 @@ pub(super) fn request_ask_subject(id: crate::domain::RequestId) -> String {
     format!("request:{id}")
 }
 
+/// The open ask of a task, run, kind, finding and request in `dialect`, an
+/// absent one compared by the same value as the `asks_open` unique index keys
+/// it (0 or the empty text). The task and the run, the index's first columns,
+/// take their key from [`SqlDialect::index_key`] so the statement seeks the
+/// index in both dialects; the finding and the request only filter what it
+/// finds. The `CAST` gives an ID's parameter the type of its bigint column:
+/// next to the literal 0 alone, Postgres would take it for int4 and refuse a
+/// large ID.
+pub(super) fn open_ask_of_key(dialect: SqlDialect) -> String {
+    format!(
+        "SELECT * FROM asks
+     WHERE {task}=COALESCE(CAST(?1 AS BIGINT),0) AND {run}=COALESCE(?2,'')
+       AND kind=?3 AND COALESCE(finding_id,0)=COALESCE(CAST(?4 AS BIGINT),0)
+       AND COALESCE(request_id,0)=COALESCE(CAST(?5 AS BIGINT),0)
+       AND answered_at IS NULL AND closed_at IS NULL",
+        task = dialect.index_key("task_id", "0"),
+        run = dialect.index_key("run_id", "''"),
+    )
+}
+
 /// Register `ask` inside the caller's write transaction, or return the open
 /// one of the same task, run and kind unchanged (see [`SqliteQueue::ask`]).
 pub(super) fn insert_ask(tx: &impl SqlWrite, ask: &NewAsk) -> Result<AskOutcome> {
@@ -1251,21 +1271,24 @@ pub(super) fn insert_ask(tx: &impl SqlWrite, ask: &NewAsk) -> Result<AskOutcome>
     // decision 19); the runtime applies those answers.
     let options = ask.offered_options();
     if let Some(existing) = tx
-            .query_row(
-                "SELECT * FROM asks WHERE ifnull(task_id,0)=ifnull(?1,0) AND ifnull(run_id,'')=ifnull(?2,'')
-                 AND kind=?3 AND ifnull(finding_id,0)=ifnull(?4,0)
-                 AND ifnull(request_id,0)=ifnull(?5,0)
-                 AND answered_at IS NULL AND closed_at IS NULL",
-                sql_params![task_id, ask.run_id, ask.kind.as_str(), ask.finding_id, ask.request_id],
-                ask_row,
-            )
-            .optional()?
-        {
-            return Ok(AskOutcome {
-                ask: existing,
-                created: false,
-            });
-        }
+        .query_row(
+            &open_ask_of_key(tx.dialect()),
+            sql_params![
+                task_id,
+                ask.run_id,
+                ask.kind.as_str(),
+                ask.finding_id,
+                ask.request_id
+            ],
+            ask_row,
+        )
+        .optional()?
+    {
+        return Ok(AskOutcome {
+            ask: existing,
+            created: false,
+        });
+    }
     // A worker_question's topic codes (ADR-t947-2), primary first; NULL
     // for the kinds that carry none.
     let topics = crate::domain::worker_question::normalize_topics(&ask.topics);
@@ -1977,5 +2000,186 @@ mod tests {
         assert_eq!(answer_leased_question(awaiting, live, old), (false, false));
         assert!(answer_leased_question(RunStatus::Running, dead, 0).0);
         assert!(answer_leased_question(RunStatus::Running, live, old).0);
+    }
+
+    fn hold(subject: Option<&str>) -> NewHold {
+        NewHold {
+            reason_category: AskReason::Authentication,
+            subject: subject.map(str::to_string),
+            run_id: None,
+            job: None,
+            question: "go on?".into(),
+            options: vec!["wait".into()],
+            asked_by: "runtime".into(),
+        }
+    }
+
+    /// A hold's absent subject is the empty one, as `asks_open` keys it: the
+    /// statements that look for the open ask find what the index would refuse.
+    #[test]
+    fn a_hold_finds_the_open_ask_of_its_subject_by_the_key_of_the_unique_index() {
+        let uri = format!("file:/asks-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let mut queue = SqliteQueue::init(uri).unwrap();
+        let absent = queue.hold(hold(None)).unwrap();
+        assert!(absent.created);
+        for subject in [None, Some("")] {
+            let again = queue.hold(hold(subject)).unwrap();
+            assert!(!again.created, "{subject:?}");
+            assert_eq!(again.ask.id, absent.ask.id, "{subject:?}");
+        }
+        let named = queue.hold(hold(Some("a"))).unwrap();
+        assert!(named.created);
+        assert_ne!(named.ask.id, absent.ask.id);
+        let same_key = queue.conn.execute(
+            "INSERT INTO asks(kind, question, asked_by, reason_category, subject)
+             SELECT kind, question, asked_by, reason_category, '' FROM asks WHERE id=?1",
+            [absent.ask.id],
+        );
+        assert!(
+            same_key
+                .unwrap_err()
+                .to_string()
+                .contains("UNIQUE constraint failed"),
+            "the index keys the absent and the empty subject as one"
+        );
+
+        let closed = queue
+            .close_hold_asks(AskReason::Authentication, None, "resolved")
+            .unwrap();
+        assert_eq!(
+            closed.iter().map(|ask| ask.id).collect::<Vec<_>>(),
+            [absent.ask.id]
+        );
+        let closed = queue
+            .close_hold_asks(AskReason::Authentication, Some("a"), "resolved")
+            .unwrap();
+        assert_eq!(
+            closed.iter().map(|ask| ask.id).collect::<Vec<_>>(),
+            [named.ask.id]
+        );
+    }
+
+    /// An absent subject is not the disk's, so its hold holds the run.
+    #[test]
+    fn a_hold_without_a_subject_holds_the_run_and_the_disk_s_does_not() {
+        let uri = format!("file:/asks-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let mut queue = SqliteQueue::init(uri).unwrap();
+        let run = RunId::new("11111111-1111-4111-8111-111111111111").unwrap();
+        for (subject, held) in [(None, true), (Some("disk"), false), (Some("a"), true)] {
+            let ask = queue.hold(hold(subject)).unwrap().ask;
+            queue
+                .conn
+                .execute(
+                    "UPDATE asks SET affected=json_array(?1) WHERE id=?2",
+                    params![run.to_string(), ask.id],
+                )
+                .unwrap();
+            assert_eq!(queue.hold_of(&run).unwrap().is_some(), held, "{subject:?}");
+            assert_eq!(queue.hold_unclosed(&run).unwrap(), held, "{subject:?}");
+            queue
+                .conn
+                .execute("UPDATE asks SET affected='[]' WHERE id=?1", [ask.id])
+                .unwrap();
+        }
+    }
+
+    /// An ask with no run, finding or request is the open one of its task
+    /// and kind; another task's is another ask. The statement walks the
+    /// open asks' partial index, not the table.
+    #[test]
+    fn an_ask_finds_the_open_one_whose_absent_columns_are_absent_and_reads_the_open_asks_only() {
+        let uri = format!("file:/asks-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let mut queue = SqliteQueue::init(uri).unwrap();
+        let task = |queue: &mut SqliteQueue| {
+            queue
+                .conn
+                .execute(
+                    "INSERT INTO tasks(title, description, acceptance, verification_commands, status)
+                     VALUES ('t', '', '', '[]', 'draft')",
+                    [],
+                )
+                .unwrap();
+            TaskId::new(queue.conn.last_insert_rowid())
+        };
+        let (first, second) = (task(&mut queue), task(&mut queue));
+        let ask = |task_id: TaskId| NewAsk {
+            recommendation: None,
+            confidence: None,
+            topics: Vec::new(),
+            kind: AskKind::PlannerQuestion,
+            task_id: Some(task_id),
+            run_id: None,
+            question: "which?".into(),
+            options: vec!["a".into()],
+            asked_by: "planner".into(),
+            reason_category: AskReason::Scope,
+            finding_id: None,
+            request_id: None,
+        };
+        let opened = queue.ask(ask(first)).unwrap();
+        assert!(opened.created);
+        let again = queue.ask(ask(first)).unwrap();
+        assert!(!again.created);
+        assert_eq!(again.ask.id, opened.ask.id);
+        assert!(queue.ask(ask(second)).unwrap().created);
+
+        let plan: String = queue
+            .conn
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {}", open_ask_of_key(SqlDialect::Sqlite)),
+                params![
+                    first,
+                    Option::<String>::None,
+                    "planner_question",
+                    Option::<i64>::None,
+                    Option::<i64>::None
+                ],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert_eq!(
+            plan,
+            "SEARCH asks USING INDEX asks_open (<expr>=? AND <expr>=? AND kind=?)"
+        );
+    }
+
+    /// The key the statement seeks is the one each dialect's `asks_open` is
+    /// on: SQLite's migrations and Postgres's base.
+    #[test]
+    fn the_open_ask_s_key_is_the_expression_of_each_dialect_s_unique_index() {
+        let squeezed = |text: &str| -> String {
+            text.chars()
+                .filter(|c| !c.is_whitespace() && !matches!(c, '(' | ')'))
+                .collect::<String>()
+                .to_lowercase()
+        };
+        let uri = format!("file:/asks-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let queue = SqliteQueue::init(uri).unwrap();
+        let sqlite: String = queue
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name='asks_open'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let postgres = include_str!("../../migrations-postgres/base.sql")
+            .lines()
+            .find(|line| line.starts_with("CREATE UNIQUE INDEX asks_open "))
+            .unwrap();
+        for (dialect, index) in [
+            (SqlDialect::Sqlite, sqlite.as_str()),
+            (SqlDialect::Postgres, postgres),
+        ] {
+            let key = format!(
+                "{},{}",
+                dialect.index_key("task_id", "0"),
+                dialect.index_key("run_id", "''")
+            );
+            assert!(
+                squeezed(index).contains(&format!("asks{}", squeezed(&key))),
+                "{dialect:?}: {key} is not the first columns of {index}"
+            );
+        }
     }
 }

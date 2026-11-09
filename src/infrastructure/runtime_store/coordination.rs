@@ -455,7 +455,8 @@ impl SqliteQueue {
         let tx = self.write_tx("bind_repository")?;
         SqlWrite::execute(
             &tx,
-            "INSERT OR IGNORE INTO queue_repository(singleton, git_common_dir) VALUES (1,?1)",
+            "INSERT INTO queue_repository(singleton, git_common_dir) VALUES (1,?1)
+             ON CONFLICT DO NOTHING",
             sql_params![common_dir],
         )?;
         let bound: String = SqlRead::query_row(

@@ -88,6 +88,8 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("runner credentials", runner_credentials::<S, F>),
         ("runner leases", runner_leases::<S, F>),
         ("image digests", image_digests::<S, F>),
+        ("shared spellings", shared_spellings::<S, F>),
+        ("large ids", large_ids::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

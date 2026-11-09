@@ -1,7 +1,8 @@
 //! The dialects' fragments of the queue store's SQL (ADR-t3982-1).
 //!
 //! Where the dialects differ only in one expression (reading a field of a
-//! JSON column, a date and time function), a statement of the store takes
+//! JSON column, a date and time function, the key of an expression index), a
+//! statement of the store takes
 //! that expression from a function here instead of spelling it. A function
 //! takes what the expression reads (the column and the JSON path, or the
 //! time's value) and what it reads it as (the type, the form), and returns
@@ -32,8 +33,9 @@
 //! `value` is a `jsonb`, not SQLite's plain value.
 //!
 //! Outside test code, no SQL of `src/` but this module's spells the functions
-//! the boundary test `src/context_boundaries/dialect.rs` lists: it fails on
-//! one that does.
+//! the boundary test `src/context_boundaries/dialect.rs` lists, nor `ifnull`,
+//! which `src/context_boundaries/shared_sql.rs` checks: they fail on one that
+//! does.
 //!
 //! [`SqlDialect`] is the kind of dialect: a store module on the execution
 //! port (`super::sql_exec`) takes the expression from the method of the kind
@@ -308,6 +310,19 @@ impl SqlDialect {
         }
     }
 
+    /// The key of a unique expression index that takes an absent `column` for
+    /// the SQL literal `absent` (`0`, `''`), spelled as the dialect's index is:
+    /// SQLite's `asks_open` is on `ifnull` and Postgres's base on `coalesce`.
+    /// SQLite matches an index's expression by its function's name, so a
+    /// statement that is to seek such an index takes its key from here; one
+    /// that only filters by it spells `COALESCE`.
+    pub(crate) fn index_key(self, column: &str, absent: &str) -> String {
+        match self {
+            Self::Sqlite => format!("ifnull({column},{absent})"),
+            Self::Postgres => format!("COALESCE({column},{absent})"),
+        }
+    }
+
     fn json_expression(self, column: &str, path: &str, ty: JsonType, sep: &str) -> String {
         match self {
             Self::Sqlite => {
@@ -478,6 +493,18 @@ pub(crate) fn formatted_time(format: &str, value: &str) -> String {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    #[test]
+    fn an_index_key_is_spelled_as_each_dialect_s_index_is() {
+        assert_eq!(
+            SqlDialect::Sqlite.index_key("task_id", "0"),
+            "ifnull(task_id,0)"
+        );
+        assert_eq!(
+            SqlDialect::Postgres.index_key("run_id", "''"),
+            "COALESCE(run_id,'')"
+        );
+    }
 
     /// The kind's form returns, character for character, what the SQLite
     /// form returns, and the SQLite kind is what the statements spell.

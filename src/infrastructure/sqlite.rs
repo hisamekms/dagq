@@ -3203,6 +3203,67 @@ mod store_contract_tests {
         contract(|open| store_contract::leader_lifecycle(&open));
     }
     #[test]
+    fn shared_spellings() {
+        contract(|open| store_contract::shared_spellings(&open));
+    }
+    #[test]
+    fn large_ids() {
+        contract(|open| store_contract::large_ids(&open));
+    }
+    /// The store's shared spellings are the operators they replace: the
+    /// comparisons compile to the same program, so a statement selects the
+    /// same rows and its plan is the same. `COALESCE` gives the same values
+    /// as `ifnull`.
+    #[test]
+    fn the_shared_spellings_are_what_they_replace_on_sqlite() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, a TEXT);
+             CREATE INDEX t_a ON t(a);
+             INSERT INTO t(a) VALUES (NULL), ('x');",
+        )
+        .unwrap();
+        let program = |sql: &str| -> Vec<(String, i64, i64, i64)> {
+            let mut statement = conn.prepare(&format!("EXPLAIN {sql}")).unwrap();
+            let none = vec![Option::<i64>::None; statement.parameter_count()];
+            statement
+                .query_map(rusqlite::params_from_iter(none), |r| {
+                    Ok((r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        for (before, after) in [
+            ("a IS ?1", "a IS NOT DISTINCT FROM ?1"),
+            ("a IS NOT ?1", "a IS DISTINCT FROM ?1"),
+            ("a IS 'x'", "a IS NOT DISTINCT FROM 'x'"),
+            ("a IS NOT 'x'", "a IS DISTINCT FROM 'x'"),
+        ] {
+            for sql in ["SELECT {} FROM t", "SELECT id FROM t WHERE {}"] {
+                let of = |comparison: &str| program(&sql.replace("{}", comparison));
+                assert_eq!(of(before), of(after), "{before}");
+            }
+        }
+        for arg in [None, Some("x"), Some("")] {
+            let (ifnull, coalesce): (Vec<bool>, Vec<bool>) = {
+                let rows = |sql: &str| -> Vec<bool> {
+                    let mut statement = conn.prepare(sql).unwrap();
+                    statement
+                        .query_map([arg], |r| r.get(0))
+                        .unwrap()
+                        .map(Result::unwrap)
+                        .collect()
+                };
+                (
+                    rows("SELECT ifnull(a,'')=ifnull(?1,'') FROM t ORDER BY id"),
+                    rows("SELECT COALESCE(a,'')=COALESCE(?1,'') FROM t ORDER BY id"),
+                )
+            };
+            assert_eq!(ifnull, coalesce, "{arg:?}");
+        }
+    }
+    #[test]
     fn leader_singleton() {
         contract(|open| store_contract::leader_singleton(&open));
     }

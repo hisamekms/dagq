@@ -40,7 +40,7 @@ fn targets(dialect: super::sql_exec::SqlDialect) -> String {
         AND a.kind='planner_question' AND a.closed_at IS NULL)
     AND NOT EXISTS(SELECT 1 FROM run_events e WHERE e.kind='{}'
         AND {finding_id}=f.id
-        AND {marked_at} IS f.propose_requested_at)",
+        AND {marked_at} IS NOT DISTINCT FROM f.propose_requested_at)",
         event_kind::FINDING_PLANNER_EXHAUSTED,
         finding_id = dialect.json_field("e.payload", "$.finding_id", JsonType::Integer),
         marked_at = dialect.json_field("e.payload", "$.marked_at", JsonType::Integer),
@@ -321,7 +321,7 @@ impl SqliteQueue {
                 "SELECT * FROM findings f WHERE f.status='open' AND f.propose_reason IS NOT NULL
                  AND EXISTS(SELECT 1 FROM run_events e WHERE e.kind='{}'
                      AND {finding_id}=f.id
-                     AND {marked_at} IS f.propose_requested_at)
+                     AND {marked_at} IS NOT DISTINCT FROM f.propose_requested_at)
                  ORDER BY f.id",
                 event_kind::FINDING_PLANNER_EXHAUSTED,
                 finding_id =
@@ -558,7 +558,7 @@ pub(super) fn route_of_port(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind='{}'
          AND {finding_id}=?1
-         AND {marked_at} IS ?2)",
+         AND {marked_at} IS NOT DISTINCT FROM ?2)",
             event_kind::FINDING_PLANNER_EXHAUSTED,
             finding_id = conn
                 .dialect()

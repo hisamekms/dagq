@@ -77,7 +77,7 @@ pub(super) fn freshness_there_sql(dialect: SqlDialect) -> String {
         "SELECT EXISTS(SELECT 1 FROM run_events INDEXED BY events_by_kind WHERE kind=?1
          AND task_id IS NULL AND run_id IS NULL AND goal_id IS NULL
          AND {}=?2
-         AND {} IS ?3)",
+         AND {} IS NOT DISTINCT FROM ?3)",
         dialect.json_field("payload", "$.workflow", JsonType::Text),
         dialect.json_field("payload", "$.run_id", JsonType::Integer)
     )

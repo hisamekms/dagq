@@ -2,6 +2,8 @@
 //! separate transactions: a constraint error aborts a Postgres transaction.
 use super::ContractStore;
 use crate::application::NotLeader;
+use crate::infrastructure::asks::open_ask_of_key;
+use crate::infrastructure::findings::FINDING_OF_KEY;
 use crate::infrastructure::sql_exec::{SqlError, SqlRead, SqlWrite, sql_params};
 use crate::infrastructure::sqlite::WriteIdentity;
 use anyhow::{Context, Result, ensure};
@@ -209,6 +211,139 @@ pub fn unique_indexes<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Resul
         unique_error(tx.execute(insert, params))?;
         drop(tx);
     }
+    Ok(())
+}
+
+/// The spellings the store's statements share take what they took on SQLite
+/// and the same rows on both DBs: a conflict leaves the first row or updates
+/// it in place, and an absent value compares equal to an absent value.
+pub fn shared_spellings<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
+    let store = open()?;
+    let tx = store.write_entry("contract_shared")?;
+    let task = tx.insert_id(INSERT_TASK, &[])?;
+
+    let insert = "INSERT INTO draft_origins(task_id, origin, created_at) VALUES (?1, ?2, 0) ON CONFLICT DO NOTHING";
+    ensure!(tx.execute(insert, sql_params![task, "first"])? == 1);
+    ensure!(tx.execute(insert, sql_params![task, "second"])? == 0);
+    let origin = tx.query_row(
+        "SELECT origin FROM draft_origins WHERE task_id = ?1",
+        sql_params![task],
+        |r| r.get::<_, String>(0),
+    )?;
+    ensure!(origin == "first", "{origin}");
+
+    let upsert = "INSERT INTO draft_revisits(task_id, revisit_at, note, set_by, set_by_id, created_at, opened_at, planner_id) VALUES (?1, ?2, ?3, 'user', 'user', 0, NULL, NULL) ON CONFLICT (task_id) DO UPDATE SET revisit_at = excluded.revisit_at, note = excluded.note, opened_at = excluded.opened_at";
+    tx.execute(upsert, sql_params![task, 1_i64, "note"])?;
+    tx.execute(
+        "UPDATE draft_revisits SET opened_at = 5 WHERE task_id = ?1",
+        sql_params![task],
+    )?;
+    tx.execute(upsert, sql_params![task, 2_i64, Option::<String>::None])?;
+    let revisit = tx.query_row(
+        "SELECT revisit_at, note, opened_at, (SELECT count(*) FROM draft_revisits WHERE task_id = ?1) FROM draft_revisits WHERE task_id = ?1",
+        sql_params![task],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        },
+    )?;
+    ensure!(revisit == (2, None, None, 1), "{revisit:?}");
+
+    let insert_ask = "INSERT INTO asks(kind, question, asked_by, reason_category, task_id, subject, finding_id) VALUES ('contract-shared', 'q', 'user', 'scope', ?1, ?2, ?3)";
+    tx.execute(
+        insert_ask,
+        sql_params![
+            Option::<i64>::None,
+            Option::<String>::None,
+            Option::<i64>::None
+        ],
+    )?;
+    tx.execute(insert_ask, sql_params![task, "named", Option::<i64>::None])?;
+    let by_key = "SELECT count(*) FROM asks WHERE kind = 'contract-shared' AND COALESCE(task_id, 0) = COALESCE(CAST(?1 AS BIGINT), 0) AND COALESCE(subject, '') = COALESCE(?2, '') AND COALESCE(finding_id, 0) = COALESCE(CAST(?3 AS BIGINT), 0) AND answered_at IS NULL AND closed_at IS NULL";
+    let count = |task_id: Option<i64>, subject: Option<&str>| {
+        tx.query_row(
+            by_key,
+            sql_params![task_id, subject, Option::<i64>::None],
+            |r| r.get::<_, i64>(0),
+        )
+    };
+    ensure!(count(None, None)? == 1);
+    ensure!(count(None, Some(""))? == 1);
+    ensure!(count(Some(task), Some("named"))? == 1);
+    ensure!(count(Some(task), None)? == 0);
+
+    let compare = |sql: &str, subject: Option<&str>| {
+        tx.query_row(sql, sql_params![subject], |r| r.get::<_, i64>(0))
+    };
+    let same = "SELECT count(*) FROM asks WHERE kind = 'contract-shared' AND subject IS NOT DISTINCT FROM ?1";
+    let other =
+        "SELECT count(*) FROM asks WHERE kind = 'contract-shared' AND subject IS DISTINCT FROM ?1";
+    ensure!(compare(same, None)? == 1 && compare(other, None)? == 1);
+    ensure!(compare(same, Some("named"))? == 1 && compare(other, Some("named"))? == 1);
+    ensure!(compare(same, Some("gone"))? == 0 && compare(other, Some("gone"))? == 2);
+    let literal = tx.query_row(
+        "SELECT count(*) FROM asks WHERE kind = 'contract-shared' AND subject IS DISTINCT FROM 'named'",
+        &[],
+        |r| r.get::<_, i64>(0),
+    )?;
+    ensure!(literal == 1, "{literal}");
+    Ok(())
+}
+
+/// The statements that look for an open ask and for a finding by key take IDs
+/// past int4, the columns' bigint range, and an absent ID is not one of them.
+pub fn large_ids<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
+    const LARGE: i64 = 2_147_483_648;
+    let store = open()?;
+    let tx = store.write_entry("contract_large_ids")?;
+    tx.execute(
+        "INSERT INTO goals(id, title) VALUES (?1, 'contract')",
+        sql_params![LARGE],
+    )?;
+    tx.execute(
+        "INSERT INTO tasks(id, title, description, acceptance, verification_commands, status) VALUES (?1, 'contract', '', '', '[]', 'draft')",
+        sql_params![LARGE],
+    )?;
+    tx.execute(
+        "INSERT INTO findings(id, kind, target, task_id, goal_id, subject, summary, first_seen_at, last_seen_at, recorded_by, updated_at) VALUES (?1, 'contract-large', 'task', ?1, ?1, 'a', 's', 0, 0, 'user', 0)",
+        sql_params![LARGE],
+    )?;
+    tx.execute(
+        "INSERT INTO asks(kind, question, asked_by, reason_category, task_id, finding_id, request_id) VALUES ('contract-large', 'q', 'user', 'scope', ?1, ?1, ?1)",
+        sql_params![LARGE],
+    )?;
+    let asks = |id: Option<i64>| {
+        tx.query_row(
+            &format!(
+                "SELECT count(*) FROM ({}) AS found",
+                open_ask_of_key(tx.dialect())
+            ),
+            sql_params![id, Option::<String>::None, "contract-large", id, id],
+            |r| r.get::<_, i64>(0),
+        )
+    };
+    ensure!(asks(Some(LARGE))? == 1);
+    ensure!(asks(None)? == 0);
+    let findings = |id: Option<i64>| {
+        tx.query_row(
+            &format!("SELECT count(*) FROM findings WHERE {FINDING_OF_KEY}"),
+            sql_params![
+                "contract-large",
+                "task",
+                id,
+                Option::<String>::None,
+                id,
+                "a"
+            ],
+            |r| r.get::<_, i64>(0),
+        )
+    };
+    ensure!(findings(Some(LARGE))? == 1);
+    ensure!(findings(None)? == 0);
     Ok(())
 }
 

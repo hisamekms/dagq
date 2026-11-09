@@ -22,13 +22,13 @@
 //! from its `(`, the messages of [`NOT_SQL`], and the migrations (`migrations/`, not under `src/`),
 //! whose SQL stays the dialect's own.
 
+use super::covers;
 use super::source;
 use super::sql;
-use super::{children_dir, covers};
 use std::collections::BTreeSet;
 
 /// The module of the dialect's functions, whose SQL spells the functions.
-const DIALECT: &[&str] = &[
+pub(super) const DIALECT: &[&str] = &[
     "src/infrastructure/sql_dialect.rs",
     "src/infrastructure/sql_dialect/",
 ];
@@ -91,24 +91,7 @@ const NOT_SQL: [(&str, &str); 2] = [
 /// their text), one line each.
 fn check(rust: &[(String, String)]) -> Vec<String> {
     let mut errors = BTreeSet::new();
-    let mut read = Vec::new();
-    let mut test_paths = Vec::new();
-    for (path, text) in rust {
-        match source::read(text) {
-            Ok(source) => {
-                let dir = children_dir(path);
-                for module in &source.test_modules {
-                    test_paths.push(format!("{dir}/{module}.rs"));
-                    test_paths.push(format!("{dir}/{module}/"));
-                }
-                read.push((path.as_str(), source));
-            }
-            Err(error) => {
-                errors.insert(format!("{path}: not read as Rust: {error}"));
-            }
-        }
-    }
-    read.retain(|(path, _)| !test_paths.iter().any(|test| covers(test, path)));
+    let read = source::read_production(rust, &mut errors);
     for (path, source) in &read {
         for literal in &source.literals {
             if NOT_SQL.contains(&(*path, literal.text.as_str())) {

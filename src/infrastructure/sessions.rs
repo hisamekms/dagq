@@ -2004,7 +2004,7 @@ pub(super) fn open_hook_spans(conn: &impl SqlRead) -> Result<Vec<OpenSpan>> {
         conn,
         &format!(
             "o.run_id IS NULL AND {o_kind} IN ({kinds})
-             AND {o_route} IS NOT '{HEADLESS_ROUTE}'",
+             AND {o_route} IS DISTINCT FROM '{HEADLESS_ROUTE}'",
             o_kind = conn
                 .dialect()
                 .json_field("o.payload", "$.kind", JsonType::Text),
@@ -3564,7 +3564,8 @@ pub(super) mod tests {
         std::fs::write(repo.join("dagq.toml"), dagq_toml).unwrap();
         let common_dir = crate::infrastructure::adapters::git_common_dir(&repo).unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO queue_repository(singleton,git_common_dir) VALUES (1,?1)",
+            "INSERT INTO queue_repository(singleton,git_common_dir) VALUES (1,?1)
+             ON CONFLICT (singleton) DO UPDATE SET git_common_dir=excluded.git_common_dir",
             [common_dir.to_str().unwrap()],
         )
         .unwrap();

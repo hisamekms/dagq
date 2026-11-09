@@ -990,8 +990,8 @@ fn link_request(
     now: i64,
 ) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO plan_request_proposals(request_id, proposal_id, created_at)
-         VALUES (?1, ?2, ?3)",
+        "INSERT INTO plan_request_proposals(request_id, proposal_id, created_at)
+         VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
         sql_params![request, proposal, now],
     )?;
     if link == ProposalLink::Propose {

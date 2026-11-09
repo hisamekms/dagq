@@ -655,7 +655,7 @@ impl PlanReviewStore for SqliteQueue {
         }
         let attempt: usize = SqlRead::query_row(
             &tx,
-            "SELECT count(*) + 1 FROM plan_reviews WHERE proposal_id=?1 AND outcome IS NOT 'interrupted'",
+            "SELECT count(*) + 1 FROM plan_reviews WHERE proposal_id=?1 AND outcome IS DISTINCT FROM 'interrupted'",
             sql_params![proposal_id],
             |r| r.get::<_, i64>(0),
         )? as usize;

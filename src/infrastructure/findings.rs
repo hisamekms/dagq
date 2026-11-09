@@ -41,9 +41,7 @@ impl SqliteQueue {
         let tx = self.write_tx("record_finding_once")?;
         let (task_id, run_id, goal_id) = resolve_target(&tx, &new.target)?;
         let there: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM findings WHERE kind=?1 AND target=?2
-               AND ifnull(task_id,0)=ifnull(?3,0) AND ifnull(run_id,'')=ifnull(?4,'')
-               AND ifnull(goal_id,0)=ifnull(?5,0) AND subject=?6)",
+            &format!("SELECT EXISTS(SELECT 1 FROM findings WHERE {FINDING_OF_KEY})"),
             sql_params![
                 new.kind,
                 new.target.name(),
@@ -167,6 +165,14 @@ impl SqliteQueue {
     }
 }
 
+/// The condition on a finding's key, an absent column compared by the value
+/// `findings_unsettled` keys it by (0 or the empty text). The `CAST` gives an
+/// ID's parameter the type of its bigint column: next to the literal 0 alone,
+/// Postgres would take it for int4 and refuse a large ID.
+pub(super) const FINDING_OF_KEY: &str = "kind=?1 AND target=?2
+     AND COALESCE(task_id,0)=COALESCE(CAST(?3 AS BIGINT),0) AND COALESCE(run_id,'')=COALESCE(?4,'')
+     AND COALESCE(goal_id,0)=COALESCE(CAST(?5 AS BIGINT),0) AND subject=?6";
+
 /// [`SqliteQueue::record_finding`] inside the caller's write transaction.
 pub(super) fn record_in(tx: &impl SqlWrite, new: &NewFinding, now: i64) -> Result<FindingOutcome> {
     new.validate()?;
@@ -183,21 +189,22 @@ pub(super) fn record_in(tx: &impl SqlWrite, new: &NewFinding, now: i64) -> Resul
         );
     }
     let existing = tx
-            .query_row(
-                "SELECT * FROM findings WHERE kind=?1 AND target=?2 AND ifnull(task_id,0)=ifnull(?3,0)
-                 AND ifnull(run_id,'')=ifnull(?4,'') AND ifnull(goal_id,0)=ifnull(?5,0) AND subject=?6
-                 ORDER BY status IN ('open','proposed') DESC, id DESC LIMIT 1",
-                sql_params![
-                    new.kind,
-                    new.target.name(),
-                    task_id,
-                    run_id,
-                    goal_id,
-                    new.subject
-                ],
-                finding_row,
-            )
-            .optional()?;
+        .query_row(
+            &format!(
+                "SELECT * FROM findings WHERE {FINDING_OF_KEY}
+                     ORDER BY status IN ('open','proposed') DESC, id DESC LIMIT 1"
+            ),
+            sql_params![
+                new.kind,
+                new.target.name(),
+                task_id,
+                run_id,
+                goal_id,
+                new.subject
+            ],
+            finding_row,
+        )
+        .optional()?;
     let outcome = match existing {
         None => {
             let id = tx.insert_id(
@@ -576,5 +583,87 @@ mod tests {
         );
         assert!(resolve_target(&tx, &FindingTarget::Task(TaskId::new(99))).is_err());
         assert!(resolve_target(&tx, &FindingTarget::Goal(GoalId::new(99))).is_err());
+    }
+
+    fn finding(target: FindingTarget, subject: &str) -> NewFinding {
+        NewFinding {
+            kind: "stall".into(),
+            target,
+            subject: subject.into(),
+            summary: "s".into(),
+            detail: None,
+            impact: None,
+            evidence: Vec::new(),
+            propose: None,
+            by: "observer".into(),
+        }
+    }
+
+    /// The target's absent columns are keyed by the value `findings_unsettled`
+    /// keys them by: the queue's finding (all three absent) is found again,
+    /// and one on a task is another finding.
+    #[test]
+    fn a_finding_is_found_again_by_the_key_of_the_unique_index_with_its_absent_columns() {
+        let mut queue = queue();
+        let task = queue
+            .add(NewTask {
+                title: "task".into(),
+                description: "d".into(),
+                acceptance: "a".into(),
+                verification_commands: vec!["true".into()],
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                priority: None,
+                change: None,
+                dependencies: Vec::new(),
+                goal_dependencies: Vec::new(),
+                goal_id: None,
+                context: String::new(),
+                provider: None,
+                worker_mode: None,
+                wait_for_build: false,
+                execution_class: Default::default(),
+            })
+            .unwrap()
+            .id();
+        let on_queue = queue
+            .record_finding_once(finding(FindingTarget::Queue, "a"))
+            .unwrap()
+            .expect("the first is recorded");
+        assert_eq!(
+            queue
+                .record_finding_once(finding(FindingTarget::Queue, "a"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            queue
+                .record_finding(finding(FindingTarget::Queue, "a"))
+                .unwrap()
+                .finding
+                .id,
+            on_queue
+        );
+        let on_task = queue
+            .record_finding_once(finding(FindingTarget::Task(task), "a"))
+            .unwrap()
+            .expect("another target is another finding");
+        assert_ne!(on_task, on_queue);
+        assert_eq!(
+            queue
+                .record_finding(finding(FindingTarget::Task(task), "a"))
+                .unwrap()
+                .finding
+                .id,
+            on_task
+        );
+        assert_ne!(
+            queue
+                .record_finding(finding(FindingTarget::Queue, "b"))
+                .unwrap()
+                .finding
+                .id,
+            on_queue
+        );
     }
 }

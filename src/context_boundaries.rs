@@ -30,7 +30,9 @@
 //! That every transaction of the queue DB begins as a `WriteTx` is checked
 //! by [`write_tx`], that the SQL spells the functions whose spelling
 //! differs between the dialects only in the dialect's functions by
-//! [`dialect`], that only the adapter's insert reads the ID of an
+//! [`dialect`], that the SQL spells nothing only SQLite takes where both
+//! dialects take a shared spelling by [`shared_sql`], that only the
+//! adapter's insert reads the ID of an
 //! inserted row by [`inserted_ids`], and that only the modules still bound
 //! to it name rusqlite by [`rusqlite_names`], and that `ps` and `top` start
 //! only where a sandbox's refusal stops nothing by [`setuid_tools`].
@@ -50,6 +52,7 @@ mod port_fixtures;
 mod queue_opens;
 mod rusqlite_names;
 mod setuid_tools;
+mod shared_sql;
 mod source;
 mod sql;
 mod store_entries;

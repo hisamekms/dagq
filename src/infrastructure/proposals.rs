@@ -243,7 +243,7 @@ pub(super) fn submit(
     super::draft_planners::record_adoptions(conn, &adoptions)?;
     for &goal_id in submitted.goal_ids() {
         let joined = conn.execute(
-            "UPDATE goals SET proposal_id=?1 WHERE id=?2 AND proposal_id IS NOT ?1",
+            "UPDATE goals SET proposal_id=?1 WHERE id=?2 AND proposal_id IS DISTINCT FROM ?1",
             sql_params![id, goal_id],
         )?;
         if joined != 0 {

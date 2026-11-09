@@ -698,7 +698,7 @@ pub(super) fn source_follow_ups(conn: &impl SqlRead, goal: GoalId) -> Result<Vec
     let version = acceptance_version(conn, goal)?;
     let rows = conn
         .query_map(
-            &format!("SELECT o.task_id, t.status, t.goal_id IS ?1, j.id, j.classification, j.acceptance_version
+            &format!("SELECT o.task_id, t.status, t.goal_id IS NOT DISTINCT FROM ?1, j.id, j.classification, j.acceptance_version
              FROM draft_origins o JOIN tasks t ON t.id = o.task_id
              LEFT JOIN follow_up_judgements j ON j.id =
                  (SELECT max(id) FROM follow_up_judgements WHERE task_id = o.task_id)

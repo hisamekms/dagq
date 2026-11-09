@@ -1009,8 +1009,8 @@ pub(crate) fn job_facts(
             attempt,
         } => {
             let (operator, label) = match label {
-                RowLabel::Is(label) => ("IS", label.as_str()),
-                RowLabel::Not(label) => ("IS NOT", *label),
+                RowLabel::Is(label) => ("IS NOT DISTINCT FROM", label.as_str()),
+                RowLabel::Not(label) => ("IS DISTINCT FROM", *label),
             };
             let mut records = Vec::new();
             for kind in *kinds {

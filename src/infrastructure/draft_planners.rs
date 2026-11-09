@@ -174,8 +174,8 @@ pub(super) fn insert_draft_origin(
 ) -> Result<bool> {
     let inserted = SqlWrite::execute(
         tx,
-        "INSERT OR IGNORE INTO draft_origins(task_id, origin, material, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO draft_origins(task_id, origin, material, created_at)
+         VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
         sql_params![
             task,
             origin.as_str(),
@@ -410,9 +410,13 @@ impl SqliteQueue {
                 let note = note.filter(|note| !note.trim().is_empty());
                 SqlWrite::execute(
                     &tx,
-                    "INSERT OR REPLACE INTO draft_revisits(task_id, revisit_at, note, set_by,
+                    "INSERT INTO draft_revisits(task_id, revisit_at, note, set_by,
                          set_by_id, created_at, opened_at, planner_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL)
+                     ON CONFLICT (task_id) DO UPDATE SET revisit_at=excluded.revisit_at,
+                         note=excluded.note, set_by=excluded.set_by,
+                         set_by_id=excluded.set_by_id, created_at=excluded.created_at,
+                         opened_at=excluded.opened_at, planner_id=excluded.planner_id",
                     sql_params![task, at, note, role, actor, now],
                 )?;
                 let after = read_revisit(&tx, task)?.context("the revisit was just written")?;

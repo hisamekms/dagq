@@ -70,11 +70,10 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 - 共有のSQLを流す入口は実行のport（`src/infrastructure/sql_exec/`）。
   Postgresの読み書きの入口は`src/infrastructure/postgres/`。
 - Postgresの実行のportが共有のSQLの引数・値・行を写し、storeは方言ごとのSQLを持たない。
-- rusqliteを名指してよいのは`src/context_boundaries/rusqlite_names.rs`の一覧のmoduleだけ。
 - 時刻とIDは`SqliteQueue`の`Generators`から取り、SQLの`now`で作らない。
   例外はDBの時計で判じる`write_leader`のleaseの期限（ADR-t3986-1決定4）。
 - schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`が持つ。
-- 共有のSQLの引数は型を決める形でNULLと比べる（境界の検査が守る）。
+- 共有のSQLは引数を型を決める形でNULLと比べ、`INSERT OR`・値との`IS` / `IS NOT`・`ifnull`を使わない（境界の検査が守る）。
 - 方言の違う式の断片は`src/infrastructure/sql_dialect.rs`の関数が返す（ADR-t3982-1）。
   JSONの関数と`unixepoch()`は方言の関数のmoduleの外で綴らない。
   行の順と選び方はrowidに頼らず挿入の順の方言の関数で決め、真偽は両方のDBで同じに動く形で比べ・書く（境界の検査が守る）。

@@ -8,6 +8,7 @@
 //! attributes (doc comments too) are not read; the tokens of a macro are
 //! read for their string literals and those calls only.
 
+use super::{children_dir, covers};
 use proc_macro2::TokenTree;
 use std::collections::BTreeSet;
 use syn::visit::{self, Visit};
@@ -50,6 +51,34 @@ pub(super) fn read(text: &str) -> syn::Result<Source> {
         reader.visit_file(&file);
     }
     Ok(reader.source)
+}
+
+/// The files `rust` (paths from the repository root, with their text) that
+/// are production code, read: without those a read file declares as test
+/// modules. A file that does not read as Rust is a line of `errors`.
+pub(super) fn read_production<'a>(
+    rust: &'a [(String, String)],
+    errors: &mut BTreeSet<String>,
+) -> Vec<(&'a str, Source)> {
+    let mut read = Vec::new();
+    let mut test_paths = Vec::new();
+    for (path, text) in rust {
+        match self::read(text) {
+            Ok(source) => {
+                let dir = children_dir(path);
+                for module in &source.test_modules {
+                    test_paths.push(format!("{dir}/{module}.rs"));
+                    test_paths.push(format!("{dir}/{module}/"));
+                }
+                read.push((path.as_str(), source));
+            }
+            Err(error) => {
+                errors.insert(format!("{path}: not read as Rust: {error}"));
+            }
+        }
+    }
+    read.retain(|(path, _)| !test_paths.iter().any(|test| covers(test, path)));
+    read
 }
 
 /// [`read`], with the test code read as any other code.

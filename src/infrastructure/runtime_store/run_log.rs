@@ -57,8 +57,8 @@ pub(super) fn inbox_nudged_sql(dialect: SqlDialect) -> String {
     format!(
         "SELECT EXISTS(SELECT 1 FROM run_events INDEXED BY events_by_kind
          WHERE kind=?1 AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
-         AND {} IS ?2
-         AND {} IS ?3)",
+         AND {} IS NOT DISTINCT FROM ?2
+         AND {} IS NOT DISTINCT FROM ?3)",
         dialect.json_field("payload", "$.absent_since", JsonType::Integer),
         dialect.json_field("payload", "$.attempt", JsonType::Integer),
     )
@@ -737,7 +737,7 @@ impl SqliteQueue {
         Ok(SqlRead::query_row(
             &tx,
             &format!(
-                "SELECT ifnull(max(id),0) FROM run_events
+                "SELECT COALESCE(max(id),0) FROM run_events
              WHERE {} < ?1",
                 SqlRead::dialect(&tx).time_value("created_at", TimeForm::EpochSeconds)
             ),
@@ -772,7 +772,7 @@ impl SqliteQueue {
         let tx = self.read_entry("ask_high_water")?;
         Ok(SqlRead::query_row(
             &tx,
-            "SELECT ifnull(max(id),0) FROM asks",
+            "SELECT COALESCE(max(id),0) FROM asks",
             sql_params![],
             |r| r.get(0),
         )?)
@@ -856,7 +856,7 @@ impl SqliteQueue {
             &format!(
                 "SELECT id, payload FROM run_events
                  WHERE kind='{}' AND {}=?1
-                   AND ifnull({},'')<>'skipped'
+                   AND COALESCE({},'')<>'skipped'
                  ORDER BY id DESC LIMIT 1",
                 event_kind::OBSERVE_FINISHED,
                 SqlRead::dialect(&tx).json_field("payload", "$.mode", JsonType::Text),
@@ -892,11 +892,11 @@ impl SqliteQueue {
                 "SELECT count(*) FROM run_events WHERE id>?3 AND NOT (
                kind IN (SELECT {ignored_kind} FROM {ignored_kinds})
                OR (kind IN ('{}','{}','{}')
-                   AND {by} IS ?1)
-               OR (kind='{}' AND {asked_by} IS ?1)
-               OR (kind='{}' AND actor_role IS ?1)
+                   AND {by} IS NOT DISTINCT FROM ?1)
+               OR (kind='{}' AND {asked_by} IS NOT DISTINCT FROM ?1)
+               OR (kind='{}' AND actor_role IS NOT DISTINCT FROM ?1)
                OR (kind IN ('{}','{}','{}')
-                   AND {kind} IS ?2))",
+                   AND {kind} IS NOT DISTINCT FROM ?2))",
                 event_kind::FINDING_RECORDED,
                 event_kind::FINDING_UPDATED,
                 event_kind::FINDING_STATUS_CHANGED,

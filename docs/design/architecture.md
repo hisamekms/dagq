@@ -219,6 +219,8 @@ queue serviceはqueue DBを開く唯一のプロセスで（例外は[Queue serv
 - 方言の違う式の断片の置き場（ADR-t3982-1）は、`cargo test`が流すRustのtest（`src/context_boundaries/dialect.rs`）が当て、`src/`の本番のコードの文字列のSQLが`src/infrastructure/sql_dialect.rs`の外で方言の違う関数を呼ぶと落ちる。
   共有のSQLで型を決めずに引数をNULLと比べる文、検索のadapter以外のrowid、方言の関数を通さないスカラーの極値・真偽の集約、真偽の列と0/1の比較も拒む。
   対象の関数と見ない部分はtestのdoc commentが持つ。
+- 共有のSQLがSQLiteだけの綴りを使わないことは、`cargo test`が流すRustのtest（`src/context_boundaries/shared_sql.rs`）が当て、`src/`の本番のコードの文字列のSQLがそれを綴ると落ちる。
+  対象の綴りと見ない部分はtestのdoc commentが持つ。
 - X4は、`cargo test`が流すRustのtest（`src/context_boundaries/inserted_ids.rs`）が当て、`src/`の本番のコードで内部の関数の外の`last_insert_rowid`の使用で落ちる。
   公開する関数と内部の関数の分担は[Persistence](persistence.md#transactions-and-constraints)。
 - storeのmoduleが接続や書き込みの入口の設定を直接名指さず、名前付きのtransactionの入口を使うことは、Rustのtest（`src/context_boundaries/store_entries.rs`）が検査し、SQLiteの接続・schema・入口と検索のadapterだけを例外とする。

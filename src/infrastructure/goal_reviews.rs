@@ -465,7 +465,7 @@ impl GoalReviewStore for SqliteQueue {
         let anchor = anchor(&tx, goal)?.context("a goal to review has a task")?;
         let attempt = SqlRead::query_row(
             &tx,
-            "SELECT count(*) + 1 FROM goal_reviews WHERE goal_id=?1 AND outcome IS NOT 'interrupted'",
+            "SELECT count(*) + 1 FROM goal_reviews WHERE goal_id=?1 AND outcome IS DISTINCT FROM 'interrupted'",
             sql_params![goal],
             |r| r.get::<_, i64>(0),
         )? as usize;

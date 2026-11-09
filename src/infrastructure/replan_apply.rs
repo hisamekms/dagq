@@ -590,7 +590,8 @@ fn write_replacement(
         )?;
         for need in needs {
             conn.execute(
-                "INSERT OR IGNORE INTO task_dependencies(task_id, predecessor_id) VALUES (?1, ?2)",
+                "INSERT INTO task_dependencies(task_id, predecessor_id) VALUES (?1, ?2)
+                 ON CONFLICT DO NOTHING",
                 sql_params![successor, need],
             )?;
         }

@@ -1522,7 +1522,7 @@ impl LedgerStore for SqliteQueue {
         let statement = format!(
             "SELECT key FROM ledger_rows
               WHERE kind=?1 AND {steps} IS NOT NULL
-                AND {rules} IS NOT ?2
+                AND {rules} IS DISTINCT FROM ?2
               ORDER BY key",
             steps = SqlRead::dialect(&tx).json_type_of("detail", "$.steps"),
             rules = SqlRead::dialect(&tx).json_field_spaced(
@@ -1647,9 +1647,9 @@ impl LedgerStore for SqliteQueue {
                         AND COALESCE(r.outcome, '') <> ?7
                         AND CASE r.subject_kind
                               WHEN 'slots_full' THEN COALESCE({end}, '') = ?8
-                                   OR {supervisor_type} IS NOT 'text'
+                                   OR {supervisor_type} IS DISTINCT FROM 'text'
                               ELSE COALESCE({end}, '') <> ?7
-                                   OR {ended_by_type} IS NOT 'text'
+                                   OR {ended_by_type} IS DISTINCT FROM 'text'
                             END)
                     OR COALESCE(r.subject_kind, '') NOT IN
                        ('live_alert_stream', 'live_alert', 'finding', 'landing_slot',
