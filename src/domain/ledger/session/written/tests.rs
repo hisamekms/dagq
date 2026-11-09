@@ -420,3 +420,27 @@ fn take_offset_round_trips_and_defaults_for_existing_marks() {
         Some((original.through, original.read_ms.unwrap()))
     );
 }
+
+/// The absent split fields of the stored single R seed both streams at
+/// exactly that position and time, retaining the ledger version.
+#[test]
+fn a_legacy_certificate_seeds_both_kinds_without_a_version_change() {
+    let legacy = serde_json::json!({
+        "through": {"events": 4, "samples": 7, "steps": 8, "resources": 9, "inside_resources": 10},
+        "ledger_v": LEDGER_V, "read_ms": READ_MS
+    });
+    let rows: RowsWritten = serde_json::from_value(legacy).unwrap();
+    assert_eq!(rows.core, None);
+    assert_eq!(rows.queue, None);
+    let marks = Marks {
+        sessions: SessionsWritten::at(EventId::new(4)),
+        rows: Some(rows),
+        omitted: None,
+    };
+    for queue in [false, true] {
+        let at = rows_to_resume(Some(&marks), &[], queue).unwrap();
+        assert_eq!(at.through, rows.through);
+        assert_eq!(at.read_ms, READ_MS);
+    }
+    assert_eq!(rows.ledger_v, LEDGER_V);
+}

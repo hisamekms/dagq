@@ -52,7 +52,7 @@ use crate::domain::ledger::builder::{
 use crate::domain::ledger::queue::{QueueBook, QueueHead, cut};
 use crate::domain::ledger::session::SessionsHeld;
 use crate::domain::ledger::session::written::{
-    Marks, marks_with_time_work, rows_to_go_on_from, written_through,
+    Marks, RowPosition, marks_with_time_work, rows_to_resume, written_through,
 };
 use crate::domain::ledger::{LedgerKind, LedgerRow};
 use crate::domain::pre_claim::{self, PreClaimBook};
@@ -1430,41 +1430,16 @@ fn read_by_id(store: &dyn LedgerQueue, ids: &[EventId]) -> Result<Vec<RunEvent>>
     Ok(read)
 }
 
-/// The builder of a new process on `store`, at `now_ms`. Where the store's
-/// marks give the position R ([`rows_to_go_on_from`]), it goes on from R: its
-/// cursors at R, each its own
-/// ([`Builder::go_on_from_rows`]), and every book of [`Kept`] made again
-/// from the rows as they were at R's events, the one position they all
-/// share ([`books_of_heads`], [`restore_sessions`], [`restore_pushes`]).
-/// R is no later than W, so the session rows hold every input up to it; a
-/// book made at any later position would read the events after R twice.
-/// The rows the store holds not settled are marked (session rows by
-/// [`restore_sessions`]): their grace, the waits they read and a time past
-/// a silence fold them again with no input, as a builder from its cursors'
-/// start finds them. Rows settled with no input after R are not looked at:
-/// they are the fold of every input as they are. So it reads the inputs
-/// after R only; the rows a mark left unwritten are among what those inputs
-/// mark ([`Builder::rows_written`]). The latest time of an event read up
-/// to R it takes from the mark ([`rows_to_go_on_from`],
-/// [`Builder::read_up_to`]), reading no event. Besides the heads, what it reads by
-/// target bears on the rows not settled and the lives open only
-/// ([`cut::Needs`], [`restore_pushes`]). A row folded by an older version
-/// is marked by its passes, a share at a time, and folded by target
-/// ([`Builder::older_rows_to_read`]): no cursor moves back for it, and rows
-/// of this version are not read for it. A queue row of an older version a
-/// later event may reach is folded on its own inputs here, before those
-/// events are read ([`Builder::older_reached_later`]), and so is every older
-/// wait, which a task's fold reads ([`Builder::older_waits`]).
-///
-/// With no R (a store with no mark, W alone, or marks of another version),
-/// or with an R that does not hold that time at its position, it starts at
-/// its cursors' start, as [`Builder::default`], whatever the version of the
-/// rows: it reads every input, and its writes fill what the rows lack and
-/// write the marks, R with its time.
-///
-/// A read that fails gives no builder: the next pass starts again.
-///
-/// [`Kept`]: crate::domain::ledger::builder::Kept
+/// The builder of a new process, restoring each kind at its own certified
+/// position and event time. Queue replay cannot move core restoration back,
+/// and core replay cannot move the queue's head read back. The lagging
+/// stream alone replays to the later event cursor before the books join
+/// ([`Builder::join_queue`]); normal incremental scans then share a cursor.
+/// Open rows and older versions are marked as usual; settled core rows
+/// need no replay when only queue R lags. A missing certificate starts only
+/// that stream at zero, and a legacy single R seeds both streams there.
+/// Neither R exceeds W, so session restoration never trusts an unrecorded
+/// session prefix. A read that fails gives no builder: the next pass retries.
 pub fn start_builder(store: &dyn LedgerQueue, now_ms: i64) -> Result<Builder> {
     start_builder_timed(store, now_ms, Timing::default())
 }
@@ -1474,42 +1449,199 @@ fn start_builder_timed(
     now_ms: i64,
     timing: Timing<'_>,
 ) -> Result<Builder> {
-    const CALLER: &str = "ledger.start_builder_timed";
-    let _caller = crate::application::supervisor_service::caller::scope(CALLER);
+    let _caller =
+        crate::application::supervisor_service::caller::scope("ledger.start_builder_timed");
     let started = timing.start();
-    let mut builder = Builder::default();
-    let heads = store.ledger_heads(LedgerKind::Session)?;
     let marks = store.ledger_marks()?;
-    let latest = store.latest_event_id()?;
-    let resume = rows_to_go_on_from(marks.as_ref(), &heads);
-    let reason = crate::domain::ledger::session::written::restart_reason(marks.as_ref(), &heads);
-    let Some((r, read_ms)) = resume else {
-        info!(marks = ?marks, latest = latest.as_i64(), lag = latest.as_i64(),
-            reason, restored_rows = 0, elapsed_ms = timing.since(started).as_millis(),
-            "the ledger builder started");
-        return Ok(builder);
+    let heads = store.ledger_heads(LedgerKind::Session)?;
+    let zero = RowPosition {
+        through: Default::default(),
+        read_ms: i64::MIN,
     };
+    let core = rows_to_resume(marks.as_ref(), &heads, false);
+    let queue = rows_to_resume(marks.as_ref(), &heads, true);
+    let latest = store.latest_event_id()?;
+    let lag_from = core
+        .map_or(EventId::new(0), |at| at.through.events)
+        .min(queue.map_or(EventId::new(0), |at| at.through.events));
+    let (builder, reason) = if core.is_none() && queue.is_none() {
+        (
+            Builder::default(),
+            crate::domain::ledger::session::written::restart_reason(marks.as_ref(), &heads),
+        )
+    } else {
+        (
+            resume_builder(
+                store,
+                now_ms,
+                (core.unwrap_or(zero), queue.unwrap_or(zero)),
+                marks.as_ref(),
+            )?,
+            None,
+        )
+    };
+    // Observe the complete startup, including the independent replay and
+    // joined queue book, once. The lag still describes the stored marks.
+    info!(marks = ?marks, latest = latest.as_i64(),
+        lag = latest.as_i64().saturating_sub(lag_from.as_i64()), reason,
+        restored_rows = builder.book_rows(),
+        elapsed_ms = timing.since(started).as_millis(), "the ledger builder started");
+    Ok(builder)
+}
+
+fn resume_builder(
+    store: &dyn LedgerQueue,
+    now_ms: i64,
+    (core, queue): (RowPosition, RowPosition),
+    marks: Option<&Marks>,
+) -> Result<Builder> {
+    if core == queue {
+        return start_builder_at(store, now_ms, core, marks, None, false);
+    }
+
+    // The streams replay only their own missing prefix, to their join at
+    // the later event cursor. Queue replay supplies routing when core is
+    // ahead: no core target read or session reconstruction moves back to Q.
+    let mut queue_builder = Builder::default();
+    queue_builder.go_on_from_rows(queue.through);
+    queue_builder.read_up_to(queue.read_ms);
+    let since = store.ledger_tasks_open_since_at(queue.through.events)?;
+    let heads = store.ledger_queue_heads_at(queue.through.events, since)?;
+    let latest = store.latest_event_id()?;
+    let queue_time = queue_builder.folds_at_snapshot(now_ms, latest);
+    let (book, lives, pre_claim) =
+        books_of_heads(store, &heads, since, queue.through.events, queue_time)?;
+    queue_builder.restore_pre_claim(lives, pre_claim);
+    queue_builder.restore_queue_rows(book);
+    for head in &heads {
+        if !head.head.is_final {
+            queue_builder.keep(Target::Row(LedgerKind::Queue, head.head.key.clone()));
+        }
+    }
+    let reached = queue_builder.older_reached_later();
+    restore(store, &mut queue_builder, &reached)?;
+    fold_older_waits(store, &mut queue_builder)?;
+    replay_startup(store, &mut queue_builder, core.through.events, now_ms, true)?;
+    let routing = (queue.through.events < core.through.events).then_some(&queue_builder);
+    let mut builder = start_builder_at(store, now_ms, core, marks, routing, true)?;
+    replay_startup(store, &mut builder, queue.through.events, now_ms, false)?;
+    builder.join_queue(queue_builder);
+    Ok(builder)
+}
+
+/// A restart's lagging stream alone reads its missing inputs. Page folds
+/// name dirty rows before joining; they neither write rows nor certificates.
+fn replay_startup(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    until: EventId,
+    now_ms: i64,
+    queue: bool,
+) -> Result<()> {
+    let _caller = crate::application::supervisor_service::caller::scope(if queue {
+        "ledger.replay_queue"
+    } else {
+        "ledger.replay_core"
+    });
+    while builder.events < until {
+        let events = store.events_between(
+            builder.events,
+            until,
+            &EventFilter::default(),
+            EVENTS_PER_READ,
+        )?;
+        anyhow::ensure!(
+            !events.is_empty(),
+            "missing ledger restart inputs before {until}"
+        );
+        if queue {
+            builder.replay_queue_events(&events);
+        } else {
+            builder.mark_events(&events);
+        }
+        let rows = builder
+            .page_rows(builder.kept())
+            .into_iter()
+            .filter(|(kind, _)| {
+                *kind
+                    == if queue {
+                        LedgerKind::Queue
+                    } else {
+                        LedgerKind::Session
+                    }
+            })
+            .collect();
+        restore(store, builder, &rows)?;
+        let after = builder.take_rows_after();
+        fold_rows(
+            store,
+            builder,
+            (
+                builder.folds_at_snapshot(now_ms, store.latest_event_id()?),
+                "",
+            ),
+            &rows,
+            after,
+            true,
+            &mut SweepCounts::default(),
+        )?;
+        builder.page_swept();
+    }
+    Ok(())
+}
+
+fn start_builder_at(
+    store: &dyn LedgerQueue,
+    now_ms: i64,
+    position: RowPosition,
+    marks: Option<&Marks>,
+    routing: Option<&Builder>,
+    wait_only: bool,
+) -> Result<Builder> {
+    let mut builder = Builder::default();
+    let latest = store.latest_event_id()?;
+    let (r, read_ms) = (position.through, position.read_ms);
     builder.go_on_from_rows(r);
     builder.resume_taking(
         marks
-            .as_ref()
             .and_then(|marks| marks.rows)
             .map_or(0, |rows| rows.take_offset),
     );
     builder.restore_time(
         marks
-            .as_ref()
             .and_then(|marks| marks.rows)
             .and_then(|rows| rows.time_pending),
     );
     builder.read_up_to(read_ms);
     let now_ms = builder.folds_at_snapshot(now_ms, latest);
-    let since = store.ledger_tasks_open_since_at(r.events)?;
-    let heads = store.ledger_queue_heads_at(r.events, since)?;
-    let (queue, lives, pre_claim) = books_of_heads(store, &heads, since, r.events, now_ms)?;
-    builder.restore_pre_claim(lives, pre_claim);
-    // Taken while nothing is marked.
-    builder.restore_queue_rows(queue);
+    let heads = if let Some(routing) = routing {
+        builder.restore_routing_from(routing);
+        Vec::new()
+    } else {
+        let since = store.ledger_tasks_open_since_at(r.events)?;
+        // Core replay needs only waits/lives at its R, not the queue's
+        // finding, stream and slot head reconstruction at that older R.
+        let heads = if wait_only {
+            let read_since = pre_claim::rows::Since {
+                // A wait settled now may still have been open at core R,
+                // even with no task ready there. Include its later end.
+                id: since.id.min(r.events),
+                ms: since.ms.min(read_ms),
+            };
+            store
+                .ledger_wait_rows(read_since)?
+                .iter()
+                .filter(|row| pre_claim::rows::holds_at(row, since, r.events))
+                .map(QueueHead::of)
+                .collect()
+        } else {
+            store.ledger_queue_heads_at(r.events, since)?
+        };
+        let (queue, lives, pre_claim) = books_of_heads(store, &heads, since, r.events, now_ms)?;
+        builder.restore_pre_claim(lives, pre_claim);
+        builder.restore_queue_rows(queue);
+        heads
+    };
     restore_sessions(store, &mut builder)?;
     restore_pushes(store, &mut builder, now_ms)?;
     for head in store.ledger_heads_open_at(r.events, r.resources)? {
@@ -1531,10 +1663,6 @@ fn start_builder_timed(
     restore(store, &mut builder, &reached)?;
     fold_older_waits(store, &mut builder)?;
     builder.walk_older_rows();
-    info!(marks = ?marks, latest = latest.as_i64(),
-        lag = latest.as_i64().saturating_sub(r.events.as_i64()), reason,
-        restored_rows = builder.book_rows(),
-        elapsed_ms = timing.since(started).as_millis(), "the ledger builder started");
     Ok(builder)
 }
 

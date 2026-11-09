@@ -22,16 +22,16 @@
 //! session events from its cursors' start, and its first pass's writes
 //! fill what the store's rows lack and write the mark.
 //!
-//! Beside it the store keeps the mark R ([`RowsWritten`], a row of
-//! [`ROWS_KIND`]) of where its run, task, queue and node rows record every
-//! input up to, each cursor its own ([`Cursors`]): a pass leaves some of
+//! Beside it the store keeps the marks R ([`RowsWritten`], a row of
+//! [`ROWS_KIND`]), independently for queue rows and for run, task, session
+//! and node rows, each cursor its own ([`Cursors`]): a pass leaves some of
 //! those rows to later passes past its bound of writes, so their heads do
 //! not say it either. It is written with W in the same transaction
 //! ([`Marks`]), its events no later than W, and a store with W alone gives
 //! none ([`rows_written_through`]). R holds the latest time of an event read
 //! up to its events, as a builder going on from it needs it and no event
 //! says it; a mark that does not hold it for its position gives a builder
-//! nothing to go on from ([`rows_to_go_on_from`]).
+//! nothing to go on from for that kind ([`rows_to_resume`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -105,7 +105,7 @@ pub struct Cursors {
 }
 
 /// The store's mark (R) that its run, task, queue and node rows record
-/// every input up to `through`, each cursor its own position: every row
+/// every input up to its kind's position, each cursor its own: every row
 /// an input up to it made dirty is written. A pass writes it with the
 /// session rows' mark ([`SessionsWritten`]) in one transaction, its
 /// events no later than that mark's; each position is the pass's, or the
@@ -117,6 +117,8 @@ pub struct Cursors {
 /// that comes due with time (a row's grace over, a supervisor's silence)
 /// holds no position: the rows not settled the store holds give it back.
 ///
+/// The shared `through` is the conservative minimum for compatibility;
+/// kind-specific positions and times are independent ([`RowPosition`]).
 /// `read_ms` is the latest time (unix ms) of an event read up to
 /// `through.events`, as the builder that wrote the mark held it at that
 /// position ([`crate::domain::ledger::builder::Builder::folds_at`]; the
@@ -126,7 +128,17 @@ pub struct Cursors {
 /// before it was held: [`rows_to_go_on_from`] gives no position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowsWritten {
+    /// Conservative position shared by both kinds; retained for old marks
+    /// and readers. New certificates keep each independent position below.
     pub through: Cursors,
+    /// Run, task, session and node certificate. Missing in a legacy mark:
+    /// both kinds then start at `through` with `read_ms`, without a version
+    /// change or rewriting rows. Each certificate covers only its own rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core: Option<RowPosition>,
+    /// Queue certificate, independent of pending core writes and vice versa.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<RowPosition>,
     pub ledger_v: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_ms: Option<i64>,
@@ -141,6 +153,40 @@ pub struct RowsWritten {
     pub time_pending: Option<i64>,
 }
 
+/// One kind's complete input prefix and the latest event time in that
+/// prefix. Time travels with the position: event timestamps can go back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowPosition {
+    pub through: Cursors,
+    pub read_ms: i64,
+}
+
+impl RowsWritten {
+    /// The usable restart certificate of this kind, falling back to the
+    /// single R of a legacy mark through serde's absent-field defaults.
+    pub fn position(self, queue: bool) -> Option<RowPosition> {
+        (if queue { self.queue } else { self.core }).or_else(|| {
+            self.read_ms.map(|read_ms| RowPosition {
+                through: self.through,
+                read_ms,
+            })
+        })
+    }
+}
+
+/// This kind's R, only with a W covering its event position. Neither kind
+/// borrows the other's position or latest time when the certificates differ.
+pub fn rows_to_resume(
+    marks: Option<&Marks>,
+    heads: &[LedgerHead],
+    queue: bool,
+) -> Option<RowPosition> {
+    let marks = marks?;
+    let w = written_through(Some(&marks.sessions), heads)?;
+    let rows = marks.rows.filter(|rows| rows.ledger_v == LEDGER_V)?;
+    rows.position(queue).filter(|at| at.through.events <= w)
+}
+
 fn is_zero(value: &usize) -> bool {
     *value == 0
 }
@@ -151,6 +197,8 @@ impl RowsWritten {
     pub const fn at(through: Cursors, read_ms: i64) -> Self {
         Self {
             through,
+            core: None,
+            queue: None,
             ledger_v: LEDGER_V,
             read_ms: Some(read_ms),
             take_offset: 0,
@@ -181,7 +229,7 @@ pub struct Marks {
     pub omitted: Option<omitted::Omitted>,
 }
 
-/// The position R each of whose cursors the store's run, task, queue and
+/// The conservative shared R (legacy readers), each of whose cursors the store's run, task, queue and
 /// node rows record every input up to, by its `marks` and the heads of
 /// its session rows (`heads`): R's positions, its events no later than
 /// the session rows' W ([`written_through`]), when there is a W and an R

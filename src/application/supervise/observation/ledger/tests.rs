@@ -111,9 +111,12 @@ struct Memory {
     /// How many heads [`LedgerStore::ledger_queue_heads_at`] gave at most
     /// at once.
     heads_given: Cell<usize>,
+    queue_starts: RefCell<Vec<EventId>>,
     /// Each read of an input after a cursor (not by id): which cursor, the
     /// position it read after, and how many it gave.
     scans: RefCell<Vec<(&'static str, i64, usize)>>,
+    /// Startup replay reads, by the independently resumed stream.
+    restart_reads: RefCell<Vec<(&'static str, EventId, usize)>>,
     /// The keys of the rows written, in order.
     written_keys: RefCell<Vec<(LedgerKind, String)>>,
     /// The coverage of the omitted queue events and its points, by kind and
@@ -310,6 +313,13 @@ impl EventStore for Memory {
             .cloned()
             .collect();
         self.read.set(self.read.get() + read.len());
+        if let Some(caller @ ("ledger.replay_queue" | "ledger.replay_core")) =
+            crate::application::supervisor_service::caller::current()
+        {
+            self.restart_reads
+                .borrow_mut()
+                .push((caller, after, read.len()));
+        }
         if limit != 1 {
             self.scans
                 .borrow_mut()
@@ -650,6 +660,7 @@ impl LedgerStore for Memory {
         at: EventId,
         since: pre_claim::rows::Since,
     ) -> Result<Vec<crate::domain::ledger::queue::QueueHead>> {
+        self.queue_starts.borrow_mut().push(at);
         let heads = self.ledger_queue_heads_at_after(at, since, None, usize::MAX)?;
         self.heads_given
             .set(self.heads_given.get().max(heads.len()));

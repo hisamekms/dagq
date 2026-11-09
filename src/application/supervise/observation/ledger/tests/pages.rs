@@ -495,7 +495,10 @@ fn task_check_rank_is_written_and_rotates_through_one_pass_restarts() {
     }
     memory.broken.replace(Some((
         LedgerKind::Queue,
-        log.events[CHECKS_PER_PASS + EVENTS_PER_READ].id.to_string(),
+        log.events
+            [first.position(true).unwrap().through.events.as_i64() as usize + EVENTS_PER_READ]
+            .id
+            .to_string(),
     )));
     let mut builder = start_builder(&memory, ms(2)).unwrap();
     assert!(
@@ -516,7 +519,7 @@ fn task_check_rank_is_written_and_rotates_through_one_pass_restarts() {
     assert_eq!(second.failure, None);
     assert_eq!(
         second.work.events as i64,
-        log.last().as_i64() - checkpoint.through.events.as_i64()
+        log.last().as_i64() - checkpoint.position(true).unwrap().through.events.as_i64()
     );
     let mark = memory.rows_mark.borrow().unwrap();
     assert_eq!(mark.take_offset, (CHECKS_PER_PASS * 2) % count);

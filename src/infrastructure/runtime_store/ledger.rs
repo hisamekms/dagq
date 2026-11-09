@@ -123,6 +123,8 @@ fn write_rows_mark(conn: &impl SqlWrite, mark: &RowsWritten) -> Result<()> {
             resources: Some(mark.through.resources),
             inside_resources: Some(mark.through.inside_resources),
         },
+        core: mark.core,
+        queue: mark.queue,
         read_ms: mark.read_ms,
         take_offset: mark.take_offset,
         time_pending: mark.time_pending,
@@ -238,6 +240,10 @@ fn point_row(r: &SqlRow<'_>) -> SqlResult<Point> {
 /// restart scheduling metadata is persisted here too, without changing input positions.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct MarkThrough {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    core: Option<written::RowPosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queue: Option<written::RowPosition>,
     #[serde(flatten)]
     positions: InputsThrough,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1045,6 +1051,8 @@ impl LedgerStore for SqliteQueue {
                         inside_resources: through.inside_resources.unwrap_or_default(),
                     },
                     ledger_v,
+                    core: mark.core,
+                    queue: mark.queue,
                     read_ms: mark.read_ms,
                     take_offset: mark.take_offset,
                     time_pending: mark.time_pending,
@@ -3367,6 +3375,15 @@ mod tests {
             )),
             omitted: None,
         };
+        let rows = marks.rows.as_mut().unwrap();
+        rows.queue = rows.position(true);
+        rows.core = Some(written::RowPosition {
+            through: written::Cursors {
+                events: EventId::new(7),
+                ..rows.through
+            },
+            read_ms: 1_900_000_000_500,
+        });
         marks.rows.as_mut().unwrap().take_offset = 1700;
         marks.rows.as_mut().unwrap().time_pending = Some(1_900_000_001_000);
         queue

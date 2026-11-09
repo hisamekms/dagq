@@ -1152,3 +1152,136 @@ fn a_started_builder_folds_a_task_over_the_waits_left_out_as_every_event() {
     // The waits left out bear on the row: with no read of them it differs.
     assert_ne!(stored(&going_on(true).0), every[&task]);
 }
+
+/// Only the lagging kind replays its missing events. Core target/session
+/// restoration stays at core R even when the queue has an older prefix.
+#[test]
+fn split_restart_replays_each_kind_from_its_own_certificate() {
+    use crate::domain::ledger::session::written::RowPosition;
+    for (name, log, samples, secs) in histories() {
+        let half = log.events.len() / 2;
+        let early = drained_store(&log, &samples, half, secs);
+        let early_mark = early.rows_mark.borrow().unwrap();
+        let full = drained_store(&log, &samples, log.events.len(), secs);
+        let full_mark = full.rows_mark.borrow().unwrap();
+        let expected = full.rows.borrow().clone();
+        for queue_lags in [true, false] {
+            let memory = drained_store(&log, &samples, log.events.len(), secs);
+            let lagged = |kind| {
+                if queue_lags {
+                    kind == LedgerKind::Queue
+                } else {
+                    matches!(kind, LedgerKind::Run | LedgerKind::Task | LedgerKind::Node)
+                }
+            };
+            memory
+                .rows
+                .borrow_mut()
+                .retain(|(kind, _), _| !lagged(*kind));
+            memory.rows.borrow_mut().extend(
+                early
+                    .rows
+                    .borrow()
+                    .iter()
+                    .filter(|((kind, _), _)| lagged(*kind))
+                    .map(|(key, row)| (key.clone(), row.clone())),
+            );
+            let position = |mark: RowsWritten| RowPosition {
+                through: mark.through,
+                read_ms: mark.read_ms.unwrap(),
+            };
+            let (core, queue) = if queue_lags {
+                (position(full_mark), position(early_mark))
+            } else {
+                (position(early_mark), position(full_mark))
+            };
+            memory.rows_mark.replace(Some(RowsWritten {
+                core: Some(core),
+                queue: Some(queue),
+                ..early_mark
+            }));
+            memory.scans.borrow_mut().clear();
+            memory.queue_starts.borrow_mut().clear();
+            memory.written_keys.borrow_mut().clear();
+            memory.runs_read.borrow_mut().clear();
+            let mut builder = start_builder(&memory, ms(secs)).unwrap();
+            assert_eq!(
+                builder.events,
+                log.last(),
+                "{name}, queue lags={queue_lags}"
+            );
+            assert_eq!(
+                *memory.queue_starts.borrow(),
+                vec![queue.through.events],
+                "{name}: queue heads start only at Q"
+            );
+            let scans = scans_of(&memory);
+            assert_eq!(
+                scans["events"],
+                (early_mark.through.events.as_i64(), log.events.len() - half),
+                "{name}"
+            );
+            assert!(
+                memory.written_keys.borrow().is_empty(),
+                "startup writes no row"
+            );
+            let replay = if queue_lags {
+                "ledger.replay_queue"
+            } else {
+                "ledger.replay_core"
+            };
+            assert_eq!(
+                *memory.restart_reads.borrow(),
+                vec![(replay, early_mark.through.events, log.events.len() - half)],
+                "{name}"
+            );
+            drain(&memory, &mut builder, secs);
+            assert_eq!(
+                differing_from_whole(&memory.rows.borrow(), &expected),
+                Vec::new(),
+                "{name}, queue lags={queue_lags}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_single_r_store_resumes_without_rebuilding_its_rows() {
+    let (log, samples) = every_kind_of_row();
+    let memory = drained_store(&log, &samples, log.events.len(), LATER);
+    let mut legacy = serde_json::to_value(memory.rows_mark.borrow().unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("core");
+    legacy.as_object_mut().unwrap().remove("queue");
+    let mark: RowsWritten = serde_json::from_value(legacy).unwrap();
+    memory.rows_mark.replace(Some(mark));
+    memory.scans.borrow_mut().clear();
+    memory.written_keys.borrow_mut().clear();
+    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+    assert_eq!(builder.cursors(), mark.through);
+    drain(&memory, &mut builder, LATER);
+    assert!(!scans_of(&memory).contains_key("events"));
+    assert!(memory.written_keys.borrow().is_empty());
+    assert_eq!(memory.rows_mark.borrow().unwrap().ledger_v, LEDGER_V);
+
+    let count = memory.rows.borrow().len();
+    let mut more = log.clone();
+    more.add(
+        Some(90_000),
+        None,
+        "task_created",
+        json!({"status": "draft"}),
+        LATER,
+    );
+    memory.events.replace(more.events.clone());
+    drain(&memory, &mut builder, LATER);
+    let moved = memory.rows_mark.borrow().unwrap();
+    for queue in [false, true] {
+        assert_eq!(moved.position(queue).unwrap().through.events, more.last());
+    }
+    assert_eq!(moved.ledger_v, mark.ledger_v);
+    assert!(!memory.written_keys.borrow().is_empty());
+    assert!(
+        memory.written_keys.borrow().len() < count,
+        "only changed rows are written"
+    );
+}

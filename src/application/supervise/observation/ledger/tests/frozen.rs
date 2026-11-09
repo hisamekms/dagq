@@ -469,3 +469,44 @@ fn a_builder_of_no_kind_writes_no_coverage() {
         assert!(memory.points.borrow().is_empty(), "{}", input.name);
     }
 }
+
+/// Same deterministic EventStore, with the old single-R restart
+/// certificate and with split certificates: fully caught-up rows and all
+/// stats, kpi and report values from the common readers agree.
+#[test]
+fn split_and_single_r_builders_catch_up_to_the_same_rows_and_reader_values() {
+    for input in inputs()
+        .into_iter()
+        .filter(|input| matches!(input.name, "cut" | "queue and run"))
+    {
+        let split = built(&input);
+        let single = built_with(&input, None, |memory, _| {
+            if let Some(mark) = memory.rows_mark.borrow_mut().as_mut() {
+                mark.core = None;
+                mark.queue = None;
+            }
+        });
+        drain(
+            &split,
+            &mut start_builder(&split, ms(input.now)).unwrap(),
+            input.now,
+        );
+        drain(
+            &single,
+            &mut start_builder(&single, ms(input.now)).unwrap(),
+            input.now,
+        );
+        assert_eq!(
+            *split.rows.borrow(),
+            *single.rows.borrow(),
+            "{}",
+            input.name
+        );
+        assert_eq!(
+            values(&split, &input),
+            values(&single, &input),
+            "{}",
+            input.name
+        );
+    }
+}

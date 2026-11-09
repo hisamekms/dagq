@@ -139,7 +139,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 
 - 着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - runは終わりから猶予の後で、telemetryのtokenの失効と資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
-- storeの印は、その位置までの全入力が行の記録か写さないqueueのeventの被覆で記録済みである約束で、Wはsession行、Rはほかの行のカーソルごとの位置（予定: Rはqueueの行とrun・task・session・nodeの行で分かれ、Wの約束は保ち、queueの遅れはほかの読み直しを増やさない）。
+- storeの印は、その位置までの全入力が行の記録か写さないqueueのeventの被覆で記録済みである約束で、Wはsession行、Rはqueueの行とrun・task・session・nodeの行で分かれたカーソルごとの位置で、Wの約束は保ち、queueの遅れはほかの読み直しを増やさない。
 - 写さないkindのeventも読んだ入力としてRを進め、被覆の始まりC・到達点Sと要約をR・Wと同じ書き込みで同じ範囲(C, S]を覆う形で下げずに保ち、停止の条件の間は据え置いて今どおり写す。
   停止の条件と値の保証は[窓の端の補いの決定](../adr/2026-11-09-t4644-1-omit-unread-queue-events-and-read-window-edges.md)が持つ。
 - 入力を記録済みなら確定待ちと版の更新はRを押さえず、追いつきの印と確認の順番を起動をまたいで保つ。

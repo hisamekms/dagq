@@ -60,14 +60,14 @@ fn a_started_builder_folds_at_the_time_read_up_to_r_as_the_build_of_every_event(
     }
 }
 
-/// A pass that leaves tasks past [`WRITES_PER_PASS`] leaves R before P, with
-/// the time at R: not P's, nor that of the event at R. A started builder
+/// A legacy single-R certificate left before P holds R's time, not P's
+/// or that of the event at R. A started builder
 /// folds at the time of the build of every event up to R, and so does each
 /// pass as it reads (R,P] again, up to each position, and its rows end as
 /// those of a builder from its cursors' start. The same with each event
 /// timed before the one before it.
 #[test]
-fn r_left_before_p_holds_the_time_at_r_and_a_start_follows_every_position_after_it() {
+fn a_legacy_r_left_before_p_holds_its_time_and_a_start_follows_each_position() {
     let bound = WRITES_PER_PASS;
     let count = bound + 30;
     // The first the latest up to R, one past R later than all, the rest
@@ -103,6 +103,14 @@ fn r_left_before_p_holds_the_time_at_r_and_a_start_follows_every_position_after_
         let whole = Memory::of(&log);
         whole.rows.replace(memory.rows.borrow().clone());
         let mut from_start = Builder::default();
+        // Exercise a stored single R explicitly. Split certificates replay
+        // core during startup when the queue certificate is already at P.
+        {
+            let mut held = memory.rows_mark.borrow_mut();
+            let mark = held.as_mut().unwrap();
+            mark.core = None;
+            mark.queue = None;
+        }
         let mut started = start_builder(&memory, ms(50)).unwrap();
         assert_eq!(started.cursors(), r, "{order}");
         assert_eq!(started.folds_at(ms(50)), at_r, "{order}");

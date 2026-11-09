@@ -16,25 +16,21 @@
 //!   (another run's push may close them). No row is scanned to find a dirty
 //!   one.
 //! - **Where a new process starts**
-//!   ([`crate::application::supervise::start_builder`]): where the store's
-//!   marks give the position R, at R. R is the one position of its start: each cursor takes R's, and every book of [`Kept`] is made again
-//!   from the rows as they were at it (below, "What a pass reads"), so that
-//!   no input after it is in a book twice, nor the rows' marks of what it
-//!   lacks missed: an input after R marks what the store lacks of it. The
-//!   latest time of an event read up to R comes back from the mark R, which
-//!   holds it as it was at R ([`RowsWritten`]), reading no event: events in
-//!   the order of their ids need not be in the order of their times, so the
-//!   event at R does not say it. The rows not settled are marked with no
-//!   input, for what comes with time (a grace, a silence), and
-//!   [`Self::rules_moved`] goes as for any builder. With no R, or with an R
-//!   that does not hold that time at its position (one written before it
-//!   did, or whose events W cuts), it starts with its cursors at 0: it marks every run and task, those before the switch
-//!   too, and catches up, and its writes fill what the rows lack and write
-//!   the marks, R with its time. Two kinds of read follow. The scan of an input after a
-//!   cursor reads after R only. A read by target (a push by id, the last
-//!   event of a life open, the events of a run or task it folds) may reach
-//!   before R, of what a scan after R marked, the rows not settled and the
-//!   lives open, the runs the rules mark, the rows of an older version, and
+//!   ([`crate::application::supervise::start_builder`]): each kind starts
+//!   at its own R, queue separately from run, task, session and node.
+//!   Each book is reconstructed at that position, with the latest event
+//!   time certified there, without scanning events to discover that time
+//!   ([`RowsWritten`]). The lagging stream replays only its own inputs to
+//!   the later event cursor, then [`Builder::join_queue`] joins the books
+//!   for ordinary incremental reads. Queue replay restores routing (lives
+//!   and waits) when core is ahead, without rereading core target rows or
+//!   session inputs. Core replay uses its own routing at its R when queue
+//!   is ahead. Neither stream borrows the other's certificate. With no
+//!   usable certificate that stream starts at zero. Legacy marks seed both
+//!   streams at the shared R without a version change or a row rewrite.
+//!   Open rows are marked for time work, and [`Self::rules_moved`] applies
+//!   as usual. Scans read only after their own R. Reads by target or id
+//!   may reach before R for open rows, rules changes, older versions and
 //!   the pushes those rows name.
 //! - **A row of an older [`LEDGER_V`] where a builder goes on from R** (a
 //!   legacy row aside; marks of another version give no R, so the first
@@ -155,12 +151,12 @@
 //!   ([`Builder::sessions_mark`]), so that the store's session rows record
 //!   every session event up to the position the mark gives (W,
 //!   [`super::session::written::written_through`]). With it, in the same
-//!   transaction, goes the mark R of where the other rows record every
+//!   transaction, go the kind-specific marks R of where the other rows record every
 //!   input up to, each cursor its own ([`Builder::rows_written`]): each
 //!   mark an input made holds the position before the first such input
 //!   of each cursor until the row is looked at or a sweep finds its inputs
 //!   already recorded (even while it waits on time or an older version).
-//!   R is the pass's cursors cut back to the earliest of those the pass left marked (past
+//!   Each R is the pass's cursors cut back only by its own kind left marked (past
 //!   the bound, a write that failed, a fold behind), so that a builder
 //!   going on from R reads those inputs again and marks those rows again;
 //!   a mark that comes with time holds back none (the rows not settled
@@ -249,7 +245,8 @@
 //!   row) and of those whose row does not record them all, cut to it, with
 //!   the pushes the rows and the runs not settled at it read by id
 //!   ([`pushes::PushesHeld::at`], [`Builder::restore_pushes`]). A new
-//!   process takes them all at R, or none at its cursors' start.
+//!   process restores each at its kind's R, then joins the streams after
+//!   replaying the lagging prefix ([`Builder::join_queue`]).
 //! - **What a pass makes**: each event is read into [`Kept`] once as it
 //!   comes in (the supervisors' lives, the waits before a claim, the
 //!   landing slot's attempts, which session or queue row it is a record
@@ -519,8 +516,9 @@ struct WaitsMoved {
 /// ([`Builder::restore_sessions`], [`Builder::restore_queue_rows`],
 /// [`Builder::restore_pre_claim`], [`Builder::restore_pushes`]): the last
 /// four as of any position no later than the one the rows were written at,
-/// cut there by a read the position decides. A new process takes all of
-/// them at R, or none at its cursors' start
+/// cut there by a read the position decides. A new process restores each
+/// at its kind's R (or zero without a certificate), then replays the
+/// lagging prefix before joining them
 /// ([`crate::application::supervise::start_builder`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Kept {
@@ -648,6 +646,15 @@ impl Kept {
         new: &[RunEvent],
         touched: &mut BTreeSet<(LedgerKind, String)>,
     ) -> WaitsMoved {
+        self.add_kind(new, touched, false)
+    }
+
+    fn add_kind(
+        &mut self,
+        new: &[RunEvent],
+        touched: &mut BTreeSet<(LedgerKind, String)>,
+        queue_only: bool,
+    ) -> WaitsMoved {
         let mut waits = WaitsMoved::default();
         for event in new {
             if event.id <= self.last {
@@ -664,7 +671,7 @@ impl Kept {
             self.queue_rows
                 .add(event, owned == Owner::Queue, moved, touched);
             match owned {
-                Owner::Session => {
+                Owner::Session if !queue_only => {
                     self.session_rows.add(event, touched);
                     self.event_heap += event_heap_bytes(event);
                     self.sessions.push(event.clone());
@@ -673,9 +680,11 @@ impl Kept {
                     self.event_heap += event_heap_bytes(event);
                     self.queue.push(event.clone());
                 }
-                Owner::Run | Owner::Task => {}
+                Owner::Run | Owner::Task | Owner::Session => {}
             }
-            self.wait_on_push(event);
+            if !queue_only {
+                self.wait_on_push(event);
+            }
         }
         waits
     }
@@ -2009,10 +2018,26 @@ impl Builder {
             oldest(|dirtied| dirtied.inside_resources),
         ];
         let mut taken: Vec<&Target> = Vec::with_capacity(limit);
+        // Reserve the earliest event blocker of each R before filling the
+        // rest. A flood of queue marks cannot crowd the core R out.
+        let first_core = held
+            .iter()
+            .filter(|(target, _)| !matches!(target, Target::Row(LedgerKind::Queue, _)))
+            .filter_map(|(target, dirtied)| dirtied.events.map(|at| (at, *target)))
+            .min()
+            .map(|(_, target)| target);
+        let first_queue = held
+            .iter()
+            .filter(|(target, _)| matches!(target, Target::Row(LedgerKind::Queue, _)))
+            .filter_map(|(target, dirtied)| dirtied.events.map(|at| (at, *target)))
+            .min()
+            .map(|(_, target)| target);
         for target in events
             .first()
             .map(|(_, target)| *target)
             .into_iter()
+            .chain(first_core)
+            .chain(first_queue)
             .chain(cursors.into_iter().flatten())
             .chain(events.iter().map(|(_, target)| *target))
         {
@@ -2555,7 +2580,12 @@ impl Builder {
             .map(|omitted| &omitted.coverage);
         let r = marks
             .and_then(|marks| marks.rows)
-            .map(|rows| rows.through.events);
+            // Coverage needs the queue position, even when a legacy mark
+            // has no event time and therefore cannot resume a builder.
+            .map(|rows| {
+                rows.queue
+                    .map_or(rows.through.events, |queue| queue.through.events)
+            });
         self.covering
             .begin(&self.omission, (stored, r), self.events);
     }
@@ -2612,7 +2642,7 @@ impl Builder {
         }
     }
 
-    /// The position R up to which every input made dirty a run, task,
+    /// The conservative shared R up to which every input made dirty a run, task,
     /// queue or node row that is written, each cursor its own: its
     /// cursor, or the position before the first input that made a mark
     /// still left with unacknowledged input (past [`WRITES_PER_PASS`], a
@@ -2635,9 +2665,11 @@ impl Builder {
     /// builder going on from the mark reads no event for it
     /// ([`Self::read_up_to`]).
     fn rows_mark(&self) -> Option<RowsWritten> {
-        let mut at = self.cursors();
-        let mut read_ms = self.read_ms;
-        if self.rows_through != at {
+        let mut core = self.cursors();
+        let mut queue = core;
+        let mut core_ms = self.read_ms;
+        let mut queue_ms = core_ms;
+        if self.rows_through != core {
             return None;
         }
         for target in &self.marks {
@@ -2645,10 +2677,132 @@ impl Builder {
                 continue;
             }
             if let Some(dirtied) = self.dirtied.get(target) {
-                dirtied.cut(&mut at, &mut read_ms);
+                if matches!(target, Target::Row(LedgerKind::Queue, _)) {
+                    dirtied.cut(&mut queue, &mut queue_ms);
+                } else {
+                    dirtied.cut(&mut core, &mut core_ms);
+                }
             }
         }
-        Some(self.row_certificate(at, read_ms))
+        Some(self.split_certificate(core, core_ms, queue, queue_ms))
+    }
+
+    /// Each R is cut only by unrecorded inputs of its own rows. W still
+    /// certifies every session row before either R is persisted. Keep a
+    /// conservative shared position for legacy readers; equal certificates
+    /// need no extra fields and keep the single-R serialization readable.
+    fn split_certificate(
+        &self,
+        core: Cursors,
+        core_ms: i64,
+        queue: Cursors,
+        queue_ms: i64,
+    ) -> RowsWritten {
+        use super::session::written::RowPosition;
+        let through = Cursors {
+            events: core.events.min(queue.events),
+            samples: core.samples.min(queue.samples),
+            steps: core.steps.min(queue.steps),
+            resources: core.resources.min(queue.resources),
+            inside_resources: core.inside_resources.min(queue.inside_resources),
+        };
+        let read_ms = if core.events <= queue.events {
+            core_ms
+        } else {
+            queue_ms
+        };
+        let mut mark = self.row_certificate(through, read_ms);
+        if core != queue || core_ms != queue_ms {
+            mark.core = Some(RowPosition {
+                through: core,
+                read_ms: core_ms,
+            });
+            mark.queue = Some(RowPosition {
+                through: queue,
+                read_ms: queue_ms,
+            });
+        }
+        mark
+    }
+
+    /// Replay queue inputs on restart without marking or reconstructing
+    /// run, task or session rows. The queue's own book includes the waits
+    /// and lives that route its events; no input can be skipped.
+    pub fn replay_queue_events(&mut self, events: &[RunEvent]) {
+        let before = self.read_to();
+        let kept = Arc::make_mut(&mut self.kept);
+        kept.add_kind(events, &mut self.touched, true);
+        self.rows_after.get_or_insert(before);
+        for event in events {
+            self.events = self.events.max(event.id);
+            if let Some(at) = timestamp_millis(&event.created_at) {
+                self.read_ms = self.read_ms.max(at);
+            }
+        }
+        self.rows_through.events = self.events;
+    }
+
+    /// Restore only routing at the core cursor after the queue replay
+    /// reached it. No core row or core input is read on that replay.
+    pub fn restore_routing_from(&mut self, queue: &Self) {
+        let kept = Arc::make_mut(&mut self.kept);
+        kept.lives = queue.kept.lives.clone();
+        kept.pre_claim = queue.kept.pre_claim.clone();
+    }
+
+    /// Join independently restored streams once both have reached the same
+    /// event position. Core books and non-queue marks stay with `self`;
+    /// queue records, routing and unrecorded inputs come only from `queue`.
+    /// Page folds must have named their marks before the join.
+    pub fn join_queue(&mut self, queue: Self) {
+        assert_eq!(self.events, queue.events);
+        assert!(self.rows_after.is_none() && queue.rows_after.is_none());
+        let is_queue = |target: &Target| matches!(target, Target::Row(LedgerKind::Queue, _));
+        self.marks.retain(|target| !is_queue(target));
+        self.dirtied.retain(|target, _| !is_queue(target));
+        self.marks.extend(queue.marks.into_iter().filter(is_queue));
+        self.dirtied.extend(
+            queue
+                .dirtied
+                .into_iter()
+                .filter(|(target, _)| is_queue(target)),
+        );
+        self.unsettled.retain(|target, _| !is_queue(target));
+        self.unsettled.extend(
+            queue
+                .unsettled
+                .into_iter()
+                .filter(|(target, _)| is_queue(target)),
+        );
+        self.settled.retain(|(kind, _)| *kind != LedgerKind::Queue);
+        self.settled.extend(
+            queue
+                .settled
+                .into_iter()
+                .filter(|(kind, _)| *kind == LedgerKind::Queue),
+        );
+        let kept = Arc::make_mut(&mut self.kept);
+        let q = Arc::unwrap_or_clone(queue.kept);
+        kept.queue_rows = q.queue_rows;
+        kept.queue = q.queue;
+        kept.lives = q.lives;
+        kept.pre_claim = q.pre_claim;
+        kept.dropped.retain(|(kind, _)| *kind != LedgerKind::Queue);
+        kept.dropped.extend(
+            q.dropped
+                .into_iter()
+                .filter(|(kind, _)| *kind == LedgerKind::Queue),
+        );
+        kept.forgotten = q.forgotten;
+        kept.event_heap = kept
+            .sessions
+            .iter()
+            .chain(&kept.queue)
+            .chain(&kept.pushes)
+            .map(event_heap_bytes)
+            .sum();
+        kept.last = self.events;
+        self.read_ms = self.read_ms.max(queue.read_ms);
     }
 
     /// Why no new W/R is offered. Incomplete books or pending session
@@ -2702,6 +2856,8 @@ impl Builder {
         };
         let mut at = observation.cursors;
         let mut read_ms = self.read_ms;
+        let mut queue_at = at;
+        let mut queue_ms = read_ms;
         for target in &self.marks {
             let kind = match target {
                 Target::Run(_) => LedgerKind::Run,
@@ -2721,7 +2877,11 @@ impl Builder {
                 continue;
             }
             if let Some(dirtied) = dirtied {
-                dirtied.cut(&mut at, &mut read_ms);
+                if kind == LedgerKind::Queue {
+                    dirtied.cut(&mut queue_at, &mut queue_ms);
+                } else {
+                    dirtied.cut(&mut at, &mut read_ms);
+                }
                 if let Some(events) = dirtied.events
                     && observation.oldest.as_ref().is_none_or(|(_, old)| {
                         old.events.is_none_or(|old| events.event < old.event)
@@ -2732,7 +2892,7 @@ impl Builder {
             }
         }
         if self.rows_through == observation.cursors {
-            observation.rows = Some(self.row_certificate(at, read_ms));
+            observation.rows = Some(self.split_certificate(at, read_ms, queue_at, queue_ms));
         }
         observation
     }

@@ -1841,3 +1841,136 @@ fn open_row_time_only_advances() {
     legacy.legacy = Some(json!({}));
     assert!(!builder.time_advanced(&legacy, &later));
 }
+
+/// Each certificate stops before its own unrecorded input. Queue work
+/// cannot hold core inputs back, nor can a core write hold queue back.
+#[test]
+fn queue_and_core_certificates_cover_only_their_own_recorded_inputs() {
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "supervisor_started",
+        json!({"supervisor": "s"}),
+        1,
+    );
+    log.add(Some(1), None, "task_created", json!({}), 2);
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events);
+    let input = inputs(&log, 100);
+    builder.mark_rows(&input.rows);
+    let task = Target::Task(TaskId::new(1));
+    let core_before = builder.rows_mark().unwrap().position(false).unwrap();
+    let queue_before = builder.rows_mark().unwrap().position(true).unwrap();
+    assert!(core_before.through.events < log.last());
+    assert!(queue_before.through.events < log.last());
+    builder.track(&task, &build(&task, &input, &[]).unwrap());
+    let mark = builder.rows_mark().unwrap();
+    assert_eq!(mark.position(false).unwrap().through.events, log.last());
+    assert_eq!(mark.position(true), Some(queue_before));
+    assert_eq!(builder.observe_marks().rows, Some(mark));
+    for (key, row) in &input.rows {
+        builder.track(&Target::Row(key.0, key.1.clone()), row);
+    }
+    assert_eq!(builder.rows_written(), Some(builder.cursors()));
+
+    // A core-only input cannot lower Q. Include a non-event input as well.
+    builder.dirtied.insert(
+        task.clone(),
+        Dirtied::events(ReadTo {
+            event: EventId::new(1),
+            read_ms: ms(1),
+        }),
+    );
+    builder.marks.insert(task);
+    let node = Target::Node("n".into(), 0);
+    builder.samples = 5;
+    builder.rows_through.samples = 5;
+    builder.marks.insert(node.clone());
+    builder.dirtied.insert(
+        node,
+        Dirtied {
+            samples: Some(3),
+            ..Dirtied::default()
+        },
+    );
+    let mark = builder.rows_mark().unwrap();
+    assert_eq!(
+        mark.position(false).unwrap().through.events,
+        EventId::new(1)
+    );
+    assert_eq!(mark.position(false).unwrap().through.samples, 3);
+    assert_eq!(mark.position(true).unwrap().through, builder.cursors());
+}
+
+#[test]
+fn both_kinds_get_a_turn_among_the_marks_holding_r() {
+    let mut builder = Builder::default();
+    for (kind, before) in [
+        (LedgerKind::Queue, 1),
+        (LedgerKind::Queue, 2),
+        (LedgerKind::Task, 10),
+    ] {
+        let target = if kind == LedgerKind::Task {
+            Target::Task(TaskId::new(1))
+        } else {
+            Target::Row(kind, before.to_string())
+        };
+        builder.marks.insert(target.clone());
+        builder.dirtied.insert(
+            target,
+            Dirtied::events(ReadTo {
+                event: EventId::new(before),
+                read_ms: before,
+            }),
+        );
+    }
+    let taken = builder.holding_r(2);
+    assert!(taken.contains(&Target::Task(TaskId::new(1))));
+    assert!(taken.contains(&Target::Row(LedgerKind::Queue, "1".into())));
+}
+
+/// Coverage validates queue R, independently of core R and of the event
+/// time needed only for restarting the fold of a legacy certificate.
+#[test]
+fn coverage_checks_queue_r_even_when_a_legacy_mark_has_no_event_time() {
+    use crate::domain::ledger::session::written::RowPosition;
+    let kinds = ["authorization_denied".to_owned()];
+    for (queue, core, legacy, stopped) in [
+        (7, 7, true, true),
+        (7, 2, false, true),
+        (2, 7, false, false),
+    ] {
+        let mut builder = Builder::default();
+        builder.set_omission(omitted::Omission::of(kinds.iter().map(String::as_str), 2));
+        let position = |event| RowPosition {
+            through: Cursors {
+                events: EventId::new(event),
+                ..Cursors::default()
+            },
+            read_ms: event,
+        };
+        let mut rows = RowsWritten::at(position(queue.min(core)).through, 0);
+        if legacy {
+            rows.read_ms = None;
+        } else {
+            rows.queue = Some(position(queue));
+            rows.core = Some(position(core));
+        }
+        let mut coverage = omitted::Coverage::start(&kinds, EventId::new(0));
+        coverage.through = EventId::new(5);
+        builder.begin_coverage(Some(&Marks {
+            sessions: SessionsWritten::at(EventId::new(10)),
+            rows: Some(rows),
+            omitted: Some(omitted::Omitted {
+                coverage,
+                points: Vec::new(),
+            }),
+        }));
+        assert_eq!(
+            builder.omission_stopped(),
+            stopped,
+            "queue={queue}, core={core}, legacy={legacy}"
+        );
+    }
+}
