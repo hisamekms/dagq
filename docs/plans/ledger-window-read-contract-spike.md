@@ -14,6 +14,7 @@ related:
   - design-measurement
   - plan-kpi-read-memory-spike
   - plan-ledger-queue-rows-readers-spike
+  - plan-ledger-window-read-preconditions-spike
 ---
 
 # スパイク：台帳の窓を範囲で読むときの mark の読みの約束と停止の根拠

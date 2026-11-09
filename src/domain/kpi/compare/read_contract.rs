@@ -12,6 +12,8 @@
 //! range of times); the others need an index today's migrations lack, named
 //! on each.
 
+mod preconditions;
+
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
