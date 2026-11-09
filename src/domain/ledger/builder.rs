@@ -176,6 +176,16 @@
 //!   gives no W either: a builder folds the session events from its
 //!   cursors' start, and its writes fill what the rows lack and write the
 //!   marks.
+//! - **The omitted queue events**: a builder that omits some kind of the
+//!   queue's events from queue rows ([`omitted::Omission`]) reads, at each
+//!   pass's start, the coverage the store holds with its marks
+//!   ([`Builder::begin_coverage`]), folds the events it reads after its S
+//!   into the summaries, and writes C, S and the summaries with W and R in
+//!   their transaction ([`Builder::sessions_mark`]), S the position read.
+//!   One that omits none writes nothing of it, and reads the store's only
+//!   to know whether it stops. A store that stops it ([`omitted::stops`]:
+//!   R past S, or a coverage of other kinds, an empty set's too) keeps them
+//!   as they are ([`Builder::omission_stopped`]).
 //! - **What a pass reads**: the events after its cursor, [`EVENTS_PER_READ`]
 //!   at a time, and the events of each run and task it folds. Until the
 //!   snapshot is caught up, its folds and time-driven work use the latest
@@ -264,7 +274,7 @@ use super::{
     queue::{self, QueueBook},
     session::{
         SessionBook, SessionsHeld,
-        written::{Cursors, Marks, RowsWritten, SessionsWritten},
+        written::{Cursors, Marks, RowsWritten, SessionsWritten, omitted},
     },
     settle::{self, SETTLE_GRACE_MS},
 };
@@ -1229,6 +1239,10 @@ pub struct Builder {
     /// Where it is in the rows the store holds of an older [`LEDGER_V`]
     /// ([`Self::walk_older_rows`]).
     older_rows: OlderRows,
+    /// The kinds of the queue's events it does not copy to queue rows.
+    omission: omitted::Omission,
+    /// What it holds of their coverage ([`Self::begin_coverage`]).
+    covering: omitted::Covering,
 }
 
 /// How far a builder went through the rows the store holds of an older
@@ -1372,6 +1386,8 @@ impl Default for Builder {
             dirtied: BTreeMap::new(),
             rows_through: Cursors::default(),
             older_rows: OlderRows::default(),
+            omission: omitted::Omission::of_version(),
+            covering: omitted::Covering::default(),
         }
     }
 }
@@ -1445,6 +1461,7 @@ impl Builder {
                 self.read_ms = self.read_ms.max(at);
             }
         }
+        self.covering.read(new, self.omission.every, self.events);
         if folds_on {
             self.sessions_through = self.events;
         }
@@ -2327,6 +2344,7 @@ impl Builder {
         self.marks_written = held.written.then(|| Marks {
             sessions: SessionsWritten::at(held.through),
             rows: None,
+            omitted: None,
         });
         self.sessions_through = held.through;
         Arc::make_mut(&mut self.kept).restore_sessions(held, records);
@@ -2472,14 +2490,17 @@ impl Builder {
     /// during that write, and they never hold R. This avoids another walk
     /// of all targets to certify the same R at the same cursors.
     pub fn sessions_mark_from(&self, rows: Option<RowsWritten>) -> Option<Marks> {
-        if !self.can_mark_sessions() {
+        // A coverage behind its cursor would write a S before the events
+        // read, so no mark moves until it is read up to it.
+        if !self.can_mark_sessions() || self.coverage_behind().is_some() {
             return None;
         }
         let marks = Marks {
             sessions: SessionsWritten::at(self.events),
             rows,
+            omitted: self.covering.to_write(),
         };
-        (self.marks_written != Some(marks)).then_some(marks)
+        (self.marks_written.as_ref() != Some(&marks)).then_some(marks)
     }
 
     fn session_marks(&self) -> impl Iterator<Item = &Target> {
@@ -2503,18 +2524,81 @@ impl Builder {
                 },
             );
         }
-        observation.written = self.marks_written;
+        observation.written = self.marks_written.clone();
     }
 
     /// The session rows' mark it last wrote or the position it went on
     /// from (W, or R before it, which the store's mark is not).
     pub fn sessions_mark_written(&self) -> Option<SessionsWritten> {
-        self.marks_written.map(|marks| marks.sessions)
+        self.marks_written.as_ref().map(|marks| marks.sessions)
     }
 
-    /// Note that the store holds `marks` now, written with the session rows.
-    pub fn wrote_sessions_mark(&mut self, marks: Marks) {
+    /// Note that the store holds `marks` now, written with the session rows,
+    /// and the coverage they carry with its points
+    /// ([`omitted::Covering::wrote`]).
+    pub fn wrote_sessions_mark(&mut self, mut marks: Marks) {
+        if let Some(omitted) = &mut marks.omitted {
+            self.covering.wrote(omitted.coverage.through);
+            omitted.points.clear();
+        }
         self.marks_written = Some(marks);
+    }
+
+    /// Begin a pass's coverage of the omitted queue events
+    /// ([`omitted::Covering::begin`]) by the store's `marks` (the coverage
+    /// they hold and R) as it reads them at the pass's start, the pass to
+    /// read after its cursor. A builder that omits no kind holds none and
+    /// writes none, and stops on a store of a coverage (of other kinds).
+    pub fn begin_coverage(&mut self, marks: Option<&Marks>) {
+        let stored = marks
+            .and_then(|marks| marks.omitted.as_ref())
+            .map(|omitted| &omitted.coverage);
+        let r = marks
+            .and_then(|marks| marks.rows)
+            .map(|rows| rows.through.events);
+        self.covering
+            .begin(&self.omission, (stored, r), self.events);
+    }
+
+    /// The S of the coverage it holds when it is before its cursor (it took
+    /// another builder's from the store): the events after it up to the
+    /// cursor are to be read again ([`Self::catch_up_coverage`]) before
+    /// any mark is written.
+    pub fn coverage_behind(&self) -> Option<EventId> {
+        self.covering.behind(self.events)
+    }
+
+    /// Fold `events` (ascending, after [`Self::coverage_behind`], up to its
+    /// cursor) into the coverage held, nothing else.
+    pub fn catch_up_coverage(&mut self, events: &[RunEvent]) {
+        let to = events
+            .last()
+            .map_or(EventId::new(0), |event| event.id)
+            .min(self.events);
+        let events: Vec<RunEvent> = events
+            .iter()
+            .filter(|event| event.id <= self.events)
+            .cloned()
+            .collect();
+        self.covering.read(&events, self.omission.every, to);
+    }
+
+    /// Whether it stopped covering the omitted queue events
+    /// ([`omitted::stops`]): it moves and lowers none of the store's C, S
+    /// and summaries, and those events are a queue row's as before.
+    pub fn omission_stopped(&self) -> bool {
+        self.covering.stopped()
+    }
+
+    /// The coverage of the omitted queue events it holds, if any.
+    pub fn coverage(&self) -> Option<&omitted::Coverage> {
+        self.covering.held()
+    }
+
+    /// Omit `omission`'s kinds in place of the version's.
+    #[cfg(test)]
+    pub(crate) fn set_omission(&mut self, omission: omitted::Omission) {
+        self.omission = omission;
     }
 
     /// Its cursors.
@@ -2583,11 +2667,11 @@ impl Builder {
             "sessions_pending"
         } else if observation.rows.is_none() {
             "rows_not_whole"
-        } else if self.marks_written
-            != Some(Marks {
-                sessions: SessionsWritten::at(self.events),
-                rows: observation.rows,
-            })
+        } else if self
+            .marks_written
+            .as_ref()
+            .map(|marks| (marks.sessions, marks.rows))
+            != Some((SessionsWritten::at(self.events), observation.rows))
         {
             "session_write_not_acknowledged"
         } else {
@@ -2596,8 +2680,8 @@ impl Builder {
     }
 
     /// The marks last acknowledged, without walking the remaining targets.
-    pub const fn observe_written_marks(&self) -> Option<Marks> {
-        self.marks_written
+    pub fn observe_written_marks(&self) -> Option<Marks> {
+        self.marks_written.clone()
     }
 
     /// Rows of the session and queue books reconstructed on startup,
@@ -2613,7 +2697,7 @@ impl Builder {
     pub fn observe_marks(&self) -> MarkObservation {
         let mut observation = MarkObservation {
             cursors: self.cursors(),
-            written: self.marks_written,
+            written: self.marks_written.clone(),
             ..MarkObservation::default()
         };
         let mut at = observation.cursors;

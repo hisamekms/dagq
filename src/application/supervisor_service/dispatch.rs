@@ -2435,24 +2435,37 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
         // The session rows of a pass, each named with the row it read by
         // its fingerprint, and the marks (R beside the session rows' when
         // sent), written in one transaction: none when another writer
-        // wrote one of them since.
+        // wrote one of them since. The coverage of the omitted queue events
+        // crosses by the covered operations alone: these write none.
         "write_session_rows_over" => {
-            let (rows, mark): (
-                Vec<(crate::domain::ledger::LedgerRow, Option<String>)>,
-                Option<crate::domain::ledger::session::written::Marks>,
-            ) = read(op, args)?;
-            answer(write_sessions_over(&*store, &rows, mark.as_ref()))
+            let (rows, mark): SessionRowsSent = read(op, args)?;
+            answer(write_sessions_over(
+                &*store,
+                &rows,
+                uncovered(mark).as_ref(),
+            ))
         }
         // The same past one request whole: its text's parts held first
         // (`stage_ledger_row`), then written as one sent whole.
         "write_staged_session_rows_over" => {
             let (digest,): (String,) = read(op, args)?;
-            let (rows, mark): (
-                Vec<(crate::domain::ledger::LedgerRow, Option<String>)>,
-                Option<crate::domain::ledger::session::written::Marks>,
-            ) = serde_json::from_str(&super::large::take(&digest)?).map_err(|error| {
-                BadOperation(format!("the session rows staged do not read: {error}"))
-            })?;
+            let (rows, mark) = staged_session_rows(&digest)?;
+            answer(write_sessions_over(
+                &*store,
+                &rows,
+                uncovered(mark).as_ref(),
+            ))
+        }
+        // As the two above, the marks with the coverage they carry, which
+        // a service that knows no coverage refuses as an operation it does
+        // not know rather than answering it wrote them.
+        "write_covered_session_rows_over" => {
+            let (rows, mark): SessionRowsSent = read(op, args)?;
+            answer(write_sessions_over(&*store, &rows, mark.as_ref()))
+        }
+        "write_staged_covered_session_rows_over" => {
+            let (digest,): (String,) = read(op, args)?;
+            let (rows, mark) = staged_session_rows(&digest)?;
             answer(write_sessions_over(&*store, &rows, mark.as_ref()))
         }
         // The session rows' mark, R beside it when the store holds one:
@@ -2794,6 +2807,28 @@ fn write_over<S: SupervisorStore + ?Sized>(
 /// `mark`, as [`LedgerStore::write_session_rows_marked`] does over the
 /// rows themselves: false, nothing written, when another writer wrote one
 /// of them since it was read.
+/// The session rows and the marks a write of them sends.
+type SessionRowsSent = (
+    Vec<(crate::domain::ledger::LedgerRow, Option<String>)>,
+    Option<crate::domain::ledger::session::written::Marks>,
+);
+
+/// The session rows and marks staged under `digest` ([`super::large`]).
+fn staged_session_rows(digest: &str) -> Result<SessionRowsSent> {
+    Ok(serde_json::from_str(&super::large::take(digest)?)
+        .map_err(|error| BadOperation(format!("the session rows staged do not read: {error}")))?)
+}
+
+/// `mark` without the coverage it may carry.
+fn uncovered(
+    mark: Option<crate::domain::ledger::session::written::Marks>,
+) -> Option<crate::domain::ledger::session::written::Marks> {
+    mark.map(|mark| crate::domain::ledger::session::written::Marks {
+        omitted: None,
+        ..mark
+    })
+}
+
 fn write_sessions_over<S: SupervisorStore + ?Sized>(
     store: &S,
     rows: &[(crate::domain::ledger::LedgerRow, Option<String>)],

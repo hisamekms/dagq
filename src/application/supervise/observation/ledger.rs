@@ -239,12 +239,12 @@ fn write_sessions_observed(
     builder.refresh_session_observation(&mut built.marks);
     let after = builder.observe_written_marks();
     if before != after {
-        built.work.marks_written = after;
-        built.work.no_marks = if after.is_some_and(|marks| marks.rows.is_none()) {
+        built.work.no_marks = if after.as_ref().is_some_and(|marks| marks.rows.is_none()) {
             "rows_not_whole"
         } else {
             ""
         };
+        built.work.marks_written = after;
     } else {
         built.work.no_marks = if result.is_err() {
             "session_write_failed"
@@ -269,9 +269,16 @@ fn preserve_time_work(
     let stored = store.ledger_marks()?;
     let heads = store.ledger_heads(LedgerKind::Session)?;
     let marks = marks_with_time_work(stored.as_ref(), &heads, until);
-    if stored != Some(marks) {
+    // The coverage is not the time work's: compared without it.
+    let unchanged = stored.as_ref().is_some_and(|stored| {
+        Marks {
+            omitted: None,
+            ..stored.clone()
+        } == marks
+    });
+    if !unchanged {
         store.write_ledger_marks(&marks)?;
-        built.work.marks_written = Some(marks);
+        built.work.marks_written = Some(marks.clone());
     }
     builder.defer_time(
         marks
@@ -455,6 +462,32 @@ fn build_pass_limited(
     built
 }
 
+/// Read again the events from the S of the coverage the builder took from
+/// the store up to its cursor ([`Builder::coverage_behind`]), `per_read` at
+/// a time, before the pass writes anything: so that the S it writes covers
+/// every event it read. A read short of the cursor fails the pass.
+fn catch_up_coverage(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    per_read: usize,
+) -> Result<()> {
+    while let Some(after) = builder.coverage_behind() {
+        let events = store.events_between(
+            after,
+            builder.events,
+            &EventFilter::default(),
+            per_read.max(1),
+        )?;
+        anyhow::ensure!(
+            !events.is_empty(),
+            "the events after the coverage's S {after} up to {} are not read",
+            builder.events
+        );
+        builder.catch_up_coverage(&events);
+    }
+    Ok(())
+}
+
 /// One pass's reads, folds and writes. A builder that has not swept
 /// ([`Builder::sweeps_pages`]: a new process's catching up) builds and
 /// sweeps the session and queue rows each page
@@ -477,6 +510,10 @@ fn pass(
     ),
     built: &mut Built,
 ) -> Result<()> {
+    // Every builder, one that omits no kind too, so that a store of a
+    // coverage of other kinds says it stops.
+    builder.begin_coverage(store.ledger_marks()?.as_ref());
+    catch_up_coverage(store, builder, per_read)?;
     let latest = store.latest_event_id()?;
     built.work.latest = latest.as_i64();
     let mut progress = Duration::ZERO;
@@ -826,9 +863,12 @@ fn write_sessions(
             None => return Ok(written),
             // R alone moved: the session rows' mark as the store holds it
             // (a builder gone on from R before W reads past W before it).
+            // A coverage the store refused writes neither: the next pass
+            // takes the store's and writes them again.
             Some(marks) if builder.sessions_mark_written() == Some(marks.sessions) => {
-                store.write_ledger_marks(&marks)?;
-                builder.wrote_sessions_mark(marks);
+                if store.write_ledger_marks(&marks)? {
+                    builder.wrote_sessions_mark(marks);
+                }
                 return Ok(written);
             }
             Some(_) => {}
@@ -1452,11 +1492,13 @@ fn start_builder_timed(
     builder.go_on_from_rows(r);
     builder.resume_taking(
         marks
+            .as_ref()
             .and_then(|marks| marks.rows)
             .map_or(0, |rows| rows.take_offset),
     );
     builder.restore_time(
         marks
+            .as_ref()
             .and_then(|marks| marks.rows)
             .and_then(|rows| rows.time_pending),
     );

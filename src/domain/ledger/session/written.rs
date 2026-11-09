@@ -38,6 +38,8 @@ use serde::{Deserialize, Serialize};
 use crate::domain::EventId;
 use crate::domain::ledger::{LEDGER_V, LedgerHead, LedgerKind};
 
+pub mod omitted;
+
 /// The kind of the mark's row in the ledger's table: no [`LedgerKind`], so
 /// that no reader of the rows of a kind reads it.
 pub const KIND: &str = "sessions_written";
@@ -163,12 +165,20 @@ impl RowsWritten {
 /// reads as the session rows' mark alone too (R's fields beside W's), so
 /// that a reader of W alone reads it and one that gives no R is taken to
 /// give none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// With them, when the builder holds one, goes the coverage of the
+/// omitted queue events ([`omitted::Omitted`]): the store writes it in the
+/// same transaction only over a coverage it supersedes
+/// ([`omitted::Coverage::supersedes`]), and gives it back with the marks
+/// it reads (its points apart).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Marks {
     #[serde(flatten)]
     pub sessions: SessionsWritten,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<RowsWritten>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<omitted::Omitted>,
 }
 
 /// The position R each of whose cursors the store's run, task, queue and
@@ -212,12 +222,15 @@ pub fn rows_to_go_on_from(marks: Option<&Marks>, heads: &[LedgerHead]) -> Option
 /// writes the returned marks only when they differ from the stored ones.
 pub fn marks_with_time_work(marks: Option<&Marks>, heads: &[LedgerHead], until: i64) -> Marks {
     let mut held = marks
-        .copied()
+        .cloned()
         .filter(|marks| rows_to_go_on_from(Some(marks), heads).is_some())
         .unwrap_or_else(|| Marks {
             sessions: SessionsWritten::at(EventId::new(0)),
             rows: Some(RowsWritten::at(Cursors::default(), i64::MIN)),
+            omitted: None,
         });
+    // The coverage moves with the reads only; the store keeps its own.
+    held.omitted = None;
     let rows = held.rows.as_mut().expect("a usable R or zero");
     rows.time_pending = Some(
         rows.time_pending

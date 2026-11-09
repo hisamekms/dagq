@@ -3,6 +3,7 @@ use crate::infrastructure::sql_exec::TransactionEntries;
 
 use super::*;
 use crate::application::LedgerStore;
+use crate::domain::ledger::session::written::omitted::{self, Coverage, Omitted, Point};
 use crate::domain::ledger::session::written::{self, Marks, RowsWritten, SessionsWritten};
 use crate::domain::ledger::window::{
     EARLIER_RUN_KINDS, EarlierRecords, RECORD_TIME_FORM, RUN_END_STATUSES, RowsFrom,
@@ -135,6 +136,99 @@ fn write_rows_mark(conn: &impl SqlWrite, mark: &RowsWritten) -> Result<()> {
         sql_params![written::ROWS_KIND, written::KEY, mark.ledger_v, through],
     )?;
     Ok(())
+}
+
+/// The coverage of the omitted queue events `conn` holds
+/// ([`omitted::KIND`]'s row, the coverage the text of its `detail`), if any;
+/// one whose text does not read is [`Coverage::unreadable`], so that a
+/// builder of this version stops rather than fails or writes over it.
+fn held_coverage(conn: &impl SqlRead) -> Result<Option<Coverage>> {
+    let detail = SqlRead::query_row(
+        conn,
+        "SELECT detail FROM ledger_rows WHERE kind=?1 AND key=?2",
+        sql_params![omitted::KIND, written::KEY],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()?;
+    Ok(detail
+        .map(|detail| serde_json::from_str(&detail).unwrap_or_else(|_| Coverage::unreadable())))
+}
+
+/// Write `omitted` on `conn` when its coverage supersedes the one held
+/// ([`Coverage::supersedes`]): the coverage as the one row of its kind, S
+/// as the `events` of its `inputs_through`, and each point not held yet in
+/// `ledger_omitted_points` (a point held is the same one). The same
+/// coverage again writes nothing. False, nothing written, when it
+/// conflicts with the one held ([`Coverage::conflicts`]): the caller rolls
+/// back the whole transaction, so that no W or R moves past a S it holds.
+fn write_omitted(conn: &impl SqlWrite, omitted: &Omitted) -> Result<bool> {
+    let coverage = &omitted.coverage;
+    let held = held_coverage(conn)?;
+    if coverage.conflicts(held.as_ref()) {
+        return Ok(false);
+    }
+    if !coverage.supersedes(held.as_ref()) {
+        return Ok(true);
+    }
+    let through = text(&InputsThrough {
+        events: coverage.through,
+        supervisor: None,
+        life_ended: Vec::new(),
+        node_samples: None,
+        steps: None,
+        resources: None,
+        inside_resources: None,
+    })?;
+    SqlWrite::execute(
+        conn,
+        "INSERT INTO ledger_rows(kind, key, ledger_v, built_at, inputs_through, detail)
+         VALUES (?1, ?2, ?3, '', ?4, ?5)
+         ON CONFLICT(kind, key) DO UPDATE SET
+           ledger_v=excluded.ledger_v, inputs_through=excluded.inputs_through,
+           detail=excluded.detail",
+        sql_params![
+            omitted::KIND,
+            written::KEY,
+            crate::domain::ledger::LEDGER_V,
+            through,
+            text(coverage)?
+        ],
+    )?;
+    for point in &omitted.points {
+        SqlWrite::execute(
+            conn,
+            "INSERT INTO ledger_omitted_points(kind, at, max_ms, last, timed)
+             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(kind, at) DO NOTHING",
+            sql_params![
+                point.kind.as_str(),
+                point.at.as_i64(),
+                point.max_ms,
+                point.last.map(EventId::as_i64),
+                point.timed.map(EventId::as_i64)
+            ],
+        )?;
+    }
+    Ok(true)
+}
+
+/// A kind's points past a position, by position: a seek of the key.
+const POINTS_AFTER_SQL: &str = "SELECT kind, at, max_ms, last, timed FROM ledger_omitted_points
+  WHERE kind=?1 AND at > ?2 ORDER BY at LIMIT ?3";
+
+/// A kind's last point whose M is before a time: a seek of the index of M,
+/// the latest M then the latest position (M only rises with it).
+const POINT_BEFORE_MS_SQL: &str = "SELECT kind, at, max_ms, last, timed FROM ledger_omitted_points
+  WHERE kind=?1 AND max_ms < ?2 ORDER BY max_ms DESC, at DESC LIMIT 1";
+
+/// A point as [`POINTS_AFTER_SQL`] and [`POINT_BEFORE_MS_SQL`] read it.
+fn point_row(r: &SqlRow<'_>) -> SqlResult<Point> {
+    Ok(Point {
+        kind: r.get(0)?,
+        at: EventId::new(r.get(1)?),
+        max_ms: r.get(2)?,
+        last: r.get::<_, Option<i64>>(3)?.map(EventId::new),
+        timed: r.get::<_, Option<i64>>(4)?.map(EventId::new),
+    })
 }
 
 /// The text of the `inputs_through` of the mark R's row: the positions of
@@ -890,6 +984,7 @@ impl LedgerStore for SqliteQueue {
         let marks = mark.map(|&sessions| Marks {
             sessions,
             rows: None,
+            omitted: None,
         });
         self.write_session_rows_marked(rows, marks.as_ref())
     }
@@ -912,6 +1007,12 @@ impl LedgerStore for SqliteQueue {
             write_mark(&tx, &marks.sessions)?;
             if let Some(rows) = &marks.rows {
                 write_rows_mark(&tx, rows)?;
+            }
+            // A coverage refused rolls back the rows and marks with it.
+            if let Some(omitted) = &marks.omitted
+                && !write_omitted(&tx, omitted)?
+            {
+                return Ok(false);
             }
         }
         tx.commit()?;
@@ -950,7 +1051,42 @@ impl LedgerStore for SqliteQueue {
                 });
             }
         }
-        Ok(sessions.map(|sessions| Marks { sessions, rows }))
+        let omitted = held_coverage(&tx)?.map(|coverage| Omitted {
+            coverage,
+            points: Vec::new(),
+        });
+        Ok(sessions.map(|sessions| Marks {
+            sessions,
+            rows,
+            omitted,
+        }))
+    }
+
+    fn ledger_omitted_points_after(
+        &self,
+        kind: &str,
+        after: EventId,
+        limit: usize,
+    ) -> Result<Vec<Point>> {
+        let tx = self.read_entry("ledger_omitted_points_after")?;
+        Ok(SqlRead::query_map(
+            &tx,
+            POINTS_AFTER_SQL,
+            sql_params![
+                kind,
+                after.as_i64(),
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            point_row,
+        )?)
+    }
+
+    fn ledger_omitted_point_before_ms(&self, kind: &str, ms: i64) -> Result<Option<Point>> {
+        let tx = self.read_entry("ledger_omitted_point_before_ms")?;
+        Ok(
+            SqlRead::query_row(&tx, POINT_BEFORE_MS_SQL, sql_params![kind, ms], point_row)
+                .optional()?,
+        )
     }
 
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
@@ -1893,6 +2029,8 @@ fn ledger_row(r: &SqlRow<'_>) -> SqlResult<Result<LedgerRow>> {
     })())
 }
 
+#[cfg(test)]
+mod omitted_tests;
 #[cfg(test)]
 mod read_from_tests;
 
@@ -3227,6 +3365,7 @@ mod tests {
                 },
                 1_900_000_000_000,
             )),
+            omitted: None,
         };
         marks.rows.as_mut().unwrap().take_offset = 1700;
         marks.rows.as_mut().unwrap().time_pending = Some(1_900_000_001_000);
@@ -3251,7 +3390,7 @@ mod tests {
                 .write_session_rows_marked(&batch, Some(&marks))
                 .unwrap()
         );
-        assert_eq!(queue.ledger_marks().unwrap(), Some(marks));
+        assert_eq!(queue.ledger_marks().unwrap(), Some(marks.clone()));
         assert_eq!(queue.sessions_written().unwrap(), Some(marks.sessions));
         assert_eq!(rows_of_kind(&queue, ledger::session::written::ROWS_KIND), 1);
         for kind in LedgerKind::ALL {
@@ -3284,7 +3423,7 @@ mod tests {
             queue.ledger_marks().unwrap(),
             Some(Marks {
                 sessions: later,
-                ..marks
+                ..marks.clone()
             })
         );
     }
@@ -3395,6 +3534,7 @@ mod tests {
         let marks_of = |rows: RowsWritten| Marks {
             sessions: SessionsWritten::at(EventId::new(7)),
             rows: Some(rows),
+            omitted: None,
         };
         let held = marks_of(RowsWritten::at(cursors, 1_900_000_000_000));
         let batch: Vec<(LedgerRow, Option<LedgerRow>)> =
@@ -3404,7 +3544,7 @@ mod tests {
                 .write_session_rows_marked(&batch, Some(&held))
                 .unwrap()
         );
-        assert_eq!(queue.ledger_marks().unwrap(), Some(held));
+        assert_eq!(queue.ledger_marks().unwrap(), Some(held.clone()));
         let text = |kind: &str| -> String {
             queue
                 .conn
@@ -3454,7 +3594,7 @@ mod tests {
             .write_session_rows_marked(&over, Some(&later))
             .unwrap_err();
         assert!(format!("{error:#}").contains("part way"), "{error:#}");
-        assert_eq!(queue.ledger_marks().unwrap(), Some(held));
+        assert_eq!(queue.ledger_marks().unwrap(), Some(held.clone()));
         assert!(
             queue
                 .ledger_rows(LedgerKind::Session)
@@ -3473,7 +3613,7 @@ mod tests {
         ] {
             let marks = marks_of(rows);
             queue.write_ledger_marks(&marks).unwrap();
-            assert_eq!(queue.ledger_marks().unwrap(), Some(marks));
+            assert_eq!(queue.ledger_marks().unwrap(), Some(marks.clone()));
         }
         assert!(!text(written::ROWS_KIND).contains("read_ms"));
     }
@@ -4103,6 +4243,7 @@ mod tests {
                     ledger_v: ledger::LEDGER_V - 1,
                 },
                 rows: None,
+                omitted: None,
             })
             .unwrap();
         assert_eq!(queue.ledger_older_rows_after(None, 9).unwrap(), Vec::new());

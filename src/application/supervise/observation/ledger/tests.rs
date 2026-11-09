@@ -11,6 +11,7 @@ use crate::domain::ledger::builder::HOLDING_R_PER_PASS;
 use crate::domain::ledger::queue::QueueBook;
 use crate::domain::ledger::read::read;
 use crate::domain::ledger::session::SessionBook;
+use crate::domain::ledger::session::written::omitted::{Coverage, Omitted, Point};
 use crate::domain::ledger::session::written::{
     Cursors, Marks, RowsWritten, SessionsWritten, written_through,
 };
@@ -115,6 +116,35 @@ struct Memory {
     scans: RefCell<Vec<(&'static str, i64, usize)>>,
     /// The keys of the rows written, in order.
     written_keys: RefCell<Vec<(LedgerKind, String)>>,
+    /// The coverage of the omitted queue events and its points, by kind and
+    /// position, as `ledger_rows` and `ledger_omitted_points` hold them.
+    omitted: RefCell<Option<Coverage>>,
+    points: RefCell<BTreeMap<(String, EventId), Point>>,
+}
+
+impl Memory {
+    /// Write `omitted` as the store does: only over a coverage it
+    /// supersedes, a point held kept.
+    /// Whether the store refuses the whole write of `marks` as it does: a
+    /// coverage that conflicts with the one held.
+    fn refuses_coverage(&self, marks: Option<&Marks>) -> bool {
+        marks
+            .and_then(|marks| marks.omitted.as_ref())
+            .is_some_and(|omitted| omitted.coverage.conflicts(self.omitted.borrow().as_ref()))
+    }
+
+    fn write_omitted(&self, omitted: &Omitted) {
+        if !omitted.coverage.supersedes(self.omitted.borrow().as_ref()) {
+            return;
+        }
+        self.omitted.replace(Some(omitted.coverage.clone()));
+        let mut points = self.points.borrow_mut();
+        for point in &omitted.points {
+            points
+                .entry((point.kind.clone(), point.at))
+                .or_insert_with(|| point.clone());
+        }
+    }
 }
 
 /// How many times each read a cut of the queue rows makes was called, and
@@ -476,27 +506,68 @@ impl LedgerStore for Memory {
         rows: &[(LedgerRow, Option<LedgerRow>)],
         marks: Option<&Marks>,
     ) -> Result<bool> {
+        if self.refuses_coverage(marks) {
+            return Ok(false);
+        }
         let written = self.write_session_rows_over(rows, marks.map(|marks| &marks.sessions))?;
         if written && let Some(rows) = marks.and_then(|marks| marks.rows) {
             self.rows_mark.replace(Some(rows));
         }
+        if written && let Some(omitted) = marks.and_then(|marks| marks.omitted.as_ref()) {
+            self.write_omitted(omitted);
+        }
         Ok(written)
     }
     /// The marks alone, counted apart from the writes of the session rows.
-    fn write_ledger_marks(&self, marks: &Marks) -> Result<()> {
+    fn write_ledger_marks(&self, marks: &Marks) -> Result<bool> {
         ensure!(!self.refuses.get(), "attempt to write a readonly database");
+        if self.refuses_coverage(Some(marks)) {
+            return Ok(false);
+        }
         self.mark.replace(Some(marks.sessions));
         if let Some(rows) = marks.rows {
             self.rows_mark.replace(Some(rows));
         }
+        if let Some(omitted) = &marks.omitted {
+            self.write_omitted(omitted);
+        }
         self.marks_alone.set(self.marks_alone.get() + 1);
-        Ok(())
+        Ok(true)
     }
     fn ledger_marks(&self) -> Result<Option<Marks>> {
         Ok(self.mark.borrow().map(|sessions| Marks {
             sessions,
             rows: *self.rows_mark.borrow(),
+            omitted: self.omitted.borrow().clone().map(|coverage| Omitted {
+                coverage,
+                points: Vec::new(),
+            }),
         }))
+    }
+    fn ledger_omitted_points_after(
+        &self,
+        kind: &str,
+        after: EventId,
+        limit: usize,
+    ) -> Result<Vec<Point>> {
+        Ok(self
+            .points
+            .borrow()
+            .range((kind.to_owned(), after)..)
+            .take_while(|((of, _), _)| of == kind)
+            .filter(|((_, at), _)| *at > after)
+            .take(limit)
+            .map(|(_, point)| point.clone())
+            .collect())
+    }
+    fn ledger_omitted_point_before_ms(&self, kind: &str, ms: i64) -> Result<Option<Point>> {
+        Ok(self
+            .points
+            .borrow()
+            .values()
+            .filter(|point| point.kind == kind && point.max_ms.is_some_and(|max| max < ms))
+            .max_by_key(|point| (point.max_ms, point.at))
+            .cloned())
     }
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
         self.callers.borrow_mut().push((
@@ -2993,6 +3064,7 @@ fn a_run_measured_from_inside_only_folds_its_executors_samples() {
 
 mod frozen;
 mod oldest_first;
+mod omitted;
 mod pages;
 mod pushes_mixed;
 mod queue_waits;

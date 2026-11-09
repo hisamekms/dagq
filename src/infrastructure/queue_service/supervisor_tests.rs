@@ -1117,7 +1117,8 @@ fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
         queue.ledger_marks().unwrap(),
         Some(Marks {
             sessions: alone,
-            rows: None
+            rows: None,
+            omitted: None
         })
     );
     let r = |events: i64| {
@@ -1135,12 +1136,13 @@ fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
     let marks = Marks {
         sessions: SessionsWritten::at(crate::domain::EventId::new(8)),
         rows: Some(r(6)),
+        omitted: None,
     };
     assert!(queue.write_session_rows_marked(&[], Some(&marks)).unwrap());
-    assert_eq!(queue.ledger_marks().unwrap(), Some(marks));
+    assert_eq!(queue.ledger_marks().unwrap(), Some(marks.clone()));
     assert_eq!(queue.sessions_written().unwrap(), Some(marks.sessions));
     let direct = SqliteQueue::open(&db).unwrap();
-    assert_eq!(direct.ledger_marks().unwrap(), Some(marks));
+    assert_eq!(direct.ledger_marks().unwrap(), Some(marks.clone()));
 
     // Past one request whole: staged, then written as one.
     let mut large = rows[0].clone();
@@ -1149,6 +1151,7 @@ fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
     let later = Marks {
         sessions: SessionsWritten::at(crate::domain::EventId::new(9)),
         rows: Some(r(9)),
+        omitted: None,
     };
     service.ops.lock().unwrap().clear();
     assert!(
@@ -1160,7 +1163,7 @@ fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
         service.ops.lock().unwrap().last().map(String::as_str),
         Some("write_staged_session_rows_over")
     );
-    assert_eq!(direct.ledger_marks().unwrap(), Some(later));
+    assert_eq!(direct.ledger_marks().unwrap(), Some(later.clone()));
     // The marks alone, R moved with W as it was.
     let moved = Marks {
         rows: Some(r(9).through).map(|through| {
@@ -1175,7 +1178,7 @@ fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
         ..later
     };
     queue.write_ledger_marks(&moved).unwrap();
-    assert_eq!(direct.ledger_marks().unwrap(), Some(moved));
+    assert_eq!(direct.ledger_marks().unwrap(), Some(moved.clone()));
     assert_eq!(
         direct.ledger_rows(LedgerKind::Session).unwrap().len(),
         rows.len()
@@ -1189,8 +1192,8 @@ fn r_crosses_with_the_session_rows_mark_in_one_write_whole_or_staged() {
         ..moved
     };
     queue.write_ledger_marks(&no_time).unwrap();
-    assert_eq!(queue.ledger_marks().unwrap(), Some(no_time));
-    assert_eq!(direct.ledger_marks().unwrap(), Some(no_time));
+    assert_eq!(queue.ledger_marks().unwrap(), Some(no_time.clone()));
+    assert_eq!(direct.ledger_marks().unwrap(), Some(no_time.clone()));
 }
 
 /// What builds the ledger cuts its rows to a position by reads the start
@@ -1625,4 +1628,148 @@ fn completed_kpi_checks_cross_the_supervisor_service_once() {
             "kpi_breaches_checked"
         ]
     );
+}
+
+/// A service of the version before the coverage of the omitted queue
+/// events: it knows no covered operation, as this service knows no
+/// operation of a name it was not built with.
+struct BeforeCoverage(Arc<InProcess>);
+
+impl crate::application::supervisor_service::ServiceCaller for BeforeCoverage {
+    fn call(&self, use_case: UseCase, mut params: Value) -> Result<Value> {
+        let op = params["op"].as_str().unwrap().to_owned();
+        if op.contains("covered") {
+            params["op"] = json!("an_operation_this_service_was_not_built_with");
+        }
+        self.0.call(use_case, params)
+    }
+    fn with_token(
+        &self,
+        path: &Path,
+    ) -> Result<Arc<dyn crate::application::supervisor_service::ServiceCaller>> {
+        self.0.with_token(path)
+    }
+    fn sign_in(&self, owner: &LeaseToken, instance: u32) -> Result<()> {
+        self.0.sign_in(owner, instance)
+    }
+    fn take_back(&self, owner: &LeaseToken, instance: u32) -> Result<()> {
+        self.0.take_back(owner, instance)
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// Marks that carry the coverage of the omitted queue events cross by the
+/// covered operations, whole or staged, and write it with them; the
+/// operations of before write marks with no coverage even when sent one.
+/// A service that knows no covered operation refuses the marks that carry
+/// one rather than answering it wrote them: none of them is written.
+#[test]
+fn the_coverage_crosses_by_its_own_operations_and_a_service_before_it_refuses_them() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::session::written::omitted::{Coverage, Omitted, Point};
+    use crate::domain::ledger::session::written::{Marks, SessionsWritten};
+    use crate::domain::ledger::{LedgerKind, LedgerRow};
+    let kind = "authorization_denied".to_owned();
+    let covered = |w: i64, s: i64| {
+        let mut coverage = Coverage::start(std::slice::from_ref(&kind), EventId::new(0));
+        coverage.through = EventId::new(s);
+        Marks {
+            sessions: SessionsWritten::at(EventId::new(w)),
+            rows: None,
+            omitted: Some(Omitted {
+                coverage,
+                points: vec![Point {
+                    kind: kind.clone(),
+                    at: EventId::new(s),
+                    max_ms: Some(s),
+                    last: None,
+                    timed: None,
+                }],
+            }),
+        }
+    };
+    let (log, _) = crate::domain::ledger::testkit::sessions_across();
+    let rows =
+        crate::domain::ledger::session::session_rows(&log.events, "2030-01-01T00:00:00.000Z");
+    for before in [false, true] {
+        let owner = LeaseToken::new("owner");
+        let (_dir, backend) = claimed_with(&owner, fixed_time());
+        let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+        let db = backend.db.clone();
+        let service = Arc::new(InProcess {
+            backend,
+            token,
+            ops: std::sync::Mutex::default(),
+        });
+        let caller: Arc<dyn crate::application::supervisor_service::ServiceCaller> = if before {
+            Arc::new(BeforeCoverage(service.clone()))
+        } else {
+            service.clone()
+        };
+        let queue = SupervisorQueues::new(
+            caller,
+            crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+        )
+        .queue();
+        let direct = SqliteQueue::open(&db).unwrap();
+        let coverage = || {
+            direct
+                .ledger_marks()
+                .unwrap()
+                .and_then(|marks| marks.omitted)
+                .map(|omitted| omitted.coverage.through)
+        };
+        let batch: Vec<(LedgerRow, Option<LedgerRow>)> =
+            rows.iter().map(|row| (row.clone(), None)).collect();
+        let sent = queue.write_session_rows_marked(&batch, Some(&covered(7, 7)));
+        let mut large = rows[0].clone();
+        large.detail = json!({"text": "a".repeat(crate::domain::queue_service::MAX_REQUEST_BYTES)});
+        if before {
+            assert!(sent.is_err(), "{sent:?}");
+            assert_eq!(direct.ledger_marks().unwrap(), None);
+            assert!(direct.ledger_rows(LedgerKind::Session).unwrap().is_empty());
+            let staged = queue.write_session_rows_marked(&[(large, None)], Some(&covered(9, 9)));
+            assert!(staged.is_err(), "{staged:?}");
+            assert_eq!(direct.ledger_marks().unwrap(), None);
+            assert!(queue.write_ledger_marks(&covered(9, 9)).is_err());
+            assert_eq!(direct.ledger_marks().unwrap(), None);
+            continue;
+        }
+        assert!(sent.unwrap());
+        assert_eq!(coverage(), Some(EventId::new(7)));
+        let points = direct
+            .ledger_omitted_points_after(&kind, EventId::new(0), 9)
+            .unwrap();
+        assert_eq!(points.len(), 1);
+        let over = [(large, Some(rows[0].clone()))];
+        assert!(
+            queue
+                .write_session_rows_marked(&over, Some(&covered(9, 9)))
+                .unwrap()
+        );
+        assert_eq!(coverage(), Some(EventId::new(9)));
+        assert_eq!(
+            service.ops.lock().unwrap().last().map(String::as_str),
+            Some("write_staged_covered_session_rows_over")
+        );
+        // The operation of before writes the marks, not the coverage.
+        let args = json!([[], covered(11, 11)]);
+        let answer = call(
+            &service.backend,
+            &service.token,
+            "write_session_rows_over",
+            args,
+        );
+        assert!(answer.ok, "{answer:?}");
+        assert_eq!(
+            direct.ledger_marks().unwrap().unwrap().sessions.through,
+            EventId::new(11)
+        );
+        assert_eq!(coverage(), Some(EventId::new(9)));
+    }
 }

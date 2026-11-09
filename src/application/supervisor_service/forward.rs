@@ -3028,7 +3028,20 @@ impl SupervisorQueue {
             Option<crate::domain::ledger::LedgerRow>,
         )],
         mark: Option<&impl serde::Serialize>,
+        covered: bool,
     ) -> Result<bool> {
+        // Marks that carry the coverage of the omitted queue events cross by
+        // the operations of their own: a service that knows only the others
+        // refuses them rather than writing the marks without it and answering
+        // that it wrote them.
+        let (whole, staged) = if covered {
+            (
+                "write_covered_session_rows_over",
+                "write_staged_covered_session_rows_over",
+            )
+        } else {
+            ("write_session_rows_over", "write_staged_session_rows_over")
+        };
         let rows: Vec<(&crate::domain::ledger::LedgerRow, Option<String>)> = rows
             .iter()
             .map(|(row, read)| {
@@ -3041,10 +3054,7 @@ impl SupervisorQueue {
             .collect();
         let text = serde_json::to_string(&(&rows, mark))?;
         if text.len() <= LEDGER_ROW_REQUEST_BYTES {
-            return self.remote(
-                "write_session_rows_over",
-                vec![to_value(&rows)?, to_value(mark)?],
-            );
+            return self.remote(whole, vec![to_value(&rows)?, to_value(mark)?]);
         }
         let digest = super::large::digest(&text);
         let parts = super::large::split(&text, super::large::WRITE_PART_BYTES);
@@ -3059,7 +3069,7 @@ impl SupervisorQueue {
                 ],
             )?;
         }
-        self.remote("write_staged_session_rows_over", vec![to_value(&digest)?])
+        self.remote(staged, vec![to_value(&digest)?])
     }
 }
 
@@ -3109,7 +3119,7 @@ impl LedgerStore for SupervisorQueue {
         )],
         mark: Option<&crate::domain::ledger::session::written::SessionsWritten>,
     ) -> Result<bool> {
-        self.send_session_rows(rows, mark)
+        self.send_session_rows(rows, mark, false)
     }
     // R crosses beside the session rows' mark, in the same operation: a
     // service that reads the session rows' mark alone writes that alone.
@@ -3121,7 +3131,8 @@ impl LedgerStore for SupervisorQueue {
         )],
         marks: Option<&crate::domain::ledger::session::written::Marks>,
     ) -> Result<bool> {
-        self.send_session_rows(rows, marks)
+        let covered = marks.is_some_and(|marks| marks.omitted.is_some());
+        self.send_session_rows(rows, marks, covered)
     }
     fn sessions_written(
         &self,

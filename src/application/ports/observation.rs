@@ -164,25 +164,36 @@ pub trait LedgerStore {
     /// [`Self::write_session_rows_over`] with `marks`: the session rows'
     /// mark and, when given, the mark R that the run, task, queue and node
     /// rows record every input up to
-    /// ([`crate::domain::ledger::session::written::RowsWritten`]), all in
-    /// the one transaction. A store that keeps no R writes the session
-    /// rows' mark alone, and gives no R ([`Self::ledger_marks`]).
+    /// ([`crate::domain::ledger::session::written::RowsWritten`]), and the
+    /// coverage of the omitted queue events they carry, all in the one
+    /// transaction. A store that keeps no R writes the session rows' mark
+    /// alone, and gives no R ([`Self::ledger_marks`]). False, nothing
+    /// written, as for a row written since its read, when the coverage
+    /// conflicts with the store's
+    /// ([`crate::domain::ledger::session::written::omitted::Coverage::conflicts`]);
+    /// a store that keeps no coverage refuses marks that carry one, so that
+    /// no caller takes them for written.
     fn write_session_rows_marked(
         &self,
         rows: &[(LedgerRow, Option<LedgerRow>)],
         marks: Option<&crate::domain::ledger::session::written::Marks>,
     ) -> Result<bool> {
+        anyhow::ensure!(
+            marks.is_none_or(|marks| marks.omitted.is_none()),
+            "this store keeps no coverage of the omitted queue events"
+        );
         self.write_session_rows_over(rows, marks.map(|marks| &marks.sessions))
     }
     /// Write `marks` alone in one transaction, as
     /// [`Self::write_session_rows_marked`] with no row: what builds the
     /// ledger writes so an R that moved with no session row to write and
-    /// the session rows' mark as the store holds it.
+    /// the session rows' mark as the store holds it. False, nothing
+    /// written, when the coverage they carry conflicts with the store's.
     fn write_ledger_marks(
         &self,
         marks: &crate::domain::ledger::session::written::Marks,
-    ) -> Result<()> {
-        self.write_session_rows_marked(&[], Some(marks)).map(drop)
+    ) -> Result<bool> {
+        self.write_session_rows_marked(&[], Some(marks))
     }
     /// The store's marks, if it holds the session rows' one: with R when it
     /// holds that too ([`crate::domain::ledger::session::written::rows_written_through`]).
@@ -191,8 +202,33 @@ pub trait LedgerStore {
             crate::domain::ledger::session::written::Marks {
                 sessions,
                 rows: None,
+                omitted: None,
             }
         }))
+    }
+    /// At most `limit` points of `kind` of the coverage of the omitted
+    /// queue events ([`crate::domain::ledger::session::written::omitted::Point`])
+    /// past the position `after`, by position: the store seeks them by
+    /// their key. A store that keeps no points refuses it, so that no
+    /// reader takes a store of none for a kind of no point.
+    fn ledger_omitted_points_after(
+        &self,
+        kind: &str,
+        after: EventId,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::ledger::session::written::omitted::Point>> {
+        let _ = (kind, after, limit);
+        anyhow::bail!("this store keeps no points of the omitted queue events")
+    }
+    /// The last point of `kind` whose M is before `ms`, if any: the store
+    /// seeks it by an index of M, which only rises with the position.
+    fn ledger_omitted_point_before_ms(
+        &self,
+        kind: &str,
+        ms: i64,
+    ) -> Result<Option<crate::domain::ledger::session::written::omitted::Point>> {
+        let _ = (kind, ms);
+        anyhow::bail!("this store keeps no points of the omitted queue events")
     }
     /// The row of `kind` and `key`, if there is one.
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;

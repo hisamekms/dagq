@@ -10,6 +10,7 @@ use crate::domain::run_phase::{Attempt, Phase, PhaseChange};
 use crate::domain::{EventId, RunEvent, RunId, TaskId};
 
 pub(crate) mod frozen;
+pub(crate) mod omitted;
 
 pub(crate) const T0: i64 = 1_900_000_000;
 

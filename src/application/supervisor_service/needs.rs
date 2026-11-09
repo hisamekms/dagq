@@ -380,6 +380,8 @@ const SUPERVISE: &[&str] = &[
     "write_staged_ledger_row_over",
     "write_session_rows_over",
     "write_staged_session_rows_over",
+    "write_covered_session_rows_over",
+    "write_staged_covered_session_rows_over",
 ];
 
 /// The operations of one capability other than `scheduler.supervise`.

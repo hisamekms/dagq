@@ -6,12 +6,31 @@
 use super::*;
 use crate::application::ports::frozen::{check, values};
 use crate::domain::ledger::owner::{self, Owner};
+use crate::domain::ledger::session::written::omitted::Omission;
 use crate::domain::ledger::testkit::frozen::{Input, Step, THREE, inputs};
+use crate::domain::ledger::testkit::omitted::counted;
 
 /// The store after `input`'s steps.
 fn built(input: &Input) -> Memory {
+    built_with(input, None, |_, _| {})
+}
+
+/// The store after `input`'s steps by builders omitting `omission`'s kinds
+/// (the version's with none), `after` given the store and the builder after
+/// each step.
+fn built_with(
+    input: &Input,
+    omission: Option<&Omission>,
+    mut after: impl FnMut(&Memory, &Builder),
+) -> Memory {
     let memory = Memory::default();
-    let mut builder = Builder::default();
+    let omit = |mut builder: Builder| {
+        if let Some(omission) = omission {
+            builder.set_omission(omission.clone());
+        }
+        builder
+    };
+    let mut builder = omit(Builder::default());
     for step in &input.steps {
         match *step {
             Step::Arrive(n) => {
@@ -32,9 +51,10 @@ fn built(input: &Input) -> Memory {
                 pass(&memory, &mut builder, secs);
                 memory.batch_fails.set(0);
             }
-            Step::Start(secs) => builder = start_builder(&memory, ms(secs)).unwrap(),
-            Step::FromTheStart => builder = Builder::default(),
+            Step::Start(secs) => builder = omit(start_builder(&memory, ms(secs)).unwrap()),
+            Step::FromTheStart => builder = omit(Builder::default()),
         }
+        after(&memory, &builder);
     }
     memory
 }
@@ -299,4 +319,153 @@ fn an_event_of_no_time_is_the_latest_and_no_time_cursors_answer() {
         named(&values, "stats position")["window_ms"][0],
         json!(crate::domain::stats::timestamp_millis(&first.created_at).unwrap())
     );
+}
+
+/// A point every so many events of a kind, few enough that the inputs
+/// place several.
+const EVERY: u64 = 3;
+
+/// The three kinds omitted, as a builder of the next version omits them.
+fn three() -> Omission {
+    Omission::of(THREE, EVERY)
+}
+
+/// With the three kinds covered, after every step of each input the store
+/// holds C at 0 (each input's builder reads from the first event), S at
+/// the position read, and each kind's summary and points those counted of
+/// the input's events in (C, S]: (vii)'s runs' and tasks' events of the
+/// three kinds in the points' count alone, (viii)'s events of no time in L
+/// alone, (v)'s clock turned back in D. The readers' values are those
+/// fixed: no reader reads the coverage, and the rows are those of now.
+#[test]
+fn the_coverage_of_each_input_is_counted_of_c_to_s_after_every_step() {
+    let all = inputs();
+    let mut each = Vec::new();
+    for input in &all {
+        let mut covered = 0;
+        let memory = built_with(input, Some(&three()), |memory, _| {
+            let Some(coverage) = memory.omitted.borrow().clone() else {
+                return;
+            };
+            covered += 1;
+            assert_eq!(coverage.from, EventId::new(0), "{}", input.name);
+            let events = memory.events.borrow();
+            let (summaries, points) = counted(
+                &events,
+                &coverage.kinds,
+                (coverage.from, coverage.through),
+                EVERY,
+            );
+            assert_eq!(coverage.summaries, summaries, "{}", input.name);
+            let held: Vec<_> = memory.points.borrow().values().cloned().collect();
+            assert_eq!(held, points, "{}", input.name);
+        });
+        assert!(covered > 0, "{}", input.name);
+        each.push((input, values(&memory, input)));
+    }
+    check(&each);
+
+    let of = |name: &str| all.iter().find(|input| input.name == name).unwrap();
+    // (i) S at the last event read, where R is.
+    let input = of("reached");
+    let memory = built_with(input, Some(&three()), |_, _| {});
+    let s = memory.omitted.borrow().as_ref().unwrap().through;
+    assert_eq!(
+        (s, r_of(&memory).events),
+        (input.log.last(), input.log.last())
+    );
+    // (vii) The runs' and tasks' events of the three kinds are in no L, T,
+    // M or D (those counted of the queue's alone), and in the points' count.
+    let input = of("queue and run");
+    let memory = built_with(input, Some(&three()), |_, _| {});
+    let coverage = memory.omitted.borrow().clone().unwrap();
+    let theirs: Vec<&RunEvent> = input
+        .log
+        .events
+        .iter()
+        .filter(|event| THREE.contains(&event.kind.as_str()))
+        .filter(|event| owner::owner(event) != Owner::Queue)
+        .collect();
+    assert!(theirs.len() > 60);
+    for kind in THREE {
+        let summary = &coverage.summaries[kind];
+        let of_kind = input
+            .log
+            .events
+            .iter()
+            .filter(|event| event.kind.as_str() == kind);
+        assert_eq!(
+            summary.seen,
+            u64::try_from(of_kind.clone().count()).unwrap(),
+            "{kind}"
+        );
+        let queue: Vec<&RunEvent> = of_kind
+            .filter(|event| owner::owner(event) == Owner::Queue)
+            .collect();
+        assert_eq!(summary.last, queue.last().map(|event| event.id), "{kind}");
+        for event in theirs.iter().filter(|event| event.kind.as_str() == kind) {
+            assert_ne!(summary.last, Some(event.id), "{kind}");
+            assert_ne!(summary.timed, Some(event.id), "{kind}");
+        }
+    }
+    // The last token, a run's of no row, is no kind's L; a point may fall on
+    // it, its values the queue's before it.
+    let token = input.id(input.log.events.len() - 3);
+    assert!(
+        coverage
+            .summaries
+            .values()
+            .all(|summary| summary.last != Some(token))
+    );
+
+    // (viii) Of each kind, the last event has no time: it is L, and T is the
+    // timed one before it; M is that one's time.
+    let input = of("timeless");
+    let memory = built_with(input, Some(&three()), |_, _| {});
+    let coverage = memory.omitted.borrow().clone().unwrap();
+    let n = input.log.events.len();
+    for k in [n - 5, n - 3, n - 1] {
+        let (timed, timeless) = (&input.log.events[k - 1], &input.log.events[k]);
+        let summary = &coverage.summaries[timeless.kind.as_str()];
+        assert_eq!(summary.last, Some(timeless.id));
+        assert_eq!(summary.timed, Some(timed.id));
+        assert_eq!(
+            summary.max_ms,
+            crate::domain::stats::timestamp_millis(&timed.created_at)
+        );
+    }
+
+    // (v) The clock turned back past other kinds' events: each kind's last
+    // event, timed before a mark before it, is its T and its time M, and D
+    // is 0, as each kind's own times rise (D is of a kind's events alone).
+    let input = of("clock back");
+    let memory = built_with(input, Some(&three()), |_, _| {});
+    let coverage = memory.omitted.borrow().clone().unwrap();
+    for kind in THREE {
+        let last = input
+            .log
+            .events
+            .iter()
+            .rfind(|event| event.kind.as_str() == kind)
+            .unwrap();
+        let summary = &coverage.summaries[kind];
+        assert_eq!(summary.timed, Some(last.id), "{kind}");
+        assert_eq!(
+            summary.max_ms,
+            crate::domain::stats::timestamp_millis(&last.created_at),
+            "{kind}"
+        );
+        assert_eq!(summary.back_ms, 0, "{kind}");
+    }
+}
+
+/// The version's builder omits no kind: it writes no coverage and no
+/// point, and reads no mark for one.
+#[test]
+fn a_builder_of_no_kind_writes_no_coverage() {
+    for input in inputs() {
+        let memory = built(&input);
+        assert_eq!(*memory.omitted.borrow(), None, "{}", input.name);
+        assert!(memory.points.borrow().is_empty(), "{}", input.name);
+    }
 }

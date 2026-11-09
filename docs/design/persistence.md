@@ -100,6 +100,8 @@ runのファイル・台帳の行・古いeventは通さない。
 
 `members`: 人の登録簿。
 runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`image_publish.rs`
+`ledger_omitted_points`: 台帳の写さないeventの被覆の点（[計測](measurement.md#台帳を作る係)）。
+被覆と点はW・Rと同じtransactionで書き、消さない。
 
 表ごとの役割と列の意味は、表を作るmigrationのコメントと表を持つstoreと`src/domain/`の型のdoc commentが持つ。
 
@@ -115,7 +117,7 @@ runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`
   所属を変える書き込みは同じtransactionで、goalに入れるtaskのownerを空にし、goalから外すtaskに外す前のgoalのownerを写す。
 - 認可の後の変化: 計画系のコマンドは認可に使ったtaskの状態を渡し、storeはトランザクションを開いた直後に照合して、変わっていれば何も書かずに拒む（[Authorization](authorization.md)）。
   supervisor（`supervisor_needs`）と着地のintegrator（`integrator_scope`）の操作はserviceがcapabilityで認可し、taskの状態は照合しない。
-- runのdomainの拒否は、トランザクションが巻き戻ってeventに残せないので、run directoryの`refusals.log`に1行で残す（`runtime_store::REFUSALS_LOG`）。
+- runのdomainの拒否は、トランザクションが巻き戻ってeventに残せないので、run directoryの`refusals.log`に1行で残す。
 
 ## asks
 
@@ -217,7 +219,6 @@ schemaが安定したと人が決めるまで、SQLiteのCHECK制約を使わな
   読む側がfail closedの列への追加は、古いバイナリが読めないので非互換の宣言のmigrationで下限を上げる（表は作り直さない）。
 - kindの規則（[ADR-0073](../adr/0073-kind-additions-are-compatible.md)）: 書き込み口はkindを`EventKind`で受け、kindに結び付く規則は書く前に検査する。
   queueのeventのkindは`EventKind::is_queue`にも足す。
-- 新しいmigrationにCHECKを書かないことは`scripts/check-migration-numbers.sh`が検査する。
 
 ## Queue location
 
@@ -277,7 +278,6 @@ SQLite adapterは`src/infrastructure/search.rs`、索引とtriggerは`migrations
 ## 関連（related）
 
 `dagq related TASK`（ADR-0063決定4）は表を足さず、既存の表と`search_index`を読む。
-`SearchIndex`が関連のtaskと着地のcommitを読む。
 SQLite adapterは`src/infrastructure/related.rs`、手がかりと点数と重みは`src/domain/related.rs`。
 
 ## CIの見張り

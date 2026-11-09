@@ -102,11 +102,12 @@ fn r_is_given_only_with_a_w_and_an_r_of_this_version_and_no_later_than_w() {
     let alone = Marks {
         sessions: SessionsWritten::at(EventId::new(5)),
         rows: None,
+        omitted: None,
     };
     assert_eq!(rows_written_through(Some(&alone), &heads), None);
     let marks = Marks {
         rows: Some(rows_at(4)),
-        ..alone
+        ..alone.clone()
     };
     assert_eq!(
         rows_written_through(Some(&marks), &heads),
@@ -117,7 +118,7 @@ fn r_is_given_only_with_a_w_and_an_r_of_this_version_and_no_later_than_w() {
             ledger_v: LEDGER_V - 1,
             ..rows_at(4)
         }),
-        ..alone
+        ..alone.clone()
     };
     assert_eq!(rows_written_through(Some(&older), &heads), None);
     let no_w = Marks {
@@ -125,13 +126,13 @@ fn r_is_given_only_with_a_w_and_an_r_of_this_version_and_no_later_than_w() {
             ledger_v: LEDGER_V + 1,
             ..alone.sessions
         },
-        ..marks
+        ..marks.clone()
     };
     assert_eq!(rows_written_through(Some(&no_w), &heads), None);
     // An R past W (written before a W set back) is cut back to W.
     let past = Marks {
         rows: Some(rows_at(9)),
-        ..alone
+        ..alone.clone()
     };
     let r = rows_written_through(Some(&past), &heads).unwrap();
     assert_eq!(r.events, EventId::new(5));
@@ -145,6 +146,7 @@ fn the_marks_and_the_session_rows_mark_read_as_each_other() {
     let marks = Marks {
         sessions: SessionsWritten::at(EventId::new(5)),
         rows: Some(rows_at(4)),
+        omitted: None,
     };
     let text = serde_json::to_string(&marks).unwrap();
     assert_eq!(serde_json::from_str::<Marks>(&text).unwrap(), marks);
@@ -157,7 +159,7 @@ fn the_marks_and_the_session_rows_mark_read_as_each_other() {
         serde_json::from_str::<Marks>(&alone).unwrap(),
         Marks {
             rows: None,
-            ..marks
+            ..marks.clone()
         }
     );
 }
@@ -172,12 +174,13 @@ fn a_builder_goes_on_only_from_an_r_that_holds_the_time_read_at_its_position() {
     let alone = Marks {
         sessions: SessionsWritten::at(EventId::new(5)),
         rows: None,
+        omitted: None,
     };
     assert_eq!(rows_to_go_on_from(None, &heads), None);
     assert_eq!(rows_to_go_on_from(Some(&alone), &heads), None);
     let held = Marks {
         rows: Some(rows_at(4)),
-        ..alone
+        ..alone.clone()
     };
     assert_eq!(
         rows_to_go_on_from(Some(&held), &heads),
@@ -185,7 +188,7 @@ fn a_builder_goes_on_only_from_an_r_that_holds_the_time_read_at_its_position() {
     );
     let at_w = Marks {
         rows: Some(rows_at(5)),
-        ..alone
+        ..alone.clone()
     };
     assert_eq!(
         rows_to_go_on_from(Some(&at_w), &heads),
@@ -193,7 +196,7 @@ fn a_builder_goes_on_only_from_an_r_that_holds_the_time_read_at_its_position() {
     );
     let none_read = Marks {
         rows: Some(RowsWritten::at(rows_at(4).through, i64::MIN)),
-        ..alone
+        ..alone.clone()
     };
     assert_eq!(
         rows_to_go_on_from(Some(&none_read), &heads),
@@ -204,13 +207,13 @@ fn a_builder_goes_on_only_from_an_r_that_holds_the_time_read_at_its_position() {
             read_ms: None,
             ..rows_at(4)
         }),
-        ..alone
+        ..alone.clone()
     };
     assert!(rows_written_through(Some(&no_time), &heads).is_some());
     assert_eq!(rows_to_go_on_from(Some(&no_time), &heads), None);
     let cut = Marks {
         rows: Some(rows_at(9)),
-        ..alone
+        ..alone.clone()
     };
     assert!(rows_written_through(Some(&cut), &heads).is_some());
     assert_eq!(rows_to_go_on_from(Some(&cut), &heads), None);
@@ -227,6 +230,7 @@ fn clock_work_keeps_a_usable_certificate_and_never_retreats() {
             time_pending: Some(READ_MS + 100),
             ..rows_at(4)
         }),
+        omitted: None,
     };
     let mut heads = heads();
     // Older session rows are also compatible with the current mark.
@@ -243,7 +247,7 @@ fn clock_work_keeps_a_usable_certificate_and_never_retreats() {
                     time_pending: Some(pending),
                     ..marks.rows.unwrap()
                 }),
-                ..marks
+                ..marks.clone()
             }
         );
         assert_eq!(
@@ -266,6 +270,7 @@ fn clock_work_without_a_usable_certificate_starts_every_input_at_zero() {
             time_pending: Some(READ_MS + 100),
             ..rows_at(4)
         }),
+        omitted: None,
     };
     let until = READ_MS + 10;
     let zero = Marks {
@@ -274,6 +279,7 @@ fn clock_work_without_a_usable_certificate_starts_every_input_at_zero() {
             time_pending: Some(until),
             ..RowsWritten::at(Cursors::default(), i64::MIN)
         }),
+        omitted: None,
     };
     let mut cases = vec![
         ("no marks", None),
@@ -281,7 +287,7 @@ fn clock_work_without_a_usable_certificate_starts_every_input_at_zero() {
             "W alone",
             Some(Marks {
                 rows: None,
-                ..valid
+                ..valid.clone()
             }),
         ),
         (
@@ -291,14 +297,14 @@ fn clock_work_without_a_usable_certificate_starts_every_input_at_zero() {
                     read_ms: None,
                     ..valid.rows.unwrap()
                 }),
-                ..valid
+                ..valid.clone()
             }),
         ),
         (
             "W cuts R",
             Some(Marks {
                 sessions: SessionsWritten::at(EventId::new(3)),
-                ..valid
+                ..valid.clone()
             }),
         ),
     ];
@@ -310,7 +316,7 @@ fn clock_work_without_a_usable_certificate_starts_every_input_at_zero() {
                     ledger_v: version,
                     ..valid.sessions
                 },
-                ..valid
+                ..valid.clone()
             }),
         ));
         cases.push((
@@ -320,7 +326,7 @@ fn clock_work_without_a_usable_certificate_starts_every_input_at_zero() {
                     ledger_v: version,
                     ..valid.rows.unwrap()
                 }),
-                ..valid
+                ..valid.clone()
             }),
         ));
     }
@@ -351,6 +357,7 @@ fn the_time_read_crosses_with_r_and_an_r_with_none_reads_as_none() {
     let marks = Marks {
         sessions: SessionsWritten::at(EventId::new(5)),
         rows: Some(RowsWritten::at(rows_at(4).through, i64::MIN)),
+        omitted: None,
     };
     let text = serde_json::to_string(&marks).unwrap();
     assert_eq!(serde_json::from_str::<Marks>(&text).unwrap(), marks);
@@ -369,6 +376,7 @@ fn restart_reasons_explain_why_r_cannot_be_used() {
     let mut marks = Marks {
         sessions: SessionsWritten::at(EventId::new(20)),
         rows: None,
+        omitted: None,
     };
     assert_eq!(restart_reason(Some(&marks), &[]), Some("no_rows_mark"));
     marks.rows = Some(rows_at(10));
@@ -405,6 +413,7 @@ fn take_offset_round_trips_and_defaults_for_existing_marks() {
     let marks = Marks {
         sessions: SessionsWritten::at(EventId::new(10)),
         rows: Some(rotated),
+        omitted: None,
     };
     assert_eq!(
         rows_to_go_on_from(Some(&marks), &[]),

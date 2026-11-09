@@ -48,6 +48,12 @@ use crate::domain::{
     supervisor_life::{Lives, supervisor_of},
 };
 
+/// The kinds of the queue's events not copied to queue rows (ADR-t4644-1
+/// decision 1): none in this version. What builds the ledger holds of the
+/// queue's events of these kinds the coverage of
+/// [`super::session::written::omitted`] instead.
+pub const OMITTED_KINDS: &[EventKind] = &[];
+
 /// What a queue row the store holds says of itself that [`QueueBook`] is
 /// made again by ([`QueueBook::from_heads`]): its head ([`LedgerHead`],
 /// the ids of its records and not the records), its task, its subject's
