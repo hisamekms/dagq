@@ -2983,3 +2983,68 @@ pub trait RunnerStore {
         now: i64,
     ) -> Result<Option<crate::domain::runner_registration::Runner>>;
 }
+
+/// A run's fenced lease on a runner and its per-generation records
+/// (ADR-t3987-1 decisions 1 and 2). Every change is one write transaction
+/// that judges the current lease by [`crate::domain::runner_lease`] at the
+/// control side's `now_ms` and updates it on the generation it read; a refused
+/// call writes nothing and answers [`crate::domain::runner_lease::Verdict::LeaseLost`].
+pub trait RunnerLeaseStore {
+    /// Grant `run_id` to `runner_id` at the next generation, unless the
+    /// current lease is still held.
+    fn grant_runner_lease(
+        &self,
+        run_id: &str,
+        runner_id: &str,
+        now_ms: i64,
+    ) -> Result<crate::domain::runner_lease::Grant>;
+    /// A liveness, result or run branch report of `report`'s generation:
+    /// accepted, it extends the lease and records `head` as that
+    /// generation's accepted head.
+    fn report_runner_lease(
+        &self,
+        run_id: &str,
+        report: crate::domain::runner_lease::Report<'_>,
+        head: Option<&str>,
+        now_ms: i64,
+    ) -> Result<crate::domain::runner_lease::Verdict>;
+    /// The runner gives its lease back.
+    fn release_runner_lease(
+        &self,
+        run_id: &str,
+        report: crate::domain::runner_lease::Report<'_>,
+        now_ms: i64,
+    ) -> Result<crate::domain::runner_lease::Verdict>;
+    /// The control side takes away the held lease of `generation`, whether
+    /// or not it ran out: `Accept` (with the lease's end it had) when it was
+    /// the held one, `LeaseLost` when there was nothing of it to take away.
+    fn lose_runner_lease(
+        &self,
+        run_id: &str,
+        generation: i64,
+    ) -> Result<crate::domain::runner_lease::Verdict>;
+    /// Mark that `generation`'s ref was read back from GitHub at `head`: a
+    /// generation up to one above the current one, since a hand-over verifies
+    /// the next generation's ref before it grants that generation.
+    fn verify_runner_ref(
+        &self,
+        run_id: &str,
+        generation: i64,
+        head: &str,
+        now_ms: i64,
+    ) -> Result<()>;
+    fn runner_lease(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::domain::runner_lease::RunnerLease>>;
+    /// The newest head accepted from the run's reports.
+    fn accepted_head(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::domain::runner_lease::AcceptedHead>>;
+    /// The newest generation whose ref was verified.
+    fn verified_ref(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::domain::runner_lease::VerifiedRef>>;
+}

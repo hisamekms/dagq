@@ -5,9 +5,11 @@
 //! which removes its row; leader cases release their last holder.
 mod cases;
 mod goal_owners;
+mod runner_leases;
 mod search_writes;
 pub use cases::*;
 pub use goal_owners::*;
+pub use runner_leases::*;
 pub use search_writes::postgres_search_writes;
 
 use super::sql_exec::TransactionEntries;
@@ -23,6 +25,7 @@ pub trait ContractStore:
     + WriteLeaderStore
     + crate::application::queue_service::MemberStore
     + crate::application::RunnerStore
+    + crate::application::RunnerLeaseStore
     + Sized
 {
     fn with_identity(self, identity: WriteIdentity) -> Self;
@@ -83,6 +86,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("goal owner moves", goal_owner_moves::<S, F>),
         ("goal owner move undone", goal_owner_move_undone::<S, F>),
         ("runner credentials", runner_credentials::<S, F>),
+        ("runner leases", runner_leases::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

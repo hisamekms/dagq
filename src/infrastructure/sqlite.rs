@@ -3259,6 +3259,10 @@ mod store_contract_tests {
         contract(|open| store_contract::runner_credentials(&open));
     }
     #[test]
+    fn runner_leases() {
+        contract(|open| store_contract::runner_leases(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

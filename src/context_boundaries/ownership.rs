@@ -359,6 +359,8 @@ pub(super) const TABLES: &[Table] = &[
     table("runner_codes", Execution),
     table("runner_refresh", Execution),
     table("runner_tokens", Execution),
+    table("runner_leases", Execution),
+    table("runner_lease_records", Execution),
     table("dagq_schema", Host), // the Postgres series' schema_floor and user_version
     table("binary_updates", Host),
     table("headless_jobs", Host),
@@ -413,6 +415,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/event_actor.rs", Shared), // EventStore
     store("src/infrastructure/members.rs", Host),
     store("src/infrastructure/runner_registration.rs", Execution),
+    store("src/infrastructure/runner_leases.rs", Execution),
     store("src/infrastructure/write_leader.rs", Shared), // WriteLeaderStore
     store("src/infrastructure/postgres/migrate.rs", Host), // the Postgres series' version
 ];
@@ -603,6 +606,7 @@ pub(super) const PORTS: &[Port] = &[
     port("ContainerRuntime", Public(Only(&[Host]))), // whether the container runtime can run a target now; host only wraps it in BrokerGate, which shows whether the broker runs
     port("RecordingQueue", Internal),
     port("RunnerStore", Internal),
+    port("RunnerLeaseStore", Internal),
     port("RunFiles", Public(All)), // not classified by architecture.md; public to the contexts that use it today
     port("AgentProvider", Public(All)), // not classified by architecture.md; public to the contexts that use it today
     port("TurnReader", Internal),

@@ -78,6 +78,7 @@ pub mod review_secrets;
 pub mod run_container;
 pub mod run_env;
 pub mod run_files;
+pub mod runner_leases;
 pub mod runner_registration;
 pub mod runtime_store;
 pub mod sccache;
