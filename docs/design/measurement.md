@@ -152,7 +152,7 @@ stats・kpi・reportの全ての欄は、行を窓と絞り込みで選んで返
 統計のmoduleはこの関数が返す値だけを取り、StateStore・run dir・process・Gitを読まない。
 窓の当て方・絞り込み・旧方式と走っているrunの扱い・欄ごとの元の行は`domain::ledger::window`、今の名前の意味の違いは`ledger::read`のdoc commentが持つ。
 
-- kpiの工程の名前と、hostの設定の目標の読み替えは`domain::kpi::window`のmodule docが持つ（[ADR-t1662-1](../adr/2026-10-04-t1662-1-runs-are-covering-phase-intervals-folded-into-a-ledger.md)が[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)決定1をamends）。
+- kpiの工程の名前と、hostの設定の目標の読み替えは`domain::kpi::window`のmodule docが持つ（ADR-t1662-1）。
 - 新しい出力は所要時間とslotを握った時間の2本でタグごとの内訳とunattributedを出し、`change`と`area`で層に分ける。
 
 ### 欠測と集約の契約
@@ -196,12 +196,12 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
 - **送る側**: executor（session wrapper、`integrate`とe2eの検証、非対話のjobを起動するプロセス）がstepと中から測った資源をTelemetrySinkに送る。
   agentは送らない。
   supervisorは工程・claim・slot・ask・`environment_attached`・nodeの時系列・外から測れる資源を自分で書く。
-- **集める口**: executorはagentの出力を`StepReader`で、検証は流したコマンドからstepを作り、30秒ごとと終わりに送り、送れなくても結果を変えない（送り直しと置き場は`step_report`）。
+- **集める口**: executorはagentの出力を`StepReader`で、検証は流したコマンドからstepを作り、30秒ごとと終わりに（agentを待つcommandのagentが名づけるsessionは終わりに）送り、送れなくても結果を変えない（送り直しと置き場は`step_report`）。
 - **TelemetrySink**: portで、今のアダプタはqueue serviceの`telemetry_report`（[Queue service](queue-service.md#telemetry_report)）。
 - **principal**: role `executor-telemetry`。
   制御側の依頼でserviceが対象ごとに発行し、制御側が失効させ、agentに渡さない（詳細は[Queue service](queue-service.md#principalとtoken)）。
 - **所属**: runの対象のstepはrunの行に畳み、runを持たない対象のstepはSessionStepStoreに持ってsessionの行で読む。
-- **sessionの登録**: 制御側がsessionを起動の前に、agentが名前を決めるsession（Codexのthread）は出力で読んだ時点で対象に登録する（経路は`application::telemetry_tokens`のmodule doc）。
+- **sessionの登録**: 制御側がsessionを起動の前に、agentが名前を決めるsession（Codexのthread）は出力で読んだ時点で（agentを待つcommandはagentの終わりに）対象に登録する（経路は`application::telemetry_tokens`のmodule doc）。
 - **差し替える口**: 送る口・環境と資源の口（[実行環境と資源](measurement-environment.md)、適合testも）。
 - **OpenTelemetry**: [対応の表](measurement-otel.md)で写し、記録の経路にしない。
 
