@@ -51,6 +51,10 @@ pub(crate) fn fixture() -> Fixture {
     let mut queue = common::template::queue(&db);
     let blocker = add(&mut queue, "blocker", &[], Priority::Normal);
     assert_eq!(blocker, TaskId::new(1));
+    // Service takeover advances the generation. Finish it before callers
+    // open the fixture's stores or a wrapper retains its store for a turn.
+    drop(queue);
+    common::cli::prepare_service(&db);
     let claude = dir.path().join("claude-stub");
     crate::common::template::script(&claude, "#!/bin/sh\nprintf 'stub\\n'\n");
 

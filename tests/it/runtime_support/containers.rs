@@ -496,6 +496,9 @@ impl ContainerQueue {
         if let Some(turn) = turn {
             fs::write(state.join("turn.sh"), turn).unwrap();
         }
+        // A hold or replan may use the CLI while a wrapper retains its
+        // store. Take leadership before that wrapper can open the queue.
+        common::cli::prepare_service(&db);
         let mut backend = TestWorkspace::new(&db, false, "exit 99");
         backend.headless = Some(PathBuf::from("/nonexistent/claude-on-the-host"));
         backend.containers = Some(containers.clone());

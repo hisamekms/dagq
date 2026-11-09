@@ -443,6 +443,19 @@ pub fn fixture() -> (Fixture, PathBuf, PathBuf) {
 /// [`fixture`] with the queue in `queue_dir`, relative to the fixture's
 /// directory (made), the repository staying beside it.
 pub fn fixture_with_queue_in(queue_dir: &Path) -> (Fixture, PathBuf, PathBuf) {
+    let fixture = unserved_fixture_with_queue_in(queue_dir);
+    // Take leadership before callers open stores retained across a turn.
+    common::cli::prepare_service(&fixture.2);
+    fixture
+}
+
+/// A fixture for tests of service startup and outages, which must control
+/// when the first takeover happens instead of opening ordinary stores first.
+pub fn fixture_without_service() -> (Fixture, PathBuf, PathBuf) {
+    unserved_fixture_with_queue_in(Path::new(""))
+}
+
+fn unserved_fixture_with_queue_in(queue_dir: &Path) -> (Fixture, PathBuf, PathBuf) {
     let (dir, owner) = common::cleanup::owned_short_temp_dir();
     let repo = dir.path().join("repo's directory");
     fs::create_dir(&repo).unwrap();

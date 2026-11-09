@@ -612,7 +612,8 @@ fn service_status_opens_no_queue_whether_the_service_answers_or_not() {
 #[test]
 fn the_supervisor_records_the_outage_outside_the_queue_and_holds_its_claims() {
     use crate::runtime_support::{
-        TestWorkspace, VALID_AGENT, fixture, supervise_options, supervise_with,
+        TestWorkspace, VALID_AGENT, fixture_without_service as fixture, supervise_options,
+        supervise_with,
     };
     let (_fixture, repo, db) = fixture();
     let queue_dir = db.canonicalize().unwrap().parent().unwrap().to_path_buf();

@@ -20,6 +20,10 @@ use std::time::Duration;
 /// The caller's identity, retained by the service that opened the store.
 /// Until startup takes over explicitly, init and open inherit the current row,
 /// including the unheld generation zero. It is never refreshed by a write.
+/// Opening a store does not acquire leadership: a store retained across
+/// takeover still carries the earlier generation and must be fenced. Callers
+/// that also start a service must finish its takeover before retaining stores
+/// for ordinary work.
 #[derive(Clone, Debug)]
 pub struct WriteIdentity {
     pub holder: Option<String>,

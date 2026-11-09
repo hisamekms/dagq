@@ -362,7 +362,7 @@ fn submit_improvement(
 #[test]
 fn kpi_counts_the_improvement_proposals_running() {
     use dagq::domain::{FindingTarget, NewFinding, PlannerOrigin};
-    let (dir, db) = queue();
+    let (dir, db) = served_queue();
     let config = dir.path().join("config");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let mut finding = |subject: &str| {

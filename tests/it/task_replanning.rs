@@ -10,7 +10,7 @@
 //! `list` and `show` say. The condition mappings' writer deletes an
 //! acceptance item at most once per operation.
 
-use crate::common::cli::{ok, ok_as, queue};
+use crate::common::cli::{ok, ok_as, served_queue as queue};
 use crate::common::queue::{base, new_task};
 use crate::common::replans::{args, as_role, claimed, denials, park, request};
 use dagq::domain::EventKind;

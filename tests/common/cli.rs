@@ -21,6 +21,21 @@ pub fn queue() -> (TempDir, PathBuf) {
     (dir, db)
 }
 
+/// A queue whose service has taken leadership before the caller opens any
+/// fixture connections. A connection opened earlier keeps the previous
+/// generation and must be fenced when service startup takes over.
+pub fn served_queue() -> (TempDir, PathBuf) {
+    let (dir, db) = queue();
+    prepare_service(&db);
+    (dir, db)
+}
+
+/// Complete local service startup with the same read environment as
+/// `invoke_with` before a fixture lends out long-lived store connections.
+pub fn prepare_service(db: &Path) {
+    ok(db, &["list"]);
+}
+
 pub fn invoke(db: &Path, args: &[&str]) -> Output {
     invoke_as(None, db, args)
 }

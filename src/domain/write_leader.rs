@@ -170,5 +170,13 @@ mod tests {
         assert_eq!(fresh.holder, None);
         assert_eq!(takeover(&fresh, 10_000, false), Takeover::Take);
         assert_eq!(takeover(&fresh, 10_000, true), Takeover::Take);
+        // Fixture setup may have written at generation zero, extending
+        // its lease without a holder. Only local lock proof bypasses it.
+        let written = row(0, 40_000);
+        assert_eq!(
+            takeover(&written, 10_000, false),
+            Takeover::Wait { until_ms: 40_000 }
+        );
+        assert_eq!(takeover(&written, 10_000, true), Takeover::Take);
     }
 }

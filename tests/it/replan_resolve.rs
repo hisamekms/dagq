@@ -5,7 +5,7 @@
 //! on through the restore and the new session, which hold it `blocked`
 //! again when they fail, and a snapshot not as saved refuses every choice.
 
-use crate::common::cli::{ok, ok_as, queue};
+use crate::common::cli::{ok, ok_as, served_queue as queue};
 use crate::common::queue::{base, new_task};
 use crate::common::replans::{args, as_role, claimed, denials, park, request};
 use dagq::domain::EventKind;

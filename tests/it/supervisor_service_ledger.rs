@@ -10,7 +10,9 @@
 //! queue instead.
 
 use crate::common;
-use crate::runtime_support::{fixture, head_commit};
+// These cases own service startup: its event is an input to the queue
+// ledger, and startup precedes every retained store connection.
+use crate::runtime_support::{fixture_without_service as fixture, head_commit};
 
 use std::sync::Arc;
 

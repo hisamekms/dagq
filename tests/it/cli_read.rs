@@ -1267,7 +1267,7 @@ fn status_and_doctor_show_the_codex_worker_confined() {
         Provider,
         worker::{ProviderCheck, WorkerMode},
     };
-    let (_dir, db) = queue();
+    let (_dir, db) = common::cli::served_queue();
     let check = |provider, found, modes: &[WorkerMode]| ProviderCheck {
         provider,
         executable: format!("/bin/{}", Provider::as_str(provider)),

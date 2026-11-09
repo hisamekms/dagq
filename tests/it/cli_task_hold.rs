@@ -6,7 +6,7 @@
 //! command; and the release records `task_released` and lets the task be
 //! claimed again.
 
-use crate::common::cli::{invoke_with, queue};
+use crate::common::cli::{invoke_with, served_queue as queue};
 use crate::common::queue::{base, new_task};
 use dagq::{
     application::TaskStore,
