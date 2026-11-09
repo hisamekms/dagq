@@ -9,6 +9,8 @@ use crate::domain::marks::utc_text;
 use crate::domain::run_phase::{Attempt, Phase, PhaseChange};
 use crate::domain::{EventId, RunEvent, RunId, TaskId};
 
+pub(crate) mod frozen;
+
 pub(crate) const T0: i64 = 1_900_000_000;
 
 /// The unix milliseconds of `secs` after [`T0`].

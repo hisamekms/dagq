@@ -1223,4 +1223,6 @@ impl<
 }
 
 #[cfg(test)]
+pub(crate) mod frozen;
+#[cfg(test)]
 mod queue_rows_spike;

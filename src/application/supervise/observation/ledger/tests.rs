@@ -2991,6 +2991,7 @@ fn a_run_measured_from_inside_only_folds_its_executors_samples() {
     assert_eq!(row.inputs_through.resources, None);
 }
 
+mod frozen;
 mod oldest_first;
 mod pages;
 mod pushes_mixed;
