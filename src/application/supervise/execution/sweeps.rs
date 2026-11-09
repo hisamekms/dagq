@@ -146,33 +146,38 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Register to each slot's run the sessions its jobs' agents named so
-    /// far (a Codex thread, registered otherwise only from the job's end),
-    /// before a handoff or the loop's end stops them: the steps their stop
-    /// sends are then the run's.
-    pub(super) fn register_stopping_sessions(&mut self) {
-        let mut named = Vec::new();
+    /// Register to each slot's run (and to the run of the replanning's
+    /// diagnosis) the sessions its running jobs' agents named so far and
+    /// not yet registered (a review agent's on Claude, a
+    /// Codex thread: any whose session the runtime did not name ahead),
+    /// before anything of them is sent ([`super::jobs::JobStepsOn`]): on
+    /// every pass ([`Self::sweep_telemetry`]), and before a handoff or the
+    /// loop's end stops them, so the steps their stop sends are the run's.
+    /// A registration that failed is logged and asked again at the next
+    /// pass, unless another target holds the session
+    /// ([`telemetry_tokens::register_settled`]).
+    pub(super) fn register_job_sessions(&mut self) {
+        let (tokens, db) = (self.telemetry_tokens, self.layout.db.clone());
+        let mut register = |target: &crate::domain::session_step::StepTarget, session: &str| {
+            telemetry_tokens::register_settled(tokens, &db, target, session)
+        };
         for slot in self.claim.slots.iter_mut() {
-            let run = slot.run.id().clone();
-            named.extend(
-                named_sessions(slot)
-                    .into_iter()
-                    .map(|session| (run.clone(), session)),
-            );
+            register_slot_sessions(slot, &mut register);
         }
-        for (run, session) in named {
-            self.register_run_job_session(&run, Some(&session));
+        // A replanning's diagnosis runs on a run outside its slot.
+        if let Some(diagnosis) = self.replan_diagnosis.as_mut() {
+            diagnosis.register_session(&mut register);
         }
     }
 
     /// [`stop_job`] on a slot taken out of the table, the sessions its
     /// jobs' agents named registered to its run first
-    /// ([`Self::register_stopping_sessions`]).
+    /// ([`Self::register_job_sessions`]).
     pub(super) fn stop_slot_job(&mut self, slot: &mut Slot) {
-        let run = slot.run.id().clone();
-        for session in named_sessions(slot) {
-            self.register_run_job_session(&run, Some(&session));
-        }
+        let (tokens, db) = (self.telemetry_tokens, self.layout.db.clone());
+        register_slot_sessions(slot, &mut |target, session| {
+            telemetry_tokens::register_settled(tokens, &db, target, session)
+        });
         stop_job(slot);
     }
 
@@ -245,6 +250,7 @@ impl Supervisor<'_> {
         const CALLER: &str = "sweeps.sweep_telemetry";
         let _caller = crate::application::supervisor_service::caller::scope(CALLER);
         self.register_held_sessions();
+        self.register_job_sessions();
         self.resend_kept_steps();
         let processes = &self.processes;
         telemetry_tokens::sweep_targets(
@@ -280,27 +286,15 @@ impl Supervisor<'_> {
     }
 
     /// Send again the steps kept ([`UnsentSteps`]), the session each kept
-    /// step of an eval's job names first registered to its row: one its
-    /// end named, or one whose registration failed while it ran
-    /// (ADR-t1662-3 decision 10). On every pass, and before the ends of
-    /// jobs are written ([`Self::write_job_ends`]): the queue service
+    /// step names first registered to its target, a run or an eval's job
+    /// ([`super::jobs::resend_kept`]). On every pass, and before the ends
+    /// of jobs are written ([`Self::write_job_ends`]): the queue service
     /// refuses the token of a row that ended, so what a job's end kept
     /// goes while its row is still open.
     ///
     /// [`UnsentSteps`]: crate::application::step_report::UnsentSteps
     pub(super) fn resend_kept_steps(&self) {
-        for (target, session) in self
-            .unsent_steps
-            .sessions_of(crate::domain::session_step::TargetKind::EvalJob)
-        {
-            telemetry_tokens::register_session(
-                self.telemetry_tokens,
-                &self.layout.db,
-                &target,
-                &session,
-            );
-        }
-        self.unsent_steps.resend();
+        super::jobs::resend_kept(self.telemetry_tokens, &self.layout.db, &self.unsent_steps);
     }
 
     /// Register the sessions of each run whose telemetry token this

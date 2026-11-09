@@ -33,6 +33,11 @@ pub struct TestReviewer {
     pub review_agents: Mutex<Vec<(String, Vec<String>)>>,
     /// Each agent job's launch as it started, the eval's and the reviews'.
     pub launches: Mutex<Vec<dagq::application::AgentJobLaunch>>,
+    /// Whether its jobs' stdout is read as Claude's stream (the steps of
+    /// the stream's events the executor sends, the session its `init`
+    /// names) and its reply is the lines that are no such event; without
+    /// it a job collects no step and its reply is its stdout.
+    pub claude_steps: bool,
 }
 
 impl TestReviewer {
@@ -48,7 +53,13 @@ impl TestReviewer {
             agent_jobs: Mutex::new(Vec::new()),
             review_agents: Mutex::new(Vec::new()),
             launches: Mutex::new(Vec::new()),
+            claude_steps: false,
         }
+    }
+    /// See `claude_steps`.
+    pub fn reading_claude_steps(mut self) -> Self {
+        self.claude_steps = true;
+        self
     }
     /// See `review_agents`.
     pub fn with_review_agents(self, scripts: &[(&str, Vec<String>)]) -> Self {
@@ -90,6 +101,32 @@ impl TestReviewer {
 impl AgentProvider for TestReviewer {
     fn preflight(&self) -> Result<()> {
         Ok(())
+    }
+    fn job_reply(&self, stdout: &str) -> String {
+        if !self.claude_steps {
+            return stdout.to_owned();
+        }
+        let stream = |line: &str| {
+            serde_json::from_str::<Value>(line).is_ok_and(|event| event.get("type").is_some())
+        };
+        stdout
+            .lines()
+            .filter(|line| !stream(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn step_reader(
+        &self,
+        model: Option<&str>,
+        known: dagq::domain::command_shape::Subcommands,
+    ) -> Box<dyn dagq::application::StepReader> {
+        if self.claude_steps {
+            Box::new(
+                dagq::infrastructure::claude_steps::ClaudeStepReader::new(model).knowing(known),
+            )
+        } else {
+            Box::new(dagq::application::NoSteps)
+        }
     }
     // A run that fails under these tests is recovered by this provider too:
     // with no script left, a live session's recovery job escalates, and one

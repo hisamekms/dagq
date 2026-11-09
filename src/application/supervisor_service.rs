@@ -431,6 +431,9 @@ pub fn take_unanswered() -> bool {
 /// queue's own operation would have returned: a run not found and a busy
 /// queue as the queue's, the rest with the service's code and message.
 pub fn service_error(error: &ServiceError) -> anyhow::Error {
+    if error.session_of_another_target {
+        return crate::domain::session_step::StepError::SessionOfAnotherTarget.into();
+    }
     match &error.kind {
         Some(FailureKind::RunNotFound(run)) => RunNotFound(run.clone()).into(),
         Some(FailureKind::QueueBusy) => anyhow!(error.message.clone()).context(QueueBusy),
@@ -531,6 +534,16 @@ pub fn held_refusal(error: &anyhow::Error) -> Option<crate::domain::task_hold::H
         _ => cause
             .downcast_ref::<Refused>()
             .and_then(|refused| refused.held),
+    })
+}
+
+/// Whether `error` is the store's refusal to register a session another
+/// target holds ([`ServiceError::session_of_another_target`]), which
+/// [`service_error`] reads back as that refusal.
+pub fn session_of_another_target(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<crate::domain::session_step::StepError>()
+            == Some(&crate::domain::session_step::StepError::SessionOfAnotherTarget)
     })
 }
 

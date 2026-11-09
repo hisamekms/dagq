@@ -980,6 +980,8 @@ pub fn respond(result: Result<Value>) -> ServiceResponse {
                     failure.kind = super::supervisor_service::failure_kind(&error);
                     failure.rejected = super::supervisor_service::rejected(&error);
                     failure.held = super::supervisor_service::held_refusal(&error).map(Box::new);
+                    failure.session_of_another_target =
+                        super::supervisor_service::session_of_another_target(&error);
                 }
                 response
             }

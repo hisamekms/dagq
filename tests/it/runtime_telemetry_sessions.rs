@@ -377,3 +377,114 @@ fn a_headless_runs_steps_go_into_the_step_store_under_the_run() {
     // ended.
     assert!(!kept_file.exists(), "{}", kept());
 }
+
+/// A run's review agent's job, whose session the runtime does not name
+/// ahead (an agent job on Claude names its own in its stream's `init`): as
+/// it runs, the supervisor reads the session its output named and
+/// registers it to the run (ADR-t1662-3 decision 10), so that what its
+/// executor sends of it is the run's. The job waits, its stream out, until
+/// the test sees the registration; then it answers, and its steps (the
+/// stream's call of a tool and the model's turn) are in the SessionStepStore
+/// under the run and that session, none refused.
+#[test]
+fn a_review_agents_session_is_registered_to_its_run_as_it_runs_and_its_steps_go_in() {
+    let (dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[review.subagents.design]\npaths = [\"change.txt\"]\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".dagq/agents/design")).unwrap();
+    fs::write(
+        repo.join(".dagq/agents/design/AGENT.md"),
+        "---\ndescription: design checks\n---\nCheck the design.\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml", ".dagq/agents/design/AGENT.md"]);
+    git(&repo, &["commit", "-q", "-m", "review subagents"]);
+    let _served = crate::common::service::Served::start(&db);
+    let go = dir.path().join("agent-go");
+    let command = "true";
+    // `stub` is the session the stream's `init` names.
+    let agent = format!(
+        "{}{}\n{}",
+        claude_stream_script(command),
+        crate::common::await_path(&go),
+        agent_says("design", "pass", &[])
+    );
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")])
+        .with_review_agents(&[("design", vec![agent])])
+        .reading_claude_steps();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let outcome = thread::scope(|scope| {
+        let supervising = scope.spawn(|| supervise_reviewed(&db, &repo, &backend, &reviewer));
+        // While the agent's job runs, its session is registered to the run.
+        wait_until(&db, crate::common::STEP_LIMIT, |_| {
+            crate::common::service::session_owner(&db, "stub").is_some()
+        });
+        fs::write(&go, "").unwrap();
+        supervising.join().unwrap()
+    });
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap()
+        .runs[0]
+        .clone();
+    assert_eq!(run.status(), RunStatus::Integrated);
+    // The registration came while the job ran: its one job answered, never
+    // stopped at its timeout to be registered from its kept steps.
+    let design: Vec<Value> = SqliteQueue::open(&db)
+        .unwrap()
+        .run_events(run.id())
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.kind == EventKind::ReviewJobFinished && event.payload["agent"] == "design"
+        })
+        .map(|event| event.payload)
+        .collect();
+    assert_eq!(design.len(), 1, "{design:?}");
+    assert_eq!(design[0]["outcome"], "answered", "{design:?}");
+    let target = StepTarget::run(run.id());
+    assert_eq!(
+        crate::common::service::session_owner(&db, "stub"),
+        Some(format!("run:{}", run.id()))
+    );
+    let steps = SqliteQueue::open(&db)
+        .unwrap()
+        .target_steps(&target)
+        .unwrap();
+    let agent: Vec<&Step> = steps
+        .iter()
+        .filter(|kept| kept.session_id == "stub")
+        .map(|kept| &kept.step)
+        .collect();
+    let bash = agent
+        .iter()
+        .find(|step| step.tool.as_deref() == Some("Bash"))
+        .unwrap_or_else(|| panic!("{steps:?}"));
+    assert_eq!(bash.kind, StepKind::ToolCall);
+    assert_eq!(
+        bash.command_shape,
+        dagq::domain::command_shape::shape_value_with(
+            command,
+            &dagq::domain::command_shape::Subcommands::common().keyed(Some(queue_key(&db)))
+        )
+    );
+    assert!(
+        agent.iter().any(|step| step.kind == StepKind::ModelTurn),
+        "{steps:?}"
+    );
+    // The executor's reports of the run were never refused.
+    let denied: Vec<_> = SqliteQueue::open(&db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::AuthorizationDenied)
+        .map(|event| event.payload)
+        .collect();
+    assert!(denied.is_empty(), "{denied:?}");
+}

@@ -472,6 +472,9 @@ impl PlanningState {
         // it ran on (ADR-t1063-1 decisions 2, 4 and 6).
         let agent = env.jobs.job_agent(provider).unwrap_or(env.jobs.reviewer());
         let watch = self.goal_review.as_mut().expect("read above");
+        // Its session is registered once named, before its steps are sent.
+        env.jobs
+            .register_job_session(&env.pass, &mut watch.headless);
         let Some(outcome) = watch.headless.poll(&**env.files, agent)? else {
             return Ok(false);
         };

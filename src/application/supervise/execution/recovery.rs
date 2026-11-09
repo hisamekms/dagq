@@ -610,10 +610,15 @@ impl RecoveryWatch {
         }
     }
 
-    /// The session its job's agent named so far
-    /// ([`HeadlessJob::named_session`]).
-    pub(super) fn named_session(&mut self) -> Option<String> {
-        self.job.as_mut().and_then(|job| job.job.named_session())
+    /// Register with `register` the session its job's agent named so far
+    /// ([`HeadlessJob::register_session`]).
+    pub(super) fn register_session(
+        &mut self,
+        register: &mut dyn FnMut(&crate::domain::session_step::StepTarget, &str) -> bool,
+    ) {
+        if let Some(job) = self.job.as_mut() {
+            job.job.register_session(register);
+        }
     }
 
     /// Record `recovery_requested` for `alert` with `facts` and start its

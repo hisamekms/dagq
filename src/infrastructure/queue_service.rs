@@ -1653,12 +1653,28 @@ impl TelemetrySink for ServiceTelemetrySink {
     fn report(&self, report: &TelemetryReport) -> Result<ReportRecorded> {
         // A report past its bounds would not be read: it is not sent.
         crate::domain::telemetry::check(report).map_err(anyhow::Error::msg)?;
-        let result = self.client.call_within(
-            UseCase::TelemetryReport,
-            serde_json::to_value(report)?,
-            REPORT_TIMEOUT,
-        )?;
+        let result = self
+            .client
+            .call_within(
+                UseCase::TelemetryReport,
+                serde_json::to_value(report)?,
+                REPORT_TIMEOUT,
+            )
+            .map_err(denied_report)?;
         serde_json::from_value(result).context("the queue service's answer to telemetry_report")
+    }
+}
+
+/// The service's `authorization_denied` of a report as
+/// [`crate::domain::telemetry::ReportDenied`], which the executor counts
+/// as a refusal that sending again cannot pass; any other failure as it
+/// came.
+fn denied_report(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<ClientFailure>() {
+        Some(failure) if failure.code == ServiceErrorCode::AuthorizationDenied.as_str() => {
+            crate::domain::telemetry::ReportDenied(failure.message.clone()).into()
+        }
+        _ => error,
     }
 }
 
@@ -1812,6 +1828,7 @@ fn request_refused(past: RequestPastLimit) -> anyhow::Error {
             kind: None,
             rejected: false,
             held: None,
+            session_of_another_target: false,
         },
     )
 }
@@ -5997,6 +6014,40 @@ mod write_line_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The service's `authorization_denied` of a report reaches the
+    /// executor as a refusal that sending again cannot pass, told apart
+    /// from a service that did not answer, which stays as it came.
+    #[test]
+    fn a_denied_report_is_told_apart_from_one_that_did_not_arrive() {
+        let denied = denied_report(
+            ClientFailure::new(
+                ServiceErrorCode::AuthorizationDenied.as_str(),
+                "executor-telemetry may not telemetry.report (not on this resource)",
+            )
+            .into(),
+        );
+        assert_eq!(
+            denied.downcast_ref::<crate::domain::telemetry::ReportDenied>(),
+            Some(&crate::domain::telemetry::ReportDenied(
+                "executor-telemetry may not telemetry.report (not on this resource)".into()
+            ))
+        );
+        assert_eq!(
+            denied.to_string(),
+            "authorization_denied: executor-telemetry may not telemetry.report (not on this resource)"
+        );
+        for other in [
+            anyhow::Error::from(ClientFailure::new("unreachable", "no service")),
+            anyhow!("the queue service at /s is unreachable"),
+        ] {
+            let kept = denied_report(other);
+            assert!(
+                kept.downcast_ref::<crate::domain::telemetry::ReportDenied>()
+                    .is_none()
+            );
+        }
+    }
 
     /// An inbox's hook finds the service by the token's file alone: that of
     /// the queue whose credentials hold it, naming no queue to compare; a

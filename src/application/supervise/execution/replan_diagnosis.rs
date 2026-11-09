@@ -108,6 +108,17 @@ pub(super) struct DiagnosisJob {
     job: HeadlessJob,
 }
 
+impl DiagnosisJob {
+    /// Register with `register` the session its agent named so far
+    /// ([`HeadlessJob::register_session`]).
+    pub(super) fn register_session(
+        &mut self,
+        register: &mut dyn FnMut(&crate::domain::session_step::StepTarget, &str) -> bool,
+    ) {
+        self.job.register_session(register);
+    }
+}
+
 /// What a diagnosis job read as it started, which its verdict rests on:
 /// kept with the verdict (`read` of its `replan_diagnosed`) when a hold
 /// keeps it, so that the release applies it on the same premise.
@@ -2032,6 +2043,7 @@ mod tests {
                 kind: None,
                 rejected: true,
                 held: held.map(Box::new),
+                session_of_another_target: false,
             })
         };
         for refusal in [
@@ -2086,6 +2098,7 @@ mod tests {
                 kind: None,
                 rejected: true,
                 held: held.map(Box::new),
+                session_of_another_target: false,
             })
         };
         for refusal in [on_queue, through_service(Some(hold))] {

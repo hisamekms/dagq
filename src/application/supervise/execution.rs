@@ -2196,23 +2196,25 @@ impl Supervisor<'_> {
     }
 }
 
-/// The sessions the agents of `slot`'s jobs named in their output so far
-/// ([`HeadlessJob::named_session`]).
-fn named_sessions(slot: &mut Slot) -> Vec<String> {
-    let mut named = Vec::new();
+/// Register with `register` the sessions the agents of `slot`'s running
+/// jobs named in their output so far ([`HeadlessJob::register_session`]):
+/// its review's, its recovery's and its claim review's.
+fn register_slot_sessions(
+    slot: &mut Slot,
+    register: &mut dyn FnMut(&crate::domain::session_step::StepTarget, &str) -> bool,
+) {
     match &mut slot.phase {
-        Phase::Review(watch) => named.extend(watch.named_sessions()),
-        Phase::Recovery(watch) => named.extend(watch.job.named_session()),
-        Phase::SatisfiedReview(watch) => named.extend(watch.named_session()),
-        Phase::Session(watch) => named.extend(watch.recovery.named_session()),
+        Phase::Review(watch) => watch.register_sessions(register),
+        Phase::Recovery(watch) => watch.job.register_session(register),
+        Phase::SatisfiedReview(watch) => watch.register_session(register),
+        Phase::Session(watch) => watch.recovery.register_session(register),
         Phase::Resume(watch) => {
-            named.extend(watch.recovery.named_session());
-            named.extend(watch.live.recovery.named_session());
+            watch.recovery.register_session(register);
+            watch.live.recovery.register_session(register);
         }
-        Phase::Revise(watch) => named.extend(watch.live.recovery.named_session()),
+        Phase::Revise(watch) => watch.live.recovery.register_session(register),
         _ => {}
     }
-    named
 }
 
 /// Kill the headless job (a review or a recovery job) of a slot the

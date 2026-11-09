@@ -1,0 +1,5 @@
+# 5.5s to 8.3s in the worker's stress under the host's load of other runs
+[[test]]
+name = "runtime_telemetry_sessions::a_review_agents_session_is_registered_to_its_run_as_it_runs_and_its_steps_go_in"
+reason = "B 境界（プロセス・SQLite）: run の review の agent の job の process が名づけた session を、supervisor が job の実行中に queue service の process を通して run に登録し、送った step が SessionStepStore に run の下で入ることを、1 本の run を claim から着地まで通して確かめる。登録まで送らない判断と拒否の上限は supervise::execution::jobs と step_report の unit test"
+task = 4059

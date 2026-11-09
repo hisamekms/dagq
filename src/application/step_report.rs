@@ -12,7 +12,13 @@
 //! What was not sent (no token for the target, a service that does not
 //! answer, a session not registered yet) is kept and sent again the next
 //! time, at most [`MAX_PENDING`] steps of a session, the oldest dropped
-//! past it (a gap the store sees). The store keeps one of each
+//! past it (a gap the store sees). A session the service refuses as not
+//! of the target is sent again at most [`MAX_DENIALS`] times in a row
+//! ([`WRAPPER_MAX_DENIALS`] from a session wrapper), and then given up
+//! with one warning ([`StepReporter::flush`]). The
+//! supervisor's own jobs send nothing of a session until the control side
+//! registered it ([`JobSteps::keep`]), so a refusal there is a
+//! registration that failed. The store keeps one of each
 //! `(session_id, seq)`, so a step sent twice is added once. A wrapper keeps
 //! its sessions' numbering and unsent steps in the file of its target the
 //! control side's [`TelemetrySinks::steps_file`] names, beside the tokens'
@@ -41,11 +47,30 @@ use super::{RunFiles, StepReader, TelemetrySink, TelemetrySinks};
 use crate::domain::command_shape::{Subcommands, shape_value_with};
 use crate::domain::session_step::{FIRST_SEQ, Step, StepKind, StepTarget};
 use crate::domain::telemetry::{
-    MAX_NAME_BYTES, MAX_STEPS_PER_REPORT, REPORT_INTERVAL_SECS, TelemetryError, TelemetryReport,
+    MAX_NAME_BYTES, MAX_STEPS_PER_REPORT, REPORT_INTERVAL_SECS, ReportDenied, TelemetryError,
+    TelemetryReport,
 };
 
 /// How many unsent steps of a session are kept.
 pub const MAX_PENDING: usize = 4096;
+
+/// How many reports of one session in a row the queue service may refuse
+/// as not of the token's target ([`ReportDenied`]) before the reporter
+/// stops sending that session, for the supervisor's own jobs and
+/// verifications: the control side registers their sessions before it
+/// sends them (and before it sends a job's kept steps again), so a session
+/// still refused after this many is one it will not register (another
+/// target's). A report that went through counts the session's refusals
+/// from zero again.
+pub const MAX_DENIALS: u32 = 3;
+
+/// [`MAX_DENIALS`] for a session wrapper ([`WrapperSteps`]): a thread its
+/// agent names is registered only once a pass of the supervisor reads it in
+/// the run's events, and the wrapper sends at every
+/// [`REPORT_INTERVAL_SECS`] and every turn's end, so it waits about ten
+/// minutes of its sends (a supervisor slow or between processes) before
+/// it gives a session up.
+pub const WRAPPER_MAX_DENIALS: u32 = 20;
 
 /// [`REPORT_INTERVAL_SECS`] in milliseconds.
 const INTERVAL_MS: i64 = REPORT_INTERVAL_SECS as i64 * 1000;
@@ -54,14 +79,25 @@ const INTERVAL_MS: i64 = REPORT_INTERVAL_SECS as i64 * 1000;
 pub const VERIFICATION_TOOL: &str = "verification";
 
 /// One session's numbering: the next seq, when it started on the
-/// executor's clock (unix milliseconds, kept here only), and its unsent
-/// steps.
+/// executor's clock (unix milliseconds, kept here only), its unsent
+/// steps, how many of its reports in a row the service refused as not of
+/// the target ([`MAX_DENIALS`]), and whether the reporter gave the
+/// session up for that, after which its steps are dropped as they come.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSteps {
     pub next_seq: i64,
     pub started_ms: i64,
     #[serde(default)]
     pub pending: Vec<Step>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub denied: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refused: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 /// The sessions of one target an executor reports.
@@ -98,6 +134,8 @@ pub struct StepReporter {
     /// When the last flush was (or the reporter made), on the clock the
     /// caller gives.
     last_flush_ms: i64,
+    /// How many refusals in a row give a session up ([`MAX_DENIALS`]).
+    max_denials: u32,
 }
 
 impl StepReporter {
@@ -107,7 +145,16 @@ impl StepReporter {
             target,
             state,
             last_flush_ms: now_ms,
+            max_denials: MAX_DENIALS,
         }
+    }
+
+    /// The reporter giving a session up at its `max_denials`th refusal in
+    /// a row, not at [`MAX_DENIALS`].
+    #[must_use]
+    pub const fn giving_up_at(mut self, max_denials: u32) -> Self {
+        self.max_denials = max_denials;
+        self
     }
 
     pub fn target(&self) -> &StepTarget {
@@ -143,7 +190,17 @@ impl StepReporter {
                 next_seq: FIRST_SEQ,
                 started_ms: from_ms,
                 pending: Vec::new(),
+                denied: 0,
+                refused: false,
             });
+        if kept.refused {
+            debug!(
+                session,
+                "{} steps of session {session}, which the queue service refuses, are dropped",
+                steps.len()
+            );
+            return;
+        }
         let shift = from_ms.saturating_sub(kept.started_ms).max(0);
         for mut step in steps {
             step.seq = kept.next_seq;
@@ -174,6 +231,17 @@ impl StepReporter {
     /// at most [`MAX_STEPS_PER_REPORT`] that fit their bound; what the sink
     /// did not take is kept for the next time. With no sink (no token for
     /// the target) nothing is sent and everything is kept. It never fails.
+    ///
+    /// A report the service refused as not of the target ([`ReportDenied`]:
+    /// a session not registered to it, or another target's) is that
+    /// session's alone: its steps are kept, each refusal is warned of once,
+    /// and the other sessions are still sent. At the [`MAX_DENIALS`]th
+    /// refusal in a row ([`WRAPPER_MAX_DENIALS`] for a session wrapper's)
+    /// the session is given up: one warning names it and
+    /// how many of its steps are dropped, and its later steps are dropped
+    /// as they come, never sent (a gap the store sees). Any other failure
+    /// (a service that did not answer) stops this flush and keeps
+    /// everything for the next time, as it may pass then.
     pub fn flush(&mut self, sink: Option<&dyn TelemetrySink>, now_ms: i64) -> Flushed {
         self.last_flush_ms = now_ms;
         let mut flushed = Flushed::default();
@@ -221,7 +289,31 @@ impl StepReporter {
                 match sink.report(&report) {
                     Ok(_) => {
                         kept.pending.drain(..count);
+                        kept.denied = 0;
                         flushed.sent += count;
+                    }
+                    Err(error) if error.downcast_ref::<ReportDenied>().is_some() => {
+                        kept.denied += 1;
+                        if kept.denied >= self.max_denials {
+                            warn!(
+                                session,
+                                "the queue service refused the steps of session {session} {} times as not of {} {}: its {} unsent steps are dropped and its later ones are not sent: {error:#}",
+                                kept.denied,
+                                self.target.kind.as_str(),
+                                self.target.id,
+                                kept.pending.len()
+                            );
+                            kept.pending.clear();
+                            kept.refused = true;
+                        } else {
+                            warn!(
+                                session,
+                                "the steps of session {session} were refused ({} of {}); they are sent again once the session is registered: {error:#}",
+                                kept.denied,
+                                self.max_denials
+                            );
+                        }
+                        continue 'sessions;
                     }
                     Err(error) => {
                         warn!(
@@ -287,7 +379,10 @@ impl WrapperSteps {
             .filter(|kept| kept.target == target)
             .map(|kept| kept.state)
             .unwrap_or_default();
-        self.reporter = Some((StepReporter::new(target, state, now_ms), kept));
+        self.reporter = Some((
+            StepReporter::new(target, state, now_ms).giving_up_at(WRAPPER_MAX_DENIALS),
+            kept,
+        ));
     }
 
     /// The turn started at `now_ms` read by `reader`, of `session` when it
@@ -713,17 +808,13 @@ impl UnsentSteps {
         }
     }
 
-    /// The sessions of the kept steps of targets of `kind`, each with its
-    /// target: what the control side registers before it sends them again
-    /// (an eval's job, whose session only its output names, named at its
-    /// end).
-    pub fn sessions_of(
-        &self,
-        kind: crate::domain::session_step::TargetKind,
-    ) -> Vec<(StepTarget, String)> {
+    /// The sessions of the kept steps, each with its target: what the
+    /// control side registers before it sends them again (a job's whose
+    /// session only its output names, read at its end, or whose
+    /// registration failed while it ran).
+    pub fn sessions(&self) -> Vec<(StepTarget, String)> {
         self.lock()
             .iter()
-            .filter(|steps| steps.reporter.target().kind == kind)
             .filter_map(|steps| {
                 let session = steps.session.clone()?;
                 Some((steps.reporter.target().clone(), session))
@@ -823,18 +914,36 @@ impl JobSteps {
     /// is sent again at the next sweeps.
     pub fn finish(mut self, files: &dyn RunFiles, stdout: &Path, now_ms: i64) {
         self.look(files, stdout, now_ms);
+        self.read_rest(now_ms);
+        if !self.steps.finish(now_ms) {
+            self.unsent.keep(self.steps);
+        }
+    }
+
+    /// The job ended `now_ms` after its start before the control side
+    /// registered its session: the rest of its output is read and its open
+    /// steps end as at [`Self::finish`], and nothing is sent; all of it is
+    /// kept for the sweep, which registers the session to its target before
+    /// it sends the kept steps again
+    /// ([`UnsentSteps::sessions`]).
+    pub fn keep(mut self, files: &dyn RunFiles, stdout: &Path, now_ms: i64) {
+        self.read_on(files, stdout, now_ms);
+        self.read_rest(now_ms);
+        self.unsent.keep(self.steps);
+    }
+
+    /// The last line its output left unended, and the steps its reader
+    /// still holds open, ended at `now_ms`; nothing is sent.
+    fn read_rest(&mut self, now_ms: i64) {
         if !self.rest.is_empty() {
             let line = std::mem::take(&mut self.rest);
             let steps = self
                 .reader
                 .line(String::from_utf8_lossy(&line).trim_end(), now_ms);
-            self.steps.push(steps, now_ms);
+            self.steps.add(steps);
         }
         let steps = self.reader.finish(now_ms);
-        self.steps.push(steps, now_ms);
-        if !self.steps.finish(now_ms) {
-            self.unsent.keep(self.steps);
-        }
+        self.steps.add(steps);
     }
 }
 
@@ -870,9 +979,14 @@ impl<'a> CommandSteps<'a> {
     /// stdout goes to `stdout`) while a thread of its own reads that
     /// stdout every [`LOOK_MS`] by `agent`'s [`StepReader`] into the steps
     /// of `target`'s session (`session` when it is named ahead, else the
-    /// one the output names) of the queue at `db`, from `clock`'s now:
-    /// sent every [`REPORT_INTERVAL_SECS`], what failed again the next
-    /// time. Its value, and the steps to end.
+    /// one the output names) of the queue at `db`, from `clock`'s now. A
+    /// session named ahead, which the command registered before its agent
+    /// started, is sent every [`REPORT_INTERVAL_SECS`], what failed again
+    /// the next time; one only the output names (a Codex thread) is read
+    /// and held while the agent runs, as the command registers it only
+    /// once its agent ended, and is sent at [`WatchedSteps::finish`], after
+    /// that registration: nothing of it is refused before it is the
+    /// target's. Its value, and the steps to end.
     pub fn watch<T>(
         &self,
         agent: &dyn super::AgentProvider,
@@ -898,6 +1012,7 @@ impl<'a> CommandSteps<'a> {
         );
         let started = clock.monotonic();
         let files = self.files;
+        let registered = session.is_some();
         let (value, ended) = std::thread::scope(|scope| {
             let (stop, stopped) = std::sync::mpsc::channel::<()>();
             let steps = &mut steps;
@@ -910,7 +1025,12 @@ impl<'a> CommandSteps<'a> {
                     while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                         stopped.recv_timeout(std::time::Duration::from_millis(LOOK_MS))
                     {
-                        steps.look(files, stdout, millis_since(started, clock.monotonic()));
+                        let now = millis_since(started, clock.monotonic());
+                        if registered {
+                            steps.look(files, stdout, now);
+                        } else {
+                            steps.read_on(files, stdout, now);
+                        }
                     }
                 })
                 .inspect_err(|error| {
@@ -965,17 +1085,33 @@ mod tests {
     use crate::domain::telemetry::ReportRecorded;
     use std::sync::{Arc, Mutex};
 
-    /// A sink that records the reports it takes, refusing while `down`.
+    /// A sink that records the reports it takes, failing while `down`,
+    /// and refusing as the service does (`authorization_denied`) the
+    /// sessions in `unregistered`, each refusal counted in `denials`.
     #[derive(Default)]
     struct Sink {
         reports: Mutex<Vec<TelemetryReport>>,
         down: Mutex<bool>,
+        unregistered: Mutex<Vec<String>>,
+        denials: Mutex<Vec<String>>,
     }
 
     impl TelemetrySink for Sink {
         fn report(&self, report: &TelemetryReport) -> anyhow::Result<ReportRecorded> {
             if *self.down.lock().unwrap() {
                 anyhow::bail!("the queue service at /s is unreachable");
+            }
+            if self
+                .unregistered
+                .lock()
+                .unwrap()
+                .contains(&report.session_id)
+            {
+                self.denials.lock().unwrap().push(report.session_id.clone());
+                return Err(anyhow::Error::new(ReportDenied(
+                    "executor-telemetry may not telemetry.report (not on this resource)".into(),
+                ))
+                .context("the report was not sent"));
             }
             self.reports.lock().unwrap().push(report.clone());
             Ok(ReportRecorded::default())
@@ -1257,6 +1393,8 @@ mod tests {
                     next_seq: 2,
                     started_ms: 0,
                     pending: vec![planted],
+                    denied: 0,
+                    refused: false,
                 },
             )]
             .into(),
@@ -1428,11 +1566,12 @@ mod tests {
         assert_eq!(sink_count(&tokens.sink), 1);
     }
 
-    /// The kept steps name, by their target's kind, the sessions the
-    /// control side registers before it sends them again: an eval's job's,
-    /// not another target's, and none of steps whose session is not named.
+    /// The kept steps name, with their targets, the sessions the control
+    /// side registers before it sends them again: of every kind of target
+    /// (an eval's job's, a run's), and none of steps whose session is not
+    /// named.
     #[test]
-    fn the_sessions_of_kept_steps_are_listed_by_their_targets_kind() {
+    fn the_sessions_of_kept_steps_are_listed_with_their_targets() {
         use crate::domain::session_step::TargetKind;
         let tokens = Arc::new(Tokens::default());
         *tokens.sink.down.lock().unwrap() = true;
@@ -1459,9 +1598,259 @@ mod tests {
             unsent.keep(steps);
         }
         assert_eq!(
-            unsent.sessions_of(TargetKind::EvalJob),
-            vec![(eval, "eval-session".to_owned())]
+            unsent.sessions(),
+            vec![
+                (eval, "eval-session".to_owned()),
+                (target(), "planner-session".to_owned())
+            ]
         );
+    }
+
+    fn step(at: i64) -> Step {
+        Step::new(0, StepKind::ToolCall, at * 10, 1)
+    }
+
+    /// A session wrapper waits longer for the registration of a thread its
+    /// agent named ([`WRAPPER_MAX_DENIALS`]), sending at every interval and
+    /// turn's end, and gives it up then all the same; the count goes on
+    /// in the file its next wrapper loads.
+    #[test]
+    fn a_wrapper_gives_a_refused_session_up_at_its_own_bound() {
+        let files = MemoryRunFiles::default();
+        let sink = Arc::new(Sink::default());
+        sink.unregistered.lock().unwrap().push("thread".to_owned());
+        let sinks: Arc<Sink> = sink.clone();
+        let db = Path::new("/q/queue.db");
+        for turn in 0..30_i64 {
+            let mut steps = WrapperSteps::default();
+            steps.load(
+                &files,
+                Some(PathBuf::from(KEPT)),
+                target(),
+                turn * INTERVAL_MS,
+            );
+            steps.start_turn(
+                Box::new(Lines),
+                turn * INTERVAL_MS,
+                Some("thread".to_owned()),
+            );
+            steps.line("Read", turn * INTERVAL_MS + 10);
+            steps.end_turn(&files, Some(&sinks), db, turn * INTERVAL_MS + 20);
+            if turn + 1 < i64::from(WRAPPER_MAX_DENIALS) {
+                assert_eq!(denials_of(&sink, "thread"), turn as usize + 1);
+            }
+        }
+        assert_eq!(denials_of(&sink, "thread"), WRAPPER_MAX_DENIALS as usize);
+        let kept: KeptSteps =
+            serde_json::from_str(&files.read_to_string(Path::new(KEPT)).unwrap()).unwrap();
+        assert!(kept.state.sessions["thread"].refused);
+        assert!(kept.state.sessions["thread"].pending.is_empty());
+    }
+
+    /// An agent that names its own session (`thread-9`), as [`Named`]
+    /// reads it.
+    struct NamingAgent;
+
+    impl super::super::AgentProvider for NamingAgent {
+        fn preflight(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn review_command(
+            &self,
+            _: &crate::domain::TaskRun,
+            _: &Path,
+            _: &str,
+            _: crate::domain::headless_job::JobAccess,
+        ) -> anyhow::Result<crate::application::CommandSpec> {
+            unreachable!()
+        }
+        fn step_reader(&self, _: Option<&str>, _: Subcommands) -> Box<dyn StepReader> {
+            Box::new(Named)
+        }
+    }
+
+    /// A clock whose every look is [`REPORT_INTERVAL_SECS`] past the one
+    /// before, so each look of a watch is past its interval, and that tells
+    /// `looked` of each look.
+    struct Racing {
+        now: Mutex<Instant>,
+        looked: Mutex<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl crate::application::Clock for Racing {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::UNIX_EPOCH
+        }
+        fn monotonic(&self) -> Instant {
+            let mut now = self.now.lock().unwrap();
+            *now += std::time::Duration::from_secs(REPORT_INTERVAL_SECS + 1);
+            // The test may have stopped waiting for looks.
+            let _ = self.looked.lock().unwrap().send(());
+            *now
+        }
+    }
+
+    /// A command's agent that names its own session and runs past many
+    /// intervals sends nothing of it while it runs, though its steps came
+    /// early: the command registers the session only once the agent ended,
+    /// and the steps then go whole at the finish, none refused, none given
+    /// up.
+    #[test]
+    fn a_long_command_sends_its_agents_named_session_only_once_registered() {
+        let files = MemoryRunFiles::default();
+        let tokens = Arc::new(Tokens::default());
+        tokens
+            .sink
+            .unregistered
+            .lock()
+            .unwrap()
+            .push("thread-9".to_owned());
+        let stdout = Path::new("/obs/output.out");
+        files.write(stdout, b"Read\nBash\n").unwrap();
+        let (looked, looks) = std::sync::mpsc::channel();
+        let clock = Racing {
+            now: Mutex::new(Instant::now()),
+            looked: Mutex::new(looked),
+        };
+        let watch = CommandSteps {
+            files: &files,
+            sinks: tokens.clone(),
+        };
+        let ((), watched) = watch.watch(
+            &NamingAgent,
+            None,
+            (Path::new("/q/queue.db"), target(), None),
+            stdout,
+            &clock,
+            || {
+                // The agent runs on until its watch's start and four looks
+                // read the clock, each past its interval.
+                for _ in 0..5 {
+                    looks
+                        .recv_timeout(std::time::Duration::from_secs(60))
+                        .expect("the watch looks at the agent's stdout");
+                }
+            },
+        );
+        assert_eq!(denials_of(&tokens.sink, "thread-9"), 0);
+        assert_eq!(sink_count(&tokens.sink), 0);
+        // The command registered the thread once its agent ended.
+        tokens.sink.unregistered.lock().unwrap().clear();
+        watched.finish();
+        assert_eq!(denials_of(&tokens.sink, "thread-9"), 0);
+        let sent: usize = tokens
+            .sink
+            .reports
+            .lock()
+            .unwrap()
+            .iter()
+            .inspect(|report| assert_eq!(report.session_id, "thread-9"))
+            .map(|report| report.steps.len())
+            .sum();
+        assert_eq!(sent, 3);
+    }
+
+    fn denials_of(sink: &Sink, session: &str) -> usize {
+        sink.denials
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|denied| *denied == session)
+            .count()
+    }
+
+    /// A session the service refuses as not of the target (never
+    /// registered, or another target's) is sent again at most
+    /// [`MAX_DENIALS`] times, each refusal warned of, and then given up:
+    /// its steps dropped, its later ones never sent, so the refusals and
+    /// their warnings stop. The other sessions of the target are sent all
+    /// along.
+    #[test]
+    fn a_session_the_service_refuses_is_given_up_after_max_denials() {
+        let sink = Sink::default();
+        sink.unregistered.lock().unwrap().push("foreign".to_owned());
+        let mut reporter = StepReporter::new(target(), ReporterState::default(), 0);
+        for round in 0..10_i64 {
+            reporter.push("foreign", 0, vec![step(round), step(round)]);
+            reporter.push("own", 0, vec![step(round)]);
+            reporter.flush(Some(&sink), round * INTERVAL_MS);
+        }
+        assert_eq!(denials_of(&sink, "foreign"), MAX_DENIALS as usize);
+        let foreign = &reporter.state().sessions["foreign"];
+        assert!(foreign.refused);
+        assert!(foreign.pending.is_empty());
+        assert_eq!(reporter.pending(), 0);
+        let own: usize = sink
+            .reports
+            .lock()
+            .unwrap()
+            .iter()
+            .inspect(|report| assert_eq!(report.session_id, "own"))
+            .map(|report| report.steps.len())
+            .sum();
+        assert_eq!(own, 10);
+        // The give-up outlives the wrapper: a resume's goes on from it.
+        let kept: ReporterState =
+            serde_json::from_value(serde_json::to_value(reporter.state()).unwrap()).unwrap();
+        assert!(kept.sessions["foreign"].refused);
+    }
+
+    /// A session registered before its refusals reach [`MAX_DENIALS`] is
+    /// sent whole, the steps refused before included, and its count of
+    /// refusals starts again.
+    #[test]
+    fn a_session_registered_after_a_refusal_is_sent_and_its_count_reset() {
+        let sink = Sink::default();
+        sink.unregistered.lock().unwrap().push("s".to_owned());
+        let mut reporter = StepReporter::new(target(), ReporterState::default(), 0);
+        reporter.push("s", 0, vec![step(0), step(1)]);
+        reporter.flush(Some(&sink), 0);
+        assert_eq!(reporter.state().sessions["s"].denied, 1);
+        assert_eq!(reporter.pending(), 2);
+        sink.unregistered.lock().unwrap().clear();
+        reporter.push("s", 0, vec![step(2)]);
+        let flushed = reporter.flush(Some(&sink), INTERVAL_MS);
+        assert_eq!(flushed, Flushed { sent: 3, kept: 0 });
+        let session = &reporter.state().sessions["s"];
+        assert_eq!((session.denied, session.refused), (0, false));
+    }
+
+    /// Steps a job kept of a session the service refuses are sent again by
+    /// the sweeps at most [`MAX_DENIALS`] times, and then go: the sweeps of
+    /// every pass do not send them on while the target's token holds.
+    #[test]
+    fn kept_steps_of_a_refused_session_stop_being_sent_again() {
+        let tokens = Arc::new(Tokens::default());
+        tokens
+            .sink
+            .unregistered
+            .lock()
+            .unwrap()
+            .push("review-agent".to_owned());
+        let unsent = UnsentSteps::default();
+        let mut steps = VerificationSteps::new(
+            tokens.clone(),
+            PathBuf::from("/q/queue.db"),
+            target(),
+            Some("review-agent".to_owned()),
+        );
+        steps.command(
+            ("cargo build", &Subcommands::common()),
+            (0, 10),
+            Some(0),
+            None,
+        );
+        assert!(!steps.finish(20));
+        unsent.keep(steps);
+        for _ in 0..20 {
+            unsent.resend();
+        }
+        assert_eq!(
+            denials_of(&tokens.sink, "review-agent"),
+            MAX_DENIALS as usize
+        );
+        assert_eq!(unsent.resend(), 0);
+        assert!(unsent.sessions().is_empty());
     }
 
     fn sink_count(sink: &Sink) -> usize {

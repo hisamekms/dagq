@@ -258,7 +258,7 @@ impl Supervisor<'_> {
     /// and the slots' jobs ([`HeadlessJob::abandon`]).
     fn abandon_jobs(&mut self) {
         self.on_planning(|planning, env| planning.register_stopping_sessions(env));
-        self.register_stopping_sessions();
+        self.register_job_sessions();
         self.planning.abandon_jobs();
         self.abandon_agent_eval();
         self.abandon_agent_cases();

@@ -962,6 +962,14 @@ pub struct ServiceError {
     /// client that does not know the field ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<Box<super::task_hold::HoldGuard>>,
+    /// Whether a `failed` is the registration of a session another target
+    /// holds ([`crate::domain::session_step::StepError::SessionOfAnotherTarget`]),
+    /// which asking again cannot change: a field of its own beside
+    /// [`Self::kind`], so a client that does not know it ignores it and
+    /// reads the failure as any other (`kind` takes no variant an older
+    /// client cannot read).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session_of_another_target: bool,
 }
 
 /// A failure of a use case the caller tells apart from the others, as the
@@ -1179,6 +1187,7 @@ impl ServiceResponse {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             }),
         }
     }

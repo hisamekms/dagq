@@ -13,6 +13,7 @@ fn failed(kind: Option<FailureKind>) -> ServiceError {
         kind,
         rejected: false,
         held: None,
+        session_of_another_target: false,
     }
 }
 
@@ -40,6 +41,24 @@ fn a_services_failure_reads_as_the_queues_own_error() {
     let missing = service_error(&failed(Some(FailureKind::RunNotFound(run.clone()))));
     assert!(missing.downcast_ref::<RunNotFound>().is_some());
     assert_eq!(failure_kind(&missing), Some(FailureKind::RunNotFound(run)));
+    // A registration of another target's session reads as the store's
+    // refusal, which asking again cannot change; it is no kind.
+    let taken = anyhow::Error::new(crate::domain::session_step::StepError::SessionOfAnotherTarget)
+        .context("register_telemetry_session");
+    assert!(super::session_of_another_target(&taken));
+    assert_eq!(failure_kind(&taken), None);
+    let taken = service_error(&ServiceError {
+        session_of_another_target: true,
+        ..failed(None)
+    });
+    assert_eq!(
+        taken.downcast_ref::<crate::domain::session_step::StepError>(),
+        Some(&crate::domain::session_step::StepError::SessionOfAnotherTarget)
+    );
+    assert!(super::session_of_another_target(&taken));
+    assert!(!super::session_of_another_target(&service_error(&failed(
+        None
+    ))));
     let busy = service_error(&failed(Some(FailureKind::QueueBusy)));
     assert!(QueueBusy::is(&busy));
     assert_eq!(failure_kind(&busy), Some(FailureKind::QueueBusy));
@@ -49,6 +68,65 @@ fn a_services_failure_reads_as_the_queues_own_error() {
         "{other:#}"
     );
     assert_eq!(failure_kind(&other), None);
+}
+
+/// The answer of the service to a registration of a session another
+/// target holds, as `respond` makes it, read by a client of the version
+/// before (the same `API_VERSION`): its `ServiceResponse` and
+/// `FailureKind` as they were, which know no `session_of_another_target`.
+/// It reads, as a `failed` with no kind, the refusal it read before
+/// (`queue-service.md` 「API versionと互換」); the client of this version
+/// reads the store's refusal back.
+#[test]
+fn a_registration_of_another_targets_session_reads_in_the_client_before() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum KindBefore {
+        RunNotFound(crate::domain::RunId),
+        QueueBusy,
+        HandoffAsked(Box<crate::domain::queue_service::HandoffRefusal>),
+    }
+    #[derive(serde::Deserialize)]
+    struct ErrorBefore {
+        code: crate::domain::queue_service::ServiceErrorCode,
+        message: String,
+        #[serde(default)]
+        kind: Option<KindBefore>,
+        #[serde(default)]
+        rejected: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct ResponseBefore {
+        api_version: u32,
+        ok: bool,
+        error: Option<ErrorBefore>,
+    }
+    let answered = crate::application::queue_service::respond(Err(anyhow::Error::new(
+        crate::domain::session_step::StepError::SessionOfAnotherTarget,
+    )
+    .context("register_telemetry_session")));
+    let wire = serde_json::to_string(&answered).unwrap();
+    let before: ResponseBefore = serde_json::from_str(&wire).unwrap();
+    assert_eq!(
+        before.api_version,
+        crate::domain::queue_service::API_VERSION
+    );
+    assert!(!before.ok);
+    let error = before.error.unwrap();
+    assert_eq!(error.code, ServiceErrorCode::Failed);
+    assert!(error.kind.is_none());
+    assert!(!error.rejected);
+    assert!(
+        error.message.contains("another target"),
+        "{}",
+        error.message
+    );
+    let now: crate::domain::queue_service::ServiceResponse = serde_json::from_str(&wire).unwrap();
+    assert_eq!(
+        service_error(&now.error.unwrap()).downcast_ref::<crate::domain::session_step::StepError>(),
+        Some(&crate::domain::session_step::StepError::SessionOfAnotherTarget)
+    );
 }
 
 /// Only a service out of reach is waited for: a refusal is not.
@@ -229,6 +307,7 @@ fn set_max_load_sends_the_value_alone_only_to_a_service_that_reads_no_source() {
             kind: None,
             rejected: false,
             held: None,
+            session_of_another_target: false,
         })
     }
     assert_eq!(
@@ -426,6 +505,7 @@ impl ServiceCaller for PagedRuns {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             }));
         }
         let runs: Vec<_> = self.runs.iter().skip(offset).take(page).collect();
@@ -1328,6 +1408,7 @@ impl ServiceCaller for Tokens {
                         kind: None,
                         rejected: false,
                         held: None,
+                        session_of_another_target: false,
                     }))
                 }
             }
@@ -1777,6 +1858,7 @@ impl ServiceCaller for PagedSamples {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             }));
         }
         Ok(Value::Array(
@@ -1901,6 +1983,7 @@ impl ServiceCaller for PagedResources {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             }));
         }
         Ok(Value::Array(
@@ -2237,6 +2320,7 @@ impl ServiceCaller for PagedLedger {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             }));
         }
         Ok(Value::Array(answer(page)))
@@ -2347,6 +2431,7 @@ impl ServiceCaller for RowInParts {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             })),
             "ledger_row_keys" => {
                 let after = params.args[1].as_str().map(str::to_owned);
@@ -2481,6 +2566,7 @@ impl ServiceCaller for RowsOfLedger {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             }));
         }
         Ok(answer)
@@ -2578,6 +2664,7 @@ impl ServiceCaller for OlderDiagnosisService {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             })),
         }
     }
@@ -2721,6 +2808,7 @@ impl ServiceCaller for PagedEventsOf {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             })
         };
         let asked = usize::try_from(params.args[3].as_u64().unwrap()).unwrap();
@@ -2895,6 +2983,7 @@ impl ServiceCaller for PagedHeads {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             }));
         }
         if params.op == "ledger_heads" {
@@ -3037,6 +3126,7 @@ impl ServiceCaller for PagedSettledWaits {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             }));
         }
         let rows: Vec<_> = (1..=self.rows)
@@ -3173,6 +3263,7 @@ impl ServiceCaller for PagedWaits {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             }));
         }
         if params.op == "ledger_supervisor_stops" {
@@ -3533,6 +3624,7 @@ impl ServiceCaller for PagedPushRecords {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             }));
         }
         Ok(answer)

@@ -1,0 +1,6 @@
+[[boundary]]
+id = "review-agent-session-registered-as-it-runs-and-steps-stored-under-the-run"
+kind = "プロセス"
+test = "runtime_telemetry_sessions::a_review_agents_session_is_registered_to_its_run_as_it_runs_and_its_steps_go_in"
+reason = "run の review の agent の job の process が自分で名づけた session を、supervisor の pass が job の実行中に読んで queue service の process を通して run に登録し、executor が送った step を拒まれずに SQLite の SessionStepStore に run の下で記録することは、実の job の process と queue service の process でしか確かめられない（ask 1586 で人が求めた代表の 1 case）。登録まで送らない判断と拒否の上限は supervise::execution::jobs と step_report の unit test"
+task = 4059

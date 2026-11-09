@@ -354,7 +354,7 @@ fn register_job_session(
 fn end_job_telemetry(env: &contexts::PlanningEnv<'_>, kind: TargetKind, id: i64) {
     // What its steps could not send yet (a Codex thread registered only at
     // its end) goes while its token holds.
-    env.jobs.resend_steps();
+    env.jobs.resend_steps(&env.pass);
     env.jobs.target_telemetry(&env.pass).end(
         &*env.pass.queue,
         &StepTarget::of(kind, id),
@@ -390,6 +390,7 @@ mod tests {
                 kind: None,
                 rejected: false,
                 held: None,
+                session_of_another_target: false,
             })
         };
         let bytes = PromptBytes::default;

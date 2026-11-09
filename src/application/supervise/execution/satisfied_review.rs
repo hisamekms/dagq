@@ -124,12 +124,14 @@ impl ClaimReviewWatch {
         }
     }
 
-    /// The session its running job's agent named so far
-    /// ([`HeadlessJob::named_session`]).
-    pub(super) fn named_session(&mut self) -> Option<String> {
-        match &mut self.state {
-            ClaimJob::Running { job, .. } => job.named_session(),
-            _ => None,
+    /// Register with `register` the session its running job's agent named
+    /// so far ([`HeadlessJob::register_session`]).
+    pub(super) fn register_session(
+        &mut self,
+        register: &mut dyn FnMut(&crate::domain::session_step::StepTarget, &str) -> bool,
+    ) {
+        if let ClaimJob::Running { job, .. } = &mut self.state {
+            job.register_session(register);
         }
     }
 }

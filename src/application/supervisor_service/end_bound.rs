@@ -27,7 +27,7 @@ use crate::domain::LeaseToken;
 use crate::domain::queue_service::UseCase;
 use crate::domain::session_step::StepTarget;
 use crate::domain::telemetry::{ReportRecorded, TelemetryReport};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
@@ -318,14 +318,18 @@ impl TelemetrySink for BoundSink {
             report.clone(),
         );
         within(&self.deadline, &*self.clock, move || {
-            inner
-                .sink(&db, &target)
-                .map(|sink| sink.report(&report).map_err(|error| format!("{error:#}")))
+            inner.sink(&db, &target).map(|sink| sink.report(&report))
         })
         .ok()
         .flatten()
-        .unwrap_or_else(|| Err("no answer before the supervisor's end's deadline".to_owned()))
-        .map_err(|error| anyhow::anyhow!("the report was not sent: {error}"))
+        .unwrap_or_else(|| {
+            Err(anyhow::anyhow!(
+                "no answer before the supervisor's end's deadline"
+            ))
+        })
+        // What the service refused stays told apart from what did not
+        // arrive (crate::domain::telemetry::ReportDenied).
+        .context("the report was not sent")
     }
 }
 
@@ -504,6 +508,74 @@ mod tests {
         assert_eq!(
             deadline.left(start + Duration::from_secs(11)),
             Some(Duration::ZERO)
+        );
+    }
+
+    /// A clock a second on at each look, so a wait for an answer that does
+    /// not come ends at the deadline after as many looks as it has seconds.
+    struct Ticking(Mutex<Instant>);
+
+    impl Clock for Ticking {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH
+        }
+        fn monotonic(&self) -> Instant {
+            let mut now = self.0.lock().unwrap();
+            *now += Duration::from_secs(1);
+            *now
+        }
+    }
+
+    /// Has a sink for every target, whose service refuses every report as
+    /// not of the target.
+    struct Denying;
+
+    impl TelemetrySink for Denying {
+        fn report(&self, _: &TelemetryReport) -> Result<ReportRecorded> {
+            Err(crate::domain::telemetry::ReportDenied("not on this resource".into()).into())
+        }
+    }
+
+    impl TelemetrySinks for Denying {
+        fn sink(&self, _: &Path, _: &StepTarget) -> Option<Box<dyn TelemetrySink>> {
+            Some(Box::new(Self))
+        }
+        fn digest_key(&self, _: &Path) -> Option<crate::domain::command_shape::DigestKey> {
+            None
+        }
+        fn steps_file(&self, _: &Path, _: &StepTarget) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    /// The bound sink keeps a refusal of the service's as one
+    /// ([`crate::domain::telemetry::ReportDenied`]), so the executor still
+    /// tells it from a report that did not arrive.
+    #[test]
+    fn a_bound_sink_keeps_the_services_refusal_told_apart() {
+        // A deadline bounds the wait for the sink's answer, should it never
+        // come: thirty looks of the clock.
+        let start = Instant::now();
+        let deadline = Arc::new(EndDeadline::default());
+        deadline.set_by(start + Duration::from_secs(30));
+        let clock = Arc::new(Ticking(Mutex::new(start)));
+        let sinks = EndBoundSinks::new(Arc::new(Denying), clock, deadline);
+        let target = StepTarget::run(&crate::domain::RunId::new("r").unwrap());
+        let report = TelemetryReport::new(target.clone(), "s", Vec::new());
+        let error = sinks
+            .sink(Path::new("q.db"), &target)
+            .unwrap()
+            .report(&report)
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::domain::telemetry::ReportDenied>()
+                .is_some(),
+            "{error:#}"
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "the report was not sent: authorization_denied: not on this resource"
         );
     }
 

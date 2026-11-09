@@ -55,9 +55,19 @@
 //! token's target. A session the runtime names ahead (Claude's
 //! `--session-id`, a worker's by its run and its session starts) is
 //! registered before its agent starts; one its agent names (a Codex
-//! thread) once its events or its job's output name it, and what the
-//! executor sent before is refused and sent again. A registration is
-//! telemetry too: one that failed is logged and changes no outcome.
+//! thread, a run's review agent's job, which is given no session ahead)
+//! once its events or its job's output name it. A job the supervisor runs
+//! sends nothing of its session before that registration: it is read on
+//! every pass (a run's jobs) or poll (a target of no run's), and what a
+//! job kept at its end is registered before it is sent again
+//! (`supervise::execution::jobs::JobStepsOn`); a command's agent (an
+//! observation's, a throughput review's) sends nothing of a session it
+//! named before the command registers it at the agent's end
+//! ([`super::step_report::CommandSteps::watch`]). What a session wrapper sent
+//! before the next pass read its events is refused and sent again, at most
+//! [`super::step_report::WRAPPER_MAX_DENIALS`] times in a row before it
+//! gives the session up. A registration is telemetry too: one that failed is logged
+//! and changes no outcome.
 
 use std::path::{Path, PathBuf};
 
@@ -183,6 +193,26 @@ pub fn register_session(
     try_register(tokens, db, target, session_id).is_ok()
 }
 
+/// Register `session_id` as `target`'s ([`register_session`]): whether
+/// asking again is no use, as it was registered or another target holds
+/// it, never `target`'s then (its reports are refused and the executor
+/// gives them up, [`super::step_report::MAX_DENIALS`]). A registration
+/// that failed otherwise (the queue locked) is worth asking again.
+pub fn register_settled(
+    tokens: &dyn TelemetryTokens,
+    db: &Path,
+    target: &StepTarget,
+    session_id: &str,
+) -> bool {
+    match try_register(tokens, db, target, session_id) {
+        Ok(()) => true,
+        Err(error) => matches!(
+            error.downcast_ref::<crate::domain::session_step::StepError>(),
+            Some(crate::domain::session_step::StepError::SessionOfAnotherTarget)
+        ),
+    }
+}
+
 /// [`register_session`]: what the registration returned, logged when it
 /// failed.
 fn try_register(
@@ -221,14 +251,7 @@ pub fn register_run_sessions(
         if registered.contains(&session) {
             continue;
         }
-        let done = match try_register(tokens, db, &target, &session) {
-            Ok(()) => true,
-            Err(error) => matches!(
-                error.downcast_ref::<crate::domain::session_step::StepError>(),
-                Some(crate::domain::session_step::StepError::SessionOfAnotherTarget)
-            ),
-        };
-        if done {
+        if register_settled(tokens, db, &target, &session) {
             registered.insert(session);
         }
     }
@@ -1655,6 +1678,104 @@ mod tests {
             BTreeMap::from([("p-1".to_owned(), planner)])
         );
         assert_eq!(*tokens.registrations.lock().unwrap(), 3);
+    }
+
+    /// A registration is settled once made or once another target holds
+    /// the session, which asking again cannot change, never the second
+    /// target's then; one the queue failed (locked) is asked again.
+    #[test]
+    fn a_registration_is_settled_once_made_or_held_by_another_target() {
+        let tokens = Tokens::default();
+        let (run, other) = (StepTarget::run(&run("r1")), StepTarget::run(&run("r2")));
+        *tokens.failing_registrations.lock().unwrap() = 1;
+        assert!(!register_settled(&tokens, Path::new(DB), &run, "s"));
+        assert!(register_settled(&tokens, Path::new(DB), &run, "s"));
+        assert!(register_settled(&tokens, Path::new(DB), &other, "s"));
+        assert_eq!(
+            *tokens.owners.lock().unwrap(),
+            BTreeMap::from([("s".to_owned(), run)])
+        );
+    }
+
+    /// The registrations of a supervisor that asks them of the queue
+    /// service: each answer is what the service's queue returned, made the
+    /// service's response ([`crate::application::queue_service::respond`]),
+    /// carried as JSON and read back as the supervisor's queue reads it
+    /// ([`crate::application::supervisor_service::service_error`]).
+    struct Served(Tokens);
+
+    impl TelemetryTokens for Served {
+        fn issue_telemetry(
+            &self,
+            db: &Path,
+            target: &StepTarget,
+            task: Option<TaskId>,
+            lease: Option<&LeaseToken>,
+        ) -> Result<PathBuf> {
+            self.0.issue_telemetry(db, target, task, lease)
+        }
+        fn revoke_telemetry(
+            &self,
+            db: &Path,
+            target: &StepTarget,
+            issued_under: Option<&LeaseToken>,
+        ) -> Result<bool> {
+            self.0.revoke_telemetry(db, target, issued_under)
+        }
+        fn telemetry_credential(&self, db: &Path, target: &StepTarget) -> Option<PathBuf> {
+            self.0.telemetry_credential(db, target)
+        }
+        fn kept_steps(&self, db: &Path) -> Result<Vec<crate::domain::telemetry::KeptStepsFile>> {
+            self.0.kept_steps(db)
+        }
+        fn forget_steps(&self, db: &Path, file: &Path) -> Result<()> {
+            self.0.forget_steps(db, file)
+        }
+        fn held_telemetry(&self, db: &Path) -> Result<Vec<HeldTelemetry>> {
+            self.0.held_telemetry(db)
+        }
+        fn target_facts(&self, db: &Path, target: &StepTarget) -> Result<TargetFacts> {
+            self.0.target_facts(db, target)
+        }
+        fn register_telemetry_session(
+            &self,
+            db: &Path,
+            target: &StepTarget,
+            session_id: &str,
+        ) -> Result<()> {
+            let answered = crate::application::queue_service::respond(
+                self.0
+                    .register_telemetry_session(db, target, session_id)
+                    .map(|()| serde_json::Value::Null),
+            );
+            let carried: crate::domain::queue_service::ServiceResponse =
+                serde_json::from_str(&serde_json::to_string(&answered).unwrap()).unwrap();
+            match carried.error {
+                Some(error) => Err(crate::application::supervisor_service::service_error(
+                    &error,
+                )),
+                None => Ok(()),
+            }
+        }
+    }
+
+    /// Through the queue service, as the supervisor registers, a session
+    /// another target holds is still known as that: settled at the first
+    /// ask, so the next passes do not ask (and warn) again, and it is never
+    /// the second target's; a queue that failed is asked again.
+    #[test]
+    fn another_targets_session_is_settled_through_the_queue_service() {
+        let served = Served(Tokens::default());
+        let (run, other) = (StepTarget::run(&run("r1")), StepTarget::run(&run("r2")));
+        assert!(register_settled(&served, Path::new(DB), &run, "s"));
+        assert!(register_settled(&served, Path::new(DB), &other, "s"));
+        *served.0.failing_registrations.lock().unwrap() = 1;
+        assert!(!register_settled(&served, Path::new(DB), &other, "t"));
+        assert_eq!(
+            *served.0.owners.lock().unwrap(),
+            BTreeMap::from([("s".to_owned(), run)])
+        );
+        assert_eq!(*served.0.registrations.lock().unwrap(), 3);
     }
 
     /// The sweep removes a wrapper's kept file once the queue says its

@@ -237,7 +237,7 @@ impl Supervisor<'_> {
         // again (a weekly review may take longer than the time between two
         // updates).
         self.on_planning(|planning, env| planning.stop_for_handoff(env));
-        self.register_stopping_sessions();
+        self.register_job_sessions();
         let mut kept = 0;
         for mut slot in self.claim.slots.take_all() {
             let run = slot.run.clone();

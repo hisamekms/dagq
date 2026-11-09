@@ -149,6 +149,24 @@ impl fmt::Display for TelemetryError {
 
 impl std::error::Error for TelemetryError {}
 
+/// A report the queue service refused as `authorization_denied`, with what
+/// it said: a valid telemetry token reaches that refusal only for a report
+/// of a session not registered to the token's target (one never
+/// registered, or another target's), so sending the same report again
+/// cannot pass until the control side registers the session (ADR-t1662-3
+/// decision 10). What the sink's adapter returns in place of the service's
+/// failure, so the executor tells it from a service that did not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportDenied(pub String);
+
+impl fmt::Display for ReportDenied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "authorization_denied: {}", self.0)
+    }
+}
+
+impl std::error::Error for ReportDenied {}
+
 /// The report `params` carry: its version is read first, and one the
 /// service does not read refuses it whatever else it says; a field the
 /// report does not know, at any level, is dropped. The report is then

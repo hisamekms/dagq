@@ -175,27 +175,20 @@ impl PlanningState {
     }
 
     /// Register to the plan and goal reviews running the sessions their
-    /// agents named so far (a Codex thread, registered otherwise only from
-    /// the job's end), before a handoff or the loop's end stops them: the
-    /// steps their stop sends are then theirs.
+    /// agents named so far and not yet registered (a Codex thread), before
+    /// a handoff or the loop's end stops them: the steps their stop sends
+    /// are then theirs.
     pub(in crate::application::supervise) fn register_stopping_sessions(
         &mut self,
         env: &mut PlanningEnv<'_>,
     ) {
-        let telemetry = env.jobs.target_telemetry(&env.pass);
         if let Some(watch) = &mut self.plan_review {
-            let named = watch.headless.named_session();
-            telemetry.register(
-                &StepTarget::of(TargetKind::PlanReview, watch.job.id),
-                named.as_deref(),
-            );
+            env.jobs
+                .register_job_session(&env.pass, &mut watch.headless);
         }
         if let Some(watch) = &mut self.goal_review {
-            let named = watch.headless.named_session();
-            telemetry.register(
-                &StepTarget::of(TargetKind::GoalReview, watch.job.id),
-                named.as_deref(),
-            );
+            env.jobs
+                .register_job_session(&env.pass, &mut watch.headless);
         }
     }
 
@@ -808,6 +801,9 @@ impl PlanningState {
         // it ran on (ADR-t1063-1 decisions 2, 4 and 6).
         let agent = env.jobs.job_agent(provider).unwrap_or(env.jobs.reviewer());
         let watch = self.plan_review.as_mut().expect("read above");
+        // Its session is registered once named, before its steps are sent.
+        env.jobs
+            .register_job_session(&env.pass, &mut watch.headless);
         let Some(outcome) = watch.headless.poll(&**env.files, agent)? else {
             return Ok(false);
         };
