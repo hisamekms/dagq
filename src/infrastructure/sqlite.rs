@@ -36,12 +36,15 @@
 //! schema and the reason. A breaking migration's user check, backup and
 //! application share one transaction ([`SqliteQueue::migrate`]).
 
-use super::sql_exec::TransactionEntries;
 use super::sql_exec::sqlite::{
     attach_event_actors, attach_event_bodies, is_contention, native_error, port_tx, with_row,
 };
+use super::sql_exec::{CommitTransaction as _, TransactionEntries};
+use super::store_queue::StoreQueue;
 use super::store_rows;
 use super::store_writes;
+#[cfg(test)]
+use crate::domain::actor::ActorContext;
 use crate::domain::event_kind::EventKind;
 use std::{
     path::{Path, PathBuf},
@@ -58,14 +61,14 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use crate::{
-    application::{Generators, GraphInput, IdGenerator, TaskPage, TaskQuery, TaskReads, TaskStore},
+    application::{GraphInput, IdGenerator, TaskPage, TaskQuery, TaskReads, TaskStore},
     domain::{
         ChangeSet, ClaimOutcome, CommitSha, DomainError, Goal, GoalDetail, GoalEdit, GoalId,
         GoalPredecessor, GoalSummary, GoalVerdict, LintInput, NewGoal, NewNote, NewTask, NotePage,
         NoteQuery, Predecessor, Priority, Proposal, ProposalId, RunEvent, RunId, Submission,
         TagSet, Task, TaskAction, TaskAuthorization, TaskDetail, TaskEdit, TaskId, TaskRun,
-        TaskStatus, TitlePrefixes, actor::ActorContext, cancel_reason::NewCancel,
-        provider_switch::WorkerRoute, scope::validate_path_globs, worker_model::WorkerTrial,
+        TaskStatus, TitlePrefixes, cancel_reason::NewCancel, provider_switch::WorkerRoute,
+        scope::validate_path_globs, worker_model::WorkerTrial,
     },
     infrastructure::{
         clock,
@@ -1110,84 +1113,10 @@ impl SqliteQueue {
         refuse_in_use(&queue_use(&queue.conn)?, alive, &pending)
     }
 
-    /// The queue reading the time and creating IDs through `generators`
-    /// instead of the system clock and random UUIDs.
-    pub fn with_generators(mut self, generators: Generators) -> Self {
-        self.generators = generators;
-        self
-    }
-
-    /// The queue holding the tasks to the repository's set of changes
-    /// (ADR-t980-1); `None` holds them to none.
-    pub fn with_changes(mut self, changes: Option<ChangeSet>) -> Self {
-        self.changes = changes;
-        self
-    }
-
-    /// The queue holding the tasks' titles to the repository's prefixes;
-    /// `None` holds them to none.
-    pub fn with_title_prefixes(mut self, prefixes: Option<TitlePrefixes>) -> Self {
-        self.title_prefixes = prefixes;
-        self
-    }
-
-    /// The queue holding the goals to the repository's set of tags
-    /// (ADR-t1639-1 decision 6); `None` holds them to none.
-    /// With `[goals] max_spike_cycles` (ADR-t1487-1 decision 8).
-    pub fn with_max_spike_cycles(mut self, max: Option<usize>) -> Self {
-        self.max_spike_cycles = max;
-        self
-    }
-
-    /// The queue whose next `submit` goes with the replacement plan `plan`
-    /// of a replanning operation's request (ADR-t1521-2 decision 4).
-    pub fn with_replacement_plan(
-        mut self,
-        plan: Option<crate::domain::replan_plan::ReplacementPlan>,
-    ) -> Self {
-        self.replacement = plan;
-        self
-    }
-
-    pub fn with_goal_tags(mut self, tags: Option<TagSet>) -> Self {
-        self.goal_tags = tags;
-        self
-    }
-
-    /// [`Self::with_changes`], [`Self::with_goal_tags`],
-    /// [`Self::with_max_spike_cycles`], [`Self::with_title_prefixes`] and
-    /// [`Self::with_replacement_plan`] on
-    /// a queue held by reference, each set only when given: the rules a
-    /// planning command holds its tasks and goals to.
-    pub fn hold_planning_to(&mut self, rules: PlanningRules) {
-        if let Some(changes) = rules.changes {
-            self.changes = changes;
-        }
-        if let Some(tags) = rules.goal_tags {
-            self.goal_tags = tags;
-        }
-        if let Some(max) = rules.max_spike_cycles {
-            self.max_spike_cycles = max;
-        }
-        if let Some(prefixes) = rules.title_prefixes {
-            self.title_prefixes = prefixes;
-        }
-        if let Some(plan) = rules.replacement {
-            self.replacement = plan;
-        }
-    }
-
     /// The queue warning of, and recording, a [`WriteTx`] that held the
     /// write lock past `threshold` instead of [`WRITE_HOLD_WARN`].
     pub fn with_write_hold_warn(mut self, threshold: Duration) -> Self {
         self.write_hold_warn = threshold;
-        self
-    }
-
-    /// Record the refusals of the policy with `log`: for a read-only
-    /// connection, which cannot write them.
-    pub fn with_denial_log(mut self, log: DenialRecorder) -> Self {
-        self.denial_log = Some(log);
         self
     }
 
@@ -1214,29 +1143,6 @@ impl SqliteQueue {
         .recorded())
     }
 
-    /// A single-statement write still uses the named, fenced transaction
-    /// entry, with exactly the statement's affected-row result.
-    pub(super) fn write_sql(
-        &self,
-        name: &'static str,
-        sql: &str,
-        params: &[super::sql_exec::SqlValue],
-    ) -> Result<usize> {
-        let tx = self.write_tx(name)?;
-        let changed = super::sql_exec::SqlWrite::execute(&tx, sql, params)?;
-        tx.commit()?;
-        Ok(changed)
-    }
-
-    /// Read transcripts through the session execution port before a write
-    /// entry holds its lock.
-    pub(super) fn read_session_transcripts_before(
-        &self,
-        closing: super::sessions::Closing<'_>,
-    ) -> Result<super::sessions::ReadBefore> {
-        self.read_before(closing)
-    }
-
     /// A transaction that reads one snapshot, named `name` on this
     /// connection ([`WriteTx::read`], deferred), which records a long hold
     /// of a write in it on this connection.
@@ -1244,22 +1150,6 @@ impl SqliteQueue {
         let mut tx = WriteTx::read(&self.conn, name, self.write_hold_warn)?.recorded();
         tx.identity = self.write_identity.clone();
         Ok(tx)
-    }
-
-    pub fn generators(&self) -> &Generators {
-        &self.generators
-    }
-
-    /// The queue writing its events as `actor` instead of the process's
-    /// actor ([`process_actor`]).
-    pub fn with_actor(self, actor: ActorContext) -> Self {
-        self.actors.set(actor);
-        self
-    }
-
-    /// The actor this queue's events record.
-    pub fn actor(&self) -> ActorContext {
-        self.actors.get()
     }
 
     pub fn schema_version(&self) -> Result<i64> {
@@ -1802,7 +1692,7 @@ fn path_text(path: &Path) -> Result<&str> {
 /// proposal owner in its transaction is not `authorized`, what the caller
 /// authorized it with. The [`TaskStore`] methods of the same names pass
 /// `None` and check nothing more.
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Configuration and execution transaction of a shared store operation.
     fn store<'a, T>(&'a self, tx: &'a T) -> super::task_store::Store<'a, T> {
         super::task_store::Store {
@@ -1816,14 +1706,14 @@ impl SqliteQueue {
     }
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     pub(super) fn transition_authorized(
         &mut self,
         task_id: TaskId,
         action: TaskAction,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
-        let tx = self.write_tx("transition_authorized")?;
+        let tx = self.write_entry("transition_authorized")?;
         let result = self
             .store(&tx)
             .transition_authorized(task_id, action, authorized)
@@ -1838,7 +1728,7 @@ impl SqliteQueue {
         cancel: &NewCancel,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
-        let tx = self.write_tx("cancel_authorized")?;
+        let tx = self.write_entry("cancel_authorized")?;
         let result = self
             .store(&tx)
             .cancel_authorized(task_id, cancel, authorized)
@@ -1853,7 +1743,7 @@ impl SqliteQueue {
         predecessor_id: TaskId,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
-        let tx = self.write_tx("add_dependency_authorized")?;
+        let tx = self.write_entry("add_dependency_authorized")?;
         self.store(&tx)
             .add_dependency_authorized(task_id, predecessor_id, authorized)
             .map_err(native_error)?;
@@ -1867,7 +1757,7 @@ impl SqliteQueue {
         predecessor_id: TaskId,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
-        let tx = self.write_tx("remove_dependency_authorized")?;
+        let tx = self.write_entry("remove_dependency_authorized")?;
         self.store(&tx)
             .remove_dependency_authorized(task_id, predecessor_id, authorized)
             .map_err(native_error)?;
@@ -1881,7 +1771,7 @@ impl SqliteQueue {
         goal_id: GoalId,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
-        let tx = self.write_tx("add_goal_dependency_authorized")?;
+        let tx = self.write_entry("add_goal_dependency_authorized")?;
         self.store(&tx)
             .add_goal_dependency_authorized(task_id, goal_id, authorized)
             .map_err(native_error)?;
@@ -1895,7 +1785,7 @@ impl SqliteQueue {
         goal_id: GoalId,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<()> {
-        let tx = self.write_tx("remove_goal_dependency_authorized")?;
+        let tx = self.write_entry("remove_goal_dependency_authorized")?;
         self.store(&tx)
             .remove_goal_dependency_authorized(task_id, goal_id, authorized)
             .map_err(native_error)?;
@@ -1909,7 +1799,7 @@ impl SqliteQueue {
         goal_id: Option<GoalId>,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
-        let tx = self.write_tx("set_goal_authorized")?;
+        let tx = self.write_entry("set_goal_authorized")?;
         let result = self
             .store(&tx)
             .set_goal_authorized(task_id, goal_id, authorized)
@@ -1927,7 +1817,7 @@ impl SqliteQueue {
         // Checked before the task is read, so a bad glob is reported first.
         validate_path_globs(&paths)?;
 
-        let tx = self.write_tx("set_paths_authorized")?;
+        let tx = self.write_entry("set_paths_authorized")?;
         let result = self
             .store(&tx)
             .set_paths_authorized(task_id, paths, authorized)
@@ -1942,7 +1832,7 @@ impl SqliteQueue {
         priority: Option<Priority>,
         authorized: Option<&TaskAuthorization>,
     ) -> Result<Task> {
-        let tx = self.write_tx("set_priority_authorized")?;
+        let tx = self.write_entry("set_priority_authorized")?;
         let result = self
             .store(&tx)
             .set_priority_authorized(task_id, priority, authorized)
@@ -1967,7 +1857,7 @@ impl SqliteQueue {
             changes.check(change)?;
         }
 
-        let tx = self.write_tx("edit_task_authorized")?;
+        let tx = self.write_entry("edit_task_authorized")?;
         let result = self
             .store(&tx)
             .edit_task_authorized(task_id, edit, authorized, full)
@@ -1977,7 +1867,7 @@ impl SqliteQueue {
     }
 }
 
-impl TaskStore for SqliteQueue {
+impl<E: TransactionEntries> TaskStore for StoreQueue<E> {
     fn add(&mut self, new: NewTask) -> Result<Task> {
         // Rejected before taking the write lock; `new` checks it again.
         new.validate()?;
@@ -1985,7 +1875,7 @@ impl TaskStore for SqliteQueue {
             changes.check(change)?;
         }
 
-        let tx = self.write_tx("task_add")?;
+        let tx = self.write_entry("task_add")?;
         let result = self.store(&tx).add(new).map_err(native_error)?;
         tx.commit()?;
         Ok(result)
@@ -2016,20 +1906,20 @@ impl TaskStore for SqliteQueue {
     }
 
     fn investigations(&mut self) -> Result<crate::domain::investigation::Investigations> {
-        let tx = self.write_tx("investigations")?;
+        let tx = self.write_entry("investigations")?;
         let investigations = super::investigations::refresh(&tx, self.generators.clock.now())?;
         tx.commit()?;
         Ok(investigations)
     }
 
     fn ready_at(&self, tasks: &[TaskId]) -> Result<std::collections::HashMap<TaskId, i64>> {
-        let tx = self.read_tx("ready_at")?;
+        let tx = self.read_entry("ready_at")?;
         let result = self.store(&tx).ready_at(tasks).map_err(native_error)?;
         Ok(result)
     }
 
     fn claim(&mut self, base_commit: &CommitSha) -> Result<ClaimOutcome> {
-        let tx = self.write_tx("task_claim")?;
+        let tx = self.write_entry("task_claim")?;
         let result = self.store(&tx).claim(base_commit).map_err(native_error)?;
         tx.commit()?;
         Ok(result)
@@ -2042,7 +1932,7 @@ impl TaskStore for SqliteQueue {
             tags.check(&new.tags)?;
         }
 
-        let tx = self.write_tx("add_goal")?;
+        let tx = self.write_entry("add_goal")?;
         let result = self.store(&tx).add_goal(new).map_err(native_error)?;
         tx.commit()?;
         Ok(result)
@@ -2058,7 +1948,7 @@ impl TaskStore for SqliteQueue {
             set.check(tags)?;
         }
 
-        let tx = self.write_tx("edit_goal")?;
+        let tx = self.write_entry("edit_goal")?;
         let result = self
             .store(&tx)
             .edit_goal(goal_id, edit)
@@ -2068,7 +1958,7 @@ impl TaskStore for SqliteQueue {
     }
 
     fn close_goal(&mut self, goal_id: GoalId, verdict: GoalVerdict) -> Result<Goal> {
-        let tx = self.write_tx("close_goal")?;
+        let tx = self.write_entry("close_goal")?;
         let result = self
             .store(&tx)
             .close_goal(goal_id, verdict)
@@ -2082,21 +1972,21 @@ impl TaskStore for SqliteQueue {
     }
 
     fn approve_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self.write_tx("approve_proposal")?;
+        let tx = self.write_entry("approve_proposal")?;
         let proposal = proposals::approve(&tx, proposal_id, &self.generators.clock.timestamp())?;
         tx.commit()?;
         Ok(proposal)
     }
 
     fn send_back_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self.write_tx("send_back_proposal")?;
+        let tx = self.write_entry("send_back_proposal")?;
         let proposal = proposals::send_back(&tx, proposal_id, &self.generators.clock.timestamp())?;
         tx.commit()?;
         Ok(proposal)
     }
 
     fn withdraw_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self.write_tx("withdraw_proposal")?;
+        let tx = self.write_entry("withdraw_proposal")?;
         let proposal = proposals::withdraw(
             &tx,
             proposal_id,
@@ -2108,7 +1998,7 @@ impl TaskStore for SqliteQueue {
     }
 
     fn ready_goal(&mut self, goal_id: GoalId) -> Result<Goal> {
-        let tx = self.write_tx("ready_goal")?;
+        let tx = self.write_entry("ready_goal")?;
         let result = self.store(&tx).ready_goal(goal_id).map_err(native_error)?;
         tx.commit()?;
         Ok(result)
@@ -2119,7 +2009,7 @@ impl TaskStore for SqliteQueue {
     fn add_note(&mut self, note: NewNote) -> Result<RunEvent> {
         note.validate()?;
 
-        let tx = self.write_tx("add_note")?;
+        let tx = self.write_entry("add_note")?;
         let result = self.store(&tx).add_note(note).map_err(native_error)?;
         tx.commit()?;
         Ok(result)
@@ -2147,9 +2037,9 @@ impl TaskStore for SqliteQueue {
     }
 }
 
-impl TaskReads for SqliteQueue {
+impl<E: TransactionEntries> TaskReads for StoreQueue<E> {
     fn list(&self, query: &TaskQuery) -> Result<TaskPage> {
-        let tx = self.read_tx("task_list")?;
+        let tx = self.read_entry("task_list")?;
         let result = self.store(&tx).list(query).map_err(native_error)?;
         Ok(result)
     }
@@ -2157,14 +2047,14 @@ impl TaskReads for SqliteQueue {
     fn show(&mut self, task_id: TaskId) -> Result<TaskDetail> {
         // One read snapshot keeps task status, run history and events consistent.
 
-        let tx = self.read_tx("task_show")?;
+        let tx = self.read_entry("task_show")?;
         let result = self.store(&tx).show(task_id).map_err(native_error)?;
-        tx.commit()?;
+        drop(tx);
         Ok(result)
     }
 
     fn candidates(&self) -> Result<Vec<Task>> {
-        let tx = self.read_tx("candidates")?;
+        let tx = self.read_entry("candidates")?;
         let result = self.store(&tx).candidates().map_err(native_error)?;
         Ok(result)
     }
@@ -2178,7 +2068,7 @@ impl TaskReads for SqliteQueue {
     }
 
     fn graph_input(&self) -> Result<GraphInput> {
-        let tx = self.read_tx("graph_input")?;
+        let tx = self.read_entry("graph_input")?;
         let result = self.store(&tx).graph_input().map_err(native_error)?;
         Ok(result)
     }
@@ -2202,7 +2092,7 @@ impl TaskReads for SqliteQueue {
     }
 
     fn task_fenced(&self, task: TaskId) -> Result<bool> {
-        Ok(SqliteQueue::turn_fence(self, task)?.is_some())
+        Ok(StoreQueue::turn_fence(self, task)?.is_some())
     }
     fn tasks_in_progress(&self) -> Result<Vec<Task>> {
         let tx = self.read_entry("tasks_in_progress")?;
@@ -2217,24 +2107,24 @@ impl TaskReads for SqliteQueue {
     }
 
     fn show_goal(&mut self, goal_id: GoalId) -> Result<GoalDetail> {
-        let tx = self.read_tx("show_goal")?;
+        let tx = self.read_entry("show_goal")?;
         let result = self.store(&tx).show_goal(goal_id).map_err(native_error)?;
-        tx.commit()?;
+        drop(tx);
         Ok(result)
     }
 
     fn show_proposal(&self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self.read_tx("show_proposal")?;
+        let tx = self.read_entry("show_proposal")?;
         proposals::read(&tx, proposal_id)
     }
 
     fn proposals(&self, all: bool) -> Result<Vec<Proposal>> {
-        let tx = self.read_tx("proposals")?;
+        let tx = self.read_entry("proposals")?;
         proposals::list(&tx, all)
     }
 
     fn lint_input(&self, tasks: &[TaskId]) -> Result<LintInput> {
-        let tx = self.read_tx("lint_input")?;
+        let tx = self.read_entry("lint_input")?;
         let result = self.store(&tx).lint_input(tasks).map_err(native_error)?;
         Ok(result)
     }

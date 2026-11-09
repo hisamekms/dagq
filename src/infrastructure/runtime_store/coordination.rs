@@ -28,7 +28,9 @@
 //! when their heartbeat is past `HEARTBEAT_TIMEOUT_SECS` and their PID is dead
 //! or reused. A failed heartbeat or stop record leaves the row stale for a
 //! later prune.
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::domain::worker::ProviderCheck;
@@ -38,7 +40,7 @@ use crate::infrastructure::sql_exec::{SqlRead, SqlWrite};
 /// while preserving NULL when no supervisor matches.
 pub(crate) const BACKEND_PARALLEL_SQL: &str = "SELECT CAST(SUM(parallel) AS BIGINT) FROM supervisors WHERE CAST(?1 AS TEXT) IS NULL OR token=?1";
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Refresh every lease this supervisor holds. Zero rows is not an error:
     /// an idle supervisor owns nothing.
     pub fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize> {
@@ -58,7 +60,7 @@ impl SqliteQueue {
     pub fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite> {
         let now = self.generators.clock.now();
         let write = || -> Result<HeartbeatWrite> {
-            let tx = self.write_tx("heartbeat")?;
+            let tx = self.write_entry("heartbeat")?;
             let registered = refresh_registration(&tx, token, now)?;
             let leases = SqlWrite::execute(
                 &tx,
@@ -116,7 +118,7 @@ impl SqliteQueue {
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
         ensure!(parallel >= 1, "parallel must be at least 1");
-        let tx = self.write_tx("supervisor_register")?;
+        let tx = self.write_entry("supervisor_register")?;
         let now = self.generators.clock.now();
         SqlWrite::execute(
             &tx,
@@ -192,7 +194,7 @@ impl SqliteQueue {
         stopped: &dyn Fn(&SupervisorRegistration) -> Value,
     ) -> Result<bool> {
         crate::domain::check_event_target(kind, None, None)?;
-        let tx = self.write_tx("prune_supervisor")?;
+        let tx = self.write_entry("prune_supervisor")?;
         let Some(registration) = SqlRead::query_row(
             &tx,
             &format!("{SUPERVISORS_SELECT} WHERE token=?1"),
@@ -315,7 +317,7 @@ impl SqliteQueue {
         setup: Option<(SlotLimits, &[ProviderCheck])>,
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
-        let tx = self.write_tx("supervisor_resume")?;
+        let tx = self.write_entry("supervisor_resume")?;
         ensure!(
             SqlWrite::execute(
                 &tx,
@@ -382,7 +384,7 @@ impl SqliteQueue {
         providers: &[ProviderCheck],
     ) -> Result<()> {
         {
-            let tx = self.write_tx("write_providers")?;
+            let tx = self.write_entry("write_providers")?;
             write_providers(&tx, token, providers)?;
             tx.commit()?;
             Ok(())
@@ -394,7 +396,7 @@ impl SqliteQueue {
     /// task 941, ADR-t1479-1) and where each comes from (task 698).
     pub fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
         {
-            let tx = self.write_tx("write_slot_limits")?;
+            let tx = self.write_entry("write_slot_limits")?;
             write_slot_limits(&tx, token, limits)?;
             tx.commit()?;
             Ok(())
@@ -422,7 +424,7 @@ impl SqliteQueue {
     /// drains or hands off a run it cannot keep. The run's `supervisor_token`
     /// stays as a record.
     pub fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {
-        let tx = self.write_tx("release_lease")?;
+        let tx = self.write_entry("release_lease")?;
         ensure!(
             SqlWrite::execute(
                 &tx,
@@ -452,7 +454,7 @@ impl SqliteQueue {
     /// queue resolved from the working directory. A queue already bound to
     /// another repository is refused; rebinding is never implicit.
     pub fn bind_repository(&mut self, common_dir: &str) -> Result<()> {
-        let tx = self.write_tx("bind_repository")?;
+        let tx = self.write_entry("bind_repository")?;
         SqlWrite::execute(
             &tx,
             "INSERT INTO queue_repository(singleton, git_common_dir) VALUES (1,?1)
@@ -477,7 +479,7 @@ impl SqliteQueue {
     /// the previous binding. Only the explicit `rebind` command calls this
     /// (ADR-0020); `init` and `supervise` go through `bind_repository`.
     pub fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
-        let tx = self.write_tx("rebind_repository")?;
+        let tx = self.write_entry("rebind_repository")?;
         let previous: Option<String> = SqlRead::query_row(
             &tx,
             "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
@@ -566,7 +568,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         pid: u32,
     ) -> Result<()> {
-        let tx = self.write_tx("register_resume_wrapper")?;
+        let tx = self.write_entry("register_resume_wrapper")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         // A running run's lost session opened again (task 1372) starts the
         // same way: its wrapper waits for the supervisor's request.
@@ -594,7 +596,7 @@ impl SqliteQueue {
     ) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
         let _read = self.read_before(Closing::Run(id, &[EventKind::AgentStarted]))?;
-        let tx = self.write_tx("register_resume_agent")?;
+        let tx = self.write_entry("register_resume_agent")?;
         assert_wrapper(&tx, id, wrapper_pid)?;
         SqlWrite::execute(
             &tx,
@@ -623,7 +625,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         lost: Option<u32>,
     ) -> Result<()> {
-        let tx = self.write_tx("clear_lost_session")?;
+        let tx = self.write_entry("clear_lost_session")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let allowed =
             supervised_run(&tx, id, token)?.is_some_and(|run| run::check_reopenable(&run).is_ok());
@@ -661,7 +663,7 @@ impl SqliteQueue {
         attempt: u64,
         repaired: Value,
     ) -> Result<()> {
-        let tx = self.write_tx("session_reopened")?;
+        let tx = self.write_entry("session_reopened")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         apply(
             &tx,
@@ -683,7 +685,7 @@ impl SqliteQueue {
     }
 
     pub fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
-        let tx = self.write_tx("register_wrapper")?;
+        let tx = self.write_entry("register_wrapper")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let allowed = supervised_run(&tx, id, token)?
             .is_some_and(|run| run::check_ready_for_wrapper(&run).is_ok());
@@ -702,7 +704,7 @@ impl SqliteQueue {
     pub fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
         let _read = self.read_before(Closing::Run(id, &[EventKind::AgentStarted]))?;
-        let tx = self.write_tx("register_agent")?;
+        let tx = self.write_entry("register_agent")?;
         assert_wrapper(&tx, id, wrapper_pid)?;
         SqlWrite::execute(
             &tx,
@@ -738,7 +740,7 @@ impl SqliteQueue {
         wrapper_pid: u32,
         agent_pid: u32,
     ) -> Result<()> {
-        let tx = self.write_tx("register_turn_agent")?;
+        let tx = self.write_entry("register_turn_agent")?;
         assert_wrapper(&tx, id, wrapper_pid)?;
         let changed = SqlWrite::execute(
             &tx,
@@ -767,7 +769,7 @@ impl SqliteQueue {
     pub fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
         let _read = self.read_before(Closing::Run(id, &[EventKind::SessionExited]))?;
-        let tx = self.write_tx("wrapper_exited")?;
+        let tx = self.write_entry("wrapper_exited")?;
         assert_wrapper(&tx, id, pid)?;
         SqlWrite::execute(
             &tx,
@@ -859,21 +861,21 @@ fn write_slot_limits(conn: &impl SqlWrite, token: &LeaseToken, limits: SlotLimit
 
 /// The [`RunCoordination`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
-impl RunCoordination for SqliteQueue {
+impl<E: TransactionEntries> RunCoordination for StoreQueue<E> {
     fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize> {
-        SqliteQueue::heartbeat_leases(self, token)
+        StoreQueue::heartbeat_leases(self, token)
     }
     fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {
-        SqliteQueue::release_lease(self, id, token)
+        StoreQueue::release_lease(self, id, token)
     }
     fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite> {
-        SqliteQueue::heartbeat(self, token)
+        StoreQueue::heartbeat(self, token)
     }
     fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
-        SqliteQueue::register_wrapper(self, id, token, pid)
+        StoreQueue::register_wrapper(self, id, token, pid)
     }
     fn register_resume_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
-        SqliteQueue::register_resume_wrapper(self, id, token, pid)
+        StoreQueue::register_resume_wrapper(self, id, token, pid)
     }
     fn clear_lost_session(
         &mut self,
@@ -881,7 +883,7 @@ impl RunCoordination for SqliteQueue {
         token: &LeaseToken,
         lost: Option<u32>,
     ) -> Result<()> {
-        SqliteQueue::clear_lost_session(self, id, token, lost)
+        StoreQueue::clear_lost_session(self, id, token, lost)
     }
     fn session_reopened(
         &mut self,
@@ -891,10 +893,10 @@ impl RunCoordination for SqliteQueue {
         attempt: u64,
         repaired: Value,
     ) -> Result<()> {
-        SqliteQueue::session_reopened(self, id, token, workspace, attempt, repaired)
+        StoreQueue::session_reopened(self, id, token, workspace, attempt, repaired)
     }
     fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
-        SqliteQueue::register_agent(self, id, wrapper_pid, agent_pid)
+        StoreQueue::register_agent(self, id, wrapper_pid, agent_pid)
     }
     fn register_resume_agent(
         &mut self,
@@ -902,39 +904,39 @@ impl RunCoordination for SqliteQueue {
         wrapper_pid: u32,
         agent_pid: u32,
     ) -> Result<()> {
-        SqliteQueue::register_resume_agent(self, id, wrapper_pid, agent_pid)
+        StoreQueue::register_resume_agent(self, id, wrapper_pid, agent_pid)
     }
     fn register_turn_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
-        SqliteQueue::register_turn_agent(self, id, wrapper_pid, agent_pid)
+        StoreQueue::register_turn_agent(self, id, wrapper_pid, agent_pid)
     }
     fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()> {
-        SqliteQueue::heartbeat_wrapper(self, id, pid)
+        StoreQueue::heartbeat_wrapper(self, id, pid)
     }
     fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()> {
-        SqliteQueue::wrapper_exited(self, id, pid, exit_code)
+        StoreQueue::wrapper_exited(self, id, pid, exit_code)
     }
 }
 
-impl crate::application::CoordinationReads for SqliteQueue {
+impl<E: TransactionEntries> crate::application::CoordinationReads for StoreQueue<E> {
     fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
-        SqliteQueue::holds_lease(self, id, token)
+        StoreQueue::holds_lease(self, id, token)
     }
     fn run_leases(&self) -> Result<Vec<RunLease>> {
-        SqliteQueue::run_leases(self)
+        StoreQueue::run_leases(self)
     }
     fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>> {
-        SqliteQueue::run_lease(self, id)
+        StoreQueue::run_lease(self, id)
     }
     fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>> {
-        SqliteQueue::processes(self, id)
+        StoreQueue::processes(self, id)
     }
     fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)> {
-        SqliteQueue::backend_slots(self, token)
+        StoreQueue::backend_slots(self, token)
     }
 }
 
 /// The [`SupervisorRegistry`] port over the inherent methods above.
-impl SupervisorRegistry for SqliteQueue {
+impl<E: TransactionEntries> SupervisorRegistry for StoreQueue<E> {
     fn register_supervisor(
         &mut self,
         token: &LeaseToken,
@@ -943,7 +945,7 @@ impl SupervisorRegistry for SqliteQueue {
         providers: &[ProviderCheck],
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
-        SqliteQueue::register_supervisor_with_limits(
+        StoreQueue::register_supervisor_with_limits(
             self,
             token,
             pid,
@@ -958,19 +960,19 @@ impl SupervisorRegistry for SqliteQueue {
         kind: EventKind,
         stopped: &dyn Fn(&SupervisorRegistration) -> Value,
     ) -> Result<bool> {
-        SqliteQueue::prune_supervisor(self, token, kind, stopped)
+        StoreQueue::prune_supervisor(self, token, kind, stopped)
     }
     fn accept_handoff(&self, token: &LeaseToken) -> Result<()> {
-        SqliteQueue::accept_handoff(self, token)
+        StoreQueue::accept_handoff(self, token)
     }
     fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        SqliteQueue::request_handoff(self, token, binary)
+        StoreQueue::request_handoff(self, token, binary)
     }
     fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        SqliteQueue::take_handoff(self, token, binary)
+        StoreQueue::take_handoff(self, token, binary)
     }
     fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
-        SqliteQueue::cancel_handoff(self, token, binary)
+        StoreQueue::cancel_handoff(self, token, binary)
     }
     fn resume_registration(
         &mut self,
@@ -980,7 +982,7 @@ impl SupervisorRegistry for SqliteQueue {
         providers: &[ProviderCheck],
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
-        SqliteQueue::resume_registration_with_limits(
+        StoreQueue::resume_registration_with_limits(
             self,
             token,
             pid,
@@ -990,7 +992,7 @@ impl SupervisorRegistry for SqliteQueue {
         )
     }
     fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()> {
-        SqliteQueue::set_auto_update(self, token, enabled)
+        StoreQueue::set_auto_update(self, token, enabled)
     }
     fn set_max_load(
         &self,
@@ -998,19 +1000,19 @@ impl SupervisorRegistry for SqliteQueue {
         max_load: Option<f64>,
         source: Option<SettingSource>,
     ) -> Result<()> {
-        SqliteQueue::set_max_load(self, token, max_load, source)
+        StoreQueue::set_max_load(self, token, max_load, source)
     }
     fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
-        SqliteQueue::set_slot_limits(self, token, limits)
+        StoreQueue::set_slot_limits(self, token, limits)
     }
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
-        SqliteQueue::rebind_repository(self, common_dir)
+        StoreQueue::rebind_repository(self, common_dir)
     }
     fn bind_repository(&mut self, common_dir: &str) -> Result<()> {
-        SqliteQueue::bind_repository(self, common_dir)
+        StoreQueue::bind_repository(self, common_dir)
     }
     fn assert_repository(&self, common_dir: &str) -> Result<()> {
-        SqliteQueue::assert_repository(self, common_dir)
+        StoreQueue::assert_repository(self, common_dir)
     }
     fn set_supervisor_mode(
         &self,
@@ -1018,19 +1020,19 @@ impl SupervisorRegistry for SqliteQueue {
         mode: SupervisorMode,
         workspace_id: Option<&str>,
     ) -> Result<()> {
-        SqliteQueue::set_supervisor_mode(self, token, mode, workspace_id)
+        StoreQueue::set_supervisor_mode(self, token, mode, workspace_id)
     }
 }
 
-impl crate::application::SupervisorReads for SqliteQueue {
+impl<E: TransactionEntries> crate::application::SupervisorReads for StoreQueue<E> {
     fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
-        SqliteQueue::supervisors(self)
+        StoreQueue::supervisors(self)
     }
     fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
-        SqliteQueue::handoff_request(self, token)
+        StoreQueue::handoff_request(self, token)
     }
     fn repository_binding(&self) -> Result<Option<String>> {
-        SqliteQueue::repository_binding(self)
+        StoreQueue::repository_binding(self)
     }
 }
 

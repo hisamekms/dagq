@@ -11,12 +11,13 @@
 //! a goal, and `+run_id` alone does not change that. Naming the index keeps
 //! the read to the events of the two kinds whatever statistics or new
 //! indexes the queue gets, and a lost index fails the prepare.
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
-use super::sqlite::SqliteQueue;
 use crate::domain::kpi::push::{
     KPI_BREACH_KINDS, KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS, breach_key,
 };
@@ -90,7 +91,7 @@ fn pushed_on(events: &[(EventId, RecordedKind, Value)], day: i64) -> usize {
         .count()
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// The breaches started and not resolved, each its
     /// `kpi_breach_started` payload.
     pub fn kpi_breaches_open(&self) -> Result<Vec<Value>> {
@@ -135,7 +136,7 @@ impl SqliteQueue {
         if !KPI_BREACH_KINDS.contains(&kind.as_str()) {
             bail!("{kind} is not a breach event");
         }
-        let tx = self.write_tx("record_kpi_breach")?;
+        let tx = self.write_entry("record_kpi_breach")?;
         let key = breach_key(&payload);
         let events = breach_events(&tx)?;
         let pushed_today = push_day.map(|(day, _)| pushed_on(&events, day));
@@ -167,7 +168,7 @@ impl SqliteQueue {
     /// since the latest `kpi_push_sent`: a failure that goes on keeps the
     /// one attention. `false` when it was not recorded.
     pub fn record_kpi_push_abandoned(&self, payload: Value) -> Result<bool> {
-        let tx = self.write_tx("record_kpi_push_abandoned")?;
+        let tx = self.write_entry("record_kpi_push_abandoned")?;
         let latest: Option<String> = tx
             .query_row(
                 LATEST_PUSH_ATTENTION,

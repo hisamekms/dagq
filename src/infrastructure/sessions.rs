@@ -17,6 +17,7 @@
 use crate::domain::RecordedKind;
 use crate::domain::event_kind::{self, EventKind};
 use crate::infrastructure::sql_dialect::{JsonType, TimeForm};
+use crate::infrastructure::store_queue::StoreQueue;
 use std::cell::RefCell;
 
 use super::sql_exec::{
@@ -59,7 +60,7 @@ pub(super) use self::{
     read_before as read_before_port, span_closed as span_closed_port, span_task as span_task_port,
 };
 
-impl super::sqlite::SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Read the closing spans through this queue's execution port.
     pub(super) fn read_before(&self, closing: Closing<'_>) -> Result<ReadBefore> {
         read_before(self, closing)

@@ -8,7 +8,9 @@ use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::write_rules::{check_at_least, check_non_blank};
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -16,7 +18,6 @@ use std::path::Path;
 use super::{
     asks::{insert_ask, read_ask, record_ask_closed},
     follow_up_membership, sessions,
-    sqlite::SqliteQueue,
     store_writes::insert_task,
     task_store::{close_goal_in, goal_event},
 };
@@ -381,7 +382,7 @@ pub(super) fn goal_answer_applies(
     Ok(ask.closed_at.is_none() && applicable_port(conn, ask, text)?.is_some())
 }
 
-impl GoalReviewStore for SqliteQueue {
+impl<E: TransactionEntries> GoalReviewStore for StoreQueue<E> {
     fn interrupt_goal_reviews_for_handoff(
         &mut self,
         token: &LeaseToken,
@@ -391,7 +392,7 @@ impl GoalReviewStore for SqliteQueue {
         // Read transcripts before taking the write lock, as in begin/finish.
         let _read =
             self.read_session_transcripts_before(sessions::Closing::GoalReviews(None, false))?;
-        let tx = self.write_tx("interrupt_goal_reviews_for_handoff")?;
+        let tx = self.write_entry("interrupt_goal_reviews_for_handoff")?;
         let unfinished: Vec<i64> = SqlRead::query_map(
             &tx,
             "SELECT id FROM goal_reviews WHERE supervisor_token=?1 AND finished_at IS NULL",
@@ -431,7 +432,7 @@ impl GoalReviewStore for SqliteQueue {
         // The spans it closes read their transcripts first (task 543).
         let _read =
             self.read_session_transcripts_before(sessions::Closing::GoalReviews(None, true))?;
-        let tx = self.write_tx("begin_goal_review")?;
+        let tx = self.write_entry("begin_goal_review")?;
         type Unfinished = (i64, LeaseToken, Option<u32>, Option<i64>);
         let unfinished: Vec<Unfinished> = SqlRead::query_map(
             &tx,
@@ -550,7 +551,7 @@ impl GoalReviewStore for SqliteQueue {
         // The spans it closes read their transcripts first (task 543).
         let _read = self
             .read_session_transcripts_before(sessions::Closing::GoalReviews(Some(job.id), false))?;
-        let tx = self.write_tx("finish_goal_review")?;
+        let tx = self.write_entry("finish_goal_review")?;
         if !running(&tx, job, token)? {
             return Ok(GoalReviewApplied {
                 stale: true,
@@ -672,7 +673,7 @@ impl GoalReviewStore for SqliteQueue {
         // The span it closes reads its transcript first (task 543).
         let _read = self
             .read_session_transcripts_before(sessions::Closing::GoalReviews(Some(job.id), false))?;
-        let tx = self.write_tx("fail_goal_review")?;
+        let tx = self.write_entry("fail_goal_review")?;
         if !running(&tx, job, token)? {
             return Ok(());
         }
@@ -732,7 +733,7 @@ impl GoalReviewStore for SqliteQueue {
     fn decide_goal(&mut self, ask_id: AskId) -> Result<Option<GoalDecided>> {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
-        let tx = self.write_tx("decide_goal")?;
+        let tx = self.write_entry("decide_goal")?;
         let ask = read_ask(&tx, ask_id)?;
         ensure!(
             ask.kind == AskKind::ApproveGoal,
@@ -921,7 +922,7 @@ impl GoalReviewStore for SqliteQueue {
 
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<Value> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("rearm_goal_review")?;
+        let tx = self.write_entry("rearm_goal_review")?;
         let open: Option<bool> = SqlRead::query_row(
             &tx,
             "SELECT status='open' AND closed_at IS NULL FROM goals WHERE id=?1",
@@ -960,6 +961,7 @@ impl GoalReviewStore for SqliteQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::sqlite::SqliteQueue;
 
     /// A blank outcome is refused before the write (ADR-t876-1: the rule
     /// the `goal_reviews` CHECK held).

@@ -16,7 +16,10 @@ use crate::domain::agent_eval::production::{self, Take};
 use crate::domain::agent_eval::round::owner_gone;
 use crate::infrastructure::sessions::read_before_port;
 use crate::infrastructure::sql_dialect::{JsonType, SqlDialect};
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::SqlRead;
+use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 /// The queue's events of the eval of round `?1` of the kinds `?2` (a JSON
 /// array).
@@ -88,7 +91,7 @@ fn any_of_round(tx: &impl SqlRead, eval_id: i64, of: &[EventKind]) -> Result<boo
     )?)
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// [`EvalRounds::settle_eval_round`].
     pub fn settle_eval_round(
         &self,
@@ -106,7 +109,7 @@ impl SqliteQueue {
         );
         crate::domain::check_event_target(kind, None, None)?;
         let _read = read_before_port(self, Closing::Queue(kind, &payload))?;
-        let tx = self.write_tx("settle_eval_round")?;
+        let tx = self.write_entry("settle_eval_round")?;
         if any_of_round(
             &tx,
             eval_id,
@@ -145,7 +148,7 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let payload = json!({"eval_id": eval_id, "supervisor": token});
         let _read = read_before_port(self, Closing::Queue(kind, &payload))?;
-        let tx = self.write_tx("take_up_eval_round")?;
+        let tx = self.write_entry("take_up_eval_round")?;
         if any_of_round(&tx, eval_id, &[EventKind::AgentEvalFinished])? {
             return Ok(false);
         }
@@ -210,7 +213,7 @@ pub(super) fn set_owner_sql(dialect: SqlDialect) -> String {
     latest_owner_sql(dialect, &of_set(dialect))
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// [`EvalRounds::take_case_set`].
     pub fn take_case_set(
         &self,
@@ -223,7 +226,7 @@ impl SqliteQueue {
         let now = self.generators.clock.now();
         let payload = json!({"set_id": set_id, "supervisor": token});
         let _read = read_before_port(self, Closing::Queue(kind, &payload))?;
-        let tx = self.write_tx("take_case_set")?;
+        let tx = self.write_entry("take_case_set")?;
         let settled: bool = SqlRead::query_row(
             &tx,
             &any_of_set_sql(SqlRead::dialect(&tx)),
@@ -266,14 +269,14 @@ impl SqliteQueue {
     }
 }
 
-impl EvalRounds for SqliteQueue {
+impl<E: TransactionEntries> EvalRounds for StoreQueue<E> {
     fn settle_eval_round(
         &self,
         eval_id: i64,
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<bool> {
-        SqliteQueue::settle_eval_round(self, eval_id, kind, payload)
+        StoreQueue::settle_eval_round(self, eval_id, kind, payload)
     }
     fn take_up_eval_round(
         &self,
@@ -281,10 +284,10 @@ impl EvalRounds for SqliteQueue {
         token: &str,
         alive: &dyn Fn(u32) -> bool,
     ) -> Result<bool> {
-        SqliteQueue::take_up_eval_round(self, eval_id, token, alive)
+        StoreQueue::take_up_eval_round(self, eval_id, token, alive)
     }
     fn take_case_set(&self, set_id: i64, token: &str, alive: &dyn Fn(u32) -> bool) -> Result<bool> {
-        SqliteQueue::take_case_set(self, set_id, token, alive)
+        StoreQueue::take_case_set(self, set_id, token, alive)
     }
 }
 

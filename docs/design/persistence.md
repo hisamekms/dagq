@@ -70,9 +70,9 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 - 共有のSQLを流す入口は実行のport（`src/infrastructure/sql_exec/`）。
   Postgresの読み書きの入口は`src/infrastructure/postgres/`。
 - Postgresの実行のportが共有のSQLの引数・値・行を写し、storeは方言ごとのSQLを持たない。
-- 時刻とIDは`SqliteQueue`の`Generators`から取り、SQLの`now`で作らない。
+- storeのportのimplはqueueの型で共有し、adapterごとに分けるのは入口の組と検索と係の行の始め方だけ。
+- 時刻とIDはqueueの型の`Generators`から取り、SQLの`now`で作らない。
   例外はDBの時計で判じる`write_leader`のleaseの期限（ADR-t3986-1決定4）。
-- schemaの形は`migrations/*.sql`、適用と互換の判定は`src/infrastructure/schema.rs`が持つ。
 - 共有のSQLは引数を型を決める形でNULLと比べ、`INSERT OR`・値との`IS` / `IS NOT`・`ifnull`を使わない（境界の検査が守る）。
 - 方言の違う式の断片は`src/infrastructure/sql_dialect.rs`の関数が返す（ADR-t3982-1）。
   JSONの関数と`unixepoch()`は方言の関数のmoduleの外で綴らない。
@@ -246,7 +246,7 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
 
 ## Database setup and migrations
 
-入口は`src/infrastructure/schema.rs`（`MIGRATIONS`と互換の判定）と`src/infrastructure/sqlite.rs`の`SqliteQueue`。
+入口は`src/infrastructure/schema.rs`と`src/infrastructure/sqlite.rs`の`SqliteQueue`。
 migrationの登録と順序は[ADR-0067](../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)、互換の宣言と判定は`schema.rs`のdoc commentが持つ。
 migrationを足すtaskの規則（リリース済みは変えない）は[migrations.md](../development/migrations.md)が持つ。
 

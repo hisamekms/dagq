@@ -15,7 +15,9 @@
 //! transaction: it rereads the latest `ci_checked` and writes nothing if
 //! another supervisor already recorded the run. A finding's `covered_by_task`
 //! has no foreign key; the runtime writes only a task ID it just read.
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::sql_dialect::{JsonType, SqlDialect};
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
@@ -25,7 +27,6 @@ use std::collections::BTreeMap;
 
 use super::event_bodies::set_event_body_field;
 use super::findings::{record_in, set_status_in};
-use super::sqlite::SqliteQueue;
 use super::store_rows::event_row;
 use crate::domain::ci_watch::freshness::{FRESHNESS_KINDS, FreshnessRecord};
 use crate::domain::ci_watch::scheduled::{CI_SCHEDULED_CHECKED, ScheduledCheckRecord};
@@ -83,7 +84,7 @@ pub(super) fn freshness_there_sql(dialect: SqlDialect) -> String {
     )
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Every event of the watch, oldest first.
     pub fn ci_watch_events(&self) -> Result<Vec<RunEvent>> {
         let tx = self.read_entry("ci_watch_events")?;
@@ -101,7 +102,7 @@ impl SqliteQueue {
     /// authorization, by `supervisor`.
     pub fn record_ci_check(&self, record: CiCheckRecord) -> Result<Option<CiCheckRecorded>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_ci_check")?;
+        let tx = self.write_entry("record_ci_check")?;
         let latest: Option<i64> = tx
             .query_row(LATEST_OF_KIND_SQL, sql_params![CI_CHECKED], |r| r.get(0))
             .optional()?;
@@ -161,7 +162,7 @@ impl SqliteQueue {
         record: ScheduledCheckRecord,
     ) -> Result<Option<CiCheckRecorded>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_ci_scheduled_check")?;
+        let tx = self.write_entry("record_ci_scheduled_check")?;
         let latest: Option<i64> = tx
             .query_row(LATEST_OF_KIND_SQL, sql_params![CI_SCHEDULED_CHECKED], |r| {
                 r.get(0)
@@ -206,7 +207,7 @@ impl SqliteQueue {
     /// once per latest success; a fresh record when the workflow's latest
     /// record is the stale one it `closes`.
     pub fn record_ci_freshness(&self, record: FreshnessRecord) -> Result<Option<EventId>> {
-        let tx = self.write_tx("record_ci_freshness")?;
+        let tx = self.write_entry("record_ci_freshness")?;
         let [stale, fresh] = FRESHNESS_KINDS;
         let latest = |workflow: Option<&str>| -> Result<Option<(i64, String)>> {
             Ok(tx

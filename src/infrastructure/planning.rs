@@ -2,11 +2,11 @@
 //! ([`crate::application::commands::planning`]): the ports of the task
 //! store, and what the authorization reads before them.
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use anyhow::Result;
 use serde_json::Value;
 
-use super::sqlite::SqliteQueue;
 use crate::application::commands::planning::{Dependency, PlanningStore};
 use crate::application::{GoalReviewStore, TaskReads, TaskStore};
 use crate::domain::{
@@ -15,7 +15,7 @@ use crate::domain::{
     cancel_reason::NewCancel,
 };
 
-impl PlanningStore for SqliteQueue {
+impl<E: TransactionEntries> PlanningStore for StoreQueue<E> {
     fn task_authorization(&self, task: TaskId) -> Result<TaskAuthorization> {
         let tx = self.read_entry("task_authorization")?;
         super::task_store::task_authorization(&tx, task)
@@ -49,7 +49,7 @@ impl PlanningStore for SqliteQueue {
         judgement: crate::domain::follow_up::MembershipJudgement,
         role: &str,
     ) -> Result<Value> {
-        SqliteQueue::judge_follow_up(self, task, judgement, role)
+        StoreQueue::judge_follow_up(self, task, judgement, role)
     }
 
     fn set_goal(
@@ -173,7 +173,7 @@ impl PlanningStore for SqliteQueue {
     }
 }
 
-impl crate::application::queue_writes::PlannerRecords for SqliteQueue {
+impl<E: TransactionEntries> crate::application::queue_writes::PlannerRecords for StoreQueue<E> {
     fn planner_record(
         &self,
         id: crate::domain::PlannerId,

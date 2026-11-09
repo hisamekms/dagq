@@ -5,26 +5,27 @@
 //! measurement folds after the change ([`finding_event`]).
 use crate::domain::event_kind::EventKind;
 use crate::domain::ledger::findings as findings_fold;
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
 use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlWrite, sql_params};
-use super::sqlite::SqliteQueue;
 use super::store_rows::{enum_col, event_row, json_col, read_goal, read_task};
 use crate::domain::{
     AskId, EventId, Finding, FindingId, FindingOutcome, FindingQuery, FindingStatus, FindingTarget,
     FindingView, GoalId, NewFinding, RunId, TaskId, finding,
 };
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Record `new`: the unsettled finding of the same kind, target and
     /// subject (or else the latest settled one) takes it as an occurrence
     /// ([`finding::merge`]); without one a new finding is created. A
     /// record that brings nothing new writes nothing (`changed` is empty).
     pub fn record_finding(&mut self, new: NewFinding) -> Result<FindingOutcome> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_finding")?;
+        let tx = self.write_entry("record_finding")?;
         let outcome = record_in(&tx, &new, now)?;
         tx.commit()?;
         Ok(outcome)
@@ -38,7 +39,7 @@ impl SqliteQueue {
     /// or `None` when one was there.
     pub fn record_finding_once(&self, new: NewFinding) -> Result<Option<FindingId>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_finding_once")?;
+        let tx = self.write_entry("record_finding_once")?;
         let (task_id, run_id, goal_id) = resolve_target(&tx, &new.target)?;
         let there: bool = tx.query_row(
             &format!("SELECT EXISTS(SELECT 1 FROM findings WHERE {FINDING_OF_KEY})"),
@@ -88,7 +89,7 @@ impl SqliteQueue {
         covered_by: Option<TaskId>,
     ) -> Result<Finding> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("set_finding_status_covered")?;
+        let tx = self.write_entry("set_finding_status_covered")?;
         if let Some(task) = covered_by {
             ensure!(
                 to == FindingStatus::Dismissed,
@@ -500,6 +501,7 @@ mod tests {
     use super::*;
     use crate::application::TaskStore;
     use crate::domain::{NewGoal, NewTask, Priority};
+    use crate::infrastructure::sqlite::SqliteQueue;
 
     fn queue() -> SqliteQueue {
         let uri = format!("file:/findings-{}?vfs=memdb", uuid::Uuid::new_v4());

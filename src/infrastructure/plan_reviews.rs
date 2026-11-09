@@ -10,9 +10,12 @@ use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, LIVE_PLANNER_NOT_RAISED};
 use crate::domain::headless_job::{ReviewTakeover, review_owner_gone};
+use crate::domain::related::RelatedPage;
 use crate::domain::write_rules::check_at_least;
 use crate::domain::{LeaseToken, event_kind};
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -115,14 +118,14 @@ fn running(conn: &impl SqlRead, job: &PlanReviewJob, token: &LeaseToken) -> Resu
 /// (`plan_reviews` or `goal_reviews`) when its owner is gone or is `token`
 /// itself ([`review_owner_gone`]), in one transaction: what it found.
 pub(super) fn take_over_review(
-    queue: &SqliteQueue,
+    queue: &StoreQueue<impl TransactionEntries>,
     table: &'static str,
     id: i64,
     token: &LeaseToken,
     now: i64,
     alive: &dyn Fn(u32) -> bool,
 ) -> Result<ReviewTakeover> {
-    let tx = queue.write_tx("review_take_over")?;
+    let tx = queue.write_entry("review_take_over")?;
     let owner: Option<String> = SqlRead::query_row(
         &tx,
         &format!("SELECT supervisor_token FROM {table} WHERE id=?1 AND finished_at IS NULL"),
@@ -486,7 +489,10 @@ fn follow_up_depth(conn: &impl SqlRead, task_id: TaskId) -> Result<i64> {
     Ok(depth)
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E>
+where
+    StoreQueue<E>: ProposalRelatedness,
+{
     /// What `proposal_id` is like now (ADR-0079 decision 7): where it came
     /// from, how deep its follow-ups go, how close its closest existing
     /// task is (`dagq related`), and how often plan review sent it back.
@@ -533,7 +539,7 @@ impl SqliteQueue {
         drop(tx);
         let mut related: Option<f64> = None;
         for &task in members {
-            let page = self.related(task.as_i64(), &[], members.len() + 1)?;
+            let page = self.related_page(task, members.len() + 1)?;
             let best = page
                 .related
                 .iter()
@@ -552,7 +558,25 @@ impl SqliteQueue {
     }
 }
 
-impl PlanReviewStore for SqliteQueue {
+/// The relatedness of `dagq related` that [`StoreQueue::proposal_features`]
+/// scores a proposal's tasks by. It reads the search index, which each
+/// adapter implements its own way (ADR-t3982-1 decision 1), so it is the
+/// one part of the plan review store an adapter supplies.
+pub trait ProposalRelatedness {
+    /// The tasks most related to `task`, best first, cut to `limit`.
+    fn related_page(&self, task: TaskId, limit: usize) -> Result<RelatedPage>;
+}
+
+impl ProposalRelatedness for SqliteQueue {
+    fn related_page(&self, task: TaskId, limit: usize) -> Result<RelatedPage> {
+        self.related(task.as_i64(), &[], limit)
+    }
+}
+
+impl<E: TransactionEntries> PlanReviewStore for StoreQueue<E>
+where
+    StoreQueue<E>: ProposalRelatedness,
+{
     fn interrupt_plan_reviews_for_handoff(
         &mut self,
         token: &LeaseToken,
@@ -562,7 +586,7 @@ impl PlanReviewStore for SqliteQueue {
         // Read transcripts before taking the write lock, as in begin/finish.
         let _read =
             self.read_session_transcripts_before(sessions::Closing::PlanReviews(None, false))?;
-        let tx = self.write_tx("interrupt_plan_reviews_for_handoff")?;
+        let tx = self.write_entry("interrupt_plan_reviews_for_handoff")?;
         let unfinished: Vec<i64> = SqlRead::query_map(
             &tx,
             "SELECT id FROM plan_reviews WHERE supervisor_token=?1 AND finished_at IS NULL",
@@ -621,7 +645,7 @@ impl PlanReviewStore for SqliteQueue {
         // The spans it closes read their transcripts first (task 543).
         let _read =
             self.read_session_transcripts_before(sessions::Closing::PlanReviews(None, true))?;
-        let tx = self.write_tx("begin_plan_review")?;
+        let tx = self.write_entry("begin_plan_review")?;
         type Unfinished = (i64, LeaseToken, Option<u32>, Option<i64>);
         let unfinished: Vec<Unfinished> = SqlRead::query_map(
             &tx,
@@ -709,7 +733,7 @@ impl PlanReviewStore for SqliteQueue {
         // The spans it closes read their transcripts first (task 543).
         let _read = self
             .read_session_transcripts_before(sessions::Closing::PlanReviews(Some(job.id), false))?;
-        let tx = self.write_tx("finish_plan_review")?;
+        let tx = self.write_entry("finish_plan_review")?;
         if !running(&tx, job, token)? {
             return Ok(PlanReviewApplied {
                 stale: true,
@@ -979,7 +1003,7 @@ impl PlanReviewStore for SqliteQueue {
         // The spans it closes read their transcripts first (task 543).
         let _read = self
             .read_session_transcripts_before(sessions::Closing::PlanReviews(Some(job.id), false))?;
-        let tx = self.write_tx("fail_plan_review")?;
+        let tx = self.write_entry("fail_plan_review")?;
         if !running(&tx, job, token)? {
             return Ok(());
         }
@@ -1027,7 +1051,7 @@ impl PlanReviewStore for SqliteQueue {
     }
 
     fn revising_proposals(&self) -> Result<Vec<RevisingProposal>> {
-        let tx = self.read_tx("revising_proposals")?;
+        let tx = self.read_entry("revising_proposals")?;
         let ids: Vec<ProposalId> = SqlRead::query_map(
             &tx,
             "SELECT id FROM proposals WHERE status='revising' ORDER BY id",
@@ -1115,7 +1139,7 @@ impl PlanReviewStore for SqliteQueue {
         opened: Option<&crate::domain::actor_model::ActorLaunch>,
         answers: &[AskId],
     ) -> Result<()> {
-        let tx = self.write_tx("revise_sent")?;
+        let tx = self.write_entry("revise_sent")?;
         SqlWrite::execute(
             &tx,
             "UPDATE proposals SET revise_planner_id=?2, unresponsive_at=NULL
@@ -1153,7 +1177,7 @@ impl PlanReviewStore for SqliteQueue {
         planner: Option<PlannerId>,
         why: &str,
     ) -> Result<()> {
-        let tx = self.write_tx("revise_lost")?;
+        let tx = self.write_entry("revise_lost")?;
         let changed = SqlWrite::execute(
             &tx,
             "UPDATE proposals SET revise_sent_at=NULL, revise_planner_id=NULL, unresponsive_at=NULL
@@ -1181,7 +1205,7 @@ impl PlanReviewStore for SqliteQueue {
         holders: &[PlannerHold],
     ) -> Result<()> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("planner_unresponsive")?;
+        let tx = self.write_entry("planner_unresponsive")?;
         let changed = SqlWrite::execute(
             &tx,
             "UPDATE proposals SET unresponsive_at=?2
@@ -1240,7 +1264,7 @@ impl PlanReviewStore for SqliteQueue {
 
     fn settle_proposals(&mut self) -> Result<Vec<(ProposalId, ProposalStatus)>> {
         let stamp = self.generators.clock.timestamp();
-        let tx = self.write_tx("settle_proposals")?;
+        let tx = self.write_entry("settle_proposals")?;
         let emptied: Vec<ProposalId> = SqlRead::query_map(
             &tx,
             "SELECT p.id FROM proposals p WHERE p.status='submitted'
@@ -1298,7 +1322,7 @@ impl PlanReviewStore for SqliteQueue {
     fn decide_plan(&mut self, ask_id: AskId) -> Result<Option<PlanDecided>> {
         let now = self.generators.clock.now();
         let stamp = self.generators.clock.timestamp();
-        let tx = self.write_tx("decide_plan")?;
+        let tx = self.write_entry("decide_plan")?;
         let ask = read_ask(&tx, ask_id)?;
         ensure!(
             ask.kind == AskKind::ApprovePlan,
@@ -1420,7 +1444,7 @@ impl PlanReviewStore for SqliteQueue {
     }
 
     fn stranded_dependencies(&self) -> Result<Vec<crate::domain::StrandedDependency>> {
-        SqliteQueue::stranded_dependencies(self)
+        StoreQueue::stranded_dependencies(self)
     }
 
     fn plan_review_holds(&self) -> Result<Vec<PlanReviewHold>> {

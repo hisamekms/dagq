@@ -16,14 +16,15 @@
 //! it settled in its own, so a release while `settling` is refused and a
 //! park after a release writes nothing.
 use super::sql_dialect::JsonType;
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::store_writes::event;
 use anyhow::{Context, Result};
 use serde_json::json;
 
 use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlWrite, sql_params};
-use super::sqlite::SqliteQueue;
 use super::store_rows::read_task;
 use crate::application::commands::holds::{ReleaseRequest, ReleaseView};
 use crate::domain::event_kind::EventKind;
@@ -45,7 +46,7 @@ pub(super) use self::{
     settle_at_rest_in as settle_at_rest_in_port, settle_open as settle_open_port,
 };
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Hold the task `target` names for `reason` until `until` (a time to
     /// remind a person, unix seconds), as `by_role` with actor id `by_id`.
     /// In one transaction: resolve a run to its task, check the task takes
@@ -62,7 +63,7 @@ impl SqliteQueue {
         by_id: &str,
     ) -> Result<HoldRecorded> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("hold_task")?;
+        let tx = self.write_entry("hold_task")?;
         let task_id = resolve(&tx, target)?;
         let task = read_task(&tx, task_id)?;
         let open = open_hold_of(&tx, task_id)?;
@@ -197,7 +198,7 @@ impl SqliteQueue {
             None => None,
         };
         let now = self.generators.clock.now();
-        let tx = self.write_tx("release_task")?;
+        let tx = self.write_entry("release_task")?;
         let task_id = resolve(&tx, &request.target)?;
         let task = read_task(&tx, task_id)?;
         let open = open_hold_of(&tx, task_id)?;
@@ -437,7 +438,7 @@ impl SqliteQueue {
     }
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Every open hold of a task that has not ended, oldest first, each
     /// with its task's latest run and that run's status now.
     pub fn held_tasks(&self) -> Result<Vec<task_hold::HeldTask>> {
@@ -461,7 +462,7 @@ impl SqliteQueue {
     /// holds told, with why.
     pub fn remind_task_holds(&mut self) -> Result<Vec<(TaskHold, task_hold::HoldReminder)>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("remind_task_holds")?;
+        let tx = self.write_entry("remind_task_holds")?;
         let holds: Vec<TaskHold> = tx.query_map(
             "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
                  WHERE h.released_at IS NULL AND t.status NOT IN ('completed','canceled')
@@ -573,11 +574,14 @@ const HOLD_ENDER: &str = "runtime";
 /// holds ([`end_with_task`]), as that end would have, the task unchanged:
 /// in one transaction, which a pass with none to close does not open. The
 /// tasks whose hold was closed.
-pub(super) fn end_holds_of_ended(queue: &SqliteQueue, now: i64) -> Result<Vec<TaskId>> {
+pub(super) fn end_holds_of_ended(
+    queue: &StoreQueue<impl TransactionEntries>,
+    now: i64,
+) -> Result<Vec<TaskId>> {
     if ended_with_open_hold(&queue.read_entry("end_holds_of_ended")?)?.is_empty() {
         return Ok(Vec::new());
     }
-    let tx = queue.write_tx("end_holds_of_ended")?;
+    let tx = queue.write_entry("end_holds_of_ended")?;
     let mut closed = Vec::new();
     for (task, status) in ended_with_open_hold(&tx)? {
         if end_with_task(&tx, task, status, now)? {
@@ -881,7 +885,7 @@ pub(super) fn progress_version(
     ))
 }
 
-impl crate::application::commands::holds::HoldStore for SqliteQueue {
+impl<E: TransactionEntries> crate::application::commands::holds::HoldStore for StoreQueue<E> {
     fn record_images(&mut self, records: &[(EventKind, serde_json::Value)]) -> Result<()> {
         crate::application::EventStore::record_queue_events(self, records.to_vec()).map(drop)
     }
@@ -905,11 +909,11 @@ impl crate::application::commands::holds::HoldStore for SqliteQueue {
         by_role: &str,
         by_id: &str,
     ) -> Result<HoldRecorded> {
-        SqliteQueue::hold_task(self, target, reason, until, by_role, by_id)
+        StoreQueue::hold_task(self, target, reason, until, by_role, by_id)
     }
 
     fn release_view(&self, target: &HoldTarget) -> Result<ReleaseView> {
-        SqliteQueue::release_view(self, target)
+        StoreQueue::release_view(self, target)
     }
 
     fn release_task(
@@ -919,7 +923,7 @@ impl crate::application::commands::holds::HoldStore for SqliteQueue {
         by_id: &str,
         keep: &dyn Fn(&TaskRun, &crate::domain::CommitSha) -> Result<()>,
     ) -> Result<ReleaseRecorded> {
-        SqliteQueue::release_task(self, request, by_role, by_id, keep)
+        StoreQueue::release_task(self, request, by_role, by_id, keep)
     }
 }
 

@@ -6,8 +6,9 @@
 use anyhow::Result;
 
 use super::search_writes::{SearchWrite, maintain};
+use super::sql_exec::CommitTransaction as _;
 use super::sql_exec::{SqlRead, SqlWrite, TransactionEntries, sql_params};
-use super::sqlite::SqliteQueue;
+use super::store_queue::StoreQueue;
 
 /// A landed commit recorded without its message
 /// ([`SqliteQueue::missing_commit_messages`]).
@@ -47,7 +48,7 @@ pub(super) fn fill(tx: &impl SqlWrite, id: i64, message: &str) -> Result<usize> 
     Ok(filled)
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Fill the message of each landed commit recorded without one, read by
     /// `read(git_common_dir, commit)` (the Git directory the landing
     /// recorded, if any). Returns how many were filled; a commit `read`

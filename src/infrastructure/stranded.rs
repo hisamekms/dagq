@@ -7,11 +7,11 @@
 use super::sql_exec::SqlWrite;
 use crate::domain::EventKind;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::sql_exec::{OptionalRow, SqlRead, sql_params};
-use super::sqlite::SqliteQueue;
 use super::store_rows::enum_col;
 use super::store_writes::event;
 use crate::domain::{GoalId, StrandedDependency, TaskId, event_kind};
@@ -158,7 +158,7 @@ pub(super) fn record_upstream(
     Ok(())
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Every stranded dependency in the queue now, by task ID.
     pub fn stranded_dependencies(&self) -> Result<Vec<StrandedDependency>> {
         let tx = self.read_entry("stranded_dependencies")?;

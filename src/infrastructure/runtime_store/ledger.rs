@@ -1,5 +1,7 @@
 //! The ledger's rows in queue.db (`ledger_rows`, [`LedgerStore`]).
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::application::LedgerStore;
@@ -520,7 +522,7 @@ fn stops_after_sql(dialect: SqlDialect, after: bool) -> String {
     )
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// The queue heads a read of [`queue_heads_sql`] gives.
     fn queue_heads(
         &self,
@@ -690,7 +692,7 @@ fn row_keys_after_sql(after: bool) -> &'static str {
     }
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// The heads of the rows of `kind` (`?1` of `params`) that `filter`
     /// (SQL over the row `r`) keeps, by key, each with whether its row is
     /// legacy: the ids of their records come from SQLite's JSON functions
@@ -929,7 +931,7 @@ impl<T: SqlRead> crate::application::LedgerWindowRead for LedgerSnapshot<'_, T> 
     }
 }
 
-impl LedgerStore for SqliteQueue {
+impl<E: TransactionEntries> LedgerStore for StoreQueue<E> {
     fn ledger_run_events(
         &self,
         run: &crate::domain::RunId,
@@ -957,7 +959,7 @@ impl LedgerStore for SqliteQueue {
     }
 
     fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool> {
-        let tx = self.write_tx("write_ledger_row")?;
+        let tx = self.write_entry("write_ledger_row")?;
         let changed = upsert(&tx, row)?;
         tx.commit()?;
         Ok(changed)
@@ -970,7 +972,7 @@ impl LedgerStore for SqliteQueue {
         row: &LedgerRow,
         read: Option<&LedgerRow>,
     ) -> Result<Option<bool>> {
-        let tx = self.write_tx("ledger_row_over")?;
+        let tx = self.write_entry("ledger_row_over")?;
         if held_row(&tx, row.kind, &row.key)?.as_ref() != read {
             return Ok(None);
         }
@@ -1002,7 +1004,7 @@ impl LedgerStore for SqliteQueue {
         rows: &[(LedgerRow, Option<LedgerRow>)],
         marks: Option<&Marks>,
     ) -> Result<bool> {
-        let tx = self.write_tx("ledger_session_rows")?;
+        let tx = self.write_entry("ledger_session_rows")?;
         for (row, read) in rows {
             if held_row(&tx, row.kind, &row.key)?.as_ref() != read.as_ref() {
                 return Ok(false);
@@ -1150,9 +1152,9 @@ impl LedgerStore for SqliteQueue {
         &self,
         read: &mut dyn FnMut(&dyn crate::application::LedgerWindowRead) -> Result<()>,
     ) -> Result<()> {
-        let tx = self.read_tx("ledger_read_snapshot")?;
+        let tx = self.read_entry("ledger_read_snapshot")?;
         read(&LedgerSnapshot { tx: &tx })?;
-        tx.commit()?;
+        drop(tx);
         Ok(())
     }
 

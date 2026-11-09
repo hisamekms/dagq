@@ -1,6 +1,8 @@
 //! The node samples in queue.db (`node_samples` and
 //! `node_sample_imports`, [`NodeSampleStore`]).
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::application::NodeSampleStore;
@@ -80,7 +82,7 @@ fn values(
     values
 }
 
-impl NodeSampleStore for SqliteQueue {
+impl<E: TransactionEntries> NodeSampleStore for StoreQueue<E> {
     fn record_node_sample(
         &self,
         node: &str,
@@ -92,7 +94,7 @@ impl NodeSampleStore for SqliteQueue {
     ) -> Result<bool> {
         // Immediate: the rows around are read in the write that admits the
         // sample, so another supervisor's sample comes before or after both.
-        let tx = self.write_tx("node_samples_record")?;
+        let tx = self.write_entry("node_samples_record")?;
         let (before, later): (Option<i64>, bool) = SqlRead::query_row(
             &tx,
             "SELECT (SELECT max(unix) FROM node_samples WHERE node_id=?1 AND unix < ?2),
@@ -261,7 +263,7 @@ enum Removal {
     Mark(String, String),
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// The rows of `node_samples` `filter` (a `WHERE` clause and its order)
     /// keeps.
     fn read_node_samples(&self, filter: &str, params: &[SqlValue]) -> Result<Vec<NodeSample>> {

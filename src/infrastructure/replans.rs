@@ -24,13 +24,15 @@
 
 use super::sql_dialect::JsonType;
 use super::store_writes::event;
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
 use super::plan_requests::read_request;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
-use super::sqlite::{SqliteQueue, replan_guarding};
+use super::sqlite::replan_guarding;
 use super::store_rows::{self, read_task};
 use crate::domain::DomainError;
 use crate::domain::event_kind::EventKind;
@@ -63,7 +65,7 @@ pub(super) use self::{
 /// The open operations (not closed), oldest first.
 const OPEN: &str = "SELECT * FROM replan_operations WHERE closed_at IS NULL ORDER BY id";
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Record `new` from `origin` as `by_role` with actor id `by_id`: a new
     /// `candidate` operation on its run with the task's and its goal's
     /// conditions as they are now, or the task's open one (`created` false)
@@ -85,7 +87,7 @@ impl SqliteQueue {
     ) -> Result<ReplanRecorded> {
         new.validate()?;
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_replan")?;
+        let tx = self.write_entry("record_replan")?;
         let (task_id, status): (TaskId, String) = tx
             .query_row(
                 "SELECT task_id, status FROM task_runs WHERE id=?1",
@@ -232,7 +234,7 @@ impl SqliteQueue {
         step: &ReplanMove,
     ) -> Result<ReplanOperation> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("move_replan")?;
+        let tx = self.write_entry("move_replan")?;
         let moved = move_in(&tx, id, generation, step, now)?;
         tx.commit()?;
         Ok(moved)
@@ -272,7 +274,7 @@ impl SqliteQueue {
             op.task_id
         );
         let now = self.generators.clock.now();
-        let tx = self.write_tx("ask_replan_diagnosis")?;
+        let tx = self.write_entry("ask_replan_diagnosis")?;
         if let Some(premise) = premise {
             let read = read_operation(&tx, id)?;
             check_premise(&tx, &read, ReplanStatus::Diagnosing, premise)?;
@@ -326,7 +328,7 @@ impl SqliteQueue {
     ) -> Result<ReplanOperation> {
         let mut payload = payload;
         let now = self.generators.clock.now();
-        let tx = self.write_tx("start_replan_diagnosis")?;
+        let tx = self.write_entry("start_replan_diagnosis")?;
         let running = running_diagnoses(&tx, gone)?;
         ensure!(
             running.is_empty(),
@@ -384,7 +386,7 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<ReplanOperation> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("fail_replan_diagnosis")?;
+        let tx = self.write_entry("fail_replan_diagnosis")?;
         let claimed = move_in(
             &tx,
             id,
@@ -442,7 +444,7 @@ impl SqliteQueue {
         id: ReplanId,
         mappings: &[task_replan::ConditionMapping],
     ) -> Result<ReplanOperation> {
-        let tx = self.write_tx("record_replan_mappings")?;
+        let tx = self.write_entry("record_replan_mappings")?;
         write_mappings(&tx, id, mappings)?;
         let op = read_operation(&tx, id)?;
         tx.commit()?;
@@ -487,7 +489,7 @@ impl SqliteQueue {
     }
 }
 
-impl crate::application::commands::replans::ReplanStore for SqliteQueue {
+impl<E: TransactionEntries> crate::application::commands::replans::ReplanStore for StoreQueue<E> {
     fn run_task(&self, run: &RunId) -> Result<Option<TaskId>> {
         let tx = self.read_entry("run_task")?;
         Ok(SqlRead::query_row(
@@ -506,11 +508,11 @@ impl crate::application::commands::replans::ReplanStore for SqliteQueue {
         by_role: &str,
         by_id: &str,
     ) -> Result<ReplanRecorded> {
-        SqliteQueue::record_replan(self, new, origin, by_role, by_id)
+        StoreQueue::record_replan(self, new, origin, by_role, by_id)
     }
 
     fn replan_operation(&self, id: ReplanId) -> Result<ReplanOperation> {
-        SqliteQueue::replan_operation(self, id)
+        StoreQueue::replan_operation(self, id)
     }
 
     fn move_replan(
@@ -519,7 +521,7 @@ impl crate::application::commands::replans::ReplanStore for SqliteQueue {
         generation: i64,
         step: &ReplanMove,
     ) -> Result<ReplanOperation> {
-        SqliteQueue::move_replan(self, id, generation, step)
+        StoreQueue::move_replan(self, id, generation, step)
     }
 
     fn resolve_replan(
@@ -529,7 +531,7 @@ impl crate::application::commands::replans::ReplanStore for SqliteQueue {
         by_role: &str,
         by_id: &str,
     ) -> Result<task_replan::ReplanResolved> {
-        SqliteQueue::resolve_replan(self, resolve, snapshot_problem, by_role, by_id)
+        StoreQueue::resolve_replan(self, resolve, snapshot_problem, by_role, by_id)
     }
 }
 
@@ -952,7 +954,7 @@ pub(super) fn replan_again(
     read_operation(conn, op.id)
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Resolve the operation `resolve` names, held `blocked` by anything
     /// but its apply, at a person's word (`by_role`, `by_id`: the user or
     /// the inbox), in one write transaction ([`task_replan::resolve_to`]
@@ -979,7 +981,7 @@ impl SqliteQueue {
     ) -> Result<task_replan::ReplanResolved> {
         resolve.validate()?;
         let now = self.generators.clock.now();
-        let tx = self.write_tx("resolve_replan")?;
+        let tx = self.write_entry("resolve_replan")?;
         let op = read_operation(&tx, resolve.operation)?;
         let mut children = Vec::new();
         if let Some(proposal) = op.proposal_id {
@@ -1151,7 +1153,7 @@ impl SqliteQueue {
     /// person. The operations moved, oldest first.
     pub fn settle_replan_requests(&mut self) -> Result<Vec<ReplanOperation>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("settle_replan_requests")?;
+        let tx = self.write_entry("settle_replan_requests")?;
         let ended: Vec<(ReplanId, String)> = tx.query_map(
             "SELECT o.id, r.status FROM replan_operations o
                  JOIN plan_requests r ON r.id=o.request_id

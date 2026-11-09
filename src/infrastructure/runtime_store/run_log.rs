@@ -4,7 +4,9 @@
 //!
 //! The reads of the queue's own events by kind (no run, task or goal) name
 //! `events_by_kind`, why: [`crate::infrastructure::kpi_push`].
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::application::{LAST_TURNS_PAGE, LastSessionTurn, RunSessionPair};
@@ -272,7 +274,7 @@ pub(super) fn run_of(tx: &impl SqlRead, runs_dir: &Path, id: &RunId) -> Result<T
     .ok_or_else(|| crate::application::RunNotFound(id.clone()).into())
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// See [`RunReads::last_turns_of`]. Malformed last turns stay absent;
     /// parsing never retries an earlier turn. Width is bounded in SQL,
     /// before a start can enter an adapter row or a service answer.
@@ -308,7 +310,7 @@ impl SqliteQueue {
     pub fn installs_after(&self, after: EventId, limit: usize) -> Result<(Vec<RunEvent>, usize)> {
         let kind = crate::domain::UPDATE_INSTALLED;
         // One read snapshot keeps the installs and their count consistent.
-        let tx = self.read_tx("installs_after")?;
+        let tx = self.read_entry("installs_after")?;
         let total: i64 = SqlRead::query_row(
             &tx,
             &format!("SELECT COUNT(*) {}", installs_after_sql(tx.dialect())),
@@ -324,7 +326,7 @@ impl SqliteQueue {
             sql_params![kind, after, i64::try_from(limit).unwrap_or(i64::MAX)],
             event_row,
         )?;
-        tx.finish()?;
+        drop(tx);
         installs.reverse();
         Ok((installs, usize::try_from(total).unwrap_or(usize::MAX)))
     }
@@ -403,7 +405,7 @@ impl SqliteQueue {
         // connection leaves no transaction open and the closes' lines are
         // known rolled back.
         let _read = read_before_port(self, Closing::Event(id, kind, &payload))?;
-        let tx = self.write_tx("record_runtime_event")?;
+        let tx = self.write_entry("record_runtime_event")?;
         run_event_port(&tx, id, kind, payload)?;
         tx.commit()?;
         Ok(())
@@ -418,7 +420,7 @@ impl SqliteQueue {
     ) -> Result<()> {
         match run {
             Some(id) => {
-                let tx = self.write_tx("record_backend_failure")?;
+                let tx = self.write_entry("record_backend_failure")?;
                 run_event_port(&tx, id, EventKind::BackendCallFailed, payload)?;
                 tx.commit()?;
                 Ok(())
@@ -441,7 +443,7 @@ impl SqliteQueue {
         // (the schema, to prepare the insert) got SQLITE_BUSY at once, past
         // the busy timeout, when another supervisor wrote at the same time.
         let _read = read_before_port(self, Closing::Queue(kind, &payload))?;
-        let tx = self.write_tx("record_queue_event")?;
+        let tx = self.write_entry("record_queue_event")?;
         let id = queue_event(&tx, kind, &payload)?;
         tx.commit()?;
         Ok(id)
@@ -460,7 +462,7 @@ impl SqliteQueue {
             .iter()
             .map(|(kind, payload)| read_before_port(self, Closing::Queue(*kind, payload)))
             .collect::<Result<Vec<_>>>()?;
-        let tx = self.write_tx("record_queue_events")?;
+        let tx = self.write_entry("record_queue_events")?;
         let ids = events
             .iter()
             .map(|(kind, payload)| queue_event(&tx, *kind, payload))
@@ -487,7 +489,7 @@ impl SqliteQueue {
             None => Closing::Queue(kind, &payload),
         };
         let _read = read_before_port(self, closing)?;
-        let tx = self.write_tx("record_event_once")?;
+        let tx = self.write_entry("record_event_once")?;
         let found: Option<i64> = SqlRead::query_row(
             &tx,
             "SELECT event_id FROM event_records WHERE record=?1",
@@ -527,7 +529,7 @@ impl SqliteQueue {
         let kind = EventKind::InboxNudged;
         crate::domain::check_event_target(kind, None, None)?;
         let _read = read_before_port(self, Closing::Queue(kind, &payload))?;
-        let tx = self.write_tx("claim_inbox_nudge")?;
+        let tx = self.write_entry("claim_inbox_nudge")?;
         let claimed: bool = SqlRead::query_row(
             &tx,
             &inbox_nudged_sql(tx.dialect()),
@@ -567,7 +569,7 @@ impl SqliteQueue {
         );
         crate::domain::check_event_target(kind, None, None)?;
         let _read = read_before_port(self, Closing::Queue(kind, &payload))?;
-        let tx = self.write_tx("record_inbox_watcher_change")?;
+        let tx = self.write_entry("record_inbox_watcher_change")?;
         let latest: Option<(String, Option<i64>)> = SqlRead::query_row(
             &tx,
             &latest_inbox_watcher_change_sql(tx.dialect()),
@@ -1435,94 +1437,94 @@ fn ended_run_worktree_sql() -> String {
 }
 
 /// The [`InboxWatchLog`] port over the inherent methods above.
-impl InboxWatchLog for SqliteQueue {
+impl<E: TransactionEntries> InboxWatchLog for StoreQueue<E> {
     fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
-        SqliteQueue::claim_inbox_nudge(self, payload)
+        StoreQueue::claim_inbox_nudge(self, payload)
     }
     fn record_inbox_watcher_change(
         &self,
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<bool> {
-        SqliteQueue::record_inbox_watcher_change(self, kind, payload)
+        StoreQueue::record_inbox_watcher_change(self, kind, payload)
     }
 }
 
 /// The [`RunReads`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
-impl RunReads for SqliteQueue {
+impl<E: TransactionEntries> RunReads for StoreQueue<E> {
     fn last_turns_of(&self, sessions: &[RunSessionPair]) -> Result<Vec<LastSessionTurn>> {
-        SqliteQueue::last_turns_of(self, sessions)
+        StoreQueue::last_turns_of(self, sessions)
     }
 
     fn active_runs(&self) -> Result<Vec<TaskRun>> {
-        SqliteQueue::active_runs(self)
+        StoreQueue::active_runs(self)
     }
     fn all_runs(&self) -> Result<Vec<TaskRun>> {
-        SqliteQueue::all_runs(self)
+        StoreQueue::all_runs(self)
     }
     fn run(&self, id: &RunId) -> Result<TaskRun> {
-        SqliteQueue::run(self, id)
+        StoreQueue::run(self, id)
     }
     fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>> {
-        SqliteQueue::runs_with_status(self, status)
+        StoreQueue::runs_with_status(self, status)
     }
     fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
-        SqliteQueue::next_awaiting_integration(self)
+        StoreQueue::next_awaiting_integration(self)
     }
     fn ended_run_workspaces(&self) -> Result<Vec<EndedRunWorkspace>> {
-        SqliteQueue::ended_run_workspaces(self)
+        StoreQueue::ended_run_workspaces(self)
     }
     fn ended_run_worktrees(&self) -> Result<Vec<EndedRunWorktree>> {
-        SqliteQueue::ended_run_worktrees(self)
+        StoreQueue::ended_run_worktrees(self)
     }
     fn ended_run_worktree(&self, id: &RunId) -> Result<Option<EndedRunWorktree>> {
-        SqliteQueue::ended_run_worktree(self, id)
+        StoreQueue::ended_run_worktree(self, id)
     }
     fn latest_runs_in_progress(&self) -> Result<Vec<TaskRun>> {
-        SqliteQueue::latest_runs_in_progress(self)
+        StoreQueue::latest_runs_in_progress(self)
     }
     fn runs_with_pending_push(&self) -> Result<Vec<TaskRun>> {
-        SqliteQueue::runs_with_pending_push(self)
+        StoreQueue::runs_with_pending_push(self)
     }
     fn run_in_workspace(&self, workspace_id: &str) -> Result<Option<RunId>> {
-        SqliteQueue::run_in_workspace(self, workspace_id)
+        StoreQueue::run_in_workspace(self, workspace_id)
     }
 }
 
 /// The [`EventStore`] port over the inherent methods above, in the same
 /// `run_events` table and transactions as the state the other ports
 /// change (ADR-t1662-2 D1).
-impl EventStore for SqliteQueue {
+impl<E: TransactionEntries> EventStore for StoreQueue<E> {
     fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-        SqliteQueue::update_events(self, limit)
+        StoreQueue::update_events(self, limit)
     }
     fn installs_after(&self, after: EventId, limit: usize) -> Result<(Vec<RunEvent>, usize)> {
-        SqliteQueue::installs_after(self, after, limit)
+        StoreQueue::installs_after(self, after, limit)
     }
     fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
-        SqliteQueue::e2e_gate_events(self, limit)
+        StoreQueue::e2e_gate_events(self, limit)
     }
     fn all_events(&self) -> Result<Vec<RunEvent>> {
-        SqliteQueue::all_events(self)
+        StoreQueue::all_events(self)
     }
     fn earliest_event_at(&self) -> Result<Option<i64>> {
-        SqliteQueue::earliest_event_at(self)
+        StoreQueue::earliest_event_at(self)
     }
     fn stats_window(&self) -> Result<crate::domain::stats::StatsWindow> {
-        SqliteQueue::stats_window(self)
+        StoreQueue::stats_window(self)
     }
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
-        SqliteQueue::latest_task_events(self, kinds)
+        StoreQueue::latest_task_events(self, kinds)
     }
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
-        SqliteQueue::run_events(self, id)
+        StoreQueue::run_events(self, id)
     }
     fn task_events(&self, task: TaskId) -> Result<Vec<RunEvent>> {
-        SqliteQueue::task_events(self, task)
+        StoreQueue::task_events(self, task)
     }
     fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
-        SqliteQueue::has_run_event(self, id, kind)
+        StoreQueue::has_run_event(self, id, kind)
     }
     fn record_runtime_event(
         &self,
@@ -1530,29 +1532,29 @@ impl EventStore for SqliteQueue {
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()> {
-        SqliteQueue::record_runtime_event(self, id, kind, payload)
+        StoreQueue::record_runtime_event(self, id, kind, payload)
     }
     fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
-        SqliteQueue::last_observe(self, mode)
+        StoreQueue::last_observe(self, mode)
     }
     fn latest_event_id(&self) -> Result<EventId> {
-        SqliteQueue::latest_event_id(self)
+        StoreQueue::latest_event_id(self)
     }
     fn record_backend_failure(
         &self,
         run: Option<&RunId>,
         payload: serde_json::Value,
     ) -> Result<()> {
-        SqliteQueue::record_backend_failure(self, run, payload)
+        StoreQueue::record_backend_failure(self, run, payload)
     }
     fn record_queue_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<EventId> {
-        SqliteQueue::record_queue_event(self, kind, payload)
+        StoreQueue::record_queue_event(self, kind, payload)
     }
     fn record_queue_events(
         &self,
         events: Vec<(EventKind, serde_json::Value)>,
     ) -> Result<Vec<EventId>> {
-        SqliteQueue::record_queue_events(self, &events)
+        StoreQueue::record_queue_events(self, &events)
     }
     fn record_event_once(
         &self,
@@ -1561,29 +1563,29 @@ impl EventStore for SqliteQueue {
         payload: serde_json::Value,
         record: &str,
     ) -> Result<EventId> {
-        SqliteQueue::record_event_once(self, run, kind, payload, record)
+        StoreQueue::record_event_once(self, run, kind, payload, record)
     }
     fn record_attributes_baseline(&self) -> Result<Option<(usize, usize)>> {
-        SqliteQueue::record_attributes_baseline(self)
+        StoreQueue::record_attributes_baseline(self)
     }
     fn record_findings_baseline(&self) -> Result<Option<usize>> {
-        SqliteQueue::record_findings_baseline(self)
+        StoreQueue::record_findings_baseline(self)
     }
     fn latest_event_of(&self, kind: &str) -> Result<Option<RunEvent>> {
-        SqliteQueue::latest_event_of(self, kind)
+        StoreQueue::latest_event_of(self, kind)
     }
     fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>> {
-        SqliteQueue::latest_events_of(self, kind, limit)
+        StoreQueue::latest_events_of(self, kind, limit)
     }
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
-        SqliteQueue::latest_queue_event(self, kinds)
+        StoreQueue::latest_queue_event(self, kinds)
     }
     fn latest_events_by_supervisor(
         &self,
         kinds: &[&str],
         supervisors: &[&str],
     ) -> Result<Vec<RunEvent>> {
-        SqliteQueue::latest_events_by_supervisor(self, kinds, supervisors)
+        StoreQueue::latest_events_by_supervisor(self, kinds, supervisors)
     }
     fn events_of_between(
         &self,
@@ -1592,7 +1594,7 @@ impl EventStore for SqliteQueue {
         upto: EventId,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
-        SqliteQueue::events_of_between(self, kinds, after, upto, limit)
+        StoreQueue::events_of_between(self, kinds, after, upto, limit)
     }
     fn request_as(&self, requester: Option<&crate::domain::actor::ActorContext>) -> Option<String> {
         self.actors
@@ -1616,7 +1618,7 @@ impl EventStore for SqliteQueue {
         filter: &EventFilter,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
-        SqliteQueue::events_between(self, after, upto, filter, limit)
+        StoreQueue::events_between(self, after, upto, filter, limit)
     }
 }
 
@@ -1638,24 +1640,24 @@ pub(super) fn queue_event(
     Ok(id)
 }
 
-impl crate::application::ObserverLog for SqliteQueue {
+impl<E: TransactionEntries> crate::application::ObserverLog for StoreQueue<E> {
     fn event_id_before(&self, unix: i64) -> Result<EventId> {
-        SqliteQueue::event_id_before(self, unix)
+        StoreQueue::event_id_before(self, unix)
     }
     fn ask_high_water(&self) -> Result<AskId> {
-        SqliteQueue::ask_high_water(self)
+        StoreQueue::ask_high_water(self)
     }
     fn written_by(&self, role: &str, event_id: EventId, ask_id: AskId) -> Result<WrittenBy> {
-        SqliteQueue::written_by(self, role, event_id, ask_id)
+        StoreQueue::written_by(self, role, event_id, ask_id)
     }
     fn last_observation(&self, mode: &str) -> Result<Option<(EventId, Value)>> {
-        SqliteQueue::last_observation(self, mode)
+        StoreQueue::last_observation(self, mode)
     }
     fn events_besides(&self, role: &str, span_kind: &str, after: EventId) -> Result<i64> {
-        SqliteQueue::events_besides(self, role, span_kind, after)
+        StoreQueue::events_besides(self, role, span_kind, after)
     }
     fn observations(&self, limit: usize) -> Result<Vec<(RunEvent, Option<RunEvent>)>> {
-        SqliteQueue::observations(self, limit)
+        StoreQueue::observations(self, limit)
     }
 }
 

@@ -19,7 +19,9 @@
 //! target; a mismatch rejects each registration, step or sample call.
 //! Retention removes owners registered over 90 days ago only when neither
 //! steps nor samples remain.
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::application::{SessionOwners, SessionResourceStore, SessionStepStore};
@@ -565,7 +567,7 @@ fn remove_session_rows(
     })
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// The steps `filter` (a `WHERE` clause and its order) keeps.
     fn read_steps(&self, filter: &str, params: &[SqlValue]) -> Result<Vec<SessionStep>> {
         let tx = self.read_entry("read_steps")?;
@@ -579,7 +581,7 @@ impl SqliteQueue {
     }
 }
 
-impl SessionStepStore for SqliteQueue {
+impl<E: TransactionEntries> SessionStepStore for StoreQueue<E> {
     fn record_steps(
         &self,
         target: &StepTarget,
@@ -588,7 +590,7 @@ impl SessionStepStore for SqliteQueue {
         received_at: i64,
     ) -> Result<StepsRecorded> {
         session_step::check(steps)?;
-        let tx = self.write_tx("session_steps_record")?;
+        let tx = self.write_entry("session_steps_record")?;
         if of_another_target(&tx, session_id, target)? {
             return Err(StepError::SessionOfAnotherTarget.into());
         }
@@ -714,7 +716,7 @@ impl SessionStepStore for SqliteQueue {
                 planned += session.rows();
                 reach += 1;
             }
-            let tx = self.write_tx("session_steps_retention")?;
+            let tx = self.write_entry("session_steps_retention")?;
             let mut budget = ROWS_PER_TRANSACTION;
             let mut steps = 0;
             while budget > 0 && next < reach {
@@ -739,7 +741,7 @@ impl SessionStepStore for SqliteQueue {
     }
 }
 
-impl SessionResourceStore for SqliteQueue {
+impl<E: TransactionEntries> SessionResourceStore for StoreQueue<E> {
     fn record_resources(
         &self,
         target: &StepTarget,
@@ -748,7 +750,7 @@ impl SessionResourceStore for SqliteQueue {
         received_at: i64,
     ) -> Result<StepsRecorded> {
         session_step::check_resources(samples)?;
-        let tx = self.write_tx("session_resources_record")?;
+        let tx = self.write_entry("session_resources_record")?;
         if of_another_target(&tx, session_id, target)? {
             return Err(StepError::SessionOfAnotherTarget.into());
         }
@@ -825,14 +827,14 @@ impl SessionResourceStore for SqliteQueue {
     }
 }
 
-impl SessionOwners for SqliteQueue {
+impl<E: TransactionEntries> SessionOwners for StoreQueue<E> {
     fn register_session(
         &self,
         target: &StepTarget,
         session_id: &str,
         registered_at: i64,
     ) -> Result<()> {
-        let tx = self.write_tx("session_owner_register")?;
+        let tx = self.write_entry("session_owner_register")?;
         if of_another_target(&tx, session_id, target)? {
             return Err(StepError::SessionOfAnotherTarget.into());
         }
@@ -883,7 +885,7 @@ fn supervised_job(ended: Option<i64>, pid: Option<i64>, age: Option<i64>) -> Tar
     }
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// What the queue holds of `target`, a target of no run, for whether its
     /// telemetry token still holds ([`crate::domain::telemetry::TargetFacts`]):
     /// a planner's `closed_at`; a plan review's, a goal review's or an eval

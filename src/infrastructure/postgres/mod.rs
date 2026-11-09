@@ -77,6 +77,28 @@ impl<S: PostgresSession> PostgresQueue<S> {
             denial_log: None,
         })
     }
+
+    /// Use the identity acquired by the service that opens this store, as
+    /// the SQLite queue's `with_write_identity` does: every later write
+    /// entry fences with it, even after another service took over.
+    pub fn with_write_identity(mut self, identity: WriteIdentity) -> Self {
+        self.entries = self.entries.with_write_identity(identity);
+        self
+    }
+}
+
+/// The Postgres store has no relatedness of its own yet: its search index
+/// reads are the search adapter's, which does not implement them on this
+/// queue type yet. A plan review's proposal features are then not recorded,
+/// as when SQLite's relatedness read fails.
+impl<S: PostgresSession> super::plan_reviews::ProposalRelatedness for PostgresQueue<S> {
+    fn related_page(
+        &self,
+        _task: crate::domain::TaskId,
+        _limit: usize,
+    ) -> Result<crate::domain::related::RelatedPage> {
+        anyhow::bail!("the Postgres store reads no relatedness yet")
+    }
 }
 
 /// What a driver answers for the store. Its statements' parameters are
@@ -608,6 +630,182 @@ mod tests {
             SqlValue::Text("service-1".into())
         );
         assert_eq!(session.bound.borrow()[0][1], SqlValue::Integer(7));
+    }
+
+    /// The store ports the queue type shares with SQLite's, which a queue on
+    /// Postgres's entries implements too. The search index and the store
+    /// bundles holding it are the search adapter's and are not listed.
+    #[test]
+    fn the_postgres_queue_implements_the_shared_store_ports() {
+        use crate::application::agent_cases::CaseSetStore;
+        use crate::application::agent_eval::EvalStore;
+        use crate::application::commands::{
+            DenialLog, holds::HoldStore, planning::PlanningStore, replans::ReplanStore,
+            requests::RequestStore,
+        };
+        use crate::application::{
+            AskStore, CoordinationReads, DraftPlannerReads, DraftPlannerStore, EvalRounds,
+            EventStore, GoalReviewStore, HeadlessJobStore, InboxWatchLog, LedgerStore,
+            NodeSampleStore, ObserverLog, PlanRequestStore, PlanReviewStore, PlanningRecords,
+            QueueRecords, RunCoordination, RunReads, RunRecovery, RunResourceStore, RunTransitions,
+            SessionOwners, SessionReads, SessionRegistry, SessionResourceStore, SessionStepStore,
+            SupervisorReads, SupervisorRegistry, TaskReads, TaskStore, WriteLeaderStore,
+            health::ReplanSource, inherit::InheritStore, queue_writes::PlannerRecords,
+        };
+        fn shared_ports<Q>(_: &Q)
+        where
+            Q: AskStore
+                + CaseSetStore
+                + CoordinationReads
+                + DenialLog
+                + DraftPlannerReads
+                + DraftPlannerStore
+                + EvalRounds
+                + EvalStore
+                + EventStore
+                + GoalReviewStore
+                + HeadlessJobStore
+                + HoldStore
+                + InboxWatchLog
+                + InheritStore
+                + LedgerStore
+                + NodeSampleStore
+                + ObserverLog
+                + PlanRequestStore
+                + PlanReviewStore
+                + PlannerRecords
+                + PlanningRecords
+                + PlanningStore
+                + QueueRecords
+                + ReplanSource
+                + ReplanStore
+                + RequestStore
+                + RunCoordination
+                + RunReads
+                + RunRecovery
+                + RunResourceStore
+                + RunTransitions
+                + SessionOwners
+                + SessionReads
+                + SessionRegistry
+                + SessionResourceStore
+                + SessionStepStore
+                + SupervisorReads
+                + SupervisorRegistry
+                + TaskReads
+                + TaskStore
+                + WriteLeaderStore,
+        {
+        }
+        let session = Recorded::taken();
+        shared_ports(&PostgresQueue::open(&session, "runs".into()).unwrap());
+    }
+
+    #[test]
+    fn the_queue_s_leader_begins_unfenced_and_commits_only_what_it_changed() {
+        use crate::application::WriteLeaderStore;
+        let session = Recorded::taken();
+        let queue = PostgresQueue::open(&session, "runs".into()).unwrap();
+        session
+            .answers
+            .replace(vec![one_column("generation", SqlValue::Integer(8))]);
+        assert_eq!(
+            queue.take_write_leader("next", LEASE, true).unwrap(),
+            Some(8)
+        );
+        let statements = after_open(&session);
+        assert_eq!(statements[0], BEGIN_WRITE_SQL);
+        assert!(statements[1].contains("generation = generation + 1"));
+        assert_eq!(
+            statements[2],
+            "SELECT generation FROM write_leader WHERE singleton = 1"
+        );
+        assert_eq!(statements[3], COMMIT_SQL);
+        assert_eq!(statements.len(), 4);
+
+        session.changed.set(0);
+        let start = session.statements.borrow().len();
+        assert_eq!(
+            queue.take_write_leader("other", LEASE, false).unwrap(),
+            None
+        );
+        {
+            let statements = session.statements.borrow();
+            assert_eq!(statements[start], BEGIN_WRITE_SQL);
+            assert!(statements[start + 1].contains("generation = generation + 1"));
+            assert_eq!(statements[start + 2..], [ROLLBACK_SQL.to_owned()]);
+        }
+
+        for (changed, release) in [(1, false), (1, true), (0, false), (0, true)] {
+            session.changed.set(changed);
+            let start = session.statements.borrow().len();
+            let done = if release {
+                queue.release_write_leader("next", 8).unwrap()
+            } else {
+                queue.renew_write_leader("next", 8, LEASE).unwrap()
+            };
+            assert_eq!(done, changed == 1);
+            let statements = session.statements.borrow();
+            // Only the conditional update between BEGIN and COMMIT: renewing
+            // is the fence's own statement, run once, and no fence precedes it.
+            assert_eq!(statements[start], BEGIN_WRITE_SQL);
+            if release {
+                assert!(statements[start + 1].contains("SET lease_until_ms = 0"));
+            } else {
+                assert!(statements[start + 1].contains("+ $3"));
+            }
+            assert_eq!(statements[start + 2], COMMIT_SQL);
+            assert_eq!(statements.len(), start + 3);
+        }
+    }
+
+    #[test]
+    fn the_queue_reads_its_leader_in_a_snapshot_and_fences_with_the_identity_it_was_given() {
+        use crate::application::WriteLeaderStore;
+        let session = Recorded::taken();
+        let queue = PostgresQueue::open(&session, "runs".into()).unwrap();
+        session.answers.replace(vec![PostgresRow::new(
+            [
+                "holder",
+                "generation",
+                "lease_until_ms",
+                "acquired_at_ms",
+                "now",
+            ]
+            .map(str::to_owned)
+            .into(),
+            vec![
+                SqlValue::Text("next".into()),
+                SqlValue::Integer(8),
+                SqlValue::Integer(99),
+                SqlValue::Integer(1),
+                SqlValue::Integer(2),
+            ],
+        )]);
+        let (row, now) = queue.write_leader().unwrap();
+        assert_eq!(
+            (row.holder.as_deref(), row.generation, now),
+            (Some("next"), 8, 2)
+        );
+        assert_eq!(after_open(&session)[0], BEGIN_READ_SQL);
+        let queue = queue.with_write_identity(WriteIdentity {
+            holder: Some("next".into()),
+            generation: 8,
+        });
+        let start = session.statements.borrow().len();
+        queue.write_entry("inherited").unwrap().commit().unwrap();
+        assert_eq!(
+            session.statements.borrow()[start..],
+            [
+                BEGIN_WRITE_SQL.to_owned(),
+                fence_sql(),
+                COMMIT_SQL.to_owned()
+            ]
+        );
+        assert_eq!(
+            session.bound.borrow().last().unwrap()[..2],
+            [SqlValue::Text("next".into()), SqlValue::Integer(8)]
+        );
     }
 
     /// The fake session exercises successful, dropped and failed commits,

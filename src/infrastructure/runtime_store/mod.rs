@@ -302,16 +302,17 @@ pub const PAUSE_BETWEEN_TRANSACTIONS: std::time::Duration = std::time::Duration:
 
 /// Run `write` on each batch of at most [`ROWS_PER_TRANSACTION`] of
 /// `items` in its own immediate transaction named `name`
-/// ([`SqliteQueue::write_tx`]), committed before the next starts,
+/// ([`super::sql_exec::TransactionEntries::write_entry`]), committed before the next starts,
 /// [`PAUSE_BETWEEN_TRANSACTIONS`] apart; `items` empty runs it once on no
 /// items. `write` is told whether its batch is the last. A failure stops
 /// at its batch: the batches before it stay committed.
-fn in_batches<T>(
-    queue: &SqliteQueue,
+fn in_batches<'q, T, E: super::sql_exec::TransactionEntries>(
+    queue: &'q super::store_queue::StoreQueue<E>,
     name: &'static str,
     items: &[T],
-    mut write: impl FnMut(&super::sqlite::WriteTx<'_>, &[T], bool) -> Result<()>,
+    mut write: impl FnMut(&E::Write<'q>, &[T], bool) -> Result<()>,
 ) -> Result<()> {
+    use super::sql_exec::{CommitTransaction as _, TransactionEntries as _};
     let batches = items.len().div_ceil(ROWS_PER_TRANSACTION).max(1);
     for index in 0..batches {
         if index > 0 {
@@ -319,7 +320,7 @@ fn in_batches<T>(
         }
         let start = (index * ROWS_PER_TRANSACTION).min(items.len());
         let end = (start + ROWS_PER_TRANSACTION).min(items.len());
-        let tx = queue.write_tx(name)?;
+        let tx = queue.write_entry(name)?;
         write(&tx, &items[start..end], index + 1 == batches)?;
         tx.commit()?;
     }

@@ -1,11 +1,12 @@
 //! The lookups of the planning tables that `stats`, `kpi` and `forecast` join with
 //! ([`PlanningRecords`]).
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::infrastructure::sql_exec::SqlRead;
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// The goal of every task, for `stats`. A pure read.
     pub fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>> {
         let tx = self.read_entry("task_goals")?;
@@ -47,17 +48,17 @@ impl SqliteQueue {
 
 /// The [`PlanningRecords`] port over the inherent methods, which callers
 /// that hold a `SqliteQueue` keep using directly.
-impl PlanningRecords for SqliteQueue {
+impl<E: TransactionEntries> PlanningRecords for StoreQueue<E> {
     fn task_goals(&self) -> Result<HashMap<TaskId, Option<GoalId>>> {
-        SqliteQueue::task_goals(self)
+        StoreQueue::task_goals(self)
     }
     fn task_titles(&self) -> Result<HashMap<TaskId, String>> {
-        SqliteQueue::task_titles(self)
+        StoreQueue::task_titles(self)
     }
     fn task_changes(&self) -> Result<HashMap<TaskId, Option<TaskChange>>> {
-        SqliteQueue::task_changes(self)
+        StoreQueue::task_changes(self)
     }
     fn draft_origins(&self) -> Result<HashMap<TaskId, crate::domain::DraftOrigin>> {
-        SqliteQueue::draft_origins(self)
+        StoreQueue::draft_origins(self)
     }
 }

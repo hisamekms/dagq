@@ -1,11 +1,12 @@
 //! The `headless_jobs` rows (task 443): the process of each headless job a
 //! supervisor started, so that another supervisor can stop it once the one
 //! that started it is gone.
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::Result;
 
 use super::sql_exec::{SqlRead, SqlWrite, sql_params};
-use super::sqlite::SqliteQueue;
 use crate::domain::write_rules::check_non_blank;
 use crate::domain::{LeaseToken, Provider, headless_job};
 use crate::{
@@ -13,11 +14,11 @@ use crate::{
     domain::HEARTBEAT_TIMEOUT_SECS,
 };
 
-impl HeadlessJobStore for SqliteQueue {
+impl<E: TransactionEntries> HeadlessJobStore for StoreQueue<E> {
     fn record_headless_job(&self, job: &NewHeadlessJob) -> Result<i64> {
         check_non_blank("headless job kind", job.kind)?;
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_headless_job")?;
+        let tx = self.write_entry("record_headless_job")?;
         let id = SqlWrite::insert_id(
             &tx,
             "INSERT INTO headless_jobs(kind, label, run_id, proposal_id, goal_id, attempt, pid,
@@ -48,7 +49,7 @@ impl HeadlessJobStore for SqliteQueue {
     fn end_headless_job(&self, id: i64, outcome: &str) -> Result<bool> {
         check_non_blank("headless job outcome", outcome)?;
         let now = self.generators.clock.now();
-        let tx = self.write_tx("end_headless_job")?;
+        let tx = self.write_entry("end_headless_job")?;
         let ended = SqlWrite::execute(
             &tx,
             "UPDATE headless_jobs SET ended_at=?2, outcome=?3 WHERE id=?1 AND ended_at IS NULL",
@@ -104,6 +105,7 @@ impl HeadlessJobStore for SqliteQueue {
 mod tests {
     use super::*;
     use crate::domain::RunId;
+    use crate::infrastructure::sqlite::SqliteQueue;
 
     fn job(token: &LeaseToken, pid: u32) -> NewHeadlessJob {
         NewHeadlessJob {

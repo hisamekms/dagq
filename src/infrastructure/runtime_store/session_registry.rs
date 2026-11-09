@@ -1,6 +1,8 @@
 //! Session workspaces, planner sessions and Claude session spans
 //! ([`SessionRegistry`]).
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::domain::EventKind;
@@ -9,14 +11,14 @@ use crate::infrastructure::sql_dialect::JsonType;
 use crate::infrastructure::sql_exec::{OptionalRow, SqlRead, SqlValue, SqlWrite, sql_params};
 use crate::infrastructure::store_rows::event_row;
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     fn write_session_statement(
         &self,
         name: &'static str,
         sql: &str,
         params: &[SqlValue],
     ) -> Result<usize> {
-        let tx = self.write_tx(name)?;
+        let tx = self.write_entry(name)?;
         let rows = SqlWrite::execute(&tx, sql, params)?;
         tx.commit()?;
         Ok(rows)
@@ -73,13 +75,13 @@ impl SqliteQueue {
     }
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Record `planner_unresponsive` about planner `id` of the runtime's
     /// (task 805) with `payload`, which names it by `planner_id` with
     /// `subject: "planner"`: once per planner, `false` when it was recorded
     /// before.
     pub fn planner_silent(&self, id: PlannerId, payload: Value) -> Result<bool> {
-        let tx = self.write_tx("planner_silent")?;
+        let tx = self.write_entry("planner_silent")?;
         let seen: bool = SqlRead::query_row(
             &tx,
             &format!(
@@ -112,7 +114,7 @@ impl SqliteQueue {
     /// ([`crate::infrastructure::plan_requests::decline_after_planner`]):
     /// `false`, with nothing recorded, when the row was closed already.
     pub fn end_planner(&self, id: PlannerId, payload: &Value) -> Result<bool> {
-        let tx = self.write_tx("end_planner")?;
+        let tx = self.write_entry("end_planner")?;
         let now = self.generators.clock.now();
         let closed = SqlWrite::execute(
             &tx,
@@ -169,37 +171,37 @@ impl SqliteQueue {
 
 /// The [`SessionRegistry`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
-impl SessionRegistry for SqliteQueue {
+impl<E: TransactionEntries> SessionRegistry for StoreQueue<E> {
     fn remove_session_workspace(&self, role: SessionRole) -> Result<bool> {
-        SqliteQueue::remove_session_workspace(self, role)
+        StoreQueue::remove_session_workspace(self, role)
     }
     fn forget_retired_session_workspaces(&self) -> Result<usize> {
-        SqliteQueue::forget_retired_session_workspaces(self)
+        StoreQueue::forget_retired_session_workspaces(self)
     }
     fn open_planner(
         &self,
         origin: PlannerOrigin,
         proposal: Option<ProposalId>,
     ) -> Result<PlannerSession> {
-        SqliteQueue::open_planner(self, origin, proposal)
+        StoreQueue::open_planner(self, origin, proposal)
     }
     fn planner_workspace_created(&self, id: PlannerId, workspace_id: &str) -> Result<()> {
-        SqliteQueue::planner_workspace_created(self, id, workspace_id)
+        StoreQueue::planner_workspace_created(self, id, workspace_id)
     }
     fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession> {
-        SqliteQueue::close_planner(self, id, error)
+        StoreQueue::close_planner(self, id, error)
     }
     fn planner(&self, id: PlannerId) -> Result<PlannerSession> {
-        SqliteQueue::planner(self, id)
+        StoreQueue::planner(self, id)
     }
     fn planners(&self, all: bool) -> Result<Vec<PlannerSession>> {
-        SqliteQueue::planners(self, all)
+        StoreQueue::planners(self, all)
     }
     fn set_planner_route(&self, id: PlannerId, route: crate::domain::PlannerRoute) -> Result<()> {
-        SqliteQueue::set_planner_route(self, id, route)
+        StoreQueue::set_planner_route(self, id, route)
     }
     fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>> {
-        SqliteQueue::planner_turn_events(self, id)
+        StoreQueue::planner_turn_events(self, id)
     }
     fn planner_answer_wait(
         &self,
@@ -207,7 +209,7 @@ impl SessionRegistry for SqliteQueue {
         asks: &[crate::domain::AskId],
         payload: &Value,
     ) -> Result<bool> {
-        SqliteQueue::planner_answer_wait(self, id, asks, payload)
+        StoreQueue::planner_answer_wait(self, id, asks, payload)
     }
     fn planner_answer_undelivered(
         &self,
@@ -215,31 +217,31 @@ impl SessionRegistry for SqliteQueue {
         ask: crate::domain::AskId,
         payload: &Value,
     ) -> Result<bool> {
-        SqliteQueue::planner_answer_undelivered(self, id, ask, payload)
+        StoreQueue::planner_answer_undelivered(self, id, ask, payload)
     }
     fn planner_handover(
         &self,
         ask: crate::domain::AskId,
     ) -> Result<Option<crate::domain::PlannerHandover>> {
-        SqliteQueue::planner_handover(self, ask)
+        StoreQueue::planner_handover(self, ask)
     }
     fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()> {
-        SqliteQueue::register_planner_wrapper(self, id, pid)
+        StoreQueue::register_planner_wrapper(self, id, pid)
     }
     fn register_planner_agent(&self, id: PlannerId, wrapper_pid: u32, agent: u32) -> Result<()> {
-        SqliteQueue::register_planner_agent(self, id, wrapper_pid, agent)
+        StoreQueue::register_planner_agent(self, id, wrapper_pid, agent)
     }
     fn heartbeat_planner(&self, id: PlannerId, wrapper_pid: u32) -> Result<()> {
-        SqliteQueue::heartbeat_planner(self, id, wrapper_pid)
+        StoreQueue::heartbeat_planner(self, id, wrapper_pid)
     }
     fn planner_exited(&self, id: PlannerId, wrapper_pid: u32, exit_code: i32) -> Result<()> {
-        SqliteQueue::planner_exited(self, id, wrapper_pid, exit_code)
+        StoreQueue::planner_exited(self, id, wrapper_pid, exit_code)
     }
     fn end_planner(&self, id: PlannerId, payload: &Value) -> Result<bool> {
-        SqliteQueue::end_planner(self, id, payload)
+        StoreQueue::end_planner(self, id, payload)
     }
     fn planner_silent(&self, id: PlannerId, payload: Value) -> Result<bool> {
-        SqliteQueue::planner_silent(self, id, payload)
+        StoreQueue::planner_silent(self, id, payload)
     }
     fn record_session_turns(&self) -> Result<usize> {
         crate::infrastructure::sessions::record_open_turns(self)
@@ -265,7 +267,7 @@ impl SessionRegistry for SqliteQueue {
         session: Option<&crate::domain::headless_job::JobSession>,
     ) -> Result<usize> {
         let _read = read_before(self, Closing::Run(id, &[EventKind::ReviewFailed]))?;
-        let tx = self.write_tx("close_review_session")?;
+        let tx = self.write_entry("close_review_session")?;
         let ending = session.map(|session| {
             let mut ending = serde_json::json!({});
             session.record(&mut ending);
@@ -277,8 +279,8 @@ impl SessionRegistry for SqliteQueue {
     }
 }
 
-impl crate::application::SessionReads for SqliteQueue {
+impl<E: TransactionEntries> crate::application::SessionReads for StoreQueue<E> {
     fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>> {
-        SqliteQueue::silent_planners(self)
+        StoreQueue::silent_planners(self)
     }
 }

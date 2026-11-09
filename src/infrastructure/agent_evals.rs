@@ -3,6 +3,8 @@
 //! log. No table of their own: a round's state is read back from them.
 //! The production sets' events (ADR-t1728-1 (g)) are kept the same way.
 
+use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::Result;
 use serde_json::Value;
 
@@ -14,9 +16,8 @@ use crate::application::agent_eval::{EvalStore, LaunchSettings};
 use crate::domain::agent_eval::production;
 use crate::domain::agent_eval::record::KINDS;
 use crate::domain::{EventId, EventKind, RunEvent};
-use crate::infrastructure::sqlite::SqliteQueue;
 
-impl EvalStore for SqliteQueue {
+impl<E: TransactionEntries> EvalStore for StoreQueue<E> {
     fn record_eval_event(&self, kind: EventKind, payload: Value) -> Result<EventId> {
         EventStore::record_queue_event(self, kind, payload)
     }
@@ -46,7 +47,7 @@ pub fn bound_launch_settings(binding: Option<&str>, agent: &str) -> Result<Optio
     crate::infrastructure::run_env::load_eval_launch_settings(&checkout, agent).map(Some)
 }
 
-impl CaseSetStore for SqliteQueue {
+impl<E: TransactionEntries> CaseSetStore for StoreQueue<E> {
     fn record_cases_event(&self, kind: EventKind, payload: Value) -> Result<EventId> {
         EventStore::record_queue_event(self, kind, payload)
     }

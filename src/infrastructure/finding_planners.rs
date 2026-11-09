@@ -11,14 +11,15 @@ use super::sql_dialect::JsonType;
 use super::sql_exec::sql_params;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
 use crate::domain::event_kind::{self, EventKind};
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::{Context, Result};
 use serde_json::json;
 
 use super::{
     asks::{ask_row, read_ask},
     findings::{finding_event, finding_row, read_finding, record_in, set_status_in},
-    sqlite::SqliteQueue,
 };
 use crate::application::{FindingPlannerStart, PlannerAnswerRoute};
 use crate::domain::{
@@ -47,7 +48,7 @@ fn targets(dialect: super::sql_exec::SqlDialect) -> String {
     )
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Submit `submission` (see [`crate::application::TaskStore::submit`])
     /// and, in the same transaction, link to its proposal the findings it
     /// remedies ([`link_findings`]): the ones named, and that of the
@@ -63,7 +64,7 @@ impl SqliteQueue {
             PlannerOrigin::Runtime => "planner",
             PlannerOrigin::Person => "person",
         };
-        let tx = self.write_tx("submit_linking")?;
+        let tx = self.write_entry("submit_linking")?;
         let previous = super::plan_requests::previous_proposals(&tx, &submission)?;
         let held_retry = super::proposals::held_retry(&tx, &submission)?;
         let proposal = super::proposals::submit(
@@ -146,7 +147,7 @@ impl SqliteQueue {
         limit: usize,
     ) -> Result<FindingPlannerStart> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("open_finding_planner")?;
+        let tx = self.write_entry("open_finding_planner")?;
         let eligible = match answer {
             None => is_target(&tx, finding)?,
             // A planner of the finding still open (asked to exit because
@@ -261,7 +262,7 @@ impl SqliteQueue {
             return Ok(Vec::new());
         }
         let now = self.generators.clock.now();
-        let tx = self.write_tx("settle_findings")?;
+        let tx = self.write_entry("settle_findings")?;
         let proposed: Vec<Finding> = SqlRead::query_map(
             &tx,
             "SELECT * FROM findings WHERE status='proposed' AND proposal_id IS NOT NULL
@@ -345,7 +346,7 @@ impl SqliteQueue {
     ) -> Result<()> {
         let current = read_finding(&self.read_entry("record_finding_event")?, finding)?;
         {
-            let tx = self.write_tx("finding_planner_event")?;
+            let tx = self.write_entry("finding_planner_event")?;
             finding_event(&tx, &current, kind, payload)?;
             tx.commit()?;
             Ok(())
@@ -804,6 +805,7 @@ fn record_from_ask(
 mod tests {
     use super::*;
     use crate::domain::{FindingTarget, ci_watch};
+    use crate::infrastructure::sqlite::SqliteQueue;
 
     fn marked(queue: &mut SqliteQueue, kind: &str, subject: &str) -> FindingId {
         queue

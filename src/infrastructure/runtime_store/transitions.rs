@@ -1,13 +1,15 @@
 //! The run aggregate saved as it moves: claim, provisioning, supervision,
 //! validation, landing decisions, integration and clean-up ([`RunTransitions`]).
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::domain::satisfied::TaskMove;
 use crate::domain::{EventKind, run_phase};
 use crate::infrastructure::sql_exec::{SqlRead, SqlWrite};
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Reserve the next dependency-ready task of a Claude worker
     /// (interactive or headless) for this supervisor: the run,
     /// its `supervisor_token` and its lease row are created in one transaction,
@@ -68,7 +70,7 @@ impl SqliteQueue {
         trial: &WorkerTrial,
         routes: &[WorkerRoute],
     ) -> Result<ClaimOutcome> {
-        let tx = self.write_tx("claim_for_supervisor_holding")?;
+        let tx = self.write_entry("claim_for_supervisor_holding")?;
         // The claim, its run and its first heartbeat share one time.
         let at = self.generators.clock.system_time();
         let outcome = claim_task(
@@ -120,7 +122,7 @@ impl SqliteQueue {
         reason: &Reason,
         session: Option<&Value>,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("abandon_run")?;
+        let tx = self.write_entry("abandon_run")?;
         let run = apply(
             &tx,
             refusals(&self.runs_dir, &self.generators),
@@ -147,7 +149,7 @@ impl SqliteQueue {
     }
 
     pub fn plan_run(&mut self, id: &RunId, token: &LeaseToken, plan: &RunPlan) -> Result<()> {
-        let tx = self.write_tx("plan_run")?;
+        let tx = self.write_entry("plan_run")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         apply(
             &tx,
@@ -168,7 +170,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         workspace: &str,
     ) -> Result<()> {
-        let tx = self.write_tx("workspace_created")?;
+        let tx = self.write_entry("workspace_created")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         apply(
             &tx,
@@ -194,7 +196,7 @@ impl SqliteQueue {
         message: &str,
         reason: &Reason,
     ) -> Result<()> {
-        let tx = self.write_tx("record_runtime_error")?;
+        let tx = self.write_entry("record_runtime_error")?;
         apply(
             &tx,
             refusals(&self.runs_dir, &self.generators),
@@ -219,7 +221,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         receipt: bool,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("finish_supervision")?;
+        let tx = self.write_entry("finish_supervision")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let code: i32 = SqlRead::query_row(
             &tx,
@@ -251,7 +253,7 @@ impl SqliteQueue {
         exit_code: i32,
         receipt: bool,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("finish_lost_session")?;
+        let tx = self.write_entry("finish_lost_session")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply_recorded(
             &tx,
@@ -270,7 +272,7 @@ impl SqliteQueue {
     /// `validating` under the same lease, and `supervision_finished` records
     /// `session_live: true` with no exit code.
     pub fn finish_supervision_live(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
-        let tx = self.write_tx("finish_supervision_live")?;
+        let tx = self.write_entry("finish_supervision_live")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply_recorded(
             &tx,
@@ -289,7 +291,7 @@ impl SqliteQueue {
     /// `revise` verdict (ADR-0027 decision 2); `revise_finished` is the
     /// record of why.
     pub fn restart_validation(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
-        let tx = self.write_tx("restart_validation")?;
+        let tx = self.write_entry("restart_validation")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply(
             &tx,
@@ -314,7 +316,7 @@ impl SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("decide_landing")?;
+        let tx = self.write_entry("decide_landing")?;
         let leased: bool = SqlRead::query_row(
             &tx,
             "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1)",
@@ -348,7 +350,7 @@ impl SqliteQueue {
         token: Option<&LeaseToken>,
         payload: serde_json::Value,
     ) -> Result<(Task, TaskRun)> {
-        let tx = self.write_tx("close_satisfied")?;
+        let tx = self.write_entry("close_satisfied")?;
         let at = self.generators.clock.system_time();
         match token {
             Some(token) => renew_lease(&tx, id, token, unix_seconds(at))?,
@@ -412,7 +414,7 @@ impl SqliteQueue {
         payload: serde_json::Value,
         task: &TaskMove,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("decide_satisfied")?;
+        let tx = self.write_entry("decide_satisfied")?;
         ensure!(!run_leased(&tx, id)?, "run {id} is leased");
         let run = apply_recorded(
             &tx,
@@ -450,7 +452,7 @@ impl SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("park_live")?;
+        let tx = self.write_entry("park_live")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply_recorded(
             &tx,
@@ -487,7 +489,7 @@ impl SqliteQueue {
     ) -> Result<(crate::domain::task_replan::ReplanOperation, TaskRun)> {
         let now = self.generators.clock.now();
         let reason = step.reason.as_str();
-        let tx = self.write_tx("settle_replan")?;
+        let tx = self.write_entry("settle_replan")?;
         let parked = crate::infrastructure::replans::move_in(&tx, op, generation, step, now)?;
         let id = parked.run_id.clone();
         let run = match token {
@@ -572,7 +574,7 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("park_for_hold")?;
+        let tx = self.write_entry("park_for_hold")?;
         if !crate::infrastructure::task_holds::settle_open(&tx, hold, now)? {
             return Ok(None);
         }
@@ -636,7 +638,7 @@ impl SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("rest_fenced")?;
+        let tx = self.write_entry("rest_fenced")?;
         renew_lease(&tx, id, token, now)?;
         let task: crate::domain::TaskId = SqlRead::query_row(
             &tx,
@@ -727,7 +729,7 @@ impl SqliteQueue {
         id: &RunId,
         status: RunStatus,
     ) -> Result<bool> {
-        let tx = self.write_tx("settle_hold_at_rest")?;
+        let tx = self.write_entry("settle_hold_at_rest")?;
         let Some(stored) = stored_run(&tx, id)? else {
             return Ok(false);
         };
@@ -751,7 +753,7 @@ impl SqliteQueue {
         id: &RunId,
         token: &LeaseToken,
     ) -> Result<bool> {
-        let tx = self.write_tx("release_for_hold")?;
+        let tx = self.write_entry("release_for_hold")?;
         ensure!(
             SqlWrite::execute(
                 &tx,
@@ -792,7 +794,7 @@ impl SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("park_e2e_failed")?;
+        let tx = self.write_entry("park_e2e_failed")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply_recorded(
             &tx,
@@ -816,7 +818,7 @@ impl SqliteQueue {
         worker: Worker,
         payload: Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("switch_provider")?;
+        let tx = self.write_entry("switch_provider")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         // Written from the typed worker: the column has no CHECK (ADR-t876-1).
         SqlWrite::execute(
@@ -846,7 +848,7 @@ impl SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
-        let tx = self.write_tx("park_rechecked")?;
+        let tx = self.write_entry("park_rechecked")?;
         let lease: Option<LeaseToken> = SqlRead::query_row(
             &tx,
             "SELECT token FROM run_leases WHERE run_id=?1",
@@ -897,7 +899,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         validation: &Validation,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("finish_validation")?;
+        let tx = self.write_entry("finish_validation")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let refusal = || "run is not validating under this supervisor".to_owned();
         let run = apply_recorded(
@@ -976,7 +978,7 @@ impl SqliteQueue {
     ) -> Result<()> {
         let kind = EventKind::RunE2eStarted;
         let _read = self.read_before(Closing::Event(id, kind, &payload))?;
-        let tx = self.write_tx("begin_e2e_with")?;
+        let tx = self.write_entry("begin_e2e_with")?;
         if refused_by_handoff {
             refuse_on_handoff(&tx, token)?;
         }
@@ -1016,7 +1018,7 @@ impl SqliteQueue {
             Some(SlotHolder::Supervisor { now }) => (None, Some(now)),
             None => (None, None),
         };
-        let tx = self.write_tx("begin_integration_then")?;
+        let tx = self.write_entry("begin_integration_then")?;
         if let Some(now) = registered_at {
             let heartbeat_at: Option<i64> = SqlRead::query_row(
                 &tx,
@@ -1206,7 +1208,7 @@ impl SqliteQueue {
         mut detail: serde_json::Value,
     ) -> Result<TaskRun> {
         let revert_to: RunStatus = revert_to.parse()?;
-        let tx = self.write_tx("hand_over_integration")?;
+        let tx = self.write_entry("hand_over_integration")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply(
             &tx,
@@ -1232,7 +1234,7 @@ impl SqliteQueue {
         kind: EventKind,
         mut detail: serde_json::Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("leave_integration")?;
+        let tx = self.write_entry("leave_integration")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = apply(
             &tx,
@@ -1272,7 +1274,7 @@ impl SqliteQueue {
         landing: &Landing,
         common_dir: &str,
     ) -> Result<(Task, TaskRun)> {
-        let tx = self.write_tx("finish_integration")?;
+        let tx = self.write_entry("finish_integration")?;
         // The same landing sent again, its answer lost (ADR-t3102-3
         // decision 5): recorded once, and answered as it was.
         if let Some(landed) = stored_run(&tx, id)?
@@ -1356,7 +1358,7 @@ impl SqliteQueue {
         message: &str,
         reason: &Reason,
     ) -> Result<()> {
-        let tx = self.write_tx("record_cleanup_failure")?;
+        let tx = self.write_entry("record_cleanup_failure")?;
         apply(
             &tx,
             refusals(&self.runs_dir, &self.generators),
@@ -1384,7 +1386,7 @@ impl SqliteQueue {
     pub fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
         let _read = self.read_before(Closing::Run(id, &[EventKind::WorkspaceClosed]))?;
-        let tx = self.write_tx("workspace_closed")?;
+        let tx = self.write_entry("workspace_closed")?;
         let now = self.generators.clock.now();
         renew_lease(&tx, id, token, now)?;
         let result = apply(
@@ -1415,7 +1417,7 @@ impl SqliteQueue {
         message: &str,
         reason: &Reason,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("cleanup_failed")?;
+        let tx = self.write_entry("cleanup_failed")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let result = apply(
             &tx,
@@ -1448,7 +1450,7 @@ impl SqliteQueue {
     ) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
         let _read = self.read_before(Closing::Run(id, &[EventKind::WorkspaceClosed]))?;
-        let tx = self.write_tx("record_workspace_closed")?;
+        let tx = self.write_entry("record_workspace_closed")?;
         let now = self.generators.clock.now();
         if let Some(run) = stored_run(&tx, id)? {
             let from = run.status();
@@ -1464,31 +1466,31 @@ impl SqliteQueue {
 
 /// The [`RunTransitions`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
-impl RunTransitions for SqliteQueue {
+impl<E: TransactionEntries> RunTransitions for StoreQueue<E> {
     fn turn_fence(
         &self,
         task: crate::domain::TaskId,
     ) -> Result<Option<crate::domain::task_replan::Fence>> {
-        SqliteQueue::turn_fence(self, task)
+        StoreQueue::turn_fence(self, task)
     }
     fn settling_holds(&self) -> Result<Vec<crate::domain::task_hold::TaskHold>> {
-        SqliteQueue::settling_holds(self)
+        StoreQueue::settling_holds(self)
     }
     fn remind_task_holds(&mut self) -> Result<usize> {
-        Ok(SqliteQueue::remind_task_holds(self)?.len())
+        Ok(StoreQueue::remind_task_holds(self)?.len())
     }
     fn open_hold(
         &self,
         task: crate::domain::TaskId,
     ) -> Result<Option<crate::domain::task_hold::TaskHold>> {
-        SqliteQueue::task_hold(self, task)
+        StoreQueue::task_hold(self, task)
     }
     fn latest_run_of(&self, task: crate::domain::TaskId) -> Result<Option<TaskRun>> {
         let tx = self.read_entry("latest_run_of")?;
         let latest = crate::infrastructure::task_holds::latest_run(&tx, task)?;
         drop(tx);
         match latest {
-            Some((id, _)) => Ok(Some(SqliteQueue::run(self, &id)?)),
+            Some((id, _)) => Ok(Some(StoreQueue::run(self, &id)?)),
             None => Ok(None),
         }
     }
@@ -1500,7 +1502,7 @@ impl RunTransitions for SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::park_for_hold(self, hold, id, token, reason, payload)
+        StoreQueue::park_for_hold(self, hold, id, token, reason, payload)
     }
     fn release_for_hold(
         &mut self,
@@ -1508,7 +1510,7 @@ impl RunTransitions for SqliteQueue {
         id: &RunId,
         token: &LeaseToken,
     ) -> Result<bool> {
-        SqliteQueue::release_for_hold(self, hold, id, token)
+        StoreQueue::release_for_hold(self, hold, id, token)
     }
     fn settle_hold_at_rest(
         &mut self,
@@ -1516,38 +1518,38 @@ impl RunTransitions for SqliteQueue {
         id: &RunId,
         status: RunStatus,
     ) -> Result<bool> {
-        SqliteQueue::settle_hold_at_rest(self, hold, id, status)
+        StoreQueue::settle_hold_at_rest(self, hold, id, status)
     }
     fn replan_guard(
         &self,
         task: crate::domain::TaskId,
     ) -> Result<Option<crate::domain::task_replan::ReplanGuard>> {
-        SqliteQueue::replan_guard(self, task)
+        StoreQueue::replan_guard(self, task)
     }
     fn parking_replans(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
-        SqliteQueue::parking_replans(self)
+        StoreQueue::parking_replans(self)
     }
     fn replans_of_run(
         &self,
         run: &RunId,
     ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
-        SqliteQueue::replans_of_run(self, run)
+        StoreQueue::replans_of_run(self, run)
     }
     fn open_replan_operations(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
-        SqliteQueue::replan_operations(self, false)
+        StoreQueue::replan_operations(self, false)
     }
     fn replan_lineage(
         &self,
         task: crate::domain::TaskId,
     ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
-        SqliteQueue::replan_lineage(self, task)
+        StoreQueue::replan_lineage(self, task)
     }
     fn detect_replan(
         &mut self,
         new: &crate::domain::task_replan::NewReplan,
         by_id: &str,
     ) -> Result<crate::domain::task_replan::ReplanOperation> {
-        Ok(SqliteQueue::record_replan(
+        Ok(StoreQueue::record_replan(
             self,
             new,
             crate::domain::task_replan::ReplanOrigin::Runtime,
@@ -1570,7 +1572,7 @@ impl RunTransitions for SqliteQueue {
         crate::domain::AskOutcome,
         crate::domain::task_replan::ReplanOperation,
     )> {
-        SqliteQueue::ask_replan_diagnosis(self, ask, op, reason, run, written)
+        StoreQueue::ask_replan_diagnosis(self, ask, op, reason, run, written)
     }
     fn fail_replan_diagnosis(
         &mut self,
@@ -1579,10 +1581,10 @@ impl RunTransitions for SqliteQueue {
         run: &RunId,
         payload: serde_json::Value,
     ) -> Result<crate::domain::task_replan::ReplanOperation> {
-        SqliteQueue::fail_replan_diagnosis(self, op, reason, run, payload)
+        StoreQueue::fail_replan_diagnosis(self, op, reason, run, payload)
     }
     fn running_diagnosis_owners(&self) -> Result<Vec<crate::domain::replan_detect::RunningOwner>> {
-        SqliteQueue::running_diagnosis_owners(self)
+        StoreQueue::running_diagnosis_owners(self)
     }
     fn start_replan_diagnosis(
         &mut self,
@@ -1595,7 +1597,7 @@ impl RunTransitions for SqliteQueue {
             &[crate::domain::replan_detect::JobOwner],
         ),
     ) -> Result<crate::domain::task_replan::ReplanOperation> {
-        SqliteQueue::start_replan_diagnosis(self, op, reason, run, started)
+        StoreQueue::start_replan_diagnosis(self, op, reason, run, started)
     }
     fn move_replan(
         &mut self,
@@ -1603,7 +1605,7 @@ impl RunTransitions for SqliteQueue {
         generation: i64,
         step: &crate::domain::task_replan::ReplanMove,
     ) -> Result<crate::domain::task_replan::ReplanOperation> {
-        SqliteQueue::move_replan(self, id, generation, step)
+        StoreQueue::move_replan(self, id, generation, step)
     }
     fn settle_replan(
         &mut self,
@@ -1613,7 +1615,7 @@ impl RunTransitions for SqliteQueue {
         token: Option<&LeaseToken>,
         payload: serde_json::Value,
     ) -> Result<(crate::domain::task_replan::ReplanOperation, TaskRun)> {
-        SqliteQueue::settle_replan(self, op, generation, step, token, payload)
+        StoreQueue::settle_replan(self, op, generation, step, token, payload)
     }
     fn rest_fenced(
         &mut self,
@@ -1622,7 +1624,7 @@ impl RunTransitions for SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::rest_fenced(self, id, token, reason, payload)
+        StoreQueue::rest_fenced(self, id, token, reason, payload)
     }
     fn begin_restore(
         &mut self,
@@ -1631,7 +1633,7 @@ impl RunTransitions for SqliteQueue {
         op: crate::domain::ReplanId,
         generation: i64,
     ) -> Result<crate::domain::replan_snapshot::RestoreStart> {
-        SqliteQueue::begin_restore(self, id, token, op, generation)
+        StoreQueue::begin_restore(self, id, token, op, generation)
     }
     fn lease_for_park(
         &mut self,
@@ -1640,7 +1642,7 @@ impl RunTransitions for SqliteQueue {
         op: crate::domain::ReplanId,
         generation: i64,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::lease_for_park(self, id, token, op, generation)
+        StoreQueue::lease_for_park(self, id, token, op, generation)
     }
     fn lease_for_hold_park(
         &mut self,
@@ -1648,7 +1650,7 @@ impl RunTransitions for SqliteQueue {
         token: &LeaseToken,
         hold: crate::domain::HoldId,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::lease_for_hold_park(self, id, token, hold)
+        StoreQueue::lease_for_hold_park(self, id, token, hold)
     }
     fn fail_continuation_start(
         &mut self,
@@ -1658,7 +1660,7 @@ impl RunTransitions for SqliteQueue {
         generation: i64,
         why: &str,
     ) -> Result<bool> {
-        SqliteQueue::fail_continuation_start(self, id, token, op, generation, why)
+        StoreQueue::fail_continuation_start(self, id, token, op, generation, why)
     }
     fn finish_restore(
         &mut self,
@@ -1668,7 +1670,7 @@ impl RunTransitions for SqliteQueue {
         generation: i64,
         restored: std::result::Result<serde_json::Value, String>,
     ) -> Result<bool> {
-        SqliteQueue::finish_restore(self, id, token, op, generation, restored)
+        StoreQueue::finish_restore(self, id, token, op, generation, restored)
     }
     fn record_clone_restore(
         &mut self,
@@ -1678,14 +1680,14 @@ impl RunTransitions for SqliteQueue {
         generation: i64,
         restored: std::result::Result<serde_json::Value, String>,
     ) -> Result<bool> {
-        SqliteQueue::record_clone_restore(self, id, token, op, generation, restored)
+        StoreQueue::record_clone_restore(self, id, token, op, generation, restored)
     }
     fn claim_for_supervisor(
         &mut self,
         base_commit: &CommitSha,
         token: &LeaseToken,
     ) -> Result<ClaimOutcome> {
-        SqliteQueue::claim_for_supervisor(self, base_commit, token)
+        StoreQueue::claim_for_supervisor(self, base_commit, token)
     }
     fn abandon_run(
         &mut self,
@@ -1695,7 +1697,7 @@ impl RunTransitions for SqliteQueue {
         reason: &Reason,
         session: Option<&Value>,
     ) -> Result<TaskRun> {
-        SqliteQueue::abandon_run(self, id, token, message, reason, session)
+        StoreQueue::abandon_run(self, id, token, message, reason, session)
     }
     fn approve_integration(
         &mut self,
@@ -1705,7 +1707,7 @@ impl RunTransitions for SqliteQueue {
     ) -> Result<bool> {
         let kind = EventKind::IntegrationApproved;
         let _read = self.read_before(Closing::Event(id, kind, &payload))?;
-        let tx = self.write_tx("approve_integration")?;
+        let tx = self.write_entry("approve_integration")?;
         // These reads share the event's write transaction: a store read
         // would open a nested entry and separate checking from recording.
         let run = run_log::run_of(&tx, &self.runs_dir, id)?;
@@ -1730,7 +1732,7 @@ impl RunTransitions for SqliteQueue {
         token: &LeaseToken,
         main: &CommitSha,
     ) -> Result<TaskRun> {
-        SqliteQueue::begin_integration(self, id, token, main)
+        StoreQueue::begin_integration(self, id, token, main)
     }
     fn begin_integration_over_handoff(
         &mut self,
@@ -1738,10 +1740,10 @@ impl RunTransitions for SqliteQueue {
         token: &LeaseToken,
         main: &CommitSha,
     ) -> Result<TaskRun> {
-        SqliteQueue::begin_integration_over_handoff(self, id, token, main)
+        StoreQueue::begin_integration_over_handoff(self, id, token, main)
     }
     fn begin_e2e(&mut self, id: &RunId, token: &LeaseToken, payload: Value) -> Result<()> {
-        SqliteQueue::begin_e2e(self, id, token, payload)
+        StoreQueue::begin_e2e(self, id, token, payload)
     }
     fn begin_e2e_over_handoff(
         &mut self,
@@ -1749,7 +1751,7 @@ impl RunTransitions for SqliteQueue {
         token: &LeaseToken,
         payload: Value,
     ) -> Result<()> {
-        SqliteQueue::begin_e2e_over_handoff(self, id, token, payload)
+        StoreQueue::begin_e2e_over_handoff(self, id, token, payload)
     }
     fn defer_integration(
         &mut self,
@@ -1758,7 +1760,7 @@ impl RunTransitions for SqliteQueue {
         reason: &str,
         detail: serde_json::Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::defer_integration(self, id, token, reason, detail)
+        StoreQueue::defer_integration(self, id, token, reason, detail)
     }
     fn hold_integration(
         &mut self,
@@ -1767,7 +1769,7 @@ impl RunTransitions for SqliteQueue {
         reason: &str,
         detail: serde_json::Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::hold_integration(self, id, token, reason, detail)
+        StoreQueue::hold_integration(self, id, token, reason, detail)
     }
     fn fail_integration(
         &mut self,
@@ -1776,7 +1778,7 @@ impl RunTransitions for SqliteQueue {
         reason: &str,
         receipt: serde_json::Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::fail_integration(self, id, token, reason, receipt)
+        StoreQueue::fail_integration(self, id, token, reason, receipt)
     }
     fn abort_integration(
         &mut self,
@@ -1786,7 +1788,7 @@ impl RunTransitions for SqliteQueue {
         message: &str,
         reason: &Reason,
     ) -> Result<TaskRun> {
-        SqliteQueue::abort_integration(self, id, token, revert_to, message, reason)
+        StoreQueue::abort_integration(self, id, token, revert_to, message, reason)
     }
     fn hand_over_integration(
         &mut self,
@@ -1796,7 +1798,7 @@ impl RunTransitions for SqliteQueue {
         reason: &str,
         detail: serde_json::Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::hand_over_integration(self, id, token, revert_to, reason, detail)
+        StoreQueue::hand_over_integration(self, id, token, revert_to, reason, detail)
     }
     fn finish_integration(
         &mut self,
@@ -1805,13 +1807,13 @@ impl RunTransitions for SqliteQueue {
         landing: &Landing,
         common_dir: &str,
     ) -> Result<(Task, TaskRun)> {
-        SqliteQueue::finish_integration(self, id, token, landing, common_dir)
+        StoreQueue::finish_integration(self, id, token, landing, common_dir)
     }
     fn record_cleanup_failure(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()> {
-        SqliteQueue::record_cleanup_failure(self, id, message, reason)
+        StoreQueue::record_cleanup_failure(self, id, message, reason)
     }
     fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
-        SqliteQueue::workspace_closed(self, id, token)
+        StoreQueue::workspace_closed(self, id, token)
     }
     fn cleanup_failed(
         &mut self,
@@ -1820,7 +1822,7 @@ impl RunTransitions for SqliteQueue {
         message: &str,
         reason: &Reason,
     ) -> Result<TaskRun> {
-        SqliteQueue::cleanup_failed(self, id, token, message, reason)
+        StoreQueue::cleanup_failed(self, id, token, message, reason)
     }
     fn claim_for_supervisor_holding(
         &mut self,
@@ -1832,7 +1834,7 @@ impl RunTransitions for SqliteQueue {
         trial: &WorkerTrial,
         routes: &[WorkerRoute],
     ) -> Result<ClaimOutcome> {
-        SqliteQueue::claim_for_supervisor_holding(
+        StoreQueue::claim_for_supervisor_holding(
             self,
             base_commit,
             token,
@@ -1850,10 +1852,10 @@ impl RunTransitions for SqliteQueue {
         worker: Worker,
         payload: Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::switch_provider(self, id, token, worker, payload)
+        StoreQueue::switch_provider(self, id, token, worker, payload)
     }
     fn record_runtime_error(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()> {
-        SqliteQueue::record_runtime_error(self, id, message, reason)
+        StoreQueue::record_runtime_error(self, id, message, reason)
     }
     fn plan_run(
         &mut self,
@@ -1861,10 +1863,10 @@ impl RunTransitions for SqliteQueue {
         token: &LeaseToken,
         plan: &crate::domain::RunPlan,
     ) -> Result<()> {
-        SqliteQueue::plan_run(self, id, token, plan)
+        StoreQueue::plan_run(self, id, token, plan)
     }
     fn workspace_created(&mut self, id: &RunId, token: &LeaseToken, workspace: &str) -> Result<()> {
-        SqliteQueue::workspace_created(self, id, token, workspace)
+        StoreQueue::workspace_created(self, id, token, workspace)
     }
     fn finish_supervision(
         &mut self,
@@ -1872,7 +1874,7 @@ impl RunTransitions for SqliteQueue {
         token: &LeaseToken,
         receipt: bool,
     ) -> Result<TaskRun> {
-        SqliteQueue::finish_supervision(self, id, token, receipt)
+        StoreQueue::finish_supervision(self, id, token, receipt)
     }
     fn finish_lost_session(
         &mut self,
@@ -1881,10 +1883,10 @@ impl RunTransitions for SqliteQueue {
         exit_code: i32,
         receipt: bool,
     ) -> Result<TaskRun> {
-        SqliteQueue::finish_lost_session(self, id, token, exit_code, receipt)
+        StoreQueue::finish_lost_session(self, id, token, exit_code, receipt)
     }
     fn finish_supervision_live(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
-        SqliteQueue::finish_supervision_live(self, id, token)
+        StoreQueue::finish_supervision_live(self, id, token)
     }
     fn finish_validation(
         &mut self,
@@ -1892,10 +1894,10 @@ impl RunTransitions for SqliteQueue {
         token: &LeaseToken,
         validation: &Validation,
     ) -> Result<TaskRun> {
-        SqliteQueue::finish_validation(self, id, token, validation)
+        StoreQueue::finish_validation(self, id, token, validation)
     }
     fn restart_validation(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
-        SqliteQueue::restart_validation(self, id, token)
+        StoreQueue::restart_validation(self, id, token)
     }
     fn decide_landing(
         &mut self,
@@ -1904,7 +1906,7 @@ impl RunTransitions for SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::decide_landing(self, id, status, reason, payload)
+        StoreQueue::decide_landing(self, id, status, reason, payload)
     }
     fn close_satisfied(
         &mut self,
@@ -1912,7 +1914,7 @@ impl RunTransitions for SqliteQueue {
         token: Option<&LeaseToken>,
         payload: serde_json::Value,
     ) -> Result<(Task, TaskRun)> {
-        SqliteQueue::close_satisfied(self, id, token, payload)
+        StoreQueue::close_satisfied(self, id, token, payload)
     }
     fn decide_satisfied(
         &mut self,
@@ -1921,7 +1923,7 @@ impl RunTransitions for SqliteQueue {
         payload: serde_json::Value,
         task: &TaskMove,
     ) -> Result<TaskRun> {
-        SqliteQueue::decide_satisfied(self, id, reason, payload, task)
+        StoreQueue::decide_satisfied(self, id, reason, payload, task)
     }
     fn park_live(
         &mut self,
@@ -1930,7 +1932,7 @@ impl RunTransitions for SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::park_live(self, id, token, reason, payload)
+        StoreQueue::park_live(self, id, token, reason, payload)
     }
     fn park_e2e_failed(
         &mut self,
@@ -1939,7 +1941,7 @@ impl RunTransitions for SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::park_e2e_failed(self, id, token, reason, payload)
+        StoreQueue::park_e2e_failed(self, id, token, reason, payload)
     }
     fn park_rechecked(
         &mut self,
@@ -1948,7 +1950,7 @@ impl RunTransitions for SqliteQueue {
         reason: &str,
         payload: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::park_rechecked(self, id, token, reason, payload)
+        StoreQueue::park_rechecked(self, id, token, reason, payload)
     }
     fn record_workspace_closed(
         &mut self,
@@ -1956,7 +1958,7 @@ impl RunTransitions for SqliteQueue {
         workspace_id: &str,
         payload: serde_json::Value,
     ) -> Result<()> {
-        SqliteQueue::record_workspace_closed(self, id, workspace_id, payload)
+        StoreQueue::record_workspace_closed(self, id, workspace_id, payload)
     }
 }
 

@@ -1,7 +1,9 @@
 //! The runs' resources the supervisor measured from outside in queue.db
 //! (`run_resources`, [`RunResourceStore`]). Its boundary on a real
 //! queue.db is `tests/it/run_resources.rs`.
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::application::RunResourceStore;
@@ -34,9 +36,9 @@ fn resource_row(row: &SqlRow<'_>) -> SqlResult<RunResource> {
     })
 }
 
-impl RunResourceStore for SqliteQueue {
+impl<E: TransactionEntries> RunResourceStore for StoreQueue<E> {
     fn record_run_resource(&self, row: &RunResource) -> Result<i64> {
-        let tx = self.write_tx("run_resources_record")?;
+        let tx = self.write_entry("run_resources_record")?;
         let id = SqlWrite::insert_id(
             &tx,
             "INSERT INTO run_resources(run_id,attachment,node_id,from_ms,until_ms,cpu_seconds,

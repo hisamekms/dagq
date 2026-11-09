@@ -15,7 +15,9 @@
 //! ([`replan_apply::ApplyRecovery`]): checked again at each pass, back to a
 //! planner on a new request, or held for a person. A second apply of an
 //! applied operation writes nothing.
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
@@ -28,7 +30,6 @@ use super::replans::{
     move_in_as, read_operation, write_mappings,
 };
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite, sql_params};
-use super::sqlite::SqliteQueue;
 use super::store_rows::{self, enum_col, read_task};
 use super::store_writes::event;
 use super::task_store::{replace_task, transition_task};
@@ -48,7 +49,7 @@ pub(super) use self::{
     successors_now as successors_now_port, wait_graph as wait_graph_port,
 };
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// The operations whose replacement the trusted runtime applies now,
     /// oldest first: those `reviewing` whose latest plan plan review
     /// approved, its proposal accepted, those left `applying` (an apply a
@@ -81,7 +82,7 @@ impl SqliteQueue {
     /// it is.
     pub fn begin_replan_apply(&mut self, id: ReplanId, generation: i64) -> Result<ReplanOperation> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("begin_replan_apply")?;
+        let tx = self.write_entry("begin_replan_apply")?;
         let op = read_operation(&tx, id)?;
         let op = if op.status == ReplanStatus::Applying && op.generation == generation {
             op
@@ -122,7 +123,7 @@ impl SqliteQueue {
         snapshot_problem: Option<&str>,
     ) -> Result<ApplyOutcome> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("apply_replacement")?;
+        let tx = self.write_entry("apply_replacement")?;
         let op = read_operation(&tx, id)?;
         if op.status == ReplanStatus::Applied {
             return Ok(ApplyOutcome::AlreadyApplied);
@@ -193,7 +194,7 @@ impl SqliteQueue {
         recovery: ApplyRecovery,
         now: i64,
     ) -> Result<bool> {
-        let tx = self.write_tx("hold_apply")?;
+        let tx = self.write_entry("hold_apply")?;
         let mut op = read_operation(&tx, id)?;
         let reason = format!(
             "the replacement was not applied, nothing of it is written and the saved work is kept: {}",

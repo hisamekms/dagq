@@ -10,12 +10,14 @@ use super::sql_exec::{
 };
 use super::store_rows::{enum_col, read_goal, read_task};
 use super::store_writes::event;
+use crate::infrastructure::sql_exec::CommitTransaction as _;
+use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::{Result, anyhow, ensure};
 
 use serde_json::{Value, json};
 
 use super::asks::{insert_ask, read_ask};
-use super::sqlite::SqliteQueue;
 use crate::domain::follow_up::{
     self, CorrectionAnswer, MembershipClassification as Class, MembershipFacts, MembershipGap,
     MembershipJudgement, ReleasedDependent, SourceFollowUp, WaitingFollowUp,
@@ -210,7 +212,7 @@ pub(super) fn check_judged(
     Ok(())
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Record a membership judgement of `task` and return its row. A
     /// judgement that opens a correction of a goal closed as achieved
     /// ([`follow_up::opens_correction`]) opens a `correct_goal` ask in the
@@ -232,7 +234,7 @@ impl SqliteQueue {
             ["user", "inbox", "planner"].contains(&role),
             "{role} may not judge follow_up membership"
         );
-        let tx = self.write_tx("judge_follow_up")?;
+        let tx = self.write_entry("judge_follow_up")?;
         let origin: Option<(String, String)> = SqlRead::query_row(
             &tx,
             "SELECT origin,material FROM draft_origins WHERE task_id=?1",
@@ -521,12 +523,12 @@ pub(super) fn correction_answers(conn: &impl SqlRead) -> Result<Vec<Ask>> {
 /// the follow-up is treated as out of scope and the planner may record its
 /// corrected out-of-scope destination.
 pub(super) fn decide_correction(
-    queue: &SqliteQueue,
+    queue: &StoreQueue<impl TransactionEntries>,
     ask_id: AskId,
     stamp: String,
     now: i64,
 ) -> Result<Option<Value>> {
-    let tx = queue.write_tx("decide_correction")?;
+    let tx = queue.write_entry("decide_correction")?;
     let ask = read_ask(&tx, ask_id)?;
     ensure!(
         ask.kind == AskKind::CorrectGoal,

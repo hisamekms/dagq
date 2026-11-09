@@ -5,14 +5,16 @@
 //! record made or changed) gets its values now, read and written in one
 //! transaction.
 
+use crate::infrastructure::sql_exec::CommitTransaction as _;
+use crate::infrastructure::sql_exec::TransactionEntries;
 use crate::infrastructure::sql_exec::{SqlRead, ToSqlValue, sql_params};
+use crate::infrastructure::store_queue::StoreQueue;
 use std::collections::BTreeMap;
 
 use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::super::findings::{finding_event, finding_row};
-use super::super::sqlite::SqliteQueue;
 use super::super::store_rows::{event_row, read_goal};
 use super::super::store_writes::event;
 use super::super::task_store::goal_event;
@@ -24,7 +26,7 @@ use crate::domain::ledger::findings;
 use crate::domain::plan_request::PriorityBy;
 use crate::domain::{EventKind, Finding, GoalId, Priority, RunEvent, RunId, RunStatus, TaskId};
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Compare what the records fold to with what the state tables hold,
     /// and write `attributes_baseline` with the state's values on every
     /// task and goal that differs, then the queue's mark of the baseline
@@ -34,14 +36,14 @@ impl SqliteQueue {
     /// inside the write. Idempotent: after it the records agree.
     pub fn record_attributes_baseline(&self) -> Result<Option<(usize, usize)>> {
         {
-            let read = self.read_tx("attributes_baseline_read")?;
+            let read = self.read_entry("attributes_baseline_read")?;
             let (tasks, goals) = differing(&read)?;
-            read.commit()?;
+            drop(read);
             if tasks.is_empty() && goals.is_empty() {
                 return Ok(None);
             }
         }
-        let tx = self.write_tx("attributes_baseline_write")?;
+        let tx = self.write_entry("attributes_baseline_write")?;
         let (tasks, goals) = differing(&tx)?;
         if tasks.is_empty() && goals.is_empty() {
             return Ok(None);
@@ -71,7 +73,7 @@ impl SqliteQueue {
     }
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Compare the findings the records fold to with the `findings` rows,
     /// and write `finding_baseline` with the row's attributes on every
     /// finding that differs, settled ones too, then the queue's mark that
@@ -80,14 +82,14 @@ impl SqliteQueue {
     /// inside the write. Idempotent: after it the records agree.
     pub fn record_findings_baseline(&self) -> Result<Option<usize>> {
         {
-            let read = self.read_tx("findings_baseline_read")?;
+            let read = self.read_entry("findings_baseline_read")?;
             let differ = differing_findings(&read)?;
-            read.commit()?;
+            drop(read);
             if differ.is_empty() {
                 return Ok(None);
             }
         }
-        let tx = self.write_tx("findings_baseline_write")?;
+        let tx = self.write_entry("findings_baseline_write")?;
         let differ = differing_findings(&tx)?;
         if differ.is_empty() {
             return Ok(None);

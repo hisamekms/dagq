@@ -27,7 +27,9 @@
 
 use super::sql_dialect::JsonType;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::sql_exec::sql_params;
 use super::store_writes::{self};
@@ -40,7 +42,6 @@ use serde_json::{Value, json};
 
 use super::{
     asks::{ask_row, read_ask},
-    sqlite::SqliteQueue,
     store_rows::read_task,
     store_writes::{event, insert_task},
 };
@@ -195,7 +196,7 @@ pub(super) fn insert_draft_origin(
     Ok(inserted)
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Register a receipt's or review judgment's still-unregistered entries
     /// in one write transaction: a planning pass sees all of that batch or
     /// none. Categories and membership proposals are kept in origin material.
@@ -208,7 +209,7 @@ impl SqliteQueue {
         depth: i64,
     ) -> Result<Vec<RegisteredFollowUp>> {
         ensure!(depth >= 0, "follow_up_depth must not be negative");
-        let tx = self.write_tx("register_follow_ups")?;
+        let tx = self.write_entry("register_follow_ups")?;
         let source: TaskId = SqlRead::query_row(
             &tx,
             "SELECT task_id FROM task_runs WHERE id=?1",
@@ -337,7 +338,7 @@ impl SqliteQueue {
             origin != DraftOrigin::Reopened,
             "a reopened draft's origin is recorded by withdrawing its proposal"
         );
-        let tx = self.write_tx("record_draft_origin")?;
+        let tx = self.write_entry("record_draft_origin")?;
         let status = read_task(&tx, task)?.status();
         ensure!(
             status == TaskStatus::Draft,
@@ -384,7 +385,7 @@ impl SqliteQueue {
         authorized: Option<&crate::domain::TaskAuthorization>,
     ) -> Result<Option<DraftRevisit>> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("revisit_draft_authorized")?;
+        let tx = self.write_entry("revisit_draft_authorized")?;
         super::task_store::check_authorized(&tx, task, authorized)?;
         let status = read_task(&tx, task)?.status();
         ensure!(
@@ -512,7 +513,7 @@ impl SqliteQueue {
         answer: Option<AskId>,
     ) -> Result<DraftPlannerStart> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("open_draft_planner")?;
+        let tx = self.write_entry("open_draft_planner")?;
         let Some(&lead) = drafts.first() else {
             return Ok(DraftPlannerStart::Skipped);
         };
@@ -751,7 +752,7 @@ impl SqliteQueue {
         planner: PlannerId,
         workspace: &str,
     ) -> Result<bool> {
-        let tx = self.write_tx("claim_planner_answer")?;
+        let tx = self.write_entry("claim_planner_answer")?;
         let ask = read_ask(&tx, id)?;
         // A question about a finding may be about no task: its claim is on
         // the finding's target (ADR-0044 decision 19).
@@ -809,7 +810,7 @@ impl SqliteQueue {
     }
 
     pub fn close_planner_answer(&mut self, id: AskId, why: &str) -> Result<()> {
-        let tx = self.write_tx("close_planner_answer")?;
+        let tx = self.write_entry("close_planner_answer")?;
         let ask = read_ask(&tx, id)?;
         if ask.closed_at.is_some() {
             return Ok(());
@@ -872,14 +873,14 @@ impl SqliteQueue {
     }
 }
 
-impl DraftPlannerStore for SqliteQueue {
+impl<E: TransactionEntries> DraftPlannerStore for StoreQueue<E> {
     fn register_follow_ups(
         &mut self,
         run: &RunId,
         entries: Vec<FollowUpRegistration>,
         depth: i64,
     ) -> Result<Vec<RegisteredFollowUp>> {
-        SqliteQueue::register_follow_ups(self, run, entries, depth)
+        StoreQueue::register_follow_ups(self, run, entries, depth)
     }
     fn record_draft_origin(
         &mut self,
@@ -887,44 +888,44 @@ impl DraftPlannerStore for SqliteQueue {
         origin: DraftOrigin,
         material: &Value,
     ) -> Result<()> {
-        SqliteQueue::record_draft_origin(self, task, origin, material)
+        StoreQueue::record_draft_origin(self, task, origin, material)
     }
     fn draft_origin(&self, task: TaskId) -> Result<Option<(DraftOrigin, Value)>> {
-        SqliteQueue::draft_origin(self, task)
+        StoreQueue::draft_origin(self, task)
     }
     fn register_recurring_draft(
         &mut self,
         item: &crate::domain::recurring::RecurringDraft,
     ) -> Result<crate::domain::recurring::RecurringOutcome> {
-        SqliteQueue::register_recurring_draft(self, item)
+        StoreQueue::register_recurring_draft(self, item)
     }
     fn planner_drafts(&self) -> Result<Vec<DraftTarget>> {
-        SqliteQueue::planner_drafts(self)
+        StoreQueue::planner_drafts(self)
     }
     fn open_draft_planner(
         &mut self,
         drafts: &[TaskId],
         answer: Option<AskId>,
     ) -> Result<DraftPlannerStart> {
-        SqliteQueue::open_draft_planner(self, drafts, answer)
+        StoreQueue::open_draft_planner(self, drafts, answer)
     }
     fn planner_draft_tasks(&self, planner: PlannerId) -> Result<Vec<TaskId>> {
-        SqliteQueue::planner_draft_tasks(self, planner)
+        StoreQueue::planner_draft_tasks(self, planner)
     }
     fn draft_bundle(&self, planner: PlannerId) -> Result<Option<DraftBundleView>> {
-        SqliteQueue::draft_bundle(self, planner)
+        StoreQueue::draft_bundle(self, planner)
     }
     fn planner_answers(&self) -> Result<Vec<Ask>> {
-        SqliteQueue::planner_answers(self)
+        StoreQueue::planner_answers(self)
     }
     fn planner_answer_route(&self, ask: &Ask) -> Result<PlannerAnswerRoute> {
-        SqliteQueue::planner_answer_route(self, ask)
+        StoreQueue::planner_answer_route(self, ask)
     }
     fn proposal_questions(&self, proposal: ProposalId) -> Result<Vec<Ask>> {
-        SqliteQueue::proposal_questions(self, proposal)
+        StoreQueue::proposal_questions(self, proposal)
     }
     fn replaced_tasks(&self, proposal: ProposalId) -> Result<Vec<TaskId>> {
-        SqliteQueue::replaced_tasks(self, proposal)
+        StoreQueue::replaced_tasks(self, proposal)
     }
     fn answer_request(&self, ask: &Ask) -> Result<Option<RequestId>> {
         let tx = self.read_entry("answer_request")?;
@@ -936,27 +937,27 @@ impl DraftPlannerStore for SqliteQueue {
         planner: PlannerId,
         workspace: &str,
     ) -> Result<bool> {
-        SqliteQueue::claim_planner_answer(self, ask, planner, workspace)
+        StoreQueue::claim_planner_answer(self, ask, planner, workspace)
     }
     fn close_planner_answer(&mut self, ask: AskId, why: &str) -> Result<()> {
-        SqliteQueue::close_planner_answer(self, ask, why)
+        StoreQueue::close_planner_answer(self, ask, why)
     }
     fn record_task_event(&mut self, task: TaskId, kind: EventKind, payload: Value) -> Result<()> {
         {
-            let tx = self.write_tx("draft_planner_event")?;
+            let tx = self.write_entry("draft_planner_event")?;
             event(&tx, task, None, kind, payload)?;
             tx.commit()?;
             Ok(())
         }
     }
     fn exhausted_drafts(&self) -> Result<Vec<Task>> {
-        SqliteQueue::exhausted_drafts(self)
+        StoreQueue::exhausted_drafts(self)
     }
     fn follow_up_depth(&self, task: TaskId) -> Result<i64> {
-        SqliteQueue::follow_up_depth(self, task)
+        StoreQueue::follow_up_depth(self, task)
     }
     fn set_follow_up_depth(&mut self, task: TaskId, depth: i64) -> Result<()> {
-        SqliteQueue::set_follow_up_depth(self, task, depth)
+        StoreQueue::set_follow_up_depth(self, task, depth)
     }
     fn open_finding_planner(
         &mut self,
@@ -964,10 +965,10 @@ impl DraftPlannerStore for SqliteQueue {
         answer: Option<AskId>,
         limit: usize,
     ) -> Result<FindingPlannerStart> {
-        SqliteQueue::open_finding_planner(self, finding, answer, limit)
+        StoreQueue::open_finding_planner(self, finding, answer, limit)
     }
     fn finding_view(&self, finding: FindingId) -> Result<FindingView> {
-        SqliteQueue::findings(
+        StoreQueue::findings(
             self,
             &FindingQuery {
                 id: Some(finding),
@@ -980,13 +981,13 @@ impl DraftPlannerStore for SqliteQueue {
         .with_context(|| format!("finding {finding} does not exist"))
     }
     fn finding_asks(&self, finding: FindingId) -> Result<Vec<Ask>> {
-        SqliteQueue::finding_asks(self, finding)
+        StoreQueue::finding_asks(self, finding)
     }
     fn settle_findings(&mut self) -> Result<Vec<(FindingId, FindingStatus)>> {
-        SqliteQueue::settle_findings(self)
+        StoreQueue::settle_findings(self)
     }
     fn exhausted_findings(&self) -> Result<Vec<Finding>> {
-        SqliteQueue::exhausted_findings(self)
+        StoreQueue::exhausted_findings(self)
     }
     fn record_finding_event(
         &mut self,
@@ -994,25 +995,25 @@ impl DraftPlannerStore for SqliteQueue {
         kind: EventKind,
         payload: Value,
     ) -> Result<()> {
-        SqliteQueue::record_finding_event(self, finding, kind, payload)
+        StoreQueue::record_finding_event(self, finding, kind, payload)
     }
     fn ask_delivered_to(&self, ask: AskId, workspace: &str) -> Result<bool> {
-        SqliteQueue::ask_delivered_to(self, ask, workspace)
+        StoreQueue::ask_delivered_to(self, ask, workspace)
     }
     fn answer_claimed_at(&self, ask: AskId, workspace: &str) -> Result<Option<i64>> {
-        SqliteQueue::answer_claimed_at(self, ask, workspace)
+        StoreQueue::answer_claimed_at(self, ask, workspace)
     }
     fn ask_delivery_failed(&self, ask: AskId, planner: PlannerId) -> Result<bool> {
-        SqliteQueue::ask_delivery_failed(self, ask, planner)
+        StoreQueue::ask_delivery_failed(self, ask, planner)
     }
 }
 
-impl crate::application::DraftPlannerReads for SqliteQueue {
+impl<E: TransactionEntries> crate::application::DraftPlannerReads for StoreQueue<E> {
     fn planner_findings(&self) -> Result<Vec<Finding>> {
-        SqliteQueue::planner_findings(self)
+        StoreQueue::planner_findings(self)
     }
     fn improvements(&self, limit: usize) -> Result<crate::domain::ImprovementLimit> {
-        SqliteQueue::improvements(self, limit)
+        StoreQueue::improvements(self, limit)
     }
 }
 
@@ -2072,6 +2073,7 @@ mod tests {
     use super::*;
     use crate::application::{TaskReads, TaskStore};
     use crate::domain::{NewAsk, NewTask};
+    use crate::infrastructure::sqlite::SqliteQueue;
 
     fn draft(queue: &mut SqliteQueue, title: &str) -> TaskId {
         queue

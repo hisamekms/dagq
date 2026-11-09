@@ -1,8 +1,13 @@
 //! Queue state shared by store adapters. The entries own the connection and
 //! transaction policy; shared store implementations can only use their port.
 
-use super::{event_actor::EventActors, sql_exec::TransactionEntries};
+use super::sqlite::PlanningRules;
+use super::{
+    event_actor::EventActors,
+    sql_exec::{CommitTransaction, SqlValue, SqlWrite, TransactionEntries},
+};
 use crate::application::Generators;
+use crate::domain::actor::ActorContext;
 use crate::domain::{ChangeSet, TagSet, TitlePrefixes};
 use anyhow::Result;
 use std::{path::PathBuf, sync::Arc};
@@ -64,5 +69,120 @@ impl<E: TransactionEntries> TransactionEntries for StoreQueue<E> {
 
     fn read_entry(&self, name: &'static str) -> Result<Self::Read<'_>> {
         self.entries.read_entry(name)
+    }
+}
+
+impl<E: TransactionEntries> StoreQueue<E> {
+    /// The queue reading the time and creating IDs through `generators`
+    /// instead of the system clock and random UUIDs.
+    pub fn with_generators(mut self, generators: Generators) -> Self {
+        self.generators = generators;
+        self
+    }
+
+    /// The queue holding the tasks to the repository's set of changes
+    /// (ADR-t980-1); `None` holds them to none.
+    pub fn with_changes(mut self, changes: Option<ChangeSet>) -> Self {
+        self.changes = changes;
+        self
+    }
+
+    /// The queue holding the tasks' titles to the repository's prefixes;
+    /// `None` holds them to none.
+    pub fn with_title_prefixes(mut self, prefixes: Option<TitlePrefixes>) -> Self {
+        self.title_prefixes = prefixes;
+        self
+    }
+
+    /// The queue holding the goals to the repository's set of tags
+    /// (ADR-t1639-1 decision 6); `None` holds them to none.
+    /// With `[goals] max_spike_cycles` (ADR-t1487-1 decision 8).
+    pub fn with_max_spike_cycles(mut self, max: Option<usize>) -> Self {
+        self.max_spike_cycles = max;
+        self
+    }
+
+    /// The queue whose next `submit` goes with the replacement plan `plan`
+    /// of a replanning operation's request (ADR-t1521-2 decision 4).
+    pub fn with_replacement_plan(
+        mut self,
+        plan: Option<crate::domain::replan_plan::ReplacementPlan>,
+    ) -> Self {
+        self.replacement = plan;
+        self
+    }
+
+    pub fn with_goal_tags(mut self, tags: Option<TagSet>) -> Self {
+        self.goal_tags = tags;
+        self
+    }
+
+    /// [`Self::with_changes`], [`Self::with_goal_tags`],
+    /// [`Self::with_max_spike_cycles`], [`Self::with_title_prefixes`] and
+    /// [`Self::with_replacement_plan`] on
+    /// a queue held by reference, each set only when given: the rules a
+    /// planning command holds its tasks and goals to.
+    pub fn hold_planning_to(&mut self, rules: PlanningRules) {
+        if let Some(changes) = rules.changes {
+            self.changes = changes;
+        }
+        if let Some(tags) = rules.goal_tags {
+            self.goal_tags = tags;
+        }
+        if let Some(max) = rules.max_spike_cycles {
+            self.max_spike_cycles = max;
+        }
+        if let Some(prefixes) = rules.title_prefixes {
+            self.title_prefixes = prefixes;
+        }
+        if let Some(plan) = rules.replacement {
+            self.replacement = plan;
+        }
+    }
+
+    /// Record the refusals of the policy with `log`: for a read-only
+    /// connection, which cannot write them.
+    pub fn with_denial_log(mut self, log: DenialRecorder) -> Self {
+        self.denial_log = Some(log);
+        self
+    }
+
+    pub fn generators(&self) -> &Generators {
+        &self.generators
+    }
+
+    /// The queue writing its events as `actor` instead of the process's
+    /// actor ([`process_actor`]).
+    pub fn with_actor(self, actor: ActorContext) -> Self {
+        self.actors.set(actor);
+        self
+    }
+
+    /// The actor this queue's events record.
+    pub fn actor(&self) -> ActorContext {
+        self.actors.get()
+    }
+
+    /// A single-statement write still uses the named, fenced transaction
+    /// entry, with exactly the statement's affected-row result.
+    pub(super) fn write_sql(
+        &self,
+        name: &'static str,
+        sql: &str,
+        params: &[SqlValue],
+    ) -> Result<usize> {
+        let tx = self.write_entry(name)?;
+        let changed = SqlWrite::execute(&tx, sql, params)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Read transcripts through the session execution port before a write
+    /// entry holds its lock.
+    pub(super) fn read_session_transcripts_before(
+        &self,
+        closing: super::sessions::Closing<'_>,
+    ) -> Result<super::sessions::ReadBefore> {
+        self.read_before(closing)
     }
 }

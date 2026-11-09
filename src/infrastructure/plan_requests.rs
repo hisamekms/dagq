@@ -22,7 +22,9 @@ use super::sql_exec::{
 };
 use super::store_rows::{enum_col, event_row, json_col};
 use super::store_writes::record_queue_event_in;
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::store_writes;
 use crate::domain::event_kind::EventKind;
@@ -30,10 +32,7 @@ use anyhow::{Context, Result};
 
 use serde_json::json;
 
-use super::{
-    asks::{ask_row, read_ask},
-    sqlite::SqliteQueue,
-};
+use super::asks::{ask_row, read_ask};
 use crate::application::{PlanRequestStore, PlannerAnswerRoute, RequestPlannerStart};
 use crate::domain::{
     Ask, AskId, EventId, GoalId, PlannerId, PlannerOrigin, PlannerSession, Priority, ProposalId,
@@ -180,7 +179,7 @@ fn targets(conn: &impl SqlRead) -> String {
     )
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Record `request` as `by_role` (`inbox`, `user`) with actor id
     /// `by_id`, `open`, with `request_recorded`.
     pub fn record_plan_request(
@@ -191,7 +190,7 @@ impl SqliteQueue {
     ) -> Result<PlanRequest> {
         request.validate()?;
         let now = self.generators.clock.now();
-        let tx = self.write_tx("record_plan_request")?;
+        let tx = self.write_entry("record_plan_request")?;
         let id = RequestId::new(SqlWrite::insert_id(
             &tx,
             "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
@@ -303,7 +302,7 @@ impl SqliteQueue {
         continue_run: bool,
     ) -> Result<PlanRequest> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("decline_request_choosing")?;
+        let tx = self.write_entry("decline_request_choosing")?;
         let current = read_request(&tx, request)?;
         check_decline(&current, reason)?;
         anyhow::ensure!(
@@ -335,9 +334,9 @@ impl SqliteQueue {
     }
 }
 
-impl PlanRequestStore for SqliteQueue {
+impl<E: TransactionEntries> PlanRequestStore for StoreQueue<E> {
     fn planner_requests(&self) -> Result<Vec<PlanRequest>> {
-        SqliteQueue::planner_requests(self)
+        StoreQueue::planner_requests(self)
     }
 
     fn open_request_planner(
@@ -346,7 +345,7 @@ impl PlanRequestStore for SqliteQueue {
         answer: Option<AskId>,
     ) -> Result<RequestPlannerStart> {
         let now = self.generators.clock.now();
-        let tx = self.write_tx("open_request_planner")?;
+        let tx = self.write_entry("open_request_planner")?;
         let eligible = match answer {
             None => SqlRead::query_row(
                 &tx,
@@ -429,7 +428,7 @@ impl PlanRequestStore for SqliteQueue {
     }
 
     fn request_asks(&self, request: RequestId) -> Result<Vec<Ask>> {
-        SqliteQueue::request_asks(self, request)
+        StoreQueue::request_asks(self, request)
     }
 
     fn event_by_id(&self, id: EventId) -> Result<Option<RunEvent>> {
@@ -447,24 +446,24 @@ impl PlanRequestStore for SqliteQueue {
         &self,
         id: crate::domain::ReplanId,
     ) -> Result<crate::domain::replan_plan::ReplanBrief> {
-        SqliteQueue::replan_brief(self, id)
+        StoreQueue::replan_brief(self, id)
     }
 
     fn replacement_brief(
         &self,
         proposal: crate::domain::ProposalId,
     ) -> Result<Option<crate::domain::replan_plan::ReplanBrief>> {
-        SqliteQueue::replacement_brief(self, proposal)
+        StoreQueue::replacement_brief(self, proposal)
     }
 
     fn settle_replan_requests(
         &mut self,
     ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
-        SqliteQueue::settle_replan_requests(self)
+        StoreQueue::settle_replan_requests(self)
     }
 
     fn replacements_to_apply(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
-        SqliteQueue::replacements_to_apply(self)
+        StoreQueue::replacements_to_apply(self)
     }
 
     fn begin_replan_apply(
@@ -472,7 +471,7 @@ impl PlanRequestStore for SqliteQueue {
         id: crate::domain::ReplanId,
         generation: i64,
     ) -> Result<crate::domain::task_replan::ReplanOperation> {
-        SqliteQueue::begin_replan_apply(self, id, generation)
+        StoreQueue::begin_replan_apply(self, id, generation)
     }
 
     fn apply_replacement(
@@ -481,11 +480,11 @@ impl PlanRequestStore for SqliteQueue {
         generation: i64,
         snapshot_problem: Option<&str>,
     ) -> Result<crate::domain::replan_apply::ApplyOutcome> {
-        SqliteQueue::apply_replacement(self, id, generation, snapshot_problem)
+        StoreQueue::apply_replacement(self, id, generation, snapshot_problem)
     }
 
     fn child_carry(&self, task: TaskId) -> Result<Option<crate::domain::replan_apply::ChildCarry>> {
-        SqliteQueue::child_carry(self, task)
+        StoreQueue::child_carry(self, task)
     }
 }
 
@@ -1018,7 +1017,7 @@ fn link_request(
 }
 
 /// What the request commands record a refusal on: the queue itself.
-impl crate::application::commands::DenialLog for SqliteQueue {
+impl<E: TransactionEntries> crate::application::commands::DenialLog for StoreQueue<E> {
     fn record_denial(&self, payload: serde_json::Value) -> Result<()> {
         if let Some(log) = &self.denial_log {
             return log(payload);
@@ -1032,7 +1031,7 @@ impl crate::application::commands::DenialLog for SqliteQueue {
     }
 }
 
-impl crate::application::commands::requests::RequestStore for SqliteQueue {
+impl<E: TransactionEntries> crate::application::commands::requests::RequestStore for StoreQueue<E> {
     fn record_request(
         &mut self,
         request: &NewPlanRequest,
@@ -1046,7 +1045,7 @@ impl crate::application::commands::requests::RequestStore for SqliteQueue {
         let tx = self.read_entry("request_planner")?;
         read_request(&tx, request)?;
         drop(tx);
-        SqliteQueue::request_planner(self, request)
+        StoreQueue::request_planner(self, request)
     }
 
     fn decline_request(
@@ -1057,6 +1056,6 @@ impl crate::application::commands::requests::RequestStore for SqliteQueue {
         planner: Option<PlannerId>,
         continue_run: bool,
     ) -> Result<PlanRequest> {
-        SqliteQueue::decline_request_choosing(self, request, reason, by, planner, continue_run)
+        StoreQueue::decline_request_choosing(self, request, reason, by, planner, continue_run)
     }
 }

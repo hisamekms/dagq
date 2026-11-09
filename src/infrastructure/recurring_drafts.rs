@@ -18,12 +18,13 @@
 //! source-goal facts, membership judgement and automatic adoption gate.
 use super::sql_dialect::JsonType;
 use super::sql_exec::{OptionalRow, SqlRead, sql_params};
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::Result;
 
 use super::{
     draft_planners::insert_draft_origin,
-    sqlite::SqliteQueue,
     store_rows::{enum_col, read_goal},
     store_writes::insert_task,
 };
@@ -85,7 +86,7 @@ fn accepts_tasks(tx: &impl SqlRead, goal: Option<GoalId>) -> bool {
         .is_some_and(|read| check_accepts_tasks(&read).is_ok())
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Register the draft of `item` when its interval came at the queue's
     /// now and no task of its key is still to end, with its origin
     /// `recurring` (`material`: the key, the previous registration and the
@@ -95,7 +96,7 @@ impl SqliteQueue {
     pub fn register_recurring_draft(&mut self, item: &RecurringDraft) -> Result<RecurringOutcome> {
         let now = self.generators.clock.now();
         let timestamp = self.generators.clock.timestamp();
-        let tx = self.write_tx("register_recurring_draft")?;
+        let tx = self.write_entry("register_recurring_draft")?;
         let open = open_task(&tx, &item.key)?;
         let last = last_registration(&tx, &item.key)?;
         if let Some(held) = held_back(now, item.interval_days, last.map(|(_, at)| at), open) {

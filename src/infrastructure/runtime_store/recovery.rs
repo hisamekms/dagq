@@ -1,6 +1,8 @@
 //! The run aggregate moved by recovery: triage, resumes and adoption
 //! ([`RunRecovery`]).
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::application::KeptOutcome;
@@ -17,7 +19,7 @@ use crate::domain::{AskKind, EventKind, run_phase};
 use crate::infrastructure::sql_dialect::JsonType;
 use crate::infrastructure::sql_exec::{SqlRead, SqlSavepoint, SqlSavepoints, SqlWrite};
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// The runs whose lease carries `token`, oldest first: what a supervisor
     /// that exec'd another binary under the same token picks up again.
     pub fn runs_leased_by(&self, token: &LeaseToken) -> Result<Vec<TaskRun>> {
@@ -110,7 +112,7 @@ impl SqliteQueue {
         pid: u32,
         wrapper: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
-        let tx = self.write_tx("adopt_run")?;
+        let tx = self.write_entry("adopt_run")?;
         let now = self.generators.clock.now();
         let lease = SqlRead::query_row(
             &tx,
@@ -208,7 +210,7 @@ impl SqliteQueue {
         id: &RunId,
         token: &LeaseToken,
     ) -> Result<Option<TaskRun>> {
-        let tx = self.write_tx("lease_stranded_landing")?;
+        let tx = self.write_entry("lease_stranded_landing")?;
         let now = self.generators.clock.now();
         let Some(run) =
             stored_run(&tx, id)?.filter(|run| run.status() == RunStatus::AwaitingIntegration)
@@ -291,7 +293,7 @@ impl SqliteQueue {
         op: crate::domain::ReplanId,
         generation: i64,
     ) -> Result<Option<TaskRun>> {
-        let tx = self.write_tx("lease_for_park")?;
+        let tx = self.write_entry("lease_for_park")?;
         let now = self.generators.clock.now();
         let operation = crate::infrastructure::replans::read_operation(&tx, op)?;
         if operation.run_id != *id
@@ -347,7 +349,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         hold: crate::domain::HoldId,
     ) -> Result<Option<TaskRun>> {
-        let tx = self.write_tx("lease_for_hold_park")?;
+        let tx = self.write_entry("lease_for_hold_park")?;
         let now = self.generators.clock.now();
         let Some(run) = stored_run(&tx, id)?.filter(|run| {
             matches!(
@@ -409,7 +411,7 @@ impl SqliteQueue {
         op: crate::domain::ReplanId,
         generation: i64,
     ) -> Result<RestoreStart> {
-        let tx = self.write_tx("begin_restore")?;
+        let tx = self.write_entry("begin_restore")?;
         let now = self.generators.clock.now();
         let operation = crate::infrastructure::replans::read_operation(&tx, op)?;
         if operation.run_id != *id
@@ -465,7 +467,7 @@ impl SqliteQueue {
         if matches!(recorded, Ok(true)) {
             return recorded;
         }
-        let tx = self.write_tx("finish_restore")?;
+        let tx = self.write_entry("finish_restore")?;
         if SqlWrite::execute(
             &tx,
             "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
@@ -506,7 +508,7 @@ impl SqliteQueue {
         generation: i64,
         why: &str,
     ) -> Result<bool> {
-        let tx = self.write_tx("fail_continuation_start")?;
+        let tx = self.write_entry("fail_continuation_start")?;
         let now = self.generators.clock.now();
         if renew_lease(&tx, id, token, now).is_err() {
             return Ok(false);
@@ -553,7 +555,7 @@ impl SqliteQueue {
         generation: i64,
         restored: std::result::Result<serde_json::Value, String>,
     ) -> Result<bool> {
-        let tx = self.write_tx("record_clone_restore")?;
+        let tx = self.write_entry("record_clone_restore")?;
         let now = self.generators.clock.now();
         if renew_lease(&tx, id, token, now).is_err() {
             return Ok(false);
@@ -581,7 +583,7 @@ impl SqliteQueue {
         generation: i64,
         restored: std::result::Result<serde_json::Value, String>,
     ) -> Result<bool> {
-        let tx = self.write_tx("record_restore")?;
+        let tx = self.write_entry("record_restore")?;
         let now = self.generators.clock.now();
         if renew_lease(&tx, id, token, now).is_err() {
             return Ok(false);
@@ -645,7 +647,7 @@ fn record_restore_in(
     Ok(true)
 }
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     fn lease_awaiting(
         &mut self,
         id: &RunId,
@@ -673,7 +675,7 @@ impl SqliteQueue {
         status: RunStatus,
         guarded: Option<GuardedStep>,
     ) -> Result<Option<TaskRun>> {
-        let tx = self.write_tx("lease_unheld")?;
+        let tx = self.write_entry("lease_unheld")?;
         let now = self.generators.clock.now();
         let Some(run) = stored_run(&tx, id)?.filter(|run| run.status() == status) else {
             return Ok(None);
@@ -706,7 +708,7 @@ impl SqliteQueue {
     ) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
         let _read = self.read_before(Closing::Run(id, &[EventKind::RunRecovered]))?;
-        let tx = self.write_tx("recover_run")?;
+        let tx = self.write_entry("recover_run")?;
         let fresh: bool = SqlRead::query_row(
             &tx,
             "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1 AND heartbeat_at >= ?2-?3)",
@@ -812,7 +814,7 @@ impl SqliteQueue {
         reason: Option<&str>,
         config: resume::ResumeConfig,
     ) -> Result<Option<(TaskRun, usize)>> {
-        let tx = self.write_tx("begin_resume")?;
+        let tx = self.write_entry("begin_resume")?;
         let now = self.generators.clock.now();
         let Some(run) = stored_run(&tx, id)?.filter(|run| run::check_resumable(run).is_ok()) else {
             return Ok(None);
@@ -897,7 +899,7 @@ impl SqliteQueue {
         main: &CommitSha,
         approved: bool,
     ) -> Result<Option<TaskRun>> {
-        let tx = self.write_tx("skip_resume")?;
+        let tx = self.write_entry("skip_resume")?;
         let now = self.generators.clock.now();
         // No session starts: the earlier session's rows stay as they are.
         if replanning(&tx, id, GuardedStep::Resume)? {
@@ -974,7 +976,7 @@ impl SqliteQueue {
         keep_lease: bool,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("end_resume")?;
+        let tx = self.write_entry("end_resume")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         if let Some(head) = landing {
             apply(
@@ -1075,7 +1077,7 @@ impl SqliteQueue {
     ) -> Result<Option<(TaskRun, usize)>> {
         // The spans it closes read their transcripts first (task 543).
         let _read = self.read_before(Closing::Run(id, &[EventKind::TriageStarted]))?;
-        let tx = self.write_tx("begin_triage")?;
+        let tx = self.write_entry("begin_triage")?;
         let now = self.generators.clock.now();
         let run = SqlRead::query_row(
             &tx,
@@ -1173,7 +1175,7 @@ impl SqliteQueue {
             .chain(also.iter().map(|(kind, _)| *kind))
             .collect();
         let _read = self.read_before(Closing::Run(id, &kinds))?;
-        let tx = self.write_tx("finish_triage")?;
+        let tx = self.write_entry("finish_triage")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
         let run = SqlRead::query_row(
             &tx,
@@ -1252,7 +1254,7 @@ impl SqliteQueue {
     ) -> Result<Option<TaskRun>> {
         // The spans it closes read their transcripts first (task 543).
         let _read = self.read_before(Closing::Run(id, &[EventKind::TriageFinished]))?;
-        let tx = self.write_tx("exhaust_resumes")?;
+        let tx = self.write_entry("exhaust_resumes")?;
         let now = self.generators.clock.now();
         let run = SqlRead::query_row(
             &tx,
@@ -1354,7 +1356,7 @@ impl SqliteQueue {
         use crate::domain::full_disk::{self, FullDiskStep};
         // The spans it closes read their transcripts first (task 543).
         let _read = self.read_before(Closing::Run(id, &[EventKind::TriageFinished]))?;
-        let tx = self.write_tx("resume_on_full_disk")?;
+        let tx = self.write_entry("resume_on_full_disk")?;
         let now = self.generators.clock.now();
         let run = SqlRead::query_row(
             &tx,
@@ -1439,7 +1441,7 @@ impl SqliteQueue {
         answer: &str,
         reason: &str,
     ) -> Result<TaskRun> {
-        let tx = self.write_tx("decide_triage")?;
+        let tx = self.write_entry("decide_triage")?;
         let result = decide_triage_in(
             &tx,
             refusals(&self.runs_dir, &self.generators),
@@ -1473,7 +1475,7 @@ impl SqliteQueue {
         step: GuardedStep,
         supervisor: &LeaseToken,
     ) -> Result<bool> {
-        let tx = self.write_tx("note_hold_deferred")?;
+        let tx = self.write_entry("note_hold_deferred")?;
         let noted: bool = SqlRead::query_row(
             &tx,
             &format!(
@@ -1513,7 +1515,7 @@ impl SqliteQueue {
         answer: &str,
         reason: &str,
     ) -> Result<bool> {
-        let tx = self.write_tx("keep_triage_answer")?;
+        let tx = self.write_entry("keep_triage_answer")?;
         let task = task_of(&tx, id)?;
         let Some(hold) = crate::infrastructure::task_holds::guard_of(&tx, task)? else {
             return Ok(false);
@@ -1536,7 +1538,7 @@ impl SqliteQueue {
     /// Keep a recovery job's verdict on a live session while its task is
     /// held (see [`RunRecovery::keep_live_verdict`]).
     pub fn keep_live_verdict(&mut self, id: &RunId, verdict: serde_json::Value) -> Result<bool> {
-        let tx = self.write_tx("keep_live_verdict")?;
+        let tx = self.write_entry("keep_live_verdict")?;
         let task = task_of(&tx, id)?;
         let Some(hold) = crate::infrastructure::task_holds::guard_of(&tx, task)? else {
             return Ok(false);
@@ -1594,7 +1596,7 @@ impl SqliteQueue {
     /// ([`crate::infrastructure::asks::discard_by_runtime`]). A discarded result
     /// leaves the run as if none came: its next recovery round is due.
     pub fn settle_kept_result(&mut self, kept: EventId) -> Result<KeptOutcome> {
-        let mut tx = self.write_tx("settle_kept_result")?;
+        let mut tx = self.write_entry("settle_kept_result")?;
         let Some(event) = SqlRead::query_row(
             &tx,
             "SELECT * FROM run_events WHERE id=?1 AND kind=?2",
@@ -1739,7 +1741,7 @@ impl SqliteQueue {
             }
             None => None,
         };
-        let tx = self.write_tx("inherit_by_hand")?;
+        let tx = self.write_entry("inherit_by_hand")?;
         let now = self.generators.clock.now();
         let task = read_task(&tx, task_id)?;
         crate::domain::task::check_status_authorized(&task, request.authorized)?;
@@ -1866,12 +1868,12 @@ impl SqliteQueue {
 }
 
 /// The port execution and landing publishes to `ready --inherit` (T10).
-impl crate::application::inherit::InheritStore for SqliteQueue {
+impl<E: TransactionEntries> crate::application::inherit::InheritStore for StoreQueue<E> {
     fn inherit_by_hand(
         &mut self,
         request: crate::application::inherit::InheritRequest,
     ) -> Result<crate::application::inherit::InheritedByHand> {
-        SqliteQueue::inherit_by_hand(self, request)
+        StoreQueue::inherit_by_hand(self, request)
     }
 
     fn record_images(&mut self, records: &[(EventKind, serde_json::Value)]) -> Result<()> {
@@ -1881,15 +1883,15 @@ impl crate::application::inherit::InheritStore for SqliteQueue {
 
 /// The [`RunRecovery`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
-impl RunRecovery for SqliteQueue {
+impl<E: TransactionEntries> RunRecovery for StoreQueue<E> {
     fn runs_leased_by_others(&self, token: &LeaseToken) -> Result<Vec<LeasedRun>> {
-        SqliteQueue::runs_leased_by_others(self, token)
+        StoreQueue::runs_leased_by_others(self, token)
     }
     fn runs_leased_by(&self, token: &LeaseToken) -> Result<Vec<TaskRun>> {
-        SqliteQueue::runs_leased_by(self, token)
+        StoreQueue::runs_leased_by(self, token)
     }
     fn unclosed_run_asks(&self, run_id: &RunId) -> Result<Vec<crate::domain::Ask>> {
-        SqliteQueue::unclosed_run_asks(self, run_id)
+        StoreQueue::unclosed_run_asks(self, run_id)
     }
     fn adopt_run(
         &mut self,
@@ -1899,7 +1901,7 @@ impl RunRecovery for SqliteQueue {
         pid: u32,
         wrapper: serde_json::Value,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::adopt_run(self, id, previous_token, token, pid, wrapper)
+        StoreQueue::adopt_run(self, id, previous_token, token, pid, wrapper)
     }
     fn recover_run(
         &mut self,
@@ -1907,26 +1909,26 @@ impl RunRecovery for SqliteQueue {
         checked_processes: usize,
         report: serde_json::Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::recover_run(self, id, checked_processes, report)
+        StoreQueue::recover_run(self, id, checked_processes, report)
     }
     fn lease_for_review(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
-        SqliteQueue::lease_for_review(self, id, token)
+        StoreQueue::lease_for_review(self, id, token)
     }
     fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
-        SqliteQueue::lease_for_e2e(self, id, token)
+        StoreQueue::lease_for_e2e(self, id, token)
     }
     fn lease_stranded_landing(
         &mut self,
         id: &RunId,
         token: &LeaseToken,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::lease_stranded_landing(self, id, token)
+        StoreQueue::lease_stranded_landing(self, id, token)
     }
     fn lease_satisfied(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
-        SqliteQueue::lease_satisfied(self, id, token)
+        StoreQueue::lease_satisfied(self, id, token)
     }
     fn runs_to_triage(&self) -> Result<Vec<TaskRun>> {
-        SqliteQueue::runs_to_triage(self)
+        StoreQueue::runs_to_triage(self)
     }
     fn begin_triage(
         &mut self,
@@ -1935,7 +1937,7 @@ impl RunRecovery for SqliteQueue {
         request: Option<serde_json::Value>,
         launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<(TaskRun, usize)>> {
-        SqliteQueue::begin_triage(self, id, token, request, launch)
+        StoreQueue::begin_triage(self, id, token, request, launch)
     }
     fn finish_triage(
         &mut self,
@@ -1945,7 +1947,7 @@ impl RunRecovery for SqliteQueue {
         payload: serde_json::Value,
         also: Vec<(EventKind, serde_json::Value)>,
     ) -> Result<TaskRun> {
-        SqliteQueue::finish_triage(self, id, token, action, payload, also)
+        StoreQueue::finish_triage(self, id, token, action, payload, also)
     }
     fn decide_triage(
         &mut self,
@@ -1954,10 +1956,10 @@ impl RunRecovery for SqliteQueue {
         answer: &str,
         reason: &str,
     ) -> Result<TaskRun> {
-        SqliteQueue::decide_triage(self, id, ask_id, answer, reason)
+        StoreQueue::decide_triage(self, id, ask_id, answer, reason)
     }
     fn runs_needing_session(&self) -> Result<Vec<ResumeCandidate>> {
-        SqliteQueue::runs_needing_session(self)
+        StoreQueue::runs_needing_session(self)
     }
     fn begin_resume(
         &mut self,
@@ -1967,7 +1969,7 @@ impl RunRecovery for SqliteQueue {
         reason: Option<&str>,
         config: resume::ResumeConfig,
     ) -> Result<Option<(TaskRun, usize)>> {
-        SqliteQueue::begin_resume(self, id, token, main, reason, config)
+        StoreQueue::begin_resume(self, id, token, main, reason, config)
     }
     fn finish_resume(
         &mut self,
@@ -1978,7 +1980,7 @@ impl RunRecovery for SqliteQueue {
         keep_lease: bool,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::finish_resume(self, id, token, status, reason, keep_lease, payload)
+        StoreQueue::finish_resume(self, id, token, status, reason, keep_lease, payload)
     }
     fn finish_approved_resume(
         &mut self,
@@ -1987,7 +1989,7 @@ impl RunRecovery for SqliteQueue {
         head: &CommitSha,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
-        SqliteQueue::finish_approved_resume(self, id, token, head, payload)
+        StoreQueue::finish_approved_resume(self, id, token, head, payload)
     }
     fn skip_resume(
         &mut self,
@@ -1997,7 +1999,7 @@ impl RunRecovery for SqliteQueue {
         main: &CommitSha,
         approved: bool,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::skip_resume(self, id, token, head, main, approved)
+        StoreQueue::skip_resume(self, id, token, head, main, approved)
     }
     fn exhaust_resumes(
         &mut self,
@@ -2006,20 +2008,20 @@ impl RunRecovery for SqliteQueue {
         reason: &str,
         config: resume::ResumeConfig,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::exhaust_resumes(self, id, exhaustion, reason, config)
+        StoreQueue::exhaust_resumes(self, id, exhaustion, reason, config)
     }
     fn resume_on_full_disk(
         &mut self,
         id: &RunId,
         config: resume::ResumeConfig,
     ) -> Result<Option<TaskRun>> {
-        SqliteQueue::resume_on_full_disk(self, id, config)
+        StoreQueue::resume_on_full_disk(self, id, config)
     }
     fn hold_guard(&self, task: TaskId) -> Result<Option<HoldGuard>> {
-        SqliteQueue::hold_guard(self, task)
+        StoreQueue::hold_guard(self, task)
     }
     fn held_claims(&self) -> Result<Vec<HoldGuard>> {
-        SqliteQueue::held_claims(self)
+        StoreQueue::held_claims(self)
     }
     fn note_hold_deferred(
         &mut self,
@@ -2028,7 +2030,7 @@ impl RunRecovery for SqliteQueue {
         step: GuardedStep,
         supervisor: &LeaseToken,
     ) -> Result<bool> {
-        SqliteQueue::note_hold_deferred(self, hold, run, step, supervisor)
+        StoreQueue::note_hold_deferred(self, hold, run, step, supervisor)
     }
     fn keep_triage_answer(
         &mut self,
@@ -2037,19 +2039,19 @@ impl RunRecovery for SqliteQueue {
         answer: &str,
         reason: &str,
     ) -> Result<bool> {
-        SqliteQueue::keep_triage_answer(self, id, ask_id, answer, reason)
+        StoreQueue::keep_triage_answer(self, id, ask_id, answer, reason)
     }
     fn keep_live_verdict(&mut self, id: &RunId, verdict: serde_json::Value) -> Result<bool> {
-        SqliteQueue::keep_live_verdict(self, id, verdict)
+        StoreQueue::keep_live_verdict(self, id, verdict)
     }
     fn end_holds_of_ended_tasks(&mut self) -> Result<Vec<TaskId>> {
-        SqliteQueue::end_holds_of_ended_tasks(self)
+        StoreQueue::end_holds_of_ended_tasks(self)
     }
     fn released_kept_results(&self) -> Result<Vec<EventId>> {
-        SqliteQueue::released_kept_results(self)
+        StoreQueue::released_kept_results(self)
     }
     fn settle_kept_result(&mut self, kept: EventId) -> Result<KeptOutcome> {
-        SqliteQueue::settle_kept_result(self, kept)
+        StoreQueue::settle_kept_result(self, kept)
     }
 }
 

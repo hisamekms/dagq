@@ -7,16 +7,17 @@
 use super::sql_dialect::JsonType;
 use super::sql_exec::sql_params;
 use super::sql_exec::{OptionalRow, SqlRead, SqlWrite};
+use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::store_queue::StoreQueue;
 use anyhow::{Result, ensure};
 
-use super::sqlite::SqliteQueue;
 use crate::domain::{
     AskId, GoalTask, PlannerHandover, PlannerId, PlannerOrigin, PlannerRoute, PlannerSession,
     ProposalId, RunEvent, TaskStatus, event_kind,
 };
 
-impl SqliteQueue {
+impl<E: TransactionEntries> StoreQueue<E> {
     /// Mark planner `id` of the runtime's as asked to exit because only a
     /// person's answer to `asks`, its `planner_question`s, is left
     /// (ADR-t1704-1 decision 1): `answer_wait_at` and `planner_answer_wait`
@@ -60,7 +61,7 @@ impl SqliteQueue {
         answered: bool,
         payload: &serde_json::Value,
     ) -> Result<bool> {
-        let tx = self.write_tx("mark_answer_wait")?;
+        let tx = self.write_entry("mark_answer_wait")?;
         for ask in asks {
             let waiting: bool = SqlRead::query_row(
                 &tx,
@@ -171,7 +172,7 @@ impl SqliteQueue {
         origin: PlannerOrigin,
         proposal: Option<ProposalId>,
     ) -> Result<PlannerSession> {
-        let tx = self.write_tx("open_planner")?;
+        let tx = self.write_entry("open_planner")?;
         let id = PlannerId::new(SqlWrite::insert_id(
             &tx,
             "INSERT INTO planners(origin, proposal_id, created_at) VALUES (?1, ?2, ?3)",
@@ -202,7 +203,7 @@ impl SqliteQueue {
     /// declines that request ([`super::plan_requests::decline_after_planner`]),
     /// in the same transaction.
     pub fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession> {
-        let tx = self.write_tx("close_planner")?;
+        let tx = self.write_entry("close_planner")?;
         let now = self.generators.clock.now();
         let closed = SqlWrite::execute(
             &tx,
@@ -389,6 +390,7 @@ pub(super) fn planner_row_port(
 mod tests {
     use super::*;
     use crate::domain::PlannerState;
+    use crate::infrastructure::sqlite::SqliteQueue;
 
     /// ADR-t1704-1 decisions 1 to 3: a planner is marked as ended for a
     /// person's answer once, and only while its questions are not answered
