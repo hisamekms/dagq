@@ -7,7 +7,7 @@
 //! [`expected_run_size`]), with no factor; [`DiskState::needs`] and
 //! [`DiskState::claims`] give them for a pass, and the queue always moves
 //! on above the reserve with no run moving. The `[disk]` table of
-//! `dagq.toml` sets the reserve's share and when the disk ask opens.
+//! `dagq.toml` sets the reserve's share.
 
 use crate::domain::EventKind;
 use serde::Serialize;
@@ -23,16 +23,8 @@ pub const DISK_OPTIONS: &[&str] = &["done", "wait"];
 /// The `repair` of the `auto_repaired` a cleanup for the disk records.
 pub const DISK_CLEANUP: &str = "disk_cleanup";
 
-/// Default seconds a shortage lasts, from the first reading short of it,
-/// before the disk ask opens: 30 minutes, past the few minutes a run's
-/// build or a cleanup moves the free space across a threshold.
-pub const DEFAULT_ASK_AFTER_SECS: u64 = 30 * 60;
-/// Default share of the threshold the free space is below it by for the
-/// disk ask to open at once.
-pub const DEFAULT_ASK_MARGIN: f64 = 0.10;
-/// Default share of the threshold the free space is above it by for the
-/// runtime to close the disk ask.
-pub const DEFAULT_CLOSE_MARGIN: f64 = 0.05;
+/// Share above the reserve at which the runtime closes an open disk ask.
+pub const DISK_CLOSE_MARGIN: f64 = 0.05;
 
 /// The `[disk]` table of `dagq.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -42,71 +34,32 @@ pub struct DiskConfig {
     /// below is this share of the volume's size, at least
     /// [`MIN_RESERVE_BYTES`] ([`reserve_bytes`]).
     pub reserve: f64,
-    /// `ask_after_secs` (a positive whole number of seconds, default
-    /// [`DEFAULT_ASK_AFTER_SECS`]): how long a shortage lasts, from the
-    /// first pass that read it, before the disk ask opens. The claims and
-    /// landings are held from the first reading whatever it says; it
-    /// only keeps a free space that moves across a threshold from asking.
-    pub ask_after_secs: u64,
-    /// `ask_margin` (a positive number, default [`DEFAULT_ASK_MARGIN`]):
-    /// the disk ask opens at once, without waiting `ask_after_secs`, when
-    /// the free space is below the threshold by this share of it or more;
-    /// 1 or more never asks at once.
-    pub ask_margin: f64,
-    /// `close_margin` (a positive number, default
-    /// [`DEFAULT_CLOSE_MARGIN`]): the runtime closes the disk ask it opened
-    /// only once the free space is above the threshold by this share of
-    /// it; until then the ask stays and no second one is opened, while
-    /// the holds end at the threshold itself.
-    pub close_margin: f64,
 }
 
 impl Default for DiskConfig {
     fn default() -> Self {
         Self {
             reserve: DEFAULT_RESERVE_SHARE,
-            ask_after_secs: DEFAULT_ASK_AFTER_SECS,
-            ask_margin: DEFAULT_ASK_MARGIN,
-            close_margin: DEFAULT_CLOSE_MARGIN,
         }
     }
 }
 
 impl DiskConfig {
     /// The setting names of the `[disk]` table.
-    pub const KEYS: [&str; 4] = ["reserve", "ask_after_secs", "ask_margin", "close_margin"];
-    /// The settings that are shares (positive numbers, not whole ones).
-    pub const FACTORS: [&str; 2] = ["ask_margin", "close_margin"];
+    pub const KEYS: [&str; 1] = ["reserve"];
     /// The settings of an older `[disk]` that are read no more: the
     /// thresholds follow the reserve and the recent runs' samples with no
     /// factor (ADR-t4473-1), so a `dagq.toml` that still has them is
     /// warned of and read on without them.
-    pub const RETIRED_KEYS: [&str; 4] = [
+    pub const RETIRED_KEYS: [&str; 7] = [
         "sample_runs",
         "claim_factor",
         "integrate_factor",
         "min_free_bytes",
+        "ask_after_secs",
+        "ask_margin",
+        "close_margin",
     ];
-
-    /// The whole-number setting `key` set to `value`; `None` for a key
-    /// that is not one.
-    pub fn set_whole(&mut self, key: &str, value: i64) -> Option<()> {
-        match key {
-            "ask_after_secs" => self.ask_after_secs = u64::try_from(value).ok()?,
-            _ => return None,
-        }
-        Some(())
-    }
-
-    /// The share `key` set to `value`; `None` for a key that is not one.
-    pub fn set_factor(&mut self, key: &str, value: f64) -> Option<()> {
-        match key {
-            "ask_margin" => self.ask_margin = value,
-            "close_margin" => self.close_margin = value,
-            _ => return None,
-        }
-        Some(())
-    }
 }
 
 /// The share of the volume `text` (`"5%"`: a number above 0 and below 100
@@ -537,31 +490,8 @@ mod tests {
 
     #[test]
     fn the_settings_are_set_by_name() {
-        let mut config = DiskConfig::default();
-        assert_eq!(config.reserve, DEFAULT_RESERVE_SHARE);
-        assert_eq!(config.set_whole("ask_after_secs", 60), Some(()));
-        assert_eq!(config.set_whole("ask_margin", 9), None);
-        assert_eq!(config.set_whole("reserve", 9), None);
-        assert_eq!(config.set_factor("ask_margin", 0.2), Some(()));
-        assert_eq!(config.set_factor("close_margin", 0.1), Some(()));
-        assert_eq!(config.set_factor("ask_after_secs", 2.5), None);
-        assert_eq!(
-            config,
-            DiskConfig {
-                reserve: DEFAULT_RESERVE_SHARE,
-                ask_after_secs: 60,
-                ask_margin: 0.2,
-                close_margin: 0.1,
-            }
-        );
-        // Every key but the reserve is set by one of the two, and the
-        // shares by the second; no retired key is a key.
-        for key in DiskConfig::KEYS.iter().filter(|key| **key != "reserve") {
-            let mut config = DiskConfig::default();
-            let factor = config.set_factor(key, 1.0).is_some();
-            assert_eq!(factor, DiskConfig::FACTORS.contains(key), "{key}");
-            assert_eq!(config.set_whole(key, 1).is_some(), !factor, "{key}");
-        }
+        assert_eq!(DiskConfig::KEYS, ["reserve"]);
+        assert_eq!(DiskConfig::default().reserve, DEFAULT_RESERVE_SHARE);
         for key in DiskConfig::RETIRED_KEYS {
             assert!(!DiskConfig::KEYS.contains(&key), "{key}");
         }

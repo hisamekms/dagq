@@ -48,7 +48,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - reviewのagentの設定の書式は`run_env::REVIEW_SUBAGENTS_PREFIX`、built-inの意味は`domain::review_builtins`が持つ（[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)、[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)）。
   起動の組と、landing branchから選ぶsnapshotの境界は[Review](review.md#reviewのsubagent)。
 
-- `[disk]`はclaimと着地の検証の前に確かめる空き容量の最低ラインの割合（`reserve`）とdiskのaskの開き方で、keyと既定は`domain::disk::DiskConfig`、読む時と読めないときと廃止したkeyの扱いは[claimを控える](claim-hold.md#空き容量)が持つ（ADR-0047の決定44、ADR-t4473-1）。
+- `[disk]`はclaimと着地の検証の前に確かめる空き容量の最低ラインの割合（`reserve`）で、keyと既定は`domain::disk::DiskConfig`、読む時と読めないときと廃止したkeyの扱いは[claimを控える](claim-hold.md#空き容量)が持つ（ADR-0047の決定44、ADR-t4473-1）。
 
 - `[resume]`は`needs_session`のrunの衝突だけの試行の上限で、keyと既定、設定にしない上限は`domain::resume::ResumeConfig`が持つ（[Needs session](needs-session.md)の「試行の数え方」、ADR-0047の決定24）。
   supervisorが起動時に読み（`SuperviseOptions::resume`で上書きできる）、読めなければ既定値で動く。

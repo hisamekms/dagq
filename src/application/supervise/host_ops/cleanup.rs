@@ -231,10 +231,19 @@ pub(in crate::application::supervise) struct CleanupWatch {
 }
 
 struct Job {
-    handle: thread::JoinHandle<Vec<Outcome>>,
+    handle: thread::JoinHandle<JobResult>,
+    /// The disk reading's epoch when this job started.
+    disk_epoch: u64,
     disk: Option<DiskRequest>,
     /// [`Request::counted`].
     counted: Option<DiskRequest>,
+}
+
+/// The cleanup job's bounded diagnostic travels back with its outcomes.
+#[derive(Default)]
+struct JobResult {
+    outcomes: Vec<Outcome>,
+    breakdown: Vec<(PathBuf, u64)>,
 }
 
 impl CleanupWatch {
@@ -1235,9 +1244,12 @@ impl HostOpsState {
         let Some(job) = self.cleanup.job.take_if(|job| job.handle.is_finished()) else {
             return;
         };
-        let outcomes = job.handle.join().unwrap_or_else(|_| {
+        let JobResult {
+            outcomes,
+            breakdown,
+        } = job.handle.join().unwrap_or_else(|_| {
             warn!("the cleanup of ended runs' worktrees panicked");
-            Vec::new()
+            JobResult::default()
         });
         self.cleanup.jobs.joined();
         // Whatever the job left reserved, offered or reached (it could not
@@ -1246,10 +1258,14 @@ impl HostOpsState {
         self.cleanup.deferred = false;
         let cleaned = self.record_cleanup(env, outcomes);
         if let Some(disk) = for_room(job.disk, job.counted) {
+            let completion = self.disk.cleanup_epoch.completed(job.disk_epoch);
+            self.disk.breakdown = completion.ready.then_some(breakdown);
             self.cleaned_for_disk(env, disk, &cleaned);
             // The next cleanup for room waits its interval from here, so
             // the pass after it judges the reading after it (task 1627).
-            self.disk.cleaned = Some(env.generators.clock.monotonic());
+            self.disk.cleaned = completion
+                .cooldown
+                .then(|| env.generators.clock.monotonic());
         }
         self.start_cleanup(env, held);
     }
@@ -1416,10 +1432,27 @@ impl HostOpsState {
                 Toolchains::none()
             }),
         };
-        let handle = spawn_traced(move || run_job(&ports, candidates));
+        let queue_dir = env.layout.db.parent().map(Path::to_path_buf);
+        let measure_breakdown = self
+            .disk
+            .cleanup_epoch
+            .measures_breakdown(for_room(request.disk, request.counted).is_some());
+        let handle = spawn_traced(move || {
+            let outcomes = run_job(&ports, candidates);
+            let breakdown = if measure_breakdown {
+                directory_breakdown(&*ports.files, queue_dir.as_deref(), &ports.runs_dir)
+            } else {
+                Vec::new()
+            };
+            JobResult {
+                outcomes,
+                breakdown,
+            }
+        });
         self.cleanup.jobs.started();
         self.cleanup.job = Some(Job {
             handle,
+            disk_epoch: self.disk.cleanup_epoch.generation,
             disk: request.disk,
             counted: request.counted,
         });
@@ -1626,6 +1659,32 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
         );
     }
     outcomes
+}
+
+/// The largest five directories among the direct entries of `queue` and
+/// `runs`, ordered by descending bytes. Measured after cleanup on the job
+/// thread, never on the supervisor's loop. Unread directories and entries
+/// are skipped independently.
+fn directory_breakdown(
+    files: &dyn RunFiles,
+    queue: Option<&Path>,
+    runs: &Path,
+) -> Vec<(PathBuf, u64)> {
+    let mut sizes: Vec<_> = queue
+        .into_iter()
+        .chain(std::iter::once(runs))
+        .flat_map(|dir| files.read_dir(dir).unwrap_or_default())
+        .filter_map(|path| {
+            files
+                .tree_size(&path)
+                .ok()
+                .flatten()
+                .map(|bytes| (path, bytes))
+        })
+        .collect();
+    sizes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sizes.truncate(5);
+    sizes
 }
 
 /// Pass each candidate in turn: under the lock, read it again
@@ -3801,7 +3860,8 @@ mod tests {
     /// test of the watch reads of it.
     fn job(disk: Option<DiskRequest>, counted: Option<DiskRequest>) -> Job {
         Job {
-            handle: thread::spawn(Vec::new),
+            handle: thread::spawn(JobResult::default),
+            disk_epoch: 0,
             disk,
             counted,
         }
@@ -5127,6 +5187,46 @@ mod tests {
             ),
             "{}",
             outcomes.len()
+        );
+    }
+
+    /// The diagnostic reads both levels, skips files/missing entries,
+    /// sorts all readable directories together and bounds the result.
+    #[test]
+    fn the_disk_breakdown_returns_the_largest_five_directories_from_both_levels() {
+        let files = TreeFiles::with(&[
+            ("/q", &["runs", "cache", "small", "file"]),
+            ("/q/runs", &["a", "b", "c", "d"]),
+            ("/q/runs/a", &["1", "2", "3", "4"]),
+            ("/q/runs/b", &["1", "2", "3"]),
+            ("/q/runs/c", &["1", "2"]),
+            ("/q/runs/d", &["1"]),
+            ("/q/cache", &["1", "2", "3", "4", "5"]),
+            ("/q/small", &[]),
+        ]);
+        let sizes = directory_breakdown(&files, Some(Path::new("/q")), Path::new("/q/runs"));
+        assert_eq!(
+            sizes,
+            [
+                (PathBuf::from("/q/runs"), 1400),
+                (PathBuf::from("/q/cache"), 500),
+                (PathBuf::from("/q/runs/a"), 400),
+                (PathBuf::from("/q/runs/b"), 300),
+                (PathBuf::from("/q/runs/c"), 200),
+            ]
+        );
+        files.list("/q", Err(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            directory_breakdown(&files, Some(Path::new("/q")), Path::new("/q/runs")).len(),
+            4
+        );
+        let unread = CacheFiles {
+            unmeasurable: true,
+            entries: Some(vec![PathBuf::from("/q/x")]),
+            ..CacheFiles::default()
+        };
+        assert!(
+            directory_breakdown(&unread, Some(Path::new("/q")), Path::new("/q/runs")).is_empty()
         );
     }
 

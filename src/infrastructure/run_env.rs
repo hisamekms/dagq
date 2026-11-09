@@ -2358,14 +2358,6 @@ pub fn parse_config(text: &str) -> Result<Config> {
                                 "{CONFIG_FILE_NAME}:{number}: value of {key}: expected a share of the volume such as \"5%\" (above 0% and below 100%), not {text:?}"
                             )
                         })?;
-                } else if DiskConfig::FACTORS.contains(&key) {
-                    let value = parse_positive_number(rest.trim())
-                        .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
-                    config.disk.set_factor(key, value);
-                } else {
-                    let value = parse_positive(rest.trim(), "number")
-                        .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
-                    config.disk.set_whole(key, value);
                 }
                 disk_keys.push(key.to_owned());
             }
@@ -3006,10 +2998,8 @@ fn parse_positive_number(text: &str) -> Result<f64> {
 /// `[disk]` of the `dagq.toml` in `root` (ADR-0047 decision 44,
 /// ADR-t4473-1), `None` when there is no file; no table or no key is the
 /// default ([`DiskConfig`] names each key, its type and default).
-/// `reserve` takes a share written as `"5%"`, the shares (`ask_margin`,
-/// `close_margin`) a positive number and `ask_after_secs` a positive whole
-/// number; a key it does not know, a value of the wrong type or a key set
-/// twice is an error, and the supervisor that cannot read the table warns
+/// `reserve` takes a share written as `"5%"`; a bad value is an error.
+/// The supervisor warns of a file it cannot read
 /// and runs on the defaults. A retired key ([`DiskConfig::RETIRED_KEYS`])
 /// is read on without its value, warned of once in a process
 /// ([`warns_of_retired_disk_keys`]). An older binary refuses the keys it
@@ -6587,32 +6577,14 @@ LITERAL = 'no \n escapes # here'
             let message = format!("{:#}", parse_config(&text).unwrap_err());
             assert!(message.contains("value of reserve"), "{text}: {message}");
         }
-        // The disk ask's hysteresis: a whole number of seconds and two
-        // shares.
-        let config = parse_config(
-            "[disk]\nask_after_secs = 1_800\nask_margin = 0.2 # below\nclose_margin = 1\n",
-        )
-        .unwrap();
+        let config =
+            parse_config("[disk]\nask_after_secs = x\nask_margin = 0\nclose_margin = -1\n")
+                .unwrap();
+        assert_eq!(config.disk, DiskConfig::default());
         assert_eq!(
-            config.disk,
-            DiskConfig {
-                ask_after_secs: 1800,
-                ask_margin: 0.2,
-                close_margin: 1.0,
-                ..DiskConfig::default()
-            }
+            config.disk_retired,
+            ["ask_after_secs", "ask_margin", "close_margin"]
         );
-        for (text, error) in [
-            ("[disk]\nask_after_secs = 1.5", "whole number"),
-            ("[disk]\nask_after_secs = 0", "positive number, not 0"),
-            ("[disk]\nask_after_secs = x", "whole number"),
-            ("[disk]\nask_margin = 0", "positive number, not 0"),
-            ("[disk]\nclose_margin = -0.1", "positive number"),
-            ("[disk]\nclose_margin = x", "expected a number, not x"),
-        ] {
-            let message = format!("{:#}", parse_config(text).unwrap_err());
-            assert!(message.contains(error), "{text}: {message}");
-        }
         assert_eq!(parse_config("").unwrap().disk, DiskConfig::default());
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load_disk_config(dir.path()).unwrap(), None);
@@ -6623,10 +6595,7 @@ LITERAL = 'no \n escapes # here'
         .unwrap();
         assert_eq!(
             load_disk_config(dir.path()).unwrap().unwrap(),
-            DiskConfig {
-                ask_after_secs: 60,
-                ..DiskConfig::default()
-            }
+            DiskConfig::default()
         );
         // Warned of once in a process: the first call says so, the next
         // ones not.
@@ -6684,14 +6653,6 @@ LITERAL = 'no \n escapes # here'
             ),
             ("A = 'x'", "a key outside [run.env]"),
             ("[disk]\nother = 1", "unknown key other in [disk]"),
-            ("[disk]\nask_margin = 0", "positive number, not 0"),
-            ("[disk]\nask_margin = x", "expected a number, not x"),
-            ("[disk]\nask_margin = ", "missing value"),
-            ("[disk]\nask_after_secs = 1.5", "whole number"),
-            (
-                "[disk]\nask_after_secs = 1\nask_after_secs = 2",
-                "ask_after_secs is defined twice",
-            ),
             ("[resume]\nother = 1", "2: unknown key other in [resume]"),
             (
                 "[resume]\nconflict_only_limit = 0",

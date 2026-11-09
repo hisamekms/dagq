@@ -12,8 +12,8 @@
 //! the end of the last ([`asks_for_cleanup`], task 1627): the pass after
 //! it judges the reading after it. Still short, it opens
 //! the queue's one `cost` ask about the disk (`subject: disk`) once, and
-//! the runs whose landing waits for the disk join it; but only once the
-//! shortage lasted or is deep, with no run in flight, and the runtime
+//! the runs whose landing waits for the disk join it; but only below the
+//! reserve after cleanup, with no run in flight, and the runtime
 //! closes it only once there is room with a margin ([`disk_ask_condition`]). The claims are held through
 //! the claim pass's hold (`claim_held`, reason `disk_space`), the
 //! landings through `landing_held` / `landing_resumed`; a run waiting to
@@ -24,7 +24,7 @@ use crate::domain::EventKind;
 use crate::domain::{
     Ask,
     disk::{
-        DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskConfig, DiskNeeds, DiskState, RunSample,
+        DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskNeeds, DiskState, RunSample,
         expected_run_size, gib,
     },
 };
@@ -39,7 +39,7 @@ pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const DISK_ENOUGH_CLOSED: &str = "the free disk space is enough again; closed by the runtime";
 
 /// The question of the disk ask; the runs whose landing waits follow it.
-const DISK_QUESTION: &str = "The free disk space of the queue's directory stays below what the runs need, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`, and the target directories of the automatic update and the landing recheck when neither runs) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the reserve of {reserve}, [disk] reserve of dagq.toml as a share of the volume and at least {least}, plus what a run is expected to take, {expected}, from the sizes of the recent runs, for each run while others move). No new run is claimed and no run lands until there is room; the runs in flight go on. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
+const DISK_QUESTION: &str = "With no run moving, the free disk space of the queue's directory is below the reserve, and cleaning what the ended runs left (their build outputs and those of the runs nobody works on that wait for an answer, a landing or a resume, the worktrees, the Claude Code scratchpads and the run TMPDIRs of completed and canceled tasks' runs, `git worktree prune`, and the target directories of the automatic update and the landing recheck when neither runs) did not free enough: {free} free, a new run needs {claim} and a landing's verification {landing} (the reserve of {reserve}, [disk] reserve of dagq.toml as a share of the volume and at least {least}, plus what a run is expected to take, {expected}, from the sizes of the recent runs, for each run while others move). No new run is claimed and no run lands below the reserve. Free disk space (for example the worktrees of failed runs nobody looks at any more, or other files on that disk) and answer `done`, or answer `wait` to leave the queue waiting: the supervisor resumes by itself once there is room.";
 
 /// What moves at a pass's reading of the disk: `in_flight`, the runs the
 /// slots hold that go on by themselves, `landing`, how many of them are
@@ -90,9 +90,68 @@ pub(in crate::application::supervise) struct DiskWatch {
     pub(super) cleaning: bool,
     /// This pass's reading is short of what a claim or a landing needs.
     short: bool,
-    /// When the first reading of this shortage was short; `None` while
-    /// there is room ([`disk_ask_condition`]).
-    short_since: Option<Instant>,
+    /// The latest completed cleanup's largest directories; `None` until
+    /// a cleanup for room finishes. Measured only by the job thread.
+    pub(super) breakdown: Option<Vec<(std::path::PathBuf, u64)>>,
+    /// A cleanup can justify an ask only within the same idle epoch.
+    pub(super) cleanup_epoch: CleanupEpoch,
+}
+
+/// A change between moving and idle invalidates a cleanup started before
+/// it. A job finishing after the last moving run ends must not certify
+/// that run's leftovers as cleaned.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CleanupEpoch {
+    pub(super) generation: u64,
+    moving: bool,
+}
+
+struct CleanupTransition {
+    next: CleanupEpoch,
+    discard_breakdown: bool,
+    retry_now: bool,
+}
+
+pub(super) struct CleanupCompletion {
+    pub(super) ready: bool,
+    pub(super) cooldown: bool,
+}
+
+impl CleanupEpoch {
+    fn read(self, in_flight: usize) -> CleanupTransition {
+        let moving = in_flight > 0;
+        let changed = moving != self.moving;
+        CleanupTransition {
+            next: Self {
+                generation: self.generation.wrapping_add(u64::from(changed)),
+                moving,
+            },
+            discard_breakdown: moving || changed,
+            retry_now: self.moving && !moving,
+        }
+    }
+
+    /// Only an idle cleanup for room can supply the breakdown for an ask.
+    /// Moving-era results are discarded, so avoid those heavy walks.
+    pub(super) fn measures_breakdown(self, for_disk: bool) -> bool {
+        for_disk && !self.moving
+    }
+
+    /// A stale completion while idle must not postpone the fresh cleanup;
+    /// while runs move, ordinary cleanup throttling still applies.
+    pub(super) fn completed(self, generation: u64) -> CleanupCompletion {
+        let current = generation == self.generation;
+        CleanupCompletion {
+            ready: current && !self.moving,
+            cooldown: current || self.moving,
+        }
+    }
+
+    /// Neither a pending cleanup for room nor an ordinary job still
+    /// running permits a new ask, even with an earlier measurement.
+    fn ready(self, measured: bool, for_disk: bool, running: bool) -> bool {
+        !self.moving && measured && !for_disk && !running
+    }
 }
 
 impl HostOpsState {
@@ -144,6 +203,14 @@ impl HostOpsState {
             moves.besides_the_landing(),
             std::sync::atomic::Ordering::SeqCst,
         );
+        let cleanup = self.disk.cleanup_epoch.read(in_flight);
+        self.disk.cleanup_epoch = cleanup.next;
+        if cleanup.discard_breakdown {
+            self.disk.breakdown = None;
+        }
+        if cleanup.retry_now {
+            self.disk.cleaned = None;
+        }
         let most = Some(needs.claim.max(needs.landing));
         if short_of(free, most) {
             self.clean_for_disk(env, held, free, most, interval);
@@ -153,20 +220,7 @@ impl HostOpsState {
         self.disk.short = reading.short;
         self.disk.cleaning = reading.cleaning;
         self.disk.landing_short = reading.landing_short;
-        if reading.short {
-            self.disk
-                .short_since
-                .get_or_insert_with(|| env.generators.clock.monotonic());
-        } else {
-            self.disk.short_since = None;
-        }
-        let Judged::Recorded {
-            ask,
-            landings: hold,
-        } = judge_reading(reading, free, &needs, !landings.is_empty())
-        else {
-            return Ok(());
-        };
+        let judged = judge_reading(reading, free, &needs, !landings.is_empty());
         let waiting: &[RunId] = if self.disk.landing_short {
             landings
         } else {
@@ -174,23 +228,25 @@ impl HostOpsState {
         };
         let open = unclosed.iter().any(|ask| ask.is_open());
         let condition = disk_ask_condition(&ShortageReading {
-            short: ask,
             free,
-            need: most,
-            short_for: self
-                .disk
-                .short_since
-                .map(|at| env.generators.clock.since(at)),
+            need: Some(needs.reserve),
+            cleaned: self.disk.cleanup_epoch.ready(
+                self.disk.breakdown.is_some(),
+                self.cleanup.for_disk(),
+                self.cleanup.running(),
+            ),
             in_flight,
-            asked: self.disk.asked,
             open,
-            config: &self.disk_config,
+            cleaning: reading.cleaning,
         });
-        match disk_ask_step(condition, self.disk.asked, open, &self.disk.joined, waiting) {
+        let step = disk_ask_step(condition, self.disk.asked, open, &self.disk.joined, waiting);
+        if forgets_cleanup(&step, reading.short) {
+            self.disk.cleaned = None;
+        }
+        match step {
             AskStep::Open(joining) => self.ask_for_disk(env, free, &needs, joining)?,
             AskStep::Nothing => {}
             AskStep::Close => {
-                self.disk.cleaned = None;
                 self.disk.asked = false;
                 self.disk.joined.clear();
                 for ask in env.queue.close_hold_asks(
@@ -201,9 +257,11 @@ impl HostOpsState {
                     info!(ask_id = %ask.id, "the free disk space is enough again: closed the disk ask {}", ask.id);
                 }
             }
-            AskStep::Forget => self.disk.cleaned = None,
+            AskStep::Forget => {}
         }
-        env.record_hold(claim_hold::LANDINGS, hold.as_ref())?;
+        if let Judged::Recorded { landings: hold, .. } = judged {
+            env.record_hold(claim_hold::LANDINGS, hold.as_ref())?;
+        }
         Ok(())
     }
     /// A handoff found after this pass polled the cleanup and read the
@@ -270,6 +328,7 @@ impl HostOpsState {
         // after the drain ends is not kept waiting for it (task 1427).
         if self.request_cleanup(env, held, None, Some(DiskRequest { free, needed })) {
             self.disk.cleaned = Some(env.generators.clock.monotonic());
+            self.disk.breakdown = None;
         }
     }
     /// Once a cleanup for room is done: record `auto_repaired` when it
@@ -307,7 +366,11 @@ impl HostOpsState {
         needs: &DiskNeeds,
         joining: Vec<Option<RunId>>,
     ) -> Result<()> {
-        let question = disk_question(free, needs);
+        let question = disk_question(
+            free,
+            needs,
+            self.disk.breakdown.as_deref().unwrap_or_default(),
+        );
         for run in joining {
             let (outcome, _) = ask::hold(
                 &mut *env.queue,
@@ -342,6 +405,7 @@ impl HostOpsState {
             if asks_again_on(&answer) {
                 self.disk.asked = false;
                 self.disk.cleaned = None;
+                self.disk.breakdown = None;
                 self.disk.joined.clear();
             }
         }
@@ -503,77 +567,46 @@ pub(in crate::application::supervise) enum AskCondition {
 
 /// A judged pass's reading for [`disk_ask_condition`].
 #[derive(Debug, Clone, Copy)]
-pub(in crate::application::supervise) struct ShortageReading<'a> {
-    /// Short of the larger threshold (what holds the claims or landings).
-    pub(super) short: bool,
+pub(in crate::application::supervise) struct ShortageReading {
     pub(super) free: Option<u64>,
-    /// The larger of what a claim and a landing need.
+    /// The reserve, independent of what claims and landings need.
     pub(super) need: Option<u64>,
-    /// How long since the first reading of this shortage was short.
-    pub(super) short_for: Option<Duration>,
-    /// The runs the slots hold that go on by themselves.
+    /// A cleanup for room started and finished in the current idle epoch,
+    /// and no cleanup job is pending or running.
+    pub(super) cleaned: bool,
     pub(super) in_flight: usize,
-    /// The disk ask of this shortage was opened (open still, or answered
-    /// `wait`).
-    pub(super) asked: bool,
-    /// A disk ask is open.
     pub(super) open: bool,
-    pub(super) config: &'a DiskConfig,
+    /// A cleanup for room still holds claims and landings; even an
+    /// existing ask waits before adding those landings, as before.
+    pub(super) cleaning: bool,
 }
 
-/// Whether a judged pass asks, keeps or closes the disk ask: the
-/// hysteresis that keeps a free space moving across the threshold (a
-/// run's build, a cleanup) from opening and closing it pass after pass,
-/// while the holds follow the threshold itself.
-///
-/// - With an open ask, it closes only once the free space is above the
-///   threshold by `close_margin` of it (or no longer read); short, the
-///   waiting landings join it, and between the threshold and that margin
-///   nothing changes, so no second ask opens.
-/// - With the ask of this shortage answered `wait` (closed, still asked),
-///   nothing is asked while short, and the threshold itself ends the
-///   shortage, so a later one may ask again.
-/// - With none, room forgets the shortage; short, a run in flight keeps
-///   it from asking (its end and the cleanup after it may make room, and
-///   the supervisor resumes by itself); with none in flight it asks once
-///   the shortage lasted `ask_after_secs` from its first reading, or at
-///   once when the free space is below the threshold by `ask_margin` of
-///   it.
+/// Open only below the reserve with no moving run after cleanup. Keep an
+/// open ask across the reserve until the close margin, preventing churn.
+/// An answered `wait` forgets its shortage at the reserve itself. Waiting
+/// landings may still join an existing ask while runs move, once no
+/// cleanup for room holds them.
 pub(in crate::application::supervise) fn disk_ask_condition(
-    reading: &ShortageReading<'_>,
+    reading: &ShortageReading,
 ) -> AskCondition {
-    let config = reading.config;
-    if reading.open {
-        return if clear_above(reading.free, reading.need, config.close_margin) {
-            AskCondition::Room
-        } else if reading.short {
-            AskCondition::Ask
-        } else {
-            AskCondition::Keep
-        };
-    }
-    if !reading.short {
+    let short = short_of(reading.free, reading.need);
+    if reading.open
+        && clear_above(
+            reading.free,
+            reading.need,
+            crate::domain::disk::DISK_CLOSE_MARGIN,
+        )
+    {
         return AskCondition::Room;
     }
-    if reading.asked {
-        return AskCondition::Ask;
+    if !reading.open && !short {
+        return AskCondition::Room;
     }
-    if reading.in_flight > 0 {
-        return AskCondition::Keep;
-    }
-    let lasted = reading
-        .short_for
-        .is_some_and(|since| since >= Duration::from_secs(config.ask_after_secs));
-    if lasted || far_below(reading.free, reading.need, config.ask_margin) {
+    if short && !reading.cleaning && (reading.open || (reading.in_flight == 0 && reading.cleaned)) {
         AskCondition::Ask
     } else {
         AskCondition::Keep
     }
-}
-
-/// Free bytes below `need` by `margin` of it or more.
-fn far_below(free: Option<u64>, need: Option<u64>, margin: f64) -> bool {
-    matches!((free, need), (Some(free), Some(need)) if free < need && (need - free) as f64 >= need as f64 * margin)
 }
 
 /// Free bytes above `need` by `margin` of it; either unknown is room, as
@@ -597,8 +630,7 @@ pub(in crate::application::supervise) enum AskStep {
     Nothing,
     /// There is room again: close the disk ask and forget this shortage.
     Close,
-    /// There is room and nothing was asked: only the cleanup's interval
-    /// starts anew.
+    /// There is room above the reserve and nothing was asked.
     Forget,
 }
 
@@ -638,6 +670,12 @@ pub(in crate::application::supervise) fn disk_ask_step(
     }
 }
 
+/// Room for the ask alone must not restart cleanup pass after pass while
+/// the disk is still short of what a claim or landing needs.
+fn forgets_cleanup(step: &AskStep, short: bool) -> bool {
+    !short && matches!(step, AskStep::Close | AskStep::Forget)
+}
+
 /// Whether the answer of a disk ask asks again (a person freed the disk:
 /// `done`), cleaning and checking at once; `wait` and any other answer
 /// leave the queue waiting without asking again.
@@ -646,16 +684,19 @@ pub(in crate::application::supervise) fn asks_again_on(answer: &str) -> bool {
 }
 
 /// The question of the disk ask, with the free bytes and what a claim and
-/// a landing need (`unknown` when not read).
+/// a landing need (`unknown` when not read). Append at most five directory
+/// paths in descending size order, with sizes in GiB, or `内訳なし` if
+/// none could be measured.
 pub(in crate::application::supervise) fn disk_question(
     free: Option<u64>,
     needs: &DiskNeeds,
+    breakdown: &[(std::path::PathBuf, u64)],
 ) -> String {
     let show = |bytes: Option<u64>| bytes.map_or_else(|| "unknown".into(), |b| gib(b as f64));
     let expected = needs
         .expected
         .map_or_else(|| "none yet".into(), |bytes| gib(bytes as f64));
-    DISK_QUESTION
+    let question = DISK_QUESTION
         .replace("{free}", &show(free))
         .replace("{claim}", &show(Some(needs.claim)))
         .replace("{landing}", &show(Some(needs.landing)))
@@ -664,7 +705,20 @@ pub(in crate::application::supervise) fn disk_question(
         .replace(
             "{least}",
             &gib(crate::domain::disk::MIN_RESERVE_BYTES as f64),
-        )
+        );
+    let mut sizes = breakdown.to_vec();
+    sizes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let details = if sizes.is_empty() {
+        "内訳なし".to_owned()
+    } else {
+        sizes
+            .iter()
+            .take(5)
+            .map(|(path, bytes)| format!("{}: {}", path.display(), gib(*bytes as f64)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!("{question}\n\nLargest directories after cleanup:\n{details}")
 }
 
 /// The queue's `cost` ask about the disk.
@@ -1013,181 +1067,200 @@ mod tests {
         );
     }
 
-    /// A reading of `free` free bytes against a need of 100 GiB with the
-    /// default `[disk]` (30 minutes, 10% below, 5% above), short as the
-    /// holds read it, `short_for` since its first short reading.
-    fn condition(free: u64, short_for: Option<u64>, in_flight: usize, asked: bool) -> AskCondition {
-        reading(free, short_for, in_flight, asked, asked)
+    fn condition(free: u64, cleaned: bool, in_flight: usize, asked: bool) -> AskCondition {
+        reading(free, cleaned, in_flight, asked)
     }
 
-    /// [`condition`] with an ask `asked` and `open` apart (answered
-    /// `wait`: asked, not open).
-    fn reading(
-        free: u64,
-        short_for: Option<u64>,
-        in_flight: usize,
-        asked: bool,
-        open: bool,
-    ) -> AskCondition {
-        let need = 100 * GIB;
+    fn reading(free: u64, cleaned: bool, in_flight: usize, open: bool) -> AskCondition {
         disk_ask_condition(&ShortageReading {
-            short: free < need,
             free: Some(free),
-            need: Some(need),
-            short_for: short_for.map(Duration::from_secs),
+            need: Some(100 * GIB),
+            cleaned,
             in_flight,
-            asked,
             open,
-            config: &DiskConfig::default(),
+            cleaning: false,
         })
     }
 
-    /// A shortage just below the threshold asks only once it lasted the
-    /// default 30 minutes from its first reading, one 10% below or deeper
-    /// at once; a run in flight keeps either from asking (the holds still
-    /// follow the threshold: the reading stays short).
     #[test]
-    fn a_shortage_asks_once_it_lasted_or_is_deep_and_no_run_is_in_flight() {
-        use AskCondition::{Ask, Keep, Room};
-        let (shallow, deep) = (99 * GIB, 89 * GIB);
-        for (free, short_for, in_flight, expected) in [
-            // Room, nothing asked: the shortage is forgotten.
-            (100 * GIB, None, 0, Room),
-            (100 * GIB, None, 2, Room),
-            // Just below: kept until 30 minutes passed.
-            (shallow, Some(0), 0, Keep),
-            (shallow, Some(29 * 60 + 59), 0, Keep),
-            (shallow, Some(30 * 60), 0, Ask),
-            (shallow, Some(3 * 3600), 0, Ask),
-            // Within 10% below it waits; 10% below or deeper it asks.
-            (90 * GIB + 1, Some(0), 0, Keep),
-            (90 * GIB, Some(0), 0, Ask),
-            (deep, Some(0), 0, Ask),
-            (1, None, 0, Ask),
-            // A run in flight: kept, however long or deep.
-            (shallow, Some(3 * 3600), 1, Keep),
-            (deep, Some(0), 1, Keep),
-            (1, Some(3 * 3600), 3, Keep),
+    fn only_idle_cleanup_jobs_for_room_measure_a_breakdown() {
+        for (moving, for_disk, expected) in [
+            (0, true, true),
+            (0, false, false),
+            (1, true, false),
+            (1, false, false),
         ] {
+            let epoch = CleanupEpoch::default().read(moving).next;
+            assert_eq!(epoch.measures_breakdown(for_disk), expected);
+        }
+    }
+
+    #[test]
+    fn a_cleanup_must_follow_the_transition_to_idle() {
+        let initial = CleanupEpoch::default();
+        let moving = initial.read(1);
+        assert!(moving.discard_breakdown);
+        assert!(!moving.retry_now);
+        let started_while_moving = moving.next.generation;
+        let done_while_moving = moving.next.completed(started_while_moving);
+        assert!(!done_while_moving.ready);
+        assert!(done_while_moving.cooldown);
+        let idle = moving.next.read(0);
+        assert!(idle.discard_breakdown);
+        assert!(idle.retry_now);
+        // A completed cleanup's cooldown cannot block the first idle job.
+        assert!(asks_for_cleanup(None, false, CLEANUP_INTERVAL));
+        // Nor may that earlier job finishing now certify the idle disk.
+        let stale = idle.next.completed(started_while_moving);
+        assert!(!stale.ready);
+        assert!(!stale.cooldown);
+        assert_eq!(
+            condition(
+                99 * GIB,
+                idle.next.ready(stale.ready, false, false),
+                0,
+                false
+            ),
+            AskCondition::Keep
+        );
+        assert!(!idle.next.completed(initial.generation).ready);
+        let fresh = idle.next.completed(idle.next.generation);
+        assert!(fresh.ready);
+        assert!(fresh.cooldown);
+        assert_eq!(
+            condition(
+                99 * GIB,
+                idle.next.ready(fresh.ready, false, false),
+                0,
+                false
+            ),
+            AskCondition::Ask
+        );
+        assert!(!idle.next.read(0).discard_breakdown);
+        assert!(!idle.next.read(0).retry_now);
+    }
+
+    #[test]
+    fn only_a_finished_idle_cleanup_with_no_job_pending_is_ready() {
+        for (moving, measured, for_disk, running, expected) in [
+            (0, false, false, false, AskCondition::Keep),
+            (0, true, true, false, AskCondition::Keep), // pending job
+            (0, true, true, true, AskCondition::Keep),  // cleanup for room
+            (0, true, false, true, AskCondition::Keep), // ordinary cleanup
+            (1, true, false, false, AskCondition::Keep),
+            (0, true, false, false, AskCondition::Ask),
+        ] {
+            let epoch = CleanupEpoch::default().read(moving).next;
             assert_eq!(
-                condition(free, short_for, in_flight, false),
-                expected,
-                "{free} {short_for:?} {in_flight}"
+                condition(
+                    99 * GIB,
+                    epoch.ready(measured, for_disk, running),
+                    moving,
+                    false
+                ),
+                expected
             );
         }
     }
 
-    /// An ask opened stays until the free space is 5% above the threshold:
-    /// across it below that nothing changes (no second ask, no close),
-    /// short it is joined whatever runs, and at the margin it is closed.
     #[test]
-    fn an_ask_closes_only_once_the_free_space_is_above_the_threshold_by_the_margin() {
-        use AskCondition::{Ask, Keep, Room};
-        for (free, in_flight, expected) in [
-            (99 * GIB, 0, Ask),
-            (99 * GIB, 2, Ask),
-            (100 * GIB, 0, Keep),
-            (105 * GIB - 1, 0, Keep),
-            (105 * GIB, 0, Room),
-            (200 * GIB, 1, Room),
+    fn room_for_the_ask_keeps_the_cleanup_cooldown_while_claims_are_short() {
+        for (step, cleared_with_room) in [
+            (AskStep::Close, true),
+            (AskStep::Forget, true),
+            (AskStep::Nothing, false),
+            (AskStep::Open(vec![None]), false),
         ] {
-            assert_eq!(
-                condition(free, None, in_flight, true),
-                expected,
-                "{free} {in_flight}"
-            );
+            assert!(!forgets_cleanup(&step, true));
+            assert_eq!(forgets_cleanup(&step, false), cleared_with_room);
         }
-        // A free space moving across the threshold, pass after pass, while
-        // the ask stays open: it is opened once and never closed.
-        let (a, b) = (RunId::new("a").unwrap(), RunId::new("b").unwrap());
+    }
+
+    #[test]
+    fn an_open_ask_accepts_waiting_landings_while_runs_move() {
+        let a = RunId::new("a").unwrap();
+        let b = RunId::new("b").unwrap();
+        let condition = condition(99 * GIB, false, 1, true);
+        assert_eq!(condition, AskCondition::Ask);
+        let mut cleaning = ShortageReading {
+            free: Some(99 * GIB),
+            need: Some(100 * GIB),
+            cleaned: false,
+            in_flight: 1,
+            open: true,
+            cleaning: true,
+        };
+        assert_eq!(disk_ask_condition(&cleaning), AskCondition::Keep);
+        cleaning.free = Some(105 * GIB);
+        assert_eq!(disk_ask_condition(&cleaning), AskCondition::Room);
+        assert_eq!(
+            disk_ask_step(
+                condition,
+                true,
+                true,
+                std::slice::from_ref(&a),
+                &[a.clone(), b.clone()]
+            ),
+            AskStep::Open(vec![Some(b)])
+        );
+    }
+
+    #[test]
+    fn asks_only_below_reserve_after_cleanup_with_no_moving_runs() {
+        use AskCondition::{Ask, Keep, Room};
+        for (free, cleaned, moving, expected) in [
+            (99 * GIB, false, 0, Keep),
+            (1, false, 0, Keep),
+            (99 * GIB, true, 0, Ask),
+            (1, true, 1, Keep),
+            (100 * GIB, true, 0, Room),
+            (101 * GIB, true, 2, Room),
+        ] {
+            assert_eq!(condition(free, cleaned, moving, false), expected);
+        }
+    }
+
+    #[test]
+    fn an_open_ask_keeps_until_five_percent_above_reserve() {
+        use AskCondition::{Ask, Keep, Room};
+        for (free, expected) in [(99, Ask), (100, Keep), (104, Keep), (105, Room)] {
+            assert_eq!(condition(free * GIB, true, 0, true), expected);
+        }
+        assert_eq!(condition(105 * GIB - 1, true, 0, true), Keep);
         let mut asked = false;
         let mut opened = 0;
         for free in [99, 101, 99, 103, 98, 104, 99] {
-            let short_for = (free < 100).then_some(31 * 60);
-            let step = disk_ask_step(
-                condition(free * GIB, short_for, 0, asked),
+            match disk_ask_step(
+                condition(free * GIB, true, 0, asked),
                 asked,
                 asked,
                 &[],
                 &[],
-            );
-            match step {
-                AskStep::Open(joining) if !asked => {
-                    assert_eq!(joining, [None]);
+            ) {
+                AskStep::Open(_) if !asked => {
                     opened += 1;
                     asked = true;
                 }
                 AskStep::Open(joining) => assert!(joining.is_empty()),
                 AskStep::Nothing => {}
-                other => panic!("{free}: {other:?}"),
+                other => panic!("{other:?}"),
             }
         }
         assert_eq!(opened, 1);
-        assert_eq!(
-            disk_ask_step(condition(106 * GIB, None, 0, true), true, true, &[], &[]),
-            AskStep::Close
-        );
-        // Kept with no ask: nothing is opened, closed or forgotten, and no
-        // landing joins.
-        assert_eq!(
-            disk_ask_step(
-                condition(99 * GIB, Some(0), 0, false),
-                false,
-                false,
-                &[],
-                &[a, b]
-            ),
-            AskStep::Nothing
-        );
-        // Unknown free bytes or need are room, as before.
-        let config = DiskConfig::default();
-        let unknown = |free: Option<u64>, need: Option<u64>| {
-            disk_ask_condition(&ShortageReading {
-                short: false,
-                free,
-                need,
-                short_for: None,
-                in_flight: 0,
-                asked: true,
-                open: true,
-                config: &config,
-            })
-        };
-        assert_eq!(unknown(None, Some(GIB)), Room);
-        assert_eq!(unknown(Some(1), None), Room);
-    }
-
-    /// The `[disk]` shares and duration decide: a shorter duration asks
-    /// sooner, a wider ask margin asks later, a wider close margin closes
-    /// later.
-    #[test]
-    fn the_disk_settings_move_when_the_ask_opens_and_closes() {
-        use AskCondition::{Ask, Keep, Room};
-        let config = DiskConfig {
-            ask_after_secs: 60,
-            ask_margin: 0.5,
-            close_margin: 0.2,
-            ..DiskConfig::default()
-        };
-        let judge = |free: u64, short_for: u64, asked: bool| {
-            disk_ask_condition(&ShortageReading {
-                short: free < 100,
-                free: Some(free),
-                need: Some(100),
-                short_for: Some(Duration::from_secs(short_for)),
-                in_flight: 0,
-                asked,
-                open: asked,
-                config: &config,
-            })
-        };
-        assert_eq!(judge(99, 59, false), Keep);
-        assert_eq!(judge(99, 60, false), Ask);
-        assert_eq!(judge(60, 0, false), Keep);
-        assert_eq!(judge(49, 0, false), Ask);
-        assert_eq!(judge(50, 0, false), Ask);
-        assert_eq!(judge(119, 0, true), Keep);
-        assert_eq!(judge(120, 0, true), Room);
+        assert_eq!(condition(99 * GIB, true, 1, true), Ask);
+        for (free, need) in [(None, Some(GIB)), (Some(1), None)] {
+            assert_eq!(
+                disk_ask_condition(&ShortageReading {
+                    free,
+                    need,
+                    cleaned: true,
+                    in_flight: 0,
+                    open: true,
+                    cleaning: false,
+                }),
+                Room
+            );
+        }
     }
 
     /// An ask answered `wait` (asked, closed) asks nothing more while
@@ -1199,40 +1272,22 @@ mod tests {
         use AskCondition::{Ask, Room};
         // Short, answered `wait`: asked, so nothing is asked.
         for free in [99 * GIB, 89 * GIB, 1] {
-            assert_eq!(reading(free, Some(3600), 0, true, false), Ask);
+            assert_eq!(reading(free, true, 0, false), Ask);
             assert_eq!(
-                disk_ask_step(
-                    reading(free, Some(3600), 0, true, false),
-                    true,
-                    false,
-                    &[],
-                    &[]
-                ),
+                disk_ask_step(reading(free, true, 0, false), true, false, &[], &[]),
                 AskStep::Nothing
             );
         }
         // Back at the threshold, within the close margin: the shortage
         // ends (the watch forgets it asked).
-        assert_eq!(reading(100 * GIB, None, 0, true, false), Room);
+        assert_eq!(reading(100 * GIB, false, 0, false), Room);
         assert_eq!(
-            disk_ask_step(
-                reading(101 * GIB, None, 0, true, false),
-                true,
-                false,
-                &[],
-                &[]
-            ),
+            disk_ask_step(reading(101 * GIB, false, 0, false), true, false, &[], &[]),
             AskStep::Close
         );
         // Short again, deep: a new ask opens.
         assert_eq!(
-            disk_ask_step(
-                reading(89 * GIB, Some(0), 0, false, false),
-                false,
-                false,
-                &[],
-                &[]
-            ),
+            disk_ask_step(reading(89 * GIB, true, 0, false), false, false, &[], &[]),
             AskStep::Open(vec![None])
         );
     }
@@ -1254,6 +1309,19 @@ mod tests {
         assert!(asks_for_cleanup(None, false, CLEANUP_INTERVAL));
     }
 
+    #[test]
+    fn the_question_shows_the_top_five_in_gib_or_no_breakdown() {
+        let sizes: Vec<_> = (1..=7)
+            .map(|n| (std::path::PathBuf::from(format!("/q/{n}")), n * GIB))
+            .collect();
+        let question = disk_question(Some(1), &NEEDS, &sizes);
+        assert!(question.ends_with(
+            "/q/7: 7.0 GiB\n/q/6: 6.0 GiB\n/q/5: 5.0 GiB\n/q/4: 4.0 GiB\n/q/3: 3.0 GiB"
+        ));
+        assert!(!question.contains("/q/2"));
+        assert!(disk_question(Some(1), &NEEDS, &[]).ends_with("内訳なし"));
+    }
+
     /// The disk ask's question names the free bytes, what a claim and a
     /// landing need and what they are made of (the reserve and what a run
     /// is expected to take, with no factor), and the scratchpads among
@@ -1270,6 +1338,7 @@ mod tests {
                 landing: 5 * GIB,
                 claims_wait: false,
             },
+            &[],
         );
         assert!(question.contains("0.5 GiB free"), "{question}");
         assert!(
@@ -1298,7 +1367,7 @@ mod tests {
         );
         assert!(!question.contains("factor"), "{question}");
         assert!(!question.contains("Affected:"));
-        let unread = disk_question(None, &DiskNeeds::default());
+        let unread = disk_question(None, &DiskNeeds::default(), &[]);
         assert!(unread.contains("unknown free"), "{unread}");
         assert!(unread.contains("expected to take, none yet,"), "{unread}");
     }
