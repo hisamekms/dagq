@@ -9,6 +9,8 @@ accepted_on: 2026-10-04
 amends:
   - adr-0049 decision 5
   - adr-0051 decision 1
+amended_by:
+  - adr-t4652-1
 owners:
   - hisamekms
 tags:

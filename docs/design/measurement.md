@@ -67,8 +67,6 @@ SSOTは消えてはいけない正本、ビューはSSOTから作り直せるも
 | machineのメモリの予約と待ち | dagq専用のmachineの予約（持ち主・種類・上限・取った時刻）と待ちの列（同じ欄で時刻は待ち始め）。全てのqueueのclaim・wrapper・`integrate`が読む | 材料 | data homeの`dagq/machine/`のlockの下の`reservations/`と`waiting/`。寿命は持ち主のturnかverificationの間で、失っても記録の無いcontainerを上限で数えて安全側で、計測の層は読まない。待った区間の正本はEventStoreのevent |
 | 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | hostで`scripts/landing-it.sh`がartifact `it-coverage-map`から取ってqueueの外に置き、containerのverificationはrun dirの材料への写しだけを読む（置き場・取り直し・写し方はscriptの冒頭）。cacheも写しも消えてよい |
 
-計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。
-
 ## 区間とタグ
 
 runの一生を、重ならず隙間なく全体を覆う区間の列で表す（ADR-t1662-1決定1〜5）。
@@ -135,16 +133,18 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 
 ## 台帳を作る係
 
-何を書くかは`domain::ledger::builder`が決め、`supervise::observation::ledger`が書く（両moduleのdoc）。
+何を書くかは`domain::ledger::builder`のdocが持つ（[ADR-t4652-1](../adr/2026-11-09-t4652-1-ledger-writes-bounded-by-pass-time-and-r-split-by-kind.md)）。
 
 - 着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - runは終わりから猶予の後で、telemetryのtokenの失効と資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
-- storeの印は、その位置までの全入力を行が記録する約束で、Wはsession行、Rはほかの行のカーソルごとの位置。
+- storeの印は、その位置までの全入力を行が記録する約束で、Wはsession行、Rはほかの行のカーソルごとの位置（予定: Rはqueueの行とrun・task・session・nodeの行で分かれ、Wの約束は保ち、queueの遅れはほかの読み直しを増やさない）。
 - 入力を記録済みなら確定待ちと版の更新はRを押さえず、追いつきの印と確認の順番を起動をまたいで保つ。
 - 増分の走査はRより後だけを読み、対象別・id指定の読みはRより前に及ぶが確定済みの履歴に比例しない（起動時のpushの要約は除く。`builder`のdoc）。
 - 古い版の作り直しは`builder`のdocが持つ。
   行の持ち主を変える版上げは直らない。
 - 読めない・書けない周回は印を残して次に任せ、runとtaskの結果を変えない。
+- 書く量は件数でなくpassの経過時間で決まり、遅れの間は続けて回る（予定）。
+- 1要求の行は1つのtransactionで書かれ、印は覆う最後の組と同じ書き込みに載り、巨大な単独行も飛ばされず原子的に書かれる（予定）。
 
 ## 共通の読み取り関数
 
