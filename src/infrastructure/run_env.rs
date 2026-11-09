@@ -511,7 +511,16 @@ const LOCAL_GATE_PATHS: &str = "paths";
 const LOCAL_GATE_KIND: &str = "kind";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 35] = [
+/// `[landing.approval]` adds OR conditions to the existing human asks.
+/// `paths` is an array using task scope globs; `review_confidence` is an
+/// array accepting only "low"; `goal_marks` is an array of nonblank literal
+/// names. All arrays default to empty. `two_person` is a boolean, default
+/// false, requiring the owner plus a distinct eligible approver when open.
+/// Unknown keys, invalid types or values and duplicate keys are errors.
+/// Only the commit-pinned main reader can expose these as trusted conditions.
+const LANDING_APPROVAL_TABLE: &str = "landing.approval";
+const TABLES: [&str; 36] = [
+    LANDING_APPROVAL_TABLE,
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -582,6 +591,8 @@ pub fn parse_run_env(text: &str) -> Result<Vec<(String, String)>> {
 /// each field below names, `[tasks] changes` and `[goals] tags` among them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
+    // Intentionally private: parse_config also reads untrusted run worktrees.
+    landing_approval: crate::domain::landing_approval::ApprovalSettings,
     /// `[run.env]` as written, in file order, values unexpanded.
     pub run_env: Vec<(String, String)>,
     /// `[stall]`, the defaults for the keys it does not set. Each value is
@@ -776,6 +787,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut table: Option<&str> = None;
     let mut seen: Vec<&str> = Vec::new();
     let mut config = Config::default();
+    let mut approval_keys: Vec<String> = Vec::new();
     let mut stall_keys: Vec<String> = Vec::new();
     let mut conflict_keys: Vec<String> = Vec::new();
     let mut disk_keys: Vec<String> = Vec::new();
@@ -1208,6 +1220,48 @@ pub fn parse_config(text: &str) -> Result<Config> {
             .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: expected KEY = value"))?;
         let key = key.trim();
         match table {
+            Some(LANDING_APPROVAL_TABLE) => {
+                ensure!(
+                    !approval_keys.iter().any(|seen| seen == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                approval_keys.push(key.to_owned());
+                let settings = &mut config.landing_approval;
+                let with =
+                    || format!("{CONFIG_FILE_NAME}:{number}: [{LANDING_APPROVAL_TABLE}] {key}");
+                match key {
+                    "paths" => {
+                        let paths = parse_string_array(rest.trim()).with_context(with)?;
+                        crate::domain::scope::validate_path_globs(&paths).with_context(with)?;
+                        settings.paths = paths;
+                    }
+                    "review_confidence" => {
+                        let values = parse_string_array(rest.trim()).with_context(with)?;
+                        ensure!(
+                            values.iter().all(|value| value == "low"),
+                            "{CONFIG_FILE_NAME}:{number}: review_confidence accepts only low"
+                        );
+                        settings.low_confidence = !values.is_empty();
+                    }
+                    "goal_marks" => {
+                        settings.goal_marks = parse_string_array(rest.trim())
+                            .with_context(with)?
+                            .into_iter()
+                            .map(|name| {
+                                crate::domain::landing_approval::GoalMark::new(name)
+                                    .map_err(anyhow::Error::msg)
+                            })
+                            .collect::<Result<_>>()
+                            .with_context(with)?;
+                    }
+                    "two_person" => {
+                        settings.two_person = parse_bool(rest.trim()).with_context(with)?
+                    }
+                    _ => bail!(
+                        "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{LANDING_APPROVAL_TABLE}]"
+                    ),
+                }
+            }
             Some(VERIFY_MARKS_TABLE) => mark_open
                 .as_mut()
                 .expect("a [verify_marks.*] table names its mark")
@@ -4093,6 +4147,44 @@ impl Verifier for ShellVerifier {
         })
         .map(super::process::exit)
     }
+}
+
+/// A main read or parse failure blocks landing; it must never be interpreted
+/// as an empty set of conditions. Diagnostics do not expose upstream contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandingConfigError;
+impl std::fmt::Display for LandingConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("landing blocked: main configuration unavailable or invalid")
+    }
+}
+impl std::error::Error for LandingConfigError {}
+
+/// Read main's commit-pinned dagq.toml using the existing runner-App read port.
+/// No checkout path, parsed run Config, or cached fallback is accepted. A failed
+/// read/parse stops landing even if an earlier main snapshot was valid. `now`
+/// is supplied by the caller's clock for token issuance. Not wired into landing.
+pub fn read_main_approval_conditions(
+    source: &dyn crate::application::supervise::repository_config::MainRules,
+    repository_name: &str,
+    now: i64,
+) -> std::result::Result<crate::domain::landing_approval::MainApprovalConditions, LandingConfigError>
+{
+    use crate::application::supervise::repository_config::read_scope;
+    let token = source
+        .issue(&read_scope(repository_name), now)
+        .map_err(|_| LandingConfigError)?;
+    let commit = source.main_sha(&token).map_err(|_| LandingConfigError)?;
+    let text = source
+        .contents(&token, &commit)
+        .map_err(|_| LandingConfigError)?;
+    let config = parse_config(&text).map_err(|_| LandingConfigError)?;
+    Ok(
+        crate::domain::landing_approval::MainApprovalConditions::from_main(
+            commit,
+            config.landing_approval,
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -8372,5 +8464,180 @@ enabled = true
             load_run_env(dir.path(), Path::new("/q"), Path::new("/r")).unwrap_err()
         );
         assert!(error.contains("read "), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod landing_approval_tests {
+    use super::*;
+    use crate::{
+        application::supervise::repository_config::{
+            AppToken, ConfigUnavailable, InstallationTokens, MainRules,
+        },
+        domain::landing_approval::{ApprovalMatch, matching_conditions},
+    };
+
+    struct MainFile<'a> {
+        text: &'a str,
+        fail: Option<&'static str>,
+    }
+    impl InstallationTokens for MainFile<'_> {
+        fn issue(
+            &self,
+            scope: &serde_json::Value,
+            _: i64,
+        ) -> std::result::Result<AppToken, ConfigUnavailable> {
+            assert_eq!(
+                scope,
+                &crate::application::supervise::repository_config::read_scope("repo")
+            );
+            if self.fail == Some("token") {
+                return Err(ConfigUnavailable);
+            }
+            Ok(AppToken("test".into()))
+        }
+    }
+    impl MainRules for MainFile<'_> {
+        fn main_sha(&self, _: &AppToken) -> std::result::Result<String, ConfigUnavailable> {
+            if self.fail == Some("sha") {
+                return Err(ConfigUnavailable);
+            }
+            Ok("trusted-main-sha".into())
+        }
+        fn contents(
+            &self,
+            _: &AppToken,
+            sha: &str,
+        ) -> std::result::Result<String, ConfigUnavailable> {
+            assert_eq!(sha, "trusted-main-sha");
+            if self.fail == Some("contents") {
+                return Err(ConfigUnavailable);
+            }
+            Ok(self.text.into())
+        }
+    }
+
+    #[test]
+    fn main_conditions_survive_run_removal_or_relaxation() {
+        let main = MainFile {
+            text: "[landing.approval]\npaths = ['protected/**']\ntwo_person = true",
+            fail: None,
+        };
+        let trusted = read_main_approval_conditions(&main, "repo", 0).unwrap();
+        assert_eq!(trusted.main_commit(), "trusted-main-sha");
+        assert!(trusted.two_person());
+        for run_text in [
+            "",
+            "[landing.approval]\npaths = []\ntwo_person = false",
+            "[landing.approval]\npaths = ['other/**']",
+        ] {
+            let _run = parse_config(run_text).unwrap();
+            assert_eq!(
+                matching_conditions(
+                    &trusted,
+                    &["dagq.toml".into(), "protected/edit".into()],
+                    None,
+                    &[]
+                ),
+                vec![ApprovalMatch::Path("protected/**".into())]
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_main_blocks_landing_and_absent_section_preserves_defaults() {
+        assert_eq!(parse_config("").unwrap(), Config::default());
+        for text in [
+            "",
+            "[landing.approval]",
+            "[landing.approval]\ntwo_person = false",
+            "[landing.approval]\ntwo_person = true",
+        ] {
+            let main = MainFile { text, fail: None };
+            let trusted = read_main_approval_conditions(&main, "repo", 0).unwrap();
+            assert_eq!(trusted.two_person(), text.ends_with("true"));
+            assert!(
+                matching_conditions(
+                    &trusted,
+                    &["any/path".into()],
+                    Some(crate::domain::AskConfidence::Low),
+                    &[]
+                )
+                .is_empty()
+            );
+        }
+        for entry in [
+            "unknown = []",
+            "review_confidence = ['high']",
+            "review_confidence = ['medium']",
+            "review_confidence = 'low'",
+            "paths = true",
+            "paths = ['']",
+            "paths = ['a//b']",
+            "goal_marks = [' ']",
+            "goal_marks = false",
+            "two_person = 'true'",
+            "two_person = 1",
+            "paths = ['/absolute']",
+            "paths = ['a/../b']",
+            "paths = []\npaths = []",
+        ] {
+            let text = format!("[landing.approval]\n{entry}");
+            assert!(parse_config(&text).is_err(), "{entry}");
+            let main = MainFile {
+                text: &text,
+                fail: None,
+            };
+            assert_eq!(
+                read_main_approval_conditions(&main, "repo", 0),
+                Err(LandingConfigError),
+                "{entry}"
+            );
+        }
+        let invalid = MainFile {
+            text: "[landing.approval]\nreview_confidence = ['unknown']",
+            fail: None,
+        };
+        assert_eq!(
+            read_main_approval_conditions(&invalid, "repo", 0),
+            Err(LandingConfigError)
+        );
+        for fail in ["token", "sha", "contents"] {
+            let main = MainFile {
+                text: "",
+                fail: Some(fail),
+            };
+            assert_eq!(
+                read_main_approval_conditions(&main, "repo", 0),
+                Err(LandingConfigError)
+            );
+        }
+        assert!(LandingConfigError.to_string().contains("landing blocked"));
+    }
+
+    #[test]
+    fn all_declared_conditions_are_interpreted() {
+        use crate::domain::{AskConfidence, landing_approval::GoalMark};
+        let main = MainFile {
+            text: "[landing.approval]\npaths = ['docs/**']\nreview_confidence = ['low']\ngoal_marks = ['sensitive']",
+            fail: None,
+        };
+        let trusted = read_main_approval_conditions(&main, "repo", 0).unwrap();
+        let mark = GoalMark::new("sensitive".into()).unwrap();
+        assert_eq!(mark.as_str(), "sensitive");
+        assert_eq!(
+            matching_conditions(
+                &trusted,
+                &["docs/change".into()],
+                Some(AskConfidence::Low),
+                std::slice::from_ref(&mark)
+            ),
+            vec![
+                ApprovalMatch::Path("docs/**".into()),
+                ApprovalMatch::LowConfidence,
+                ApprovalMatch::GoalMark(mark)
+            ]
+        );
+        assert!(!trusted.two_person());
     }
 }
