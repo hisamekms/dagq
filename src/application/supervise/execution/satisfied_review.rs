@@ -708,6 +708,7 @@ impl Supervisor<'_> {
                                 run,
                                 tree: &tree,
                                 prompt: &watch.prompt,
+                                reads: None,
                                 access: REVIEW_ACCESS,
                             },
                             session_id,

@@ -136,6 +136,8 @@ pub enum HeadlessProgram<'a> {
         tree: &'a Path,
         prompt: &'a str,
         access: JobAccess,
+        /// A case's read boundary; also starts it without queue service access.
+        reads: Option<&'a super::AgentReads>,
     },
     /// A job in `cwd` allowed what `access` says beyond what needs no
     /// permission (ADR-t1063-1 decision 2): the recovery job, the plan and
@@ -145,12 +147,24 @@ pub enum HeadlessProgram<'a> {
         cwd: &'a Path,
         prompt: &'a str,
         access: JobAccess,
+        /// A case's read boundary; also starts it without queue service access.
+        reads: Option<&'a super::AgentReads>,
     },
     /// One agent's own job (ADR-t1895-1, [`crate::application::agent_job`]):
     /// a review job's reads narrowed to the agent's declared tools, in the
     /// change's tree; the eval of an agent starts it for each run of a
     /// case.
     AgentJob(&'a crate::application::AgentJobLaunch),
+}
+
+impl HeadlessProgram<'_> {
+    /// A case never receives a queue credential or a route to the service.
+    fn isolated(&self) -> bool {
+        match self {
+            Self::Job { reads, .. } | Self::Review { reads, .. } => reads.is_some(),
+            Self::AgentJob(job) => job.reads.is_some(),
+        }
+    }
 }
 
 /// What to start for the actor.
@@ -440,7 +454,8 @@ pub fn local_checks_env(run: &TaskRun) -> Result<(String, String)> {
 /// `DAGQ_ROLE`は`ActorRole::env_value`、`DAGQ_ACTOR_ID`は`ActorContext`の
 /// constructor（`instance`の`<role>:<instance>`など）が作る。
 /// inboxとplanner（と登録済みのin-cmuxのsupervisor）は`DAGQ_QUEUE`（queue DBのpath）も持つ。
-/// workerとresume、headlessのjob、observerは持たず（`domain::queue_service::client_role`）、agentのプロセスはqueue serviceのsocketの`DAGQ_SERVICE_SOCKET`とtokenのfileの`DAGQ_SERVICE_CREDENTIAL_FILE`を持ち、その`dagq`はクライアントモードで動く（Queue service）。
+/// workerとresume、headlessのjob、observerは持たず（`domain::queue_service::client_role`）、本番のagentはqueue serviceのsocketの`DAGQ_SERVICE_SOCKET`とtokenのfileの`DAGQ_SERVICE_CREDENTIAL_FILE`を持ち、その`dagq`はクライアントモードで動く（Queue service）。
+/// ケースのheadless job（`AgentReads`あり）はroleを保ち、socketもtokenのfileも渡さず、資格も発行しない。
 /// runのsession wrapperのprocess自体はどちらも持たない。
 /// `DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`は`[run.env]`で上書きできない（`DAGQ_`の予約）。
 /// 環境は`actor_env`（`src/application/actor_executor.rs`）の1か所で作り、runのsession wrapperはその後に`[run.env]`を足す。
@@ -999,18 +1014,33 @@ impl ActorExecutor for HostActorExecutor<'_> {
             } => {
                 let provider = self.provider()?;
                 self.spawner()?;
+                let isolated = program.isolated();
                 let mut command = match program {
                     HeadlessProgram::Review {
                         run,
                         tree,
                         prompt,
                         access,
-                    } => provider.review_command(run, tree, prompt, access)?,
+                        reads,
+                    } => {
+                        let mut command = provider.review_command(run, tree, prompt, access)?;
+                        if let Some(reads) = reads {
+                            provider.restrict_role_job_reads(&mut command, reads)?;
+                        }
+                        command
+                    }
                     HeadlessProgram::Job {
                         cwd,
                         prompt,
                         access,
-                    } => provider.headless_command(cwd, prompt, access)?,
+                        reads,
+                    } => {
+                        let mut command = provider.headless_command(cwd, prompt, access)?;
+                        if let Some(reads) = reads {
+                            provider.restrict_role_job_reads(&mut command, reads)?;
+                        }
+                        command
+                    }
                     HeadlessProgram::AgentJob(job) => provider.agent_job_command(job)?,
                 };
                 if let Some(session_id) = session_id {
@@ -1033,9 +1063,9 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         command.env_remove(name);
                     }
                 }
-                // A job's `dagq` goes to the queue service with a token of
-                // its own, which ends with it (goal 82's stage (3)).
-                let client = client_role(actor.role());
+                // Production jobs get a token of their own. A case keeps
+                // its role but gets neither a token nor a service route.
+                let client = client_role(actor.role()) && !isolated;
                 // Whether this start was issued its token, as the service's
                 // answer tells, which it gives back when its agent does not
                 // start: one handed over again, held already by another job
@@ -1054,6 +1084,11 @@ impl ActorExecutor for HostActorExecutor<'_> {
                     actor_env.extend(env);
                 }
                 command.envs(env).envs(actor_env);
+                if isolated {
+                    for name in [QUEUE_ENV].into_iter().chain(CLIENT_ENV) {
+                        command.env_remove(name);
+                    }
+                }
                 for name in without_env {
                     command.env_remove(name);
                 }
@@ -1143,6 +1178,9 @@ mod tests {
     struct Fake {
         workspaces: Mutex<Vec<Launched>>,
         spawned: Mutex<Vec<CommandSpec>>,
+        /// Read boundaries and queue routes requested from the provider.
+        reads: Mutex<Vec<super::super::AgentReads>>,
+        reached: Mutex<Vec<PathBuf>>,
         /// The actors a token was issued for, in order.
         issued: Mutex<Vec<String>>,
         /// The actors whose token a job's end revokes, in order.
@@ -1229,6 +1267,27 @@ mod tests {
             let mut command = CommandSpec::new("job");
             command.current_dir(cwd).arg(access.as_str()).arg(prompt);
             Ok(command)
+        }
+        fn agent_job_command(
+            &self,
+            job: &crate::application::AgentJobLaunch,
+        ) -> Result<CommandSpec> {
+            let mut command = self.headless_command(&job.cwd, &job.prompt, JobAccess::ReadFiles)?;
+            if let Some(reads) = &job.reads {
+                self.restrict_role_job_reads(&mut command, reads)?;
+            }
+            Ok(command)
+        }
+        fn restrict_role_job_reads(
+            &self,
+            _: &mut CommandSpec,
+            reads: &super::super::AgentReads,
+        ) -> Result<()> {
+            self.reads.lock().unwrap().push(reads.clone());
+            Ok(())
+        }
+        fn reach_queue_service(&self, _: &mut CommandSpec, socket: &Path) {
+            self.reached.lock().unwrap().push(socket.to_owned());
         }
         fn inbox_command(
             &self,
@@ -1390,6 +1449,7 @@ mod tests {
             program: HeadlessProgram::Job {
                 cwd,
                 prompt: "p",
+                reads: None,
                 access: JobAccess::QueueCli,
             },
             session_id: None,
@@ -1399,6 +1459,102 @@ mod tests {
             env: Vec::new(),
             streams: Streams::Null,
         }
+    }
+
+    #[test]
+    fn cases_keep_their_role_but_issue_no_token_and_open_no_network() {
+        let fake = Fake::default();
+        let reads = super::super::AgentReads {
+            readable: vec![
+                "/q/agent-evals/1/0/tree".into(),
+                "/q/agent-evals/1/0/material".into(),
+            ],
+            unreadable: vec!["/repo".into(), "/repo/.git".into(), "/q".into()],
+        };
+        let tree = &reads.readable[0];
+        let run = provisioned_run(Path::new("/q/agent-evals/1/0/job"));
+        let agent = crate::application::AgentJobLaunch {
+            cwd: tree.clone(),
+            dir: "/q/agent-evals/1/0/job".into(),
+            material: reads.readable[1].join("material.md"),
+            prompt: "p".into(),
+            tools: crate::domain::review_subagents::AgentRole::Review.default_tools(),
+            reads: Some(reads.clone()),
+        };
+        for (role, program) in [
+            (
+                ActorRole::PlanReviewJob,
+                HeadlessProgram::Job {
+                    cwd: tree,
+                    prompt: "p",
+                    access: JobAccess::ReadFilesAndQueueCli,
+                    reads: Some(&reads),
+                },
+            ),
+            (
+                ActorRole::GoalReviewJob,
+                HeadlessProgram::Job {
+                    cwd: tree,
+                    prompt: "p",
+                    access: JobAccess::ReadFilesAndQueueCli,
+                    reads: Some(&reads),
+                },
+            ),
+            (
+                ActorRole::ReviewJob,
+                HeadlessProgram::Review {
+                    run: &run,
+                    tree,
+                    prompt: "p",
+                    access: JobAccess::ReadFiles,
+                    reads: Some(&reads),
+                },
+            ),
+            (ActorRole::ReviewJob, HeadlessProgram::AgentJob(&agent)),
+        ] {
+            HostActorExecutor::new(Path::new("/q/queue.db"))
+                .with_provider(&fake)
+                .with_spawner(&fake)
+                .with_queue_service(&fake)
+                .spawn(ActorExecutionSpec::new(
+                    ActorContext::instance(role, "case"),
+                    WorkspaceAccess::Read(tree.clone()),
+                    ActorProgram::Headless {
+                        program,
+                        session_id: None,
+                        launch: None,
+                        without_mcp: true,
+                        without_env: &[],
+                        // Even caller-provided credentials must be removed.
+                        env: vec![
+                            (SOCKET_ENV.into(), "socket".into()),
+                            (CREDENTIAL_FILE_ENV.into(), "credential".into()),
+                        ],
+                        streams: Streams::Null,
+                    },
+                ))
+                .unwrap();
+            let commands = fake.spawned.lock().unwrap();
+            let command = commands.last().unwrap();
+            let effective: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+            assert_eq!(
+                effective[std::ffi::OsStr::new(ROLE_ENV)],
+                Some(std::ffi::OsStr::new(role.env_value().unwrap()))
+            );
+            for key in [QUEUE_ENV].into_iter().chain(CLIENT_ENV) {
+                assert_eq!(
+                    effective[std::ffi::OsStr::new(key)],
+                    None,
+                    "{key}: {effective:?}"
+                );
+            }
+            assert_eq!(fake.reads.lock().unwrap().last(), Some(&reads));
+        }
+        assert_eq!(fake.reads.lock().unwrap().len(), 4);
+        assert!(fake.reached.lock().unwrap().is_empty());
+        assert!(fake.issued.lock().unwrap().is_empty());
+        assert!(fake.revoked.lock().unwrap().is_empty());
+        assert!(fake.given_back.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1956,6 +2112,7 @@ mod tests {
                         program: HeadlessProgram::Job {
                             cwd: dir,
                             prompt: "observe",
+                            reads: None,
                             access: JobAccess::QueueCli,
                         },
                         session_id: Some("s1"),
@@ -2057,6 +2214,7 @@ mod tests {
                             run: &run,
                             tree: dir,
                             prompt: "review",
+                            reads: None,
                             access: JobAccess::ReadFiles,
                         },
                         session_id: None,

@@ -527,6 +527,9 @@ const TESTS_DEFINITION: &str = "---\ndescription: main's test checks\n---\nCheck
 /// and 4 the agent's job with the default setting sources (and, for 4,
 /// `write` declared) load the marker, list the agent and write the file;
 /// for 3 the same job with the deny emptied runs the command.
+/// 5. A role case whose tree and material live under a queue data directory
+///    reads its material, but cannot read another case or the queue DB.
+///    Disabling only `blockReadsOutsideWorkingDirectories` reads all three.
 #[test]
 #[ignore = "runs the real Claude Code; see the doc comment"]
 fn the_real_claude_review_jobs_keep_their_limits() {
@@ -775,6 +778,92 @@ fn the_real_claude_review_jobs_keep_their_limits() {
         worktree.join(ran).is_file(),
         "the control runs the command: {reply}"
     );
+
+    // A role case in the queue data directory: its material reads, but
+    // another case and the queue DB do not. The control disables only
+    // the working-directory boundary, leaving tools and directories alike.
+    let data = dir.path().join("eval-data");
+    let tree = data.join("agent-evals/1/0/tree");
+    let material = data.join("agent-evals/1/0/material");
+    let other = data.join("agent-evals/1/1/material");
+    for path in [&tree, &material, &other] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let files = [
+        material.join("input.txt"),
+        other.join("input.txt"),
+        data.join("queue.db"),
+    ];
+    let contents: Vec<_> = files
+        .iter()
+        .map(|_| uuid::Uuid::new_v4().to_string())
+        .collect();
+    for (path, body) in files.iter().zip(&contents) {
+        fs::write(path, body).unwrap();
+    }
+    let reads = dagq::application::AgentReads {
+        readable: vec![tree.clone(), material],
+        unreadable: vec![
+            dir.path().join("main"),
+            dir.path().join("git"),
+            data.clone(),
+        ],
+    };
+    let prompt = format!(
+        "Use Read exactly once for EACH of these three files: {}. If a read is denied, \
+         report DENIED for that file and continue to the next. Do not use any other tool or \
+         retry. Finally report each file's full contents or DENIED.",
+        files
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for control in [false, true] {
+        let mut command = claude
+            .headless_command(
+                &tree,
+                &prompt,
+                dagq::domain::headless_job::JobAccess::ReadFilesAndQueueCli,
+            )
+            .unwrap();
+        claude
+            .restrict_role_job_reads(&mut command, &reads)
+            .unwrap();
+        if control {
+            let args: Vec<_> = command.get_args().map(|s| s.to_owned()).collect();
+            let settings_arg = args.windows(2).find(|p| p[0] == "--settings").unwrap()[1].clone();
+            let mut settings: Value = serde_json::from_str(settings_arg.to_str().unwrap()).unwrap();
+            settings["permissions"]["blockReadsOutsideWorkingDirectories"] = false.into();
+            assert!(command.remove_arg_pair("--settings", settings_arg));
+            command.arg("--settings").arg(settings.to_string());
+        }
+        claude.without_mcp(&mut command);
+        let (reply, _, result) = run(command, false, &data.join("prompt.txt"));
+        assert!(
+            reply.contains(&contents[0]),
+            "case material was not read: {reply}"
+        );
+        for hidden in &contents[1..] {
+            assert_eq!(
+                reply.contains(hidden),
+                control,
+                "control={control}: {reply}"
+            );
+        }
+        if !control {
+            let denials = result["permission_denials"]
+                .as_array()
+                .expect("read denials");
+            for path in &files[1..] {
+                assert!(
+                    denials.iter().any(|d| d["tool_name"] == "Read"
+                        && d["tool_input"]["file_path"].as_str() == path.to_str()),
+                    "no denial for {path:?}: {result}"
+                );
+            }
+        }
+    }
 }
 
 /// Main with `[roles.review]` naming Codex, `extra` after it, and

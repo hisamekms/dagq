@@ -247,7 +247,9 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   eval専用の起動の組み立ては作らない。
 - 本番のagentのjobも同じ起動のコマンドと1つのverdictの読み取りを使う。
   ケースのjobは読める場所の欄（`AgentReads`）を持ち、本番のjobはその欄を空にする。
-  同じ定義・provider・道具の宣言なら、argvの差はその欄からproviderが作る読み取りの制限の引数、stdinのpromptの差は材料の行だけである。
+  同じ定義・provider・道具の宣言なら、argvとenvの差は読み取りの制限とqueueへの接続、stdinのpromptの差は材料の行だけである。
+- evalのjobはqueueに届かず、役割のjobが読める場所はケースのtreeと材料に限り、Claudeの境界は作業dirの外の読み取りの拒否に拠る。
+  起動の入口は`application::actor_executor`とproviderの`AgentProvider::restrict_role_job_reads`。
 - 実行の入口は`application::supervise::execution::agent_eval`。
 - ケースのtreeは、queueのdata dirの`agent-evals/`の下に周ごとに置く、tree自身のGitのrepositoryである。
   `base_commit`のケースは、supervisorが`base_commit`にpatchを当てたcommitをrepositoryの中に作り、材料のファイルをそこから作って、ケースのdirの材料だけのdirに書く。
@@ -260,7 +262,7 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   repositoryのcheckoutとGit directory、queueのdata dirのほか（ほかのケースと実行の出力、productionのケースの集合）は読めない。
   Claudeのjobは読める場所の欄を使わず、`--add-dir`でtree・材料のdir・自分のjobのdirを足す起動のままである（shellを宣言した定義のcommandは限らない）。
   Codexのjobは、`--sandbox read-only`の代わりに、読める場所の欄から作るjobのpermission profileの読み取りの設定で限る。
-  書き込みとnetworkはread-onlyのsandbox・jobのpermission profile（ADR-t1233-5）・`untrusted`（ADR-t1570-1）のまま変えない。
+  書き込みはread-onlyのsandbox・jobのpermission profile（ADR-t1233-5）・`untrusted`（ADR-t1570-1）で拒む。
   ケースのdirは番号で名付け、promptにもpathにもケースのidと期待を出さない。
 - providerのloginか使用量の上限で止まった実行は、providerを控えて同じ実行を待たせ、やり直しに数えない。
 - 起動を止めたsupervisor（drain・stop・serviceの停止）は、流れている実行が終われば周を手放し、次に動くsupervisorがeventから読み直す。

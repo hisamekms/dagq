@@ -365,8 +365,9 @@ fn job_network_config(socket: &Path) -> Result<[String; 3]> {
 /// The `-c` of a case's agent job in place of `--sandbox read-only` that
 /// let it read only where it may ([`AgentReads`]): the [`JOB_PROFILE`]
 /// permission profile on top of `:read-only` (no write anywhere, no
-/// network; [`Codex::reach_queue_service`] opens the socket alone as for
-/// any job) with a `filesystem` table that reads nothing (`:root`), no
+/// network; production jobs use [`Codex::reach_queue_service`] for the
+/// socket, while a case's executor never calls it) with a `filesystem`
+/// table that reads nothing (`:root`), no
 /// `/tmp` and no `$TMPDIR` (`:slash_tmp`, `:tmpdir`: without them a
 /// `filesystem` table lets the job write `/tmp`), but the system's paths
 /// a command needs (`:minimal`), the places the commands are found
@@ -613,6 +614,15 @@ impl AgentProvider for Codex {
             }
         }
         Ok(command)
+    }
+    fn restrict_role_job_reads(&self, command: &mut CommandSpec, reads: &AgentReads) -> Result<()> {
+        let search = std::env::var_os("PATH");
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        command.remove_arg_pair("--sandbox", JOB_SANDBOX);
+        for config in agent_reads_config(reads, search.as_deref(), home.as_deref())? {
+            command.option_args(["-c".to_owned(), config]);
+        }
+        Ok(())
     }
     /// A [`headless_command`](AgentProvider::headless_command) in the
     /// run's worktree with [`distrust_config`] as `-c`: the worker's
@@ -1936,6 +1946,48 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn role_case_profiles_refuse_production_files_and_other_cases() {
+        let reads = AgentReads {
+            readable: vec![
+                "/q/agent-evals/1/0/tree".into(),
+                "/q/agent-evals/1/0/material".into(),
+            ],
+            unreadable: vec!["/main".into(), "/git".into(), "/q".into()],
+        };
+        let codex = Codex::new("/bin/codex".into());
+        let task_run = run(&reads.readable[0], Path::new("/q/agent-evals/1/0/job"));
+        for mut command in [
+            codex
+                .headless_command(&reads.readable[0], "p", JobAccess::ReadFilesAndQueueCli)
+                .unwrap(),
+            codex
+                .review_command(&task_run, &reads.readable[0], "p", JobAccess::ReadFiles)
+                .unwrap(),
+        ] {
+            codex.restrict_role_job_reads(&mut command, &reads).unwrap();
+            let configs: Vec<_> = command
+                .get_args()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            let table = filesystem(&configs);
+            for (path, expected) in [
+                ("/main/src/lib.rs", "none"),
+                ("/git/objects/a", "none"),
+                ("/q/queue.db", "none"),
+                ("/q/service/queue.sock", "none"),
+                ("/q/service/credentials/token", "none"),
+                ("/q/runs/other/receipt.json", "none"),
+                ("/q/agent-evals/1/1/tree/a", "none"),
+                ("/q/agent-evals/1/0/tree/a", "read"),
+                ("/q/agent-evals/1/0/material/a", "read"),
+            ] {
+                assert_eq!(access(&table, Path::new(path)), expected, "{path}");
+            }
+            assert!(!configs.iter().any(|s| s.contains("network")));
+        }
+    }
+
     /// A case's agent job (ADR-t1233-5 decision 4's profile, narrowed)
     /// reads its tree, its material's directory, the system's paths and
     /// the commands' places, and nothing else: not the repository's
@@ -2002,6 +2054,10 @@ mod tests {
                 "none",
             ),
             ("data/agent-cases/1/cases.json", "none"),
+            ("data/queue.db", "none"),
+            ("data/service/queue.sock", "none"),
+            ("data/service/credentials/token", "none"),
+            ("data/runs/other/receipt.json", "none"),
             ("repo/.dagq/agents/demo/evals/dev.json", "none"),
             ("repo/.git/objects/pack", "none"),
         ] {
@@ -2027,8 +2083,8 @@ mod tests {
     /// The launch of a case's agent job is a run's review's agent's
     /// (distrusted, its tools' features), with the read-only sandbox's
     /// flag in place of [`agent_reads_config`]'s profile and nothing else
-    /// changed; reaching the queue service then opens the profile's
-    /// network to the socket alone, as for any job.
+    /// changed. The provider can open the profile's network to a socket;
+    /// the executor never asks it to do so for a case.
     #[test]
     fn a_cases_agent_job_is_a_reviews_agent_job_with_its_reads_profile() {
         let layout = case_layout();

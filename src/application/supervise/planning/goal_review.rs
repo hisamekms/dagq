@@ -291,6 +291,7 @@ impl PlanningState {
                     program: HeadlessProgram::Job {
                         cwd: &env.layout.repo_root,
                         prompt,
+                        reads: None,
                         access: GOAL_REVIEW_ACCESS,
                     },
                     session_id: job.session_id.as_deref(),

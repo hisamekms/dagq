@@ -201,6 +201,7 @@ pub fn run_agent_in(
                     program: HeadlessProgram::Job {
                         cwd: &cwd,
                         prompt,
+                        reads: None,
                         access: agent.access,
                     },
                     session_id: agent.session_id,

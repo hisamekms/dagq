@@ -20,6 +20,7 @@ mod session;
 mod already_satisfied;
 mod ci_freshness;
 mod disk_holds;
+mod eval_isolation;
 mod fresh_session_decisions;
 mod full_disk;
 mod landing_answers;

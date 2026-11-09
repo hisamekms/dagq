@@ -19,8 +19,8 @@
 //! an error ([`DefinitionOverLimit`]) and no job starts.
 //! What a case expects (its verdict, codes, split and id) is never in it.
 //! The job reads only the material file and the files of the tree it runs
-//! in, with the tools its definition declares; it is given no way to read
-//! the queue. A case's job also names where it may read
+//! in, with the tools its definition declares. A case's job has no queue
+//! credential or service route and names where it may read
 //! ([`AgentJob::reads`]): Codex adds a read restriction from it, and
 //! Claude Code's launch does not use it (its `--add-dir` stays as it is);
 //! that is all the launch of a case's job and of a run's review's agent

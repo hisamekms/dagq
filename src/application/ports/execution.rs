@@ -351,12 +351,12 @@ pub struct AgentJobLaunch {
     pub reads: Option<AgentReads>,
 }
 
-/// The places an agent job of a case (an eval's run, a set's labeling)
+/// The places a role or agent job of a case (an eval's run, a set's labeling)
 /// may read: its provider lets it read these and the places the system's
 /// commands need, and nothing else (Codex's permission profile,
-/// `infrastructure::codex::agent_reads_config`). Claude Code's job does
-/// not use it: its reads stay those of its launch's `--add-dir` and its
-/// declared tools.
+/// `infrastructure::codex::agent_reads_config`). Claude role jobs block
+/// reads outside working directories; Claude agent jobs keep their
+/// launch's `--add-dir` and declared tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentReads {
     /// The case's tree and its material's directory.
@@ -526,6 +526,14 @@ pub trait AgentProvider {
     fn agent_job_command(&self, job: &AgentJobLaunch) -> Result<CommandSpec> {
         let _ = job;
         anyhow::bail!("this provider has no agent job")
+    }
+    /// Narrow a role job built by `headless_command` or `review_command`
+    /// to a case's tree and material. Called only with `AgentReads`; a
+    /// provider without this boundary refuses rather than launching wider.
+    /// Agent jobs keep their own provider-specific read restriction.
+    fn restrict_role_job_reads(&self, command: &mut CommandSpec, reads: &AgentReads) -> Result<()> {
+        let _ = (command, reads);
+        anyhow::bail!("this provider cannot restrict a role job's reads")
     }
     /// The agent of the inbox (ADR-0022): an interactive agent in `cwd`
     /// (the main checkout) with `prompt` as its first message that loads

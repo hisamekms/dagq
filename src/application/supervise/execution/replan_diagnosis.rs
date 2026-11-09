@@ -895,6 +895,7 @@ impl Supervisor<'_> {
                     program: HeadlessProgram::Job {
                         cwd: dir,
                         prompt,
+                        reads: None,
                         access: TRIAGE_ACCESS,
                     },
                     session_id: None,

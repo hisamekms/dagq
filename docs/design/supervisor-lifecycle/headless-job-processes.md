@@ -26,6 +26,9 @@ supervisorが起動するheadlessのjob（runのreview、終わったrunと生�
 use caseは`src/application/supervise/execution/jobs.rs`、表は`src/infrastructure/headless_jobs.rs`、判定は`src/domain/headless_job.rs`。
 observerの子プロセスはここに記録せず、時間切れとsupervisorのループのerrorでの終了のときに子孫ごとkillする（[Observer](observer.md)）。
 
+evalのjobはqueueに届かず、役割のjobが読める場所はケースのtreeと材料に限り、Claudeの境界は作業dirの外の読み取りの拒否に拠る。
+起動の入口は`application::actor_executor`とproviderの`AgentProvider::restrict_role_job_reads`。
+
 ## 記録
 
 判定を返す役割の起動のsnapshotの入口は`application::role_snapshot`、材料の受け持ちは[計測のSSOTとビュー](../measurement.md#ssotとビュー)。

@@ -4167,6 +4167,14 @@ impl AgentProvider for ClaudeCode {
         command.stdin(prompt);
         Ok(command)
     }
+    fn restrict_role_job_reads(
+        &self,
+        command: &mut CommandSpec,
+        reads: &crate::application::AgentReads,
+    ) -> Result<()> {
+        *command = claude_role_case_command(command, reads)?;
+        Ok(())
+    }
     /// `claude -p --output-format stream-json` prints the job's events,
     /// the last its `result`: the reply is its `result` text. An output
     /// without such an event (a Claude Code that printed text) is the reply
@@ -4498,6 +4506,65 @@ pub fn agent_settings(role: ActorRole) -> AgentSettings {
         ActorRole::ReviewJob => AgentSettings::Review,
         _ => AgentSettings::None,
     }
+}
+
+/// A case's role job keeps the production prompt and executable, but
+/// reads only its cwd (the case tree) and the other readable directories
+/// (material). No shell or setting source can widen that boundary.
+/// `Read` denies cannot be overridden by `--add-dir`, so an unreadable
+/// ancestor of a readable directory (the queue data dir) is omitted:
+/// `blockReadsOutsideWorkingDirectories` refuses its other descendants.
+fn claude_role_case_command(
+    original: &CommandSpec,
+    reads: &crate::application::AgentReads,
+) -> Result<CommandSpec> {
+    let cwd = original.get_current_dir().context("case job has no cwd")?;
+    anyhow::ensure!(
+        reads.readable.iter().any(|path| path == cwd),
+        "case tree is not readable"
+    );
+    let mut deny = permission_deny(ActorRole::ReviewJob);
+    for path in &reads.unreadable {
+        if !reads
+            .readable
+            .iter()
+            .any(|readable| readable.starts_with(path))
+        {
+            let path = path_text(path)?;
+            deny.push(format!("Read(/{}/**)", path.trim_end_matches('/')));
+        }
+    }
+    let mut settings: serde_json::Value = serde_json::from_str(&review_settings(&deny)?)?;
+    settings["permissions"]["blockReadsOutsideWorkingDirectories"] = true.into();
+    let mut command = original.clone();
+    for option in [
+        "--add-dir",
+        "--settings",
+        "--setting-sources",
+        "--allowedTools",
+        "--disallowedTools",
+    ] {
+        command.remove_option(option);
+    }
+    command
+        .args(["--setting-sources", ""])
+        .args(["--allowedTools", "Read,Grep,Glob"])
+        .arg("--disallowedTools")
+        .arg(
+            review_disallowed_tools(JobAccess::ReadFiles)
+                .into_iter()
+                .chain(PRINT_MODE_DENIED_TOOLS)
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+        .arg("--settings")
+        .arg(serde_json::to_string(&settings)?);
+    for dir in &reads.readable {
+        if dir != cwd {
+            command.arg("--add-dir").arg(dir);
+        }
+    }
+    Ok(command)
 }
 
 /// Claude Code's tools a headless job of `access` is allowed beyond what
@@ -5938,6 +6005,104 @@ mod tests {
             .headless_command(Path::new("/q/job"), "p", JobAccess::ReadFiles)
             .unwrap();
         assert!(!read.get_args().any(|arg| arg == "--setting-sources"));
+    }
+
+    #[test]
+    fn claude_role_cases_block_reads_outside_the_tree_and_material_without_denying_them() {
+        use crate::application::AgentReads;
+        let reads = AgentReads {
+            readable: vec![
+                "/q/agent-evals/1/0/tree".into(),
+                "/q/agent-evals/1/0/material".into(),
+            ],
+            unreadable: vec!["/main".into(), "/git".into(), "/q".into()],
+        };
+        let claude = ClaudeCode {
+            executable: "claude".into(),
+        };
+        for review in [false, true] {
+            let mut command = claude
+                .headless_command(
+                    &reads.readable[0],
+                    "prompt",
+                    JobAccess::ReadFilesAndQueueCli,
+                )
+                .unwrap();
+            if review {
+                // A whole review's extra directory must disappear too.
+                command.args(["--add-dir", "/q/agent-evals/1/0/job"]);
+                command.args(["--settings", "/q/agent-evals/1/0/job/settings.json"]);
+                command.args(["--debug-file", "/q/agent-evals/1/0/job/debug.log"]);
+            }
+            claude
+                .restrict_role_job_reads(&mut command, &reads)
+                .unwrap();
+            assert_eq!(command.get_current_dir(), Some(reads.readable[0].as_path()));
+            assert_eq!(command.get_stdin(), Some("prompt"));
+            if review {
+                assert!(
+                    command
+                        .get_args()
+                        .any(|arg| arg == "/q/agent-evals/1/0/job/debug.log")
+                );
+            }
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect();
+            let dirs: Vec<_> = args
+                .windows(2)
+                .filter(|p| p[0] == "--add-dir")
+                .map(|p| p[1])
+                .collect();
+            assert_eq!(dirs, ["/q/agent-evals/1/0/material"]);
+            let allowed: Vec<_> = args
+                .windows(2)
+                .filter(|pair| pair[0] == "--allowedTools")
+                .map(|pair| pair[1])
+                .collect();
+            assert_eq!(allowed, ["Read,Grep,Glob"]);
+            assert!(!args.contains(&"Bash(dagq:*)"));
+            assert!(
+                args.windows(2)
+                    .any(|p| p[0] == "--disallowedTools" && p[1].split(',').any(|t| t == "Bash"))
+            );
+            let settings: serde_json::Value =
+                serde_json::from_str(args.windows(2).find(|p| p[0] == "--settings").unwrap()[1])
+                    .unwrap();
+            assert_eq!(
+                settings["permissions"]["blockReadsOutsideWorkingDirectories"],
+                true
+            );
+            let deny = settings["permissions"]["deny"].as_array().unwrap();
+            assert!(deny.contains(&serde_json::json!("Read(//main/**)")));
+            assert!(deny.contains(&serde_json::json!("Read(//git/**)")));
+            let denied_roots: Vec<_> = deny
+                .iter()
+                .filter_map(|rule| rule.as_str()?.strip_prefix("Read(/")?.strip_suffix("/**)"))
+                .map(Path::new)
+                .collect();
+            assert_eq!(denied_roots, [Path::new("/main"), Path::new("/git")]);
+            for (path, inside) in [
+                ("/q/agent-evals/1/0/tree/src/a", true),
+                ("/q/agent-evals/1/0/material/a", true),
+                ("/q/agent-evals/1/1/tree/a", false),
+                ("/q/agent-evals/1/1/material/a", false),
+                ("/q/queue.db", false),
+                ("/q/runs/other/receipt.json", false),
+                ("/q/agent-evals/1/0/job/agent.out", false),
+            ] {
+                let path = Path::new(path);
+                assert_eq!(
+                    reads.readable.iter().any(|root| path.starts_with(root)),
+                    inside,
+                    "{path:?}"
+                );
+                if inside {
+                    assert!(!denied_roots.iter().any(|root| path.starts_with(root)));
+                }
+            }
+        }
     }
 
     #[test]

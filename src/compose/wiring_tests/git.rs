@@ -455,8 +455,14 @@ impl Repository for FakeGit {
         Ok(Vec::new())
     }
 
-    fn paths_in(&self, _: &str, _: &str) -> Result<Vec<String>> {
-        Ok(Vec::new())
+    fn paths_in(&self, _: &str, prefix: &str) -> Result<Vec<String>> {
+        Ok(self
+            .lock()
+            .files
+            .keys()
+            .filter(|path| path.starts_with(prefix))
+            .cloned()
+            .collect())
     }
 
     fn paths_containing(&self, _: &str, _: &str, _: &[String]) -> Result<Vec<String>> {
@@ -607,6 +613,15 @@ impl Repository for FakeGit {
                 bail!("the wiring test's repository merges no tree")
             }
         }
+    }
+
+    fn add_case_tree(&self, path: &Path, base: &str, _: &Path, _: &[&str]) -> Result<CommitSha> {
+        self.checkout_scratch(path, base)?;
+        Ok(CommitSha::parse(base, "case head")?)
+    }
+
+    fn remove_case_tree(&self, path: &Path) -> Result<()> {
+        self.remove_scratch(path)
     }
 
     fn checkout_scratch(&self, path: &Path, commit: &str) -> Result<()> {

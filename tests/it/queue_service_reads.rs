@@ -72,12 +72,24 @@ fn answer(queue: &Queue, token: &str, use_case: UseCase, params: &Value) -> Valu
 /// the two service calls (a period that ended in between).
 fn same_as_cli(queue: &Queue, token: &str, use_case: UseCase, params: &Value, args: &[&str]) {
     let clock = clock_fields(use_case);
+    let mut changed = Vec::new();
     for _ in 0..3 {
         let mut before = answer(queue, token, use_case, params);
         let mut printed = ok(&queue.db, args);
         let mut after = answer(queue, token, use_case, params);
         let told = [&mut before, &mut printed, &mut after].map(|value| take(value, &clock));
+        if use_case == UseCase::Kpi {
+            // Exercise the late-quality clock even if all three calls
+            // happened in one second; omitting it used to pass by chance.
+            assert!(
+                told[0]
+                    .keys()
+                    .any(|path| path.ends_with("/post_landing/all/reverts/read_at")),
+                "the KPI late-quality read clock was not compared separately"
+            );
+        }
         if before != after {
+            changed = differing_paths(&before, &after);
             continue;
         }
         assert_eq!(before, printed, "{use_case:?} {params} against {args:?}");
@@ -103,7 +115,41 @@ fn same_as_cli(queue: &Queue, token: &str, use_case: UseCase, params: &Value, ar
         }
         return;
     }
-    panic!("{use_case:?} {params} kept changing beside the clock");
+    panic!("{use_case:?} {params} kept changing beside the clock; changed paths: {changed:?}");
+}
+
+/// At most twelve paths of a changing answer, including added and removed
+/// keys, so a failed comparison identifies what its clock list missed.
+fn differing_paths(before: &Value, after: &Value) -> Vec<String> {
+    fn walk(before: &Value, after: &Value, path: &str, changed: &mut Vec<String>) {
+        if before == after || changed.len() >= 12 {
+            return;
+        }
+        match (before, after) {
+            (Value::Object(a), Value::Object(b)) => {
+                let keys: std::collections::BTreeSet<_> = a.keys().chain(b.keys()).collect();
+                for key in keys {
+                    if changed.len() >= 12 {
+                        break;
+                    }
+                    let path = format!("{path}/{key}");
+                    match (a.get(key), b.get(key)) {
+                        (Some(a), Some(b)) => walk(a, b, &path, changed),
+                        _ => changed.push(path),
+                    }
+                }
+            }
+            (Value::Array(a), Value::Array(b)) if a.len() == b.len() => {
+                for (index, (a, b)) in a.iter().zip(b).enumerate() {
+                    walk(a, b, &format!("{path}/{index}"), changed);
+                }
+            }
+            _ => changed.push(path.to_owned()),
+        }
+    }
+    let mut changed = Vec::new();
+    walk(before, after, "", &mut changed);
+    changed
 }
 
 /// The fields of `use_case`'s answer that tell the time now, as paths
@@ -119,7 +165,9 @@ fn clock_fields(use_case: UseCase) -> Vec<(&'static [&'static str], bool)> {
             (&["landing_utilization", "window_secs"], true),
             (&["execution_tokens", "until"], true),
         ],
-        // Every period of `kpi`: only the one not over yet moves.
+        // A period's open window moves, and late-quality arrivals keep
+        // their read time even for closed periods and comparison windows.
+        // Arrival::read_at and its elapsed times grow with the read clock.
         UseCase::Kpi => vec![
             (
                 &[
@@ -132,6 +180,94 @@ fn clock_fields(use_case: UseCase) -> Vec<(&'static [&'static str], bool)> {
                 true,
             ),
             (&["periods", "*", "details", "tokens", "until"], true),
+            (
+                &[
+                    "periods",
+                    "*",
+                    "details",
+                    "post_landing",
+                    "*",
+                    "*",
+                    "read_at",
+                ],
+                true,
+            ),
+            (
+                &[
+                    "periods",
+                    "*",
+                    "details",
+                    "post_landing",
+                    "*",
+                    "*",
+                    "after_period_ms",
+                ],
+                true,
+            ),
+            (
+                &[
+                    "periods",
+                    "*",
+                    "details",
+                    "post_landing",
+                    "*",
+                    "*",
+                    "reach_before_end_ms",
+                ],
+                true,
+            ),
+            (
+                &["compare", "before", "post_landing", "*", "*", "read_at"],
+                true,
+            ),
+            (
+                &[
+                    "compare",
+                    "before",
+                    "post_landing",
+                    "*",
+                    "*",
+                    "after_period_ms",
+                ],
+                true,
+            ),
+            (
+                &[
+                    "compare",
+                    "before",
+                    "post_landing",
+                    "*",
+                    "*",
+                    "reach_before_end_ms",
+                ],
+                true,
+            ),
+            (
+                &["compare", "after", "post_landing", "*", "*", "read_at"],
+                true,
+            ),
+            (
+                &[
+                    "compare",
+                    "after",
+                    "post_landing",
+                    "*",
+                    "*",
+                    "after_period_ms",
+                ],
+                true,
+            ),
+            (
+                &[
+                    "compare",
+                    "after",
+                    "post_landing",
+                    "*",
+                    "*",
+                    "reach_before_end_ms",
+                ],
+                true,
+            ),
         ],
         UseCase::Status => vec![(&["checked_at"][..], true)],
         UseCase::Forecast => vec![(&["at"][..], true), (&["seed"], false)],

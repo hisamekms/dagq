@@ -1757,10 +1757,10 @@ impl Supervisor<'_> {
                     run,
                     tree: &worktree,
                     prompt,
+                    reads: None,
                     access: REVIEW_ACCESS,
                 },
-                // One agent's own job, given no way to read the queue, as
-                // the eval's is.
+                // One agent's own job, using the same builder as the eval.
                 ReviewJobInput::Agent(built) => HeadlessProgram::AgentJob(&built.launch),
             };
             let without_mcp = matches!(job.input, ReviewJobInput::Agent(_));

@@ -126,6 +126,19 @@ impl CommandSpec {
         at.is_some()
     }
 
+    /// Remove every occurrence of a named option and its values (up to
+    /// the next option). Used to narrow a provider's existing job command
+    /// without rebuilding its launch or keeping additional directories.
+    pub fn remove_option(&mut self, name: &str) {
+        while let Some(at) = self.args.iter().position(|arg| arg == name) {
+            let end = self.args[at + 1..]
+                .iter()
+                .position(|arg| arg.to_string_lossy().starts_with('-'))
+                .map_or(self.args.len(), |next| at + 1 + next);
+            self.args.drain(at..end);
+        }
+    }
+
     /// See [`Self::get_env_clear`].
     pub fn env_clear(&mut self) -> &mut Self {
         self.env_clear = true;
