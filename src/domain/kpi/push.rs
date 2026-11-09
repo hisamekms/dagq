@@ -27,6 +27,11 @@ pub const KPI_BREACH_RESOLVED: &str =
     crate::domain::event_kind::EventKind::KpiBreachResolved.as_str();
 /// The breaches' start and end, the latest of a target telling its state.
 pub const KPI_BREACH_KINDS: [&str; 2] = [KPI_BREACH_STARTED, KPI_BREACH_RESOLVED];
+/// Completion of the target check for a finished `period` and `label`,
+/// identifying its `build` and `supervisor`. Bookkeeping: this completion
+/// alone does not wake the observer.
+pub const KPI_BREACH_CHECKED: &str =
+    crate::domain::event_kind::EventKind::KpiBreachChecked.as_str();
 /// The push command took a message (`push_kind`, `period`, `attempt`).
 pub const KPI_PUSH_SENT: &str = crate::domain::event_kind::EventKind::KpiPushSent.as_str();
 /// The push command failed on a message: `push_kind`, `period`,

@@ -75,6 +75,73 @@ impl SqliteQueue {
         Ok(!recorded)
     }
 
+    /// The completed KPI checks: (period, label) of every
+    /// `kpi_breach_checked` event.
+    pub fn kpi_breaches_checked(&self) -> Result<std::collections::HashSet<(String, String)>> {
+        let tx = self.read_entry("kpi_breaches_checked")?;
+        let dialect = SqlRead::dialect(&tx);
+        let period = dialect.json_field("payload", "$.period", JsonType::Text);
+        let label = dialect.json_field("payload", "$.label", JsonType::Text);
+        let rows = SqlRead::query_map(
+            &tx,
+            &format!(
+                "SELECT {period}, {label}
+             FROM run_events WHERE kind=?1",
+            ),
+            sql_params![EventKind::KpiBreachChecked.as_str()],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )?;
+        let mut written = std::collections::HashSet::new();
+        for row in rows {
+            if let (Some(period), Some(label)) = row {
+                written.insert((period, label));
+            }
+        }
+        Ok(written)
+    }
+
+    /// Record `kpi_breach_checked` unless a check of the same `period` and
+    /// `label` is recorded, in one write: of two supervisors that wrote
+    /// the same check, one records it. `false` when it was recorded.
+    pub fn record_kpi_breach_checked(&self, payload: serde_json::Value) -> Result<bool> {
+        let (Some(period), Some(label)) = (
+            payload.get("period").and_then(Value::as_str),
+            payload.get("label").and_then(Value::as_str),
+        ) else {
+            bail!("kpi_breach_checked needs a period and a label");
+        };
+        let tx = self.write_tx("record_kpi_breach_checked")?;
+        let recorded: bool = SqlRead::query_row(
+            &tx,
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+               AND {}=?2 AND {}=?3)",
+                SqlRead::dialect(&tx).json_field("payload", "$.period", JsonType::Text),
+                SqlRead::dialect(&tx).json_field("payload", "$.label", JsonType::Text),
+            ),
+            sql_params![EventKind::KpiBreachChecked.as_str(), period, label],
+            |r| r.get(0),
+        )?;
+        if !recorded {
+            SqlWrite::execute(
+                &tx,
+                "INSERT INTO run_events(kind,payload,actor_role,actor_id,requested_by)
+             VALUES (?1,dagq_event_body(?2),dagq_actor_role(),dagq_actor_id(),dagq_requested_by())",
+                sql_params![
+                    EventKind::KpiBreachChecked.as_str(),
+                    serde_json::to_string(&payload)?
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(!recorded)
+    }
+
     /// Record `forecast_recorded` (ADR-0070 decision 3) unless another
     /// snapshot was recorded after `previous` (the latest one the caller
     /// read, `None` for none), in one write: of two supervisors that took
@@ -123,6 +190,12 @@ impl QueueRecords for SqliteQueue {
     }
     fn record_report_written(&self, payload: serde_json::Value) -> Result<bool> {
         SqliteQueue::record_report_written(self, payload)
+    }
+    fn kpi_breaches_checked(&self) -> Result<std::collections::HashSet<(String, String)>> {
+        SqliteQueue::kpi_breaches_checked(self)
+    }
+    fn record_kpi_breach_checked(&self, payload: serde_json::Value) -> Result<bool> {
+        SqliteQueue::record_kpi_breach_checked(self, payload)
     }
     fn kpi_breaches_open(&self) -> Result<Vec<serde_json::Value>> {
         SqliteQueue::kpi_breaches_open(self)
@@ -208,5 +281,83 @@ impl crate::application::health::ReplanSource for SqliteQueue {
         task: TaskId,
     ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
         Self::replan_lineage(self, task)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_breach_checks_are_recorded_once_per_period_and_label() {
+        let uri = format!("file:/breach-checks-{}?vfs=memdb", uuid::Uuid::new_v4());
+        let queue = SqliteQueue::init(&uri).unwrap();
+        assert!(queue.kpi_breaches_checked().unwrap().is_empty());
+        for (period, label) in [
+            ("day", "2026-11-08"),
+            ("week", "2026-W45"),
+            ("day", "2026-11-09"),
+        ] {
+            let payload = serde_json::json!({"period": period, "label": label, "build": "build", "supervisor": "first"});
+            assert!(queue.record_kpi_breach_checked(payload.clone()).unwrap());
+            let mut repeated = payload;
+            repeated["supervisor"] = serde_json::json!("restarted");
+            assert!(!queue.record_kpi_breach_checked(repeated).unwrap());
+        }
+        assert_eq!(queue.kpi_breaches_checked().unwrap().len(), 3);
+        let count: i64 = queue
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM run_events WHERE kind='kpi_breach_checked'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 3);
+        assert!(queue.reports_written().unwrap().is_empty());
+        assert!(
+            queue
+                .record_kpi_breach_checked(serde_json::json!({"period": "day"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn completed_breach_checks_do_not_wake_the_observer() {
+        let uri = format!(
+            "file:/breach-checks-quiet-{}?vfs=memdb",
+            uuid::Uuid::new_v4()
+        );
+        let queue = SqliteQueue::init(&uri).unwrap();
+        let after = queue
+            .record_queue_event(
+                EventKind::ReportWritten,
+                json!({
+                    "period": "day", "label": "2026-11-08"
+                }),
+            )
+            .unwrap();
+        let count = || {
+            queue
+                .events_besides("observer", crate::domain::sessions::OBSERVER, after)
+                .unwrap()
+        };
+        for (period, label) in [("day", "2026-11-08"), ("week", "2026-W45")] {
+            assert!(
+                queue
+                    .record_kpi_breach_checked(json!({
+                        "period": period, "label": label, "build": "test", "supervisor": "s"
+                    }))
+                    .unwrap()
+            );
+            assert_eq!(count(), 0);
+        }
+        for (kind, expected) in [
+            (EventKind::KpiBreachStarted, 1),
+            (EventKind::KpiBreachResolved, 2),
+        ] {
+            queue.record_queue_event(kind, json!({})).unwrap();
+            assert_eq!(count(), expected);
+        }
     }
 }

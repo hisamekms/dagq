@@ -137,7 +137,7 @@ impl ObservationState {
             // The reports are recorded already: a failure from here on is
             // logged and does not fail the job, which would not write them
             // again.
-            let push = push::check_breaches(&*queue, &*ledger, &setup, config.as_ref(), now)
+            let push = push::check_breaches(&*queue, &*ledger, &setup, config.as_ref(), now, &token)
                 .and_then(|breaches| {
                     config
                         .map(|config| {

@@ -1122,6 +1122,13 @@ pub trait QueueRecords {
     /// Record `report_written` with `payload` (its `period` and `label`)
     /// unless the same report is recorded; `false` when it is.
     fn record_report_written(&self, payload: serde_json::Value) -> Result<bool>;
+    /// Completed target checks, keyed by `day` or `week` and the latest
+    /// finished period's local date or ISO week label.
+    fn kpi_breaches_checked(&self) -> Result<std::collections::HashSet<(String, String)>>;
+    /// Record `kpi_breach_checked` once per `period` and `label`. The
+    /// payload also identifies the `build` and `supervisor` that checked.
+    /// Returns false if that period was already recorded.
+    fn record_kpi_breach_checked(&self, payload: serde_json::Value) -> Result<bool>;
     /// The KPI breaches started and not resolved (ADR-0051 decision 18),
     /// each its `kpi_breach_started` payload.
     fn kpi_breaches_open(&self) -> Result<Vec<serde_json::Value>>;

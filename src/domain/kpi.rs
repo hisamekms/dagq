@@ -56,6 +56,7 @@ pub use window::{CANDIDATES_SAMPLED, UNATTRIBUTED_RATIO, WindowKpis};
 pub const BOOKKEEPING_KINDS: &[&str] = &[
     CANDIDATES_SAMPLED,
     report::REPORT_WRITTEN,
+    push::KPI_BREACH_CHECKED,
     super::forecast::snapshot::FORECAST_RECORDED,
     push::KPI_PUSH_SENT,
     push::KPI_PUSH_FAILED,

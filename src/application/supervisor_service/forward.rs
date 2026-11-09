@@ -2611,6 +2611,12 @@ impl QueueRecords for SupervisorQueue {
     fn record_report_written(&self, payload: serde_json::Value) -> Result<bool> {
         self.remote("record_report_written", vec![to_value(payload)?])
     }
+    fn kpi_breaches_checked(&self) -> Result<std::collections::HashSet<(String, String)>> {
+        self.remote("kpi_breaches_checked", vec![])
+    }
+    fn record_kpi_breach_checked(&self, payload: serde_json::Value) -> Result<bool> {
+        self.remote("record_kpi_breach_checked", vec![to_value(payload)?])
+    }
     fn kpi_breaches_open(&self) -> Result<Vec<serde_json::Value>> {
         self.remote("kpi_breaches_open", vec![])
     }

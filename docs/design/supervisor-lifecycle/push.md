@@ -47,6 +47,11 @@ runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookの
 - supervisorのレポートのjob（[レポート](commands.md)のsupervisorの日次）が、`write_due`の後に`application::push::check_breaches`で、今の時点の日と週の`kpi`の目標の判定（[kpi](commands.md)）を読む。
   目標が1つも無く、開いた目標割れも無ければ何もしない。
   `dagq kpi`とレポートと同じくhostの負荷の記録も読むので、hostの負荷から作るKPI（`cpu_per_landing`・`load_per_core`）の目標も判定し、記録が無ければそのKPIは`not_judged`になるだけで検査は続く。
+- 判定は日と週それぞれの最新の終了済み期間について行い、完了をqueueの`kpi_breach_checked`に残す。
+  同じ期間の記録は一度だけで、起動し直しても記録済みの期間は判定しない。
+  `kpi_breach_checked`は記帳のeventで、observerの起動判定では数えない。
+  目標の設定を期間の途中で変えたときは、次の期間の判定から反映する。
+  日次・週次のまとめはレポートの作成結果から作る。
 - 状態が`breach`の目標（KPIと層）は`kpi_breach_started`を、開いた目標割れのうち今の判定が`ok`か`missed`のもの（判定できる期間が目標を満たした）は解消を、目標の設定から消えたものも解消を`kpi_breach_resolved`で記録する。
   `not_judged`の間は開いたまま。
   どれもtaskの無いqueueのevent。
@@ -57,7 +62,7 @@ runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookの
   開いた目標割れは`SqliteQueue::kpi_breaches_open`。
 - 即時通知の印は、即時通知を送る設定で、同じlocal dayに印を付けて記録した`kpi_breach_started`が1日の上限に満たないときだけ付く（数え方は`record_kpi_breach`のdoc comment）。
   上限を超えた分と`[push]`が無いときはfalseで、日次のまとめにだけ載る。
-- これらのeventはobserverの「変化が無ければ起動しない」の判定で数える（記帳のeventではない。ADR-0051の決定24）。
+- 目標割れの始まりと解消のeventはobserverの「変化が無ければ起動しない」の判定で数える（記帳のeventではない。ADR-0051の決定24）。
 
 ## 送るもの（stdin）
 

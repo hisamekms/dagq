@@ -1572,3 +1572,41 @@ fn the_rows_of_an_older_version_cross_in_pages_as_the_queues_own() {
         ["ledger_older_rows_after", "ledger_older_rows_after"]
     );
 }
+
+#[test]
+fn completed_kpi_checks_cross_the_supervisor_service_once() {
+    use crate::application::QueueRecords;
+    use crate::application::supervisor_service::SupervisorQueues;
+    let owner = LeaseToken::new("owner");
+    let (_dir, direct, backend) = claimed_in_memdb_with(&owner, "kpi-check-service", fixed_time());
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    assert!(queue.kpi_breaches_checked().unwrap().is_empty());
+    let payload = serde_json::json!({"period": "day", "label": "2026-11-08", "build": "test", "supervisor": owner});
+    assert!(queue.record_kpi_breach_checked(payload.clone()).unwrap());
+    assert!(!queue.record_kpi_breach_checked(payload).unwrap());
+    let checked = queue.kpi_breaches_checked().unwrap();
+    assert_eq!(
+        checked,
+        std::collections::HashSet::from([("day".into(), "2026-11-08".into())])
+    );
+    assert_eq!(checked, direct.kpi_breaches_checked().unwrap());
+    assert_eq!(
+        *service.ops.lock().unwrap(),
+        [
+            "kpi_breaches_checked",
+            "record_kpi_breach_checked",
+            "record_kpi_breach_checked",
+            "kpi_breaches_checked"
+        ]
+    );
+}

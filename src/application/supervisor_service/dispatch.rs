@@ -2186,6 +2186,11 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             let (query,): (crate::domain::FindingQuery,) = read(op, args)?;
             answer(QueueRecords::findings(&*store, &query))
         }
+        "kpi_breaches_checked" => answer(QueueRecords::kpi_breaches_checked(&*store)),
+        "record_kpi_breach_checked" => {
+            let (payload,): (serde_json::Value,) = read(op, args)?;
+            answer(QueueRecords::record_kpi_breach_checked(&*store, payload))
+        }
         "reports_written" => answer(QueueRecords::reports_written(&*store)),
         "record_report_written" => {
             let (payload,): (serde_json::Value,) = read(op, args)?;

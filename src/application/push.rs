@@ -71,14 +71,19 @@ pub struct BreachCheck {
     pub resolved: Vec<Value>,
 }
 
-/// Judge the targets at `now` for the days and the weeks, and record each
+/// Judge each latest finished day and week not already checked in the queue,
+/// recording completion only after its transitions. Restarting skips checked
+/// periods; when both are checked no ledger window is read. Record each
 /// breach that started and each that ended since the last check (decision
 /// 18). A start is marked `pushed` while `push` sends breaches and the
 /// local day's limit allows.
 ///
+/// After downtime across local midnight, the next job checks the latest
+/// finished day and week at that time, without backfilling older periods.
+///
 /// Read one ledger window with
 /// [`WindowQuery::read_from_ms`](crate::domain::ledger::window::WindowQuery::read_from_ms)
-/// set to the earlier of [`read_from_ms`] for the day and week queries
+/// set to the earliest [`read_from_ms`] of the unchecked day and week queries
 /// (`last: 2`), including the baseline and breach streak history both need.
 pub fn check_breaches(
     queue: &(impl QueueRecords + ?Sized),
@@ -86,9 +91,30 @@ pub fn check_breaches(
     setup: &ReportSetup,
     push: Option<&PushConfig>,
     now: i64,
+    supervisor: &crate::domain::LeaseToken,
 ) -> Result<BreachCheck> {
-    let open = queue.kpi_breaches_open()?;
+    let checked = queue.kpi_breaches_checked()?;
+    let offset_ms = setup.host.utc_offset_secs * 1000;
+    let queries: Vec<_> = [Period::Day, Period::Week]
+        .into_iter()
+        .filter_map(|period| {
+            let start = period.start(super::stats::now_ms(now), offset_ms);
+            let label = period.label(period.start(start - 1, offset_ms), offset_ms);
+            (!checked.contains(&(period.as_str().to_owned(), label.clone()))).then_some((
+                KpiQuery {
+                    period,
+                    last: 2,
+                    ..KpiQuery::default()
+                },
+                label,
+            ))
+        })
+        .collect();
     let mut check = BreachCheck::default();
+    if queries.is_empty() {
+        return Ok(check);
+    }
+    let open = queue.kpi_breaches_open()?;
     if setup.config.targets.is_empty() && open.is_empty() {
         return Ok(check);
     }
@@ -96,22 +122,18 @@ pub fn check_breaches(
     let push_day = push
         .filter(|push| push.breach)
         .map(|push| (day, push.max_breach_per_day));
-    let queries = [Period::Day, Period::Week].map(|period| KpiQuery {
-        period,
-        // The period over and the one in progress: a target's latest
-        // judged value is the one over.
-        last: 2,
-        ..KpiQuery::default()
-    });
     let from = queries
-        .each_ref()
-        .map(|query| read_from_ms(query, &setup.config, now, setup.host.utc_offset_secs));
+        .iter()
+        .filter_map(|(query, _)| {
+            read_from_ms(query, &setup.config, now, setup.host.utc_offset_secs)
+        })
+        .min();
     let window = ledger.ledger_window(&crate::domain::ledger::window::WindowQuery {
         now_ms: super::stats::now_ms(now),
-        read_from_ms: from[0].zip(from[1]).map(|(day, week)| day.min(week)),
+        read_from_ms: from,
         ..Default::default()
     })?;
-    for query in &queries {
+    for (query, label) in &queries {
         let period = query.period;
         let kpi = super::kpi::of_window(
             &window,
@@ -140,6 +162,12 @@ pub fn check_breaches(
                 check.resolved.push(recorded);
             }
         }
+        queue.record_kpi_breach_checked(json!({
+            "period": period.as_str(),
+            "label": label,
+            "build": setup.build,
+            "supervisor": supervisor,
+        }))?;
     }
     Ok(check)
 }

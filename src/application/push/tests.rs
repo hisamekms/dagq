@@ -147,6 +147,7 @@ impl LedgerStore for Probe {
 #[derive(Default)]
 struct Records {
     open: RefCell<Vec<Value>>,
+    checked: RefCell<Vec<Value>>,
     recorded: RefCell<Vec<(EventKind, Value)>>,
 }
 impl QueueRecords for Records {
@@ -205,6 +206,23 @@ impl QueueRecords for Records {
         unimplemented!()
     }
 
+    fn kpi_breaches_checked(&self) -> Result<std::collections::HashSet<(String, String)>> {
+        Ok(self
+            .checked
+            .borrow()
+            .iter()
+            .map(|p| {
+                (
+                    p["period"].as_str().unwrap().into(),
+                    p["label"].as_str().unwrap().into(),
+                )
+            })
+            .collect())
+    }
+    fn record_kpi_breach_checked(&self, payload: Value) -> Result<bool> {
+        self.checked.borrow_mut().push(payload);
+        Ok(true)
+    }
     fn kpi_breaches_open(&self) -> Result<Vec<Value>> {
         Ok(self.open.borrow().clone())
     }
@@ -323,7 +341,15 @@ fn breach_window_starts_at_the_earlier_day_or_week_read_once() {
         setup.config.breach_periods = days;
         setup.config.breach_weeks = weeks;
         let ledger = probe(Vec::new(), false);
-        check_breaches(&Records::default(), &ledger, &setup, None, now).unwrap();
+        check_breaches(
+            &Records::default(),
+            &ledger,
+            &setup,
+            None,
+            now,
+            &crate::domain::LeaseToken::new("s"),
+        )
+        .unwrap();
         let starts = [Period::Day, Period::Week].map(|period| {
             read_from_ms(
                 &KpiQuery {
@@ -366,8 +392,24 @@ fn settled_history_outside_the_window_adds_no_store_reads() {
         false,
     );
     let expanded = probe(rows, false);
-    let a = check_breaches(&Records::default(), &recent, &setup(), None, now).unwrap();
-    let b = check_breaches(&Records::default(), &expanded, &setup(), None, now).unwrap();
+    let a = check_breaches(
+        &Records::default(),
+        &recent,
+        &setup(),
+        None,
+        now,
+        &crate::domain::LeaseToken::new("s"),
+    )
+    .unwrap();
+    let b = check_breaches(
+        &Records::default(),
+        &expanded,
+        &setup(),
+        None,
+        now,
+        &crate::domain::LeaseToken::new("s"),
+    )
+    .unwrap();
     assert!(!a.started.is_empty());
     assert_eq!(a, b);
     assert!(recent.store.read.get() > 0);
@@ -386,8 +428,24 @@ fn bounded_and_whole_windows_record_the_same_day_and_week_transitions() {
     ] {
         let now = T0 + day * DAY;
         let rows = history(now);
-        let a = check_breaches(&bounded, &probe(rows.clone(), false), &setup, None, now).unwrap();
-        let b = check_breaches(&whole, &probe(rows, true), &setup, None, now).unwrap();
+        let a = check_breaches(
+            &bounded,
+            &probe(rows.clone(), false),
+            &setup,
+            None,
+            now,
+            &crate::domain::LeaseToken::new("s"),
+        )
+        .unwrap();
+        let b = check_breaches(
+            &whole,
+            &probe(rows, true),
+            &setup,
+            None,
+            now,
+            &crate::domain::LeaseToken::new("s"),
+        )
+        .unwrap();
         assert_eq!(a, b);
         let payloads = if kind == EventKind::KpiBreachStarted {
             &a.started
@@ -435,4 +493,121 @@ fn bounded_and_whole_windows_record_the_same_day_and_week_transitions() {
         );
     }
     assert!(bounded.open.borrow().is_empty());
+}
+
+#[test]
+fn restarting_a_checked_job_reads_no_window_and_records_no_transitions() {
+    let now = T0 + 100 * DAY;
+    let records = Records::default();
+    let ledger = probe(history(now), false);
+    let first = check_breaches(
+        &records,
+        &ledger,
+        &setup(),
+        None,
+        now,
+        &crate::domain::LeaseToken::new("first"),
+    )
+    .unwrap();
+    assert_eq!(first.started.len(), 2);
+    assert_eq!(records.checked.borrow().len(), 2);
+    records.recorded.borrow_mut().clear();
+    let restarted = probe(Vec::new(), false);
+    assert_eq!(
+        check_breaches(
+            &records,
+            &restarted,
+            &setup(),
+            None,
+            now,
+            &crate::domain::LeaseToken::new("restarted")
+        )
+        .unwrap(),
+        BreachCheck::default()
+    );
+    assert!(restarted.queries.borrow().is_empty());
+    assert!(records.recorded.borrow().is_empty());
+    assert_eq!(records.open.borrow().len(), 2);
+    assert_eq!(records.checked.borrow().len(), 2);
+}
+
+#[test]
+fn only_the_unchecked_day_is_judged_and_recorded() {
+    let now = T0 + 100 * DAY;
+    let records = Records::default();
+    let token = crate::domain::LeaseToken::new("s");
+    check_breaches(
+        &records,
+        &probe(history(now), false),
+        &setup(),
+        None,
+        now,
+        &token,
+    )
+    .unwrap();
+    records
+        .checked
+        .borrow_mut()
+        .retain(|p| p["period"] == "week");
+    records.open.borrow_mut().retain(|p| p["period"] == "week");
+    records.recorded.borrow_mut().clear();
+    let ledger = probe(history(now), false);
+    let check = check_breaches(&records, &ledger, &setup(), None, now, &token).unwrap();
+    assert_eq!(check.started.len(), 1);
+    assert_eq!(check.started[0]["period"], "day");
+    assert!(check.resolved.is_empty());
+    assert_eq!(records.recorded.borrow().len(), 1);
+    let checked = records.checked.borrow();
+    assert_eq!(checked.len(), 2);
+    assert_eq!(checked[1]["period"], "day");
+    assert_eq!(checked[1]["build"], "test");
+    assert_eq!(checked[1]["supervisor"], "s");
+    assert_eq!(ledger.queries.borrow().len(), 1);
+    assert_eq!(
+        ledger.queries.borrow()[0].read_from_ms,
+        read_from_ms(
+            &KpiQuery {
+                period: Period::Day,
+                last: 2,
+                ..Default::default()
+            },
+            &setup().config,
+            now,
+            setup().host.utc_offset_secs
+        )
+    );
+}
+
+#[test]
+fn after_stopping_across_midnight_only_the_latest_finished_periods_are_checked() {
+    let token = crate::domain::LeaseToken::new("s");
+    let records = Records::default();
+    let setup = setup();
+    // Sunday 23:59 JST, then Tuesday 00:01 JST: a whole daily job missed,
+    // and both a day and an ISO week ended while the process was stopped.
+    let before = crate::domain::stats::timestamp_millis("2026-11-08T14:59:00Z").unwrap() / 1000;
+    let after = crate::domain::stats::timestamp_millis("2026-11-09T15:01:00Z").unwrap() / 1000;
+    check_breaches(
+        &records,
+        &probe(Vec::new(), false),
+        &setup,
+        None,
+        before,
+        &token,
+    )
+    .unwrap();
+    assert_eq!(
+        records.kpi_breaches_checked().unwrap(),
+        std::collections::HashSet::from([
+            ("day".into(), "2026-11-07".into()),
+            ("week".into(), "2026-W44".into()),
+        ])
+    );
+    let ledger = probe(Vec::new(), false);
+    check_breaches(&records, &ledger, &setup, None, after, &token).unwrap();
+    assert_eq!(ledger.queries.borrow().len(), 1);
+    let checked = records.checked.borrow();
+    assert_eq!(checked.len(), 4);
+    assert_eq!(checked[2]["label"], "2026-11-09");
+    assert_eq!(checked[3]["label"], "2026-W45");
 }

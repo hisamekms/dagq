@@ -257,6 +257,7 @@ event_kinds! {
     IntegrationStarted => "integration_started",
     JobRestarted => "job_restarted",
     KnownDialogUnanswered => "known_dialog_unanswered",
+    KpiBreachChecked => "kpi_breach_checked",
     KpiBreachResolved => "kpi_breach_resolved",
     KpiBreachStarted => "kpi_breach_started",
     KpiPushAbandoned => "kpi_push_abandoned",
@@ -753,6 +754,7 @@ impl EventKind {
                 | CandidatesSampled
                 // The breaches of the KPIs' targets and their push
                 // (ADR-0051 decisions 18 and 23).
+                | KpiBreachChecked
                 | KpiBreachStarted
                 | KpiBreachResolved
                 | KpiPushSent
@@ -1789,6 +1791,7 @@ mod tests {
             (EventKind::IntegrationStarted, "integration_started"),
             (EventKind::JobRestarted, "job_restarted"),
             (EventKind::KnownDialogUnanswered, "known_dialog_unanswered"),
+            (EventKind::KpiBreachChecked, "kpi_breach_checked"),
             (EventKind::KpiBreachResolved, "kpi_breach_resolved"),
             (EventKind::KpiBreachStarted, "kpi_breach_started"),
             (EventKind::KpiPushAbandoned, "kpi_push_abandoned"),

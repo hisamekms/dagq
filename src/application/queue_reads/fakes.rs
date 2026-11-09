@@ -71,6 +71,12 @@ impl QueueRecords for Records {
     fn record_report_written(&self, _: serde_json::Value) -> Result<bool> {
         unimplemented!()
     }
+    fn kpi_breaches_checked(&self) -> Result<std::collections::HashSet<(String, String)>> {
+        unimplemented!()
+    }
+    fn record_kpi_breach_checked(&self, _: serde_json::Value) -> Result<bool> {
+        unimplemented!()
+    }
     fn kpi_breaches_open(&self) -> Result<Vec<serde_json::Value>> {
         unimplemented!()
     }
