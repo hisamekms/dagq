@@ -87,3 +87,4 @@ tags:
 - [PostgreSQL の pg_trgm・pg_bigm で dagq search と related の検索の手がかりが今の FTS5 trigram と同じ結果を返せるかの実測（does_not_hold、順位が揃わない）](team-version-search-spike.md)（goal 250、task 3991）
 - [スパイク：起動ごとの ledger_row の要求を呼び手ごとに数え、回数が確定済みの履歴に比例する呼び手と減らし方を判定する](ledger-row-reads-spike.md)（goal 266、task 4447）
 - [スパイク：台帳の queue 行の kind ごとの読み手と、単発の event の kind を台帳に写さず EventStore の読みで同じ値を出せるか（kind で分かれる、読み手の無い kind は holds）](ledger-queue-rows-readers-spike.md)（goal 273、task 4616）
+- [スパイク：台帳の係の書く量を pass の時間で決め、遅れの間は続けて pass を回し、queue 行を 1 transaction で書く形が本番の流入より速く書けるか（holds、続けて回せば書く速さは流入の 600 倍以上）](ledger-write-budget-spike.md)（goal 273、task 4617）
