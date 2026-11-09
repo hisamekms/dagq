@@ -24,6 +24,7 @@ mod event_actor;
 pub mod exec;
 mod leader;
 pub mod migrate;
+pub(crate) mod search;
 pub(crate) mod search_write;
 pub mod tls;
 

@@ -6,10 +6,12 @@
 mod cases;
 mod goal_owners;
 mod runner_leases;
+mod search;
 mod search_writes;
 pub use cases::*;
 pub use goal_owners::*;
 pub use runner_leases::*;
+pub use search::{search_cases, short_non_ascii};
 pub use search_writes::{postgres_search_writes, source_search_writes};
 
 use super::sql_exec::TransactionEntries;
@@ -28,6 +30,11 @@ pub trait ContractStore:
     + crate::application::RunnerLeaseStore
     + Sized
 {
+    fn search_in(
+        &self,
+        tx: &Self::Write<'_>,
+        query: &crate::domain::search::SearchQuery,
+    ) -> Result<crate::domain::search::SearchPage>;
     fn with_identity(self, identity: WriteIdentity) -> Self;
     fn set_actor(&self, actor: crate::domain::actor::ActorContext);
     fn request(&self, requested_by: Option<String>) -> Option<String>;
@@ -35,6 +42,14 @@ pub trait ContractStore:
 }
 
 impl<S: super::postgres::PostgresSession> ContractStore for super::postgres::PostgresStore<S> {
+    fn search_in(
+        &self,
+        tx: &Self::Write<'_>,
+        query: &crate::domain::search::SearchQuery,
+    ) -> Result<crate::domain::search::SearchPage> {
+        super::postgres::search::search(tx, query)
+    }
+
     fn with_identity(self, identity: WriteIdentity) -> Self {
         self.with_write_identity(identity)
     }
@@ -91,6 +106,8 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),
         ("source search writes", source_search_writes::<S, F>),
+        ("search", search_cases::<S, F>),
+        ("short non-ASCII", short_non_ascii::<S, F>),
     ];
     sequence(cases, |case| case(open))
 }

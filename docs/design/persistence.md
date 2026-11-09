@@ -268,12 +268,13 @@ migrationを足すtaskの規則（リリース済みは変えない）は[migrat
 ## 全文検索（search）
 
 `dagq search`の索引（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)決定1〜3）。
-計画の記録と独立したport `SearchIndex`を通す。
-SQLite adapterは`src/infrastructure/search.rs`、索引とtriggerは`migrations/0026_search.sql`、問い合わせの解釈と抜粋は`src/domain/search.rs`。
+計画の記録と独立した`SearchIndex`を通す。
+PostgresはLIKEで絞り、アプリのbm25で並べる。
+SQLiteは`src/infrastructure/search.rs`、索引とtriggerは`migrations/0026_search.sql`、問い合わせの解釈と抜粋は`src/domain/search.rs`。
 
 - 索引はSQLiteではtriggerが同じトランザクションで保ち、索引を知らない古いバイナリの書き込みにも追いつく。
-  `tasks` / `goals` / `run_events`を作り直すmigrationはtriggerを作り直す。
-  Postgresはtriggerを置かず、元の行を書くadapterが同じトランザクションで保つ（ADR-t3986-1決定6）。
+  元の表を作り直すmigrationはtriggerも作り直す。
+  Postgresはtriggerを置かず、元の行を書くadapterが同じtransactionで保つ（ADR-t3986-1決定6）。
 
 ## 関連（related）
 

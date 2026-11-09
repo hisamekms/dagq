@@ -3164,6 +3164,14 @@ mod store_contract_tests {
     use crate::infrastructure::store_contract::{self, ContractStore};
 
     impl ContractStore for SqliteQueue {
+        fn search_in(
+            &self,
+            _tx: &Self::Write<'_>,
+            query: &crate::domain::search::SearchQuery,
+        ) -> Result<crate::domain::search::SearchPage> {
+            self.search(query)
+        }
+
         fn with_identity(self, identity: WriteIdentity) -> Self {
             self.with_write_identity(identity)
         }
@@ -3196,6 +3204,14 @@ mod store_contract_tests {
     #[test]
     fn large_ids() {
         contract(|open| store_contract::large_ids(&open));
+    }
+    #[test]
+    fn search_cases() {
+        contract(|open| store_contract::search_cases(&open));
+    }
+    #[test]
+    fn short_non_ascii() {
+        contract(|open| store_contract::short_non_ascii(&open));
     }
     #[test]
     fn source_search_writes() {
