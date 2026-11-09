@@ -1243,6 +1243,10 @@ pub struct Principal {
     /// Roles are deliberately not copied into a token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human: Option<super::oidc::OidcIdentity>,
+    /// Loaded from the registry on every authenticated call, never serialized
+    /// into a token record or accepted from a client.
+    #[serde(skip)]
+    pub human_role: Option<super::actor::HumanRole>,
     pub role: ActorRole,
     pub actor_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1329,6 +1333,29 @@ impl Principal {
         principal
     }
 
+    /// Authenticate a human token against the current registry row. The role
+    /// is call-local: serialization drops it, so revocation and role changes
+    /// apply without issuing a replacement token. Identity must still match.
+    pub fn with_current_member(
+        mut self,
+        expires_at: Option<i64>,
+        member: Option<&Member>,
+        now: i64,
+    ) -> Option<Self> {
+        if !human_token_live(expires_at, member, now) {
+            return None;
+        }
+        let member = member?;
+        if self.human.as_ref() != Some(&member.identity) || self.role != ActorRole::User {
+            return None;
+        }
+        self.human_role = Some(super::actor::HumanRole {
+            role: member.role,
+            on_call: member.on_call,
+        });
+        Some(self)
+    }
+
     /// The inbox of the session `session` (ADR-t3102-1 decisions 2 and 3):
     /// its actor id is the inbox's, and its token ends with the session's
     /// process, or when the inbox is opened again (an issue for the same
@@ -1386,6 +1413,7 @@ impl Principal {
             session: None,
             landing: None,
             human: None,
+            human_role: None,
         }
     }
 
@@ -1447,6 +1475,7 @@ impl Principal {
             session: None,
             landing: None,
             human: None,
+            human_role: None,
         }
     }
 
@@ -1466,6 +1495,7 @@ impl Principal {
             session: None,
             landing: None,
             human: None,
+            human_role: None,
         }
     }
 
@@ -1482,7 +1512,8 @@ impl Principal {
     /// local user takes no token (decision 1); a human identity is HTTP-only.
     pub fn check(&self) -> Result<(), DomainError> {
         if let Some(identity) = &self.human {
-            let expected = Self::human(identity.clone());
+            let mut expected = Self::human(identity.clone());
+            expected.human_role = self.human_role;
             return if self == &expected {
                 Ok(())
             } else {
@@ -1491,6 +1522,12 @@ impl Principal {
                     value: "invalid binding".into(),
                 })
             };
+        }
+        if self.human_role.is_some() {
+            return Err(DomainError::UnknownValue {
+                kind: "human principal",
+                value: "role without human identity".into(),
+            });
         }
         let refuse = |value: String| {
             Err(DomainError::UnknownValue {
@@ -1623,7 +1660,12 @@ impl Principal {
 
     /// The actor the service acts as.
     pub fn actor(&self) -> ActorContext {
-        let actor = ActorContext::new(self.role, self.actor_id.clone());
+        let mut actor = ActorContext::new(self.role, self.actor_id.clone());
+        if self.human.is_some()
+            && let Some(role) = self.human_role
+        {
+            actor = actor.with_human_role(role);
+        }
         match (&self.run_id, self.task_id) {
             (Some(run), Some(task)) => actor.with_run(run.clone(), task),
             _ => actor,
@@ -2716,7 +2758,7 @@ pub fn attention_stands(latest: Option<&RecordedKind>) -> bool {
     latest.is_some_and(|kind| *kind == EventKind::QueueServiceDown)
 }
 
-/// Registry role, independent of the user actor's authorization policy.
+/// Registry role that narrows the user actor's existing grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamRole {

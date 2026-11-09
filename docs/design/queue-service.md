@@ -75,6 +75,8 @@ serviceの書き込みは1本の列で1つずつ確定し、読み取りは列�
 
 ## principalとtoken
 
+人の役割と有効性は呼び出しごとに登録簿から引き、tokenには役割を写さない。
+
 入口はHTTPの`exchange_token`（`application::queue_service::exchange_human`）。
 runnerの登録・交換・更新・失効の入口はHTTPの`application::queue_service::runner_http`。
 通常の登録の経路では、runnerの資格は人が発行した1回きりの値から始まり、値はハッシュだけを持つ。

@@ -156,9 +156,19 @@ impl ActorRole {
     }
 }
 
+/// Registry attributes of an HTTP-authenticated person. On-call overlays
+/// either role; neither attributes nor their absence change the actor role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct HumanRole {
+    pub role: super::queue_service::TeamRole,
+    pub on_call: bool,
+}
+
 /// The actor a command runs as, or an AI actor the runtime starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ActorContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    human_role: Option<HumanRole>,
     actor_id: String,
     role: ActorRole,
     trust: TrustLevel,
@@ -172,12 +182,26 @@ impl ActorContext {
     /// `role` as `actor_id`; the trust is the role's.
     pub fn new(role: ActorRole, actor_id: impl Into<String>) -> Self {
         Self {
+            human_role: None,
             actor_id: actor_id.into(),
             role,
             trust: role.trust(),
             run_id: None,
             task_id: None,
         }
+    }
+
+    /// Only the human-token authentication path attaches registry attributes.
+    /// Environment and socket-peer actors never acquire them.
+    pub(crate) fn with_human_role(mut self, role: HumanRole) -> Self {
+        if self.role == ActorRole::User {
+            self.human_role = Some(role);
+        }
+        self
+    }
+
+    pub fn human_role(&self) -> Option<HumanRole> {
+        self.human_role
     }
 
     /// A person at a plain terminal.
@@ -391,6 +415,35 @@ pub fn with_actor(mut env: Vec<(String, String)>, actor: &ActorContext) -> Vec<(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    #[test]
+    fn local_event_actors_keep_their_shape_and_registry_roles_do_not_enter_env() {
+        let user = ActorContext::user();
+        assert_eq!(
+            serde_json::to_value(&user).unwrap(),
+            serde_json::json!({
+                "actor_id": "user", "role": "user", "trust": "human"
+            })
+        );
+        for role in ActorRole::ALL {
+            let actor = ActorContext::new(role, "id");
+            assert!(
+                serde_json::to_value(&actor)
+                    .unwrap()
+                    .get("human_role")
+                    .is_none()
+            );
+        }
+        let human = user.clone().with_human_role(HumanRole {
+            role: super::super::queue_service::TeamRole::Member,
+            on_call: true,
+        });
+        assert_eq!(human.env(), user.env());
+        assert_eq!(
+            serde_json::to_value(&human).unwrap()["human_role"],
+            serde_json::json!({"role": "member", "on_call": true})
+        );
+    }
 
     /// Only a supervisor's actor that names its pid has one.
     #[test]

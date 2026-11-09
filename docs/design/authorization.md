@@ -61,6 +61,15 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 
 ## Policy
 
+外向きの人もuserのまま、grantsの後、resourceの前に登録簿の役割で狭める。
+
+| 人の役割 | userの許可からの狭め |
+| --- | --- |
+| 管理者 | なし |
+| member | `service.install`・`queue.admin`・`review.setup`・`review.setup_approve`・`task.ready_bypass_review`・`workspace.cleanup`・`run.recover`・`service.lifecycle`を拒む |
+| 当番（管理者かmemberに重ねる） | 重ねた役割に`run.recover`を戻す。grantsに無い許可は足さない |
+| 役割なし（hostのsocketのpeer） | なし |
+
 同じroleの「続き」の行は、許可とresourceの規則を全て合わせて読む。
 
 | role | 許すcapability | resourceの規則 |
@@ -141,12 +150,10 @@ runtimeが自分で閉じる・取り下げる・置き換えるanswerは、kind
 CLIはqueueの場所を決めた直後、queueやログを開く前に`operations::authorize`で全てのroleを判定する。
 着地はこの入口の後で[Integrator](#着地とpushintegrator)がもう一度判定する。
 
-`run close-workspaces`は認可を通っても何も閉じず、`run screen`も認可を通っても画面を読まない（引数を受け付ける互換と理由は[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
 workspaceを閉じる手順の入口は[dagq-recoverのsession](../../plugins/claude-dagq/skills/dagq-recover/reference/session.md#the-commands)。
 終わったrunのwrapperの停止はsupervisorの[自分の掃除](supervisor-lifecycle/background-recovery-job.md#終わったrunの掃除)が担う。
 plannerはruntimeだけが立て、人が頼む相手ではないので、起動・停止と更新は人かinboxが担う（[Roles](supervisor-lifecycle/roles.md)）。
 `plan`は誰が打っても何も開かず、inboxへの依頼の案内を返す（ADR-t1394-1）。
-plannerを閉じるCLIは無い。
 続きの依頼の境界は[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)。
 
 拒否はserviceが呼び出し元のprincipalで記録し、CLIはqueueを開かない（`CommandDenials`と[hostのCLI](queue-service-host-cli.md#送る範囲)）。

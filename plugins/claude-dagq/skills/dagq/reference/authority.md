@@ -22,6 +22,14 @@ A worker, a job and the observer get the queue service's address and a token, ne
 
 ## What each role is refused
 
+HTTP-authenticated people remain `user`; the registry role narrows user grants before resource checks. Role changes and disabling apply on the next call without replacing the token. Local socket users have no registry role and keep their grants.
+
+| Human role | Restriction on user grants |
+| --- | --- |
+| Administrator | None |
+| Member | Refused `service.install`, `queue.admin`, `review.setup`, `review.setup_approve`, `task.ready_bypass_review`, `workspace.cleanup`, `run.recover`, and `service.lifecycle` |
+| On-call overlay on either role | Restores `run.recover` within user grants; never adds an ungranted capability |
+
 | Role | Runner registration and revocation |
 | --- | --- |
 | user | `runner.register` for oneself; `runner.revoke` as owner or administrator, with human authentication |

@@ -463,6 +463,8 @@ impl Resource {
 pub enum DenyReason {
     /// The role's allowlist lacks the capability.
     NotGranted,
+    /// The authenticated person's registry role narrows the user grant.
+    HumanRole,
     /// The capability is reserved for a later stage.
     Reserved,
     /// The resource is not the actor's, or its owner or state is unknown.
@@ -486,6 +488,7 @@ impl DenyReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NotGranted => "not granted",
+            Self::HumanRole => "restricted by human role",
             Self::Reserved => "reserved",
             Self::Resource => "not on this resource",
             Self::AskKind => "not of this kind",
@@ -529,8 +532,8 @@ pub trait Authorizer {
     ) -> Result<(), AuthorizationError>;
 }
 
-/// The static policy of ADR-t728-1: [`grants`] per role, then the
-/// resource rules of the worker, the planner, the observer and the jobs
+/// The static policy of ADR-t728-1: [`grants`] per actor role, narrowed
+/// by an authenticated human's registry role, then the resource rules of the worker, the planner, the observer and the jobs
 /// that submit on a run.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StaticPolicy;
@@ -553,6 +556,11 @@ impl Authorizer for StaticPolicy {
         if !grants(actor.role()).contains(&capability) {
             return Err(deny(DenyReason::NotGranted));
         }
+        if let Some(role) = actor.human_role()
+            && !human_role_permits(role, capability)
+        {
+            return Err(deny(DenyReason::HumanRole));
+        }
         if let Resource::NewAsk { kind, .. } = resource
             && !opens_ask(actor.role(), kind)
         {
@@ -564,6 +572,24 @@ impl Authorizer for StaticPolicy {
             Err(deny(DenyReason::Resource))
         }
     }
+}
+
+/// Narrow existing user grants before resource checks. On-call restores only
+/// recovery to members, never a capability absent from the actor's grants.
+fn human_role_permits(role: super::actor::HumanRole, capability: Capability) -> bool {
+    use super::queue_service::TeamRole;
+    role.role == TeamRole::Admin
+        || match capability {
+            C::BinaryInstall
+            | C::QueueAdmin
+            | C::ReviewSetup
+            | C::ReviewSetupApprove
+            | C::TaskReadyBypassReview
+            | C::WorkspaceCleanup
+            | C::ServiceLifecycle => false,
+            C::RunRecover => role.on_call,
+            _ => true,
+        }
 }
 
 use Capability as C;
@@ -1026,6 +1052,63 @@ pub fn check_priority_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn human_role_table_narrows_user_grants_and_on_call_restores_only_recovery() {
+        use crate::domain::{actor::HumanRole, queue_service::TeamRole};
+        let denied = [
+            C::BinaryInstall,
+            C::QueueAdmin,
+            C::ReviewSetup,
+            C::ReviewSetupApprove,
+            C::TaskReadyBypassReview,
+            C::WorkspaceCleanup,
+            C::RunRecover,
+            C::ServiceLifecycle,
+        ];
+        for role in [TeamRole::Admin, TeamRole::Member] {
+            for on_call in [false, true] {
+                let attributes = HumanRole { role, on_call };
+                let actor = ActorContext::user().with_human_role(attributes);
+                for capability in Capability::ALL {
+                    let base =
+                        StaticPolicy.authorize(&ActorContext::user(), capability, &Resource::Queue);
+                    let actual = StaticPolicy.authorize(&actor, capability, &Resource::Queue);
+                    let restricted = role == TeamRole::Member
+                        && denied.contains(&capability)
+                        && !(on_call && capability == C::RunRecover);
+                    if restricted {
+                        assert_eq!(
+                            actual.as_ref().unwrap_err().reason,
+                            DenyReason::HumanRole,
+                            "{capability:?}"
+                        );
+                    } else {
+                        assert_eq!(actual, base, "{role:?} {on_call} {capability:?}");
+                    }
+                    if !grants(ActorRole::User).contains(&capability) {
+                        assert!(actual.is_err());
+                    }
+                }
+            }
+        }
+        // Registry attributes cannot attach to AI/control actors. Compare every
+        // capability, including resource and reserved refusals, to the baseline.
+        for role in ActorRole::ALL.into_iter().filter(|r| *r != ActorRole::User) {
+            let original = ActorContext::new(role, "actor");
+            let with_role = original.clone().with_human_role(HumanRole {
+                role: TeamRole::Admin,
+                on_call: true,
+            });
+            assert_eq!(with_role.human_role(), None);
+            for capability in Capability::ALL {
+                assert_eq!(
+                    StaticPolicy.authorize(&original, capability, &Resource::Queue),
+                    StaticPolicy.authorize(&with_role, capability, &Resource::Queue)
+                );
+            }
+        }
+    }
 
     #[test]
     fn only_user_and_inbox_can_correct_an_ended_tasks_verify() {

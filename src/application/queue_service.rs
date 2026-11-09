@@ -1921,7 +1921,7 @@ struct DenialParams {
 /// match on the reasons fails to compile when one is added and not listed.
 fn deny_reason(name: &str) -> Option<crate::domain::authorization::DenyReason> {
     use crate::domain::authorization::DenyReason as R;
-    const ALL: [R; 7] = [
+    const ALL: [R; 8] = [
         R::NotGranted,
         R::Reserved,
         R::Resource,
@@ -1929,6 +1929,7 @@ fn deny_reason(name: &str) -> Option<crate::domain::authorization::DenyReason> {
         R::PersonsPriority,
         R::GoalGapDraft,
         R::NotHeld,
+        R::HumanRole,
     ];
     const fn listed(reason: R) -> usize {
         match reason {
@@ -1939,6 +1940,7 @@ fn deny_reason(name: &str) -> Option<crate::domain::authorization::DenyReason> {
             R::PersonsPriority => 4,
             R::GoalGapDraft => 5,
             R::NotHeld => 6,
+            R::HumanRole => 7,
         }
     }
     ALL.into_iter()
@@ -3917,12 +3919,11 @@ pub(crate) mod tests {
         fn principal(&self, token: &str) -> Result<Option<Principal>> {
             let memory = self.human.lock().unwrap();
             if let Some((principal, expires)) = memory.records.get(token) {
-                return Ok(crate::domain::queue_service::human_token_live(
+                return Ok(principal.clone().with_current_member(
                     *expires,
                     memory.member.as_ref(),
                     memory.now,
-                )
-                .then(|| principal.clone()));
+                ));
             }
             drop(memory);
             let run = RunId::new("r1")?;
@@ -4298,6 +4299,98 @@ pub(crate) mod tests {
                 claims: serde_json::Map::new(),
             },
         )
+    }
+
+    #[test]
+    fn registry_role_changes_apply_to_the_same_token_on_the_next_http_call() {
+        use crate::domain::queue_service::TeamRole;
+        let (backend, jwt) = human_fixture();
+        let token = exchange_human(&backend, &jwt).result.unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        assert_eq!(
+            deny_reason("restricted by human role"),
+            Some(crate::domain::authorization::DenyReason::HumanRole)
+        );
+        let req = request(Some(&token), UseCase::Hello, json!({}));
+        for (role, on_call, allowed) in [
+            (TeamRole::Admin, false, true),
+            (TeamRole::Member, false, false),
+            (TeamRole::Member, true, true),
+            (TeamRole::Admin, true, true),
+        ] {
+            {
+                let mut memory = backend.human.lock().unwrap();
+                let member = memory.member.as_mut().unwrap();
+                member.role = role;
+                member.on_call = on_call;
+                // The stored token contains identity only, even after use.
+                let record = &memory.records[&token].0;
+                assert!(record.human_role.is_none());
+                assert!(
+                    serde_json::to_value(record)
+                        .unwrap()
+                        .get("human_role")
+                        .is_none()
+                );
+            }
+            let response = service.handle_from(
+                &request(Some(&token), UseCase::Doctor, json!({})),
+                Peer::Absent,
+            );
+            assert_eq!(
+                code(&response) == Some(ServiceErrorCode::AuthorizationDenied),
+                role == TeamRole::Member
+            );
+            if role == TeamRole::Member {
+                assert_eq!(
+                    response.error.unwrap().denied.unwrap().reason,
+                    "restricted by human role"
+                );
+            }
+            let (principal, _) = service
+                .authenticate(&req, Peer::Absent, Connection::Read)
+                .unwrap();
+            let serialized = serde_json::to_value(&principal).unwrap();
+            assert!(serialized.get("human_role").is_none());
+            let restored: Principal = serde_json::from_value(serialized).unwrap();
+            assert!(restored.human_role.is_none());
+            assert!(principal.check().is_ok());
+            let actor = principal.actor();
+            assert_eq!(actor.human_role().unwrap().role, role);
+            assert_eq!(actor.human_role().unwrap().on_call, on_call);
+            assert_eq!(
+                StaticPolicy
+                    .authorize(&actor, Capability::RunRecover, &Resource::Queue)
+                    .is_ok(),
+                allowed
+            );
+            assert_eq!(
+                StaticPolicy
+                    .authorize(&actor, Capability::ServiceLifecycle, &Resource::Queue)
+                    .is_ok(),
+                role == TeamRole::Admin
+            );
+        }
+        backend
+            .human
+            .lock()
+            .unwrap()
+            .member
+            .as_mut()
+            .unwrap()
+            .disabled_at = Some(1);
+        assert!(
+            service
+                .authenticate(&req, Peer::Absent, Connection::Read)
+                .is_err()
+        );
     }
 
     #[test]

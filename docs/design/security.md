@@ -58,6 +58,8 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 
 ## actor × capability
 
+外向きの入口の人もactorはuserのままで、登録簿の役割が許可を狭める（[Policy](authorization.md#policy)）。
+
 `src/domain/authorization.rs`の`StaticPolicy`（`grants(role)`とresourceの規則）の要約。
 明示して許したもの以外は全て拒む（default deny）。
 resourceの持ち主や状態が分からないときも拒む（fail closed）。

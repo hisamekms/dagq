@@ -1390,6 +1390,7 @@ mod tests {
             session: None,
             landing: None,
             human: None,
+            human_role: None,
         };
         // Nor is an executor's telemetry token of the run.
         let telemetry = Principal::telemetry(

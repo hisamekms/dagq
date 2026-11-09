@@ -4383,7 +4383,7 @@ impl ServiceBackend for SqliteServiceBackend {
     }
 
     fn principal(&self, token: &str) -> Result<Option<Principal>> {
-        let Some(record) = lookup_record(&self.queue_dir, token)? else {
+        let Some(mut record) = lookup_record(&self.queue_dir, token)? else {
             // Host tokens retain their file-only lookup, including on an older
             // schema. No runner credential exists before its schema is applied.
             use crate::application::RunnerStore;
@@ -4402,13 +4402,14 @@ impl ServiceBackend for SqliteServiceBackend {
             use crate::application::queue_service::MemberStore;
             let queue = SqliteQueue::open_read_only(&self.db)?;
             let member = queue.member(identity)?;
-            if !crate::domain::queue_service::human_token_live(
+            let Some(principal) = record.principal.with_current_member(
                 record.expires_at,
                 member.as_ref(),
                 self.now_ms() / 1000,
-            ) {
+            ) else {
                 return Ok(None);
-            }
+            };
+            record.principal = principal;
         }
         let held = HeldToken {
             principal: record.principal,
