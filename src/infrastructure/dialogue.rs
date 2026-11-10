@@ -1,6 +1,6 @@
 //! The queue the dialogue and record commands work on
 //! ([`crate::application::commands::dialogue`]): the asks, notes, marks
-//! and findings of a [`SqliteQueue`] (a mark through
+//! and findings of a [`StoreQueue`] (a mark through
 //! [`crate::application::marks`], on the queue's injected clock). A new
 //! ask notifies nobody here: the inbox's watch tells the person
 //! (ADR-t1433-1 decision 2).
@@ -8,7 +8,8 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use super::sqlite::SqliteQueue;
+use crate::infrastructure::{sql_exec::TransactionEntries, store_queue::StoreQueue};
+
 use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::{TaskStore, marks};
@@ -18,17 +19,17 @@ use crate::domain::{
 };
 
 /// A queue the dialogue commands work on.
-pub struct DialogueQueue<'a> {
-    pub queue: &'a mut SqliteQueue,
+pub struct DialogueQueue<'a, E: TransactionEntries> {
+    pub queue: &'a mut StoreQueue<E>,
 }
 
-impl DenialLog for DialogueQueue<'_> {
+impl<E: TransactionEntries> DenialLog for DialogueQueue<'_, E> {
     fn record_denial(&self, payload: Value) -> Result<()> {
         DenialLog::record_denial(&*self.queue, payload)
     }
 }
 
-impl DialogueStore for DialogueQueue<'_> {
+impl<E: TransactionEntries> DialogueStore for DialogueQueue<'_, E> {
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.queue.read_ask(id)
     }

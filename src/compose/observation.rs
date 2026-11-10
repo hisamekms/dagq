@@ -18,6 +18,7 @@ use super::{
     queue_service_view, task_changes, task_title_prefixes, worker_adapters,
 };
 use crate::domain::EventKind;
+use crate::infrastructure::{sql_exec::TransactionEntries, store_queue::StoreQueue};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -166,7 +167,10 @@ impl Default for CiWatchOptions {
 /// Whether the inbox was opened with its guardrail, by the newest
 /// `inbox_opened` and `inbox_guardrail_reached`
 /// ([`crate::application::inbox_guardrail::judge_latest`]).
-fn inbox_guardrail(queue: &SqliteQueue) -> Result<Value> {
+fn inbox_guardrail<E: TransactionEntries>(queue: &StoreQueue<E>) -> Result<Value>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let opened = queue.latest_event_of(EventKind::InboxOpened.as_str())?;
     let reached = queue.latest_event_of(EventKind::InboxGuardrailReached.as_str())?;
     Ok(crate::application::inbox_guardrail::judge_latest(
@@ -229,7 +233,11 @@ pub fn doctor_on_this_host(report: &mut Value) -> Result<()> {
 /// How the queue's service makes `doctor`'s report
 /// ([`OneShot::doctor_of`] on the system clock, with this user's
 /// LaunchAgents of the queue).
-pub fn service_doctor() -> crate::infrastructure::queue_service::ServiceDoctor {
+pub fn service_doctor<E: TransactionEntries + 'static>()
+-> crate::infrastructure::queue_service::ServiceDoctor<StoreQueue<E>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     Arc::new(|db, schema, queue, full| {
         OneShot {
             user_config: crate::infrastructure::language::user_config_file(),
@@ -273,12 +281,15 @@ fn launchd_queue_agents(db: &Path) -> Vec<lifecycle::QueueAgent> {
     })
 }
 
-fn add_sccache_diagnostics(
-    queue: &SqliteQueue,
+fn add_sccache_diagnostics<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
     db: &Path,
     stats: bool,
     output: &mut Value,
-) -> Result<()> {
+) -> Result<()>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let verifier = bound_checkout(queue)?.map(|checkout| ShellVerifier {
         checkout,
         db: db.to_path_buf(),
@@ -304,7 +315,13 @@ fn add_sccache_diagnostics(
 /// The programs the `[run.env]` of the main checkout of the repository the
 /// queue is bound to names, resolved on this process's PATH (ADR-0049
 /// decision 9).
-fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_env::RunEnvCheck> {
+fn doctor_run_env<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+    db: &Path,
+) -> Result<crate::domain::run_env::RunEnvCheck>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     // A queue no supervisor or `up` bound has no repository to read, and a
     // repository without a main checkout (`repository` says why) no
     // `dagq.toml`.
@@ -324,7 +341,10 @@ fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_e
 
 /// `doctor`'s `roles` ([`health::roles`]) from the `[roles.*]` of the
 /// `dagq.toml` of the bound main checkout.
-fn doctor_roles(queue: &SqliteQueue) -> Value {
+fn doctor_roles<E: TransactionEntries>(queue: &StoreQueue<E>) -> Value
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     health::roles(match bound_checkout(queue) {
         Ok(Some(checkout)) => crate::infrastructure::run_env::load_role_models(&checkout),
         Ok(None) => Ok(Default::default()),
@@ -337,10 +357,13 @@ fn doctor_roles(queue: &SqliteQueue) -> Value {
 /// `profiles`, with the paths each applies to (none while it declares
 /// none), or `error` with the mistake; none for a queue bound to no
 /// checkout.
-fn bound_toolchains(
-    queue: &SqliteQueue,
+fn bound_toolchains<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
     profiles: &crate::domain::toolchain::ProfileRegistry,
-) -> Result<Option<Value>> {
+) -> Result<Option<Value>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let Some(checkout) = bound_checkout(queue)? else {
         return Ok(None);
     };
@@ -355,10 +378,13 @@ fn bound_toolchains(
 /// `profiles`, each with where it comes from, which a run's work breakdown
 /// classifies by too ([`crate::domain::command_rules::doctor_view`]); or
 /// `error` with the file's mistake; none for a queue bound to no checkout.
-fn bound_command_rules(
-    queue: &SqliteQueue,
+fn bound_command_rules<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
     profiles: &crate::domain::toolchain::ProfileRegistry,
-) -> Result<Option<Value>> {
+) -> Result<Option<Value>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let Some(checkout) = bound_checkout(queue)? else {
         return Ok(None);
     };
@@ -372,7 +398,12 @@ fn bound_command_rules(
 
 /// `runtime` of `[roles.worker]` and `[roles.verification]` of the
 /// `dagq.toml` of the bound main checkout (goal 38).
-fn runtimes_of(queue: &SqliteQueue) -> Result<crate::domain::container_runtime::RuntimeConfig> {
+fn runtimes_of<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+) -> Result<crate::domain::container_runtime::RuntimeConfig>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     crate::infrastructure::run_env::BoundRuntimes::new(bound_checkout(queue)).read()
 }
 
@@ -389,7 +420,10 @@ fn runtimes_of(queue: &SqliteQueue) -> Result<crate::domain::container_runtime::
 /// project's agent under that prefix, an `enabled` that is no boolean, or
 /// `builtin:acceptance` turned off or given `paths` or `provider` among
 /// them), which also keeps every review from passing.
-fn doctor_agents(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
+fn doctor_agents<E: TransactionEntries>(queue: &StoreQueue<E>) -> Result<Option<serde_json::Value>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let Some(checkout) = bound_main_checkout(queue)? else {
         return Ok(None);
     };
@@ -409,7 +443,12 @@ fn doctor_agents(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
 /// The landing branch and push of the repository the queue is bound to,
 /// as `up`'s preflight resolves them (ADR-t615-1), or `error` with why
 /// they do not resolve; `None` for a queue bound to no checkout.
-fn doctor_repository(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
+fn doctor_repository<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+) -> Result<Option<serde_json::Value>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let Some(checkout) = bound_main_checkout(queue)? else {
         return Ok(None);
     };
@@ -513,7 +552,13 @@ fn area_map(checkout: Option<&Path>) -> Result<Option<crate::domain::areas::Area
 /// The main checkout whose `dagq.toml` `stats` and `kpi` read: in the
 /// queue service (`served`) the one [`served_checkout`] finds with no Git
 /// run, on the DB the bound one.
-fn stats_checkout(queue: &SqliteQueue, served: bool) -> Result<Option<PathBuf>> {
+fn stats_checkout<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+    served: bool,
+) -> Result<Option<PathBuf>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     if served {
         served_checkout(queue)
     } else {
@@ -525,7 +570,10 @@ fn stats_checkout(queue: &SqliteQueue, served: bool) -> Result<Option<PathBuf>> 
 /// service finds it, from the binding alone and with no Git run
 /// ([`crate::infrastructure::adapters::main_checkout_from_files`]); none for
 /// a queue bound to none.
-fn served_checkout(queue: &SqliteQueue) -> Result<Option<PathBuf>> {
+fn served_checkout<E: TransactionEntries>(queue: &StoreQueue<E>) -> Result<Option<PathBuf>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     Ok(queue.repository_binding()?.and_then(|common_dir| {
         crate::infrastructure::adapters::main_checkout_from_files(Path::new(&common_dir))
     }))
@@ -613,7 +661,12 @@ pub const REPORTS_DIR: &str = "reports";
 
 /// `[ci_watch]` of the checkout `queue` is bound to (ADR-t1920-1); none
 /// for a queue bound to none or a file without the table.
-fn bound_ci_watch(queue: &SqliteQueue) -> Result<Option<crate::domain::ci_watch::CiWatchConfig>> {
+fn bound_ci_watch<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+) -> Result<Option<crate::domain::ci_watch::CiWatchConfig>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     match bound_checkout(queue)? {
         Some(checkout) => crate::infrastructure::run_env::load_ci_watch(&checkout),
         None => Ok(None),
@@ -629,7 +682,13 @@ pub fn ci_failures(db: &Path, task: Option<TaskId>) -> Result<Value> {
 
 /// `ci failures [--task ID]` on `queue`, as the command line and the queue
 /// service answer it.
-fn ci_failures_of(queue: &SqliteQueue, task: Option<TaskId>) -> Result<Value> {
+fn ci_failures_of<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+    task: Option<TaskId>,
+) -> Result<Value>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let config = bound_ci_watch(queue)?;
     let branch = config.as_ref().and_then(|config| config.branch.clone());
     crate::application::ci_watch::known_failures(queue, config.as_ref(), branch.as_deref(), task)
@@ -639,7 +698,10 @@ fn ci_failures_of(queue: &SqliteQueue, task: Option<TaskId>) -> Result<Value> {
 /// resolves, whether it is logged in, the repository, and the supervisor's
 /// last `ci_watch_unavailable` / `ci_watch_available`; none without the
 /// table, `error` when the file cannot be read.
-fn doctor_ci_watch(queue: &SqliteQueue) -> Result<Option<Value>> {
+fn doctor_ci_watch<E: TransactionEntries>(queue: &StoreQueue<E>) -> Result<Option<Value>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let Some(checkout) = bound_checkout(queue)? else {
         return Ok(None);
     };
@@ -658,7 +720,10 @@ fn doctor_ci_watch(queue: &SqliteQueue) -> Result<Option<Value>> {
 
 /// `status`'s and `doctor`'s `replans` ([`health::replans_report`]) of the
 /// queue under `[replan]` of the bound main checkout.
-fn replans_view(queue: &SqliteQueue) -> Result<Value> {
+fn replans_view<E: TransactionEntries>(queue: &StoreQueue<E>) -> Result<Value>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let config = bound_checkout(queue)?
         .map(|checkout| crate::infrastructure::run_env::load_replan(&checkout));
     health::replans_report(queue, &health::ReplanConfigRead::of(config))
@@ -667,13 +732,22 @@ fn replans_view(queue: &SqliteQueue) -> Result<Value> {
 /// `status`'s, `stats`' and `doctor`'s `recurring` ([`health::recurring`])
 /// of the `dagq.toml` of the bound main checkout and the queue's history;
 /// none for a queue bound to no checkout.
-fn recurring_view(queue: &SqliteQueue) -> Result<Option<Value>> {
+fn recurring_view<E: TransactionEntries>(queue: &StoreQueue<E>) -> Result<Option<Value>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     recurring_view_of(queue, bound_checkout(queue)?.as_deref())
 }
 
 /// [`recurring_view`] of the `dagq.toml` of `checkout`, the bound main
 /// checkout.
-fn recurring_view_of(queue: &SqliteQueue, checkout: Option<&Path>) -> Result<Option<Value>> {
+fn recurring_view_of<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+    checkout: Option<&Path>,
+) -> Result<Option<Value>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let Some(checkout) = checkout else {
         return Ok(None);
     };
@@ -727,12 +801,15 @@ fn render_svg(source: &str) -> Result<String> {
 /// `workspace_mismatch` is judged by the runs' background wrappers.
 ///
 /// [`QueueRead`]: crate::application::queue_reads::QueueRead
-pub fn read_queue(
-    queue: &mut SqliteQueue,
+pub fn read_queue<E: TransactionEntries>(
+    queue: &mut StoreQueue<E>,
     db: &Path,
     one_shot: &OneShot,
     read: &crate::application::queue_reads::QueueRead,
-) -> Result<Value> {
+) -> Result<Value>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     crate::application::queue_reads::answer(
         queue,
         &HostReads {
@@ -746,7 +823,11 @@ pub fn read_queue(
 
 /// How the queue service answers a read use case: [`read_queue`] with the
 /// user's `config.toml` for the language, as the command line reads it.
-pub fn service_reads() -> crate::infrastructure::queue_service::ServiceReads {
+pub fn service_reads<E: TransactionEntries + 'static>()
+-> crate::infrastructure::queue_service::ServiceReads<StoreQueue<E>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     std::sync::Arc::new(|queue, db, read| {
         let one_shot = OneShot {
             user_config: crate::infrastructure::language::user_config_file(),
@@ -780,35 +861,42 @@ struct HostReads<'a> {
     served: bool,
 }
 
-impl crate::application::queue_reads::PlanningSources<SqliteQueue> for HostReads<'_> {
-    fn changes(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeSet>> {
+impl<E: TransactionEntries> crate::application::queue_reads::PlanningSources<StoreQueue<E>>
+    for HostReads<'_>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
+    fn changes(&self, queue: &StoreQueue<E>) -> Result<Option<crate::domain::ChangeSet>> {
         task_changes(queue)
     }
-    fn title_prefixes(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TitlePrefixes>> {
+    fn title_prefixes(
+        &self,
+        queue: &StoreQueue<E>,
+    ) -> Result<Option<crate::domain::TitlePrefixes>> {
         task_title_prefixes(queue)
     }
     fn related_docs(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
     ) -> Result<Vec<crate::domain::doc_hints::RelatedDocument>> {
         crate::compose::task_related_docs(queue)
     }
-    fn goal_tags(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
+    fn goal_tags(&self, queue: &StoreQueue<E>) -> Result<Option<crate::domain::TagSet>> {
         goal_tags(queue)
     }
-    fn claim_holds(&self, queue: &SqliteQueue) -> Result<Vec<Value>> {
+    fn claim_holds(&self, queue: &StoreQueue<E>) -> Result<Vec<Value>> {
         health::claim_holds(queue, &SystemProcesses, queue.generators().clock.as_ref())
     }
-    fn live_supervisors(&self, queue: &SqliteQueue) -> Result<Vec<String>> {
+    fn live_supervisors(&self, queue: &StoreQueue<E>) -> Result<Vec<String>> {
         health::live_supervisors(queue, &SystemProcesses, queue.generators().clock.as_ref())
     }
     fn class_aging(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
     ) -> Result<crate::application::claim_view::AgingInputs> {
         crate::compose::class_aging_inputs(queue)
     }
-    fn clock<'q>(&self, queue: &'q SqliteQueue) -> &'q dyn crate::application::Clock {
+    fn clock<'q>(&self, queue: &'q StoreQueue<E>) -> &'q dyn crate::application::Clock {
         queue.generators().clock.as_ref()
     }
     fn render_svg(&self, source: &str) -> Result<String> {
@@ -822,13 +910,17 @@ impl crate::application::queue_reads::PlanningSources<SqliteQueue> for HostReads
     }
 }
 
-impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostReads<'_> {
-    fn status(&self, queue: &SqliteQueue, role: Option<SessionRole>) -> Result<Value> {
+impl<E: TransactionEntries> crate::application::queue_reads::ObservationSources<StoreQueue<E>>
+    for HostReads<'_>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
+    fn status(&self, queue: &StoreQueue<E>, role: Option<SessionRole>) -> Result<Value> {
         self.one_shot.status_of(self.db, queue, role)
     }
     fn stats(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         query: &StatsQuery,
         _: Option<&StatsGitReads>,
     ) -> Result<Value> {
@@ -836,13 +928,13 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
     }
     fn ledger_check(
         &self,
-        _: &SqliteQueue,
+        _: &StoreQueue<E>,
         _: &StatsQuery,
         _: Option<&StatsGitReads>,
     ) -> Result<Value> {
         Ok(refuse(StoppedRead::StatsLedger)?)
     }
-    fn stats_inputs(&self, queue: &SqliteQueue) -> Result<Value> {
+    fn stats_inputs(&self, queue: &StoreQueue<E>) -> Result<Value> {
         Ok(serde_json::to_value(statistics::stats_inputs(
             served_checkout(queue)?,
             crate::application::EventStore::latest_event_id(queue)?,
@@ -850,23 +942,23 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
     }
     fn kpi(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         query: &crate::domain::kpi::KpiQuery,
         _: Option<&StatsGitReads>,
     ) -> Result<Value> {
         self.one_shot.kpi_read(queue, self.db, query, self.served)
     }
-    fn observer_kpi(&self, queue: &SqliteQueue, _: Option<&StatsGitReads>) -> Result<Value> {
+    fn observer_kpi(&self, queue: &StoreQueue<E>, _: Option<&StatsGitReads>) -> Result<Value> {
         self.one_shot.observer_kpi_read(queue, self.db, self.served)
     }
     fn forecast(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         query: &crate::application::forecast::ForecastQuery,
     ) -> Result<Value> {
         self.one_shot.forecast_of(queue, self.db, query)
     }
-    fn improvements(&self, queue: &SqliteQueue) -> Result<Value> {
+    fn improvements(&self, queue: &StoreQueue<E>) -> Result<Value> {
         self.one_shot.improvements_of(queue)
     }
     fn observe_input(
@@ -881,47 +973,47 @@ impl crate::application::queue_reads::ObservationSources<SqliteQueue> for HostRe
             read.limit,
         )
     }
-    fn clock<'q>(&self, queue: &'q SqliteQueue) -> &'q dyn crate::application::Clock {
+    fn clock<'q>(&self, queue: &'q StoreQueue<E>) -> &'q dyn crate::application::Clock {
         queue.generators().clock.as_ref()
     }
     fn plan_request(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         id: crate::domain::RequestId,
     ) -> Result<crate::domain::plan_request::PlanRequest> {
         queue.request_by_id(id)
     }
     fn plan_requests(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         all: bool,
     ) -> Result<Vec<crate::domain::plan_request::PlanRequest>> {
         queue.plan_requests(all)
     }
     fn replan_brief(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         id: crate::domain::ReplanId,
     ) -> Result<crate::domain::replan_plan::ReplanBrief> {
         queue.replan_brief(id)
     }
     fn replan_operations(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         all: bool,
     ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
         queue.replan_operations(all)
     }
     fn ci_failures(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         read: &crate::application::queue_reads::CiFailuresRead,
     ) -> Result<Value> {
         ci_failures_of(queue, read.task.map(TaskId::new))
     }
     fn planners(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         read: &crate::application::queue_reads::PlannersRead,
     ) -> Result<Value> {
         self.one_shot.planners_of(
@@ -1180,17 +1272,21 @@ struct ObserverReads {
 }
 
 #[cfg(feature = "test-paths")]
-impl crate::application::observer::ObserverSources<SqliteQueue> for ObserverReads {
-    fn stats(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
+impl<E: TransactionEntries> crate::application::observer::ObserverSources<StoreQueue<E>>
+    for ObserverReads
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
+    fn stats(&self, queue: &StoreQueue<E>, db: &Path, query: &StatsQuery) -> Result<Value> {
         self.one_shot.stats_of(queue, db, query)
     }
-    fn kpi(&self, queue: &SqliteQueue, db: &Path) -> Result<Value> {
+    fn kpi(&self, queue: &StoreQueue<E>, db: &Path) -> Result<Value> {
         self.one_shot.observer_kpi(queue, db)
     }
-    fn improvements(&self, queue: &SqliteQueue) -> Result<Value> {
+    fn improvements(&self, queue: &StoreQueue<E>) -> Result<Value> {
         self.one_shot.improvements_of(queue)
     }
-    fn checkout(&self, queue: &SqliteQueue) -> Result<Option<PathBuf>> {
+    fn checkout(&self, queue: &StoreQueue<E>) -> Result<Option<PathBuf>> {
         bound_checkout(queue)
     }
 }
@@ -1307,26 +1403,29 @@ struct ThroughputReviewReads {
 }
 
 #[cfg(feature = "test-paths")]
-impl crate::application::throughput_review::ThroughputReviewSources<SqliteQueue>
+impl<E: TransactionEntries>
+    crate::application::throughput_review::ThroughputReviewSources<StoreQueue<E>>
     for ThroughputReviewReads
+where
+    StoreQueue<E>: crate::application::SearchIndex,
 {
-    fn stats(&self, queue: &SqliteQueue, db: &Path, query: &StatsQuery) -> Result<Value> {
+    fn stats(&self, queue: &StoreQueue<E>, db: &Path, query: &StatsQuery) -> Result<Value> {
         self.one_shot.stats_of(queue, db, query)
     }
     fn kpi(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         db: &Path,
         query: &crate::domain::kpi::KpiQuery,
     ) -> Result<Value> {
         self.one_shot.kpi_of(queue, db, query)
     }
-    fn checkout(&self, queue: &SqliteQueue) -> Result<Option<PathBuf>> {
+    fn checkout(&self, queue: &StoreQueue<E>) -> Result<Option<PathBuf>> {
         bound_checkout(queue)
     }
     fn record_finding(
         &self,
-        queue: &mut SqliteQueue,
+        queue: &mut StoreQueue<E>,
         finding: crate::domain::NewFinding,
     ) -> Result<i64> {
         Ok(queue.record_finding(finding)?.finding.id.as_i64())
@@ -1363,7 +1462,15 @@ pub fn timeline(db: &Path, run: &RunId, gap_secs: i64, full: bool) -> Result<Val
 
 /// [`timeline`] on a queue the caller already opened, so a command opens
 /// it once.
-pub fn timeline_in(queue: &SqliteQueue, run: &RunId, gap_secs: i64, full: bool) -> Result<Value> {
+pub fn timeline_in<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+    run: &RunId,
+    gap_secs: i64,
+    full: bool,
+) -> Result<Value>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     crate::application::watch::timeline_in(
         queue,
         run,
@@ -1576,7 +1683,10 @@ fn push_target(db: &Path, binding: Option<&Path>) -> crate::application::push::P
 
 /// `status`'s `requests` ([`health::requests`]): the `open` planning requests with the planner
 /// of the runtime's open for each and its asks, and which of them wait for a planner to open.
-fn open_requests(queue: &SqliteQueue) -> Result<Value> {
+fn open_requests<E: TransactionEntries>(queue: &StoreQueue<E>) -> Result<Value>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     let waiting: Vec<_> = queue
         .planner_requests()?
         .into_iter()
@@ -1609,25 +1719,31 @@ impl OneShot {
     /// the release check of the host's `[update]` (ADR-t618-1). `held` is
     /// the open holds of tasks, and the overdue ones join `attention`
     /// ([`health::add_held_tasks`]).
-    pub fn status_of(
+    pub fn status_of<E: TransactionEntries>(
         &self,
         db: &Path,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         role: Option<SessionRole>,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         self.status_with_agents(db, queue, role, || launchd_queue_agents(db))
     }
 
     /// [`Self::status_of`] judging what `agents` gives as the queue's
     /// LaunchAgents ([`queue_agents`]) for `duplicate_supervisors`
     /// ([`health::duplicate_supervisors`]); tests give a fake launchd's.
-    pub fn status_with_agents(
+    pub fn status_with_agents<E: TransactionEntries>(
         &self,
         db: &Path,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         role: Option<SessionRole>,
         agents: impl FnOnce() -> Vec<lifecycle::QueueAgent>,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         // A bound repository whose main checkout is not found reads as
         // unknown.
         let ci_watch = match bound_main_checkout(queue) {
@@ -1704,10 +1820,13 @@ impl OneShot {
 
     /// The language of the checkout `queue` is bound to over the user's
     /// (ADR-t616-2), with where it came from and any mistake.
-    fn language_report(
+    fn language_report<E: TransactionEntries>(
         &self,
-        queue: &SqliteQueue,
-    ) -> Result<crate::infrastructure::language::LanguageReport> {
+        queue: &StoreQueue<E>,
+    ) -> Result<crate::infrastructure::language::LanguageReport>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         Ok(crate::infrastructure::language::language_report(
             bound_checkout(queue)?.as_deref(),
             self.user_config.as_deref(),
@@ -1757,14 +1876,17 @@ impl OneShot {
     /// ([`queue_agents`]) for `duplicate_supervisors`
     /// ([`health::duplicate_supervisors`]), read only for a queue that
     /// opens; tests give a fake launchd's.
-    pub fn doctor_of(
+    pub fn doctor_of<E: TransactionEntries>(
         &self,
         db: &Path,
         schema: crate::infrastructure::sqlite::SchemaState,
-        queue: ReadOnlyQueue,
+        queue: ReadOnlyQueue<StoreQueue<E>>,
         full: bool,
         agents: impl FnOnce() -> Vec<lifecycle::QueueAgent>,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         let mut service_view = None;
         let mut broker_view = None;
         let mut report = match queue {
@@ -1832,10 +1954,10 @@ impl OneShot {
         report["inbox_watcher"] = self.inbox_watcher(db);
         // The queue service (ADR-t1233-4): whether it answers, and its
         // attention from a queue that can be read.
-        report["queue_service"] = service_view.unwrap_or_else(|| queue_service_view(db, None));
+        report["queue_service"] = service_view.unwrap_or_else(|| queue_service_view::<E>(db, None));
         // The queue broker (ADR-t2114-1): whether it runs, its address and
         // build, and its attention from a queue that can be read.
-        report["queue_broker"] = broker_view.unwrap_or_else(|| queue_broker_view(db, None));
+        report["queue_broker"] = broker_view.unwrap_or_else(|| queue_broker_view::<E>(db, None));
         // The host's `[update]`, with what was taken as its default
         // (ADR-t618-1 decision 3).
         report["release_update"] = serde_json::to_value(host_update(db))?;
@@ -1864,18 +1986,29 @@ impl OneShot {
 
     /// [`Self::stats`] on `queue`, the queue at `db` the caller already
     /// opened, so a command opens it once.
-    pub fn stats_of(&self, queue: &SqliteQueue, _db: &Path, query: &StatsQuery) -> Result<Value> {
+    pub fn stats_of<E: TransactionEntries>(
+        &self,
+        queue: &StoreQueue<E>,
+        _db: &Path,
+        query: &StatsQuery,
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         self.stats_read(queue, query, false)
     }
 
     /// [`Self::stats_of`], in the queue service when `served` (the main
     /// checkout is the one [`served_checkout`] finds).
-    pub fn stats_read(
+    pub fn stats_read<E: TransactionEntries>(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         query: &StatsQuery,
         served: bool,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         let checkout = stats_checkout(queue, served)?;
         let now = self.generators.clock.now();
         let config_file = || match checkout.as_deref() {
@@ -1907,24 +2040,30 @@ impl OneShot {
     /// measured to these generators' now in the host's time zone, judged by
     /// the `[kpi]` of the main checkout's `dagq.toml` with the host's
     /// `host.toml` (the queue's, over the host-wide one) over it.
-    pub fn kpi_of(
+    pub fn kpi_of<E: TransactionEntries>(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         db: &Path,
         query: &crate::domain::kpi::KpiQuery,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         self.kpi_read(queue, db, query, false)
     }
 
     /// [`Self::kpi_of`], in the queue service when `served`, from the
     /// queue's ledger alone ([`crate::application::kpi::kpi`]).
-    pub fn kpi_read(
+    pub fn kpi_read<E: TransactionEntries>(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         db: &Path,
         query: &crate::domain::kpi::KpiQuery,
         served: bool,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
         let checkout = stats_checkout(queue, served)?;
@@ -1949,12 +2088,15 @@ impl OneShot {
     /// [`crate::application::forecast::forecast`], at these generators' now,
     /// with the `min_samples` of the `[kpi]` settings `kpi` judges by, the
     /// samples from the queue's ledger.
-    pub fn forecast_of(
+    pub fn forecast_of<E: TransactionEntries>(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         db: &Path,
         query: &crate::application::forecast::ForecastQuery,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
         let setup = report_setup(
@@ -1984,17 +2126,27 @@ impl OneShot {
     /// including host-load targets. The input carries target judgments,
     /// each breach's kind, subject, evidence and marks, and the trend and
     /// forecast scoring for each period.
-    pub fn observer_kpi(&self, queue: &SqliteQueue, db: &Path) -> Result<serde_json::Value> {
+    pub fn observer_kpi<E: TransactionEntries>(
+        &self,
+        queue: &StoreQueue<E>,
+        db: &Path,
+    ) -> Result<serde_json::Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         self.observer_kpi_read(queue, db, false)
     }
 
     /// [`Self::observer_kpi`], in the queue service when `served`.
-    pub fn observer_kpi_read(
+    pub fn observer_kpi_read<E: TransactionEntries>(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         db: &Path,
         served: bool,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<serde_json::Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         use crate::domain::kpi::{KpiQuery, Period, observe};
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
@@ -2031,7 +2183,13 @@ impl OneShot {
 
     /// [`crate::application::kpi::improvements`] against `[kpi]`'s
     /// `max_improvement_proposals` of the main checkout's `dagq.toml`.
-    pub fn improvements_of(&self, queue: &SqliteQueue) -> Result<serde_json::Value> {
+    pub fn improvements_of<E: TransactionEntries>(
+        &self,
+        queue: &StoreQueue<E>,
+    ) -> Result<serde_json::Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         let limit = match bound_checkout(queue)? {
             Some(checkout) => max_improvement_proposals(&checkout)?,
             None => crate::domain::kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS,
@@ -2042,11 +2200,14 @@ impl OneShot {
     /// `report_inputs` ([`crate::application::report::report_inputs`]) of
     /// `queue`: a checkout `params` names is accepted only as the main
     /// checkout [`served_checkout`] finds.
-    pub fn report_inputs_of(
+    pub fn report_inputs_of<E: TransactionEntries>(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         params: &crate::application::queue_commands::ReportInputsParams,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         use crate::application::report;
         let window = report::window(queue, self.generators.clock.now())?;
         Ok(serde_json::to_value(report::report_inputs(
@@ -2074,12 +2235,15 @@ impl OneShot {
     /// program runs: the `dagq.toml` read is the main checkout's
     /// [`served_checkout`] finds, and a checkout `params` names that is not
     /// it is refused ([`crate::application::report::accept_checkout`]).
-    pub fn report_of(
+    pub fn report_of<E: TransactionEntries>(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         db: &Path,
         params: &crate::application::queue_commands::ReportParams,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         use crate::application::report;
         let period = params.period.parse().map_err(anyhow::Error::msg)?;
         let at = params

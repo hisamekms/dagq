@@ -87,20 +87,6 @@ impl<S: PostgresSession> PostgresQueue<S> {
     }
 }
 
-/// The Postgres store has no relatedness of its own yet: its search index
-/// reads are the search adapter's, which does not implement them on this
-/// queue type yet. A plan review's proposal features are then not recorded,
-/// as when SQLite's relatedness read fails.
-impl<S: PostgresSession> super::plan_reviews::ProposalRelatedness for PostgresQueue<S> {
-    fn related_page(
-        &self,
-        _task: crate::domain::TaskId,
-        _limit: usize,
-    ) -> Result<crate::domain::related::RelatedPage> {
-        anyhow::bail!("the Postgres store reads no relatedness yet")
-    }
-}
-
 /// What a driver answers for the store. Its statements' parameters are
 /// already numbered as Postgres spells them. Driver errors from query and
 /// execute use [`exec::session_error`] to distinguish server rejections from

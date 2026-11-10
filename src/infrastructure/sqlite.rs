@@ -1453,18 +1453,17 @@ impl QueueSchema {
     }
 }
 
-/// A queue opened read-only by [`SqliteQueue::inspect_read_only`].
-pub enum ReadOnlyQueue {
+/// An inspected queue, readable as it is or retained only for its binding.
+/// SQLite inspection supplies the default queue type; service backends may
+/// report the same outcome over their own transaction entries.
+pub enum ReadOnlyQueue<Q = SqliteQueue> {
     /// A queue this binary reads as it is.
-    Readable(SqliteQueue),
+    Readable(Q),
     /// A queue older than this binary's schema, or whose floor refuses
     /// this binary: `binding` reads only its
     /// repository binding ([`SqliteQueue::assert_repository`]), and `error`
     /// is what [`SqliteQueue::open_read_only`] fails with.
-    Refused {
-        binding: SqliteQueue,
-        error: anyhow::Error,
-    },
+    Refused { binding: Q, error: anyhow::Error },
 }
 
 /// A queue's schema as `migrate --check` and `doctor` report it.

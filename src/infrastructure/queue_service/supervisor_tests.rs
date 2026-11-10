@@ -94,6 +94,7 @@ fn claimed_at_with(
         ))
         .unwrap();
     let backend = SqliteServiceBackend {
+        storage: crate::infrastructure::queue_service::SqliteStorage,
         queue_dir: dir.path().to_path_buf(),
         db,
         generators,

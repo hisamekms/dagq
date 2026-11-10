@@ -14,6 +14,7 @@
 //! - a struct expression of `SqliteOpener`, which opens the queue for each
 //!   connection it is asked for, or of `SqliteServiceBackend`, the
 //!   service's use cases on a DB they open;
+//! - a value of `SqliteStorage`, the local backend's opening capability;
 //! - a path to an entry of the in-process service ([`IN_PROCESS`]), which
 //!   only the tests build;
 //! - the same in the tokens of a macro (`SqliteQueue :: f`, `SqliteOpener {`).
@@ -110,24 +111,14 @@ const fn row(path: &'static str, function: &'static str, why: Why) -> Opener {
 pub(super) const OPENERS: &[Opener] = &[
     row("src/compose/host.rs", "init_queue", Why::Init),
     row(
-        "src/infrastructure/queue_service.rs",
-        "SqliteServiceBackend::principal",
-        Why::Service,
-    ),
-    row(
-        "src/infrastructure/queue_service.rs",
-        "SqliteServiceBackend::admin",
-        Why::Service,
-    ),
-    row(
-        "src/infrastructure/queue_service.rs",
-        "SqliteServiceBackend::target_facts",
-        Why::Service,
-    ),
-    row(
         "src/infrastructure/runtime_store/mod.rs",
         "SqliteOpener::connect",
         Why::Opener,
+    ),
+    row(
+        "src/infrastructure/queue_service.rs",
+        "serve_on",
+        Why::Service,
     ),
     row(
         "src/infrastructure/queue_service.rs",
@@ -137,31 +128,6 @@ pub(super) const OPENERS: &[Opener] = &[
     row(
         "src/infrastructure/queue_service.rs",
         "apply_start_migrations",
-        Why::Service,
-    ),
-    row(
-        "src/infrastructure/queue_service.rs",
-        "serve_on",
-        Why::Service,
-    ),
-    row(
-        "src/infrastructure/queue_service.rs",
-        "SqliteServiceBackend::binding",
-        Why::Service,
-    ),
-    row(
-        "src/infrastructure/queue_service.rs",
-        "SqliteServiceBackend::open_read",
-        Why::Service,
-    ),
-    row(
-        "src/infrastructure/queue_service.rs",
-        "SqliteServiceBackend::open_watch",
-        Why::Service,
-    ),
-    row(
-        "src/infrastructure/queue_service.rs",
-        "write_queue",
         Why::Service,
     ),
     row(
@@ -177,6 +143,56 @@ pub(super) const OPENERS: &[Opener] = &[
     row(
         "src/infrastructure/queue_service.rs",
         "ServiceWriteLine::stop_within",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service/storage.rs",
+        "SqliteStorage::open",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service/storage.rs",
+        "SqliteStorage::open_read_only",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service/storage.rs",
+        "SqliteStorage::open_watch",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service/storage.rs",
+        "SqliteStorage::schema",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service/storage.rs",
+        "SqliteStorage::binding_at",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service/storage.rs",
+        "SqliteStorage::inspect_read_only",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service/storage.rs",
+        "SqliteStorage::migrate_compatible",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service/storage.rs",
+        "SqliteStorage::migrate_with_proof",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service/storage.rs",
+        "SqliteStorage::refuse_breaking_in_use",
+        Why::Service,
+    ),
+    row(
+        "src/infrastructure/queue_service/storage.rs",
+        "SqliteStorage::write_connection",
         Why::Service,
     ),
 ];
@@ -300,6 +316,7 @@ fn skipped(attrs: &[Attribute]) -> bool {
 struct Names {
     queues: BTreeSet<String>,
     openers: BTreeSet<String>,
+    unit_openers: BTreeSet<String>,
     generic_queues: BTreeSet<String>,
     sqlite_entries: BTreeSet<String>,
 }
@@ -330,6 +347,7 @@ impl Names {
     fn count(&self) -> usize {
         self.queues.len()
             + self.openers.len()
+            + self.unit_openers.len()
             + self.generic_queues.len()
             + self.sqlite_entries.len()
     }
@@ -346,6 +364,8 @@ fn names<'a>(files: impl Iterator<Item = &'a syn::File> + Clone) -> Names {
     names.sqlite_entries.insert("SqliteEntries".to_owned());
     names.openers.insert("SqliteOpener".to_owned());
     names.openers.insert("SqliteServiceBackend".to_owned());
+    names.openers.insert("SqliteStorage".to_owned());
+    names.unit_openers.insert("SqliteStorage".to_owned());
     loop {
         let before = names.count();
         for file in files.clone() {
@@ -377,6 +397,9 @@ struct Aliases<'a> {
 
 impl Aliases<'_> {
     fn alias(&mut self, of: &str, name: String) {
+        if self.names.unit_openers.contains(of) {
+            self.names.unit_openers.insert(name.clone());
+        }
         if self.names.queues.contains(of) {
             self.names.queues.insert(name);
         } else if self.names.openers.contains(of) {
@@ -474,9 +497,10 @@ impl Reader {
                 TokenTree::Group(group) => self.tokens(group.stream()),
                 TokenTree::Ident(owner) => {
                     let owner = owner.to_string();
-                    if self.names.openers.contains(&owner)
-                        && matches!(trees.get(at + 1), Some(TokenTree::Group(group))
-                            if group.delimiter() == proc_macro2::Delimiter::Brace)
+                    if self.names.unit_openers.contains(&owner)
+                        || (self.names.openers.contains(&owner)
+                            && matches!(trees.get(at + 1), Some(TokenTree::Group(group))
+                            if group.delimiter() == proc_macro2::Delimiter::Brace))
                     {
                         self.found(owner.clone());
                     }
@@ -603,10 +627,9 @@ impl<'ast> Visit<'ast> for Reader {
         if let (Some(owner), Some(name)) = (owner, segments.last()) {
             self.path(&owner, name);
         }
-        if let Some(name) = segments
-            .last()
-            .filter(|name| IN_PROCESS_NAMES.contains(&name.as_str()))
-        {
+        if let Some(name) = segments.last().filter(|name| {
+            IN_PROCESS_NAMES.contains(&name.as_str()) || self.names.unit_openers.contains(*name)
+        }) {
             self.found(name.clone());
         }
         visit::visit_expr_path(self, path);
@@ -630,7 +653,12 @@ mod fixtures {
 
     /// The opens this module finds, one statement each, with the name its
     /// error gives it.
-    const OPENS_FOUND: [(&str, &str); 6] = [
+    const OPENS_FOUND: [(&str, &str); 8] = [
+        ("let storage = SqliteStorage;", "SqliteStorage"),
+        (
+            r#"format!("{:?}", SqliteStorage.open(db));"#,
+            "SqliteStorage",
+        ),
         (
             "let q = SqliteQueue::open(db).unwrap();",
             "SqliteQueue::open",
@@ -694,7 +722,12 @@ mod fixtures {
 
     /// Opens through an alias, `Self` or the in-process service: each case's
     /// files (the one to read first), with the name its error gives it.
-    const THROUGH: [(&str, &str, &str); 10] = [
+    const THROUGH: [(&str, &str, &str); 11] = [
+        (
+            "",
+            "use crate::infrastructure::queue_service::SqliteStorage as Local; fn reads(db: &Path) { Local.open(db); }",
+            "Local",
+        ),
         (
             "",
             "type Q = crate::infrastructure::sqlite::SqliteQueue;\nfn reads(db: &Path) { let _ = Q::open(db); }",

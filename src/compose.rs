@@ -17,6 +17,10 @@
 //! adapters, the queue service's view) and re-exports every entry point,
 //! so its callers name `crate::compose::<entry>` and never a submodule.
 
+#[cfg(any(test, feature = "test-paths"))]
+use crate::infrastructure::sqlite::SqliteQueue;
+
+use crate::infrastructure::{sql_exec::TransactionEntries, store_queue::StoreQueue};
 use anyhow::{Result, ensure};
 use serde_json::Value;
 use std::{
@@ -34,7 +38,6 @@ use crate::{
         adapters::{ClaudeCode, VERIFICATION_TIMEOUT, free_disk_bytes, main_checkout_of},
         clock,
         codex::Codex,
-        sqlite::SqliteQueue,
         transcripts::ClaudeTranscripts,
     },
 };
@@ -535,14 +538,18 @@ pub fn ready_inherit(
 
 /// The main checkout of the repository the queue is bound to; `None` for a
 /// queue bound to none, or to one without a main checkout.
-pub(crate) fn bound_checkout(queue: &SqliteQueue) -> Result<Option<PathBuf>> {
+pub(crate) fn bound_checkout<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+) -> Result<Option<PathBuf>> {
     Ok(bound_main_checkout(queue)?.and_then(Result::ok))
 }
 
 /// The main checkout of the repository the queue is bound to
 /// ([`main_checkout_of`]), or why it has none; `None` for a queue bound to
 /// no repository.
-fn bound_main_checkout(queue: &SqliteQueue) -> Result<Option<Result<PathBuf>>> {
+fn bound_main_checkout<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+) -> Result<Option<Result<PathBuf>>> {
     Ok(queue
         .repository_binding()?
         .map(|common_dir| main_checkout_of(Path::new(&common_dir))))
@@ -637,7 +644,7 @@ pub fn wrapper_entry(background: bool) -> Result<WrapperStart> {
 /// The queue service as `status`, `doctor` and `dagq service status` show
 /// it ([`crate::application::queue_service::view`]): its socket under the
 /// queue's directory, and its attention when `queue` can be read.
-fn queue_service_view(db: &Path, queue: Option<&SqliteQueue>) -> Value {
+fn queue_service_view<E: TransactionEntries>(db: &Path, queue: Option<&StoreQueue<E>>) -> Value {
     crate::application::queue_service::view(
         &crate::infrastructure::queue_service::probe(db.parent().unwrap_or(Path::new("."))),
         queue.map(|queue| queue as &dyn crate::application::RunLog),
@@ -648,7 +655,7 @@ fn queue_service_view(db: &Path, queue: Option<&SqliteQueue>) -> Value {
 /// show it ([`crate::application::queue_broker::view`]): its record and
 /// health under the queue's directory, and its attention when `queue` can
 /// be read. It starts no broker.
-fn queue_broker_view(db: &Path, queue: Option<&SqliteQueue>) -> Value {
+fn queue_broker_view<E: TransactionEntries>(db: &Path, queue: Option<&StoreQueue<E>>) -> Value {
     crate::application::queue_broker::view(
         &crate::infrastructure::queue_broker::probe(db.parent().unwrap_or(Path::new("."))),
         queue.map(|queue| queue as &dyn crate::application::RunLog),
@@ -692,7 +699,9 @@ impl OneShot {
 /// The `[tasks] changes` of the `dagq.toml` of the main checkout `queue`
 /// is bound to (ADR-t980-1), which `add`, `edit`, `submit` and `lint` hold
 /// the tasks to; none for a queue bound to no checkout or without them.
-pub fn task_changes(queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeSet>> {
+pub fn task_changes<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+) -> Result<Option<crate::domain::ChangeSet>> {
     match bound_checkout(queue)? {
         Some(checkout) => crate::infrastructure::run_env::load_change_set(&checkout),
         None => Ok(None),
@@ -702,7 +711,9 @@ pub fn task_changes(queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeS
 /// The `[tasks] title_prefixes` of the `dagq.toml` of the main checkout
 /// `queue` is bound to, which `submit` and `lint` hold the tasks' titles
 /// to; none for a queue bound to no checkout or without them.
-pub fn task_title_prefixes(queue: &SqliteQueue) -> Result<Option<crate::domain::TitlePrefixes>> {
+pub fn task_title_prefixes<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+) -> Result<Option<crate::domain::TitlePrefixes>> {
     match bound_checkout(queue)? {
         Some(checkout) => crate::infrastructure::run_env::load_title_prefixes(&checkout),
         None => Ok(None),
@@ -713,8 +724,8 @@ pub fn task_title_prefixes(queue: &SqliteQueue) -> Result<Option<crate::domain::
 /// checkout `queue` is bound to name, read from that checkout, which `lint`
 /// gives its hints from (ADR-t3321-1); none for a queue bound to no
 /// checkout or without them.
-pub fn task_related_docs(
-    queue: &SqliteQueue,
+pub fn task_related_docs<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
 ) -> Result<Vec<crate::domain::doc_hints::RelatedDocument>> {
     match bound_checkout(queue)? {
         Some(checkout) => crate::infrastructure::related_docs::read_related_docs(
@@ -730,8 +741,8 @@ pub fn task_related_docs(
 /// the read of `[supervisor]` of the `dagq.toml` of the main checkout
 /// `queue` is bound to, as it came (`None` without a checkout), and each
 /// registration's value, oldest first.
-pub fn class_aging_inputs(
-    queue: &SqliteQueue,
+pub fn class_aging_inputs<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
 ) -> Result<crate::application::claim_view::AgingInputs> {
     let file = bound_checkout(queue)?
         .map(|checkout| crate::infrastructure::run_env::load_supervisor_config(&checkout));
@@ -747,7 +758,7 @@ pub fn class_aging_inputs(
 /// `queue` is bound to (ADR-t1487-1 decision 8), which `submit` holds a
 /// planner of the runtime's to; none for a queue bound to no checkout or
 /// without it.
-pub fn max_spike_cycles(queue: &SqliteQueue) -> Result<Option<usize>> {
+pub fn max_spike_cycles<E: TransactionEntries>(queue: &StoreQueue<E>) -> Result<Option<usize>> {
     match bound_checkout(queue)? {
         Some(checkout) => crate::infrastructure::run_env::load_max_spike_cycles(&checkout),
         None => Ok(None),
@@ -758,9 +769,38 @@ pub fn max_spike_cycles(queue: &SqliteQueue) -> Result<Option<usize>> {
 /// bound to (ADR-t1639-1 decision 6), which `goal add`, `goal edit`,
 /// `submit` and `lint` hold the goals to; none for a queue bound to no
 /// checkout or without them.
-pub fn goal_tags(queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
+pub fn goal_tags<E: TransactionEntries>(
+    queue: &StoreQueue<E>,
+) -> Result<Option<crate::domain::TagSet>> {
     match bound_checkout(queue)? {
         Some(checkout) => crate::infrastructure::run_env::load_goal_tags(&checkout),
         None => Ok(None),
     }
+}
+
+/// The composition root assembles callbacks from its contexts for either store.
+#[cfg(test)]
+#[test]
+fn postgres_service_callbacks_do_not_require_sqlite_entries() {
+    use crate::infrastructure::postgres::{PostgresSession, PostgresStore, exec::PostgresRow};
+    use crate::infrastructure::sql_exec::{SqlResult, SqlValue};
+
+    struct Unopened;
+    impl PostgresSession for Unopened {
+        fn run(&self, _: &str) -> Result<()> {
+            panic!("constructing callbacks must not open a session")
+        }
+        fn query(&self, _: &str, _: &[SqlValue]) -> SqlResult<Vec<PostgresRow>> {
+            panic!("constructing callbacks must not query a session")
+        }
+        fn execute(&self, _: &str, _: &[SqlValue]) -> SqlResult<u64> {
+            panic!("constructing callbacks must not write a session")
+        }
+    }
+    // Concrete instantiation checks every callback's queue bounds, including
+    // reads through SearchIndex, without opening a DB or enabling a driver.
+    let _ = service_reads::<PostgresStore<Unopened>>();
+    let _ = service_writes::<PostgresStore<Unopened>>();
+    let _ = service_commands::<PostgresStore<Unopened>>();
+    let _ = service_doctor::<PostgresStore<Unopened>>();
 }

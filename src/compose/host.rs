@@ -13,6 +13,7 @@ use crate::domain::LeaseToken;
 use crate::domain::queue_service::{ControlCall, ControlCommand, UseCase};
 use crate::infrastructure::location::runs_dir;
 use crate::infrastructure::queue_service as service;
+use crate::infrastructure::{sql_exec::TransactionEntries, store_queue::StoreQueue};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::{
@@ -853,13 +854,16 @@ impl OneShot {
     /// opened already and written as its actor: bound to the repository
     /// whose Git common directory is `common_dir`. It runs no Git; its
     /// caller repairs the worktrees it lists ([`repair_rebound_worktrees`]).
-    fn rebind_on(
+    fn rebind_on<E: TransactionEntries>(
         &self,
-        queue: &mut SqliteQueue,
+        queue: &mut StoreQueue<E>,
         db: &Path,
         common_dir: &Path,
         repository_queue_dir: Option<PathBuf>,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         let db = db
             .canonicalize()
             .context("queue must already be initialized")?;
@@ -1659,7 +1663,14 @@ pub(super) fn sccache_port(
 /// operations and the exports are authorized before it, as
 /// [`QueueCommand::authorization`] says; the dialogue, the holds and the
 /// replans by the application as they run.
-pub fn run_command(queue: &mut SqliteQueue, db: &Path, command: &QueueCommand) -> Result<Value> {
+pub fn run_command<E: TransactionEntries>(
+    queue: &mut StoreQueue<E>,
+    db: &Path,
+    command: &QueueCommand,
+) -> Result<Value>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     use crate::application::commands::{
         dialogue::Dialogue, holds::Holds, planning::Planning, replans::Replans,
     };
@@ -1988,7 +1999,11 @@ pub(super) fn ready_inherit(
 
 /// How the queue service runs the host's dialogue and operation commands:
 /// [`run_command`], as the command line runs them.
-pub fn service_commands() -> crate::infrastructure::queue_service::ServiceCommands {
+pub fn service_commands<E: TransactionEntries + 'static>()
+-> crate::infrastructure::queue_service::ServiceCommands<StoreQueue<E>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     Arc::new(run_command)
 }
 

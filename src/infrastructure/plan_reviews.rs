@@ -15,7 +15,10 @@ use crate::domain::write_rules::check_at_least;
 use crate::domain::{LeaseToken, event_kind};
 use crate::infrastructure::sql_exec::CommitTransaction as _;
 use crate::infrastructure::sql_exec::TransactionEntries;
+#[cfg(test)]
+use crate::infrastructure::sqlite::SqliteQueue;
 use crate::infrastructure::store_queue::StoreQueue;
+
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -24,7 +27,6 @@ use tracing::warn;
 use super::{
     asks::{deliver_ask_in, insert_ask, read_ask, record_ask_closed},
     proposals, sessions,
-    sqlite::SqliteQueue,
     store_rows::{enum_col, read_task},
     store_writes::{event, insert_dependency},
     task_store::{cancel_task, change_priority, check_duplicate, transition_task},
@@ -560,16 +562,19 @@ where
 
 /// The relatedness of `dagq related` that [`StoreQueue::proposal_features`]
 /// scores a proposal's tasks by. It reads the search index, which each
-/// adapter implements its own way (ADR-t3982-1 decision 1), so it is the
-/// one part of the plan review store an adapter supplies.
+/// adapter implements its own way (ADR-t3982-1 decision 1). The shared
+/// queue forwards this read to its search port.
 pub trait ProposalRelatedness {
     /// The tasks most related to `task`, best first, cut to `limit`.
     fn related_page(&self, task: TaskId, limit: usize) -> Result<RelatedPage>;
 }
 
-impl ProposalRelatedness for SqliteQueue {
+impl<E: TransactionEntries> ProposalRelatedness for StoreQueue<E>
+where
+    Self: crate::application::SearchIndex,
+{
     fn related_page(&self, task: TaskId, limit: usize) -> Result<RelatedPage> {
-        self.related(task.as_i64(), &[], limit)
+        crate::application::SearchIndex::related_tasks(self, task, &[], limit)
     }
 }
 

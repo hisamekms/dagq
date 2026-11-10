@@ -3,6 +3,10 @@
 //! wrapper. Each entry builds the adapters and calls the use case.
 
 use super::{OneShot, wrapper_entry};
+#[cfg(any(test, feature = "test-paths"))]
+use crate::infrastructure::sqlite::SqliteQueue;
+use crate::infrastructure::{sql_exec::TransactionEntries, store_queue::StoreQueue};
+
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::{
@@ -22,7 +26,6 @@ use crate::{
         location::planners_dir,
         process::LocalSpawner,
         run_files::LocalRunFiles,
-        sqlite::SqliteQueue,
     },
 };
 
@@ -142,13 +145,16 @@ impl OneShot {
 
     /// [`Self::planners`] on `queue`, the queue at `db` the caller already
     /// opened, so a command opens it once.
-    pub fn planners_of(
+    pub fn planners_of<E: TransactionEntries>(
         &self,
-        queue: &SqliteQueue,
+        queue: &StoreQueue<E>,
         db: &Path,
         sessions: &dyn SessionWrappers,
         all: bool,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         // Claude Code's signals only read what its hook shows.
         let signals = ClaudeCode {
             executable: PathBuf::from("claude"),
@@ -171,14 +177,17 @@ impl OneShot {
     /// `planner request ID`: hand `words` to the headless planner `planner`
     /// of `queue` (at `db`) as its next turn, the planner judged as
     /// [`Self::planners_of`] judges it ([`crate::application::planner_request::request_planner`]).
-    pub fn request_planner(
+    pub fn request_planner<E: TransactionEntries>(
         &self,
-        queue: &mut SqliteQueue,
+        queue: &mut StoreQueue<E>,
         db: &Path,
         sessions: &dyn SessionWrappers,
         planner: PlannerId,
         words: &str,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        StoreQueue<E>: crate::application::SearchIndex,
+    {
         let signals = ClaudeCode {
             executable: PathBuf::from("claude"),
         };
@@ -203,12 +212,15 @@ impl OneShot {
 /// and a goal's limit of Spike cycles and the prefixes of a task's title
 /// for `submit`, ADR-t1487-1 decision 8). `owner` gives the planner a
 /// submit's proposal belongs to.
-pub fn write_queue(
-    queue: &mut SqliteQueue,
+pub fn write_queue<E: TransactionEntries>(
+    queue: &mut StoreQueue<E>,
     actor: &crate::domain::ActorContext,
     write: &crate::application::queue_writes::QueueWrite,
-    owner: impl FnOnce(&SqliteQueue) -> Result<crate::domain::PlannerOwner>,
-) -> Result<Value> {
+    owner: impl FnOnce(&StoreQueue<E>) -> Result<crate::domain::PlannerOwner>,
+) -> Result<Value>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     use crate::application::queue_writes::QueueWrite;
     let mut rules = crate::infrastructure::sqlite::PlanningRules::default();
     if matches!(
@@ -252,7 +264,11 @@ pub fn write_queue(
 /// submit's proposal owned by the caller's principal
 /// ([`crate::application::queue_writes::principal_owner`], the queue as its
 /// planners' records).
-pub fn service_writes() -> crate::infrastructure::queue_service::ServiceWrites {
+pub fn service_writes<E: TransactionEntries + 'static>()
+-> crate::infrastructure::queue_service::ServiceWrites<StoreQueue<E>>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     std::sync::Arc::new(|queue, actor, write| {
         write_queue(queue, actor, write, |queue| {
             crate::application::queue_writes::principal_owner(queue, actor)

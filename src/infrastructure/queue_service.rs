@@ -33,6 +33,8 @@
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
+use super::sql_exec::CommitTransaction;
+use crate::infrastructure::{sql_exec::TransactionEntries, store_queue::StoreQueue};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::TcpListener;
@@ -1411,7 +1413,13 @@ impl TelemetryTokens for SystemServiceAccess {
 /// The service's own telemetry tokens: [`SystemServiceAccess`]'s files,
 /// and what the queue holds of a target and its sessions read and
 /// registered on the DB, which only the service's process opens.
-impl TelemetryTokens for SqliteServiceBackend {
+impl<B: QueueStorage> TelemetryTokens for SqliteServiceBackend<B>
+where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     fn issue_telemetry(
         &self,
         db: &Path,
@@ -1436,7 +1444,7 @@ impl TelemetryTokens for SqliteServiceBackend {
     }
 
     fn target_facts(&self, db: &Path, target: &StepTarget) -> Result<TargetFacts> {
-        SqliteQueue::open(db)?.telemetry_target(target)
+        self.storage.open(db)?.telemetry_target(target)
     }
 
     fn register_telemetry_session(
@@ -1445,7 +1453,7 @@ impl TelemetryTokens for SqliteServiceBackend {
         target: &StepTarget,
         session_id: &str,
     ) -> Result<()> {
-        let queue = write_queue(self.write_line.as_ref(), db)?;
+        let queue = write_queue(&self.storage, self.write_line.as_ref(), db)?;
         SessionOwners::register_session(&queue, target, session_id, unix_now_ms())
     }
 
@@ -1494,7 +1502,7 @@ impl TelemetryTokens for InProcessTelemetry {
     }
 
     fn target_facts(&self, db: &Path, target: &StepTarget) -> Result<TargetFacts> {
-        SqliteQueue::open(db)?.telemetry_target(target)
+        SqliteStorage.open(db)?.telemetry_target(target)
     }
 
     fn register_telemetry_session(
@@ -1503,7 +1511,7 @@ impl TelemetryTokens for InProcessTelemetry {
         target: &StepTarget,
         session_id: &str,
     ) -> Result<()> {
-        SessionOwners::register_session(&SqliteQueue::open(db)?, target, session_id, unix_now_ms())
+        SessionOwners::register_session(&SqliteStorage.open(db)?, target, session_id, unix_now_ms())
     }
 
     fn kept_steps(&self, db: &Path) -> Result<Vec<KeptStepsFile>> {
@@ -2903,19 +2911,15 @@ pub(crate) fn lock_file_held(path: &Path) -> bool {
 /// How the service answers a read use case: as the command line reads it
 /// (`compose::read_queue`), given by the composition root. It takes the
 /// request's queue and its DB. No read calls cmux (ADR-t1433-1).
-pub type ServiceReads =
-    Arc<dyn Fn(&mut SqliteQueue, &Path, &QueueRead) -> Result<Value> + Send + Sync>;
+pub type ServiceReads<Q = SqliteQueue> =
+    Arc<dyn Fn(&mut Q, &Path, &QueueRead) -> Result<Value> + Send + Sync>;
 
 /// How the service runs a planning command: as the command line runs it
 /// (`compose::write_queue`, the queue held to the repository's rules
 /// first), given by the composition root. It takes the request's queue,
 /// written as the caller's actor, and that actor.
-pub type ServiceWrites = Arc<
-    dyn Fn(
-            &mut SqliteQueue,
-            &ActorContext,
-            &crate::application::queue_writes::QueueWrite,
-        ) -> Result<Value>
+pub type ServiceWrites<Q = SqliteQueue> = Arc<
+    dyn Fn(&mut Q, &ActorContext, &crate::application::queue_writes::QueueWrite) -> Result<Value>
         + Send
         + Sync,
 >;
@@ -2929,15 +2933,20 @@ pub type ServiceDetail = fn(&crate::domain::TaskDetail, usize) -> Value;
 /// ([`QueueCommand`]): as the command line runs it on the DB
 /// (`compose::run_command`), given by the composition root. It takes the
 /// request's queue, written as the principal's actor, and its DB.
-pub type ServiceCommands =
-    Arc<dyn Fn(&mut SqliteQueue, &Path, &QueueCommand) -> Result<Value> + Send + Sync>;
+pub type ServiceCommands<Q = SqliteQueue> =
+    Arc<dyn Fn(&mut Q, &Path, &QueueCommand) -> Result<Value> + Send + Sync>;
 
 /// How the service makes `doctor`'s report of the queue at the DB from
 /// what it read of it, `full` or not ([`SqliteQueue::inspect_read_only`]:
 /// its schema, and the queue or why its build does not open it as it is),
 /// as the composition root makes it (ADR-t3102-2 decision 1).
-pub type ServiceDoctor = Arc<
-    dyn Fn(&Path, super::sqlite::SchemaState, super::sqlite::ReadOnlyQueue, bool) -> Result<Value>
+pub type ServiceDoctor<Q = SqliteQueue> = Arc<
+    dyn Fn(
+            &Path,
+            super::sqlite::SchemaState,
+            super::sqlite::ReadOnlyQueue<Q>,
+            bool,
+        ) -> Result<Value>
         + Send
         + Sync,
 >;
@@ -3097,7 +3106,7 @@ fn judge_start(
     if migrations == StartMigrations::None {
         return Ok(());
     }
-    let state = SqliteQueue::schema(db)?;
+    let state = SqliteStorage.schema(db)?;
     state.check_floor()?;
     if state.pending.is_empty() {
         return Ok(());
@@ -3108,7 +3117,8 @@ fn judge_start(
     // Judged again in the migration's transaction; a queue in use found
     // now leaves the running service as it was.
     if migrations == StartMigrations::Breaking {
-        SqliteQueue::refuse_breaking_in_use(db, &crate::infrastructure::adapters::process_alive)?;
+        SqliteStorage
+            .refuse_breaking_in_use(db, &crate::infrastructure::adapters::process_alive)?;
     }
     Ok(())
 }
@@ -3126,18 +3136,19 @@ fn apply_start_migrations(
     let alive = crate::infrastructure::adapters::process_alive;
     match migrations {
         StartMigrations::None => Ok(None),
-        StartMigrations::Compatible => SqliteQueue::migrate_compatible(db, Some(&alive), now),
+        StartMigrations::Compatible => SqliteStorage.migrate_compatible(db, Some(&alive), now),
         StartMigrations::Breaking => {
-            if SqliteQueue::schema(db)?.pending.is_empty() {
+            if SqliteStorage.schema(db)?.pending.is_empty() {
                 return Ok(None);
             }
-            SqliteQueue::migrate_with_proof(
-                db,
-                Some(&alive),
-                now,
-                local_lock_proof(db, &queue_dir_of(db)),
-            )
-            .map(Some)
+            SqliteStorage
+                .migrate_with_proof(
+                    db,
+                    Some(&alive),
+                    now,
+                    local_lock_proof(db, &queue_dir_of(db)),
+                )
+                .map(Some)
         }
     }
 }
@@ -3372,7 +3383,7 @@ fn serve_on(
     // accepts; what refuses them leaves the running service as it was.
     let taken = (|| {
         if let Some(binding) = &options.binding
-            && let Some(bound) = SqliteQueue::binding_at(&options.db)?
+            && let Some(bound) = SqliteStorage.binding_at(&options.db)?
         {
             ensure!(
                 bound == *binding,
@@ -3440,7 +3451,9 @@ accepts: schema {} to {}",
         }
     };
     // What a later replacement reads: a queue its build would migrate.
-    let pending = SqliteQueue::schema(&options.db).is_ok_and(|state| !state.pending.is_empty());
+    let pending = SqliteStorage
+        .schema(&options.db)
+        .is_ok_and(|state| !state.pending.is_empty());
     match fs::remove_file(&socket) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -3484,6 +3497,7 @@ accepts: schema {} to {}",
     let mut takeover =
         TakeoverWorker::start(write_line.clone(), options.db.clone(), holder, local_proof)?;
     let backend = Arc::new(SqliteServiceBackend {
+        storage: SqliteStorage,
         heavy_reads: Some(crate::application::heavy_reads::HeavyReads::of_service(
             options.generators.clock.clone(),
         )),
@@ -4196,7 +4210,7 @@ impl ServiceWriteLine {
     #[cfg(test)]
     fn start(db: &Path) -> Result<Self> {
         let line = Self::waiting(db)?;
-        let (row, _) = SqliteQueue::open(db)?.write_leader()?;
+        let (row, _) = SqliteStorage.open(db)?.write_leader()?;
         *line.identity.lock().unwrap() = Some(super::write_leader::WriteIdentity {
             holder: row.holder,
             generation: row.generation,
@@ -4207,7 +4221,7 @@ impl ServiceWriteLine {
     fn waiting(db: &Path) -> Result<Self> {
         Ok(Self {
             line: WriteLine::start(refused_as_not_leader)?,
-            connection: SqliteQueue::write_connection(db),
+            connection: SqliteStorage.write_connection(db),
             record_wait: LINE_RECORD_WAIT,
             identity: Mutex::new(None),
             acquiring: Mutex::new(()),
@@ -4246,12 +4260,13 @@ impl ServiceWriteLine {
         if self.identity.lock().unwrap().is_some() {
             return Ok(true);
         }
-        if SqliteQueue::schema(db)?.schema_version < SqliteQueue::SCHEMA_VERSION {
+        let schema = SqliteStorage.schema(db)?;
+        if schema.schema_version < schema.binary_schema_version {
             self.bootstrap.store(true, Ordering::SeqCst);
             return Ok(false);
         }
         self.bootstrap.store(false, Ordering::SeqCst);
-        let queue = SqliteQueue::open(db)?;
+        let queue = SqliteStorage.open(db)?;
         let (row, now) = queue.write_leader()?;
         if takeover(&row, now, local_proof) != Takeover::Take {
             return Ok(false);
@@ -4284,7 +4299,9 @@ impl ServiceWriteLine {
             && let Some(identity) = self.identity.lock().unwrap().take()
             && let Some(holder) = identity.holder
         {
-            SqliteQueue::open(db)?.release_write_leader(&holder, identity.generation)?;
+            SqliteStorage
+                .open(db)?
+                .release_write_leader(&holder, identity.generation)?;
         }
         Ok(())
     }
@@ -4329,11 +4346,12 @@ impl ServiceWriteLine {
 
 /// A queue that writes, for `line`'s thread, or of its own for a backend
 /// with no line.
-fn write_queue(line: Option<&Arc<ServiceWriteLine>>, db: &Path) -> Result<SqliteQueue> {
-    match line {
-        Some(line) => line.queue(),
-        None => SqliteQueue::open(db),
-    }
+fn write_queue<B: QueueStorage>(
+    storage: &B,
+    line: Option<&Arc<ServiceWriteLine>>,
+    db: &Path,
+) -> Result<StoreQueue<B::Entries>> {
+    storage.write_queue(line, db)
 }
 
 /// Run `write`, which uses [`write_queue`], on `line`: here on its thread or
@@ -4385,14 +4403,15 @@ fn on_line(
 /// The queue the service's use cases run on: to write, the write line's
 /// connection when the service has one, written as the request's principal;
 /// to read, a fresh connection per request.
-pub struct SqliteServiceBackend {
+pub struct SqliteServiceBackend<B: QueueStorage = SqliteStorage> {
+    pub storage: B,
     pub db: PathBuf,
     pub queue_dir: PathBuf,
     pub generators: Generators,
-    pub reads: ServiceReads,
-    pub writes: ServiceWrites,
+    pub reads: ServiceReads<StoreQueue<B::Entries>>,
+    pub writes: ServiceWrites<StoreQueue<B::Entries>>,
     pub detail: ServiceDetail,
-    pub commands: ServiceCommands,
+    pub commands: ServiceCommands<StoreQueue<B::Entries>>,
     /// The keys of the tokens to revoke as the service stops
     /// ([`ServiceBackend::revoke_at_stop`]), which [`serve`] revokes before
     /// it exits; `None` for a backend that never stops on its own (a
@@ -4405,7 +4424,7 @@ pub struct SqliteServiceBackend {
     /// What makes `doctor`'s report ([`ServiceDoctor`]); `None` for a
     /// backend of a process that is no service's (a test's in-process one),
     /// which makes none.
-    pub doctor: Option<ServiceDoctor>,
+    pub doctor: Option<ServiceDoctor<StoreQueue<B::Entries>>>,
     /// The line the service's writes go on; `None` for a backend no service
     /// runs (a supervisor's or a test's in-process one), each of whose
     /// callers opens its own connection on its own thread.
@@ -4440,21 +4459,37 @@ impl AtStop {
     }
 }
 
-impl SqliteServiceBackend {
+impl<B: QueueStorage> SqliteServiceBackend<B>
+where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     /// `queue`, a read-only one, for a read as `actor`, whose refusals of
     /// the policy are recorded on the connection that writes.
-    fn reading(&self, queue: SqliteQueue, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
+    fn reading(
+        &self,
+        queue: StoreQueue<B::Entries>,
+        actor: &ActorContext,
+    ) -> Result<Box<dyn ServiceQueue>> {
         let (line, db, generators, reader) = (
             self.write_line.clone(),
             self.db.clone(),
             self.generators.clone(),
             actor.clone(),
         );
+        let storage = self.storage.clone();
         let denials = Arc::new(move |payload: Value| {
-            let (writing, db, generators, reader) =
-                (line.clone(), db.clone(), generators.clone(), reader.clone());
+            let (writing, db, generators, reader, storage) = (
+                line.clone(),
+                db.clone(),
+                generators.clone(),
+                reader.clone(),
+                storage.clone(),
+            );
             on_line(line.as_ref(), move || {
-                let queue = write_queue(writing.as_ref(), &db)?
+                let queue = write_queue(&storage, writing.as_ref(), &db)?
                     .with_generators(generators)
                     .with_actor(reader);
                 EventStore::record_queue_event(&queue, EventKind::AuthorizationDenied, payload)
@@ -4485,7 +4520,13 @@ impl SqliteServiceBackend {
     }
 }
 
-impl ServiceBackend for SqliteServiceBackend {
+impl<B: QueueStorage> ServiceBackend for SqliteServiceBackend<B>
+where
+    StoreQueue<B::Entries>: crate::application::SearchIndex
+        + crate::application::RunnerStore
+        + crate::application::ImageStore
+        + crate::application::queue_service::MemberStore,
+{
     fn is_write_leader(&self) -> bool {
         self.write_line.as_ref().is_none_or(|line| line.leading())
     }
@@ -4507,13 +4548,17 @@ impl ServiceBackend for SqliteServiceBackend {
         claim: Option<&crate::domain::runner_assignment::ClaimInputs>,
     ) -> Result<crate::domain::runner_assignment::Outcome> {
         use crate::application::RunnerStore;
-        let queue = write_queue(self.write_line.as_ref(), &self.db)?;
+        let queue = write_queue(&self.storage, self.write_line.as_ref(), &self.db)?;
         let Some(runner) = queue.runner_token(hash, self.now_ms() / 1000)? else {
             return Ok(crate::domain::runner_assignment::Outcome::Unauthenticated);
         };
-        queue
-            .with_actor(Principal::runner(&runner.id).actor())
-            .runner_operation(hash, operation, claim, &self.generators)
+        self.storage.runner_operation(
+            queue.with_actor(Principal::runner(&runner.id).actor()),
+            hash,
+            operation,
+            claim,
+            &self.generators,
+        )
     }
 
     fn runner_change(
@@ -4522,7 +4567,7 @@ impl ServiceBackend for SqliteServiceBackend {
         now: i64,
     ) -> Result<crate::domain::runner_registration::Outcome> {
         use crate::application::RunnerStore;
-        let queue = write_queue(self.write_line.as_ref(), &self.db)?;
+        let queue = write_queue(&self.storage, self.write_line.as_ref(), &self.db)?;
         queue.change_runner(action, now)
     }
 
@@ -4531,7 +4576,7 @@ impl ServiceBackend for SqliteServiceBackend {
         token: &crate::domain::image_publish::PublisherToken,
     ) -> Result<()> {
         use crate::application::ImageStore;
-        write_queue(self.write_line.as_ref(), &self.db)?
+        write_queue(&self.storage, self.write_line.as_ref(), &self.db)?
             .with_generators(self.generators.clone())
             .with_actor(Principal::image_publisher(&token.id).actor())
             .issue_image_publisher(token)
@@ -4545,7 +4590,7 @@ impl ServiceBackend for SqliteServiceBackend {
         now: i64,
     ) -> Result<crate::domain::image_publish::PublishOutcome> {
         use crate::application::ImageStore;
-        write_queue(self.write_line.as_ref(), &self.db)?
+        write_queue(&self.storage, self.write_line.as_ref(), &self.db)?
             .with_generators(self.generators.clone())
             .with_actor(actor.clone())
             .publish_image(hash, publication, now)
@@ -4584,8 +4629,8 @@ impl ServiceBackend for SqliteServiceBackend {
             if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Ok(None);
             }
-            let queue = SqliteQueue::open_read_only(&self.db)?;
-            if queue.schema_version()? < SqliteQueue::SCHEMA_VERSION {
+            let queue = self.storage.open_read_only(&self.db)?;
+            if !self.storage.current_schema(&queue)? {
                 return Ok(None);
             }
             let (hash, now) = (sha256_hex(token.as_bytes()), self.now_ms() / 1000);
@@ -4599,7 +4644,7 @@ impl ServiceBackend for SqliteServiceBackend {
         };
         if let Some(identity) = &record.principal.human {
             use crate::application::queue_service::MemberStore;
-            let queue = SqliteQueue::open_read_only(&self.db)?;
+            let queue = self.storage.open_read_only(&self.db)?;
             let member = queue.member(identity)?;
             let Some(principal) = record.principal.with_current_member(
                 record.expires_at,
@@ -4622,7 +4667,7 @@ impl ServiceBackend for SqliteServiceBackend {
         {
             // Failure to read an old schema refuses authentication too;
             // neither a migration nor leadership is needed to fail closed.
-            let queue = SqliteQueue::open_read_only(&self.db)?;
+            let queue = self.storage.open_read_only(&self.db)?;
             let registrations = crate::application::SupervisorReads::supervisors(&queue)?;
             if crate::application::queue_service::supervisor_ended(self, &held, |token| {
                 registrations.iter().any(|row| row.token == *token)
@@ -4642,27 +4687,23 @@ impl ServiceBackend for SqliteServiceBackend {
         clean_human_tokens(&self.queue_dir, now)
     }
 
-    /// The same file as the service's DB, by both paths resolved: a path
-    /// that does not resolve (no such file) is another queue's.
+    /// Whether this locator denotes the queue this backend serves.
     fn serves(&self, db: &Path) -> bool {
-        match (fs::canonicalize(db), fs::canonicalize(&self.db)) {
-            (Ok(named), Ok(own)) => named == own,
-            _ => false,
-        }
+        self.storage.serves(db, &self.db)
     }
 
     /// Read whatever the queue's schema within the floor, so that a queue
     /// its build does not open as it is is still held to its repository
     /// (`migrate`, `doctor`).
     fn binding(&self) -> Result<Option<String>> {
-        SqliteQueue::binding_at(&self.db)
+        self.storage.binding_at(&self.db)
     }
 
     fn admin(&self, actor: &ActorContext, admin: &Admin) -> Result<Value> {
         let alive = crate::infrastructure::adapters::process_alive;
         match admin {
             Admin::SchemaFacts => {
-                let state = SqliteQueue::schema(&self.db)?;
+                let state = self.storage.schema(&self.db)?;
                 Ok(json!({"schema_version": state.schema_version, "floor": state.floor}))
             }
             Admin::Migrate => {
@@ -4670,7 +4711,9 @@ impl ServiceBackend for SqliteServiceBackend {
                 // service an `install` grants or one of another build
                 // started before the queue named it may not be.
                 queue_binary::check(&self.db, &std::env::current_exe()?, &alive)?;
-                let breaking = SqliteQueue::schema(&self.db)?
+                let breaking = self
+                    .storage
+                    .schema(&self.db)?
                     .pending
                     .iter()
                     .any(|m| !m.compatible);
@@ -4681,7 +4724,7 @@ impl ServiceBackend for SqliteServiceBackend {
                     .write_line
                     .as_ref()
                     .map(|line| line.acquiring.lock().unwrap());
-                let report = SqliteQueue::migrate_with_proof(
+                let report = self.storage.migrate_with_proof(
                     &self.db,
                     Some(&alive),
                     self.generators.clock.now(),
@@ -4727,13 +4770,16 @@ migrate's request: schema {} to {}",
                         &serde_json::to_vec(&record)?,
                     )?;
                 }
-                let missing = SqliteQueue::open_read_only(&self.db)?.missing_commit_messages()?;
+                let missing = self
+                    .storage
+                    .open_read_only(&self.db)?
+                    .missing_commit_messages()?;
                 let mut value = serde_json::to_value(report)?;
                 value["commit_messages_missing"] = serde_json::to_value(missing)?;
                 Ok(value)
             }
             Admin::CommitMessages(messages) => {
-                let mut queue = write_queue(self.write_line.as_ref(), &self.db)?
+                let mut queue = write_queue(&self.storage, self.write_line.as_ref(), &self.db)?
                     .with_generators(self.generators.clone())
                     .with_actor(actor.clone());
                 let mut filled = 0;
@@ -4743,20 +4789,20 @@ migrate's request: schema {} to {}",
                 Ok(json!({"filled": filled}))
             }
             Admin::Init { binding } => {
-                let mut queue = write_queue(self.write_line.as_ref(), &self.db)?
+                let mut queue = write_queue(&self.storage, self.write_line.as_ref(), &self.db)?
                     .with_generators(self.generators.clone())
                     .with_actor(actor.clone());
                 if let Some(binding) = binding {
                     queue.bind_repository(binding)?;
                 }
-                Ok(json!({"schema_version": queue.schema_version()?}))
+                Ok(json!({"schema_version": self.storage.schema_version(&queue)?}))
             }
             Admin::Doctor { full } => {
                 let doctor = self
                     .doctor
                     .as_ref()
                     .context("this queue service makes no doctor's report")?;
-                let (schema, queue) = SqliteQueue::inspect_read_only(&self.db)?;
+                let (schema, queue) = self.storage.inspect_read_only(&self.db)?;
                 doctor(&self.db, schema, queue, *full)
             }
         }
@@ -4839,7 +4885,7 @@ migrate's request: schema {} to {}",
     }
 
     fn open(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
-        let queue = write_queue(self.write_line.as_ref(), &self.db)?
+        let queue = write_queue(&self.storage, self.write_line.as_ref(), &self.db)?
             .with_generators(self.generators.clone())
             .with_actor(actor.clone());
         Ok(Box::new(ServiceSqlite {
@@ -4853,19 +4899,20 @@ migrate's request: schema {} to {}",
     }
 
     fn open_read(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
-        self.reading(SqliteQueue::open_read_only(&self.db)?, actor)
+        self.reading(self.storage.open_read_only(&self.db)?, actor)
     }
 
     fn open_watch(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>> {
-        self.reading(SqliteQueue::open_watch(&self.db)?, actor)
+        self.reading(self.storage.open_watch(&self.db)?, actor)
     }
 
     fn record_unauthenticated(&self, payload: Value) -> Result<()> {
         let line = self.write_line.clone();
         let db = self.db.clone();
         let generators = self.generators.clone();
+        let storage = self.storage.clone();
         on_line(self.write_line.as_ref(), move || {
-            let queue = write_queue(line.as_ref(), &db)?
+            let queue = write_queue(&storage, line.as_ref(), &db)?
                 .with_generators(generators)
                 .with_actor(Self::own_actor());
             EventStore::record_queue_event(&queue, EventKind::QueueServiceUnauthenticated, payload)
@@ -5226,6 +5273,7 @@ impl InProcessCaller {
         let queue_dir = queue_dir_of(db);
         Self::on(
             Arc::new(SqliteServiceBackend {
+                storage: SqliteStorage,
                 db: db.to_path_buf(),
                 queue_dir: queue_dir.clone(),
                 generators,
@@ -5566,6 +5614,7 @@ impl InProcessControlCaller {
         let (reads, writes, detail, commands) = services;
         Self {
             backend: SqliteServiceBackend {
+                storage: SqliteStorage,
                 db: db.to_path_buf(),
                 queue_dir: queue_dir_of(db),
                 generators,
@@ -5642,14 +5691,15 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessControlC
     }
 }
 
-/// One request's queue.
-struct ServiceSqlite {
-    queue: SqliteQueue,
+/// One request's queue over the backend's transaction entries. The use
+/// cases share store ports; search stays supplied by the queue's adapter.
+struct ServiceSqlite<E: TransactionEntries> {
+    queue: StoreQueue<E>,
     db: PathBuf,
-    reads: ServiceReads,
-    writes: ServiceWrites,
+    reads: ServiceReads<StoreQueue<E>>,
+    writes: ServiceWrites<StoreQueue<E>>,
     detail: ServiceDetail,
-    commands: ServiceCommands,
+    commands: ServiceCommands<StoreQueue<E>>,
 }
 
 /// What the issue's already-open transaction reads for a token held already
@@ -5748,7 +5798,10 @@ fn host_processes() -> Option<Vec<crate::domain::queue_service::HostProcess>> {
     )
 }
 
-impl ServiceSqlite {
+impl<E: TransactionEntries> ServiceSqlite<E>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     /// Why `held` is not held at `now` (seconds), from the facts read in
     /// the issue's transaction, `registrations` the supervisors'; `None`
     /// when it is ([`ServiceQueue::issuing`],
@@ -5794,20 +5847,26 @@ impl ServiceSqlite {
         Ok(not_held(held, &facts))
     }
 
-    fn dialogue(&mut self) -> DialogueQueue<'_> {
+    fn dialogue(&mut self) -> DialogueQueue<'_, E> {
         DialogueQueue {
             queue: &mut self.queue,
         }
     }
 }
 
-impl DenialLog for ServiceSqlite {
+impl<E: TransactionEntries> DenialLog for ServiceSqlite<E>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     fn record_denial(&self, payload: Value) -> Result<()> {
         DenialLog::record_denial(&self.queue, payload)
     }
 }
 
-impl crate::application::agent_eval::EvalStore for ServiceSqlite {
+impl<E: TransactionEntries> crate::application::agent_eval::EvalStore for ServiceSqlite<E>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     fn record_eval_event(&self, kind: EventKind, payload: Value) -> Result<crate::domain::EventId> {
         crate::application::agent_eval::EvalStore::record_eval_event(&self.queue, kind, payload)
     }
@@ -5822,7 +5881,10 @@ impl crate::application::agent_eval::EvalStore for ServiceSqlite {
     }
 }
 
-impl crate::application::commands::replans::ReplanStore for ServiceSqlite {
+impl<E: TransactionEntries> crate::application::commands::replans::ReplanStore for ServiceSqlite<E>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     fn run_task(&self, run: &RunId) -> Result<Option<TaskId>> {
         crate::application::commands::replans::ReplanStore::run_task(&self.queue, run)
     }
@@ -5861,7 +5923,10 @@ impl crate::application::commands::replans::ReplanStore for ServiceSqlite {
     }
 }
 
-impl crate::application::agent_cases::CaseSetStore for ServiceSqlite {
+impl<E: TransactionEntries> crate::application::agent_cases::CaseSetStore for ServiceSqlite<E>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     fn record_cases_event(
         &self,
         kind: EventKind,
@@ -5878,7 +5943,10 @@ impl crate::application::agent_cases::CaseSetStore for ServiceSqlite {
     }
 }
 
-impl DialogueStore for ServiceSqlite {
+impl<E: TransactionEntries> DialogueStore for ServiceSqlite<E>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     fn read_ask(&self, id: AskId) -> Result<Ask> {
         self.queue.read_ask(id)
     }
@@ -5916,7 +5984,10 @@ impl DialogueStore for ServiceSqlite {
     }
 }
 
-impl ServiceQueue for ServiceSqlite {
+impl<E: TransactionEntries> ServiceQueue for ServiceSqlite<E>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value> {
         let detail = TaskReads::show(&mut self.queue, id)?;
         Ok(if full {
@@ -6018,7 +6089,7 @@ impl ServiceQueue for ServiceSqlite {
     ) -> Result<Value> {
         let tx = self
             .queue
-            .write_tx("issuing")
+            .write_entry("issuing")
             .map_err(super::sqlite::tag_busy)?;
         let registrations = super::runtime_store::supervisors_of(&tx);
         let result = registrations.and_then(|registrations| {
@@ -6587,13 +6658,17 @@ again once it ends"
     }
 }
 
+mod storage;
 mod write_line;
+pub use storage::{QueueStorage, SqliteStorage};
 
 #[cfg(test)]
 mod supervisor_tests;
 
 #[cfg(test)]
 mod issuing_tests;
+#[cfg(test)]
+mod postgres_tests;
 #[cfg(test)]
 mod write_line_tests;
 
@@ -6952,6 +7027,7 @@ mod tests {
         let clock: Arc<dyn crate::application::Clock> = Arc::new(Still);
         let dir = tempfile::tempdir().unwrap();
         let backend = SqliteServiceBackend {
+            storage: SqliteStorage,
             db: dir.path().join("queue.db"),
             queue_dir: dir.path().to_path_buf(),
             generators: Generators {

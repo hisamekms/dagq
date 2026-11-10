@@ -560,6 +560,7 @@ impl Wiring {
         Arc::new(InProcessCaller::on(
             Arc::new(MemoryBackend {
                 sqlite: SqliteServiceBackend {
+                    storage: crate::infrastructure::queue_service::SqliteStorage,
                     db: self.db.clone(),
                     queue_dir: self.tokens.dir().to_owned(),
                     generators: self.generators.clone(),
