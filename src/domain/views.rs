@@ -93,6 +93,11 @@ pub struct GoalDetail {
     /// Unfinished tasks that depend on this goal (ADR-0038), ascending.
     pub dependents: Vec<GoalTask>,
     pub events: Vec<RunEvent>,
+    /// The landing marks the goal carries, sorted
+    /// ([`super::goal::LandingMarkChange`]); absent from the JSON when it
+    /// carries none, so a goal without one prints as before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub landing_marks: Vec<super::landing_approval::GoalMark>,
 }
 
 /// A task's landed commit (its `run_integrated`'s `result_commit`, the

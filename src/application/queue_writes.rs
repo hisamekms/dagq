@@ -3,7 +3,7 @@
 //! per planning command a person, the inbox or a planner runs (`add`,
 //! `edit`, `submit`, `cancel`, `dependency add|remove`, `set-goal`,
 //! `set-paths`, `set-priority`, `revisit`, `judge-follow-up`, `draft`,
-//! `ready`, `goal add|edit|close|ready|review`, `proposal withdraw`,
+//! `ready`, `goal add|edit|close|ready|review|landing-mark`, `proposal withdraw`,
 //! `request add|decline`), with the command line's options as its params.
 //! The command line and the service both run one with [`answer`] (through
 //! `compose::write_queue`, which holds the queue to the repository's rules
@@ -34,6 +34,8 @@ use super::commands::Gate;
 use super::commands::planning::{Dependency, Planning, PlanningStore};
 use super::commands::requests::{RequestStore, Requests};
 use crate::domain::follow_up::{MembershipJudgement, RevisitChange, revisit_seconds};
+use crate::domain::goal::LandingMarkChange;
+use crate::domain::landing_approval::GoalMark;
 use crate::domain::plan_request::{NewPlanRequest, RequestRef};
 use crate::domain::queue_service::UseCase;
 use crate::domain::worker::WorkerMode;
@@ -66,6 +68,7 @@ pub enum QueueWrite {
     GoalClose(GoalCloseWrite),
     GoalReady(IdWrite),
     GoalReview(IdWrite),
+    GoalLandingMark(GoalLandingMarkWrite),
     ProposalWithdraw(IdWrite),
     RequestAdd(RequestAddWrite),
     RequestDecline(RequestDeclineWrite),
@@ -265,6 +268,17 @@ pub struct GoalEditWrite {
     pub no_tags: bool,
 }
 
+/// `goal landing-mark`'s options: the goal, the mark, and whether it is
+/// taken off rather than put on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalLandingMarkWrite {
+    pub id: i64,
+    pub mark: String,
+    #[serde(default)]
+    pub remove: bool,
+}
+
 /// `goal close`'s options.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -352,6 +366,7 @@ impl QueueWrite {
             UseCase::GoalClose => Self::GoalClose(read(use_case, params)?),
             UseCase::GoalReady => Self::GoalReady(read(use_case, params)?),
             UseCase::GoalReview => Self::GoalReview(read(use_case, params)?),
+            UseCase::GoalLandingMark => Self::GoalLandingMark(read(use_case, params)?),
             UseCase::ProposalWithdraw => Self::ProposalWithdraw(read(use_case, params)?),
             UseCase::RequestAdd => Self::RequestAdd(read(use_case, params)?),
             UseCase::RequestDecline => Self::RequestDecline(read(use_case, params)?),
@@ -380,6 +395,7 @@ impl QueueWrite {
             Self::GoalClose(_) => UseCase::GoalClose,
             Self::GoalReady(_) => UseCase::GoalReady,
             Self::GoalReview(_) => UseCase::GoalReview,
+            Self::GoalLandingMark(_) => UseCase::GoalLandingMark,
             Self::ProposalWithdraw(_) => UseCase::ProposalWithdraw,
             Self::RequestAdd(_) => UseCase::RequestAdd,
             Self::RequestDecline(_) => UseCase::RequestDecline,
@@ -410,6 +426,7 @@ impl QueueWrite {
             Self::GoalAdd(write) => serde_json::to_value(write),
             Self::GoalEdit(write) => serde_json::to_value(write),
             Self::GoalClose(write) => serde_json::to_value(write),
+            Self::GoalLandingMark(write) => serde_json::to_value(write),
             Self::RequestAdd(write) => serde_json::to_value(write),
             Self::RequestDecline(write) => serde_json::to_value(write),
         }?;
@@ -595,6 +612,15 @@ pub fn answer<S: PlanningStore + RequestStore>(
             serde_json::to_value(planning!().ready_goal(GoalId::new(write.id))?)?
         }
         QueueWrite::GoalReview(write) => planning!().review_goal(GoalId::new(write.id))?,
+        QueueWrite::GoalLandingMark(write) => {
+            let mark = GoalMark::new(write.mark).map_err(|why| BadWrite(why.to_owned()))?;
+            let change = if write.remove {
+                LandingMarkChange::TakeOff(mark)
+            } else {
+                LandingMarkChange::Put(mark)
+            };
+            serde_json::to_value(planning!().change_landing_mark(GoalId::new(write.id), change)?)?
+        }
         QueueWrite::ProposalWithdraw(write) => {
             serde_json::to_value(planning!().withdraw(ProposalId::new(write.id))?)?
         }
@@ -719,6 +745,8 @@ mod tests {
     use super::*;
     use crate::application::commands::DenialLog;
     use crate::domain::authorization::DenyReason;
+    use crate::domain::goal::LandingMarksChanged;
+    use crate::domain::goal_owner::Owner;
     use crate::domain::plan_request::PlanRequest;
     use crate::domain::{
         ActorRole, AuthorizationError, DraftRevisit, Goal, PlannerId, PlannerOrigin, Priority,
@@ -732,6 +760,9 @@ mod tests {
     #[derive(Default)]
     struct Store {
         denials: RefCell<Vec<Value>>,
+        /// The landing mark changes that reached the store, with the owner
+        /// they were authorized with.
+        landing_changes: RefCell<Vec<(LandingMarkChange, Option<Owner>)>>,
     }
 
     fn reached<T>() -> Result<T> {
@@ -821,6 +852,18 @@ mod tests {
             reached()
         }
         fn rearm_goal_review(&mut self, _: GoalId) -> Result<Value> {
+            reached()
+        }
+        fn goal_owner(&self, _: GoalId) -> Result<Option<Owner>> {
+            Ok(None)
+        }
+        fn change_landing_mark(
+            &mut self,
+            _: GoalId,
+            change: LandingMarkChange,
+            authorized: Option<Owner>,
+        ) -> Result<LandingMarksChanged> {
+            self.landing_changes.borrow_mut().push((change, authorized));
             reached()
         }
     }
@@ -1121,6 +1164,104 @@ mod tests {
             None
         );
         assert_eq!(QueueWrite::parse(UseCase::Mark, &json!({})).unwrap(), None);
+    }
+
+    /// `goal landing-mark` reads back as the same write and reaches the
+    /// store for the host's user only, with the goal's owner it was
+    /// authorized with (none in the local default); the inbox and a planner
+    /// are refused as not granted and recorded, and a blank mark is a bad
+    /// write.
+    #[test]
+    fn only_the_user_changes_a_landing_mark_and_the_inbox_and_planner_are_refused() {
+        for remove in [false, true] {
+            let write = QueueWrite::GoalLandingMark(GoalLandingMarkWrite {
+                id: 3,
+                mark: "human-landing".into(),
+                remove,
+            });
+            let (use_case, params) = write.request().unwrap();
+            assert_eq!(use_case, UseCase::GoalLandingMark);
+            assert_eq!(
+                QueueWrite::parse(use_case, &params).unwrap(),
+                Some(write.clone())
+            );
+            let mut store = Store::default();
+            let error = answer(
+                &mut store,
+                &ActorContext::user(),
+                &StaticPolicy,
+                &write,
+                || unreachable!("no submit"),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "reached");
+            let mark = GoalMark::new("human-landing".into()).unwrap();
+            let change = if remove {
+                LandingMarkChange::TakeOff(mark)
+            } else {
+                LandingMarkChange::Put(mark)
+            };
+            assert_eq!(store.landing_changes.into_inner(), [(change, None)]);
+            for actor in [
+                ActorContext::new(ActorRole::Inbox, "inbox:1"),
+                ActorContext::instance(ActorRole::Planner, 1),
+            ] {
+                let (refused, recorded) = refusal(&actor, &write);
+                let refused = refused.expect("refused");
+                assert_eq!(
+                    (refused.capability, refused.reason),
+                    (Capability::GoalLandingMark, DenyReason::NotGranted)
+                );
+                assert_eq!(recorded, 1);
+            }
+        }
+        let blank = QueueWrite::GoalLandingMark(GoalLandingMarkWrite {
+            id: 3,
+            mark: " ".into(),
+            remove: false,
+        });
+        let mut store = Store::default();
+        let error = answer(
+            &mut store,
+            &ActorContext::user(),
+            &StaticPolicy,
+            &blank,
+            || unreachable!("no submit"),
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<BadWrite>().is_some(), "{error}");
+        assert!(store.landing_changes.into_inner().is_empty());
+    }
+
+    /// `goal edit --tag` and `--no-tags` replace the tags and never reach
+    /// the landing marks, which are no tags: a tag that names a mark too
+    /// leaves the marks alone.
+    #[test]
+    fn a_goal_edit_of_its_tags_changes_no_landing_mark() {
+        for (tag, no_tags) in [
+            (vec!["human-landing".to_owned()], false),
+            (Vec::new(), true),
+        ] {
+            let write = QueueWrite::GoalEdit(GoalEditWrite {
+                id: 3,
+                tag,
+                no_tags,
+                ..Default::default()
+            });
+            for actor in [
+                ActorContext::user(),
+                ActorContext::instance(ActorRole::Planner, 1),
+            ] {
+                let mut store = Store::default();
+                let error = answer(&mut store, &actor, &StaticPolicy, &write, || {
+                    unreachable!("no submit")
+                })
+                .unwrap_err();
+                assert_eq!(error.to_string(), "reached", "{write:?}");
+                assert!(store.landing_changes.into_inner().is_empty());
+                assert!(store.denials.into_inner().is_empty());
+            }
+        }
     }
 
     #[test]

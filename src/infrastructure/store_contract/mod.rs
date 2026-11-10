@@ -4,12 +4,14 @@
 //! run sequentially: business writes roll back except the fenced-write case,
 //! which removes its row; leader cases release their last holder.
 mod cases;
+mod goal_landing_marks;
 mod goal_owners;
 mod related;
 mod runner_leases;
 mod search;
 mod search_writes;
 pub use cases::*;
+pub use goal_landing_marks::*;
 pub use goal_owners::*;
 pub use related::related_cases;
 pub use runner_leases::*;
@@ -118,6 +120,19 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("goal owner records", goal_owner_records::<S, F>),
         ("goal owner moves", goal_owner_moves::<S, F>),
         ("goal owner move undone", goal_owner_move_undone::<S, F>),
+        ("goal landing marks", goal_landing_marks_records::<S, F>),
+        (
+            "goal landing marks survive tags",
+            goal_landing_marks_survive_tags::<S, F>,
+        ),
+        (
+            "goal landing marks change with event",
+            goal_landing_marks_change_with_event::<S, F>,
+        ),
+        (
+            "goal landing marks change undone",
+            goal_landing_marks_change_undone::<S, F>,
+        ),
         ("runner credentials", runner_credentials::<S, F>),
         ("runner leases", runner_leases::<S, F>),
         ("image digests", image_digests::<S, F>),

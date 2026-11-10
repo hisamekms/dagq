@@ -6,8 +6,25 @@ use super::{AskConfidence, scope::glob_matches};
 
 /// A goal's approval mark, shared by configuration and goal attribute storage.
 /// Names must contain a non-whitespace character; names otherwise remain literal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Printed and read as the bare name; a blank one does not read.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
 pub struct GoalMark(String);
+
+impl TryFrom<String> for GoalMark {
+    type Error = &'static str;
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        Self::new(name)
+    }
+}
+
+impl From<GoalMark> for String {
+    fn from(mark: GoalMark) -> Self {
+        mark.0
+    }
+}
 
 impl GoalMark {
     pub fn new(name: String) -> Result<Self, &'static str> {

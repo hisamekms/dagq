@@ -216,6 +216,7 @@ event_kinds! {
     GoalDecided => "goal_decided",
     GoalDependencyAdded => "goal_dependency_added",
     GoalDependencyRemoved => "goal_dependency_removed",
+    GoalLandingMarksChanged => "goal_landing_marks_changed",
     GoalReopened => "goal_reopened",
     GoalReviewFailed => "goal_review_failed",
     GoalReviewFinished => "goal_review_finished",
@@ -1747,6 +1748,10 @@ mod tests {
             (EventKind::GoalDecided, "goal_decided"),
             (EventKind::GoalDependencyAdded, "goal_dependency_added"),
             (EventKind::GoalDependencyRemoved, "goal_dependency_removed"),
+            (
+                EventKind::GoalLandingMarksChanged,
+                "goal_landing_marks_changed",
+            ),
             (EventKind::GoalReopened, "goal_reopened"),
             (EventKind::GoalReviewFailed, "goal_review_failed"),
             (EventKind::GoalReviewFinished, "goal_review_finished"),

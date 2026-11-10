@@ -217,6 +217,15 @@ impl ActorContext {
         self.human_role
     }
 
+    /// The person an HTTP-authenticated user is: the pair its actor id
+    /// encodes ([`super::queue_service::Principal::human`]), read only
+    /// for an actor that carries registry attributes, which only the
+    /// human-token authentication attaches.
+    pub fn human_identity(&self) -> Option<super::oidc::OidcIdentity> {
+        self.human_role?;
+        serde_json::from_str(self.actor_id.strip_prefix("human:")?).ok()
+    }
+
     /// A person at a plain terminal.
     pub fn user() -> Self {
         Self::new(ActorRole::User, ActorRole::User.as_str())

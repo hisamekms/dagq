@@ -58,14 +58,14 @@ queue service（ADR-t3102-2の例外: DBの無い所へのinit）
         ▼
 SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（WAL）
         │  行を読む → domainの集約に復元 → domainのコマンド → 返った集約を UPDATE / INSERT
-        │  同じトランザクションで run_events に event を書く
+        │  同じtransactionで run_events に event を書く
         ▼
 serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを拒むqueueは拒み、古いschemaは読まない）
 ```
 
 ## 責務と境界
 
-- 判断（遷移を許すか、どのeventを書くか、payloadの中身）はdomainが持ち、storeは読む・復元する・書く・同じトランザクションにまとめるだけを持つ（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)）。
+- 判断（遷移を許すか、どのeventを書くか、payloadの中身）はdomainが持ち、storeは読む・復元する・書く・同じtransactionにまとめるだけを持つ（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)）。
 - 例外は全体のグラフが要る依存の循環の検出（再帰CTE）だけで、拒むかの判断はdomainが持つ。
 - 共有のSQLを流す入口は実行のport（`src/infrastructure/sql_exec/`）。
   Postgresの読み書きの入口は`src/infrastructure/postgres/`。
@@ -114,9 +114,11 @@ runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`
   `WHERE status=<読んだstatus>`や`AND supervisor_token=<token>`は並行の変更を見つける条件で、どの遷移を許すかの判断ではない。
 - owner（ADR-t3989-1）: goalに属するtaskはownerを持たずgoalの行から読み、goalの無いtaskだけが自分のownerを持つ。
   所属を変える書き込みは同じtransactionで、goalに入れるtaskのownerを空にし、goalから外すtaskに外す前のgoalのownerを写す。
-- 認可の後の変化: 計画系のコマンドは認可に使ったtaskの状態を渡し、storeはトランザクションを開いた直後に照合して、変わっていれば何も書かずに拒む（[Authorization](authorization.md)）。
+- 着地の印（ADR-t3988-1）: goalの印は`goal_landing_marks`に置き、tagの書き込みは触れない。
+  付け外しは印の行と監査のeventを同じtransactionで書く（`change_landing_mark`）。
+- 認可の後の変化: 計画系のコマンドは認可に使ったtaskの状態を渡し、storeはtransactionを開いた直後に照合して、変わっていれば何も書かずに拒む（[Authorization](authorization.md)）。
   supervisor（`supervisor_needs`）と着地のintegrator（`integrator_scope`）の操作はserviceがcapabilityで認可し、taskの状態は照合しない。
-- runのdomainの拒否は、トランザクションが巻き戻ってeventに残せないので、run directoryの`refusals.log`に1行で残す。
+- runのdomainの拒否は、transactionが巻き戻ってeventに残せないので、run directoryの`refusals.log`に1行で残す。
 
 ## asks
 
@@ -150,8 +152,8 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 入口は`src/infrastructure/runtime_store/coordination.rs`と`transitions.rs`、`recovery.rs`。
 
 - leaseは実行中のrunの所有で、実行の記録と揮発する所有権を混ぜないよう`task_runs`の列にせず別の表にする。
-- claimはrun・`supervisor_token`・lease行を1トランザクションで作り、所有者のないclaimed runを作らない。
-- runを変える書き込みは同じトランザクションで自分のlease行のheartbeatを更新し（`renew_lease`）、0行なら何も書かずに拒む。
+- claimはrun・`supervisor_token`・lease行を1transactionで作り、所有者のないclaimed runを作らない。
+- runを変える書き込みは同じtransactionで自分のlease行のheartbeatを更新し（`renew_lease`）、0行なら何も書かずに拒む。
   heartbeatの古さは拒む理由にしない（hostのsleepの後も、引き継がれるまでは自分のもの）。
 - 動いているrunのleaseを奪うのは引き継ぎ（`adopt_run`）だけで、他のtokenのstaleなleaseでwrapperが生きているか終了を記録したrunだけを対象にする。
   自分の更新と引き継ぎはどちらもlease行への書き込みなので、SQLiteが直列化して片方だけが通る。
@@ -159,9 +161,9 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 - `supervisors`の行はそのプロセスの性質を持ち、行と寿命を共にする。
   登録の削除は停止のeventと不可分で、決まった経路だけが行う（`coordination.rs`）。
   掃除の条件は`src/application/supervise/host_ops/sweep.rs`の`prune_left_supervisors`、登録の値の寿命は`coordination.rs`のdoc commentが持つ。
-- `recover`だけがtokenなしで未完了のrunを止め、同じトランザクションでleaseとプロセスを再検査する。
+- `recover`だけがtokenなしで未完了のrunを止め、同じtransactionでleaseとプロセスを再検査する。
 - 着地（`integrate`）は自分のtokenでlease行を持ち、`integrating`から出る遷移はどれもそのlease行を要する。
-  Gitの操作はトランザクションの外で行い、mainを進める前のエラーではrunを元のstatusに戻す。
+  Gitの操作はtransactionの外で行い、mainを進める前のエラーではrunを元のstatusに戻す。
 - receiptの内容は読んだ時点でevent（`validation_finished`・`integration_receipt`）に写すので、worktreeとrun dirが消えた後も`show`で辿れる。
   `needs_session`をsessionが解消した後のreceiptは、そのrunの最後の`integration_receipt`が持つ。
 - backendの呼び出しの失敗とsessionの終了の依頼は、runのstatusを変えずeventだけで表す（[backendの呼び出しの失敗](supervisor-lifecycle/backend-call-failures.md)、[receiptとsessionの終わり](supervisor-lifecycle/headless-worker.md#receiptとsessionの終わり)）。
@@ -169,8 +171,8 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 
 ### queue service
 
-queue DBを開くのはqueue service（[Queue service](queue-service.md)）と[その例外](queue-service.md#dbを開く経路)だけで、SQLiteのトランザクションとleaseの規則で並ぶ。
-送り直される結果の記録のeventは最初の送信の識別子と`event_records`で結んで同じトランザクションで書き、識別子ごとに1つのeventにする（ADR-t3102-3決定5）。
+queue DBを開くのはqueue service（[Queue service](queue-service.md)）と[その例外](queue-service.md#dbを開く経路)だけで、SQLiteのtransactionとleaseの規則で並ぶ。
+送り直される結果の記録のeventは最初の送信の識別子と`event_records`で結んで同じtransactionで書き、識別子ごとに1つのeventにする（ADR-t3102-3決定5）。
 
 ## session steps
 
@@ -186,7 +188,7 @@ queue DBを開くのはqueue service（[Queue service](queue-service.md)）と[�
 
 ## follow-upの所属の判断
 
-follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`BEGIN IMMEDIATE`のトランザクションで行う。
+follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`BEGIN IMMEDIATE`のtransactionで行う。
 行・遷移・必須の情報・旧schemaの読み方は[所属の判断](follow-up-membership.md)、入口は`src/infrastructure/follow_up_membership.rs`。
 
 ## Transactions and constraints
@@ -200,10 +202,10 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
 
 queue DBのtransactionの入口は`infrastructure::sqlite::WriteTx`（境界の検査は`src/context_boundaries/write_tx.rs`）。
 
-- claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
-  holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
+- claimは候補の選択・taskの更新・runの作成・event・lease行を1つのtransactionにまとめ、同時のclaimは別々のtaskを取る。
+  holdの行と`task_held` / `task_released`も1つのtransactionで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのtransactionでholdを読むので、先に確定した側だけが効く。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒む。
-- NULLになる列を含む主キーはSQLiteではその行の一意を保たないので、その一意は書く関数がトランザクションの中で読んでから検査する。
+- NULLになる列を含む主キーはSQLiteではその行の一意を保たないので、その一意は書く関数がtransactionの中で読んでから検査する。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。
 
 ### CHECK制約を使わない
@@ -258,7 +260,7 @@ migrationを足すtaskの規則（リリース済みは変えない）は[migrat
   バイナリより新しくても下限以下なら動く。
   このため`INSERT`は必ず列を列挙し、行は列名で読む。
   claimのときに写したバイナリ（`runs/<id>/runner`）も互換のmigrationの後に動き続ける。
-- 表の作り直し: 全ての列を列挙してrowidと`sqlite_sequence`も写し（消した行のIDを再び払い出さない）、`foreign_keys`はrunnerがトランザクションの外でOFFにしてcommitの前に`pragma_foreign_key_check`を確かめる。
+- 表の作り直し: 全ての列を列挙してrowidと`sqlite_sequence`も写し（消した行のIDを再び払い出さない）、`foreign_keys`はrunnerがtransactionの外でOFFにしてcommitの前に`pragma_foreign_key_check`を確かめる。
   `run_events`を作り直すときは、actorの列・検索のtrigger・`run_events`のindexも作り直す。
 - 落とし穴: `run_events`の式のindex（`events_by_opened_event`）の式の列は、queryが同じ式でaffinityの掛からない値（bindした値か`+o.id`）と比べるときだけ使われ、先頭列の`kind`だけでも選ばれうる。
   `run_id IS NULL`は`+run_id`と書いて`events_by_run`を避けるが、`goal_id IS NULL`も絞ると`events_by_goal`を辿りうるので、lockの下は`INDEXED BY events_by_kind`（か3列とも`+`）で固定する。
@@ -272,7 +274,7 @@ migrationを足すtaskの規則（リリース済みは変えない）は[migrat
 PostgresはLIKEで絞り、アプリのbm25で並べる。
 SQLiteは`src/infrastructure/search.rs`、索引とtriggerは`migrations/0026_search.sql`、問い合わせの解釈と抜粋は`src/domain/search.rs`。
 
-- 索引はSQLiteではtriggerが同じトランザクションで保ち、索引を知らない古いバイナリの書き込みにも追いつく。
+- 索引はSQLiteではtriggerが同じtransactionで保ち、索引を知らない古いバイナリの書き込みにも追いつく。
   元の表を作り直すmigrationはtriggerも作り直す。
   Postgresはtriggerを置かず、元の行を書くadapterが同じtransactionで保つ（ADR-t3986-1決定6）。
 

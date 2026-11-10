@@ -5,6 +5,7 @@
 use serde::Serialize;
 
 use super::goal_owner::Owner;
+use super::landing_approval::GoalMark;
 
 use super::{
     DomainError, GoalEdit, GoalId, GoalRecord, GoalStatus, GoalSummary, GoalTag, GoalVerdict,
@@ -292,6 +293,76 @@ pub fn edit(mut goal: Goal, edit: GoalEdit) -> Result<Goal, DomainError> {
         goal.doc = Some(doc).filter(|d| !d.trim().is_empty());
     }
     Ok(goal)
+}
+
+/// A change of a goal's landing marks (ADR-t3988-1 decision 4): the marks a
+/// main's `goal_marks` landing condition names. They are an attribute of the
+/// goal apart from its tags, which a planner's `goal edit` replaces, so that
+/// no AI actor takes a gate off by editing tags; who may change them is the
+/// policy's (`goal.landing_mark`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LandingMarkChange {
+    Put(GoalMark),
+    TakeOff(GoalMark),
+}
+
+impl LandingMarkChange {
+    pub fn mark(&self) -> &GoalMark {
+        match self {
+            Self::Put(mark) | Self::TakeOff(mark) => mark,
+        }
+    }
+
+    /// The word the event and the answer name the change by.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Put(_) => "put",
+            Self::TakeOff(_) => "take_off",
+        }
+    }
+}
+
+/// What a [`LandingMarkChange`] did: the goal's marks before and after it,
+/// each sorted and once. `changed` is false for a mark put on again or one
+/// taken off that the goal does not carry: nothing is written and no event
+/// is recorded. The event `goal_landing_marks_changed` carries `change`,
+/// `mark`, `before` and `after`; its actor is who changed them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LandingMarksChanged {
+    pub goal_id: GoalId,
+    pub change: &'static str,
+    pub mark: GoalMark,
+    pub changed: bool,
+    pub before: Vec<GoalMark>,
+    pub after: Vec<GoalMark>,
+}
+
+/// Apply `change` to `current`, the marks goal `goal_id` carries.
+pub fn change_landing_marks(
+    goal_id: GoalId,
+    current: &[GoalMark],
+    change: &LandingMarkChange,
+) -> LandingMarksChanged {
+    let mut before = current.to_vec();
+    before.sort();
+    before.dedup();
+    let mut after = before.clone();
+    match change {
+        LandingMarkChange::Put(mark) => {
+            if let Err(at) = after.binary_search(mark) {
+                after.insert(at, mark.clone());
+            }
+        }
+        LandingMarkChange::TakeOff(mark) => after.retain(|held| held != mark),
+    }
+    LandingMarksChanged {
+        goal_id,
+        change: change.as_str(),
+        mark: change.mark().clone(),
+        changed: before != after,
+        before,
+        after,
+    }
 }
 
 /// `goal list` (ADR-t1639-1 decision 7): the goals that carry one of
@@ -607,6 +678,110 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(back.owner(), Some(&owner));
+    }
+
+    /// A landing mark put on is added once and kept sorted; one put on
+    /// again, or taken off the goal that does not carry it, changes nothing
+    /// and says so; each result carries the marks before and after.
+    #[test]
+    fn a_landing_mark_change_reports_the_marks_before_and_after() {
+        use crate::domain::landing_approval::GoalMark;
+        let m = |name: &str| GoalMark::new(name.into()).unwrap();
+        let id = GoalId::new(7);
+        let cases = [
+            (
+                vec![],
+                LandingMarkChange::Put(m("b")),
+                vec![],
+                vec![m("b")],
+                true,
+            ),
+            (
+                vec![m("c"), m("a")],
+                LandingMarkChange::Put(m("b")),
+                vec![m("a"), m("c")],
+                vec![m("a"), m("b"), m("c")],
+                true,
+            ),
+            (
+                vec![m("b")],
+                LandingMarkChange::Put(m("b")),
+                vec![m("b")],
+                vec![m("b")],
+                false,
+            ),
+            (
+                vec![m("a"), m("b")],
+                LandingMarkChange::TakeOff(m("a")),
+                vec![m("a"), m("b")],
+                vec![m("b")],
+                true,
+            ),
+            (
+                vec![m("b")],
+                LandingMarkChange::TakeOff(m("a")),
+                vec![m("b")],
+                vec![m("b")],
+                false,
+            ),
+            (
+                vec![],
+                LandingMarkChange::TakeOff(m("a")),
+                vec![],
+                vec![],
+                false,
+            ),
+        ];
+        for (current, change, before, after, changed) in cases {
+            let result = change_landing_marks(id, &current, &change);
+            assert_eq!(
+                result,
+                LandingMarksChanged {
+                    goal_id: id,
+                    change: change.as_str(),
+                    mark: change.mark().clone(),
+                    changed,
+                    before,
+                    after,
+                },
+                "{change:?} on {current:?}"
+            );
+        }
+        let shown = serde_json::to_value(change_landing_marks(
+            id,
+            &[m("a")],
+            &LandingMarkChange::TakeOff(m("a")),
+        ))
+        .unwrap();
+        assert_eq!(
+            shown,
+            serde_json::json!({"goal_id": 7, "change": "take_off", "mark": "a",
+                "changed": true, "before": ["a"], "after": []})
+        );
+    }
+
+    /// `goal edit` has no landing marks among its fields: an edit of the
+    /// tags (a list, or none for `--no-tags`) changes the tags only, and
+    /// the goal holds no mark to change.
+    #[test]
+    fn an_edit_of_the_tags_is_no_change_of_landing_marks() {
+        let tag: GoalTag = "human-landing".parse().unwrap();
+        for tags in [vec![tag], Vec::new()] {
+            let before = serde_json::to_value(goal(None)).unwrap();
+            let edited = edit(
+                goal(None),
+                GoalEdit {
+                    tags: Some(tags.clone()),
+                    ..GoalEdit::default()
+                },
+            )
+            .unwrap();
+            let mut after = serde_json::to_value(&edited).unwrap();
+            assert_eq!(edited.tags(), tags.as_slice());
+            assert!(after.get("landing_marks").is_none());
+            after["tags"] = before["tags"].clone();
+            assert_eq!(after, before);
+        }
     }
 
     /// ADR-t1504-2 decision 9: only an achieved goal opens again, without

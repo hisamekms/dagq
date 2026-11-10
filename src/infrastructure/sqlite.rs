@@ -3225,6 +3225,22 @@ mod store_contract_tests {
         contract(|open| store_contract::goal_owner_move_undone(&open));
     }
     #[test]
+    fn goal_landing_marks_records() {
+        contract(|open| store_contract::goal_landing_marks_records(&open));
+    }
+    #[test]
+    fn goal_landing_marks_survive_tags() {
+        contract(|open| store_contract::goal_landing_marks_survive_tags(&open));
+    }
+    #[test]
+    fn goal_landing_marks_change_with_event() {
+        contract(|open| store_contract::goal_landing_marks_change_with_event(&open));
+    }
+    #[test]
+    fn goal_landing_marks_change_undone() {
+        contract(|open| store_contract::goal_landing_marks_change_undone(&open));
+    }
+    #[test]
     fn runner_credentials() {
         contract(|open| store_contract::runner_credentials(&open));
     }

@@ -2589,6 +2589,18 @@ enum GoalCommand {
     /// Have the supervisor's goal review judge the open goal again although its tasks did not
     /// change since its last review (after a failed review or a keep_open answer).
     Review { id: i64 },
+    /// Put a landing mark on a goal, or take it off with --remove. A landing mark is not a tag
+    /// (`goal edit --tag` leaves it) and not a KPI mark (`dagq mark`): main's
+    /// `[landing.approval] goal_marks` names the marks whose goals' runs a person approves
+    /// before they land. Only the goal's owner or an administrator changes one (the host's user
+    /// in a local queue); `goal show` lists them as `landing_marks`.
+    LandingMark {
+        id: i64,
+        mark: String,
+        /// Take the mark off instead.
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 /// The error of a command the observer may not run.
@@ -2804,6 +2816,9 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             GoalCommand::Close { id, .. } => one(C::GoalClose, Resource::Goal(GoalId::new(*id))),
             GoalCommand::Review { id } => {
                 one(C::GoalReviewRequest, Resource::Goal(GoalId::new(*id)))
+            }
+            GoalCommand::LandingMark { id, .. } => {
+                one(C::GoalLandingMark, Resource::Goal(GoalId::new(*id)))
             }
             GoalCommand::List { .. } | GoalCommand::Show { .. } => queue(C::QueueRead),
         },
@@ -4010,6 +4025,9 @@ fn queue_write(command: &Command) -> Result<Option<QueueWrite>> {
             }
             GoalCommand::Ready { id } => QueueWrite::GoalReady(writes::IdWrite { id }),
             GoalCommand::Review { id } => QueueWrite::GoalReview(writes::IdWrite { id }),
+            GoalCommand::LandingMark { id, mark, remove } => {
+                QueueWrite::GoalLandingMark(writes::GoalLandingMarkWrite { id, mark, remove })
+            }
             GoalCommand::List { .. } | GoalCommand::Show { .. } => return Ok(None),
         },
         Command::Proposal {
@@ -7040,6 +7058,7 @@ mod tests {
             ("goal ready", &["1"]),
             ("goal close", &["1", "--verdict", "achieved"]),
             ("goal review", &["1"]),
+            ("goal landing-mark", &["1", "m"]),
             ("note", &["--text", "n", "--task", "1"]),
             ("mark", &["m"]),
             (
@@ -7267,6 +7286,7 @@ mod tests {
             ("goal edit", &["1", "--title", "g"]),
             ("goal close", &["1", "--verdict", "achieved"]),
             ("goal review", &["1"]),
+            ("goal landing-mark", &["1", "m", "--remove"]),
             (
                 "judge-follow-up",
                 &["1", "--classification", "required", "--reason", "r"],

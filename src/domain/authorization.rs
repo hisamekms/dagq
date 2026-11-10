@@ -53,6 +53,10 @@ string_enum!(Capability {
     GoalReady => "goal.ready",
     GoalClose => "goal.close",
     GoalReviewRequest => "goal.review_request",
+    /// Put a landing mark on a goal or take one off (ADR-t3988-1 decision
+    /// 4): a person's alone, the goal's owner or an administrator, so no AI
+    /// actor, runner or inbox takes its own landing gate off.
+    GoalLandingMark => "goal.landing_mark",
     /// Changing a task before it starts. `revisit` (a draft's time to be
     /// looked at again) is one of them rather than a capability of its
     /// own, since the roles allowed it are the same.
@@ -168,7 +172,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 76] = [
+    pub const ALL: [Self; 77] = [
         Self::ImagePublish,
         Self::RunnerClaim,
         Self::RunnerHeartbeat,
@@ -187,6 +191,7 @@ impl Capability {
         Self::GoalReady,
         Self::GoalClose,
         Self::GoalReviewRequest,
+        Self::GoalLandingMark,
         Self::TaskWrite,
         Self::FollowUpJudge,
         Self::TaskVerifyEdit,
@@ -275,6 +280,13 @@ pub enum Resource {
         runner_id: Option<String>,
     },
     Goal(GoalId),
+    /// A goal with the owner the queue records for it, read before the
+    /// rule: `None` is the host's user, the owner of the local default
+    /// (ADR-t3989-1 decision 2).
+    OwnedGoal {
+        id: GoalId,
+        owner: Option<super::goal_owner::Owner>,
+    },
     /// A task and its status when known, with the proposal it is in when
     /// the caller read its status (`None` for a task in no proposal, or one
     /// named without its status). A planner changes no task of a revising
@@ -440,6 +452,11 @@ impl Resource {
                 json!({"kind": "runner_run", "id": id, "runner_id": runner_id})
             }
             Self::Goal(id) => json!({"kind": "goal", "id": id}),
+            // Whether a person owns it, never who.
+            Self::OwnedGoal { id, owner } => json!({
+                "kind": "goal", "id": id,
+                "owner": if owner.is_some() { "person" } else { "host_user" },
+            }),
             Self::Task {
                 id,
                 status,
@@ -690,13 +707,14 @@ const INBOX: &[Capability] = &[
     C::TokenIssue,
 ];
 
-/// The number of [`USER`]'s capabilities: the inbox's and six more.
-const USER_LEN: usize = INBOX.len() + 6;
+/// The number of [`USER`]'s capabilities: the inbox's and seven more.
+const USER_LEN: usize = INBOX.len() + 7;
 
 /// [`INBOX`]'s capabilities, the approval of `setup-review`'s changes
 /// beforehand ([`C::ReviewSetupApprove`]) and the queue broker's records
 /// ([`C::QueueBrokerRecord`]), human runner registration, revocation and sharing,
-/// and terminal authentication ([`C::IdentityLogin`]).
+/// terminal authentication ([`C::IdentityLogin`]) and a goal's landing
+/// marks ([`C::GoalLandingMark`]).
 const USER_CAPABILITIES: [Capability; USER_LEN] = {
     let mut all = [C::ReviewSetupApprove; USER_LEN];
     let mut at = 0;
@@ -709,6 +727,7 @@ const USER_CAPABILITIES: [Capability; USER_LEN] = {
     all[at + 3] = C::RunnerRevoke;
     all[at + 4] = C::RunnerShare;
     all[at + 5] = C::IdentityLogin;
+    all[at + 6] = C::GoalLandingMark;
     all
 };
 
@@ -894,6 +913,9 @@ fn resource_permits(actor: &ActorContext, capability: Capability, resource: &Res
     if capability == C::TokenIssue {
         return matches!(resource, Resource::Principal(child) if starts(actor.role(), *child));
     }
+    if capability == C::GoalLandingMark {
+        return changes_landing_marks(actor, resource);
+    }
     match actor.role() {
         ActorRole::Runner => match capability {
             C::RunnerDeclare | C::RunnerClaim => matches!(resource, Resource::Queue),
@@ -915,6 +937,30 @@ fn resource_permits(actor: &ActorContext, capability: Capability, resource: &Res
         ActorRole::ExecutorTelemetry => telemetry_owns(actor, resource),
         ActorRole::Wrapper => capability == C::QueueRead || wrapper_owns(actor, resource),
         _ => true,
+    }
+}
+
+/// Who puts a landing mark on a goal or takes one off: a person who owns it
+/// or an administrator, by the human principal the service authenticated;
+/// the host's user (no registry role) only on a goal no person owns, which
+/// is every goal of the local default. A goal named without its owner is
+/// refused (fail closed). Only the user's grants hold the capability, so
+/// every other role, the inbox included, is refused before this rule.
+fn changes_landing_marks(actor: &ActorContext, resource: &Resource) -> bool {
+    use super::queue_service::TeamRole;
+    let Resource::OwnedGoal { owner, .. } = resource else {
+        return false;
+    };
+    if actor.role() != ActorRole::User {
+        return false;
+    }
+    match (actor.human_role(), actor.human_identity()) {
+        // A person's actor id without the attributes is not the host's user.
+        (None, _) => owner.is_none() && !actor.actor_id().starts_with("human:"),
+        (Some(role), Some(person)) => {
+            role.role == TeamRole::Admin || owner.as_ref().is_some_and(|o| *o.identity() == person)
+        }
+        (Some(_), None) => false,
     }
 }
 
@@ -1165,6 +1211,114 @@ mod tests {
         }
     }
 
+    /// A goal's landing marks (ADR-t3988-1 decision 4), by actor and goal:
+    /// in the team version the goal's owner or an administrator, by the
+    /// human principal; in the local default the host's user, on the goals
+    /// no person owns. No AI actor, runner, control role or inbox, whoever
+    /// its parent is, and no goal named without its owner.
+    #[test]
+    fn only_a_goals_owner_or_an_administrator_changes_its_landing_marks() {
+        use crate::domain::goal_owner::Owner;
+        use crate::domain::oidc::OidcIdentity;
+        use crate::domain::{actor::HumanRole, queue_service::TeamRole};
+        let identity = |subject: &str| OidcIdentity {
+            issuer: "https://issuer.example".into(),
+            subject: subject.into(),
+        };
+        let person = |subject: &str, role| {
+            ActorContext::new(
+                ActorRole::User,
+                format!(
+                    "human:{}",
+                    serde_json::to_string(&identity(subject)).unwrap()
+                ),
+            )
+            .with_human_role(HumanRole {
+                role,
+                on_call: true,
+            })
+        };
+        let goal = GoalId::new(4);
+        let alices = Resource::OwnedGoal {
+            id: goal,
+            owner: Some(Owner::new(identity("alice"))),
+        };
+        let unowned = Resource::OwnedGoal {
+            id: goal,
+            owner: None,
+        };
+        let unread = Resource::Goal(goal);
+        let host = ActorContext::user();
+        let alice = person("alice", TeamRole::Member);
+        let bob = person("bob", TeamRole::Member);
+        let carol = person("carol", TeamRole::Admin);
+        // A user's actor id that names a person without registry attributes
+        // is neither that person nor the host's user.
+        let unauthenticated = ActorContext::new(ActorRole::User, alice.actor_id());
+        let rows: [(&str, &ActorContext, &Resource, Option<DenyReason>); 12] = [
+            ("host user, local goal", &host, &unowned, None),
+            (
+                "host user, a person's goal",
+                &host,
+                &alices,
+                Some(DenyReason::Resource),
+            ),
+            ("owner", &alice, &alices, None),
+            (
+                "owner, a goal without one",
+                &alice,
+                &unowned,
+                Some(DenyReason::Resource),
+            ),
+            ("another member", &bob, &alices, Some(DenyReason::Resource)),
+            ("administrator", &carol, &alices, None),
+            ("administrator, a goal without one", &carol, &unowned, None),
+            ("owner, unread", &alice, &unread, Some(DenyReason::Resource)),
+            ("admin, unread", &carol, &unread, Some(DenyReason::Resource)),
+            ("host, unread", &host, &unread, Some(DenyReason::Resource)),
+            (
+                "unauthenticated pair",
+                &unauthenticated,
+                &alices,
+                Some(DenyReason::Resource),
+            ),
+            (
+                "unauthenticated pair, local goal",
+                &unauthenticated,
+                &unowned,
+                Some(DenyReason::Resource),
+            ),
+        ];
+        for (name, actor, resource, refused) in rows {
+            let result = StaticPolicy.authorize(actor, C::GoalLandingMark, resource);
+            assert_eq!(result.err().map(|e| e.reason), refused, "{name}");
+        }
+        // Every other role is refused on every goal, as not granted: the
+        // inbox (which is never given a person's registry attributes, so
+        // neither an owner's nor an administrator's), the AI actors, the
+        // runner and the control side.
+        for role_ in ActorRole::ALL.into_iter().filter(|r| *r != ActorRole::User) {
+            let actor = ActorContext::new(role_, alice.actor_id()).with_human_role(HumanRole {
+                role: TeamRole::Admin,
+                on_call: true,
+            });
+            for resource in [&alices, &unowned, &unread] {
+                let error = StaticPolicy
+                    .authorize(&actor, C::GoalLandingMark, resource)
+                    .unwrap_err();
+                assert_eq!(error.reason, DenyReason::NotGranted, "{role_:?}");
+            }
+        }
+        assert_eq!(
+            Capability::ALL
+                .iter()
+                .filter(|c| **c == C::GoalLandingMark)
+                .count(),
+            1
+        );
+        assert!(!grants(ActorRole::Inbox).contains(&C::GoalLandingMark));
+    }
+
     #[test]
     fn only_user_and_inbox_can_correct_an_ended_tasks_verify() {
         let task = task_in(TaskStatus::InProgress);
@@ -1298,6 +1452,7 @@ mod tests {
         inbox.push(C::RunnerRevoke);
         inbox.push(C::RunnerShare);
         inbox.push(C::IdentityLogin);
+        inbox.push(C::GoalLandingMark);
         assert_eq!(inbox, grants(ActorRole::User));
         assert_eq!(grants(ActorRole::SetupReviewJob), [C::QueueRead]);
         let job = ActorContext::setup_review_job("s1");

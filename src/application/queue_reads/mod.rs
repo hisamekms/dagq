@@ -715,6 +715,7 @@ impl QueueRead {
             | UseCase::GoalClose
             | UseCase::GoalReady
             | UseCase::GoalReview
+            | UseCase::GoalLandingMark
             | UseCase::ProposalWithdraw
             | UseCase::RequestAdd
             | UseCase::RequestDecline

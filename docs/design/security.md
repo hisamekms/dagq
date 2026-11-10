@@ -61,9 +61,8 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 
 外向きの入口の人もactorはuserのままで、登録簿の役割が許可を狭める（[Policy](authorization.md#policy)）。
 
-`src/domain/authorization.rs`の`StaticPolicy`（`grants(role)`とresourceの規則）の要約。
+`src/domain/authorization.rs`の`StaticPolicy`の要約。
 明示して許したもの以外は全て拒む（default deny）。
-resourceの持ち主や状態が分からないときも拒む（fail closed）。
 列はcapabilityの群（入口は[Authorization](authorization.md#capability)）で、○は許す、△はresourceの規則つきで許す、—は拒む。
 
 | role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose` / `replan resolve`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push | telemetryの送信（`telemetry_report`） | runner・image |
@@ -84,6 +83,7 @@ resourceの持ち主や状態が分からないときも拒む（fail closed）�
 | executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ | — |
 
 `identity.login`はuser専用。
+goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、hostのuserは人のownerの無いgoalだけ。
 
 権限ごとの持ち主とresourceの条件は[AuthorizationのPolicy](authorization.md#policy)を読む。
 

@@ -2287,6 +2287,7 @@ fn run(
         | UseCase::GoalClose
         | UseCase::GoalReady
         | UseCase::GoalReview
+        | UseCase::GoalLandingMark
         | UseCase::ProposalWithdraw
         | UseCase::RequestAdd
         | UseCase::RequestDecline => unreachable!("a write is answered above"),

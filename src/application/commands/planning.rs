@@ -26,8 +26,12 @@ use crate::domain::{
     ActorContext, AuthorizationError, Authorizer, Capability, CommitSha, DomainError, DraftRevisit,
     FindingId, Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal,
     ProposalId, Resource, Submission, Task, TaskAction, TaskAuthorization, TaskDetail, TaskEdit,
-    TaskId, TaskStatus, authorization::DenyReason, cancel_reason::NewCancel,
+    TaskId, TaskStatus,
+    authorization::DenyReason,
+    cancel_reason::NewCancel,
     follow_up::RevisitChange,
+    goal::{LandingMarkChange, LandingMarksChanged},
+    goal_owner::Owner,
 };
 
 /// What the planning commands read and change of the queue.
@@ -129,6 +133,18 @@ pub trait PlanningStore {
     fn ready_goal(&mut self, goal: GoalId) -> Result<Goal>;
     fn close_goal(&mut self, goal: GoalId, verdict: GoalVerdict) -> Result<Goal>;
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<Value>;
+    /// The owner `goal` records, `None` for the host's user; a missing
+    /// goal is an error.
+    fn goal_owner(&self, goal: GoalId) -> Result<Option<Owner>>;
+    /// Put a landing mark on `goal` or take one off, with the event of the
+    /// change, in one transaction that refuses, writing nothing, a goal
+    /// whose owner is not `authorized` there.
+    fn change_landing_mark(
+        &mut self,
+        goal: GoalId,
+        change: LandingMarkChange,
+        authorized: Option<Owner>,
+    ) -> Result<LandingMarksChanged>;
 }
 
 /// What a task waits for: another task, or a goal closed as achieved.
@@ -155,6 +171,7 @@ pub enum Dependency {
 /// | `submit` / `submit --proposal ID` | `proposal.submit` | queue / proposal（持ち主） |
 /// | `proposal withdraw` | `proposal.withdraw` | proposal（持ち主） |
 /// | `goal add` / `goal edit` / `goal ready` / `goal close` / `goal review` | `goal.write` / `goal.write` / `goal.ready` / `goal.close` / `goal.review_request` | queue / goal |
+/// | `goal landing-mark` | `goal.landing_mark` | goal with the owner the queue records（storeが同一transactionで照合） |
 ///
 /// `Planning::refuse_ungranted` rejects before reading a missing task or
 /// proposal; for a role with the capability, a missing resource is the
@@ -349,6 +366,26 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     pub fn close_goal(&mut self, goal: GoalId, verdict: GoalVerdict) -> Result<Goal> {
         self.authorize(Capability::GoalClose, Resource::Goal(goal))?;
         self.store.close_goal(goal, verdict)
+    }
+
+    /// `goal landing-mark`: put a landing mark on the goal or take one off
+    /// (ADR-t3988-1 decision 4), authorized with the goal's owner as the
+    /// store records it, which the store checks again in its transaction.
+    pub fn change_landing_mark(
+        &mut self,
+        goal: GoalId,
+        change: LandingMarkChange,
+    ) -> Result<LandingMarksChanged> {
+        self.refuse_ungranted(Capability::GoalLandingMark, &Resource::Goal(goal))?;
+        let owner = self.store.goal_owner(goal)?;
+        self.authorize(
+            Capability::GoalLandingMark,
+            Resource::OwnedGoal {
+                id: goal,
+                owner: owner.clone(),
+            },
+        )?;
+        self.store.change_landing_mark(goal, change, owner)
     }
 
     /// `goal review`: review the goal again.
@@ -676,6 +713,11 @@ mod tests {
         authorized_as: Option<TaskAuthorization>,
         /// The store refuses a change of priority as a person's.
         persons_priority: bool,
+        /// The owner the goal records.
+        goal_owner: Option<Owner>,
+        /// The owner the last change of a landing mark was handed as
+        /// authorized.
+        landing_authorized_as: Option<Option<Owner>>,
     }
 
     /// An actor's cancel of a task whose premise is gone.
@@ -869,6 +911,18 @@ mod tests {
         }
         fn rearm_goal_review(&mut self, _: GoalId) -> Result<Value> {
             Err(reached("goal review"))
+        }
+        fn goal_owner(&self, _: GoalId) -> Result<Option<Owner>> {
+            Ok(self.goal_owner.clone())
+        }
+        fn change_landing_mark(
+            &mut self,
+            _: GoalId,
+            _: LandingMarkChange,
+            authorized: Option<Owner>,
+        ) -> Result<LandingMarksChanged> {
+            self.landing_authorized_as = Some(authorized);
+            Err(reached("goal landing-mark"))
         }
     }
 
@@ -1151,6 +1205,47 @@ mod tests {
             assert!(matches!(outcome, Outcome::Allowed));
             assert!(denials.is_empty(), "{denials:?}");
         }
+    }
+
+    /// `goal landing-mark` is authorized with the owner the store reads of
+    /// the goal and hands the store that owner to check again; a person's
+    /// goal is refused to the host's user and recorded with whether a
+    /// person owns it, never who.
+    #[test]
+    fn a_landing_mark_change_is_authorized_with_the_goals_owner() {
+        use crate::domain::landing_approval::GoalMark;
+        let owner = Owner::new(crate::domain::oidc::OidcIdentity {
+            issuer: "https://issuer.example".into(),
+            subject: "alice".into(),
+        });
+        let change = || LandingMarkChange::Put(GoalMark::new("m".into()).unwrap());
+        let user = ActorContext::user();
+        let mut local = Store::default();
+        let error = Planning::new(&mut local, &user, &StaticPolicy)
+            .change_landing_mark(GOAL, change())
+            .unwrap_err();
+        assert_eq!(error.to_string(), "store: goal landing-mark");
+        assert_eq!(local.landing_authorized_as, Some(None));
+        let mut owned = Store {
+            goal_owner: Some(owner),
+            ..Store::default()
+        };
+        let error = Planning::new(&mut owned, &user, &StaticPolicy)
+            .change_landing_mark(GOAL, change())
+            .unwrap_err();
+        let refused = error.downcast::<AuthorizationError>().unwrap();
+        assert_eq!(refused.reason, DenyReason::Resource);
+        assert_eq!(owned.landing_authorized_as, None);
+        assert_eq!(
+            owned.denials.into_inner(),
+            [json!({
+                "event": "authorization_denied",
+                "role": "user",
+                "capability": "goal.landing_mark",
+                "reason": "not on this resource",
+                "resource": {"kind": "goal", "id": 1, "owner": "person"},
+            })]
+        );
     }
 
     /// ADR-t1433-2: `add` and `edit` refuse the interactive worker mode

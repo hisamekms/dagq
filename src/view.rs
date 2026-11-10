@@ -278,7 +278,7 @@ pub fn goal_detail(detail: &GoalDetail) -> Value {
         .iter()
         .map(|event| Value::Object(pick(&object(event), &["kind", "created_at"])))
         .collect();
-    json!({
+    let mut view = json!({
         "goal": goal,
         "closed": detail.closed,
         "acceptance_version": detail.acceptance_version,
@@ -288,7 +288,11 @@ pub fn goal_detail(detail: &GoalDetail) -> Value {
         "events": events,
         "events_total": detail.events.len(),
         "observations": observations(&detail.events),
-    })
+    });
+    if !detail.landing_marks.is_empty() {
+        view["landing_marks"] = json!(detail.landing_marks);
+    }
+    view
 }
 
 #[cfg(test)]
@@ -675,6 +679,7 @@ mod tests {
                 priority_by: crate::domain::plan_request::PriorityBy::Ai,
             }],
             events: (1..=11).map(|id| event(id, json!({"goal": {}}))).collect(),
+            landing_marks: Vec::new(),
         };
         let view = goal_detail(&detail);
         assert_eq!(view["goal"]["truncated"], true);
@@ -694,6 +699,54 @@ mod tests {
         let events = view["events"].as_array().unwrap();
         assert_eq!(events.len(), DEFAULT_EVENTS);
         assert_eq!(events[0], json!({"kind": "kind2", "created_at": "t2"}));
+    }
+
+    /// A goal without a landing mark prints as before, in the compact view
+    /// and in full; one with marks adds `landing_marks` and nothing else.
+    #[test]
+    fn a_goal_without_landing_marks_keeps_its_json() {
+        use crate::domain::landing_approval::GoalMark;
+        let detail = GoalDetail {
+            acceptance_version: 1,
+            follow_up_memberships: Vec::new(),
+            goal: Goal::restore(crate::domain::GoalRecord {
+                priority: Default::default(),
+                tags: Vec::new(),
+                id: GoalId::new(1),
+                title: "g".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                constraints: String::new(),
+                doc: None,
+                status: crate::domain::GoalStatus::Open,
+                closed_at: None,
+                verdict: None,
+                created_at: "c".into(),
+                updated_at: "u".into(),
+            })
+            .unwrap(),
+            closed: false,
+            tasks: Vec::new(),
+            dependents: Vec::new(),
+            events: Vec::new(),
+            landing_marks: Vec::new(),
+        };
+        let compact = goal_detail(&detail);
+        let full = serde_json::to_value(&detail).unwrap();
+        assert!(compact.get("landing_marks").is_none(), "{compact}");
+        assert!(full.get("landing_marks").is_none(), "{full}");
+        let marked = GoalDetail {
+            landing_marks: vec![GoalMark::new("human-landing".into()).unwrap()],
+            ..detail
+        };
+        for (mut shown, plain) in [
+            (goal_detail(&marked), compact),
+            (serde_json::to_value(&marked).unwrap(), full),
+        ] {
+            let marks = shown.as_object_mut().unwrap().remove("landing_marks");
+            assert_eq!(marks, Some(json!(["human-landing"])));
+            assert_eq!(shown, plain);
+        }
     }
 
     #[test]

@@ -528,6 +528,8 @@ pub struct GoalDetailForm {
     tasks: Vec<crate::domain::GoalTask>,
     dependents: Vec<crate::domain::GoalTask>,
     events: Vec<RunEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    landing_marks: Vec<crate::domain::landing_approval::GoalMark>,
 }
 
 impl Wire for crate::domain::GoalDetail {
@@ -541,6 +543,7 @@ impl Wire for crate::domain::GoalDetail {
             tasks,
             dependents,
             events,
+            landing_marks,
         } = self;
         GoalDetailForm {
             acceptance_version,
@@ -550,6 +553,7 @@ impl Wire for crate::domain::GoalDetail {
             tasks,
             dependents,
             events,
+            landing_marks,
         }
     }
     fn from_form(form: GoalDetailForm) -> Result<Self> {
@@ -561,6 +565,7 @@ impl Wire for crate::domain::GoalDetail {
             tasks,
             dependents,
             events,
+            landing_marks,
         } = form;
         Ok(Self {
             acceptance_version,
@@ -570,6 +575,7 @@ impl Wire for crate::domain::GoalDetail {
             tasks,
             dependents,
             events,
+            landing_marks,
         })
     }
 }

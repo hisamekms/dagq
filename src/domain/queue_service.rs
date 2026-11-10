@@ -451,6 +451,7 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::GoalClose
         | UseCase::GoalReady
         | UseCase::GoalReview
+        | UseCase::GoalLandingMark
         | UseCase::ProposalWithdraw
         | UseCase::RequestAdd
         | UseCase::RequestDecline
@@ -693,6 +694,7 @@ string_enum!(UseCase {
     GoalClose => "goal_close",
     GoalReady => "goal_ready",
     GoalReview => "goal_review",
+    GoalLandingMark => "goal_landing_mark",
     ProposalWithdraw => "proposal_withdraw",
     RequestAdd => "request_add",
     RequestDecline => "request_decline",
@@ -891,6 +893,7 @@ impl UseCase {
             ("goal", Some("close")) => Self::GoalClose,
             ("goal", Some("ready")) => Self::GoalReady,
             ("goal", Some("review")) => Self::GoalReview,
+            ("goal", Some("landing-mark")) => Self::GoalLandingMark,
             ("proposal", Some("withdraw")) => Self::ProposalWithdraw,
             ("request", Some("add")) => Self::RequestAdd,
             ("request", Some("decline")) => Self::RequestDecline,

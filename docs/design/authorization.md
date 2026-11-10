@@ -75,12 +75,12 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | role | 許すcapability | resourceの規則 |
 | --- | --- | --- |
 | user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report` runnerの行と`image.publish`を除く全て | なし |
-| user（続き） | `runner.register`・`runner.revoke` | OIDCの人。登録は自分、失効は持ち主か管理者 |
+| user（続き） | `runner.register`・`runner.revoke`・`goal.landing_mark` | OIDCの人。登録は自分、失効とgoalの印は持ち主か管理者（印はhostのuserも人のownerの無いgoalに） |
 | user（続き） | `runner.share`・`runner.list` | 共有は管理者、一覧はmemberが自分、管理者が全て |
 | runner | `runner.declare`・`runner.claim`・`runner.heartbeat`・`runner.report` | 申告・pullは自分、報告・返却は割り当てrun |
 | image-publisher | `image.publish`だけ | なし |
 | inbox（続き） | `runner.list` | 親の人の一覧の範囲だけ |
-| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`・`runner.share`・`runner.declare`・`identity.login`は持たない | なし。人自身の操作との区別は記録が持つ |
+| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`・`runner.share`・`runner.declare`・`identity.login`・`goal.landing_mark`は持たない | なし。人自身の操作との区別は記録が持つ |
 | planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge` | runはnoteだけでask不可。askは`planner_question`だけ、依頼のaskは担当planner本人だけ（`request.decline`と同じ所有の規則）。 |
 | planner（続き） | `task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss` | taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）で、`revising`のproposalのtaskは持ち主だけ（不明なら拒む）。 |
 | planner（続き） | `planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install` | `revisit`（`task.write`）はdraftだけで、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。 |
@@ -115,7 +115,7 @@ askのkindをroleに制限する入口は`opens_ask`。
 
 計画系の判定の入口は`src/application/commands/planning.rs`の`Planning`で、全てのroleについてstoreの変更より先に判定する。
 CLIはparseと出力を担い、storeの変更を直接呼ばない。
-認可に使った状態とproposalはstoreが同じtransactionで照合し、食い違えばtask・依存・eventを変えずに拒む。
+認可に使った状態・proposal・goalのowner（`goal landing-mark`）はstoreが同じtransactionで照合し、食い違えば何も変えずに拒む。
 照合が防ぐ取り違えは`TaskAuthorization`、editの制約は`PlanningStore::edit_task`のdoc commentが持つ。
 roleがcapabilityを持たないときの、storeを読む前の拒否は`Planning::refuse_ungranted`が持つ。
 終了runのverifyを人とinboxが直せる約束は[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)。
@@ -172,7 +172,7 @@ Codexのinboxのhookもこの約束を持つ（[ADR-t2159-1](../adr/2026-10-09-t
 
 `supervise`と`auto-update`はruntimeの制御側（信頼する制御側。ADR-t728-1の決定2）のプロセスを始めるコマンドで、呼び出し元の環境で判定する:
 
-- `supervise`は`scheduler.supervise`を持つuser・inbox・supervisorだけが打てる。
+- `supervise`は`scheduler.supervise`で判定する。
   launchdのsupervisorは`DAGQ_ROLE`を持たない（user）ので、`up`を打ったのがplannerでも起動は通る（登録済みのin-cmuxのものは`DAGQ_ROLE=supervisor`で動く）。
   exec の引き継ぎは同じ環境のまま自分をexecするので、同じroleで判定される。
   起動したプロセスのeventのactorは、呼び出し元ではなく`supervisor:<pid>`（`event_actor`）
@@ -185,7 +185,7 @@ Codexのinboxのhookもこの約束を持つ（[ADR-t2159-1](../adr/2026-10-09-t
 ### 着地とpush（Integrator）
 
 着地（rebase・再検証・squash・mainの更新）とpushは`src/application/integrate.rs`の`Integrator`だけが行う（[ADR-t728-2](../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)）。
-Integratorはrole `integrator`のactor（`integrator:<pid>`）で、`landing.land`と`landing.push`を持つのはこのroleだけ。
+Integratorはrole `integrator`のactor（`integrator:<pid>`）。
 `Integrator::acting_as(actor)`は`StaticPolicy`がこの2つを許すactorでなければ拒み、着地の関数はmoduleの外から呼べない。
 
 着地の依頼と記録の境界は`IntegrationRequest`、着地前の検査は`landing_refusal`、pushの許可の証拠は`PushGrant`のdoc commentが持つ。
@@ -220,5 +220,5 @@ guardrailが迂回できる限界と、規則をwildcardで広げない約束は
 ## CIの見張り（ADR-t1920-1）
 
 [ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)。
-読むコマンド`dagq ci failures`のcapabilityは`ci.read`（`Capability::CiRead`）で、誰が持つかはPolicyの表のとおり（一覧はworkerとrunの全体のreviewにはpromptとrun directoryのファイルで渡す）。
+読むコマンド`dagq ci failures`のcapabilityは`ci.read`で、誰が持つかはPolicyの表のとおり（一覧はworkerとrunの全体のreviewにはpromptとrun directoryのファイルで渡す）。
 guardrailの対応は`DAGQ_COMMANDS`、findingの判断の入口は`Dialogue`。

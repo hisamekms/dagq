@@ -340,6 +340,30 @@ pub(super) fn task_own_owner(tx: &impl SqlRead, task_id: TaskId) -> Result<Optio
     .with_context(|| format!("task {task_id} does not exist"))
 }
 
+/// The landing marks goal `goal_id` carries, sorted by name here rather
+/// than by the database's collation; none for a goal without one, or one
+/// the queue does not hold. A stored blank name is a conversion error.
+pub(super) fn goal_landing_marks(
+    tx: &impl SqlRead,
+    goal_id: GoalId,
+) -> Result<Vec<crate::domain::landing_approval::GoalMark>> {
+    let mut marks = tx.query_map(
+        "SELECT mark FROM goal_landing_marks WHERE goal_id=?1",
+        sql_params![goal_id],
+        |row| {
+            crate::domain::landing_approval::GoalMark::new(row.get("mark")?).map_err(|cause| {
+                SqlError::Conversion {
+                    index: 0,
+                    stored: ValueKind::Text,
+                    cause: cause.into(),
+                }
+            })
+        },
+    )?;
+    marks.sort();
+    Ok(marks)
+}
+
 pub(super) fn read_goal(tx: &impl SqlRead, goal_id: GoalId) -> Result<Goal> {
     tx.query_row(
         "SELECT * FROM goals WHERE id=?1",

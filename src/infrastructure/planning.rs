@@ -1,7 +1,7 @@
 //! The queue the planning commands work on
 //! ([`crate::application::commands::planning`]): the ports of the task
 //! store, and what the authorization reads before them.
-use crate::infrastructure::sql_exec::TransactionEntries;
+use crate::infrastructure::sql_exec::{CommitTransaction, TransactionEntries};
 use crate::infrastructure::store_queue::StoreQueue;
 
 use anyhow::Result;
@@ -13,6 +13,8 @@ use crate::domain::{
     FindingId, Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal,
     ProposalId, Submission, Task, TaskAction, TaskAuthorization, TaskDetail, TaskEdit, TaskId,
     cancel_reason::NewCancel,
+    goal::{LandingMarkChange, LandingMarksChanged},
+    goal_owner::Owner,
 };
 
 impl<E: TransactionEntries> PlanningStore for StoreQueue<E> {
@@ -170,6 +172,24 @@ impl<E: TransactionEntries> PlanningStore for StoreQueue<E> {
 
     fn rearm_goal_review(&mut self, goal: GoalId) -> Result<Value> {
         GoalReviewStore::rearm_goal_review(self, goal)
+    }
+
+    fn goal_owner(&self, goal: GoalId) -> Result<Option<Owner>> {
+        let tx = self.read_entry("goal_owner")?;
+        super::store_rows::goal_owner(&tx, goal)
+    }
+
+    fn change_landing_mark(
+        &mut self,
+        goal: GoalId,
+        change: LandingMarkChange,
+        authorized: Option<Owner>,
+    ) -> Result<LandingMarksChanged> {
+        let tx = self.write_entry("change_landing_mark")?;
+        let changed =
+            super::task_store::change_landing_mark(&tx, goal, &change, authorized.as_ref())?;
+        tx.commit()?;
+        Ok(changed)
     }
 }
 

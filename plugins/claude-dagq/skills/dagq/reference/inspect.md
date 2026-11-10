@@ -120,6 +120,7 @@ A task registered with `--paths` may change only what they match (`reference/sco
 "$DAGQ" goal edit ID --constraints "..."  # see goal edit --help
 "$DAGQ" goal close ID --verdict achieved  # or abandoned; see goal-close.md
 "$DAGQ" goal review ID                    # rearm the goal review after a review by hand or a keep_open answer (person or inbox)
+"$DAGQ" goal landing-mark ID MARK         # put a landing mark on the goal (--remove takes it off); who may: authority.md
 ```
 
 A run already claimed keeps the prompt it started with; runs claimed after a `goal edit` see the new text.

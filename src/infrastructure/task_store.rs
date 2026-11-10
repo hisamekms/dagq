@@ -4,9 +4,9 @@ use super::search_writes;
 use super::sql_dialect::{JsonType, SqlDialect};
 use super::sql_exec::{OptionalRow, SqlRead, SqlResult, SqlRow, SqlValue, sql_params};
 use super::store_rows::{
-    RecordedCancel, cancel_of, enum_col, event_row, goal_owner, goal_row, optional_enum_col,
-    optional_priority_col, read_goal, read_task, ready_conditions, replan_guarding, run_row,
-    select_tasks, task_own_owner, task_row,
+    RecordedCancel, cancel_of, enum_col, event_row, goal_landing_marks, goal_owner, goal_row,
+    optional_enum_col, optional_priority_col, read_goal, read_task, ready_conditions,
+    replan_guarding, run_row, select_tasks, task_own_owner, task_row,
 };
 use super::store_writes::{
     Node, event, event_id, insert_dependency, insert_goal_dependency, insert_task, next_id,
@@ -273,6 +273,51 @@ pub(super) fn goal_event(
     payload: serde_json::Value,
 ) -> Result<()> {
     goal_event_id(conn, goal_id, kind, payload).map(drop)
+}
+
+/// Put a landing mark on goal `goal_id` or take one off by `change`, in
+/// the caller's write transaction (ADR-t3988-1 decision 4). `authorized` is
+/// the goal's owner the policy was asked with: a goal whose owner is
+/// another one in this transaction is refused and nothing is written. A
+/// change that changes the marks writes the row and its
+/// `goal_landing_marks_changed` event, whose actor is the transaction's,
+/// together; one that changes nothing writes neither. The goal's row, its
+/// tags among it, is not touched.
+pub(super) fn change_landing_mark(
+    tx: &impl crate::infrastructure::sql_exec::SqlWrite,
+    goal_id: GoalId,
+    change: &goal::LandingMarkChange,
+    authorized: Option<&Owner>,
+) -> Result<goal::LandingMarksChanged> {
+    let owner = goal_owner(tx, goal_id)?;
+    ensure!(
+        owner.as_ref() == authorized,
+        "goal {goal_id}'s owner changed after the change of its landing marks was authorized; \
+         nothing changed"
+    );
+    let changed = goal::change_landing_marks(goal_id, &goal_landing_marks(tx, goal_id)?, change);
+    if !changed.changed {
+        return Ok(changed);
+    }
+    let mark = change.mark().as_str();
+    match change {
+        goal::LandingMarkChange::Put(_) => tx.execute(
+            "INSERT INTO goal_landing_marks(goal_id, mark) VALUES (?1, ?2)",
+            sql_params![goal_id, mark],
+        )?,
+        goal::LandingMarkChange::TakeOff(_) => tx.execute(
+            "DELETE FROM goal_landing_marks WHERE goal_id=?1 AND mark=?2",
+            sql_params![goal_id, mark],
+        )?,
+    };
+    goal_event(
+        tx,
+        goal_id,
+        EventKind::GoalLandingMarksChanged,
+        json!({"change": changed.change, "mark": changed.mark,
+            "before": changed.before, "after": changed.after}),
+    )?;
+    Ok(changed)
 }
 
 /// [`goal_event`], returning the ID of the event it inserted.
@@ -2202,6 +2247,7 @@ impl<T: SqlRead> Store<'_, T> {
             tasks,
             dependents,
             events,
+            landing_marks: goal_landing_marks(tx, goal_id)?,
         })
     }
 

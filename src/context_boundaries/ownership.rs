@@ -316,6 +316,7 @@ const fn allowed(
 pub(super) const TABLES: &[Table] = &[
     table("tasks", Planning),
     table("goals", Planning),
+    table("goal_landing_marks", Planning), // a goal's landing marks, apart from its tags
     table("task_dependencies", Planning),
     table("task_goal_dependencies", Planning),
     table("proposals", Planning),
