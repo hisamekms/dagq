@@ -10,6 +10,8 @@ use crate::domain::environment::{
     EnvironmentAttached, EnvironmentWait, Resources, RunProcesses, RunResource,
 };
 use crate::domain::host_metrics::{HostSample, ImportMark, NodeSample, SampleSource};
+use crate::domain::ledger::session::written::omitted::{Coverage, Point};
+use crate::domain::ledger::window::omitted::OmittedEdges;
 use crate::domain::ledger::{
     LedgerKind, LedgerRow,
     window::{LedgerWindow, WindowQuery},
@@ -242,6 +244,46 @@ pub trait LedgerStore {
     ) -> Result<Option<crate::domain::ledger::session::written::omitted::Point>> {
         let _ = (kind, ms);
         anyhow::bail!("this store keeps no points of the omitted queue events")
+    }
+    /// The last point of `kind` of the coverage of the omitted queue events
+    /// at the position `at` or before it, if any: the store seeks it by
+    /// its key. A store that keeps no points refuses it.
+    fn ledger_omitted_point_at_or_before(
+        &self,
+        kind: &str,
+        at: EventId,
+    ) -> Result<Option<crate::domain::ledger::session::written::omitted::Point>> {
+        let _ = (kind, at);
+        anyhow::bail!("this store keeps no points of the omitted queue events")
+    }
+    /// The coverage of the omitted queue events the store holds, whatever
+    /// marks it holds beside it: none for a store that keeps none.
+    fn ledger_omitted_coverage(
+        &self,
+    ) -> Result<Option<crate::domain::ledger::session::written::omitted::Coverage>> {
+        Ok(None)
+    }
+    /// The event of `id`, by its key: what a window's edges read of an
+    /// omitted queue event ([`crate::domain::ledger::window::omitted`]). A
+    /// store that does not give it refuses it, so that no read takes a
+    /// store of none for an event that is not there.
+    fn ledger_event(&self, id: EventId) -> Result<Option<RunEvent>> {
+        let _ = id;
+        anyhow::bail!("this store gives no event by its id to a window's edges")
+    }
+    /// The events of `kind` with `after < id <= upto`, oldest first, at
+    /// most `limit`, by the index of kind and id: what a window's edges
+    /// read of the omitted queue events near an edge. A store that does
+    /// not give them refuses it.
+    fn ledger_events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        let _ = (kind, after, upto, limit);
+        anyhow::bail!("this store gives no events of a kind to a window's edges")
     }
     /// The row of `kind` and `key`, if there is one.
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
@@ -733,71 +775,211 @@ pub trait LedgerStore {
     /// one fold ([`crate::domain::ledger::window::run_on_its_way`]) and
     /// taken the same way, so that a window holds what a run not ended
     /// recorded too.
+    ///
+    /// All of it is read of one snapshot ([`Self::ledger_read_snapshot`]),
+    /// a read from a time or not, and so are the coverage of the omitted
+    /// queue events, C, S and the summaries, and what the window's edges
+    /// read of them ([`crate::domain::ledger::window::omitted`]): the
+    /// latest event, a cursor's event and its time, the last event of a
+    /// time at or before a time cursor's and `queue_before`'s, and the first
+    /// time of a window without `--since` take the omitted events of
+    /// (C, S] with the rows' records. A store of no coverage adds none. The
+    /// edges read L for the latest and one event by its key for a cursor's
+    /// event; for a time, the events of a kind between the points whose T
+    /// rises (K each, by the index of kind and id) from the last point of
+    /// an M at or before it, up to a timed omitted event past the time and
+    /// D (no later one is of a time before it, M never falling and none
+    /// falling behind M by more than D) or S; for a first time, alike from
+    /// the window's start up to one past the least time read and D. So they
+    /// read the spans of the timed omitted events within D of the edge, the
+    /// seeks of the points aside, however long the history around the
+    /// window, of the runs', tasks' and sessions' events of those kinds and
+    /// of those of no time. The coverage is read after the rows its edges
+    /// are taken with (`queue_before`'s after the queue's, the others' after
+    /// every row), so that a store whose pages are of more than one state
+    /// gives the newest coverage of them
+    /// ([`LedgerWindowRead::omitted_coverage`]): no row read is of a later
+    /// state than the S its edges read to.
     fn ledger_window(&self, query: &WindowQuery) -> Result<LedgerWindow> {
         use crate::domain::ledger::window::WindowRows;
-        Ok(window_rows(self, query, WindowRows::new)?.into_window(query))
+        read_window(self, query, WindowRows::new, true, |read| {
+            Ok(read.into_window(query))
+        })
     }
 }
 
 /// The rows of the window `query` asks of `store`, taken as
 /// [`LedgerStore::ledger_window`] reads them into the read `new` makes (of
-/// the query and the room for the events expected).
-fn window_rows<S: LedgerStore + ?Sized>(
+/// the query and the room for the events expected), and `finish` of them
+/// and the edges of the omitted queue events (of none unless `omitted`),
+/// all in one snapshot.
+fn read_window<S: LedgerStore + ?Sized, T>(
     store: &S,
     query: &WindowQuery,
     new: fn(&WindowQuery, usize) -> crate::domain::ledger::window::WindowRows,
-) -> Result<crate::domain::ledger::window::WindowRows> {
-    if query.read_from_ms.is_none() {
-        let mut read = new(query, store.ledger_events_expected()?);
-        for kind in LedgerKind::ALL {
-            read.take_pages(|after, limit| store.ledger_rows_after(kind, after, limit))?;
-        }
-        return with_runs_on_their_way(&store, read, query);
-    }
-    // Which rows a read leaves out and what they still give must be of
-    // one state of the rows, or a row moved between them is in neither.
+    omitted: bool,
+    mut finish: impl FnMut(crate::domain::ledger::window::WindowRows) -> Result<T>,
+) -> Result<T> {
+    // A read from a time has no use for room for every event.
+    let expected = match query.read_from_ms {
+        None => store.ledger_events_expected()?,
+        Some(_) => 0,
+    };
     let mut taken = None;
     store.ledger_read_snapshot(&mut |snapshot| {
-        // A read from a time has no use for room for every event.
-        let mut read = new(query, 0);
-        // The queue's rows first: they tell which of the others to leave out.
-        read.take_pages(|after, limit| snapshot.rows_after(LedgerKind::Queue, after, limit))?;
-        let others = LedgerKind::ALL
-            .into_iter()
-            .filter(|kind| *kind != LedgerKind::Queue);
-        if let Some(from) = read.rows_from() {
-            for kind in others {
-                read.take_pages(|after, limit| snapshot.rows_from(kind, after, limit, &from))?;
-            }
-            read.take_earlier(snapshot.earlier(&from)?);
-            loop {
-                let wanted = read.rows_wanted();
-                if wanted.is_empty() {
-                    break;
-                }
-                for (kind, key) in wanted {
-                    read.take_row(snapshot.row(kind, &key)?);
-                }
-            }
-        }
-        taken = Some(with_runs_on_their_way(snapshot, read, query)?);
+        let reads = OmittedReads(snapshot);
+        let edges = Edges(omitted.then_some(&reads));
+        let read = window_rows(snapshot, query, new(query, expected), &edges)?;
+        taken = Some(finish(read)?);
         Ok(())
     })?;
     taken.ok_or_else(|| anyhow::anyhow!("the ledger's snapshot read nothing"))
+}
+
+/// Where a window's edges read the coverage of the omitted queue events:
+/// of none without a read. The coverage is read when an edge takes it,
+/// after the rows it is taken with
+/// ([`LedgerWindowRead::omitted_coverage`]).
+struct Edges<'a, 'b>(Option<&'a OmittedReads<'b>>);
+
+impl Edges<'_, '_> {
+    /// The edges of the coverage read now.
+    fn now(&self) -> Result<OmittedEdges<'_, anyhow::Error>> {
+        match self.0 {
+            Some(reads) => OmittedEdges::of(reads),
+            None => Ok(OmittedEdges::none()),
+        }
+    }
+}
+
+/// The queue's rows of `snapshot`, taken into `read` first: they tell which
+/// of the others to leave out, the omitted events of `edges` among the
+/// queue's records.
+fn take_queue_rows(
+    snapshot: &dyn LedgerWindowRead,
+    read: &mut crate::domain::ledger::window::WindowRows,
+    edges: &Edges<'_, '_>,
+) -> Result<()> {
+    read.take_pages(|after, limit| snapshot.rows_after(LedgerKind::Queue, after, limit))?;
+    read.take_omitted_before(&edges.now()?)?;
+    Ok(())
+}
+
+/// Which rows the read from a time of `query` leaves out of `store`, as
+/// [`LedgerStore::ledger_window`] takes it of the queue's rows and the
+/// omitted events: `queue_before` as a test reads it.
+#[cfg(test)]
+pub(crate) fn rows_from_of<S: LedgerStore + ?Sized>(
+    store: &S,
+    query: &WindowQuery,
+) -> Result<Option<crate::domain::ledger::window::RowsFrom>> {
+    let mut from = None;
+    store.ledger_read_snapshot(&mut |snapshot| {
+        let reads = OmittedReads(snapshot);
+        let mut read = crate::domain::ledger::window::WindowRows::new(query, 0);
+        take_queue_rows(snapshot, &mut read, &Edges(Some(&reads)))?;
+        from = read.rows_from();
+        Ok(())
+    })?;
+    Ok(from)
+}
+
+/// The rows of the window `query` asks, of `snapshot`, taken into `read`.
+fn window_rows(
+    snapshot: &dyn LedgerWindowRead,
+    query: &WindowQuery,
+    mut read: crate::domain::ledger::window::WindowRows,
+    edges: &Edges<'_, '_>,
+) -> Result<crate::domain::ledger::window::WindowRows> {
+    take_queue_rows(snapshot, &mut read, edges)?;
+    let others = LedgerKind::ALL
+        .into_iter()
+        .filter(|kind| *kind != LedgerKind::Queue);
+    let Some(from) = read.rows_from() else {
+        for kind in others {
+            read.take_pages(|after, limit| snapshot.rows_after(kind, after, limit))?;
+        }
+        let mut read = with_runs_on_their_way(snapshot, read, query)?;
+        read.take_omitted_edges(query, &edges.now()?)?;
+        return Ok(read);
+    };
+    // Which rows a read leaves out and what they still give must be of
+    // one state of the rows, or a row moved between them is in neither.
+    for kind in others {
+        read.take_pages(|after, limit| snapshot.rows_from(kind, after, limit, &from))?;
+    }
+    read.take_earlier(snapshot.earlier(&from)?);
+    loop {
+        let wanted = read.rows_wanted();
+        if wanted.is_empty() {
+            break;
+        }
+        for (kind, key) in wanted {
+            read.take_row(snapshot.row(kind, &key)?);
+        }
+    }
+    let mut read = with_runs_on_their_way(snapshot, read, query)?;
+    read.take_omitted_edges(query, &edges.now()?)?;
+    Ok(read)
 }
 
 /// The window `query` asks of `store` read as [`LedgerStore::ledger_window`]
 /// reads it, with the payloads of its records held as their text and not
 /// decoded: the prototype
 /// [`crate::domain::ledger::window::payload_text`] describes, which no read
-/// of `stats`, `kpi` or `report` makes.
+/// of `stats`, `kpi` or `report` makes. It reads no coverage of the omitted
+/// queue events.
 #[doc(hidden)]
 pub fn ledger_window_payload_text<S: LedgerStore + ?Sized>(
     store: &S,
     query: &WindowQuery,
 ) -> Result<crate::domain::ledger::window::payload_text::TextWindow> {
     use crate::domain::ledger::window::WindowRows;
-    Ok(window_rows(store, query, WindowRows::payload_text)?.into_text_window())
+    read_window(store, query, WindowRows::payload_text, false, |read| {
+        Ok(read.into_text_window())
+    })
+}
+
+/// What a window's edges read of a snapshot
+/// ([`crate::domain::ledger::window::omitted::OmittedRead`]).
+struct OmittedReads<'a>(&'a dyn LedgerWindowRead);
+
+impl crate::domain::ledger::window::omitted::OmittedRead for OmittedReads<'_> {
+    type Error = anyhow::Error;
+    fn coverage(&self) -> Result<Option<Coverage>> {
+        self.0.omitted_coverage()
+    }
+    fn point_after(&self, kind: &str, after: EventId) -> Result<Option<Point>> {
+        Ok(self
+            .0
+            .omitted_points_after(kind, after, 1)?
+            .into_iter()
+            .next())
+    }
+    fn point_at_or_before(&self, kind: &str, at: EventId) -> Result<Option<Point>> {
+        self.0.omitted_point_at_or_before(kind, at)
+    }
+    fn point_by_ms(&self, kind: &str, ms: i64) -> Result<Option<Point>> {
+        // The store's is of an M before a time.
+        match ms.checked_add(1) {
+            Some(after) => self.0.omitted_point_before_ms(kind, after),
+            None => self
+                .0
+                .omitted_point_at_or_before(kind, EventId::new(i64::MAX)),
+        }
+    }
+    fn event(&self, id: EventId) -> Result<Option<RunEvent>> {
+        self.0.event(id)
+    }
+    fn events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        self.0.events_of_kind(kind, after, upto, limit)
+    }
 }
 
 /// The reads needed to fold a ledger window, borrowed from a store or its
@@ -823,6 +1005,46 @@ pub trait LedgerWindowRead {
     ) -> Result<crate::domain::ledger::window::EarlierRecords>;
     fn row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
     fn run_events(&self, run: &RunId) -> Result<Vec<RunEvent>>;
+    /// [`LedgerStore::ledger_omitted_coverage`] of the snapshot: none for
+    /// one that reads none. A window reads it after the rows its edges are
+    /// taken with: a read whose rows are of more than one state of the
+    /// store (pages asked of the service one by one) gives the newest that
+    /// came with them, so that no row read is of a later state than the
+    /// coverage (it only grows, and (C, S] is never written again).
+    fn omitted_coverage(&self) -> Result<Option<Coverage>> {
+        Ok(None)
+    }
+    /// [`LedgerStore::ledger_omitted_points_after`] of the snapshot.
+    fn omitted_points_after(&self, kind: &str, after: EventId, limit: usize) -> Result<Vec<Point>> {
+        let _ = (kind, after, limit);
+        anyhow::bail!("this snapshot reads no points of the omitted queue events")
+    }
+    /// [`LedgerStore::ledger_omitted_point_at_or_before`] of the snapshot.
+    fn omitted_point_at_or_before(&self, kind: &str, at: EventId) -> Result<Option<Point>> {
+        let _ = (kind, at);
+        anyhow::bail!("this snapshot reads no points of the omitted queue events")
+    }
+    /// [`LedgerStore::ledger_omitted_point_before_ms`] of the snapshot.
+    fn omitted_point_before_ms(&self, kind: &str, ms: i64) -> Result<Option<Point>> {
+        let _ = (kind, ms);
+        anyhow::bail!("this snapshot reads no points of the omitted queue events")
+    }
+    /// [`LedgerStore::ledger_event`] of the snapshot.
+    fn event(&self, id: EventId) -> Result<Option<RunEvent>> {
+        let _ = id;
+        anyhow::bail!("this snapshot gives no event by its id")
+    }
+    /// [`LedgerStore::ledger_events_of_kind`] of the snapshot.
+    fn events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        let _ = (kind, after, upto, limit);
+        anyhow::bail!("this snapshot gives no events of a kind")
+    }
 }
 
 impl<T: LedgerStore + ?Sized> LedgerWindowRead for &T {
@@ -854,6 +1076,30 @@ impl<T: LedgerStore + ?Sized> LedgerWindowRead for &T {
     }
     fn run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
         self.ledger_run_events(run)
+    }
+    fn omitted_coverage(&self) -> Result<Option<Coverage>> {
+        self.ledger_omitted_coverage()
+    }
+    fn omitted_points_after(&self, kind: &str, after: EventId, limit: usize) -> Result<Vec<Point>> {
+        self.ledger_omitted_points_after(kind, after, limit)
+    }
+    fn omitted_point_at_or_before(&self, kind: &str, at: EventId) -> Result<Option<Point>> {
+        self.ledger_omitted_point_at_or_before(kind, at)
+    }
+    fn omitted_point_before_ms(&self, kind: &str, ms: i64) -> Result<Option<Point>> {
+        self.ledger_omitted_point_before_ms(kind, ms)
+    }
+    fn event(&self, id: EventId) -> Result<Option<RunEvent>> {
+        self.ledger_event(id)
+    }
+    fn events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        self.ledger_events_of_kind(kind, after, upto, limit)
     }
 }
 

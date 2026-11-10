@@ -2644,6 +2644,141 @@ fn the_rows_of_a_list_past_the_answers_limit_are_asked_again_in_halves_and_in_pa
     assert!(service.asked.lock().unwrap().is_empty());
 }
 
+/// A service that answers `ledger_events_of_kind` of its events and refuses
+/// an answer past `largest` bytes as the service does; it keeps how many
+/// each request asked for.
+struct EventsOfKind {
+    events: Vec<crate::domain::RunEvent>,
+    largest: usize,
+    asked: std::sync::Mutex<Vec<usize>>,
+}
+
+impl ServiceCaller for EventsOfKind {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        assert_eq!(use_case, UseCase::Supervisor);
+        let params: SupervisorParams = serde_json::from_value(params)?;
+        assert_eq!(params.op, "ledger_events_of_kind");
+        use crate::domain::{EventId, RunEvent};
+        let (kind, after, upto, limit): (String, EventId, EventId, usize) =
+            serde_json::from_value(Value::Array(params.args))?;
+        self.asked.lock().unwrap().push(limit);
+        let read: Vec<&RunEvent> = self
+            .events
+            .iter()
+            .filter(|event| event.kind.as_str() == kind && event.id > after && event.id <= upto)
+            .take(limit)
+            .collect();
+        let answer = serde_json::to_value(read)?;
+        if serde_json::to_string(&answer)?.len() > self.largest {
+            return Err(service_error(&ServiceError {
+                code: ServiceErrorCode::ResponseTooLarge,
+                message: "too large".into(),
+                denied: None,
+                kind: None,
+                rejected: false,
+                held: None,
+                session_of_another_target: false,
+            }));
+        }
+        Ok(answer)
+    }
+    fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+        unreachable!("no landing here")
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// A kind's events of a range past the answer's limit are asked again in
+/// smaller pages, each after the last id of the one before, so that the
+/// events read are those of the range up to the limit asked, payloads
+/// whole: a short page ends the range, and a full one is followed by the
+/// next until the limit.
+#[test]
+fn a_kinds_events_past_the_answers_limit_are_read_in_smaller_pages_up_to_the_limit() {
+    use crate::application::LedgerStore;
+    use crate::domain::{EventId, RunEvent};
+    let kind = "authorization_denied";
+    let event = |id: i64, kind: &str| RunEvent {
+        id: EventId::new(id),
+        task_id: None,
+        goal_id: None,
+        run_id: None,
+        kind: kind.into(),
+        payload: serde_json::json!({"pad": "x".repeat(1_000)}),
+        created_at: "2030-01-01T00:00:00Z".into(),
+        actor: None,
+    };
+    let events: Vec<RunEvent> = (1..=40)
+        .map(|id| {
+            event(
+                id,
+                if id % 4 == 0 {
+                    "supervisor_alive"
+                } else {
+                    kind
+                },
+            )
+        })
+        .collect();
+    let of_kind = |after: i64, upto: i64, limit: usize| -> Vec<RunEvent> {
+        events
+            .iter()
+            .filter(|event| {
+                event.kind.as_str() == kind
+                    && event.id.as_i64() > after
+                    && event.id.as_i64() <= upto
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    };
+    let one = serde_json::to_string(&events[0]).unwrap().len();
+    let read = |largest: usize, after: i64, upto: i64, limit: usize| {
+        let service = Arc::new(EventsOfKind {
+            events: events.clone(),
+            largest,
+            asked: std::sync::Mutex::default(),
+        });
+        let queue = SupervisorQueues::new(
+            service.clone(),
+            ActorContext::instance(ActorRole::Supervisor, 7),
+        )
+        .queue();
+        let read = queue
+            .ledger_events_of_kind(kind, EventId::new(after), EventId::new(upto), limit)
+            .unwrap();
+        (read, std::mem::take(&mut *service.asked.lock().unwrap()))
+    };
+    // The answer holds them all: one request.
+    let (whole, asked) = read(usize::MAX, 0, 40, 256);
+    assert_eq!(whole, of_kind(0, 40, 256));
+    assert_eq!(asked, [256]);
+    // It holds five at most: 256 is too large, then 64, 16 and 4 too, and
+    // pages of 4 go on to the range's end, the last one short.
+    let (paged, asked) = read(5 * one + 10, 0, 40, 256);
+    assert_eq!(paged, of_kind(0, 40, 256));
+    assert_eq!(paged.len(), 30);
+    assert_eq!(asked, [256, 64, 16, 4, 4, 4, 4, 4, 4, 4, 4]);
+    // The limit ends the read: no more than asked for, the range not ended.
+    let (limited, asked) = read(5 * one + 10, 2, 40, 9);
+    assert_eq!(limited, of_kind(2, 40, 9));
+    assert_eq!(asked, [9, 2, 2, 2, 2, 1]);
+    // No limit, no request.
+    let (none, asked) = read(5 * one + 10, 0, 40, 0);
+    assert!(none.is_empty());
+    assert!(asked.is_empty());
+}
+
 /// A service of the binary before a handoff: it refuses `diagnosis_owners`
 /// and a start that names its owner by more than a pid as requests it
 /// does not read, and answers the owners as pids; it keeps each call's op.

@@ -3148,9 +3148,16 @@ impl LedgerStore for SupervisorQueue {
     fn ledger_marks(&self) -> Result<Option<crate::domain::ledger::session::written::Marks>> {
         self.remote("ledger_sessions_written", vec![])
     }
-    // The points cross as the service seeks them: a service built before
-    // them knows no such operation and refuses it, which fails the read as
-    // a store that keeps no points does.
+    // What a window's edges read of the omitted queue events, each asked
+    // of the service: the coverage with the pages ([`CoveredPages`]), then
+    // its points and events in (C, S], which no write changes (a point is
+    // never removed, an event never rewritten), so the reads stand for the
+    // snapshot the coverage was read of.
+    fn ledger_omitted_coverage(
+        &self,
+    ) -> Result<Option<crate::domain::ledger::session::written::omitted::Coverage>> {
+        self.remote("ledger_omitted_coverage", vec![])
+    }
     fn ledger_omitted_points_after(
         &self,
         kind: &str,
@@ -3162,6 +3169,16 @@ impl LedgerStore for SupervisorQueue {
             vec![to_value(kind)?, to_value(after)?, to_value(limit)?],
         )
     }
+    fn ledger_omitted_point_at_or_before(
+        &self,
+        kind: &str,
+        at: EventId,
+    ) -> Result<Option<crate::domain::ledger::session::written::omitted::Point>> {
+        self.remote(
+            "ledger_omitted_point_at_or_before",
+            vec![to_value(kind)?, to_value(at)?],
+        )
+    }
     fn ledger_omitted_point_before_ms(
         &self,
         kind: &str,
@@ -3171,6 +3188,53 @@ impl LedgerStore for SupervisorQueue {
             "ledger_omitted_point_before_ms",
             vec![to_value(kind)?, to_value(ms)?],
         )
+    }
+    fn ledger_event(&self, id: EventId) -> Result<Option<RunEvent>> {
+        self.remote("ledger_event", vec![to_value(id)?])
+    }
+    // In pages past the last id of the page before: a page past the
+    // answer's limit is asked again at a quarter of its size, and a full
+    // page is followed by the next, so that the events read are those of
+    // the range up to `limit` whatever their payloads (an event crossed in
+    // one request fits one answer); a page short of what it asked for ends
+    // the range.
+    fn ledger_events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        let (mut events, mut after, mut page) = (Vec::new(), after, limit);
+        loop {
+            let ask = page.min(limit - events.len());
+            if ask == 0 {
+                return Ok(events);
+            }
+            let read: Vec<RunEvent> = match self.remote(
+                "ledger_events_of_kind",
+                vec![
+                    to_value(kind)?,
+                    to_value(after)?,
+                    to_value(upto)?,
+                    to_value(ask)?,
+                ],
+            ) {
+                Err(error) if super::too_large(&error) && ask > 1 => {
+                    page = (ask / 4).max(1);
+                    continue;
+                }
+                read => read?,
+            };
+            let full = read.len() == ask;
+            if let Some(last) = read.last() {
+                after = last.id;
+            }
+            events.extend(read);
+            if !full {
+                return Ok(events);
+            }
+        }
     }
     // A row past one answer whole is read in parts.
     fn ledger_row(
@@ -3250,6 +3314,20 @@ impl LedgerStore for SupervisorQueue {
     }
     fn ledger_events_expected(&self) -> Result<usize> {
         Ok(usize::try_from(self.latest_event_id()?.as_i64()).unwrap_or(0))
+    }
+
+    // The pages of a window are asked one by one, each answered of a
+    // snapshot of the service's with the coverage of the omitted queue
+    // events of the same snapshot ([`CoveredPages`]).
+    fn ledger_read_snapshot(
+        &self,
+        read: &mut dyn FnMut(&dyn LedgerWindowRead) -> Result<()>,
+    ) -> Result<()> {
+        read(&CoveredPages {
+            queue: self,
+            newest: std::cell::RefCell::new(None),
+            read_alone: std::cell::Cell::new(false),
+        })
     }
 
     // One page asked for: past the answer's limit asked again at a
@@ -3651,7 +3729,167 @@ impl SupervisorQueue {
 /// writer writes the row between its parts.
 const ROW_PART_TRIES: usize = 3;
 
+/// A page of the ledger's rows and the coverage of the omitted queue
+/// events, read of one snapshot of the service's (`ledger_rows_covered`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CoveredRows {
+    pub rows: Vec<crate::domain::ledger::LedgerRow>,
+    pub coverage: Option<crate::domain::ledger::session::written::omitted::Coverage>,
+}
+
+/// What a window reads through the service ([`LedgerStore::ledger_window`]):
+/// each page a request of its own, of the state of the store the service
+/// reads it at, and its coverage of the same snapshot. Its coverage is the
+/// newest of those that came with the pages read; a coverage only grows and
+/// its (C, S] is never written again, so no page read is of a later state
+/// than the coverage the edges read to, and the points and events of
+/// (C, S] the edges read after it are those of its snapshot. A row read by
+/// its key or in parts and the events of a run on its way come with no
+/// coverage: the coverage is asked again after them. The pages are of more than one state, as they were before a
+/// coverage (one snapshot over the pages is the service's to hold).
+struct CoveredPages<'a> {
+    queue: &'a SupervisorQueue,
+    newest: std::cell::RefCell<Option<crate::domain::ledger::session::written::omitted::Coverage>>,
+    /// A row was read with no coverage since the last.
+    read_alone: std::cell::Cell<bool>,
+}
+
+impl CoveredPages<'_> {
+    /// Take `coverage`, read with or after the rows read so far, when it is
+    /// newer than the one held.
+    fn take(&self, coverage: Option<crate::domain::ledger::session::written::omitted::Coverage>) {
+        let mut newest = self.newest.borrow_mut();
+        let newer = match (&*newest, &coverage) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(held), Some(read)) => read.through > held.through,
+        };
+        if newer {
+            *newest = coverage;
+        }
+    }
+}
+
+impl LedgerWindowRead for CoveredPages<'_> {
+    fn rows_after(
+        &self,
+        kind: crate::domain::ledger::LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::ledger::LedgerRow>> {
+        let (rows, coverage) = self.queue.ledger_rows_covered(kind, after, limit)?;
+        self.take(coverage);
+        Ok(rows)
+    }
+    // The service's client leaves no row out.
+    fn rows_from(
+        &self,
+        kind: crate::domain::ledger::LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+        _: &crate::domain::ledger::window::RowsFrom,
+    ) -> Result<Vec<crate::domain::ledger::LedgerRow>> {
+        self.rows_after(kind, after, limit)
+    }
+    fn earlier(
+        &self,
+        from: &crate::domain::ledger::window::RowsFrom,
+    ) -> Result<crate::domain::ledger::window::EarlierRecords> {
+        self.queue.ledger_earlier(from)
+    }
+    fn row(
+        &self,
+        kind: crate::domain::ledger::LedgerKind,
+        key: &str,
+    ) -> Result<Option<crate::domain::ledger::LedgerRow>> {
+        self.read_alone.set(true);
+        self.queue.ledger_row(kind, key)
+    }
+    // A run's events come with no coverage: the coverage is asked again
+    // after them, as after a row read alone.
+    fn run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
+        self.read_alone.set(true);
+        self.queue.ledger_run_events(run)
+    }
+    fn omitted_coverage(
+        &self,
+    ) -> Result<Option<crate::domain::ledger::session::written::omitted::Coverage>> {
+        if self.read_alone.replace(false) || self.newest.borrow().is_none() {
+            self.take(self.queue.ledger_omitted_coverage()?);
+        }
+        Ok(self.newest.borrow().clone())
+    }
+    fn omitted_points_after(
+        &self,
+        kind: &str,
+        after: EventId,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::ledger::session::written::omitted::Point>> {
+        self.queue.ledger_omitted_points_after(kind, after, limit)
+    }
+    fn omitted_point_at_or_before(
+        &self,
+        kind: &str,
+        at: EventId,
+    ) -> Result<Option<crate::domain::ledger::session::written::omitted::Point>> {
+        self.queue.ledger_omitted_point_at_or_before(kind, at)
+    }
+    fn omitted_point_before_ms(
+        &self,
+        kind: &str,
+        ms: i64,
+    ) -> Result<Option<crate::domain::ledger::session::written::omitted::Point>> {
+        self.queue.ledger_omitted_point_before_ms(kind, ms)
+    }
+    fn event(&self, id: EventId) -> Result<Option<RunEvent>> {
+        self.queue.ledger_event(id)
+    }
+    fn events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        self.queue.ledger_events_of_kind(kind, after, upto, limit)
+    }
+}
+
 impl SupervisorQueue {
+    /// [`LedgerStore::ledger_rows_after`] with the coverage of the omitted
+    /// queue events of the same snapshot of the service's. A page past the
+    /// answer's limit is asked again at a quarter of its size; a row past it
+    /// alone is read in parts as [`LedgerStore::ledger_rows_after`] reads
+    /// it, and the coverage asked after it (of the same state or a later
+    /// one, never an earlier).
+    fn ledger_rows_covered(
+        &self,
+        kind: crate::domain::ledger::LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<(
+        Vec<crate::domain::ledger::LedgerRow>,
+        Option<crate::domain::ledger::session::written::omitted::Coverage>,
+    )> {
+        let mut page = limit.max(1);
+        loop {
+            match self.remote::<CoveredRows>(
+                "ledger_rows_covered",
+                vec![to_value(kind)?, to_value(after)?, to_value(page)?],
+            ) {
+                Err(error) if super::too_large(&error) && page > 1 => page = (page / 4).max(1),
+                Err(error) if super::too_large(&error) => {
+                    let rows = self.ledger_rows_after(kind, after, 1)?;
+                    return Ok((rows, self.ledger_omitted_coverage()?));
+                }
+                read => {
+                    let read = read?;
+                    return Ok((read.rows, read.coverage));
+                }
+            }
+        }
+    }
+
     /// The row of `kind` and `key` read a part of its text at a time
     /// ([`super::large`]), all of the same row (another writer's row
     /// between them starts the read again); `None` for no row.

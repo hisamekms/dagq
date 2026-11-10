@@ -692,6 +692,33 @@ impl LedgerStore for Memory {
             .max_by_key(|point| (point.max_ms, point.at))
             .cloned())
     }
+    fn ledger_omitted_point_at_or_before(&self, kind: &str, at: EventId) -> Result<Option<Point>> {
+        Ok(self
+            .points
+            .borrow()
+            .range(..=(kind.to_owned(), at))
+            .next_back()
+            .filter(|((of, _), _)| of == kind)
+            .map(|(_, point)| point.clone()))
+    }
+    fn ledger_omitted_coverage(&self) -> Result<Option<Coverage>> {
+        Ok(self.omitted.borrow().clone())
+    }
+    fn ledger_event(&self, id: EventId) -> Result<Option<RunEvent>> {
+        Ok(self.read(|event| event.id == id).into_iter().next())
+    }
+    fn ledger_events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        let mut events =
+            self.read(|event| event.kind.as_str() == kind && event.id > after && event.id <= upto);
+        events.truncate(limit);
+        Ok(events)
+    }
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
         self.callers.borrow_mut().push((
             "ledger_row",

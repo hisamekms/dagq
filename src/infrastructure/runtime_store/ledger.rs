@@ -224,6 +224,72 @@ const POINTS_AFTER_SQL: &str = "SELECT kind, at, max_ms, last, timed FROM ledger
 const POINT_BEFORE_MS_SQL: &str = "SELECT kind, at, max_ms, last, timed FROM ledger_omitted_points
   WHERE kind=?1 AND max_ms < ?2 ORDER BY max_ms DESC, at DESC LIMIT 1";
 
+/// A kind's last point at a position or before it: a seek of the key.
+const POINT_AT_OR_BEFORE_SQL: &str =
+    "SELECT kind, at, max_ms, last, timed FROM ledger_omitted_points
+  WHERE kind=?1 AND at <= ?2 ORDER BY at DESC LIMIT 1";
+
+/// An event by its id: a seek of the key.
+const EVENT_BY_ID_SQL: &str = "SELECT * FROM run_events WHERE id=?1";
+
+fn points_after_in(
+    conn: &impl SqlRead,
+    kind: &str,
+    after: EventId,
+    limit: usize,
+) -> Result<Vec<Point>> {
+    Ok(SqlRead::query_map(
+        conn,
+        POINTS_AFTER_SQL,
+        sql_params![
+            kind,
+            after.as_i64(),
+            i64::try_from(limit).unwrap_or(i64::MAX)
+        ],
+        point_row,
+    )?)
+}
+
+fn point_before_ms_in(conn: &impl SqlRead, kind: &str, ms: i64) -> Result<Option<Point>> {
+    Ok(
+        SqlRead::query_row(conn, POINT_BEFORE_MS_SQL, sql_params![kind, ms], point_row)
+            .optional()?,
+    )
+}
+
+fn point_at_or_before_in(conn: &impl SqlRead, kind: &str, at: EventId) -> Result<Option<Point>> {
+    Ok(SqlRead::query_row(
+        conn,
+        POINT_AT_OR_BEFORE_SQL,
+        sql_params![kind, at.as_i64()],
+        point_row,
+    )
+    .optional()?)
+}
+
+fn event_in(conn: &impl SqlRead, id: EventId) -> Result<Option<RunEvent>> {
+    Ok(
+        SqlRead::query_row(conn, EVENT_BY_ID_SQL, sql_params![id.as_i64()], event_row)
+            .optional()?,
+    )
+}
+
+/// The events of a kind in an id range by `events_by_kind`.
+fn events_of_kind_in(
+    conn: &impl SqlRead,
+    kind: &str,
+    after: EventId,
+    upto: EventId,
+    limit: usize,
+) -> Result<Vec<RunEvent>> {
+    Ok(SqlRead::query_map(
+        conn,
+        super::run_log::EVENTS_OF_KIND_BETWEEN_SQL,
+        sql_params![kind, after, upto, i64::try_from(limit).unwrap_or(i64::MAX)],
+        event_row,
+    )?)
+}
+
 /// A point as [`POINTS_AFTER_SQL`] and [`POINT_BEFORE_MS_SQL`] read it.
 fn point_row(r: &SqlRow<'_>) -> SqlResult<Point> {
     Ok(Point {
@@ -929,6 +995,30 @@ impl<T: SqlRead> crate::application::LedgerWindowRead for LedgerSnapshot<'_, T> 
     fn run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
         run_events_of(self.tx, run)
     }
+    fn omitted_coverage(&self) -> Result<Option<Coverage>> {
+        held_coverage(self.tx)
+    }
+    fn omitted_points_after(&self, kind: &str, after: EventId, limit: usize) -> Result<Vec<Point>> {
+        points_after_in(self.tx, kind, after, limit)
+    }
+    fn omitted_point_at_or_before(&self, kind: &str, at: EventId) -> Result<Option<Point>> {
+        point_at_or_before_in(self.tx, kind, at)
+    }
+    fn omitted_point_before_ms(&self, kind: &str, ms: i64) -> Result<Option<Point>> {
+        point_before_ms_in(self.tx, kind, ms)
+    }
+    fn event(&self, id: EventId) -> Result<Option<RunEvent>> {
+        event_in(self.tx, id)
+    }
+    fn events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        events_of_kind_in(self.tx, kind, after, upto, limit)
+    }
 }
 
 impl<E: TransactionEntries> LedgerStore for StoreQueue<E> {
@@ -1079,24 +1169,39 @@ impl<E: TransactionEntries> LedgerStore for StoreQueue<E> {
         limit: usize,
     ) -> Result<Vec<Point>> {
         let tx = self.read_entry("ledger_omitted_points_after")?;
-        Ok(SqlRead::query_map(
-            &tx,
-            POINTS_AFTER_SQL,
-            sql_params![
-                kind,
-                after.as_i64(),
-                i64::try_from(limit).unwrap_or(i64::MAX)
-            ],
-            point_row,
-        )?)
+        points_after_in(&tx, kind, after, limit)
     }
 
     fn ledger_omitted_point_before_ms(&self, kind: &str, ms: i64) -> Result<Option<Point>> {
         let tx = self.read_entry("ledger_omitted_point_before_ms")?;
-        Ok(
-            SqlRead::query_row(&tx, POINT_BEFORE_MS_SQL, sql_params![kind, ms], point_row)
-                .optional()?,
-        )
+        point_before_ms_in(&tx, kind, ms)
+    }
+
+    fn ledger_omitted_point_at_or_before(&self, kind: &str, at: EventId) -> Result<Option<Point>> {
+        let tx = self.read_entry("ledger_omitted_point_at_or_before")?;
+        point_at_or_before_in(&tx, kind, at)
+    }
+
+    /// The coverage's row, whether the marks are held or not.
+    fn ledger_omitted_coverage(&self) -> Result<Option<Coverage>> {
+        let tx = self.read_entry("ledger_omitted_coverage")?;
+        held_coverage(&tx)
+    }
+
+    fn ledger_event(&self, id: EventId) -> Result<Option<RunEvent>> {
+        let tx = self.read_entry("ledger_event")?;
+        event_in(&tx, id)
+    }
+
+    fn ledger_events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        let tx = self.read_entry("ledger_events_of_kind")?;
+        events_of_kind_in(&tx, kind, after, upto, limit)
     }
 
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {

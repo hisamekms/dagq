@@ -1,11 +1,16 @@
 //! The coverage of the omitted queue events counted straight from the
 //! events, for the tests of what builds it
-//! ([`crate::domain::ledger::session::written::omitted`]) to compare with.
+//! ([`crate::domain::ledger::session::written::omitted`]) to compare with,
+//! and a store of it in memory for the tests of what reads it
+//! ([`crate::domain::ledger::window::omitted`]).
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 
 use crate::domain::ledger::owner::{self, Owner};
-use crate::domain::ledger::session::written::omitted::{Coverage, KindSummary, Point};
+use crate::domain::ledger::session::written::omitted::{Coverage, KindSummary, Omission, Point};
+use crate::domain::ledger::window::omitted::OmittedRead;
 use crate::domain::stats::timestamp_millis;
 use crate::domain::{EventId, RunEvent};
 
@@ -80,4 +85,115 @@ pub(crate) fn covers(coverage: &Coverage, events: &[RunEvent], every: u64) -> bo
         every,
     );
     summaries == coverage.summaries
+}
+
+/// A store in memory of `events`, the coverage of `kinds` over (C, S] as
+/// the builder writes it, and its points, counting the events it gives.
+pub(crate) struct EdgeStore {
+    pub(crate) events: Vec<RunEvent>,
+    pub(crate) coverage: Option<Coverage>,
+    pub(crate) points: Vec<Point>,
+    read: Cell<usize>,
+}
+
+impl EdgeStore {
+    /// The coverage of `kinds` over (`from`, `through`] of `events`, a point
+    /// every `every` events of a kind.
+    pub(crate) fn of(
+        events: Vec<RunEvent>,
+        kinds: &[&str],
+        (from, through): (EventId, EventId),
+        every: u64,
+    ) -> Self {
+        let kinds: Vec<String> = Omission::of(kinds.iter().copied(), every).kinds;
+        let mut coverage = Coverage::start(&kinds, from);
+        let mut points = Vec::new();
+        let read: Vec<RunEvent> = events
+            .iter()
+            .filter(|event| event.id <= through)
+            .cloned()
+            .collect();
+        coverage.read(&read, every, through, &mut points);
+        Self {
+            events,
+            coverage: Some(coverage),
+            points,
+            read: Cell::new(0),
+        }
+    }
+
+    /// How many events it gave, and none counted after.
+    pub(crate) fn taken(&self) -> usize {
+        self.read.replace(0)
+    }
+
+    /// The omitted events: of the kinds, the queue's, in (C, S].
+    pub(crate) fn omitted(&self) -> Vec<&RunEvent> {
+        let coverage = self.coverage.as_ref().unwrap();
+        self.events
+            .iter()
+            .filter(|event| event.id > coverage.from && event.id <= coverage.through)
+            .filter(|event| {
+                coverage
+                    .kinds
+                    .iter()
+                    .any(|kind| kind == event.kind.as_str())
+                    && owner::owner(event) == Owner::Queue
+            })
+            .collect()
+    }
+}
+
+impl OmittedRead for EdgeStore {
+    type Error = Infallible;
+    fn coverage(&self) -> Result<Option<Coverage>, Infallible> {
+        Ok(self.coverage.clone())
+    }
+    fn point_after(&self, kind: &str, after: EventId) -> Result<Option<Point>, Infallible> {
+        Ok(self
+            .points
+            .iter()
+            .filter(|point| point.kind == kind && point.at > after)
+            .min_by_key(|point| point.at)
+            .cloned())
+    }
+    fn point_at_or_before(&self, kind: &str, at: EventId) -> Result<Option<Point>, Infallible> {
+        Ok(self
+            .points
+            .iter()
+            .filter(|point| point.kind == kind && point.at <= at)
+            .max_by_key(|point| point.at)
+            .cloned())
+    }
+    fn point_by_ms(&self, kind: &str, ms: i64) -> Result<Option<Point>, Infallible> {
+        Ok(self
+            .points
+            .iter()
+            .filter(|point| point.kind == kind && point.max_ms.is_some_and(|max| max <= ms))
+            .max_by_key(|point| (point.max_ms, point.at))
+            .cloned())
+    }
+    fn event(&self, id: EventId) -> Result<Option<RunEvent>, Infallible> {
+        let event = self.events.iter().find(|event| event.id == id).cloned();
+        self.read
+            .set(self.read.get() + usize::from(event.is_some()));
+        Ok(event)
+    }
+    fn events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>, Infallible> {
+        let events: Vec<RunEvent> = self
+            .events
+            .iter()
+            .filter(|event| event.kind.as_str() == kind && event.id > after && event.id <= upto)
+            .take(limit)
+            .cloned()
+            .collect();
+        self.read.set(self.read.get() + events.len());
+        Ok(events)
+    }
 }

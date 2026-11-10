@@ -63,6 +63,39 @@
 //! ([`crate::application::LedgerStore::ledger_read_snapshot`]): a row that
 //! the builder moves between two of its reads would be in neither.
 //!
+//! # The edges of a window
+//!
+//! A window's edges are taken of the records of the rows read: the latest
+//! event (`upto`), each cursor's id and time, the time of the event an
+//! event id `--until` stops at, the first time of a window without
+//! `--since` (`host_from_ms`) and, for a read from a time, the queue's last
+//! record of the time or before it (`queue_before`), whatever the records
+//! are (those past R of the rows held, a run's on its way, the omitted
+//! kinds' up to C), and `stats` takes its own of the same records. The
+//! queue's events of the kinds a coverage holds in its (C, S] have no row
+//! ([`omitted`]); of the same snapshot as the rows (its coverage read after
+//! the rows each edge is taken with, the newest of the pages of a read
+//! whose pages are of more than one state:
+//! [`crate::application::LedgerWindowRead::omitted_coverage`]), the read
+//! takes the few of them each edge stands on among the records
+//! ([`WindowRows::take_omitted_edges`]), and those before the time among the
+//! queue's records ([`WindowRows::take_omitted_before`]), so that every
+//! edge is the one of the rows that held them: the larger latest, the
+//! smaller first time, a cursor's event itself. No other kind's edge is
+//! read, and no run's, task's or session's event of those kinds (it comes
+//! with its row's records alone). Of each kind: the latest is its L; a
+//! cursor's event is read by its key; the last of a time at or before t
+//! (a time cursor, the window's end, `queue_before`) is read from the last
+//! point of an M at or before t, its T the answer so far, through the
+//! events between the points whose T rises (K each), up to a timed one past
+//! t + D or S, as M never falls and no timed one after another falls behind
+//! M by more than D; the first time of ids (a, b] alike from the point
+//! before the first whose T is past a, up to a timed one past the least
+//! time read and D, or b, or S. An event of no time is the latest and no
+//! time's answer. So the edges read the spans of K events that hold the
+//! timed omitted events within D of their times, and a few seeks of the
+//! points, however long the history around the window.
+//!
 //! # Where each value comes from
 //!
 //! The rows' kinds are `run` and `task` ([`super::fold`]), `session`
@@ -192,6 +225,10 @@
 //! | `host` (each period's `host`, `cpu_per_landing`, `load_per_core` and `health.disk` in the JSON; the HTML's section of the host's CPU per landing and load over the cores) | as `kpi` above: node rows of `host`, each period's seconds ([`LedgerWindow::host_between`]) |
 
 use std::collections::{BTreeSet, HashMap};
+#[cfg(test)]
+use std::convert::Infallible;
+
+use omitted::OmittedEdges;
 
 use super::{
     LedgerKind, LedgerRow, WindowEnd, attributes, findings, node, post_landing,
@@ -469,14 +506,65 @@ pub fn run_on_its_way(run: &RunId, events: &[RunEvent], now_ms: i64) -> Option<L
 /// store holds.
 pub const ON_ITS_WAY: &str = "folded at the read";
 
-/// The time a cursor stands for among `events`: its own, or its event's.
-fn cursor_ms(cursor: Cursor, events: &[RunEvent]) -> Option<i64> {
-    match cursor {
-        Cursor::Time(millis) => Some(millis),
-        Cursor::Event(id) => events
-            .iter()
-            .find(|event| event.id == id)
-            .and_then(|event| timestamp_millis(&event.created_at)),
+/// Where the window `query` asks stands among records, as [`LedgerWindow`]
+/// gives it: by id, its start and end, and by time, its start and end.
+pub(super) struct Positions {
+    pub after: EventId,
+    pub upto: EventId,
+    pub start_ms: Option<i64>,
+    pub end_ms: i64,
+}
+
+impl Positions {
+    /// Of `records` (any order), `time_of` the time of the record of an id
+    /// (none when none is, or of no time).
+    pub(super) fn of<'a>(
+        records: impl Iterator<Item = &'a RunEvent> + Clone,
+        query: &WindowQuery,
+        time_of: impl Fn(EventId) -> Option<i64>,
+    ) -> Self {
+        // As [`Cursor::event_id`] of the records.
+        let id_of = |cursor: Cursor| match cursor {
+            Cursor::Event(id) => id,
+            Cursor::Time(millis) => records
+                .clone()
+                .filter(|event| timestamp_millis(&event.created_at).is_some_and(|at| at <= millis))
+                .map(|event| event.id)
+                .max()
+                .unwrap_or(EventId::new(0)),
+        };
+        let since = query.since.map(id_of);
+        let until = query.until.map(id_of);
+        let latest = records
+            .clone()
+            .map(|event| event.id)
+            .max()
+            .unwrap_or(EventId::new(0));
+        let upto = until.map_or(latest, |until| {
+            let capped = until.min(latest);
+            since.map_or(capped, |since| capped.max(since.min(latest)))
+        });
+        // As `stats` times its window: to `--until`'s time (not past now), else
+        // the time of the event it stops at, else now; from `--since`'s, not
+        // past the end.
+        let stops_at = until.and_then(|_| time_of(upto));
+        let end_ms = match query.until {
+            Some(Cursor::Time(millis)) => millis.min(query.now_ms),
+            _ => stops_at.unwrap_or(query.now_ms),
+        };
+        let start_ms = query
+            .since
+            .and_then(|cursor| match cursor {
+                Cursor::Time(millis) => Some(millis),
+                Cursor::Event(id) => time_of(id),
+            })
+            .map(|start| start.min(end_ms));
+        Self {
+            after: since.unwrap_or(EventId::new(0)),
+            upto,
+            start_ms,
+            end_ms,
+        }
     }
 }
 
@@ -595,6 +683,35 @@ impl WindowRows {
             }),
             text: None,
         }
+    }
+
+    /// Take as the queue's records of the time or before it the omitted
+    /// events `edges` reads ([`OmittedEdges::at_or_before`]), once the
+    /// queue's rows are taken: they are the queue's records with no row.
+    pub fn take_omitted_before<E>(&mut self, edges: &OmittedEdges<'_, E>) -> Result<(), E> {
+        if let Some(from) = &mut self.from
+            && let Some(id) = edges.at_or_before(from.ms)?
+        {
+            from.queue_before = from.queue_before.max(id);
+        }
+        Ok(())
+    }
+
+    /// Take among the window's records the omitted events its edges stand
+    /// on ([`OmittedEdges::events_for`]), once every row is taken: the rows'
+    /// records do not hold them, and a window's edges and `stats`' are read
+    /// of its records. A record a row holds too counts once.
+    pub fn take_omitted_edges<E>(
+        &mut self,
+        query: &WindowQuery,
+        edges: &OmittedEdges<'_, E>,
+    ) -> Result<(), E> {
+        let mut events = edges.events_for(query, &[&self.records, &self.earlier_records])?;
+        if !events.is_empty() {
+            debug_assert!(self.text.is_none(), "a read of the payloads as text");
+            self.earlier_records.append(&mut events);
+        }
+        Ok(())
     }
 
     /// Which rows a read from a time leaves out, once the queue's rows are
@@ -798,12 +915,23 @@ fn settled(mut earlier: Earlier, read: impl Fn(EventId) -> bool) -> Earlier {
 /// ([`crate::application::LedgerStore::ledger_window`]).
 #[cfg(test)]
 pub(crate) fn select(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
+    select_with(rows, query, &OmittedEdges::<Infallible>::none()).unwrap()
+}
+
+/// [`select`] with the omitted events of `edges` its edges stand on.
+#[cfg(test)]
+pub(crate) fn select_with<E>(
+    rows: Vec<LedgerRow>,
+    query: &WindowQuery,
+    edges: &OmittedEdges<'_, E>,
+) -> Result<LedgerWindow, E> {
     let events = rows.iter().map(|row| row.records.len()).sum();
     let mut read = WindowRows::new(query, events);
     for row in rows {
         read.take(row);
     }
-    read.into_window(query)
+    read.take_omitted_edges(query, edges)?;
+    Ok(read.into_window(query))
 }
 
 /// The window `query` asks of `rows` read as a store reads them: what
@@ -811,6 +939,17 @@ pub(crate) fn select(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow 
 /// with [`RowsFrom::leaves_out`] for the store's condition.
 #[cfg(test)]
 pub(crate) fn select_from_time(rows: Vec<LedgerRow>, query: &WindowQuery) -> LedgerWindow {
+    select_from_time_with(rows, query, &OmittedEdges::<Infallible>::none()).unwrap()
+}
+
+/// [`select_from_time`] with the omitted events of `edges`: among the
+/// queue's records before the time, and those its edges stand on.
+#[cfg(test)]
+pub(crate) fn select_from_time_with<E>(
+    rows: Vec<LedgerRow>,
+    query: &WindowQuery,
+    edges: &OmittedEdges<'_, E>,
+) -> Result<LedgerWindow, E> {
     let mut read = WindowRows::new(query, 0);
     let (queue, others): (Vec<_>, Vec<_>) = rows
         .into_iter()
@@ -818,11 +957,13 @@ pub(crate) fn select_from_time(rows: Vec<LedgerRow>, query: &WindowQuery) -> Led
     for row in queue {
         read.take(row);
     }
+    read.take_omitted_before(edges)?;
     let Some(from) = read.rows_from() else {
         for row in others {
             read.take(row);
         }
-        return read.into_window(query);
+        read.take_omitted_edges(query, edges)?;
+        return Ok(read.into_window(query));
     };
     let (out, kept): (Vec<_>, Vec<_>) = others.into_iter().partition(|row| from.leaves_out(row));
     for row in kept {
@@ -857,7 +998,8 @@ pub(crate) fn select_from_time(rows: Vec<LedgerRow>, query: &WindowQuery) -> Led
     loop {
         let wanted = read.rows_wanted();
         if wanted.is_empty() {
-            return read.into_window(query);
+            read.take_omitted_edges(query, edges)?;
+            return Ok(read.into_window(query));
         }
         for (kind, key) in wanted {
             read.take_row(
@@ -897,29 +1039,16 @@ fn of_records(
     goals: &RecordGoals,
     query: &WindowQuery,
 ) -> LedgerWindow {
-    let since = query.since.map(|cursor| cursor.event_id(&all));
-    let until = query.until.map(|cursor| cursor.event_id(&all));
-    let latest = all.last().map_or(EventId::new(0), |event| event.id);
-    let upto = until.map_or(latest, |until| {
-        let capped = until.min(latest);
-        since.map_or(capped, |since| capped.max(since.min(latest)))
+    let Positions {
+        after,
+        upto,
+        start_ms,
+        end_ms,
+    } = Positions::of(all.iter(), query, |id| {
+        all.binary_search_by_key(&id, |event| event.id)
+            .ok()
+            .and_then(|at| timestamp_millis(&all[at].created_at))
     });
-    let after = since.unwrap_or(EventId::new(0));
-    // As `stats` times its window: to `--until`'s time (not past now), else
-    // the time of the event it stops at, else now; from `--since`'s, not
-    // past the end.
-    let stops_at = all
-        .iter()
-        .find(|event| until.is_some() && event.id == upto)
-        .and_then(|event| timestamp_millis(&event.created_at));
-    let end_ms = match query.until {
-        Some(Cursor::Time(millis)) => millis.min(query.now_ms),
-        _ => stops_at.unwrap_or(query.now_ms),
-    };
-    let start_ms = query
-        .since
-        .and_then(|cursor| cursor_ms(cursor, &all))
-        .map(|start| start.min(end_ms));
     let end = WindowEnd {
         upto: Some(upto),
         ms: (!matches!(query.until, Some(Cursor::Event(_)))).then_some(end_ms),
@@ -1134,6 +1263,15 @@ impl Filters {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+impl LedgerWindow {
+    /// Where the host's load is read from (unix milliseconds): the first
+    /// time of a window without `--since`.
+    pub(crate) const fn host_from_ms(&self) -> i64 {
+        self.host_from_ms
     }
 }
 
@@ -1397,6 +1535,7 @@ pub(crate) fn through_ledger(events: &[RunEvent], until_secs: Option<i64>) -> Le
 }
 
 #[doc(hidden)]
+pub mod omitted;
 pub mod payload_text;
 
 #[cfg(test)]

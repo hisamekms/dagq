@@ -2080,3 +2080,511 @@ fn byte_groups_write_queue_and_session_rows_atomically_whole_and_staged() {
         assert_eq!(direct.ledger_row(kind, &saved.key).unwrap(), Some(saved));
     }
 }
+
+/// A service caller that runs `write` once: right before the first request
+/// of the operation `before` names, or without one right after the first
+/// request of a window's read of the rows or the coverage has been
+/// answered, so that the write lands between that request and the next.
+struct WriteBetween {
+    service: Arc<InProcess>,
+    before: Option<&'static str>,
+    write: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl WriteBetween {
+    fn write(&self) {
+        if let Some(write) = self.write.lock().unwrap().take() {
+            write();
+            self.service.ops.lock().unwrap().push("written".to_owned());
+        }
+    }
+}
+
+impl crate::application::supervisor_service::ServiceCaller for WriteBetween {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        let op = params["op"].as_str().unwrap().to_owned();
+        if self.before == Some(op.as_str()) {
+            self.write();
+        }
+        let answer = self.service.call(use_case, params);
+        if self.before.is_none()
+            && (op.starts_with("ledger_rows") || op == "ledger_omitted_coverage")
+        {
+            self.write();
+        }
+        answer
+    }
+    fn with_token(
+        &self,
+        path: &Path,
+    ) -> Result<Arc<dyn crate::application::supervisor_service::ServiceCaller>> {
+        self.service.with_token(path)
+    }
+    fn sign_in(&self, owner: &LeaseToken, instance: u32) -> Result<()> {
+        self.service.sign_in(owner, instance)
+    }
+    fn take_back(&self, owner: &LeaseToken, instance: u32) -> Result<()> {
+        self.service.take_back(owner, instance)
+    }
+    fn hand_over(&self) {}
+    fn sign_out(&self) {}
+    fn credential(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// A window read through the service while a builder's pass is written
+/// between its requests: the pass summarizes an omitted queue event 13 (S
+/// to 14) and writes the row of the queue event 14 in the same transaction.
+/// Each page comes with the coverage of its own snapshot and the edges take
+/// the newest, so no row read is past the S they read to: `--until` the
+/// omitted event and a time cursor at its time end at it, of its time, as
+/// the store read directly after the pass ends them (not at the window's
+/// now, as an S read before the rows would).
+#[test]
+fn a_write_between_the_pages_of_a_window_through_the_service_leaves_no_row_past_its_s() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::session::written::omitted::{Coverage, Omitted};
+    use crate::domain::ledger::session::written::{Marks, SessionsWritten};
+    use crate::domain::ledger::window::WindowQuery;
+    use crate::domain::stats::Cursor;
+    let kind = "authorization_denied";
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let db = backend.db.clone();
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let direct = SqliteQueue::open(&db).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let base: i64 = conn
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM run_events", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let ms = |n: i64| 1_900_000_000_000 + n * 10_000;
+    let event = |n: i64, kind: &str| RunEvent {
+        id: EventId::new(base + n),
+        task_id: None,
+        goal_id: None,
+        run_id: None,
+        kind: kind.into(),
+        payload: json!({}),
+        created_at: crate::domain::marks::utc_text(ms(n)),
+        actor: None,
+    };
+    let insert = |conn: &rusqlite::Connection, event: &RunEvent| {
+        conn.execute(
+            "INSERT INTO run_events(id, kind, payload, created_at) VALUES (?1, ?2, '{}', ?3)",
+            rusqlite::params![event.id.as_i64(), event.kind.as_str(), event.created_at],
+        )
+        .unwrap();
+    };
+    let events: Vec<RunEvent> = (1..=12).map(|n| event(n, kind)).collect();
+    for event in &events {
+        insert(&conn, event);
+    }
+    let mut coverage = Coverage::start(&[kind.to_owned()], EventId::new(base));
+    let mut points = Vec::new();
+    coverage.read(&events, 4, EventId::new(base + 12), &mut points);
+    assert!(
+        direct
+            .write_ledger_marks(&Marks {
+                sessions: SessionsWritten::at(EventId::new(base + 12)),
+                rows: None,
+                omitted: Some(Omitted {
+                    coverage: coverage.clone(),
+                    points,
+                }),
+            })
+            .unwrap()
+    );
+    // The pass: 13 omitted and summarized, 14 a queue event of a kind not
+    // omitted, its row written with S in one transaction.
+    let pass = {
+        let db = db.clone();
+        let (thirteen, fourteen) = (event(13, kind), event(14, "telemetry_token_issued"));
+        move || {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            insert(&conn, &thirteen);
+            insert(&conn, &fourteen);
+            let read = [thirteen.clone(), fourteen.clone()];
+            let mut points = Vec::new();
+            coverage.read(&read, 4, fourteen.id, &mut points);
+            let rows = crate::domain::ledger::queue::queue_rows(
+                std::slice::from_ref(&fourteen),
+                &read,
+                ms(20),
+                &fourteen.created_at,
+            );
+            let store = SqliteQueue::open(&db).unwrap();
+            for row in &rows {
+                assert!(store.write_ledger_row(row).unwrap());
+            }
+            assert!(
+                store
+                    .write_ledger_marks(&Marks {
+                        sessions: SessionsWritten::at(fourteen.id),
+                        rows: None,
+                        omitted: Some(Omitted { coverage, points }),
+                    })
+                    .unwrap()
+            );
+        }
+    };
+    let caller = Arc::new(WriteBetween {
+        service: service.clone(),
+        before: None,
+        write: std::sync::Mutex::new(Some(Box::new(pass))),
+    });
+    let queue = SupervisorQueues::new(
+        caller,
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let thirteen = EventId::new(base + 13);
+    let queries = [
+        WindowQuery {
+            until: Some(Cursor::Event(thirteen)),
+            now_ms: ms(100),
+            ..WindowQuery::default()
+        },
+        WindowQuery {
+            until: Some(Cursor::Time(ms(13))),
+            now_ms: ms(100),
+            ..WindowQuery::default()
+        },
+    ];
+    let edges = |window: &crate::domain::ledger::window::LedgerWindow| {
+        (
+            window.after,
+            window.upto,
+            window.start_ms,
+            window.end_ms,
+            window
+                .events()
+                .iter()
+                .map(|event| event.id)
+                .filter(|id| *id <= window.upto)
+                .collect::<Vec<_>>(),
+        )
+    };
+    let through = queue.ledger_window(&queries[0]).unwrap();
+    let ops = std::mem::take(&mut *service.ops.lock().unwrap());
+    let written = ops.iter().position(|op| op == "written").unwrap();
+    assert_eq!(ops[written - 1], "ledger_rows_covered", "{ops:?}");
+    assert!(
+        ops[written..].iter().any(|op| op == "ledger_rows_covered"),
+        "the pass is written between the pages: {ops:?}"
+    );
+    let read = direct.ledger_window(&queries[0]).unwrap();
+    assert_eq!(edges(&through), edges(&read));
+    assert_eq!((through.upto, through.end_ms), (thirteen, ms(13)));
+    let through = queue.ledger_window(&queries[1]).unwrap();
+    let read = direct.ledger_window(&queries[1]).unwrap();
+    assert_eq!(edges(&through), edges(&read));
+    assert_eq!((through.upto, through.end_ms), (thirteen, ms(13)));
+}
+
+/// A window read through the service while a builder's pass is written
+/// after its last page of rows, before it reads the events of a run on its
+/// way: the pass summarizes an omitted queue event (S past it) and the run
+/// records an event after it. The run's events come with no coverage, so
+/// the coverage is asked again after them: `--until` the omitted event ends
+/// at it, of its time, as the store read directly after the pass ends it
+/// (not at the window's now, as the S of the pages would).
+#[test]
+fn a_write_before_the_events_of_a_run_on_its_way_leaves_none_past_the_s_of_the_window() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::session::written::omitted::{Coverage, Omitted};
+    use crate::domain::ledger::session::written::{Marks, SessionsWritten};
+    use crate::domain::ledger::testkit::{Log, ms, run_id};
+    use crate::domain::ledger::window::WindowQuery;
+    use crate::domain::ledger::{LedgerKind, LedgerRow};
+    use crate::domain::stats::Cursor;
+    let kind = "authorization_denied";
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let db = backend.db.clone();
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let direct = SqliteQueue::open(&db).unwrap();
+    let base: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM run_events", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let insert = move |db: &Path, events: &[RunEvent]| {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        for event in events {
+            conn.execute(
+                "INSERT INTO run_events(id, task_id, run_id, kind, payload, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    event.id.as_i64(),
+                    event.task_id.map(|task| task.as_i64()),
+                    event.run_id.as_ref().map(|run| run.as_str()),
+                    event.kind.as_str(),
+                    event.payload.to_string(),
+                    event.created_at,
+                ],
+            )
+            .unwrap();
+        }
+    };
+    // A task whose run is on its way, and the queue's refusals after it.
+    let run = run_id(1);
+    let mut log = Log::default();
+    log.worked(1, &run, 0);
+    for n in 0..6 {
+        log.add(None, None, kind, json!({}), 700 + n * 10);
+    }
+    // The pass: the omitted 13th refusal and the run's event after it.
+    log.add(None, None, kind, json!({}), 800);
+    log.add(Some(1), Some(&run), "agent_started", json!({}), 810);
+    for event in &mut log.events {
+        event.id = EventId::new(base + event.id.as_i64());
+    }
+    let pass_events = log.events.split_off(log.events.len() - 2);
+    let (omitted_next, after_it) = (pass_events[0].clone(), pass_events[1].clone());
+    let last = log.events.last().unwrap().id;
+    let now = ms(10_000);
+    let whole = crate::domain::ledger::build(&log.events, now, "built");
+    let written = |row: &LedgerRow| {
+        !(row.kind == LedgerKind::Run
+            || row.kind == LedgerKind::Queue
+                && row
+                    .subject
+                    .as_ref()
+                    .is_some_and(|subject| subject.kind.as_str() == kind))
+    };
+    insert(&db, &log.events);
+    for row in whole.iter().filter(|row| written(row)) {
+        assert!(direct.write_ledger_row(row).unwrap());
+    }
+    let mut coverage = Coverage::start(&[kind.to_owned()], EventId::new(base));
+    let mut points = Vec::new();
+    coverage.read(&log.events, 4, last, &mut points);
+    assert!(
+        direct
+            .write_ledger_marks(&Marks {
+                sessions: SessionsWritten::at(last),
+                rows: None,
+                omitted: Some(Omitted {
+                    coverage: coverage.clone(),
+                    points,
+                }),
+            })
+            .unwrap()
+    );
+    let pass = {
+        let db = db.clone();
+        move || {
+            insert(&db, &pass_events);
+            let mut points = Vec::new();
+            coverage.read(&pass_events, 4, after_it.id, &mut points);
+            assert!(
+                SqliteQueue::open(&db)
+                    .unwrap()
+                    .write_ledger_marks(&Marks {
+                        sessions: SessionsWritten::at(after_it.id),
+                        rows: None,
+                        omitted: Some(Omitted { coverage, points }),
+                    })
+                    .unwrap()
+            );
+        }
+    };
+    let queue = SupervisorQueues::new(
+        Arc::new(WriteBetween {
+            service: service.clone(),
+            before: Some("run_events"),
+            write: std::sync::Mutex::new(Some(Box::new(pass))),
+        }),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let query = WindowQuery {
+        until: Some(Cursor::Event(omitted_next.id)),
+        now_ms: now,
+        ..WindowQuery::default()
+    };
+    let through = queue.ledger_window(&query).unwrap();
+    let ops = std::mem::take(&mut *service.ops.lock().unwrap());
+    let at = ops.iter().position(|op| op == "written").unwrap();
+    assert_eq!(ops[at + 1], "run_events", "{ops:?}");
+    assert!(
+        !ops[at..].iter().any(|op| op == "ledger_rows_covered"),
+        "the pass is written after the last page: {ops:?}"
+    );
+    let read = direct.ledger_window(&query).unwrap();
+    let edges = |window: &crate::domain::ledger::window::LedgerWindow| {
+        (
+            window.after,
+            window.upto,
+            window.start_ms,
+            window.end_ms,
+            window
+                .events()
+                .iter()
+                .map(|event| event.id)
+                .filter(|id| *id <= window.upto)
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(edges(&through), edges(&read));
+    assert_eq!((through.upto, through.end_ms), (omitted_next.id, ms(800)));
+}
+
+/// What a window's edges read of the omitted queue events crosses the
+/// service as the queue's own adapter answers it: the coverage, the points at
+/// or before a position, an event by its id (none past the last) and a
+/// kind's events of a range within a limit (none of a kind of no event), each
+/// by its own operation with its arguments; and a page of rows with the
+/// coverage of the same snapshot.
+#[test]
+fn the_coverage_its_points_and_events_cross_as_the_queues_own() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::LedgerKind;
+    use crate::domain::ledger::session::written::omitted::{Coverage, Omitted};
+    use crate::domain::ledger::session::written::{Marks, SessionsWritten};
+    let kind = "authorization_denied";
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let db = backend.db.clone();
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let direct = SqliteQueue::open(&db).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let base: i64 = conn
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM run_events", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut events = Vec::new();
+    for n in 0..12_i64 {
+        let id = base + n + 1;
+        let at = crate::domain::marks::utc_text(1_900_000_000_000 + n * 10_000);
+        conn.execute(
+            "INSERT INTO run_events(id, kind, payload, created_at) VALUES (?1, ?2, '{}', ?3)",
+            rusqlite::params![id, kind, at],
+        )
+        .unwrap();
+        events.push(RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload: json!({}),
+            created_at: at,
+            actor: None,
+        });
+    }
+    let last = events.last().unwrap().id;
+    let mut coverage = Coverage::start(&[kind.to_owned()], EventId::new(base));
+    let mut points = Vec::new();
+    coverage.read(&events, 4, last, &mut points);
+    assert!(
+        direct
+            .write_ledger_marks(&Marks {
+                sessions: SessionsWritten::at(last),
+                rows: None,
+                omitted: Some(Omitted {
+                    coverage: coverage.clone(),
+                    points: points.clone(),
+                }),
+            })
+            .unwrap()
+    );
+    assert_eq!(queue.ledger_omitted_coverage().unwrap(), Some(coverage));
+    for at in [base, base + 5, points[1].at.as_i64(), last.as_i64() + 3] {
+        assert_eq!(
+            queue
+                .ledger_omitted_point_at_or_before(kind, EventId::new(at))
+                .unwrap(),
+            direct
+                .ledger_omitted_point_at_or_before(kind, EventId::new(at))
+                .unwrap(),
+            "{at}"
+        );
+    }
+    for id in [base + 1, base + 7, last.as_i64() + 1] {
+        let id = EventId::new(id);
+        assert_eq!(
+            queue.ledger_event(id).unwrap(),
+            direct.ledger_event(id).unwrap()
+        );
+    }
+    assert_eq!(
+        queue.ledger_event(EventId::new(last.as_i64() + 1)).unwrap(),
+        None
+    );
+    for (after, upto, limit) in [(base, last.as_i64(), 256), (base + 2, base + 9, 3)] {
+        let (after, upto) = (EventId::new(after), EventId::new(upto));
+        let read = queue
+            .ledger_events_of_kind(kind, after, upto, limit)
+            .unwrap();
+        assert_eq!(
+            read,
+            direct
+                .ledger_events_of_kind(kind, after, upto, limit)
+                .unwrap()
+        );
+        assert_eq!(read.len(), limit.min(12));
+    }
+    assert!(
+        queue
+            .ledger_events_of_kind("telemetry_token_revoked", EventId::new(base), last, 9)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        std::mem::take(&mut *service.ops.lock().unwrap()),
+        std::iter::once("ledger_omitted_coverage")
+            .chain(std::iter::repeat_n("ledger_omitted_point_at_or_before", 4))
+            .chain(std::iter::repeat_n("ledger_event", 4))
+            .chain(std::iter::repeat_n("ledger_events_of_kind", 3))
+            .collect::<Vec<_>>()
+    );
+    // A page of rows and the coverage, of one snapshot.
+    let covered: crate::application::supervisor_service::CoveredRows = serde_json::from_value(
+        call(
+            &service.backend,
+            &service.token,
+            "ledger_rows_covered",
+            json!(["queue", null, 10]),
+        )
+        .result
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        covered.rows,
+        direct
+            .ledger_rows_after(LedgerKind::Queue, None, 10)
+            .unwrap()
+    );
+    assert_eq!(covered.coverage, direct.ledger_omitted_coverage().unwrap());
+}

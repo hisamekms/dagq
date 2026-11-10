@@ -220,8 +220,13 @@ pub(super) const READS: &[&str] = &[
     "ledger_heads_open_at",
     "ledger_runs_without_row",
     "ledger_sessions_written",
+    "ledger_rows_covered",
+    "ledger_omitted_coverage",
     "ledger_omitted_points_after",
+    "ledger_omitted_point_at_or_before",
     "ledger_omitted_point_before_ms",
+    "ledger_event",
+    "ledger_events_of_kind",
     "run_events_after",
     "task_events_after",
 ];

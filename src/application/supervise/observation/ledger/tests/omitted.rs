@@ -364,3 +364,110 @@ fn a_builder_of_no_kind_on_a_store_of_a_coverage_stops() {
     assert_eq!(coverage(&memory), Some(held));
     assert_eq!(*memory.points.borrow(), points);
 }
+
+/// A window read of a store whose coverage holds the queue's refusals takes
+/// the omitted events for its edges: with the queue rows of the omitted
+/// events gone (as a builder that omits them writes none), its positions,
+/// `stats`' edges, the latest event and the queue's last record before a
+/// time are those of the rows that hold them, whole and from a time, with a
+/// time cursor and an event id `--until`. The run's events of the kind and
+/// the events of no time stay out of every answer but the latest, as there.
+#[test]
+fn a_window_takes_the_omitted_events_of_the_store_for_its_edges() {
+    use crate::domain::ledger::testkit::ms;
+    use crate::domain::ledger::window::{WindowQuery, WindowRows, select, select_from_time};
+    use crate::domain::stats::Cursor;
+    let mut log = Log::default();
+    for n in 0..30 {
+        log.add(None, None, DENIED, json!({}), n * 10);
+        log.add(None, Some(&run_id(4)), DENIED, json!({}), n * 10 + 1);
+        if n % 7 == 3 {
+            log.add(None, None, DENIED, json!({}), n * 10 + 2);
+            log.events.last_mut().unwrap().created_at = "not a time".into();
+        }
+        if n % 5 == 0 {
+            log.add(
+                None,
+                None,
+                "supervisor_alive",
+                json!({"supervisor": "s1"}),
+                n * 10 + 3,
+            );
+        }
+    }
+    let now = (crate::domain::ledger::testkit::T0 + 10_000) * 1000;
+    let whole = crate::domain::ledger::build(&log.events, now, "built");
+    let omitted = |row: &LedgerRow| {
+        row.kind == LedgerKind::Queue
+            && row
+                .subject
+                .as_ref()
+                .is_some_and(|subject| subject.kind.as_str() == DENIED)
+    };
+    assert!(whole.iter().any(omitted));
+    let last = log.last();
+    let mut points = Vec::new();
+    let mut covered = Coverage::start(&[DENIED.to_owned()], EventId::new(0));
+    covered.read(&log.events, 4, last, &mut points);
+    let memory = Memory::of(&log);
+    for row in whole.iter().filter(|row| !omitted(row)) {
+        memory
+            .rows
+            .borrow_mut()
+            .insert((row.kind, row.key.clone()), row.clone());
+    }
+    memory.write_omitted(&Omitted {
+        coverage: covered,
+        points,
+    });
+    let queries = [
+        WindowQuery {
+            now_ms: now,
+            ..WindowQuery::default()
+        },
+        WindowQuery {
+            since: Some(Cursor::Time(ms(95))),
+            until: Some(Cursor::Time(ms(201))),
+            now_ms: now,
+            ..WindowQuery::default()
+        },
+        WindowQuery {
+            until: Some(Cursor::Event(EventId::new(40))),
+            now_ms: now,
+            ..WindowQuery::default()
+        },
+        WindowQuery {
+            read_from_ms: Some(ms(150)),
+            now_ms: now,
+            ..WindowQuery::default()
+        },
+    ];
+    for query in &queries {
+        let stored = memory.ledger_window(query).unwrap();
+        let expected = if query.read_from_ms.is_some() {
+            select_from_time(whole.clone(), query)
+        } else {
+            select(whole.clone(), query)
+        };
+        let edges = |window: &crate::domain::ledger::window::LedgerWindow| {
+            let latest = window.events().iter().map(|event| event.id).max();
+            (
+                window.after,
+                window.upto,
+                window.start_ms,
+                window.end_ms,
+                window.host_from_ms(),
+                latest,
+            )
+        };
+        assert_eq!(edges(&stored), edges(&expected), "{query:?}");
+    }
+    let before = crate::application::rows_from_of(&memory, &queries[3])
+        .unwrap()
+        .unwrap();
+    let mut read = WindowRows::new(&queries[3], 0);
+    for row in whole.iter().filter(|row| row.kind == LedgerKind::Queue) {
+        read.take(row.clone());
+    }
+    assert_eq!(before, read.rows_from().unwrap());
+}

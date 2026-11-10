@@ -2471,21 +2471,57 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
         // The session rows' mark, R beside it when the store holds one:
         // a reader of the session rows' mark alone reads it too.
         "ledger_sessions_written" => answer(LedgerStore::ledger_marks(&*store)),
-        // At most `limit` points of a kind of the coverage of the omitted
-        // queue events past a position, by position.
+        // What a window's edges read of the omitted queue events
+        // (`domain::ledger::window::omitted`): the coverage, its points by
+        // position and by M, an event by its id and a kind's events in a
+        // range.
+        "ledger_omitted_coverage" => answer(LedgerStore::ledger_omitted_coverage(&*store)),
         "ledger_omitted_points_after" => {
             let (kind, after, limit): (String, EventId, usize) = read(op, args)?;
             answer(LedgerStore::ledger_omitted_points_after(
                 &*store, &kind, after, limit,
             ))
         }
-        // The last point of a kind whose M is before a time (unix ms), if
-        // any.
+        "ledger_omitted_point_at_or_before" => {
+            let (kind, at): (String, EventId) = read(op, args)?;
+            answer(LedgerStore::ledger_omitted_point_at_or_before(
+                &*store, &kind, at,
+            ))
+        }
         "ledger_omitted_point_before_ms" => {
             let (kind, ms): (String, i64) = read(op, args)?;
             answer(LedgerStore::ledger_omitted_point_before_ms(
                 &*store, &kind, ms,
             ))
+        }
+        "ledger_event" => {
+            let (id,): (EventId,) = read(op, args)?;
+            answer(LedgerStore::ledger_event(&*store, id))
+        }
+        "ledger_events_of_kind" => {
+            let (kind, after, upto, limit): (String, EventId, EventId, usize) = read(op, args)?;
+            answer(LedgerStore::ledger_events_of_kind(
+                &*store, &kind, after, upto, limit,
+            ))
+        }
+        // A page of `ledger_rows` with the coverage of the omitted queue
+        // events of the same snapshot: a window read by pages takes the
+        // newest coverage of its pages for its edges, so that no row it
+        // read is of a later state than its S.
+        "ledger_rows_covered" => {
+            let (kind, after, page): (crate::domain::ledger::LedgerKind, Option<String>, usize) =
+                read(op, args)?;
+            let mut covered = None;
+            let read = LedgerStore::ledger_read_snapshot(&*store, &mut |snapshot| {
+                covered = Some(super::forward::CoveredRows {
+                    rows: snapshot.rows_after(kind, after.as_deref(), page)?,
+                    coverage: snapshot.omitted_coverage()?,
+                });
+                Ok(())
+            });
+            answer(read.and_then(|()| {
+                covered.ok_or_else(|| anyhow::anyhow!("the ledger's snapshot read nothing"))
+            }))
         }
         // A part of the text of a row past one answer whole, from `offset`
         // ([`super::large`]); none for no row.

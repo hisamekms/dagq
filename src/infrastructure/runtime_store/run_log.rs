@@ -19,7 +19,7 @@ use crate::infrastructure::store_rows::{enum_col, event_row, json_col, run_row};
 
 /// The events of one kind in a range of ids, oldest first, at most a
 /// limit: a range of `events_by_kind`.
-const EVENTS_OF_KIND_BETWEEN_SQL: &str =
+pub(super) const EVENTS_OF_KIND_BETWEEN_SQL: &str =
     "SELECT * FROM run_events WHERE kind=?1 AND id>?2 AND id<=?3
      ORDER BY id LIMIT ?4";
 

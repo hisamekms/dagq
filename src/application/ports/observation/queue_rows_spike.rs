@@ -8,12 +8,16 @@
 //! rows of some kinds (as a builder that does not take them as the queue's
 //! own would write it, reading them all the same), and each reader's value
 //! of the two is compared. Shape A gives the window the rows alone. Shape
-//! B gives it besides the rows what a store reads of the EventStore by id
-//! or time at the window's bounds ([`bounds`]: a few events, whatever the
-//! history), and for a kind a reader reads, the events of that kind in the
-//! reader's range ([`range`]).
+//! B reads its edges of the EventStore as a store does: the omitted events
+//! of the kinds left out, by the coverage of them the builder writes
+//! (C at 0, S at the last event) and its points
+//! ([`crate::domain::ledger::window::omitted`], the store in memory
+//! [`EdgeStore`]: a few events near each edge, whatever the history), and
+//! for a kind a reader reads, the events of that kind in the reader's range
+//! besides ([`range`]).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -26,8 +30,12 @@ use crate::domain::kpi::config::{KpiSettings, Target};
 use crate::domain::kpi::report::DiagramSection;
 use crate::domain::kpi::{KpiConfig, KpiQuery, Period, read_from_ms};
 use crate::domain::ledger::queue::queue_rows;
+use crate::domain::ledger::testkit::omitted::EdgeStore;
 use crate::domain::ledger::testkit::{Log, T0, ms, queue_across, run_id};
-use crate::domain::ledger::window::{LedgerWindow, WindowQuery, select, select_from_time};
+use crate::domain::ledger::window::omitted::OmittedEdges;
+use crate::domain::ledger::window::{
+    LedgerWindow, WindowQuery, select_from_time_with, select_with,
+};
 use crate::domain::ledger::{LedgerKind, LedgerRow, build, node, owner};
 use crate::domain::stats::{Cursor, StatsQuery, timestamp_millis};
 use crate::domain::{EventId, RunEvent};
@@ -265,15 +273,28 @@ fn config() -> KpiConfig {
 
 /// What a reader reads besides the rows, given its window's query and the
 /// lower bound of its own range (`--since`'s, or the time the read starts
-/// from): the events a shape gives the window.
+/// from): the events a test gives the window.
 type Give<'a> = &'a dyn Fn(&WindowQuery, Option<Cursor>) -> Vec<RunEvent>;
 
-/// The events of the EventStore a store reads by id or time at the bounds
-/// of the window `query` asks and of the range from `lower`: at each
+/// A point every this many events of a kind: few enough that the history
+/// places several.
+const EVERY: u64 = 4;
+
+/// The store in memory of `events` with the coverage of `kinds` (C at 0,
+/// S at the last event) as the builder of a set of them writes it.
+fn covered(events: &[RunEvent], kinds: &[&str]) -> EdgeStore {
+    let last = events.last().map_or(EventId::new(0), |event| event.id);
+    EdgeStore::of(events.to_vec(), kinds, (EventId::new(0), last), EVERY)
+}
+
+/// The control's read of the events at the bounds of the window `query`
+/// asks and of the range from `lower`, of every kind, in memory: at each
 /// cursor and at the time of the read from a time, the event of its id, the
 /// last at or before it and the first after it; the first event and the
-/// newest up to now. Each is one read of an index, a few in all, however
-/// many events the window holds.
+/// newest up to now. Not shape B's read of the edges, which reads the
+/// omitted events of the kinds it covers alone and near each edge: a kind a
+/// reader reads is never omitted, so the control asks whether the events
+/// at the bounds, whatever their kind, would give its readers their values.
 fn bounds(events: &[RunEvent], query: &WindowQuery, lower: Option<Cursor>) -> Vec<RunEvent> {
     let at = |event: &RunEvent| timestamp_millis(&event.created_at).unwrap_or_default();
     let mut picked: BTreeMap<EventId, RunEvent> = BTreeMap::new();
@@ -344,7 +365,12 @@ fn given_row(template: &LedgerRow, records: Vec<RunEvent>) -> Option<LedgerRow> 
 
 /// Every reader's value of the ledger `rows` at `now`, by its name, each
 /// window given what `give` reads for it.
-fn values(rows: &[LedgerRow], now: i64, give: Give<'_>) -> Vec<(String, Value)> {
+fn values(
+    rows: &[LedgerRow],
+    now: i64,
+    edges: &OmittedEdges<'_, Infallible>,
+    give: Give<'_>,
+) -> Vec<(String, Value)> {
     let template = rows
         .iter()
         .find(|row| row.kind == LedgerKind::Queue)
@@ -353,10 +379,14 @@ fn values(rows: &[LedgerRow], now: i64, give: Give<'_>) -> Vec<(String, Value)> 
     let window = |query: WindowQuery, lower: Option<Cursor>, from_time: bool| -> LedgerWindow {
         let mut rows = rows.to_vec();
         rows.extend(given_row(&template, give(&query, lower)));
-        if from_time {
-            select_from_time(rows, &query)
+        let read = if from_time {
+            select_from_time_with(rows, &query, edges)
         } else {
-            select(rows, &query)
+            select_with(rows, &query, edges)
+        };
+        match read {
+            Ok(window) => window,
+            Err(never) => match never {},
         }
     };
     let now_ms = now_ms(now);
@@ -585,9 +615,8 @@ fn ledger() -> (Vec<RunEvent>, Vec<LedgerRow>, i64) {
 /// Shape A: without the queue rows of [`UNREAD`] `kpi`, `report`, the
 /// targets, the judgments and the findings are the same, but each `stats`
 /// differs, whose window's bounds a refusal moves (the first event, the
-/// newest, an event at a cursor). Shape B: given
-/// besides the rows the few events the store reads at the window's bounds
-/// ([`bounds`]), every value is the same. And the queue rows of every
+/// newest, an event at a cursor). Shape B: with the edges read of the
+/// coverage of them ([`OmittedEdges`]), every value is the same. And the queue rows of every
 /// other kind ([`crate::domain::ledger::queue::QueueBook`]'s) are the same
 /// when the builder does not take those events as the queue's own but
 /// reads them with every event.
@@ -607,10 +636,12 @@ fn the_unread_kinds_left_out_of_the_queue_rows_give_every_reader_the_same() {
     assert_eq!(whole.len() - left.len(), refusals + 3 * 2);
 
     let nothing = |_: &WindowQuery, _: Option<Cursor>| Vec::new();
-    let at_bounds = |query: &WindowQuery, lower: Option<Cursor>| bounds(&events, query, lower);
-    let now_values = values(&whole, now, &nothing);
-    let a = values(&left, now, &nothing);
-    let b = values(&left, now, &at_bounds);
+    let none = OmittedEdges::none();
+    let store = covered(&events, &UNREAD);
+    let edges = OmittedEdges::of(&store).unwrap();
+    let now_values = values(&whole, now, &none, &nothing);
+    let a = values(&left, now, &none, &nothing);
+    let b = values(&left, now, &edges, &nothing);
     compared("shape A", &now_values, &a);
     compared("shape B", &now_values, &b);
     assert_eq!(
@@ -629,7 +660,7 @@ fn the_unread_kinds_left_out_of_the_queue_rows_give_every_reader_the_same() {
         differ(&now_values, &b)
     );
     // The input is fixed: a second read gives the same.
-    assert_eq!(now_values, values(&whole, now, &nothing));
+    assert_eq!(now_values, values(&whole, now, &none, &nothing));
 
     // QueueBook: the builder that does not take them as the queue's own
     // (but reads them with every event) gives the other rows the same.
@@ -651,10 +682,10 @@ fn the_unread_kinds_left_out_of_the_queue_rows_give_every_reader_the_same() {
 }
 
 /// The kinds a reader reads, left out of the queue rows, with the window
-/// given what shape B reads at its bounds, and with the events of the
-/// kind (its events of `event_kinds`) in each reader's range besides: the
-/// readers whose values differ
-/// from the whole ledger's, each way.
+/// given the control's events at its bounds ([`bounds`]), and with the
+/// events of the kind (its events of `event_kinds`) in each reader's range
+/// besides: the readers whose values differ from the whole ledger's, each
+/// way.
 fn left_out(kinds: &[&str], event_kinds: &[&str]) -> (BTreeSet<String>, BTreeSet<String>) {
     let (events, whole, now) = ledger();
     let left: Vec<LedgerRow> = whole
@@ -664,7 +695,8 @@ fn left_out(kinds: &[&str], event_kinds: &[&str]) -> (BTreeSet<String>, BTreeSet
         .collect();
     assert!(left.len() < whole.len(), "{kinds:?}");
     let nothing = |_: &WindowQuery, _: Option<Cursor>| Vec::new();
-    let now_values = values(&whole, now, &nothing);
+    let none = OmittedEdges::none();
+    let now_values = values(&whole, now, &none, &nothing);
     let at_bounds = |query: &WindowQuery, lower: Option<Cursor>| bounds(&events, query, lower);
     let in_range = |query: &WindowQuery, lower: Option<Cursor>| {
         let mut given = bounds(&events, query, lower);
@@ -673,8 +705,8 @@ fn left_out(kinds: &[&str], event_kinds: &[&str]) -> (BTreeSet<String>, BTreeSet
         given.dedup_by_key(|event| event.id);
         given
     };
-    let bounded_values = values(&left, now, &at_bounds);
-    let ranged_values = values(&left, now, &in_range);
+    let bounded_values = values(&left, now, &none, &at_bounds);
+    let ranged_values = values(&left, now, &none, &in_range);
     compared(&format!("{kinds:?} bounds"), &now_values, &bounded_values);
     compared(
         &format!("{kinds:?} bounds and range"),

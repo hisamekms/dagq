@@ -47,6 +47,8 @@ pub mod control;
 mod dispatch;
 pub mod end_bound;
 mod forward;
+#[cfg(test)]
+pub(crate) use forward::CoveredRows;
 pub mod large;
 mod needs;
 pub mod resend;
@@ -287,7 +289,7 @@ fn opened_for(
 /// service did not answer did nothing ([`undone`]). An operation not here
 /// is taken as one that writes by those who read this; the connection a
 /// request runs on goes by the wider [`needs::only_reads`].
-const READ_OPS: [&str; 105] = [
+const READ_OPS: [&str; 110] = [
     "diagnosis_owners",
     "candidates",
     "build_waits",
@@ -389,8 +391,13 @@ const READ_OPS: [&str; 105] = [
     "ledger_heads_open_at",
     "ledger_runs_without_row",
     "ledger_sessions_written",
+    "ledger_rows_covered",
+    "ledger_omitted_coverage",
     "ledger_omitted_points_after",
+    "ledger_omitted_point_at_or_before",
     "ledger_omitted_point_before_ms",
+    "ledger_event",
+    "ledger_events_of_kind",
     "run_events_after",
     "task_events_after",
 ];
@@ -971,7 +978,7 @@ const RUN_RESOURCE_OPS: [&str; 4] = [
 /// folds): the supervisor principal's only, refused to a landing's
 /// integrator by the policy and to a control-side command whatever its
 /// principal holds ([`control::answer`]), as [`RUN_RESOURCE_OPS`].
-const LEDGER_OPS: [&str; 41] = [
+const LEDGER_OPS: [&str; 46] = [
     "ledger_row",
     "ledger_rows_of",
     "ledger_rows",
@@ -1000,8 +1007,13 @@ const LEDGER_OPS: [&str; 41] = [
     "stage_ledger_row",
     "write_staged_ledger_row_over",
     "ledger_sessions_written",
+    "ledger_rows_covered",
+    "ledger_omitted_coverage",
     "ledger_omitted_points_after",
+    "ledger_omitted_point_at_or_before",
     "ledger_omitted_point_before_ms",
+    "ledger_event",
+    "ledger_events_of_kind",
     "write_session_rows_over",
     "write_staged_session_rows_over",
     "write_covered_session_rows_over",

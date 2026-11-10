@@ -41,7 +41,7 @@ use crate::domain::kpi::{KpiConfig, KpiQuery, Period, read_from_ms};
 use crate::domain::ledger::LedgerKind;
 use crate::domain::ledger::testkit::frozen::{FIXED_AT, Input};
 use crate::domain::ledger::testkit::{T0, ms};
-use crate::domain::ledger::window::{WindowQuery, WindowRows};
+use crate::domain::ledger::window::WindowQuery;
 use crate::domain::stats::{Cursor, StatsQuery};
 
 use super::LedgerStore;
@@ -188,10 +188,9 @@ pub(crate) fn values(store: &(impl LedgerStore + ?Sized), input: &Input) -> Vec<
             read_from_ms: Some(ms(*time)),
             ..WindowQuery::default()
         };
-        let mut rows = WindowRows::new(&query, 0);
-        rows.take_pages(|after, limit| store.ledger_rows_after(LedgerKind::Queue, after, limit))
-            .unwrap();
-        let before = rows.rows_from().map(|from| from.inputs_through.as_i64());
+        let before = super::rows_from_of(store, &query)
+            .unwrap()
+            .map(|from| from.inputs_through.as_i64());
         out.push((format!("queue_before t{time}"), json!(before)));
     }
     let queue: Vec<Value> = store

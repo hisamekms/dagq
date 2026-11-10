@@ -357,6 +357,7 @@ fn an_op_that_only_reads_writes_nothing_on_its_read_only_connection() {
         json!([1, 1, 1]),
         json!(["owner", 1, 1]),
         json!([RUN, 1, 1]),
+        json!(["owner", 1, 1, 1]),
     ];
     for op in crate::application::supervisor_service::ops_that_only_read() {
         for args in &args {
