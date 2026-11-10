@@ -2218,6 +2218,11 @@ pub trait RepositoryReads {
     fn file_in(&self, _commit: &str, _path: &str) -> Result<Option<String>> {
         anyhow::bail!("this repository cannot read committed files")
     }
+    /// Read a blob in a commit's tree as its bytes, whatever its
+    /// encoding; `None` if the path is absent.
+    fn file_bytes_in(&self, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.file_in(commit, path)?.map(String::into_bytes))
+    }
     /// Every file path of `commit`'s tree.
     fn tree_paths(&self, commit: &str) -> Result<Vec<String>> {
         let _ = commit;

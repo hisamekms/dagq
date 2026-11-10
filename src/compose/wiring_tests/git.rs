@@ -56,6 +56,12 @@ struct State {
     /// Every scratch checkout made, with its commit, in order.
     checked_out: Vec<(PathBuf, CommitSha)>,
     case_bases: Vec<(PathBuf, String, Vec<String>)>,
+    /// Files every commit holds as bytes, none of them UTF-8 text
+    /// ([`FakeGit::commit_blob`]).
+    blobs: HashMap<String, Vec<u8>>,
+    /// Each change case tree made: its path, base, the patch's bytes and
+    /// what it hides.
+    case_trees: Vec<(PathBuf, String, Vec<u8>, Vec<String>)>,
     /// The files every commit holds, by path: none unless a test commits
     /// some ([`FakeGit::commit_files`]).
     files: HashMap<String, String>,
@@ -101,6 +107,8 @@ impl FakeGit {
                 scratches: HashMap::new(),
                 checked_out: Vec::new(),
                 case_bases: Vec::new(),
+                case_trees: Vec::new(),
+                blobs: HashMap::new(),
                 files: HashMap::new(),
                 changed: Vec::new(),
                 messages: HashMap::new(),
@@ -128,6 +136,15 @@ impl FakeGit {
 
     pub(super) fn case_bases(&self) -> Vec<(PathBuf, String, Vec<String>)> {
         self.lock().case_bases.clone()
+    }
+
+    /// Every commit holds `bytes` at `path`, read only byte-wise.
+    pub(super) fn commit_blob(&self, path: &str, bytes: &[u8]) {
+        self.lock().blobs.insert(path.to_owned(), bytes.to_vec());
+    }
+
+    pub(super) fn case_trees(&self) -> Vec<(PathBuf, String, Vec<u8>, Vec<String>)> {
+        self.lock().case_trees.clone()
     }
 
     /// Main's head now.
@@ -281,6 +298,16 @@ impl RepositoryReads for FakeGit {
     fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
         ensure!(self.known(commit), "no commit {commit}");
         Ok(self.lock().files.get(path).cloned())
+    }
+
+    fn file_bytes_in(&self, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        ensure!(self.known(commit), "no commit {commit}");
+        let state = self.lock();
+        Ok(state
+            .blobs
+            .get(path)
+            .cloned()
+            .or_else(|| state.files.get(path).map(|t| t.clone().into_bytes())))
     }
 
     fn tree_paths(&self, commit: &str) -> Result<Vec<String>> {
@@ -621,8 +648,21 @@ impl Repository for FakeGit {
         }
     }
 
-    fn add_case_tree(&self, path: &Path, base: &str, _: &Path, _: &[&str]) -> Result<CommitSha> {
+    fn add_case_tree(
+        &self,
+        path: &Path,
+        base: &str,
+        patch: &Path,
+        hidden: &[&str],
+    ) -> Result<CommitSha> {
         self.checkout_scratch(path, base)?;
+        let bytes = self.files.read(patch).unwrap_or_default();
+        self.lock().case_trees.push((
+            path.to_owned(),
+            base.to_owned(),
+            bytes,
+            hidden.iter().map(|p| (*p).to_owned()).collect(),
+        ));
         Ok(CommitSha::parse(base, "case head")?)
     }
 

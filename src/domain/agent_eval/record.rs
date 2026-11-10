@@ -263,6 +263,9 @@ pub struct RunEnd {
     pub tokens: Option<TokenUsage>,
     /// How long the job ran; `None` when its end records none.
     pub duration_secs: Option<u64>,
+    /// Why it has no result: the job did not start, failed or printed no
+    /// readable verdict; `None` with a result.
+    pub error: Option<String>,
 }
 
 /// One run of a round.
@@ -606,6 +609,7 @@ pub fn rounds_at<'a>(
                 retry: payload["retry"].as_bool().unwrap_or(false),
                 tokens: TokenUsage::from_payload(&payload["tokens"]),
                 duration_secs: payload["duration_secs"].as_u64(),
+                error: payload["error"].as_str().map(str::to_owned),
             };
             if let Some(record) =
                 round.runs.iter_mut().rev().find(|record| {

@@ -482,7 +482,8 @@ pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete
     let threshold = started.map_or(crate::domain::agent_eval::DEFAULT_THRESHOLD, |s| {
         s.threshold
     });
-    let ended: Vec<(&str, u32, Option<&Value>)> = round
+    // Each ended run with why it has no verdict, which a role's score keeps.
+    let ended: Vec<(&str, u32, Option<&Value>, Option<&str>)> = round
         .runs
         .iter()
         .filter(|run| {
@@ -493,12 +494,17 @@ pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete
         })
         .filter_map(|run| {
             let end = run.end.as_ref().filter(|end| !end.abandoned)?;
-            Some((run.case.as_str(), run.round, end.result.as_ref()))
+            Some((
+                run.case.as_str(),
+                run.round,
+                end.result.as_ref(),
+                end.error.as_deref(),
+            ))
         })
         .collect();
     let runs: Vec<ReviewRun> = ended
         .iter()
-        .map(|(case, run, result)| ReviewRun {
+        .map(|(case, run, result, _)| ReviewRun {
             case: (*case).to_owned(),
             round: *run,
             outcome: result.and_then(ReviewOutcome::from_agent_result),
@@ -511,8 +517,8 @@ pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete
         .map(|case| {
             let reasons: Vec<Value> = ended
                 .iter()
-                .filter(|(id, _, _)| *id == case.id)
-                .filter_map(|(_, _, result)| result.map(|result| result["reasons"].clone()))
+                .filter(|(id, _, _, _)| *id == case.id)
+                .filter_map(|(_, _, result, _)| result.map(|result| result["reasons"].clone()))
                 .collect();
             json!({
                 "id": case.id,
@@ -563,7 +569,7 @@ pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete
     if let Some(harness) = super::role_eval::RoleHarness::target(&round.request.agent) {
         let runs = ended
             .iter()
-            .map(|(id, _, result)| (*id, *result))
+            .map(|(id, _, result, error)| (*id, *result, *error))
             .collect::<Vec<_>>();
         let scores = harness.score(cases, &runs, threshold, false);
         payload["passed"] = json!(complete && scores["passed"] == true);

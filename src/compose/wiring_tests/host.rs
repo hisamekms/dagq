@@ -260,6 +260,15 @@ impl Verifier for FakeVerifier {
         Ok(crate::infrastructure::run_env::parse_config(&config)?.roles)
     }
 
+    fn eval_config(&self) -> Result<crate::domain::agent_eval::round::EvalConfig> {
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Ok(crate::infrastructure::run_env::parse_config(&config)?.eval)
+    }
+
     fn worker_trial(&self) -> Result<crate::domain::worker_model::WorkerTrial> {
         let config = self
             .config
@@ -563,6 +572,24 @@ impl ReviewProgramBackend for Nothing {
             "a wiring test runs no program review ({})",
             program.program.name
         )
+    }
+}
+
+/// Program reviews the fake agent runs ([`super::agent::PROGRAM`]): in the
+/// tree they are given, named by their program.
+pub(super) struct FakePrograms;
+
+impl ReviewProgramBackend for FakePrograms {
+    fn command(
+        &self,
+        program: &SnapshotProgram,
+        worktree: &Path,
+        _: &Path,
+        _: &Path,
+    ) -> Result<CommandSpec> {
+        let mut command = CommandSpec::new(super::agent::PROGRAM);
+        command.current_dir(worktree).arg(&program.program.name);
+        Ok(command)
     }
 }
 

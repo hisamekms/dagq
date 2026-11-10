@@ -276,12 +276,15 @@ pub struct Snapshot {
 /// The material's range and the commit/tree actually read by the job.
 /// A different `tree_commit` from `head` is retained as evidence but cannot
 /// become a case. `patch` is relative to the snapshot's directory.
+/// `tree` is the full tree ID production read; a record always has it,
+/// and only a handmade eval case omits it (no identity is then compared).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReviewChange {
     pub base: String,
     pub head: String,
     pub tree_commit: String,
-    pub tree: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
     pub patch: PathBuf,
 }
 impl Snapshot {
@@ -452,7 +455,9 @@ pub fn refusal(
     if patch.is_none_or(|p| p.is_empty()) {
         return Some("change copy is missing or empty".into());
     }
-    if rebuilt.is_some_and(|tree| tree != change.tree) {
+    if let (Some(rebuilt), Some(recorded)) = (rebuilt, &change.tree)
+        && rebuilt != recorded
+    {
         return Some("rebuilt tree differs from recorded tree".into());
     }
     None

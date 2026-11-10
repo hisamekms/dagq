@@ -246,7 +246,7 @@ fn change_refusals_are_chosen_before_a_case_can_run() {
         base: "base".into(),
         head: "head".into(),
         tree_commit: "head".into(),
-        tree: "tree".into(),
+        tree: Some("tree".into()),
         patch: "change.patch".into(),
     };
     assert_eq!(

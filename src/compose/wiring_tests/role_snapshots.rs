@@ -205,7 +205,7 @@ fn check_run_record(fail: bool) {
         assert_eq!(snapshot.main_commit, main);
         let change = snapshot.change.as_ref().unwrap();
         assert_eq!(change.head, change.tree_commit);
-        assert_eq!(change.tree, format!("tree-{}", change.head));
+        assert_eq!(change.tree, Some(format!("tree-{}", change.head)));
         assert_ne!(change.base, change.head);
         assert!(!w.files.read(&dir.join(&change.patch)).unwrap().is_empty());
         let Input::Run(input) = &snapshot.input else {

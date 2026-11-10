@@ -161,6 +161,9 @@ const REVIEW: &str = "wiring-review";
 const AGENT_JOB: &str = "wiring-agent-job";
 const JOB: &str = "wiring-job";
 const RECOVERY: &str = "wiring-recovery-job";
+/// A program review ([`super::host::FakePrograms`]): one named `reject…`
+/// exits 1 in a case's tree (`…/tree`) and 0 elsewhere, any other 0.
+pub(super) const PROGRAM: &str = "wiring-program";
 
 /// The agent: its script, and what it started, by program, in order.
 pub(super) struct FakeAgent {
@@ -186,6 +189,10 @@ pub(super) struct FakeAgent {
     pub(super) case_reads: Mutex<Vec<crate::application::AgentReads>>,
     /// The prompt of each review job, in order.
     review_prompts: Mutex<Vec<String>>,
+    /// Each program review started: its name and working directory.
+    pub(super) program_runs: Mutex<Vec<(String, PathBuf)>>,
+    /// The run directory each review job's command was given, in order.
+    pub(super) review_run_dirs: Mutex<Vec<Option<String>>>,
     /// What runs as the next review job starts, before it answers, once.
     on_review: Mutex<Option<super::host::Hook>>,
     /// What runs as the next worker turn starts, once.
@@ -234,6 +241,8 @@ impl FakeAgent {
             case_commands: Mutex::default(),
             case_reads: Mutex::default(),
             review_prompts: Mutex::default(),
+            review_run_dirs: Mutex::default(),
+            program_runs: Mutex::default(),
             on_review: Mutex::default(),
             on_turn: Mutex::default(),
             turn_sessions: Mutex::default(),
@@ -511,11 +520,15 @@ impl AgentProvider for FakeAgent {
 
     fn review_command(
         &self,
-        _: &TaskRun,
+        run: &TaskRun,
         tree: &Path,
         prompt: &str,
         _: JobAccess,
     ) -> Result<CommandSpec> {
+        self.review_run_dirs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(run.run_dir().map(str::to_owned));
         self.review_prompts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -720,6 +733,15 @@ impl Spawner for FakeAgent {
                 stdout
             }
             REVIEW => {
+                // A run review eval case's job, as the role cases' below.
+                if command.get_envs().any(|(key, value)| {
+                    key == "DAGQ_ROLE" && value.is_some_and(|v| v == "review-job")
+                }) && command
+                    .get_current_dir()
+                    .is_some_and(|p| p.ends_with("tree"))
+                {
+                    self.case_commands.lock().unwrap().push(command.clone());
+                }
                 self.review_sessions.lock().unwrap().push(
                     args.windows(2)
                         .find(|pair| pair[0] == Path::new("--session-id"))
@@ -826,6 +848,21 @@ impl Spawner for FakeAgent {
                     }));
                 }
                 stdout
+            }
+            PROGRAM => {
+                let [name] = args.as_slice() else {
+                    bail!("a program review names its program");
+                };
+                let name = name.to_string_lossy().into_owned();
+                let cwd = command
+                    .get_current_dir()
+                    .unwrap_or(Path::new(""))
+                    .to_owned();
+                if name.starts_with("reject") && cwd.ends_with("tree") {
+                    code = 1;
+                }
+                self.program_runs.lock().unwrap().push((name, cwd));
+                String::new()
             }
             other => bail!("the wiring test's agent starts no {other}"),
         };

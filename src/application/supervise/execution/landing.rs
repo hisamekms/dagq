@@ -1641,7 +1641,7 @@ impl Supervisor<'_> {
                 let change = ReviewChange {
                     base,
                     head,
-                    tree: self.repository.tree_id(&tree_commit)?,
+                    tree: Some(self.repository.tree_id(&tree_commit)?),
                     tree_commit,
                     patch,
                 };

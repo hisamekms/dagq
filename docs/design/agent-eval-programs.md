@@ -18,6 +18,7 @@ related:
 [agentのeval](agent-eval.md)のケースに、本番のreviewと同じ段を当てる約束。
 
 - evalは各ケースに本番のreviewと同じ段を当てる（判断は`domain::agent_eval::programs`）。
+  判定を返す役割では、本番でprogramの段の後にjobが動くrunのreviewの全体のケースだけに当てる。
   周の定義とケースを読むlanding branchのcommitから、programの一覧とscriptを読み（[ADR-t1895-2](../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)。一覧の設定・実行・envとbackendは[プログラムのreview](supervisor-lifecycle/review-programs.md)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、ここに写さない）、pathがケースの差分に当たるものを、ケースのtreeをcwdに設定の順に流す。
   ケースのpatchがscriptや設定を変えても、流れるのはcommitの中身である。
 - 選んだprogramは、先にケースの`base_commit`のtree（ケースのtreeと同じものを隠す）で設定の順に流し、0以外で終わったものはそのケースのtreeで流さない（古いbaseは今の規則に既に違反しうるが、本番のreviewのbaseのlanding branchはCIが通すため。[ADR-t2300-1](../adr/2026-10-21-t2300-1-eval-leaves-out-programs-a-cases-base-fails.md)）。

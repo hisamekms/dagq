@@ -32,6 +32,9 @@ fn roundtrip_with_prefix_setting(no_prefix: bool) {
     fs::write(source.join("changed.txt"), b"old\n").unwrap();
     fs::write(source.join("removed.txt"), b"remove this\n").unwrap();
     fs::write(source.join("binary.bin"), b"\0\xffold\0").unwrap();
+    // Shift-JIS text without NUL: Git diffs it as text, so the copy is no
+    // UTF-8.
+    fs::write(source.join("sjis.txt"), b"\x82\xa0\n").unwrap();
     fs::write(
         source.join(".dagq/agents/demo/evals/dev.json"),
         b"secret expectations",
@@ -44,6 +47,8 @@ fn roundtrip_with_prefix_setting(no_prefix: bool) {
     let changed = b"the entire changed file\nsecond line\n";
     let added = b"new file in full\n";
     let binary = b"\0\xffnew\0\x80binary\n";
+    let sjis = b"\x82\xa2\x82\xa4\n";
+    fs::write(source.join("sjis.txt"), sjis).unwrap();
     fs::write(source.join("changed.txt"), changed).unwrap();
     fs::write(source.join("added.txt"), added).unwrap();
     fs::write(source.join("binary.bin"), binary).unwrap();
@@ -56,7 +61,9 @@ fn roundtrip_with_prefix_setting(no_prefix: bool) {
     repository
         .diff_binary_to_file(&base, &head, &patch)
         .unwrap();
-    let copy = fs::read_to_string(&patch).unwrap();
+    let bytes = fs::read(&patch).unwrap();
+    assert!(std::str::from_utf8(&bytes).is_err());
+    let copy = String::from_utf8_lossy(&bytes);
     assert!(copy.contains("GIT binary patch"));
     assert!(copy.contains("diff --git a/changed.txt b/changed.txt"));
     let tree = repository.tree_id(&head).unwrap();
@@ -64,12 +71,25 @@ fn roundtrip_with_prefix_setting(no_prefix: bool) {
         base,
         head: head.clone(),
         tree_commit: head,
-        tree: tree.clone(),
+        tree: Some(tree.clone()),
         patch: "change.patch".into(),
     };
     git(&source, &["switch", "-q", "main"]);
     git(&source, &["branch", "-D", "run"]);
     assert!(!repository.reachable_commit(&change.head).unwrap());
+    // The copy committed as a case's patch is read back byte for byte.
+    fs::create_dir_all(source.join(".dagq/agent-cases/patches")).unwrap();
+    fs::write(source.join(".dagq/agent-cases/patches/case.patch"), &bytes).unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-q", "-m", "case"]);
+    let main = git_out(&source, &["rev-parse", "HEAD"]);
+    let read = repository
+        .file_bytes_in(&main, ".dagq/agent-cases/patches/case.patch")
+        .unwrap()
+        .unwrap();
+    assert_eq!(read, bytes);
+    let patch = dir.path().join("read.patch");
+    fs::write(&patch, &read).unwrap();
     let case = dir.path().join("case");
     let full = rebuild(
         &repository,
@@ -77,7 +97,7 @@ fn roundtrip_with_prefix_setting(no_prefix: bool) {
         &change,
         &patch,
         &case,
-        &[".dagq/agents/*/evals"],
+        &[".dagq/agents/*/evals", ".dagq/agent-cases"],
     )
     .unwrap()
     .unwrap();
@@ -87,6 +107,7 @@ fn roundtrip_with_prefix_setting(no_prefix: bool) {
     assert_eq!(fs::read(case.join("added.txt")).unwrap(), added);
     assert_eq!(fs::read(case.join("changed.txt")).unwrap(), changed);
     assert_eq!(fs::read(case.join("binary.bin")).unwrap(), binary);
+    assert_eq!(fs::read(case.join("sjis.txt")).unwrap(), sjis);
     assert!(!case.join("removed.txt").exists());
     assert!(!case.join(".dagq/agents/demo/evals").exists());
     assert!(case.join(".git").is_dir());
@@ -96,7 +117,10 @@ fn roundtrip_with_prefix_setting(no_prefix: bool) {
         "refs/heads/main"
     );
     assert_eq!(git_out(&case, &["rev-list", "--all"]).lines().count(), 2);
-    assert!(!git_out(&case, &["log", "--all", "--root", "-p"]).contains("secret expectations"));
+    assert!(
+        !git_out(&case, &["log", "--all", "--root", "-p", "--", ".dagq"])
+            .contains("secret expectations")
+    );
     assert_ne!(
         git_out(&case, &["rev-parse", "--absolute-git-dir"]),
         git_out(&source, &["rev-parse", "--absolute-git-dir"])

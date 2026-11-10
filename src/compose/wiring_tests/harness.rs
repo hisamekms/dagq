@@ -145,12 +145,17 @@ pub(super) struct Wiring {
     /// Whether the supervisor also runs Codex headless workers and jobs
     /// (on the same fake agent); Claude only by default.
     codex: bool,
+    /// Whether program reviews run, on [`super::host::FakePrograms`]; none
+    /// may by default.
+    programs: bool,
     /// Planner slot limit and timeout of the next supervisor pass.
     planning: std::cell::Cell<(Option<usize>, Duration)>,
     /// `[provider_fallback] workers`; on by default.
     worker_fallback: bool,
     job_fallback: bool,
     review_concurrency: Option<u64>,
+    /// `[review.jobs] agent_timeout_secs`, read at the start.
+    review_agent_timeout: Option<u64>,
     retry_review: bool,
     /// `[fresh_session]`; no threshold by default.
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
@@ -226,10 +231,12 @@ impl Wiring {
             generators,
             pid,
             codex: false,
+            programs: false,
             planning: std::cell::Cell::new((None, super::super::wiring_planner_timeout())),
             worker_fallback: true,
             job_fallback: true,
             review_concurrency: None,
+            review_agent_timeout: None,
             retry_review: false,
             fresh_session: Default::default(),
             parallel: Arc::new(AtomicUsize::new(2)),
@@ -267,6 +274,12 @@ impl Wiring {
     /// Review jobs wait on their requested provider rather than falling back.
     pub(super) fn without_job_fallback(mut self) -> Self {
         self.job_fallback = false;
+        self
+    }
+
+    /// The time limit of a run's review's agent jobs, in seconds.
+    pub(super) fn with_review_agent_timeout(mut self, secs: u64) -> Self {
+        self.review_agent_timeout = Some(secs);
         self
     }
 
@@ -346,6 +359,13 @@ impl Wiring {
     /// jobs (a review's among them), on the same fake agent.
     pub(super) fn with_codex(mut self) -> Self {
         self.codex = true;
+        self
+    }
+
+    /// The wiring whose program reviews run as [`super::host::FakePrograms`]
+    /// says.
+    pub(super) fn with_programs(mut self) -> Self {
+        self.programs = true;
         self
     }
 
@@ -669,9 +689,11 @@ impl Wiring {
                 db: self.db.clone(),
                 pid: self.pid,
                 codex: self.codex,
+                programs: self.programs,
                 worker_fallback: self.worker_fallback,
                 job_fallback: self.job_fallback,
                 review_concurrency: self.review_concurrency,
+                review_agent_timeout: self.review_agent_timeout,
                 retry_review: self.retry_review,
                 fresh_session: self.fresh_session,
                 parallel: self.parallel.load(std::sync::atomic::Ordering::SeqCst),
@@ -756,9 +778,12 @@ struct Parts {
     db: PathBuf,
     pid: u32,
     codex: bool,
+    programs: bool,
     worker_fallback: bool,
     job_fallback: bool,
     review_concurrency: Option<u64>,
+    /// `[review.jobs] agent_timeout_secs`, read at the start.
+    review_agent_timeout: Option<u64>,
     retry_review: bool,
     fresh_session: crate::domain::fresh_session::FreshSessionConfig,
     parallel: usize,
@@ -869,7 +894,11 @@ impl Parts {
             codex_jobs: self.codex.then_some(agent as &dyn AgentProvider),
             spawner: agent,
             programs: crate::application::review_programs::ProgramBackends::new(
-                &Nothing,
+                if self.programs {
+                    &super::host::FakePrograms
+                } else {
+                    &Nothing
+                },
                 crate::application::execution::ExecutionConfig::default(),
             ),
             landing_programs: crate::application::review_programs::ProgramHost {
@@ -934,6 +963,7 @@ impl Parts {
         };
         settings.provider_fallback.jobs = self.job_fallback;
         settings.review_jobs.concurrency = self.review_concurrency;
+        settings.review_jobs.agent = self.review_agent_timeout;
         settings.slot_flags.runtime_planners = self.planning.0;
         settings.limits = SlotLimits::resolve(settings.slot_flags, &Default::default());
         settings.planner_timeout = self.planning.1;

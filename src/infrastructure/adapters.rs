@@ -1648,6 +1648,23 @@ impl GitRepository {
     }
 
     /// Read the blob from the object store, never from a checkout or index.
+    /// [`Self::file_in`] without the UTF-8 requirement: the blob's bytes.
+    pub fn file_bytes_in(&self, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let entry =
+            output(
+                self.git_root()
+                    .args(["ls-tree", "--name-only", "-z", commit, "--", path]),
+            )?;
+        if entry.is_empty() {
+            return Ok(None);
+        }
+        let mut command = self.git_root();
+        command.args(["cat-file", "blob", &format!("{commit}:{path}")]);
+        let (status, stdout, stderr) = capture_bytes(&mut command, OUTPUT_TIMEOUT)?;
+        ensure!(status.success(), "git cat-file failed ({status}): {stderr}");
+        Ok(Some(stdout))
+    }
+
     pub fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
         let entry =
             output(
@@ -3738,6 +3755,9 @@ impl Repository for GitRepository {
 impl crate::application::RepositoryReads for GitRepository {
     fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
         GitRepository::file_in(self, commit, path)
+    }
+    fn file_bytes_in(&self, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        GitRepository::file_bytes_in(self, commit, path)
     }
     fn landing_branch(&self) -> Result<LandingBranch> {
         GitRepository::landing_branch(self)
