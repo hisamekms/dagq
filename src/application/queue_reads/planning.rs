@@ -105,10 +105,13 @@ pub fn candidates<Q: TaskStore + RunLog + ?Sized>(
         deferrals,
         &aging,
     );
+    let held = sources.claim_holds(queue)?;
+    let mut deferred = serde_json::to_value(view.deferred)?;
+    crate::application::claim_view::under_claims_hold(&mut deferred, &held);
     let mut value = json!({
         "candidates": view.candidates,
-        "deferred": view.deferred,
-        "held": sources.claim_holds(queue)?,
+        "deferred": deferred,
+        "held": held,
         "excluded": excluded,
     });
     if !view.aged.is_empty() {

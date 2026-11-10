@@ -840,6 +840,8 @@ enum Command {
     /// investigation limits' among them: a Spike held while Spikes fill `[supervisor]
     /// max_spikes` shows `spike_limit`, and one that would open an investigation past
     /// `max_investigations` shows `investigation_limit` once the Spike limit lets Spikes go.
+    /// While the claims of the whole queue are held (`claim_held` in `held`), each deferral
+    /// carries that hold's reason (`claims_held`): it is the last one recorded before the hold.
     /// The ready tasks that never enter the order are counted by why, with their lowest IDs
     /// (`excluded`: `draft_goal`, `dependencies`, `goal_dependencies`). Does not claim.
     Candidates {
@@ -1418,6 +1420,8 @@ enum Command {
         id: i64,
     },
     /// List supervisors, unfinished runs, what waits for a person (attention), the open asks, the held tasks, the open planning requests (not for a planner) and the event cursor, without changing anything.
+    /// `claim_hold` is the hold on the whole queue's claims in place now (its reason, `since`,
+    /// value, threshold, message and, for the disk, its need's breakdown), null while none is.
     /// The cursor is read before the state, so `watch --after <cursor>` misses no change after it
     /// (it may repeat one). A run's `progress.phase` is the phase it last recorded
     /// (`run_phase_changed`) and `since` when; a run with no phase recorded has a null phase and

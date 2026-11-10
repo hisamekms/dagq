@@ -302,11 +302,10 @@ pub fn transition_of(
     live: impl Fn(&str) -> bool,
 ) -> Option<(EventKind, Value)> {
     let held = last.filter(|event| event.kind == kinds.held);
-    let held_reason = held
-        .filter(|event| {
-            text(event, "supervisor").is_some_and(|holder| holder == token.as_str() || live(holder))
-        })
-        .and_then(|event| text(event, "reason"));
+    let held_reason = in_place(kinds, last, |holder| {
+        holder == token.as_str() || live(holder)
+    })
+    .and_then(|event| text(event, "reason"));
     match hold {
         Some(hold) if held_reason != Some(hold.reason.as_str()) => {
             let mut payload = json!({
@@ -338,6 +337,71 @@ pub fn transition_of(
         )),
         _ => None,
     }
+}
+
+/// The hold of `kinds` in place as `last`, the latest of its two events,
+/// leaves it: a `held` whose supervisor runs (`live` of its token). The rule
+/// [`transition_of`] reads the hold by, for the readers that record none
+/// (`status`, `candidates`): a hold whose supervisor stopped or died holds
+/// nothing, though no `resumed` followed it.
+pub fn in_place(
+    kinds: HoldKinds,
+    last: Option<&RunEvent>,
+    live: impl Fn(&str) -> bool,
+) -> Option<&RunEvent> {
+    last.filter(|event| event.kind == kinds.held)
+        .filter(|event| text(event, "supervisor").is_some_and(&live))
+}
+
+/// How long a hold of new claims on the free disk space stands before it is
+/// the inbox's attention. The cleaning of the ended runs frees the disk in
+/// minutes, so a short hold ends by itself (on 2026-11-10 the disk holds
+/// came and went every 10 to 20 minutes while it worked); one that outlasts
+/// several cleanings needs a person to free the disk, and went unseen for
+/// six hours while only its event told of it.
+pub const DISK_HOLD_ATTENTION_SECS: i64 = 30 * 60;
+
+/// What the inbox is told of the claims' hold in place (`held`,
+/// [`in_place`] of [`CLAIMS`]) at `now_ms`, when it is an attention: a hold
+/// on the free disk space that has stood [`DISK_HOLD_ATTENTION_SECS`] or
+/// more while `candidates` ready tasks could be claimed. The text gives how
+/// long it stood, the free space, what a new run needs and its breakdown
+/// (the payload's `disk`, when recorded). None for no hold, a hold of
+/// another reason (its own ask or attention tells of it), a younger one or
+/// one with no task to claim; a hold that ends ends the attention. It is
+/// told, never asked: the disk's ask keeps its own condition.
+pub fn disk_hold_attention(
+    held: Option<&RunEvent>,
+    candidates: usize,
+    now_ms: i64,
+) -> Option<String> {
+    let held = held.filter(|event| {
+        event.kind == CLAIMS.held && text(event, "reason") == Some(HoldReason::DiskSpace.as_str())
+    })?;
+    let secs = (now_ms - timestamp_millis(&held.created_at)?) / 1000;
+    if secs < DISK_HOLD_ATTENTION_SECS || candidates == 0 {
+        return None;
+    }
+    let number = |value: &Value, key: &str| value.get(key).and_then(Value::as_f64);
+    let gib = |bytes: Option<f64>| bytes.map_or_else(|| "?".to_owned(), super::disk::gib);
+    let disk = held.payload.get("disk").map_or_else(String::new, |disk| {
+        format!(
+            " (reserve {}, new run {}, remaining of {} moving runs {}, waiting landing {})",
+            gib(number(disk, "reserve")),
+            gib(number(disk, "claim_expected")),
+            disk.get("moving")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            gib(number(disk, "claim_remaining")),
+            gib(number(disk, "landing_expected")),
+        )
+    });
+    Some(format!(
+        "no new run claimed for {} min: free {} below the {} a new run needs{disk}; ready tasks waiting: {candidates}",
+        secs / 60,
+        gib(number(&held.payload, "value")),
+        gib(number(&held.payload, "threshold")),
+    ))
 }
 
 /// A hold of one supervisor's claims kept outside [`ClaimHold::judge`]
@@ -868,6 +932,80 @@ mod tests {
         assert_eq!(landings.held, None);
         assert_eq!(LANDINGS.kinds(), LANDING_HOLD_KINDS);
         assert_eq!(CLAIMS.kinds(), CLAIM_HOLD_KINDS);
+    }
+
+    /// A reader takes the hold in place by the supervisors' rule: a
+    /// `claim_held` of a supervisor that runs, not one whose supervisor
+    /// stopped, nor any after its `claim_resumed`.
+    #[test]
+    fn a_reader_takes_the_hold_in_place_by_the_supervisors_rule() {
+        const GIB: u64 = 1 << 30;
+        let held = event(
+            1,
+            CLAIM_HELD,
+            json!({"reason": "disk_space", "supervisor": "s"}),
+            "00:00",
+        );
+        let resumed = event(2, CLAIM_RESUMED, json!({"supervisor": "s"}), "00:10");
+        assert_eq!(in_place(CLAIMS, Some(&held), |_| true), Some(&held));
+        assert_eq!(in_place(CLAIMS, Some(&held), |holder| holder == "t"), None);
+        assert_eq!(in_place(CLAIMS, Some(&resumed), |_| true), None);
+        assert_eq!(in_place(CLAIMS, None, |_| true), None);
+        let unnamed = event(3, CLAIM_HELD, json!({"reason": "disk_space"}), "00:00");
+        assert_eq!(in_place(CLAIMS, Some(&unnamed), |_| true), None);
+        // The supervisor that records reads it by the same rule: a hold
+        // in place for the same reason records nothing; a stopped
+        // supervisor's is recorded anew.
+        let hold = disk(Some(GIB), Some(2 * GIB), None).unwrap();
+        let token = LeaseToken::new("t");
+        assert_eq!(transition(Some(&hold), Some(&held), &token, |_| true), None);
+        assert!(transition(Some(&hold), Some(&held), &token, |_| false).is_some());
+    }
+
+    /// The disk's hold is the inbox's attention once it has stood 30
+    /// minutes with a ready task to claim, telling the free space, the
+    /// need and its breakdown; not before, not with no task, not for
+    /// another reason and not once it ended.
+    #[test]
+    fn a_long_disk_hold_with_tasks_to_claim_is_the_inboxs_attention() {
+        const GIB: u64 = 1 << 30;
+        let payload = json!({
+            "reason": "disk_space",
+            "value": (35 * GIB) as f64,
+            "threshold": (48 * GIB) as f64,
+            "supervisor": "s",
+            "disk": {"reserve": 11 * GIB, "claim_expected": 12 * GIB,
+                     "moving": 2, "claim_remaining": 13 * GIB,
+                     "landing_expected": 12 * GIB},
+        });
+        let held = event(1, CLAIM_HELD, payload.clone(), "00:00");
+        let at = |time: &str| timestamp_millis(&format!("2026-09-26T{time}.000Z")).unwrap();
+        let told = disk_hold_attention(Some(&held), 2, at("01:30:00")).unwrap();
+        assert_eq!(
+            told,
+            "no new run claimed for 30 min: free 35.0 GiB below the 48.0 GiB a new run needs \
+             (reserve 11.0 GiB, new run 12.0 GiB, remaining of 2 moving runs 13.0 GiB, \
+             waiting landing 12.0 GiB); ready tasks waiting: 2"
+        );
+        assert!(told.chars().count() <= 300, "{told}");
+        assert_eq!(disk_hold_attention(Some(&held), 2, at("01:29:59")), None);
+        assert_eq!(disk_hold_attention(Some(&held), 0, at("07:00:00")), None);
+        assert_eq!(disk_hold_attention(None, 2, at("07:00:00")), None);
+        let mut load = payload.clone();
+        load["reason"] = json!("load_average");
+        let load = event(2, CLAIM_HELD, load, "00:00");
+        assert_eq!(disk_hold_attention(Some(&load), 2, at("07:00:00")), None);
+        let landing = event(3, LANDING_HELD, payload.clone(), "00:00");
+        assert_eq!(disk_hold_attention(Some(&landing), 2, at("07:00:00")), None);
+        // A hold recorded without the breakdown still tells the need.
+        let mut bare = payload;
+        bare.as_object_mut().unwrap().remove("disk");
+        let bare = event(4, CLAIM_HELD, bare, "00:00");
+        assert_eq!(
+            disk_hold_attention(Some(&bare), 1, at("02:00:00")).unwrap(),
+            "no new run claimed for 60 min: free 35.0 GiB below the 48.0 GiB a new run needs; \
+             ready tasks waiting: 1"
+        );
     }
 
     #[test]

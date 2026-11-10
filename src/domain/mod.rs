@@ -2668,6 +2668,13 @@ pub enum AttentionNext {
     ReleaseOrKeepHold {
         task_id: TaskId,
     },
+    /// New claims have been held on the free disk space for
+    /// [`claim_hold::DISK_HOLD_ATTENTION_SECS`] or more while ready tasks
+    /// wait (`claim_held`, [`claim_hold::disk_hold_attention`]): a notice
+    /// the inbox passes on to the person with the free space, the need and
+    /// its breakdown, not an ask. The person frees the disk; the claims
+    /// resume by themselves and the attention ends with the hold.
+    FreeDisk,
 }
 
 impl AttentionNext {
@@ -2783,6 +2790,7 @@ impl fmt::Display for AttentionNext {
             Self::ReleaseOrKeepHold { task_id } => {
                 write!(f, "release or keep the hold of task {task_id}")
             }
+            Self::FreeDisk => f.write_str("tell the person to free the disk"),
         }
     }
 }
@@ -4946,6 +4954,7 @@ mod attention_tests {
             "release or keep the hold of task 7"
         );
         assert_eq!(InstallTool.to_string(), "install tool");
+        assert_eq!(FreeDisk.to_string(), "tell the person to free the disk");
         assert_eq!(FixRecheckTarget.to_string(), "fix the recheck target");
         assert_eq!(LogInToGh.to_string(), "log in to gh");
         assert_eq!(FixDagqToml.to_string(), "fix dagq.toml");

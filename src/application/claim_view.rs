@@ -219,6 +219,25 @@ impl ExcludedTasks {
     }
 }
 
+/// `candidates`' `deferred` while `held` (its `held`) leads with the
+/// queue-wide hold on the claims (`claim_held`): each deferral carries that
+/// hold's reason as `claims_held`. No supervisor judges a task's deferral
+/// while the claims are held, so the one shown is the last recorded before
+/// the hold, and the queue-wide hold, not it, is why the task waits now.
+/// With no such hold, `deferred` is left as it is.
+pub fn under_claims_hold(deferred: &mut serde_json::Value, held: &[serde_json::Value]) {
+    let Some(reason) = held
+        .iter()
+        .find(|entry| entry["reason"] == crate::domain::claim_hold::CLAIM_HELD)
+        .map(|entry| entry["record"]["reason"].clone())
+    else {
+        return;
+    };
+    for deferral in deferred.as_array_mut().into_iter().flatten() {
+        deferral["claims_held"] = reason.clone();
+    }
+}
+
 /// The ready tasks the claim order never takes, by why: `candidates`'
 /// `excluded` and `status`' `claim_excluded`. They fall out before the
 /// order, so no supervisor judges them and none has a deferral. Each task
@@ -270,6 +289,30 @@ impl ClaimExclusions {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The deferrals shown under the queue-wide hold name it; with no such
+    /// hold (none, or only another kind in `held`) they are left alone.
+    #[test]
+    fn deferrals_under_the_claims_hold_name_it() {
+        let deferred = json!([{"task_id": 7, "reason": "investigation_limit"}]);
+        let held = [
+            json!({"reason": "claim_held", "since": "t",
+                   "record": {"reason": "disk_space", "supervisor": "s"}}),
+            json!({"reason": "run_env_program_missing", "record": {}}),
+        ];
+        let mut shown = deferred.clone();
+        under_claims_hold(&mut shown, &held);
+        assert_eq!(
+            shown,
+            json!([{"task_id": 7, "reason": "investigation_limit", "claims_held": "disk_space"}])
+        );
+        let mut shown = deferred.clone();
+        under_claims_hold(&mut shown, &held[1..]);
+        assert_eq!(shown, deferred);
+        let mut shown = deferred.clone();
+        under_claims_hold(&mut shown, &[]);
+        assert_eq!(shown, deferred);
+    }
 
     fn deferral(task: i64, reason: &str) -> OpenDeferral {
         OpenDeferral {

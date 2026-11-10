@@ -116,6 +116,118 @@ fn below_the_reserve_no_run_is_claimed_and_with_room_a_new_queue_claims_one_at_a
     );
 }
 
+/// The disk's hold a supervisor recorded reaches `status` as its
+/// `claim_hold` (the need's breakdown with it) while that supervisor runs,
+/// and, once it has stood 30 minutes with a ready task to claim, the
+/// inbox's attention; `candidates`' `held` names it. A hold whose supervisor
+/// stopped holds nothing, and neither shows once the claims resume.
+#[test]
+fn a_standing_disk_hold_shows_in_status_and_after_30_minutes_in_the_inboxs_attention() {
+    use std::time::{Duration, SystemTime};
+
+    use crate::domain::{EventKind, LeaseToken, SessionRole};
+    let wiring = Wiring::new(
+        "a_standing_disk_hold_shows_in_status_and_after_30_minutes_in_the_inboxs_attention",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    );
+    wiring.free.store(SHORT, Ordering::SeqCst);
+    let task = wiring.ready_task(&[]);
+    wiring.supervise_once();
+    let mut queue = wiring.queue();
+    let held = queue_payloads(&queue, "claim_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    let token = LeaseToken::new(held[0]["supervisor"].as_str().unwrap());
+    // The events carry the queue's own time; a person reads the queue so
+    // long after the hold started.
+    let since = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == EventKind::ClaimHeld)
+        .unwrap()
+        .created_at;
+    let since = crate::domain::stats::timestamp_millis(&since).unwrap();
+    let later = |minutes: u64| {
+        SystemTime::UNIX_EPOCH
+            + Duration::from_millis(u64::try_from(since).unwrap())
+            + Duration::from_secs(minutes * 60)
+    };
+    let told = |status: &Value| {
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["kind"] == "claim_held")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    // The `--once` supervisor stopped: its hold holds nothing.
+    let status = wiring.status();
+    assert_eq!(status["claim_hold"], Value::Null, "{status}");
+    assert!(told(&status).is_empty());
+
+    // Still running ten minutes on: shown, not yet the inbox's.
+    wiring.register_at(&token, later(10));
+    let status = wiring.status_at(later(10), Some(SessionRole::Inbox));
+    let hold = &status["claim_hold"];
+    assert_eq!(hold["reason"], "disk_space", "{status}");
+    assert_eq!(hold["value"], serde_json::json!(SHORT as f64));
+    assert_eq!(hold["threshold"], serde_json::json!((5 * GIB) as f64));
+    assert_eq!(hold["disk"]["reserve"], 5 * GIB);
+    assert_eq!(hold["supervisor"], token.as_str());
+    assert!(hold["since"].is_string());
+    assert!(
+        hold["message"]
+            .as_str()
+            .unwrap()
+            .contains("reserve 5.0 GiB")
+    );
+    assert!(told(&status).is_empty(), "{status}");
+
+    // Past thirty minutes (the clock reads whole seconds), the task still
+    // ready: the inbox's attention, told with the need, not asked.
+    wiring.register_at(&token, later(31));
+    let status = wiring.status_at(later(31), Some(SessionRole::Inbox));
+    let items = told(&status);
+    assert_eq!(items.len(), 1, "{status}");
+    assert_eq!(items[0]["next"], "tell the person to free the disk");
+    assert_eq!(
+        items[0]["last_error"],
+        "no new run claimed for 30 min: free 4.0 GiB below the 5.0 GiB a new run needs \
+         (reserve 5.0 GiB, new run 0.0 GiB, remaining of 0 moving runs 0.0 GiB, \
+         waiting landing 0.0 GiB); ready tasks waiting: 1"
+    );
+    // Told, not asked: the only ask is the disk's own, opened by its own
+    // condition (nothing moves below the reserve), not by this attention.
+    let asks = status["asks"].as_array().unwrap();
+    assert!(
+        asks.iter().all(|ask| ask["kind"] == "queue_hold"),
+        "{status}"
+    );
+    assert!(items[0]["ask_id"].is_null());
+    // A planner's status has no attention.
+    let planner = wiring.status_at(later(31), Some(SessionRole::Planner));
+    assert!(told(&planner).is_empty());
+    let shown = wiring.claim_holds_at(later(31));
+    assert_eq!(shown[0]["reason"], "claim_held", "{shown:?}");
+    assert_eq!(shown[0]["record"]["reason"], "disk_space");
+    assert!(queue.show(task).unwrap().runs.is_empty());
+
+    // The claims resume: neither shows any more.
+    queue
+        .record_queue_event(
+            EventKind::ClaimResumed,
+            serde_json::json!({"reason": "disk_space", "supervisor": token}),
+        )
+        .unwrap();
+    let status = wiring.status_at(later(31), Some(SessionRole::Inbox));
+    assert_eq!(status["claim_hold"], Value::Null);
+    assert!(told(&status).is_empty());
+}
+
 /// A run that waits to land while the free space is below the reserve does
 /// not start its landing: `landing_held` (`disk_space`), the run awaiting
 /// integration. Once there is room it lands (`landing_resumed`).

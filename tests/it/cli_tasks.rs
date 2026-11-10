@@ -199,6 +199,8 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             expected["waiting"] = serde_json::json!([]);
             // No claim is deferred on a conflict hotspot (ADR-0069).
             expected["claim_deferrals"] = serde_json::json!([]);
+            // Nothing holds the queue's claims.
+            expected["claim_hold"] = serde_json::Value::Null;
             // No ready task is out of the claim order.
             let none = serde_json::json!({"count": 0, "task_ids": []});
             expected["claim_excluded"] = serde_json::json!({

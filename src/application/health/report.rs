@@ -60,6 +60,8 @@ pub fn status(
     let leases = queue.run_leases()?;
     let (runs, supervisors, waiting) =
         runs_slots_and_waits(queue, control, &registrations, &leases, now)?;
+    let claim_hold = claim_hold_in_place(queue, &registrations, control, now)?;
+    let graph = queue.graph_input()?;
     let asks = queue
         .asks(AskQuery {
             open: true,
@@ -105,8 +107,12 @@ pub fn status(
             ci_freshness,
         )?
             .into_iter()
+            .chain(claim_hold_attention(claim_hold.as_ref(), graph.candidates.len(), now))
             .filter(|_| for_role(role))
             .collect::<Vec<_>>(),
+        // The queue-wide hold on new claims in place now, whichever
+        // supervisor recorded it, null while none holds them.
+        "claim_hold": claim_hold.as_ref().map(hold_view),
         "asks": asks,
         // The claims deferred now on a conflict hotspot (ADR-0069): each
         // task's open `claim_deferred`, with the files and the runs.
@@ -117,7 +123,7 @@ pub fn status(
             .collect::<Vec<_>>(),
         // The ready tasks the claim order never takes, by why: they are
         // out before any deferral, so `claim_deferrals` misses them.
-        "claim_excluded": crate::application::claim_view::ClaimExclusions::of(&queue.graph_input()?),
+        "claim_excluded": crate::application::claim_view::ClaimExclusions::of(&graph),
         "proposals": queue.proposals(false)?,
         // The latest landing recheck of the waiting runs (ADR-0068
         // decision 6), with when it finished.
@@ -368,9 +374,7 @@ pub(super) fn slots_and_waits(
                         event.payload.get("supervisor").and_then(Value::as_str)
                             == Some(registration.token.as_str())
                     }) {
-                        let mut held = event.payload.clone();
-                        held["since"] = json!(event.created_at);
-                        value[*key] = held;
+                        value[*key] = hold_view(event);
                     }
                 }
                 for (key, kinds, records) in &own_holds {
@@ -385,6 +389,60 @@ pub(super) fn slots_and_waits(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((supervisors, waiting))
+}
+
+/// The queue-wide hold on new claims in place at `now`: the queue's latest
+/// `claim_held` / `claim_resumed` when it is a `claim_held` of a registered
+/// supervisor alive with a fresh heartbeat, the rule the supervisors record
+/// it by ([`crate::domain::claim_hold::in_place`]). Reads those two kinds'
+/// latest event only.
+pub(crate) fn claim_hold_in_place(
+    queue: &(impl RunLog + ?Sized),
+    registrations: &[SupervisorRegistration],
+    control: &dyn ProcessControl,
+    now: i64,
+) -> Result<Option<RunEvent>> {
+    let claims = crate::domain::claim_hold::CLAIMS;
+    let last = queue.latest_queue_event(&claims.kinds())?;
+    let live = |holder: &str| {
+        registrations.iter().any(|registration| {
+            registration.token.as_str() == holder && is_live(registration, control, now)
+        })
+    };
+    Ok(crate::domain::claim_hold::in_place(claims, last.as_ref(), live).cloned())
+}
+
+/// A hold's record as `status` shows it: its payload (`reason`, `value`,
+/// `threshold`, `message`, `supervisor`, the disk's `disk`) and when it
+/// started (`since`).
+fn hold_view(event: &RunEvent) -> Value {
+    let mut held = event.payload.clone();
+    held["since"] = json!(event.created_at);
+    held
+}
+
+/// The attention of the claims' hold in place (`held`) at `now`, when it is
+/// one ([`crate::domain::claim_hold::disk_hold_attention`]): `candidates`
+/// ready tasks wait to be claimed.
+pub(super) fn claim_hold_attention(
+    held: Option<&RunEvent>,
+    candidates: usize,
+    now: i64,
+) -> Option<Attention> {
+    let told =
+        crate::domain::claim_hold::disk_hold_attention(held, candidates, now.saturating_mul(1000))?;
+    Some(Attention {
+        run_id: None,
+        task_id: None,
+        pid: None,
+        ask_id: None,
+        reason_category: None,
+        status: "held".into(),
+        kind: crate::domain::claim_hold::CLAIM_HELD.into(),
+        last_error: Some(truncate_reason(&told)),
+        last_error_code: None,
+        next: AttentionNext::FreeDisk,
+    })
 }
 
 /// A supervisor's settings of the execution classes' claims in `status`
@@ -438,10 +496,11 @@ pub(super) fn claim_spacing(
 
 /// What holds the claims now, as the supervisors recorded it, for
 /// `candidates`' `held` (ADR-t1992-1): `no_supervisor` while no registered
-/// supervisor is alive with a fresh heartbeat, then the queue's latest
-/// record of each hold that is on (`claim_held` for the load, the disk or
-/// a queue hold, `run_env_program_missing`) of a live supervisor or of
-/// none named, then each live supervisor's own holds (`ci_watch_held`,
+/// supervisor is alive with a fresh heartbeat, then the queue-wide hold on
+/// the claims in place (`claim_held` for the load, the disk or a queue
+/// hold, [`claim_hold_in_place`], as `status`' `claim_hold`), then the
+/// queue's latest `run_env_program_missing` of a live supervisor or of none
+/// named, then each live supervisor's own holds (`ci_watch_held`,
 /// `landing_branch_unresolved`, `repository_config_held`) by its own latest record,
 /// however many the others recorded since, then each live supervisor's
 /// wait for its claim spacing. A hold no supervisor records is not shown,
@@ -462,9 +521,8 @@ pub fn claim_holds(
             .latest_queue_event(kinds)?
             .filter(|event| event.kind == held))
     };
-    let claims = crate::domain::claim_hold::CLAIMS;
     let records = [
-        on(&claims.kinds(), claims.held)?,
+        claim_hold_in_place(queue, &registrations, control, now)?,
         on(&RUN_ENV_PROGRAM_KINDS, EventKind::RunEnvProgramMissing)?,
     ];
     let last_claim = queue.latest_event_of(event_kind::RUN_CLAIMED)?;

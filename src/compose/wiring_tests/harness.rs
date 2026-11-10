@@ -530,6 +530,59 @@ impl Wiring {
         .expect("read the queue's status")
     }
 
+    /// This test's queue on a clock stopped at `at`.
+    fn queue_at(&self, at: SystemTime) -> (SqliteQueue, Arc<dyn crate::application::Clock>) {
+        let clock: Arc<dyn crate::application::Clock> =
+            Arc::new(StoppedClock::new(at, Instant::now()));
+        let generators = Generators {
+            clock: clock.clone(),
+            ids: self.generators.ids.clone(),
+        };
+        let queue = SqliteQueue::open(&self.db)
+            .expect("open the test's queue")
+            .with_generators(generators);
+        (queue, clock)
+    }
+
+    /// Register the supervisor `token` as this process at `at`, or beat
+    /// its heartbeat then when it is registered, so that it runs with a
+    /// fresh heartbeat then: a supervisor still running when a person reads
+    /// the queue that late.
+    pub(super) fn register_at(&self, token: &crate::domain::LeaseToken, at: SystemTime) {
+        let mut queue = self.queue_at(at).0;
+        let registered = queue
+            .supervisors()
+            .unwrap()
+            .iter()
+            .any(|registration| registration.token == *token);
+        if registered {
+            queue
+                .heartbeat(token)
+                .expect("beat the supervisor's heartbeat");
+        } else {
+            queue
+                .register_supervisor(token, self.pid, 1, "test")
+                .expect("register the supervisor");
+        }
+    }
+
+    /// What `dagq status --role` shows at `at`.
+    pub(super) fn status_at(
+        &self,
+        at: SystemTime,
+        role: Option<crate::domain::SessionRole>,
+    ) -> Value {
+        let (queue, clock) = self.queue_at(at);
+        crate::application::health::status(&queue, &*self.processes, &*clock, role, None, None)
+            .expect("read the queue's status")
+    }
+
+    /// What `candidates`' `held` shows at `at`.
+    pub(super) fn claim_holds_at(&self, at: SystemTime) -> Vec<Value> {
+        let (queue, clock) = self.queue_at(at);
+        crate::application::health::claim_holds(&queue, &*self.processes, &*clock).unwrap()
+    }
+
     pub(super) fn claim_holds(&self) -> Vec<Value> {
         crate::application::health::claim_holds(
             &self.queue(),

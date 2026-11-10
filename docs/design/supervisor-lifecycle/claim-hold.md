@@ -80,6 +80,8 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 - 落とし穴: 前回の記録はqueueの最新の`claim_held` / `claim_resumed`で、`claim_held`は書いたsupervisorが自分自身か今動いている間だけ続いているとみなす（`domain::claim_hold::transition`）。
   止まったか死んだsupervisorの控えは、loadが高いまま起動したsupervisorが自分のtokenで書き直し、下がっていれば`claim_resumed`で終える。
 - 2つのeventはclaimの前の待ちの区間も兼ね（[計測](../measurement.md)の「claimの前」）、区間の終わり方は`domain::claim_hold::hold_spans`が持つ。
+- `status`と`candidates`も最新の2つを同じ判定（`claim_hold::in_place`）で読む。
+  空き容量の控えが長くreadyのtaskが待てばaskでなくattentionになる（`claim_hold::disk_hold_attention`）。
 
 ## providerごとの控え
 
@@ -280,7 +282,6 @@ Spikeは実装とworkerの総枠を共有し、枠を予約しない（[ADR-t148
 ## 記録と見え方
 
 - queue全体の控えは`claim_held` / `claim_resumed`（queueのevent）、着地の控えは`landing_held` / `landing_resumed`、候補ごとの控えは`claim_deferred` / `claim_deferral_ended`（taskのevent）で、欄は各判定のdoc commentが持つ。
-- 候補ごとの控えの区間は`domain::claim_defer::deferral_spans`で、どのsupervisorの記録でも終わる。
 - `candidates`と`graph`は記録を`application::claim_view`で読み、開いている控えのtaskを順から除いて別に出す（[ADR-t1992-1](../../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)）。
   CLIは控えを判定し直さず、記録を閉じたり足したりもしない。
 - 落とし穴: 控えが閉じるのはsupervisorが次に判定したときだけで、slotが無いpassとclaimを止めているpass（両方のproviderが使えないpassを除く）では判定せず、hotspotの入力もcacheするので、その間は前の判定の控えが開いたまま出る（遅れの上限は無い）。
