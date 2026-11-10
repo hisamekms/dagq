@@ -104,6 +104,9 @@ brokerの起動・停止の例外は`application::queue_broker::start_by_hand`�
 
 ## principal
 
+runnerの登録と資格の交換のCLIは`application::runner_enroll`が持ち、HTTPSの宛てにだけ送る。
+runnerの更新の資格はrunnerのhostのその人だけが読むファイルにだけ置く。
+
 人の端末の認証操作は`application::login`が持ち、queueを開かずserviceへ転送しない。
 遠くの人のtokenはその人の資格の置き場にだけ置き、hostのsocketの入口では受けない。
 認可の拒否だけは既存のbest-effortの記録経路を使い、serviceが呼び出し元を認証できたときだけ認可の拒否が記録される。

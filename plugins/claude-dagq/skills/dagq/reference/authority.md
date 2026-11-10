@@ -44,6 +44,8 @@ With an OIDC issuer configured, approving landing in an `approve_landing` answer
 
 An external `issue_token` authenticated with a person's token issues only that person's inbox token, returning the value only in its response. The inbox's capabilities are the intersection of its own permissions and its human parent's current registry role. Changes and disabling apply on the next call; a member can issue their own inbox without gaining other lifecycle operations.
 
+`runner register-code|enroll|list|revoke|share` are refused to every role except user on their own terminal.
+
 `login`, `logout` and `whoami` (`identity.login`) belong only to a person on their own terminal. Every AI actor, including the inbox, and every control-side role is refused them. Never read or carry the person's credentials.
 
 `goal landing-mark ID MARK` (and `--remove`, `goal.landing_mark`) puts a landing mark on a goal or takes it off: only the person, as the goal's owner or an administrator when people authenticate, and the host's user on a local queue. The inbox and every AI actor are refused (`authorization_denied`). `goal edit --tag` / `--no-tags` never changes a mark.

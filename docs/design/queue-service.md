@@ -161,7 +161,7 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 
 ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
 `dagq`（`src/main.rs`の`execute`）は、環境がsocketかbrokerの宛てを名指せば、`DAGQ_ROLE`もqueueの解決（cwdや`--db`）も読まずにクライアントモードで動く（`infrastructure::queue_service::Client`）。
-チームの制御側へのHTTPSの宛ては環境`DAGQ_CONTROL_URL`で、送る入口は同moduleの`call_control`、人のtokenは`dagq login`の置き場から読み、転送する命令は`DAGQ_ROLE`が人でなければ断り、認証の3命令は手元で動く（分岐は`client_mode`のdoc comment）。
+チームの制御側へのHTTPSの宛ては環境`DAGQ_CONTROL_URL`で、送る入口は同moduleの`call_control`（runnerの資格の交換は`infrastructure::runner_enroll`）、人のtokenは`dagq login`の置き場から読み、転送する命令は`DAGQ_ROLE`が人でなければ断り、認証の3命令は手元で動く（分岐は`client_mode`のdoc comment）。
 
 `login`・`logout`・`whoami`はクライアントモードで実行できず、socketかbrokerの宛ての環境ではactorの判定より前にCLIが`control_side_command`で拒む。
 この拒否では資格の置き場を開かず、発行元にもqueue serviceにも通信せず、拒否の記録も送らない。

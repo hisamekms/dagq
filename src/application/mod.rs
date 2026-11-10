@@ -38,6 +38,7 @@ pub mod login;
 pub mod main_history;
 pub mod main_log;
 pub mod marks;
+pub mod runner_enroll;
 // The run files in memory of the use cases' unit tests and of the
 // composition root's wiring tests (`crate::compose`).
 #[cfg(test)]

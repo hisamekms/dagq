@@ -578,6 +578,7 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/queue_broker.rs", Host),
     module("src/application/broker_relay.rs", Host),
     module("src/application/login/mod.rs", Host),
+    module("src/application/runner_enroll.rs", Host),
     module("src/application/oidc.rs", Host), // the check of an OIDC issuer's JWT, behind the team version's entry
     module("src/application/sccache.rs", Host),
     module("src/application/retention.rs", Host), // the observations' directories and the backups past their retention
@@ -718,6 +719,8 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/login/mod.rs", "CredentialStore", Some(Host), Internal),
     outer_port("src/application/login/mod.rs", "LoginHttp", Some(Host), Internal),
     outer_port("src/application/login/mod.rs", "LoginInteraction", Some(Host), Internal),
+    outer_port("src/application/runner_enroll.rs", "RunnerCredentialStore", Some(Host), Internal),
+    outer_port("src/application/runner_enroll.rs", "RunnerExchange", Some(Host), Internal),
     outer_port("src/application/oidc.rs", "OidcDocumentSource", Some(Host), Internal), // the HTTPS fetching of an OIDC issuer's documents
     outer_port("src/application/run_container.rs", "RunContainers", Some(Execution), Internal), // the containers a worker's turns run in; the wrapper starts and removes them, and every stop of a run's session or processes removes its container
     outer_port("src/application/run_container.rs", "VerificationContainers", Some(Execution), Internal), // the containers the commands of integrate's verification run in, on a clone of the commit that lands; integrate removes what each verification left

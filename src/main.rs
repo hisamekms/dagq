@@ -81,6 +81,11 @@ enum Command {
     Logout,
     /// Show identity and expiry from this terminal's saved exchange response.
     Whoami,
+    /// Manage runner enrollment on the HTTPS control side.
+    Runner {
+        #[command(subcommand)]
+        command: dagq::application::runner_enroll::RunnerCommand,
+    },
 
     /// Initialize the queue, creating its directory if needed. An existing queue is checked, never migrated.
     /// Its output recommends the review's settings (`recommended`): the built-ins on and off by
@@ -2690,6 +2695,13 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
     let one = |capability, resource| vec![(capability, resource)];
     let queue = |capability| vec![(capability, Resource::Queue)];
     match command {
+        Command::Runner { command } => queue(match command {
+            dagq::application::runner_enroll::RunnerCommand::RegisterCode => C::RunnerRegister,
+            dagq::application::runner_enroll::RunnerCommand::Enroll { .. } => C::IdentityLogin,
+            dagq::application::runner_enroll::RunnerCommand::List => C::RunnerList,
+            dagq::application::runner_enroll::RunnerCommand::Revoke { .. } => C::RunnerRevoke,
+            dagq::application::runner_enroll::RunnerCommand::Share { .. } => C::RunnerShare,
+        }),
         Command::Login { .. } | Command::Logout | Command::Whoami => queue(C::IdentityLogin),
         // Run before any actor is read (`execute`): it opens no queue and
         // carries bytes only (ADR-t2114-3).
@@ -4575,7 +4587,8 @@ fn unserved(role: ActorRole, command: &Command, registered: bool) -> Result<Unse
         {
             Unserved::SupervisorsJob
         }
-        Command::Login { .. }
+        Command::Runner { .. }
+        | Command::Login { .. }
         | Command::Logout
         | Command::Whoami
         | Command::Relay { .. }
@@ -4955,6 +4968,11 @@ fn resolve_observe_interval(interval: Option<u64>, once: bool) -> Duration {
 /// - headlessのjobは読み取りだけの制限を受け、状態を変えるコマンドは拒まれる。
 ///   判定は`StaticPolicy`（Authorization）で、どのjobにもCLIの書き込みを与えない。
 fn execute(cli: Cli) -> Result<Value> {
+    if let Command::Runner { command } = &cli.command {
+        return dagq::infrastructure::runner_enroll::run(command, cli.db.is_some(), |name| {
+            env::var(name).ok()
+        });
+    }
     // The relay and the forwarder of a run's container carry bytes and open
     // no queue (ADR-t2114-3): they run whatever the environment names,
     // the forwarder in a container whose `dagq` is in client mode.
@@ -6981,6 +6999,12 @@ mod tests {
             ("login", &[]),
             ("logout", &[]),
             ("whoami", &[]),
+            ("runner register-code", &[]),
+            ("runner enroll", &[]),
+            ("runner list", &[]),
+            ("runner revoke", &["r"]),
+            ("runner share", &["r"]),
+            ("runner share", &["r", "--remove"]),
             ("watch", &[]),
             ("report", &[]),
             ("init", &[]),
@@ -7218,6 +7242,13 @@ mod tests {
             ("login", NO_QUEUE),
             ("logout", NO_QUEUE),
             ("whoami", NO_QUEUE),
+            // Runner management goes only to HTTPS; enrollment reads its
+            // code on the runner host. Neither uses the local host route.
+            ("runner register-code", NO_QUEUE),
+            ("runner enroll", NO_QUEUE),
+            ("runner list", NO_QUEUE),
+            ("runner revoke", NO_QUEUE),
+            ("runner share", NO_QUEUE),
             (
                 "init",
                 "creates the DB where there is none, and sends the rest to the queue's service: \
@@ -7269,6 +7300,8 @@ mod tests {
         ];
         // The arguments each command needs to parse.
         let samples: &[(&str, &[&str])] = &[
+            ("runner revoke", &["r"]),
+            ("runner share", &["r"]),
             ("add", &["t"]),
             ("lint", &["1"]),
             (
