@@ -3054,6 +3054,15 @@ mod store_contract_tests {
     use crate::infrastructure::store_contract::{self, ContractStore};
 
     impl ContractStore for SqliteQueue {
+        fn related_in(
+            &self,
+            _tx: &Self::Write<'_>,
+            task: crate::domain::TaskId,
+            statuses: &[String],
+            limit: usize,
+        ) -> Result<crate::domain::related::RelatedPage> {
+            self.related(task.as_i64(), statuses, limit)
+        }
         fn search_in(
             &self,
             _tx: &Self::Write<'_>,
@@ -3094,6 +3103,10 @@ mod store_contract_tests {
     #[test]
     fn large_ids() {
         contract(|open| store_contract::large_ids(&open));
+    }
+    #[test]
+    fn related_cases() {
+        contract(|open| store_contract::related_cases(&open));
     }
     #[test]
     fn search_cases() {

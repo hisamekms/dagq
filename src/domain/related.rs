@@ -606,6 +606,38 @@ fn score_pair(
     clues
 }
 
+/// Distinct title trigrams in encounter order, capped at 200. Whitespace,
+/// quotes and grams without a letter or digit cannot supply a search clue.
+pub fn title_trigrams(title: &str) -> Vec<String> {
+    let chars: Vec<char> = title.chars().collect();
+    let mut seen = Vec::new();
+    for window in chars.windows(super::search::TRIGRAM) {
+        let gram: String = window.iter().collect();
+        if window.iter().any(|c| c.is_whitespace() || *c == '"')
+            || !window.iter().any(|c| c.is_alphanumeric())
+            || seen.contains(&gram)
+        {
+            continue;
+        }
+        seen.push(gram);
+        if seen.len() == 200 {
+            break;
+        }
+    }
+    seen
+}
+
+/// An FTS5 query for any of the distinct trigrams of `title` that hold a
+/// letter or a digit, on the title and description columns. The index
+/// folds case itself, so the title is taken as written.
+pub fn trigram_query(title: &str) -> Option<String> {
+    let seen = title_trigrams(title);
+    (!seen.is_empty()).then(|| {
+        let terms: Vec<String> = seen.iter().map(|gram| format!("\"{gram}\"")).collect();
+        format!("{{title description}} : ({})", terms.join(" OR "))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -808,5 +840,34 @@ mod tests {
                 .is_empty()
         );
         assert!(rank(42, &docs, &HashMap::new(), &[], 10).is_none());
+    }
+}
+
+#[cfg(test)]
+mod trigram_tests {
+    use super::*;
+
+    #[test]
+    fn trigrams_skip_spaces_and_punctuation_and_repeat_once() {
+        assert_eq!(
+            trigram_query("ab abab: ..").as_deref(),
+            Some("{title description} : (\"aba\" OR \"bab\" OR \"ab:\")")
+        );
+        assert_eq!(trigram_query("a b"), None);
+        let long: String = (0..240)
+            .map(|i| char::from_u32(0x4e00 + i).unwrap())
+            .collect();
+        let grams = title_trigrams(&long);
+        assert_eq!(grams.len(), 200);
+        assert_eq!(
+            grams[199],
+            long.chars().skip(199).take(3).collect::<String>()
+        );
+        assert_eq!(trigram_query(&long).unwrap().matches(" OR ").count(), 199);
+        // FTS5's operators and special characters stay inside the quotes.
+        assert_eq!(
+            trigram_query("(a*b) ^cd").as_deref(),
+            Some("{title description} : (\"(a*\" OR \"a*b\" OR \"*b)\" OR \"^cd\")")
+        );
     }
 }

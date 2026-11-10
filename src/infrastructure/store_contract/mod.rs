@@ -5,11 +5,13 @@
 //! which removes its row; leader cases release their last holder.
 mod cases;
 mod goal_owners;
+mod related;
 mod runner_leases;
 mod search;
 mod search_writes;
 pub use cases::*;
 pub use goal_owners::*;
+pub use related::related_cases;
 pub use runner_leases::*;
 pub use search::{search_cases, short_non_ascii};
 pub use search_writes::{postgres_search_writes, source_search_writes};
@@ -30,6 +32,13 @@ pub trait ContractStore:
     + crate::application::RunnerLeaseStore
     + Sized
 {
+    fn related_in(
+        &self,
+        tx: &Self::Write<'_>,
+        task: crate::domain::TaskId,
+        statuses: &[String],
+        limit: usize,
+    ) -> Result<crate::domain::related::RelatedPage>;
     fn search_in(
         &self,
         tx: &Self::Write<'_>,
@@ -42,6 +51,15 @@ pub trait ContractStore:
 }
 
 impl<S: super::postgres::PostgresSession> ContractStore for super::postgres::PostgresStore<S> {
+    fn related_in(
+        &self,
+        tx: &Self::Write<'_>,
+        task: crate::domain::TaskId,
+        statuses: &[String],
+        limit: usize,
+    ) -> Result<crate::domain::related::RelatedPage> {
+        super::postgres::search::related(tx, task, statuses, limit)
+    }
     fn search_in(
         &self,
         tx: &Self::Write<'_>,
@@ -107,6 +125,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("large ids", large_ids::<S, F>),
         ("source search writes", source_search_writes::<S, F>),
         ("search", search_cases::<S, F>),
+        ("related", related_cases::<S, F>),
         ("short non-ASCII", short_non_ascii::<S, F>),
     ];
     sequence(cases, |case| case(open))

@@ -12,7 +12,7 @@ use super::{PostgresQueue, PostgresSession, PostgresStore};
 use crate::application::SearchIndex;
 use crate::domain::{TaskId, related::RelatedPage, search::*, worker::Worker};
 use crate::infrastructure::sql_exec::{SqlRead, SqlRow, SqlValue, TransactionEntries};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 use serde_json::json;
 
 const COLUMNS: [&str; 5] = ["title", "description", "acceptance", "context", "text"];
@@ -21,11 +21,18 @@ impl<S: PostgresSession> SearchIndex for PostgresQueue<S> {
     fn search_documents(&self, query: &SearchQuery) -> Result<SearchPage> {
         self.entries.search(query)
     }
-    fn related_landed_commits(&self, _: TaskId, _: usize) -> Result<Vec<String>> {
-        bail!("Postgres related search is not implemented")
+    fn related_landed_commits(&self, task: TaskId, limit: usize) -> Result<Vec<String>> {
+        let tx = self.entries.read_entry("related_landed_commits")?;
+        let page = related(&tx, task, &["completed".into()], limit)?;
+        crate::infrastructure::related::landed_commits(&tx, page)
     }
-    fn related_tasks(&self, _: TaskId, _: &[String], _: usize) -> Result<RelatedPage> {
-        bail!("Postgres related search is not implemented")
+    fn related_tasks(
+        &self,
+        task: TaskId,
+        statuses: &[String],
+        limit: usize,
+    ) -> Result<RelatedPage> {
+        related(&self.entries.read_entry("related")?, task, statuses, limit)
     }
 }
 
@@ -349,6 +356,107 @@ fn read_hit(r: &SqlRow<'_>) -> crate::infrastructure::sql_exec::SqlResult<Search
     })
 }
 
+/// Reads structural clues and search statistics from the same repeatable-read
+/// snapshot. Ranking and all clue weights remain in the domain.
+pub(crate) fn related(
+    tx: &impl SqlRead,
+    task: TaskId,
+    statuses: &[String],
+    limit: usize,
+) -> Result<RelatedPage> {
+    crate::infrastructure::related::related_in(tx, task.as_i64(), statuses, limit, |title| {
+        title_matches(tx, task, title)
+    })
+}
+
+/// At most 200 OR-ed trigrams select the union of title/description matches
+/// across ALL kinds. Every phrase occurrence lies in this union, so its n is
+/// counted here without one query per phrase. N and the sum of D are global;
+/// D includes all five columns. Only task rows become candidates. This reads
+/// C rows (two text columns) and holds C * K counts, K <= 200, before reducing
+/// scores to ratios. It intentionally never truncates the union before bm25.
+/// The td newline cannot match a gram (grams contain no whitespace).
+pub(crate) fn title_matches(
+    tx: &impl SqlRead,
+    task: TaskId,
+    title: &str,
+) -> Result<std::collections::HashMap<i64, f64>> {
+    use crate::domain::related::title_trigrams;
+    let grams = title_trigrams(title);
+    if grams.is_empty() {
+        return Ok(Default::default());
+    }
+    let mut values = Vec::new();
+    let filter = grams
+        .iter()
+        .map(|g| {
+            values.push(SqlValue::Text(pattern(g)));
+            format!("lower(td) LIKE lower(?{}) ESCAPE '\\'", values.len())
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let (rows, total): (i64, i64) = tx.query_row(
+        "SELECT count(*), CAST(coalesce(sum(trigram_count),0) AS bigint) FROM search_index",
+        &[],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let candidates = tx.query_map(
+        &format!(
+            "SELECT kind, ref, title, description, trigram_count FROM search_index WHERE {filter}"
+        ),
+        &values,
+        |r| {
+            let texts = vec![
+                r.get::<_, String>("title")?,
+                r.get::<_, String>("description")?,
+            ];
+            Ok((
+                r.get::<_, String>("kind")?,
+                r.get::<_, String>("ref")?,
+                r.get::<_, i64>("trigram_count")?,
+                grams
+                    .iter()
+                    .map(|g| occurrences(&texts, g))
+                    .collect::<Vec<_>>(),
+            ))
+        },
+    )?;
+    let statistics: Vec<_> = (0..grams.len())
+        .map(|i| candidates.iter().filter(|r| r.3[i] > 0).count() as u64)
+        .collect();
+    let scores = candidates
+        .into_iter()
+        .filter(|r| r.0 == "task")
+        .map(|(_, id, size, counts)| {
+            let phrases = counts
+                .into_iter()
+                .zip(&statistics)
+                .map(|(occurrences, &matching_rows)| Bm25Phrase {
+                    occurrences,
+                    matching_rows,
+                })
+                .collect::<Vec<_>>();
+            Ok((
+                id.parse::<i64>()?,
+                bm25(rows as u64, total as u64, size as u64, &phrases),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let Some(own) = scores
+        .iter()
+        .find(|r| r.0 == task.as_i64())
+        .map(|r| r.1)
+        .filter(|s| *s < 0.0)
+    else {
+        return Ok(Default::default());
+    };
+    Ok(scores
+        .into_iter()
+        .filter(|r| r.0 != task.as_i64())
+        .map(|(id, score)| (id, (score / own).clamp(0.0, 1.0)))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +480,92 @@ mod tests {
                 params,
                 visit,
             )
+        }
+    }
+
+    #[test]
+    fn title_union_ratios_match_fts5() {
+        use crate::domain::related::trigram_query;
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE VIRTUAL TABLE search_index USING fts5(kind UNINDEXED, ref UNINDEXED, title,description,acceptance,context,text,tokenize='trigram');
+            CREATE TABLE pg_index(kind TEXT,ref TEXT,title TEXT,description TEXT,trigram_count INTEGER,td TEXT);").unwrap();
+        for (i, (kind, title, body, other)) in [
+            ("task", "検索候補を日本語で探す", "", "extra text changes D"),
+            ("task", "日本語の検索候補を抽出する", "", ""),
+            ("task", "検索候補", "", ""),
+            (
+                "goal",
+                "検索候補",
+                "日本語",
+                "large global statistics contribution",
+            ),
+            ("task", "100% a_b c\\d", "alpha ALPHA aaaaa", ""),
+            ("note", "alpha", "", ""),
+            ("task", "ab", "", ""),
+            ("task", "100X aXb cXd", "", ""),
+            ("task", "aaaaa", "", "alpha"),
+            ("commit", "unrelated", "", "検索候補"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = i as i64 + 1;
+            db.execute("INSERT INTO search_index(rowid,kind,ref,title,description,acceptance,context,text) VALUES (?1,?2,?3,?4,?5,?6,'','')", rusqlite::params![id,kind,id.to_string(),title,body,other]).unwrap();
+            let size: usize = [title, body, other]
+                .iter()
+                .map(|s| s.chars().count().saturating_sub(2))
+                .sum();
+            db.execute(
+                "INSERT INTO pg_index VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![
+                    kind,
+                    id.to_string(),
+                    title,
+                    body,
+                    size as i64,
+                    format!("{title}\n{body}")
+                ],
+            )
+            .unwrap();
+        }
+        let index = Index(db);
+        for (id, title) in [
+            (1, "検索候補を日本語で探す"),
+            (5, "100% a_b c\\d"),
+            (5, "ALPHA"),
+            (7, "ab"),
+            (9, "aaaaa"),
+            (7, "検索候補"),
+            (99, "alpha"),
+        ] {
+            let actual = title_matches(&index, TaskId::new(id), title).unwrap();
+            let Some(query) = trigram_query(title) else {
+                assert!(actual.is_empty());
+                continue;
+            };
+            let scores = index.0.prepare("SELECT ref,bm25(search_index) FROM search_index WHERE search_index MATCH ?1 AND kind='task'").unwrap().query_map([query], |r| Ok((r.get::<_,String>(0)?.parse::<i64>().unwrap(),r.get::<_,f64>(1)?))).unwrap().map(Result::unwrap).collect::<Vec<_>>();
+            let own = scores
+                .iter()
+                .find(|s| s.0 == id)
+                .map(|s| s.1)
+                .filter(|s| *s < 0.0);
+            let expected: std::collections::HashMap<_, _> = own
+                .map(|own| {
+                    scores
+                        .into_iter()
+                        .filter(|r| r.0 != id)
+                        .map(|(id, s)| (id, (s / own).clamp(0.0, 1.0)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(actual.len(), expected.len(), "{title}");
+            for (id, expected) in expected {
+                assert!(
+                    (actual[&id] - expected).abs() < 1e-12,
+                    "{title}: {id}: {} != {expected}",
+                    actual[&id]
+                );
+            }
         }
     }
 

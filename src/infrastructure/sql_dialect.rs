@@ -419,6 +419,7 @@ pub(crate) fn json_field(column: &str, path: &str, ty: JsonType) -> String {
 }
 
 /// [`SqlDialect::json_field_spaced`] in the SQLite kind.
+#[cfg(test)]
 pub(crate) fn json_field_spaced(column: &str, path: &str, ty: JsonType) -> String {
     SqlDialect::Sqlite.json_field_spaced(column, path, ty)
 }
@@ -454,6 +455,7 @@ pub(crate) enum TimeForm {
 }
 
 /// [`SqlDialect::json_type_of`] in the SQLite kind.
+#[cfg(test)]
 pub(crate) fn json_type_of(column: &str, path: &str) -> String {
     SqlDialect::Sqlite.json_type_of(column, path)
 }

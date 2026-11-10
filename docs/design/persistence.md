@@ -102,7 +102,7 @@ runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`
 `ledger_omitted_points`: 台帳の写さないeventの被覆の点（[計測](measurement.md#台帳を作る係)）。
 被覆と点はW・Rと同じtransactionで書き、消さない。
 
-表ごとの役割と列の意味は、表を作るmigrationのコメントと表を持つstoreと`src/domain/`の型のdoc commentが持つ。
+表と列の意味はmigrationとstore・domainのdoc commentが持つ。
 
 ## 集約の読み書き
 
@@ -279,7 +279,8 @@ SQLiteは`src/infrastructure/search.rs`、索引とtriggerは`migrations/0026_se
 ## 関連（related）
 
 `dagq related TASK`（ADR-0063決定4）は表を足さず、既存の表と`search_index`を読む。
-SQLite adapterは`src/infrastructure/related.rs`、手がかりと点数と重みは`src/domain/related.rs`。
+PostgresはLIKEで絞り、全索引のbm25を自身への比にして手がかりとする。
+SQLite adapterは`src/infrastructure/related.rs`、手がかりと順位は`src/domain/related.rs`。
 
 ## CIの見張り
 

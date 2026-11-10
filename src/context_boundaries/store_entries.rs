@@ -8,7 +8,6 @@ const FIELDS: [&str; 3] = ["conn", "write_hold_warn", "write_identity"];
 #[rustfmt::skip]
 const ADAPTERS: &[(&str, &str)] = &[
     ("src/infrastructure/related.rs", "SqliteQueue::related"),
-    ("src/infrastructure/related.rs", "SqliteQueue::related_docs"),
     ("src/infrastructure/related.rs", "SqliteQueue::related_landed_commits"),
     ("src/infrastructure/related.rs", "SqliteQueue::title_matches"),
     ("src/infrastructure/search.rs", "SqliteQueue::search"),
