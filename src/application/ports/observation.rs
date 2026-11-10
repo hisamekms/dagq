@@ -123,6 +123,15 @@ impl<T: EventStore + ?Sized> MarkLog for T {
 /// [`Self::ledger_window`] (a window of every kind) only, and no decision
 /// of the runtime (claim, slot, resume, landing) reads it.
 pub trait LedgerStore {
+    /// Select the pre-grouping queue writer in application tests: queue
+    /// targets go through write/fold_and_write and their normal retries,
+    /// while R still crosses with the session write or on its own.
+    /// Fakes must retain their ordinary storage semantics in either mode.
+    #[cfg(test)]
+    fn uses_singleton_queue_writer(&self) -> bool {
+        false
+    }
+
     /// Write `row` in place of the row of the same kind and key, unless
     /// that one is legacy: its values stay as first written and only its
     /// records and their range follow `row`; `false` then. Writing the
@@ -166,7 +175,11 @@ pub trait LedgerStore {
     /// rows record every input up to
     /// ([`crate::domain::ledger::session::written::RowsWritten`]), and the
     /// coverage of the omitted queue events they carry, all in the one
-    /// transaction. A store that keeps no R writes the session rows' mark
+    /// transaction. Queue groups use this same operation; despite its name,
+    /// it accepts rows of either kind, with identical compare-and-write
+    /// semantics. Normal byte-bounded groups cross whole; an oversized
+    /// singleton crosses as a staged whole with its marks.
+    /// A store that keeps no R writes the session rows' mark
     /// alone, and gives no R ([`Self::ledger_marks`]). False, nothing
     /// written, as for a row written since its read, when the coverage
     /// conflicts with the store's

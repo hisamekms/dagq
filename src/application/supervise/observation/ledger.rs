@@ -49,7 +49,7 @@ use crate::domain::ledger::builder::{
     Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, MarkObservation,
     RESOURCES_PER_READ, ReadTo, RunResources, RunSteps, SESSION_BYTES_PER_WRITE,
     SESSION_ROWS_PER_WRITE, STEPS_PER_READ, SweepCounts, Target, behind, build, hour,
-    keeps_settled, marking_spent, pass_spent, writes,
+    keeps_settled, marking_spent, pass_spent, row_groups, writes,
 };
 use crate::domain::ledger::queue::{QueueBook, QueueHead, cut};
 use crate::domain::ledger::session::SessionsHeld;
@@ -173,6 +173,11 @@ pub struct Built {
     /// when it ends.
     pub marks: MarkObservation,
     marks_observed: bool,
+    row_conflict: bool,
+    /// Reserve the final queue group prepared within the pass time.
+    /// If no session row changes, R must cross with these rows instead
+    /// of in a later mark-only transaction.
+    pending_queue: SessionChunk,
     pub sweep: SweepCounts,
     pub work: PassWork,
 }
@@ -194,7 +199,7 @@ pub struct PassWork {
     pub no_marks: &'static str,
     /// The session and queue rows folded to mark them before the writes
     /// ([`Builder::rows_to_mark`]) and to write them, one at a time as the
-    /// writes come to them ([`Inputs::build_row`]): none of the rows a pass
+    /// writes come to them ([`Inputs::build_row`], [`fold_sessions`]): none of the rows a pass
     /// leaves marked is folded again for a write it does not make.
     pub folded: usize,
 }
@@ -251,7 +256,22 @@ fn write_sessions_observed(
     built.marks = builder.observe_marks();
     built.marks_observed = true;
     let before = builder.observe_written_marks();
-    let result = write_sessions(store, builder, at, bytes, built.marks.rows);
+    let queue = std::mem::take(&mut built.pending_queue).rows;
+    let mut queue_failure = None;
+    let result = write_sessions(
+        store,
+        builder,
+        at,
+        bytes,
+        built.marks.rows,
+        (queue, &mut built.written, &mut queue_failure),
+    );
+    if let Some(error) = queue_failure {
+        built.failure.get_or_insert_with(|| format!("{error:#}"));
+        // A failed deferred queue write changed the blockers after the
+        // initial observation; its new R is the one the session writer used.
+        built.marks = builder.observe_marks();
+    }
     builder.refresh_session_observation(&mut built.marks);
     let after = builder.observe_written_marks();
     if before != after {
@@ -678,6 +698,9 @@ fn pass(
     if taken.is_ok() && !builder.marked() && builder.events >= latest {
         builder.finished_time();
     }
+    if built.row_conflict {
+        return taken;
+    }
     let sessions =
         write_sessions_observed(store, builder, (now_ms, built_at), session_bytes, built);
     if let Ok(written) = sessions {
@@ -744,8 +767,8 @@ fn write_taken(
     // time is looked at: what the pass leaves is not folded for nothing.
     let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, &BTreeSet::new());
     let mut first = builder.taken_first();
-    // The first write that failed of the marks taken first: the round goes
-    // on past it, as a new process takes those marks first again each pass.
+    // Defer the first error while continuing past failed priority targets
+    // and isolated queue errors, so healthy work still gets its turn.
     let mut failed_first = None;
     let mut targets = taken.into_iter();
     while let Some(target) = targets.next() {
@@ -756,6 +779,34 @@ fn write_taken(
             built.cut = true;
             builder.put_back(target, targets);
             break;
+        }
+        let queue_target = matches!(target, Target::Row(LedgerKind::Queue, _));
+        // The baseline test exercises the actual pre-grouping application
+        // writer below, including WRITE_TRIES, rather than emulating it
+        // by changing how a fake applies group requests.
+        #[cfg(test)]
+        let queue_target = queue_target && !store.uses_singleton_queue_writer();
+        if queue_target {
+            // Prepare one row per clock check. The byte-sized pending
+            // group crosses whole when full, or with the final marks;
+            // grouping must not eagerly fold the rest of a timed pass.
+            let share = vec![target];
+            if !write_queue_groups(
+                store,
+                builder,
+                (now_ms, built_at),
+                &share,
+                built,
+                &mut failed_first,
+            ) {
+                keep_all(builder, share);
+                keep_all(builder, targets);
+                keep_all(builder, aside);
+                keep_all(builder, std::mem::take(&mut built.pending_queue).targets());
+                built.row_conflict = true;
+                return failed_first.map_or(Ok(()), Err);
+            }
+            continue;
         }
         if inputs.build_row(&target) {
             built.work.folded += 1;
@@ -809,18 +860,22 @@ fn write_taken(
     Ok(())
 }
 
-/// What [`fold_sessions`] made of the session rows marked.
+/// A folded row, its target, and the value read for compare-and-write.
+type FoldedRow = (Target, LedgerRow, Option<LedgerRow>);
+
+/// What [`fold_sessions`] made of the session or queue rows marked.
 #[derive(Default)]
 struct SessionsFolded {
     /// The rows to write, each with the row the store held as it was read.
-    write: Vec<(Target, LedgerRow, Option<LedgerRow>)>,
-    /// The rows the store holds as folded, which are tracked as they are.
+    write: Vec<FoldedRow>,
+    /// Rows whose inputs the store already records, tracked even when a
+    /// queue row still needs a version or settlement rewrite.
     held: Vec<(Target, LedgerRow)>,
     /// The rows whose fold is [`behind`] the store's, left marked.
     behind: Vec<Target>,
 }
 
-/// Fold the session rows of `targets` ([`Inputs::of`]), each over the row
+/// Fold the session or queue rows of `targets` ([`Inputs::of`]), each over the row
 /// the store holds of it, and sort them by what [`writes`] and [`behind`]
 /// say.
 fn fold_sessions(
@@ -834,14 +889,31 @@ fn fold_sessions(
     let mut folded = SessionsFolded::default();
     let keys: BTreeSet<(LedgerKind, String)> = targets.iter().map(Target::row_key).collect();
     let inputs = Inputs::of(builder.kept(), now_ms, built_at, &keys);
+    let row_keys: Vec<_> = targets.iter().map(Target::row_key).collect();
+    let mut held: BTreeMap<_, _> = store
+        .ledger_rows_of(&row_keys)?
+        .into_iter()
+        .map(|row| ((row.kind, row.key.clone()), row))
+        .collect();
     for target in targets {
-        let (kind, key) = target.row_key();
-        let stored = store.ledger_row(kind, &key)?;
+        let stored = held.remove(&target.row_key());
         let Some(row) = build(target, &inputs, &[]) else {
             continue;
         };
+        // A queue rewrite for version or settlement may be behind or
+        // refused later. Inputs already recorded must not hold its R.
+        let recorded = matches!(target, Target::Row(LedgerKind::Queue, _))
+            && stored
+                .as_ref()
+                .is_some_and(|stored| Builder::inputs_recorded(stored, &row));
+        if recorded {
+            folded.held.push((
+                target.clone(),
+                stored.as_ref().expect("recorded row").clone(),
+            ));
+        }
         if !writes(stored.as_ref(), &row) {
-            if let Some(stored) = stored {
+            if !recorded && let Some(stored) = stored {
                 folded.held.push((target.clone(), stored));
             }
         } else if stored.as_ref().is_some_and(|stored| behind(stored, &row)) {
@@ -874,13 +946,20 @@ fn fold_sessions(
 /// stays true. A fold [`behind`] the stored row, and a chunk another writer
 /// wrote a row of since its read, stay marked, and so no mark is written;
 /// a read or a write that fails leaves its chunk and those after it marked
-/// and writes no mark. The number of rows written.
+/// and writes no mark. The held final queue group crosses before the
+/// first changed session row, or with the marks if no session row changes.
+/// The number of session rows written; queue writes update `queue_written`.
 fn write_sessions(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
     at: (i64, &str),
     bytes: usize,
-    rows_mark: Option<crate::domain::ledger::session::written::RowsWritten>,
+    mut rows_mark: Option<crate::domain::ledger::session::written::RowsWritten>,
+    (mut queue, queue_written, queue_failure): (
+        Vec<FoldedRow>,
+        &mut usize,
+        &mut Option<anyhow::Error>,
+    ),
 ) -> Result<usize> {
     let targets = builder.take_sessions();
     let mut written = 0;
@@ -892,6 +971,7 @@ fn write_sessions(
         let folded = match fold_sessions(store, builder, at, share) {
             Ok(folded) => folded,
             Err(error) => {
+                keep_all(builder, queue.into_iter().map(|(target, ..)| target));
                 keep_all(builder, pending.targets());
                 keep_all(builder, targets[index * SESSION_ROWS_PER_WRITE..].to_vec());
                 return Err(error);
@@ -903,10 +983,36 @@ fn write_sessions(
         keep_all(builder, folded.behind);
         let mut rows = folded.write.into_iter();
         while let Some(row) = rows.next() {
+            if !queue.is_empty() {
+                if !write_queue_chunk(
+                    store,
+                    builder,
+                    std::mem::take(&mut queue),
+                    None,
+                    queue_written,
+                    queue_failure,
+                ) {
+                    keep_all(builder, [row.0]);
+                    keep_all(builder, rows.map(|(target, ..)| target));
+                    keep_all(builder, targets.get(after..).unwrap_or_default().to_vec());
+                    return Ok(written);
+                }
+                // Error isolation may have put only the failed queue
+                // targets back. Certify sessions with that conservative R.
+                if queue_failure.is_some() {
+                    rows_mark = builder.observe_marks().rows;
+                }
+            }
             let size = serde_json::to_vec(&row.1).map_or(0, |text| text.len());
             if !pending.takes(size, bytes) {
                 match write_chunk(store, builder, std::mem::take(&mut pending).rows, None) {
-                    Ok(count) => written += count,
+                    Ok(Some(count)) => written += count,
+                    Ok(None) => {
+                        keep_all(builder, [row.0]);
+                        keep_all(builder, rows.map(|(target, ..)| target));
+                        keep_all(builder, targets.get(after..).unwrap_or_default().to_vec());
+                        return Ok(written);
+                    }
                     Err(error) => {
                         keep_all(builder, [row.0]);
                         keep_all(builder, rows.map(|(target, ..)| target));
@@ -919,6 +1025,10 @@ fn write_sessions(
         }
     }
     let mark = builder.sessions_mark_from(rows_mark);
+    if !queue.is_empty() {
+        write_queue_chunk(store, builder, queue, mark, queue_written, queue_failure);
+        return Ok(written);
+    }
     if pending.rows.is_empty() {
         match mark {
             None => return Ok(written),
@@ -935,14 +1045,14 @@ fn write_sessions(
             Some(_) => {}
         }
     }
-    Ok(written + write_chunk(store, builder, pending.rows, mark)?)
+    Ok(written + write_chunk(store, builder, pending.rows, mark)?.unwrap_or(0))
 }
 
 /// The session rows of one write ([`write_sessions`]), each with its target
 /// and the row the store held as it was read, and the bytes of their text.
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct SessionChunk {
-    rows: Vec<(Target, LedgerRow, Option<LedgerRow>)>,
+    rows: Vec<FoldedRow>,
     bytes: usize,
 }
 
@@ -952,10 +1062,10 @@ impl SessionChunk {
     fn takes(&self, size: usize, bytes: usize) -> bool {
         self.rows.is_empty()
             || (self.rows.len() < SESSION_ROWS_PER_WRITE
-                && self.bytes.saturating_add(size) <= bytes)
+                && row_groups(&[self.bytes, size], bytes, None::<()>).len() == 1)
     }
 
-    fn push(&mut self, row: (Target, LedgerRow, Option<LedgerRow>), size: usize) {
+    fn push(&mut self, row: FoldedRow, size: usize) {
         self.rows.push(row);
         self.bytes = self.bytes.saturating_add(size);
     }
@@ -972,9 +1082,9 @@ impl SessionChunk {
 fn write_chunk(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
-    chunk: Vec<(Target, LedgerRow, Option<LedgerRow>)>,
+    chunk: Vec<FoldedRow>,
     mark: Option<Marks>,
-) -> Result<usize> {
+) -> Result<Option<usize>> {
     let (targets, rows): (Vec<Target>, Vec<(LedgerRow, Option<LedgerRow>)>) = chunk
         .into_iter()
         .map(|(target, row, stored)| (target, (row, stored)))
@@ -983,15 +1093,167 @@ fn write_chunk(
     if !matches!(written, Ok(true)) {
         // Folded again next pass.
         keep_all(builder, targets);
-        return written.map(|_| 0);
+        return written.map(|_| None);
     }
     for (target, (row, _)) in targets.iter().zip(&rows) {
-        builder.track(target, row);
+        if matches!(target, Target::Row(LedgerKind::Queue, _)) {
+            // An earlier failed group may have re-marked this row.
+            // Its successful singleton retry acknowledges those inputs.
+            builder.sweep(target, Some(row), Some(row));
+        } else {
+            builder.track(target, row);
+        }
     }
     if let Some(mark) = mark {
         builder.wrote_sessions_mark(mark);
     }
-    Ok(rows.len())
+    Ok(Some(rows.len()))
+}
+
+/// Write queue rows through the same atomic whole/staged operation as
+/// sessions. A refused group leaves all later groups for a fresh fold.
+/// Its final group waits for the session folds: R crosses with the last
+/// session group, or with this queue group when no session row changes.
+fn write_queue_groups(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    at: (i64, &str),
+    targets: &[Target],
+    built: &mut Built,
+    failure: &mut Option<anyhow::Error>,
+) -> bool {
+    if let Ok(written) = try_write_queue_groups(store, builder, at, targets, built, failure) {
+        return written;
+    }
+    // Save the healthy pending group before isolating read/fold errors;
+    // a current target's read error cannot mark its predecessor failed.
+    let pending = std::mem::take(&mut built.pending_queue).rows;
+    if !pending.is_empty()
+        && !write_queue_chunk(store, builder, pending, None, &mut built.written, failure)
+    {
+        return false;
+    }
+    for (index, target) in targets.iter().enumerate() {
+        match try_write_queue_groups(
+            store,
+            builder,
+            at,
+            std::slice::from_ref(target),
+            built,
+            failure,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                keep_all(builder, targets[index..].iter().cloned());
+                return false;
+            }
+            Err(error) => {
+                builder.keep_failed(target.clone());
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    true
+}
+
+/// Attempt a group without error isolation. False means a compare-and-write
+/// refusal; errors are retried by [`write_queue_groups`] one row at a time.
+fn try_write_queue_groups(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    at: (i64, &str),
+    targets: &[Target],
+    built: &mut Built,
+    failure: &mut Option<anyhow::Error>,
+) -> Result<bool> {
+    built.work.folded += targets.len();
+    let folded = fold_sessions(store, builder, at, targets)?;
+    for (target, stored) in folded.held {
+        builder.track(&target, &stored);
+    }
+    keep_all(builder, folded.behind);
+    for row in folded.write {
+        let size = serde_json::to_vec(&row.1)?.len();
+        if !built.pending_queue.rows.is_empty()
+            && row_groups(
+                &[built.pending_queue.bytes, size],
+                SESSION_BYTES_PER_WRITE,
+                None::<()>,
+            )
+            .len()
+                > 1
+        {
+            let pending = std::mem::take(&mut built.pending_queue).rows;
+            if !write_queue_chunk(store, builder, pending, None, &mut built.written, failure) {
+                return Ok(false);
+            }
+        }
+        built.pending_queue.push(row, size);
+    }
+    Ok(true)
+}
+
+/// Write a queue group, including the deferred final group. A compare
+/// refusal stops later work; a store error isolates singletons, keeps
+/// only failed targets failed, and lets sessions and the other R proceed.
+/// If this was the last group, recompute its certificate after isolation
+/// and pair it with the last successful singleton (or no row if all failed).
+fn write_queue_chunk(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    chunk: Vec<FoldedRow>,
+    mark: Option<Marks>,
+    written: &mut usize,
+    failure: &mut Option<anyhow::Error>,
+) -> bool {
+    match write_chunk(store, builder, chunk.clone(), mark.clone()) {
+        Ok(Some(count)) => {
+            *written += count;
+            return true;
+        }
+        Ok(None) => return false,
+        Err(_) => {}
+    }
+    let mut last_written = None;
+    for (index, (target, row, _)) in chunk.iter().enumerate() {
+        match write_chunk(store, builder, vec![chunk[index].clone()], None) {
+            Ok(Some(count)) => {
+                *written += count;
+                last_written = Some((target.clone(), row.clone(), Some(row.clone())));
+            }
+            Ok(None) => {
+                keep_all(
+                    builder,
+                    chunk[index + 1..].iter().map(|(target, ..)| target.clone()),
+                );
+                return false;
+            }
+            Err(error) => {
+                builder.keep_failed(target.clone());
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    if mark.is_some()
+        && let Some(mark) = builder.sessions_mark()
+    {
+        // Every failure is now marked. Rewriting the last successful row
+        // with its current read pairs the safe R with its last covered
+        // group, without counting that row twice against the pass budget.
+        let last: Vec<_> = last_written.into_iter().collect();
+        let targets: Vec<_> = last.iter().map(|(target, ..)| target.clone()).collect();
+        match write_chunk(store, builder, last, Some(mark)) {
+            Ok(Some(_)) => {}
+            Ok(None) => return false,
+            Err(error) => {
+                for target in targets {
+                    builder.keep_failed(target);
+                }
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    true
 }
 
 /// Mark `targets` again for the next pass ([`Builder::keep`]).

@@ -731,7 +731,9 @@ fn prefix_clock_work_survives_a_failed_final_mark_write() {
         },
         ms(1),
     )));
-    memory.batch_fails.set(1);
+    // Queue-row errors may be isolated and retried. Refuse the marks
+    // throughout this pass so the final certificate really cannot commit.
+    memory.refuses_batch_marks.set(true);
     let mut builder = start_builder(&memory, ms(wall)).unwrap();
     let first = build_pass_limited(
         &memory,
@@ -755,6 +757,7 @@ fn prefix_clock_work_survives_a_failed_final_mark_write() {
             .end
             < ms(wall)
     );
+    memory.refuses_batch_marks.set(false);
     let mut builder = start_builder(&memory, ms(wall)).unwrap();
     let recovered = pass(&memory, &mut builder, wall);
     assert_eq!(recovered.failure, None);

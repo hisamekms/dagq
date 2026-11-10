@@ -1986,3 +1986,57 @@ fn a_pass_is_spent_at_its_time_and_not_before() {
     assert!(pass_spent(PASS_TIME));
     assert!(pass_spent(PASS_TIME * 2));
 }
+
+#[test]
+fn byte_groups_preserve_order_and_put_r_on_the_last_even_when_oversized() {
+    let limit = SESSION_BYTES_PER_WRITE;
+    for sizes in [
+        vec![limit / 2, limit / 2, 1, limit + 1, 2, 3],
+        vec![1, limit + 1],
+        vec![limit + 1, 1],
+        vec![],
+    ] {
+        let groups = row_groups(&sizes, limit, Some(17));
+        assert_eq!(groups.last().unwrap().mark, Some(17));
+        assert!(
+            groups[..groups.len() - 1]
+                .iter()
+                .all(|group| group.mark.is_none())
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .flat_map(|group| group.rows.clone())
+                .collect::<Vec<_>>(),
+            (0..sizes.len()).collect::<Vec<_>>()
+        );
+        for group in &groups {
+            let bytes: usize = sizes[group.rows.clone()].iter().sum();
+            assert!(group.rows.len() <= 1 || bytes <= limit);
+            if bytes > limit {
+                assert_eq!(group.rows.len(), 1);
+            }
+        }
+    }
+    assert_eq!(
+        row_groups(&[4, 6, 1, 11, 2], 10, Some(17)),
+        vec![
+            RowGroup {
+                rows: 0..2,
+                mark: None
+            },
+            RowGroup {
+                rows: 2..3,
+                mark: None
+            },
+            RowGroup {
+                rows: 3..4,
+                mark: None
+            },
+            RowGroup {
+                rows: 4..5,
+                mark: Some(17)
+            },
+        ]
+    );
+}

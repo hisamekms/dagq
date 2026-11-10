@@ -1900,3 +1900,182 @@ fn the_omitted_points_cross_as_the_queues_own_and_a_service_before_them_refuses_
         ]
     );
 }
+
+/// Both kinds use the same request and SQLite transaction. The staged
+/// singleton retains its mark and fingerprint check, even beyond the wire
+/// limit; no early row or R survives a conflict or a transaction failure.
+#[test]
+fn byte_groups_write_queue_and_session_rows_atomically_whole_and_staged() {
+    use crate::application::LedgerStore;
+    use crate::application::supervisor_service::SupervisorQueues;
+    use crate::domain::ledger::session::written::{Cursors, Marks, RowsWritten, SessionsWritten};
+    use crate::domain::ledger::{LedgerKind, LedgerRow};
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed_with(&owner, fixed_time());
+    let token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let direct = SqliteQueue::open(&backend.db).unwrap();
+    let service = Arc::new(InProcess {
+        backend,
+        token,
+        ops: std::sync::Mutex::default(),
+    });
+    let queue = SupervisorQueues::new(
+        service.clone(),
+        crate::domain::ActorContext::instance(crate::domain::ActorRole::Supervisor, 7),
+    )
+    .queue();
+    let (log, _) = crate::domain::ledger::testkit::sessions_across();
+    let originals =
+        crate::domain::ledger::session::session_rows(&log.events, "2030-01-01T00:00:00.000Z");
+    let marks_at = |event| Marks {
+        sessions: SessionsWritten::at(EventId::new(event)),
+        rows: Some(RowsWritten::at(
+            Cursors {
+                events: EventId::new(event),
+                ..Default::default()
+            },
+            0,
+        )),
+        omitted: None,
+    };
+    for (index, kind) in [LedgerKind::Queue, LedgerKind::Session]
+        .into_iter()
+        .enumerate()
+    {
+        let offset = i64::try_from(index).unwrap() * 20;
+        let mark = |event| marks_at(event + offset);
+        let rows: Vec<LedgerRow> = originals
+            .iter()
+            .take(2)
+            .cloned()
+            .map(|mut row| {
+                row.kind = kind;
+                row.detail = json!({"text": ""});
+                let size = serde_json::to_vec(&row).unwrap().len();
+                let half = crate::domain::ledger::builder::SESSION_BYTES_PER_WRITE / 2;
+                row.detail = json!({"text": "x".repeat(half - size)});
+                row
+            })
+            .collect();
+        assert_eq!(rows.len(), 2);
+        let batch: Vec<_> = rows.iter().cloned().map(|row| (row, None)).collect();
+        service.ops.lock().unwrap().clear();
+        assert!(
+            queue
+                .write_session_rows_marked(&batch, Some(&mark(7)))
+                .unwrap()
+        );
+        assert_eq!(*service.ops.lock().unwrap(), ["write_session_rows_over"]);
+        assert_eq!(direct.ledger_marks().unwrap(), Some(mark(7)));
+        for row in &rows {
+            assert_eq!(
+                direct.ledger_row(kind, &row.key).unwrap().as_ref(),
+                Some(row)
+            );
+        }
+
+        // A stale second read refuses both the first row and R.
+        let mut changed = rows[0].clone();
+        changed.built_at = "2031-01-01T00:00:00.000Z".into();
+        let stale = [
+            (changed.clone(), Some(rows[0].clone())),
+            (rows[1].clone(), None),
+        ];
+        assert!(
+            !queue
+                .write_session_rows_marked(&stale, Some(&mark(8)))
+                .unwrap()
+        );
+        assert_eq!(
+            direct.ledger_row(kind, &changed.key).unwrap(),
+            Some(rows[0].clone())
+        );
+        assert_eq!(direct.ledger_marks().unwrap(), Some(mark(7)));
+        // Exercise the transaction's reread too, beyond the service's
+        // fingerprint preflight: a stale second row rolls back the first.
+        assert!(
+            !direct
+                .write_session_rows_marked(&stale, Some(&mark(8)))
+                .unwrap()
+        );
+        assert_eq!(
+            direct.ledger_row(kind, &changed.key).unwrap(),
+            Some(rows[0].clone())
+        );
+        assert_eq!(direct.ledger_marks().unwrap(), Some(mark(7)));
+
+        // Force failure at R, after all rows have been upserted in the
+        // transaction: even a successful preflight cannot expose a prefix.
+        direct
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_group BEFORE UPDATE ON ledger_rows
+             WHEN NEW.kind = 'rows_written'
+             BEGIN SELECT RAISE(ABORT, 'reject group'); END;",
+            )
+            .unwrap();
+        let over = [
+            (changed.clone(), Some(rows[0].clone())),
+            (rows[1].clone(), Some(rows[1].clone())),
+        ];
+        assert!(
+            queue
+                .write_session_rows_marked(&over, Some(&mark(8)))
+                .is_err()
+        );
+        direct
+            .conn
+            .execute_batch("DROP TRIGGER reject_group")
+            .unwrap();
+        assert_eq!(
+            direct.ledger_row(kind, &changed.key).unwrap(),
+            Some(rows[0].clone())
+        );
+        assert_eq!(direct.ledger_marks().unwrap(), Some(mark(7)));
+
+        let mut large = rows[0].clone();
+        large.detail =
+            json!({"text": "a".repeat(crate::domain::queue_service::MAX_REQUEST_BYTES + 1)});
+        service.ops.lock().unwrap().clear();
+        assert!(
+            queue
+                .write_session_rows_marked(
+                    &[(large.clone(), Some(rows[0].clone()))],
+                    Some(&mark(9))
+                )
+                .unwrap()
+        );
+        let ops = service.ops.lock().unwrap().clone();
+        assert!(ops.len() > 1);
+        assert_eq!(ops.last().unwrap(), "write_staged_session_rows_over");
+        assert!(
+            ops[..ops.len() - 1]
+                .iter()
+                .all(|op| op == "stage_ledger_row")
+        );
+        assert_eq!(
+            direct.ledger_row(kind, &large.key).unwrap(),
+            Some(large.clone())
+        );
+        assert_eq!(direct.ledger_marks().unwrap(), Some(mark(9)));
+        assert!(
+            !queue
+                .write_session_rows_marked(
+                    &[(rows[0].clone(), Some(rows[0].clone()))],
+                    Some(&mark(10))
+                )
+                .unwrap()
+        );
+        // A staged singleton with a stale fingerprint also changes nothing.
+        let saved = large.clone();
+        large.detail =
+            json!({"text": "b".repeat(crate::domain::queue_service::MAX_REQUEST_BYTES + 1)});
+        assert!(
+            !queue
+                .write_session_rows_marked(&[(large, Some(rows[0].clone()))], Some(&mark(10)))
+                .unwrap()
+        );
+        assert_eq!(direct.ledger_marks().unwrap(), Some(mark(9)));
+        assert_eq!(direct.ledger_row(kind, &saved.key).unwrap(), Some(saved));
+    }
+}

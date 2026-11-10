@@ -314,8 +314,10 @@ pub const INTERVAL_SECS: u64 = 60;
 /// [`INTERVAL_SECS`]). Its session rows and marks are written after it as
 /// before. About a second: one row is written in
 /// about half a millisecond, so a pass writes some two thousand rows,
-/// and a request of it holds the queue service's line no longer than a
-/// row (docs/plans/ledger-write-budget-spike.md "判定").
+/// and each queue request holds the service's line for one byte-bounded
+/// group ([`SESSION_BYTES_PER_WRITE`]); an oversized singleton retains
+/// the staged whole path. A prepared final group crosses with the session
+/// phase even when the clock has expired (docs/plans/ledger-write-budget-spike.md "判定").
 pub const PASS_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Whether a pass that has taken `elapsed` since its start has reached
@@ -350,10 +352,45 @@ pub const OLDER_ROWS_PER_PASS: usize = 200;
 pub const SESSION_ROWS_PER_WRITE: usize = 200;
 
 /// How many bytes of the session rows' text one write of them holds at
-/// most (a row past it alone is a write of its own): well within what the
-/// queue service takes of one write staged in parts (256 MiB), so that a
-/// write of rows each of which crosses alone crosses too.
-pub const SESSION_BYTES_PER_WRITE: usize = 32 << 20;
+/// most. Normal groups cross whole; an oversized row is a singleton and
+/// uses the existing staged whole path without reducing its capacity.
+pub const SESSION_BYTES_PER_WRITE: usize = crate::domain::queue_service::MAX_REQUEST_BYTES / 2;
+
+/// A contiguous write group; only the last group carries the offered R.
+/// Empty input has an empty last group so a mark can still cross alone.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RowGroup<M> {
+    pub rows: std::ops::Range<usize>,
+    pub mark: Option<M>,
+}
+
+/// Partition row text byte sizes in input order, closing before the next
+/// row would exceed `limit`. An oversized singleton never shares a group:
+/// the sender stages that whole in WRITE_PART_BYTES parts, retaining its
+/// fingerprint check, STAGED_BYTES capacity and single transaction. Normal
+/// groups fit the sender's LEDGER_ROW_REQUEST_BYTES and need no staging.
+/// R certifies all preceding groups and crosses with the last, including
+/// an oversized singleton; a refused group must stop the remaining writes.
+pub fn row_groups<M>(sizes: &[usize], limit: usize, mark: Option<M>) -> Vec<RowGroup<M>> {
+    let mut groups = Vec::new();
+    let (mut start, mut bytes) = (0, 0usize);
+    for (index, &size) in sizes.iter().enumerate() {
+        if index > start && bytes.checked_add(size).is_none_or(|sum| sum > limit) {
+            groups.push(RowGroup {
+                rows: start..index,
+                mark: None,
+            });
+            start = index;
+            bytes = 0;
+        }
+        bytes = bytes.saturating_add(size);
+    }
+    groups.push(RowGroup {
+        rows: start..sizes.len(),
+        mark,
+    });
+    groups
+}
 
 /// How many marks one pass looks at at most (a mark of a row the store
 /// already holds up to date is looked at and not written).

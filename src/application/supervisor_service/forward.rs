@@ -2989,8 +2989,10 @@ impl SupervisorQueue {
 /// the answer's limit: a run's row holds its events.
 const LEDGER_ROWS_PAGE: usize = 100;
 
-/// How many bytes of a ledger row one write sends whole at most, half the
-/// request's limit; a longer one crosses in parts.
+/// Text bytes of the rows in a normal whole group, half the request
+/// limit so fingerprints and marks have room. Larger singleton rows use
+/// the existing staged whole path (WRITE_PART_BYTES, STAGED_BYTES), with
+/// the same fingerprint check and one transaction, including an offered R.
 const LEDGER_ROW_REQUEST_BYTES: usize = crate::domain::queue_service::MAX_REQUEST_BYTES / 2;
 
 /// How many session steps or samples a read asks for at a time, halved for
@@ -3010,12 +3012,10 @@ fn not_sent(op: &str) -> anyhow::Error {
 
 // What builds the ledger reads and writes: the reads in pages, each after
 // the last of the page before, and a write over a row read naming that row
-// by its fingerprint, so a request holds one row.
-// A write of the session rows (at most this many bytes of rows, with
-// their reads' fingerprints) stages within what the service holds of one.
-const _: () = assert!(
-    crate::domain::ledger::builder::SESSION_BYTES_PER_WRITE * 2 <= super::large::STAGED_BYTES
-);
+// by its fingerprint. Queue and session groups share the atomic operation;
+// only an oversized singleton normally needs staging.
+const _: () =
+    assert!(crate::domain::ledger::builder::SESSION_BYTES_PER_WRITE == LEDGER_ROW_REQUEST_BYTES);
 
 impl SupervisorQueue {
     /// The session rows and `mark` cross in one request, or in parts
@@ -3053,7 +3053,11 @@ impl SupervisorQueue {
             })
             .collect();
         let text = serde_json::to_string(&(&rows, mark))?;
-        if text.len() <= LEDGER_ROW_REQUEST_BYTES {
+        if text.len() <= crate::domain::queue_service::MAX_REQUEST_BYTES
+            && rows.iter().try_fold(0usize, |bytes, (row, _)| {
+                serde_json::to_vec(row).map(|text| bytes.saturating_add(text.len()))
+            })? <= LEDGER_ROW_REQUEST_BYTES
+        {
             return self.remote(whole, vec![to_value(&rows)?, to_value(mark)?]);
         }
         let digest = super::large::digest(&text);

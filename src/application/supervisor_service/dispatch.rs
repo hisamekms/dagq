@@ -2850,10 +2850,18 @@ fn write_sessions_over<S: SupervisorStore + ?Sized>(
     rows: &[(crate::domain::ledger::LedgerRow, Option<String>)],
     mark: Option<&crate::domain::ledger::session::written::Marks>,
 ) -> Result<bool> {
+    let keys: Vec<_> = rows
+        .iter()
+        .map(|(row, _)| (row.kind, row.key.clone()))
+        .collect();
+    let mut held: std::collections::BTreeMap<_, _> = LedgerStore::ledger_rows_of(store, &keys)?
+        .into_iter()
+        .map(|row| ((row.kind, row.key.clone()), row))
+        .collect();
     let mut over = Vec::with_capacity(rows.len());
     for (row, read) in rows {
-        let held = LedgerStore::ledger_row(store, row.kind, &row.key)?;
-        if held
+        let stored = held.remove(&(row.kind, row.key.clone()));
+        if stored
             .as_ref()
             .map(crate::domain::ledger::LedgerRow::fingerprint)
             .as_ref()
@@ -2861,7 +2869,7 @@ fn write_sessions_over<S: SupervisorStore + ?Sized>(
         {
             return Ok(false);
         }
-        over.push((row.clone(), held));
+        over.push((row.clone(), stored));
     }
     LedgerStore::write_session_rows_marked(store, &over, mark)
 }

@@ -81,6 +81,8 @@ struct Memory {
     refuses: Cell<bool>,
     /// The row whose read fails, as a stored row that does not parse.
     broken: RefCell<Option<(LedgerKind, String)>>,
+    /// A row whose write fails, including the whole transaction that holds it.
+    unwritable: RefCell<Option<(LedgerKind, String)>>,
     /// Runs once, as the next run's steps are read: another builder's pass
     /// between a fold's read of the row and its write.
     between: RefCell<Option<Between>>,
@@ -92,11 +94,20 @@ struct Memory {
     mark: RefCell<Option<SessionsWritten>>,
     /// How many of the next writes of the session rows fail part way.
     batch_fails: Cell<usize>,
+    /// Refuse transactions carrying marks, while mark-only checkpoints
+    /// through write_ledger_marks remain available for clock preservation.
+    refuses_batch_marks: Cell<bool>,
     /// How many writes of the session rows were committed.
     batches: Cell<usize>,
     /// How many writes of the session rows were tried, and which of them
     /// (counted from 0) fails part way.
     batch_calls: Cell<usize>,
+    batch_conflicts_at: Cell<Option<usize>>,
+    /// Route the application's queue targets through its old writer.
+    queue_one_by_one: Cell<bool>,
+    queue_row_calls: Cell<usize>,
+    queue_group_calls: Cell<usize>,
+    queue_row_refusals: Cell<usize>,
     batch_fails_at: Cell<Option<usize>>,
     /// The bytes of the rows' text of each write of the session rows
     /// committed, and whether it held the mark.
@@ -131,8 +142,11 @@ struct Memory {
 }
 
 /// A clock that moves only as the store writes a run, task, queue or node
-/// row ([`LedgerStore::write_ledger_row_over`]), by [`Self::per_write`]
-/// each: a pass on it stops at [`PASS_TIME`] after as many writes as fit,
+/// row ([`LedgerStore::write_ledger_row_over`]), or prepares a queue row
+/// for a group ([`fold_sessions`]), by [`Self::per_write`] each. Charging
+/// a grouped row at preparation models fold/read cost before its atomic
+/// group crosses, so the clock also checks work deferred to that write:
+/// a pass on it stops at [`PASS_TIME`] after as many writes as fit,
 /// [`frozen::WRITES_PER_PASS`] by default (the count the values fixed were
 /// cut by).
 ///
@@ -421,6 +435,10 @@ impl Memory {
 }
 
 impl LedgerStore for Memory {
+    fn uses_singleton_queue_writer(&self) -> bool {
+        self.queue_one_by_one.get()
+    }
+
     fn ledger_run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
         let events = EventStore::run_events(self, run)?;
         self.count_cut(|reads| {
@@ -505,6 +523,10 @@ impl LedgerStore for Memory {
 
     fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool> {
         ensure!(!self.refuses.get(), "attempt to write a readonly database");
+        ensure!(
+            self.unwritable.borrow().as_ref() != Some(&(row.kind, row.key.clone())),
+            "the row cannot be written"
+        );
         self.writes.set(self.writes.get() + 1);
         let mut rows = self.rows.borrow_mut();
         let key = (row.kind, row.key.clone());
@@ -529,6 +551,14 @@ impl LedgerStore for Memory {
         row: &LedgerRow,
         read: Option<&LedgerRow>,
     ) -> Result<Option<bool>> {
+        if row.kind == LedgerKind::Queue {
+            self.queue_row_calls.set(self.queue_row_calls.get() + 1);
+            if self.queue_row_refusals.get() > 0 {
+                self.queue_row_refusals
+                    .set(self.queue_row_refusals.get() - 1);
+                return Ok(None);
+            }
+        }
         let held = self.ledger_row(row.kind, &row.key)?;
         if held.as_ref() != read {
             return Ok(None);
@@ -546,6 +576,9 @@ impl LedgerStore for Memory {
         ensure!(!self.refuses.get(), "attempt to write a readonly database");
         let call = self.batch_calls.get();
         self.batch_calls.set(call + 1);
+        if self.batch_conflicts_at.get() == Some(call) {
+            return Ok(false);
+        }
         if self.batch_fails_at.get() == Some(call) {
             anyhow::bail!("the transaction failed part way");
         }
@@ -558,6 +591,14 @@ impl LedgerStore for Memory {
                 return Ok(false);
             }
         }
+        // Fail before mutating anything, as the adapter rolls its
+        // transaction back if any of its rows cannot be written.
+        ensure!(
+            rows.iter()
+                .all(|(row, _)| self.unwritable.borrow().as_ref()
+                    != Some(&(row.kind, row.key.clone()))),
+            "the row cannot be written"
+        );
         for (row, _) in rows {
             self.write_ledger_row(row)?;
         }
@@ -583,6 +624,13 @@ impl LedgerStore for Memory {
     ) -> Result<bool> {
         if self.refuses_coverage(marks) {
             return Ok(false);
+        }
+        ensure!(
+            !(marks.is_some() && self.refuses_batch_marks.get()),
+            "the transaction failed while writing the mark"
+        );
+        if rows.iter().any(|(row, _)| row.kind == LedgerKind::Queue) {
+            self.queue_group_calls.set(self.queue_group_calls.get() + 1);
         }
         let written = self.write_session_rows_over(rows, marks.map(|marks| &marks.sessions))?;
         if written && let Some(rows) = marks.and_then(|marks| marks.rows) {
@@ -662,6 +710,12 @@ impl LedgerStore for Memory {
         }
         let mut rows = Vec::new();
         for (kind, key) in keys {
+            if *kind == LedgerKind::Queue
+                && crate::application::supervisor_service::caller::current()
+                    == Some("ledger.fold_sessions")
+            {
+                self.clock.charge();
+            }
             rows.extend(if self.rows_one_by_one.get() {
                 self.ledger_row(*kind, key)?
             } else {
@@ -2966,6 +3020,311 @@ fn a_target_that_fails_each_pass_leaves_the_others_written() {
             .borrow()
             .contains_key(&(LedgerKind::Task, "1".to_owned()))
     );
+}
+
+/// A corrupt queue row cannot poison its bulk read's healthy neighbours,
+/// later run/task/node work, or sessions and W. Only the queue R stays
+/// before the unreadable row, which keeps its turn instead of taking first.
+#[test]
+fn a_queue_target_that_fails_each_pass_leaves_the_others_written() {
+    let mut log = Log::default();
+    for message in ["broken", "healthy", "also healthy"] {
+        log.add(
+            None,
+            None,
+            "backend_call_failed",
+            json!({"message": message}),
+            0,
+        );
+    }
+    let memory = Memory::of(&log);
+    memory.broken.replace(Some((LedgerKind::Queue, "1".into())));
+    let mut builder = Builder::default();
+    // The startup sweep has its own reads; exercise the steady-state writer.
+    builder.swept();
+    for secs in 10..13 {
+        let count = usize::try_from(secs - 9).unwrap();
+        log.landed(secs, &run_id(u8::try_from(secs).unwrap()), secs);
+        log.add(
+            None,
+            None,
+            "session_opened",
+            json!({"kind": "runtime_planner", "planner_id": secs}),
+            secs,
+        );
+        log.add(
+            None,
+            None,
+            "backend_call_failed",
+            json!({"message": "new healthy"}),
+            secs,
+        );
+        let healthy = log.last().to_string();
+        memory.events.replace(log.events.clone());
+        memory.samples.borrow_mut().push(sample(secs, T0 + secs));
+        let built = pass(&memory, &mut builder, LATER + secs);
+        assert!(
+            built
+                .failure
+                .as_ref()
+                .is_some_and(|error| error.contains("does not parse")),
+            "{built:?}"
+        );
+        assert!(
+            memory
+                .rows
+                .borrow()
+                .contains_key(&(LedgerKind::Queue, "2".into()))
+        );
+        assert!(
+            memory
+                .rows
+                .borrow()
+                .contains_key(&(LedgerKind::Queue, "3".into()))
+        );
+        assert!(
+            memory
+                .rows
+                .borrow()
+                .contains_key(&(LedgerKind::Queue, healthy))
+        );
+        assert_eq!(memory.count(LedgerKind::Run), count);
+        assert_eq!(memory.count(LedgerKind::Task), count);
+        assert_eq!(memory.count(LedgerKind::Node), 1);
+        assert_eq!(memory.count(LedgerKind::Session), count);
+        assert_eq!(
+            memory.sessions_written().unwrap(),
+            Some(SessionsWritten::at(log.last()))
+        );
+        let r = memory.ledger_marks().unwrap().unwrap().rows.unwrap();
+        assert_eq!(r.position(true).unwrap().through.events, EventId::new(0));
+        assert_eq!(r.position(false).unwrap().through.events, log.last());
+        assert!(
+            !builder
+                .holding_r(CHECKS_PER_PASS)
+                .contains(&Target::Row(LedgerKind::Queue, "1".into()))
+        );
+    }
+}
+
+/// A permanently unwritable row in the deferred queue group must not
+/// block W or core R, with changed sessions or a mark-only session pass.
+/// Healthy neighbours cross even when the failing row is last.
+#[test]
+fn an_unwritable_final_queue_group_leaves_sessions_and_core_r_advancing() {
+    for (sessions, failed) in [(false, "2"), (true, "2"), (false, "9"), (true, "9")] {
+        let mut log = Log::default();
+        // "9" sorts after the healthy rows in these passes, exercising
+        // the final singleton failing after its healthy neighbours saved.
+        for message in 1..=9 {
+            log.add(
+                None,
+                None,
+                "backend_call_failed",
+                json!({"message": message}),
+                0,
+            );
+        }
+        let memory = Memory::of(&log);
+        memory
+            .unwritable
+            .replace(Some((LedgerKind::Queue, failed.to_owned())));
+        let mut builder = Builder::default();
+        builder.swept();
+        for secs in 10..13 {
+            let count = usize::try_from(secs - 9).unwrap();
+            log.landed(secs, &run_id(u8::try_from(secs).unwrap()), secs);
+            if sessions {
+                log.add(
+                    None,
+                    None,
+                    "session_opened",
+                    json!({"kind": "runtime_planner", "planner_id": secs}),
+                    secs,
+                );
+            }
+            log.add(
+                None,
+                None,
+                "backend_call_failed",
+                json!({"message": "new healthy"}),
+                secs,
+            );
+            let healthy = log.last().to_string();
+            memory.events.replace(log.events.clone());
+            memory.samples.borrow_mut().push(sample(secs, T0 + secs));
+            let built = pass(&memory, &mut builder, LATER + secs);
+            assert!(
+                built
+                    .failure
+                    .as_ref()
+                    .is_some_and(|e| e.contains("cannot be written")),
+                "{built:?}"
+            );
+            assert!(
+                memory
+                    .rows
+                    .borrow()
+                    .contains_key(&(LedgerKind::Queue, "1".into()))
+            );
+            assert!(
+                memory
+                    .rows
+                    .borrow()
+                    .contains_key(&(LedgerKind::Queue, healthy))
+            );
+            assert!(
+                !memory
+                    .rows
+                    .borrow()
+                    .contains_key(&(LedgerKind::Queue, failed.to_owned()))
+            );
+            assert_eq!(memory.count(LedgerKind::Run), count);
+            assert_eq!(memory.count(LedgerKind::Task), count);
+            assert_eq!(memory.count(LedgerKind::Node), 1);
+            assert_eq!(
+                memory.count(LedgerKind::Session),
+                if sessions { count } else { 0 }
+            );
+            assert_eq!(built.sessions, usize::from(sessions));
+            let marks = memory.ledger_marks().unwrap().unwrap();
+            assert_eq!(marks.sessions, SessionsWritten::at(log.last()));
+            assert_eq!(
+                marks.rows.unwrap().position(true).unwrap().through.events,
+                EventId::new(0)
+            );
+            assert_eq!(
+                marks.rows.unwrap().position(false).unwrap().through.events,
+                log.last()
+            );
+            assert!(
+                !builder
+                    .holding_r(CHECKS_PER_PASS)
+                    .contains(&Target::Row(LedgerKind::Queue, failed.to_owned()))
+            );
+        }
+    }
+}
+
+/// An error flushing the previous pending row is that row's failure.
+/// The current healthy target must still be folded and written.
+#[test]
+fn a_failed_pending_queue_write_does_not_skip_the_current_target() {
+    let mut log = Log::default();
+    for message in ["unwritable", "healthy"] {
+        log.add(
+            None,
+            None,
+            "backend_call_failed",
+            json!({"message": message}),
+            0,
+        );
+    }
+    let memory = Memory::of(&log);
+    memory
+        .unwritable
+        .replace(Some((LedgerKind::Queue, "1".into())));
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events);
+    builder.mark_rows(&Inputs::new(&log.events, ms(LATER), BUILT, true).rows);
+    let targets = builder.take(CHECKS_PER_PASS);
+    let folded = fold_sessions(&memory, &builder, (ms(LATER), BUILT), &targets).unwrap();
+    let mut built = Built {
+        pending_queue: SessionChunk {
+            rows: vec![folded.write[0].clone()],
+            bytes: serde_json::to_vec(&folded.write[0].1).unwrap().len(),
+        },
+        ..Default::default()
+    };
+    let mut failure = None;
+    assert!(write_queue_groups(
+        &memory,
+        &mut builder,
+        (ms(LATER), BUILT),
+        &targets[1..],
+        &mut built,
+        &mut failure
+    ));
+    assert!(write_queue_chunk(
+        &memory,
+        &mut builder,
+        std::mem::take(&mut built.pending_queue).rows,
+        None,
+        &mut built.written,
+        &mut failure
+    ));
+    assert!(failure.is_some());
+    assert_eq!(built.written, 1);
+    assert!(
+        memory
+            .rows
+            .borrow()
+            .contains_key(&(LedgerKind::Queue, "2".into()))
+    );
+    assert_eq!(builder.backlog(), 1, "only the unwritable row stays marked");
+}
+
+/// Version/settlement rewrites cannot hold queue R when the stored row
+/// records every input, even behind another writer or refused on compare.
+#[test]
+fn recorded_queue_inputs_release_r_before_behind_or_refused_rewrites() {
+    for ahead in [false, true] {
+        let mut log = Log::default();
+        log.add(None, None, "backend_call_failed", json!({}), 0);
+        let memory = Memory::of(&log);
+        drain(&memory, &mut Builder::default(), LATER);
+        let mut stored = memory.row(LedgerKind::Queue, "1");
+        stored.ledger_v = LEDGER_V - 1;
+        if ahead {
+            stored.inputs_through.events = EventId::new(2);
+        }
+        memory
+            .rows
+            .borrow_mut()
+            .insert((LedgerKind::Queue, "1".into()), stored.clone());
+        let mut builder = Builder::default();
+        builder.mark_events(&log.events);
+        builder.mark_rows(&Inputs::new(&log.events, ms(LATER), BUILT, true).rows);
+        assert_eq!(builder.rows_written().unwrap().events, EventId::new(0));
+        let targets = builder.take(CHECKS_PER_PASS);
+        let mut built = Built::default();
+        let mut failure = None;
+        assert!(write_queue_groups(
+            &memory,
+            &mut builder,
+            (ms(LATER), BUILT),
+            &targets,
+            &mut built,
+            &mut failure
+        ));
+        if ahead {
+            assert!(
+                built.pending_queue.rows.is_empty(),
+                "behind: no write attempted"
+            );
+        } else {
+            memory
+                .batch_conflicts_at
+                .set(Some(memory.batch_calls.get()));
+            assert!(!write_queue_chunk(
+                &memory,
+                &mut builder,
+                std::mem::take(&mut built.pending_queue).rows,
+                None,
+                &mut built.written,
+                &mut failure
+            ));
+        }
+        assert!(failure.is_none());
+        assert_eq!(
+            memory.row(LedgerKind::Queue, "1"),
+            stored,
+            "rewrite not committed"
+        );
+        assert_eq!(builder.rows_written().unwrap().events, log.last());
+        assert_eq!(builder.backlog(), 1, "the rewrite still has its turn");
+        assert!(builder.holding_r(CHECKS_PER_PASS).is_empty());
+    }
 }
 
 /// `run` attached to the host at `secs` (its `environment_attached`); the
@@ -6628,7 +6987,10 @@ fn session_folds_name_their_ledger_row_reads() {
         folded.write.len() + folded.held.len() + folded.behind.len(),
         1
     );
-    assert_ledger_row_callers(&memory, &["ledger.fold_sessions"]);
+    assert_eq!(
+        *memory.callers.borrow(),
+        [("ledger_rows_of", Some("ledger.fold_sessions"))]
+    );
 }
 
 #[test]
@@ -6680,4 +7042,310 @@ fn push_restoration_names_its_own_and_task_runs_ledger_row_reads() {
         &memory,
         &["ledger.restore_pushes", "ledger.run_and_task_records"],
     );
+}
+
+/// The same deterministic EventStore, folded with singleton queue writes
+/// or atomic groups, produces identical rows/marks and reader inputs.
+/// A refused second group stops later groups and R until a fresh pass.
+#[test]
+fn grouped_queue_writes_match_singletons_and_retry_before_advancing_r() {
+    let mut log = sessions_and_tasks(3, 2);
+    log.landed(3, &run_id(3), 5);
+    for index in 0..450 {
+        log.add(
+            None,
+            None,
+            "claim_held",
+            json!({"supervisor": format!("s-{index}")}),
+            10 + index,
+        );
+        log.add(
+            None,
+            None,
+            "claim_resumed",
+            json!({"supervisor": format!("s-{index}")}),
+            11 + index,
+        );
+    }
+    // Keep each row normal but force several byte groups, so refusal
+    // number two is a queue group with later queue and session work.
+    for index in 0..450 {
+        log.add(
+            None,
+            None,
+            "backend_call_failed",
+            json!({"message": "x".repeat(4096)}),
+            500 + index,
+        );
+    }
+    let old = Memory::of(&log);
+    old.queue_one_by_one.set(true);
+    old.queue_row_refusals.set(WRITE_TRIES);
+    let mut old_builder = Builder::default();
+    let old_first = pass(&old, &mut old_builder, LATER);
+    assert_eq!(old_first.failure, None);
+    assert_eq!(
+        old.queue_row_refusals.get(),
+        0,
+        "the old writer uses WRITE_TRIES"
+    );
+    assert!(
+        old.count(LedgerKind::Queue) > 1,
+        "a refused old target does not stop later targets"
+    );
+    assert_eq!(
+        old.sessions_written().unwrap(),
+        Some(SessionsWritten::at(log.last())),
+        "the old writer still writes W beside a conservative R"
+    );
+    drain(&old, &mut old_builder, LATER);
+    assert!(old.queue_row_calls.get() > old.count(LedgerKind::Queue));
+    assert_eq!(
+        old.queue_group_calls.get(),
+        0,
+        "the baseline never submits queue groups"
+    );
+    let grouped = Memory::of(&log);
+    // This comparison isolates the byte groups from the pass-time bound;
+    // queue_groups_prepare_only_the_rows_within_the_pass_time covers it.
+    grouped.clock.costs(Duration::ZERO);
+    let mut builder = Builder::default();
+    // The second group is refused; it and every later group remain pending.
+    grouped.batch_conflicts_at.set(Some(1));
+    let first = pass(&grouped, &mut builder, LATER);
+    assert_eq!(first.failure, None);
+    assert_eq!(grouped.batch_calls.get(), 2);
+    assert_eq!(grouped.queue_group_calls.get(), 2, "a queue group refused");
+    assert_eq!(grouped.count(LedgerKind::Session), 0, "later sessions wait");
+    assert!(grouped.count(LedgerKind::Queue) > 0);
+    assert!(grouped.count(LedgerKind::Queue) < old.count(LedgerKind::Queue));
+    assert!(grouped.ledger_marks().unwrap().is_none());
+    assert!(builder.backlog() > 0);
+    let reads_before_retry = grouped.row_reads.get();
+    grouped.batch_conflicts_at.set(None);
+    drain(&grouped, &mut builder, LATER);
+    assert!(grouped.queue_group_calls.get() > 0);
+    assert_eq!(
+        grouped.queue_row_calls.get(),
+        0,
+        "the group writer never uses queue singleton writes"
+    );
+    assert!(grouped.row_reads.get() > reads_before_retry);
+    assert_eq!(*grouped.rows.borrow(), *old.rows.borrow());
+    assert_eq!(grouped.ledger_marks().unwrap(), old.ledger_marks().unwrap());
+    // stats, KPI and report all consume these same folded rows/window.
+    let window = |memory: &Memory| {
+        crate::domain::ledger::window::select(
+            memory.rows.borrow().values().cloned().collect(),
+            &crate::domain::ledger::window::WindowQuery {
+                now_ms: ms(LATER),
+                ..Default::default()
+            },
+        )
+    };
+    let readings = |memory: &Memory| {
+        use crate::domain::{kpi, stats};
+        let window = window(memory);
+        let times = window.run_times();
+        let live = stats::LiveSnapshot {
+            ledger: Some(times.clone()),
+            ..Default::default()
+        };
+        let stats = stats::stats(
+            window.events(),
+            &Default::default(),
+            ms(LATER) / 1000,
+            Default::default(),
+            &Default::default(),
+            &live,
+        );
+        let rows: Vec<_> = memory.rows.borrow().values().cloned().collect();
+        let refs: Vec<_> = rows
+            .iter()
+            .filter(|row| row.kind == LedgerKind::Run)
+            .collect();
+        let executions = window.executions();
+        let post = window.post_landing_book();
+        let kpi = kpi::kpi(
+            &kpi::KpiInput {
+                events: window.events(),
+                goals: &Default::default(),
+                changes: &Default::default(),
+                areas: None,
+                heartbeats: &Default::default(),
+                draft_origins: &Default::default(),
+                now: ms(LATER) / 1000,
+                utc_offset_secs: 0,
+                cores: None,
+                rust_toolchain: false,
+                config: &Default::default(),
+                host: None,
+                ledger: Some(&times),
+                rows: &refs,
+                post_landing: Some(&post),
+                executions: Some(&executions),
+                earlier: None,
+            },
+            &kpi::KpiQuery {
+                last: 14,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let report = kpi::report::Report::new(
+            kpi.clone(),
+            kpi::Period::Day,
+            ms(LATER),
+            BUILT,
+            &[],
+            kpi::report::DiagramSection::not_drawn(vec![], false, "no tasks"),
+        );
+        (
+            serde_json::to_value(stats).unwrap(),
+            serde_json::to_value(kpi).unwrap(),
+            serde_json::to_value(report).unwrap(),
+        )
+    };
+    assert_eq!(readings(&grouped), readings(&old));
+}
+
+/// Preparing queue rows consumes the pass time one row at a time, while
+/// the rows already prepared cross in one final group. Later passes fold
+/// only their own share, leave R before unread rows and eventually catch up.
+#[test]
+fn queue_groups_prepare_only_the_rows_within_the_pass_time() {
+    let mut log = Log::default();
+    for message in 1..=600 {
+        log.add(
+            None,
+            None,
+            "backend_call_failed",
+            json!({"message": message}),
+            0,
+        );
+    }
+    let memory = Memory::of(&log);
+    memory.clock.costs(PASS_TIME / 100);
+    let mut builder = Builder::default();
+    let first = pass(&memory, &mut builder, LATER);
+    assert_eq!(first.failure, None);
+    assert_eq!((first.written, first.backlog, first.cut), (100, 500, true));
+    assert_eq!(memory.queue_group_calls.get(), 1);
+    assert_eq!(memory.queue_row_calls.get(), 0);
+    assert!(r_of(&memory).events < log.last());
+    let mut written = first.written;
+    for _ in 0..10 {
+        if builder.backlog() == 0 {
+            break;
+        }
+        let built = pass(&memory, &mut builder, LATER);
+        assert_eq!(built.failure, None);
+        assert!((1..=100).contains(&built.written));
+        assert!(built.work.folded <= built.written + 3, "{built:?}");
+        written += built.written;
+    }
+    assert_eq!((written, builder.backlog()), (600, 0));
+    assert_eq!(memory.count(LedgerKind::Queue), 600);
+    assert_eq!(r_of(&memory).events, log.last());
+    assert_eq!(memory.queue_group_calls.get(), 6);
+    assert_eq!(memory.queue_row_calls.get(), 0);
+}
+
+/// A compare refusal still stops later groups and certificates, but it
+/// must not erase an earlier isolated store error from the pass report.
+#[test]
+fn a_queue_compare_refusal_preserves_an_earlier_isolated_error() {
+    let mut log = Log::default();
+    for message in ["broken", "healthy", "later"] {
+        log.add(
+            None,
+            None,
+            "backend_call_failed",
+            json!({"message": message}),
+            0,
+        );
+    }
+    let memory = Memory::of(&log);
+    memory.broken.replace(Some((LedgerKind::Queue, "1".into())));
+    memory.batch_conflicts_at.set(Some(0));
+    let mut builder = Builder::default();
+    builder.swept();
+    let built = pass(&memory, &mut builder, LATER);
+    assert!(
+        built
+            .failure
+            .as_ref()
+            .is_some_and(|error| error.contains("does not parse")),
+        "{built:?}"
+    );
+    assert_eq!(
+        memory.batch_calls.get(),
+        1,
+        "the refusal stops later requests"
+    );
+    assert!(memory.rows.borrow().is_empty());
+    assert!(memory.ledger_marks().unwrap().is_none());
+    assert_eq!(builder.backlog(), 3);
+}
+
+/// A conflict is not an error: the unwritten prefix and R must still
+/// remain pending, and no later session group may be sent that pass.
+#[test]
+fn a_refused_session_group_stops_the_pass_before_later_groups_and_r() {
+    let log = sessions_and_tasks(12, 0);
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    memory.batch_conflicts_at.set(Some(1));
+    let built = build_pass_bounded(
+        &memory,
+        &mut builder,
+        (ms(LATER), BUILT),
+        Retain::default(),
+        None,
+        (EVENTS_PER_READ, 1),
+    );
+    assert_eq!(built.failure, None);
+    assert_eq!(memory.batch_calls.get(), 2);
+    assert_eq!(memory.count(LedgerKind::Session), 1);
+    assert_eq!(memory.ledger_marks().unwrap(), None);
+    memory.batch_conflicts_at.set(None);
+    drain(&memory, &mut builder, LATER);
+    assert_eq!(
+        rows_of_kind(&memory, LedgerKind::Session),
+        rows_of_every_event(&log)
+    );
+    assert_eq!(
+        memory.sessions_written().unwrap(),
+        Some(SessionsWritten::at(log.last()))
+    );
+}
+
+/// With no changed session row, the final queue row itself carries R,
+/// even when its text needs the oversized singleton path.
+#[test]
+fn the_last_oversized_queue_group_carries_r_without_a_mark_only_write() {
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "backend_call_failed",
+        json!({"message": "small"}),
+        1,
+    )
+    .add(
+        None,
+        None,
+        "backend_call_failed",
+        json!({"message": "x".repeat(crate::domain::queue_service::MAX_REQUEST_BYTES + 1)}),
+        2,
+    );
+    let memory = Memory::of(&log);
+    let built = drain(&memory, &mut Builder::default(), LATER);
+    assert_eq!(built.failure, None);
+    let batches = memory.batch_bytes.borrow();
+    assert_eq!(batches.len(), 2);
+    assert!(!batches[0].1);
+    assert!(batches[1].0 > SESSION_BYTES_PER_WRITE && batches[1].1);
+    assert_eq!(memory.marks_alone.get(), 0);
+    assert_eq!(r_of(&memory).events, log.last());
 }
