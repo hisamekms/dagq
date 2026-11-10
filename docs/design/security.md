@@ -83,7 +83,9 @@ resourceの持ち主や状態が分からないときも拒む（fail closed）�
 | image-publisher | — | — | — | — | — | — | — | — | — | — | — | — | — | — | `image.publish`だけ |
 | executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ | — |
 
-権限ごとの持ち主とresourceの条件は[AuthorizationのPolicy](authorization.md#policy)、判定の入口は`StaticPolicy`が持つ。
+`identity.login`はuser専用。
+
+権限ごとの持ち主とresourceの条件は[AuthorizationのPolicy](authorization.md#policy)を読む。
 
 - plannerの運用の権限はADR-t728-1（上）の決定7に従う（`dagq-planner` skillの「Where your authority ends」はこの行と一致させる。規則は[文書の規則](../development/documents.md)の「権限の表を写す文書」）
 - sessionの画面とlogを読む・送る`screen.read`・`screen.send`（[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定7）はuserとinboxだけが持つ。

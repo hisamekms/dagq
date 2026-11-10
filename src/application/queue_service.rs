@@ -7201,6 +7201,24 @@ pub(crate) mod tests {
         assert!(backend.log.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn an_authenticated_principal_records_one_identity_login_denial() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let payload = json!({"event":"authorization_denied","role":"worker","capability":"identity.login","reason":"not granted","resource":{"kind":"queue"}});
+        let response = service.handle(&request(
+            Some("worker"),
+            UseCase::DenialRecord,
+            payload.clone(),
+        ));
+        assert!(response.ok, "{response:?}");
+        assert_eq!(*backend.log.lock().unwrap(), vec![payload]);
+    }
+
     /// `denial_record` records a refusal only as the caller's own: one of
     /// another role is refused (and that refusal recorded as the caller's),
     /// one the policy would not make and one that does not read are bad

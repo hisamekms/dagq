@@ -48,7 +48,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 ## Capability
 
 CLIからcapabilityとresourceへの入口は`src/main.rs`の`requests`。
-capabilityの意味と予約の区分は`src/domain/authorization.rs`の`Capability`が持つ。
+定義は`src/domain/authorization.rs`の`Capability`、端末の認証は`application::login`。
 予約のcapabilityは誰にも与えない。
 CLIに無いjobの判定結果はデータとしてsupervisorが読み、遷移に写す（[Review](supervisor-lifecycle/review.md)）。
 
@@ -80,8 +80,8 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | runner | `runner.declare`・`runner.claim`・`runner.heartbeat`・`runner.report` | 申告・pullは自分、報告・返却は割り当てrun |
 | image-publisher | `image.publish`だけ | なし |
 | inbox（続き） | `runner.list` | 親の人の一覧の範囲だけ |
-| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`・`runner.share`・`runner.declare`は持たない | なし。人自身の操作との区別は記録が持つ |
-| planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくaskは`request.decline`と同じ所有の規則。 |
+| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`・`runner.share`・`runner.declare`・`identity.login`は持たない | なし。人自身の操作との区別は記録が持つ |
+| planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge` | runはnoteだけでask不可。askは`planner_question`だけ、依頼のaskは担当planner本人だけ（`request.decline`と同じ所有の規則）。 |
 | planner（続き） | `task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss` | taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）で、`revising`のproposalのtaskは持ち主だけ（不明なら拒む）。 |
 | planner（続き） | `planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install` | `revisit`（`task.write`）はdraftだけで、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。 |
 | planner（続き） | `queue.admin` | `follow_up.judge`は全状態に記録でき、移動はdraft・readyだけ。noteは全状態に書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`request.decline`はそのplannerが立てられた依頼（閉じていないplanner本人）だけで、plannerが分からなければ拒む |
@@ -104,9 +104,12 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 人の優先度を守る判定の入口は`check_priority_change`、所属を動かす制約は[所属の判断](follow-up-membership.md)。
 askのkindをroleに制限する入口は`opens_ask`。
 
-`AuthorizationError`はroleと拒んだcapabilityと理由（`DenyReason`）だけを出し、actor id（session idを含みうる）やresourceのid・本文を出さない。
+拒否の情報の制限は`AuthorizationError`を読む。
 
 ## 適用の範囲
+
+端末のlogin・logout・whoamiは`identity.login`で認可し、userだけに許す。
+入力不備・資格不在は認可の拒否ではなく、queueへ送らない。
 
 ### 計画系のコマンド（application）
 
@@ -200,7 +203,7 @@ wrapperの操作と制御側のコマンドの判定は`QueueService`のdoc comm
 
 ### ほかのコマンド（CLIの入口）
 
-上の3つ以外（読み取り・`watch`など）は状態を変えない。
+queueの読み取り・`watch`などはqueueの状態を変えない。
 
 - 宛ての環境のあるworker・job・observerはserviceのユースケースだけを送り、ほかはCLIが拒みDBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
 - 宛ての環境の無いuser・inbox・plannerはserviceが答える読み取り・`watch`・`status`・`report`・`graph --out`をserviceへ送り、serviceがprincipalで認可する（読み取りは上の節、後の2つは`Gate`の`queue.export`）。

@@ -55,6 +55,33 @@ struct RetiredCmux {
 
 #[derive(Subcommand, Clone)]
 enum Command {
+    /// Log in on your own terminal using a public OIDC client; no client secret.
+    Login {
+        /// Control-side destination; falls back to DAGQ_CONTROL_URL.
+        #[arg(long)]
+        control_url: Option<String>,
+        /// OIDC issuer; falls back to DAGQ_LOGIN_ISSUER.
+        #[arg(long)]
+        issuer: Option<String>,
+        /// Public client ID (DAGQ_LOGIN_CLIENT_ID). Deployment DAGQ_OIDC_AUDIENCE
+        /// must have this same value for the ID token's audience to pass.
+        #[arg(long)]
+        client_id: Option<String>,
+        /// Use loopback authorization code with S256 PKCE instead of device code.
+        #[arg(long)]
+        browser: bool,
+        /// Whitespace-separated scopes (DAGQ_LOGIN_SCOPE); always includes openid.
+        #[arg(long)]
+        scope: Option<String>,
+        /// Additional authorization parameters, NAME=VALUE, repeatable.
+        #[arg(long)]
+        auth_param: Vec<String>,
+    },
+    /// Remove this terminal's credentials locally; no server revocation.
+    Logout,
+    /// Show identity and expiry from this terminal's saved exchange response.
+    Whoami,
+
     /// Initialize the queue, creating its directory if needed. An existing queue is checked, never migrated.
     /// Its output recommends the review's settings (`recommended`): the built-ins on and off by
     /// default, and `dagq setup-review` to write the project's rules for them; the toolchain
@@ -2647,6 +2674,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
     let one = |capability, resource| vec![(capability, resource)];
     let queue = |capability| vec![(capability, Resource::Queue)];
     match command {
+        Command::Login { .. } | Command::Logout | Command::Whoami => queue(C::IdentityLogin),
         // Run before any actor is read (`execute`): it opens no queue and
         // carries bytes only (ADR-t2114-3).
         Command::Relay { .. } | Command::ReviewProgram { .. } | Command::CodexInboxHook { .. } => {
@@ -3136,6 +3164,9 @@ impl dagq::application::commands::DenialLog for CommandDenials<'_> {
 /// observer and the headless jobs always got; a client-mode dagq's refusal
 /// by the service's policy is printed the same, with the service's code.
 fn error_json(error: &anyhow::Error) -> Value {
+    if error.is::<dagq::application::login::ApiVersionMismatch>() {
+        return json!({"error": error.to_string(), "queue_service": {"code": "api_version_mismatch"}});
+    }
     // A client-mode dagq's failure carries the service's code or its own
     // (goal 82's stage (3)).
     if let Some(failure) =
@@ -4220,6 +4251,13 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
 /// every command when the service does not answer (fail closed).
 fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) -> Result<Value> {
     use dagq::infrastructure::queue_service::ClientFailure;
+    if matches!(
+        cli.command,
+        Command::Login { .. } | Command::Logout | Command::Whoami
+    ) {
+        let name = control_side_command(&cli.command).unwrap();
+        return Err(ClientFailure::new("control_side_command", format!("dagq {name} is a command a person runs on their own terminal; client mode sends nothing for it")).into());
+    }
     if let Some(db) = &cli.db {
         return Err(ClientFailure::new(
             "queue_named",
@@ -4435,7 +4473,10 @@ fn unserved(role: ActorRole, command: &Command, registered: bool) -> Result<Unse
         {
             Unserved::SupervisorsJob
         }
-        Command::Relay { .. }
+        Command::Login { .. }
+        | Command::Logout
+        | Command::Whoami
+        | Command::Relay { .. }
         | Command::ReviewProgram { .. }
         | Command::CodexInboxHook { .. }
         | Command::Session { .. }
@@ -4622,14 +4663,64 @@ fn host_client(
     call_service(&client, Some(db), command, use_case, params)
 }
 
-/// The name of `command` when it is one of the control side's, which a
-/// person or the inbox runs on the host and a client-mode `dagq` refuses
-/// as `control_side_command` rather than as `no_use_case`: none of the
-/// service's use cases (`service status` reads the service's socket and
-/// files on the host beside its one read), so a command it answers is
-/// sent to it and authorized on its side.
+/// Build the terminal adapters only after the capability gate. This path
+/// opens no queue and never constructs a service request.
+fn terminal_identity(command: &Command) -> Result<Value> {
+    use dagq::application::login::{self, CredentialStore, LoginInteraction};
+    use dagq::infrastructure::{credentials, oidc_keys::HttpsDocumentSource};
+    // Validate input before opening either store or talking to any endpoint.
+    let options = if let Command::Login {
+        control_url,
+        issuer,
+        client_id,
+        browser,
+        scope,
+        auth_param,
+    } = command
+    {
+        Some(login::LoginOptions {
+            destination: login::destination(
+                [control_url.clone(), issuer.clone(), client_id.clone()],
+                |name| env::var(name).ok(),
+            )?,
+            browser: *browser,
+            scope: scope.clone().or_else(|| env::var("DAGQ_LOGIN_SCOPE").ok()),
+            auth_params: login::auth_params(auth_param)?,
+        })
+    } else {
+        None
+    };
+    let choice = login::StoreChoice::parse(env::var("DAGQ_CREDENTIAL_STORE").ok().as_deref())?;
+    let file = credentials::FileCredentials::from_env(|name| env::var(name).ok())?;
+    let store = login::Stores {
+        choice,
+        os: &credentials::OsCredentials,
+        file: &file,
+    };
+    let http = HttpsDocumentSource::for_login();
+    let terminal = dagq::infrastructure::login::TerminalLogin;
+    match command {
+        Command::Login { .. } => {
+            login::login(&options.unwrap(), &http, &store, &terminal)?;
+            Ok(json!({"logged_in": true}))
+        }
+        Command::Logout => {
+            store.delete()?;
+            Ok(json!({"logged_out": true}))
+        }
+        Command::Whoami => login::whoami(&http, &store, terminal.now()),
+        _ => unreachable!(),
+    }
+}
+
+/// Commands client mode refuses by name, without sending a use case.
+/// Diagnostics belong to a person or inbox on the host; authentication
+/// belongs only to a person on their own terminal.
 fn control_side_command(command: &Command) -> Option<&'static str> {
     match command {
+        Command::Login { .. } => Some("login"),
+        Command::Logout => Some("logout"),
+        Command::Whoami => Some("whoami"),
         Command::Doctor { .. } => Some("doctor"),
         Command::Service {
             command: ServiceCommand::Status,
@@ -4875,6 +4966,12 @@ fn execute(cli: Cli) -> Result<Value> {
         return result;
     }
     check_access(&actor, &cli.command, cli.db.as_deref())?;
+    if matches!(
+        cli.command,
+        Command::Login { .. } | Command::Logout | Command::Whoami
+    ) {
+        return terminal_identity(&cli.command);
+    }
     dagq::infrastructure::event_actor::set_process_actor(event_actor(&actor, &cli.command));
     // A command that starts a job asks the queue service for its token as
     // its caller (ADR-t3102-1 decision 2).
@@ -6066,6 +6163,72 @@ mod daemon_output_tests {
     };
 
     #[test]
+    fn identity_commands_are_local_user_capabilities_and_client_mode_never_sends_them() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let result = std::panic::catch_unwind(identity_command_cases);
+                let _ = done.send(result);
+            })
+            .unwrap();
+        if let Err(panic) = finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("identity CLI cases timed out")
+        {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    fn identity_command_cases() {
+        let version = anyhow::Error::new(dagq::application::login::ApiVersionMismatch {
+            minimum: 3,
+            maximum: 4,
+        });
+        assert_eq!(
+            error_json(&version)["queue_service"]["code"],
+            "api_version_mismatch"
+        );
+        assert!(
+            error_json(&version)["error"]
+                .as_str()
+                .unwrap()
+                .contains("3..4")
+        );
+        for name in ["login", "logout", "whoami"] {
+            let cli = Cli::try_parse_from(["dagq", name]).unwrap();
+            assert_eq!(
+                requests(&cli.command),
+                vec![(Capability::IdentityLogin, Resource::Queue)]
+            );
+            assert!(!authorized_in_application(&cli.command));
+            for setting in ["DAGQ_SERVICE_SOCKET", "DAGQ_SERVICE_URL"] {
+                let client = dagq::infrastructure::queue_service::Client::from_env(|key| {
+                    (key == setting).then(|| {
+                        if setting == "DAGQ_SERVICE_SOCKET" {
+                            "/never-opened.sock".into()
+                        } else {
+                            "http://127.0.0.1:1".into()
+                        }
+                    })
+                })
+                .unwrap()
+                .unwrap();
+                let error = client_mode(&client, &cli).unwrap_err().to_string();
+                assert!(
+                    error.contains("control_side_command") && error.contains("own terminal"),
+                    "{error}"
+                );
+            }
+        }
+        for name in ["logout", "whoami"] {
+            assert!(
+                Cli::try_parse_from(["dagq", name, "--control-url", "https://elsewhere"]).is_err()
+            );
+        }
+    }
+
+    #[test]
     fn only_resident_control_commands_replace_the_cli_response() {
         for command in ["service serve", "queue-broker serve", "supervise"] {
             assert!(daemon_command(command));
@@ -6500,6 +6663,9 @@ mod tests {
     fn denied_commands_need_what_the_table_says() {
         use dagq::application::execution::DAGQ_COMMANDS;
         let samples: &[(&str, &[&str])] = &[
+            ("login", &[]),
+            ("logout", &[]),
+            ("whoami", &[]),
             ("watch", &[]),
             ("report", &[]),
             ("init", &[]),
@@ -6733,6 +6899,9 @@ mod tests {
                                  operations as its command's steps (ControlCommand::lifecycle)";
         const NO_QUEUE: &str = "opens no queue for the command";
         let kept: &[(&str, &str)] = &[
+            ("login", NO_QUEUE),
+            ("logout", NO_QUEUE),
+            ("whoami", NO_QUEUE),
             (
                 "init",
                 "creates the DB where there is none, and sends the rest to the queue's service: \
@@ -6938,7 +7107,14 @@ mod tests {
         assert!(wrong.is_empty(), "{wrong:#?}");
         assert_eq!(
             refused_by_name,
-            ["doctor", "service status", "queue-broker status"]
+            [
+                "login",
+                "logout",
+                "whoami",
+                "doctor",
+                "service status",
+                "queue-broker status"
+            ]
         );
         for (leaf, _) in kept {
             assert!(found.iter().any(|found| found == leaf), "no command {leaf}");

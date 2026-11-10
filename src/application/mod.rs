@@ -34,6 +34,7 @@ pub mod integrate;
 pub mod kpi;
 pub mod lifecycle;
 pub mod live_inputs;
+pub mod login;
 pub mod main_history;
 pub mod main_log;
 pub mod marks;

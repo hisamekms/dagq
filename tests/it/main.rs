@@ -31,6 +31,7 @@ mod cli_goals;
 mod cli_graph;
 mod cli_install_release;
 mod cli_kpi;
+mod cli_login;
 mod cli_operations;
 mod cli_planner_request;
 mod cli_proposals;

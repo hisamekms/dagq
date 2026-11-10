@@ -21,8 +21,9 @@ use std::{
 /// OBJECT_STORE_ENDPOINT is an explicit http(s) URL even for AWS S3; BUCKET
 /// and REGION are nonempty S3 names. ACCESS_KEY_ID and SECRET_ACCESS_KEY
 /// are a pair; absent, leave credentials to the SDK's standard discovery.
-/// OIDC_ISSUER is an HTTPS issuer URL, AUDIENCE its nonempty audience (the
-/// domain OidcConfig retains the RS256/ES256 defaults).
+/// OIDC_ISSUER is an HTTPS issuer URL, AUDIENCE its nonempty audience.
+/// For human login DAGQ_OIDC_AUDIENCE must equal the CLI public client_id
+/// (the ID token audience). OidcConfig retains the RS256/ES256 defaults.
 /// GITHUB_{RUNNER,MAIN}_APP_ID are positive numeric IDs of distinct Apps;
 /// their APP_KEY values are PEM private keys, normally supplied via _FILE.
 /// GITHUB_API_BASE_URL is the HTTPS REST base, default https://api.github.com;

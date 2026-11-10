@@ -104,6 +104,10 @@ brokerの起動・停止の例外は`application::queue_broker::start_by_hand`�
 
 ## principal
 
+人の端末の認証操作は`application::login`が持ち、queueを開かずserviceへ転送しない。
+遠くの人のtokenはその人の資格の置き場にだけ置き、hostのsocketの入口では受けない。
+認可の拒否だけは既存のbest-effortの記録経路を使い、serviceが呼び出し元を認証できたときだけ認可の拒否が記録される。
+
 serviceはtokenもroleも無い要求を、同じOSのuserのsocket peerならuserとして扱う。
 roleを名乗るだけの要求は認めず、tokenが無ければ拒む（`QueueService::authenticate`）。
 inboxとplannerの次の手は`domain::queue_service::missing_token_next`。

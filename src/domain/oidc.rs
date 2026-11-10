@@ -450,6 +450,16 @@ fn is_https(url: &str) -> bool {
         .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
 }
 
+/// Discovery issuer matching shared by the control side and the public CLI.
+/// Exact equality includes any trailing slash; no endpoint policy is implied.
+pub fn check_discovery_issuer(expected: &str, actual: &str) -> Result<(), KeyFetchFailure> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(KeyFetchFailure::DiscoveryIssuerMismatch)
+    }
+}
+
 /// The address of the key document, from a discovery document that names
 /// exactly the configured issuer (OIDC Discovery section 4.3).
 pub fn check_discovery(config: &OidcConfig, body: &[u8]) -> Result<String, KeyFetchFailure> {
@@ -460,9 +470,7 @@ pub fn check_discovery(config: &OidcConfig, body: &[u8]) -> Result<String, KeyFe
     }
     let discovery: Discovery =
         serde_json::from_slice(body).map_err(|_| KeyFetchFailure::DiscoveryMalformed)?;
-    if discovery.issuer != config.issuer {
-        return Err(KeyFetchFailure::DiscoveryIssuerMismatch);
-    }
+    check_discovery_issuer(&config.issuer, &discovery.issuer)?;
     if !is_https(&discovery.jwks_uri) {
         return Err(KeyFetchFailure::JwksUriNotHttps);
     }

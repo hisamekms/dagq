@@ -12,7 +12,7 @@ Take a refusal as the answer: never retry it under another `DAGQ_ROLE`, without 
 
 A worker, a job and the observer get the queue service's address and a token, never the queue's path: their `dagq` sends each command to the service, which checks it for the token's principal whatever `DAGQ_ROLE` says. A refusal names a code:
 
-- `no_use_case`: the service does not serve the command; `control_side_command`: `doctor`, `service status` or `queue-broker status`, which a person or the inbox runs on the host; `queue_named`: it names a queue (`--db`). Never add `--db` to reach the queue; hand the step on.
+- `no_use_case`: the service does not serve the command; `control_side_command`: `doctor`, `service status` or `queue-broker status`, which a person or the inbox runs on the host, or `login`, `logout`, `whoami`, which a person runs on their own terminal (nothing is sent or recorded for this refusal); `queue_named`: it names a queue (`--db`). Never add `--db` to reach the queue; hand the step on.
 - `authorization_denied`: refused for your principal, as in "The check".
 - `unreachable`, `unauthenticated`, `no_credential`, `client_misconfigured`: no service, token or usable address. Do not work around it (the client never opens the queue instead): try again later, or write it in the receipt.
 - `response_too_large`: the answer is too long to print. Do not retry the same read: narrow it as the message says (a smaller window or limit, the next page) and run it again.
@@ -39,6 +39,8 @@ HTTP-authenticated people remain `user`; the registry role narrows user grants b
 | inbox | `runner.list` within its human parent's scope |
 | planner, worker, all jobs, observer, supervisor, wrapper, integrator, executor-telemetry | `runner.declare`, `runner.share`, `runner.list` are refused |
 | inbox, planner, worker, all jobs, observer, supervisor, wrapper, integrator, executor-telemetry | `runner.register` and `runner.revoke` are refused |
+
+`login`, `logout` and `whoami` (`identity.login`) belong only to a person on their own terminal. Every AI actor, including the inbox, and every control-side role is refused them. Never read or carry the person's credentials.
 
 `judge-follow-up` (`follow_up.judge`) is granted only to the person (`user`), inbox and runtime planner, for follow_up tasks in any state; it moves membership only in `draft` / `ready`. Workers, jobs and the supervisor may not judge.
 

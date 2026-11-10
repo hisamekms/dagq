@@ -39,7 +39,7 @@ ADRは方針と境界だけを持ち、ここの名前・値・形は候補で�
 
 | token | 期限の候補 | 置き場 |
 | --- | --- | --- |
-| 人のdagqのtoken | 15分 | OSの資格の置き場（macOSのKeychain・Linuxのsecret service）、無ければ`$XDG_CONFIG_HOME/dagq/credentials/`の`0600`のファイル |
+| 人のdagqのtoken | 交換の答えの期限 | 端末の置き場（実装と選び方は`infrastructure::credentials`） |
 | 人のIdPの更新の資格 | IdPの既定 | 同上 |
 | 承認に使えるtokenのloginの新しさ | `auth_time`から10分以内 | — |
 | runnerの登録の値 | 1回きり・15分 | 人が手で渡す |
@@ -48,7 +48,7 @@ ADRは方針と境界だけを持ち、ここの名前・値・形は候補で�
 
 ## CLIの候補
 
-- `dagq login`（device codeを既定、`--browser`でloopbackのauthorization code＋PKCE）・`dagq logout`・`dagq whoami`
+- 人の端末の認証と資格の置き場は`application::login`と`infrastructure::credentials`の定義を読む。
 - `dagq member add|role|remove`（管理者）
 - `dagq runner register-code`（人が登録の値を得る）・`dagq runner enroll`（runnerの側）・`dagq runner list|revoke|share`
 
@@ -59,7 +59,7 @@ ADRは方針と境界だけを持ち、ここの名前・値・形は候補で�
 ```toml
 [identity]
 issuer = "https://idp.example.com/"
-audience = "dagq-team"
+audience = "dagq-cli"
 client_id = "dagq-cli"
 # GitHub Actions の控えの runner を受けるとき
 [identity.github_actions]

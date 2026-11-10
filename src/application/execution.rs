@@ -310,6 +310,9 @@ use Capability as C;
 /// refuses its other form. A test in `main.rs` checks that every
 /// subcommand is here or on its list of the commands left out.
 pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
+    ("login", &[C::IdentityLogin]),
+    ("logout", &[C::IdentityLogin]),
+    ("whoami", &[C::IdentityLogin]),
     ("watch", &[C::QueueWatch]),
     ("report", &[C::ExportFile]),
     ("init", &[C::QueueAdmin]),

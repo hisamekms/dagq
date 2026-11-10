@@ -39,6 +39,8 @@ string_enum!(Capability {
     /// The CI bound to main hands over an image's digest
     /// (`domain::image_publish`): the image publisher's one capability.
     ImagePublish => "image.publish",
+    /// Human terminal authentication; no AI actor or control-side role.
+    IdentityLogin => "identity.login",
     // Reading.
     QueueRead => "queue.read",
     QueueWatch => "queue.watch",
@@ -166,7 +168,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 75] = [
+    pub const ALL: [Self; 76] = [
         Self::ImagePublish,
         Self::RunnerClaim,
         Self::RunnerHeartbeat,
@@ -176,6 +178,7 @@ impl Capability {
         Self::RunnerList,
         Self::RunnerRegister,
         Self::RunnerRevoke,
+        Self::IdentityLogin,
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -629,7 +632,8 @@ use Capability as C;
 /// submissions, the integrator's own landing and push, the park and the
 /// replacement of a replanning, which only the runtime does, and the
 /// approval of `setup-review`'s changes beforehand, which is the person's
-/// own ([`USER`]). It alone (with the person) holds and releases a task and
+/// own ([`USER`]). Human authentication is also the person's alone.
+/// It alone (with the person) holds and releases a task and
 /// generates the review's settings (`setup-review`).
 const INBOX: &[Capability] = &[
     C::RunnerList,
@@ -686,12 +690,13 @@ const INBOX: &[Capability] = &[
     C::TokenIssue,
 ];
 
-/// The number of [`USER`]'s capabilities: the inbox's and five more.
-const USER_LEN: usize = INBOX.len() + 5;
+/// The number of [`USER`]'s capabilities: the inbox's and six more.
+const USER_LEN: usize = INBOX.len() + 6;
 
 /// [`INBOX`]'s capabilities, the approval of `setup-review`'s changes
 /// beforehand ([`C::ReviewSetupApprove`]) and the queue broker's records
-/// ([`C::QueueBrokerRecord`]), and human runner registration, revocation and sharing.
+/// ([`C::QueueBrokerRecord`]), human runner registration, revocation and sharing,
+/// and terminal authentication ([`C::IdentityLogin`]).
 const USER_CAPABILITIES: [Capability; USER_LEN] = {
     let mut all = [C::ReviewSetupApprove; USER_LEN];
     let mut at = 0;
@@ -703,12 +708,14 @@ const USER_CAPABILITIES: [Capability; USER_LEN] = {
     all[at + 2] = C::RunnerRegister;
     all[at + 3] = C::RunnerRevoke;
     all[at + 4] = C::RunnerShare;
+    all[at + 5] = C::IdentityLogin;
     all
 };
 
 /// What a person at a plain terminal may do: the inbox's, approving
 /// `setup-review`'s changes beforehand (`--yes`), which only a person does,
-/// and the queue broker's records, which the broker sends as the user
+/// terminal authentication, and the queue broker's records, which the broker
+/// sends as the user
 /// (ADR-t3102-1 decision 1) and no AI actor does.
 const USER: &[Capability] = &USER_CAPABILITIES;
 
@@ -1290,6 +1297,7 @@ mod tests {
         inbox.push(C::RunnerRegister);
         inbox.push(C::RunnerRevoke);
         inbox.push(C::RunnerShare);
+        inbox.push(C::IdentityLogin);
         assert_eq!(inbox, grants(ActorRole::User));
         assert_eq!(grants(ActorRole::SetupReviewJob), [C::QueueRead]);
         let job = ActorContext::setup_review_job("s1");
@@ -1464,6 +1472,17 @@ mod tests {
         let text = error.to_string();
         assert_eq!(text, "review-job may not landing.request (not granted)");
         assert!(!text.contains("secret") && !text.contains("42"));
+    }
+
+    #[test]
+    fn only_a_person_can_authenticate_on_their_terminal() {
+        for r in ActorRole::ALL {
+            let result = StaticPolicy.authorize(&role(r), C::IdentityLogin, &Resource::Queue);
+            assert_eq!(result.is_ok(), r == ActorRole::User, "{r:?}");
+            if let Err(e) = result {
+                assert_eq!(e.reason, DenyReason::NotGranted);
+            }
+        }
     }
 
     #[test]

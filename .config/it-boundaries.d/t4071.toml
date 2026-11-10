@@ -1,0 +1,6 @@
+[[boundary]]
+id = "cli-login-device-code-against-a-loopback-idp"
+kind = "プロセス"
+test = "cli_login::device_login_uses_loopback_http_and_private_terminal_credentials"
+reason = "実のdagqプロセスが発行元と交換の端点へ外向きのHTTPを送り、指定のファイルの置き場に0600で保存する境界。発行元と制御側はloopbackの偽物とし、OSの資格の置き場を開かない。判断のcaseはapplication::loginのunit testが持つ。"
+task = 4071

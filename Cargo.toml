@@ -73,6 +73,10 @@ store-contract = []
 # a default build, so a local SQLite queue compiles none of its driver.
 postgres = ["dep:bytes", "dep:postgres", "dep:tokio-postgres-rustls", "dep:webpki-roots"]
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Keychain through the OS Security.framework; no external C library or tools.
+security-framework = "3"
+
 [dev-dependencies]
 # Generate fresh RSA App keys and TLS fixtures in memory for deployment tests.
 # RSA generation needs rcgen's aws-lc backend; the runtime still uses ring.
