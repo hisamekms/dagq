@@ -141,10 +141,13 @@
 //!   the round comes back to before the process ends, R would stay where
 //!   those marks hold it. The session rows are not bounded so: a pass folds every one
 //!   marked ([`Builder::take_sessions`]) and writes all those that changed,
-//!   after the other rows, [`SESSION_ROWS_PER_WRITE`] rows and
-//!   [`SESSION_BYTES_PER_WRITE`] a transaction, the last with the store's
-//!   mark of its position ([`super::session::written`]): a write that fails
-//!   or a fold behind the stored row leaves its rows marked and no mark.
+//!   after the other rows. The final queue group is held aside and sent
+//!   before the first changed session row is written. The last session
+//!   write, or that queue group when no session row changes, carries the
+//!   store's mark of its position ([`super::session::written`]) and R in
+//!   the same transaction. Group bounds and oversized singletons are
+//!   described at [`row_groups`] and [`SESSION_BYTES_PER_WRITE`]. A write
+//!   that fails or a fold behind the stored row leaves its rows marked and no mark.
 //!   Only a builder whose session book is the fold of every session event
 //!   (from its cursors' start, or gone on from a position no later than
 //!   the mark's, W or R) writes the mark,

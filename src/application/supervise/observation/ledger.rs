@@ -682,9 +682,11 @@ fn pass(
         );
     }
     // The session rows wait aside for the write of them all after the
-    // other rows, so that none is written alone, a failure of theirs stops
-    // no other row, and the marks written with the last of them hold back
-    // only for the rows this pass left marked.
+    // other rows. Hold the final queue group until just before the first
+    // changed session row is written; if none changes, that group carries
+    // W and R instead of the last session write. The marks hold back only
+    // for rows this pass left marked. See row_groups for group bounds and
+    // the oversized singleton path.
     let aside = builder.take_sessions();
     let taken = write_taken(
         store,
