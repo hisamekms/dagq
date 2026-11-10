@@ -5,7 +5,9 @@
 //! time limit over the whole fetch and at most one byte read past the limit.
 //!
 //! Human login also uses this agent for bounded form and JSON POSTs, with
-//! HTTP permitted only for the CLI's checked loopback URLs.
+//! HTTP permitted only for the CLI's checked loopback URLs, and so does a
+//! person's client-mode `dagq` for its use cases at a control side
+//! ([`HttpsDocumentSource::for_control`]).
 //!
 //! The environment's proxy settings are not read: what is checked is the
 //! issuer's own answer, on the control side's direct way out.
@@ -141,6 +143,54 @@ impl HttpsDocumentSource {
         serde_json::from_slice(&body).map_err(|_| anyhow::anyhow!("invalid login HTTP response"))
     }
 }
+impl HttpsDocumentSource {
+    /// The client of a person's `dagq` to a control side's HTTP entrance
+    /// ([`crate::infrastructure::queue_service::ControlHttp`]): the login's
+    /// agent (no redirect followed, no proxy from the environment, HTTP
+    /// only where `application::login::check_url` lets it), each call's own
+    /// time limit, and the queue service's answer limit instead of a
+    /// document's.
+    pub fn for_control() -> Self {
+        Self::for_login()
+    }
+}
+
+impl crate::infrastructure::queue_service::ControlHttp for HttpsDocumentSource {
+    fn post(
+        &self,
+        url: &str,
+        bearer: Option<&str>,
+        body: &[u8],
+        timeout: Duration,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        crate::application::login::check_url(url)?;
+        let mut request = self
+            .agent
+            .post(url)
+            .config()
+            .timeout_global(Some(timeout))
+            .build()
+            .content_type("application/json");
+        if let Some(token) = bearer {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        // The error says where, never the header.
+        let response = request
+            .send(body)
+            .map_err(|error| anyhow::anyhow!("{url}: {error}"))?;
+        let status = response.status().as_u16();
+        let limit = crate::domain::queue_service::MAX_ANSWER_BYTES as u64;
+        let mut answer = Vec::new();
+        response
+            .into_body()
+            .into_reader()
+            .take(limit + 1)
+            .read_to_end(&mut answer)
+            .map_err(|error| anyhow::anyhow!("{url}: the answer did not read: {error}"))?;
+        Ok((status, answer))
+    }
+}
+
 impl crate::application::login::LoginHttp for HttpsDocumentSource {
     fn get(&self, url: &str) -> anyhow::Result<serde_json::Value> {
         crate::application::login::check_url(url)?;

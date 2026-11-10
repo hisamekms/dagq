@@ -1,0 +1,9 @@
+# The registry's boundary task 4170 gave (the format is in the header of
+# scripts/check-it-added-tests.sh).
+
+[[boundary]]
+id = "cli-client-mode-https-route-against-a-loopback-server"
+kind = "プロセス"
+test = "cli_control_url::a_command_goes_to_the_control_url_with_the_terminal_s_bearer"
+reason = "実のdagqプロセスがDAGQ_CONTROL_URLの宛てへloopbackのTCPでユースケースの要求を送り、端末のloginが置いたtokenがbearerのheaderで届き、答えがそのまま出る境界を代表する。cli-login-device-code-against-a-loopback-idpはloginの流れだけ、queue-service-http-loopback-carries-a-use-caseは受ける側だけを代表し、CLIのユースケースの経路を代表しない。相手はtestの中の偽のHTTPの受けで、置き場はDAGQ_CREDENTIAL_STORE=fileと一時のXDG_CONFIG_HOMEにしてOSの置き場を開かない。宛ての読みと拒否・取り直し・断りの判断はinfrastructure::queue_service::control_testsのunit testが持つ。"
+task = 4170

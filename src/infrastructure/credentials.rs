@@ -153,6 +153,33 @@ impl CredentialStore for OsCredentials {
     }
 }
 
+/// The person's token for their client-mode `dagq` to a control side
+/// (`DAGQ_CONTROL_URL`): the credential set of the store
+/// `DAGQ_CREDENTIAL_STORE` chooses, read by
+/// [`crate::application::login::read_token`] for the URL the call goes to,
+/// which refuses a set of another control side (`dagq login`'s guide) and
+/// renews once on a refusal. The store is opened only when a call is sent,
+/// never by a command refused before it. The command line alone uses it: a
+/// runner or a CI gives its own token.
+pub struct TerminalBearer;
+impl crate::infrastructure::queue_service::BearerSource for TerminalBearer {
+    fn token(&self, url: &str, renew: bool) -> Result<String> {
+        use crate::application::login::{self, Rejected, StoreChoice, Stores};
+        let env = |name: &str| std::env::var(name).ok();
+        let choice = StoreChoice::parse(env("DAGQ_CREDENTIAL_STORE").as_deref())?;
+        let file = FileCredentials::from_env(env)?;
+        let stores = Stores {
+            choice,
+            os: &OsCredentials,
+            file: &file,
+        };
+        let rejected = if renew { Rejected::First } else { Rejected::No };
+        let now = crate::application::unix_seconds(std::time::SystemTime::now());
+        let http = crate::infrastructure::oidc_keys::HttpsDocumentSource::for_login();
+        Ok(login::read_token(url, rejected, now, &http, &stores)?.token)
+    }
+}
+
 /// Reject any group/other permission, executable bit or special mode.
 pub fn private_file_mode(mode: u32) -> bool {
     mode & 0o7777 == 0o600

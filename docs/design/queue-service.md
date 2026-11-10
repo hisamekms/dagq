@@ -159,14 +159,16 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 ## クライアントモード
 
 ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
-`dagq`（`src/main.rs`の`execute`）は、環境が宛てを名指せば、`DAGQ_ROLE`もqueueの解決（cwdや`--db`）も読まずにクライアントモードで動く（`infrastructure::queue_service::Client`）。
+`dagq`（`src/main.rs`の`execute`）は、環境がsocketかbrokerの宛てを名指せば、`DAGQ_ROLE`もqueueの解決（cwdや`--db`）も読まずにクライアントモードで動く（`infrastructure::queue_service::Client`）。
+チームの制御側へのHTTPSの宛ては環境`DAGQ_CONTROL_URL`で、送る入口は同moduleの`call_control`、人のtokenは`dagq login`の置き場から読み、転送する命令は`DAGQ_ROLE`が人でなければ断り、認証の3命令は手元で動く（分岐は`client_mode`のdoc comment）。
 
-`login`・`logout`・`whoami`はクライアントモードで実行できず、actorの判定より前にCLIが`control_side_command`で拒む。
+`login`・`logout`・`whoami`はクライアントモードで実行できず、socketかbrokerの宛ての環境ではactorの判定より前にCLIが`control_side_command`で拒む。
 この拒否では資格の置き場を開かず、発行元にもqueue serviceにも通信せず、拒否の記録も送らない。
 
 宛てと転送は`infrastructure::queue_service::ClientRoute`、断りの形と意味は同moduleの`ClientFailure`、到達の答えは`reach_of`のdoc commentが持つ。
 containerの経路は[Queue broker](queue-broker.md#入口)と[Container runtime](container-runtime.md#brokerへの経路)を参照する。
 どの断りでもDBを開くことに戻らない（fail closed）。
+HTTPSの宛てでもDBに戻らず、loopbackでないhttpを拒む。
 宛ての無いhostのCLIの範囲は[hostのCLI](queue-service-host-cli.md#送る範囲)、roleとの分岐の順は[Roles](supervisor-lifecycle/roles.md#cliでの解釈)。
 
 workerとjobのpromptとskillはDBのpathを含めず、`dagq`を名指す。

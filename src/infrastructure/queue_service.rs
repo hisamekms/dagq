@@ -2100,16 +2100,21 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// the request on the socket is longer than [`MAX_REQUEST_BYTES`] and was
 /// not sent; the service's `busy`: a heavy read it refused unread, which may
 /// be sent again in a little while; `no_credential`: the
-/// token's file does not read; `control_side_command`: the command is one of the control
+/// token's file does not read, or, to a control side, the person's token
+/// does not read (no login for its URL, a renewal refused) or the
+/// environment names a role that carries none; `control_side_command`: the command is one of the control
 /// side's (`doctor`, `service status`, `queue-broker status`), which a person or the
-/// inbox runs on the host; `no_use_case`: any other command that is none
+/// inbox runs on the host, or, to a control side, one whose steps this
+/// process does (`integrate`, `review`, ...); `no_use_case`: any other command that is none
 /// of the service's;
 /// `queue_named`: the command names a queue to open; `wrong_queue`: the
 /// host's `dagq` names a queue whose service did not issue the token the
 /// environment names, which is not sent to it ([`issued_by`]);
 /// `client_misconfigured`:
 /// the environment names both a socket and a broker, a broker URL that
-/// does not read, or, with a broker, a run that holds a control character).
+/// does not read, or, with a broker, a run that holds a control character,
+/// or a control side's URL beside another route or a token's file, or one
+/// that is neither HTTPS nor HTTP on a numeric loopback address).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientFailure {
     pub code: String,
@@ -2157,6 +2162,60 @@ pub enum ClientRoute {
         address: String,
         run: Option<String>,
     },
+    /// A team's control side at `url`, its HTTP entrance
+    /// ([`CONTROL_URL_ENV`](crate::domain::queue_service::CONTROL_URL_ENV),
+    /// [`call_control`]): a person's `dagq` anywhere, with the token
+    /// `bearer` gives. `None` sends none (`locate`'s `hello`); the command
+    /// line attaches the person's ([`Client::with_bearer`]), a runner or a
+    /// CI its own.
+    Control { url: String, bearer: Option<Bearer> },
+}
+
+/// Where the token of a call to a control side comes from
+/// ([`ClientRoute::Control`]): the person's credential store for a person's
+/// `dagq` (`infrastructure::credentials::TerminalBearer`), a runner's or a
+/// CI's own token for theirs. It is read only when a call is sent, so a
+/// command refused before it opens no store.
+pub trait BearerSource: Send + Sync {
+    /// The token to send to `url`; `renew` after the control side refused
+    /// the last one as `unauthenticated`, when it is asked once to get a
+    /// new one. An error sends nothing and says what to do next (`dagq
+    /// login`), never a token's value.
+    fn token(&self, url: &str, renew: bool) -> Result<String>;
+}
+
+/// A [`BearerSource`] a route holds: compared by identity, and printed
+/// without anything of it.
+#[derive(Clone)]
+pub struct Bearer(pub Arc<dyn BearerSource>);
+
+impl std::fmt::Debug for Bearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Bearer(..)")
+    }
+}
+
+impl PartialEq for Bearer {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::addr_eq(Arc::as_ptr(&self.0), Arc::as_ptr(&other.0))
+    }
+}
+
+impl Eq for Bearer {}
+
+/// The HTTP of a call to a control side's entrance: `POST` of `body` to
+/// `url` with `bearer` as `Authorization: Bearer` when there is one, giving
+/// the status and at most [`MAX_ANSWER_BYTES`] and one more of the body
+/// (more is cut), following no redirect and waiting at most `timeout`. An
+/// error is no answer: the request may have been done.
+pub trait ControlHttp {
+    fn post(
+        &self,
+        url: &str,
+        bearer: Option<&str>,
+        body: &[u8],
+        timeout: Duration,
+    ) -> Result<(u16, Vec<u8>)>;
 }
 
 /// Where a client-mode `dagq` sends its commands (ADR-t1233-1 decision 7,
@@ -2188,6 +2247,10 @@ pub struct Client {
 
 /// What a worker's or a job's client that gets no answer says to do next.
 const NEXT_CONTROL_SIDE: &str = "dagq service status, from the control side, says why";
+/// What a person's `dagq` that gets no answer from a control side says to
+/// do next.
+const NEXT_CONTROL_URL: &str = "the control side's deployment (its TLS end and health check) \
+                                says why";
 /// What the host's `dagq` that gets no answer says to do next
 /// (ADR-t3102-3 decision 2).
 const NEXT_HOST: &str = "dagq service status says why, and dagq up (or dagq service start) \
@@ -2200,12 +2263,45 @@ impl Client {
     /// broker and a run that holds a control character (it would go in a
     /// header), when `dagq` refuses every command and opens no queue (fail
     /// closed).
+    ///
+    /// A control side ([`CONTROL_URL_ENV`]) is the route alone: beside a
+    /// socket, a broker or a token's file it is `client_misconfigured`, as
+    /// `dagq` does not choose which token goes, and so is a URL
+    /// `application::login::check_url` refuses (HTTP off a numeric loopback
+    /// address, a userinfo, a fragment), with nothing sent and no store
+    /// opened. Its route has no [`Bearer`] yet.
     pub fn from_env(env: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, ClientFailure> {
         use crate::domain::actor::RUN_ID_ENV;
         use crate::domain::queue_service::{
-            CREDENTIAL_FILE_ENV, SOCKET_ENV, URL_ENV, broker_address,
+            CONTROL_URL_ENV, CREDENTIAL_FILE_ENV, SOCKET_ENV, URL_ENV, broker_address,
         };
         let named = |name: &str| env(name).filter(|value| !value.trim().is_empty());
+        if let Some(url) = named(CONTROL_URL_ENV) {
+            let beside: Vec<&str> = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV]
+                .into_iter()
+                .filter(|name| named(name).is_some())
+                .collect();
+            if !beside.is_empty() {
+                return Err(ClientFailure::new(
+                    "client_misconfigured",
+                    format!(
+                        "{CONTROL_URL_ENV} is set with {}, and a client-mode dagq does not \
+                         choose between their routes or tokens: it runs no command and opens \
+                         no queue",
+                        beside.join(" and ")
+                    ),
+                ));
+            }
+            check_control_url(&url)?;
+            return Ok(Some(Self {
+                route: ClientRoute::Control { url, bearer: None },
+                credential: None,
+                env_role: named(crate::domain::actor::ROLE_ENV),
+                next: NEXT_CONTROL_URL,
+                queue: None,
+                binding: None,
+            }));
+        }
         let route = match (named(SOCKET_ENV), named(URL_ENV)) {
             (None, None) => return Ok(None),
             (Some(_), Some(_)) => {
@@ -2379,8 +2475,24 @@ impl Client {
                     },
                 )?
             }
+            ClientRoute::Control { url, bearer } => {
+                let http = super::oidc_keys::HttpsDocumentSource::for_control();
+                let request = control_request(use_case, params);
+                let bearer = bearer.as_ref().map(|bearer| bearer.0.as_ref());
+                call_control(&http, url, bearer, &request, timeout)
+                    .map_err(|error| control_failure(error, use_case, self.next))?
+            }
         };
         answer_of(response)
+    }
+
+    /// This client with `bearer` as the token of its calls to a control
+    /// side ([`ClientRoute::Control`]); any other route as it is.
+    pub fn with_bearer(mut self, source: Arc<dyn BearerSource>) -> Self {
+        if let ClientRoute::Control { bearer, .. } = &mut self.route {
+            *bearer = Some(Bearer(source));
+        }
+        self
     }
 
     /// The service's `hello` (its build and the API versions it answers):
@@ -2392,7 +2504,7 @@ impl Client {
         match &self.route {
             ClientRoute::Socket(socket) => hello(socket, PROBE_TIMEOUT)
                 .map_err(|error| self.not_answered(&error, UseCase::Hello).into()),
-            ClientRoute::Broker { .. } => {
+            ClientRoute::Broker { .. } | ClientRoute::Control { .. } => {
                 self.call_within(UseCase::Hello, Value::Null, PROBE_TIMEOUT)
             }
         }
@@ -2495,9 +2607,34 @@ impl Client {
                     })
                 })
             }
+            ClientRoute::Control { url, .. } => {
+                return reach_control(&super::oidc_keys::HttpsDocumentSource::for_control(), url);
+            }
         };
         reach_of(response)
     }
+}
+
+/// [`Client::reach`] of the control side at `url`: `hello` sent with no
+/// token within [`PROBE_TIMEOUT`], so no credential store is opened, and
+/// the entrance's `unauthenticated` (it asks a token of `hello` too) is
+/// reached, with its versions. It never fails.
+fn reach_control(http: &dyn ControlHttp, url: &str) -> Value {
+    if let Err(refused) = check_control_url(url) {
+        return json!({"reachable": false, "reason": refused.to_string()});
+    }
+    let request = control_request(UseCase::Hello, Value::Null);
+    let response = send_control(http, url, None, &request, PROBE_TIMEOUT).map(|mut response| {
+        if response
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == ServiceErrorCode::Unauthenticated)
+        {
+            response.error = None;
+        }
+        response
+    });
+    reach_of(response)
 }
 
 /// Whether the token's `file` is one the queue at `db` issued: a file in
@@ -2573,6 +2710,208 @@ fn reach_of(response: Result<ServiceResponse>) -> Value {
             "api_compatible": crate::domain::queue_service::understands(&response),
         }),
     }
+}
+
+/// That `url` names a control side a request goes to: what
+/// `application::login::check_url` lets through (HTTPS, or HTTP on a
+/// numeric loopback address, with no userinfo or fragment), with no query
+/// either, since the use case's path is put after the URL's own path and a
+/// query would leave it after the `?`. `client_misconfigured`, nothing sent.
+pub fn check_control_url(url: &str) -> Result<(), ClientFailure> {
+    use crate::domain::queue_service::CONTROL_URL_ENV;
+    let refused = |why: String| {
+        ClientFailure::new(
+            "client_misconfigured",
+            format!("{CONTROL_URL_ENV}: {why}; nothing was sent"),
+        )
+    };
+    crate::application::login::check_url(url).map_err(|why| refused(format!("{why:#}")))?;
+    if url.contains('?') {
+        return Err(refused(
+            "a control side's URL holds no query (the use case's path follows its path)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The request a client sends a control side: the use case and its
+/// params alone, as through the broker. The token goes as the `Bearer` and
+/// no role, queue or binding goes: the URL says which service is meant.
+fn control_request(use_case: UseCase, params: Value) -> ServiceRequest {
+    ServiceRequest {
+        caller: None,
+        api_version: API_VERSION,
+        token: None,
+        env_role: None,
+        queue: None,
+        binding: None,
+        use_case,
+        params,
+    }
+}
+
+/// `request` sent once to the HTTP entrance of the control side at `url`
+/// (`infrastructure::queue_service_http`: `POST` to the use case's path)
+/// with `token` as the `Bearer`, the one function that sends; its caller
+/// says which token. The service's answer whatever its status, or why
+/// there is none: a request past [`MAX_REQUEST_BYTES`] is not sent
+/// ([`RequestPastLimit`]); an answer past [`MAX_ANSWER_BYTES`] is
+/// [`AnswerPastLimit`]; a redirect is not followed and, as a body that is
+/// no use case's answer (a TLS end's own `502`), is `unreachable`, or the
+/// code such a body names (`store_unavailable`); no answer is the
+/// transport's error. None of these is sent again.
+pub fn send_control(
+    http: &dyn ControlHttp,
+    url: &str,
+    token: Option<&str>,
+    request: &ServiceRequest,
+    timeout: Duration,
+) -> Result<ServiceResponse> {
+    let body = serde_json::to_vec(request)?;
+    if body.len() + 1 > MAX_REQUEST_BYTES {
+        return Err(RequestPastLimit {
+            use_case: request.use_case,
+            size: body.len() + 1,
+        }
+        .into());
+    }
+    let target = format!(
+        "{}{}{}",
+        url.trim_end_matches('/'),
+        super::queue_service_http::USE_CASE_PATH,
+        request.use_case.as_str()
+    );
+    let (status, answer) = http
+        .post(&target, token, &body, timeout)
+        .context("the control side did not answer")?;
+    if answer.len() > MAX_ANSWER_BYTES {
+        return Err(AnswerPastLimit.into());
+    }
+    if (300..400).contains(&status) {
+        return Err(ClientFailure::new(
+            "unreachable",
+            format!(
+                "the control side answered a redirect (status {status}), which a client-mode \
+                 dagq does not follow"
+            ),
+        )
+        .into());
+    }
+    serde_json::from_slice::<ServiceResponse>(&answer).map_err(|_| {
+        let named = serde_json::from_slice::<Value>(&answer)
+            .ok()
+            .and_then(|value| {
+                let error = value.get("error")?;
+                Some((
+                    error.get("code")?.as_str()?.to_owned(),
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                ))
+            });
+        match named {
+            Some((code, message)) => ClientFailure::new(&code, message),
+            None => ClientFailure::new(
+                "unreachable",
+                format!(
+                    "the control side's answer (status {status}) is no use case's answer: what \
+                     is in front of the service (its TLS end) answered instead"
+                ),
+            ),
+        }
+        .into()
+    })
+}
+
+/// What a client does after a control side's `response`: take it, or,
+/// for an `unauthenticated` of a token it read, get a new one and send
+/// again once, or stop at the second with `dagq login`'s guide. An answer
+/// of versions this client does not take is taken, and refused as such.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlNext {
+    Answer,
+    Renew,
+    Login,
+}
+
+/// [`ControlNext`] of `response`, the answer to a request sent with a
+/// token from a [`BearerSource`] when `bearer`, after one renewal when
+/// `renewed`. Checking the token comes before the use case, so a request
+/// sent again is not done twice.
+pub fn control_next(response: &ServiceResponse, bearer: bool, renewed: bool) -> ControlNext {
+    let unauthenticated = crate::domain::queue_service::understands(response)
+        && response
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == ServiceErrorCode::Unauthenticated);
+    match (unauthenticated && bearer, renewed) {
+        (false, _) => ControlNext::Answer,
+        (true, false) => ControlNext::Renew,
+        (true, true) => ControlNext::Login,
+    }
+}
+
+/// `request` to the control side at `url` with the token of `bearer`
+/// (none with `None`): read before the first send and, after an
+/// `unauthenticated`, once more as a renewal before the one send again
+/// ([`control_next`]). A token that does not read is `no_credential` and
+/// sends nothing; an answer of versions this client does not take is
+/// [`ApiVersionMismatch`](crate::application::login::ApiVersionMismatch),
+/// the range it needs and to install a compatible `dagq`.
+pub fn call_control(
+    http: &dyn ControlHttp,
+    url: &str,
+    bearer: Option<&dyn BearerSource>,
+    request: &ServiceRequest,
+    timeout: Duration,
+) -> Result<ServiceResponse> {
+    check_control_url(url)?;
+    let token = |renew| -> Result<Option<String>> {
+        bearer
+            .map(|source| source.token(url, renew))
+            .transpose()
+            .map_err(|error| ClientFailure::new("no_credential", format!("{error:#}")).into())
+    };
+    let mut response = send_control(http, url, token(false)?.as_deref(), request, timeout)?;
+    let mut renewed = false;
+    loop {
+        match control_next(&response, bearer.is_some(), renewed) {
+            ControlNext::Answer => break,
+            ControlNext::Renew => {
+                renewed = true;
+                response = send_control(http, url, token(true)?.as_deref(), request, timeout)?;
+            }
+            ControlNext::Login => {
+                return Err(ClientFailure::new(
+                    ServiceErrorCode::Unauthenticated.as_str(),
+                    format!(
+                        "the control side refused the renewed token too: {}",
+                        crate::application::login::LOGIN_AGAIN
+                    ),
+                )
+                .into());
+            }
+        }
+    }
+    if !crate::domain::queue_service::understands(&response) {
+        return Err(crate::application::login::ApiVersionMismatch {
+            minimum: response.min_api_version.into(),
+            maximum: response.api_version.into(),
+        }
+        .into());
+    }
+    Ok(response)
+}
+
+/// The failure of a call to a control side that got no answer it takes:
+/// its own refusal as it is, else as [`no_answer`] says.
+fn control_failure(error: anyhow::Error, use_case: UseCase, next: &str) -> anyhow::Error {
+    if error.is::<ClientFailure>() || error.is::<crate::application::login::ApiVersionMismatch>() {
+        return error;
+    }
+    no_answer(&error, use_case, next).into()
 }
 
 /// `request` through the broker at `address` in the shape
@@ -6665,6 +7004,8 @@ pub use storage::{QueueStorage, SqliteStorage};
 #[cfg(test)]
 mod supervisor_tests;
 
+#[cfg(test)]
+mod control_tests;
 #[cfg(test)]
 mod issuing_tests;
 #[cfg(test)]

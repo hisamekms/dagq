@@ -198,8 +198,52 @@ pub const URL_ENV: &str = "DAGQ_SERVICE_URL";
 /// registration ([`Principal::credential_key`]); the value is not a token.
 /// A job command without it opens no queue either: it is refused.
 pub const SUPERVISOR_REGISTRATION_ENV: &str = "DAGQ_SUPERVISOR_REGISTRATION";
-/// The variables of a client-mode `dagq`.
-pub const CLIENT_ENV: [&str; 3] = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV];
+/// The variable that names a team's control side to a person's `dagq`
+/// (ADR-t3990-1 decisions 2 and 3): its HTTPS URL (HTTP only on a numeric
+/// loopback address, by `application::login::check_url`). With it, `dagq`
+/// opens no queue and sends each command as one request to the control
+/// side's HTTP entrance, with the token of the person's credential store
+/// (the one `dagq login` keeps for that URL) as the `Bearer` alone; `login`
+/// takes it as `--control-url`, and `login`, `logout` and `whoami` run on
+/// the terminal with it ([`identity_runs_on_the_terminal`]). Given with
+/// [`SOCKET_ENV`], [`URL_ENV`] or [`CREDENTIAL_FILE_ENV`], `dagq` refuses
+/// every command (fail closed), and with none of them a stored credential
+/// alone never sends anything there.
+pub const CONTROL_URL_ENV: &str = "DAGQ_CONTROL_URL";
+/// The variables of a client-mode `dagq`: none of them reaches a child the
+/// control side starts.
+pub const CLIENT_ENV: [&str; 4] = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV, CONTROL_URL_ENV];
+
+/// Whether a person's `login`, `logout` or `whoami` runs on its own
+/// terminal (`dagq`'s identity path, which `identity.login` authorizes for
+/// the user alone) rather than in client mode: when `env` names none of the
+/// client variables but [`CONTROL_URL_ENV`], which `login` reads as its
+/// destination and the other two do not read. With a socket, a broker or a
+/// token's file named, client mode refuses them (`control_side_command`,
+/// or `client_misconfigured` beside [`CONTROL_URL_ENV`]).
+pub fn identity_runs_on_the_terminal(env: impl Fn(&str) -> Option<String>) -> bool {
+    [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV]
+        .into_iter()
+        .all(|name| env(name).is_none_or(|value| value.trim().is_empty()))
+}
+
+/// Why a client-mode `dagq` sending to [`CONTROL_URL_ENV`] refuses to put
+/// the person's token on a command for the role `env_role` names
+/// ([`crate::domain::actor::ROLE_ENV`]), before it opens the credential
+/// store: any role but the user's, an unknown value too, since the token is
+/// the person's and an AI actor holds none (ADR-t3985-1 decision 8). As on
+/// the host it is advisory (ADR-t3102-1 decision 5): the role is the
+/// environment's own word. `None` for no role or `user`.
+pub fn control_role_refusal(env_role: Option<&str>) -> Option<String> {
+    match env_role.map(str::trim) {
+        None | Some("" | "user") => None,
+        Some(role) => Some(format!(
+            "DAGQ_ROLE names {role}, and the token {CONTROL_URL_ENV} goes with is a person's \
+             from their own credential store, which no other role's command carries: nothing \
+             was sent and the store was not opened"
+        )),
+    }
+}
 /// The longest request line the service reads: a client on its socket
 /// refuses a longer one before it sends it, with
 /// [`ServiceErrorCode::RequestTooLarge`]; one through the queue broker
@@ -5061,5 +5105,79 @@ mod human_tests {
             }),
             1
         ));
+    }
+}
+
+#[cfg(test)]
+mod control_url_tests {
+    use super::*;
+
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(named, _)| *named == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    /// `login`, `logout` and `whoami` stay on the terminal unless another
+    /// client variable is named beside the control side, when client mode
+    /// refuses them; a control side's URL is not looked at for this.
+    #[test]
+    fn identity_commands_stay_on_the_terminal_with_a_control_url_alone() {
+        for url in ["https://c.example", "http://not-loopback.example", ""] {
+            assert!(identity_runs_on_the_terminal(env_of(&[
+                (CONTROL_URL_ENV, url),
+                (crate::domain::actor::ROLE_ENV, "worker"),
+            ])));
+        }
+        assert!(identity_runs_on_the_terminal(env_of(&[])));
+        for other in [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV] {
+            assert!(!identity_runs_on_the_terminal(env_of(&[
+                (CONTROL_URL_ENV, "https://c.example"),
+                (other, "/x"),
+            ])));
+            assert!(!identity_runs_on_the_terminal(env_of(&[(other, "/x")])));
+            assert!(identity_runs_on_the_terminal(env_of(&[(other, " ")])));
+        }
+    }
+
+    /// The person's token goes on a forwarded command of no role but the
+    /// user's: every other role, the legacy reviewer's name and an unknown
+    /// value are refused before the store is opened.
+    #[test]
+    fn only_the_user_s_command_carries_the_person_s_token() {
+        for role in [None, Some(""), Some(" "), Some("user")] {
+            assert_eq!(control_role_refusal(role), None, "{role:?}");
+        }
+        use crate::domain::actor::ActorRole;
+        for role in ActorRole::ALL {
+            let refused = control_role_refusal(Some(role.as_str()));
+            assert_eq!(
+                refused.is_none(),
+                role == ActorRole::User,
+                "{}",
+                role.as_str()
+            );
+            if let Some(refused) = refused {
+                assert!(refused.contains(role.as_str()), "{refused}");
+            }
+        }
+        for unknown in [
+            crate::domain::actor::LEGACY_REVIEWER_ROLE,
+            "desk",
+            "someone",
+        ] {
+            assert!(control_role_refusal(Some(unknown)).is_some(), "{unknown}");
+        }
+    }
+
+    /// The control side's variable is a client one: no child the control
+    /// side starts inherits it.
+    #[test]
+    fn the_control_url_is_a_client_variable() {
+        assert!(CLIENT_ENV.contains(&CONTROL_URL_ENV));
+        assert_eq!(CONTROL_URL_ENV, "DAGQ_CONTROL_URL");
     }
 }

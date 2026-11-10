@@ -3098,16 +3098,21 @@ fn authorized_in_application(command: &Command) -> bool {
 /// integrator reads but does not watch or export, and the observer and the
 /// supervisor's headless jobs (ADR-0027, each job by its own role and the
 /// legacy `reviewer` as a review job) keep their limits (ADR-0044
-/// decision 4). A refusal is sent to the service of the queue `db` names,
-/// which records it as `authorization_denied` of the caller's principal
-/// ([`CommandDenials`]); the queue is not opened. `request add` also uses
+/// decision 4). A refusal goes to `log`: the service of the queue the
+/// command names, which records it as `authorization_denied` of the
+/// caller's principal ([`CommandDenials`]), but where
+/// [`terminal_denials`] says nowhere; the queue is not opened. `request add` also uses
 /// this check before reading its input; Requests::record still authorizes
 /// before recording. A command allowed opens nothing here either: it is
 /// sent to the queue service, which runs reads on its read-only
 /// connection, run in this process ([`Unserved::OwnProcess`], where only
 /// the DB's exceptions of ADR-t3102-2 open the queue), or refused when no
 /// service serves it.
-fn check_access(actor: &ActorContext, command: &Command, db: Option<&Path>) -> Result<()> {
+fn check_access(
+    actor: &ActorContext,
+    command: &Command,
+    log: &dyn dagq::application::commands::DenialLog,
+) -> Result<()> {
     // `request add` must reject before reading words from a file or stdin.
     // Keep Requests::record's application check too; a refusal here returns
     // immediately, so only this Gate records it.
@@ -3124,11 +3129,39 @@ fn check_access(actor: &ActorContext, command: &Command, db: Option<&Path>) -> R
         actor,
         authorizer: &StaticPolicy,
     };
-    let log = CommandDenials { db };
     for (capability, resource) in requests(command) {
-        gate.authorize(&log, capability, &resource)?;
+        gate.authorize(log, capability, &resource)?;
     }
     Ok(())
+}
+
+/// Where the refusal of `command` goes: for a person's `login`, `logout`
+/// or `whoami` with a control side named (`control_url`), nowhere, as that
+/// path talks to no queue service on the host and sends nothing ([`Unsent`]);
+/// for any other, to `sent` (the queue's service on the host).
+fn terminal_denials<'a>(
+    command: &Command,
+    control_url: bool,
+    sent: &'a dyn dagq::application::commands::DenialLog,
+) -> &'a dyn dagq::application::commands::DenialLog {
+    let identity = matches!(
+        command,
+        Command::Login { .. } | Command::Logout | Command::Whoami
+    );
+    if identity && control_url {
+        &Unsent
+    } else {
+        sent
+    }
+}
+
+/// A refusal recorded nowhere: the command is still refused.
+struct Unsent;
+
+impl dagq::application::commands::DenialLog for Unsent {
+    fn record_denial(&self, _: Value) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// The queue a refused command names (`--db` or the repository of the
@@ -4249,8 +4282,16 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
 /// the environment names. No queue is opened: a command that names one
 /// (`--db`) or is none of the service's use cases is refused, and so is
 /// every command when the service does not answer (fail closed).
+///
+/// To a control side (`DAGQ_CONTROL_URL`), the commands whose steps this
+/// process does (`integrate`, `review`, `observe`, `throughput-review`,
+/// `setup-review`) are refused as `control_side_command`, since main moves
+/// only on the control side; a command sent carries the person's token
+/// from their credential store, which no other role's command does
+/// (`no_credential`, [`dagq::domain::queue_service::control_role_refusal`]).
 fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) -> Result<Value> {
-    use dagq::infrastructure::queue_service::ClientFailure;
+    use dagq::infrastructure::queue_service::{ClientFailure, ClientRoute};
+    let control = matches!(client.route, ClientRoute::Control { .. });
     if matches!(
         cli.command,
         Command::Login { .. } | Command::Logout | Command::Whoami
@@ -4262,8 +4303,8 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
         return Err(ClientFailure::new(
             "queue_named",
             format!(
-                "--db {} names a queue to open, and a client-mode dagq (DAGQ_SERVICE_SOCKET or \
-                 DAGQ_SERVICE_URL is set) opens none: run the command without it",
+                "--db {} names a queue to open, and a client-mode dagq ({CLIENT_MODE_SET}) opens \
+                 none: run the command without it",
                 db.display()
             ),
         )
@@ -4274,8 +4315,8 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
             "control_side_command",
             format!(
                 "dagq {name} is a control-side command: a person or the inbox runs it on the \
-                 host, and a client-mode dagq (DAGQ_SERVICE_SOCKET or DAGQ_SERVICE_URL is set) \
-                 neither opens the queue for it nor sends it to the queue service"
+                 host, and a client-mode dagq ({CLIENT_MODE_SET}) neither opens the queue for it \
+                 nor sends it to the queue service"
             ),
         )
         .into());
@@ -4284,44 +4325,83 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
     // whether the service answers there: the plugin's `--resolve` runs it
     // first.
     if matches!(cli.command, Command::Locate) {
-        use dagq::infrastructure::queue_service::ClientRoute;
-        let mut located = match &client.route {
-            ClientRoute::Socket(socket) => json!({
-                "client_mode": true,
-                "socket": socket,
-                "db": null,
-                "db_exists": null,
-                "note": "dagq runs in client mode: its commands go to the queue service at the \
-                         socket, and it opens no queue",
-            }),
-            ClientRoute::Broker { address, .. } => json!({
-                "client_mode": true,
-                "broker": address,
-                "db": null,
-                "db_exists": null,
-                "note": "dagq runs in client mode: its commands go to the queue service through \
-                         the queue broker, and it opens no queue",
-            }),
-        };
+        let mut located = located(&client.route);
         if let (Value::Object(located), Value::Object(reach)) = (&mut located, client.reach()) {
             located.extend(reach);
         }
         return Ok(located);
     }
-    if let Some(control) = control_call(&cli.command) {
-        return control_command(client.clone(), control, cli.command.clone());
+    if let Some(call) = control_call(&cli.command) {
+        if control {
+            return Err(ClientFailure::new(
+                "control_side_command",
+                "this command does its steps in this process (Git, worktrees, the landing), and \
+                 to a control side (DAGQ_CONTROL_URL is set) a client-mode dagq does not send \
+                 it: main moves only on the control side",
+            )
+            .into());
+        }
+        return control_command(client.clone(), call, cli.command.clone());
     }
     let Some((use_case, params)) = client_request(&cli.command)? else {
         return Err(ClientFailure::new(
             "no_use_case",
-            "this command is not one of the queue service's use cases, and a client-mode dagq \
-             (DAGQ_SERVICE_SOCKET or DAGQ_SERVICE_URL is set) opens no queue to run it \
-             (docs/design/queue-service.md lists the use cases)",
+            format!(
+                "this command is not one of the queue service's use cases, and a client-mode \
+                 dagq ({CLIENT_MODE_SET}) opens no queue to run it \
+                 (docs/design/queue-service.md lists the use cases)"
+            ),
         )
         .into());
     };
+    if control {
+        if let Some(why) =
+            dagq::domain::queue_service::control_role_refusal(client.env_role.as_deref())
+        {
+            return Err(ClientFailure::new("no_credential", why).into());
+        }
+        let client = client.clone().with_bearer(std::sync::Arc::new(
+            dagq::infrastructure::credentials::TerminalBearer,
+        ));
+        return call_service(&client, None, &cli.command, use_case, params);
+    }
     call_service(client, None, &cli.command, use_case, params)
 }
+
+/// Where `locate` of a client-mode `dagq` says its commands go, with no
+/// queue's path and no word of whether a DB is there.
+fn located(route: &dagq::infrastructure::queue_service::ClientRoute) -> Value {
+    use dagq::infrastructure::queue_service::ClientRoute;
+    match route {
+        ClientRoute::Socket(socket) => json!({
+            "client_mode": true,
+            "socket": socket,
+            "db": null,
+            "db_exists": null,
+            "note": "dagq runs in client mode: its commands go to the queue service at the \
+                     socket, and it opens no queue",
+        }),
+        ClientRoute::Broker { address, .. } => json!({
+            "client_mode": true,
+            "broker": address,
+            "db": null,
+            "db_exists": null,
+            "note": "dagq runs in client mode: its commands go to the queue service through \
+                     the queue broker, and it opens no queue",
+        }),
+        ClientRoute::Control { url, .. } => json!({
+            "client_mode": true,
+            "control_url": url,
+            "db": null,
+            "db_exists": null,
+            "note": "dagq runs in client mode: its commands go to the control side's queue \
+                     service at the URL with your login's token, and it opens no queue",
+        }),
+    }
+}
+
+/// How client mode's refusals name the variables that put `dagq` in it.
+const CLIENT_MODE_SET: &str = "DAGQ_SERVICE_SOCKET, DAGQ_SERVICE_URL or DAGQ_CONTROL_URL is set";
 
 /// The control-side command `command` is when it runs through the queue
 /// service ([`dagq::domain::queue_service::UseCase::Control`]): `integrate`,
@@ -4875,8 +4955,18 @@ fn execute(cli: Cli) -> Result<Value> {
     // authorizes it for the principal of its token: neither `DAGQ_ROLE`
     // nor the queue's path is read (goal 82's stage (3)). An environment
     // that names both a socket and a broker runs nothing (fail closed).
-    if let Some(client) =
-        dagq::infrastructure::queue_service::Client::from_env(|name| env::var(name).ok())?
+    // A person's `login`, `logout` and `whoami` with a control side named
+    // and no other client variable stay on the terminal, where
+    // `identity.login` authorizes them: the person's token is not sent for
+    // them, and `DAGQ_CONTROL_URL` is `login`'s destination.
+    let identity = matches!(
+        cli.command,
+        Command::Login { .. } | Command::Logout | Command::Whoami
+    );
+    if !(identity
+        && dagq::domain::queue_service::identity_runs_on_the_terminal(|name| env::var(name).ok()))
+        && let Some(client) =
+            dagq::infrastructure::queue_service::Client::from_env(|name| env::var(name).ok())?
     {
         return client_mode(&client, &cli);
     }
@@ -4965,7 +5055,19 @@ fn execute(cli: Cli) -> Result<Value> {
         }
         return result;
     }
-    check_access(&actor, &cli.command, cli.db.as_deref())?;
+    let control_url = env::var(dagq::domain::queue_service::CONTROL_URL_ENV)
+        .is_ok_and(|url| !url.trim().is_empty());
+    check_access(
+        &actor,
+        &cli.command,
+        terminal_denials(
+            &cli.command,
+            control_url,
+            &CommandDenials {
+                db: cli.db.as_deref(),
+            },
+        ),
+    )?;
     if matches!(
         cli.command,
         Command::Login { .. } | Command::Logout | Command::Whoami
@@ -6226,6 +6328,197 @@ mod daemon_output_tests {
                 Cli::try_parse_from(["dagq", name, "--control-url", "https://elsewhere"]).is_err()
             );
         }
+    }
+
+    /// `cases` on a thread with the stack the command line's parse needs
+    /// in a debug build, within a minute.
+    fn on_a_large_stack(cases: fn()) {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let _ = done.send(std::panic::catch_unwind(cases));
+            })
+            .unwrap();
+        if let Err(panic) = finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the cases timed out")
+        {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// To a control side (`DAGQ_CONTROL_URL`) client mode refuses before it
+    /// reads a token: a queue named, the control side's diagnostics and the
+    /// commands this process does the steps of, each by its own code, and a
+    /// forwarded command of any role but the user's as `no_credential`;
+    /// `watch` is still no use case, and `locate` says the URL and no DB
+    /// (its look is `reach_control`'s). None of these opens a credential
+    /// store (no bearer is attached before the role is checked) or sends
+    /// anything: the URL's port is the discard one, where nothing listens.
+    #[test]
+    fn a_control_url_refuses_what_it_does_not_forward_before_any_token() {
+        on_a_large_stack(a_control_url_refuses_what_it_does_not_forward_before_any_token_cases);
+    }
+
+    fn a_control_url_refuses_what_it_does_not_forward_before_any_token_cases() {
+        use dagq::infrastructure::queue_service::{Client, ClientFailure, ClientRoute};
+        let control = |role: Option<&str>| {
+            let role = role.map(str::to_owned);
+            Client::from_env(move |name| match name {
+                "DAGQ_CONTROL_URL" => Some("http://127.0.0.1:9".into()),
+                "DAGQ_ROLE" => role.clone(),
+                _ => None,
+            })
+            .unwrap()
+            .unwrap()
+        };
+        let code = |argv: &[&str], role: Option<&str>| {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let failed = client_mode(&control(role), &cli).unwrap_err();
+            let failure = failed.downcast_ref::<ClientFailure>().unwrap();
+            assert!(
+                failure.message.contains("DAGQ_CONTROL_URL"),
+                "{}",
+                failure.message
+            );
+            failure.code.clone()
+        };
+        for role in [None, Some("worker"), Some("someone")] {
+            assert_eq!(
+                code(&["dagq", "--db", "/q.db", "show", "1"], role),
+                "queue_named"
+            );
+            for argv in [
+                &["dagq", "doctor"][..],
+                &["dagq", "service", "status"],
+                &["dagq", "queue-broker", "status"],
+                &["dagq", "integrate", "1"],
+                &["dagq", "review", "1"],
+                &["dagq", "observe"],
+                &["dagq", "throughput-review"],
+                &["dagq", "setup-review"],
+            ] {
+                assert_eq!(code(argv, role), "control_side_command", "{argv:?}");
+            }
+            assert_eq!(code(&["dagq", "watch"], role), "no_use_case");
+        }
+        for role in [
+            "worker",
+            "inbox",
+            "planner",
+            "review-job",
+            "reviewer",
+            "someone",
+        ] {
+            for argv in [
+                &["dagq", "show", "1"][..],
+                &["dagq", "note", "--task", "1", "--text", "x"],
+                &["dagq", "list"],
+            ] {
+                assert_eq!(code(argv, Some(role)), "no_credential", "{role} {argv:?}");
+            }
+        }
+        let client = control(Some("worker"));
+        assert!(matches!(
+            &client.route,
+            ClientRoute::Control { bearer: None, .. }
+        ));
+        let located = located(&client.route);
+        assert_eq!(located["control_url"], "http://127.0.0.1:9");
+        assert_eq!(located["client_mode"], true);
+        assert!(located["db"].is_null() && located["db_exists"].is_null());
+    }
+
+    /// With a control side named and no other client variable, `login`,
+    /// `logout` and `whoami` take the terminal's path, where only the user
+    /// may (`identity.login`): another role is `authorization_denied` by the
+    /// gate, before any store, never `no_credential`, and its refusal is sent
+    /// to no queue service on the host (the fake `Sent` stands for it).
+    #[test]
+    fn identity_commands_with_a_control_url_alone_are_the_terminal_s() {
+        on_a_large_stack(identity_commands_with_a_control_url_alone_are_the_terminal_s_cases);
+    }
+
+    fn identity_commands_with_a_control_url_alone_are_the_terminal_s_cases() {
+        use dagq::application::commands::DenialLog;
+        /// Stands for the queue's service on the host: what is sent to it.
+        struct Sent(std::cell::RefCell<Vec<Value>>);
+        impl DenialLog for Sent {
+            fn record_denial(&self, payload: Value) -> Result<()> {
+                self.0.borrow_mut().push(payload);
+                Ok(())
+            }
+        }
+        let alone = |name: &str| {
+            (name == "DAGQ_CONTROL_URL").then(|| "http://not-loopback.example".to_owned())
+        };
+        assert!(dagq::domain::queue_service::identity_runs_on_the_terminal(
+            alone
+        ));
+        let role = |role: &str| {
+            ActorContext::from_env(|key| (key == "DAGQ_ROLE").then(|| role.to_owned())).unwrap()
+        };
+        for name in ["login", "logout", "whoami"] {
+            let cli = Cli::try_parse_from(["dagq", name]).unwrap();
+            assert_eq!(
+                requests(&cli.command),
+                vec![(Capability::IdentityLogin, Resource::Queue)]
+            );
+            for refused in ["worker", "inbox", "planner"] {
+                // With a control side named, the refusal is the gate's and
+                // nothing reaches the host's service.
+                let sent = Sent(Default::default());
+                let error = check_access(
+                    &role(refused),
+                    &cli.command,
+                    terminal_denials(&cli.command, true, &sent),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error_json(&error)["denied"]["capability"],
+                    "identity.login",
+                    "{error:#}"
+                );
+                assert!(sent.0.borrow().is_empty());
+                // With none, the refusal still goes to the host's service.
+                let sent = Sent(Default::default());
+                check_access(
+                    &role(refused),
+                    &cli.command,
+                    terminal_denials(&cli.command, false, &sent),
+                )
+                .unwrap_err();
+                assert_eq!(sent.0.borrow().len(), 1);
+            }
+            let user = ActorContext::from_env(|_| None).unwrap();
+            let sent = Sent(Default::default());
+            check_access(
+                &user,
+                &cli.command,
+                terminal_denials(&cli.command, true, &sent),
+            )
+            .unwrap();
+            assert!(sent.0.borrow().is_empty());
+            // An unknown role stops at the actor's reading, as before.
+            assert!(
+                ActorContext::from_env(|key| (key == "DAGQ_ROLE").then(|| "someone".into()))
+                    .is_err()
+            );
+            // Beside a socket the refusal is client mode's, as before.
+            for other in ["DAGQ_SERVICE_SOCKET", "DAGQ_SERVICE_CREDENTIAL_FILE"] {
+                assert!(!dagq::domain::queue_service::identity_runs_on_the_terminal(
+                    |key: &str| (key == other || key == "DAGQ_CONTROL_URL").then(|| "/x".into())
+                ));
+            }
+        }
+        // Another command's refusal goes to the host's service whatever.
+        let cli = Cli::try_parse_from(["dagq", "show", "1"]).unwrap();
+        let sent = Sent(Default::default());
+        assert!(std::ptr::addr_eq(
+            terminal_denials(&cli.command, true, &sent),
+            &sent as &dyn DenialLog
+        ));
     }
 
     #[test]
@@ -7685,7 +7978,7 @@ mod tests {
             for (capability, _) in requested {
                 assert_eq!(capability, Capability::QueueRead, "{argv:?}");
             }
-            check_access(&actor, &cli.command, None)
+            check_access(&actor, &cli.command, &CommandDenials { db: None })
                 .unwrap_or_else(|error| panic!("{argv:?}: {error:#}"));
             assert!(
                 client_request(&cli.command).unwrap().is_some(),
@@ -7729,7 +8022,7 @@ mod tests {
                         for (capability, _) in requested {
                             assert_eq!(capability, Capability::QueueRead, "{argv:?}");
                         }
-                        check_access(&actor, &cli.command, None)
+                        check_access(&actor, &cli.command, &CommandDenials { db: None })
                             .unwrap_or_else(|error| panic!("{actor:?} {argv:?}: {error:#}"));
                         assert!(
                             !client || client_request(&cli.command).unwrap().is_some(),

@@ -39,7 +39,7 @@ pub fn destination(
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<Destination> {
     let names = [
-        "DAGQ_CONTROL_URL",
+        crate::domain::queue_service::CONTROL_URL_ENV,
         "DAGQ_LOGIN_ISSUER",
         "DAGQ_LOGIN_CLIENT_ID",
     ];
