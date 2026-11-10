@@ -321,6 +321,10 @@ pub trait ServiceBackend: Send + Sync {
     /// The unix milliseconds now, by the service's clock: what a target's
     /// command is read against, past the time it ends by or not.
     fn now_ms(&self) -> i64;
+    /// Policy-owned approval configuration. Missing composition denies landing.
+    fn answer_authorizer(&self) -> Box<dyn Authorizer + '_> {
+        Box::new(StaticPolicy)
+    }
     /// The places of the heavy reads this service answers at once; `None`
     /// for a backend no service runs (a supervisor's or a test's in-process
     /// one), whose one caller reads what it asks.
@@ -829,6 +833,7 @@ impl QueueService<'_> {
                 &principal,
                 &request.params,
                 process,
+                peer == Peer::Absent,
             ));
         }
         if request.use_case == UseCase::RevokeToken {
@@ -862,6 +867,7 @@ impl QueueService<'_> {
                 &request.params,
                 heavy_reads,
                 notes,
+                &*self.backend.answer_authorizer(),
             )
         }))
     }
@@ -954,6 +960,7 @@ impl QueueService<'_> {
             }
         };
         if (principal.human.is_some()
+            || principal.parent_human.is_some()
             || matches!(
                 principal.role,
                 ActorRole::Runner | ActorRole::ImagePublisher
@@ -1228,10 +1235,44 @@ fn issue_token_of(
     parent: &Principal,
     raw: &Value,
     process: Option<u32>,
+    external: bool,
 ) -> Result<Value> {
     let p: IssueTokenParams = params(UseCase::IssueToken, raw)?;
-    let mut queue = backend.open(&parent.actor())?;
-    issue_token(backend, &mut *queue, parent, &p.principal, process)
+    let actor = parent.actor();
+    let mut queue = backend.open(&actor)?;
+    if !external {
+        return issue_token(backend, &mut *queue, parent, &p.principal, process);
+    }
+    let resource = Resource::Principal(p.principal.role);
+    if !crate::domain::queue_service::human_inbox_issue(parent, p.principal.role) {
+        return Err(refuse_recorded(
+            &mut *queue,
+            &actor,
+            Capability::TokenIssue,
+            &resource,
+            crate::domain::authorization::DenyReason::Resource,
+            "HTTP token issue requires a human token and issues only that person's inbox",
+        ));
+    }
+    Gate {
+        actor: &actor,
+        authorizer: &StaticPolicy,
+    }
+    .authorize(&Store(&mut *queue), Capability::TokenIssue, &resource)?;
+    let child = Principal::human_inbox(parent.human.clone().expect("human token checked"));
+    let expires = parent
+        .token_expires_at
+        .ok_or_else(|| anyhow!("human token has no expiry"))?;
+    issuing_undone(
+        || backend.hold_issues(),
+        |held, then| queue.issuing(held, backend.now_ms(), then),
+        &IssueHeld::Nothing,
+        &mut |_| {
+            let (token, record) = backend.issue_human(&child, expires)?;
+            Ok((json!({"token": token, "expires_at": expires}), Some(record)))
+        },
+        |record| backend.revoke_record(&child, record),
+    )
 }
 
 /// Revoke, as the service starts, the supervisors' sign-ins left over from
@@ -2018,7 +2059,7 @@ struct DenialParams {
 /// match on the reasons fails to compile when one is added and not listed.
 fn deny_reason(name: &str) -> Option<crate::domain::authorization::DenyReason> {
     use crate::domain::authorization::DenyReason as R;
-    const ALL: [R; 8] = [
+    const ALL: [R; 9] = [
         R::NotGranted,
         R::Reserved,
         R::Resource,
@@ -2027,6 +2068,7 @@ fn deny_reason(name: &str) -> Option<crate::domain::authorization::DenyReason> {
         R::GoalGapDraft,
         R::NotHeld,
         R::HumanRole,
+        R::RecentLogin,
     ];
     const fn listed(reason: R) -> usize {
         match reason {
@@ -2038,6 +2080,7 @@ fn deny_reason(name: &str) -> Option<crate::domain::authorization::DenyReason> {
             R::GoalGapDraft => 5,
             R::NotHeld => 6,
             R::HumanRole => 7,
+            R::RecentLogin => 8,
         }
     }
     ALL.into_iter()
@@ -2169,6 +2212,7 @@ fn run(
     raw: &Value,
     heavy_reads: Option<&HeavyReads>,
     notes: &mut RequestNotes,
+    answer_policy: &dyn Authorizer,
 ) -> Result<Value> {
     let mut store = Store(queue);
     // The executor's telemetry principal reaches `telemetry_report` alone
@@ -2209,6 +2253,16 @@ fn run(
     // The host's dialogue and operations (ADR-t3102-2 decision 6 (4)),
     // each authorized before it runs as the command line authorizes it, or
     // by the application as it runs it.
+    if use_case == UseCase::Answer {
+        let QueueCommand::Answer(p) = QueueCommand::parse(use_case, raw)?.expect("answer command")
+        else {
+            unreachable!("answer command")
+        };
+        return serde_json::to_value(
+            Dialogue::new(&mut store, actor, answer_policy).answer(AskId::new(p.id), &p.text)?,
+        )
+        .map_err(Into::into);
+    }
     if let Some(command) = QueueCommand::parse(use_case, raw)? {
         if let Some((capability, resource)) = command.authorization() {
             authorize_as(&store, actor, capability, &resource)?;
@@ -3248,7 +3302,15 @@ pub fn exchange_human(
     let run = || -> Result<Value> {
         let mut queue = backend.open(&Principal::user().actor())?;
         let now = backend.now_ms() / 1000;
-        let principal = Principal::human(verified.identity.clone());
+        let mut principal = Principal::human(verified.identity.clone());
+        let auth_time = verified.claims.get("auth_time").and_then(Value::as_i64);
+        let approval = crate::domain::queue_service::approval_login(auth_time, now);
+        // Permanently quarantine values whose future skew was refused at exchange.
+        if approval.approval_unavailable
+            != Some(crate::domain::queue_service::ApprovalLoginRefusal::FutureAuthTime)
+        {
+            principal.auth_time = auth_time;
+        }
         let result = issuing_undone(
             || backend.hold_issues(),
             |held, then| queue.issuing(held, now * 1000, then),
@@ -3270,6 +3332,7 @@ pub fn exchange_human(
                     on_call: member.on_call,
                     display_name: member.display_name.clone(),
                     expires_at,
+                    approval: approval.clone(),
                 })
                 .expect("human token JSON");
                 Ok((value, Some(record)))
@@ -3853,8 +3916,14 @@ pub(crate) mod tests {
     }
 
     impl DialogueStore for Queue {
-        fn read_ask(&self, _: AskId) -> Result<Ask> {
-            Err(anyhow!("no ask"))
+        fn read_ask(&self, id: AskId) -> Result<Ask> {
+            self.human
+                .lock()
+                .unwrap()
+                .ask
+                .clone()
+                .filter(|ask| ask.id == id)
+                .ok_or_else(|| anyhow!("no ask"))
         }
         /// Request 7 is planner 3's, request 8 planner 4's.
         fn request_planner(&self, request: RequestId) -> Result<Option<PlannerId>> {
@@ -3873,8 +3942,16 @@ pub(crate) mod tests {
             self.log.lock().unwrap().push(value.clone());
             Ok(value)
         }
-        fn answer(&mut self, _: AskId, _: &str, _: Answerer) -> Result<Ask> {
-            Err(anyhow!("answer"))
+        fn answer(&mut self, id: AskId, text: &str, answerer: Answerer) -> Result<Ask> {
+            let mut memory = self.human.lock().unwrap();
+            let ask = memory
+                .ask
+                .as_mut()
+                .filter(|ask| ask.id == id)
+                .ok_or_else(|| anyhow!("no ask"))?;
+            ask.answer = Some(text.to_owned());
+            ask.answer_authority = Some(answerer.authority);
+            Ok(ask.clone())
         }
         fn close_ask(&mut self, _: AskId) -> Result<Ask> {
             Err(anyhow!("close"))
@@ -4157,6 +4234,13 @@ pub(crate) mod tests {
     }
 
     impl ServiceBackend for Backend {
+        fn answer_authorizer(&self) -> Box<dyn Authorizer + '_> {
+            let memory = self.human.lock().unwrap();
+            Box::new(crate::domain::authorization::AnswerPolicy::new(
+                memory.approval_issuer,
+                memory.now,
+            ))
+        }
         fn image_publisher_issue(
             &self,
             token: &crate::domain::image_publish::PublisherToken,
@@ -4568,6 +4652,8 @@ pub(crate) mod tests {
 
     #[derive(Default)]
     struct HumanMemory {
+        ask: Option<Ask>,
+        approval_issuer: Option<bool>,
         member: Option<crate::domain::queue_service::Member>,
         records: std::collections::HashMap<String, (Principal, Option<i64>)>,
         counter: usize,
@@ -5175,6 +5261,65 @@ pub(crate) mod tests {
         assert_eq!(code(&fenced), Some(ServiceErrorCode::NotLeader));
     }
 
+    fn test_ask(kind: AskKind) -> Ask {
+        serde_json::from_value(json!({"id":1,"kind":kind,"question":"q","options":["land","cancel"],"asked_by":"supervisor","reason_category":"recovery_failed","affected":[],"topics":[],"created_at":0})).unwrap()
+    }
+
+    #[test]
+    fn answers_use_the_backend_policy_without_actor_deployment_metadata() {
+        for issuer in [None, Some(false), Some(true)] {
+            for token in [None, Some("inbox"), Some("human")] {
+                let (backend, mut jwt) = human_fixture();
+                jwt.claims.insert("auth_time".into(), json!(0));
+                let human = exchange_human(&backend, &jwt).result.unwrap();
+                let supplied = if token == Some("human") {
+                    human["token"].as_str()
+                } else {
+                    token
+                };
+                {
+                    let mut memory = backend.human.lock().unwrap();
+                    memory.approval_issuer = issuer;
+                    memory.ask = Some(test_ask(AskKind::ApproveLanding));
+                }
+                let service = QueueService {
+                    backend: &backend,
+                    build: "b",
+                    pid: 1,
+                };
+                let response = service.handle_from(
+                    &request(
+                        supplied,
+                        UseCase::Answer,
+                        json!({"id":1,"text":"land: reviewed"}),
+                    ),
+                    if token == Some("human") {
+                        Peer::Absent
+                    } else {
+                        Peer::Owner
+                    },
+                );
+                let permitted =
+                    issuer == Some(false) || (issuer == Some(true) && token == Some("human"));
+                assert_eq!(response.ok, permitted, "{issuer:?} {token:?}: {response:?}");
+                let answer = backend.human.lock().unwrap().ask.clone().unwrap();
+                assert_eq!(answer.answer.is_some(), permitted);
+                if !permitted {
+                    assert_eq!(code(&response), Some(ServiceErrorCode::AuthorizationDenied));
+                } else {
+                    assert_eq!(
+                        answer.answer_authority,
+                        Some(if token == Some("inbox") {
+                            crate::domain::AnswerAuthority::Delegated
+                        } else {
+                            crate::domain::AnswerAuthority::User
+                        })
+                    );
+                }
+            }
+        }
+    }
+
     fn human_fixture() -> (Backend, crate::domain::oidc::VerifiedJwt) {
         use crate::domain::{
             oidc::{OidcIdentity, VerifiedJwt},
@@ -5200,6 +5345,152 @@ pub(crate) mod tests {
                 claims: serde_json::Map::new(),
             },
         )
+    }
+
+    #[test]
+    fn exchange_and_landing_share_freshness_and_future_values_stay_quarantined() {
+        use crate::domain::oidc::CLOCK_SKEW_SECS;
+        use crate::domain::{
+            authorization::landing_answer_permitted,
+            queue_service::{APPROVAL_LOGIN_SECONDS, ApprovalLoginRefusal},
+        };
+        for at in [
+            None,
+            Some(1000 - APPROVAL_LOGIN_SECONDS),
+            Some(999),
+            Some(1000 + CLOCK_SKEW_SECS),
+            Some(1001 + CLOCK_SKEW_SECS),
+        ] {
+            let (backend, mut jwt) = human_fixture();
+            backend.human.lock().unwrap().now = 1000;
+            jwt.claims.insert("iat".into(), json!(1000));
+            if let Some(at) = at {
+                jwt.claims.insert("auth_time".into(), json!(at));
+            }
+            let reply = exchange_human(&backend, &jwt).result.unwrap();
+            let decision = crate::domain::queue_service::approval_login(at, 1000);
+            assert_eq!(reply["approval_until"], json!(decision.approval_until));
+            assert_eq!(
+                reply["approval_unavailable"],
+                json!(decision.approval_unavailable)
+            );
+            let token = reply["token"].as_str().unwrap();
+            let principal = backend.principal(token).unwrap().unwrap();
+            let stored =
+                if decision.approval_unavailable == Some(ApprovalLoginRefusal::FutureAuthTime) {
+                    None
+                } else {
+                    at
+                };
+            assert_eq!(principal.auth_time, stored);
+            assert_eq!(
+                landing_answer_permitted(
+                    principal.role,
+                    true,
+                    stored,
+                    Some(true),
+                    &AskKind::ApproveLanding,
+                    "land: reviewed",
+                    1000
+                ),
+                decision.approval_until.is_some()
+            );
+            if decision.approval_unavailable == Some(ApprovalLoginRefusal::Expired) {
+                backend.human.lock().unwrap().now = 1100;
+                let refreshed = exchange_human(&backend, &jwt).result.unwrap();
+                assert_eq!(refreshed["approval_unavailable"], "expired");
+                let renewed = backend
+                    .principal(refreshed["token"].as_str().unwrap())
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(renewed.auth_time, at);
+            }
+            if stored.is_none() {
+                assert!(!landing_answer_permitted(
+                    principal.role,
+                    true,
+                    stored,
+                    Some(true),
+                    &AskKind::ApproveLanding,
+                    "land",
+                    1100
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn external_issue_uses_the_authenticated_parent_and_rejects_every_other_child() {
+        use crate::domain::{oidc::OidcIdentity, queue_service::TeamRole};
+        for role in [TeamRole::Admin, TeamRole::Member] {
+            let (backend, jwt) = human_fixture();
+            backend.human.lock().unwrap().member.as_mut().unwrap().role = role;
+            let human = exchange_human(&backend, &jwt).result.unwrap();
+            let token = human["token"].as_str().unwrap();
+            let service = QueueService {
+                backend: &backend,
+                build: "b",
+                pid: 1,
+            };
+            for child in ActorRole::ALL {
+                let mut supplied = Principal::human_inbox(OidcIdentity {
+                    issuer: "https://other.example".into(),
+                    subject: "forged".into(),
+                });
+                supplied.role = child;
+                let response = service.handle_from(
+                    &request(
+                        Some(token),
+                        UseCase::IssueToken,
+                        json!({"principal": supplied}),
+                    ),
+                    Peer::Absent,
+                );
+                if child != ActorRole::Inbox {
+                    assert_eq!(
+                        code(&response),
+                        Some(ServiceErrorCode::AuthorizationDenied),
+                        "{role:?} {child:?}"
+                    );
+                    continue;
+                }
+                let result = response
+                    .result
+                    .expect("member can issue inbox without service.lifecycle");
+                let inbox_token = result["token"].as_str().unwrap();
+                assert_eq!(result["expires_at"], human["expires_at"]);
+                let inbox = backend.principal(inbox_token).unwrap().unwrap();
+                assert_eq!(inbox.parent_human, Some(jwt.identity.clone()));
+                assert!(inbox.human.is_none());
+                let refused = service.handle_from(
+                    &request(
+                        Some(inbox_token),
+                        UseCase::IssueToken,
+                        json!({"principal": supplied}),
+                    ),
+                    Peer::Absent,
+                );
+                assert_eq!(code(&refused), Some(ServiceErrorCode::AuthorizationDenied));
+                let on_socket = service.handle_from(
+                    &request(Some(inbox_token), UseCase::Hello, json!({})),
+                    Peer::Owner,
+                );
+                assert_eq!(code(&on_socket), Some(ServiceErrorCode::Unauthenticated));
+                if role == TeamRole::Member {
+                    assert!(
+                        StaticPolicy
+                            .authorize(
+                                &inbox.actor(),
+                                Capability::ServiceLifecycle,
+                                &Resource::Queue
+                            )
+                            .is_err()
+                    );
+                }
+            }
+            let refused = service.handle_from(&request(Some("inbox"), UseCase::IssueToken, json!({"principal": Principal::of(&ActorContext::new(ActorRole::Inbox, "inbox"))})), Peer::Absent);
+            assert_eq!(code(&refused), Some(ServiceErrorCode::AuthorizationDenied));
+        }
     }
 
     #[test]
@@ -6430,6 +6721,7 @@ pub(crate) mod tests {
     fn the_host_s_commands_are_authorized_before_they_run_as_the_command_line_does() {
         use crate::domain::authorization::grants;
         let backend = backend(RunStatus::Running);
+        backend.human.lock().unwrap().ask = Some(test_ask(AskKind::Decide));
         let service = QueueService {
             backend: &backend,
             build: "b",
@@ -6523,12 +6815,16 @@ pub(crate) mod tests {
                 ),
             ] {
                 let response = service.handle_from(&request(token, use_case, params), Peer::Owner);
-                assert!(
-                    response.ok,
-                    "{} {}: {response:?}",
-                    role.as_str(),
-                    use_case.as_str()
-                );
+                if use_case == UseCase::Answer && !grants(role).contains(&Capability::AskAnswer) {
+                    assert_eq!(code(&response), Some(ServiceErrorCode::AuthorizationDenied));
+                } else {
+                    assert!(
+                        response.ok,
+                        "{} {}: {response:?}",
+                        role.as_str(),
+                        use_case.as_str()
+                    );
+                }
             }
         }
         // The worker's every one, the planner's operations.

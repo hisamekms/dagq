@@ -1320,6 +1320,15 @@ pub struct Principal {
     /// into a token record or accepted from a client.
     #[serde(skip)]
     pub human_role: Option<super::actor::HumanRole>,
+    /// Verified JWT auth_time only; never synthesized from iat or issue time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_time: Option<i64>,
+    /// Inbox's human parent, supplied by the authenticated principal alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_human: Option<super::oidc::OidcIdentity>,
+    /// Record expiry loaded on authentication, not accepted from a request.
+    #[serde(skip)]
+    pub token_expires_at: Option<i64>,
     pub role: ActorRole,
     pub actor_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1406,7 +1415,7 @@ impl Principal {
         principal
     }
 
-    /// Authenticate a human token against the current registry row. The role
+    /// Authenticate a human or its inbox token against the current registry row. The role
     /// is call-local: serialization drops it, so revocation and role changes
     /// apply without issuing a replacement token. Identity must still match.
     pub fn with_current_member(
@@ -1419,14 +1428,22 @@ impl Principal {
             return None;
         }
         let member = member?;
-        if self.human.as_ref() != Some(&member.identity) || self.role != ActorRole::User {
+        if self.human.as_ref().or(self.parent_human.as_ref()) != Some(&member.identity) {
             return None;
         }
+        self.token_expires_at = expires_at;
         self.human_role = Some(super::actor::HumanRole {
             role: member.role,
             on_call: member.on_call,
         });
         Some(self)
+    }
+
+    /// An inbox bound to its authenticated human parent, with no host process.
+    pub fn human_inbox(identity: super::oidc::OidcIdentity) -> Self {
+        let mut principal = Self::of(&ActorContext::new(ActorRole::Inbox, "inbox"));
+        principal.parent_human = Some(identity);
+        principal
     }
 
     /// The inbox of the session `session` (ADR-t3102-1 decisions 2 and 3):
@@ -1492,6 +1509,9 @@ impl Principal {
             landing: None,
             human: None,
             human_role: None,
+            auth_time: None,
+            parent_human: None,
+            token_expires_at: None,
         }
     }
 
@@ -1554,6 +1574,9 @@ impl Principal {
             landing: None,
             human: None,
             human_role: None,
+            auth_time: None,
+            parent_human: None,
+            token_expires_at: None,
         }
     }
 
@@ -1574,6 +1597,9 @@ impl Principal {
             landing: None,
             human: None,
             human_role: None,
+            auth_time: None,
+            parent_human: None,
+            token_expires_at: None,
         }
     }
 
@@ -1592,6 +1618,8 @@ impl Principal {
         if let Some(identity) = &self.human {
             let mut expected = Self::human(identity.clone());
             expected.human_role = self.human_role;
+            expected.auth_time = self.auth_time;
+            expected.token_expires_at = self.token_expires_at;
             return if self == &expected {
                 Ok(())
             } else {
@@ -1601,7 +1629,21 @@ impl Principal {
                 })
             };
         }
-        if self.human_role.is_some() {
+        if let Some(identity) = &self.parent_human {
+            let mut expected = Self::human_inbox(identity.clone());
+            expected.human_role = self.human_role;
+            expected.token_expires_at = self.token_expires_at;
+            return if self == &expected {
+                Ok(())
+            } else {
+                Err(DomainError::UnknownValue {
+                    kind: "human inbox",
+                    value: "invalid binding".into(),
+                })
+            };
+        }
+        if self.human_role.is_some() || self.auth_time.is_some() || self.token_expires_at.is_some()
+        {
             return Err(DomainError::UnknownValue {
                 kind: "human principal",
                 value: "role without human identity".into(),
@@ -1724,6 +1766,12 @@ impl Principal {
     /// session opened after it (ADR-t3102-1 decision 2), or a landing
     /// integrator's run with it, as one supervisor may land more than one.
     pub fn credential_key(&self) -> String {
+        if let Some(parent) = &self.parent_human {
+            return format!(
+                "inbox@{}",
+                serde_json::to_string(parent).expect("identity JSON")
+            );
+        }
         if let Some(run) = self.landing_run() {
             return format!("{}@{run}", self.actor_id);
         }
@@ -1739,11 +1787,16 @@ impl Principal {
     /// The actor the service acts as.
     pub fn actor(&self) -> ActorContext {
         let mut actor = ActorContext::new(self.role, self.actor_id.clone());
-        if self.human.is_some()
+        if (self.human.is_some() || self.parent_human.is_some())
             && let Some(role) = self.human_role
         {
-            actor = actor.with_human_role(role);
+            actor = if self.parent_human.is_some() {
+                actor.with_parent_role(role)
+            } else {
+                actor.with_human_role(role)
+            };
         }
+        actor = actor.with_human_login(self.human.is_some(), self.auth_time);
         match (&self.run_id, self.task_id) {
             (Some(run), Some(task)) => actor.with_run(run.clone(), task),
             _ => actor,
@@ -2875,6 +2928,62 @@ pub struct HumanToken {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     pub expires_at: i64,
+    #[serde(flatten)]
+    pub approval: ApprovalLogin,
+}
+
+/// Maximum approval login age: ten minutes from the JWT's original auth_time.
+/// Refresh does not extend it; max_age requests the same bound in either flow.
+pub const APPROVAL_LOGIN_SECONDS: i64 = 10 * 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalLoginRefusal {
+    MissingAuthTime,
+    Expired,
+    FutureAuthTime,
+}
+
+/// Exchange-only approval guidance. The deadline is absolute Unix seconds;
+/// missing both fields in an older reply means MissingAuthTime. CLI clocks
+/// never reinterpret these fields. Exactly one is present on new replies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalLogin {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_until: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_unavailable: Option<ApprovalLoginRefusal>,
+}
+
+/// Pure login freshness decision shared by exchange and landing. At the
+/// deadline the login is expired. Future auth_time within JWT clock skew
+/// remains unchanged; values beyond it must not be retained at exchange.
+pub fn approval_login(auth_time: Option<i64>, now: i64) -> ApprovalLogin {
+    use ApprovalLoginRefusal::*;
+    let result = match auth_time {
+        None => Err(MissingAuthTime),
+        Some(at) if at > now.saturating_add(super::oidc::CLOCK_SKEW_SECS) => Err(FutureAuthTime),
+        Some(at) => match at.checked_add(APPROVAL_LOGIN_SECONDS) {
+            Some(until) if now < until => Ok(until),
+            _ => Err(Expired),
+        },
+    };
+    match result {
+        Ok(until) => ApprovalLogin {
+            approval_until: Some(until),
+            approval_unavailable: None,
+        },
+        Err(reason) => ApprovalLogin {
+            approval_until: None,
+            approval_unavailable: Some(reason),
+        },
+    }
+}
+
+/// HTTP callers may issue only their own inbox, even when administrators.
+/// No supplied identity or parent attributes participate in this decision.
+pub fn human_inbox_issue(parent: &Principal, child: ActorRole) -> bool {
+    parent.role == ActorRole::User && parent.human.is_some() && child == ActorRole::Inbox
 }
 
 /// All identity/registration failures have the same outward refusal.
@@ -2899,6 +3008,79 @@ pub fn human_token_live(expires_at: Option<i64>, member: Option<&Member>, now: i
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn approval_login_table_uses_only_original_auth_time_and_shared_clock_skew() {
+        use ApprovalLoginRefusal::*;
+        let now = 10_000;
+        for (at, until, refusal) in [
+            (None, None, Some(MissingAuthTime)),
+            (Some(now - APPROVAL_LOGIN_SECONDS), None, Some(Expired)),
+            (Some(now - APPROVAL_LOGIN_SECONDS + 1), Some(now + 1), None),
+            (
+                Some(now + super::super::oidc::CLOCK_SKEW_SECS),
+                Some(now + super::super::oidc::CLOCK_SKEW_SECS + APPROVAL_LOGIN_SECONDS),
+                None,
+            ),
+            (
+                Some(now + super::super::oidc::CLOCK_SKEW_SECS + 1),
+                None,
+                Some(FutureAuthTime),
+            ),
+        ] {
+            assert_eq!(
+                approval_login(at, now),
+                ApprovalLogin {
+                    approval_until: until,
+                    approval_unavailable: refusal
+                }
+            );
+        }
+        // Re-exchange with a refreshed ID token does not change the original authentication.
+        assert_eq!(
+            approval_login(Some(1), 1000).approval_unavailable,
+            Some(Expired)
+        );
+        assert_eq!(
+            approval_login(Some(1), 1100).approval_unavailable,
+            Some(Expired)
+        );
+    }
+
+    #[test]
+    fn http_issue_table_accepts_only_humans_requesting_their_own_inbox() {
+        use super::super::{actor::HumanRole, oidc::OidcIdentity};
+        let identity = OidcIdentity {
+            issuer: "https://idp.example".into(),
+            subject: "person".into(),
+        };
+        for role in [TeamRole::Admin, TeamRole::Member] {
+            let mut human = Principal::human(identity.clone());
+            human.human_role = Some(HumanRole {
+                role,
+                on_call: false,
+            });
+            for child in ActorRole::ALL {
+                assert_eq!(
+                    human_inbox_issue(&human, child),
+                    child == ActorRole::Inbox,
+                    "{role:?} {child:?}"
+                );
+            }
+        }
+        for role in ActorRole::ALL {
+            let parent = Principal::of(&ActorContext::new(role, "actor"));
+            assert!(!human_inbox_issue(&parent, ActorRole::Inbox));
+        }
+        let inbox = Principal::human_inbox(identity.clone());
+        assert!(inbox.check().is_ok());
+        assert!(!human_inbox_issue(&inbox, ActorRole::Inbox));
+        let other = Principal::human_inbox(super::super::oidc::OidcIdentity {
+            subject: "other".into(),
+            ..identity
+        });
+        assert_ne!(inbox.credential_key(), other.credential_key());
+    }
 
     /// `migrate --check`'s answer with no service that reads `migrate` is
     /// a promise across builds ([`schema_unanswered`]): the judgment of

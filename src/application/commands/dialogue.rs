@@ -128,7 +128,23 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
     /// `answer`: the user's own, or the inbox's at a person's word
     /// (delegated), which the ask's row and `ask_answered` record.
     pub fn answer(&mut self, id: AskId, text: &str) -> Result<Ask> {
-        self.authorize_ask(Capability::AskAnswer, id)?;
+        let ask = self.authorize_ask(Capability::AskAnswer, id)?;
+        let actor = self.gate.actor;
+        if let Err(error) = self
+            .gate
+            .authorizer
+            .authorize_answer(actor, &ask.kind, text)
+        {
+            super::record(
+                &*self.store,
+                &error,
+                &Resource::Ask {
+                    id,
+                    run: ask.run_id,
+                },
+            );
+            return Err(error.into());
+        }
         let Some(answerer) = self.gate.actor.answerer() else {
             // A policy that let another actor answer names no authority
             // for it: refused rather than recorded as someone else's.
@@ -235,12 +251,19 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
     /// Authorize `capability` on the ask `id`: a role without it is
     /// refused before the ask is read, whether or not it exists; the rest
     /// are judged with the ask's run.
-    fn authorize_ask(&mut self, capability: Capability, id: AskId) -> Result<()> {
+    fn authorize_ask(&mut self, capability: Capability, id: AskId) -> Result<Ask> {
         self.gate
             .refuse_ungranted(&*self.store, capability, &Resource::Ask { id, run: None })?;
-        let run = self.store.read_ask(id)?.run_id;
-        self.gate
-            .authorize(&*self.store, capability, &Resource::Ask { id, run })
+        let ask = self.store.read_ask(id)?;
+        self.gate.authorize(
+            &*self.store,
+            capability,
+            &Resource::Ask {
+                id,
+                run: ask.run_id.clone(),
+            },
+        )?;
+        Ok(ask)
     }
 }
 
@@ -260,6 +283,7 @@ mod tests {
     /// `store: <what>`, so a test sees whether a command reached it.
     #[derive(Default)]
     struct Store {
+        ask_kind: Option<AskKind>,
         denials: RefCell<Vec<Value>>,
         answerer: Option<Answerer>,
         writer: Option<String>,
@@ -296,7 +320,7 @@ mod tests {
                 confidence: None,
                 topics: Vec::new(),
                 id,
-                kind: AskKind::Decide,
+                kind: self.ask_kind.clone().unwrap_or(AskKind::Decide),
                 task_id: Some(TaskId::new(1)),
                 run_id: Some(RunId::new("r1").unwrap()),
                 question: "q".into(),
@@ -505,6 +529,73 @@ mod tests {
 
     fn worker() -> ActorContext {
         ActorContext::worker(&RunId::new("r1").unwrap(), TaskId::new(1))
+    }
+
+    #[test]
+    fn team_landing_denial_does_not_reach_answer_and_other_answers_keep_authority() {
+        use crate::domain::ActorRole;
+        for actor in [
+            ActorContext::user(),
+            ActorContext::new(ActorRole::Inbox, "inbox"),
+            ActorContext::user().with_human_login(true, Some(100)),
+        ] {
+            for kind in [AskKind::ApproveLanding, AskKind::Decide] {
+                for text in ["land", " land : reviewed", "cancel", "send_back: fix"] {
+                    let mut store = Store {
+                        ask_kind: Some(kind.clone()),
+                        ..Store::default()
+                    };
+                    let policy = crate::domain::authorization::AnswerPolicy::new(Some(true), 101);
+                    let result = Dialogue::new(&mut store, &actor, &policy).answer(ASK, text);
+                    let deny = kind == AskKind::ApproveLanding
+                        && text.trim().starts_with("land")
+                        && !actor.human_login().0;
+                    if deny {
+                        let error = result
+                            .unwrap_err()
+                            .downcast::<AuthorizationError>()
+                            .unwrap();
+                        assert_eq!(error.reason, DenyReason::RecentLogin);
+                        assert!(error.to_string().contains("dagq login"));
+                        assert!(store.answerer.is_none());
+                        assert_eq!(store.denials.into_inner().len(), 1);
+                    } else {
+                        assert!(result.unwrap_err().to_string().starts_with("store: "));
+                        assert_eq!(
+                            store.answerer.unwrap().authority,
+                            actor.answerer().unwrap().authority
+                        );
+                        assert!(store.denials.into_inner().is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_policy_deployment_never_allows_landing_even_for_a_human_token() {
+        for actor in [
+            ActorContext::user(),
+            ActorContext::new(ActorRole::Inbox, "inbox"),
+            ActorContext::user().with_human_login(true, Some(100)),
+        ] {
+            let unknown = crate::domain::authorization::AnswerPolicy::new(None, 101);
+            for policy in [&StaticPolicy as &dyn Authorizer, &unknown] {
+                let mut store = Store {
+                    ask_kind: Some(AskKind::ApproveLanding),
+                    ..Store::default()
+                };
+                let error = Dialogue::new(&mut store, &actor, policy)
+                    .answer(ASK, "land: reviewed")
+                    .unwrap_err();
+                assert_eq!(
+                    error.downcast_ref::<AuthorizationError>().unwrap().reason,
+                    DenyReason::RecentLogin
+                );
+                assert!(store.answerer.is_none());
+                assert_eq!(store.denials.into_inner().len(), 1);
+            }
+        }
     }
 
     #[test]

@@ -41,10 +41,11 @@ ADRは方針と境界だけを持ち、ここの名前・値・形は候補で�
 | --- | --- | --- |
 | 人のdagqのtoken | 交換の答えの期限 | 端末の置き場（実装と選び方は`infrastructure::credentials`） |
 | 人のIdPの更新の資格 | IdPの既定 | 同上 |
-| 承認に使えるtokenのloginの新しさ | `auth_time`から10分以内 | — |
 | runnerの登録の値 | 1回きり・15分 | 人が手で渡す |
 | runnerの更新の資格 | 30日、使うたびに回す | runnerのhostの`0600`のファイル |
 | runnerのdagqのtoken | 15分 | runnerのプロセスの中だけ |
+
+承認のloginの新しさは`domain::queue_service::APPROVAL_LOGIN_SECONDS`のdoc commentを読む。
 
 ## CLIの候補
 

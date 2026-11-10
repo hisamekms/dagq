@@ -1671,6 +1671,25 @@ pub fn run_command<E: TransactionEntries>(
 where
     StoreQueue<E>: crate::application::SearchIndex,
 {
+    if matches!(command, QueueCommand::Answer(_)) {
+        let policy = crate::infrastructure::dialogue::answer_policy(&*queue.generators().clock);
+        run_command_with_policy(queue, db, command, &policy)
+    } else {
+        run_command_with_policy(queue, db, command, &crate::domain::StaticPolicy)
+    }
+}
+
+/// Shared command dispatch with its approval policy, also used by an explicit
+/// composition. Omitting the policy's deployment refuses landing by default.
+pub(crate) fn run_command_with_policy<E: TransactionEntries>(
+    queue: &mut StoreQueue<E>,
+    db: &Path,
+    command: &QueueCommand,
+    answer_policy: &dyn crate::domain::Authorizer,
+) -> Result<Value>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
     use crate::application::commands::{
         dialogue::Dialogue, holds::Holds, planning::Planning, replans::Replans,
     };
@@ -1697,7 +1716,7 @@ where
         C::Answer(params) => {
             let mut store = crate::infrastructure::dialogue::DialogueQueue { queue };
             serde_json::to_value(
-                Dialogue::new(&mut store, &actor, &StaticPolicy)
+                Dialogue::new(&mut store, &actor, answer_policy)
                     .answer(AskId::new(params.id), &params.text)?,
             )?
         }

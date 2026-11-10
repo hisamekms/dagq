@@ -61,7 +61,7 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 
 ## Policy
 
-外向きの人もuserのまま、grantsの後、resourceの前に登録簿の役割で狭める。
+外向きの人もuserで、grantsの後・resourceの前に登録簿で狭め、inboxに親の人の許可も適用する。
 
 | 人の役割 | userの許可からの狭め |
 | --- | --- |
@@ -80,7 +80,7 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | runner | `runner.declare`・`runner.claim`・`runner.heartbeat`・`runner.report` | 申告・pullは自分、報告・返却は割り当てrun |
 | image-publisher | `image.publish`だけ | なし |
 | inbox（続き） | `runner.list` | 親の人の一覧の範囲だけ |
-| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`・`runner.share`・`runner.declare`・`identity.login`・`goal.landing_mark`は持たない | なし。人自身の操作との区別は記録が持つ |
+| inbox | userと同じだが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`・`runner.share`・`runner.declare`・`identity.login`・`goal.landing_mark`は持たない | 親の人の役割で狭める。OIDCの発行元のある配置の着地承認は拒む |
 | planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge` | runはnoteだけでask不可。askは`planner_question`だけ、依頼のaskは担当planner本人だけ（`request.decline`と同じ所有の規則）。 |
 | planner（続き） | `task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss` | taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）で、`revising`のproposalのtaskは持ち主だけ（不明なら拒む）。 |
 | planner（続き） | `planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install` | `revisit`（`task.write`）はdraftだけで、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。 |
@@ -141,14 +141,13 @@ answerの代行の境界は[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-dele
 
 #### answerの権限の出どころと承認の分類
 
-answerは誰の権限で書かれたか（`AnswerAuthority`）を記録する（ADR-t728-3の決定2）。
+answerの権限は`AnswerAuthority`（ADR-t728-3決定2）。
 値はactorの型（`ActorContext::answerer`）から決め、answerの文やinboxのpromptから推さない。
-`answered_by`と`asked_by`の値の綴りは変えない。
-eventのactorの列（roleとid）も同じ区別を持つ。
 
-承認に当たるask（ADR-t728-3の決定3）はdomainが分類する（`answer_approves`）。
-runtimeが自分で閉じる・取り下げる・置き換えるanswerは、kindに関わらず何も承認しない。
-この段では承認を人だけに限る強制はしない。
+記録の綴り・runtimeの非承認は`Answerer`のdoc comment、承認の分類は`answer_approves`。
+OIDCの発行元のある配置のapprove_landingの着地の承認は、最近のloginの人のtokenだけを受け、inboxとtokenの無いuserを拒む。
+policyが配置を取得し、不明なら拒む。
+着地を承認しないanswerと他のaskはこの制限を受けず、発行元の無い配置の許否と記録も変わらない。
 
 ### runtimeの操作系のコマンド（application）
 

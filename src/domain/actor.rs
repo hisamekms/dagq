@@ -182,6 +182,10 @@ pub struct HumanRole {
 pub struct ActorContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     human_role: Option<HumanRole>,
+    #[serde(skip)]
+    human_token: bool,
+    #[serde(skip)]
+    auth_time: Option<i64>,
     actor_id: String,
     role: ActorRole,
     trust: TrustLevel,
@@ -196,6 +200,8 @@ impl ActorContext {
     pub fn new(role: ActorRole, actor_id: impl Into<String>) -> Self {
         Self {
             human_role: None,
+            human_token: false,
+            auth_time: None,
             actor_id: actor_id.into(),
             role,
             trust: role.trust(),
@@ -211,6 +217,25 @@ impl ActorContext {
             self.human_role = Some(role);
         }
         self
+    }
+
+    /// Only an inbox authenticated against its human parent's registry row.
+    pub(crate) fn with_parent_role(mut self, role: HumanRole) -> Self {
+        if self.role == ActorRole::Inbox {
+            self.human_role = Some(role);
+        }
+        self
+    }
+
+    /// Authentication metadata, never environment or event attributes.
+    pub(crate) fn with_human_login(mut self, human_token: bool, auth_time: Option<i64>) -> Self {
+        self.human_token = human_token;
+        self.auth_time = auth_time;
+        self
+    }
+
+    pub fn human_login(&self) -> (bool, Option<i64>) {
+        (self.human_token, self.auth_time)
     }
 
     pub fn human_role(&self) -> Option<HumanRole> {

@@ -515,6 +515,8 @@ pub enum DenyReason {
     NotGranted,
     /// The authenticated person's registry role narrows the user grant.
     HumanRole,
+    /// Landing approval requires a human token from a recent login.
+    RecentLogin,
     /// The capability is reserved for a later stage.
     Reserved,
     /// The resource is not the actor's, or its owner or state is unknown.
@@ -539,6 +541,9 @@ impl DenyReason {
         match self {
             Self::NotGranted => "not granted",
             Self::HumanRole => "restricted by human role",
+            Self::RecentLogin => {
+                "landing approval requires a recent human login; run dagq login again"
+            }
             Self::Reserved => "reserved",
             Self::Resource => "not on this resource",
             Self::AskKind => "not of this kind",
@@ -574,6 +579,17 @@ impl std::error::Error for AuthorizationError {}
 
 /// Decides whether `actor` may use `capability` on `resource`.
 pub trait Authorizer {
+    /// Approval is fail-closed without a policy-owned deployment. Actor
+    /// construction and missing entry-point metadata never imply local mode.
+    fn authorize_answer(
+        &self,
+        actor: &ActorContext,
+        kind: &AskKind,
+        text: &str,
+    ) -> Result<(), AuthorizationError> {
+        answer_authorization(actor, None, kind, text, 0)
+    }
+
     fn authorize(
         &self,
         actor: &ActorContext,
@@ -607,7 +623,8 @@ impl Authorizer for StaticPolicy {
             return Err(deny(DenyReason::NotGranted));
         }
         if let Some(role) = actor.human_role()
-            && !human_role_permits(role, capability)
+            && (!human_role_permits(role, capability)
+                || !grants(ActorRole::User).contains(&capability))
         {
             return Err(deny(DenyReason::HumanRole));
         }
@@ -622,6 +639,79 @@ impl Authorizer for StaticPolicy {
             Err(deny(DenyReason::Resource))
         }
     }
+}
+
+/// Static capability policy with a trusted deployment snapshot and its clock.
+/// None means unavailable configuration, never "issuer absent". Only a known
+/// false retains local approvals; an unconfigured Authorizer refuses them.
+pub struct AnswerPolicy {
+    issuer: Option<bool>,
+    now: i64,
+}
+impl AnswerPolicy {
+    pub fn new(issuer: Option<bool>, now: i64) -> Self {
+        Self { issuer, now }
+    }
+}
+impl Authorizer for AnswerPolicy {
+    fn authorize(
+        &self,
+        actor: &ActorContext,
+        capability: Capability,
+        resource: &Resource,
+    ) -> Result<(), AuthorizationError> {
+        StaticPolicy.authorize(actor, capability, resource)
+    }
+    fn authorize_answer(
+        &self,
+        actor: &ActorContext,
+        kind: &AskKind,
+        text: &str,
+    ) -> Result<(), AuthorizationError> {
+        answer_authorization(actor, self.issuer, kind, text, self.now)
+    }
+}
+fn answer_authorization(
+    actor: &ActorContext,
+    issuer: Option<bool>,
+    kind: &AskKind,
+    text: &str,
+    now: i64,
+) -> Result<(), AuthorizationError> {
+    let (human, auth_time) = actor.human_login();
+    if landing_answer_permitted(actor.role(), human, auth_time, issuer, kind, text, now) {
+        Ok(())
+    } else {
+        Err(AuthorizationError {
+            role: actor.role(),
+            capability: C::AskAnswer,
+            reason: DenyReason::RecentLogin,
+        })
+    }
+}
+
+/// Pure landing-answer row of StaticPolicy. answer_approves classifies every
+/// approve_landing answer as an approval and deliberately is not used here.
+/// Inputs are the authenticated role/login, deployment, stored ask kind,
+/// runtime-parsed answer and control-side Unix seconds.
+pub fn landing_answer_permitted(
+    role: ActorRole,
+    human_token: bool,
+    auth_time: Option<i64>,
+    oidc: Option<bool>,
+    kind: &AskKind,
+    answer: &str,
+    now: i64,
+) -> bool {
+    oidc == Some(false)
+        || *kind != AskKind::ApproveLanding
+        || super::LandingAnswer::parse(answer) != Some(super::LandingAnswer::Land)
+        || (oidc == Some(true)
+            && role == ActorRole::User
+            && human_token
+            && super::queue_service::approval_login(auth_time, now)
+                .approval_until
+                .is_some())
 }
 
 /// Narrow existing user grants before resource checks. On-call restores only
@@ -1152,6 +1242,138 @@ pub fn check_priority_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn landing_answer_policy_table_preserves_local_and_non_landing_answers() {
+        use crate::domain::oidc::CLOCK_SKEW_SECS;
+        use crate::domain::queue_service::APPROVAL_LOGIN_SECONDS;
+        use crate::domain::{AnswerAuthority, actor::HumanRole, queue_service::TeamRole};
+        let now = 10_000;
+        for (role, human, at, allowed) in [
+            (ActorRole::Inbox, false, None, false),
+            (ActorRole::User, false, None, false),
+            (ActorRole::User, true, None, false),
+            (
+                ActorRole::User,
+                true,
+                Some(now - APPROVAL_LOGIN_SECONDS),
+                false,
+            ),
+            (
+                ActorRole::User,
+                true,
+                Some(now - APPROVAL_LOGIN_SECONDS + 1),
+                true,
+            ),
+            (ActorRole::User, true, Some(now + CLOCK_SKEW_SECS), true),
+            (
+                ActorRole::User,
+                true,
+                Some(now + CLOCK_SKEW_SECS + 1),
+                false,
+            ),
+        ] {
+            let mut actor = ActorContext::new(role, "actor").with_human_login(human, at);
+            if human {
+                actor = actor.with_human_role(HumanRole {
+                    role: TeamRole::Member,
+                    on_call: false,
+                });
+            }
+            for oidc in [None, Some(false), Some(true)] {
+                for kind in [AskKind::ApproveLanding, AskKind::Decide] {
+                    for answer in [
+                        "land",
+                        " land : review passed",
+                        "send_back: fix",
+                        "cancel",
+                        "yes",
+                    ] {
+                        StaticPolicy
+                            .authorize(&actor, C::AskAnswer, &Resource::Queue)
+                            .unwrap();
+                        assert_eq!(
+                            landing_answer_permitted(role, human, at, oidc, &kind, answer, now),
+                            oidc == Some(false)
+                                || kind != AskKind::ApproveLanding
+                                || !matches!(
+                                    super::super::LandingAnswer::parse(answer),
+                                    Some(super::super::LandingAnswer::Land)
+                                )
+                                || (oidc == Some(true) && allowed),
+                            "{role:?} {at:?} {oidc:?} {kind:?} {answer}"
+                        );
+                        assert_eq!(
+                            actor.answerer().unwrap().authority,
+                            if role == ActorRole::Inbox {
+                                AnswerAuthority::Delegated
+                            } else {
+                                AnswerAuthority::User
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn human_inbox_capabilities_intersect_both_roles_and_follow_registry_changes() {
+        use crate::domain::{
+            actor::HumanRole,
+            oidc::OidcIdentity,
+            queue_service::{Member, Principal, TeamRole},
+        };
+        let identity = OidcIdentity {
+            issuer: "https://idp.example".into(),
+            subject: "person".into(),
+        };
+        let token = Principal::human_inbox(identity.clone());
+        for role in [TeamRole::Admin, TeamRole::Member] {
+            for on_call in [false, true] {
+                let member = Member {
+                    identity: identity.clone(),
+                    role,
+                    on_call,
+                    display_name: None,
+                    created_at: 0,
+                    disabled_at: None,
+                };
+                let inbox = token
+                    .clone()
+                    .with_current_member(Some(900), Some(&member), 1)
+                    .unwrap()
+                    .actor();
+                let parent = ActorContext::user().with_human_role(HumanRole { role, on_call });
+                for cap in Capability::ALL {
+                    let base = StaticPolicy.authorize(
+                        &ActorContext::new(ActorRole::Inbox, "inbox"),
+                        cap,
+                        &Resource::Queue,
+                    );
+                    assert_eq!(
+                        StaticPolicy
+                            .authorize(&inbox, cap, &Resource::Queue)
+                            .is_ok(),
+                        base.is_ok()
+                            && StaticPolicy
+                                .authorize(&parent, cap, &Resource::Queue)
+                                .is_ok(),
+                        "{role:?} {on_call} {cap:?}"
+                    );
+                }
+                let mut disabled = member;
+                disabled.disabled_at = Some(1);
+                assert!(
+                    token
+                        .clone()
+                        .with_current_member(Some(900), Some(&disabled), 2)
+                        .is_none()
+                );
+            }
+        }
+        assert!(token.with_current_member(Some(2), None, 1).is_none());
+    }
 
     #[test]
     fn human_role_table_narrows_user_grants_and_on_call_restores_only_recovery() {

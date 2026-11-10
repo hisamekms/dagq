@@ -75,7 +75,7 @@ serviceの書き込みは1本の列で1つずつ確定し、読み取りは列�
 
 ## principalとtoken
 
-人の役割と有効性は呼び出しごとに登録簿から引き、tokenには役割を写さない。
+人とinboxの親の役割と有効性は呼び出しごとに登録簿から引き、tokenには役割を写さない。
 
 入口はHTTPの`exchange_token`（`application::queue_service::exchange_human`）。
 runnerの登録・交換・更新・失効の入口はHTTPの`application::queue_service::runner_http`。
@@ -83,6 +83,7 @@ runnerの登録・交換・更新・失効の入口はHTTPの`application::queue
 例外として、GitHub Actionsの控えのrunnerは登録の値の代わりに配置の設定が縛るOIDCのJWTで識別され、短いtokenだけを得て更新の資格を持たない。
 申告は割り当てにだけ使い、権限は登録の印が決める。
 外向きの入口だけが発行元のJWTを人の短いtokenに替え、hostのsocketの入口は人のtokenを発行も受けもしない。
+外向きの入口の人のtokenによるissue_tokenは、自分を親とするinboxのtokenだけを発行し、値を応答の中だけで返す。
 人のtokenの記録は制御側の手元のファイルだけにあり、制御側の入れ替えで失われると期限の内でもunauthenticatedになる。
 
 serviceは呼び出しのprincipal（`Principal`）をtokenから決め（tokenの無い人は[hostのCLI](queue-service-host-cli.md#principal)）、クライアントが名乗るrole（`DAGQ_ROLE`）は認可に使わない（ADR-t1233-1決定4、ADR-t1233-4決定4）。

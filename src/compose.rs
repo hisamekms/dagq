@@ -70,6 +70,21 @@ fn wiring_service_use_cases() -> (
     )
 }
 
+/// Explicit approval-policy dispatch for the wiring tests. Contexts reach
+/// the host's command composition through this root (rule L9).
+#[cfg(test)]
+fn wiring_run_command_with_policy<E: TransactionEntries>(
+    queue: &mut StoreQueue<E>,
+    db: &Path,
+    command: &crate::application::queue_commands::QueueCommand,
+    answer_policy: &dyn crate::domain::Authorizer,
+) -> Result<Value>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
+    host::run_command_with_policy(queue, db, command, answer_policy)
+}
+
 /// The binary's limit of a planner's revise ([`PLANNER_TIMEOUT`]), for
 /// [`wiring_tests`]' loop.
 #[cfg(test)]

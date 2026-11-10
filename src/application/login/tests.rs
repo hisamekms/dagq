@@ -112,6 +112,10 @@ impl LoginInteraction for Interaction {
         Ok(())
     }
     fn authorize(&self, _: &str, p: &Params, state: &str) -> Result<(String, String)> {
+        assert!(p.contains(&(
+            "max_age".into(),
+            crate::domain::queue_service::APPROVAL_LOGIN_SECONDS.to_string()
+        )));
         assert!(p.contains(&("code_challenge_method".into(), "S256".into())));
         assert!(p.contains(&("state".into(), state.into())));
         self.browser.set(true);
@@ -678,4 +682,71 @@ fn a_file_fallback_replaces_a_readable_old_os_destination() {
     assert!(stores.save(&replacement).is_err());
     assert_eq!(*os.calls.borrow(), ["save", "save"]);
     assert_eq!(os.load().unwrap().unwrap().destination, saved().destination);
+}
+
+#[test]
+fn approval_guidance_and_success_use_exchange_fields_for_both_flows() {
+    use crate::domain::oidc::CLOCK_SKEW_SECS;
+    use crate::domain::queue_service::{APPROVAL_LOGIN_SECONDS, approval_login};
+    for browser in [false, true] {
+        let flow = if browser { Flow::Browser } else { Flow::Device };
+        for at in [
+            None,
+            Some(1000 - APPROVAL_LOGIN_SECONDS),
+            Some(999),
+            Some(1000 + CLOCK_SKEW_SECS),
+            Some(1001 + CLOCK_SKEW_SECS),
+        ] {
+            let decision = approval_login(at, 1000);
+            let mut reply = exchange();
+            let fields = serde_json::to_value(&decision).unwrap();
+            reply["result"]
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let guidance = approval_guidance(&reply["result"], &flow);
+            if let Some(until) = decision.approval_until {
+                assert!(guidance.contains(&until.to_string()));
+                assert!(guidance.contains("承認に使える期限"));
+            } else if at == Some(1001 + CLOCK_SKEW_SECS) {
+                assert!(guidance.contains("この login は承認に使えない"));
+                assert!(guidance.contains("時計のずれ"));
+                assert!(!guidance.contains("--browser"));
+                assert!(!guidance.contains("承認に使える期限"));
+            } else {
+                assert!(guidance.contains("この IdP では承認に使えない"));
+                assert_eq!(guidance.contains("--browser"), !browser);
+                if browser {
+                    assert!(
+                        guidance.contains("auth_time")
+                            && guidance.contains("max_age")
+                            && guidance.contains("管理者")
+                    );
+                }
+            }
+            let mut replies = vec![doc(!browser)];
+            if !browser {
+                replies.push(start());
+            }
+            replies.extend([json!({"id_token":"opaque-jwt"}), reply]);
+            let http = Http::new(replies);
+            let store = Store::default();
+            let mut opts = options();
+            opts.browser = browser;
+            login(&opts, &http, &store, &Interaction::new()).unwrap();
+            assert_eq!(store.load().unwrap().unwrap().token, "new-dagq-secret");
+            if !browser {
+                let params: Params =
+                    serde_json::from_value(http.sent.borrow()[1].1.clone()).unwrap();
+                assert!(params.contains(&("max_age".into(), APPROVAL_LOGIN_SECONDS.to_string())));
+            }
+        }
+        assert_eq!(
+            approval_guidance(&json!({}), &flow),
+            approval_guidance(
+                &serde_json::to_value(approval_login(None, 0)).unwrap(),
+                &flow
+            )
+        );
+    }
 }

@@ -280,6 +280,10 @@ pub trait LoginHttp {
     fn exchange(&self, control: &str, id_token: &str) -> Result<Value>;
 }
 pub trait LoginInteraction {
+    /// Guidance contains only fixed text and the control-side approval deadline.
+    fn approval(&self, message: &str) {
+        eprintln!("{message}");
+    }
     fn now(&self) -> i64;
     fn sleep(&self, seconds: u64);
     fn entropy(&self) -> Result<[u8; 32]>;
@@ -362,6 +366,10 @@ pub fn login(
     )?;
     let mut params = options.auth_params.clone();
     params.extend([
+        (
+            "max_age".into(),
+            crate::domain::queue_service::APPROVAL_LOGIN_SECONDS.to_string(),
+        ),
         ("client_id".into(), dest.client_id.clone()),
         (
             "scope".into(),
@@ -441,17 +449,42 @@ pub fn login(
         }
     };
     let jwt = id_token(&answer)?;
+    let exchanged = http.exchange(&dest.control_url, jwt)?;
+    let guidance = approval_guidance(&exchanged["result"], &flow);
     let credentials = received(
         dest,
-        http.exchange(&dest.control_url, jwt)?,
+        exchanged,
         answer["refresh_token"]
             .as_str()
             .filter(|s| !s.is_empty())
             .map(str::to_owned),
     )?;
     store.save(&credentials)?;
+    interaction.approval(&guidance);
     Ok(credentials.identity)
 }
+/// Pure rendering of the exchange's freshness decision and chosen flow. No
+/// JWT decoding or CLI clock comparison; old replies fail closed as missing
+/// auth_time. A clock failure never suggests changing browser flow.
+pub fn approval_guidance(exchange: &Value, flow: &Flow) -> String {
+    use crate::domain::queue_service::ApprovalLoginRefusal;
+    let reason =
+        serde_json::from_value::<ApprovalLoginRefusal>(exchange["approval_unavailable"].clone())
+            .ok();
+    if reason == Some(ApprovalLoginRefusal::FutureAuthTime) {
+        return "この login は承認に使えない。発行元と制御側の時計のずれを配置の管理者に確かめてください。".into();
+    }
+    if reason.is_none()
+        && let Some(until) = exchange["approval_until"].as_i64()
+    {
+        return format!("承認に使える期限: {until} (Unix seconds)");
+    }
+    match flow {
+        Flow::Device => "この IdP では承認に使えない。dagq login --browser を実行してください。".into(),
+        Flow::Browser => "この IdP では承認に使えない。ID token に auth_time を載せることと max_age を守ることを、配置の管理者に確かめてください。".into(),
+    }
+}
+
 /// The caller reports unauthenticated once, and reports rejection of the retry
 /// separately. This function never resends a request or loops over renewal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

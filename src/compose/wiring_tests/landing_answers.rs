@@ -140,7 +140,43 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
     wiring.supervise_once_while(|queue| {
         if !answered {
             if running(queue, second) {
-                queue.answer(ask.id, LAND_WITH_A_REASON).unwrap();
+                use crate::application::queue_commands::{AnswerParams, QueueCommand};
+                use crate::domain::authorization::{AnswerPolicy, DenyReason};
+                use crate::domain::{ActorContext, AuthorizationError};
+                // Direct DB dispatch receives an ordinary actor, with no
+                // deployment metadata supplied by the caller.
+                let mut direct = wiring.queue().with_actor(ActorContext::user());
+                let command = QueueCommand::Answer(AnswerParams {
+                    id: ask.id.as_i64(),
+                    text: LAND_WITH_A_REASON.into(),
+                });
+                let before = direct.read_ask(ask.id).unwrap();
+                for policy in [
+                    AnswerPolicy::new(Some(true), 100),
+                    AnswerPolicy::new(None, 100),
+                ] {
+                    let error = crate::compose::wiring_run_command_with_policy(
+                        &mut direct,
+                        std::path::Path::new("/wiring/queue"),
+                        &command,
+                        &policy,
+                    )
+                    .unwrap_err();
+                    assert_eq!(
+                        error.downcast_ref::<AuthorizationError>().unwrap().reason,
+                        DenyReason::RecentLogin
+                    );
+                    let after = direct.read_ask(ask.id).unwrap();
+                    assert_eq!(after.answer, before.answer);
+                    assert_eq!(after.closed_at, before.closed_at);
+                }
+                crate::compose::wiring_run_command_with_policy(
+                    &mut direct,
+                    std::path::Path::new("/wiring/queue"),
+                    &command,
+                    &AnswerPolicy::new(Some(false), 100),
+                )
+                .unwrap();
                 answered = true;
             }
             return false;

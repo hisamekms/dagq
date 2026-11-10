@@ -40,6 +40,10 @@ HTTP-authenticated people remain `user`; the registry role narrows user grants b
 | planner, worker, all jobs, observer, supervisor, wrapper, integrator, executor-telemetry | `runner.declare`, `runner.share`, `runner.list` are refused |
 | inbox, planner, worker, all jobs, observer, supervisor, wrapper, integrator, executor-telemetry | `runner.register` and `runner.revoke` are refused |
 
+With an OIDC issuer configured, approving landing in an `approve_landing` answer requires a person's token from a recent login. The inbox and a user without a human token are refused. Landing is also refused when the policy cannot determine the deployment. Non-approving answers and other asks remain available; deployments without an issuer keep their existing answer permissions and authority records.
+
+An external `issue_token` authenticated with a person's token issues only that person's inbox token, returning the value only in its response. The inbox's capabilities are the intersection of its own permissions and its human parent's current registry role. Changes and disabling apply on the next call; a member can issue their own inbox without gaining other lifecycle operations.
+
 `login`, `logout` and `whoami` (`identity.login`) belong only to a person on their own terminal. Every AI actor, including the inbox, and every control-side role is refused them. Never read or carry the person's credentials.
 
 `goal landing-mark ID MARK` (and `--remove`, `goal.landing_mark`) puts a landing mark on a goal or takes it off: only the person, as the goal's owner or an administrator when people authenticate, and the host's user on a local queue. The inbox and every AI actor are refused (`authorization_denied`). `goal edit --tag` / `--no-tags` never changes a mark.

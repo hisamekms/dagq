@@ -85,3 +85,72 @@ impl<E: TransactionEntries> DialogueStore for DialogueQueue<'_, E> {
             .set_finding_status_covered(id, to, reason, by, covered_by)
     }
 }
+
+/// The direct-DB policy reads deployment settings itself, independently of
+/// the caller's actor. Invalid/unavailable settings stay unknown and deny
+/// landing; only a successful read with no issuer establishes local mode.
+pub fn answer_policy(
+    clock: &dyn crate::application::Clock,
+) -> crate::domain::authorization::AnswerPolicy {
+    policy_from_deployment(
+        super::deployment_config::DeploymentConfig::from_process().ok(),
+        clock.now(),
+    )
+}
+
+fn policy_from_deployment(
+    config: Option<super::deployment_config::DeploymentConfig>,
+    now: i64,
+) -> crate::domain::authorization::AnswerPolicy {
+    crate::domain::authorization::AnswerPolicy::new(
+        config.map(|config| config.value("DAGQ_OIDC_ISSUER").is_some()),
+        now,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{ActorContext, ActorRole, AskKind, Authorizer};
+    use crate::infrastructure::deployment_config::DeploymentConfig;
+
+    #[test]
+    fn deployment_policy_reads_issuer_and_file_settings_and_fails_closed() {
+        for source in ["local", "issuer", "file", "unreadable"] {
+            let config = DeploymentConfig::read(
+                |name| match (source, name) {
+                    ("issuer", "DAGQ_OIDC_ISSUER") => Some("https://idp.example".into()),
+                    ("file" | "unreadable", "DAGQ_OIDC_ISSUER_FILE") => Some("/issuer".into()),
+                    ("issuer" | "file" | "unreadable", "DAGQ_OIDC_AUDIENCE") => Some("cli".into()),
+                    _ => None,
+                },
+                |_| {
+                    if source == "unreadable" {
+                        Err(())
+                    } else {
+                        Ok(b"https://idp.example".to_vec())
+                    }
+                },
+            );
+            let policy = policy_from_deployment(config.ok(), 100);
+            // No actor carries any deployment context.
+            for actor in [
+                ActorContext::user(),
+                ActorContext::new(ActorRole::Inbox, "inbox"),
+            ] {
+                assert_eq!(
+                    policy
+                        .authorize_answer(&actor, &AskKind::ApproveLanding, "land: reviewed")
+                        .is_ok(),
+                    source == "local",
+                    "{source}"
+                );
+                assert!(
+                    policy
+                        .authorize_answer(&actor, &AskKind::ApproveLanding, "cancel")
+                        .is_ok()
+                );
+            }
+        }
+    }
+}

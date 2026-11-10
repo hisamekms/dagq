@@ -56,5 +56,6 @@ pushの資格情報をIntegratorのプロセスだけに持たせ、supervisor�
 
 ## 人しか出せない承認
 
-人だけに限る強制は、承認の経路（別のterminal、署名、人の端末からの確認など）を決めてから行う（[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)決定3）。
+OIDCの発行元のある配置では、approve_landingの着地の承認を最近のloginの人のtokenに限り、inboxの代行とtokenの無いuserを拒む。
+発行元の無い配置の許否は変わらない。
 現在の代行の記録と残るリスクは[Security](security.md#answerと代行の記録)を入口にする。

@@ -329,7 +329,11 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 /// exchange), but never roles. Their values are returned only in the response;
 /// no credentials file is written. These records live only on the control
 /// side's filesystem: replacing its container may lose even unexpired
-/// tokens, which then authenticate as unknown_token.
+/// tokens, which then authenticate as unknown_token. The principal retains
+/// JWT auth_time without an iat/issue-time fallback, except future-skew refusals
+/// which are permanently omitted. Human-parent inboxes keep parent_human here,
+/// expire no later than the issuing human token, and replace only that parent's
+/// prior inbox record; neither kind writes a plaintext credential file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TokenRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -471,9 +475,18 @@ fn write_human_token(
     now: i64,
 ) -> Result<(String, String)> {
     ensure!(
-        principal.human.is_some() && principal.check().is_ok(),
+        (principal.human.is_some() || principal.parent_human.is_some())
+            && principal.check().is_ok(),
         "human identity required"
     );
+    if principal.parent_human.is_some() {
+        // The issue lock serializes replacement; no plaintext credentials file.
+        for (path, record) in records(queue_dir)? {
+            if record.principal.credential_key() == principal.credential_key() {
+                fs::remove_file(path)?;
+            }
+        }
+    }
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| anyhow!("draw human token random bytes"))?;
     let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
@@ -603,7 +616,9 @@ fn write_token(
     now: i64,
 ) -> Result<IssuedToken> {
     ensure!(
-        principal.human.is_none() && principal.role != ActorRole::Runner,
+        principal.human.is_none()
+            && principal.parent_human.is_none()
+            && principal.role != ActorRole::Runner,
         "human and runner tokens require the HTTP exchange"
     );
     principal.check().map_err(anyhow::Error::msg)?;
@@ -3576,8 +3591,15 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
             Ok((binding, verifier))
         })
         .transpose()?;
+    let oidc_configured = config.value("DAGQ_OIDC_ISSUER").is_some();
     let http = config.http.map(HttpStart::Deployment);
-    serve_on(options, http, oidc, Exchanges { actions, images })
+    serve_on(
+        options,
+        http,
+        oidc,
+        Exchanges { actions, images },
+        oidc_configured,
+    )
 }
 
 /// Whether the production entry [`serve`] opens the human exchange to a
@@ -3626,6 +3648,7 @@ pub fn serve_with_http(options: &ServeOptions, http: TcpListener) -> Result<Valu
         Some(HttpStart::Bound(http)),
         None,
         Exchanges::default(),
+        false,
     )
 }
 
@@ -3650,6 +3673,7 @@ pub fn serve_with_http_oidc<S: crate::application::oidc::OidcDocumentSource + 's
         Some(HttpStart::Bound(http)),
         Some(verifier),
         Exchanges::default(),
+        true,
     )
 }
 
@@ -3695,6 +3719,7 @@ fn serve_on(
     http: Option<HttpStart>,
     oidc: Option<Arc<dyn HumanVerifier>>,
     exchanges: Exchanges,
+    oidc_configured: bool,
 ) -> Result<Value> {
     let queue_dir = queue_dir_of(&options.db);
     ensure!(options.db.is_file(), "no queue at {}", options.db.display());
@@ -3837,6 +3862,7 @@ accepts: schema {} to {}",
         TakeoverWorker::start(write_line.clone(), options.db.clone(), holder, local_proof)?;
     let backend = Arc::new(SqliteServiceBackend {
         storage: SqliteStorage,
+        oidc_configured,
         heavy_reads: Some(crate::application::heavy_reads::HeavyReads::of_service(
             options.generators.clock.clone(),
         )),
@@ -4744,6 +4770,8 @@ fn on_line(
 /// to read, a fresh connection per request.
 pub struct SqliteServiceBackend<B: QueueStorage = SqliteStorage> {
     pub storage: B,
+    /// Set from deployment configuration, independently of exchange availability.
+    pub oidc_configured: bool,
     pub db: PathBuf,
     pub queue_dir: PathBuf,
     pub generators: Generators,
@@ -4866,6 +4894,12 @@ where
         + crate::application::ImageStore
         + crate::application::queue_service::MemberStore,
 {
+    fn answer_authorizer(&self) -> Box<dyn crate::domain::Authorizer + '_> {
+        Box::new(crate::domain::authorization::AnswerPolicy::new(
+            Some(self.oidc_configured),
+            self.now_ms() / 1000,
+        ))
+    }
     fn is_write_leader(&self) -> bool {
         self.write_line.as_ref().is_none_or(|line| line.leading())
     }
@@ -4940,6 +4974,9 @@ where
         token: &str,
         principal: &Principal,
     ) -> Result<Option<crate::domain::oidc::OidcIdentity>> {
+        if let Some(parent) = &principal.parent_human {
+            return Ok(Some(parent.clone()));
+        }
         // Principal authentication checked the inbox token and its process.
         // This binding was written by the service at its parent's request.
         let parent = if principal.role == ActorRole::Inbox {
@@ -4981,7 +5018,12 @@ where
                     .map(|id| Principal::image_publisher(&id)),
             );
         };
-        if let Some(identity) = &record.principal.human {
+        if let Some(identity) = record
+            .principal
+            .human
+            .as_ref()
+            .or(record.principal.parent_human.as_ref())
+        {
             use crate::application::queue_service::MemberStore;
             let queue = self.storage.open_read_only(&self.db)?;
             let member = queue.member(identity)?;
@@ -5613,6 +5655,7 @@ impl InProcessCaller {
         Self::on(
             Arc::new(SqliteServiceBackend {
                 storage: SqliteStorage,
+                oidc_configured: false,
                 db: db.to_path_buf(),
                 queue_dir: queue_dir.clone(),
                 generators,
@@ -5954,6 +5997,7 @@ impl InProcessControlCaller {
         Self {
             backend: SqliteServiceBackend {
                 storage: SqliteStorage,
+                oidc_configured: false,
                 db: db.to_path_buf(),
                 queue_dir: queue_dir_of(db),
                 generators,
@@ -7369,6 +7413,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let backend = SqliteServiceBackend {
             storage: SqliteStorage,
+            oidc_configured: false,
             db: dir.path().join("queue.db"),
             queue_dir: dir.path().to_path_buf(),
             generators: Generators {
@@ -8789,6 +8834,35 @@ mod tests {
 mod human_tests {
     use super::*;
     use crate::domain::oidc::{JwtRefusal, OidcIdentity, VerifiedJwt};
+
+    #[test]
+    fn human_inbox_records_replace_only_the_same_parent_without_plaintext_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = OidcIdentity {
+            issuer: "https://idp.example".into(),
+            subject: "person".into(),
+        };
+        let first = Principal::human_inbox(identity.clone());
+        let second = Principal::human_inbox(OidcIdentity {
+            subject: "other".into(),
+            ..identity
+        });
+        let (old, _) = write_human_token(dir.path(), &first, 900, 1).unwrap();
+        let (other, _) = write_human_token(dir.path(), &second, 800, 2).unwrap();
+        let (new, _) = write_human_token(dir.path(), &first, 700, 3).unwrap();
+        assert!(lookup_record(dir.path(), &old).unwrap().is_none());
+        assert!(lookup_record(dir.path(), &other).unwrap().is_some());
+        let record = lookup_record(dir.path(), &new).unwrap().unwrap();
+        assert_eq!(record.expires_at, Some(700));
+        assert_eq!(record.principal.parent_human, first.parent_human);
+        assert!(!service_dir(dir.path()).join(CREDENTIALS_DIR).exists());
+        for (path, _) in records(dir.path()).unwrap() {
+            let bytes = fs::read_to_string(path).unwrap();
+            for value in [&old, &other, &new] {
+                assert!(!bytes.contains(value));
+            }
+        }
+    }
 
     #[test]
     fn human_records_contain_no_value_have_no_credentials_and_cleanup_preserves_other_logins() {

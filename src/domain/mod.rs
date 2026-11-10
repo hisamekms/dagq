@@ -1530,7 +1530,8 @@ string_enum!(AnswerAuthority {
 });
 
 /// Who writes an answer: `answered_by` as it always was, and the
-/// authority it carries.
+/// authority it carries. The spellings of answered_by and asked_by remain
+/// unchanged when authority/approval classification is added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Answerer {
     #[serde(deserialize_with = "interned::text")]
@@ -1545,6 +1546,7 @@ impl Answerer {
         authority: AnswerAuthority::User,
     };
     /// The runtime withdrawing, superseding or closing an ask itself.
+    /// These answers approve nothing, regardless of ask kind.
     pub const RUNTIME: Self = Self {
         by: ANSWERED_BY_RUNTIME,
         authority: AnswerAuthority::Runtime,

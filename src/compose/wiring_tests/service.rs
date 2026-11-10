@@ -339,6 +339,10 @@ pub(super) struct MemoryBackend {
 }
 
 impl ServiceBackend for MemoryBackend {
+    fn answer_authorizer(&self) -> Box<dyn crate::domain::Authorizer + '_> {
+        self.sqlite.answer_authorizer()
+    }
+
     fn principal(&self, token: &str) -> Result<Option<Principal>> {
         Ok(self.tokens.lookup(token))
     }

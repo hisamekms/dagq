@@ -1391,6 +1391,9 @@ mod tests {
             landing: None,
             human: None,
             human_role: None,
+            auth_time: None,
+            parent_human: None,
+            token_expires_at: None,
         };
         // Nor is an executor's telemetry token of the run.
         let telemetry = Principal::telemetry(
