@@ -1649,7 +1649,7 @@ impl Supervisor<'_> {
             let bytes = built.map(|b| b.prompt.bytes).unwrap_or_else(|| {
                 crate::application::prompt::PromptBytes {
                     total: prompt.len(),
-                    limit: crate::application::prompt::PLAN_REVIEW_PROMPT_LIMIT,
+                    limit: harness.expect("a verdict harness").prompt_limit(),
                     ..Default::default()
                 }
             });

@@ -32,13 +32,32 @@ impl EvalStore for Requested<'_> {
 
 #[test]
 fn plan_round_uses_its_recorded_main_production_job_and_records_launch_and_scores() {
+    role_round("plan_review");
+}
+
+#[test]
+fn goal_round_uses_its_recorded_main_production_job_and_records_launch_and_scores() {
+    role_round("goal_review");
+}
+
+fn role_round(role: &str) {
+    let goal = role == "goal_review";
     let pass = json!({"verdict":"pass","reasons":[],"summary":"sound"});
     let revise =
         json!({"verdict":"revise","reasons":[{"text":"fix","codes":["P-1"]}],"summary":"fix"});
     let concern =
         json!({"verdict":"concern","reasons":[{"text":"ask","codes":["P-1"]}],"summary":"ask"});
+    let (pass, revise, concern) = if goal {
+        (
+            json!({"verdict":"achieved","criteria":[{"criterion":"G-1","met":true}]}),
+            json!({"verdict":"gaps","criteria":[{"criterion":"G-1","met":false}],"gaps":[{"title":"fix"}]}),
+            json!({"verdict":"ask","criteria":[{"criterion":"G-1","met":false}],"question":"scope?"}),
+        )
+    } else {
+        (pass, revise, concern)
+    };
     let w = Wiring::new(
-        "plan_role_eval",
+        "role_eval",
         Script {
             receipts: vec![],
             verdicts: vec![
@@ -52,20 +71,50 @@ fn plan_round_uses_its_recorded_main_production_job_and_records_launch_and_score
         },
     );
     let main = w.git.main().to_string();
-    let snapshot = crate::application::role_eval::tests::snapshot(&main);
-    let members = ["pass", "revise", "concern"].map(|verdict| {
+    let snapshot = if goal {
+        crate::application::role_snapshot::Snapshot {
+            main_commit: main.clone(),
+            change: None,
+            materials: vec![],
+            input: crate::application::role_snapshot::Input::Goal(Box::new(
+                crate::application::role_snapshot::GoalInput {
+                    goal: json!({"id":42,"title":"goal","acceptance":"G-1"}),
+                    tasks: vec![json!({"id":1,"status":"completed","result":"done"})],
+                    follow_ups: vec![json!({"task_id":3,"judgement":"out_of_scope"})],
+                    replacements: vec![],
+                    events: vec![],
+                    previous: vec![],
+                    gaps_in_a_row: 0,
+                    repo_root: "/production/repository".into(),
+                    language: None,
+                },
+            )),
+        }
+    } else {
+        crate::application::role_eval::tests::snapshot(&main)
+    };
+    let values = if goal {
+        ["achieved", "gaps", "ask"]
+    } else {
+        ["pass", "revise", "concern"]
+    };
+    let code = if goal { "G-1" } else { "P-1" };
+    let members = values.map(|verdict| {
         json!({"id":verdict,"source":"handmade","made_by":"test","snapshot":snapshot,
-            "expected":{"verdict":verdict,"codes":if verdict=="pass" {vec![]}else{vec!["P-1"]}}})
+            "expected":{"verdict":verdict,"codes":if verdict==values[0] {vec![]}else{vec![code]}}})
     });
-    let cases = json!({"role":"plan_review","codes":["P-1"],"k":1,"cases": members});
+    let cases = json!({"role":role,"codes":[code],"k":1,"cases": members});
     // Main moves after the record. The case must still request the old main.
     w.git.move_main();
-    let config = "[roles.plan_review]\nprovider='claude'\n[roles.review]\nprovider='codex'\n";
-    w.verifier.set_config(config);
+    let config = format!("[roles.{role}]\nprovider='claude'\n[roles.review]\nprovider='codex'\n");
+    w.verifier.set_config(&config);
     w.git.commit_files(
         &[
-            ("dagq.toml", config),
-            (".dagq/role-evals/plan_review/dev.json", &cases.to_string()),
+            ("dagq.toml", config.as_str()),
+            (
+                &format!(".dagq/role-evals/{role}/dev.json"),
+                &cases.to_string(),
+            ),
         ],
         &[],
     );
@@ -73,7 +122,7 @@ fn plan_round_uses_its_recorded_main_production_job_and_records_launch_and_score
     let store = Requested {
         store: &queue,
         settings: LaunchSettings {
-            roles: crate::infrastructure::run_env::parse_config(config)
+            roles: crate::infrastructure::run_env::parse_config(&config)
                 .unwrap()
                 .roles,
             ..Default::default()
@@ -83,7 +132,7 @@ fn plan_round_uses_its_recorded_main_production_job_and_records_launch_and_score
     let evals = AgentEvals::new(&store, &actor, &StaticPolicy);
     let requested = evals
         .request(&EvalRequest {
-            agent: "role:plan_review".into(),
+            agent: format!("role:{role}"),
             split: Split::Dev,
             k: Some(2),
             cases: None,
@@ -107,7 +156,7 @@ fn plan_round_uses_its_recorded_main_production_job_and_records_launch_and_score
         .collect::<Vec<_>>();
     assert_eq!(result["passed"], true, "{result}; job errors {errors:?}");
     assert_eq!(result["scores"]["runs"], 6);
-    assert_eq!(result["scores"]["per_verdict"]["concern"]["recall"], 1.0);
+    assert_eq!(result["scores"]["per_verdict"][values[2]]["recall"], 1.0);
     assert_eq!(
         result["launch"],
         json!({"provider":"claude","model":"claude-haiku-5-5","effort":"low"})
@@ -116,6 +165,25 @@ fn plan_round_uses_its_recorded_main_production_job_and_records_launch_and_score
         evals.list(None, 10, true).unwrap()["by_launch"][0]["rounds"][0]["scores"],
         result["scores"]
     );
+    let events = store.eval_events().unwrap();
+    let started: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == EventKind::AgentEvalRunStarted)
+        .collect();
+    assert_eq!(started.len(), 6);
+    for event in started {
+        assert_eq!(event.payload["provider"], "claude");
+        assert_eq!(event.payload["model"], "claude-haiku-5-5");
+        assert_eq!(event.payload["effort"], "low");
+        assert_eq!(
+            event.payload["prompt_bytes"]["limit"],
+            if goal {
+                crate::application::prompt::GOAL_REVIEW_PROMPT_LIMIT
+            } else {
+                crate::application::prompt::PLAN_REVIEW_PROMPT_LIMIT
+            }
+        );
+    }
     let trees = w.git.case_bases();
     assert_eq!(trees.len(), 3);
     for (_, base, hidden) in trees {
@@ -128,7 +196,11 @@ fn plan_round_uses_its_recorded_main_production_job_and_records_launch_and_score
         let env: std::collections::BTreeMap<_, _> = command.get_envs().collect();
         assert_eq!(
             env[std::ffi::OsStr::new("DAGQ_ROLE")],
-            Some(std::ffi::OsStr::new("plan-review-job"))
+            Some(std::ffi::OsStr::new(if goal {
+                "goal-review-job"
+            } else {
+                "plan-review-job"
+            }))
         );
         for key in crate::domain::queue_service::CLIENT_ENV {
             assert_eq!(env[std::ffi::OsStr::new(key)], None);
@@ -147,10 +219,26 @@ fn plan_round_uses_its_recorded_main_production_job_and_records_launch_and_score
                 .contains(&w.db.parent().unwrap().to_owned())
         );
     }
-    for (prompt, cwd) in w.agent.recovery_prompts() {
+    let prompts = w.agent.recovery_prompts();
+    assert_eq!(prompts.len(), 6);
+    for (prompt, cwd) in prompts {
         assert!(cwd.ends_with("tree"));
         assert!(!prompt.contains("\"expected\""));
         assert!(!prompt.contains("/production/repository"));
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let harness =
+            crate::application::role_eval::RoleHarness::target(&format!("role:{role}")).unwrap();
+        assert_eq!(
+            prompt,
+            harness
+                .prompt(
+                    &snapshot,
+                    &files,
+                    &cwd.parent().unwrap().join("material"),
+                    &cwd
+                )
+                .unwrap()
+        );
     }
 }
 

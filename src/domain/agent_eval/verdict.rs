@@ -1,6 +1,7 @@
 //! Cases and scoring for whole verdict roles. Snapshot deserialization and
 //! production prompt assembly belong to the application harness.
 use super::{Case, CaseBase, RoleCase, Source, Split, ratio};
+use crate::domain::goal_review::{GoalReviewDecision, GoalReviewVerdict};
 use crate::domain::plan_review::{PlanReviewDecision, PlanReviewVerdict};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -29,10 +30,39 @@ pub struct VerdictCase {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expected {
-    pub verdict: PlanReviewDecision,
+    pub verdict: Decision,
     pub codes: BTreeSet<String>,
     #[serde(default)]
     pub acceptable_codes: BTreeSet<String>,
+}
+
+/// The role's production decision, serialized without a wrapper or renaming.
+/// Goal reason codes in expectations are the exact unmet criterion strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Decision {
+    Plan(PlanReviewDecision),
+    Goal(GoalReviewDecision),
+}
+impl Decision {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan(d) => d.as_str(),
+            Self::Goal(d) => d.as_str(),
+        }
+    }
+    fn positive(self) -> bool {
+        matches!(
+            self,
+            Self::Plan(PlanReviewDecision::Pass) | Self::Goal(GoalReviewDecision::Achieved)
+        )
+    }
+    fn belongs_to(self, role: &str) -> bool {
+        matches!(
+            (self, role),
+            (Self::Plan(_), "plan_review") | (Self::Goal(_), "goal_review")
+        )
+    }
 }
 
 /// Hidden in every role's case tree, including trees for agent cases.
@@ -67,11 +97,12 @@ pub fn read(text: &str, split: Split, role: &str) -> Result<List, String> {
             return Err(format!("invalid id, source, made_by or k: {}", c.id));
         }
         let e = &c.expected;
-        if !e.codes.is_subset(&list.codes)
+        if !e.verdict.belongs_to(role)
+            || !e.codes.is_subset(&list.codes)
             || !e.acceptable_codes.is_subset(&list.codes)
             || !e.codes.is_disjoint(&e.acceptable_codes)
-            || (e.verdict == PlanReviewDecision::Pass && !e.codes.is_empty())
-            || (e.verdict != PlanReviewDecision::Pass && e.codes.is_empty())
+            || (e.verdict.positive() && !e.codes.is_empty())
+            || (!e.verdict.positive() && e.codes.is_empty())
         {
             return Err(format!("invalid expected codes: {}", c.id));
         }
@@ -152,12 +183,43 @@ pub fn score(
     threshold: f64,
     disputed: bool,
 ) -> Value {
+    score_role(cases, runs, threshold, disputed, false)
+}
+
+/// Score goal decisions and the acceptance items explicitly marked unmet.
+/// Gap titles and prose summaries are not a second classification.
+pub fn score_goal(
+    cases: &[Case],
+    runs: &[(&str, Option<&Value>)],
+    threshold: f64,
+    disputed: bool,
+) -> Value {
+    score_role(cases, runs, threshold, disputed, true)
+}
+
+fn score_role(
+    cases: &[Case],
+    runs: &[(&str, Option<&Value>)],
+    threshold: f64,
+    disputed: bool,
+    goal: bool,
+) -> Value {
     let mut decisions = [Counts::default(), Counts::default(), Counts::default()];
-    let values = [
-        PlanReviewDecision::Pass,
-        PlanReviewDecision::Revise,
-        PlanReviewDecision::Concern,
-    ];
+    let values = if goal {
+        [
+            GoalReviewDecision::Achieved,
+            GoalReviewDecision::Gaps,
+            GoalReviewDecision::Ask,
+        ]
+        .map(Decision::Goal)
+    } else {
+        [
+            PlanReviewDecision::Pass,
+            PlanReviewDecision::Revise,
+            PlanReviewDecision::Concern,
+        ]
+        .map(Decision::Plan)
+    };
     let mut codes = std::collections::BTreeMap::<String, Counts>::new();
     let (mut errors, mut total) = (0, 0);
     let mut failed_cases = Vec::new();
@@ -172,23 +234,46 @@ pub fn score(
             continue;
         };
         total += 1;
-        let Some(v) = result.and_then(|v| PlanReviewVerdict::parse(&v.to_string()).ok()) else {
+        let parsed = result.and_then(|v| {
+            if goal {
+                let v = GoalReviewVerdict::parse(&v.to_string()).ok()?;
+                let codes = v
+                    .criteria
+                    .iter()
+                    .filter(|c| !c.met)
+                    .map(|c| c.criterion.clone())
+                    .collect();
+                Some((
+                    Decision::Goal(v.verdict),
+                    codes,
+                    serde_json::to_value(v.criteria).ok()?,
+                ))
+            } else {
+                let v = PlanReviewVerdict::parse(&v.to_string()).ok()?;
+                let codes = v.reason_codes.into_iter().flatten().collect();
+                Some((
+                    Decision::Plan(v.verdict),
+                    codes,
+                    serde_json::to_value(v.reasons).ok()?,
+                ))
+            }
+        });
+        let Some((decision, actual, reasons)): Option<(Decision, BTreeSet<String>, Value)> = parsed
+        else {
             errors += 1;
             failed_cases.push(json!({"id":id,"error":"no readable production verdict"}));
             continue;
         };
-        for (counts, decision) in decisions.iter_mut().zip(values) {
-            counts.add(c.expected.verdict == decision, v.verdict == decision);
+        for (counts, value) in decisions.iter_mut().zip(values) {
+            counts.add(c.expected.verdict == value, decision == value);
         }
-        let actual: BTreeSet<String> = v.reason_codes.into_iter().flatten().collect();
-        if v.verdict != c.expected.verdict
+        if decision != c.expected.verdict
             || !c.expected.codes.is_subset(&actual)
             || actual.iter().any(|code| {
                 !c.expected.codes.contains(code) && !c.expected.acceptable_codes.contains(code)
             })
         {
-            failed_cases
-                .push(json!({"id":id,"verdict":v.verdict,"codes":actual,"reasons":v.reasons}));
+            failed_cases.push(json!({"id":id,"verdict":decision,"codes":actual,"reasons":reasons}));
         }
         for code in c.expected.codes.union(&actual) {
             if !c.expected.acceptable_codes.contains(code) {
@@ -352,6 +437,89 @@ mod tests {
             1
         );
     }
+    #[test]
+    fn goal_cases_keep_production_decisions_and_score_only_unmet_criteria() {
+        let list = json!({"role":"goal_review","codes":["works","docs"],"k":1,"cases":[
+            {"id":"done","source":"handmade","made_by":"test","snapshot":{},"expected":{"verdict":"achieved","codes":[]}},
+            {"id":"gap","source":"handmade","made_by":"test","snapshot":{},"expected":{"verdict":"gaps","codes":["works"],"acceptable_codes":["docs"]}},
+            {"id":"ask","source":"handmade","made_by":"test","snapshot":{},"expected":{"verdict":"ask","codes":["works"]}}
+        ]});
+        let read_goal = |v: &Value| read(&v.to_string(), Split::Dev, "goal_review");
+        let cases: Vec<_> = read_goal(&list)
+            .unwrap()
+            .cases
+            .into_iter()
+            .map(|c| c.into_case("a".repeat(40)))
+            .collect();
+        for bad in [
+            {
+                let mut v = list.clone();
+                v["cases"][0]["expected"]["verdict"] = json!("pass");
+                v
+            },
+            {
+                let mut v = list.clone();
+                v["cases"][0]["expected"]["codes"] = json!(["works"]);
+                v
+            },
+            {
+                let mut v = list.clone();
+                v["cases"][1]["expected"]["codes"] = json!([]);
+                v
+            },
+            {
+                let mut v = list.clone();
+                v["cases"][1]["expected"]["codes"] = json!(["unknown"]);
+                v
+            },
+        ] {
+            assert!(read_goal(&bad).is_err(), "{bad}");
+        }
+        let done = json!({"verdict":"achieved","criteria":[{"criterion":"docs","met":true}]});
+        let gap = json!({"verdict":"gaps","criteria":[{"criterion":"works","met":false},{"criterion":"docs","met":false}],"gaps":[{"title":"a different title"}]});
+        let ask = json!({"verdict":"ask","criteria":[{"criterion":"works","met":false}],"question":"scope?"});
+        let good = [
+            ("done", Some(&done)),
+            ("gap", Some(&gap)),
+            ("ask", Some(&ask)),
+        ];
+        let scored = score_goal(&cases, &good, 0.9, false);
+        assert_eq!(scored["passed"], true, "{scored}");
+        assert_eq!(scored["per_code"]["works"]["recall"], 1.0);
+        assert!(scored["per_code"].get("docs").is_none());
+        let wrong = score_goal(
+            &cases,
+            &[
+                ("done", Some(&done)),
+                ("gap", Some(&ask)),
+                ("ask", Some(&ask)),
+            ],
+            0.9,
+            false,
+        );
+        assert_eq!(wrong["passed"], false);
+        assert_eq!(wrong["per_verdict"]["gaps"]["recall"], 0.0);
+        let missing = json!({"verdict":"gaps","gaps":[{"title":"works"}]});
+        let wrong = score_goal(&cases, &[("gap", Some(&missing))], 0.9, false);
+        assert_eq!(wrong["per_code"]["works"]["recall"], 0.0);
+        let extra = json!({"verdict":"ask","criteria":[{"criterion":"works","met":false},{"criterion":"unknown","met":false}]});
+        assert_eq!(
+            score_goal(&cases, &[("ask", Some(&extra))], 0.9, false)["per_code"]["unknown"]["precision"],
+            0.0
+        );
+        let mut disputed = cases.clone();
+        disputed[1].disputed = Some(json!("disagree"));
+        for bad in [
+            json!({"verdict":"gaps"}),
+            json!({"verdict":"pass","reasons":[],"summary":"ok"}),
+            json!({"verdict":"achieved","extra":true}),
+        ] {
+            let runs = [("gap", Some(&bad))];
+            assert_eq!(score_goal(&disputed, &runs, 0.9, false)["runs"], 0);
+            assert_eq!(score_goal(&disputed, &runs, 0.9, true)["errors"], 1);
+        }
+    }
+
     #[test]
     fn every_case_tree_hides_every_expectation_store() {
         assert_eq!(

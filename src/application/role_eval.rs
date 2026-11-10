@@ -8,29 +8,33 @@ use crate::domain::{ActorContext, Provider};
 use anyhow::{Result, bail, ensure};
 use std::path::Path;
 
-/// `agent eval role:plan_review` selects the whole plan review role,
+/// `agent eval role:plan_review` and `role:goal_review` select whole verdict roles,
 /// independently of review agents named by their definition directories.
 /// Its held-out definition digest is the versioned harness identity below;
 /// changing replay or scoring semantics must change that identity.
 #[derive(Clone, Copy, Debug)]
 pub enum RoleHarness {
     PlanReview,
+    GoalReview,
 }
 impl RoleHarness {
     pub fn target(name: &str) -> Option<Self> {
         match name {
             "role:plan_review" => Some(Self::PlanReview),
+            "role:goal_review" => Some(Self::GoalReview),
             _ => None,
         }
     }
     pub fn role(self) -> ModelRole {
         match self {
             Self::PlanReview => ModelRole::PlanReview,
+            Self::GoalReview => ModelRole::GoalReview,
         }
     }
     pub fn identity(self) -> &'static str {
         match self {
             Self::PlanReview => "role:plan_review:snapshot-v1:score-v1",
+            Self::GoalReview => "role:goal_review:snapshot-v1:score-v1",
         }
     }
     /// Validate the production record without consulting the source paths.
@@ -44,9 +48,15 @@ impl RoleHarness {
         );
         match (self, &s.input) {
             (Self::PlanReview, Input::Plan(_)) => (),
+            (Self::GoalReview, Input::Goal(_)) => {
+                ensure!(
+                    s.materials.is_empty(),
+                    "goal review has no external material"
+                );
+            }
             _ => bail!("snapshot belongs to another role"),
         }
-        ensure!(s.change.is_none(), "plan review has no change copy");
+        ensure!(s.change.is_none(), "main-tree role has no change copy");
         let mut paths = std::collections::BTreeSet::new();
         for m in &s.materials {
             ensure!(
@@ -76,6 +86,9 @@ impl RoleHarness {
             Self::PlanReview => {
                 crate::domain::plan_review::PlanReviewVerdict::parse(text).ok()?;
             }
+            Self::GoalReview => {
+                crate::domain::goal_review::GoalReviewVerdict::parse(text).ok()?;
+            }
         }
         super::agent_job::read_reply(text)
     }
@@ -88,12 +101,23 @@ impl RoleHarness {
     ) -> serde_json::Value {
         match self {
             Self::PlanReview => verdict::score(cases, runs, threshold, disputed),
+            Self::GoalReview => verdict::score_goal(cases, runs, threshold, disputed),
+        }
+    }
+    /// The production fitter's limit, retained in eval job measurements.
+    pub fn prompt_limit(self) -> usize {
+        match self {
+            Self::PlanReview => super::prompt::PLAN_REVIEW_PROMPT_LIMIT,
+            Self::GoalReview => super::prompt::GOAL_REVIEW_PROMPT_LIMIT,
         }
     }
     pub fn actor(self, eval: i64, index: usize, run: u32) -> ActorContext {
         match self {
             Self::PlanReview => {
                 ActorContext::plan_review_job(format_args!("agent-eval:{eval}:{index}"), run)
+            }
+            Self::GoalReview => {
+                ActorContext::goal_review_job(format_args!("agent-eval:{eval}:{index}"), run)
             }
         }
     }
@@ -116,13 +140,14 @@ impl RoleHarness {
         prompt: &'a str,
         reads: &'a super::AgentReads,
     ) -> HeadlessProgram<'a> {
-        match self {
-            Self::PlanReview => HeadlessProgram::Job {
-                cwd: tree,
-                prompt,
-                access: super::prompt::PLAN_REVIEW_ACCESS,
-                reads: Some(reads),
+        HeadlessProgram::Job {
+            cwd: tree,
+            prompt,
+            access: match self {
+                Self::PlanReview => super::prompt::PLAN_REVIEW_ACCESS,
+                Self::GoalReview => super::prompt::GOAL_REVIEW_ACCESS,
             },
+            reads: Some(reads),
         }
     }
     pub fn checked(
@@ -141,7 +166,7 @@ impl RoleHarness {
         models.checked_agent_launch(self.role(), &written)
     }
     /// Verdict roles share the lifecycle but choose their own tree policy.
-    /// Plan review reads the recorded main tree, with every case store hidden.
+    /// Plan and goal review read recorded main, with every case store hidden.
     pub fn tree(
         self,
         repository: &dyn super::Repository,
@@ -149,7 +174,7 @@ impl RoleHarness {
         tree: &Path,
     ) -> Result<()> {
         match self {
-            Self::PlanReview => {
+            Self::PlanReview | Self::GoalReview => {
                 repository.add_case_base_tree(tree, &snapshot.main_commit, &verdict::HIDDEN)
             }
         }
@@ -224,30 +249,105 @@ pub(crate) mod tests {
         }
     }
     #[test]
+    fn goal_snapshot_replays_saved_values_and_rejects_other_roles_and_material() {
+        use crate::application::role_snapshot::GoalInput;
+        let harness = RoleHarness::target("role:goal_review").unwrap();
+        let input = GoalInput {
+            goal: json!({"id":42,"title":"goal","acceptance":"works"}),
+            tasks: vec![json!({"id":1,"status":"completed","result":"saved result"})],
+            follow_ups: vec![json!({"task_id":3,"judgement":"out_of_scope"})],
+            replacements: vec![],
+            events: vec![],
+            previous: vec![],
+            gaps_in_a_row: 3,
+            repo_root: "/production/repository".into(),
+            language: Some(crate::domain::language::Language {
+                tag: "ja".into(),
+                source: crate::domain::language::LanguageSource::User,
+            }),
+        };
+        let production = input.build().text;
+        let value = serde_json::to_value(Snapshot {
+            main_commit: "a".repeat(40),
+            change: None,
+            materials: vec![],
+            input: Input::Goal(Box::new(input)),
+        })
+        .unwrap();
+        let read = harness.snapshot(&value).unwrap();
+        let files = crate::application::memory_files::MemoryFiles::default();
+        assert_eq!(
+            harness
+                .prompt(
+                    &read,
+                    &files,
+                    Path::new("/case/material"),
+                    Path::new("/case/tree")
+                )
+                .unwrap(),
+            production.replace("/production/repository", "/case/tree")
+        );
+        assert!(RoleHarness::PlanReview.snapshot(&value).is_err());
+        assert!(
+            harness
+                .snapshot(&serde_json::to_value(snapshot(&"a".repeat(40))).unwrap())
+                .is_err()
+        );
+        for bad in [
+            {
+                let mut v = value.clone();
+                v["main_commit"] = json!("main");
+                v
+            },
+            {
+                let mut v = value.clone();
+                v["materials"] = json!([{"source":"/secret","at":"replacement/file","bytes":""}]);
+                v
+            },
+            {
+                let mut v = value;
+                v["change"] = json!({});
+                v
+            },
+        ] {
+            assert!(harness.snapshot(&bad).is_err(), "{bad}");
+        }
+        let gaps = r#"{"verdict":"gaps","criteria":[{"criterion":"works","met":false}],"gaps":[{"title":"fix"}]}"#;
+        assert_eq!(harness.reply(gaps).unwrap()["verdict"], "gaps");
+        assert!(harness.reply(r#"{"verdict":"gaps"}"#).is_none());
+        assert!(
+            harness
+                .reply(r#"{"verdict":"pass","reasons":[],"summary":"ok"}"#)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn role_launch_checks_only_its_role_and_declared_destinations() {
         use crate::domain::actor_model::RoleModel;
-        let h = RoleHarness::PlanReview;
-        let mut roles = RoleModels::default();
-        *roles.entry(ModelRole::PlanReview) = RoleModel {
-            provider: Some(Provider::Codex),
-            ..Default::default()
-        };
-        let asked = AgentModel {
-            provider: Some(Provider::Claude),
-            model: Some("claude-haiku-5-5".into()),
-            effort: Some("low".into()),
-        };
-        assert!(h.checked(&asked, &roles, &[]).is_err());
-        let launch = h.checked(&asked, &roles, &[Provider::Claude]).unwrap();
-        assert_eq!(
-            (launch.provider, launch.model, launch.effort),
-            (Provider::Claude, asked.model, asked.effort)
-        );
-        assert_eq!(
-            h.checked(&AgentModel::default(), &roles, &[])
-                .unwrap()
-                .provider,
-            Provider::Codex
-        );
+        for h in [RoleHarness::PlanReview, RoleHarness::GoalReview] {
+            let mut roles = RoleModels::default();
+            *roles.entry(h.role()) = RoleModel {
+                provider: Some(Provider::Codex),
+                ..Default::default()
+            };
+            let asked = AgentModel {
+                provider: Some(Provider::Claude),
+                model: Some("claude-haiku-5-5".into()),
+                effort: Some("low".into()),
+            };
+            assert!(h.checked(&asked, &roles, &[]).is_err());
+            let launch = h.checked(&asked, &roles, &[Provider::Claude]).unwrap();
+            assert_eq!(
+                (launch.provider, launch.model, launch.effort),
+                (Provider::Claude, asked.model, asked.effort)
+            );
+            assert_eq!(
+                h.checked(&AgentModel::default(), &roles, &[])
+                    .unwrap()
+                    .provider,
+                Provider::Codex
+            );
+        }
     }
 }

@@ -2091,7 +2091,7 @@ enum AgentCommand {
     /// run only; holdout and production are a person's, the inbox's or a planner's. Prints the
     /// eval's id.
     Eval {
-        /// An agent (`.dagq/agents/<agent>/`), `builtin:<name>`, or `role:plan_review`.
+        /// An agent (`.dagq/agents/<agent>/`), `builtin:<name>`, or `role:plan_review` / `role:goal_review`.
         agent: String,
         /// The cases' split.
         #[arg(long, default_value = "dev", value_parser = SPLITS)]

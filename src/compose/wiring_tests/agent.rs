@@ -777,7 +777,8 @@ impl Spawner for FakeAgent {
             }
             JOB => {
                 if command.get_envs().any(|(key, value)| {
-                    key == "DAGQ_ROLE" && value == Some(std::ffi::OsStr::new("plan-review-job"))
+                    key == "DAGQ_ROLE"
+                        && value.is_some_and(|v| v == "plan-review-job" || v == "goal-review-job")
                 }) && command
                     .get_current_dir()
                     .is_some_and(|p| p.ends_with("tree"))
