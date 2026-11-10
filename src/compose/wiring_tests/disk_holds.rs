@@ -75,6 +75,19 @@ fn below_the_reserve_no_run_is_claimed_and_with_room_a_new_queue_claims_one_at_a
     assert_eq!(held[0]["reason"], "disk_space");
     assert_eq!(held[0]["value"], serde_json::json!(SHORT as f64));
     assert_eq!(held[0]["threshold"], serde_json::json!((5 * GIB) as f64));
+    assert_eq!(held[0]["disk"]["reserve"], 5 * GIB);
+    assert_eq!(held[0]["disk"]["volume"], 0);
+    assert_eq!(held[0]["disk"]["reserve_share"], 0.05);
+    assert_eq!(held[0]["disk"]["expected"], Value::Null);
+    assert_eq!(held[0]["disk"]["sample_count"], 0);
+    assert_eq!(held[0]["disk"]["moving"], 0);
+    assert_eq!(held[0]["disk"]["remaining"], 0);
+    assert!(
+        held[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reserve 5.0 GiB")
+    );
     assert!(queue.show(first).unwrap().runs.is_empty());
 
     wiring.free.store(ROOM, Ordering::SeqCst);
@@ -143,6 +156,10 @@ fn below_the_reserve_a_landing_waits_and_with_room_it_lands() {
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(held[0]["reason"], "disk_space");
     assert_eq!(held[0]["threshold"], serde_json::json!((5 * GIB) as f64));
+    assert_eq!(held[0]["disk"]["reserve"], 5 * GIB);
+    assert_eq!(held[0]["disk"]["moving"], 0);
+    assert_eq!(held[0]["disk"]["claim_expected"], 0);
+    assert!(held[0]["message"].as_str().unwrap().contains("moving 0"));
     assert_eq!(queue_payloads(&queue, "landing_resumed").len(), 1);
     let detail = queue.show(task).unwrap();
     assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
@@ -306,6 +323,25 @@ fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_cla
     assert_eq!(
         held[0]["threshold"],
         serde_json::json!((5 * GIB + 2 * EXPECTED) as f64)
+    );
+    let disk = &held[0]["disk"];
+    assert_eq!(disk["expected"], EXPECTED);
+    assert_eq!(disk["sample_count"], 1);
+    assert_eq!(disk["moving"], 1);
+    assert_eq!(disk["remaining"], EXPECTED);
+    assert_eq!(disk["measured"], 0);
+    assert_eq!(disk["unmeasured"], 1);
+    assert_eq!(disk["landing_waiting"], false);
+    assert_eq!(disk["landing_expected"], 0);
+    assert_eq!(disk["claims_wait_reason"], Value::Null);
+    let message = held[0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("expected 10.0 GiB (samples 1)"),
+        "{message}"
+    );
+    assert!(
+        message.contains("remaining 10.0 GiB (measured 0, unmeasured 1)"),
+        "{message}"
     );
     for task in [second, third] {
         assert_eq!(

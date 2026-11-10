@@ -586,6 +586,7 @@ impl Supervisor<'_> {
             max_load: self.host.max_load(),
             free_bytes: self.host.free(),
             needed_bytes: needed,
+            disk: Some(needs),
             // Claude's hold ask holds the claims only while no worker can
             // run on the other provider either (ADR-t813-2 decision 6).
             queue_hold: self.queue_hold.filter(|_| self.routes().is_empty()),

@@ -150,6 +150,8 @@ pub struct HoldInputs {
     /// The free bytes a new run (or a landing) needs; `None` holds for no
     /// disk space.
     pub needed_bytes: Option<u64>,
+    /// This pass's disk calculation, carried unchanged into disk holds.
+    pub disk: Option<super::disk::DiskNeeds>,
     /// The open authentication or usage-limit ask that holds the queue's
     /// work (task 437), if any.
     pub queue_hold: Option<QueueHold>,
@@ -177,6 +179,9 @@ pub struct ClaimHold {
     /// The `queue_hold` ask of an authentication or usage-limit hold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ask_id: Option<i64>,
+    /// Disk needs in bytes and the inputs that explain them; absent for other holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk: Option<super::disk::DiskNeeds>,
 }
 
 impl ClaimHold {
@@ -193,6 +198,7 @@ impl ClaimHold {
                 value: hold.affected as f64,
                 threshold: 0.0,
                 ask_id: Some(hold.ask_id),
+                disk: None,
             });
         }
         if let (Some(free), Some(needed)) = (inputs.free_bytes, inputs.needed_bytes)
@@ -203,6 +209,7 @@ impl ClaimHold {
                 value: free as f64,
                 threshold: needed as f64,
                 ask_id: None,
+                disk: inputs.disk,
             });
         }
         match (inputs.load_average, inputs.max_load) {
@@ -211,6 +218,7 @@ impl ClaimHold {
                 value,
                 threshold,
                 ask_id: None,
+                disk: None,
             }),
             _ => None,
         }
@@ -228,9 +236,10 @@ impl ClaimHold {
                 "the usage-limit ask {ask} is open (Claude Code's usage limit was reached): no new run is claimed and no headless job (review, recovery, plan review, goal review, observer) starts until a person answers it; the runs in flight keep their leases"
             ),
             HoldReason::DiskSpace => format!(
-                "the free disk space {} of the queue's directory is below the {} a new run needs: no new run is claimed until the ended runs' worktrees are cleaned or a person frees the disk; the runs in flight go on",
+                "the free disk space {} of the queue's directory is below the {} a new run needs: no new run is claimed until the ended runs' worktrees are cleaned or a person frees the disk; the runs in flight go on{}",
                 super::disk::gib(self.value),
-                super::disk::gib(self.threshold)
+                super::disk::gib(self.threshold),
+                self.disk_detail()
             ),
             HoldReason::LoadAverage => format!(
                 "the 1-minute load average {:.2} is above --max-load {:.2}: no new run is claimed until it falls back; the runs in flight go on",
@@ -242,10 +251,16 @@ impl ClaimHold {
     /// Why no landing starts its verification, for the log and the event.
     pub fn landing_message(&self) -> String {
         format!(
-            "the free disk space {} of the queue's directory is below the {} a landing's verification needs: no run lands until the ended runs' worktrees are cleaned or a person frees the disk; the runs stay awaiting integration",
+            "the free disk space {} of the queue's directory is below the {} a landing's verification needs: no run lands until the ended runs' worktrees are cleaned or a person frees the disk; the runs stay awaiting integration{}",
             super::disk::gib(self.value),
-            super::disk::gib(self.threshold)
+            super::disk::gib(self.threshold),
+            self.disk_detail()
         )
+    }
+
+    fn disk_detail(&self) -> String {
+        self.disk
+            .map_or_else(String::new, |needs| format!("; {}", needs.message()))
     }
 
     /// The message of a hold of `kinds`.
@@ -301,6 +316,9 @@ pub fn transition_of(
                 "message": hold.message_for(kinds),
                 "supervisor": token,
             });
+            if let Some(needs) = hold.disk {
+                payload["disk"] = json!(needs);
+            }
             if let Some(ask_id) = hold.ask_id {
                 payload["ask_id"] = json!(ask_id);
             }
@@ -649,7 +667,55 @@ mod tests {
             free_bytes: free,
             needed_bytes: needed,
             queue_hold: None,
+            disk: None,
         })
+    }
+
+    #[test]
+    fn disk_holds_record_the_same_breakdown_their_messages_explain() {
+        let gib = 1 << 30;
+        let mut needs = super::super::disk::DiskState {
+            free: Some(gib),
+            total: 200 * gib,
+            expected: Some(10 * gib),
+            moving: 2,
+            remaining: 16 * gib,
+            landing_waiting: true,
+        }
+        .needs(0.05);
+        needs.sample_count = 3;
+        needs.measured = 1;
+        needs.unmeasured = 1;
+        for (kinds, threshold) in [(CLAIMS, needs.claim), (LANDINGS, needs.landing)] {
+            let hold = ClaimHold::judge(&HoldInputs {
+                free_bytes: Some(gib),
+                needed_bytes: Some(threshold),
+                disk: Some(needs),
+                ..HoldInputs::default()
+            })
+            .unwrap();
+            let (kind, payload) =
+                transition_of(kinds, Some(&hold), None, &LeaseToken::new("s"), |_| false).unwrap();
+            assert_eq!(kind, kinds.held);
+            assert_eq!(payload["reason"], "disk_space");
+            assert_eq!(payload["value"], json!(gib as f64));
+            assert_eq!(payload["threshold"], json!(threshold as f64));
+            assert_eq!(payload["supervisor"], "s");
+            assert_eq!(payload["disk"], json!(needs));
+            let message = payload["message"].as_str().unwrap();
+            // Cleanup waits use this same text without emitting a hold event.
+            assert!(message.ends_with(&needs.message()), "{message}");
+            for part in [
+                "reserve 10.0 GiB (volume 200.0 GiB, share 5.00%)",
+                "expected 10.0 GiB (samples 3)",
+                "moving 2, remaining 16.0 GiB (measured 1, unmeasured 1)",
+                "landing_waiting true, landing_expected 10.0 GiB",
+                "claim additions: expected 10.0 GiB, remaining 16.0 GiB",
+                "claims_wait none",
+            ] {
+                assert!(message.contains(part), "{message}");
+            }
+        }
     }
 
     /// Without `--max-load` the threshold is twice the logical cores (16
@@ -680,6 +746,7 @@ mod tests {
                 ask_id: 7,
                 affected: 2,
             }),
+            disk: None,
         };
         let hold = ClaimHold::judge(&inputs(HoldReason::Authentication)).unwrap();
         assert_eq!(hold.reason, HoldReason::Authentication);

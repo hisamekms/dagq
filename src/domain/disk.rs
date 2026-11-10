@@ -248,6 +248,11 @@ pub const QUANTILE_TENTHS: usize = 9;
 /// ceil(0.9 × n)-th smallest) from it; `None` without one, when only the
 /// rule that one run moves on at a time holds.
 pub fn expected_run_size(samples: &[RunSample], now_millis: i64) -> Option<u64> {
+    expected_run_estimate(samples, now_millis).0
+}
+
+/// The expectation and number of samples actually used in its window.
+pub fn expected_run_estimate(samples: &[RunSample], now_millis: i64) -> (Option<u64>, usize) {
     let mut recent: Vec<&RunSample> = samples
         .iter()
         .filter(|sample| now_millis.saturating_sub(sample.at_millis) <= SAMPLE_WINDOW_MILLIS)
@@ -258,10 +263,10 @@ pub fn expected_run_size(samples: &[RunSample], now_millis: i64) -> Option<u64> 
     sizes.sort_unstable();
     let n = sizes.len();
     if n < QUANTILE_SAMPLES {
-        return sizes.last().copied();
+        return (sizes.last().copied(), n);
     }
     let rank = (n * QUANTILE_TENTHS).div_ceil(10);
-    sizes.get(rank.max(1) - 1).copied()
+    (sizes.get(rank.max(1) - 1).copied(), n)
 }
 
 /// The least free bytes a reserve is, whatever the volume: 5 GiB, so a
@@ -308,8 +313,32 @@ pub struct DiskVerdict {
 
 /// The free bytes a claim and a landing need now ([`DiskState::needs`]),
 /// for the holds, the cleanup and the disk ask.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct DiskNeeds {
+    /// Size in bytes of the volume used to calculate the reserve; zero when unread.
+    pub volume: u64,
+    /// Configured fraction of that volume; the minimum reserve still applies.
+    pub reserve_share: f64,
+    /// Samples within the expectation's age and count window.
+    pub sample_count: usize,
+    /// Runs moving at this reading, including landing verifications.
+    pub moving: usize,
+    /// Sum of the moving runs' remaining estimates, before the idle rule.
+    pub remaining: u64,
+    /// Moving runs counted from a trusted measured size, including measured zero.
+    pub measured: usize,
+    /// Moving runs counted at the whole expectation because no size is trusted.
+    pub unmeasured: usize,
+    /// Whether a landing waits, even when the idle rule adds no expectation.
+    pub landing_waiting: bool,
+    /// Bytes added for the new claim; zero with no moving run or no expectation.
+    pub claim_expected: u64,
+    /// Remaining bytes added to the claim; zero under the idle/no-sample rule.
+    pub claim_remaining: u64,
+    /// Bytes added for a waiting landing; at most one expectation.
+    pub landing_expected: u64,
+    /// Why claims wait regardless of free space; None when space alone decides.
+    pub claims_wait_reason: Option<ClaimsWaitReason>,
     /// The reserve ([`reserve_bytes`]).
     pub reserve: u64,
     /// What a new run is expected to take ([`expected_run_size`]).
@@ -325,6 +354,44 @@ pub struct DiskNeeds {
     /// waits with no run moving (it goes first), or runs move with no
     /// expectation (a project with no samples runs one at a time).
     pub claims_wait: bool,
+}
+
+/// The existing ordering and no-sample rules that defer claims without a hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimsWaitReason {
+    /// An idle queue gives the waiting landing the first turn.
+    LandingFirst,
+    /// With no expectation only one run moves at a time.
+    NoSamples,
+}
+
+impl DiskNeeds {
+    /// The same breakdown for event messages and cleanup waits; sizes are GiB.
+    pub fn message(&self) -> String {
+        let show = |bytes: u64| gib(bytes as f64);
+        format!(
+            "reserve {} (volume {}, share {:.2}%); expected {} (samples {}); moving {}, remaining {} (measured {}, unmeasured {}); landing_waiting {}, landing_expected {}; claim additions: expected {}, remaining {}; claims_wait {}",
+            show(self.reserve),
+            show(self.volume),
+            self.reserve_share * 100.0,
+            self.expected.map_or_else(|| "none yet".into(), show),
+            self.sample_count,
+            self.moving,
+            show(self.remaining),
+            self.measured,
+            self.unmeasured,
+            self.landing_waiting,
+            show(self.landing_expected),
+            show(self.claim_expected),
+            show(self.claim_remaining),
+            match self.claims_wait_reason {
+                Some(ClaimsWaitReason::LandingFirst) => "landing first",
+                Some(ClaimsWaitReason::NoSamples) => "no samples; one run at a time",
+                None => "none",
+            },
+        )
+    }
 }
 
 impl DiskState {
@@ -346,6 +413,33 @@ impl DiskState {
             _ => reserve,
         };
         DiskNeeds {
+            volume: self.total,
+            reserve_share: share,
+            moving: self.moving,
+            remaining: self.remaining,
+            landing_waiting: self.landing_waiting,
+            claim_expected: if moving {
+                self.expected.unwrap_or(0)
+            } else {
+                0
+            },
+            claim_remaining: if moving && self.expected.is_some() {
+                self.remaining
+            } else {
+                0
+            },
+            landing_expected: if moving && self.landing_waiting {
+                self.expected.unwrap_or(0)
+            } else {
+                0
+            },
+            claims_wait_reason: if moving && self.expected.is_none() {
+                Some(ClaimsWaitReason::NoSamples)
+            } else if !moving && self.landing_waiting {
+                Some(ClaimsWaitReason::LandingFirst)
+            } else {
+                None
+            },
             reserve,
             expected: self.expected,
             claim,
@@ -355,6 +449,7 @@ impl DiskState {
             } else {
                 self.landing_waiting
             },
+            ..DiskNeeds::default()
         }
     }
 
@@ -578,6 +673,76 @@ mod tests {
         for (kind, _) in SAMPLE_EVENTS {
             assert!(SAMPLE_KINDS.contains(&kind), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn breakdown_additions_match_both_thresholds_under_the_existing_rules() {
+        for (expected, moving, waiting, remaining) in [
+            (Some(10 * GIB), 0, false, 0),
+            (None, 2, false, 0),
+            (None, 0, true, 0),
+            (Some(10 * GIB), 0, true, 0),
+            (
+                Some(10 * GIB),
+                2,
+                true,
+                moving_remaining(Some(10 * GIB), [Some(4 * GIB), None]),
+            ),
+        ] {
+            let state = DiskState {
+                free: Some(1),
+                total: 200 * GIB,
+                expected,
+                moving,
+                remaining,
+                landing_waiting: waiting,
+            };
+            let mut needs = state.needs(0.05);
+            needs.measured = usize::from(remaining > 0);
+            needs.unmeasured = moving - needs.measured;
+            assert_eq!(
+                needs.claim,
+                needs
+                    .reserve
+                    .saturating_add(needs.claim_expected)
+                    .saturating_add(needs.claim_remaining)
+                    .saturating_add(needs.landing_expected)
+            );
+            assert_eq!(
+                needs.landing,
+                needs.reserve.saturating_add(needs.claim_expected)
+            );
+            assert_eq!(needs.volume, 200 * GIB);
+            assert_eq!(needs.reserve, 10 * GIB);
+            assert_eq!(needs.measured + needs.unmeasured, moving);
+            assert_eq!(needs.claims_wait, needs.claims_wait_reason.is_some());
+            if remaining > 0 {
+                assert_eq!(needs.claim, 46 * GIB);
+                assert_eq!(needs.landing_expected, 10 * GIB);
+                assert_eq!(needs.unmeasured, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn estimate_reports_only_samples_used_by_the_expectation() {
+        let now = SAMPLE_WINDOW_MILLIS + 1;
+        let mut samples = vec![
+            RunSample {
+                bytes: GIB,
+                at_millis: now
+            };
+            SAMPLE_COUNT + 3
+        ];
+        samples.push(RunSample {
+            bytes: 100 * GIB,
+            at_millis: 0,
+        });
+        assert_eq!(
+            expected_run_estimate(&samples, now),
+            (Some(GIB), SAMPLE_COUNT)
+        );
+        assert_eq!(expected_run_estimate(&[], now), (None, 0));
     }
 
     #[test]
@@ -1167,6 +1332,13 @@ mod tests {
                 claim: reserve + 20 * GIB,
                 landing: reserve + 10 * GIB,
                 claims_wait: false,
+                volume: 50 * GIB,
+                reserve_share: share,
+                moving: 2,
+                landing_waiting: true,
+                claim_expected: 10 * GIB,
+                landing_expected: 10 * GIB,
+                ..DiskNeeds::default()
             }
         );
         assert_eq!(state(0, e, 0, false).needs(share).claim, reserve);

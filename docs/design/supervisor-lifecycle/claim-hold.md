@@ -101,6 +101,8 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 
 ### 閾値
 
+控えのlogとeventは必要量の内訳を持ち、掃除を待つ間のeventのない控えも同じ内訳をlogに残す。
+
 - 必要量は`domain::disk::DiskState::needs`が最低ラインと直近の標本からの想定で係数なしで決める（[ADR-t4473-1](../../adr/2026-11-08-t4473-1-disk-needs-follow-a-reserve-and-recent-runs-with-no-factor.md)）。
 - 動いているrun（`check_disk`の`in_flight`）が0本なら最低ラインだけを要り、0本で着地待ちがあれば着地が先に始まり、claimは控えのeventなしにそのpassを待つ。
   標本が無ければqueueは1本ずつ進む。

@@ -176,25 +176,40 @@ impl MovingSizes {
     /// `now` on the loop's monotonic clock: for each, `expected` less the
     /// size the claims trust ([`trusted_size`]), unmeasured ones counted
     /// whole ([`moving_remaining`]).
-    pub(in crate::application::supervise) fn remaining(
+    #[cfg(test)]
+    fn remaining(&self, moving: &[MovingTarget], expected: Option<u64>, now: Instant) -> u64 {
+        self.remaining_with_counts(moving, expected, now).0
+    }
+
+    /// Remaining bytes and the counts using trusted sizes or the whole expectation.
+    pub(in crate::application::supervise) fn remaining_with_counts(
         &self,
         moving: &[MovingTarget],
         expected: Option<u64>,
         now: Instant,
-    ) -> u64 {
+    ) -> (u64, usize, usize) {
         let measured = lock(&self.measured);
         let interval = Duration::from_secs(MOVING_SIZE_INTERVAL_SECS);
-        moving_remaining(
-            expected,
-            moving.iter().map(|target| {
+        let mut trusted = 0;
+        let mut unmeasured = 0;
+        let sizes: Vec<_> = moving
+            .iter()
+            .map(|target| {
                 let measure = measured.get(&target.run).map(|measured| SizeMeasure {
                     bytes: measured.bytes,
                     age: now.saturating_duration_since(measured.at),
                     same_target: measured.target == *target,
                 });
-                trusted_size(measure.as_ref(), interval)
-            }),
-        )
+                let size = trusted_size(measure.as_ref(), interval);
+                if size.is_some() {
+                    trusted += 1;
+                } else {
+                    unmeasured += 1;
+                }
+                size
+            })
+            .collect();
+        (moving_remaining(expected, sizes), trusted, unmeasured)
     }
 }
 
@@ -379,6 +394,11 @@ mod tests {
         // `b` has no measure: a walk starts before the interval.
         moving.pass(&ab, &measure, &dyn_clock, start);
         assert_eq!(moving.remaining(&ab, expected, start), 16 * GIB);
+        assert_eq!(
+            moving.remaining_with_counts(&ab, expected, start),
+            (16 * GIB, 1, 1)
+        );
+        assert_eq!(moving.remaining_with_counts(&ab, None, start), (0, 1, 1));
         go.send(()).unwrap();
         go.send(()).unwrap();
         wait(&mut moving, TEST);
@@ -393,6 +413,10 @@ mod tests {
             + interval * crate::domain::disk::MOVING_SIZE_STALE_INTERVALS
             + Duration::from_secs(1);
         assert_eq!(moving.remaining(&ab, expected, stale), 20 * GIB);
+        assert_eq!(
+            moving.remaining_with_counts(&ab, expected, stale),
+            (20 * GIB, 0, 2)
+        );
         // The same runs, all measured: 1 ms before the interval no walk,
         // at the interval one walks them again.
         moving.pass(

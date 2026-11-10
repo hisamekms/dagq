@@ -26,7 +26,7 @@ use crate::domain::{
     Ask,
     disk::{
         DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskNeeds, DiskState, RunSample,
-        expected_run_size, gib,
+        expected_run_estimate, gib,
     },
 };
 
@@ -185,13 +185,15 @@ impl HostOpsState {
             .filter(is_disk_ask)
             .collect();
         self.apply_disk_answers(env, &unclosed)?;
-        let expected = self.expected_run_size(env)?;
+        let (expected, sample_count) = self.expected_run_size(env)?;
         let free = self.free_bytes(env);
         // The moving runs' remaining, from their sizes measured off the
         // loop; one with no size to trust counts the expectation whole
         // (ADR-t4542-1). This pass's runs are walked for the next.
         let now = env.generators.clock.monotonic();
-        let remaining = self.moving_sizes.remaining(moving, expected, now);
+        let (remaining, measured, unmeasured) = self
+            .moving_sizes
+            .remaining_with_counts(moving, expected, now);
         self.moving_sizes
             .pass(moving, &self.measure_tree, &env.generators.clock, now);
         let state = DiskState {
@@ -202,7 +204,10 @@ impl HostOpsState {
             remaining,
             landing_waiting,
         };
-        let needs = state.needs(self.disk_config.reserve);
+        let mut needs = state.needs(self.disk_config.reserve);
+        needs.sample_count = sample_count;
+        needs.measured = measured;
+        needs.unmeasured = unmeasured;
         self.disk.needs = needs;
         self.disk.claims = state.claims(self.disk_config.reserve);
         self.disk.moving.store(
@@ -225,6 +230,15 @@ impl HostOpsState {
         let reading = read_disk(free, &needs, self.cleanup.for_disk());
         self.disk.short = reading.short;
         self.disk.cleaning = reading.cleaning;
+        if reading.cleaning {
+            info!(
+                "the free disk space {} is short (claim {}, landing {}): waiting for cleanup; {}",
+                free.map_or_else(|| "unknown".into(), |bytes| gib(bytes as f64)),
+                gib(needs.claim as f64),
+                gib(needs.landing as f64),
+                needs.message()
+            );
+        }
         self.disk.landing_short = reading.landing_short;
         let judged = judge_reading(reading, free, &needs, !landings.is_empty());
         let waiting: &[RunId] = if self.disk.landing_short {
@@ -295,7 +309,7 @@ impl HostOpsState {
     /// What a new run is expected to take now, from the recent runs'
     /// samples read again every [`SAMPLES_INTERVAL`]
     /// ([`crate::application::recent_run_samples`]).
-    fn expected_run_size(&mut self, env: &mut HostEnv<'_>) -> Result<Option<u64>> {
+    fn expected_run_size(&mut self, env: &mut HostEnv<'_>) -> Result<(Option<u64>, usize)> {
         let fresh = self
             .disk
             .samples
@@ -310,7 +324,9 @@ impl HostOpsState {
             .disk
             .samples
             .as_ref()
-            .and_then(|(_, samples)| expected_run_size(samples, now)))
+            .map_or((None, 0), |(_, samples)| {
+                expected_run_estimate(samples, now)
+            }))
     }
     /// Ask for what the ended runs left to be cleaned for room, when
     /// [`asks_for_cleanup`] says so; the job does it off the loop, and
@@ -491,6 +507,7 @@ pub(in crate::application::supervise) fn judge_reading(
         ClaimHold::judge(&HoldInputs {
             free_bytes: free,
             needed_bytes: Some(needs.landing),
+            disk: Some(*needs),
             ..HoldInputs::default()
         })
     } else {
@@ -808,6 +825,18 @@ mod tests {
         claim: 100 * GIB,
         landing: GIB,
         claims_wait: false,
+        volume: 0,
+        reserve_share: 0.05,
+        sample_count: 0,
+        moving: 0,
+        remaining: 0,
+        measured: 0,
+        unmeasured: 0,
+        landing_waiting: false,
+        claim_expected: 0,
+        claim_remaining: 0,
+        landing_expected: 0,
+        claims_wait_reason: None,
     };
 
     /// What a pass does with `free` free bytes while a cleanup for room
@@ -1343,6 +1372,7 @@ mod tests {
                 claim: 13 * GIB,
                 landing: 5 * GIB,
                 claims_wait: false,
+                ..DiskNeeds::default()
             },
             &[],
         );
