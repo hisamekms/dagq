@@ -429,6 +429,14 @@ timeout_secs = 1800
 # [e2e] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 965 を含んでから足した。
 paths = ["src/infrastructure/adapters.rs", "src/infrastructure/adapters/ref_transaction.rs", "src/infrastructure/adapters/run_clones.rs", "src/infrastructure/process.rs", "src/application/worktree_processes.rs", "src/infrastructure/sessions.rs", "src/infrastructure/launchd.rs", "src/application/lifecycle.rs", "src/application/supervise/host_ops/handoff.rs", "src/application/supervise/execution/handoff_slots.rs", "src/application/integrate.rs", "src/application/integrate/**", "src/application/install.rs", "src/infrastructure/binaries.rs", "src/application/update.rs", "src/application/supervise/host_ops/update.rs", "src/infrastructure/e2e_gate.rs", "src/application/actor_executor.rs", "src/application/session.rs", "src/application/headless_session.rs", "src/infrastructure/claude.rs", "src/infrastructure/codex.rs", "tests/e2e.rs", "tests/e2e/**"]
 
+# run の review の自動の手直しの上限（request 289、人の言葉「コードの指摘が残れば人の承認は閾値を5にしよう」。key と読み方は ADR-t3033-1）。
+# review の試行ごとに landing branch の commit のこの値を読み、run を通して数える: 1〜5 回目の差し戻しは生きている session に返す手直し、
+# 6 回目以降の差し戻しは上限の後の判定（ADR-t2599-1）に入り、コードの指摘が無ければ着地、あれば approve_landing で人の承認を待つ。
+# runtime の既定（2）は変えない。runtime はこの repository の事情を既定にしない（ADR-t2257-1 決定 1）ため、値はここにだけ書く。
+# 固定バイナリは task 3033 を含み、この key を既に読める。
+[review]
+revise_limit = 5
+
 # Review の検査項目と参照先は .dagq/agents/<agent>/AGENT.md（ADR-t1453-1、置き場は ADR-t1728-1）。
 # 固定バイナリが task 1455 を含むことを着手時に確認し、着地の verify でも検査する。
 # 文書の照合は全体の review だけが持ち、このrepositoryの規則は .dagq/review/builtin-acceptance.md に置く（ADR-t2389-1）。
