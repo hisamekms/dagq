@@ -17,6 +17,7 @@ pub mod programs;
 pub mod record;
 pub mod review;
 pub mod round;
+pub mod verdict;
 pub mod watch;
 
 /// The directory of an agent's case lists, in its definition's directory
@@ -133,6 +134,7 @@ pub trait Harness {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoleCase {
     Review(review::ReviewCase),
+    Verdict(Box<verdict::VerdictCase>),
 }
 
 /// Who made a case.
@@ -215,6 +217,7 @@ impl Case {
     pub fn review(&self) -> Option<&review::ReviewCase> {
         match &self.role {
             RoleCase::Review(case) => Some(case),
+            RoleCase::Verdict(_) => None,
         }
     }
 }

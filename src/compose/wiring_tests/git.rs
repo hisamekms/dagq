@@ -55,6 +55,7 @@ struct State {
     scratches: HashMap<PathBuf, CommitSha>,
     /// Every scratch checkout made, with its commit, in order.
     checked_out: Vec<(PathBuf, CommitSha)>,
+    case_bases: Vec<(PathBuf, String, Vec<String>)>,
     /// The files every commit holds, by path: none unless a test commits
     /// some ([`FakeGit::commit_files`]).
     files: HashMap<String, String>,
@@ -99,6 +100,7 @@ impl FakeGit {
                 worktrees: HashMap::new(),
                 scratches: HashMap::new(),
                 checked_out: Vec::new(),
+                case_bases: Vec::new(),
                 files: HashMap::new(),
                 changed: Vec::new(),
                 messages: HashMap::new(),
@@ -122,6 +124,10 @@ impl FakeGit {
             state.files.insert((*path).to_owned(), (*text).to_owned());
         }
         state.changed = changed.iter().map(|path| (*path).to_owned()).collect();
+    }
+
+    pub(super) fn case_bases(&self) -> Vec<(PathBuf, String, Vec<String>)> {
+        self.lock().case_bases.clone()
     }
 
     /// Main's head now.
@@ -618,6 +624,16 @@ impl Repository for FakeGit {
     fn add_case_tree(&self, path: &Path, base: &str, _: &Path, _: &[&str]) -> Result<CommitSha> {
         self.checkout_scratch(path, base)?;
         Ok(CommitSha::parse(base, "case head")?)
+    }
+
+    fn add_case_base_tree(&self, path: &Path, base: &str, hidden: &[&str]) -> Result<()> {
+        self.checkout_scratch(path, base)?;
+        self.lock().case_bases.push((
+            path.to_owned(),
+            base.to_owned(),
+            hidden.iter().map(|p| (*p).to_owned()).collect(),
+        ));
+        Ok(())
     }
 
     fn remove_case_tree(&self, path: &Path) -> Result<()> {

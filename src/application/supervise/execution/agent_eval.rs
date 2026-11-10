@@ -66,6 +66,7 @@ use crate::application::agent_eval::{Incomplete, finished as finished_payload};
 use crate::application::agent_job::{self, AgentJob};
 use crate::application::review::{CONFIG_FILE, written_launch_at};
 use crate::application::review_programs::{SnapshotProgram, programs_at, required_programs};
+use crate::application::role_eval::RoleHarness;
 use crate::domain::actor_model::{ActorLaunch, AgentModel, ModelRole, RoleModels};
 use crate::domain::agent_eval::programs::{self, Against, CaseCheck, ProgramFailure, Step};
 use crate::domain::agent_eval::record::{self, Round};
@@ -78,6 +79,7 @@ use crate::domain::agent_eval::round::{
 use crate::domain::agent_eval::{
     Case, CaseBase, EVALS_DIR, PATCH_DIR, PATCH_EXTENSION, Split, patch_hash, read_agent_cases,
 };
+use crate::domain::agent_eval::{RoleCase, verdict};
 use crate::domain::headless_job::JobKind;
 use crate::domain::review_builtins::{self, BuiltinAgent, evals as builtin_evals};
 use crate::domain::review_programs::ReviewProgram;
@@ -138,6 +140,9 @@ struct CaseTree {
     base: String,
     head: String,
     material: PathBuf,
+    /// Prepared once with the tree, so concurrent repetitions never rewrite
+    /// material underneath another job.
+    role_prompt: Option<String>,
 }
 
 /// One run of a case in progress: its agent job, or, before it, one of
@@ -265,7 +270,7 @@ const fn against_str(against: Against) -> &'static str {
 /// keeps them): the eval's own
 /// case lists, with each case's expected verdict, and their patches,
 /// which a job in the tree could otherwise read.
-const HIDDEN: [&str; 2] = [".dagq/agents/*/evals", ".dagq/agent-cases"];
+const HIDDEN: [&str; 3] = crate::domain::agent_eval::verdict::HIDDEN;
 
 /// Where the agent job of a case (an eval's run, a set's labeling) may
 /// read ([`AgentReads`]): the case's tree and its material's directory,
@@ -518,6 +523,22 @@ impl Supervisor<'_> {
         commit: &str,
         provider: Option<Provider>,
     ) -> std::result::Result<ActorLaunch, String> {
+        if let Some(harness) = RoleHarness::target(agent) {
+            let models = self.verifier.role_models().map_err(|e| format!("{e:#}"))?;
+            let mut launch = harness.checked(
+                requested,
+                &models,
+                &self
+                    .verifier
+                    .eval_config()
+                    .map_err(|e| format!("{e:#}"))?
+                    .declared_providers,
+            )?;
+            if let Some(provider) = provider {
+                launch.provider = provider;
+            }
+            return Ok(launch);
+        }
         let written = written_launch_at(
             &*self.repository,
             commit,
@@ -543,6 +564,15 @@ impl Supervisor<'_> {
         (definition_commit, commit): (&str, &str),
         selected: Option<&[String]>,
     ) -> Result<std::result::Result<Snapshot, Refusal>> {
+        if let Some(harness) = RoleHarness::target(agent) {
+            if set.is_some() {
+                return Ok(Err(refusal(
+                    RefusalReason::CasesInvalid,
+                    "role production sets are not implemented".into(),
+                )));
+            }
+            return self.role_eval_snapshot(harness, split, commit, selected);
+        }
         let repository = &*self.repository;
         let builtin = match review_builtins::evaluated(agent) {
             Ok(builtin) => builtin,
@@ -648,6 +678,69 @@ impl Supervisor<'_> {
             set_through: None,
             builtin: None,
         }))
+    }
+
+    fn role_eval_snapshot(
+        &self,
+        harness: RoleHarness,
+        split: Split,
+        commit: &str,
+        selected: Option<&[String]>,
+    ) -> Result<std::result::Result<Snapshot, Refusal>> {
+        let read = (|| -> Result<Snapshot> {
+            let root = format!("{}/{}", verdict::CASE_DIR, harness.role().as_str());
+            let paths = self.repository.paths_in(commit, &root)?;
+            verdict::check_files(
+                paths
+                    .iter()
+                    .map(|path| path.strip_prefix(&format!("{root}/")).unwrap_or(path)),
+                split,
+            )
+            .map_err(anyhow::Error::msg)?;
+            let mut chosen = None;
+            for path in paths {
+                let name = path
+                    .strip_prefix(&format!("{root}/"))
+                    .context("case outside role directory")?;
+                let part = Split::from_file_name(name)
+                    .with_context(|| format!("unknown role case file {path}"))?;
+                let text = self
+                    .repository
+                    .file_in(commit, &path)?
+                    .context("missing role case file")?;
+                let list = verdict::read(&text, part, harness.role().as_str())
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| path.clone())?;
+                let mut cases = Vec::new();
+                let mut patches = BTreeMap::new();
+                for case in list.cases {
+                    let snapshot = harness
+                        .snapshot(&case.snapshot)
+                        .with_context(|| format!("{path} case {}", case.id))?;
+                    let text = serde_json::to_string(&case.snapshot)?;
+                    let case = case.into_case(snapshot.main_commit);
+                    patches.insert(case.patch.clone(), text);
+                    cases.push(case);
+                }
+                if part == split {
+                    chosen = Some(Snapshot {
+                        definition: harness.identity().into(),
+                        tools: ToolRole::Review.default_tools(),
+                        list_k: list.k,
+                        cases,
+                        patches,
+                        set_through: None,
+                        builtin: None,
+                    });
+                }
+            }
+            let mut snapshot =
+                chosen.with_context(|| format!("no {root}/{}", split.file_name()))?;
+            snapshot.cases = selected_cases(&snapshot.cases, selected, &root)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(snapshot)
+        })();
+        Ok(read.map_err(|e| refusal(RefusalReason::CasesInvalid, format!("{e:#}"))))
     }
 
     /// The snapshot of production set `set` of the queue's side for
@@ -810,7 +903,11 @@ impl Supervisor<'_> {
                 return Ok(true);
             }
         };
-        let programs = self.round_programs(snapshot.builtin, &commit);
+        let programs = if RoleHarness::target(&request.agent).is_some() {
+            Ok(Vec::new())
+        } else {
+            self.round_programs(snapshot.builtin, &commit)
+        };
         // A built-in is judged the same in every project.
         let threshold = if snapshot.builtin.is_some() {
             builtin_evals::THRESHOLD
@@ -964,11 +1061,11 @@ impl Supervisor<'_> {
             ),
         )?;
         let config = self.verifier.eval_config()?;
-        // A built-in's definition and carried cases are the binary's: ones
-        // that changed since the start (another build took the round up)
-        // are not those the round measures.
+        // Built-in definitions and verdict-role harnesses belong to the binary.
+        // A new build must not take up a round with different semantics
+        // or cases under its recorded key.
         let snapshot = snapshot.and_then(|snapshot| {
-            if snapshot.builtin.is_none()
+            if (snapshot.builtin.is_none() && RoleHarness::target(&request.agent).is_none())
                 || (definition_digest(&snapshot.definition) == started.definition_digest
                     && round_digest(&snapshot.cases, &snapshot.patches) == started.case_set_digest)
             {
@@ -1010,17 +1107,33 @@ impl Supervisor<'_> {
             id: round.id,
             agent: request.agent.clone(),
             provider: started.provider,
-            launch: taken_up_launch(
-                &self.role_models(ModelRole::Review),
-                &request.launch,
-                round.launch.as_ref(),
-                self.eval_launch(
-                    (&request.agent, &request.launch),
-                    started.cases_commit(),
-                    Some(started.provider),
-                ),
-                started.provider,
-            ),
+            launch: if let Some(harness) = RoleHarness::target(&request.agent) {
+                let mut launch = self
+                    .eval_launch(
+                        (&request.agent, &request.launch),
+                        started.cases_commit(),
+                        Some(started.provider),
+                    )
+                    .unwrap_or_else(|_| self.role_models(harness.role()).launch(harness.role()));
+                launch.provider = started.provider;
+                if let Some(recorded) = &round.launch {
+                    launch.model = recorded.model.clone();
+                    launch.effort = recorded.effort.clone();
+                }
+                launch
+            } else {
+                taken_up_launch(
+                    &self.role_models(ModelRole::Review),
+                    &request.launch,
+                    round.launch.as_ref(),
+                    self.eval_launch(
+                        (&request.agent, &request.launch),
+                        started.cases_commit(),
+                        Some(started.provider),
+                    ),
+                    started.provider,
+                )
+            },
             definition: snapshot.definition,
             tools: snapshot.tools,
             cases: snapshot.cases,
@@ -1037,7 +1150,11 @@ impl Supervisor<'_> {
             cost_limited: false,
             waiting: None,
             dir: self.layout.agent_evals_dir.join(round.id.to_string()),
-            programs: self.round_programs(snapshot.builtin, started.cases_commit()),
+            programs: if RoleHarness::target(&request.agent).is_some() {
+                Ok(Vec::new())
+            } else {
+                self.round_programs(snapshot.builtin, started.cases_commit())
+            },
             commit: started.cases_commit().to_owned(),
             checks: round.checks.clone(),
             base_ends: BTreeMap::new(),
@@ -1368,6 +1485,34 @@ impl Supervisor<'_> {
         self.files
             .create_dir_all(&dir)
             .with_context(|| format!("create {}", dir.display()))?;
+        if let (Some(harness), RoleCase::Verdict(case_input)) =
+            (RoleHarness::target(&round.agent), &case.role)
+        {
+            let snapshot = harness.snapshot(&case_input.snapshot)?;
+            let tree = dir.join("tree");
+            harness.tree(&*self.repository, &snapshot, &tree)?;
+            let material = dir.join("material").join("material.md");
+            self.files
+                .create_dir_all(material.parent().context("material parent")?)?;
+            let prompt = harness.prompt(
+                &snapshot,
+                &*self.files,
+                material.parent().context("material parent")?,
+                &tree,
+            )?;
+            round.trees.insert(
+                case.id.clone(),
+                CaseTree {
+                    dir,
+                    tree,
+                    base: snapshot.main_commit.clone(),
+                    head: snapshot.main_commit,
+                    material,
+                    role_prompt: Some(prompt),
+                },
+            );
+            return Ok(());
+        }
         let patch = dir.join("change.patch");
         self.files
             .write(&patch, round.patches[&case.patch].as_bytes())
@@ -1420,6 +1565,7 @@ impl Supervisor<'_> {
                 base,
                 head,
                 material,
+                role_prompt: None,
             },
         );
         Ok(())
@@ -1444,24 +1590,30 @@ impl Supervisor<'_> {
                 .with_context(|| format!("create {}", dir.display()))?;
             let language = self.verifier.language();
             let reads = case_reads(self.layout, &tree.tree, &tree.material);
-            let built = agent_job::build(&AgentJob {
-                agent: &round.agent,
-                definition: &round.definition,
-                tools: &round.tools,
-                // The eval gives a built-in no project's rules
-                // (ADR-t2259-1 decision 10).
-                rules: None,
-                base: &tree.base,
-                head: &tree.head,
-                material: &tree.material,
-                cwd: &tree.tree,
-                dir: &dir,
-                language: language.as_ref(),
-                reads: Some(&reads),
-                answers: None,
-            })?;
+            let harness = RoleHarness::target(&round.agent);
+            let (prompt, built) = if let Some(prompt) = &tree.role_prompt {
+                (prompt.clone(), None)
+            } else {
+                let built = agent_job::build(&AgentJob {
+                    agent: &round.agent,
+                    definition: &round.definition,
+                    tools: &round.tools,
+                    // The eval gives a built-in no project's rules
+                    // (ADR-t2259-1 decision 10).
+                    rules: None,
+                    base: &tree.base,
+                    head: &tree.head,
+                    material: &tree.material,
+                    cwd: &tree.tree,
+                    dir: &dir,
+                    language: language.as_ref(),
+                    reads: Some(&reads),
+                    answers: None,
+                })?;
+                (built.prompt.text.clone(), Some(built))
+            };
             self.files
-                .write(&dir.join("prompt.txt"), built.prompt.text.as_bytes())?;
+                .write(&dir.join("prompt.txt"), prompt.as_bytes())?;
             let agent = self.job_agent(round.provider).with_context(|| {
                 format!("no {} runs on this supervisor", round.provider.as_str())
             })?;
@@ -1469,10 +1621,18 @@ impl Supervisor<'_> {
             let child = self
                 .actors_on(agent)
                 .spawn(ActorExecutionSpec::new(
-                    ActorContext::agent_eval_job(round.id, index, run),
+                    harness.map_or_else(
+                        || ActorContext::agent_eval_job(round.id, index, run),
+                        |h| h.actor(round.id, index, run),
+                    ),
                     WorkspaceAccess::Read(tree.tree.clone()),
                     ActorProgram::Headless {
-                        program: HeadlessProgram::AgentJob(&built.launch),
+                        program: match &built {
+                            Some(built) => HeadlessProgram::AgentJob(&built.launch),
+                            None => harness
+                                .context("a verdict harness")?
+                                .program(&tree.tree, &prompt, &reads),
+                        },
                         session_id: None,
                         launch: Some(&round.launch),
                         without_mcp: true,
@@ -1486,7 +1646,14 @@ impl Supervisor<'_> {
                 ))
                 .context("start the agent job")?
                 .process()?;
-            Ok((built.prompt.bytes, child, stdout, stderr))
+            let bytes = built.map(|b| b.prompt.bytes).unwrap_or_else(|| {
+                crate::application::prompt::PromptBytes {
+                    total: prompt.len(),
+                    limit: crate::application::prompt::PLAN_REVIEW_PROMPT_LIMIT,
+                    ..Default::default()
+                }
+            });
+            Ok((bytes, child, stdout, stderr))
         });
         match started {
             Ok((prompt_bytes, child, stdout, stderr)) => {
@@ -1498,7 +1665,7 @@ impl Supervisor<'_> {
                     JobSubject {
                         kind: headless_job::AGENT_EVAL,
                         job: JobKind::Agent,
-                        review_stage: true,
+                        review_stage: RoleHarness::target(&round.agent).is_none(),
                         label: Some(label.clone()),
                         run_id: None,
                         proposal_id: None,
@@ -1605,7 +1772,9 @@ impl Supervisor<'_> {
             let cost = run_cost(tokens, &round.prices, round.per_run_usd);
             let key = (run.case.clone(), run.round);
             let (result, error, again) = match end {
-                Ok(reply) => match agent_job::read_reply(&reply) {
+                Ok(reply) => match RoleHarness::target(&round.agent)
+                    .map_or_else(|| agent_job::read_reply(&reply), |h| h.reply(&reply))
+                {
                     Some(result) => (Some(result), None, false),
                     None => (
                         None,
@@ -2376,7 +2545,9 @@ mod tests {
         assert_eq!(round_digest(&cases, &snapshot.patches), alone);
         let with_input = |body: &str| {
             let mut cases = cases.clone();
-            let RoleCase::Review(review) = &mut cases[0].role;
+            let RoleCase::Review(review) = &mut cases[0].role else {
+                panic!("review")
+            };
             review.input = [(MaterialSection::Receipt, body.to_owned())]
                 .into_iter()
                 .collect();

@@ -67,7 +67,11 @@ use crate::domain::{AskKind, AskReason, NewAsk};
 /// What the case's tree leaves out of its working tree: every agent's
 /// definition and the eval's case lists and patches, so the labeling job
 /// judges by the rules alone.
-const HIDDEN: [&str; 2] = [DEFINITION_DIR, ".dagq/agent-cases"];
+const HIDDEN: [&str; 3] = [
+    DEFINITION_DIR,
+    ".dagq/agent-cases",
+    crate::domain::agent_eval::verdict::CASE_DIR,
+];
 
 /// The options of the `decide` ask about a set's disputed cases, which is
 /// about the task of the first disputed case's review (an ask needs a task

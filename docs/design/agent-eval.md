@@ -275,8 +275,8 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
 ## 役割のharness
 
 判定を返す役割（plan review・goal review・runのreviewの全体の判定）を、固定したsnapshotを入力に本番のその役割のjobと同じ起動で1ケース1本のjobとして測る約束で、決めた理由は[ADR-t3948-1](../adr/2026-11-06-t3948-1-role-evals-run-verdict-roles-from-fixed-snapshots-on-the-production-launch-and-adopt-the-lightest-setting-that-passes.md)が持つ。
-今動くのはreviewのagentのharnessだけで、役割のharnessはまだ実装が無い。
-入口と欄は実装するときに定義のそばのdoc commentへ、閾値の値は測定の文書へ置き、ここに写さない。
+役割の入口は`application::role_eval::RoleHarness`で、plan reviewは記録した入力から本番のpromptを組み立て、共通の周で実行して採点する。
+ケースの形と置き場は`domain::agent_eval::verdict::VerdictCase`のdoc comment、閾値の値は測定の文書が持つ。
 
 - 判定の値と理由の分類は本番の形のままで、本番のpromptと判定のschemaを変えない。
 - ケースはsnapshotの記録が始まった後のjobからだけ作り、過去のeventから当時の入力を推測しない。

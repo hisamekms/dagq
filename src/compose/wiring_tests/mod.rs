@@ -39,4 +39,5 @@ mod unapplied_decisions;
 mod worker_trial;
 
 mod repository_config;
+mod role_eval;
 mod role_snapshots;

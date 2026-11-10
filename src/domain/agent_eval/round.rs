@@ -540,31 +540,39 @@ pub fn check_requested_launch(
     table: &AgentModel,
     declared: &[Provider],
 ) -> Result<AgentModel, String> {
+    check_requested_role_launch(requested, roles, ModelRole::Review, table, declared)
+}
+
+/// The same destination and provider-specific validation for a verdict role.
+pub fn check_requested_role_launch(
+    requested: &AgentModel,
+    roles: &RoleModels,
+    role: ModelRole,
+    table: &AgentModel,
+    declared: &[Provider],
+) -> Result<AgentModel, String> {
     if !requested.written() {
         return Ok(table.clone());
     }
-    let table_provider = roles
-        .written_agent_launch(ModelRole::Review, table)
-        .provider;
-    let role_provider = roles.provider(ModelRole::Review).0;
+    let table_provider = roles.written_agent_launch(role, table).provider;
+    let role_provider = roles.provider(role).0;
     if let Some(provider) = requested.provider
         && provider != table_provider
         && provider != role_provider
         && !declared.contains(&provider)
     {
         return Err(format!(
-            "agent eval: provider {0} is not one dagq.toml uses for the agent ({1}) or [roles.review] ({2}), and it has no table [eval.providers.{0}]",
+            "agent eval: provider {0} is not one dagq.toml uses for the agent ({1}) or [roles.{3}] ({2}), and it has no table [eval.providers.{0}]",
             provider.as_str(),
             table_provider.as_str(),
-            role_provider.as_str()
+            role_provider.as_str(),
+            role.as_str()
         ));
     }
     let launch = requested_launch(table, requested, table_provider);
-    let provider = roles
-        .written_agent_launch(ModelRole::Review, &launch)
-        .provider;
+    let provider = roles.written_agent_launch(role, &launch).provider;
     launch
-        .check_on(provider, ModelRole::Review)
+        .check_on(provider, role)
         .map_err(|why| format!("agent eval: {why}"))?;
     Ok(launch)
 }

@@ -183,6 +183,7 @@ pub(super) struct FakeAgent {
     /// The directory each review job was started in, in order.
     reviewed_in: Mutex<Vec<PathBuf>>,
     pub(super) case_commands: Mutex<Vec<CommandSpec>>,
+    pub(super) case_reads: Mutex<Vec<crate::application::AgentReads>>,
     /// The prompt of each review job, in order.
     review_prompts: Mutex<Vec<String>>,
     /// What runs as the next review job starts, before it answers, once.
@@ -231,6 +232,7 @@ impl FakeAgent {
             agent_verdicts: Mutex::default(),
             reviewed_in: Mutex::default(),
             case_commands: Mutex::default(),
+            case_reads: Mutex::default(),
             review_prompts: Mutex::default(),
             on_review: Mutex::default(),
             on_turn: Mutex::default(),
@@ -544,6 +546,15 @@ impl AgentProvider for FakeAgent {
         Ok(command)
     }
 
+    fn restrict_role_job_reads(
+        &self,
+        _: &mut CommandSpec,
+        reads: &crate::application::AgentReads,
+    ) -> Result<()> {
+        self.case_reads.lock().unwrap().push(reads.clone());
+        Ok(())
+    }
+
     fn agent_job_command(&self, job: &AgentJobLaunch) -> Result<CommandSpec> {
         let mut command = CommandSpec::new(AGENT_JOB);
         command.current_dir(&job.cwd).stdin(job.prompt.as_str());
@@ -764,7 +775,17 @@ impl Spawner for FakeAgent {
                     stdout
                 }
             }
-            JOB => format!("{}\n", self.next_verdict()?),
+            JOB => {
+                if command.get_envs().any(|(key, value)| {
+                    key == "DAGQ_ROLE" && value == Some(std::ffi::OsStr::new("plan-review-job"))
+                }) && command
+                    .get_current_dir()
+                    .is_some_and(|p| p.ends_with("tree"))
+                {
+                    self.case_commands.lock().unwrap().push(command.clone());
+                }
+                format!("{}\n", self.next_verdict()?)
+            }
             AGENT_JOB => {
                 self.case_commands.lock().unwrap().push(command.clone());
                 self.agent_jobs

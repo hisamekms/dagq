@@ -2084,14 +2084,14 @@ const SPLITS: [&str; 3] = ["dev", "holdout", "production"];
 
 #[derive(Subcommand, Clone)]
 enum AgentCommand {
-    /// Ask for one round of the agent's eval: the supervisor runs it on the landing branch's
-    /// definition and cases, one job of the agent per run of a case, and records its scores.
+    /// Ask for one round of an agent's or verdict role's eval. The supervisor reads the landing branch's
+    /// cases, starts one production job per run of a case, and records its scores.
     /// A built-in agent (`builtin:<name>`) is measured on the binary's definition and the cases
     /// it carries, without the project's rules or programs. A worker asks for dev of its own
     /// run only; holdout and production are a person's, the inbox's or a planner's. Prints the
     /// eval's id.
     Eval {
-        /// The agent: `.dagq/agents/<agent>/`, or a built-in agent `builtin:<name>`.
+        /// An agent (`.dagq/agents/<agent>/`), `builtin:<name>`, or `role:plan_review`.
         agent: String,
         /// The cases' split.
         #[arg(long, default_value = "dev", value_parser = SPLITS)]
@@ -2115,9 +2115,9 @@ enum AgentCommand {
         rerun: bool,
         /// Dev only: the provider this round's runs start on, over the agent's
         /// [review.subagents.<agent>] in dagq.toml (else the role's): only one dagq.toml uses
-        /// for that agent or for [roles.review], or declares with [eval.providers.<provider>].
+        /// for that agent or its role, or declares with [eval.providers.<provider>].
         /// What is not given comes from that table, then
-        /// [roles.review]; another provider than the table's drops the table's model. Holdout
+        /// the role; a verdict role uses [roles.<role>] directly. Another provider than the table's drops its model. Holdout
         /// and production run with the table and refuse it, so a hold-out's one run is never
         /// spent on a launch dagq.toml does not give.
         #[arg(long, value_parser = ["claude", "codex"])]

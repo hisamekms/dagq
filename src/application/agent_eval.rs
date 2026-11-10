@@ -139,8 +139,10 @@ impl<'a> AgentEvals<'a> {
     /// own checks (its definition and cases, the once rule, the limits)
     /// are the supervisor's when it starts it.
     pub fn request(&self, request: &EvalRequest) -> Result<Value> {
-        // A project's agent or a built-in agent; never the whole review.
-        if let Err(why) = review_builtins::evaluated(&request.agent) {
+        // Review agents and implemented whole verdict roles have separate targets.
+        if let Err(why) = review_builtins::evaluated(&request.agent)
+            && super::role_eval::RoleHarness::target(&request.agent).is_none()
+        {
             bail!(why);
         }
         if request.k == Some(0) {
@@ -171,12 +173,21 @@ impl<'a> AgentEvals<'a> {
                     "agent eval: no dagq.toml of the queue's repository to check --provider, --model and --effort against"
                 );
             };
-            if let Err(why) = check_requested_launch(
-                &request.launch,
-                &settings.roles,
-                &settings.table,
-                &settings.declared,
-            ) {
+            if let Err(why) =
+                if let Some(harness) = super::role_eval::RoleHarness::target(&request.agent) {
+                    harness
+                        .checked(&request.launch, &settings.roles, &settings.declared)
+                        .map(|_| ())
+                } else {
+                    check_requested_launch(
+                        &request.launch,
+                        &settings.roles,
+                        &settings.table,
+                        &settings.declared,
+                    )
+                    .map(|_| ())
+                }
+            {
                 bail!(why);
             }
         }
@@ -522,7 +533,7 @@ pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete
         }
     }
     let complete = incomplete.is_none();
-    json!({
+    let mut payload = json!({
         "eval_id": round.id,
         "agent": round.request.agent,
         "split": round.request.split.as_str(),
@@ -548,7 +559,21 @@ pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete
         "definition_digest": started.map(|s| &s.definition_digest),
         "builtin": round.started_payload.as_ref().and_then(|payload| payload.get("builtin")).filter(|builtin| !builtin.is_null()),
         "case_set_digest": started.map(|s| &s.case_set_digest),
-    })
+    });
+    if let Some(harness) = super::role_eval::RoleHarness::target(&round.request.agent) {
+        let runs = ended
+            .iter()
+            .map(|(id, _, result)| (*id, *result))
+            .collect::<Vec<_>>();
+        let scores = harness.score(cases, &runs, threshold, false);
+        payload["passed"] = json!(complete && scores["passed"] == true);
+        payload["per_code"] = scores["per_code"].clone();
+        payload["failed_cases"] = scores["failed_cases"].clone();
+        payload["scores"] = scores;
+        payload["with_disputed"] = harness.score(cases, &runs, threshold, true);
+        payload["below"] = Value::Null;
+    }
+    payload
 }
 
 #[cfg(test)]

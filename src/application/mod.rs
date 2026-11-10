@@ -67,6 +67,7 @@ pub mod report;
 pub mod retention;
 pub mod review;
 pub mod review_programs;
+pub mod role_eval;
 pub mod role_snapshot;
 pub mod run_container;
 pub mod run_git;
