@@ -7212,6 +7212,7 @@ fn grouped_queue_writes_match_singletons_and_retry_before_advancing_r() {
                 post_landing: Some(&post),
                 executions: Some(&executions),
                 earlier: None,
+                answers: None,
             },
             &kpi::KpiQuery {
                 last: 14,

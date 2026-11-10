@@ -154,6 +154,7 @@ pub(crate) fn values(store: &(impl LedgerStore + ?Sized), input: &Input) -> Vec<
         .ledger_window(&WindowQuery {
             now_ms: now_ms(now),
             read_from_ms: from,
+            bounds: kpi::declared(checks.clone(), now, host(), &config(), None),
             ..WindowQuery::default()
         })
         .unwrap();
@@ -179,7 +180,13 @@ pub(crate) fn values(store: &(impl LedgerStore + ?Sized), input: &Input) -> Vec<
         reason: Some("not drawn".into()),
         svg: None,
     };
-    let window = report::window(store, now).unwrap();
+    let window = report::window_for(
+        store,
+        now,
+        &setup,
+        vec![report::report_query(Period::Day, None)],
+    )
+    .unwrap();
     let report = make_with(&window, &setup, now, Period::Day, None, section).unwrap();
     out.push(("report".into(), serde_json::to_value(&report).unwrap()));
     for time in &input.times {

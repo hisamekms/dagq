@@ -2158,7 +2158,17 @@ impl OneShot {
             now,
             self.profiles,
         )?;
-        let window = crate::application::report::window(queue, now)?;
+        let observed = |period, last| KpiQuery {
+            period,
+            last,
+            ..KpiQuery::default()
+        };
+        let window = crate::application::report::window_for(
+            queue,
+            now,
+            &setup,
+            vec![observed(Period::Day, 7), observed(Period::Week, 4)],
+        )?;
         let of = |period, last| {
             crate::application::kpi::of_window(
                 &window,
@@ -2166,11 +2176,7 @@ impl OneShot {
                 setup.host,
                 &setup.config,
                 setup.areas.as_ref(),
-                &KpiQuery {
-                    period,
-                    last,
-                    ..KpiQuery::default()
-                },
+                &observed(period, last),
             )
         };
         let (day, week) = (of(Period::Day, 7)?, of(Period::Week, 4)?);
@@ -2264,7 +2270,8 @@ impl OneShot {
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
         let setup = report_setup(db, checkout, host_wide.as_deref(), now, self.profiles)?;
-        let window = report::window(queue, now)?;
+        let window =
+            report::window_for(queue, now, &setup, vec![report::report_query(period, at)])?;
         let made = report::make_with(&window, &setup, now, period, at, diagram.into())?;
         if params.print {
             return Ok(serde_json::to_value(made)?);

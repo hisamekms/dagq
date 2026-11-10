@@ -45,8 +45,17 @@
 //!   from the point before the first whose T is past a, the least time m of
 //!   the timed omitted events read; one of a time past m + D stops it, as do
 //!   b and S, as above.
+//! - (e) The latest time of the omitted events of ids up to u
+//!   ([`OmittedEdges::max_ms_through`]) and (f) the last of them, of no
+//!   time too ([`OmittedEdges::last_through`]): M and L at u at or past S;
+//!   else M and L of the last point P at or before u, and the events of
+//!   the kind after P (after C without one) up to u, fewer than K, the
+//!   next point being past u. Of u at or before C, none. (f) is the last
+//!   event an event id `--until` holds, (e) the time `kpi` takes of an
+//!   event id cursor ([`super::bounds`]).
 //!
-//! So (a) and (b) read a constant, and (c) and (d) the events of the points'
+//! So (a) and (b) read a constant, (e) and (f) a span of K events, and
+//! (c) and (d) the events of the points'
 //! spans that hold the timed omitted events within D of the edge's time,
 //! K each, besides the seeks of the points (by key and by M, a few per
 //! span). How long the history before or after the window is, of the
@@ -155,6 +164,26 @@ impl<'a, E> OmittedEdges<'a, E> {
         Ok(answer)
     }
 
+    /// (c) among the ids up to `through`: the last omitted event of a time
+    /// at or before `ms` and an id at or before `through`, and the latest
+    /// time of those, read as (c) is.
+    pub fn at_or_before_through(
+        &self,
+        ms: i64,
+        through: EventId,
+    ) -> Result<(Option<EventId>, Option<i64>), E> {
+        let (mut id, mut latest) = (None, None);
+        if let Some((read, coverage)) = self.held() {
+            for (kind, summary) in summaries(coverage) {
+                let (of_kind, at) =
+                    kind_at_or_before_through(read, coverage, kind, summary, ms, through)?;
+                id = id.max(of_kind);
+                latest = latest.max(at);
+            }
+        }
+        Ok((id, latest))
+    }
+
     /// (d) The first time of the omitted events of ids in (`after`, `upto`]
     /// and the first event of that time.
     pub fn first(&self, after: EventId, upto: EventId) -> Result<Option<(i64, EventId)>, E> {
@@ -174,10 +203,35 @@ impl<'a, E> OmittedEdges<'a, E> {
         Ok(self.first(after, upto)?.map(|(ms, _)| ms))
     }
 
+    /// (e) The latest time of the omitted events of an id at or before
+    /// `through`.
+    pub fn max_ms_through(&self, through: EventId) -> Result<Option<i64>, E> {
+        let mut answer = None;
+        if let Some((read, coverage)) = self.held() {
+            for (kind, summary) in summaries(coverage) {
+                answer = answer.max(kind_through(read, coverage, kind, summary, through)?.1);
+            }
+        }
+        Ok(answer)
+    }
+
+    /// (f) The last omitted event of an id at or before `through`, of no
+    /// time too.
+    pub fn last_through(&self, through: EventId) -> Result<Option<EventId>, E> {
+        let mut answer = None;
+        if let Some((read, coverage)) = self.held() {
+            for (kind, summary) in summaries(coverage) {
+                answer = answer.max(kind_through(read, coverage, kind, summary, through)?.0);
+            }
+        }
+        Ok(answer)
+    }
+
     /// The omitted events a window of `query` takes for its edges with the
     /// records `records` of its rows (any order): (a) the latest; each
     /// cursor's event, by its id (b) or the last of a time at or before its
-    /// time (c); the last of a time at or before the window's end (c), the
+    /// time (c); for an event id `--until`, the last of an id at or before
+    /// it (f); the last of a time at or before the window's end (c), the
     /// latest of what it holds, unless it ends at an event; and without a
     /// time to start from, the first of the least time of the window's ids
     /// (d). The window is resolved as [`super::LedgerWindow`]'s, of the
@@ -197,6 +251,11 @@ impl<'a, E> OmittedEdges<'a, E> {
                 Cursor::Event(id) => ids.push(id),
                 Cursor::Time(ms) => ids.extend(self.at_or_before(ms)?),
             }
+        }
+        // The last the end of an event `--until` holds: the latest of the
+        // window and the event it stops at.
+        if let Some(Cursor::Event(id)) = query.until {
+            ids.extend(self.last_through(id)?);
         }
         let mut events = Vec::new();
         for id in ids {
@@ -371,32 +430,98 @@ fn kind_at_or_before<E>(
     summary: &KindSummary,
     ms: i64,
 ) -> Result<Option<EventId>, E> {
+    Ok(kind_at_or_before_through(read, coverage, kind, summary, ms, coverage.through)?.0)
+}
+
+/// (c) of one kind among the ids up to `through`, with the latest time of
+/// those: the last timed omitted event of a time at or before `ms` and an
+/// id at or before `through`, and the latest of their times. Read as (c)
+/// is, from the last point of an M at or before `ms` (or the last at or
+/// before `through` when that one is past it: M only rises, so its M is at
+/// or before `ms` too), its T and M the answer so far, up to a timed one
+/// past `ms` + D, `through` or S.
+fn kind_at_or_before_through<E>(
+    read: &dyn OmittedRead<Error = E>,
+    coverage: &Coverage,
+    kind: &str,
+    summary: &KindSummary,
+    ms: i64,
+    through: EventId,
+) -> Result<(Option<EventId>, Option<i64>), E> {
     let (Some(timed), Some(max)) = (summary.timed, summary.max_ms) else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    if max <= ms {
-        return Ok(Some(timed));
+    let through = through.min(coverage.through);
+    if through <= coverage.from {
+        return Ok((None, None));
     }
-    let (mut at, mut so_far) = point_by_ms(read, coverage, kind, ms)?
+    if max <= ms && timed <= through {
+        return Ok((Some(timed), Some(max)));
+    }
+    let point = match point_by_ms(read, coverage, kind, ms)? {
+        Some(point) if point.at > through => point_at_or_before(read, coverage, kind, through)?,
+        point => point,
+    };
+    let (mut at, mut so_far) = point
+        .as_ref()
         .map_or((coverage.from, None), |point| (point.at, point.timed));
     let mut answer = so_far;
+    let mut latest = point.and_then(|point| point.max_ms);
     let past = ms.saturating_add(summary.back_ms);
     loop {
         let (start, next) = first_point_past(read, coverage, kind, at, so_far)?;
-        let end = next.as_ref().map_or(coverage.through, |point| point.at);
+        let end = next
+            .as_ref()
+            .map_or(coverage.through, |point| point.at)
+            .min(through);
         let stopped = each_of_kind(read, kind, (start, end), |event| match omitted_ms(event) {
             Some(time) if time <= ms => {
                 answer = answer.max(Some(event.id));
+                latest = latest.max(Some(time));
                 true
             }
             Some(time) => time <= past,
             None => true,
         })?;
         match next {
-            Some(point) if !stopped => (at, so_far) = (point.at, point.timed),
-            _ => return Ok(answer),
+            Some(point) if !stopped && end < through => (at, so_far) = (point.at, point.timed),
+            _ => return Ok((answer, latest)),
         }
     }
+}
+
+/// (e) and (f) of one kind: the last omitted event of an id at or before
+/// `through` (of no time too) and the latest time of those. Of a position
+/// at or past S, L and M; else the last point P at or before it, its L and
+/// M the answer so far, and the events of the kind after P (after C
+/// without one) up to the position, fewer than K (the next point is past
+/// it).
+fn kind_through<E>(
+    read: &dyn OmittedRead<Error = E>,
+    coverage: &Coverage,
+    kind: &str,
+    summary: &KindSummary,
+    through: EventId,
+) -> Result<(Option<EventId>, Option<i64>), E> {
+    if through <= coverage.from {
+        return Ok((None, None));
+    }
+    if through >= coverage.through {
+        return Ok((summary.last, summary.max_ms));
+    }
+    let point = point_at_or_before(read, coverage, kind, through)?;
+    let (mut last, mut max) = point
+        .as_ref()
+        .map_or((None, None), |point| (point.last, point.max_ms));
+    let from = point.map_or(coverage.from, |point| point.at);
+    each_of_kind(read, kind, (from, through), |event| {
+        if owner::owner(event) == Owner::Queue {
+            last = last.max(Some(event.id));
+            max = max.max(timestamp_millis(&event.created_at));
+        }
+        true
+    })?;
+    Ok((last, max))
 }
 
 /// (d) of one kind: the least time and the first event of it.

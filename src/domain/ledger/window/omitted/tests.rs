@@ -387,3 +387,179 @@ fn the_edges_read_as_many_events_whatever_the_history_around_the_window() {
         );
     }
 }
+
+/// (e) and (f) of the omitted events counted straight: the last of an id
+/// at or before `through` and the latest time of those.
+fn oracle_through(store: &Store, through: EventId) -> (Option<EventId>, Option<i64>) {
+    let up_to: Vec<&RunEvent> = store
+        .omitted()
+        .into_iter()
+        .filter(|event| event.id <= through)
+        .collect();
+    (
+        up_to.iter().map(|event| event.id).max(),
+        up_to.iter().filter_map(|event| omitted_ms(event)).max(),
+    )
+}
+
+/// The last omitted event and the latest time through each id answer as
+/// the omitted events counted straight do, for each shape (the clock
+/// turned back, the runs' events of the kind, those of no time), C at the
+/// first event or past it, at or past S and before C.
+#[test]
+fn the_last_and_the_latest_time_through_an_id_answer_as_counted() {
+    for shape in Shape::ALL {
+        for c in [0, 7] {
+            let (events, _, _) = history(shape, 8, 8);
+            let last = events.last().unwrap().id.as_i64();
+            for s in [last - 9, last] {
+                let store = Store::of(
+                    events.clone(),
+                    &[KIND],
+                    (EventId::new(c), EventId::new(s)),
+                    EVERY,
+                );
+                let edges = ok(OmittedEdges::of(&store));
+                for id in 0..=last + 3 {
+                    let id = EventId::new(id);
+                    assert_eq!(
+                        (ok(edges.last_through(id)), ok(edges.max_ms_through(id))),
+                        oracle_through(&store, id),
+                        "{shape:?} c {c} s {s} {id:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A declaration of fixed bounds.
+struct Fixed(Vec<super::super::bounds::Bound>);
+
+impl super::super::bounds::DeclareBounds for Fixed {
+    fn bounds(&self, _: &LedgerWindow) -> Vec<super::super::bounds::Bound> {
+        self.0.clone()
+    }
+}
+
+/// The events the bounds a reader declares and an event id `--until`
+/// read, of a window whose bounds are fixed in number, are as many whatever
+/// the history before and after it, of each shape: the clock rising, turned
+/// back (D > 0), the runs' events of the kind among the omitted ones, and
+/// long runs of events of no time. Each of (c), (d), the last omitted
+/// event and the latest time through an id is read once a bound; and the
+/// window without the omitted events' rows answers as that of every row.
+#[test]
+fn the_bounds_read_as_many_events_whatever_the_history_around_the_window() {
+    use super::super::bounds::{Bound, Declared};
+    for shape in Shape::ALL {
+        let mut counts = Vec::new();
+        for (before, after) in [(8, 8), (80, 160)] {
+            let (events, (start, end), (a, b)) = history(shape, before, after);
+            let (whole, left) = ledgers(&events);
+            let last = events.last().unwrap().id;
+            let store = Store::of(events, &[KIND], (EventId::new(0), last), EVERY);
+            let edges = ok(OmittedEdges::of(&store));
+            let middle = EventId::new((a.as_i64() + b.as_i64()) / 2);
+            let bounds = vec![
+                Bound::LastAt(ms(start)),
+                Bound::LastAt(ms(end)),
+                Bound::TimeThrough(middle),
+                Bound::TimeThrough(b),
+                Bound::FirstIn(a, b),
+            ];
+            let mut read = Vec::new();
+            let now_ms = (T0 + 100_000) * 1000;
+            for query in [
+                WindowQuery {
+                    since: Some(Cursor::Time(ms(start))),
+                    until: Some(Cursor::Time(ms(end))),
+                    now_ms,
+                    bounds: Declared::of(Fixed(bounds.clone())),
+                    ..WindowQuery::default()
+                },
+                WindowQuery {
+                    until: Some(Cursor::Event(middle)),
+                    now_ms,
+                    ..WindowQuery::default()
+                },
+                WindowQuery {
+                    until: Some(Cursor::Event(b)),
+                    now_ms,
+                    ..WindowQuery::default()
+                },
+            ] {
+                let now = select(whole.clone(), &query);
+                store.taken();
+                let then = ok(select_with(left.clone(), &query, &edges));
+                assert_eq!(edges_of(&now), edges_of(&then), "{shape:?} {query:?}");
+                assert_eq!(now.answers(), then.answers(), "{shape:?} {query:?}");
+                read.push(store.taken());
+            }
+            for bound in &bounds {
+                match *bound {
+                    Bound::LastAt(at) => {
+                        ok(edges.at_or_before(at));
+                    }
+                    Bound::TimeThrough(id) => {
+                        ok(edges.max_ms_through(id));
+                    }
+                    Bound::FirstIn(after, upto) => {
+                        ok(edges.first(after, upto));
+                    }
+                }
+                read.push(store.taken());
+            }
+            ok(edges.last_through(middle));
+            read.push(store.taken());
+            counts.push(read);
+        }
+        assert_eq!(counts[0], counts[1], "{shape:?}");
+        assert!(counts[0].iter().any(|read| *read > 0), "{shape:?}");
+        // A span of the window is read, not the history.
+        assert!(
+            counts[0].iter().all(|read| *read <= 32 * EVERY as usize),
+            "{shape:?} {counts:?}"
+        );
+    }
+}
+
+/// (c) among the ids up to an id answers as the omitted events counted
+/// straight do: the last of a time at or before t and an id at or before
+/// the cap, and the latest of those times, for each shape and cap.
+#[test]
+fn the_last_of_a_time_among_the_ids_up_to_one_answers_as_counted() {
+    for shape in Shape::ALL {
+        for c in [0, 7] {
+            let (events, _, _) = history(shape, 8, 8);
+            let last = events.last().unwrap().id.as_i64();
+            let store = Store::of(
+                events,
+                &[KIND],
+                (EventId::new(c), EventId::new(last)),
+                EVERY,
+            );
+            let edges = ok(OmittedEdges::of(&store));
+            for through in (0..=last + 2).step_by(3) {
+                let through = EventId::new(through);
+                for secs in (-20..300).step_by(7) {
+                    let at = ms(secs);
+                    let within: Vec<&RunEvent> = store
+                        .omitted()
+                        .into_iter()
+                        .filter(|event| event.id <= through)
+                        .filter(|event| omitted_ms(event).is_some_and(|time| time <= at))
+                        .collect();
+                    assert_eq!(
+                        ok(edges.at_or_before_through(at, through)),
+                        (
+                            within.iter().map(|event| event.id).max(),
+                            within.iter().filter_map(|event| omitted_ms(event)).max()
+                        ),
+                        "{shape:?} c {c} {through:?} t {secs}"
+                    );
+                }
+            }
+        }
+    }
+}

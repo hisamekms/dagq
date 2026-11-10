@@ -5,10 +5,14 @@ use anyhow::{Result, anyhow};
 use super::LedgerStore;
 use crate::domain::areas::{AreaMap, run_areas};
 use crate::domain::kpi::{
-    HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive, read_from_ms,
+    HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, bounds as kpi_bounds, kpi as derive,
+    read_from_ms,
 };
 use crate::domain::ledger::attributes::Folded;
-use crate::domain::ledger::window::{LedgerWindow, WindowQuery};
+use crate::domain::ledger::window::{
+    LedgerWindow, WindowQuery,
+    bounds::{Bound, DeclareBounds, Declared},
+};
 
 /// Where the host is: the time zone at `now` (seconds east of UTC) and the
 /// logical cores; and whether the profiles of the queue's repository
@@ -44,13 +48,90 @@ pub fn kpi(
     let window = queue.ledger_window(&WindowQuery {
         now_ms: super::stats::now_ms(now),
         read_from_ms: read_from_ms(query, config, now, host.utc_offset_secs),
+        bounds: declared(vec![query.clone()], now, host, config, areas),
         ..WindowQuery::default()
     })?;
     of_window(&window, now, host, config, areas, query)
 }
 
+/// The bounds [`of_window`] of each of `queries` takes inside the window
+/// ([`crate::domain::kpi::bounds`]), for the read of its window to answer
+/// ([`WindowQuery::bounds`]): each reader of the KPIs (`kpi`, `report`,
+/// the check of the targets, the observer's input) declares those of the
+/// queries it makes of the window it reads.
+pub fn declared(
+    queries: Vec<KpiQuery>,
+    now: i64,
+    host: Host,
+    config: &KpiConfig,
+    areas: Option<&AreaMap>,
+) -> Declared {
+    Declared::of(KpiBounds {
+        queries,
+        now,
+        host,
+        config: config.clone(),
+        areas: areas.cloned(),
+    })
+}
+
+/// [`declared`]'s declaration.
+struct KpiBounds {
+    queries: Vec<KpiQuery>,
+    now: i64,
+    host: Host,
+    config: KpiConfig,
+    areas: Option<AreaMap>,
+}
+
+impl DeclareBounds for KpiBounds {
+    fn bounds(&self, window: &LedgerWindow) -> Vec<Bound> {
+        let mut bounds = Vec::new();
+        for query in &self.queries {
+            // Only a comparison reads what the input holds past the events
+            // (its marks and finishes); the periods read the events alone.
+            if query.compare.is_some() {
+                with_input(
+                    window,
+                    self.now,
+                    self.host,
+                    &self.config,
+                    self.areas.as_ref(),
+                    |input| bounds.extend(kpi_bounds(input, query)),
+                );
+            } else {
+                bounds.extend(kpi_bounds(
+                    &KpiInput {
+                        events: window.events(),
+                        goals: &std::collections::HashMap::new(),
+                        changes: &std::collections::HashMap::new(),
+                        areas: None,
+                        heartbeats: &std::collections::HashMap::new(),
+                        draft_origins: &std::collections::HashMap::new(),
+                        now: self.now,
+                        utc_offset_secs: self.host.utc_offset_secs,
+                        cores: self.host.cores,
+                        rust_toolchain: self.host.rust_toolchain,
+                        config: &self.config,
+                        host: None,
+                        ledger: None,
+                        rows: &[],
+                        post_landing: None,
+                        executions: None,
+                        earlier: None,
+                        answers: window.answers(),
+                    },
+                    query,
+                ));
+            }
+        }
+        bounds
+    }
+}
+
 /// [`kpi`] of `window`, the ledger up to `now` (all of it, or read from the
-/// time of [`read_from_ms`] for `query`).
+/// time of [`read_from_ms`] for `query`). Its bounds inside the window are
+/// the window's answers when its query declared them ([`declared`]).
 pub fn of_window(
     window: &LedgerWindow,
     now: i64,
@@ -59,6 +140,21 @@ pub fn of_window(
     areas: Option<&AreaMap>,
     query: &KpiQuery,
 ) -> Result<Kpi> {
+    with_input(window, now, host, config, areas, |input| {
+        derive(input, query)
+    })
+    .map_err(|error| anyhow!(error))
+}
+
+/// `f` of the input of the KPIs of `window`.
+fn with_input<T>(
+    window: &LedgerWindow,
+    now: i64,
+    host: Host,
+    config: &KpiConfig,
+    areas: Option<&AreaMap>,
+    f: impl FnOnce(&KpiInput<'_>) -> T,
+) -> T {
     let events = window.events();
     let run_areas = areas.map(|map| run_areas(map, events, &window.main_log().changed));
     let (goals, changes, draft_origins) = match window.attributes() {
@@ -76,29 +172,26 @@ pub fn of_window(
         window.of(crate::domain::ledger::LedgerKind::Run).collect();
     let post_landing = window.post_landing_book();
     let executions = window.executions();
-    derive(
-        &KpiInput {
-            events,
-            goals: &goals,
-            changes: &changes,
-            areas: run_areas.as_ref(),
-            heartbeats: &heartbeats,
-            draft_origins: &draft_origins,
-            now,
-            utc_offset_secs: host.utc_offset_secs,
-            cores: host.cores,
-            rust_toolchain: host.rust_toolchain,
-            config,
-            host: Some(HostReader(&read)),
-            ledger: Some(&ledger),
-            rows: &rows,
-            post_landing: Some(&post_landing),
-            executions: Some(&executions),
-            earlier: Some(window.earlier()),
-        },
-        query,
-    )
-    .map_err(|error| anyhow!(error))
+    f(&KpiInput {
+        events,
+        goals: &goals,
+        changes: &changes,
+        areas: run_areas.as_ref(),
+        heartbeats: &heartbeats,
+        draft_origins: &draft_origins,
+        now,
+        utc_offset_secs: host.utc_offset_secs,
+        cores: host.cores,
+        rust_toolchain: host.rust_toolchain,
+        config,
+        host: Some(HostReader(&read)),
+        ledger: Some(&ledger),
+        rows: &rows,
+        post_landing: Some(&post_landing),
+        executions: Some(&executions),
+        earlier: Some(window.earlier()),
+        answers: window.answers(),
+    })
 }
 
 /// [`improvements`] against `configured`, `[kpi]`'s

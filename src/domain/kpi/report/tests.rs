@@ -209,6 +209,7 @@ fn report_with_host(
             post_landing: None,
             executions: None,
             earlier: None,
+            answers: None,
         },
         &KpiQuery {
             period,

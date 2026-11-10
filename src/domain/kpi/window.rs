@@ -170,6 +170,10 @@ struct SupervisorLife {
 /// What every window reads, derived once.
 pub(super) struct Context<'a> {
     pub events: &'a [RunEvent],
+    /// Where the windows' bounds are taken ([`super::Edges`]): the last
+    /// event at or before a window's start and end, and the time of an
+    /// event id cursor of `--compare`.
+    pub edges: super::Edges<'a>,
     /// What the landings' attempts and waits read
     /// ([`landing_utilization::reads`]) of `events` and of the runs a read
     /// from a time left out, ascending id; none when it left out none.
@@ -495,6 +499,7 @@ impl<'a> Context<'a> {
             });
         let mut context = Self {
             events,
+            edges: super::Edges::of(input),
             landings,
             goals: input.goals,
             changes: input.changes,
@@ -668,7 +673,8 @@ impl<'a> Context<'a> {
     /// What `stats` derives for the runs that finished after `since` up
     /// to `until`, every one of them.
     fn stats(&self, since: Option<Cursor>, until: Option<Cursor>) -> stats::Stats {
-        let mut stats = stats::stats(
+        let mut stats = stats::stats_answering(
+            self.edges.answers(),
             self.events,
             self.goals,
             self.now,
@@ -976,8 +982,8 @@ impl<'a> Context<'a> {
     /// an ask's task but not by area, as an ask has no landed commit.
     pub fn window(&self, start: i64, end: i64, axes: &[Axis]) -> WindowKpis {
         let events = self.events;
-        let after = Cursor::Time(start).event_id(events);
-        let upto = Cursor::Time(end).event_id(events);
+        let after = self.edges.last_at(start);
+        let upto = self.edges.last_at(end);
         // By the times, not their events: the cuts of the interactive
         // sessions count by the time they cut at, which the window's last
         // event may precede.

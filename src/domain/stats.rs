@@ -1044,8 +1044,76 @@ pub fn stats(
     query: &StatsQuery,
     live: &LiveSnapshot,
 ) -> Stats {
-    let since = query.since.map(|cursor| cursor.event_id(events));
+    stats_answering(None, events, goals, now, slots, query, live)
+}
+
+/// The ids the page of [`stats`] of `query` spans without `--full` and
+/// `--since`, after the first and up to the second (its `window_start`
+/// and the window's last event), as `stats` works them out of the same
+/// `events` and `goals`: for its reader to declare the page's first time
+/// with the window's query ([`stats_answering`]). None with `--full` or
+/// `--since`, whose first time is the window's own.
+pub fn page_range(
+    events: &[RunEvent],
+    goals: &HashMap<TaskId, Option<GoalId>>,
+    query: &StatsQuery,
+) -> Option<(EventId, EventId)> {
+    if query.full || query.since.is_some() {
+        return None;
+    }
+    let latest = events.iter().map(|e| e.id).max().unwrap_or(EventId::new(0));
     let until = query.until.map(|cursor| cursor.event_id(events));
+    let latest = until.map_or(latest, |until| until.min(latest));
+    let in_goal = |task_id: TaskId| {
+        query
+            .goal_id
+            .is_none_or(|goal| goals.get(&task_id).copied().flatten() == Some(goal))
+    };
+    let mut first_event: HashMap<&str, EventId> = HashMap::new();
+    for event in events {
+        if let Some(run_id) = &event.run_id {
+            first_event.entry(run_id.as_str()).or_insert(event.id);
+        }
+    }
+    let mut finished: Vec<(EventId, RunId)> = runs(events, goals)
+        .into_iter()
+        .filter(|track| in_goal(track.stats.task_id))
+        .filter_map(|track| Some((track.stats.finished_event_id?, track.stats.run_id)))
+        .filter(|(finished, _)| until.is_none_or(|until| *finished <= until))
+        .collect();
+    finished.sort_by_key(|(finished, _)| *finished);
+    let page = &finished[finished.len().saturating_sub(DEFAULT_RUNS)..];
+    let start = page
+        .iter()
+        .filter_map(|(_, run)| first_event.get(run.as_str()))
+        .min()
+        .map_or(EventId::new(0), |id| EventId::new(id.as_i64() - 1));
+    Some((start, latest))
+}
+
+/// [`stats`] of a ledger window that answered the bounds its reader
+/// declared ([`crate::domain::ledger::window::bounds`]): a time cursor's
+/// event is the window's last at or before it when the reader declared it
+/// (`kpi`'s periods), and the first time of the page without `--full` and
+/// `--since` is the window's answer for the page's ids ([`page_range`]),
+/// not worked out again of `events`.
+pub fn stats_answering(
+    answers: Option<&crate::domain::ledger::window::bounds::Answers>,
+    events: &[RunEvent],
+    goals: &HashMap<TaskId, Option<GoalId>>,
+    now: i64,
+    slots: SlotSnapshot,
+    query: &StatsQuery,
+    live: &LiveSnapshot,
+) -> Stats {
+    let resolve = |cursor: Cursor| match cursor {
+        Cursor::Time(ms) => answers
+            .and_then(|answers| answers.last_at(ms))
+            .unwrap_or_else(|| cursor.event_id(events)),
+        Cursor::Event(_) => cursor.event_id(events),
+    };
+    let since = query.since.map(resolve);
+    let until = query.until.map(resolve);
     let latest = events.iter().map(|e| e.id).max().unwrap_or(EventId::new(0));
     let latest_event = latest;
     // A `--since` past `--until` leaves nothing, and the cursor does not go back.
@@ -1321,13 +1389,28 @@ pub fn stats(
         Some(Cursor::Time(millis)) => millis.min(now * 1000),
         _ => window_end,
     };
+    let first_of_events = || {
+        events
+            .iter()
+            .filter(|event| event.id > window_start && event.id <= window_last)
+            .filter_map(|event| timestamp_millis(&event.created_at))
+            .min()
+    };
     let window_from = cursor_ms(&query.since)
-        .or_else(|| {
-            events
-                .iter()
-                .filter(|event| event.id > window_start && event.id <= window_last)
-                .filter_map(|event| timestamp_millis(&event.created_at))
-                .min()
+        .or_else(|| match answers {
+            // The page's first time is the window's answer for its ids.
+            Some(answers) if !query.full => answers
+                .first_in(window_start, window_last)
+                .unwrap_or_else(|| {
+                    crate::domain::ledger::window::bounds::missing(
+                        crate::domain::ledger::window::bounds::Bound::FirstIn(
+                            window_start,
+                            window_last,
+                        ),
+                    );
+                    first_of_events()
+                }),
+            _ => first_of_events(),
         })
         .unwrap_or(window_until)
         .min(window_until);

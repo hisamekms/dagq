@@ -799,11 +799,16 @@ pub trait LedgerStore {
     /// every row), so that a store whose pages are of more than one state
     /// gives the newest coverage of them
     /// ([`LedgerWindowRead::omitted_coverage`]): no row read is of a later
-    /// state than the S its edges read to.
+    /// state than the S its edges read to. The bounds `query` declares
+    /// inside the window ([`WindowQuery::bounds`]) are answered last, of
+    /// the coverage read after every row, by the same reads, one each
+    /// ([`crate::domain::ledger::window::bounds`]).
     fn ledger_window(&self, query: &WindowQuery) -> Result<LedgerWindow> {
         use crate::domain::ledger::window::WindowRows;
-        read_window(self, query, WindowRows::new, true, |read| {
-            Ok(read.into_window(query))
+        read_window(self, query, WindowRows::new, true, |read, edges| {
+            let mut window = read.into_window(query);
+            crate::domain::ledger::window::bounds::answer(&mut window, query, &edges.now()?)?;
+            Ok(window)
         })
     }
 }
@@ -818,7 +823,7 @@ fn read_window<S: LedgerStore + ?Sized, T>(
     query: &WindowQuery,
     new: fn(&WindowQuery, usize) -> crate::domain::ledger::window::WindowRows,
     omitted: bool,
-    mut finish: impl FnMut(crate::domain::ledger::window::WindowRows) -> Result<T>,
+    mut finish: impl FnMut(crate::domain::ledger::window::WindowRows, &Edges<'_, '_>) -> Result<T>,
 ) -> Result<T> {
     // A read from a time has no use for room for every event.
     let expected = match query.read_from_ms {
@@ -830,7 +835,7 @@ fn read_window<S: LedgerStore + ?Sized, T>(
         let reads = OmittedReads(snapshot);
         let edges = Edges(omitted.then_some(&reads));
         let read = window_rows(snapshot, query, new(query, expected), &edges)?;
-        taken = Some(finish(read)?);
+        taken = Some(finish(read, &edges)?);
         Ok(())
     })?;
     taken.ok_or_else(|| anyhow::anyhow!("the ledger's snapshot read nothing"))
@@ -935,7 +940,7 @@ pub fn ledger_window_payload_text<S: LedgerStore + ?Sized>(
     query: &WindowQuery,
 ) -> Result<crate::domain::ledger::window::payload_text::TextWindow> {
     use crate::domain::ledger::window::WindowRows;
-    read_window(store, query, WindowRows::payload_text, false, |read| {
+    read_window(store, query, WindowRows::payload_text, false, |read, _| {
         Ok(read.into_text_window())
     })
 }

@@ -28,6 +28,7 @@ use super::{
     after_claim::AfterClaim,
     areas::RunAreas,
     host_metrics::{DiskFree, HostSummary},
+    ledger::window::bounds::{self, Answers, Bound},
     marks::{self, Mark},
     stats::{Cursor, landing::p90, median, median_f64, timestamp_millis},
 };
@@ -595,6 +596,86 @@ pub struct KpiInput<'a> {
     /// What the folds that look back keep of the rows a read left out
     /// ([`super::ledger::window::Earlier`]); none when none was.
     pub earlier: Option<&'a super::ledger::window::Earlier>,
+    /// The answers of the bounds [`bounds`] declared of the window
+    /// ([`super::ledger::window::LedgerWindow::answers`]): each period's
+    /// start and end, the time of each event id cursor and the first time
+    /// without `--since` are taken of them ([`Edges`]). None works them out
+    /// of `events`.
+    pub answers: Option<&'a Answers>,
+}
+
+/// Where [`kpi`] takes its bounds inside the window: the window's answers
+/// when the read answered them ([`KpiInput::answers`]), each declared by
+/// [`bounds`] (one asked for and not declared fails a test,
+/// [`super::ledger::window::bounds::missing`]); without answers, of the
+/// events, as of a queue that holds every event.
+#[derive(Clone, Copy)]
+pub(crate) struct Edges<'a> {
+    events: &'a [RunEvent],
+    answers: Option<&'a Answers>,
+}
+
+impl<'a> Edges<'a> {
+    pub(crate) const fn of(input: &KpiInput<'a>) -> Self {
+        Self {
+            events: input.events,
+            answers: input.answers,
+        }
+    }
+
+    /// The window's answers, if it has any.
+    pub(crate) const fn answers(self) -> Option<&'a Answers> {
+        self.answers
+    }
+
+    /// The time `cursor` stands for ([`cursor_ms`]).
+    pub(crate) fn cursor_ms(self, cursor: Cursor) -> Option<i64> {
+        let Cursor::Event(id) = cursor else {
+            return cursor_ms(cursor, self.events);
+        };
+        match self.answers.map(|answers| answers.time_through(id)) {
+            Some(Some(answer)) => answer,
+            Some(None) => {
+                bounds::missing(Bound::TimeThrough(id));
+                cursor_ms(cursor, self.events)
+            }
+            None => cursor_ms(cursor, self.events),
+        }
+    }
+
+    /// The last event at or before `ms` ([`Cursor::event_id`]).
+    pub(crate) fn last_at(self, ms: i64) -> super::EventId {
+        match self.answers.map(|answers| answers.last_at(ms)) {
+            Some(Some(answer)) => answer,
+            Some(None) => {
+                bounds::missing(Bound::LastAt(ms));
+                Cursor::Time(ms).event_id(self.events)
+            }
+            None => Cursor::Time(ms).event_id(self.events),
+        }
+    }
+
+    /// The first time of every event: a window's start without `--since`.
+    fn first_ms(self) -> Option<i64> {
+        let bound = Bound::FirstIn(super::EventId::new(0), super::EventId::new(i64::MAX));
+        let of_events = || {
+            self.events
+                .iter()
+                .filter_map(|event| timestamp_millis(&event.created_at))
+                .min()
+        };
+        match self
+            .answers
+            .map(|answers| answers.first_in(super::EventId::new(0), super::EventId::new(i64::MAX)))
+        {
+            Some(Some(answer)) => answer,
+            Some(None) => {
+                bounds::missing(bound);
+                of_events()
+            }
+            None => of_events(),
+        }
+    }
 }
 
 /// One KPI over one stratum of one window: how many samples, and the value
@@ -1053,38 +1134,27 @@ struct Span {
     end: i64,
 }
 
-/// The KPIs `query` asks for.
-pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
-    if query.last == 0 {
-        return Err("--last must be at least 1".into());
-    }
-    let config = input.config;
-    let context = Context::new(input, query);
-    let now_ms = input.now * 1000;
-    let offset_ms = input.utc_offset_secs * 1000;
-    let mut axes = vec![Axis::CHANGE, Axis::AREA];
-    for axis in &query.by {
-        if !axes.contains(axis) {
-            axes.push(axis.clone());
-        }
-    }
-    axes.sort_unstable();
+/// The spans of the periods [`kpi`] reads for `query` (or of its window
+/// of `--since` and `--until`, with the one before it), oldest first, of
+/// the bounds `edges` gives: the time of each event id cursor and the
+/// first time without `--since`.
+fn spans(
+    edges: Edges<'_>,
+    query: &KpiQuery,
+    config: &KpiConfig,
+    now_ms: i64,
+    offset_ms: i64,
+) -> Result<Vec<(String, Span)>, String> {
     let window = query.since.is_some() || query.until.is_some();
     // Oldest first: the lookback, then the periods listed.
-    let spans: Vec<(String, Span)> = if window {
+    Ok(if window {
         let end = match query.until {
-            Some(until) => cursor_ms(until, input.events).ok_or("--until names no event")?,
+            Some(until) => edges.cursor_ms(until).ok_or("--until names no event")?,
             None => now_ms,
         };
         let start = match query.since {
-            Some(since) => cursor_ms(since, input.events).ok_or("--since names no event")?,
-            None => input
-                .events
-                .iter()
-                .filter_map(|event| timestamp_millis(&event.created_at))
-                .min()
-                .unwrap_or(end)
-                .saturating_sub(1),
+            Some(since) => edges.cursor_ms(since).ok_or("--since names no event")?,
+            None => edges.first_ms().unwrap_or(end).saturating_sub(1),
         };
         if start >= end {
             return Err("--since must be before --until".into());
@@ -1102,7 +1172,7 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
         ]
     } else {
         let anchor = match query.at {
-            Some(at) => cursor_ms(at, input.events).ok_or("--at names no event")?,
+            Some(at) => edges.cursor_ms(at).ok_or("--at names no event")?,
             None => now_ms,
         };
         let count = period_count(query, config);
@@ -1116,7 +1186,83 @@ pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
                 (query.period.label(start, offset_ms), Span { start, end })
             })
             .collect()
-    };
+    })
+}
+
+/// The bounds [`kpi`] of `query` takes inside the window of `input`
+/// ([`super::ledger::window::bounds`]), for the read to answer of the same
+/// snapshot as the rows: the time of each event id cursor (`--since`,
+/// `--until`, `--at`, `--compare`'s) and the first time without
+/// `--since`; once those are answered ([`KpiInput::answers`]), the last
+/// event at or before the start and the end of each period and of each
+/// `--compare` window, worked out of those answers as [`kpi`] works them
+/// out. A query `kpi` refuses declares what it got to.
+pub fn bounds(input: &KpiInput<'_>, query: &KpiQuery) -> Vec<Bound> {
+    let answered = |bound: &Bound| input.answers.is_some_and(|answers| answers.has(*bound));
+    let mut cursors = vec![query.since, query.until, query.at];
+    match query.compare {
+        Some(CompareSpec::At(cursor)) => cursors.push(Some(cursor)),
+        Some(CompareSpec::Windows([(a, b), (c, d)])) => {
+            cursors.extend([a, b, c, d].map(Some));
+        }
+        None => {}
+    }
+    let mut first: Vec<Bound> = cursors
+        .into_iter()
+        .flatten()
+        .filter_map(|cursor| match cursor {
+            Cursor::Event(id) => Some(Bound::TimeThrough(id)),
+            Cursor::Time(_) => None,
+        })
+        .collect();
+    if query.since.is_none() && query.until.is_some() {
+        first.push(Bound::FirstIn(
+            super::EventId::new(0),
+            super::EventId::new(i64::MAX),
+        ));
+    }
+    let first: Vec<Bound> = first.into_iter().filter(|bound| !answered(bound)).collect();
+    if !first.is_empty() || query.last == 0 {
+        return first;
+    }
+    let edges = Edges::of(input);
+    let mut times = Vec::new();
+    if let Ok(spans) = spans(
+        edges,
+        query,
+        input.config,
+        input.now * 1000,
+        input.utc_offset_secs * 1000,
+    ) {
+        times.extend(spans.iter().flat_map(|(_, span)| [span.start, span.end]));
+    }
+    if let Some(spec) = query.compare {
+        let context = Context::new(input, query);
+        if let Ok((_, before, after)) = compare::spans(&context, spec, query) {
+            times.extend([before.0, before.1, after.0, after.1]);
+        }
+    }
+    times.into_iter().map(Bound::LastAt).collect()
+}
+
+/// The KPIs `query` asks for.
+pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
+    if query.last == 0 {
+        return Err("--last must be at least 1".into());
+    }
+    let config = input.config;
+    let context = Context::new(input, query);
+    let now_ms = input.now * 1000;
+    let offset_ms = input.utc_offset_secs * 1000;
+    let mut axes = vec![Axis::CHANGE, Axis::AREA];
+    for axis in &query.by {
+        if !axes.contains(axis) {
+            axes.push(axis.clone());
+        }
+    }
+    axes.sort_unstable();
+    let window = query.since.is_some() || query.until.is_some();
+    let spans = spans(Edges::of(input), query, config, now_ms, offset_ms)?;
     let windows: Vec<WindowKpis> = spans
         .iter()
         .map(|(_, span)| context.window(span.start, span.end, &axes))

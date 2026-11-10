@@ -108,6 +108,39 @@ pub fn window(ledger: &(impl LedgerStore + ?Sized), now: i64) -> Result<LedgerWi
     })
 }
 
+/// [`window`] for the KPIs of `queries` ([`make_with`] of each period and
+/// `at`, or the observer's days and weeks): the bounds they take inside it
+/// are declared with its query ([`super::kpi::declared`]) and answered by
+/// its read.
+pub fn window_for(
+    ledger: &(impl LedgerStore + ?Sized),
+    now: i64,
+    setup: &ReportSetup,
+    queries: Vec<KpiQuery>,
+) -> Result<LedgerWindow> {
+    ledger.ledger_window(&WindowQuery {
+        now_ms: super::stats::now_ms(now),
+        bounds: super::kpi::declared(
+            queries,
+            now,
+            setup.host,
+            &setup.config,
+            setup.areas.as_ref(),
+        ),
+        ..WindowQuery::default()
+    })
+}
+
+/// The query of the KPIs of the report of `period` that holds `at`
+/// ([`make_with`]).
+pub fn report_query(period: Period, at: Option<Cursor>) -> KpiQuery {
+    KpiQuery {
+        period,
+        at,
+        ..KpiQuery::default()
+    }
+}
+
 /// The near-term dependency diagram of the ledger's `window`, drawn by
 /// `render`: its tasks and the SVG the page shows as an image, or why
 /// there is none. A window with no near-term task is not drawn.
@@ -382,11 +415,7 @@ pub fn make_with(
         setup.host,
         &setup.config,
         setup.areas.as_ref(),
-        &KpiQuery {
-            period,
-            at,
-            ..KpiQuery::default()
-        },
+        &report_query(period, at),
     )?;
     let findings = match window.findings() {
         findings::Folded::Findings(findings) => findings.unsettled(),
@@ -513,19 +542,26 @@ pub fn write_due(
     let mut done = Vec::new();
     let mut drawn: Option<DiagramSection> = None;
     let mut read: Option<LedgerWindow> = None;
-    for (period, label, at) in report::due(now * 1000, offset_ms, &written) {
-        // A day the retention would remove at once (`keep_daily_days` under
-        // the backfill) is not written.
-        let file = ReportFile {
-            period,
-            label: label.clone(),
-            partial: false,
-        };
-        if report::expired(&file, now * 1000, offset_ms, setup.keep, &HashSet::new()) {
-            continue;
-        }
+    // A day the retention would remove at once (`keep_daily_days` under
+    // the backfill) is not written.
+    let owed: Vec<_> = report::due(now * 1000, offset_ms, &written)
+        .into_iter()
+        .filter(|(period, label, _)| {
+            let file = ReportFile {
+                period: *period,
+                label: label.clone(),
+                partial: false,
+            };
+            !report::expired(&file, now * 1000, offset_ms, setup.keep, &HashSet::new())
+        })
+        .collect();
+    let queries: Vec<KpiQuery> = owed
+        .iter()
+        .map(|(period, _, at)| report_query(*period, Some(Cursor::Time(*at))))
+        .collect();
+    for (period, label, at) in owed {
         if read.is_none() {
-            read = Some(window(ledger, now)?);
+            read = Some(window_for(ledger, now, setup, queries.clone())?);
         }
         let window = read.as_ref().context("the ledger's window was read")?;
         let diagram = drawn

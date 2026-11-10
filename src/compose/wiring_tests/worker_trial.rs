@@ -153,6 +153,7 @@ fn a_claim_under_the_trial_records_its_group_and_candidate() {
             post_landing: None,
             executions: None,
             earlier: None,
+            answers: None,
         },
         &KpiQuery {
             last: 1,

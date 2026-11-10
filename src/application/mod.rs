@@ -41,6 +41,8 @@ pub mod marks;
 // The run files in memory of the use cases' unit tests and of the
 // composition root's wiring tests (`crate::compose`).
 #[cfg(test)]
+mod bounds_tests;
+#[cfg(test)]
 pub(crate) mod memory_files;
 pub mod naming;
 pub mod observer;

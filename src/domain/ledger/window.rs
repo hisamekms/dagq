@@ -66,8 +66,8 @@
 //! # The edges of a window
 //!
 //! A window's edges are taken of the records of the rows read: the latest
-//! event (`upto`), each cursor's id and time, the time of the event an
-//! event id `--until` stops at, the first time of a window without
+//! event (`upto`), each cursor's id and time, the last event an event id
+//! `--until` holds and its time, the first time of a window without
 //! `--since` (`host_from_ms`) and, for a read from a time, the queue's last
 //! record of the time or before it (`queue_before`), whatever the records
 //! are (those past R of the rows held, a run's on its way, the omitted
@@ -84,7 +84,9 @@
 //! smaller first time, a cursor's event itself. No other kind's edge is
 //! read, and no run's, task's or session's event of those kinds (it comes
 //! with its row's records alone). Of each kind: the latest is its L; a
-//! cursor's event is read by its key; the last of a time at or before t
+//! cursor's event is read by its key, and the last at or before an event
+//! id `--until` from the last point at or before it (K at most); the last
+//! of a time at or before t
 //! (a time cursor, the window's end, `queue_before`) is read from the last
 //! point of an M at or before t, its T the answer so far, through the
 //! events between the points whose T rises (K each), up to a timed one past
@@ -95,6 +97,12 @@
 //! time's answer. So the edges read the spans of K events that hold the
 //! timed omitted events within D of their times, and a few seeks of the
 //! points, however long the history around the window.
+//!
+//! The bounds a reader takes inside the window past these edges (`kpi`'s
+//! periods and comparisons, the times of its event id cursors, the first
+//! time of `stats`' page) are declared with the query
+//! ([`WindowQuery::bounds`]) and answered by the same reads, a span of K
+//! or of D each ([`bounds`]).
 //!
 //! # Where each value comes from
 //!
@@ -268,6 +276,20 @@ pub struct WindowQuery {
     /// module doc): none reads every row. Apart from `since`, which is the
     /// window `stats` answers of and moves its answer.
     pub read_from_ms: Option<i64>,
+    /// The bounds the reader takes inside the window past its edges
+    /// ([`bounds`]): each period of `kpi` and of its comparison (the last
+    /// event at or before its start and end), the time of each event id
+    /// cursor of `kpi` (`--since`, `--until`, `--at`, `--compare`), its
+    /// first time without `--since`, and the first time of the page of
+    /// `stats` without `--full` and `--since`. The read answers each of
+    /// the same snapshot as the rows, the omitted queue events of (C, S]
+    /// too, and the reader takes the window's answers
+    /// ([`LedgerWindow::answers`]), not those it would work out again of
+    /// [`LedgerWindow::events`], which miss the omitted events when a clock
+    /// turned back. A reader that takes a new bound inside a window
+    /// declares it here with the others: one not declared has no answer.
+    /// None declared reads none.
+    pub bounds: bounds::Declared,
 }
 
 /// Which rows a read from a time leaves out of the store's read.
@@ -457,6 +479,8 @@ pub struct LedgerWindow {
     filters: Filters,
     /// What the rows a read from a time left out still give.
     earlier: Earlier,
+    /// The answers of the bounds the query declared ([`bounds`]).
+    answers: Option<bounds::Answers>,
 }
 
 /// The runs the task row `row` names ([`super::fold::TaskLife::runs`]),
@@ -931,7 +955,9 @@ pub(crate) fn select_with<E>(
         read.take(row);
     }
     read.take_omitted_edges(query, edges)?;
-    Ok(read.into_window(query))
+    let mut window = read.into_window(query);
+    bounds::answer(&mut window, query, edges)?;
+    Ok(window)
 }
 
 /// The window `query` asks of `rows` read as a store reads them: what
@@ -963,7 +989,9 @@ pub(crate) fn select_from_time_with<E>(
             read.take(row);
         }
         read.take_omitted_edges(query, edges)?;
-        return Ok(read.into_window(query));
+        let mut window = read.into_window(query);
+        bounds::answer(&mut window, query, edges)?;
+        return Ok(window);
     };
     let (out, kept): (Vec<_>, Vec<_>) = others.into_iter().partition(|row| from.leaves_out(row));
     for row in kept {
@@ -999,7 +1027,9 @@ pub(crate) fn select_from_time_with<E>(
         let wanted = read.rows_wanted();
         if wanted.is_empty() {
             read.take_omitted_edges(query, edges)?;
-            return Ok(read.into_window(query));
+            let mut window = read.into_window(query);
+            bounds::answer(&mut window, query, edges)?;
+            return Ok(window);
         }
         for (kind, key) in wanted {
             read.take_row(
@@ -1028,7 +1058,9 @@ pub(crate) fn select_holding_every_row(rows: Vec<LedgerRow>, query: &WindowQuery
         .filter(|row| !matches!(row.kind, LedgerKind::Run | LedgerKind::Task))
         .map(|row| ((row.kind, row.key.clone()), record_goals(row)))
         .collect();
-    of_records(all, rows, &goals, query)
+    let mut window = of_records(all, rows, &goals, query);
+    bounds::answer(&mut window, query, &OmittedEdges::<Infallible>::none()).unwrap();
+    window
 }
 
 /// The window `query` asks of `rows`, `all` their records (ascending id) and
@@ -1075,6 +1107,7 @@ fn of_records(
         records: all,
         filters: Filters::default(),
         earlier: Earlier::default(),
+        answers: None,
     };
     let filters = Filters::of(&window, query);
     let mut chosen: Vec<LedgerRow> = rows
@@ -1534,6 +1567,7 @@ pub(crate) fn through_ledger(events: &[RunEvent], until_secs: Option<i64>) -> Le
     select(rows, &query)
 }
 
+pub mod bounds;
 #[doc(hidden)]
 pub mod omitted;
 pub mod payload_text;

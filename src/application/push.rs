@@ -131,6 +131,13 @@ pub fn check_breaches(
     let window = ledger.ledger_window(&crate::domain::ledger::window::WindowQuery {
         now_ms: super::stats::now_ms(now),
         read_from_ms: from,
+        bounds: super::kpi::declared(
+            queries.iter().map(|(query, _)| query.clone()).collect(),
+            now,
+            setup.host,
+            &setup.config,
+            setup.areas.as_ref(),
+        ),
         ..Default::default()
     })?;
     for (query, label) in &queries {

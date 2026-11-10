@@ -16,9 +16,7 @@ mod read_contract;
 
 use serde::Serialize;
 
-use super::{
-    COMPARE_AXES, Change, CompareSpec, DAY_MS, KpiQuery, Kpis, Measure, cursor_ms, window::Context,
-};
+use super::{COMPARE_AXES, Change, CompareSpec, DAY_MS, KpiQuery, Kpis, Measure, window::Context};
 use crate::domain::{
     EventKind,
     host_metrics::HostSummary,
@@ -208,18 +206,25 @@ fn named_change(marks: &[Mark], groups: &[Vec<Mark>], cursor: Cursor) -> Option<
         })
 }
 
-/// The comparison `spec` asks for.
-pub(super) fn compare(
+/// A window of a comparison (unix ms, the start exclusive).
+type Window = (i64, i64);
+
+/// The split `spec` names and the windows before and after it, as
+/// [`compare`] compares them.
+pub(super) fn spans(
     context: &Context<'_>,
     spec: CompareSpec,
     query: &KpiQuery,
-    now_ms: i64,
-) -> Result<Comparison, String> {
-    let events = context.events;
+) -> Result<(Option<Split>, Window, Window), String> {
     let min_samples = context.min_samples;
     let groups = overlapping_groups(&context.marks, &context.finishes, min_samples);
-    let at = |cursor: Cursor| cursor_ms(cursor, events).ok_or("--compare names no event");
-    let (split, before, after) = match spec {
+    let at = |cursor: Cursor| {
+        context
+            .edges
+            .cursor_ms(cursor)
+            .ok_or("--compare names no event")
+    };
+    Ok(match spec {
         CompareSpec::At(cursor) => {
             let time = match cursor {
                 // Split at the mark's effective time: a person's --at, or a
@@ -257,7 +262,19 @@ pub(super) fn compare(
             }
             (None, before, after)
         }
-    };
+    })
+}
+
+/// The comparison `spec` asks for.
+pub(super) fn compare(
+    context: &Context<'_>,
+    spec: CompareSpec,
+    query: &KpiQuery,
+    now_ms: i64,
+) -> Result<Comparison, String> {
+    let min_samples = context.min_samples;
+    let groups = overlapping_groups(&context.marks, &context.finishes, min_samples);
+    let (split, before, after) = spans(context, spec, query)?;
     let in_split = |mark: &Mark| {
         split
             .as_ref()

@@ -24,12 +24,15 @@ use crate::domain::{
     areas::{AreaMap, run_areas},
     ledger::{
         attributes::Folded,
-        window::{LedgerWindow, WindowQuery},
+        window::{
+            LedgerWindow, WindowQuery,
+            bounds::{Bound, DeclareBounds, Declared},
+        },
     },
     stall::StallConfig,
     stats::{
         ConflictConfig, ConflictConfigReport, LiveSnapshot, SlotSnapshot, StallConfigReport, Stats,
-        StatsQuery, stats as aggregate, with_areas, with_changes, without_cargo_measures,
+        StatsQuery, stats_answering as aggregate, with_areas, with_changes, without_cargo_measures,
         without_rustc,
     },
 };
@@ -102,7 +105,37 @@ pub fn window_query(query: &StatsQuery, now: i64) -> WindowQuery {
         since: query.since,
         until: query.until,
         now_ms: now_ms(now),
+        bounds: if query.full || query.since.is_some() {
+            Declared::default()
+        } else {
+            Declared::of(PageBounds(query.clone()))
+        },
         ..WindowQuery::default()
+    }
+}
+
+/// The bound `stats` without `--full` and `--since` takes inside its
+/// window: the first time of its page's ids
+/// ([`crate::domain::stats::page_range`]), which starts at the first event
+/// of the page's first run, a position the window's query cannot know
+/// before the runs are read. So it is declared once the rows are read, of
+/// the window's events and goals, and the window answers it of the same
+/// snapshot ([`crate::domain::ledger::window::bounds`]): one first time of
+/// a range, read as a window's first time is, whatever the history
+/// around it, where declaring every position a page could start at would
+/// read one for each run.
+struct PageBounds(StatsQuery);
+
+impl DeclareBounds for PageBounds {
+    fn bounds(&self, window: &LedgerWindow) -> Vec<Bound> {
+        let goals = match window.attributes() {
+            Folded::Attributes(known) => known.task_goals(),
+            Folded::BeforeBaseline => std::collections::HashMap::new(),
+        };
+        crate::domain::stats::page_range(window.events(), &goals, &self.0)
+            .map(|(after, upto)| Bound::FirstIn(after, upto))
+            .into_iter()
+            .collect()
     }
 }
 
@@ -160,7 +193,15 @@ pub fn of_window(
         ledger: Some(window.run_times()),
         earlier_executions: window.earlier().executions.clone(),
     };
-    let mut stats = aggregate(events, &goals, now, SlotSnapshot::default(), query, &live);
+    let mut stats = aggregate(
+        window.answers(),
+        events,
+        &goals,
+        now,
+        SlotSnapshot::default(),
+        query,
+        &live,
+    );
     if let Some(known) = &attributes {
         let titles = known.task_titles();
         for run in &mut stats.runs {

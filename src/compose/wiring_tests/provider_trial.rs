@@ -94,6 +94,7 @@ fn pair_strata(events: &[RunEvent]) -> Vec<String> {
             post_landing: None,
             executions: None,
             earlier: None,
+            answers: None,
         },
         &KpiQuery {
             last: 1,

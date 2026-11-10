@@ -153,7 +153,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 ## 共通の読み取り関数
 
 stats・kpi・reportの全ての欄は、行を窓と絞り込みで選んで返す1つの関数（`domain::ledger::window`）だけから作る。
-窓の端の補いは(C, S]の写さないqueueのeventを越えず、ほかの値の取り方を変えず、読む量は端の近くに限る（入口は`domain::ledger::window`）。
+窓の端と、読み手が窓の問いで宣言する窓の中の境界（kpiの期間と比較の区切り・event idのcursorの時刻・statsの頁の始まり）の補いは(C, S]の写さないqueueのeventを越えず、ほかの値の取り方を変えず、読む量は境界ごとに端の近くに限る（入口は`domain::ledger::window`と`window::bounds`）。
 統計のmoduleはこの関数が返す値だけを取り、StateStore・run dir・process・Gitを読まない。
 窓の当て方・絞り込み・旧方式と走っているrunの扱い・欄ごとの元の行は`domain::ledger::window`、今の名前の意味の違いは`ledger::read`のdoc commentが持つ。
 
