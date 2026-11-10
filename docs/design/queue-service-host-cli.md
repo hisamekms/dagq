@@ -106,6 +106,8 @@ brokerの起動・停止の例外は`application::queue_broker::start_by_hand`�
 
 runnerの登録と資格の交換のCLIは`application::runner_enroll`が持ち、HTTPSの宛てにだけ送る。
 runnerの更新の資格はrunnerのhostのその人だけが読むファイルにだけ置く。
+runnerのプロセスの本体（問う・生存の報告・結果の報告・返却・停止の要求でのdrain）は`application::runner_process`が持ち、送る・待つ・移る判断は`domain::runner_process`の`choose`と`next`が持つ。
+runnerはleaseを失ったら作業の場所を捨て、受け入れられていない変更を持ち越さない。
 
 人の端末の認証操作は`application::login`が持ち、queueを開かずserviceへ転送しない。
 遠くの人のtokenはその人の資格の置き場にだけ置き、hostのsocketの入口では受けない。

@@ -139,19 +139,108 @@ impl RunnerCredentialStore for FileCredential {
 pub struct HttpExchange;
 impl RunnerExchange for HttpExchange {
     fn exchange(&self, url: &str, use_case: UseCase, params: Value) -> Result<ServiceResponse> {
-        exchange_with(
-            &super::oidc_keys::HttpsDocumentSource::for_control(),
-            url,
-            use_case,
-            params,
+        self.exchange_within(url, use_case, params, Duration::from_secs(30), &|| false)
+    }
+    fn exchange_within(
+        &self,
+        url: &str,
+        use_case: UseCase,
+        params: Value,
+        within: Duration,
+        give_up: &dyn Fn() -> bool,
+    ) -> Result<ServiceResponse> {
+        let url = url.to_owned();
+        wait_or_give_up(
+            move || {
+                exchange_with(
+                    &super::oidc_keys::HttpsDocumentSource::for_control(),
+                    &url,
+                    use_case,
+                    params,
+                    within,
+                )
+            },
+            within,
+            give_up,
         )
     }
+}
+const UNAVAILABLE: &str = "runner exchange unavailable; no credentials saved";
+
+/// A waiting call's answer and its clock: the call's thread and the
+/// monotonic clock in production ([`ThreadAnswer`]), values in tests.
+pub(crate) trait AnswerSource<T> {
+    /// How long since the call was sent.
+    fn elapsed(&self) -> Duration;
+    /// The answer if it comes within `at_most`, `None` if it has not yet.
+    fn wait(&mut self, at_most: Duration) -> Option<Result<T>>;
+}
+
+/// Wait on `source` step by step as
+/// [`crate::domain::runner_process::answer_wait`] decides: no wait longer
+/// than the time left or [`crate::domain::runner_process::GIVE_UP_POLL`], and
+/// an answer taken only if, once it came, the budget has not passed and
+/// `give_up` does not hold.
+pub(crate) fn await_answer<T>(
+    source: &mut dyn AnswerSource<T>,
+    within: Duration,
+    give_up: &dyn Fn() -> bool,
+) -> Result<T> {
+    use crate::domain::runner_process::{AnswerWait, answer_wait};
+    let mut answer = None;
+    loop {
+        match answer_wait(source.elapsed(), within, give_up(), answer.is_some()) {
+            AnswerWait::Take => {
+                return answer.unwrap_or_else(|| Err(anyhow::anyhow!(UNAVAILABLE)));
+            }
+            AnswerWait::GiveUp => anyhow::bail!(UNAVAILABLE),
+            AnswerWait::Wait(at_most) => answer = source.wait(at_most),
+        }
+    }
+}
+
+/// The answer of a call on its own thread, on the monotonic clock.
+struct ThreadAnswer<T> {
+    started: std::time::Instant,
+    answer: std::sync::mpsc::Receiver<Result<T>>,
+}
+impl<T> AnswerSource<T> for ThreadAnswer<T> {
+    fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+    fn wait(&mut self, at_most: Duration) -> Option<Result<T>> {
+        use std::sync::mpsc::RecvTimeoutError;
+        match self.answer.recv_timeout(at_most) {
+            Ok(answer) => Some(answer),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => Some(Err(anyhow::anyhow!(UNAVAILABLE))),
+        }
+    }
+}
+
+/// Run `call` on its own thread and wait for its result as [`await_answer`]
+/// decides. A call given up on is left to end on its thread (its own
+/// timeout bounds it) and its result is dropped: for a refresh, a rotation
+/// it may still commit is never saved, which the caller counts as an
+/// unknown outcome.
+pub(crate) fn wait_or_give_up<T: Send + 'static>(
+    call: impl FnOnce() -> Result<T> + Send + 'static,
+    within: Duration,
+    give_up: &dyn Fn() -> bool,
+) -> Result<T> {
+    let (sender, answer) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    std::thread::spawn(move || {
+        let _ = sender.send(call());
+    });
+    await_answer(&mut ThreadAnswer { started, answer }, within, give_up)
 }
 fn exchange_with(
     http: &dyn super::queue_service::ControlHttp,
     url: &str,
     use_case: UseCase,
     params: Value,
+    within: Duration,
 ) -> Result<ServiceResponse> {
     super::queue_service::check_control_url(url)?;
     let request = ServiceRequest {
@@ -164,7 +253,7 @@ fn exchange_with(
         use_case,
         params,
     };
-    super::queue_service::send_control(http, url, None, &request, Duration::from_secs(30))
+    super::queue_service::send_control(http, url, None, &request, within)
         .map_err(|_| anyhow::anyhow!("runner exchange unavailable; no credentials saved"))
 }
 /// Refuse before reading stdin/files or opening any local queue. The saved human
@@ -336,6 +425,83 @@ mod tests {
             );
         }
     }
+    /// An answer that comes `at` on a clock that moves only by the waits.
+    struct FakeAnswer {
+        now: std::rc::Rc<std::cell::Cell<Duration>>,
+        at: Duration,
+        answer: Option<Result<u8>>,
+        /// Each wait: when it began and how long it could last.
+        waits: Vec<(Duration, Duration)>,
+    }
+    impl AnswerSource<u8> for FakeAnswer {
+        fn elapsed(&self) -> Duration {
+            self.now.get()
+        }
+        fn wait(&mut self, at_most: Duration) -> Option<Result<u8>> {
+            let now = self.now.get();
+            self.waits.push((now, at_most));
+            if self.at <= now + at_most {
+                self.now.set(self.at.max(now));
+                self.answer.take()
+            } else {
+                self.now.set(now + at_most);
+                None
+            }
+        }
+    }
+    fn awaited(
+        at_ms: u64,
+        answer: Result<u8>,
+        within_ms: u64,
+        give_up_from_ms: Option<u64>,
+    ) -> (Result<u8>, Duration, Vec<(Duration, Duration)>) {
+        let ms = Duration::from_millis;
+        let now = std::rc::Rc::new(std::cell::Cell::new(Duration::ZERO));
+        let mut source = FakeAnswer {
+            now: now.clone(),
+            at: ms(at_ms),
+            answer: Some(answer),
+            waits: Vec::new(),
+        };
+        let clock = now.clone();
+        let give_up = move || give_up_from_ms.is_some_and(|from| clock.get() >= ms(from));
+        let result = await_answer(&mut source, ms(within_ms), &give_up);
+        (result, now.get(), source.waits)
+    }
+
+    #[test]
+    fn a_waiting_call_takes_only_an_answer_before_its_budget_and_its_give_up() {
+        let ms = Duration::from_millis;
+        let (answer, at, waits) = awaited(50, Ok(7), 1_000, None);
+        assert_eq!(answer.unwrap(), 7);
+        assert_eq!((at, waits), (ms(50), vec![(ms(0), ms(100))]));
+        assert_eq!(awaited(999, Ok(7), 1_000, None).0.unwrap(), 7);
+        for late in [1_000, 1_050] {
+            let (answer, at, _) = awaited(late, Ok(7), 1_000, None);
+            assert_eq!(
+                answer.err().unwrap().to_string(),
+                UNAVAILABLE,
+                "at {late} ms"
+            );
+            assert_eq!(at, ms(late.min(1_000)));
+        }
+        // No wait outlasts the time left: a 1 ms budget waits 1 ms.
+        let (answer, at, waits) = awaited(50, Ok(7), 1, None);
+        assert!(answer.is_err());
+        assert_eq!((at, waits), (ms(1), vec![(ms(0), ms(1))]));
+        let (_, _, waits) = awaited(5_000, Ok(7), 1_050, None);
+        assert!(waits.iter().all(|(from, most)| *from + *most <= ms(1_050)));
+        assert_eq!(waits.last(), Some(&(ms(1_000), ms(50))));
+        // Given up when asked, an answer that comes then included.
+        let (answer, at, _) = awaited(500, Ok(7), 30_000, Some(300));
+        assert!(answer.is_err());
+        assert_eq!(at, ms(300));
+        assert!(awaited(300, Ok(7), 30_000, Some(300)).0.is_err());
+        // A failure that came in time is the call's own, scrubbed message.
+        let failed = awaited(10, Err(anyhow::anyhow!("scrubbed")), 1_000, None).0;
+        assert_eq!(failed.err().unwrap().to_string(), "scrubbed");
+    }
+
     #[test]
     fn exchange_uses_https_without_bearer_and_scrubs_transport_errors() {
         use std::cell::Cell;
@@ -346,9 +512,10 @@ mod tests {
                 url: &str,
                 bearer: Option<&str>,
                 body: &[u8],
-                _: Duration,
+                timeout: Duration,
             ) -> Result<(u16, Vec<u8>)> {
                 self.0.set(self.0.get() + 1);
+                assert_eq!(timeout, Duration::from_secs(7), "the caller's budget");
                 assert_eq!(url, "https://control/api/use-case/runner_enroll");
                 assert!(bearer.is_none());
                 let request: ServiceRequest = serde_json::from_slice(body).unwrap();
@@ -362,13 +529,24 @@ mod tests {
             }
         }
         let http = Http(Cell::new(0));
-        assert!(exchange_with(&http, "http://evil", UseCase::RunnerEnroll, json!({})).is_err());
+        let within = Duration::from_secs(7);
+        assert!(
+            exchange_with(
+                &http,
+                "http://evil",
+                UseCase::RunnerEnroll,
+                json!({}),
+                within
+            )
+            .is_err()
+        );
         assert_eq!(http.0.get(), 0);
         let error = exchange_with(
             &http,
             "https://control",
             UseCase::RunnerEnroll,
             json!({"code":"sensitive-code"}),
+            within,
         )
         .err()
         .unwrap();

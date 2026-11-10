@@ -113,7 +113,38 @@ pub trait RunnerCredentialStore {
 }
 pub trait RunnerExchange {
     fn exchange(&self, url: &str, use_case: UseCase, params: Value) -> Result<ServiceResponse>;
+    /// [`Self::exchange`] that returns by `within`, and as soon as
+    /// `give_up` answers true while it waits (checked at least every
+    /// [`crate::domain::runner_process::GIVE_UP_POLL`]): an answer that has
+    /// not come by then is an `Err`, like one that never came. The HTTPS
+    /// adapter waits no longer; an exchange that answers at once may keep
+    /// this default.
+    fn exchange_within(
+        &self,
+        url: &str,
+        use_case: UseCase,
+        params: Value,
+        within: std::time::Duration,
+        give_up: &dyn Fn() -> bool,
+    ) -> Result<ServiceResponse> {
+        let _ = (within, give_up);
+        self.exchange(url, use_case, params)
+    }
 }
+/// A refresh (or enrollment) that surely rotated nothing: its credential was
+/// never sent, or the control side answered that nothing was committed
+/// (`not_leader`) or did nothing (`busy`). Only this failure may be sent again with the same refresh
+/// credential; any other failure may follow a committed rotation, and the
+/// old credential sent again is a reuse that revokes the runner.
+#[derive(Debug)]
+pub struct NothingRotated(String);
+impl std::fmt::Display for NothingRotated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for NothingRotated {}
+
 /// Ignore server-supplied error text, which might echo a submitted secret.
 /// Version refusal precedes parsing and saving any returned credentials.
 /// Only unauthenticated (including revocation) requires enrollment again.
@@ -135,10 +166,18 @@ pub fn answer(response: ServiceResponse) -> Result<Value> {
         if error.code == crate::domain::queue_service::ServiceErrorCode::Unauthenticated {
             anyhow::bail!(ENROLL_AGAIN);
         }
-        anyhow::bail!(
+        let message = format!(
             "runner exchange failed ({}); retry later",
             error.code.as_str()
         );
+        if matches!(
+            error.code,
+            crate::domain::queue_service::ServiceErrorCode::NotLeader
+                | crate::domain::queue_service::ServiceErrorCode::Busy
+        ) {
+            return Err(NothingRotated(message).into());
+        }
+        anyhow::bail!(message);
     }
     ensure!(
         response.ok,
@@ -199,11 +238,35 @@ pub fn refresh(
     if !needs_refresh(session.as_ref(), now) {
         return Ok(session.unwrap());
     }
-    let old = store.load()?;
+    let old = store
+        .load()
+        .map_err(|_| NothingRotated("runner credential could not be read; retry later".into()))?;
     let response = http.exchange(
         &old.control_url,
         UseCase::RunnerRefresh,
         json!({"refresh": old.refresh}),
+    )?;
+    install(store, &old.control_url, response)
+}
+/// [`refresh`] now, waiting for the answer no longer than `within` and
+/// than `give_up` allows (the runner process's deadlines bound it). An
+/// answer that does not come by then is an unknown outcome like any lost
+/// answer: not [`NothingRotated`].
+pub fn refresh_within(
+    http: &dyn RunnerExchange,
+    store: &dyn RunnerCredentialStore,
+    within: std::time::Duration,
+    give_up: &dyn Fn() -> bool,
+) -> Result<Session> {
+    let old = store
+        .load()
+        .map_err(|_| NothingRotated("runner credential could not be read; retry later".into()))?;
+    let response = http.exchange_within(
+        &old.control_url,
+        UseCase::RunnerRefresh,
+        json!({"refresh": old.refresh}),
+        within,
+        give_up,
     )?;
     install(store, &old.control_url, response)
 }
@@ -413,6 +476,63 @@ mod tests {
             "short-secret"
         );
     }
+    #[test]
+    fn only_a_refresh_that_rotated_nothing_is_marked_safe_to_send_again() {
+        use crate::domain::queue_service::ServiceErrorCode as Code;
+        struct Refused(Code);
+        impl RunnerExchange for Refused {
+            fn exchange(&self, _: &str, _: UseCase, _: Value) -> Result<ServiceResponse> {
+                Ok(ServiceResponse::failure(self.0, "refused"))
+            }
+        }
+        struct Lost;
+        impl RunnerExchange for Lost {
+            fn exchange(&self, _: &str, _: UseCase, _: Value) -> Result<ServiceResponse> {
+                anyhow::bail!("connection reset")
+            }
+        }
+        let safe = |error: anyhow::Error| error.is::<NothingRotated>();
+        for code in [Code::NotLeader, Code::Busy] {
+            let store = Store(RefCell::new(Some(old())), false);
+            assert!(safe(
+                refresh(&Refused(code), &store, None, 0).err().unwrap()
+            ));
+        }
+        for code in [Code::Failed, Code::BadRequest, Code::Unauthenticated] {
+            let store = Store(RefCell::new(Some(old())), false);
+            assert!(!safe(
+                refresh(&Refused(code), &store, None, 0).err().unwrap()
+            ));
+        }
+        let store = Store(RefCell::new(Some(old())), false);
+        assert!(
+            !safe(refresh(&Lost, &store, None, 0).err().unwrap()),
+            "no answer"
+        );
+        let unsaved = Store(RefCell::new(Some(old())), true);
+        assert!(
+            !safe(
+                refresh(&Http(true, false), &unsaved, None, 0)
+                    .err()
+                    .unwrap()
+            ),
+            "a rotation answered but not saved"
+        );
+        struct Unreadable;
+        impl RunnerCredentialStore for Unreadable {
+            fn load(&self) -> Result<Credential> {
+                anyhow::bail!("unreadable")
+            }
+            fn save(&self, _: &Credential) -> Result<()> {
+                unreachable!()
+            }
+        }
+        assert!(
+            safe(refresh(&Lost, &Unreadable, None, 0).err().unwrap()),
+            "not sent"
+        );
+    }
+
     #[test]
     fn only_authentication_refusals_require_enrollment_again() {
         use crate::domain::queue_service::ServiceErrorCode as Code;

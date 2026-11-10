@@ -1343,6 +1343,7 @@ pub mod run_phase;
 pub mod run_progress;
 pub mod runner_assignment;
 pub mod runner_lease;
+pub mod runner_process;
 pub mod runner_registration;
 pub mod satisfied;
 pub mod satisfied_judgment;

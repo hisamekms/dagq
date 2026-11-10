@@ -583,6 +583,91 @@ pub trait HostOpsQueue: SupervisorRegistry + InboxWatchLog + RunLog + AskStore {
 
 impl<T: SupervisorRegistry + InboxWatchLog + RunLog + AskStore + ?Sized> HostOpsQueue for T {}
 
+/// The team version runner's calls to the control side over HTTPS
+/// (ADR-t3987-1 decision 1), with the runner's short token as the bearer.
+/// `Err` is a call that got no answer (the loop tries it again later);
+/// every answer, refusals included, is `Ok`. A call returns by `within`
+/// ([`crate::domain::runner_process::call_budget`]), and as soon as
+/// `give_up` answers true while it waits (checked at least every
+/// [`crate::domain::runner_process::GIVE_UP_POLL`]): an answer that
+/// has not come by then is an `Err`, so no call outlasts the deadlines the
+/// loop keeps, a stop's drain limit included
+/// ([`crate::domain::runner_process::interrupts`]). The params carry no time
+/// of the runner's clock and no credential.
+pub trait RunnerControl {
+    fn call(
+        &self,
+        url: &str,
+        bearer: &str,
+        use_case: crate::domain::queue_service::UseCase,
+        params: serde_json::Value,
+        within: Duration,
+        give_up: &dyn Fn() -> bool,
+    ) -> Result<crate::domain::queue_service::ServiceResponse>;
+}
+
+/// A run's assignment as the runner's work receives it: the run as the
+/// control side sent it, and the lease's generation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunnerAssignment {
+    pub run_id: String,
+    pub generation: i64,
+    pub run: serde_json::Value,
+}
+
+/// What a turn's end hands to its report: the run branch's head after the
+/// push, the run's state file and receipt as data, and whether the work has
+/// no more turns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunnerTurnEnd {
+    pub head: String,
+    pub state: crate::domain::run_clone::RunState,
+    pub receipt: Option<serde_json::Value>,
+    pub exit_code: Option<i32>,
+    pub finished: bool,
+}
+
+/// The assigned work on the runner (its clone, its container and turns).
+/// The run execution's adapter implements it; the process loop only drives it.
+/// No call waits on the work: the clone, the container and the turns go on
+/// in the background, so the loop keeps its heartbeats and deadlines while
+/// they run, and [`Self::stop`] may come at any time, a start still cloning
+/// included.
+pub trait RunnerWork {
+    /// Begin the work of an assignment (its clone, then its container) and
+    /// return at once; a failure after the return comes from [`Self::turn_end`].
+    fn start(&mut self, assignment: &RunnerAssignment) -> Result<()>;
+    /// Whether a turn ended since the last call (does not block).
+    fn turn_end(&mut self) -> Result<Option<RunnerTurnEnd>>;
+    /// Stop the running work: SIGTERM, a wait, then SIGKILL.
+    fn stop(&mut self);
+    /// Throw away the clone and the run's directory, with whatever the
+    /// control side has not accepted.
+    fn discard(&mut self);
+}
+
+/// The runner process's monotonic clock and its waits. Its readings stay
+/// on the runner; none is sent to the control side.
+pub trait RunnerTimer {
+    fn now_ms(&self) -> u64;
+    fn sleep(&self, duration: Duration);
+}
+
+/// Whether a stop (SIGTERM) was asked for. The signal's handler is the
+/// entry point's; it records when the stop came, on [`RunnerTimer`]'s clock,
+/// so a stop that comes while a call waits is kept to its drain limit from
+/// then, not from when the loop reads it.
+pub trait RunnerStopRequest {
+    /// When the first stop came, or `None`.
+    fn requested_at(&self) -> Option<u64>;
+}
+
+/// Where the runner process leaves its lines for the person who runs it.
+/// No token or credential reaches it.
+pub trait RunnerOutput {
+    fn line(&self, text: &str);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

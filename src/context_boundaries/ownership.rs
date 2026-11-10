@@ -579,6 +579,7 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/broker_relay.rs", Host),
     module("src/application/login/mod.rs", Host),
     module("src/application/runner_enroll.rs", Host),
+    module("src/application/runner_process.rs", Host),
     module("src/application/oidc.rs", Host), // the check of an OIDC issuer's JWT, behind the team version's entry
     module("src/application/sccache.rs", Host),
     module("src/application/retention.rs", Host), // the observations' directories and the backups past their retention
@@ -655,6 +656,11 @@ pub(super) const PORTS: &[Port] = &[
     port("InboxWatchLog", Internal),
     port("HostOpsQueue", Internal),
     port("HostMetricsFiles", Internal), // the CSV copy of the host's load
+    port("RunnerControl", Internal), // the team runner's calls to the control side
+    port("RunnerWork", Internal), // the team runner's assigned work
+    port("RunnerTimer", Internal),
+    port("RunnerStopRequest", Internal),
+    port("RunnerOutput", Internal),
     port("SessionWrappers", Public(Only(&[Planning, Execution]))), // not classified by architecture.md; public to the contexts that use it today
     port("Clock", Public(All)),
     port("IdGenerator", Public(All)),
