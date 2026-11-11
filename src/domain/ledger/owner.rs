@@ -1,11 +1,14 @@
 //! Which kind of ledger row an event of the EventStore is a record of.
-//! Every event is one row's, so that the rows of a window give back the
-//! events the functions of `stats`, `kpi` and `report` read
-//! ([`super::window`]), but the queue's of the kinds not copied to queue
-//! rows after the coverage's start ([`super::queue::Unwritten`]), which the
-//! window takes from the coverage; which row of the kind is the fold's
-//! ([`super::session`], [`super::queue`], [`super::run_row`],
-//! [`super::task_row`]).
+//! Events are records of their row, except for the queue's events omitted
+//! after C, the coverage's start ([`super::queue::Unwritten`]): those are
+//! no row's records. The common window read ([`super::window`]) supplements
+//! the rows' records with the coverage's summaries and reads near the
+//! edges from the EventStore, so that `stats`, `kpi` and `report` keep the
+//! window's edges. The omission's rules are in [`super::queue`] and
+//! [`super::builder`], the summaries in [`super::session::written::omitted`]
+//! and the supplementing read in [`super::window`]. Which row of the kind
+//! owns a record is the fold's ([`super::session`], [`super::queue`],
+//! [`super::run_row`], [`super::task_row`]).
 
 use super::{attributes, findings};
 use crate::domain::{
