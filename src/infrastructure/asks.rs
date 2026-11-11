@@ -1212,20 +1212,24 @@ pub(super) fn request_ask_subject(id: crate::domain::RequestId) -> String {
     format!("request:{id}")
 }
 
-/// The open ask of a task, run, kind, finding and request in `dialect`, an
-/// absent one compared by the same value as the `asks_open` unique index keys
-/// it (0 or the empty text). The task and the run, the index's first columns,
-/// take their key from [`SqlDialect::index_key`] so the statement seeks the
-/// index in both dialects; the finding and the request only filter what it
-/// finds. The `CAST` gives an ID's parameter the type of its bigint column:
-/// next to the literal 0 alone, Postgres would take it for int4 and refuse a
-/// large ID.
+/// The open ask of a task, run, kind, finding, request and subject in
+/// `dialect`, an absent one compared by the same value as the `asks_open`
+/// unique index keys it (0 or the empty text). The task and the run, the
+/// index's first columns, take their key from [`SqlDialect::index_key`] so
+/// the statement seeks the index in both dialects; the finding, the request
+/// and the subject only filter what it finds. The subject is the one the
+/// new ask would be stored under, so an ask that names a subject (a
+/// request's, or [`insert_subject_ask`]'s) is never the open ask of one
+/// that names another or none. The `CAST` gives an ID's parameter the type
+/// of its bigint column: next to the literal 0 alone, Postgres would take
+/// it for int4 and refuse a large ID.
 pub(super) fn open_ask_of_key(dialect: SqlDialect) -> String {
     format!(
         "SELECT * FROM asks
      WHERE {task}=COALESCE(CAST(?1 AS BIGINT),0) AND {run}=COALESCE(?2,'')
        AND kind=?3 AND COALESCE(finding_id,0)=COALESCE(CAST(?4 AS BIGINT),0)
        AND COALESCE(request_id,0)=COALESCE(CAST(?5 AS BIGINT),0)
+       AND COALESCE(subject,'')=COALESCE(?6,'')
        AND answered_at IS NULL AND closed_at IS NULL",
         task = dialect.index_key("task_id", "0"),
         run = dialect.index_key("run_id", "''"),
@@ -1233,8 +1237,33 @@ pub(super) fn open_ask_of_key(dialect: SqlDialect) -> String {
 }
 
 /// Register `ask` inside the caller's write transaction, or return the open
-/// one of the same task, run and kind unchanged (see [`SqliteQueue::ask`]).
+/// one of the same task, run, kind, finding, request and subject unchanged
+/// ([`open_ask_of_key`], [`SqliteQueue::ask`]).
 pub(super) fn insert_ask(tx: &impl SqlWrite, ask: &NewAsk) -> Result<AskOutcome> {
+    insert_ask_about(tx, ask, None)
+}
+
+/// [`insert_ask`] for an ask about no task, run, finding or request that
+/// names `subject`: the open one of the same kind, reason and subject, as
+/// the `asks_open` index keys them, is returned unchanged, and an open ask
+/// of the same kind about another subject or none is neither returned nor
+/// touched.
+pub(super) fn insert_subject_ask(
+    tx: &impl SqlWrite,
+    ask: &NewAsk,
+    subject: &str,
+) -> Result<AskOutcome> {
+    ensure!(
+        ask.task_id.is_none()
+            && ask.run_id.is_none()
+            && ask.finding_id.is_none()
+            && ask.request_id.is_none(),
+        "an ask of subject {subject} is about no task, run, finding or request"
+    );
+    insert_ask_about(tx, ask, Some(subject))
+}
+
+fn insert_ask_about(tx: &impl SqlWrite, ask: &NewAsk, subject: Option<&str>) -> Result<AskOutcome> {
     let task_id = match (&ask.run_id, ask.task_id) {
         (Some(run_id), _) => tx
             .query_row(
@@ -1271,20 +1300,40 @@ pub(super) fn insert_ask(tx: &impl SqlWrite, ask: &NewAsk) -> Result<AskOutcome>
     // it, a `stalled` one to make a proposal of its cause (ADR-0044
     // decision 19); the runtime applies those answers.
     let options = ask.offered_options();
-    if let Some(existing) = tx
-        .query_row(
-            &open_ask_of_key(tx.dialect()),
-            sql_params![
-                task_id,
-                ask.run_id,
-                ask.kind.as_str(),
-                ask.finding_id,
-                ask.request_id
-            ],
-            ask_row,
-        )
-        .optional()?
-    {
+    // A question about a planning request names its request as its subject
+    // too: `asks_open`, which a compatible migration cannot rebuild, keeps
+    // one open ask per subject, so questions about two requests, both
+    // about no task, run or finding, do not collide (ADR-t1394-1).
+    let stored_subject = ask
+        .request_id
+        .map(request_ask_subject)
+        .or_else(|| subject.map(str::to_owned));
+    let existing = match subject {
+        Some(subject) => tx
+            .query_row(
+                "SELECT * FROM asks WHERE task_id IS NULL AND run_id IS NULL AND kind=?1
+                   AND reason_category=?2 AND COALESCE(subject,'')=?3 AND finding_id IS NULL
+                   AND answered_at IS NULL AND closed_at IS NULL",
+                sql_params![ask.kind.as_str(), ask.reason_category.as_str(), subject],
+                ask_row,
+            )
+            .optional()?,
+        None => tx
+            .query_row(
+                &open_ask_of_key(tx.dialect()),
+                sql_params![
+                    task_id,
+                    ask.run_id,
+                    ask.kind.as_str(),
+                    ask.finding_id,
+                    ask.request_id,
+                    stored_subject
+                ],
+                ask_row,
+            )
+            .optional()?,
+    };
+    if let Some(existing) = existing {
         return Ok(AskOutcome {
             ask: existing,
             created: false,
@@ -1300,11 +1349,6 @@ pub(super) fn insert_ask(tx: &impl SqlWrite, ask: &NewAsk) -> Result<AskOutcome>
     // 1); NULL without them.
     let recommendation = ask.recommended_option();
     let confidence = ask.confidence.map(|confidence| confidence.as_str());
-    // A question about a planning request names its request as its subject
-    // too: `asks_open`, which a compatible migration cannot rebuild, keeps
-    // one open ask per subject, so questions about two requests, both
-    // about no task, run or finding, do not collide (ADR-t1394-1).
-    let request_subject = ask.request_id.map(request_ask_subject);
     let id = AskId::new(tx.insert_id(
         "INSERT INTO asks(kind,task_id,run_id,question,options,asked_by,reason_category,finding_id,topics,recommendation,confidence,request_id,subject)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
@@ -1321,7 +1365,7 @@ pub(super) fn insert_ask(tx: &impl SqlWrite, ask: &NewAsk) -> Result<AskOutcome>
             recommendation,
             confidence,
             ask.request_id,
-            request_subject
+            stored_subject
         ],
     )?);
     let mut payload = json!({
@@ -2134,7 +2178,8 @@ mod tests {
                     Option::<String>::None,
                     "planner_question",
                     Option::<i64>::None,
-                    Option::<i64>::None
+                    Option::<i64>::None,
+                    Option::<String>::None
                 ],
                 |row| row.get(3),
             )

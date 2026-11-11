@@ -431,6 +431,27 @@ impl<E: TransactionEntries> StoreQueue<E> {
         }
     }
 
+    /// Record the change of the runner rulesets' hold
+    /// ([`crate::domain::ruleset_gate::transition`] from the latest of its
+    /// pair of events) and, as a hold begins, open its operations ask: a
+    /// `blocked` ask about no task (the runtime cannot fix the rulesets and
+    /// only reads its answer; the gate resumes by itself). Every record of
+    /// the hold names its ask, and the resume closes it, answered or not,
+    /// so each hold has one ask of its own. The read, the ask and the event
+    /// are one transaction, so a failure leaves neither and a retry opens
+    /// the ask once.
+    pub fn record_runner_rulesets(
+        &self,
+        now: std::result::Result<(), &crate::domain::ruleset_gate::Unverified>,
+    ) -> Result<()> {
+        let at = self.generators.clock.now();
+        let tx = self.write_entry("runner_rulesets_hold")?;
+        if runner_rulesets_in(&tx, now, at)? {
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
     /// Record an event of the queue itself, on no task, goal or run (the
     /// observer's `observe_started` / `observe_finished`); returns its id.
     pub fn record_queue_event(
@@ -1693,6 +1714,93 @@ impl<E: TransactionEntries> EventStore for StoreQueue<E> {
     }
 }
 
+/// The one option of the rulesets' hold ask, and the runtime's answer when
+/// it closes the ask as the hold ends.
+const RULESETS_ASK_ANSWER: &str = "done";
+
+/// The subject of the rulesets' hold ask: it tells that ask from any other
+/// `blocked` ask about no task or run, which the hold neither reuses nor
+/// closes.
+const RULESETS_ASK_SUBJECT: &str = "runner_rulesets";
+
+/// [`StoreQueue::record_runner_rulesets`]'s writes in the open transaction
+/// `tx` at `at` (Unix seconds); whether it wrote any.
+pub(super) fn runner_rulesets_in(
+    tx: &impl crate::infrastructure::sql_exec::SqlWrite,
+    now: std::result::Result<(), &crate::domain::ruleset_gate::Unverified>,
+    at: i64,
+) -> Result<bool> {
+    use crate::domain::ruleset_gate::{HOLD_KINDS, ask_question, transition};
+    let mut last: Option<RunEvent> = None;
+    for kind in HOLD_KINDS {
+        let event = SqlRead::query_row(
+            tx,
+            LATEST_QUEUE_EVENT_SQL,
+            sql_params![kind.as_str()],
+            event_row,
+        )
+        .optional()?;
+        if let Some(event) = event
+            && last.as_ref().is_none_or(|last| last.id < event.id)
+        {
+            last = Some(event);
+        }
+    }
+    let Some(change) = transition(now, last.as_ref()) else {
+        return Ok(false);
+    };
+    use crate::infrastructure::asks::{close_by_runtime, insert_subject_ask, read_ask};
+    let mut payload = change.payload;
+    // The ask of the hold in progress, which each of its records names.
+    let held_ask = last
+        .as_ref()
+        .filter(|event| event.kind == EventKind::RunnerRulesetsHeld)
+        .and_then(|event| event.payload["ask_id"].as_i64())
+        .map(crate::domain::AskId::new);
+    match now {
+        Err(reason) if change.open_ask => {
+            let ask = crate::domain::NewAsk {
+                kind: crate::domain::AskKind::Blocked,
+                task_id: None,
+                run_id: None,
+                question: ask_question(reason),
+                options: vec![RULESETS_ASK_ANSWER.into()],
+                asked_by: "supervisor".into(),
+                reason_category: crate::domain::AskReason::RecoveryFailed,
+                topics: vec![],
+                recommendation: None,
+                confidence: None,
+                finding_id: None,
+                request_id: None,
+            };
+            ask.validate()?;
+            // Each hold has its own ask: an open one of the hold's subject
+            // left from before is closed by the runtime, not reused. The
+            // open asks' unique index keeps at most one of the subject.
+            let mut opened = insert_subject_ask(tx, &ask, RULESETS_ASK_SUBJECT)?;
+            if !opened.created {
+                close_by_runtime(tx, &opened.ask, RULESETS_ASK_ANSWER, at)?;
+                opened = insert_subject_ask(tx, &ask, RULESETS_ASK_SUBJECT)?;
+            }
+            payload["ask_id"] = serde_json::json!(opened.ask.id);
+        }
+        Err(_) => payload["ask_id"] = serde_json::json!(held_ask),
+        Ok(()) => {
+            // The hold ended by itself: its ask, answered or not, is closed
+            // so that a later hold opens a new one.
+            if let Some(id) = held_ask {
+                let ask = read_ask(tx, id)?;
+                if ask.closed_at.is_none() {
+                    close_by_runtime(tx, &ask, RULESETS_ASK_ANSWER, at)?;
+                }
+                payload["ask_id"] = serde_json::json!(id);
+            }
+        }
+    }
+    queue_event(tx, change.kind, &payload)?;
+    Ok(true)
+}
+
 /// Insert an event of the queue itself in the open transaction `tx`, with
 /// the session span it opens or closes; its id.
 pub(super) fn queue_event(
@@ -1738,6 +1846,285 @@ mod tests {
 
     use super::*;
     use crate::infrastructure::sql_dialect::json_field_spaced;
+
+    /// A queue at a fixed time: the hold's records read the queue's clock.
+    fn rulesets_queue(name: &str) -> SqliteQueue {
+        struct Still;
+        impl crate::application::Clock for Still {
+            fn system_time(&self) -> std::time::SystemTime {
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_900_000_000)
+            }
+            fn monotonic(&self) -> std::time::Instant {
+                static AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                *AT.get_or_init(std::time::Instant::now)
+            }
+        }
+        let uri = format!("file:/{name}-{}?vfs=memdb", uuid::Uuid::new_v4());
+        SqliteQueue::init(&uri)
+            .unwrap()
+            .with_generators(crate::application::Generators {
+                clock: std::sync::Arc::new(Still),
+                ..crate::infrastructure::clock::system()
+            })
+    }
+
+    /// The runner rulesets' hold: its read, ask and event are one
+    /// transaction, so a write that does not commit leaves no ask, and a
+    /// retry, or a hold that goes on after its ask was answered, opens none
+    /// again; a new hold after a resume opens a new one.
+    #[test]
+    fn the_rulesets_hold_and_its_ask_commit_together_and_ask_once() {
+        use crate::domain::ruleset_gate::Unverified;
+        let queue = rulesets_queue("rulesets");
+        let count = |sql: &str| -> i64 { queue.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        let asks = || count("SELECT count(*) FROM asks WHERE kind='blocked'");
+        let held = || count("SELECT count(*) FROM run_events WHERE kind='runner_rulesets_held'");
+        let unreadable = Unverified::Unreadable;
+        // A transaction that wrote but did not commit leaves nothing.
+        let tx = queue.write_entry("test").unwrap();
+        assert!(runner_rulesets_in(&tx, Err(&unreadable), 1).unwrap());
+        drop(tx);
+        assert_eq!((asks(), held()), (0, 0));
+        // The retry opens the ask once, with the event naming it.
+        queue.record_runner_rulesets(Err(&unreadable)).unwrap();
+        queue.record_runner_rulesets(Err(&unreadable)).unwrap();
+        assert_eq!((asks(), held()), (1, 1));
+        let ask_id = count("SELECT id FROM asks WHERE kind='blocked'");
+        let event = queue
+            .latest_queue_event(&["runner_rulesets_held"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.payload["ask_id"], ask_id);
+        assert_eq!(event.payload["reason"], "ruleset_unreadable");
+        // Answered and closed while the hold goes on: no second ask, even
+        // when the reason changes.
+        queue
+            .conn
+            .execute("UPDATE asks SET closed_at=1", [])
+            .unwrap();
+        queue.record_runner_rulesets(Err(&unreadable)).unwrap();
+        queue
+            .record_runner_rulesets(Err(&Unverified::PlanUnavailable))
+            .unwrap();
+        assert_eq!((asks(), held()), (1, 2));
+        queue.record_runner_rulesets(Ok(())).unwrap();
+        assert_eq!(
+            count("SELECT count(*) FROM run_events WHERE kind='runner_rulesets_resumed'"),
+            1
+        );
+        queue.record_runner_rulesets(Err(&unreadable)).unwrap();
+        assert_eq!(asks(), 2);
+    }
+
+    /// An unanswered hold that resumes by itself closes its ask, so a later
+    /// hold for another reason opens a new ask (with its own question and
+    /// `ask_opened`) instead of reusing the old one; an open ask of the same
+    /// key left from before is closed, not reused.
+    #[test]
+    fn each_hold_has_its_own_ask_even_when_the_last_was_never_answered() {
+        use crate::domain::ruleset_gate::Unverified;
+        let queue = rulesets_queue("rulesets-each");
+        let open_asks = || -> Vec<(i64, String)> {
+            let mut statement = queue
+                .conn
+                .prepare("SELECT id, question FROM asks WHERE kind='blocked' AND closed_at IS NULL")
+                .unwrap();
+            statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let count = |sql: &str| -> i64 { queue.conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        queue
+            .record_runner_rulesets(Err(&Unverified::Unreadable))
+            .unwrap();
+        let first = open_asks();
+        assert_eq!(first.len(), 1);
+        assert!(first[0].1.contains("ruleset_unreadable"));
+        // Unanswered, the hold ends by itself: the runtime closes its ask.
+        queue.record_runner_rulesets(Ok(())).unwrap();
+        assert!(open_asks().is_empty());
+        let answered = count(&format!(
+            "SELECT count(*) FROM asks WHERE id={} AND answered_by IS NOT NULL AND closed_at IS NOT NULL",
+            first[0].0
+        ));
+        assert_eq!(answered, 1);
+        let resumed = queue
+            .latest_queue_event(&["runner_rulesets_resumed"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.payload["ask_id"], first[0].0);
+        // Held again for another reason: a new ask with that reason.
+        queue
+            .record_runner_rulesets(Err(&Unverified::PlanUnavailable))
+            .unwrap();
+        let second = open_asks();
+        assert_eq!(second.len(), 1);
+        assert_ne!(second[0].0, first[0].0);
+        assert!(second[0].1.contains("ruleset_plan_unavailable"));
+        assert_eq!(
+            count("SELECT count(*) FROM run_events WHERE kind='ask_opened'"),
+            2
+        );
+        // A change of reason within the hold names the same ask.
+        queue
+            .record_runner_rulesets(Err(&Unverified::Stale))
+            .unwrap();
+        let changed = queue
+            .latest_queue_event(&["runner_rulesets_held"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.payload["ask_id"], second[0].0);
+        assert_eq!(open_asks(), second);
+        // An open ask of the same key that no hold names (a resume that
+        // never ran) is closed and replaced by the next hold's own.
+        queue.record_runner_rulesets(Ok(())).unwrap();
+        queue
+            .conn
+            .execute(
+                "UPDATE asks SET closed_at=NULL, answered_at=NULL, answered_by=NULL, answer=NULL WHERE id=(SELECT max(id) FROM asks)",
+                [],
+            )
+            .unwrap();
+        queue
+            .record_runner_rulesets(Err(&Unverified::Unreadable))
+            .unwrap();
+        let third = open_asks();
+        assert_eq!(third.len(), 1);
+        assert!(third[0].0 > second[0].0);
+    }
+
+    /// Another open `blocked` ask about no task or run, of the same reason,
+    /// is not the hold's: a hold that begins opens its own ask beside it,
+    /// and neither the hold nor its resume answers or closes the other.
+    #[test]
+    fn a_hold_leaves_an_unrelated_blocked_ask_open() {
+        use crate::domain::ruleset_gate::Unverified;
+        let mut queue = rulesets_queue("rulesets-unrelated");
+        let other = queue
+            .ask(crate::domain::NewAsk {
+                kind: crate::domain::AskKind::Blocked,
+                task_id: None,
+                run_id: None,
+                question: "Is the deploy key rotated?".into(),
+                options: vec![],
+                asked_by: "inbox".into(),
+                reason_category: crate::domain::AskReason::RecoveryFailed,
+                topics: vec![],
+                recommendation: None,
+                confidence: None,
+                finding_id: None,
+                request_id: None,
+            })
+            .unwrap()
+            .ask;
+        let untouched = |queue: &SqliteQueue| {
+            let row: (Option<i64>, Option<i64>, Option<String>) = queue
+                .conn
+                .query_row(
+                    "SELECT answered_at, closed_at, answer FROM asks WHERE id=?1",
+                    [other.id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(row, (None, None, None), "the other ask stays open");
+        };
+        queue
+            .record_runner_rulesets(Err(&Unverified::Unreadable))
+            .unwrap();
+        untouched(&queue);
+        let held = queue
+            .latest_queue_event(&["runner_rulesets_held"])
+            .unwrap()
+            .unwrap();
+        let hold_ask = held.payload["ask_id"].as_i64().unwrap();
+        assert_ne!(hold_ask, other.id.as_i64());
+        let subject: Option<String> = queue
+            .conn
+            .query_row("SELECT subject FROM asks WHERE id=?1", [hold_ask], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(subject.as_deref(), Some(RULESETS_ASK_SUBJECT));
+        queue.record_runner_rulesets(Ok(())).unwrap();
+        untouched(&queue);
+        let closed: Option<i64> = queue
+            .conn
+            .query_row("SELECT closed_at FROM asks WHERE id=?1", [hold_ask], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(closed.is_some(), "the hold's own ask is closed on resume");
+        // A later hold opens a new ask of its own, still beside the other.
+        queue
+            .record_runner_rulesets(Err(&Unverified::PlanUnavailable))
+            .unwrap();
+        untouched(&queue);
+        let again = queue
+            .latest_queue_event(&["runner_rulesets_held"])
+            .unwrap()
+            .unwrap();
+        assert!(again.payload["ask_id"].as_i64().unwrap() > hold_ask);
+    }
+
+    /// The other order: a blocked ask about no task, run, finding or request
+    /// registered while the hold's ask is open is a new ask with its own
+    /// question, not the hold's, and the hold's resume closes only its own.
+    #[test]
+    fn a_blocked_ask_after_the_hold_is_its_own_and_outlives_the_resume() {
+        use crate::domain::ruleset_gate::Unverified;
+        let mut queue = rulesets_queue("rulesets-hold-first");
+        queue
+            .record_runner_rulesets(Err(&Unverified::Unreadable))
+            .unwrap();
+        let hold_ask = queue
+            .latest_queue_event(&["runner_rulesets_held"])
+            .unwrap()
+            .unwrap()
+            .payload["ask_id"]
+            .as_i64()
+            .unwrap();
+        let other = queue
+            .ask(crate::domain::NewAsk {
+                kind: crate::domain::AskKind::Blocked,
+                task_id: None,
+                run_id: None,
+                question: "Is the deploy key rotated?".into(),
+                options: vec![],
+                asked_by: "inbox".into(),
+                reason_category: crate::domain::AskReason::RecoveryFailed,
+                topics: vec![],
+                recommendation: None,
+                confidence: None,
+                finding_id: None,
+                request_id: None,
+            })
+            .unwrap();
+        assert!(other.created, "a new ask, not the hold's");
+        assert_ne!(other.ask.id.as_i64(), hold_ask);
+        assert_eq!(other.ask.question, "Is the deploy key rotated?");
+        let state = |queue: &SqliteQueue, id: i64| {
+            queue
+                .conn
+                .query_row(
+                    "SELECT subject, closed_at FROM asks WHERE id=?1",
+                    [id],
+                    |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state(&queue, other.ask.id.as_i64()), (None, None));
+        queue.record_runner_rulesets(Ok(())).unwrap();
+        assert_eq!(
+            state(&queue, other.ask.id.as_i64()),
+            (None, None),
+            "the resume leaves the other ask open"
+        );
+        let (subject, closed) = state(&queue, hold_ask);
+        assert_eq!(subject.as_deref(), Some(RULESETS_ASK_SUBJECT));
+        assert!(closed.is_some(), "the hold's own ask is closed on resume");
+    }
 
     /// Equal timestamps and reverse-sorted text IDs must keep insertion
     /// order, including the latest-run predicates used by recovery.

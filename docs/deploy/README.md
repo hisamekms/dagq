@@ -33,6 +33,7 @@ dagqは部品を配り、配置そのものは利用するpjが持つ（[ADR-t39
 | この文書 | 目的と文書の一覧。部品の一覧と版の互換の表もここに足す |
 | `requirements.md` | 配置する側が守ること（ADR-t3990-5決定1が挙げるもの）とbackupと復元・DBの監視 |
 | `github-apps.md` | 2つのGitHub Appの権限とruleset |
+| [`github-rulesets.md`](github-rulesets.md) | R1〜R6のrulesetの参考の構成と、制御側の関門が照らす範囲 |
 | `reference-aws.md` | 参考の構成（NATなしを既定に、NATと固定IPの形も並べる） |
 
 この文書のほかの行のうち、リンクの無い文書はまだ置かれていない。

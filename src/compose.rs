@@ -49,6 +49,9 @@ mod observation;
 mod planning;
 mod supervisor;
 pub use crate::infrastructure::github_app::{RemoteRules, remote_repository_rules};
+/// The ruleset gate of the team version's runner assignment, for the team
+/// composition's service backend (ADR-t4332-1).
+pub use crate::infrastructure::github_rulesets::ruleset_gate;
 #[cfg(test)]
 mod wiring_tests;
 

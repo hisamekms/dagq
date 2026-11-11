@@ -460,6 +460,7 @@ pub fn attention(
             next: AttentionNext::CheckSccache,
         });
     }
+    attention.extend(rulesets_attention(queue)?);
     // A program [run.env] names that the supervisor did not find stops its
     // claims and landings until a person installs it or takes it out of
     // dagq.toml (ADR-0049 decision 9).
@@ -1207,6 +1208,33 @@ fn runtime_wait(
     }
 }
 
+/// The row of the runner rulesets' hold: the team version's runners get no
+/// work while the rulesets do not verify (ADR-t4332-1), so the row stands
+/// from the latest `runner_rulesets_held` until a `runner_rulesets_resumed`
+/// follows it, with the reason the hold last recorded. Answering the hold's
+/// ask records neither, so the row stays while the hold lasts; the ask
+/// itself, while open, is in `asks`.
+pub fn rulesets_attention(
+    queue: &(impl crate::application::EventStore + ?Sized),
+) -> Result<Option<Attention>> {
+    let latest = queue
+        .latest_queue_event(&crate::domain::ruleset_gate::HOLD_KINDS.map(EventKind::as_str))?;
+    Ok(latest
+        .filter(|event| event.kind == EventKind::RunnerRulesetsHeld)
+        .map(|event| Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "held".into(),
+            kind: event.kind.to_string(),
+            last_error: event.payload["message"].as_str().map(truncate_reason),
+            last_error_code: None,
+            next: AttentionNext::FixRulesets,
+        }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1299,6 +1327,69 @@ mod tests {
         assert_eq!(judge(awaiting, &revising, None), to_send);
         assert_eq!(judge(awaiting, &[], Some(&fresh)), to_send);
         assert_eq!(judge(RunStatus::Failed, &[], Some(&fresh)), to_send);
+    }
+
+    /// `status` reads the runner rulesets' hold from its events
+    /// (ADR-t4332-1): while held, its row names the reason and the next
+    /// step and follows a change of reason; answering the hold's ask leaves
+    /// the row while the hold goes on; once the rulesets verify it is gone.
+    #[test]
+    fn a_rulesets_hold_shows_its_reason_until_the_rulesets_verify() {
+        use crate::application::EventStore;
+        use crate::domain::ruleset_gate::{HOLD_KINDS, Unverified, transition};
+        let queue = crate::application::port_fakes::SupervisorsAndEvents::default();
+        // What the service's ruleset watch records from the gate's result.
+        let watch = |now: std::result::Result<(), &Unverified>| {
+            let last = queue
+                .latest_queue_event(&HOLD_KINDS.map(EventKind::as_str))
+                .unwrap();
+            if let Some(change) = transition(now, last.as_ref()) {
+                if change.open_ask {
+                    queue
+                        .record_queue_event(EventKind::AskOpened, json!({"ask_id": 1}))
+                        .unwrap();
+                }
+                queue
+                    .record_queue_event(change.kind, change.payload)
+                    .unwrap();
+            }
+        };
+        let shown = || rulesets_attention(&queue).unwrap();
+        let held = |reason: &Unverified| {
+            Some(Attention {
+                run_id: None,
+                task_id: None,
+                pid: None,
+                ask_id: None,
+                reason_category: None,
+                status: "held".into(),
+                kind: "runner_rulesets_held".into(),
+                last_error: Some(truncate_reason(&reason.message())),
+                last_error_code: None,
+                next: AttentionNext::FixRulesets,
+            })
+        };
+        assert_eq!(shown(), None, "nothing before any hold");
+        watch(Err(&Unverified::Unreadable));
+        assert_eq!(shown(), held(&Unverified::Unreadable));
+        assert_eq!(
+            shown().unwrap().next.to_string(),
+            "fix the repository's rulesets"
+        );
+        // The ask is answered while the rulesets still do not verify.
+        queue
+            .record_queue_event(
+                EventKind::AskAnswered,
+                json!({"ask_id": 1, "answer": "done"}),
+            )
+            .unwrap();
+        watch(Err(&Unverified::Unreadable));
+        assert_eq!(shown(), held(&Unverified::Unreadable));
+        watch(Err(&Unverified::PlanUnavailable));
+        assert_eq!(shown(), held(&Unverified::PlanUnavailable));
+        // Verified: the row is gone.
+        watch(Ok(()));
+        assert_eq!(shown(), None);
     }
 
     /// The latest of the recheck's main kinds being a failure keeps one

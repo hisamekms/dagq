@@ -105,6 +105,7 @@ hostではtokenは誤りを止めるもので、security boundaryではない（
 
 runnerの割り当てと報告の入口は`application::queue_service::runner_work_http`。
 runnerの仕事は制御側が選んで渡し、runnerはrunを指定できない。
+チームの版の割り当ては、rulesetの規則・対象・enforcementと全てのactorのbypassを確かめられた間だけ行い、その読みは書き込みの列の外で行う（[ADR-t4332-1](../adr/2026-11-10-t4332-1-ruleset-gate-checks-rules-targets-enforcement-and-every-bypass.md)、入口は`application::queue_service::RulesetGate`）。
 
 検査の順と拒否の記録・応答は`application::queue_service::QueueService::handle`、storeの型付き拒否の応答は同moduleの`respond`が持つ。
 認可はCLIと同じapplicationの境界をprincipalのactorでservice側で通す。

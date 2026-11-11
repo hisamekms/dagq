@@ -31,9 +31,9 @@ related:
 - `dagq ask`は相談を登録してaskを返す（入口は`Dialogue::ask`）。
   workerとjob（Codexの非対話のworkerを含む）の`dagq ask`はクライアントモードでqueue serviceに送られ、serviceが呼び出しのtokenのprincipalで同じ`Dialogue`の判定を通してから開く（`asked_by`はprincipalのrole。[Queue service](../queue-service.md#クライアントモード)）。
   runに紐づけたaskはそのrunのtaskにも紐づく。
-  taskかrunのどちらかは必須で、例外は`blocked`（observerが上げる閾値超え。ADR-0044の決定4）だけ: taskにもrunにも紐づかない閾値はtask・runの無いaskにし、その`ask_opened` / `ask_answered`もtaskの無いrun_eventsになる。
+  taskかrunのどちらかは必須で、例外は`blocked`（observerが上げる閾値超え。ADR-0044の決定4。チームの版の制御側がrulesetを確かめられない間の運用のaskも、findingの無いこのkindで開く）だけ: taskにもrunにも紐づかない閾値はtask・runの無いaskにし、その`ask_opened` / `ask_answered`もtaskの無いrun_eventsになる。
   observerのblocked askは根拠のfindingに紐づけるのが必須（ADR-0044の決定23）。
-  同じ（task、run、kind、finding）でopenなaskがあれば登録せずにそれを`created: false`で返す（問いとoptionsは捨てる。taskの無い`blocked`はfindingごとに1件）。
+  同じ（task、run、kind、finding）でopenなaskがあれば登録せずにそれを`created: false`で返す（問いとoptionsは捨てる。taskの無い`blocked`はfindingごとに1件で、rulesetを確かめられない間の運用のaskはそれと別の1件）。
   新しいaskは`ask_opened`を同じトランザクションで書き、知らせはinboxの`watch`が出す（[人への通知](ask-push.md)）。
   `asked_by`はsessionの`DAGQ_ROLE`（無ければnoteの`by`と同じく`human`）。
   observer（`DAGQ_ROLE=observer`）は読み取りの`asks`と`status`と、`ask --kind blocked`だけを使え、それ以外の`ask`・`answer` / `ask close`は拒否される。

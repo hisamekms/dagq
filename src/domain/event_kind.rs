@@ -167,6 +167,8 @@ event_kinds! {
     ClaimDeferred => "claim_deferred",
     RepositoryConfigHeld => "repository_config_held",
     RepositoryConfigResumed => "repository_config_resumed",
+    RunnerRulesetsHeld => "runner_rulesets_held",
+    RunnerRulesetsResumed => "runner_rulesets_resumed",
     ClaimHeld => "claim_held",
     ClaimResumed => "claim_resumed",
     CleanupFailed => "cleanup_failed",
@@ -659,6 +661,10 @@ impl EventKind {
                 // for a landing branch that does not resolve (task 2016).
                 | RepositoryConfigHeld
                 | RepositoryConfigResumed
+                // The control side's hold of runner assignment while the
+                // rulesets do not verify (`domain::ruleset_gate`).
+                | RunnerRulesetsHeld
+                | RunnerRulesetsResumed
                 | CiWatchHeld
                 | CiWatchResumed
                 | LandingBranchUnresolved
@@ -1690,6 +1696,8 @@ mod tests {
             (EventKind::ClaimDeferralEnded, "claim_deferral_ended"),
             (EventKind::ClaimDeferred, "claim_deferred"),
             (EventKind::RepositoryConfigHeld, "repository_config_held"),
+            (EventKind::RunnerRulesetsHeld, "runner_rulesets_held"),
+            (EventKind::RunnerRulesetsResumed, "runner_rulesets_resumed"),
             (
                 EventKind::RepositoryConfigResumed,
                 "repository_config_resumed",

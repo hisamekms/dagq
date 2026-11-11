@@ -11,8 +11,8 @@ use std::cell::RefCell;
 /// The supervisors' registrations ([`SupervisorReads::supervisors`]) and
 /// the queue's events ([`EventStore::latest_events_of`],
 /// [`EventStore::latest_events_by_supervisor`],
-/// [`EventStore::record_queue_event`], [`EventStore::all_events`]), newest
-/// last.
+/// [`EventStore::latest_queue_event`], [`EventStore::record_queue_event`],
+/// [`EventStore::all_events`]), newest last.
 #[derive(Default)]
 pub(crate) struct SupervisorsAndEvents {
     pub(crate) registrations: Vec<SupervisorRegistration>,

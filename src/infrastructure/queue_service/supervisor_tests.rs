@@ -108,6 +108,7 @@ fn claimed_at_with(
         doctor: None,
         write_line: None,
         heavy_reads: None,
+        ruleset_gate: None,
     };
     (backend, queue)
 }

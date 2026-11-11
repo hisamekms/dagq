@@ -1336,6 +1336,7 @@ pub mod review_jobs;
 pub mod review_programs;
 pub mod review_reason;
 pub mod review_subagents;
+pub mod ruleset_gate;
 pub mod run;
 pub mod run_clone;
 pub mod run_container;
@@ -2557,6 +2558,11 @@ pub enum AttentionNext {
     /// Stop the faulty server on the host; let the supervisor start its
     /// replacement so the recorded start clears restart-failure attention.
     CheckSccache,
+    /// The team version's control side could not verify the repository's
+    /// rulesets (`runner_rulesets_held`, [`ruleset_gate`]): a person who
+    /// administers the repository fixes them or the deployment settings;
+    /// runners get no work until they verify, then it resumes by itself.
+    FixRulesets,
     /// The landing recheck could not write its build output under the
     /// queue's directory (`landing_recheck_target_unwritable`, with the
     /// `path` and the OS's `error`): a person gives the supervisor write
@@ -2768,6 +2774,7 @@ impl fmt::Display for AttentionNext {
             Self::RephraseRequest => f.write_str("rephrase or drop the request"),
             Self::DecideWaiting => f.write_str("request a plan for the waiting tasks"),
             Self::CheckSccache => f.write_str("stop sccache on the host; the supervisor starts it"),
+            Self::FixRulesets => f.write_str("fix the repository's rulesets"),
             Self::InstallTool => f.write_str("install tool"),
             Self::FixRecheckTarget => f.write_str("fix the recheck target"),
             Self::LogInToGh => f.write_str("log in to gh"),
@@ -3165,6 +3172,7 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         // its pass again is no attention.
         (Some(EventKind::LandingRecheckMainFailed), _) => Some(AttentionNext::FixMainOrRecheck),
         (Some(EventKind::SccacheServerRestartFailed), _) => Some(AttentionNext::CheckSccache),
+        (Some(EventKind::RunnerRulesetsHeld), _) => Some(AttentionNext::FixRulesets),
         (Some(EventKind::RunEnvProgramMissing), _) => Some(AttentionNext::InstallTool),
         // The recheck's build output could not be written, so it ran no
         // command; its pair `landing_recheck_target_writable` is none.

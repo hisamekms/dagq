@@ -263,6 +263,22 @@ pub trait ServiceBackend: Send + Sync {
     fn runner_claim_limits(&self) -> Result<crate::domain::runner_assignment::ClaimLimits> {
         anyhow::bail!("runner claim rules are not configured")
     }
+    /// The ruleset gate's kept result for the next assignment (ADR-t4332-1,
+    /// [`RulesetGate::current`]), read without I/O on the write line. A
+    /// backend with no gate (no runner App configured) fails closed.
+    fn runner_rulesets(&self) -> std::result::Result<(), crate::domain::ruleset_gate::Unverified> {
+        Err(crate::domain::ruleset_gate::Unverified::NotConfigured)
+    }
+    /// Record a change of the gate's hold as its queue event pair
+    /// ([`crate::domain::ruleset_gate::transition`]), opening the operations
+    /// ask once as a hold begins, all in one transaction. Called by the
+    /// service's ruleset watch ([`watch_rulesets`]) on the write line.
+    fn record_runner_rulesets(
+        &self,
+        _now: std::result::Result<(), &crate::domain::ruleset_gate::Unverified>,
+    ) -> Result<()> {
+        Ok(())
+    }
     /// Authenticate and perform the whole operation in one fenced transaction.
     fn runner_operation(
         &self,
@@ -4581,6 +4597,10 @@ pub(crate) mod tests {
         pub(crate) opened: Mutex<Vec<&'static str>>,
         heavy_reads: Option<HeavyReads>,
         reading: std::sync::Arc<ReadHold>,
+        /// The ruleset gate's result (`None`: verified) and the hold events
+        /// recorded, as the SQLite backend records them.
+        rulesets: Mutex<Option<crate::domain::ruleset_gate::Unverified>>,
+        ruleset_events: Mutex<Vec<crate::domain::RunEvent>>,
     }
 
     impl Backend {
@@ -4710,6 +4730,37 @@ pub(crate) mod tests {
                     grace_secs: 60,
                 },
             })
+        }
+        fn runner_rulesets(
+            &self,
+        ) -> std::result::Result<(), crate::domain::ruleset_gate::Unverified> {
+            self.rulesets.lock().unwrap().clone().map_or(Ok(()), Err)
+        }
+        fn record_runner_rulesets(
+            &self,
+            now: std::result::Result<(), &crate::domain::ruleset_gate::Unverified>,
+        ) -> Result<()> {
+            let mut events = self.ruleset_events.lock().unwrap();
+            if let Some(change) = crate::domain::ruleset_gate::transition(now, events.last()) {
+                if change.open_ask {
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push(json!({"ask_opened": change.payload["reason"]}));
+                }
+                let id = crate::domain::EventId::new(i64::try_from(events.len())? + 1);
+                events.push(crate::domain::RunEvent {
+                    id,
+                    task_id: None,
+                    goal_id: None,
+                    run_id: None,
+                    kind: change.kind.into(),
+                    payload: change.payload,
+                    created_at: String::new(),
+                    actor: None,
+                });
+            }
+            Ok(())
         }
         fn runner_operation(
             &self,
@@ -5057,6 +5108,8 @@ pub(crate) mod tests {
             heavy_reads: None,
             reading: std::sync::Arc::default(),
             human: std::sync::Arc::default(),
+            rulesets: Mutex::default(),
+            ruleset_events: Mutex::default(),
         }
     }
 
@@ -9617,6 +9670,91 @@ pub(crate) mod tests {
         }
     }
     #[test]
+    fn an_unverified_ruleset_gate_assigns_nothing_and_asks_once_until_it_verifies() {
+        use crate::domain::ruleset_gate::Unverified;
+        let backend = backend(RunStatus::Running);
+        let pull = request(Some("runner"), UseCase::RunnerPoll, json!({}));
+        // What the service's ruleset watch records from the gate's result.
+        let watch = |backend: &Backend| {
+            let now = backend.runner_rulesets();
+            backend
+                .record_runner_rulesets(now.as_ref().map(|_| ()))
+                .unwrap();
+        };
+        let polls = |backend: &Backend| {
+            backend
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.get("runner_poll").is_some())
+                .count()
+        };
+        let asks = |backend: &Backend| {
+            backend
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.get("ask_opened").is_some())
+                .count()
+        };
+        for reason in [
+            Unverified::Unreadable,
+            Unverified::Unreadable,
+            Unverified::PlanUnavailable,
+        ] {
+            *backend.rulesets.lock().unwrap() = Some(reason);
+            let answer = runner_work_http(&backend, &pull);
+            assert!(answer.error.is_none(), "{answer:?}");
+            assert_eq!(answer.result, Some(json!({"assignment": null})));
+            watch(&backend);
+        }
+        assert_eq!(polls(&backend), 0, "no selection while unverified");
+        assert_eq!(asks(&backend), 1, "one ask for the whole hold");
+        let kinds = |backend: &Backend| {
+            backend
+                .ruleset_events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|e| (e.kind.as_str().to_owned(), e.payload["reason"].clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(&backend),
+            [
+                ("runner_rulesets_held".into(), json!("ruleset_unreadable")),
+                (
+                    "runner_rulesets_held".into(),
+                    json!("ruleset_plan_unavailable")
+                ),
+            ]
+        );
+        // Verified: assignment resumes by itself.
+        *backend.rulesets.lock().unwrap() = None;
+        assert!(runner_work_http(&backend, &pull).error.is_none());
+        assert_eq!(polls(&backend), 1);
+        watch(&backend);
+        assert_eq!(kinds(&backend).last().unwrap().0, "runner_rulesets_resumed");
+        // A new hold is a new ask.
+        *backend.rulesets.lock().unwrap() = Some(Unverified::Stale);
+        runner_work_http(&backend, &pull);
+        watch(&backend);
+        assert_eq!(asks(&backend), 2);
+        // Reports are not gated: they only renew or end the caller's lease.
+        let report = request(
+            Some("runner"),
+            UseCase::RunnerHeartbeat,
+            json!({"run_id":"run", "generation":1}),
+        );
+        assert_eq!(
+            code(&runner_work_http(&backend, &report)),
+            Some(ServiceErrorCode::LeaseLost)
+        );
+    }
+
+    #[test]
     fn runner_pull_reads_the_main_head_port_and_reports_transport_lease_lost() {
         let backend = backend(RunStatus::Running);
         let pull = request(Some("runner"), UseCase::RunnerPoll, json!({}));
@@ -9737,10 +9875,16 @@ pub fn runner_work_http(backend: &dyn ServiceBackend, request: &ServiceRequest) 
             }
         };
         let claim = if matches!(operation, Operation::Poll(_)) {
-            Some(crate::domain::runner_assignment::ClaimInputs {
+            let inputs = crate::domain::runner_assignment::ClaimInputs {
                 base: backend.runner_main_head()?,
                 limits: backend.runner_claim_limits()?,
-            })
+            };
+            // Before any selection: an unverified gate gives neither a run
+            // nor a job, and so no runner App token (ADR-t4332-1).
+            if backend.runner_rulesets().is_err() {
+                return Ok(ServiceResponse::success(json!({"assignment": null})));
+            }
+            Some(inputs)
         } else {
             None
         };
@@ -9874,5 +10018,166 @@ mod disk_relax_tests {
         );
         assert_eq!(answer.unwrap()["cleared"], false);
         assert!(recorded.is_empty());
+    }
+}
+
+/// Reads the repository's rulesets for [`RulesetGate`]: GitHub's adapter
+/// (`infrastructure::github_rulesets`). It issues its own runner App token
+/// for the read, keeps it to the read and never returns it.
+pub trait RulesetSource: Send + Sync {
+    fn read(&self, now: i64) -> crate::domain::ruleset_gate::Read;
+    /// The two Apps' ids, which a ruleset's bypass actors are judged against.
+    fn apps(&self) -> crate::domain::ruleset_gate::Apps;
+}
+
+type GateResult = std::result::Result<(), crate::domain::ruleset_gate::Unverified>;
+
+/// The ruleset gate of runner assignment (ADR-t4332-1). GitHub is read only
+/// by [`Self::refresh`], which the service's watch calls on its own thread
+/// from its start, never on the write line; a pull, and any issue of a
+/// runner App token for a lease, takes [`Self::current`], the kept result,
+/// with no I/O. A result is read again after
+/// [`crate::domain::ruleset_gate::reread_due`]'s period and stops counting
+/// past [`crate::domain::ruleset_gate::usable`]'s, so a stuck read holds
+/// assignment instead of keeping an old verified result.
+pub struct RulesetGate {
+    source: Box<dyn RulesetSource>,
+    clock: Arc<dyn super::Clock>,
+    last: std::sync::Mutex<Option<(i64, GateResult)>>,
+}
+
+impl RulesetGate {
+    pub fn new(source: Box<dyn RulesetSource>, clock: Arc<dyn super::Clock>) -> Self {
+        Self {
+            source,
+            clock,
+            last: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn kept(&self) -> Option<(i64, GateResult)> {
+        // A panic elsewhere does not keep the gate shut for good.
+        self.last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The kept result at the clock's now; never reads GitHub.
+    pub fn current(&self) -> GateResult {
+        use crate::domain::ruleset_gate::{Unverified, usable};
+        match self.kept() {
+            Some((at, result)) if usable((at, result.is_ok()), self.clock.now()) => result,
+            _ => Err(Unverified::Stale),
+        }
+    }
+
+    /// Read and judge GitHub's rulesets when due; whether it read. The lock
+    /// is not held across the read, so [`Self::current`] never waits on it.
+    pub fn refresh(&self) -> bool {
+        use crate::domain::ruleset_gate::{judge, reread_due};
+        let now = self.clock.now();
+        if !reread_due(self.kept().map(|(at, r)| (at, r.is_ok())), now) {
+            return false;
+        }
+        let result = judge(&self.source.read(now), self.source.apps());
+        *self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((now, result));
+        true
+    }
+}
+
+/// One step of the service's ruleset watch, on its own thread: refresh the
+/// gate when due, then record the hold's change through `record` (the
+/// backend's [`ServiceBackend::record_runner_rulesets`], which the caller
+/// puts on the write line). The read never waits on the line.
+pub fn watch_rulesets(
+    gate: &RulesetGate,
+    record: impl FnOnce(GateResult) -> Result<()>,
+) -> Result<()> {
+    gate.refresh();
+    record(gate.current())
+}
+
+#[cfg(test)]
+mod ruleset_gate_tests {
+    use super::*;
+    use crate::domain::ruleset_gate::test_support::{APPS, reference_read};
+    use crate::domain::ruleset_gate::{Read, UNVERIFIED_SECS, Unverified, VERIFIED_SECS};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    /// A clock at the second it holds.
+    struct Clock(AtomicI64, std::time::Instant);
+    impl super::super::Clock for Clock {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::UNIX_EPOCH
+                + Duration::from_secs(u64::try_from(self.0.load(Ordering::SeqCst)).unwrap())
+        }
+        fn monotonic(&self) -> std::time::Instant {
+            self.1
+        }
+    }
+    struct Source(Arc<Mutex<(Vec<i64>, Read)>>);
+    impl RulesetSource for Source {
+        fn read(&self, now: i64) -> Read {
+            let mut state = self.0.lock().unwrap();
+            state.0.push(now);
+            state.1.clone()
+        }
+        fn apps(&self) -> crate::domain::ruleset_gate::Apps {
+            APPS
+        }
+    }
+
+    #[test]
+    fn reads_are_due_by_period_and_a_pull_only_takes_the_kept_result() {
+        let state = Arc::new(Mutex::new((vec![], Read::Rulesets(vec![]))));
+        let clock = Arc::new(Clock(AtomicI64::new(1_000), std::time::Instant::now()));
+        let gate = RulesetGate::new(Box::new(Source(state.clone())), clock.clone());
+        let reads = || state.lock().unwrap().0.len();
+        // Nothing read yet: held, and taking the result reads nothing.
+        assert_eq!(gate.current(), Err(Unverified::Stale));
+        assert_eq!(reads(), 0);
+        assert!(gate.refresh());
+        assert!(matches!(gate.current(), Err(Unverified::Missing(_))));
+        clock.0.store(1_000 + UNVERIFIED_SECS - 1, Ordering::SeqCst);
+        assert!(!gate.refresh(), "kept, not read again");
+        state.lock().unwrap().1 = Read::PlanUnavailable;
+        clock.0.store(1_000 + UNVERIFIED_SECS, Ordering::SeqCst);
+        assert!(gate.refresh());
+        assert_eq!(gate.current(), Err(Unverified::PlanUnavailable));
+        // A verified result is kept longer.
+        state.lock().unwrap().1 = reference_read();
+        let at = 1_000 + 2 * UNVERIFIED_SECS;
+        clock.0.store(at, Ordering::SeqCst);
+        assert!(gate.refresh());
+        assert_eq!(gate.current(), Ok(()));
+        state.lock().unwrap().1 = Read::Unreadable;
+        clock.0.store(at + VERIFIED_SECS - 1, Ordering::SeqCst);
+        assert!(!gate.refresh());
+        assert_eq!(gate.current(), Ok(()));
+        // A read that never comes back (no refresh) stops counting.
+        clock.0.store(at + 2 * VERIFIED_SECS, Ordering::SeqCst);
+        assert_eq!(gate.current(), Err(Unverified::Stale));
+        assert!(gate.refresh());
+        assert_eq!(gate.current(), Err(Unverified::Unreadable));
+        assert_eq!(reads(), 4);
+    }
+
+    #[test]
+    fn the_watch_records_what_the_gate_holds() {
+        let state = Arc::new(Mutex::new((vec![], Read::Unreadable)));
+        let clock = Arc::new(Clock(AtomicI64::new(1_000), std::time::Instant::now()));
+        let gate = RulesetGate::new(Box::new(Source(state)), clock);
+        let mut recorded = None;
+        watch_rulesets(&gate, |now| {
+            recorded = Some(now);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(recorded, Some(Err(Unverified::Unreadable)));
     }
 }

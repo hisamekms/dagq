@@ -3592,12 +3592,17 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
         })
         .transpose()?;
     let oidc_configured = config.value("DAGQ_OIDC_ISSUER").is_some();
+    let rulesets = super::github_rulesets::ruleset_gate(&config, options.generators.clock.clone())?;
     let http = config.http.map(HttpStart::Deployment);
     serve_on(
         options,
         http,
         oidc,
-        Exchanges { actions, images },
+        Exchanges {
+            actions,
+            images,
+            rulesets,
+        },
         oidc_configured,
     )
 }
@@ -3712,6 +3717,44 @@ type ImageExchange = (
 struct Exchanges {
     actions: Option<ActionsExchange>,
     images: Option<ImageExchange>,
+    /// The ruleset gate of a deployment with a runner App.
+    rulesets: Option<Arc<crate::application::queue_service::RulesetGate>>,
+}
+
+/// How often the ruleset watch looks at the gate and records its hold.
+const RULESET_WATCH_EVERY: Duration = Duration::from_secs(5);
+
+/// Start the service's ruleset watch: until `stop`, each step refreshes the
+/// gate when due (GitHub's reads, off the write line) and records its hold
+/// on the line while this service leads the writes.
+fn watch_rulesets(
+    gate: Arc<crate::application::queue_service::RulesetGate>,
+    backend: Arc<SqliteServiceBackend>,
+    stop: Arc<AtomicBool>,
+) {
+    let watch = move || {
+        while !stop.load(Ordering::SeqCst) {
+            let step = crate::application::queue_service::watch_rulesets(&gate, |now| {
+                if !backend.is_write_leader() {
+                    return Ok(());
+                }
+                let on = backend.clone();
+                on_line(backend.write_line.as_ref(), move || {
+                    on.record_runner_rulesets(now.as_ref().map(|_| ()))
+                })
+            });
+            if let Err(error) = step {
+                warn!("the runner rulesets' hold could not be recorded: {error:#}");
+            }
+            thread::sleep(RULESET_WATCH_EVERY);
+        }
+    };
+    if let Err(error) = thread::Builder::new()
+        .name("ruleset-watch".into())
+        .spawn(watch)
+    {
+        warn!("the ruleset watch did not start, so runners get no work: {error}");
+    }
 }
 
 fn serve_on(
@@ -3877,7 +3920,13 @@ accepts: schema {} to {}",
         stands_for: None,
         doctor: Some(options.doctor.clone()),
         write_line: Some(write_line.clone()),
+        ruleset_gate: exchanges.rulesets.clone(),
     });
+    // The rulesets are read on their own thread from the start, never on
+    // the write line; only the hold's record goes on the line.
+    if let Some(gate) = exchanges.rulesets.clone() {
+        watch_rulesets(gate, backend.clone(), options.stop.clone());
+    }
     let starting = backend.clone();
     let swept = if write_line.leading() {
         on_line(backend.write_line.as_ref(), move || {
@@ -4188,7 +4237,9 @@ fn http_answerer(
     pid: u32,
     reads: Arc<super::startup_reads::StartupReads>,
     oidc: Option<Arc<dyn HumanVerifier>>,
-    Exchanges { actions, images }: Exchanges,
+    Exchanges {
+        actions, images, ..
+    }: Exchanges,
 ) -> HttpAnswerer {
     Arc::new(move |request| {
         if request.use_case == UseCase::ImagePublisherExchange {
@@ -4814,6 +4865,10 @@ pub struct SqliteServiceBackend<B: QueueStorage = SqliteStorage> {
     /// The places of the heavy reads, the service's alone; `None` for a
     /// backend no service runs, as [`Self::write_line`].
     pub heavy_reads: Option<crate::application::heavy_reads::HeavyReads>,
+    /// The ruleset gate of runner assignment, made as a deployment's service
+    /// starts with a runner App ([`super::github_rulesets::ruleset_gate`]);
+    /// `None` elsewhere, where a runner's pull gets no work.
+    pub ruleset_gate: Option<Arc<crate::application::queue_service::RulesetGate>>,
 }
 
 /// The keys ([`Principal::credential_key`]) of the tokens a service
@@ -4928,6 +4983,21 @@ where
     }
     fn runner_hash(&self, value: &str) -> Result<String> {
         Ok(sha256_hex(value.as_bytes()))
+    }
+    fn runner_rulesets(&self) -> std::result::Result<(), crate::domain::ruleset_gate::Unverified> {
+        self.ruleset_gate.as_ref().map_or(
+            Err(crate::domain::ruleset_gate::Unverified::NotConfigured),
+            |gate| gate.current(),
+        )
+    }
+    fn record_runner_rulesets(
+        &self,
+        now: std::result::Result<(), &crate::domain::ruleset_gate::Unverified>,
+    ) -> Result<()> {
+        write_queue(&self.storage, self.write_line.as_ref(), &self.db)?
+            .with_generators(self.generators.clone())
+            .with_actor(Self::own_actor())
+            .record_runner_rulesets(now)
     }
     fn runner_operation(
         &self,
@@ -5707,6 +5777,7 @@ impl InProcessCaller {
                 doctor: None,
                 write_line: None,
                 heavy_reads: None,
+                ruleset_gate: None,
             }),
             queue_dir,
             Arc::new(read_token),
@@ -6049,6 +6120,7 @@ impl InProcessControlCaller {
                 doctor: None,
                 write_line: None,
                 heavy_reads: None,
+                ruleset_gate: None,
             },
             control,
         }
@@ -7505,6 +7577,7 @@ mod tests {
             doctor: None,
             write_line: None,
             heavy_reads: None,
+            ruleset_gate: None,
         };
         let backend = Arc::new(backend);
         let hello = serde_json::to_vec(&ServiceRequest {

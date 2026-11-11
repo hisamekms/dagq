@@ -322,7 +322,14 @@ pub fn large_ids<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()>
                 "SELECT count(*) FROM ({}) AS found",
                 open_ask_of_key(tx.dialect())
             ),
-            sql_params![id, Option::<String>::None, "contract-large", id, id],
+            sql_params![
+                id,
+                Option::<String>::None,
+                "contract-large",
+                id,
+                id,
+                Option::<String>::None
+            ],
             |r| r.get::<_, i64>(0),
         )
     };

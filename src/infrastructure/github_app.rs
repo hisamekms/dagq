@@ -27,6 +27,13 @@ pub trait GithubApi: Send + Sync {
         body: Option<&Value>,
         raw: bool,
     ) -> Result<String, ConfigUnavailable>;
+    /// A JSON GET answered with any HTTP status and its body (bounded as
+    /// [`Self::request`]'s), for a reader that tells refusals apart. Only a
+    /// transport failure is an error. A fake without statuses answers 200.
+    fn get_status(&self, url: &str, bearer: &AppToken) -> Result<(u16, String), ConfigUnavailable> {
+        self.request("GET", url, bearer, None, false)
+            .map(|body| (200, body))
+    }
 }
 
 pub struct HttpsGithub(ureq::Agent);
@@ -81,18 +88,38 @@ impl GithubApi for HttpsGithub {
         if !response.status().is_success() {
             return Err(ConfigUnavailable);
         }
-        let mut bytes = Vec::new();
-        response
-            .into_body()
-            .into_reader()
-            .take(1_048_577)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ConfigUnavailable)?;
-        if bytes.len() > 1_048_576 {
-            return Err(ConfigUnavailable);
-        }
-        String::from_utf8(bytes).map_err(|_| ConfigUnavailable)
+        bounded_body(response)
     }
+    fn get_status(&self, url: &str, bearer: &AppToken) -> Result<(u16, String), ConfigUnavailable> {
+        let response = self
+            .0
+            .get(url)
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .header("Authorization", bearer_header(bearer)?)
+            .header("User-Agent", "dagq")
+            .header("Accept", "application/vnd.github+json")
+            .call()
+            .map_err(|_| ConfigUnavailable)?;
+        let status = response.status().as_u16();
+        Ok((status, bounded_body(response)?))
+    }
+}
+
+/// At most 1 MiB of UTF-8, else the fixed error.
+fn bounded_body(response: ureq::http::Response<ureq::Body>) -> Result<String, ConfigUnavailable> {
+    let mut bytes = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(1_048_577)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ConfigUnavailable)?;
+    if bytes.len() > 1_048_576 {
+        return Err(ConfigUnavailable);
+    }
+    String::from_utf8(bytes).map_err(|_| ConfigUnavailable)
 }
 
 /// Keep generic header Debug from exposing credentials as well as the HTTP

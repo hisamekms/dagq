@@ -670,6 +670,7 @@ impl Wiring {
                     doctor: None,
                     write_line: None,
                     heavy_reads: None,
+                    ruleset_gate: None,
                 },
                 tokens: self.tokens.clone(),
                 processes: self.processes.clone(),

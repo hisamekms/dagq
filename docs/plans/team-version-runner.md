@@ -71,7 +71,7 @@ HTTPのAPIのpathと版の形はHTTPのAPIのADRが決めるので、ここの�
 | App | 権限の候補 | 鍵 |
 | --- | --- | --- |
 | runner用 | Contents: write、Metadata: read。installation tokenは`repositories`で1つに、`permissions`で`contents:write`に絞って発行（期限はGitHubの既定の1時間）。Workflows権限は与えない。leaseの間は期限の前に生存の報告の応答で新しいtokenを渡し、leaseを失えば`DELETE /installation/token`で失効させる | 制御側のsecretだけ |
-| main用 | Contents: write、Workflows: write、Administration: read（rulesetの確かめ）、Metadata: read。使うのは`PATCH /repos/{owner}/{repo}/git/refs/heads/main`の`force: false`と、引き継ぎでの名前空間のrefの`POST`（作成）と`DELETE`だけ | 制御側のsecretだけ |
+| main用 | Contents: write、Workflows: write、Metadata: read。使うのは`PATCH /repos/{owner}/{repo}/git/refs/heads/main`の`force: false`と、引き継ぎでの名前空間のrefの`POST`（作成）と`DELETE`だけ | 制御側のsecretだけ |
 
 GitHubのrulesetは「規則に当たる操作を禁じ、bypassの一覧だけが越えられる」形で、bypassはruleset全体に効く。
 そのため、迂回させてよい規則と誰にも迂回させない規則を別のrulesetに分ける。
@@ -112,8 +112,9 @@ R2の例（bypassを持たない）:
 }
 ```
 
-- 禁止の確かめ: 制御側は起動時と、runner用のAppのtokenを出す前（記憶は短い期限の候補で5分）に、`GET /repos/{owner}/{repo}/rulesets`と各rulesetの中身を読み、R1〜R6の規則・対象・`enforcement: active`・bypassの一覧が求める形と一致するかを照らす。
-  一致しない、読めない、rulesetを使えないplanのときは、割り当てを止めて理由`ruleset_unverified`（仮）で控え、runner用のAppのtokenを出さず、管理者に運用のaskで知らせる。
+- 禁止の確かめ: 制御側は起動時と、割り当てとrunner用のAppのtokenを出す前（記憶は短い期限）に、runner用のAppがrepository 1つと`metadata: read`だけに絞って発行したtokenで`GET /repos/{owner}/{repo}/rulesets`と各rulesetの中身を読み、R1〜R6の規則・対象・`enforcement: active`と、全てのactorのbypassが表のとおりであること（`bypass_actors`と、runner用のAppの`current_user_can_bypass`が`never`）を照らす（[ADR-t4332-1](../adr/2026-11-10-t4332-1-ruleset-gate-checks-rules-targets-enforcement-and-every-bypass.md)）。
+  `bypass_actors`は`metadata: read`の読みに返らないので、その読み方が決まるまで関門は開かない（[GitHubのruleset](../deploy/github-rulesets.md)）。
+  揃わない、読めない、rulesetを使えないplanのときは、割り当てを止めて理由を`status`に出し、runner用のAppのtokenを出さず、運用のaskで知らせる。
   事後に変化を見つけて知らせるだけの運用は採らない（ADR-t3987-1決定6）。
 - run branchのrefの候補: 世代ごとに`refs/heads/dagq/<run id>/g<世代>`、着地の候補は`refs/heads/dagq-landing/<run id>/g<世代>`。
 - 世代の中のpushは、そのrunnerが前に報告したheadからのfast-forwardだけ（`--force`も`--force-with-lease`も使わない）。
