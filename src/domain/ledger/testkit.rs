@@ -1152,7 +1152,7 @@ pub(crate) fn reads_from_a_clock_turned_back() -> Log {
 
 /// `log` with the ids of the places of its events, and each close of a session
 /// naming the last open of the kind before it.
-fn numbered(mut log: Log) -> Log {
+pub(crate) fn numbered(mut log: Log) -> Log {
     for (index, event) in log.events.iter_mut().enumerate() {
         event.id = EventId::new(i64::try_from(index).unwrap() + 1);
     }
@@ -1176,7 +1176,7 @@ fn numbered(mut log: Log) -> Log {
 }
 
 /// The events of [`reads_from_a_time`], in the order they were added.
-fn log_of_a_time() -> Log {
+pub(crate) fn log_of_a_time() -> Log {
     let mut log = Log::default();
     let at = |day: i64| day * DAY;
     let tokens = json!({"input": 5, "output": 7, "cache_read": 0, "cache_creation": 0});

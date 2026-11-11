@@ -1548,6 +1548,8 @@ impl<
 }
 
 #[cfg(test)]
+mod earlier_visibility_spike;
+#[cfg(test)]
 pub(crate) mod frozen;
 #[cfg(test)]
 mod queue_rows_spike;
