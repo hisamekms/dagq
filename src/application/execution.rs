@@ -318,6 +318,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("runner list", &[C::RunnerList]),
     ("runner revoke", &[C::RunnerRevoke]),
     ("runner share", &[C::RunnerShare]),
+    ("me", &[C::CredentialPreference]),
     ("watch", &[C::QueueWatch]),
     ("report", &[C::ExportFile]),
     ("init", &[C::QueueAdmin]),

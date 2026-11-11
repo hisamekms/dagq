@@ -78,6 +78,7 @@ verificationのコマンドはactorではない（[Container runtime](../contain
 statusとdoctorはhost実行がsandboxでないことを実行時にも示し、その行の互換とprovider別の強制の読み方は`ExecutionConfig::profiles`が持つ。
 
 runnerのcapabilityと所有の規則は[Authorization](../authorization.md#capability)のCapability・Policyが入口になる。
+人のClaudeの資格情報の設定の`credential.preference`はuserだけが持ち、inbox・planner・job・runnerは拒まれる（同じPolicy）。
 
 ### CLIでの解釈
 

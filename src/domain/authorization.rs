@@ -41,6 +41,10 @@ string_enum!(Capability {
     ImagePublish => "image.publish",
     /// Human terminal authentication; no AI actor or control-side role.
     IdentityLogin => "identity.login",
+    /// A person identified by OIDC reads or changes their own Claude
+    /// credential choice (`domain::credential_preference`); only their own
+    /// row, never another person's, and no AI actor or control-side role.
+    CredentialPreference => "credential.preference",
     // Reading.
     QueueRead => "queue.read",
     QueueWatch => "queue.watch",
@@ -172,7 +176,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 77] = [
+    pub const ALL: [Self; 78] = [
         Self::ImagePublish,
         Self::RunnerClaim,
         Self::RunnerHeartbeat,
@@ -183,6 +187,7 @@ impl Capability {
         Self::RunnerRegister,
         Self::RunnerRevoke,
         Self::IdentityLogin,
+        Self::CredentialPreference,
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -797,14 +802,15 @@ const INBOX: &[Capability] = &[
     C::TokenIssue,
 ];
 
-/// The number of [`USER`]'s capabilities: the inbox's and seven more.
-const USER_LEN: usize = INBOX.len() + 7;
+/// The number of [`USER`]'s capabilities: the inbox's and eight more.
+const USER_LEN: usize = INBOX.len() + 8;
 
 /// [`INBOX`]'s capabilities, the approval of `setup-review`'s changes
 /// beforehand ([`C::ReviewSetupApprove`]) and the queue broker's records
 /// ([`C::QueueBrokerRecord`]), human runner registration, revocation and sharing,
-/// terminal authentication ([`C::IdentityLogin`]) and a goal's landing
-/// marks ([`C::GoalLandingMark`]).
+/// terminal authentication ([`C::IdentityLogin`]), a goal's landing
+/// marks ([`C::GoalLandingMark`]) and one's own credential choice
+/// ([`C::CredentialPreference`]).
 const USER_CAPABILITIES: [Capability; USER_LEN] = {
     let mut all = [C::ReviewSetupApprove; USER_LEN];
     let mut at = 0;
@@ -818,6 +824,7 @@ const USER_CAPABILITIES: [Capability; USER_LEN] = {
     all[at + 4] = C::RunnerShare;
     all[at + 5] = C::IdentityLogin;
     all[at + 6] = C::GoalLandingMark;
+    all[at + 7] = C::CredentialPreference;
     all
 };
 
@@ -1675,6 +1682,7 @@ mod tests {
         inbox.push(C::RunnerShare);
         inbox.push(C::IdentityLogin);
         inbox.push(C::GoalLandingMark);
+        inbox.push(C::CredentialPreference);
         assert_eq!(inbox, grants(ActorRole::User));
         assert_eq!(grants(ActorRole::SetupReviewJob), [C::QueueRead]);
         let job = ActorContext::setup_review_job("s1");
@@ -1849,6 +1857,15 @@ mod tests {
         let text = error.to_string();
         assert_eq!(text, "review-job may not landing.request (not granted)");
         assert!(!text.contains("secret") && !text.contains("42"));
+    }
+
+    #[test]
+    fn only_a_person_chooses_their_credentials() {
+        for r in ActorRole::ALL {
+            let result =
+                StaticPolicy.authorize(&role(r), C::CredentialPreference, &Resource::Queue);
+            assert_eq!(result.is_ok(), r == ActorRole::User, "{r:?}");
+        }
     }
 
     #[test]

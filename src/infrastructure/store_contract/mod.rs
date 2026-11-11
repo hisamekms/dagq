@@ -117,6 +117,7 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("typed conditions", typed_conditions::<S, F>),
         ("backend parallel", backend_parallel::<S, F>),
         ("members", members::<S, F>),
+        ("member credentials", member_credentials::<S, F>),
         ("goal owner records", goal_owner_records::<S, F>),
         ("goal owner moves", goal_owner_moves::<S, F>),
         ("goal owner move undone", goal_owner_move_undone::<S, F>),

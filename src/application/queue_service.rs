@@ -203,6 +203,26 @@ pub trait MemberStore {
     fn add_member(&self, member: &crate::domain::queue_service::Member) -> Result<()>;
     fn disable_member(&self, identity: &crate::domain::oidc::OidcIdentity, at: i64)
     -> Result<bool>;
+    /// A person's own credential row; `None` reads as offering nothing.
+    fn credential_preference(
+        &self,
+        identity: &crate::domain::oidc::OidcIdentity,
+    ) -> Result<Option<crate::domain::credential_preference::Preference>>;
+    /// Apply an update to a person's row in the transaction that finds them
+    /// an active member: the row now, or `None` and nothing written when
+    /// they are not one.
+    fn update_credential_preference(
+        &self,
+        identity: &crate::domain::oidc::OidcIdentity,
+        update: crate::domain::credential_preference::Update,
+        at: i64,
+    ) -> Result<Option<crate::domain::credential_preference::Preference>>;
+    /// Record that a person's call did not read (`bad_request`), with the
+    /// person and the result alone.
+    fn reject_credential_preference(
+        &self,
+        identity: &crate::domain::oidc::OidcIdentity,
+    ) -> Result<()>;
 }
 
 /// What the service runs its use cases on.
@@ -274,6 +294,30 @@ pub trait ServiceBackend: Send + Sync {
         principal: &Principal,
     ) -> Result<Option<crate::domain::oidc::OidcIdentity>> {
         Ok(principal.human.clone())
+    }
+
+    /// Read, or apply `update` to, a person's own credential row in the
+    /// transaction that finds them an active member
+    /// ([`MemberStore::update_credential_preference`]), written as `actor`
+    /// (the caller), whose event records the call; `None` when they are not
+    /// one.
+    fn credential_preference(
+        &self,
+        _actor: &ActorContext,
+        _identity: &crate::domain::oidc::OidcIdentity,
+        _update: crate::domain::credential_preference::Update,
+        _now: i64,
+    ) -> Result<Option<crate::domain::credential_preference::Preference>> {
+        anyhow::bail!("credential choices unavailable")
+    }
+    /// Record, as `actor`, that a person's call did not read
+    /// ([`MemberStore::reject_credential_preference`]).
+    fn reject_credential_preference(
+        &self,
+        _actor: &ActorContext,
+        _identity: &crate::domain::oidc::OidcIdentity,
+    ) -> Result<()> {
+        anyhow::bail!("credential choices unavailable")
     }
 
     /// Write only a hashed record; the value is returned, never a credential file.
@@ -804,6 +848,33 @@ impl QueueService<'_> {
             return respond(Err(crate::application::NotLeader.into()));
         }
         let actor = principal.actor();
+        if request.use_case == UseCase::CredentialPreference {
+            // A principal the policy does not grant `credential.preference`
+            // is refused and recorded as itself, as over HTTP; the one it
+            // grants (the user) has no OIDC identity here, as only the HTTP
+            // composition answers a person's own choice.
+            drop(checked);
+            let refused = Gate {
+                actor: &actor,
+                authorizer: &StaticPolicy,
+            }
+            .authorize(
+                &OwnDenials {
+                    backend: self.backend,
+                    actor: &actor,
+                },
+                Capability::CredentialPreference,
+                &Resource::Queue,
+            );
+            if let Err(refused) = refused {
+                return respond(Err(refused));
+            }
+            let payload = json!({"use_case": UseCase::CredentialPreference, "reason": "socket"});
+            if let Err(error) = self.backend.record_unauthenticated(payload) {
+                warn!("could not record the refused credential choice: {error:#}");
+            }
+            return preference_refusal();
+        }
         // Each of these opens the queue itself: what the token was read on
         // goes first, as a service has one connection to write on.
         if request.use_case == UseCase::Control {
@@ -2289,6 +2360,7 @@ fn run(
         | UseCase::RunnerEnroll
         | UseCase::RunnerRefresh
         | UseCase::RunnerRevoke
+        | UseCase::CredentialPreference
         | UseCase::ExchangeToken
         | UseCase::IssueToken
         | UseCase::RevokeToken => {
@@ -3563,6 +3635,114 @@ pub fn runner_http(
     }
 }
 
+/// The refusal of a credential choice to a caller that is no person
+/// identified by OIDC over HTTP (the host's socket included). No submitted
+/// value is in it.
+pub fn preference_refusal() -> ServiceResponse {
+    ServiceResponse::failure(
+        ServiceErrorCode::Unauthenticated,
+        "a credential choice is a person's own, identified by OIDC over HTTP",
+    )
+}
+
+/// `credential_preference` over HTTP, on the service's write line: a person
+/// identified by OIDC reads or changes their own row only
+/// (`domain::credential_preference::target`). A role the policy does not
+/// grant `credential.preference` (the inbox, a planner, a job, a runner and
+/// every other AI actor or control-side role) and a request naming another
+/// person are `authorization_denied`, recorded through [`Gate`] as that
+/// actor (another person's as [`DenyReason::Resource`] on the queue). No
+/// token, a token the control side did not issue, a caller with no OIDC
+/// identity, a person no longer an active member and an entrance with no
+/// configured issuer are unauthenticated, recorded as
+/// `queue_service_unauthenticated` with the use case and a fixed reason.
+/// No record carries a submitted value or a token, and a record that cannot
+/// be written leaves the refusal as it is. A person's request that does not
+/// read is `bad_request`, recorded as that person with the result alone. On the host's socket the same gate
+/// refuses (and records) every principal but the user, and the local user,
+/// who has no OIDC identity there, is unauthenticated (reason `socket`).
+pub fn credential_preference_http(
+    backend: &dyn ServiceBackend,
+    request: &ServiceRequest,
+    configured: bool,
+) -> ServiceResponse {
+    use crate::domain::authorization::{AuthorizationError, DenyReason};
+    use crate::domain::credential_preference::{self as preference, Refusal};
+    let unauthenticated = |reason: &str| {
+        let payload = json!({"use_case": UseCase::CredentialPreference, "reason": reason});
+        if let Err(error) = backend.record_unauthenticated(payload) {
+            warn!("could not record the unauthenticated request ({reason}): {error:#}");
+        }
+        preference_refusal()
+    };
+    let run = || -> Result<ServiceResponse> {
+        if !configured {
+            return Ok(unauthenticated("no_issuer"));
+        }
+        let Some(token) = request.token.as_deref().filter(|t| !t.is_empty()) else {
+            return Ok(unauthenticated("missing_token"));
+        };
+        let Some(principal) = backend.principal(token)?.filter(|p| p.check().is_ok()) else {
+            return Ok(unauthenticated("unknown_token"));
+        };
+        let actor = principal.actor();
+        let gate = Gate {
+            actor: &actor,
+            authorizer: &StaticPolicy,
+        };
+        let log = OwnDenials {
+            backend,
+            actor: &actor,
+        };
+        if let Err(refused) =
+            gate.authorize(&log, Capability::CredentialPreference, &Resource::Queue)
+        {
+            return Ok(respond(Err(refused)));
+        }
+        let identity = match preference::target(principal.human.as_ref(), &request.params) {
+            Ok(identity) => identity,
+            Err(Refusal::Denied) => {
+                let error = AuthorizationError {
+                    role: actor.role(),
+                    capability: Capability::CredentialPreference,
+                    reason: DenyReason::Resource,
+                };
+                super::commands::record(&log, &error, &Resource::Queue);
+                return Ok(respond(Err(error.into())));
+            }
+            Err(_) => return Ok(unauthenticated("not_a_person")),
+        };
+        let update = match preference::parse_update(&request.params) {
+            Ok(update) => update,
+            Err(_) => {
+                // An authenticated call is recorded all the same, with the
+                // person and the result and none of what it sent.
+                if let Err(error) = backend.reject_credential_preference(&actor, &identity) {
+                    warn!("could not record the rejected credential choice: {error:#}");
+                }
+                return Ok(ServiceResponse::failure(
+                    ServiceErrorCode::BadRequest,
+                    "params are an object of offer (personal or none) and prefer \
+                     (personal_first, team_first or deployment), and optionally your own issuer \
+                     and subject",
+                ));
+            }
+        };
+        let now = backend.now_ms() / 1000;
+        Ok(
+            match backend.credential_preference(&actor, &identity, update, now)? {
+                Some(row) => ServiceResponse::success(row.to_json()),
+                None => unauthenticated("not_a_member"),
+            },
+        )
+    };
+    match run() {
+        Ok(answer) => answer,
+        Err(error) if error.is::<super::NotLeader>() => respond(Err(super::NotLeader.into())),
+        Err(_) => ServiceResponse::failure(ServiceErrorCode::Failed, "credential choice failed"),
+    }
+}
+
 /// Actions exchanges have signature/issuer/audience verified before entering
 /// the write line. Registry membership is rechecked by the same transaction
 /// that creates the runner and its single short-lived token. No refresh issued.
@@ -4241,6 +4421,50 @@ pub(crate) mod tests {
                 memory.now,
             ))
         }
+        fn credential_preference(
+            &self,
+            actor: &ActorContext,
+            identity: &crate::domain::oidc::OidcIdentity,
+            update: crate::domain::credential_preference::Update,
+            _now: i64,
+        ) -> Result<Option<crate::domain::credential_preference::Preference>> {
+            use crate::domain::credential_preference::Preference;
+            let mut memory = self.human.lock().unwrap();
+            if !memory
+                .member
+                .as_ref()
+                .is_some_and(|m| &m.identity == identity && m.disabled_at.is_none())
+            {
+                return Ok(None);
+            }
+            let now = Preference::of_row(memory.preference).updated(update);
+            if !update.is_read() {
+                memory.preference = Some(now);
+            }
+            drop(memory);
+            // As the store records the call: its kind, the person and the
+            // row now, as the caller.
+            let kind = if update.is_read() { "read" } else { "changed" };
+            self.log.lock().unwrap().push(json!({
+                "credential_preference": kind, "actor": actor.actor_id(),
+                "issuer": identity.issuer, "subject": identity.subject, "row": now.to_json(),
+            }));
+            Ok(Some(now))
+        }
+        fn reject_credential_preference(
+            &self,
+            actor: &ActorContext,
+            identity: &crate::domain::oidc::OidcIdentity,
+        ) -> Result<()> {
+            if self.human.lock().unwrap().fail_denials {
+                anyhow::bail!("the call could not be recorded");
+            }
+            self.log.lock().unwrap().push(json!({
+                "credential_preference": "rejected", "actor": actor.actor_id(),
+                "issuer": identity.issuer, "subject": identity.subject, "result": "bad_request",
+            }));
+            Ok(())
+        }
         fn image_publisher_issue(
             &self,
             token: &crate::domain::image_publish::PublisherToken,
@@ -4667,6 +4891,8 @@ pub(crate) mod tests {
         /// recorded, as the store keeps them.
         images: std::collections::HashMap<String, crate::domain::image_publish::PublisherToken>,
         image_rows: Vec<crate::domain::image_publish::ImageDigest>,
+        /// The member's credential row, as `member_credentials` keeps it.
+        preference: Option<crate::domain::credential_preference::Preference>,
     }
 
     struct HumanFacts(std::sync::Arc<Mutex<HumanMemory>>);
@@ -4764,6 +4990,269 @@ pub(crate) mod tests {
         );
         // Refusal records are deliberately deferred to the auditing use case.
         assert_eq!(*backend.log.lock().unwrap(), before_refusals);
+    }
+
+    #[test]
+    fn a_person_reads_and_changes_only_their_own_credential_choice() {
+        let (backend, jwt) = human_fixture();
+        let human = exchange_human(&backend, &jwt).result.unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let call = |token: Option<&str>, params: Value| {
+            credential_preference_http(
+                &backend,
+                &request(token, UseCase::CredentialPreference, params),
+                true,
+            )
+        };
+        let records = || backend.log.lock().unwrap().clone();
+        // No row reads as offering nothing.
+        assert_eq!(
+            call(Some(&human), json!({})).result.unwrap(),
+            json!({"offer": "none", "prefer": null})
+        );
+        assert_eq!(
+            call(
+                Some(&human),
+                json!({"offer": "personal", "prefer": "team_first"})
+            )
+            .result
+            .unwrap(),
+            json!({"offer": "personal", "prefer": "team_first"})
+        );
+        // Naming oneself is the same row; a null field changes nothing.
+        assert_eq!(
+            call(
+                Some(&human),
+                json!({"issuer": "https://idp.example", "subject": "person", "offer": null})
+            )
+            .result
+            .unwrap(),
+            json!({"offer": "personal", "prefer": "team_first"})
+        );
+        let kept = backend.human.lock().unwrap().preference;
+        // Each successful call, a read too, is recorded as the person.
+        let person = Principal::human(jwt.identity.clone()).actor_id;
+        let traced: Vec<_> = records()
+            .into_iter()
+            .filter(|record| record.get("credential_preference").is_some())
+            .collect();
+        let call_of = |kind: &str, row: Value| {
+            json!({"credential_preference": kind, "actor": person, "issuer": "https://idp.example",
+                   "subject": "person", "row": row})
+        };
+        let ordered = json!({"offer": "personal", "prefer": "team_first"});
+        assert_eq!(
+            traced,
+            [
+                call_of("read", json!({"offer": "none", "prefer": null})),
+                call_of("changed", ordered.clone()),
+                call_of("read", ordered),
+            ]
+        );
+        // A person's request that does not read changes nothing, and each is
+        // recorded as the person with the result and none of what it sent,
+        // a misspelled field included.
+        let rejected = json!({"credential_preference": "rejected", "actor": person,
+            "issuer": "https://idp.example", "subject": "person", "result": "bad_request"});
+        for bad in [
+            json!({"offer": "everything"}),
+            json!({"offer": "none", "prefre": "secret-order"}),
+            json!(null),
+        ] {
+            let before = records().len();
+            assert_eq!(
+                code(&call(Some(&human), bad.clone())),
+                Some(ServiceErrorCode::BadRequest),
+                "{bad}"
+            );
+            assert_eq!(records()[before..], [rejected.clone()][..], "{bad}");
+        }
+        assert_eq!(backend.human.lock().unwrap().preference, kept);
+        // Another person's row is never reached; the refusal is recorded as
+        // the person, on the queue, with no submitted value.
+        assert_eq!(
+            code(&call(
+                Some(&human),
+                json!({"issuer": "https://idp.example", "subject": "other", "offer": "none"})
+            )),
+            Some(ServiceErrorCode::AuthorizationDenied)
+        );
+        assert_eq!(
+            records().last().unwrap(),
+            &json!({"event": "authorization_denied", "role": "user",
+                    "capability": "credential.preference", "reason": "not on this resource",
+                    "resource": {"kind": "queue"}})
+        );
+        // Nor by the inbox, a planner, a job or a runner: each refusal is
+        // recorded as that principal.
+        for (token, role) in [
+            ("runner", "runner"),
+            ("inbox", "inbox"),
+            ("planner", "planner"),
+            ("worker", "worker"),
+            ("review", "review-job"),
+            ("recovery", "recovery-job"),
+            ("plan-review", "plan-review-job"),
+            ("observer", "observer"),
+            ("supervisor", "supervisor"),
+            ("wrapper", "wrapper"),
+        ] {
+            let before = records().len();
+            assert_eq!(
+                code(&call(Some(token), json!({"offer": "personal"}))),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{token}"
+            );
+            let added = records()[before..].to_vec();
+            assert_eq!(
+                added,
+                [json!({"event": "authorization_denied", "role": role,
+                        "capability": "credential.preference", "reason": "not granted",
+                        "resource": {"kind": "queue"}})],
+                "{token}"
+            );
+        }
+        assert_eq!(backend.human.lock().unwrap().preference, kept);
+        // No token, one the control side did not issue, an entrance with no
+        // issuer and the host's socket are unauthenticated, recorded with
+        // the use case and a fixed reason alone.
+        let unauthenticated =
+            |reason: &str| json!({"use_case": "credential_preference", "reason": reason});
+        assert_eq!(
+            code(&call(None, json!({}))),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        assert_eq!(records().last().unwrap(), &unauthenticated("missing_token"));
+        assert_eq!(
+            code(&call(
+                Some("forged-secret-token"),
+                json!({"offer": "personal"})
+            )),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        assert_eq!(records().last().unwrap(), &unauthenticated("unknown_token"));
+        assert_eq!(
+            code(&credential_preference_http(
+                &backend,
+                &request(Some(&human), UseCase::CredentialPreference, json!({})),
+                false
+            )),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        assert_eq!(records().last().unwrap(), &unauthenticated("no_issuer"));
+        assert_eq!(
+            code(
+                &QueueService {
+                    backend: &backend,
+                    build: "build",
+                    pid: 1
+                }
+                .handle_from(
+                    &request(Some(&human), UseCase::CredentialPreference, json!({})),
+                    Peer::Owner
+                )
+            ),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        // A person's token never authenticates on the socket.
+        assert_eq!(records().last().unwrap(), &unauthenticated("unknown_token"));
+        // On the socket every principal it authenticates goes through the
+        // same gate: the ones not granted are refused and recorded as
+        // themselves, and the local user, the one granted, has no OIDC
+        // identity there.
+        let service = QueueService {
+            backend: &backend,
+            build: "build",
+            pid: 1,
+        };
+        for (token, role) in [
+            ("inbox", "inbox"),
+            ("planner", "planner"),
+            ("worker", "worker"),
+            ("review", "review-job"),
+            ("recovery", "recovery-job"),
+            ("plan-review", "plan-review-job"),
+            ("observer", "observer"),
+            ("supervisor", "supervisor"),
+            ("wrapper", "wrapper"),
+        ] {
+            let before = records().len();
+            assert_eq!(
+                code(&service.handle_from(
+                    &request(
+                        Some(token),
+                        UseCase::CredentialPreference,
+                        json!({"offer": "personal"})
+                    ),
+                    Peer::Owner
+                )),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{token}"
+            );
+            assert_eq!(
+                records()[before..].to_vec(),
+                [json!({"event": "authorization_denied", "role": role,
+                        "capability": "credential.preference", "reason": "not granted",
+                        "resource": {"kind": "queue"}})],
+                "{token}"
+            );
+        }
+        let before = records().len();
+        assert_eq!(
+            code(&service.handle_from(
+                &request(
+                    None,
+                    UseCase::CredentialPreference,
+                    json!({"offer": "personal"})
+                ),
+                Peer::Owner
+            )),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        assert_eq!(records()[before..].to_vec(), [unauthenticated("socket")]);
+        assert_eq!(backend.human.lock().unwrap().preference, kept);
+        // A rejection that cannot be recorded is still the rejection.
+        backend.human.lock().unwrap().fail_denials = true;
+        assert_eq!(
+            code(&call(Some(&human), json!({"offer": "everything"}))),
+            Some(ServiceErrorCode::BadRequest)
+        );
+        backend.human.lock().unwrap().fail_denials = false;
+        // A disabled member is no longer one: refused and not written.
+        backend
+            .human
+            .lock()
+            .unwrap()
+            .member
+            .as_mut()
+            .unwrap()
+            .disabled_at = Some(1);
+        assert_eq!(
+            code(&call(Some(&human), json!({"offer": "none"}))),
+            Some(ServiceErrorCode::Unauthenticated)
+        );
+        // Its token no longer authenticates (the registry is read on every
+        // call), so this is the unknown token's record.
+        assert_eq!(records().last().unwrap(), &unauthenticated("unknown_token"));
+        assert_eq!(backend.human.lock().unwrap().preference, kept);
+        let text = serde_json::to_string(&records()).unwrap();
+        for secret in [
+            human.as_str(),
+            "forged-secret-token",
+            "other",
+            "everything",
+            "secret-order",
+        ] {
+            assert!(!text.contains(secret), "{secret}");
+        }
+        // A refusal that cannot be recorded is still the refusal.
+        backend.human.lock().unwrap().fail_denials = true;
+        assert_eq!(
+            code(&call(Some("planner"), json!({"offer": "personal"}))),
+            Some(ServiceErrorCode::AuthorizationDenied)
+        );
     }
 
     #[test]

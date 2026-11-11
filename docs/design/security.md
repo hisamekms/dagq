@@ -82,7 +82,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 | image-publisher | — | — | — | — | — | — | — | — | — | — | — | — | — | — | `image.publish`だけ |
 | executor-telemetry | — | — | — / — | — | — | — / — | — | — / —・— / — / — | — | — | — | — | — | △ 自分のtokenの対象に登録されたsessionだけ | — |
 
-`identity.login`はuser専用。
+`identity.login`・`credential.preference`はuser専用。
 goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、hostのuserは人のownerの無いgoalだけ。
 
 権限ごとの持ち主とresourceの条件は[AuthorizationのPolicy](authorization.md#policy)を読む。

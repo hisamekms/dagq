@@ -653,6 +653,151 @@ pub fn members<
     Ok(())
 }
 
+/// A person's credential row: no row reads as offering nothing, updates
+/// replace only their fields and survive reopening, a read writes no row,
+/// an unregistered or disabled person gets no row, and each active
+/// member's call, a read too, leaves one event with the person and the row
+/// (a rejected one, the person and the result).
+pub fn member_credentials<
+    S: ContractStore + crate::application::queue_service::MemberStore,
+    F: Fn() -> Result<S>,
+>(
+    open: &F,
+) -> Result<()> {
+    use crate::domain::{
+        credential_preference::{Offer, Order, Preference, Update},
+        oidc::OidcIdentity,
+        queue_service::{Member, TeamRole},
+    };
+    let store = open()?;
+    let identity = OidcIdentity {
+        issuer: "https://contract.example".into(),
+        subject: "chooser".into(),
+    };
+    let stranger = OidcIdentity {
+        subject: "stranger".into(),
+        ..identity.clone()
+    };
+    store.add_member(&Member {
+        identity: identity.clone(),
+        role: TeamRole::Member,
+        on_call: false,
+        display_name: None,
+        created_at: 100,
+        disabled_at: None,
+    })?;
+    ensure!(store.credential_preference(&identity)?.is_none());
+    ensure!(
+        store.update_credential_preference(&identity, Update::default(), 101)?
+            == Some(Preference::NONE)
+    );
+    ensure!(open()?.credential_preference(&identity)?.is_none());
+    let offered = Preference {
+        offer: Offer::Personal,
+        prefer: None,
+    };
+    ensure!(
+        store.update_credential_preference(
+            &identity,
+            Update {
+                offer: Some(Offer::Personal),
+                prefer: None
+            },
+            102
+        )? == Some(offered)
+    );
+    let ordered = Preference {
+        prefer: Some(Order::TeamFirst),
+        ..offered
+    };
+    ensure!(
+        open()?.update_credential_preference(
+            &identity,
+            Update {
+                offer: None,
+                prefer: Some(Some(Order::TeamFirst))
+            },
+            103
+        )? == Some(ordered)
+    );
+    ensure!(open()?.credential_preference(&identity)? == Some(ordered));
+    let change = Update {
+        offer: Some(Offer::Personal),
+        prefer: None,
+    };
+    ensure!(
+        store
+            .update_credential_preference(&stranger, change, 104)?
+            .is_none()
+    );
+    ensure!(open()?.credential_preference(&stranger)?.is_none());
+    store.reject_credential_preference(&identity)?;
+    ensure!(store.disable_member(&identity, 105)?);
+    ensure!(
+        store
+            .update_credential_preference(&identity, change, 106)?
+            .is_none()
+    );
+    ensure!(open()?.credential_preference(&identity)? == Some(ordered));
+    use serde_json::{Value, json};
+    // Each active member's call, the read too, left one event with the
+    // person and the row then; the stranger's and the disabled member's
+    // calls left none.
+    let read = store.read_entry("contract_member_credential_events")?;
+    let audits = read.query_map(
+        "SELECT kind, payload FROM run_events WHERE kind IN ('credential_preference_read', \
+         'credential_preference_changed', 'credential_preference_rejected') ORDER BY id",
+        sql_params![],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )?;
+    drop(read);
+    let audits: Vec<(String, Value)> = audits
+        .into_iter()
+        .map(|(kind, payload)| Ok((kind, serde_json::from_str(&payload)?)))
+        .collect::<Result<_>>()?;
+    let row = |offer: &str, prefer: Value| {
+        json!({"issuer": "https://contract.example", "subject": "chooser",
+               "offer": offer, "prefer": prefer})
+    };
+    ensure!(
+        audits
+            == [
+                (
+                    "credential_preference_read".to_owned(),
+                    row("none", Value::Null)
+                ),
+                (
+                    "credential_preference_changed".to_owned(),
+                    row("personal", Value::Null)
+                ),
+                (
+                    "credential_preference_changed".to_owned(),
+                    row("personal", json!("team_first"))
+                ),
+                (
+                    "credential_preference_rejected".to_owned(),
+                    json!({"issuer": "https://contract.example", "subject": "chooser",
+                           "result": "bad_request"})
+                ),
+            ],
+        "credential events: {audits:?}"
+    );
+    let tx = store.write_entry("contract_member_credentials_cleanup")?;
+    tx.execute(
+        "DELETE FROM run_events WHERE kind IN ('credential_preference_read', \
+         'credential_preference_changed', 'credential_preference_rejected')",
+        sql_params![],
+    )?;
+    for table in ["member_credentials", "members"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE subject = ?1"),
+            sql_params!["chooser"],
+        )?;
+    }
+    S::commit(tx)?;
+    Ok(())
+}
+
 /// Code consumption, runner creation and rotation survive reopening together;
 /// failed replacement writes roll back consumption. Replay commits revocation.
 pub fn runner_credentials<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {

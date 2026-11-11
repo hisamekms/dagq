@@ -695,6 +695,7 @@ impl QueueRead {
             | UseCase::ImagePublisherExchange
             | UseCase::ImagePublish
             | UseCase::RunnerCode | UseCase::RunnerEnroll | UseCase::RunnerRefresh | UseCase::RunnerRevoke
+            | UseCase::CredentialPreference
             | UseCase::ExchangeToken
             | UseCase::RevokeToken
             | UseCase::Add

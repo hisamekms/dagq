@@ -7,6 +7,7 @@
 //! names and fixed reasons, never values or paths.
 //! The CLI returns 78 (EX_CONFIG) for these errors before opening a queue.
 
+use crate::domain::credential_preference::{self as credential, Deployment};
 use crate::domain::store_setting::{STORE_CONNECTION_ENV, STORE_KIND_ENV, StoreSetting};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,6 +34,8 @@ use std::{
 /// The five IMAGE_CI_ settings are one group, all or none
 /// ([`DeploymentConfig::image_publish`]).
 /// ANTHROPIC_API_KEY is optional: absent disables the team's API key.
+/// CLAUDE_TEAM_API_KEY and CLAUDE_PREFER are the team's Claude credential
+/// choice ([`DeploymentConfig::claude`], `domain::credential_preference`).
 /// TIMEZONE is an IANA zone name, default UTC; LISTEN is a numeric socket
 /// address, default 0.0.0.0:8080. TLS_CERT and TLS_KEY are an optional pair
 /// of PEM certificate chain and private key (normally `_FILE`).
@@ -62,6 +65,8 @@ pub const NAMES: &[&str] = &[
     "DAGQ_GITHUB_REPOSITORY",
     "DAGQ_GITHUB_API_BASE_URL",
     "DAGQ_ANTHROPIC_API_KEY",
+    "DAGQ_CLAUDE_TEAM_API_KEY",
+    "DAGQ_CLAUDE_PREFER",
     "DAGQ_IMAGE_CI_ISSUER",
     "DAGQ_IMAGE_CI_AUDIENCE",
     "DAGQ_IMAGE_CI_REPOSITORY",
@@ -97,6 +102,7 @@ pub struct DeploymentConfig {
     pub store: StoreSetting,
     values: BTreeMap<&'static str, String>,
     pub http: Option<HttpConfig>,
+    claude: Deployment,
 }
 /// Decided without binding a port. None on DeploymentConfig means socket only.
 pub struct HttpConfig {
@@ -121,6 +127,11 @@ impl DeploymentConfig {
             "DAGQ_LISTEN" => Some("0.0.0.0:8080"),
             _ => None,
         })
+    }
+    /// Whether the team's API key may be chosen and the default order,
+    /// checked at startup: allowing it without its secret refused to start.
+    pub fn claude(&self) -> Deployment {
+        self.claude
     }
     /// Actions settings are optional as a group. Each accepts `_FILE`, like
     /// other deployment values. Owner issuer/subject name a registry human;
@@ -391,6 +402,18 @@ impl DeploymentConfig {
             },
             _ => None,
         };
+        let claude = Deployment::read(
+            get(credential::TEAM_API_KEY_ENV),
+            get(credential::PREFER_ENV),
+            get(credential::TEAM_API_KEY_SECRET).is_some(),
+        )
+        .unwrap_or_else(|names| {
+            errors.extend(names.into_iter().map(str::to_owned));
+            Deployment {
+                team_api_key: false,
+                prefer: credential::Order::PersonalFirst,
+            }
+        });
         if !errors.is_empty() {
             return Err(InvalidSettings(errors, ca_error));
         }
@@ -405,6 +428,7 @@ impl DeploymentConfig {
             store: store.expect("checked store"),
             values,
             http,
+            claude,
         })
     }
 }

@@ -61,6 +61,61 @@ fn no_deployment_is_sqlite_and_socket_only() {
     assert_eq!(config.value("DAGQ_TIMEZONE"), Some("UTC"));
     assert_eq!(config.value("DAGQ_LISTEN"), Some("0.0.0.0:8080"));
     assert_eq!(config.value("DAGQ_ANTHROPIC_API_KEY"), None);
+    assert_eq!(
+        config.claude(),
+        Deployment {
+            team_api_key: false,
+            prefer: credential::Order::PersonalFirst
+        }
+    );
+}
+#[test]
+fn the_team_key_and_order_are_read_and_allowing_a_missing_key_names_no_value() {
+    let config = read(&[
+        ("DAGQ_ANTHROPIC_API_KEY", "sk-team-secret"),
+        ("DAGQ_CLAUDE_PREFER", "team_first"),
+    ])
+    .unwrap();
+    assert_eq!(
+        config.claude(),
+        Deployment {
+            team_api_key: true,
+            prefer: credential::Order::TeamFirst
+        }
+    );
+    let kept = read(&[
+        ("DAGQ_ANTHROPIC_API_KEY", "sk-team-secret"),
+        ("DAGQ_CLAUDE_TEAM_API_KEY", "false"),
+    ])
+    .unwrap();
+    assert!(!kept.claude().team_api_key);
+    let error = refused(&[
+        ("DAGQ_CLAUDE_TEAM_API_KEY", "true"),
+        ("DAGQ_CLAUDE_PREFER", "secret-order"),
+    ]);
+    assert_eq!(
+        error.0,
+        BTreeSet::from(
+            [
+                "DAGQ_ANTHROPIC_API_KEY",
+                "DAGQ_CLAUDE_PREFER",
+                "DAGQ_CLAUDE_TEAM_API_KEY"
+            ]
+            .map(String::from)
+        )
+    );
+    assert!(!error.to_string().contains("secret-order"));
+    // A mounted key counts as present; its value is never in a refusal.
+    let mounted = DeploymentConfig::read(
+        |n| match n {
+            "DAGQ_CLAUDE_TEAM_API_KEY" => Some("true".into()),
+            "DAGQ_ANTHROPIC_API_KEY_FILE" => Some("key-path".into()),
+            _ => None,
+        },
+        |_| Ok(b"sk-mounted\n".to_vec()),
+    )
+    .unwrap();
+    assert!(mounted.claude().team_api_key);
 }
 #[test]
 fn every_setting_accepts_a_mounted_file_and_rejects_both_forms() {
@@ -71,6 +126,8 @@ fn every_setting_accepts_a_mounted_file_and_rejects_both_forms() {
         ("DAGQ_OBJECT_STORE_ACCESS_KEY_ID", "id"),
         ("DAGQ_OBJECT_STORE_SECRET_ACCESS_KEY", "secret"),
         ("DAGQ_ANTHROPIC_API_KEY", "secret"),
+        ("DAGQ_CLAUDE_TEAM_API_KEY", "true"),
+        ("DAGQ_CLAUDE_PREFER", "team_first"),
         ("DAGQ_TIMEZONE", "Asia/Tokyo"),
         ("DAGQ_GITHUB_API_BASE_URL", "https://github.example/api/v3"),
         ("DAGQ_LISTEN", "127.0.0.1:0"),

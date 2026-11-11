@@ -1256,6 +1256,7 @@ pub mod command_shape;
 pub mod concern;
 pub mod container_image;
 pub mod container_runtime;
+pub mod credential_preference;
 pub mod disk;
 pub mod doc_hints;
 pub mod e2e_deadline;

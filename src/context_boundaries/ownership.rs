@@ -357,6 +357,7 @@ pub(super) const TABLES: &[Table] = &[
     table("queue_repository", Host),
     table("schema_floor", Host),
     table("members", Host), // the service's human registry
+    table("member_credentials", Host), // a registered human's Claude credential choice
     table("runners", Execution),
     table("runner_codes", Execution),
     table("runner_refresh", Execution),

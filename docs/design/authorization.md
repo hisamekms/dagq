@@ -75,12 +75,12 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | role | 許すcapability | resourceの規則 |
 | --- | --- | --- |
 | user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report` runnerの行と`image.publish`を除く全て | なし |
-| user（続き） | `runner.register`・`runner.revoke`・`goal.landing_mark` | OIDCの人。登録は自分、失効とgoalの印は持ち主か管理者（印はhostのuserも人のownerの無いgoalに） |
+| user（続き） | `runner.register`・`runner.revoke`・`goal.landing_mark`・`credential.preference` | OIDCの人。登録と設定は自分、失効とgoalの印は持ち主か管理者（印はhostのuserも人のownerの無いgoalに） |
 | user（続き） | `runner.share`・`runner.list` | 共有は管理者、一覧はmemberが自分、管理者が全て |
 | runner | `runner.declare`・`runner.claim`・`runner.heartbeat`・`runner.report` | 申告・pullは自分、報告・返却は割り当てrun |
 | image-publisher | `image.publish`だけ | なし |
 | inbox（続き） | `runner.list` | 親の人の一覧の範囲だけ |
-| inbox | userと同じだが、`review.setup_approve`・`queue_broker.record`・`runner.register`・`runner.revoke`・`runner.share`・`runner.declare`・`identity.login`・`goal.landing_mark`は持たない | 親の人の役割で狭める。OIDCの発行元のある配置の着地承認は拒む |
+| inbox | userと同じだが、`review.setup_approve`・`queue_broker.record`・`runner.list`以外のrunnerの行・`identity.login`・`goal.landing_mark`・`credential.preference`は持たない | 親の人の役割で狭める。OIDCの発行元のある配置の着地承認は拒む |
 | planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge` | runはnoteだけでask不可。askは`planner_question`だけ、依頼のaskは担当planner本人だけ（`request.decline`と同じ所有の規則）。 |
 | planner（続き） | `task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss` | taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）で、`revising`のproposalのtaskは持ち主だけ（不明なら拒む）。 |
 | planner（続き） | `planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install` | `revisit`（`task.write`）はdraftだけで、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。 |
@@ -108,7 +108,7 @@ askのkindをroleに制限する入口は`opens_ask`。
 
 ## 適用の範囲
 
-端末のlogin・logout・whoamiは`identity.login`で認可し、userだけに許す。
+端末のlogin・logout・whoamiの認可は`identity.login`。
 入力不備・資格不在は認可の拒否ではなく、queueへ送らない。
 
 ### 計画系のコマンド（application）

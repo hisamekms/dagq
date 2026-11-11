@@ -97,10 +97,9 @@ runのファイル・台帳の行・古いeventは通さない。
 
 ## 表
 
-`members`: 人の登録簿。
+`members`・`member_credentials`: 人の登録簿と設定。
 runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`image_publish.rs`
 `ledger_omitted_points`: 台帳の写さないeventの被覆の点（[計測](measurement.md#台帳を作る係)）。
-被覆と点はW・Rと同じtransactionで書き、消さない。
 
 表と列の意味はmigrationとstore・domainのdoc commentが持つ。
 

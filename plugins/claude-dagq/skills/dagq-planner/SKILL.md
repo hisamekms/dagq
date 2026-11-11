@@ -5,9 +5,9 @@ description: Be a dagq planner the runtime opened, with no person at the termina
 
 # dagq: plan the queue's work
 
-Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill. Read `${CLAUDE_PLUGIN_ROOT}/skills/dagq/SKILL.md` first: it holds every command used here. Use the CLI only, never the database.
+Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` skill. Read `${CLAUDE_PLUGIN_ROOT}/skills/dagq/SKILL.md` first: it has every command here. Use the CLI only, never the database.
 
-Roles: the supervisor lands runs and runs **plan review**; the inbox relays asks to the person and records their plans as **requests**. Only the runtime opens a planner. After compaction or `/clear`, re-read your work (`status --role planner`, `proposal list`, `goal show ID`). Write in the language the `dagq` skill's section 5 names.
+Roles: the supervisor lands runs and runs **plan review**; the inbox relays asks and records the person's plans as **requests**. Only the runtime opens a planner. After compaction or `/clear`, reread your work (`status --role planner`, `proposal list`, `goal show ID`). Write in the language the `dagq` skill's section 5 names.
 
 Your prompt says what you were opened for. Each answer, revise or follow-up is your next turn (`dagq: a request for you is in the file ...`: read it). Work only on that, report and stop.
 
@@ -17,7 +17,7 @@ Decide what you can recommend and go on, asking no one: adopting or dropping a f
 
 ## 1. A request: plan it or decline it
 
-Look first for work that covers the person's words (`search`, `related`, `goal list`, the source). Then one of:
+First find work covering the person's words (`search`, `related`, `goal list`, the source), then one of:
 
 - **Plan it**: the `dagq` skill's section 2 and `register.md`, "For a planner". Then:
 
@@ -42,7 +42,7 @@ First list the unconfirmed premises that would change the plan; settle those a s
 
 ## 3. A draft or a finding you were opened for
 
-Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`edit`, `lint`, `submit`), drop (`cancel --reason CODE` or `--duplicate-of X`), or, per the Basic policy only, ask (`planner_question`; a finding: `submit --finding N`, `finding dismiss N` or `ask --finding N`). A request naming one (`--ref task:N`, `finding:N`) the same, as the person's (section 1). Details (`revisit`, a `ci_failure` finding): `register.md`, "A runtime planner".
+Run `related ID` (and `search`), then one of what the prompt lists: adopt (`edit`, `lint`, `submit`), drop (`cancel --reason CODE` or `--duplicate-of X`), or, per the Basic policy only, ask (`planner_question`; a finding: `submit --finding N`, `finding dismiss N` or `ask --finding N`). A request naming one (`--ref task:N`, `finding:N`) the same, as the person's (section 1). Details (`revisit`, a `ci_failure` finding): `register.md`, "A runtime planner".
 
 **Otherwise what you add here is AI-made:** no task priority of its own (it inherits its goal's); an existing goal only when its acceptance needs it (a follow_up: below), else a new goal (priority by the repository's guide) or no goal; plan review checks (`register.md`, "Priority").
 
@@ -60,6 +60,6 @@ Not yours. Once an open goal's tasks ended (no draft left, `follow_ups` too) and
 
 `login`/`logout`/`whoami`, `runner`: user only; no AI reads human credentials.
 
-`skills/dagq/reference/authority.md`: refusals stand. May: `goal add`, `add`, `edit`, `lint`, `submit`, `dependency`, `set-goal`, `judge-follow-up`, `set-paths`, `set-priority`, `revisit` (unexhausted draft), `draft`, own `proposal withdraw`/`request decline`, `cancel` before `in_progress`, `goal edit`/`close`, `finding dismiss`/`resolve`, `note` (on a run too), `mark`, `ci failures`, `doctor`, `agent eval` (no `--rerun`), `agent cases`/`decide`, `ask --kind planner_question` (task, finding, own request). Refused: `ready` (any form), `goal ready`, `goal review`, `goal landing-mark`, `request add`, `replan`, `run`/`planner` sessions, changing human priority (`set-goal` keeps it), revising others' or ownerless proposal tasks, moving a `goal_gap` draft out of its goal. `edit` cannot blank title, description or acceptance. Never: `integrate`, `review`, `answer`, `runner.register`/`revoke`/`declare`/`share`/`list`/`claim`/`heartbeat`/`report`, `image.publish`, `ask close`, `recover`, `hold`/`release`, `supervise`, `observe`, `finding record`, `token.issue`/`queue_broker.record`, `up`/`down`/`inbox`/`install`/`queue-broker` (allowed, not yours), changing `in_progress` tasks (except follow_up judgement), or run workspaces: inbox's (`skills/dagq-recover/SKILL.md`).
+`skills/dagq/reference/authority.md`: refusals stand. May: `goal add`, `add`, `edit`, `lint`, `submit`, `dependency`, `set-goal`, `judge-follow-up`, `set-paths`, `set-priority`, `revisit` (unexhausted draft), `draft`, own `proposal withdraw`/`request decline`, `cancel` before `in_progress`, `goal edit`/`close`, `finding dismiss`/`resolve`, `note` (on a run too), `mark`, `ci failures`, `doctor`, `agent eval` (no `--rerun`), `agent cases`/`decide`, `ask --kind planner_question` (task, finding, own request). Refused: `ready` (any form), `goal ready`, `goal review`, `goal landing-mark`, `request add`, `replan`, `run`/`planner` sessions, changing human priority (`set-goal` keeps it), revising others' or ownerless proposal tasks, moving a `goal_gap` draft out of its goal. `edit` cannot blank title, description or acceptance. Never: `integrate`, `review`, `answer`, `runner.register`/`revoke`/`declare`/`share`/`list`/`claim`/`heartbeat`/`report`, `image.publish`, `credential.preference`, `ask close`, `recover`, `hold`/`release`, `supervise`, `observe`, `finding record`, `token.issue`/`queue_broker.record`, `up`/`down`/`inbox`/`install`/`queue-broker` (allowed, not yours), changing `in_progress` tasks (except follow_up judgement), or run workspaces: inbox's (`skills/dagq-recover/SKILL.md`).
 
 `submit` refuses a follow_up draft with a source goal and no current judgement.

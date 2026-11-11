@@ -432,6 +432,7 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::RunnerEnroll
         | UseCase::RunnerRefresh
         | UseCase::RunnerRevoke
+        | UseCase::CredentialPreference
         | UseCase::RevokeToken
         | UseCase::Add
         | UseCase::Edit
@@ -664,6 +665,12 @@ string_enum!(UseCase {
     RunnerEnroll => "runner_enroll",
     RunnerRefresh => "runner_refresh",
     RunnerRevoke => "runner_revoke",
+    /// HTTP only: a person identified by OIDC reads, or changes, their own
+    /// Claude credential choice (`domain::credential_preference`), as
+    /// `dagq me credentials` sends it; `credential.preference`, the user's
+    /// alone. Params are optional `offer` and `prefer`; naming another
+    /// person (`issuer`, `subject`) is refused. The answer is the row now.
+    CredentialPreference => "credential_preference",
     // The revocation of a supervisor's token once its registration ended
     // (ADR-t3102-1 decision 2), at the request of `up` or `down` after they
     // pruned it, for a caller that may run them (`service.lifecycle`),
@@ -834,6 +841,7 @@ impl UseCase {
             ("planner", Some("log")) => Self::PlannerLog,
             ("planner", Some("request")) => Self::PlannerRequest,
             ("report", _) => Self::Report,
+            ("me", Some("credentials")) => Self::CredentialPreference,
             ("show", _) => Self::Show,
             ("note", _) => Self::Note,
             ("proposal", Some("list")) => Self::ProposalList,

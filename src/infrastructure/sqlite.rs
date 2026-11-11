@@ -3213,6 +3213,10 @@ mod store_contract_tests {
         contract(|open| store_contract::members(&open));
     }
     #[test]
+    fn member_credentials() {
+        contract(|open| store_contract::member_credentials(&open));
+    }
+    #[test]
     fn goal_owner_records() {
         contract(|open| store_contract::goal_owner_records(&open));
     }

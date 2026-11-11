@@ -54,6 +54,22 @@ struct RetiredCmux {
 }
 
 #[derive(Subcommand, Clone)]
+enum MeCommand {
+    /// Read your Claude credential choice, or change it with a flag: whether you offer your
+    /// own subscription for your own jobs on your own unshared runners, and which goes first
+    /// when the team's API key could run them too. With no row you offer none.
+    Credentials {
+        /// personal or none.
+        #[arg(long, value_parser = ["personal", "none"])]
+        offer: Option<String>,
+        /// personal_first or team_first; deployment (and never set) follows the deployment's
+        /// DAGQ_CLAUDE_PREFER.
+        #[arg(long, value_parser = ["personal_first", "team_first", "deployment"])]
+        prefer: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
 enum Command {
     /// Log in on your own terminal using a public OIDC client; no client secret.
     Login {
@@ -85,6 +101,11 @@ enum Command {
     Runner {
         #[command(subcommand)]
         command: dagq::application::runner_enroll::RunnerCommand,
+    },
+    /// Your own settings on a team's control side, as the person OIDC identified.
+    Me {
+        #[command(subcommand)]
+        command: MeCommand,
     },
 
     /// Initialize the queue, creating its directory if needed. An existing queue is checked, never migrated.
@@ -2703,6 +2724,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             dagq::application::runner_enroll::RunnerCommand::Share { .. } => C::RunnerShare,
         }),
         Command::Login { .. } | Command::Logout | Command::Whoami => queue(C::IdentityLogin),
+        Command::Me { .. } => queue(C::CredentialPreference),
         // Run before any actor is read (`execute`): it opens no queue and
         // carries bytes only (ADR-t2114-3).
         Command::Relay { .. } | Command::ReviewProgram { .. } | Command::CodexInboxHook { .. } => {
@@ -4125,6 +4147,12 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
         return Ok(Some(command.request()));
     }
     Ok(Some(match command {
+        Command::Me {
+            command: MeCommand::Credentials { offer, prefer },
+        } => (
+            UseCase::CredentialPreference,
+            json!({"offer": offer, "prefer": prefer}),
+        ),
         Command::Mark {
             label,
             note,
@@ -7005,6 +7033,8 @@ mod tests {
             ("runner revoke", &["r"]),
             ("runner share", &["r"]),
             ("runner share", &["r", "--remove"]),
+            ("me", &["credentials"]),
+            ("me", &["credentials", "--offer", "personal"]),
             ("watch", &[]),
             ("report", &[]),
             ("init", &[]),

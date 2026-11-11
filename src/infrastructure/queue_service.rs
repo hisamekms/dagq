@@ -4291,6 +4291,21 @@ fn http_answerer(
             };
             return Ok(answered_of(&response.response, Some(use_case))?.0);
         }
+        if request.use_case == UseCase::CredentialPreference {
+            let on = backend.clone();
+            let configured = oidc.is_some();
+            let operation = move || LineAnswer {
+                response: crate::application::queue_service::credential_preference_http(
+                    &*on, &request, configured,
+                ),
+                notes: RequestNotes::default(),
+            };
+            let answer = match &backend.write_line {
+                Some(line) => line.line.run(operation)?,
+                None => operation(),
+            };
+            return Ok(answered_of(&answer.response, Some(UseCase::CredentialPreference))?.0);
+        }
         if request.use_case == UseCase::ExchangeToken {
             let verified =
                 exchange_identity(oidc.as_deref(), &request.params, backend.now_ms() / 1000);
@@ -4942,6 +4957,30 @@ where
         use crate::application::RunnerStore;
         let queue = write_queue(&self.storage, self.write_line.as_ref(), &self.db)?;
         queue.change_runner(action, now)
+    }
+
+    fn credential_preference(
+        &self,
+        actor: &ActorContext,
+        identity: &crate::domain::oidc::OidcIdentity,
+        update: crate::domain::credential_preference::Update,
+        now: i64,
+    ) -> Result<Option<crate::domain::credential_preference::Preference>> {
+        use crate::application::queue_service::MemberStore;
+        write_queue(&self.storage, self.write_line.as_ref(), &self.db)?
+            .with_actor(actor.clone())
+            .update_credential_preference(identity, update, now)
+    }
+
+    fn reject_credential_preference(
+        &self,
+        actor: &ActorContext,
+        identity: &crate::domain::oidc::OidcIdentity,
+    ) -> Result<()> {
+        use crate::application::queue_service::MemberStore;
+        write_queue(&self.storage, self.write_line.as_ref(), &self.db)?
+            .with_actor(actor.clone())
+            .reject_credential_preference(identity)
     }
 
     fn image_publisher_issue(
@@ -9100,5 +9139,126 @@ mod runner_tests {
         );
         // Ordinary parent issuance cannot write a runner credential file.
         assert!(issue(dir.path(), &Principal::runner(id), 1_800_000_000).is_err());
+    }
+
+    #[test]
+    fn each_credential_choice_call_is_traced_to_the_person_in_a_queue_event() {
+        use crate::application::queue_service::credential_preference_http;
+        // A fixed clock: the human token's expiry is set and checked against it.
+        struct At;
+        impl crate::application::Clock for At {
+            fn system_time(&self) -> std::time::SystemTime {
+                std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
+            }
+            fn monotonic(&self) -> Instant {
+                panic!("no monotonic clock used")
+            }
+        }
+        let generators = Generators {
+            clock: Arc::new(At),
+            ids: Arc::new(super::super::clock::UuidGenerator),
+        };
+        let (_dir, kept, backend) = super::supervisor_tests::claimed_in_memdb_with(
+            &LeaseToken::new("owner"),
+            "credential-audit",
+            generators,
+        );
+        let identity = OidcIdentity {
+            issuer: "https://idp.example".into(),
+            subject: "person".into(),
+        };
+        kept.add_member(&Member {
+            identity: identity.clone(),
+            role: TeamRole::Member,
+            on_call: false,
+            display_name: None,
+            created_at: 0,
+            disabled_at: None,
+        })
+        .unwrap();
+        let (human, _) = backend
+            .issue_human(&Principal::human(identity.clone()), 1_800_000_900)
+            .unwrap();
+        let call = |params| {
+            credential_preference_http(
+                &backend,
+                &ServiceRequest {
+                    caller: None,
+                    api_version: API_VERSION,
+                    token: Some(human.clone()),
+                    env_role: None,
+                    queue: None,
+                    binding: None,
+                    use_case: UseCase::CredentialPreference,
+                    params,
+                },
+                true,
+            )
+        };
+        let events = || -> Vec<(String, String, String, Value)> {
+            let mut statement = kept
+                .conn
+                .prepare(
+                    "SELECT kind, actor_role, actor_id, payload FROM run_events \
+                     WHERE kind LIKE 'credential_preference_%' ORDER BY id",
+                )
+                .unwrap();
+            statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        serde_json::from_str(&r.get::<_, String>(3)?).unwrap(),
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert!(call(json!({})).ok);
+        assert!(call(json!({"offer": "personal", "prefer": "team_first"})).ok);
+        assert!(call(json!({})).ok);
+        // A bad request of the person is recorded too, without what it sent.
+        assert_eq!(
+            call(json!({"offer": "secret-offer"})).error.unwrap().code,
+            ServiceErrorCode::BadRequest
+        );
+        let person = Principal::human(identity).actor_id;
+        let row = |offer: &str, prefer: Value| {
+            json!({"issuer": "https://idp.example", "subject": "person",
+                   "offer": offer, "prefer": prefer})
+        };
+        assert_eq!(
+            events(),
+            [
+                ("credential_preference_read", row("none", Value::Null)),
+                (
+                    "credential_preference_changed",
+                    row("personal", json!("team_first"))
+                ),
+                (
+                    "credential_preference_read",
+                    row("personal", json!("team_first"))
+                ),
+                (
+                    "credential_preference_rejected",
+                    json!({"issuer": "https://idp.example", "subject": "person",
+                           "result": "bad_request"})
+                ),
+            ]
+            .map(|(kind, payload)| (
+                kind.to_owned(),
+                "user".to_owned(),
+                person.clone(),
+                payload
+            ))
+        );
+        // A refused call leaves its refusal's record, never this event.
+        assert!(!call(json!({"subject": "other", "issuer": "https://idp.example"})).ok);
+        assert_eq!(events().len(), 4);
+        let text = format!("{:?}", events());
+        assert!(!text.contains(&human));
+        assert!(!text.contains("secret-offer"));
     }
 }

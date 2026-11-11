@@ -182,6 +182,9 @@ event_kinds! {
     ContainerMemoryWaiting => "container_memory_waiting",
     ContainerRuntimeAvailable => "container_runtime_available",
     ContainerRuntimeUnavailable => "container_runtime_unavailable",
+    CredentialPreferenceChanged => "credential_preference_changed",
+    CredentialPreferenceRead => "credential_preference_read",
+    CredentialPreferenceRejected => "credential_preference_rejected",
     DependencyAdded => "dependency_added",
     DependencyRemoved => "dependency_removed",
     DependencyStranded => "dependency_stranded",
@@ -582,6 +585,13 @@ impl EventKind {
                 // handed over recorded (ADR-t3987-1 decision 4), by `arch`.
                 | ImagePublisherTokenIssued
                 | ImagePublished
+                // A person's own Claude credential choice read, changed or
+                // rejected as a bad request over HTTP (ADR-t3987-1 decision
+                // 8), as that person: the audit of an authenticated call
+                // (ADR-t3985-1 decision 8).
+                | CredentialPreferenceRead
+                | CredentialPreferenceChanged
+                | CredentialPreferenceRejected
                 // The throughput review (ADR-t996-1) is about the queue.
                 | ThroughputReviewStarted
                 | ThroughputReviewFinished
@@ -1710,6 +1720,18 @@ mod tests {
             (
                 EventKind::ContainerRuntimeUnavailable,
                 "container_runtime_unavailable",
+            ),
+            (
+                EventKind::CredentialPreferenceChanged,
+                "credential_preference_changed",
+            ),
+            (
+                EventKind::CredentialPreferenceRead,
+                "credential_preference_read",
+            ),
+            (
+                EventKind::CredentialPreferenceRejected,
+                "credential_preference_rejected",
             ),
             (EventKind::DependencyAdded, "dependency_added"),
             (EventKind::DependencyRemoved, "dependency_removed"),
