@@ -61,6 +61,11 @@ pub fn status(
     let (runs, supervisors, waiting) =
         runs_slots_and_waits(queue, control, &registrations, &leases, now)?;
     let claim_hold = claim_hold_in_place(queue, &registrations, control, now)?;
+    // Fetch just the newest relaxation record; both outputs share it.
+    let latest_relax =
+        queue.latest_queue_event(&crate::domain::disk::RELAX_KINDS.map(EventKind::as_str))?;
+    let disk_relax =
+        crate::domain::disk::relax_view(latest_relax.as_ref(), now.saturating_mul(1000));
     let graph = queue.graph_input()?;
     let asks = queue
         .asks(AskQuery {
@@ -108,11 +113,14 @@ pub fn status(
         )?
             .into_iter()
             .chain(claim_hold_attention(claim_hold.as_ref(), graph.candidates.len(), now))
+            .chain(disk_relax.as_ref().map(disk_relax_attention))
             .filter(|_| for_role(role))
             .collect::<Vec<_>>(),
         // The queue-wide hold on new claims in place now, whichever
         // supervisor recorded it, null while none holds them.
         "claim_hold": claim_hold.as_ref().map(hold_view),
+        // Active terms and provenance for every role, null after expiry or clear.
+        "disk_relax": disk_relax,
         "asks": asks,
         // The claims deferred now on a conflict hotspot (ADR-0069): each
         // task's open `claim_deferred`, with the files and the runs.
@@ -443,6 +451,22 @@ pub(super) fn claim_hold_attention(
         last_error_code: None,
         next: AttentionNext::FreeDisk,
     })
+}
+
+/// A report of the relaxation in effect and its deadline, never an ask.
+fn disk_relax_attention(view: &crate::domain::disk::DiskRelaxView) -> Attention {
+    Attention {
+        run_id: None,
+        task_id: None,
+        pid: None,
+        ask_id: None,
+        reason_category: None,
+        status: "relaxed".into(),
+        kind: EventKind::DiskRelaxed.as_str().into(),
+        last_error: Some(view.relaxed.message()),
+        last_error_code: None,
+        next: AttentionNext::ReportDiskRelaxation,
+    }
 }
 
 /// A supervisor's settings of the execution classes' claims in `status`

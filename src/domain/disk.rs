@@ -808,6 +808,38 @@ pub fn relax_state(latest: Option<&RunEvent>, now_millis: i64) -> RelaxState {
     }
 }
 
+/// The active relaxation as `status` shows it for every role. Its terms
+/// are flattened beside the actor, reason, start and UTC expiry from the
+/// newest record; an expired or cleared one has no view, even before the
+/// supervisor records its expiry.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskRelaxView {
+    #[serde(flatten)]
+    pub relaxed: DiskRelaxed,
+    pub actor: Option<super::EventActor>,
+    pub reason: Option<String>,
+    pub since: String,
+    pub until: String,
+}
+
+/// Read only the newest of [`RELAX_KINDS`], already fetched by the
+/// caller. Status and its attention share this view and its expiry test.
+pub fn relax_view(latest: Option<&RunEvent>, now_millis: i64) -> Option<DiskRelaxView> {
+    let relaxed = relax_state(latest, now_millis).in_effect()?;
+    let event = latest?;
+    Some(DiskRelaxView {
+        relaxed,
+        actor: event.actor.clone(),
+        reason: event
+            .payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        since: event.created_at.clone(),
+        until: super::marks::utc_text(relaxed.until_millis),
+    })
+}
+
 /// The payload of the `disk_relax_expired` of `relaxed`.
 pub fn expired_payload(relaxed: &DiskRelaxed) -> serde_json::Value {
     serde_json::json!({
@@ -1851,6 +1883,44 @@ mod tests {
             }
         );
         assert_eq!(below.claims(DEFAULT_RESERVE_SHARE), Some(0));
+    }
+
+    /// The public view keeps the exact terms and provenance only while
+    /// the newest record is active, including at the instant it expires.
+    #[test]
+    fn the_relaxation_view_shows_terms_and_provenance_until_it_ends() {
+        let mut record = relax_record(
+            "disk_relaxed",
+            serde_json::json!({
+                "expected_bytes": 1234, "no_remaining": true,
+                "no_landing_expectation": true, "for_secs": 60,
+                "reason": "allow an urgent run while space is freed"
+            }),
+        );
+        record.actor = Some(super::super::EventActor {
+            role: "inbox".into(),
+            id: "desk".into(),
+            requested_by: None,
+        });
+        let view = serde_json::to_value(relax_view(Some(&record), NOW).unwrap()).unwrap();
+        assert_eq!(
+            view,
+            serde_json::json!({
+                "expected_bytes": 1234, "no_remaining": true, "no_landing_expectation": true,
+                "event_id": 7, "until_millis": NOW + 60_000,
+                "actor": {"role": "inbox", "id": "desk"},
+                "reason": "allow an urgent run while space is freed",
+                "since": record.created_at, "until": super::super::marks::utc_text(NOW + 60_000)
+            })
+        );
+        assert!(relax_view(Some(&record), NOW + 59_999).is_some());
+        assert!(relax_view(Some(&record), NOW + 60_000).is_none());
+        assert!(relax_view(Some(&record), NOW + 60_001).is_none());
+        for kind in ["disk_relax_cleared", "disk_relax_expired"] {
+            let ended = relax_record(kind, serde_json::json!({"relaxed": 7}));
+            assert!(relax_view(Some(&ended), NOW).is_none());
+        }
+        assert!(relax_view(None, NOW).is_none());
     }
 
     /// Acceptance 3: under a relaxation one run still goes with none

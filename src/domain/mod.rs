@@ -2684,6 +2684,9 @@ pub enum AttentionNext {
     /// its breakdown, not an ask. The person frees the disk; the claims
     /// resume by themselves and the attention ends with the hold.
     FreeDisk,
+    /// Tell the person the disk needs are relaxed and when they revert.
+    /// This is a status notice, not an ask; it ends on expiry or clear.
+    ReportDiskRelaxation,
 }
 
 impl AttentionNext {
@@ -2801,6 +2804,7 @@ impl fmt::Display for AttentionNext {
                 write!(f, "release or keep the hold of task {task_id}")
             }
             Self::FreeDisk => f.write_str("tell the person to free the disk"),
+            Self::ReportDiskRelaxation => f.write_str("report the disk relaxation and its expiry"),
         }
     }
 }

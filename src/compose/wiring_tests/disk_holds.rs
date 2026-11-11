@@ -627,3 +627,88 @@ fn a_relaxation_past_its_time_is_recorded_expired_once_and_relaxes_nothing() {
         );
     }
 }
+
+/// Status wires the newest queue relaxation into both its public view
+/// and one inbox notice. An unrelated newer event does not mask it, a
+/// replacement wins, and clear never revives an older relaxation.
+#[test]
+fn status_and_attention_share_the_newest_relaxation_and_clear_hides_it() {
+    use crate::domain::{EventKind, SessionRole};
+    let wiring = Wiring::new(
+        "status_and_attention_share_the_newest_relaxation_and_clear_hides_it",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    );
+    let first = relax(&wiring, Some(GIB), false, 0);
+    let newest = relax(&wiring, Some(2 * GIB), true, 0);
+    let queue = wiring.queue();
+    queue
+        .record_queue_event(EventKind::ClaimResumed, serde_json::json!({}))
+        .unwrap();
+    let notice = |status: &Value| {
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["kind"] == "disk_relaxed")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let shown = wiring.status();
+    assert_ne!(first, newest);
+    assert_eq!(shown["disk_relax"]["event_id"], newest);
+    assert_eq!(shown["disk_relax"]["expected_bytes"], 2 * GIB);
+    assert_eq!(shown["disk_relax"]["no_remaining"], true);
+    assert_eq!(shown["disk_relax"]["reason"], "emergency");
+    // Every role gets the active record, only the inbox gets attention.
+    for role in [
+        SessionRole::Inbox,
+        SessionRole::Planner,
+        SessionRole::Worker,
+        SessionRole::Supervisor,
+        SessionRole::Observer,
+    ] {
+        let status = wiring.status_at(
+            std::time::SystemTime::UNIX_EPOCH + super::host::STOPPED_AT,
+            Some(role),
+        );
+        assert_eq!(status["disk_relax"], shown["disk_relax"]);
+        let items = notice(&status);
+        assert_eq!(items.len(), usize::from(role == SessionRole::Inbox));
+        if role == SessionRole::Inbox {
+            assert_eq!(
+                items[0]["next"],
+                "report the disk relaxation and its expiry"
+            );
+            assert!(
+                items[0]["last_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains(shown["disk_relax"]["until"].as_str().unwrap())
+            );
+            assert!(items[0]["ask_id"].is_null());
+        }
+        assert!(status["asks"].as_array().unwrap().is_empty());
+    }
+    // Deadline is judged by the read, with no expiry event needed.
+    let expired = wiring.status_at(
+        std::time::SystemTime::UNIX_EPOCH
+            + super::host::STOPPED_AT
+            + std::time::Duration::from_secs(3600),
+        Some(SessionRole::Inbox),
+    );
+    assert!(expired["disk_relax"].is_null());
+    assert!(notice(&expired).is_empty());
+    queue
+        .record_queue_event(
+            EventKind::DiskRelaxCleared,
+            serde_json::json!({"relaxed": newest, "reason": "space freed"}),
+        )
+        .unwrap();
+    let cleared = wiring.status();
+    assert!(cleared["disk_relax"].is_null());
+    assert!(notice(&cleared).is_empty());
+    assert!(cleared["asks"].as_array().unwrap().is_empty());
+}

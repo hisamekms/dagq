@@ -1,6 +1,6 @@
 ---
 name: dagq-recover
-description: What a person does by hand in a dagq queue, from the inbox or their own terminal, only on the person's word, once the runtime and the recovery job could not fix it. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or retry a failed push; answer a stalled ask, read a run's turns or a past stuck_exit or answer_prompt ask; bypass or resubmit a plan review; start, stop or update the runtime. Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", "plan task <N> with the answer", an answered stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
+description: Manual dagq recovery on the person's word, from the inbox or their terminal, after runtime recovery fails. Recover a run no supervisor serves; decide on a run whose recovery job failed; review and integrate a run whose headless review failed, or retry a failed push; answer a stalled ask, read a run's turns or a past stuck_exit or answer_prompt ask; bypass or resubmit a plan review; start, stop or update the runtime. Use when status or watch shows "recover run", "exit the session", "triage by hand", "recover by hand", "review by hand", "plan review by hand", "goal review by hand", "review and integrate", "push main", "restart supervisor", "send the answer of ask <id> to the worker", "plan task <N> with the answer", an answered stalled ask, or when the person asks to start, stop, update or recover. Entries ending in "(runtime)" need nothing.
 ---
 
 # dagq: what a person does by hand
@@ -16,6 +16,8 @@ Three layers: the runtime fixes what fixed rules prove safe (`auto_repaired`), t
 ```
 
 `reference/doctor.md`: its fields (`blockers`, `recoverable`) and common cases. A `running` or `validating` run whose wrapper is alive under a stale lease is adopted by the next supervisor: start one (`up`, section 5) instead of recovering it.
+
+Disk claim hold or active relaxation: `reference/disk.md`.
 
 ## 2. Stop what is still running
 

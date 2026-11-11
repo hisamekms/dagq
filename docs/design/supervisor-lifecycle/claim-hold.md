@@ -39,8 +39,6 @@ related:
 
 supervisorは新しいrunをclaimする前に、今claimしてよいかを決める。
 hostの負荷・空き容量・providerの壁で止まるときはqueue全体のclaimを控え、衝突やbuildの待ちのように1つのtaskだけが進めないときはそのtaskだけを飛ばして次の候補を取る。
-走っているrun（sessionの監視・validation・review・resume・triage・着地）には触れない。
-例外は空き容量で、workerのsessionが容量不足で落ちたrunのresumeも控える。
 
 ## 流れ
 
@@ -113,6 +111,9 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 - `[disk]`はsupervisorの起動時にmain checkoutの作業ファイルから読み（[Run environment](run-environment.md)）、読めなければ既定値で、廃止したkeyは読み飛ばして、warnを出す。
 - 人の`integrate`と、検証が容量不足で落ちたときのやり直しも、着地と同じ必要量で確かめる。
 - 人とinboxは`dagq disk relax`で最低ライン以外の項を期限つきで緩め、記録はqueueのeventだけで、各passが最新の1件を読み再起動なしに効く（[ADR-t4727-1](../../adr/2026-11-11-t4727-1-disk-needs-may-be-relaxed-for-a-while-by-a-person-or-the-inbox.md)）。
+
+  上書き中はどのroleの`status`にも出し、inboxのattentionは期限を知らせる報告でaskを開かない。
+  期限切れか解除で表示も消える。
 
 ### 判定と掃除
 
