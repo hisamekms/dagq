@@ -151,7 +151,7 @@ fn routine(marks: &[&Mark]) -> Vec<bool> {
 }
 
 /// The splitting marks, each with whether it is routine.
-fn classified(marks: &[Mark]) -> Vec<(&Mark, bool)> {
+pub(crate) fn classified(marks: &[Mark]) -> Vec<(&Mark, bool)> {
     let splitting = splitting(marks);
     let routine = routine(&splitting);
     splitting.into_iter().zip(routine).collect()

@@ -17,7 +17,7 @@ use crate::domain::{
 /// The changes of one task's plan that count as a change mark between a
 /// snapshot and a finish, when the snapshot forecast that task (the task
 /// triggers of [`super::snapshot`]).
-const TASK_MARK_KINDS: [EventKind; 5] = [
+pub(crate) const TASK_MARK_KINDS: [EventKind; 5] = [
     EventKind::TaskPriorityChanged,
     EventKind::DependencyAdded,
     EventKind::DependencyRemoved,

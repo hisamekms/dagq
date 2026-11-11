@@ -997,6 +997,46 @@ impl crate::domain::ledger::window::omitted::OmittedRead for OmittedReads<'_> {
     }
 }
 
+/// A complete small read, or the reason the caller must read the whole ledger.
+/// `Unavailable` includes an undecidable visibility certificate; `Exhausted`
+/// means K candidates were invisible and more remained. An empty complete
+/// answer means there is no visible candidate, not a fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowRead<T> {
+    Complete(T),
+    Unavailable,
+    Exhausted,
+    OffTimeForm,
+}
+
+/// How the event part of an id cursor's time was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorTimePath {
+    Recent,
+    Aggregate,
+    VisibleWalk,
+}
+
+/// The event part of `Answers::time_through`, and the path used to find it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorRecordTime {
+    pub millis: i64,
+    pub path: CursorTimePath,
+}
+
+/// A run's first visible end, without its ledger row's records. Goal
+/// filtering belongs to the caller's window attributes (`task_goals`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunFinish {
+    pub run: RunId,
+    pub task: TaskId,
+    pub event: EventId,
+    pub millis: i64,
+}
+
+/// The maximum candidates inspected by each ordered single-result seek.
+pub const WINDOW_READ_CANDIDATES: usize = 100;
+
 /// The reads needed to fold a ledger window, borrowed from a store or its
 /// open snapshot. It exposes domain values, so snapshot callbacks share the
 /// caller's transaction without knowing the SQL execution port.
@@ -1035,6 +1075,84 @@ pub trait LedgerWindowRead {
     fn visible_events(&self, events: &[RunEvent]) -> Result<Option<Vec<RunEvent>>> {
         let _ = events;
         Ok(None)
+    }
+
+    /// Events sufficient for marks and routine in `(start_ms, end_ms]`.
+    /// Reads the union of effective and recorded times (even at now), all
+    /// retractions by mark id, and time-selected claims. For EACH visible
+    /// claim and attribute, seeks the previous visible claim by descending id;
+    /// between those ids it seeks the first visible start announcing the new
+    /// value by ascending id, whatever its time. Routine's predecessor is
+    /// selected by descending (created_at, id) at or before start_ms.
+    /// This separation of time and id order preserves clock reversals and skew.
+    /// SQL may overselect: domain::marks retains authority over effective time.
+    /// All returned events pass `visible_events` in this same snapshot.
+    /// Each single-result seek walks at most WINDOW_READ_CANDIDATES candidates
+    /// in the stated order, then probes whether another exists without reading
+    /// its payload: Exhausted requires whole-ledger fallback, whereas exhaustion
+    /// of the index means no candidate. Undecidable visibility is Unavailable.
+    /// Reading costs include discarded candidates and visibility's row reads.
+    fn mark_events(&self, start_ms: i64, end_ms: i64) -> Result<WindowRead<Vec<RunEvent>>> {
+        let _ = (start_ms, end_ms);
+        Ok(WindowRead::Unavailable)
+    }
+
+    /// Maximum time of visible events with id <= cursor, the of_records part
+    /// of answer_bound's Bound::TimeThrough ONLY. Covered queue events in
+    /// (C, S] are not events of this answer. Wiring must combine this with
+    /// OmittedEdges::max_ms_through(min(through, upto)); if that exceeds the
+    /// window end, re-read at_or_before_through(end, held), exactly as
+    /// answer_bound does, and take the greater value. Never use this alone as
+    /// the cursor's time in kpi/report/supervisor wiring.
+    ///
+    /// First inspects K=WINDOW_READ_CANDIDATES latest (created_at, id) events.
+    /// If none qualifies, reads MAX(created_at) WHERE id <= cursor and uses it
+    /// only if a visible event has that value; otherwise walks descending time
+    /// among id <= cursor, at most K. The path is retained, including failure
+    /// via Exhausted; no visible event means i64::MIN. An off-RECORD_TIME_FORM
+    /// created_at detected by the partial index yields OffTimeForm (whole read).
+    fn cursor_record_time(&self, cursor: EventId) -> Result<WindowRead<CursorRecordTime>> {
+        let _ = cursor;
+        Ok(WindowRead::Unavailable)
+    }
+
+    /// Two-stage forecast input for finishes in `(start_ms, end_ms]`.
+    /// First reads visible task completed/canceled and goal_closed events;
+    /// for each target seeks its previous visible end in descending id, or
+    /// first visible event in ascending id. No ends means no second stage.
+    /// Then reads snapshots between the minimum predecessor and maximum end
+    /// ids, marks and TASK_MARK_KINDS after the visible snapshots' minimum
+    /// positive triggers_through, effective/recorded marks and plan changes
+    /// from their minimum at_secs through end_ms, retractions, and claims
+    /// with the per-claim predecessors/starts of mark_events. Aggregates are
+    /// over visible events only; invisible extrema are walked past with the
+    /// same K and fallback/no-candidate rules as above. The maximum finish id
+    /// walks descending id; each snapshot minimum walks ascending (field value,
+    /// id). Each target's predecessor is selected before taking their minimum.
+    /// Reads scale with the targets' open periods and marks AFTER snapshots,
+    /// including later backdates/retractions, not history before those periods
+    /// or histories of targets that do not finish in the range.
+    fn forecast_events(&self, start_ms: i64, end_ms: i64) -> Result<WindowRead<Vec<RunEvent>>> {
+        let _ = (start_ms, end_ms);
+        Ok(WindowRead::Unavailable)
+    }
+
+    /// First visible ends under stats::window::ends_run, selected by ascending
+    /// id per run. Some((S,E)) seeks ends by time, then each run's FIRST visible
+    /// end, retaining only those in (S,E]. None reads MIN(id) per run, repairing
+    /// invisible extrema by the same ordered K walk, and scales with run count
+    /// (the --compare cohort). Both use event time, never ledger_rows.ended_at.
+    /// Visibility, K, exhaustion and absence follow mark_events' contract.
+    fn run_finishes(&self, range: Option<(i64, i64)>) -> Result<WindowRead<Vec<RunFinish>>> {
+        let _ = range;
+        Ok(WindowRead::Unavailable)
+    }
+
+    /// Visible READ_KINDS events for --compare cohorts, throughout history.
+    /// No ledger row's records are read except visibility's certificates.
+    /// This intentionally scales with all claims/marks, not a time window.
+    fn comparison_events(&self) -> Result<WindowRead<Vec<RunEvent>>> {
+        Ok(WindowRead::Unavailable)
     }
 
     fn rows_after(

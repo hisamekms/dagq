@@ -416,7 +416,7 @@ fn recorded_label(event: &RunEvent) -> String {
 /// marks the change). The toolchain changes outside dagq (the host's
 /// `mise`), so only a claim can tell when; a repository other than dagq's
 /// own source records no `rustc` on its claims and gets no toolchain mark.
-const DERIVED: [(&str, Option<&str>); 5] = [
+pub(crate) const DERIVED: [(&str, Option<&str>); 5] = [
     ("dagq_version", Some("dagq_version")),
     ("claude_version", None),
     // Recorded only by a supervisor that runs Codex (ADR-t813-2 decision 7).
@@ -427,7 +427,7 @@ const DERIVED: [(&str, Option<&str>); 5] = [
 
 /// The value of a derived attribute on a claim; `None` when the claim did
 /// not record it. The toolchain is `rustc`'s release and host together.
-fn claim_value(payload: &Value, attribute: &str) -> Option<String> {
+pub(crate) fn claim_value(payload: &Value, attribute: &str) -> Option<String> {
     let value = |key: &str| match payload.get(key)? {
         Value::Null => None,
         Value::String(text) => Some(text.clone()),

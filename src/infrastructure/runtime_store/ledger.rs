@@ -1022,6 +1022,35 @@ impl<T: SqlRead> crate::application::LedgerWindowRead for LedgerSnapshot<'_, T> 
     fn visible_events(&self, events: &[RunEvent]) -> Result<Option<Vec<RunEvent>>> {
         visibility::visible_in(self.tx, events)
     }
+    fn mark_events(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<crate::application::WindowRead<Vec<RunEvent>>> {
+        small::mark_events(self.tx, start_ms, end_ms)
+    }
+    fn cursor_record_time(
+        &self,
+        cursor: EventId,
+    ) -> Result<crate::application::WindowRead<crate::application::CursorRecordTime>> {
+        small::cursor_time(self.tx, cursor)
+    }
+    fn forecast_events(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<crate::application::WindowRead<Vec<RunEvent>>> {
+        small::forecast_events(self.tx, start_ms, end_ms)
+    }
+    fn run_finishes(
+        &self,
+        range: Option<(i64, i64)>,
+    ) -> Result<crate::application::WindowRead<Vec<crate::application::RunFinish>>> {
+        small::run_finishes(self.tx, range)
+    }
+    fn comparison_events(&self) -> Result<crate::application::WindowRead<Vec<RunEvent>>> {
+        small::comparison_events(self.tx)
+    }
     fn rows_after(
         &self,
         kind: LedgerKind,
@@ -4514,3 +4543,5 @@ mod tests {
 }
 
 mod visibility;
+
+mod small;
