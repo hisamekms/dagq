@@ -22,10 +22,10 @@ related:
 
 問いは「台帳の窓を範囲 (S, E] で読むとき（goal 271 の受け入れ 1）、時刻から読む読み（`WindowQuery::read_from_ms`）が範囲の外の確定した履歴に比例して store から返す (i) 外した行の earlier と (ii) queue 行の全ページの読みを、全件の読みと同じ答えのまま比例しない読みに置き換えられるか。(iii) `run_events` を直接読む小さな読みが全件の台帳の読みと同じ可視性を保つ条件とその判定の読む量は何か。(iv) 受け入れ 1 の『読む行の数』をどう数えるか」。
 
-判定は全体で **unresolved**（(i) は holds（4678 が unresolved とした session 行の records・improvement_proposals の goal を通る所属・proposal の task の読む量・run の session の開いたままの判定は下の「追試 (i) earlier（Spike 4755）」で holds）、(iv) は holds、(ii) は kind ごとに holds と unresolved に分かれ、(iii) は 4678 で試した部分と追試（Spike 4754）の (iii-a)〜(iii-c) で holds、(iii-d) U_E は unresolved。下の「判定」と「追試 (iii) 可視性（Spike 4754）」「追試 (i) earlier（Spike 4755）」）。
+判定は全体で **unresolved**（(i) は holds（4678 が unresolved とした session 行の records・improvement_proposals の goal を通る所属・proposal の task の読む量・run の session の開いたままの判定は下の「追試 (i) earlier（Spike 4755）」で holds）、(iv) は holds、(ii) は 4678 で kind ごとに holds と unresolved に分かれ、unresolved の kind は追試（Spike 4756）でも、古い snapshot と範囲の間の mark が does_not_hold、ほかは 3000 単位の答えの比べが上限で済まず unresolved（30・300 単位の答えと 30・3000 単位の行の数では一致の見込み）、(iii) は 4678 で試した部分と追試（Spike 4754）の (iii-a)〜(iii-c) で holds、(iii-d) U_E は unresolved。下の「判定」と「追試 (iii) 可視性（Spike 4754）」「追試 (i) earlier（Spike 4755）」「追試 (ii) queue 行（Spike 4756）」）。
 
 - (i) earlier: **holds**（builder が新しく書く 2 つの小さな表が要る。4678 が unresolved とした session 行の records、improvement_proposals の goal を通る所属、名指す proposal の task の読む量、run の session が開いたままかの判定は「追試 (i) earlier（Spike 4755）」で holds）。task・session・run 行の earlier を「範囲が名指すものの seek（A）」と「S に開いているもの（B）」だけにすると、kpi の 4 問と `stats --since --full` の答えが全件と一致し、返る earlier の record は 30 単位でも 3000 単位でも 20 件（今の読みの in-memory の形は 456 件と 42,036 件）。ただし確定した単位は範囲と何も名指し合わず、開いたまま残るものも持たない（下の「試作」の限り）。範囲と結ばれる古い履歴は手で作った約 10 の場合だけで確かめた。同じ proposal の task の片方が範囲の前に終わる場合は、proposal が名指す task の記録まで読まないと proposal を動いていると数え違える（`a_proposal_the_range_names_is_read_with_the_ends_of_its_tasks_before_the_range`）ので、名指す proposal から task へ 2 段で seek する。ただし試作はその task の records を全部返すので、範囲の前に終わった task が範囲の前の record を多く持つと読む量はその履歴に比例する（30/3000 の比べはこの経路を増やしていない）。その task の終わりだけを読む形は追試で holds。goal の task が proposal に入る所属（`goal_submitted` が名指す proposal の goal の task）は 4678 の試作に無く、追試で holds。B を確定した履歴を走査せずに見つけるには、run 行が終わったときに開いたまま残したもの（slot・ask・session・landing の待ち）を builder が別の表に書く要がある。最初の Execution（C）は返る行は 1 件のままだが DB の走査は外した run 行の全部に比例するので、actor × provider の最初の時刻を builder が別の表に書く。
-- (ii) queue 行: **部分ごとに分かれる**。控え（`claim_deferred`）・watcher の待ち・alert・finding・landing の slot・mark（`mark_added`）は「S に終わっていないか S 以降の record を持つ行、kind ごとの S 前の最後の行、`queue_before` の行」で全件と一致し、3000 単位でも返る行の数が変わらない（holds）。`slots_full`・`claim_hold`・`landing_hold`、supervisor の生存と heartbeat、forecast の snapshot と baseline（試作で行の数が単位で増えない）、mark の撤回、main の記録（D の見込み）、post_landing、goal の属性、update・backend の失敗・run の無い ask と repair、`stall_config`、`candidates_sampled`（kpi の候補の数の標本）、`live_alert_stream` の records は **unresolved**（下の「未解決」）。
+- (ii) queue 行: **部分ごとに分かれる**。控え（`claim_deferred`）・watcher の待ち・alert・finding・landing の slot・mark（`mark_added`）は「S に終わっていないか S 以降の record を持つ行、kind ごとの S 前の最後の行、`queue_before` の行」で全件と一致し、3000 単位でも返る行の数が変わらない（holds）。`slots_full`・`claim_hold`・`landing_hold`、supervisor の生存と heartbeat、forecast の snapshot と baseline（試作で行の数が単位で増えない）、mark の撤回、main の記録（D の見込み）、post_landing、goal の属性、update・backend の失敗・run の無い ask と repair、`stall_config`、`candidates_sampled`（kpi の候補の数の標本）は 4678 では **unresolved** で、「追試 (ii) queue 行（Spike 4756）」でも unresolved（snapshot と範囲の間の mark は、snapshot が確定した履歴より古いとき does_not_hold）。`live_alert_stream` の records は goal 273 と Spike 4663 が持つ。
 - (iii) 可視性: **U_E を除いて holds**（4678 で試した部分と追試の (iii-a)〜(iii-c)。(iii-d) U_E は unresolved）。run と task の event を持ち主の行の `inputs_through` で判定すると、係の遅れ・resume した run の行の後の event・task が終わり run 行の無い run・legacy の行だけが名指す run を含む store で全件の `LedgerWindow::events` と一致し、引いた持ち主の数は 30 単位でも 3000 単位でも 17。4678 が上限で残した走行中の run、W・R の後で書かれていない session・queue の event と W・R の食い違い、R による検査の省略は追試で holds、U_E は追試でも unresolved（下の「追試 (iii) 可視性（Spike 4754）」の「判定」）。event の id の cursor の時刻は見える event だけで引く要がある（見えない event の id では全体の時刻が後になる）。
 - (iv) 数え方: **holds**（数え方として）。経路全体で store から返る run・task・session 行、earlier の record、最初の Execution、queue 行、範囲の event の和は、上の形で 30 単位でも 3000 単位でも 245（今の読みの in-memory の形は 1,045 と 63,415）。
 
@@ -116,27 +116,29 @@ B を確定した履歴を走査せずに見つける形: 終わっていない�
 
 ADR-t1662-2 決定 1・7・8 との関係: 足す 2 つの表（開いたまま残した行と最初の Execution）は、event だけから作り直せる台帳の一部（ビュー）で、event が SSOT のまま。`ledger_omitted_points`（0104）と同じく行の形と `ledger_v` を変えない。ただし今ある台帳にはこの表が無いので、表を作る migration で今の行から埋めるか、次の pass が埋めるまで全件の読みに戻す。
 
-### (ii) queue 行: 部分ごとに分かれる
+### (ii) queue 行: 部分ごとに分かれる（4678 で unresolved の行は追試でも unresolved）
+
+下の表で unresolved の行は「追試 (ii) queue 行（Spike 4756）」の「判定」が見込みの読みの形と足りない根拠を持つ（`live_alert_stream` を除く）。表の `mark_added` は今の kind に無い名前（mark は `mark_recorded`）で、その行の holds は読む fold の無い 1 件ごとの行の読みとしてのもの。
 
 根拠の test は `each_queue_kind_read_by_its_range_keeps_the_answers_of_every_row_or_names_what_it_misses` と `the_reads_of_the_whole_path_add_up_to_as_many_whatever_the_settled_history`（kpi）、`stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier`（stats）。読みの形は kind ごとに「S に終わっていない（`ended_at IS NULL OR ended_at >= S`）か S 以降の record を持つ行（`inputs_through.events > queue_before`）、kind ごとの S 前の最後の行、`queue_before` を持つ行」（試作の `queue_narrowed`）。`ledger_rows(kind, subject_kind, ended_at)` の索引と、`json_extract(inputs_through, '$.events')` の式の索引が要る。
 
 | kind と読む fold | 判定 | 根拠と残る量 |
 | --- | --- | --- |
 | 控え（`claim_deferred`）と watcher の待ち（`inbox_watcher_absent`・`inbox_watcher_returned`） | holds | 30/3000 から 1/1・2/2 に減り答えは一致 |
-| `slots_full`・`claim_hold`・`landing_hold` | unresolved | 試作の履歴に無い（同じ区間の行の形なので控えと同じ形の見込み） |
+| `slots_full`・`claim_hold`・`landing_hold` | unresolved（追試でも unresolved） | 試作の履歴に無い（同じ区間の行の形なので控えと同じ形の見込み） |
 | `live_alert`（1 件ごと） | holds | 30/3000 → 1/1 |
 | `finding`（findings_open は B、finding_resolve_time は A） | holds | finding の行は settled になるまで `ended_at` が無いので、S に開いている finding は終わっていない行の読みで足りる。範囲で解決したものは S 以降の record を持つ。32/3002 → 3/3 |
 | `landing_slot` | holds | 45/3015 → 8/8 |
 | `mark_added` | holds | 30/3000 → 1/1 で kpi の 4 問は一致。mark の読みの約束は 4135・4670 が持つ |
-| supervisor の生存と heartbeat（`supervisor_started`・`supervisor_stopped`・`supervisor_alive`） | unresolved | 狭めても答えは一致した（191 → 40）が、行の数は確定した単位で増えない（日ごと）ので 30/3000 の比べになっていない。S 前の最後の heartbeat は supervisor ごとに 1 行要る（試作は kind ごとの最後） |
-| mark の撤回、forecast の snapshot、baseline（`forecast_recorded`・`attributes_baseline`・`finding_baseline`） | unresolved | 撤回は履歴に無い。snapshot と baseline は 1 行ずつで単位で増えない |
-| main の記録（`main_log`・`main_history`・`main_covers`、`MAIN_LOG_KINDS`） | unresolved | 試作の履歴に無い。`fold_main_log(self.events())` が記録の全部を畳む（main が持つ path は全期間の記録から）ので、範囲の形では D の見込み |
-| `post_landing_book`（revert と CI の失敗） | unresolved | 試作の履歴に無い |
-| goal の属性 | unresolved | 試作の履歴に goal の event が無い |
-| update・backend の失敗・run の無い ask と repair | unresolved | 試作の履歴に無い |
-| `stall_config`（E 以前の最新） | unresolved | 試作の履歴に無い。`events_by_kind` を E 以前で降順に 1 件の形の見込み |
-| `live_alert_stream`（judgments） | unresolved | 試作の履歴に無い。行は baseline ごとに 1 つだが、開いている stream の records が 60 秒ごとに伸びる |
-| `candidates_sampled`（kpi の候補の数、`Context::candidates`） | unresolved | 試作の履歴に無い。stream とは別の queue の event（1 件ごとの行）で、各標本を次の標本か、それを書いた supervisor の生存の終わりまで重みにする。見込みの形は、範囲の標本と、S 以前の最後の標本（S をまたいで重みを持つ。supervisor ごとに 1 件）と、その標本の supervisor の生存の行。時計が戻ると「次の標本」が id の順と時刻の順で違うので、`candidates` の並べ方（`self.events` の id の順）に合わせる |
+| supervisor の生存と heartbeat（`supervisor_started`・`supervisor_stopped`・`supervisor_alive`） | unresolved（追試でも unresolved） | 狭めても答えは一致した（191 → 40）が、行の数は確定した単位で増えない（日ごと）ので 30/3000 の比べになっていない。S 前の最後の heartbeat は supervisor ごとに 1 行要る（試作は kind ごとの最後） |
+| mark の撤回、forecast の snapshot、baseline（`forecast_recorded`・`attributes_baseline`・`finding_baseline`） | unresolved（追試でも unresolved、古い snapshot と範囲の間の mark は does_not_hold） | 撤回は履歴に無い。snapshot と baseline は 1 行ずつで単位で増えない |
+| main の記録（`main_log`・`main_history`・`main_covers`、`MAIN_LOG_KINDS`） | unresolved（追試でも unresolved） | 試作の履歴に無い。`fold_main_log(self.events())` が記録の全部を畳む（main が持つ path は全期間の記録から）ので、範囲の形では D の見込み |
+| `post_landing_book`（revert と CI の失敗） | unresolved（追試でも unresolved） | 試作の履歴に無い |
+| goal の属性 | unresolved（追試でも unresolved） | 試作の履歴に goal の event が無い |
+| update・backend の失敗・run の無い ask と repair | unresolved（追試でも unresolved） | 試作の履歴に無い |
+| `stall_config`（E 以前の最新） | unresolved（追試でも unresolved） | 試作の履歴に無い。`events_by_kind` を E 以前で降順に 1 件の形の見込み |
+| `live_alert_stream`（judgments） | unresolved（goal 273 と Spike 4663） | 試作の履歴に無い。行は baseline ごとに 1 つだが、開いている stream の records が 60 秒ごとに伸びる |
+| `candidates_sampled`（kpi の候補の数、`Context::candidates`） | unresolved（追試でも unresolved） | 試作の履歴に無い。stream とは別の queue の event（1 件ごとの行）で、各標本を次の標本か、それを書いた supervisor の生存の終わりまで重みにする。見込みの形は、範囲の標本と、S 以前の最後の標本（S をまたいで重みを持つ。追試で、S をまたぐのは supervisor によらず S 前の最後の 1 件と分かった）と、その標本の supervisor の生存の行。時計が戻ると「次の標本」が id の順と時刻の順で違うので、`candidates` の並べ方（`self.events` の id の順）に合わせる |
 
 ### (iii) 可視性: U_E を除いて holds（4678 で試した部分と、追試の (iii-a)〜(iii-c)。U_E は追試でも unresolved）
 
@@ -160,7 +162,7 @@ ADR-t1662-2 決定 1・7・8 との関係: 足す 2 つの表（開いたまま�
 
 - `--compare` の群の読み（4135 の決定 C）: 範囲が決まらない問い。
 - forecast の 2 段目（4670 の (vii)）: snapshot と範囲の間の履歴と範囲の後の mark に比例する。範囲の外の確定した履歴のうち snapshot より前には比例しないので、受け入れ 1 の比較では snapshot を範囲の近くに置いて数え、snapshot の古い問いは範囲が決まらない問いに入れる。
-- (ii) の unresolved の kind（特に main の記録）: 判定が出るまで、それを読む問い（`--by area`・areas・`conflict_hotspots`・`main_covers`）は範囲が決まらない問いのまま。
+- (ii) の kind: 追試（Spike 4756）で、範囲の task を名指す snapshot が確定した履歴より古い forecast の問いは範囲が決まらない（does_not_hold）。ほかの (ii) の kind は追試でも unresolved で、それを読む問いの扱いは追試の「後続の draft への推奨」が持つ。
 
 ## 読みの約束
 
@@ -171,24 +173,24 @@ ADR-t1662-2 決定 1・7・8 との関係: 足す 2 つの表（開いたまま�
 3. 開いたまま残した行の表にある run の行（key で）。builder が run 行を書くときに書き、閉じる event で消す。約束に入れるのは slot・ask・landing の待ちと、close の `opened_event_id` で対にならない run の session（追試で更新）。
 4. 外した行の record のうち、範囲が名指す task・plan review・proposal と、範囲が名指す proposal の task（`task_submitted`・`task_reopened` の `proposal_id` から 2 段目）と名指す proposal の goal の task（`goal_submitted` から 3 段目）はその task の終わりだけ、範囲の task を名指す snapshot の task の `TASK_MARK_KINDS`（`run_events` の `events_by_task` と payload の式の索引）、範囲が名指す planner（actor を含む）と plan review の session 行（key の接頭辞で）。`run_events` から読むときは 6 の可視性で絞る（追試で更新。形は「追試 (i) earlier（Spike 4755）」の「読みの約束の更新」）。
 5. S 以前の時刻を持つ `integration_started` のうち id が最大のものの run（試作の `last_start` と同じ順）。読みの形は `events_by_kind(kind, id)` を id の降順に歩き、時刻が S 以前の最初の 1 件で止める。歩く数は S の後の時刻を持つ `integration_started`（範囲とその後の着地、時計が進んだもの）に比例し、範囲の前の確定した履歴には比例しない。最初の Execution は builder が書く actor × provider の表から。
-6. queue 行は kind ごとに、S に終わっていないか S 以降の record を持つ行、kind ごと（supervisor の生存は supervisor ごと）の S 前の最後の行、`queue_before` の行。(ii) で unresolved の kind は全ページのまま。
+6. queue 行は kind ごとに、S に終わっていないか S 以降の record を持つ行、kind ごとの S 前の最後の行、`queue_before` の行。kind ごとに足すもの（supervisor・snapshot と mark・baseline・main の要約と sha・goal・run の無い ask）は「追試 (ii) queue 行（Spike 4756）」の「読みの約束の更新」が持つ。
 7. `run_events` の小さな読みは、(iii) の条件の event だけを返す。条件は追試（Spike 4754）の「読みの約束の更新」の 7 が置き換える（走行中の run、W と R の後の session と queue の event、R による検査の省略を含む。U_E は追試でも unresolved で約束に入れない）。
 
 ## 未解決
 
-(iv) に未解決の部分は無い。(i) の下の 4 項目（session 行の records、improvement_proposals の goal を通る所属、名指す proposal の task の読む量、run の session が開いたままかの判定）は「追試 (i) earlier（Spike 4755）」で holds になった（項目は 4678 の時点の記録として残す）。(iii) の 4678 で上限に達して止めた部分は、追試（Spike 4754）で走行中の run・W と R の後の event と食い違い・R による省略に判定が出て、U_E だけが追試でも未解決（追試の節の「未解決」）。(ii) の次の kind は試作の履歴に無い、または行の数が単位で増えないので 30/3000 の比べになっていない。(ii) も作り直しは 3 回に達した。
+(iv) に未解決の部分は無い。(i) の下の 4 項目（session 行の records、improvement_proposals の goal を通る所属、名指す proposal の task の読む量、run の session が開いたままかの判定）は「追試 (i) earlier（Spike 4755）」で holds になった（項目は 4678 の時点の記録として残す）。(iii) の 4678 で上限に達して止めた部分は、追試（Spike 4754）で走行中の run・W と R の後の event と食い違い・R による省略に判定が出て、U_E だけが追試でも未解決（追試の節の「未解決」）。(ii) の次の kind は試作の履歴に無い、または行の数が単位で増えないので 30/3000 の比べになっていない。(ii) も作り直しは 3 回に達した。下の (ii) の項目は「追試 (ii) queue 行（Spike 4756）」で判定が出た（`live_alert_stream` を除く。項目は 4678 の時点の記録として残す）。
 
 - (i) session 行の records（追試で holds）: 試したことは、`Named::names`（task・proposal・plan review・planner の id を名指す record を持つ session 行を丸ごと残す）で答えが一致したことだけ。提案する key の接頭辞の seek（planner と plan review の id だけ）そのものと、actor の `planner:<id>` から planner を特定する planner_routes の場合は試していない。止まった理由: review の指摘で分かった抜けで、作り直しの回数は残っていた（2 回）が、試作を接頭辞の seek に替えて planner_question の ask の場合を足すと (i) の比べを全部流し直すので、revise の時間の中で他の指摘を先にした。次に要る試作: `Named` に actor の `planner:<id>` を足し、session 行を key の接頭辞だけで残す形にして、範囲の planner_question の ask と範囲の前に閉じたその planner の session（route を持つ）を置いて全件と比べる。約 120 行。
-- (ii) `slots_full`・`claim_hold`・`landing_hold`、supervisor の生存と heartbeat（supervisor ごとの最後の heartbeat）、mark の撤回、forecast の snapshot と baseline: 確定した単位にそれぞれの行を足し（supervisor は単位ごとに別の supervisor の生存）、30/3000 で比べる。約 150 行。
+- (ii)（追試でも unresolved） `slots_full`・`claim_hold`・`landing_hold`、supervisor の生存と heartbeat（supervisor ごとの最後の heartbeat）、mark の撤回、forecast の snapshot と baseline: 確定した単位にそれぞれの行を足し（supervisor は単位ごとに別の supervisor の生存）、30/3000 で比べる。約 150 行。
 
-- (ii) main の記録（`main_log`・`main_history`・`main_covers`）: 試したことは無い。`fold_main_log` が記録の全部を畳むので、範囲の形では main が S に持つ path を作れない見込み（D）。次に要る試作: `main_commits_recorded`・`main_paths_recorded` を確定した履歴に足し、S での main の状態を builder が書く要約（S 以前の最新の状態の行）から読む形と全件を比べる。約 200 行の見込み。
-- (ii) `post_landing_book`: 次に要る試作: revert と CI の失敗を範囲の前の着地に付け、範囲の run だけの seek と全件を比べる。約 100 行。
-- (ii) goal の属性: goal の作成・変更を範囲の前に置き、範囲の task の goal の E 以前の最新の seek と比べる。約 100 行。
-- (ii) update・backend の失敗・run の無い ask と repair、`stall_config`: 1 件ごとの行で、S 以降の行と E 以前の最新の seek の形。開いた run の無い ask は B。約 150 行。
+- (ii)（追試でも unresolved） main の記録（`main_log`・`main_history`・`main_covers`）: 試したことは無い。`fold_main_log` が記録の全部を畳むので、範囲の形では main が S に持つ path を作れない見込み（D）。次に要る試作: `main_commits_recorded`・`main_paths_recorded` を確定した履歴に足し、S での main の状態を builder が書く要約（S 以前の最新の状態の行）から読む形と全件を比べる。約 200 行の見込み。
+- (ii)（追試でも unresolved） `post_landing_book`: 次に要る試作: revert と CI の失敗を範囲の前の着地に付け、範囲の run だけの seek と全件を比べる。約 100 行。
+- (ii)（追試でも unresolved） goal の属性: goal の作成・変更を範囲の前に置き、範囲の task の goal の E 以前の最新の seek と比べる。約 100 行。
+- (ii)（追試でも unresolved） update・backend の失敗・run の無い ask と repair、`stall_config`: 1 件ごとの行で、S 以降の行と E 以前の最新の seek の形。開いた run の無い ask は B。約 150 行。
 - (i) 名指す proposal の task の読む量（追試で holds）: 試したことは、2 段目の task の records を `Named::names` で全部返す形で答えが一致したことだけ。止まった理由: 作り直しの上限の 3 回に達した（人の答え ask 1656 で unresolved にしてよいとされた）。次に要る試作: 範囲の前に終わった proposal の task（task 66）に範囲の前の `task_priority_changed` を 30 件と 3000 件足し、その task は E 以前の最後の `task_status_changed` と後の `task_reopened` だけを読む形にして、`improvement_proposals` を含む答えが全件と同じで返る earlier が 30 と 3000 で同じことを比べる。約 60 行。
 - (i) run の session が開いたままかの判定（追試で holds）: 試したことは無い（試作の `open_at_end` は件数の比べ）。止まった理由: 上限の 3 回（ask 1656）。次に要る試作: `open_at_end` の session を close の `opened_event_id` で対にし（`take_earlier` と同じ規則）、着地した古い run に open と `opened_event_id` の無い close、重複した close を置いて（`numbered` で補わない）、全件の読みと比べる。約 60 行。
 - (i) improvement_proposals の goal を通る所属（追試で holds）: 試していない。止まった理由: 作り直しの上限の 3 回に達した（3 回目が task が直に名指す所属の 2 段目）。次に要る試作: goal を範囲の前に作り、その goal を proposal に `goal_submitted` で入れ、goal の task の片方を範囲の前に、もう片方を範囲で完了させ、finding で proposal を結んで、`goal_submitted` からの 3 段の seek と全件を比べる。約 80 行。
-- (ii) `candidates_sampled`: 試していない。次に要る試作: 確定した単位ごとに supervisor の生存と `candidates_sampled` を置き、S をまたぐ標本と、範囲の前に生存が終わった supervisor の標本を足して、`kpi` の candidates の値を全件と比べ、30/3000 で読んだ行の数を比べる。約 100 行。
+- (ii)（追試でも unresolved） `candidates_sampled`: 試していない。次に要る試作: 確定した単位ごとに supervisor の生存と `candidates_sampled` を置き、S をまたぐ標本と、範囲の前に生存が終わった supervisor の標本を足して、`kpi` の candidates の値を全件と比べ、30/3000 で読んだ行の数を比べる。約 100 行。
 - (ii) `live_alert_stream`: records が開いている stream の中で伸びるので、行の数でなく records の読みの問い。goal 273（ADR-t4644-1 の写さない kind と task 4660・4646）と Spike 4663（queue 行を要る列に絞る測定）が持つので、ここでは試作しない。
 
 ## 後続の draft への推奨
@@ -199,10 +201,10 @@ goal 273 と Spike 4663 と重ねない: (C, S] の写さない kind の queue �
 - 新しい task（builder の 2 つの表）: 開いたまま残した行の表と、最初の Execution の表を足す migration と builder の書き込み。run の session は close の `opened_event_id` で対にして表に入れる（全件の読みの `take_earlier` と同じ規則。追試で holds）。今の行から埋める段と、無い store では全件の読みに戻す形を含める。約 400〜600 行。4122 の前提。
 - 4122（store の範囲の読みと小さな読み）: `earlier_in` の task・run・session 行の部分を「読みの約束」の 3〜5 に置き換え（session 行と名指す proposal・goal の task は追試の推奨、U_E は追試の (iii-d) が unresolved なので付けない）、queue 行を 6 の形で読む。`LedgerWindowRead` に R・W（`ledger_marks`）を足し、小さな読みは (iii) の条件で絞る。SQLite の adapter の test で `EXPLAIN QUERY PLAN` が索引を使うことを確かめる。
 - 4132（domain の範囲の関数）: `take_earlier` は今のまま使える（渡す record が減るだけ）。名指すものの集め方（試作の `Named`）を domain に置く。
-- 4133（kpi の配線）・4134（report の配線）: 受け入れの比較に、試作の 30 と 3000 単位の履歴と `Reads` の和の数え方を使う。(ii) の unresolved の kind を読む問いは範囲が決まらない問いに入れる。
+- 4133（kpi の配線）・4134（report の配線）: 受け入れの比較に、試作の 30 と 3000 単位の履歴と `Reads` の和の数え方を使う。範囲が決まらない問いに入れる問いは「追試 (ii) queue 行（Spike 4756）」の「後続の draft への推奨」が持つ。
 - 4677（run_events の小さな読み）: (c)(d) の claim と (g) の `TASK_MARK_KINDS` を (iii) の条件で返す。(f) の cursor の時刻は見える event だけで引く。(iii) の条件と U_E は追試の「後続の draft への推奨」が持つ。
 - supervisor の report の経路の draft: `SupervisorQueue` を通る読みも R・W を同じ snapshot で読む（task 4660 の `ledger_rows_covered` と同じく 1 回の要求で返す）。
-- 新しい Spike か試作の task（(ii) の unresolved の kind（`candidates_sampled` を含む）。(i) の 4 つは追試（Spike 4755）で holds になり、(iii) は追試（Spike 4754）が済ませて U_E だけが追試の「未解決」に残る）: 上の「未解決」の試作。kpi の candidates を読む問いは、その判定まで範囲が決まらない問いに入れるか、4133・4134 のその部分を draft のまま残す。main の記録の判定が does_not_hold なら、`--by area` などは範囲が決まらない問いに入れる。
+- 新しい Spike か試作の task（(ii) の unresolved の kind は追試（Spike 4756）が判定を出し、推奨はその節の「後続の draft への推奨」が持つ。(i) の 4 つは追試（Spike 4755）で holds になり、(iii) は追試（Spike 4754）が済ませて U_E だけが追試の「未解決」に残る）: 上の「未解決」の試作。(ii) は追試でも unresolved の部分が残り、範囲が決まらない問いに入れる問いはその節の推奨が持つ。
 
 ## 追試 (iii) 可視性（Spike 4754）
 
@@ -346,7 +348,7 @@ sh scripts/check-local-gates.sh --base e80bf6d961971db0e670de2c7f7a613ee964102b
 
 追試の形の行・earlier・Execution は 30 と 3000 で同じで、今の読みの earlier と全行の読みの行と records は単位（(i-b) は task 66 の変更の数）に比例して増える。test はこの増え方も確かめる（今の読みの earlier と全行の読みの行が 3000 で 30 の 25 倍を超える。(i-b) は今の読みの earlier と全行の records が 2,970 以上増える）。
 
-比べなかった場合: SQLite の adapter の SQL（下の SQL は試作の in-memory の条件と同じ式だが流していない）。`goal_review` など planner と plan review 以外の session 行（試作の履歴に無い）。`--compare`・`--goal`・report の経路。
+比べなかった場合: SQLite の adapter の SQL（下の SQL は試作の in-memory の条件と同じ式だが流していない）。範囲の前の revert が範囲の run の commit を target にする場合（試作は sha でだけ引く）。snapshot と S の間の派生の mark（supervisor の start など。単位の後の snapshot の場合はその間に無い）。要約の `main_observed` の `reverts` は fixture に合わせて true に固定した。`goal_review` など planner と plan review 以外の session 行（試作の履歴に無い）。`--compare`・`--goal`・report の経路。
 
 ### 判定
 
@@ -382,3 +384,122 @@ sh scripts/check-local-gates.sh --base e80bf6d961971db0e670de2c7f7a613ee964102b
 - 4122（store の範囲の読み）: `earlier_in` の session 行の部分を key の接頭辞の範囲の読みに替え、名指す proposal の task と goal の task の終わりの seek を足す。SQLite の adapter の test で、上の 4 つの場合を全件と比べ、`EXPLAIN QUERY PLAN` が主キーと足した索引を使うことを確かめる。約 150 行。
 - 4132（domain の範囲の関数）: 名指すものの集め方（試作の `Named`）に actor の `planner:<id>`、`plan_review_id` の text、読んだ finding が結ぶ proposal、goal の task の集め方と `member_end` を置く。約 100 行。
 - 4133・4134（kpi・report の配線）: `planner_routes` を読む問いは (i) では「範囲が決まらない」に入れなくてよい。`improvement_proposals` も (i) では入れなくてよいが、上の「未解決」の (ii) の finding の読みの判定までは finding の行を全部読む。受け入れの比較に上の 4 つの場合を足す。「範囲が決まらない」に入れる問いは (i) からは無い（(ii)・(iii) の判定に従う）。
+
+## 追試 (ii) queue 行（Spike 4756）
+
+上の「未解決」の (ii) の部分（live_alert_stream を除く）を、上の試作を広げて全件の読みと比べ直した。判定は **unresolved**（(ii-a) の「古い snapshot と範囲の間の mark」は **does_not_hold**）。どの部分も 30・300 単位の答えと 30・3000 単位の行の数では全件と一致したが、最終の形で 3000 単位の答えを比べる前に調査の上限（3 時間）に達し、baseline・main の読む量・post_landing の反例・goal の最新の seek・finding の proposal の結びは要る形で比べていない（下の「判定」と「未解決」）。(i) は「追試 (i) earlier（Spike 4755）」、(iii) は「追試 (iii) 可視性（Spike 4754）」が持つので、ここでは扱わない。`live_alert_stream` は goal 273 と Spike 4663 が持つので試作していない。
+
+### 環境
+
+- 対象の commit: `deb4d35a408b08a27f93740949c1c1555b58183d`（この run の base。(i)・(iii) の追試の試作と文書を含む）。
+- host: Apple M1、macOS 27.2.1（Darwin、arm64）。
+- 道具: `rustc 1.99.1 (58cf8f9c3 2026-10-13)`、`cargo 1.99.1 (5f94df478 2026-08-27)`、`cargo-nextest`。
+- provider と経路: 本番 queue の Spike の run（task 4756）の Claude Code の headless の worker の turn の中で、自分の worktree の shell から流した。試作は上と同じ in-memory の `#[cfg(test)]` の test で、SQLite の adapter は使っていない。本番の queue と DB は読んでいない（合成の event だけ）。
+- 使った時間と回数: 上限 3 時間に対して約 3 時間（17:30〜20:30 UTC。review の指摘で S をまたぐ場合の時刻を直して流し直した約 25 分を含む）に、2 回目の review の手直しの約 30 分（文書と receipt だけ。上限に達しているので試作は広げず、判定を unresolved に揃えた）。内訳は（コードの読みの約 30 分と fixture・比べ方の土台の約 25 分は部分に共通、debug build の test の待ちを含む）。部分ごとの時間と試作の作り直し（形を変えて全件と比べ直すこと、上限は部分ごとに 3 回）は、(ii-a) 約 35 分・1 回（1 回目の形は S 前に最後に始まった supervisor だけを読み、main の cover の判定が全件と食い違った。2 回目に範囲の records が名指す supervisor と、範囲の task を名指す snapshot を足して一致）、(ii-f) 約 5 分・0 回、(ii-b) 約 20 分・0 回、(ii-e) 約 10 分・0 回、(ii-d) 約 5 分・0 回、(ii-c) 約 10 分・0 回（1 回目の fixture に単位ごとの CI の失敗と revert が無かったので足した。読みの形は変えていないので作り直しに数えない）。文書と review は約 35 分。
+- 差分の大きさ: 試作 約 1,220 行、文書 約 150 行。試作の途中（main の要約と goal の比べを足した所）で目安の約 1,200 行に達したので、それ以降は試作を広げず（累計の mark の表などを試さず）、test の時間を抑える形の直しだけをした。
+- debug build の時間: 単位ごとに claim の待ち（`slots_full`・`claim_hold`）と task を持つ 3000 単位の履歴は、台帳を作る係の fold が待ちと開いた task の組に比例し（1000 単位で約 22 秒、task を外すと約 1.6 秒）、全件の `kpi` は supervisor の生存を始まりごとに全 event から引く（3000 単位の生存で 1 部分に約 6 分）。そのため test は、答えを 30 単位（単位の task と run を含む）と既定 300 単位（単位の task と run を外した `queue_units_only`）で比べ、行の数を 30 単位と 3000 単位（同じく task を外す）で比べる。答えを 3000 単位で比べた実行は `DAGQ_SPIKE_4756_LARGE=3000` で 1 回流した（下の「打ったコマンド」）。
+
+### 読んだコードと打ったコマンド
+
+読んだコード（上の節に足したもの）:
+
+- `src/domain/ledger/queue.rs` の module doc と `of_kind`（待ちは区間の行、ほかの kind は 1 件ごとの行）、`src/domain/ledger/owner.rs::queue_wide`。
+- `src/domain/kpi/window.rs`: `supervisor_lives`（生存は次の start・自分の stop・古い heartbeat・最後の event で終わる）、`slots_held`、`candidates`（標本は次の標本かその supervisor の生存の終わりまで）、`forecast_kpis`。`src/domain/supervisor_life.rs`（`Life`・`heartbeats`。次の start で終わらない）。
+- `src/domain/stats/main_log.rs`（`fold_main_log`・`covers`・`supervisor_alive_at`・`history_for`）、`src/domain/stats/conflicts.rs`（窓の commit と今の path）、`src/domain/areas.rs::landed_commits`、`src/domain/ledger/post_landing.rs::fold`（revert の記録と CI の記録の始まりと届き、`recorded` の集合）。
+- `src/domain/forecast/score.rs`（snapshot と終わりの間の mark を数える。撤回された mark を除く）、`src/domain/marks.rs`（`mark_recorded`・`mark_retracted`、supervisor の start などの派生の mark）。
+- `src/domain/ledger/attributes.rs`（goal の `goal_created`・`goal_updated` は event の `goal_id`、baseline の印）、`src/domain/stall.rs::StallConfig::loaded`（最後の 1 件）、`src/application/stats.rs::of_window`・`src/application/kpi.rs::with_input`。
+
+打ったコマンド:
+
+```sh
+git log -1 --format=%H
+rustc --version; cargo --version; uname -sm
+sh scripts/cargo-brief.sh cargo nextest run --locked --lib -E 'test(/earlier_visibility_spike::(the_waits|a_snapshot_after|the_candidates|main_s_record|what_befell|the_goals_of|the_updates|every_queue_part)/)' --no-capture
+DAGQ_SPIKE_4756_LARGE=3000 sh scripts/cargo-brief.sh --log $TMPDIR/large3000.log cargo nextest run --locked --lib -E 'test(/earlier_visibility_spike::(the_waits|a_snapshot_after|the_candidates|main_s_record|what_befell|the_goals_of|the_updates)/)' --no-capture
+sh scripts/cargo-brief.sh cargo fmt --all --check
+sh scripts/cargo-brief.sh cargo clippy --locked --all-targets -- -D warnings
+sh scripts/check-local-gates.sh --base deb4d35a408b08a27f93740949c1c1555b58183d
+```
+
+### 試作
+
+同じ `src/application/ports/observation/earlier_visibility_spike.rs` に足した。どれも未配線の `#[cfg(test)]` で、runtime の読みは変えていない。
+
+- 履歴（`history_ii(settled)`）: 上の `history` の確定した単位のそれぞれに、その単位だけの supervisor（`u<k>`）の start・alive・stop と、その supervisor の `slots_full`・`claim_hold`・`landing_hold` の区間、`candidates_sampled`、撤回される `mark_recorded`、単位の task の snapshot、単位の goal の作成と変更、`update_failed`・`backend_call_failed`・run の無い ask と答え・`auto_repaired`・`stall_config_loaded`、main の commit（file を足し、2 単位ごとに前の file を消して前の commit を revert し、10 単位ごとに名を変える）と `main_observed`・`ci_checked`・`ci_turned_red` を足す（`add_queue_units`）。範囲をまたぐ場合（`add_queue_cases`）は、単位の後に始まり範囲の中まで生きる supervisor `s3` と S の前の標本、S をまたぐ待ちと開いたままの claim の hold、範囲で撤回される mark と撤回されない mark、範囲で答える run の無い ask と答えの無い ask、範囲の前に作って変えた goal 700 と範囲で作って着地する task 67、範囲の前に着地した run 60 の commit `c60` と範囲の run 65 の `r65`、範囲で同じ commit をもう一度記録し `c60` を revert し、`r65` と `c60` で CI が赤くなる場合。
+- S は kpi の週の問い（`--period week --last 2`、比べの週を含めて 6 週）の読みの始まりで、day 161 の月曜（約 161.3 日目）。S をまたぐ場合は day 155〜160 に置いた（review の指摘で、1 回目の fixture の待ち・mark・ask が S の後にあったのを直した。読みの形は変えていない）。
+- 狭めた読み（`queue_ii(rows, S, kinds, QueueShape)`）: 4678 の `queue_narrowed`（S に終わっていないか S 以降の record を持つ行、kind ごとの S 前の最後の行、`queue_before` の行）に、部分ごとの読みを足す。main の記録は `main_summary` が S 前の行を builder の要約の 1 行（S での path・記録の始まりと届き・Git の読みの状態・CI の記録の最初と最後の check）に置き換え、範囲が名指す sha の commit の行を足す。
+- 答えは kpi の 4 問と `--by area`（`[areas]` つき）、`stats --since`（2 日前）`--full`（`[areas]` つき）の JSON 全体と、日の問いの窓の `main_covers` と run 60・65 の `post_landing_book` を全件の読みと比べる（`queue_misses`）。読む量は 4678 の `Reads` の queue 行のうち部分の kind の行（main は要約の行を含む）を数える。
+
+| test | 部分 | 比べたもの |
+| --- | --- | --- |
+| `the_waits_lives_marks_and_snapshots_read_by_their_range_answer_as_every_row` | (ii-a)、snapshot は day 3（単位より前） | 4678 の形は 2 件食い違う（`main_covers` と `conflict_hotspots` の理由が `SupervisorStopped` と `Stale`、snapshot の比べの層）。狭めた形の食い違いは `forecast.marks_between` だけ（30 単位で 6 と 66、300 単位で 6 と 606。食い違いの記録は 64 件で打ち切る）で、読む行は 159 と 6,099（30/3000、全行は 526 と 27,256） |
+| `a_snapshot_after_the_settled_history_reads_its_marks_by_the_range` | (ii-a)、同じ snapshot を単位の後（day 158）に置き、snapshot と S の間に撤回されない mark を置く | 30 と 300 単位で答えが一致。読む行 96 と 96（全行 527 と 27,257） |
+| `the_candidates_sampled_read_by_their_range_answer_as_every_row` | (ii-f) | 4678 の形も一致。読む行 3 と 3（全行 32 と 3,002） |
+| `main_s_record_read_from_a_summary_answers_as_every_row` | (ii-b) | 4678 の形は run 60 の CI の記録が `before_record`（全件は `recorded`）。要約の形は一致し、読む行 5 と 5（全行 99 と 9,009） |
+| `what_befell_a_landing_read_by_the_range_answers_as_every_row` | (ii-c) | 一致。`ci_turned_red` の読む行 4 と 4（全行 32 と 3,002）。revert は main の記録の行で (ii-b) の読みに入る |
+| `the_goals_of_the_range_s_tasks_read_by_the_goal_answer_as_every_row` | (ii-d) | 4678 の形は goal 700 の属性（report が読む `goal_summaries`）を落とす（kpi・stats の答えは一致）。goal の seek の形は一致し、読む行 5 と 5（全行 62 と 6,002） |
+| `the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row` | (ii-e) | 4678 の形は S をまたぐ run の無い ask を 1 つ落とし `ask_wait` が食い違う（`n` 1 と 2）。ask の seek を足した形は一致し、読む行 11 と 11（全行 186 と 18,006） |
+| `every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row` | 全部の queue の kind（4678 の kind を含む）を同時に狭める（snapshot は day 158） | 30 と 300 単位で答えが一致。queue 行は 136（30 単位、task を外すと 136）、136（300）、136（3000）で、全行は 1,168・1,138・8,698・84,298 |
+
+`DAGQ_SPIKE_4756_LARGE=3000` の実行（goal の比べと S をまたぐ場合の直しを足す前の木。goal 700 の属性と S をまたぐ待ち・mark・ask はこの実行では比べていない）では、答えの比べを 3000 単位で流した 5 つ（`a_snapshot_after_…`・`main_s_record_…`・`the_candidates_…`・`the_goals_of_…`・`the_updates_…`）が 30 単位と同じ行の数で全件と一致した（1 本 4〜6.5 分）。`the_waits_…`（day 3 の snapshot）と `what_befell_…` は background の 30 分の上限で止まり、3000 単位の答えは出ていない（300 単位では上の表のとおり）。
+
+比べなかった場合: SQLite の adapter の SQL（下の SQL は試作の in-memory の条件と同じ式だが流していない）。`main_rewritten`・`main_reverts_imported` の `unread`（試作の履歴に無い）。複数の branch の CI の記録。`--compare`・`--goal`・report の経路（report は同じ `LedgerWindow` の関数を読むが流していない）。
+
+### 判定
+
+全体で **unresolved**。4678 の「判定」の (ii) の表の該当の行はこの判定に従う。test の名前は上の表のもの。答えの比べ（`queue_misses`）は kpi の 4 問と `--by area` の JSON 全体と `stats --since --full` の JSON 全体なので、表の「読む fold」に書いた読み手の出力（stats と kpi の欄の名前）はどれもその比べに入る。答えは全件の読みと JSON 全体で 30 と 300 単位（最終の木）で比べ、読む量は部分の kind の queue 行を 30 と 3000 単位で数えた。受け入れの求める 3000 単位の答えの比べは最終の木で流しておらず（上の 3000 単位の実行は直す前の木で、2 本は済んでいない）、上限に達したので、どの部分も holds とせず unresolved とし、30・300 単位で見えたことを「見込み」として書く。
+
+| 部分・kind | 読む fold | 判定 | 見込みの読みの形 | 30・300 単位で見えたこと | 足りない根拠 |
+| --- | --- | --- | --- | --- | --- |
+| (ii-a) `slots_full`・`claim_hold`・`landing_hold` | `pre_claim` の区間、`slots_held` | unresolved（見込み holds） | 4678 の約束 6 のまま | S をまたぐ区間（day 158・159 に開始）で答えが一致、各 2 / 2 | 3000 単位の答え |
+| (ii-a) supervisor の生存と heartbeat | `kpi::supervisor_lives`・`supervisor_life::Lives`・`main_log::supervisor_alive_at` | unresolved（見込み holds） | S 前に最後に始まった supervisor と範囲の records が名指す supervisor の `supervisor_started` と kind ごとの S 前の最後の行（`json_extract(payload, '$.supervisor')` の部分の式の索引） | 4678 の形は `main_covers` が `SupervisorStopped`（全件は `Stale`）。足した形は一致、started 2 / 2・alive 80 / 80・stopped 1 / 1 | 3000 単位の答え |
+| (ii-a) mark の撤回 | `forecast::score`・`marks` | unresolved（見込み holds） | 読んだ mark を名指す `mark_retracted`（`json_extract(payload, '$.mark')`）と範囲の撤回 | S 前の mark が範囲で撤回・S 前で撤回・撤回されない場合で一致、2 / 2 | 3000 単位の答え |
+| (ii-a) forecast の snapshot | `forecast::score` | unresolved（見込み holds） | 範囲の task を名指す snapshot を builder の target の表で引く | 4678 の形は比べの層が食い違う。足した形は一致、1 / 1 | 3000 単位の答え |
+| (ii-a) snapshot と範囲の間の mark | `forecast::score` の `marks` | **does_not_hold**（snapshot が確定した履歴より古いとき） | 最も古い名指す snapshot から S までの mark を読むほかない | 読む行 159 → 6,099、派生の mark を読まないと `marks_between` が 6（全件は 66、300 単位で 606） | — |
+| (ii-a) baseline の印 | `attributes::fold_within`・`findings::fold_within` | unresolved | 試作は印の行を全部読む | fixture の印は testkit の各 1 件だけで単位ごとに増えない。docs/design/attribute-records.md の「基準と照合」は繰り返す照合と組の印を認めるので、組を単位ごとに増やすと試作の読みは増える | 組を単位ごとに増やした履歴での比べ |
+| (ii-f) `candidates_sampled` | `kpi::Context::candidates` | unresolved（見込み holds） | 4678 の約束 6 のままと supervisor の形 | 一致、3 / 3 | 3000 単位の答え（直す前の木では一致） |
+| (ii-b) main の記録 | `fold_main_log` | unresolved | builder の要約と sha の表（試作の `main_summary`） | 答えは一致。ただし 5 / 5 は 4678 の `Reads` の単位でない: 要約の行を 2 回数え、sha で引いた `main_commits_recorded` と CI の check は要約の行の records に詰めて数えていない。`main_paths_recorded` は単位の外の 1 件だけ | builder が S ごとに保存する要約と、問いごとの sha の検索で返す行・event を分けて数えた比べ |
+| (ii-c) `post_landing_book` | `post_landing::fold` | unresolved | (ii-b) の要約と範囲の `ci_turned_red` | fixture の場合では一致したが、反例を通っていない: 範囲に届く run 60 の `c60` で S 前に CI が赤くなり後で別の sha で赤くなると、`queue_narrowed` は後者だけを残し要約も失敗を補わないので `count`・`first_at` が違う。古い revert は seek が `commit.sha` しか照らさず target を照らさないので落ちる。CI の check は branch ごとでなく全体の最初と最後だけを残す | 上の反例を置いた比べと、範囲の run の S 前の失敗と revert の seek |
+| (ii-d) goal の属性 | `attributes::fold_within` の goal | unresolved | 範囲の task が名指す goal の E 以前の最新の seek | 4678 の形は report の `goal_summaries` で goal 700 を落とす。試作は名指す goal の行を全部読み、goal 700 の履歴は 2 件に固定 | goal 700 自身の確定した変更を単位ごとに増やし、最新だけを読む形の比べ |
+| (ii-e) `update_failed` | `stats::updates::updates`（`UPDATE_EVENT_KINDS` の id が窓の中の event だけ）。stats の `updates` | unresolved（見込み holds） | 4678 の約束 6 のまま（範囲の行。読み手が窓の外の event を読まない） | `the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row` と `every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row` が stats の JSON の `updates` を比べ一致。fixture の `update_failed` は e2e の段の `failed_tests` を持つ形だけ | 3000 単位の答え。`update_started` から `update_installed` までの組のように範囲の前に始まる段は fixture に無い |
+| (ii-e) `backend_call_failed` | `stats::backend_failures`（`src/domain/stats.rs`、id が窓の中の event だけ）。stats の `backend_failures` と、kpi がその数から出す `backend_failures_per_run` | unresolved（見込み holds） | 4678 の約束 6 のまま | 同じ 2 つの test が stats の `backend_failures` と kpi の `backend_failures_per_run` を比べ一致 | 3000 単位の答え |
+| (ii-e) `auto_repaired`（run の無いもの） | `stats::auto_repairs::auto_repairs`（id が窓の中の `auto_repaired` と `ask_opened` を日ごとに数える）。stats の `auto_repairs` | unresolved（見込み holds） | 4678 の約束 6 のまま | 同じ 2 つの test が stats の `auto_repairs`（日ごとの `asks_opened` を含む）を比べ一致。fixture の payload に `repair`・`layer` が無く、どれも `unknown` に数えた | 3000 単位の答え。`repair`・`layer` を持つ payload |
+| (ii-e) `stall_config_loaded` | `StallConfig::loaded`（窓の event のうち最後の 1 件）を `application::stats::stall_config` が読む。stats の `stall_config` | unresolved（見込み holds） | E 以前の最後の 1 件（`events_by_kind` を id の降順に 1 件）。4678 の約束 6 の kind ごとの S 前の最後の行と範囲の行で同じになる | 同じ 2 つの test が stats の `stall_config` を比べ一致（範囲に無く、S 前の最後の day 152 の 1 件が読まれる場合） | 3000 単位の答え。範囲の中に `stall_config_loaded` がある場合 |
+| (ii-e) run の無い ask と答え（`ask_opened`・`ask_answered`） | `stats::asks::asks`（`tracks` は E までの全 event で ask を対にする）と `stats::asks::human_waits`、`stats::ask_seen::seen_waits`。stats の `asks`、kpi の `ask_wait`・`ask_apply_wait`・`ask_seen_wait`、kpi の `asks_per_landing`（窓の中の `ask_opened` を数える） | unresolved（見込み holds） | 範囲の答えが名指す ask の `ask_opened`（`json_extract(payload, '$.ask_id')` の部分の式の索引）と、開いたまま残した行の表の答えの無い ask | 同じ 2 つの test。4678 の形は S をまたぐ ask を落として kpi の `ask_wait` が食い違う（`n` 1 と 2）。足した形は stats の `asks` と kpi の 4 つが一致、(ii-e) の kind の行は 11 / 11 | 3000 単位の答え。答えを適用する event（`ask_apply_wait`）が run の無い ask に付く場合は fixture に無い |
+| finding が結ぶ proposal（追試 (i) の「未解決」の留保） | `kpi::improvement_proposals` | unresolved | S 前に proposed から settled になった finding の結びを読む形 | この追試の fixture に無く、`queue_narrowed` の finding の読みも変えていない | 追試 (i) の「未解決」の試作（約 50 行） |
+
+- 全部を同時に狭めた読み（`every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row`）は 30 と 300 単位で答えが一致し、queue 行の和は 30・300・3000 単位で 136。ただし main の数は上の (ii-b) と同じく 4678 の単位でない。
+- ADR-t1662-2 決定 1・7・8 との関係（見込み）: 足す表（snapshot の target、main の commit の sha、main の要約、開いたまま残した行の表の queue の ask）は event だけから作り直せる台帳の一部（ビュー）で、行の形と `ledger_v` を変えない。今ある台帳には無いので、埋めるまで全件の読みに戻す。
+- does_not_hold の部分の意味: kpi の既定の問いの `forecast`（`details.forecast` の `marks_between` と `forecast.*` の層）は、範囲の task を名指す snapshot が確定した履歴より古いと、その間の mark を読まずに答えが出ない。4678 の (iv) の「snapshot の古い問いは範囲が決まらない」を mark について裏づけた。
+
+### 読みの約束の更新
+
+- 約束 6 は 4678 のまま（(ii) で unresolved の kind は全ページで読む）。この追試の判定がどれも holds でないので約束に入れない。見込みの形（上の「判定」の表）は、次の試作で holds になったものから約束 6 に足す。
+- 約束 6 の finding の読み（S に開いているか範囲の record を持つ行）は、追試 (i) の「未解決」のとおり、S 前に proposed から settled になった finding が結ぶ proposal を落としうる。その判定まで `improvement_proposals` を読む問いは finding の行を全部読む留保を残す。
+- 約束 1〜5・7 は変えない。
+
+### 未解決
+
+調査の上限（3 時間）と差分の目安（約 1,200 行）に達したので、次の部分を unresolved として止めた。作り直しの回数は (ii-a) 1 回、ほかは 0 回で上限の 3 回には達していない。
+
+- 3000 単位の答え（(ii-a) の待ち・supervisor・撤回・snapshot、(ii-f)、(ii-e)）: 試したことは、30 と 300 単位（task を外した履歴）の答えと 30・3000 単位の行の数の比べ。止まった所: 3000 単位の答えは直す前の木で 5 本だけ済み、最終の木（S をまたぐ場合と goal の比べを足したもの）では流していない。理由: debug build で全件の `kpi` が 3000 の supervisor の生存を始まりごとに全 event から引き、1 本約 4〜6.5 分、待ちの fold も単位の task に比例して遅く、2 本は 30 分で済まなかった。次に要るもの: release build か、fixture の supervisor を単位ごとに作らず生存の行だけを増やす形で、最終の木の 3000 単位の答えを流すこと（試作の変更は約 30 行、流す時間は release で数分の見込み）。
+- baseline の印: 試したことは、testkit の各 1 件の印で全部の印を読む形。止まった所: 照合の組を単位ごとに増やす履歴を作っていない。次に要る試作: 単位ごとに照合の組（task の baseline と queue の印）を足し、S 以前の最新の組の印だけを読む形と全件を比べる。約 80 行。
+- (ii-b) main の読む量: 試したことは、要約と sha の検索を 1 つの行に詰めた形で答えが一致したこと。止まった所: 返す量を 4678 の `Reads` の単位で数えていない（要約の重複、sha の検索の event を数えない）。単位ごとの `main_paths_recorded` も無い。次に要る試作: builder が保存する要約の行と、問いごとの sha の検索が返す event を別々に数え、単位ごとに paths の記録も足して 30・3000 単位で比べる。約 80 行。
+- (ii-c) post_landing: 止まった所: 範囲に届く run の S 前の CI の失敗、範囲の run の commit を target にする S 前の revert、複数の branch の CI の記録を fixture に置いていない。次に要る試作: その 3 つを置き、範囲の run の着地の commit で失敗と revert の target を引く seek と branch ごとの記録の要約と全件を比べる。約 100 行。
+- (ii-d) goal の最新の seek: 止まった所: 試作は名指す goal の行を全部読み、goal 700 の変更は 2 件に固定。次に要る試作: goal 700 の確定した `goal_updated` を単位ごとに増やし、E 以前の最新の `goal_created` か `goal_updated` とその後の状態の変化だけを読む形と比べる。約 60 行。
+- finding が結ぶ proposal: 追試 (i) の「未解決」の試作（約 50 行）がこの追試にも入っていない。
+- does_not_hold の (ii-a) mark の代わり: mark の数を builder が累計の表に書けば行を読まずに `marks_between` を数えられる見込みだが、`forecast::score` が mark の event を受け取る形を変えることになり試していない。約 150 行。
+
+### 後続の draft への推奨
+
+goal 273（task 4660・4646）と Spike 4663 と重ねない: `live_alert_stream` の records と (C, S] の写さない kind は goal 273 に、queue 行を要る列に絞ることは Spike 4663 に任せる。この追試は「どの queue 行を読むか」だけを扱う。
+
+判定が unresolved なので、(ii) の kind は判定が出るまで今の全ページの読みのまま（4678 の約束 6）。同じ部分の Spike を重ねるより、planner が次のどちらかを決める: (a) (ii) の kind を読む問いを「範囲が決まらない」に入れる小さい範囲、(b) 上の「未解決」の試作（合わせて約 400 行と 3000 単位の実行）を実装の task の受け入れの比較に入れて、その中で確かめる。
+
+- 「範囲が決まらない」に入れる kpi・report の問い（(a) のとき）: (ii) の kind を読む問いの全部。kpi の既定の問い（`slot_usage` と `slot_check` の supervisor の生存、`candidates`、`forecast`、`ask_wait` の run の無い ask、`improvement_proposals` の finding、post_landing の `details.post_landing`）、`--by area`、stats の `conflict_hotspots`・areas・`main_covers`・updates・backend の失敗、report の `goal_summaries` と observer の kpi。forecast は snapshot が古いとき does_not_hold なので (b) でも残る。これだと goal 271 の受け入れ 1 の範囲の読みが kpi・report の既定の問いに残らないので、受け入れを弱めずに人へ scope の planner_question を上げる。
+- builder の表の新しい task: (b) のとき、snapshot の target の表、main の commit の sha の表（revert の target と CI の失敗の sha を列に）、main の要約の行（S 以前の最新と branch ごとの CI の記録）、開いたまま残した行の表の queue の ask を、4678 と (i) の追試の 2 つの表に足す見込み。約 300 行の追加（4678 の約 400〜600 行と合わせて）。判定までは draft のまま。
+- 4667（索引の migration）: (b) のとき `json_extract(payload, '$.supervisor')`・`'$.mark'`（`mark_retracted`）・`'$.ask_id'`（`ask_opened`）の部分の式の索引。約 30 行。(a) なら足さない。
+- 4122（store の範囲の読み）: (a) なら queue 行は今の全ページのまま（変更なし）。(b) なら約束 6 に判定の出た kind の形を足し、adapter の test で `EXPLAIN QUERY PLAN` を確かめる。約 200 行。
+- 4132（domain の範囲の関数）: (b) のとき名指すものの集め方（試作の `queue_ii` と `main_summary`）に supervisor・範囲の task と goal・sha・ask を足す。約 150 行。(a) なら追加なし。
+- 4133（kpi の配線）: (a) なら範囲が決まらない問いの判定（上の kpi の問いを全件の読みに戻す分岐）と、範囲で読む残りの問いの 30・3000 単位の受け入れの test。約 120 行。(b) なら上の「未解決」の場合を受け入れの比較に足し、forecast の snapshot が古いときだけ全件に戻す分岐。約 250 行。
+- 4134（report の配線）: (a) なら report の作成・observer の kpi・push の判定・report_inputs のうち (ii) の kind を読むものを全件の読みに残す分岐と test。約 100 行。(b) なら `goal_summaries` の goal の seek と post_landing の反例を受け入れの比較に足す。約 200 行。

@@ -885,7 +885,7 @@ fn whole_query() -> WindowQuery {
 
 /// The paths of `a` and `b` whose values differ, at most a few.
 fn differences(a: &Value, b: &Value, path: &str, out: &mut Vec<String>) {
-    if out.len() >= 6 {
+    if out.len() >= 64 {
         return;
     }
     match (a, b) {
@@ -2750,4 +2750,1235 @@ fn every_shape_returns_as_many_records_whatever_the_settled_history() {
         "{fulls:?}"
     );
     assert!(fulls[1].1.rows > 50 * fulls[0].1.rows / 2, "{fulls:?}");
+}
+
+// (ii) the queue rows' kinds Spike 4678 left unresolved (Spike 4756).
+
+/// The supervisor that lives across the range: started after the settled
+/// units (whose own starts end every earlier life), alive each day.
+const ACROSS: &str = "s3";
+
+/// The days of the cases of (ii) before the range: after the settled
+/// units (to day 150), before the week's start.
+const QUEUE_BEFORE: i64 = 160 * DAY;
+
+/// The commit of the settled unit `k` on main.
+fn unit_commit(k: usize) -> String {
+    format!("{k:040x}")
+}
+
+/// The changes the settled unit `k`'s commit makes: its file, the
+/// previous unit's file deleted every second unit and renamed every
+/// tenth, so that the paths main has grow and shrink with the history.
+fn unit_changes(k: usize) -> Value {
+    let mut changes = vec![json!({"path": format!("src/u{k}.rs")})];
+    if k % 2 == 1 {
+        changes.push(json!({"path": format!("src/u{}.rs", k - 1), "deleted": true}));
+    } else if k.is_multiple_of(10) && k > 0 {
+        changes.push(
+            json!({"path": format!("src/moved{k}.rs"), "from": format!("src/u{}.rs", k - 1)}),
+        );
+    }
+    Value::Array(changes)
+}
+
+/// The queue's events of (ii) in each of `settled` units, each of its own
+/// supervisor started and stopped in the unit, and the cases across the
+/// range's start once.
+fn add_queue_units(settled: usize) -> impl FnOnce(&mut Log) {
+    move |log: &mut Log| {
+        let span = 139 * DAY;
+        log.add(
+            None,
+            None,
+            "main_paths_recorded",
+            json!({"head": "base", "since": T0 + 10 * DAY, "part": 0, "parts": 1,
+                   "paths": ["src/base.rs", "src/lib.rs"]}),
+            10 * DAY + 10,
+        );
+        for k in 0..settled {
+            let t = 11 * DAY + i64::try_from(k).unwrap() * span / i64::try_from(settled).unwrap();
+            let task = 100_000 + i64::try_from(k).unwrap();
+            let u = format!("u{k}");
+            let at = |offset: i64| T0 + t + offset;
+            let held = json!({"supervisor": u, "reason": "disk"});
+            let full = json!({"supervisor": u, "class": "heavy"});
+            log.add(
+                None,
+                None,
+                "forecast_recorded",
+                json!({"at_secs": at(-5), "method": 1, "goals": [],
+                       "tasks": [{"id": task, "p50_secs": 3600, "p90_secs": 7200}]}),
+                t - 5,
+            )
+            .add(
+                None,
+                None,
+                "supervisor_started",
+                json!({"supervisor": u, "parallel": 2}),
+                t + 1000,
+            )
+            .add(None, None, "slots_full_started", full.clone(), t + 1010)
+            .add(None, None, "slots_full_ended", full, t + 1020)
+            .add(None, None, "claim_held", held.clone(), t + 1030)
+            .add(None, None, "claim_resumed", held.clone(), t + 1040)
+            .add(None, None, "landing_held", held.clone(), t + 1050)
+            .add(None, None, "landing_resumed", held, t + 1060)
+            .add(
+                None,
+                None,
+                "supervisor_alive",
+                json!({"supervisor": u}),
+                t + 1070,
+            )
+            .add(
+                None,
+                None,
+                "candidates_sampled",
+                json!({"supervisor": u, "candidates": 1, "free_slots": 1, "ready": 1,
+                       "claims_held": false}),
+                t + 1080,
+            )
+            .add(
+                None,
+                None,
+                "mark_recorded",
+                json!({"label": u, "note": null, "at": null, "by": "person"}),
+                t + 1100,
+            )
+            .add(
+                None,
+                None,
+                "mark_retracted",
+                json!({"mark": 0, "kind": "mark_recorded", "label": u, "by": "person"}),
+                t + 1110,
+            );
+            let goal = 600_000 + i64::try_from(k).unwrap();
+            add_goal(log, goal, "goal_created", "normal", t + 1200);
+            add_goal(log, goal, "goal_updated", "high", t + 1210);
+            log.add(
+                None,
+                None,
+                "update_failed",
+                json!({"stage": "e2e", "failed_tests": ["e2e::t"], "secs": 10}),
+                t + 1300,
+            )
+            .add(
+                None,
+                None,
+                "backend_call_failed",
+                json!({"op": "claim", "retried": true}),
+                t + 1310,
+            )
+            .add(
+                None,
+                None,
+                "ask_opened",
+                json!({"ask_id": 800_000 + task, "kind": "planner_question"}),
+                t + 1320,
+            )
+            .add(
+                None,
+                None,
+                "ask_answered",
+                json!({"ask_id": 800_000 + task}),
+                t + 1330,
+            )
+            .add(
+                None,
+                None,
+                "auto_repaired",
+                json!({"kind": "stale_lock", "supervisor": u}),
+                t + 1340,
+            )
+            .add(
+                None,
+                None,
+                "stall_config_loaded",
+                json!({"turn_limit_secs": 600 + k}),
+                t + 1350,
+            )
+            .add(
+                None,
+                None,
+                "main_commits_recorded",
+                json!({"after": k.checked_sub(1).map(unit_commit),
+                       "commits": [{"sha": unit_commit(k), "at": at(1400),
+                                    "changes": unit_changes(k),
+                                    "reverts": (k % 2 == 1).then(|| unit_commit(k - 1))}]}),
+                t + 1400,
+            )
+            .add(
+                None,
+                None,
+                "main_observed",
+                json!({"head": unit_commit(k), "at": at(1410), "since": T0 + 10 * DAY,
+                       "reverts": true}),
+                t + 1410,
+            )
+            .add(
+                None,
+                None,
+                "ci_checked",
+                json!({"branch": "main"}),
+                t + 1420,
+            )
+            .add(
+                None,
+                None,
+                "ci_turned_red",
+                json!({"sha": unit_commit(k), "branch": "main"}),
+                t + 1430,
+            )
+            .add(
+                None,
+                None,
+                "supervisor_stopped",
+                json!({"supervisor": u}),
+                t + 1500,
+            );
+        }
+        add_queue_cases(log, settled);
+    }
+}
+
+/// A goal's record of `kind` with its priority.
+fn add_goal(log: &mut Log, goal: i64, kind: &str, priority: &str, secs: i64) {
+    let record = json!({"title": format!("goal {goal}"), "status": "open", "priority": priority});
+    let payload = if kind == "goal_created" {
+        json!({"goal": record})
+    } else {
+        json!({"new": record})
+    };
+    log.add(None, None, kind, payload, secs);
+    log.events.last_mut().unwrap().goal_id = Some(crate::domain::GoalId::new(goal));
+}
+
+/// The cases of (ii) across the range's start: the supervisor across it
+/// and its samples, waits, marks, asks of no run, a goal of a task of the
+/// range made long before, main's record and what befell a landing.
+fn add_queue_cases(log: &mut Log, settled: usize) {
+    let near = (READ_AT_DAY - 1) * DAY;
+    let s = |extra: Value| {
+        let mut payload = json!({"supervisor": ACROSS});
+        for (key, value) in extra.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        payload
+    };
+    log.add(
+        None,
+        None,
+        "supervisor_started",
+        s(json!({"parallel": 4})),
+        151 * DAY,
+    );
+    for day in 151..=READ_AT_DAY {
+        log.add(None, None, "supervisor_alive", s(json!({})), day * DAY + 50);
+    }
+    let sample = |candidates: i64| {
+        s(json!({"candidates": candidates, "free_slots": 1, "ready": 1, "claims_held": false}))
+    };
+    log.add(
+        None,
+        None,
+        "candidates_sampled",
+        sample(2),
+        QUEUE_BEFORE + 10,
+    )
+    .add(None, None, "candidates_sampled", sample(0), near + 2000)
+    .add(
+        None,
+        None,
+        "slots_full_started",
+        s(json!({"class": "heavy"})),
+        158 * DAY,
+    )
+    .add(
+        None,
+        None,
+        "slots_full_ended",
+        s(json!({"class": "heavy"})),
+        near + 2100,
+    )
+    .add(
+        None,
+        None,
+        "claim_held",
+        s(json!({"reason": "disk"})),
+        159 * DAY,
+    )
+    .add(
+        None,
+        None,
+        "landing_held",
+        s(json!({"reason": "disk"})),
+        159 * DAY + 500,
+    )
+    .add(
+        None,
+        None,
+        "landing_resumed",
+        s(json!({"reason": "disk"})),
+        near + 2200,
+    )
+    .add(
+        None,
+        None,
+        "stall_config_loaded",
+        json!({"turn_limit_secs": 900}),
+        152 * DAY,
+    );
+    for (label, at, retracted) in [
+        ("across", 156 * DAY + 100, near + 2300),
+        ("gone", 155 * DAY + 100, 157 * DAY + 100),
+    ] {
+        log.add(
+            None,
+            None,
+            "mark_recorded",
+            json!({"label": label, "note": null, "at": null, "by": "person"}),
+            at,
+        )
+        .add(
+            None,
+            None,
+            "mark_retracted",
+            json!({"mark": 0, "kind": "mark_recorded", "label": label, "by": "person"}),
+            retracted,
+        );
+    }
+    log.add(
+        None,
+        None,
+        "mark_recorded",
+        json!({"label": "kept", "note": null, "at": null, "by": "person"}),
+        159 * DAY + 100,
+    );
+    // Asks of no run: one answered in the range, one never.
+    log.add(
+        None,
+        None,
+        "ask_opened",
+        json!({"ask_id": 8001, "kind": "planner_question"}),
+        157 * DAY + 200,
+    )
+    .add(
+        None,
+        None,
+        "ask_answered",
+        json!({"ask_id": 8001}),
+        near + 2400,
+    )
+    .add(
+        None,
+        None,
+        "ask_opened",
+        json!({"ask_id": 8002, "kind": "planner_question"}),
+        157 * DAY + 300,
+    )
+    .add(
+        None,
+        None,
+        "ask_opened",
+        json!({"ask_id": 8003, "kind": "planner_question"}),
+        156 * DAY + 300,
+    )
+    .add(
+        None,
+        None,
+        "update_failed",
+        json!({"stage": "e2e", "failed_tests": ["e2e::r"], "secs": 10}),
+        near + 2800,
+    );
+    // Goal 700 made long before, changed before the range; its task 67
+    // made and landed in the range.
+    add_goal(log, 700, "goal_created", "normal", 5 * DAY);
+    add_goal(log, 700, "goal_updated", "urgent", 120 * DAY);
+    log.add(
+        Some(67),
+        None,
+        "task_created",
+        json!({"status": "ready", "goal_id": 700, "title": "t67"}),
+        near + 2500,
+    );
+    log.landed(67, &run(67), near + 2510);
+    // Main: run 60 (its row in the range by its ask) landed `c60` before
+    // the range; the range records `r65` (run 65's), records the last
+    // unit's commit again, and reverts `c60`; CI turns red on `r65` and on
+    // `c60`. Git could not be read for a day before the range.
+    let last = settled.checked_sub(1).map(unit_commit);
+    log.add(
+        None,
+        None,
+        "main_commits_recorded",
+        json!({"after": last, "commits": [{"sha": "c60", "at": T0 + 150 * DAY + 3000,
+               "changes": [{"path": "src/c60.rs"}], "reverts": null}]}),
+        150 * DAY + 3000,
+    )
+    .add(
+        None,
+        None,
+        "main_read_failed",
+        json!({"reason": "lock", "at": T0 + 155 * DAY}),
+        155 * DAY,
+    )
+    .add(
+        None,
+        None,
+        "main_read_recovered",
+        json!({"reason": "lock", "since": T0 + 155 * DAY, "at": T0 + 156 * DAY}),
+        156 * DAY,
+    )
+    .add(
+        None,
+        None,
+        "main_observed",
+        json!({"head": "c60", "at": T0 + 156 * DAY, "since": T0 + 10 * DAY, "reverts": true}),
+        156 * DAY + 10,
+    )
+    .add(
+        None,
+        None,
+        "ci_checked",
+        json!({"branch": "main"}),
+        156 * DAY + 20,
+    )
+    .add(
+        None,
+        None,
+        "main_commits_recorded",
+        json!({"after": "c60", "commits": [
+            {"sha": last, "at": T0 + 150 * DAY - 10, "changes": [], "reverts": null},
+            {"sha": "r65", "at": T0 + near + 2900,
+             "changes": [{"path": "src/base.rs"}, {"path": "src/r.rs", "from": "src/lib.rs"}],
+             "reverts": null},
+            {"sha": "rv60", "at": T0 + near + 2950, "changes": [{"path": "src/c60.rs",
+             "deleted": true}], "reverts": "c60"}]}),
+        near + 2950,
+    )
+    .add(
+        None,
+        None,
+        "main_observed",
+        json!({"head": "rv60", "at": T0 + near + 2960, "since": T0 + 10 * DAY, "reverts": true}),
+        near + 2960,
+    )
+    .add(
+        None,
+        None,
+        "ci_checked",
+        json!({"branch": "main"}),
+        near + 2970,
+    )
+    .add(
+        None,
+        None,
+        "ci_turned_red",
+        json!({"sha": "r65", "branch": "main"}),
+        near + 2980,
+    )
+    .add(
+        None,
+        None,
+        "ci_turned_red",
+        json!({"sha": "c60", "branch": "main"}),
+        near + 2990,
+    );
+}
+
+/// The retractions' marks and the landed commits of runs 60 and 65, by
+/// the ids `numbered` gives.
+fn fix_queue_units(log: &mut Log) {
+    let mut marks: HashMap<String, EventId> = HashMap::new();
+    for event in &mut log.events {
+        let label = event.payload["label"].as_str().map(str::to_owned);
+        match event.kind.known() {
+            Some(EventKind::MarkRecorded) => {
+                marks.insert(label.unwrap(), event.id);
+            }
+            Some(EventKind::MarkRetracted) => {
+                event.payload["mark"] = json!(marks[&label.unwrap()]);
+            }
+            Some(EventKind::RunIntegrated) => {
+                for (n, commit) in [(60, "c60"), (65, "r65")] {
+                    if event.run_id.as_ref().map(RunId::as_str) == Some(run(n).as_str()) {
+                        event.payload["commit"] = json!(commit);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn history_ii(settled: usize) -> Log {
+    history_with(settled, add_queue_units(settled), fix_queue_units)
+}
+
+/// [`history_ii`] without the settled units' tasks and runs, whose rows
+/// none of (ii)'s reads names: what builds the ledger folds the waits
+/// against the tasks open (a debug build takes minutes for 3000 units of
+/// both), and the queue rows of (ii) are the same.
+fn queue_units_only(settled: usize) -> Log {
+    without_unit_tasks(history_ii(settled))
+}
+
+/// `log` without the settled units' tasks and runs.
+fn without_unit_tasks(mut log: Log) -> Log {
+    log.events.retain(|e| {
+        e.task_id.is_none_or(|task| task.as_i64() < 100_000)
+            && e.run_id
+                .as_ref()
+                .is_none_or(|run| !run.as_str().ends_with("-2222-4222-8222-222222222222"))
+    });
+    log
+}
+
+/// The subject kind of a queue row.
+fn subject_kind(row: &LedgerRow) -> &str {
+    row.subject.as_ref().map_or("", |s| s.kind.as_str())
+}
+
+/// What the narrowed read of (ii) reads of a kind besides [`queue_narrowed`].
+#[derive(Debug, Clone, Copy, Default)]
+struct QueueShape {
+    /// The supervisor across the range's start (that of the last start
+    /// before it): its last row of each kind before it.
+    across: bool,
+    /// With `across`, the supervisors the range's records name too.
+    named_lives: bool,
+    /// The snapshots that forecast a task of the range, and the marks
+    /// after the earliest of them.
+    snapshots: bool,
+    /// Every row of the baselines' kinds (one each per store).
+    baselines: bool,
+    /// The ask of no run the range answers (by `ask_id`), and the one not
+    /// answered by the range's start.
+    asks: bool,
+    /// The goals' rows of the goals the range's rows name.
+    goals: bool,
+    /// Main's record before the range as a summary the builder writes
+    /// (see [`main_summary`]), with the commits the range names.
+    main: bool,
+}
+
+const MAIN_KINDS: [&str; 8] = [
+    "main_commits_recorded",
+    "main_paths_recorded",
+    "main_observed",
+    "main_read_failed",
+    "main_read_recovered",
+    "main_rewritten",
+    "main_reverts_imported",
+    "ci_checked",
+];
+
+/// The queue rows of `rows` narrowed for `kinds` as [`queue_narrowed`]
+/// reads them and what `shape` adds.
+fn queue_ii(
+    rows: &[LedgerRow],
+    from_ms: i64,
+    kinds: &BTreeSet<String>,
+    shape: QueueShape,
+) -> Vec<LedgerRow> {
+    use crate::domain::stats::timestamp_millis;
+    let before = |e: &RunEvent| timestamp_millis(&e.created_at).is_some_and(|at| at < from_ms);
+    let queue = || rows.iter().filter(|row| row.kind == LedgerKind::Queue);
+    let mut keep: BTreeSet<String> = BTreeSet::new();
+    let reaches = |row: &LedgerRow| {
+        row.ended_at.is_none_or(|end| end >= from_ms) || row.records.iter().any(|e| !before(e))
+    };
+    if shape.across {
+        // The supervisors whose life may reach the range: the last started
+        // before it, and those its records name (a life is read up to its
+        // last event, whoever started since).
+        let mut tokens: BTreeSet<String> = queue()
+            .filter(|row| subject_kind(row) == "supervisor_started")
+            .flat_map(|row| &row.records)
+            .filter(|e| before(e))
+            .max_by_key(|e| e.id)
+            .and_then(|e| e.payload["supervisor"].as_str().map(str::to_owned))
+            .into_iter()
+            .collect();
+        if shape.named_lives {
+            tokens.extend(
+                rows.iter()
+                    .flat_map(|row| &row.records)
+                    .filter(|e| !before(e))
+                    .filter_map(|e| e.payload["supervisor"].as_str().map(str::to_owned)),
+            );
+        }
+        let mut last: BTreeMap<(&str, &str), (EventId, &str)> = BTreeMap::new();
+        for row in queue() {
+            for e in row.records.iter().filter(|e| before(e)) {
+                let Some(token) = e.payload["supervisor"].as_str() else {
+                    continue;
+                };
+                if tokens.contains(token) {
+                    if subject_kind(row) == "supervisor_started" {
+                        keep.insert(row.key.clone());
+                    }
+                    let at = last
+                        .entry((token, subject_kind(row)))
+                        .or_insert((e.id, &row.key));
+                    if at.0 < e.id {
+                        *at = (e.id, &row.key);
+                    }
+                }
+            }
+        }
+        keep.extend(last.values().map(|(_, key)| (*key).to_owned()));
+    }
+    if shape.snapshots {
+        // The snapshots that forecast a task of the range (read by the
+        // task, as a table of the snapshots' targets would give them), and
+        // the marks after the earliest of them with their retractions.
+        let tasks: BTreeSet<i64> = rows
+            .iter()
+            .filter(|row| row.kind == LedgerKind::Task && reaches(row))
+            .filter_map(|row| row.task_id.map(|task| task.as_i64()))
+            .collect();
+        let snapshots: Vec<&LedgerRow> = queue()
+            .filter(|row| subject_kind(row) == "forecast_recorded")
+            .filter(|row| {
+                row.records.iter().any(|e| {
+                    e.payload["tasks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|task| task["id"].as_i64().is_some_and(|id| tasks.contains(&id)))
+                })
+            })
+            .collect();
+        keep.extend(snapshots.iter().map(|row| row.key.clone()));
+        let first = snapshots.iter().filter_map(|row| row.started_at).min();
+        let marks: BTreeSet<EventId> = queue()
+            .filter(|row| subject_kind(row) == "mark_recorded")
+            .filter(|row| first.is_some_and(|first| row.started_at.is_some_and(|at| at > first)))
+            .flat_map(|row| row.records.iter().map(|e| e.id))
+            .collect();
+        keep.extend(
+            queue()
+                .filter(|row| {
+                    row.records.iter().any(|e| {
+                        marks.contains(&e.id)
+                            || (e.kind == EventKind::MarkRetracted
+                                && e.payload["mark"]
+                                    .as_i64()
+                                    .is_some_and(|mark| marks.contains(&EventId::new(mark))))
+                    })
+                })
+                .map(|row| row.key.clone()),
+        );
+    }
+    if shape.baselines {
+        keep.extend(
+            queue()
+                .filter(|row| subject_kind(row).ends_with("_baseline"))
+                .map(|row| row.key.clone()),
+        );
+    }
+    if shape.asks {
+        let ask = |e: &RunEvent| e.payload["ask_id"].as_i64();
+        let answered_before: BTreeSet<i64> = queue()
+            .filter(|row| subject_kind(row) == "ask_answered")
+            .flat_map(|row| &row.records)
+            .filter(|e| before(e))
+            .filter_map(ask)
+            .collect();
+        let answered_after: BTreeSet<i64> = queue()
+            .filter(|row| subject_kind(row) == "ask_answered")
+            .flat_map(|row| &row.records)
+            .filter(|e| !before(e))
+            .filter_map(ask)
+            .collect();
+        keep.extend(
+            queue()
+                .filter(|row| subject_kind(row) == "ask_opened")
+                .filter(|row| {
+                    row.records
+                        .iter()
+                        .filter_map(ask)
+                        .any(|id| answered_after.contains(&id) || !answered_before.contains(&id))
+                })
+                .map(|row| row.key.clone()),
+        );
+    }
+    if shape.goals {
+        let named: BTreeSet<i64> = rows
+            .iter()
+            .filter(|row| row.kind != LedgerKind::Queue && reaches(row))
+            .flat_map(|row| &row.records)
+            .filter_map(|e| {
+                e.payload["goal_id"].as_i64().or_else(|| {
+                    (e.kind == EventKind::TaskGoalChanged)
+                        .then(|| e.payload["to"].as_i64())
+                        .flatten()
+                })
+            })
+            .collect();
+        keep.extend(
+            queue()
+                .filter(|row| {
+                    row.records
+                        .iter()
+                        .any(|e| e.goal_id.is_some_and(|goal| named.contains(&goal.as_i64())))
+                })
+                .map(|row| row.key.clone()),
+        );
+    }
+    let narrowed = queue_narrowed(rows, from_ms, kinds);
+    let mut out: Vec<LedgerRow> = narrowed;
+    let have: BTreeSet<String> = out
+        .iter()
+        .filter(|row| row.kind == LedgerKind::Queue)
+        .map(|row| row.key.clone())
+        .collect();
+    out.extend(
+        queue()
+            .filter(|row| keep.contains(&row.key) && !have.contains(&row.key))
+            .cloned(),
+    );
+    if shape.main {
+        out = main_summary(rows, out, from_ms);
+    }
+    out
+}
+
+/// `narrowed` with main's record before `from_ms` replaced by a summary
+/// row the builder would write (the paths main has, where the record
+/// starts and reaches, Git's reading, where the evidence of reverts and
+/// CI's record of each branch start and reach), and the rows of main's
+/// commits the range names (a landed commit of a run row the range reads,
+/// a commit the range's records record again or revert): read by the sha,
+/// as a table of the commits by sha the builder writes would give them.
+/// The summary's records take the ids of the rows it replaces.
+fn main_summary(whole: &[LedgerRow], narrowed: Vec<LedgerRow>, from_ms: i64) -> Vec<LedgerRow> {
+    use crate::domain::stats::main_log::fold_main_log;
+    use crate::domain::stats::timestamp_millis;
+    let before = |e: &RunEvent| timestamp_millis(&e.created_at).is_some_and(|at| at < from_ms);
+    let is_main = |row: &LedgerRow| {
+        row.kind == LedgerKind::Queue
+            && MAIN_KINDS.contains(&subject_kind(row))
+            && row.records.iter().all(&before)
+    };
+    let mut old: Vec<&LedgerRow> = whole.iter().filter(|row| is_main(row)).collect();
+    old.sort_by_key(|row| row.records.first().map(|e| e.id));
+    let events: Vec<RunEvent> = old.iter().flat_map(|row| row.records.clone()).collect();
+    // The shas the range names: the landed commits of the run rows it
+    // reads, and the commits and the reverts' targets of its records.
+    let mut named: BTreeSet<String> = BTreeSet::new();
+    for row in narrowed.iter().filter(|row| !is_main(row)) {
+        for e in &row.records {
+            if row.kind == LedgerKind::Run && e.kind == EventKind::RunIntegrated {
+                named.extend(e.payload["commit"].as_str().map(str::to_owned));
+            }
+            if e.kind == EventKind::MainCommitsRecorded {
+                for commit in e.payload["commits"].as_array().into_iter().flatten() {
+                    named.extend(commit["sha"].as_str().map(str::to_owned));
+                    named.extend(commit["reverts"].as_str().map(str::to_owned));
+                }
+            }
+            if e.kind == EventKind::CiTurnedRed {
+                named.extend(e.payload["sha"].as_str().map(str::to_owned));
+            }
+        }
+    }
+    let log = fold_main_log(&events);
+    let mut summary = Vec::new();
+    if log.paths_known {
+        let mut paths: Vec<&String> = log.history.paths.iter().collect();
+        paths.sort();
+        summary.push((
+            "main_paths_recorded",
+            json!({"head": log.history.commits.last().map(|c| c.sha.clone()),
+                   "since": log.since, "part": 0, "parts": 1, "paths": paths}),
+        ));
+    }
+    if let Some(at) = log.recorded_through {
+        summary.push((
+            "main_observed",
+            json!({"head": log.head, "at": at, "since": log.since, "reverts": true}),
+        ));
+    }
+    let last_of = |kinds: &[EventKind]| {
+        events
+            .iter()
+            .rev()
+            .find(|e| kinds.iter().any(|kind| e.kind == *kind))
+            .cloned()
+    };
+    let reading = last_of(&[EventKind::MainReadFailed, EventKind::MainReadRecovered]);
+    let checks: Vec<&RunEvent> = events
+        .iter()
+        .filter(|e| e.kind == EventKind::CiChecked)
+        .collect();
+    let mut seek: Vec<RunEvent> = events
+        .iter()
+        .filter(|e| {
+            e.kind == EventKind::MainCommitsRecorded
+                && e.payload["commits"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|commit| {
+                        commit["sha"]
+                            .as_str()
+                            .is_some_and(|sha| named.contains(sha))
+                    })
+        })
+        .cloned()
+        .collect();
+    let mut records: Vec<RunEvent> = Vec::new();
+    // CI's record of the branch: its first and its last check.
+    records.extend(checks.first().map(|e| (*e).clone()));
+    records.extend(
+        checks
+            .last()
+            .filter(|_| checks.len() > 1)
+            .map(|e| (*e).clone()),
+    );
+    records.append(&mut seek);
+    records.extend(reading);
+    let mut ids: Vec<EventId> = events.iter().map(|e| e.id).collect();
+    ids.retain(|id| !records.iter().any(|e| e.id == *id));
+    let template = old.last().map(|row| (*row).clone());
+    for (n, (kind, payload)) in summary.into_iter().enumerate() {
+        let mut event = events[events.len() - 1 - n].clone();
+        event.id = ids[ids.len() - 1 - n];
+        event.kind = kind.into();
+        event.payload = payload;
+        records.push(event);
+    }
+    records.sort_by_key(|e| e.id);
+    let mut out: Vec<LedgerRow> = narrowed.into_iter().filter(|row| !is_main(row)).collect();
+    if let Some(mut row) = template {
+        row.key = "main_summary".to_owned();
+        row.records = records;
+        out.push(row);
+    }
+    out
+}
+
+fn area_map() -> crate::domain::areas::AreaMap {
+    crate::domain::areas::AreaMap::new(vec![
+        ("base".to_owned(), vec!["src/base.rs".to_owned()]),
+        (
+            "units".to_owned(),
+            vec!["src/u*.rs".to_owned(), "src/moved*.rs".to_owned()],
+        ),
+        (
+            "landed".to_owned(),
+            vec!["src/c60.rs".to_owned(), "src/r.rs".to_owned()],
+        ),
+    ])
+    .unwrap()
+}
+
+/// The answers of `got` (rows narrowed of the queue rows) that differ
+/// from those of every row of `whole`: the kpi's four questions and its
+/// `--by area`, `stats --since` (two days) `--full` with the areas, and
+/// of each window main's cover and what befell runs 60 and 65; with the
+/// reads of the day's question.
+fn queue_misses(whole: &[LedgerRow], got: &[LedgerRow]) -> (Vec<String>, Reads) {
+    let areas = area_map();
+    let every = select(whole.to_vec(), &whole_query());
+    let mut misses = Vec::new();
+    let mut reads = Reads::default();
+    let mut questions = kpi_questions();
+    questions.push(KpiQuery {
+        by: vec!["area".parse().unwrap()],
+        ..questions[0].clone()
+    });
+    let befell = |window: &LedgerWindow| {
+        let book = window.post_landing_book();
+        json!({
+            "covers": format!("{:?}", window.main_covers()),
+            "60": serde_json::to_value(book.of_run(&RunId::new(run(60)).unwrap())).unwrap(),
+            "65": serde_json::to_value(book.of_run(&RunId::new(run(65)).unwrap())).unwrap(),
+            // What a report reads of the goal of the range's task 67.
+            "goal": match window.attributes() {
+                crate::domain::ledger::attributes::Folded::Attributes(known) => format!(
+                    "{:?}",
+                    known
+                        .goal_summaries()
+                        .into_iter()
+                        .filter(|goal| goal.id == crate::domain::GoalId::new(700))
+                        .collect::<Vec<_>>()
+                ),
+                crate::domain::ledger::attributes::Folded::BeforeBaseline => String::new(),
+            },
+        })
+    };
+    for (n, query) in questions.iter().enumerate() {
+        let value = |window: &LedgerWindow, query: &KpiQuery| {
+            serde_json::to_value(
+                kpi_of_window(
+                    window,
+                    NOW,
+                    HOST,
+                    &KpiConfig::default(),
+                    Some(&areas),
+                    query,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let expected = value(
+            &every,
+            &KpiQuery {
+                read_whole_ledger: true,
+                ..query.clone()
+            },
+        );
+        let (window, read) = narrowed_shaped(got, &time_query(query), &PARTS, SHAPED);
+        if n == 0 {
+            reads = read;
+            differences(&befell(&window), &befell(&every), "befell", &mut misses);
+        }
+        differences(
+            &value(&window, query),
+            &expected,
+            &format!("kpi[{n}]"),
+            &mut misses,
+        );
+    }
+    let sources = StatsSources {
+        config_file: &|| Ok(None),
+        conflicts_file: &|| Ok(None),
+        areas: Some(&areas),
+        utc_offset_secs: 0,
+        counts_checks: true,
+        rust_toolchain: false,
+    };
+    let since = Cursor::Time((NOW - 2 * DAY) * 1000);
+    let query = StatsQuery {
+        since: Some(since),
+        full: true,
+        ..StatsQuery::default()
+    };
+    let base = WindowQuery {
+        since: Some(since),
+        now_ms: now_ms(NOW),
+        ..WindowQuery::default()
+    };
+    let expected = serde_json::to_value(
+        stats_of_window(&select(whole.to_vec(), &base), NOW, &query, &sources).unwrap(),
+    )
+    .unwrap();
+    let from = WindowQuery {
+        read_from_ms: Some((NOW - 2 * DAY) * 1000),
+        ..base
+    };
+    let (window, _) = narrowed_shaped(got, &from, &PARTS, SHAPED);
+    let got =
+        serde_json::to_value(stats_of_window(&window, NOW, &query, &sources).unwrap()).unwrap();
+    differences(&got, &expected, "stats", &mut misses);
+    (misses, reads)
+}
+
+/// The kinds of (ii) by part, as the description names them.
+const QUEUE_PARTS: [(&str, &[&str]); 6] = [
+    (
+        "ii-a",
+        &[
+            "slots_full",
+            "claim_hold",
+            "landing_hold",
+            "supervisor_started",
+            "supervisor_alive",
+            "supervisor_stopped",
+            "mark_recorded",
+            "mark_retracted",
+            "forecast_recorded",
+            "attributes_baseline",
+            "finding_baseline",
+        ],
+    ),
+    ("ii-f", &["candidates_sampled"]),
+    ("ii-b", &MAIN_KINDS),
+    ("ii-c", &["ci_turned_red"]),
+    ("ii-d", &["goal_created", "goal_updated"]),
+    (
+        "ii-e",
+        &[
+            "update_failed",
+            "backend_call_failed",
+            "ask_opened",
+            "ask_answered",
+            "auto_repaired",
+            "stall_config_loaded",
+        ],
+    ),
+];
+
+/// The queue rows of `kind` among `rows`.
+fn queue_count(rows: &[LedgerRow], kind: &str) -> usize {
+    rows.iter()
+        .filter(|row| row.kind == LedgerKind::Queue && subject_kind(row) == kind)
+        .count()
+}
+
+const QUEUE_SHAPED: QueueShape = QueueShape {
+    across: true,
+    named_lives: true,
+    snapshots: true,
+    baselines: true,
+    asks: true,
+    goals: true,
+    main: true,
+};
+
+/// The read of (ii) of each part's kinds alone, `shape` for the kinds of
+/// the part and every other queue row read whole: the misses against the
+/// whole read of `rows`, and the part's queue rows that read and the whole
+/// read return.
+fn part_report(rows: &[LedgerRow], part: &[&str], shape: QueueShape) -> (Vec<String>, [usize; 2]) {
+    let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
+    let kinds: BTreeSet<String> = part.iter().map(|kind| (*kind).to_owned()).collect();
+    let count = |rows: &[LedgerRow]| {
+        part.iter()
+            .map(|kind| queue_count(rows, kind))
+            .sum::<usize>()
+            + rows.iter().filter(|row| row.key == "main_summary").count()
+    };
+    let narrowed = queue_ii(rows, from_ms, &kinds, shape);
+    let (misses, _) = queue_misses(rows, &narrowed);
+    (misses, [count(&narrowed), count(rows)])
+}
+
+/// [`queue_units_only`] without the settled units' supervisors' lives
+/// (each start ends the life before it, so a whole read's `kpi` reads
+/// every start for each: minutes for 3000 in a debug build): for the parts
+/// that read no life.
+fn queue_units_without_lives(settled: usize) -> Log {
+    let mut log = queue_units_only(settled);
+    log.events.retain(|e| {
+        !(e.kind.is_in(&crate::domain::supervisor_life::KINDS)
+            && e.payload["supervisor"]
+                .as_str()
+                .is_some_and(|token| token.starts_with('u')))
+    });
+    log
+}
+
+/// Check the part `name` of (ii): with 30 settled units the read of
+/// Spike 4678 ([`queue_narrowed`]) and that of [`QUEUE_SHAPED`] against the
+/// whole read, the shaped read's queue rows of the part the same with 30
+/// and 3000 units while the whole read's grow, and the shaped read's
+/// answers against the whole read's with `large` units of `history`.
+/// Returns the misses of the read of Spike 4678.
+fn check_part(name: &str, history: fn(usize) -> Log) -> Vec<String> {
+    check_part_of(name, history_ii, queue_units_only, history)
+}
+
+/// The settled units the answers are compared with besides 30: 300 by
+/// default (a whole read of 3000 units' lives and waits takes minutes in a
+/// debug build), `DAGQ_SPIKE_4756_LARGE` for another number.
+fn large_answers() -> usize {
+    std::env::var("DAGQ_SPIKE_4756_LARGE")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(300)
+}
+
+/// [`check_part`] of the histories `small` (of 30 units), `units` (whose
+/// queue rows are counted with 3000) and `history` (of the answers with
+/// [`large_answers`]).
+fn check_part_of(
+    name: &str,
+    small: fn(usize) -> Log,
+    units: fn(usize) -> Log,
+    history: fn(usize) -> Log,
+) -> Vec<String> {
+    let large = large_answers();
+    let part = QUEUE_PARTS.iter().find(|(n, _)| *n == name).unwrap().1;
+    let small = rows_of(&small(30));
+    let (of_4678, _) = part_report(&small, part, QueueShape::default());
+    let (misses, [narrowed_small, whole_small]) = part_report(&small, part, QUEUE_SHAPED);
+    let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
+    let kinds: BTreeSet<String> = part.iter().map(|kind| (*kind).to_owned()).collect();
+    let count = |rows: &[LedgerRow]| {
+        part.iter()
+            .map(|kind| queue_count(rows, kind))
+            .sum::<usize>()
+            + rows.iter().filter(|row| row.key == "main_summary").count()
+    };
+    let units = rows_of(&units(3000));
+    let by_kind = |rows: &[LedgerRow]| {
+        part.iter()
+            .map(|kind| queue_count(rows, kind))
+            .collect::<Vec<_>>()
+    };
+    let narrowed_units = queue_ii(&units, from_ms, &kinds, QUEUE_SHAPED);
+    eprintln!(
+        "{name} by kind {part:?}: {:?} {:?}",
+        by_kind(&queue_ii(&small, from_ms, &kinds, QUEUE_SHAPED)),
+        by_kind(&narrowed_units)
+    );
+    let narrowed_large = count(&narrowed_units);
+    let whole_large = count(&units);
+    let rows = rows_of(&history(large));
+    let (large_misses, _) = queue_misses(&rows, &queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED));
+    eprintln!(
+        "{name}: 4678 {} misses {:?}; shaped {narrowed_small}/{narrowed_large} of {whole_small}/{whole_large} \
+         (30/3000), misses {misses:?}, with {large}: {large_misses:?}",
+        of_4678.len(),
+        of_4678.iter().take(4).collect::<Vec<_>>()
+    );
+    assert!(
+        whole_large > 50 * whole_small / 2 || whole_small < 10,
+        "{name}"
+    );
+    if name == "ii-a" && small.iter().any(old_snapshot) {
+        // A snapshot older than the settled history: the marks between it
+        // and the range (a supervisor's start is one) are read whole.
+        let marks = |misses: &[String]| {
+            !misses.is_empty()
+                && misses
+                    .iter()
+                    .all(|miss| miss.contains("forecast.marks_between"))
+        };
+        assert!(
+            marks(&misses) && marks(&large_misses),
+            "{misses:?} {large_misses:?}"
+        );
+        assert!(narrowed_large > 25 * narrowed_small, "{name}");
+        return of_4678;
+    }
+    assert_eq!(misses, Vec::<String>::new(), "{name} 30");
+    assert_eq!(large_misses, Vec::<String>::new(), "{name} {large}");
+    assert_eq!(narrowed_small, narrowed_large, "{name}");
+    of_4678
+}
+
+/// Whether `row` is the snapshot of [`log_of_a_time`] (day 3) forecasting
+/// tasks 1 and 2.
+fn old_snapshot(row: &LedgerRow) -> bool {
+    subject_kind(row) == "forecast_recorded"
+        && row.records.iter().any(|e| {
+            e.payload["tasks"]
+                .as_array()
+                .is_some_and(|tasks| !tasks.is_empty())
+                && timestamp_secs(e) < 10 * DAY
+        })
+}
+
+fn timestamp_secs(event: &RunEvent) -> i64 {
+    crate::domain::stats::timestamp_millis(&event.created_at).unwrap_or(0) / 1000 - T0
+}
+
+/// [`history_ii`] with the snapshot of tasks 1 and 2 taken after the
+/// settled units (day 158) instead of on day 3.
+fn near_snapshot(settled: usize) -> Log {
+    let mut log = history_with(
+        settled,
+        |log| {
+            add_queue_units(settled)(log);
+            log.add(
+                None,
+                None,
+                "forecast_recorded",
+                json!({"at_secs": T0 + 158 * DAY, "method": 1, "goals": [],
+                       "tasks": [{"id": 2, "p50_secs": 3600, "p90_secs": 7200},
+                                 {"id": 1, "p50_secs": 3600, "p90_secs": 7200}]}),
+                158 * DAY,
+            );
+        },
+        fix_queue_units,
+    );
+    for event in &mut log.events {
+        if event.kind == EventKind::ForecastRecorded && timestamp_secs(event) < 10 * DAY {
+            event.payload["tasks"] = json!([]);
+        }
+    }
+    log
+}
+
+fn near_snapshot_units(settled: usize) -> Log {
+    without_unit_tasks(near_snapshot(settled))
+}
+
+#[test]
+fn the_waits_lives_marks_and_snapshots_read_by_their_range_answer_as_every_row() {
+    let of_4678 = check_part("ii-a", queue_units_only);
+    assert!(!of_4678.is_empty());
+}
+
+#[test]
+fn a_snapshot_after_the_settled_history_reads_its_marks_by_the_range() {
+    check_part_of(
+        "ii-a",
+        near_snapshot,
+        near_snapshot_units,
+        near_snapshot_units,
+    );
+}
+
+#[test]
+fn the_candidates_sampled_read_by_their_range_answer_as_every_row() {
+    check_part("ii-f", queue_units_only);
+}
+
+#[test]
+fn main_s_record_read_from_a_summary_answers_as_every_row() {
+    let of_4678 = check_part("ii-b", queue_units_without_lives);
+    assert!(!of_4678.is_empty());
+}
+
+#[test]
+fn what_befell_a_landing_read_by_the_range_answers_as_every_row() {
+    check_part("ii-c", queue_units_without_lives);
+}
+
+#[test]
+fn the_goals_of_the_range_s_tasks_read_by_the_goal_answer_as_every_row() {
+    let of_4678 = check_part("ii-d", queue_units_without_lives);
+    assert!(!of_4678.is_empty());
+}
+
+#[test]
+fn the_updates_failures_and_asks_of_no_run_read_by_their_range_answer_as_every_row() {
+    check_part("ii-e", queue_units_without_lives);
+}
+
+#[test]
+fn every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row() {
+    let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
+    let queue = |rows: &[LedgerRow]| {
+        rows.iter()
+            .filter(|row| row.kind == LedgerKind::Queue)
+            .count()
+    };
+    let mut counts = Vec::new();
+    for (settled, log) in [
+        (30, near_snapshot(30)),
+        (30, near_snapshot_units(30)),
+        (large_answers(), near_snapshot_units(large_answers())),
+        (3000, near_snapshot_units(3000)),
+    ] {
+        let rows = rows_of(&log);
+        // Every queue kind: (ii)'s by their shapes, 4678's by its read.
+        let kinds: BTreeSet<String> = rows
+            .iter()
+            .filter(|row| row.kind == LedgerKind::Queue)
+            .map(|row| subject_kind(row).to_owned())
+            .collect();
+        let narrowed = queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED);
+        if settled < 3000 || large_answers() == 3000 {
+            let (misses, _) = queue_misses(&rows, &narrowed);
+            assert_eq!(misses, Vec::<String>::new(), "{settled}");
+        }
+        eprintln!(
+            "{settled}: queue rows {} of {}",
+            queue(&narrowed),
+            queue(&rows)
+        );
+        counts.push((queue(&narrowed), queue(&rows)));
+    }
+    // Of the units without their tasks: the same with 30 and 3000.
+    assert_eq!(counts[1].0, counts[3].0, "{counts:?}");
+    assert!(counts[3].1 > 50 * counts[1].1 / 2, "{counts:?}");
 }
