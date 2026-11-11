@@ -311,6 +311,18 @@ pub struct RowsFrom {
 /// SQL `LIKE` pattern: a text of this form orders as its time. One in another
 /// form, which [`crate::domain::stats::timestamp_millis`] may still read, is not
 /// taken as before anything.
+///
+/// A read by time on an index of `created_at` (`events_by_time` and the
+/// partial ones of a kind, `starts_by_time` and the others) takes the index's
+/// order as the order of time, which holds only while every event was
+/// written in the form with digits and an upper-case `T` and `Z`: this
+/// pattern takes any character for a digit, and SQLite's `LIKE` a lower-case
+/// `t` or `z`, which order apart from the time. Whether one was not is the
+/// store's `SqlDialect::off_the_record_form` (case-sensitive), on the partial
+/// index `events_off_the_record_form` that holds only the events off that
+/// form: the check reads those and no other, as few on a long history as on
+/// a short one, and none where every clock wrote the form. With one, the
+/// read goes back to every event.
 pub const RECORD_TIME_FORM: &str = "____-__-__T__:__:__.___Z";
 
 impl RowsFrom {

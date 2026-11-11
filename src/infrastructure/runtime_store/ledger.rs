@@ -2170,6 +2170,8 @@ fn ledger_row(r: &SqlRow<'_>) -> SqlResult<Result<LedgerRow>> {
 mod omitted_tests;
 #[cfg(test)]
 mod read_from_tests;
+#[cfg(test)]
+mod window_read_plan_tests;
 
 #[cfg(test)]
 mod tests {

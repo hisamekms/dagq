@@ -310,6 +310,27 @@ impl SqlDialect {
         }
     }
 
+    /// The condition that the time's text `column` is off the form records
+    /// write: anything but four, two and two digits, a `T`, two digits each
+    /// for the hour, minute and second, a `.` and three digits and a `Z`,
+    /// case and all. Only a text in that form orders as its time, so a read
+    /// by an index of `created_at` checks first that no event is off it, on
+    /// the partial index `events_off_the_record_form` whose condition this
+    /// is: `SELECT EXISTS (SELECT 1 FROM run_events WHERE` this `)` reads
+    /// only the events off the form. Stricter than
+    /// [`crate::domain::ledger::window::RECORD_TIME_FORM`], whose `LIKE`
+    /// takes any character for a digit and, in SQLite, a lower-case `t` or
+    /// `z`, both of which order apart from the time.
+    // The range reads of the ledger's window that check it land after the
+    // index; the plan test of the index reads it now.
+    #[allow(dead_code)]
+    pub(crate) fn off_the_record_form(self, column: &str) -> String {
+        match self {
+            Self::Sqlite => format!("{column} NOT GLOB '{RECORD_TIME_GLOB}'"),
+            Self::Postgres => format!("{column} !~ '{RECORD_TIME_REGEX}'"),
+        }
+    }
+
     /// The key of a unique expression index that takes an absent `column` for
     /// the SQL literal `absent` (`0`, `''`), spelled as the dialect's index is:
     /// SQLite's `asks_open` is on `ifnull` and Postgres's base on `coalesce`.
@@ -410,6 +431,15 @@ fn postgres_time(value: &str, form: TimeForm) -> String {
         ),
     }
 }
+
+/// The record's form of a time as SQLite's `GLOB` matches it
+/// ([`SqlDialect::off_the_record_form`]).
+const RECORD_TIME_GLOB: &str =
+    "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z";
+
+/// The same form as a Postgres regular expression, anchored at both ends.
+const RECORD_TIME_REGEX: &str =
+    "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$";
 
 /// [`SqlDialect::json_field`] in the SQLite kind.
 // SQLite compatibility entry for store modules migrating independently.
