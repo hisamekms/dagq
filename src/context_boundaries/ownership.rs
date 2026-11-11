@@ -358,6 +358,7 @@ pub(super) const TABLES: &[Table] = &[
     table("schema_floor", Host),
     table("members", Host), // the service's human registry
     table("member_credentials", Host), // a registered human's Claude credential choice
+    table("delegates", Host), // the people who answer for an owner, beside the registry
     table("runners", Execution),
     table("runner_codes", Execution),
     table("runner_refresh", Execution),
@@ -422,6 +423,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/runtime_store/ask_store.rs", Shared), // AskStore
     store("src/infrastructure/event_actor.rs", Shared), // EventStore
     store("src/infrastructure/members.rs", Host),
+    store("src/infrastructure/delegates.rs", Host),
     store("src/infrastructure/runner_registration.rs", Execution),
     store("src/infrastructure/runner_leases.rs", Execution),
     store("src/infrastructure/runner_assignment.rs", Execution),
@@ -527,6 +529,7 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/commands/requests.rs", Planning),
     module("src/application/commands/replans.rs", Planning),
     module("src/application/commands/holds.rs", Planning),
+    module("src/application/commands/delegates.rs", Host),
     module("src/application/planner.rs", Planning),
     module("src/application/planner_handoff.rs", Planning),
     module("src/application/planner_request.rs", Planning),
@@ -689,6 +692,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/commands/planning.rs", "PlanningStore", Some(Planning), Internal),
     outer_port("src/application/queue_writes.rs", "PlannerRecords", Some(Planning), Internal), // the planner record a submit's proposal owner is read from, on the queue service's path
     outer_port("src/application/commands/holds.rs", "HoldStore", Some(Planning), Internal), // through Holds to the CLI
+    outer_port("src/application/commands/delegates.rs", "DelegateStore", Some(Host), Internal), // an owner's delegates, beside the registry; the queue service runs it
     outer_port("src/application/commands/dialogue.rs", "DialogueStore", Some(Shared), Public(All)), // asks and notes
     outer_port("src/application/commands/mod.rs", "DenialLog", Some(Shared), Public(All)), // what a command refused
     outer_port("src/application/watch.rs", "AskNotifier", Some(Observation), Internal), // implemented by PushNotifier

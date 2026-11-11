@@ -456,6 +456,14 @@ enum Command {
         #[command(subcommand)]
         command: GoalCommand,
     },
+    /// Choose who answers your asks with you: the registered people the asks of your goals and
+    /// tasks reach as well, each named by its subject under your own issuer. Only the team
+    /// version (a control side with an OIDC issuer) has them; you change your own alone, and so
+    /// does your inbox for you.
+    Delegate {
+        #[command(subcommand)]
+        command: DelegateCommand,
+    },
     /// Record or correct a follow-up membership judgement against its source goal acceptance.
     ///
     /// `judge-follow-up TASK --classification required|out_of_scope|undecided --reason TEXT`.
@@ -2533,6 +2541,16 @@ enum ProposalCommand {
 }
 
 #[derive(Subcommand, Clone)]
+enum DelegateCommand {
+    /// Add a registered, enabled person who answers your asks with you.
+    Add { member: String },
+    /// Take a person off the ones who answer your asks with you.
+    Remove { member: String },
+    /// List the people who answer your asks with you.
+    List,
+}
+
+#[derive(Subcommand, Clone)]
 enum GoalCommand {
     /// Register a goal; it has no state machine and no verification commands.
     Add {
@@ -2716,6 +2734,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
     let one = |capability, resource| vec![(capability, resource)];
     let queue = |capability| vec![(capability, Resource::Queue)];
     match command {
+        Command::Delegate { .. } => queue(C::DelegateWrite),
         Command::Runner { command } => queue(match command {
             dagq::application::runner_enroll::RunnerCommand::RegisterCode => C::RunnerRegister,
             dagq::application::runner_enroll::RunnerCommand::Enroll { .. } => C::IdentityLogin,
@@ -3139,6 +3158,9 @@ fn authorized_in_application(command: &Command) -> bool {
         // The eval's requests and reads (ADR-t1728-1), with the run a
         // worker's request is on and the round a read names.
         Command::Agent { .. } => true,
+        // An owner's delegates, of the caller's own person (ADR-t3989-1
+        // decision 3).
+        Command::Delegate { .. } => true,
         // The runtime operations, authorized in `execute` before they run
         // (task 734).
         _ => operation(command, |_| None).is_some(),
@@ -4286,6 +4308,19 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
             UseCase::ReplanPropose,
             json!({"run": run, "reason": reason, "evidence": evidence}),
         ),
+        Command::Delegate { command } => {
+            use dagq::application::commands::delegates::{DelegateMember, DelegateRequest};
+            match command {
+                DelegateCommand::Add { member } => DelegateRequest::Add(DelegateMember {
+                    member: member.clone(),
+                }),
+                DelegateCommand::Remove { member } => DelegateRequest::Remove(DelegateMember {
+                    member: member.clone(),
+                }),
+                DelegateCommand::List => DelegateRequest::List,
+            }
+            .request()
+        }
         Command::Proposal {
             command: ProposalCommand::List { all },
         } => (UseCase::ProposalList, json!({"all": all})),
@@ -7117,6 +7152,9 @@ mod tests {
             ("goal close", &["1", "--verdict", "achieved"]),
             ("goal review", &["1"]),
             ("goal landing-mark", &["1", "m"]),
+            ("delegate", &["add", "bob"]),
+            ("delegate", &["remove", "bob"]),
+            ("delegate", &["list"]),
             ("note", &["--text", "n", "--task", "1"]),
             ("mark", &["m"]),
             (
@@ -7354,6 +7392,8 @@ mod tests {
             ("goal close", &["1", "--verdict", "achieved"]),
             ("goal review", &["1"]),
             ("goal landing-mark", &["1", "m", "--remove"]),
+            ("delegate add", &["bob"]),
+            ("delegate remove", &["bob"]),
             (
                 "judge-follow-up",
                 &["1", "--classification", "required", "--reason", "r"],
@@ -7560,6 +7600,62 @@ mod tests {
                     assert_eq!(use_case, UseCase::Kpi);
                     assert_eq!(params["read_whole_ledger"], true);
                     assert!(sent(&["dagq", "kpi"]).1.get("read_whole_ledger").is_none());
+                }));
+            })
+            .unwrap();
+        if let Err(panic) = finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the read of the command line did not end within 60 seconds")
+        {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// `delegate add|remove|list` go to the queue service as its use cases
+    /// with the member alone, under `delegate.write`, and the service
+    /// reads them back as the same requests.
+    #[test]
+    fn delegate_commands_go_to_the_queue_services_use_cases() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let _ = done.send(std::panic::catch_unwind(|| {
+                    use dagq::application::commands::delegates::{DelegateMember, DelegateRequest};
+                    let bob = || DelegateMember {
+                        member: "bob".into(),
+                    };
+                    for (argv, use_case, request) in [
+                        (
+                            &["dagq", "delegate", "add", "bob"][..],
+                            UseCase::DelegateAdd,
+                            DelegateRequest::Add(bob()),
+                        ),
+                        (
+                            &["dagq", "delegate", "remove", "bob"][..],
+                            UseCase::DelegateRemove,
+                            DelegateRequest::Remove(bob()),
+                        ),
+                        (
+                            &["dagq", "delegate", "list"][..],
+                            UseCase::DelegateList,
+                            DelegateRequest::List,
+                        ),
+                    ] {
+                        let cli = Cli::try_parse_from(argv).unwrap();
+                        let (sent, params) = client_request(&cli.command).unwrap().unwrap();
+                        assert_eq!(sent, use_case, "{argv:?}");
+                        assert_eq!(UseCase::of_command(&argv[1..]), Some(use_case));
+                        assert_eq!(
+                            DelegateRequest::parse(sent, &params).unwrap(),
+                            Some(request)
+                        );
+                        assert!(authorized_in_application(&cli.command));
+                        assert_eq!(
+                            requests(&cli.command),
+                            vec![(Capability::DelegateWrite, Resource::Queue)]
+                        );
+                    }
                 }));
             })
             .unwrap();

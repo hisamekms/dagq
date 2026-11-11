@@ -3245,6 +3245,18 @@ mod store_contract_tests {
         contract(|open| store_contract::goal_landing_marks_change_undone(&open));
     }
     #[test]
+    fn delegates_records() {
+        contract(|open| store_contract::delegates_records(&open));
+    }
+    #[test]
+    fn delegates_refused() {
+        contract(|open| store_contract::delegates_refused(&open));
+    }
+    #[test]
+    fn delegates_change_undone() {
+        contract(|open| store_contract::delegates_change_undone(&open));
+    }
+    #[test]
     fn runner_credentials() {
         contract(|open| store_contract::runner_credentials(&open));
     }

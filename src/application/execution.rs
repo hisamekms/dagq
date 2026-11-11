@@ -373,6 +373,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("goal close", &[C::GoalClose]),
     ("goal review", &[C::GoalReviewRequest]),
     ("goal landing-mark", &[C::GoalLandingMark]),
+    ("delegate", &[C::DelegateWrite]),
     ("note", &[C::NoteWrite]),
     ("mark", &[C::MarkWrite]),
     ("finding record", &[C::FindingRecord]),

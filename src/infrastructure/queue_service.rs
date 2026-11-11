@@ -6285,6 +6285,26 @@ where
     }
 }
 
+impl<E: TransactionEntries> crate::application::commands::delegates::DelegateStore
+    for ServiceSqlite<E>
+where
+    StoreQueue<E>: crate::application::SearchIndex,
+{
+    fn delegates(
+        &self,
+        owner: &crate::domain::goal_owner::Owner,
+    ) -> Result<Vec<crate::domain::oidc::OidcIdentity>> {
+        self.queue.delegates(owner)
+    }
+    fn change_delegate(
+        &mut self,
+        owner: &crate::domain::goal_owner::Owner,
+        change: &crate::domain::delegate::DelegateChange,
+    ) -> Result<crate::domain::delegate::DelegatesChanged> {
+        self.queue.change_delegate(owner, change)
+    }
+}
+
 impl<E: TransactionEntries> crate::application::agent_eval::EvalStore for ServiceSqlite<E>
 where
     StoreQueue<E>: crate::application::SearchIndex,

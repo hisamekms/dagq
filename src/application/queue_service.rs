@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::warn;
 
+use super::commands::delegates::{BadDelegate, DelegateRequest};
 use super::commands::dialogue::{Dialogue, DialogueStore, MarkChange};
 use super::commands::{DenialLog, Gate};
 use super::heavy_reads::{HeavyReadNote, HeavyReadPlace, HeavyReads, HeavyReadsBusy};
@@ -96,6 +97,7 @@ pub trait IssueFacts {
 /// as the principal's actor.
 pub trait ServiceQueue:
     DialogueStore
+    + super::commands::delegates::DelegateStore
     + super::agent_eval::EvalStore
     + super::commands::replans::ReplanStore
     + super::agent_cases::CaseSetStore
@@ -1205,6 +1207,7 @@ pub fn respond(result: Result<Value>) -> ServiceResponse {
             None if error.downcast_ref::<BadParams>().is_some()
                 || error.downcast_ref::<BadRead>().is_some()
                 || error.downcast_ref::<BadWrite>().is_some()
+                || error.downcast_ref::<BadDelegate>().is_some()
                 || error.downcast_ref::<BadCommand>().is_some()
                 || error
                     .downcast_ref::<super::supervisor_service::BadOperation>()
@@ -2321,6 +2324,19 @@ fn run(
     if let Some(write) = QueueWrite::parse(use_case, raw)? {
         return store.0.write(&write, actor);
     }
+    // An owner's delegates (ADR-t3989-1 decision 3), of the team version's
+    // deployment alone, which the policy holds; a role without
+    // `delegate.write` is refused, and recorded, before its params are read.
+    if matches!(
+        use_case,
+        UseCase::DelegateAdd | UseCase::DelegateRemove | UseCase::DelegateList
+    ) {
+        authorize_as(&store, actor, Capability::DelegateWrite, &Resource::Queue)?;
+    }
+    if let Some(request) = DelegateRequest::parse(use_case, raw)? {
+        let team_version = answer_policy.team_version();
+        return super::commands::delegates::answer(&mut store, actor, team_version, &request);
+    }
     // The host's dialogue and operations (ADR-t3102-2 decision 6 (4)),
     // each authorized before it runs as the command line authorizes it, or
     // by the application as it runs it.
@@ -2416,7 +2432,10 @@ fn run(
         | UseCase::GoalLandingMark
         | UseCase::ProposalWithdraw
         | UseCase::RequestAdd
-        | UseCase::RequestDecline => unreachable!("a write is answered above"),
+        | UseCase::RequestDecline
+        | UseCase::DelegateAdd
+        | UseCase::DelegateRemove
+        | UseCase::DelegateList => unreachable!("a write is answered above"),
         UseCase::Mark => {
             let p: MarkParams = params(use_case, raw)?;
             let change = match p.retract {
@@ -2778,6 +2797,22 @@ impl super::commands::replans::ReplanStore for Store<'_> {
 impl DenialLog for Store<'_> {
     fn record_denial(&self, payload: Value) -> Result<()> {
         self.0.record_denial(payload)
+    }
+}
+
+impl super::commands::delegates::DelegateStore for Store<'_> {
+    fn delegates(
+        &self,
+        owner: &crate::domain::goal_owner::Owner,
+    ) -> Result<Vec<crate::domain::oidc::OidcIdentity>> {
+        self.0.delegates(owner)
+    }
+    fn change_delegate(
+        &mut self,
+        owner: &crate::domain::goal_owner::Owner,
+        change: &crate::domain::delegate::DelegateChange,
+    ) -> Result<crate::domain::delegate::DelegatesChanged> {
+        self.0.change_delegate(owner, change)
     }
 }
 
@@ -4092,6 +4127,33 @@ pub(crate) mod tests {
             self.denials.borrow_mut().push(payload.clone());
             self.log.lock().unwrap().push(payload);
             Ok(())
+        }
+    }
+
+    impl crate::application::commands::delegates::DelegateStore for Queue {
+        fn delegates(
+            &self,
+            owner: &crate::domain::goal_owner::Owner,
+        ) -> Result<Vec<crate::domain::oidc::OidcIdentity>> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(json!({"delegates_of": owner}));
+            Ok(Vec::new())
+        }
+        fn change_delegate(
+            &mut self,
+            owner: &crate::domain::goal_owner::Owner,
+            change: &crate::domain::delegate::DelegateChange,
+        ) -> Result<crate::domain::delegate::DelegatesChanged> {
+            self.log.lock().unwrap().push(
+                json!({"delegate": change.as_str(), "owner": owner, "of": change.delegate()}),
+            );
+            Ok(crate::domain::delegate::change_delegates(
+                owner,
+                &[],
+                change,
+            ))
         }
     }
 
@@ -5805,6 +5867,109 @@ pub(crate) mod tests {
                         })
                     );
                 }
+            }
+        }
+    }
+
+    /// `delegate add|remove|list` reach the queue's delegates through the
+    /// service only in the team version, for the person of a human token or
+    /// the human parent of its inbox, never one the params name; the local
+    /// user and a host inbox are refused as `authorization_denied` there,
+    /// and everyone with the reason outside it, with nothing written.
+    #[test]
+    fn delegates_reach_the_queue_only_for_the_callers_own_person_in_the_team_version() {
+        use crate::domain::queue_service::TeamRole;
+        for issuer in [None, Some(false), Some(true)] {
+            let (backend, jwt) = human_fixture();
+            backend.human.lock().unwrap().member.as_mut().unwrap().role = TeamRole::Member;
+            backend.human.lock().unwrap().approval_issuer = issuer;
+            let human = exchange_human(&backend, &jwt).result.unwrap();
+            let human = human["token"].as_str().unwrap().to_owned();
+            let service = QueueService {
+                backend: &backend,
+                build: "b",
+                pid: 1,
+            };
+            let issued = service.handle_from(
+                &request(
+                    Some(&human),
+                    UseCase::IssueToken,
+                    json!({"principal": Principal::human_inbox(jwt.identity.clone())}),
+                ),
+                Peer::Absent,
+            );
+            let parented = issued.result.unwrap()["token"].as_str().unwrap().to_owned();
+            let callers = [
+                (Some(human.as_str()), Peer::Absent, true),
+                (Some(parented.as_str()), Peer::Absent, true),
+                (None, Peer::Owner, false),
+                (Some("inbox"), Peer::Owner, false),
+            ];
+            for (token, peer, person) in callers {
+                for (use_case, params) in [
+                    (UseCase::DelegateAdd, json!({"member": "bob"})),
+                    (UseCase::DelegateRemove, json!({"member": "bob"})),
+                    (UseCase::DelegateList, json!({})),
+                ] {
+                    backend.log.lock().unwrap().clear();
+                    let response = service.handle_from(&request(token, use_case, params), peer);
+                    let reached = std::mem::take(&mut *backend.log.lock().unwrap());
+                    let case = format!("{issuer:?} {token:?} {use_case:?}: {response:?}");
+                    if issuer != Some(true) {
+                        assert_eq!(code(&response), Some(ServiceErrorCode::Failed), "{case}");
+                        let message = &response.error.as_ref().unwrap().message;
+                        assert!(message.contains("team version"), "{case}");
+                        assert!(reached.is_empty(), "{case}: {reached:?}");
+                        continue;
+                    }
+                    if !person {
+                        assert_eq!(
+                            code(&response),
+                            Some(ServiceErrorCode::AuthorizationDenied),
+                            "{case}"
+                        );
+                        assert_eq!(reached.len(), 1, "{case}: {reached:?}");
+                        assert_eq!(reached[0]["capability"], "delegate.write", "{case}");
+                        continue;
+                    }
+                    assert!(response.ok, "{case}");
+                    let owner = json!(jwt.identity);
+                    let expected = if use_case == UseCase::DelegateList {
+                        json!({"delegates_of": owner})
+                    } else {
+                        json!({
+                            "delegate": if use_case == UseCase::DelegateAdd { "add" } else { "remove" },
+                            "owner": owner,
+                            "of": {"issuer": jwt.identity.issuer, "subject": "bob"},
+                        })
+                    };
+                    assert_eq!(reached, [expected], "{case}");
+                }
+            }
+            // The params name no owner.
+            let forged = service.handle_from(
+                &request(
+                    Some(&human),
+                    UseCase::DelegateAdd,
+                    json!({"member": "bob", "owner": {"issuer": "x", "subject": "y"}}),
+                ),
+                Peer::Absent,
+            );
+            assert_eq!(code(&forged), Some(ServiceErrorCode::BadRequest));
+            // A role without the capability is refused before its params
+            // are read, the forged ones too, and recorded.
+            if issuer == Some(true) {
+                backend.log.lock().unwrap().clear();
+                let refused = service.handle(&request(
+                    Some("planner"),
+                    UseCase::DelegateAdd,
+                    json!({"member": "bob", "owner": {"issuer": "x", "subject": "y"}}),
+                ));
+                assert_eq!(code(&refused), Some(ServiceErrorCode::AuthorizationDenied));
+                let recorded = std::mem::take(&mut *backend.log.lock().unwrap());
+                assert_eq!(recorded.len(), 1, "{recorded:?}");
+                assert_eq!(recorded[0]["capability"], "delegate.write");
+                assert_eq!(recorded[0]["role"], "planner");
             }
         }
     }

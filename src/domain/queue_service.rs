@@ -453,6 +453,9 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::GoalReady
         | UseCase::GoalReview
         | UseCase::GoalLandingMark
+        | UseCase::DelegateAdd
+        | UseCase::DelegateRemove
+        | UseCase::DelegateList
         | UseCase::ProposalWithdraw
         | UseCase::RequestAdd
         | UseCase::RequestDecline
@@ -702,6 +705,11 @@ string_enum!(UseCase {
     GoalReady => "goal_ready",
     GoalReview => "goal_review",
     GoalLandingMark => "goal_landing_mark",
+    // An owner's delegates in the team version (ADR-t3989-1 decision 3):
+    // `delegate add|remove|list`, always of the caller's own person.
+    DelegateAdd => "delegate_add",
+    DelegateRemove => "delegate_remove",
+    DelegateList => "delegate_list",
     ProposalWithdraw => "proposal_withdraw",
     RequestAdd => "request_add",
     RequestDecline => "request_decline",
@@ -902,6 +910,9 @@ impl UseCase {
             ("goal", Some("ready")) => Self::GoalReady,
             ("goal", Some("review")) => Self::GoalReview,
             ("goal", Some("landing-mark")) => Self::GoalLandingMark,
+            ("delegate", Some("add")) => Self::DelegateAdd,
+            ("delegate", Some("remove")) => Self::DelegateRemove,
+            ("delegate", Some("list")) => Self::DelegateList,
             ("proposal", Some("withdraw")) => Self::ProposalWithdraw,
             ("request", Some("add")) => Self::RequestAdd,
             ("request", Some("decline")) => Self::RequestDecline,
@@ -1798,10 +1809,9 @@ impl Principal {
         if (self.human.is_some() || self.parent_human.is_some())
             && let Some(role) = self.human_role
         {
-            actor = if self.parent_human.is_some() {
-                actor.with_parent_role(role)
-            } else {
-                actor.with_human_role(role)
+            actor = match &self.parent_human {
+                Some(parent) => actor.with_parent_role(parent.clone(), role),
+                None => actor.with_human_role(role),
             };
         }
         actor = actor.with_human_login(self.human.is_some(), self.auth_time);

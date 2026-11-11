@@ -61,6 +61,11 @@ string_enum!(Capability {
     /// 4): a person's alone, the goal's owner or an administrator, so no AI
     /// actor, runner or inbox takes its own landing gate off.
     GoalLandingMark => "goal.landing_mark",
+    /// Add, remove and list the people who answer for an owner in the team
+    /// version (ADR-t3989-1 decision 3): a person's own and its inbox's,
+    /// always for the person the token names, so no AI actor or runner
+    /// picks who answers a person's asks.
+    DelegateWrite => "delegate.write",
     /// Changing a task before it starts. `revisit` (a draft's time to be
     /// looked at again) is one of them rather than a capability of its
     /// own, since the roles allowed it are the same.
@@ -176,7 +181,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 78] = [
+    pub const ALL: [Self; 79] = [
         Self::ImagePublish,
         Self::RunnerClaim,
         Self::RunnerHeartbeat,
@@ -197,6 +202,7 @@ impl Capability {
         Self::GoalClose,
         Self::GoalReviewRequest,
         Self::GoalLandingMark,
+        Self::DelegateWrite,
         Self::TaskWrite,
         Self::FollowUpJudge,
         Self::TaskVerifyEdit,
@@ -595,6 +601,13 @@ pub trait Authorizer {
         answer_authorization(actor, None, kind, text, 0)
     }
 
+    /// Whether the deployment the policy holds is the team version (an OIDC
+    /// issuer configured), `None` when it holds none: a use case of the
+    /// team version alone refuses both `Some(false)` and `None`.
+    fn team_version(&self) -> Option<bool> {
+        None
+    }
+
     fn authorize(
         &self,
         actor: &ActorContext,
@@ -674,6 +687,9 @@ impl Authorizer for AnswerPolicy {
         text: &str,
     ) -> Result<(), AuthorizationError> {
         answer_authorization(actor, self.issuer, kind, text, self.now)
+    }
+    fn team_version(&self) -> Option<bool> {
+        self.issuer
     }
 }
 fn answer_authorization(
@@ -757,6 +773,7 @@ const INBOX: &[Capability] = &[
     C::GoalReady,
     C::GoalClose,
     C::GoalReviewRequest,
+    C::DelegateWrite,
     C::TaskWrite,
     C::FollowUpJudge,
     C::TaskVerifyEdit,

@@ -185,6 +185,7 @@ event_kinds! {
     CredentialPreferenceChanged => "credential_preference_changed",
     CredentialPreferenceRead => "credential_preference_read",
     CredentialPreferenceRejected => "credential_preference_rejected",
+    DelegatesChanged => "delegates_changed",
     DependencyAdded => "dependency_added",
     DependencyRemoved => "dependency_removed",
     DependencyStranded => "dependency_stranded",
@@ -574,6 +575,9 @@ impl EventKind {
                 | AgentCasesTaken
                 // A command the authorizer refused (ADR-t728-1 decision 5).
                 | AuthorizationDenied
+                // An owner's delegates changed (ADR-t3989-1 decision 3), by
+                // `owner`.
+                | DelegatesChanged
                 | ObserveStarted
                 | ObserveFinished
                 // The issue and revocation of the telemetry token of a
@@ -1733,6 +1737,7 @@ mod tests {
                 EventKind::CredentialPreferenceRejected,
                 "credential_preference_rejected",
             ),
+            (EventKind::DelegatesChanged, "delegates_changed"),
             (EventKind::DependencyAdded, "dependency_added"),
             (EventKind::DependencyRemoved, "dependency_removed"),
             (EventKind::DependencyStranded, "dependency_stranded"),

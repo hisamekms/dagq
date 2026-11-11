@@ -182,6 +182,10 @@ pub struct HumanRole {
 pub struct ActorContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     human_role: Option<HumanRole>,
+    /// The person an inbox authenticated against its human parent acts
+    /// for; never written to an event or the environment.
+    #[serde(skip)]
+    parent_human: Option<super::oidc::OidcIdentity>,
     #[serde(skip)]
     human_token: bool,
     #[serde(skip)]
@@ -200,6 +204,7 @@ impl ActorContext {
     pub fn new(role: ActorRole, actor_id: impl Into<String>) -> Self {
         Self {
             human_role: None,
+            parent_human: None,
             human_token: false,
             auth_time: None,
             actor_id: actor_id.into(),
@@ -219,10 +224,16 @@ impl ActorContext {
         self
     }
 
-    /// Only an inbox authenticated against its human parent's registry row.
-    pub(crate) fn with_parent_role(mut self, role: HumanRole) -> Self {
+    /// Only an inbox authenticated against its human parent's registry row,
+    /// `parent` that person.
+    pub(crate) fn with_parent_role(
+        mut self,
+        parent: super::oidc::OidcIdentity,
+        role: HumanRole,
+    ) -> Self {
         if self.role == ActorRole::Inbox {
             self.human_role = Some(role);
+            self.parent_human = Some(parent);
         }
         self
     }
@@ -249,6 +260,13 @@ impl ActorContext {
     pub fn human_identity(&self) -> Option<super::oidc::OidcIdentity> {
         self.human_role?;
         serde_json::from_str(self.actor_id.strip_prefix("human:")?).ok()
+    }
+
+    /// The person an inbox acts for: its human parent, read only for an
+    /// inbox the authentication bound to that parent's registry row.
+    pub fn parent_identity(&self) -> Option<&super::oidc::OidcIdentity> {
+        self.human_role?;
+        self.parent_human.as_ref()
     }
 
     /// A person at a plain terminal.

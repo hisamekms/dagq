@@ -76,10 +76,10 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | --- | --- | --- |
 | user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.propose` `replan.park` `replan.apply` `telemetry.report` runnerの行と`image.publish`を除く全て | なし |
 | user（続き） | `runner.register`・`runner.revoke`・`goal.landing_mark`・`credential.preference` | OIDCの人。登録と設定は自分、失効とgoalの印は持ち主か管理者（印はhostのuserも人のownerの無いgoalに） |
-| user（続き） | `runner.share`・`runner.list` | 共有は管理者、一覧はmemberが自分、管理者が全て |
+| user（続き） | `runner.share`・`runner.list`・`delegate.write` | 共有は管理者、一覧はmemberが自分、管理者が全て。代わりに答える人はOIDCの人の自分の分だけ |
 | runner | `runner.declare`・`runner.claim`・`runner.heartbeat`・`runner.report` | 申告・pullは自分、報告・返却は割り当てrun |
 | image-publisher | `image.publish`だけ | なし |
-| inbox（続き） | `runner.list` | 親の人の一覧の範囲だけ |
+| inbox（続き） | `runner.list`・`delegate.write` | どちらも親の人の分だけ |
 | inbox | userと同じだが、`review.setup_approve`・`queue_broker.record`・`runner.list`以外のrunnerの行・`identity.login`・`goal.landing_mark`・`credential.preference`は持たない | 親の人の役割で狭める。OIDCの発行元のある配置の着地承認は拒む |
 | planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge` | runはnoteだけでask不可。askは`planner_question`だけ、依頼のaskは担当planner本人だけ（`request.decline`と同じ所有の規則）。 |
 | planner（続き） | `task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss` | taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）で、`revising`のproposalのtaskは持ち主だけ（不明なら拒む）。 |
@@ -158,7 +158,6 @@ CLIはqueueの場所を決めた直後、queueやログを開く前に`operation
 workspaceを閉じる手順の入口は[dagq-recoverのsession](../../plugins/claude-dagq/skills/dagq-recover/reference/session.md#the-commands)。
 終わったrunのwrapperの停止はsupervisorの[自分の掃除](supervisor-lifecycle/background-recovery-job.md#終わったrunの掃除)が担う。
 plannerはruntimeだけが立て、人が頼む相手ではないので、起動・停止と更新は人かinboxが担う（[Roles](supervisor-lifecycle/roles.md)）。
-`plan`は誰が打っても何も開かず、inboxへの依頼の案内を返す（ADR-t1394-1）。
 続きの依頼の境界は[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)。
 
 拒否はserviceが呼び出し元のprincipalで記録し、CLIはqueueを開かない（`CommandDenials`と[hostのCLI](queue-service-host-cli.md#送る範囲)）。

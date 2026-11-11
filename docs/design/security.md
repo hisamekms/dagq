@@ -84,6 +84,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 
 `identity.login`・`credential.preference`はuser専用。
 goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、hostのuserは人のownerの無いgoalだけ。
+代わりに答える人（`delegate.write`）はuserとinboxだけで、OIDCの人（inboxは親の人）の分を変える。
 
 権限ごとの持ち主とresourceの条件は[AuthorizationのPolicy](authorization.md#policy)を読む。
 
@@ -94,7 +95,6 @@ goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、
   runには画面が無く、`run screen`は認可を通った後もどのrunにも理由とturnのlogのCLIを示して拒む（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）
 - 終わったrunの残ったworkspaceの片付けの`workspace.cleanup`もuserとinboxだけが持ち、ほかのroleは`authorization_denied`で拒まれる。
   runtimeはrunのworkspaceを開かないので、認可を通った後も理由を示して拒み（ADR-t1433-3の決定3）、残ったrunのworkspaceは人が自分のterminalで閉じる。
-  supervisorは終わったrunに残ったbackgroundのwrapperを自分の掃除で止め、このcapabilityを持たない
 - 開いている非対話のruntimeのplannerへの続きの依頼の`planner.request`（[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）はuserとinboxだけが持つ。
   表のsessionの列はこれも含まない（plannerは自分のplannerへのものも拒まれる）。
   plannerを閉じるCLIは無い

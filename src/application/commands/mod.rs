@@ -6,6 +6,7 @@
 //! `authorization_denied` and returned as the typed
 //! [`crate::domain::AuthorizationError`]. The CLI parses and prints only.
 
+pub mod delegates;
 pub mod dialogue;
 pub mod holds;
 pub mod operations;

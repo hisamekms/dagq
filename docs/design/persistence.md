@@ -47,7 +47,7 @@ related:
 
 ## 目的
 
-SQLiteのDBはqueueの正本で、プロセス間の共有と再起動の後の復旧に使う。
+SQLiteのDBはqueueの正本で、process間の共有と再起動の後の復旧に使う。
 stdoutやsessionの画面は正本にしない。
 
 ## 全体の流れ
@@ -77,7 +77,7 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 - 方言の違う式の断片は`src/infrastructure/sql_dialect.rs`の関数が返す（ADR-t3982-1）。
   JSONの関数と`unixepoch()`は方言の関数のmoduleの外で綴らない。
   行の順と選び方はrowidに頼らず挿入の順の方言の関数で決め、真偽は両方のDBで同じに動く形で比べ・書く（境界の検査が守る）。
-- runのログ本体・receipt・promptはDBに置かず、queueのディレクトリの`runs/<run-id>/`のファイルに置く。
+- runのログ本体・receipt・promptはDBに置かず、queueのdirectoryの`runs/<run-id>/`のfileに置く。
 
 ## 大きなeventの本文
 
@@ -87,7 +87,7 @@ serviceの読み取りの接続 ── SQLITE_OPEN_READ_ONLY（このbinaryを�
 鍵を持つ行に足す欄は失われ、鍵を読み戻す経路も無い。
 
 ローカルの既定のadapterは本文をそのまま列に残し、行・schema・読める値を変えない。
-runのファイル・台帳の行・古いeventは通さない。
+runのfile・台帳の行・古いeventは通さない。
 
 ## 不変条件
 
@@ -98,6 +98,7 @@ runのファイル・台帳の行・古いeventは通さない。
 ## 表
 
 `members`・`member_credentials`: 人の登録簿と設定。
+`delegates`: ownerの代わりに答える人で、行とeventを1つのtransactionで書く。
 runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`image_publish.rs`
 `ledger_omitted_points`: 台帳の写さないeventの被覆の点（[計測](measurement.md#台帳を作る係)）。
 
@@ -124,7 +125,6 @@ runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`
 `asks`は人の判断を要る相談を1行で持つ（[ADR-0022](../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、[ask](supervisor-lifecycle/ask.md)）。
 入口は`src/infrastructure/asks.rs`と`runtime_store/ask_store.rs`、行の型は`src/domain/`の`Ask`と`NewAsk`。
 
-未回答のaskはcloseできない。
 行とeventの整合・回答の配送印・同じaskの判定は`src/infrastructure/asks.rs`のdoc commentが持つ。
 
 ### draft planners（`draft_planners.rs`）
@@ -145,9 +145,9 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 ## Runtime ownership
 
 書き込みの係のlifecycleの入口は`infrastructure::queue_service::serve`と`ServiceWriteLine`。
-serviceは起動で係を引き継ぎ、予定した停止で列を空にしてから手放し、`not_leader`を受けた係は終わり、lockのファイルを証にできるローカルのSQLiteは期限を待たない。
+serviceは起動で係を引き継ぎ、予定した停止で列を空にしてから手放し、`not_leader`を受けた係は終わり、lockのfileを証にできるローカルのSQLiteは期限を待たない。
 
-runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)、[ADR-0039](../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)）。
+runの所有・supervisorの登録・runのfileの約束（[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)、[ADR-0039](../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)）。
 入口は`src/infrastructure/runtime_store/coordination.rs`と`transitions.rs`、`recovery.rs`。
 
 - leaseは実行中のrunの所有で、実行の記録と揮発する所有権を混ぜないよう`task_runs`の列にせず別の表にする。
@@ -157,10 +157,10 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 - 動いているrunのleaseを奪うのは引き継ぎ（`adopt_run`）だけで、他のtokenのstaleなleaseでwrapperが生きているか終了を記録したrunだけを対象にする。
   自分の更新と引き継ぎはどちらもlease行への書き込みなので、SQLiteが直列化して片方だけが通る。
 - `integrate`は登録せずにleaseだけを持つので、`run_leases.token`から`supervisors`へ外部キーを張らない。
-- `supervisors`の行はそのプロセスの性質を持ち、行と寿命を共にする。
+- `supervisors`の行はそのprocessの性質を持ち、行と寿命を共にする。
   登録の削除は停止のeventと不可分で、決まった経路だけが行う（`coordination.rs`）。
   掃除の条件は`src/application/supervise/host_ops/sweep.rs`の`prune_left_supervisors`、登録の値の寿命は`coordination.rs`のdoc commentが持つ。
-- `recover`だけがtokenなしで未完了のrunを止め、同じtransactionでleaseとプロセスを再検査する。
+- `recover`だけがtokenなしで未完了のrunを止め、同じtransactionでleaseとprocessを再検査する。
 - 着地（`integrate`）は自分のtokenでlease行を持ち、`integrating`から出る遷移はどれもそのlease行を要する。
   Gitの操作はtransactionの外で行い、mainを進める前のエラーではrunを元のstatusに戻す。
 - receiptの内容は読んだ時点でevent（`validation_finished`・`integration_receipt`）に写すので、worktreeとrun dirが消えた後も`show`で辿れる。
@@ -238,7 +238,7 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
 - `<hash>`はcanonicalizeしたGit common directoryのhashなので、symlink経由やworktreeからでも同じqueueになる。
 - repositoryを移すとhashが変わり、新しいqueueに解決される。
   付け替えは明示の`rebind`だけが行う（[ADR-0020](../adr/0020-rebind-queue-to-a-moved-repository.md)、[コマンドをまたぐ約束](supervisor-lifecycle/commands.md)）。
-- queueのディレクトリは丸ごと移せる: runのpathは開いた場所から解決し直し、worktreeのGitの管理情報は`integrate`が直す（[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。
+- queueのdirectoryは丸ごと移せる: runのpathは開いた場所から解決し直し、worktreeのGitの管理情報は`integrate`が直す（[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。
 - `logs/`の書式と消す時期は`infrastructure::telemetry`、`planners/`・`plan-reviews/`・`observer/`・`backups/`は`[retention]`（ADR-t697-1）。
 - storeの選択の入口は`compose::refuse_unusable_store`で、どのコマンドもqueueを開く前に通る。
 - storeの種類・接続先は配置設定が持つ。
@@ -252,7 +252,7 @@ migrationの登録と順序は[ADR-0067](../adr/0067-migrations-are-listed-by-bu
 migrationを足すtaskの規則（リリース済みは変えない）は[migrations.md](../development/migrations.md)が持つ。
 
 - queueを開いただけではmigrateしない。
-  migrationを適用するのは空のファイルへの`init`と、`dagq migrate`の依頼か[`up`](supervisor-lifecycle/up-down.md)・[install](supervisor-lifecycle/install.md#install)・[自動更新](supervisor-lifecycle/auto-update.md#auto-update)の入れ替えの口（受け付けの前）のqueue serviceだけ（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)、ADR-t3102-2決定2）。
+  migrationを適用するのは空のfileへの`init`と、`dagq migrate`の依頼か[`up`](supervisor-lifecycle/up-down.md)・[install](supervisor-lifecycle/install.md#install)・[自動更新](supervisor-lifecycle/auto-update.md#auto-update)の入れ替えの口（受け付けの前）のqueue serviceだけ（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)、ADR-t3102-2決定2）。
   serviceを起動できるのはqueueのbinary（DBの隣の`queue-binary.json`が名指すpath。`init`は作ったbinaryを、installは置いたpathを名指す）だけ（決定3）。
   記録の無いqueueを名指すのはinstallか、serviceの動いていないときの最初の起動で、動いているserviceを止める・入れ替える起動はinstallのgrantが無ければ断る。
 - open: 下限がバイナリより新しければ止まり、`user_version`がバイナリより古ければ`dagq migrate`を案内して止まる。

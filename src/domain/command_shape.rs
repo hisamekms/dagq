@@ -1437,6 +1437,7 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "candidates",
             "ci",
             "close",
+            "delegate",
             "dependency",
             "dismiss",
             "doctor",
