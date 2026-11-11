@@ -360,6 +360,44 @@ fn read_marks(conn: &impl SqlRead, kinds: [&str; 2]) -> Result<Vec<(String, u32,
         .collect()
 }
 
+fn marks_in(conn: &impl SqlRead) -> Result<Option<Marks>> {
+    let (mut sessions, mut rows) = (None, None);
+    for (kind, ledger_v, mark) in read_marks(conn, [written::KIND, written::ROWS_KIND])? {
+        let through = mark.positions;
+        if kind == written::KIND {
+            sessions = Some(SessionsWritten {
+                through: through.events,
+                ledger_v,
+            });
+        } else {
+            rows = Some(RowsWritten {
+                through: written::Cursors {
+                    events: through.events,
+                    samples: through.node_samples.unwrap_or_default(),
+                    steps: through.steps.unwrap_or_default(),
+                    resources: through.resources.unwrap_or_default(),
+                    inside_resources: through.inside_resources.unwrap_or_default(),
+                },
+                ledger_v,
+                core: mark.core,
+                queue: mark.queue,
+                read_ms: mark.read_ms,
+                take_offset: mark.take_offset,
+                time_pending: mark.time_pending,
+            });
+        }
+    }
+    let omitted = held_coverage(conn)?.map(|coverage| Omitted {
+        coverage,
+        points: Vec::new(),
+    });
+    Ok(sessions.map(|sessions| Marks {
+        sessions,
+        rows,
+        omitted,
+    }))
+}
+
 /// Write `row` on `conn` as [`LedgerStore::write_ledger_row`] says.
 fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
     let totals = &row.totals;
@@ -978,6 +1016,12 @@ struct LedgerSnapshot<'a, T> {
 }
 
 impl<T: SqlRead> crate::application::LedgerWindowRead for LedgerSnapshot<'_, T> {
+    fn ledger_marks(&self) -> Result<Option<Marks>> {
+        marks_in(self.tx)
+    }
+    fn visible_events(&self, events: &[RunEvent]) -> Result<Option<Vec<RunEvent>>> {
+        visibility::visible_in(self.tx, events)
+    }
     fn rows_after(
         &self,
         kind: LedgerKind,
@@ -1134,41 +1178,7 @@ impl<E: TransactionEntries> LedgerStore for StoreQueue<E> {
     /// with the session rows' mark or before it.
     fn ledger_marks(&self) -> Result<Option<Marks>> {
         let tx = self.read_entry("ledger_marks")?;
-        let (mut sessions, mut rows) = (None, None);
-        for (kind, ledger_v, mark) in read_marks(&tx, [written::KIND, written::ROWS_KIND])? {
-            let through = mark.positions;
-            if kind == written::KIND {
-                sessions = Some(SessionsWritten {
-                    through: through.events,
-                    ledger_v,
-                });
-            } else {
-                rows = Some(RowsWritten {
-                    through: written::Cursors {
-                        events: through.events,
-                        samples: through.node_samples.unwrap_or_default(),
-                        steps: through.steps.unwrap_or_default(),
-                        resources: through.resources.unwrap_or_default(),
-                        inside_resources: through.inside_resources.unwrap_or_default(),
-                    },
-                    ledger_v,
-                    core: mark.core,
-                    queue: mark.queue,
-                    read_ms: mark.read_ms,
-                    take_offset: mark.take_offset,
-                    time_pending: mark.time_pending,
-                });
-            }
-        }
-        let omitted = held_coverage(&tx)?.map(|coverage| Omitted {
-            coverage,
-            points: Vec::new(),
-        });
-        Ok(sessions.map(|sessions| Marks {
-            sessions,
-            rows,
-            omitted,
-        }))
+        marks_in(&tx)
     }
 
     fn ledger_omitted_points_after(
@@ -4500,3 +4510,5 @@ mod tests {
         assert_eq!(queue.ledger_runless_pushes().unwrap(), expected);
     }
 }
+
+mod visibility;

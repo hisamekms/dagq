@@ -1001,6 +1001,38 @@ impl crate::domain::ledger::window::omitted::OmittedRead for OmittedReads<'_> {
 /// open snapshot. It exposes domain values, so snapshot callbacks share the
 /// caller's transaction without knowing the SQL execution port.
 pub trait LedgerWindowRead {
+    /// W and the independent queue and core R certificates of this snapshot.
+    /// Resolve them with `written_through` and `rows_to_resume(.., true/false)`;
+    /// absent certificates mean that visibility cannot be decided.
+    fn ledger_marks(&self) -> Result<Option<crate::domain::ledger::session::written::Marks>> {
+        Ok(None)
+    }
+    /// Keep candidates that the whole ledger's `LedgerWindow::events` holds,
+    /// in their input order, using the rows, marks and `omitted_coverage` of
+    /// this same snapshot. None means undecidable: callers read the whole
+    /// ledger instead. Stores without this capability default to None.
+    ///
+    /// Run events require their run row's inputs_through >= id, or no run
+    /// row and a saved unfinished task row whose detail.runs names that run,
+    /// regardless of the event's task_id. Inputs of an unrecorded run whose
+    /// task ended are not supplemented (ask 1607). Task events at or below
+    /// core R need no owner row; later ones require its inputs_through >= id.
+    /// Session events require id <= W or membership in a session row's
+    /// records written past W; queue events similarly use queue R.
+    /// Covered queue events of the coverage's kinds in (C, S] are invisible,
+    /// even below R. This does not supplement them: callers retain OmittedEdges
+    /// and answer_bound for window edges and declared bounds. The later small
+    /// reads and kpi/report/supervisor wiring must preserve that supplement.
+    ///
+    /// Owner lookups are cached per batch; reads otherwise scale with unfinished
+    /// task rows and rows written past the marks (builder lag), not settled
+    /// history outside the range. There is no U_E: rows after the window's end
+    /// remain eligible. Events remain the SSOT; no new state is kept.
+    fn visible_events(&self, events: &[RunEvent]) -> Result<Option<Vec<RunEvent>>> {
+        let _ = events;
+        Ok(None)
+    }
+
     fn rows_after(
         &self,
         kind: LedgerKind,

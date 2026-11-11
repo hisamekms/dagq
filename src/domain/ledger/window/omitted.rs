@@ -143,7 +143,7 @@ impl<'a, E> OmittedEdges<'a, E> {
         if id <= coverage.from || id > coverage.through {
             return Ok(None);
         }
-        Ok(read.event(id)?.filter(|event| omitted(coverage, event)))
+        Ok(read.event(id)?.filter(|event| covered(coverage, event)))
     }
 
     /// (b) The time of the event `id` when it is an omitted one.
@@ -304,6 +304,13 @@ fn summaries(coverage: &Coverage) -> impl Iterator<Item = (&str, &KindSummary)> 
         .kinds
         .iter()
         .filter_map(|kind| Some((kind.as_str(), coverage.summaries.get(kind)?)))
+}
+
+/// Whether `event` is omitted by this coverage: its id is in (C, S],
+/// its kind is covered and its owner is the queue. Shared with visibility
+/// reads, which exclude these events and leave supplementation to the edges.
+pub(crate) fn covered(coverage: &Coverage, event: &RunEvent) -> bool {
+    event.id > coverage.from && event.id <= coverage.through && omitted(coverage, event)
 }
 
 /// Whether `event` is one of `coverage`'s omitted events, its id aside.
