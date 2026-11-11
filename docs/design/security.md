@@ -119,7 +119,7 @@ goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、
   worker（resumeも）・headlessのjob・observerはserviceだけを使い（[クライアントモード](queue-service.md#クライアントモード)）、人・inbox・plannerはserviceが答えるコマンドをDBを開かず送る（[hostのCLI](queue-service-host-cli.md#送る範囲)）。
   閉じたのはCLIの経路で、同じユーザーのプロセスはDBもtokenも読め、userとしてもつなげるので、hostでは助言的なまま（ADR-t3102-1決定5）
 - serviceへ送らない状態を変えないコマンド（制御側の診断・fileを書く読み取りと、supervisorなどのもの）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny）。
-  拒否は同じerrorを返し、serviceが拒まれたprincipalの`authorization_denied`に記録する。
+  拒否は同じerrorを返し、serviceが拒まれたprincipalの`authorization_denied`に記録する（[例外](queue-service-host-cli.md#principal)あり）。
   通った読み取りはqueueに書かない
 - Claudeのguardrailの規則とsettingsの置き場は`execution::permission_deny`のdoc commentを入口にする。
   これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定

@@ -112,6 +112,7 @@ runnerはleaseを失ったら作業の場所を捨て、受け入れられてい
 人の端末の認証操作は`application::login`が持ち、queueを開かずserviceへ転送しない。
 遠くの人のtokenはその人の資格の置き場にだけ置き、hostのsocketの入口では受けない。
 認可の拒否だけは既存のbest-effortの記録経路を使い、serviceが呼び出し元を認証できたときだけ認可の拒否が記録される。
+例外は`DAGQ_CONTROL_URL`だけがある環境の認証操作（login・logout・whoami）で、手元でuserでないroleを拒んでも拒否の記録をどこにも送らない（入口は`terminal_denials`のdoc comment）。
 
 serviceはtokenもroleも無い要求を、同じOSのuserのsocket peerならuserとして扱う。
 roleを名乗るだけの要求は認めず、tokenが無ければ拒む（`QueueService::authenticate`）。
