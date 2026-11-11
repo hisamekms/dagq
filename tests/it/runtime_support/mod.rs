@@ -971,6 +971,19 @@ impl SessionWrappers for TestWorkspace {
             .iter()
             .any(|id| id == workspace_id))
     }
+    // The wrapper's own liveness, judged as the production backend judges
+    // it (`BackgroundSessions::wrapper_exists`): a false confirms the
+    // recorded identity is gone. Left to the port's default, which cannot
+    // certify a false, every sweep would record a `backend_call_failed`
+    // on each ended run, an event no production backend writes there.
+    fn wrapper_exists(&self, handle: &str) -> Result<bool> {
+        self.asked.lock().unwrap().push(handle.to_owned());
+        ensure!(!self.exists_fails, "injected session list failure");
+        match BackgroundHandle::parse(handle) {
+            Some(handle) => self.processes().confirmed_identity_alive(&handle),
+            None => Ok(false),
+        }
+    }
     fn resume_timeout(&self) -> Duration {
         self.resume_timeout
     }

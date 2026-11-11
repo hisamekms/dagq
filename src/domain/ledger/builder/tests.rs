@@ -350,6 +350,35 @@ fn a_row_is_written_only_for_what_changed() {
     assert!(writes(Some(&legacy), &later));
 }
 
+/// A pass after a run landed reads its events again: with no event of the
+/// run added since, its `inputs_through` stays where the stored row's is
+/// and the row is not written. A `backend_call_failed` a sweep records on
+/// the ended run (its wrapper's absence not confirmed) is an event of the
+/// run past the stored row's, so the next pass writes the row again; a
+/// sweep that confirms the wrapper gone records none.
+#[test]
+fn a_pass_over_an_ended_runs_unchanged_events_keeps_its_inputs_through() {
+    let b = run_id(2);
+    let mut log = Log::default();
+    log.landed(2, &b, 0);
+    let target = Target::Run(b.clone());
+    let row = build(&target, &inputs(&log, 1000), &[]).unwrap();
+    let again = build(&target, &inputs(&log, 1001), &[]).unwrap();
+    assert_eq!(again.inputs_through, row.inputs_through);
+    assert_eq!(write_reason(Some(&row), &again), None);
+
+    log.add(
+        Some(2),
+        Some(&b),
+        "backend_call_failed",
+        json!({"op": "exists", "code": "backend_failed", "attempt": 1}),
+        1002,
+    );
+    let swept = build(&target, &inputs(&log, 1003), &[]).unwrap();
+    assert_eq!(swept.inputs_through.events, log.last());
+    assert_eq!(write_reason(Some(&row), &swept), Some("later_event"));
+}
+
 /// Another run's push closes a pending push: the pending run's fold reads
 /// it, past what its row held, and is written again ended.
 #[test]
