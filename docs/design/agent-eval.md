@@ -34,9 +34,7 @@ related:
 # agentのeval
 
 reviewのagentが正しく判定しているかを、規則コードごとの陽性・陰性のケースと閾値で測る仕組み。
-誰か（人・inbox・plannerか、自分のrunのdevだけはworker）がqueueに依頼を記録し、supervisorがlanding branchの定義とケースで1周を実行して、成績をeventに記録する。
 workerもjobもLLMのCLIを直接打たない。
-1周の中のケースごとの1回は、本番のrunのreviewのagentのjobと同じ起動経路で、測るagentの1本のjobだけを起動する。
 
 > 欄・flag・既定値の意味は定義のそばのdoc commentが持つ。
 
@@ -48,7 +46,6 @@ workerもjobもLLMのCLIを直接打たない。
 
 - 定義: `.dagq/agents/<name>/AGENT.md`。形は[ADR-t1453-1](../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の定義と同じ（frontmatterの`description`と本文の検査項目と参照先の文書）に、道具の宣言の`tools`（下の「道具の宣言」）を足したもの。`<name>`はkebab-case。
 - ケース: `.dagq/agents/<name>/evals/`の`dev.json`・`holdout.json`・`production.json`。
-  splitはこのファイルで区分し、ケースの欄に持たない。
 - patchの共有の置き場: `.dagq/agent-cases/patches/<sha256>.patch`（patchの内容のSHA-256。agentの名前と衝突しないよう`.dagq/agents/`の外に置く）。同じ内容のpatchは1つだけ置き、ケースはhashで参照する。どのケースからも参照されないpatchと、ケースが参照するhashのpatchが無いことは、下の設定の検査が誤りにする。
 - どこで走るか: `dagq.toml`の`[review.subagents.<name>] paths`のまま（形は変えない）。定義は`.dagq/agents/<name>/AGENT.md`だけから読み、そこに無ければ定義が無い扱いで、reviewはpassにしない（[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
 - 設定の検査（`dagq.toml`を読むとき）: `[review.subagents.<name>]`が名指す`<name>`に`.dagq/agents/<name>/AGENT.md`が無いこと、同じ`<name>`を複数の役割の表が名指すこと（今の役割の表は`[review.subagents]`だけ。役割の表が増えたら同じ検査に足す）を誤りにする。
@@ -63,8 +60,7 @@ workerもjobもLLMのCLIを直接打たない。
 ファイルの形と欄の意味は`domain::agent_eval`の`CaseFile`と`Case`のdoc commentが持つ。
 
 - `handmade`はdevだけに置く。改善するsessionが中身を読んだケースはholdoutに置かない。
-- baseは`base_commit`か、built-inの同梱のケースだけの`baseline`の一方。
-- 読み手は形の誤りを、最初の1つでなく全て返す。
+- reviewのagentの`CaseFile`の一覧の読み手は形の誤りを、最初の1つでなく全て返す。
 - reviewのinputは本番のreview.mdの節を運び、evalの資料は同じ見出しと並びでdiffの前に載せる。
 - 起動・形の検査・採点・productionのケースの作り方は役割ごとのharnessが持つ（下の「役割のharness」）。
   この文書の欄・採点・起動の節はreviewのharnessの姿である。
@@ -278,6 +274,9 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
 役割の入口は`application::role_eval::RoleHarness`で、3つの役割とも記録した入力から本番のpromptを組み立て、共通の周で実行して採点する。
 ケースの形と置き場は`domain::agent_eval::verdict::VerdictCase`のdoc comment、閾値の値は測定の文書が持つ。
 
+- 役割のケースの読み手（`domain::agent_eval::verdict`）は形の誤りの最初の1つだけを返し、上の「ケースの欄」の全て返す規則はreviewのagentの一覧の読み手だけに当たる。
+- `.dagq/role-evals/<role>/`のケースのファイルの形と置き場の検査は周の開始の時だけに走り、誤りがあれば周を拒む。
+  `dagq doctor`と設定の読み込みにはまだ無く、doctorに検査を足すときはこの置き場も含める。
 - 判定の値と理由の分類は本番の形のままで、本番のpromptと判定のschemaを変えない。
 - ケースはsnapshotの記録が始まった後のjobからだけ作り、過去のeventから当時の入力を推測しない。
 - treeは役割で分かれる: plan reviewとgoal reviewは起動の時のmainのcommitのtree、runのreviewの全体は固定した変更をbaseに当てて作り直した変更後のtreeで、ケースの一覧と期待を除く前に記録したtreeの識別と合わないケース・refから届かないbaseのケース・変更の写しが無いか空のケースはjobを起動せず、理由が成績のerrorに残る。
