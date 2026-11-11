@@ -1024,9 +1024,13 @@ pub trait LedgerWindowRead {
     /// and answer_bound for window edges and declared bounds. The later small
     /// reads and kpi/report/supervisor wiring must preserve that supplement.
     ///
+    /// W and both R hold only while no run, task, session or queue row but a
+    /// legacy one was written by another ledger_v: such a fold may hold fewer
+    /// events than the marks promise, and while one is there this is None.
+    ///
     /// Owner lookups are cached per batch; reads otherwise scale with unfinished
-    /// task rows and rows written past the marks (builder lag), not settled
-    /// history outside the range. There is no U_E: rows after the window's end
+    /// task rows and rows written past the marks (builder lag), each sought by
+    /// an index, not settled history outside the range. There is no U_E: rows after the window's end
     /// remain eligible. Events remain the SSOT; no new state is kept.
     fn visible_events(&self, events: &[RunEvent]) -> Result<Option<Vec<RunEvent>>> {
         let _ = events;

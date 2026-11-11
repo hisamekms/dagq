@@ -26,11 +26,67 @@ fn past_mark(conn: &impl SqlRead, kind: LedgerKind, mark: EventId) -> Result<BTr
     Ok(ids)
 }
 
+/// The unfinished task rows, from the partial index that holds them alone:
+/// the read returns and walks as many rows as there are unfinished tasks,
+/// however many settled ones the store holds.
+fn open_tasks_sql(dialect: SqlDialect) -> String {
+    format!(
+        "SELECT * FROM ledger_rows{index} WHERE kind='task' AND ended_at IS NULL",
+        index = dialect.indexed_by("ledger_rows_open_tasks"),
+    )
+}
+
+/// The kinds whose rows hold the records of events, as the literal list of
+/// the partial index ledger_rows_by_version.
+const EVENT_KINDS: &str = "('run', 'task', 'session', 'queue')";
+
+/// A row of an event's kind that a fold of another ledger_v wrote, legacy
+/// rows apart, on one side of `?1` (`<` or `>`): two seeks of
+/// ledger_rows_by_version, none of the rows of this ledger_v.
+fn other_version_sql(dialect: SqlDialect, side: &str) -> String {
+    format!(
+        "SELECT 1 FROM ledger_rows{index}
+          WHERE legacy=FALSE AND kind IN {EVENT_KINDS} AND ledger_v{side}?1 LIMIT 1",
+        index = dialect.indexed_by("ledger_rows_by_version"),
+    )
+}
+
+/// Whether a fold of another ledger_v has written a row W or R does not
+/// vouch for. A fold of another version goes on from its cursor 0 (the
+/// marks are not of its version) and overwrites rows of every kind with the
+/// records it has folded so far, and a later one may assign an event to
+/// another row: such a row may hold fewer of the events up to W or R than
+/// the marks promise, whether the version is earlier or later, so while
+/// one is there the marks decide nothing. This is stricter than the
+/// builder's heads ([`written::written_through`]: a later session row
+/// alone). Legacy rows keep their version for good (ADR-t1662-2 decision
+/// 8) and hold their records as written; a store one version has caught up
+/// with has no other row.
+fn other_version(conn: &impl SqlRead) -> Result<bool> {
+    let v = i64::from(crate::domain::ledger::LEDGER_V);
+    for side in ["<", ">"] {
+        let rows = SqlRead::query_map(
+            conn,
+            &other_version_sql(conn.dialect(), side),
+            sql_params![v],
+            |r| r.get::<_, i64>(0),
+        )?;
+        if !rows.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn visible_in(
     conn: &impl SqlRead,
     candidates: &[RunEvent],
 ) -> Result<Option<Vec<RunEvent>>> {
     let marks = marks_in(conn)?;
+    if other_version(conn)? {
+        return Ok(None);
+    }
+    // No row of another version: the heads hold no later session row.
     let Some(w) = written::written_through(marks.as_ref().map(|m| &m.sessions), &[]) else {
         return Ok(None);
     };
@@ -72,7 +128,7 @@ pub(super) fn visible_in(
                         if open_runs.is_none() {
                             let rows = SqlRead::query_map(
                                 conn,
-                                "SELECT * FROM ledger_rows WHERE kind='task' AND ended_at IS NULL",
+                                &open_tasks_sql(conn.dialect()),
                                 sql_params![],
                                 ledger_row,
                             )?

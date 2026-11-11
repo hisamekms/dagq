@@ -142,6 +142,8 @@ fn apart(settled: i64) -> (SqliteQueue, Log, Marks, usize) {
     );
     log.planner(990001, "session_opened");
     log.planner(990003, "session_opened");
+    // A queue event at or before the queue R, held by its row.
+    log.add(None, None, "mark_added", json!({"mark":"m-0"}));
     let core = log.0.last().unwrap().id;
     log.add(None, Some(70), "first_commit_observed", json!({}));
     log.add(
@@ -494,6 +496,176 @@ fn marks_coverage_rows_and_visibility_remain_in_the_same_snapshot() {
                 ids(&read.visible_events(&log.0)?.unwrap()),
                 BTreeSet::from([first, last])
             );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// The plan of `sql` on `queue`, its parameters NULL, one line per step
+/// that reads a table or an index.
+fn reads_of(queue: &SqliteQueue, sql: &str) -> Vec<String> {
+    let mut stmt = queue
+        .conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap();
+    let nulls = vec![rusqlite::types::Null; stmt.parameter_count()];
+    stmt.query_map(rusqlite::params_from_iter(nulls), |r| {
+        r.get::<_, String>("detail")
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .filter(|step| step.starts_with("SEARCH") || step.starts_with("SCAN"))
+    .collect()
+}
+
+const POSTGRES_MIGRATION: &str =
+    include_str!("../../../../../migrations-postgres/ledger_visibility_indexes.sql");
+
+/// The unfinished task rows and the rows of another ledger_v are each read
+/// from an index that holds them alone, with no statistics: no read walks
+/// the settled task rows or the rows of this ledger_v. No other index seeks
+/// the unfinished task rows by ended_at (ledger_rows_by_subject_end puts
+/// subject_kind, NULL on a task row, before it): each takes `kind=` alone,
+/// every task row. Both series make the same indexes, on the same terms in
+/// both dialects.
+#[test]
+fn open_task_rows_and_other_versions_seek_their_indexes() {
+    let queue = queue();
+    for index in [
+        "sqlite_autoindex_ledger_rows_1",
+        "ledger_rows_by_subject_end",
+    ] {
+        let other = reads_of(
+            &queue,
+            &format!(
+                "SELECT * FROM ledger_rows INDEXED BY {index} WHERE kind='task' AND ended_at IS NULL"
+            ),
+        );
+        assert!(
+            other.iter().all(|step| !step.contains("ended_at")),
+            "{index} seeks ended_at: {other:?}"
+        );
+    }
+    let open = reads_of(&queue, &open_tasks_sql(SqlDialect::Sqlite));
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert!(open[0].contains("INDEX ledger_rows_open_tasks"), "{open:?}");
+    for side in ["<", ">"] {
+        let other = reads_of(&queue, &other_version_sql(SqlDialect::Sqlite, side));
+        assert_eq!(other.len(), 1, "{other:?}");
+        assert!(
+            other[0].starts_with("SEARCH")
+                && other[0].contains(&format!("INDEX ledger_rows_by_version (ledger_v{side}?)")),
+            "{other:?}"
+        );
+        assert!(!other_version_sql(SqlDialect::Postgres, side).contains("INDEXED BY"));
+    }
+    // Postgres has no hint and keeps the same terms as the partial index.
+    assert!(!open_tasks_sql(SqlDialect::Postgres).contains("INDEXED BY"));
+    let statements = |migration: &str| -> Vec<String> {
+        let text: String = migration
+            .lines()
+            .map(|line| line.split("--").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        text.split(';')
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let sqlite = crate::infrastructure::schema::MIGRATIONS
+        .iter()
+        .find(|migration| migration.contains("CREATE INDEX ledger_rows_open_tasks"))
+        .unwrap();
+    assert_eq!(statements(sqlite), statements(POSTGRES_MIGRATION));
+    assert!(
+        statements(POSTGRES_MIGRATION).contains(
+            &"CREATE INDEX ledger_rows_open_tasks ON ledger_rows(kind) WHERE kind = 'task' AND ended_at IS NULL"
+                .to_owned()
+        )
+    );
+}
+
+/// Rows of another ledger_v, earlier or later, whole or with fewer records
+/// than the marks promise, past W and the queue R or at or before them. A
+/// fold of another version goes on from its cursor 0 and overwrites rows of
+/// every kind with what it has folded so far, so a row of another version
+/// may lack an event at or before W or R that the whole read then does not
+/// see (the opening of 990001 at or before W, a queue record at or before
+/// R): a verdict that took every event up to the marks would keep it. Any
+/// row of another version voids the marks, the read falls back to the
+/// whole read, and so returns what the whole read sees. A legacy row keeps
+/// its version for good and leaves the verdict to the marks, equal to the
+/// whole read.
+#[test]
+fn rows_of_other_versions_are_seen_as_the_whole_read_sees_them() {
+    let later = crate::domain::ledger::LEDGER_V + 1;
+    let earlier = crate::domain::ledger::LEDGER_V - 1;
+    let full = |log: &Log| build(&log.0, NOW, BUILT);
+    let session_row = |log: &Log| {
+        full(log)
+            .into_iter()
+            .find(|r| r.kind == LedgerKind::Session && r.key.contains("990001"))
+            .unwrap()
+    };
+    let queue_row = |log: &Log, marks: &Marks| {
+        let r = marks.rows.unwrap().queue.unwrap().through.events;
+        full(log)
+            .into_iter()
+            .find(|row| row.kind == LedgerKind::Queue && row.records.iter().any(|e| e.id <= r))
+            .unwrap()
+    };
+    let mut lost_any = 0;
+    for v in [earlier, later] {
+        for (kind, lose) in [
+            (LedgerKind::Session, false),
+            (LedgerKind::Session, true),
+            (LedgerKind::Queue, false),
+            (LedgerKind::Queue, true),
+        ] {
+            let (queue, log, marks, _) = apart(30);
+            let (mut row, mark) = if kind == LedgerKind::Session {
+                (session_row(&log), marks.sessions.through)
+            } else {
+                (
+                    queue_row(&log, &marks),
+                    marks.rows.unwrap().queue.unwrap().through.events,
+                )
+            };
+            let lost = row.records.iter().find(|e| e.id <= mark).unwrap().id;
+            if lose {
+                row.records.retain(|e| e.id != lost);
+            }
+            row.ledger_v = v;
+            queue.write_ledger_row(&row).unwrap();
+            queue
+                .ledger_read_snapshot(&mut |read| {
+                    let expected = whole(read);
+                    assert_eq!(expected.contains(&lost), !lose, "{v} {kind:?} {lose}");
+                    if lose {
+                        lost_any += 1;
+                    }
+                    // None: the caller reads the whole ledger, the same events.
+                    assert_eq!(read.visible_events(&log.0)?, None, "{v} {kind:?} {lose}");
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+    assert_eq!(lost_any, 4);
+
+    // A legacy row of an earlier version does not void the marks.
+    let (queue, log, _, _) = apart(30);
+    let mut row = full(&log)
+        .into_iter()
+        .find(|r| r.kind == LedgerKind::Task && r.key == "1000")
+        .unwrap();
+    row.ledger_v = earlier;
+    row.legacy = Some(json!({}));
+    queue.write_ledger_row(&row).unwrap();
+    queue
+        .ledger_read_snapshot(&mut |read| {
+            let got = read.visible_events(&log.0)?.unwrap();
+            assert_eq!(ids(&got), whole(read));
             Ok(())
         })
         .unwrap();
