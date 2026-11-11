@@ -24,7 +24,9 @@
 //! - **Stopped** ([`stops`]): a store whose R is past its S (a builder of a
 //!   version that knows no S moved R) or whose kinds are not the builder's
 //!   keeps C, S and the summaries as they are, and the builder neither moves
-//!   nor lowers them ([`Covering::stopped`]). Nothing here ends a stop.
+//!   nor lowers them ([`Covering::stopped`]): the omitted events in (C, S]
+//!   stay without rows, those after S are queue rows' records as before
+//!   ([`Covering::unwritten`]). Nothing here ends a stop.
 //!
 //! A builder that finds the store's coverage another than its own (another
 //! builder wrote first) takes the store's and reads again the events from
@@ -244,8 +246,9 @@ enum State {
     Unknown,
     /// No kind omitted and no coverage held: nothing to write.
     Off,
-    /// [`stops`]: nothing written.
-    Stopped,
+    /// [`stops`]: nothing written. The store's coverage as it stopped it,
+    /// whose (C, S] stays without rows ([`Covering::unwritten`]).
+    Stopped(Coverage),
     Held(Coverage),
 }
 
@@ -263,11 +266,12 @@ impl Covering {
         (stored, r): (Option<&Coverage>, Option<EventId>),
         at: EventId,
     ) {
-        if self.state == State::Stopped {
+        if self.stopped() {
             return;
         }
-        if stops(stored, r, &omission.kinds) {
-            self.stop();
+        if let Some(stored) = stored.filter(|stored| stops(Some(stored), r, &omission.kinds)) {
+            self.state = State::Stopped(stored.clone());
+            self.unwritten.clear();
             return;
         }
         let held = match &self.state {
@@ -291,11 +295,6 @@ impl Covering {
         if let Some(stored) = stored {
             self.wrote(stored.through);
         }
-    }
-
-    fn stop(&mut self) {
-        self.state = State::Stopped;
-        self.unwritten.clear();
     }
 
     /// The S of the coverage held when it is before `at`, where the builder
@@ -333,7 +332,27 @@ impl Covering {
 
     /// Whether it stopped: it moves and lowers nothing the store holds.
     pub fn stopped(&self) -> bool {
-        self.state == State::Stopped
+        matches!(self.state, State::Stopped(_))
+    }
+
+    /// Which of the queue's events read no queue row records: of the
+    /// coverage held, those after its C; of the coverage a stop holds, those
+    /// in its (C, S] (those after S are rows again); none before a pass
+    /// began, or when no kind is omitted and none is held.
+    pub fn unwritten(&self) -> Unwritten {
+        match &self.state {
+            State::Held(coverage) => Unwritten {
+                kinds: coverage.kinds.clone(),
+                from: coverage.from,
+                through: None,
+            },
+            State::Stopped(coverage) => Unwritten {
+                kinds: coverage.kinds.clone(),
+                from: coverage.from,
+                through: Some(coverage.through),
+            },
+            State::Unknown | State::Off => Unwritten::default(),
+        }
     }
 
     /// The coverage held, if one is.
@@ -342,6 +361,46 @@ impl Covering {
             State::Held(coverage) => Some(coverage),
             _ => None,
         }
+    }
+}
+
+/// Which of the queue's events no queue row records (ADR-t4644-1 decision
+/// 1): those [`owner::owner`] says are the queue's, of one of `kinds`, after
+/// C (`from`) and, while the builder stops, up to S (`through`). The rest
+/// are rows' records as before. The default is none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Unwritten {
+    kinds: Vec<String>,
+    from: EventId,
+    through: Option<EventId>,
+}
+
+impl Unwritten {
+    /// Those of `kinds` after `from`, up to `through` when given.
+    pub fn of<'a>(
+        kinds: impl IntoIterator<Item = &'a str>,
+        from: EventId,
+        through: Option<EventId>,
+    ) -> Self {
+        Self {
+            kinds: kinds.into_iter().map(str::to_owned).collect(),
+            from,
+            through,
+        }
+    }
+
+    /// Its C, when it omits some kind: no event up to it is omitted.
+    pub fn from(&self) -> Option<EventId> {
+        (!self.kinds.is_empty()).then_some(self.from)
+    }
+
+    /// Whether no queue row records `event`.
+    pub fn omits(&self, event: &RunEvent) -> bool {
+        !self.kinds.is_empty()
+            && event.id > self.from
+            && self.through.is_none_or(|through| event.id <= through)
+            && self.kinds.iter().any(|kind| kind == event.kind.as_str())
+            && owner::owner(event) == Owner::Queue
     }
 }
 

@@ -2222,6 +2222,7 @@ fn a_write_between_the_pages_of_a_window_through_the_service_leaves_no_row_past_
                 &read,
                 ms(20),
                 &fourteen.created_at,
+                &crate::domain::ledger::queue::Unwritten::default(),
             );
             let store = SqliteQueue::open(&db).unwrap();
             for row in &rows {

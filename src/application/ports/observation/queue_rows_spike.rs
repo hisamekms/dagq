@@ -29,7 +29,7 @@ use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSourc
 use crate::domain::kpi::config::{KpiSettings, Target};
 use crate::domain::kpi::report::DiagramSection;
 use crate::domain::kpi::{KpiConfig, KpiQuery, Period, read_from_ms};
-use crate::domain::ledger::queue::queue_rows;
+use crate::domain::ledger::queue::{Unwritten, queue_rows};
 use crate::domain::ledger::testkit::omitted::EdgeStore;
 use crate::domain::ledger::testkit::{Log, T0, ms, queue_across, run_id};
 use crate::domain::ledger::window::omitted::OmittedEdges;
@@ -674,11 +674,15 @@ fn the_unread_kinds_left_out_of_the_queue_rows_give_every_reader_the_same() {
         .filter(|event| !UNREAD.contains(&event.kind.as_str()))
         .cloned()
         .collect();
-    let rows_now: Vec<LedgerRow> = queue_rows(&owned, &events, now * 1000, "built")
-        .into_iter()
-        .filter(|row| !of_kinds(row, &UNREAD))
-        .collect();
-    assert_eq!(queue_rows(&taken, &events, now * 1000, "built"), rows_now);
+    let rows_now: Vec<LedgerRow> =
+        queue_rows(&owned, &events, now * 1000, "built", &Unwritten::default())
+            .into_iter()
+            .filter(|row| !of_kinds(row, &UNREAD))
+            .collect();
+    assert_eq!(
+        queue_rows(&taken, &events, now * 1000, "built", &Unwritten::default()),
+        rows_now
+    );
 }
 
 /// The kinds a reader reads, left out of the queue rows, with the window

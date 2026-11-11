@@ -185,7 +185,21 @@
 //!   One that omits none writes nothing of it, and reads the store's only
 //!   to know whether it stops. A store that stops it ([`omitted::stops`]:
 //!   R past S, or a coverage of other kinds, an empty set's too) keeps them
-//!   as they are ([`Builder::omission_stopped`]).
+//!   as they are ([`Builder::omission_stopped`]). When a pass's start changes
+//!   which events go without rows (a stop, or another writer's coverage of
+//!   another C taken), the builder reads again the events it left without
+//!   rows that the rule it holds now copies, and gives them their rows,
+//!   marked to hold R until written ([`Builder::regain`]), before it reads
+//!   on: no input it read is left of neither a row nor the coverage. It
+//!   reads them again after the later of where it began omitting and the
+//!   store's R of the queue rows (every input up to R is recorded), weighing
+//!   each by every rule it read events by since; a change while one is
+//!   pending begins it again from there, and each pass's start moves one
+//!   pending on to that R as it reads it then. A pass reads them again,
+//!   and then the events after the S of a coverage it took up to its
+//!   cursor ([`Builder::coverage_behind`]), within its events and its time
+//!   ([`PASS_TIME`]) and, short of the end, writes nothing: R stays before
+//!   the events not read again, and the next pass starts at once.
 //! - **What a pass reads**: the events after its cursor, [`EVENTS_PER_READ`]
 //!   at a time, and the events of each run and task it folds. Until the
 //!   snapshot is caught up, its folds and time-driven work use the latest
@@ -721,20 +735,23 @@ impl Kept {
     /// The kept of `events` (ascending id).
     pub fn of(events: &[RunEvent]) -> Self {
         let mut kept = Self::default();
-        kept.add(events, &mut BTreeSet::new());
+        kept.add(events, &mut BTreeSet::new(), &omitted::Unwritten::default());
         kept
     }
 
     /// Keep what the folds of the queue as a whole read of `new`
     /// (ascending id), and add to `touched` the session and queue rows
     /// whose fold it changes; one at or before the last kept is kept
-    /// already. What they moved of the waits before a claim.
+    /// already. What they moved of the waits before a claim. One
+    /// `unwritten` omits is read as any other but is no queue row's
+    /// record, so it is not kept either.
     fn add(
         &mut self,
         new: &[RunEvent],
         touched: &mut BTreeSet<(LedgerKind, String)>,
+        unwritten: &omitted::Unwritten,
     ) -> WaitsMoved {
-        self.add_kind(new, touched, false)
+        self.add_kind(new, touched, false, unwritten)
     }
 
     fn add_kind(
@@ -742,6 +759,7 @@ impl Kept {
         new: &[RunEvent],
         touched: &mut BTreeSet<(LedgerKind, String)>,
         queue_only: bool,
+        unwritten: &omitted::Unwritten,
     ) -> WaitsMoved {
         let mut waits = WaitsMoved::default();
         for event in new {
@@ -756,19 +774,19 @@ impl Kept {
             waits.started_or_ended |=
                 matches!(moved.started, Some(Started::PreClaim(_))) || moved.ended[0].is_some();
             let owned = owner::owner(event);
-            self.queue_rows
-                .add(event, owned == Owner::Queue, moved, touched);
+            let queue_row = owned == Owner::Queue && !unwritten.omits(event);
+            self.queue_rows.add(event, queue_row, moved, touched);
             match owned {
                 Owner::Session if !queue_only => {
                     self.session_rows.add(event, touched);
                     self.event_heap += event_heap_bytes(event);
                     self.sessions.push(event.clone());
                 }
-                Owner::Queue => {
+                Owner::Queue if queue_row => {
                     self.event_heap += event_heap_bytes(event);
                     self.queue.push(event.clone());
                 }
-                Owner::Run | Owner::Task | Owner::Session => {}
+                Owner::Run | Owner::Task | Owner::Session | Owner::Queue => {}
             }
             if !queue_only {
                 self.wait_on_push(event);
@@ -1340,6 +1358,31 @@ pub struct Builder {
     omission: omitted::Omission,
     /// What it holds of their coverage ([`Self::begin_coverage`]).
     covering: omitted::Covering,
+    /// The events read whose rule of no row a pass's start changed
+    /// ([`Self::begin_coverage`]), to be read again and given their rows
+    /// ([`Self::regain`]).
+    regaining: Option<Regaining>,
+    /// Where it first read events by a rule of no row for some of them, and
+    /// the latest time read up to there ([`Self::begin_coverage`]): what a
+    /// change of the rule reads again from ([`Self::regain`]).
+    omitting_since: Option<ReadTo>,
+    /// Every rule of no row it read events by since then, each once.
+    rules_read_by: Vec<omitted::Unwritten>,
+}
+
+/// The queue's events a builder read since it began omitting, of which
+/// those some rule it read them by (`before`, every one since) left without
+/// a row and the rule it holds now copies are to be given their rows: those
+/// after `next` up to `through`, where it had read. A change of the rule
+/// while one is pending begins it again from the start, so that the events
+/// it read again by the rule before are weighed by the new one too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Regaining {
+    before: Vec<omitted::Unwritten>,
+    next: EventId,
+    /// The latest time of an event up to `next`.
+    read_ms: i64,
+    through: EventId,
 }
 
 /// How far a builder went through the rows the store holds of an older
@@ -1485,6 +1528,9 @@ impl Default for Builder {
             older_rows: OlderRows::default(),
             omission: omitted::Omission::of_version(),
             covering: omitted::Covering::default(),
+            regaining: None,
+            omitting_since: None,
+            rules_read_by: Vec::new(),
         }
     }
 }
@@ -1509,13 +1555,14 @@ impl Builder {
         let folds_on = self.sessions_through == self.events;
         let rows_follow = self.rows_through.events == self.events;
         let start = Dirtied::events(self.read_to());
+        let unwritten = self.covering.unwritten();
         let kept = Arc::make_mut(&mut self.kept);
         let mut waits = WaitsMoved::default();
         // A move of a wait timed before an event read before it.
         let mut out_of_order = false;
         for event in new {
             let mut touched = BTreeSet::new();
-            let moved = kept.add(std::slice::from_ref(event), &mut touched);
+            let moved = kept.add(std::slice::from_ref(event), &mut touched, &unwritten);
             waits.reached |= moved.reached;
             waits.reopened |= moved.reopened;
             out_of_order |= moved.started_or_ended
@@ -1535,7 +1582,9 @@ impl Builder {
             }
             // A row it changed reads it (a run's event too, that ends a
             // deferral or moves the landing slot); a supervisor's life may
-            // end rows.
+            // end rows. A queue's event of no row of its own too: the
+            // landing slot's open attempt reads every event, whether or not
+            // its time parses ([`QueueBook::open_slot`]).
             if matches!(owner::owner(event), Owner::Session | Owner::Queue)
                 || !touched.is_empty()
                 || supervisor_of(event).is_some()
@@ -2358,9 +2407,12 @@ impl Builder {
     }
 
     /// How many marks wait, the rows of an older version still to be read
-    /// counting as one.
+    /// and the events to read again ([`Self::regain_after`]) counting as
+    /// one each.
     pub fn backlog(&self) -> usize {
-        self.marks.len() + usize::from(self.older_rows != OlderRows::Read)
+        self.marks.len()
+            + usize::from(self.older_rows != OlderRows::Read)
+            + usize::from(self.regaining.is_some())
     }
 
     /// Go through the rows the store holds of an older [`LEDGER_V`], as a
@@ -2720,8 +2772,137 @@ impl Builder {
                 rows.queue
                     .map_or(rows.through.events, |queue| queue.through.events)
             });
+        // The store's R of the queue rows of this version: every input up to
+        // it is recorded, by a row or the coverage, whoever wrote it.
+        let certified = marks
+            .and_then(|marks| marks.rows)
+            .filter(|rows| rows.ledger_v == LEDGER_V)
+            .and_then(|rows| rows.position(true));
+        let before = self.covering.unwritten();
         self.covering
             .begin(&self.omission, (stored, r), self.events);
+        let now = self.covering.unwritten();
+        // A change of the rule, whether or not one read again is pending,
+        // reads again from where it began omitting, the events read again
+        // by the rule before weighed by this one too.
+        if before != now
+            && !self.rules_read_by.is_empty()
+            && let Some(since) = self.omitting_since
+        {
+            let through = self
+                .regaining
+                .as_ref()
+                .map_or(self.events, |pending| pending.through.max(self.events));
+            self.regaining = Some(Regaining {
+                before: self.rules_read_by.clone(),
+                next: since.event,
+                read_ms: since.read_ms,
+                through,
+            });
+        }
+        // A read again, begun now or pending from a pass before, goes on
+        // after that R as each pass's start reads it: those up to R are
+        // recorded already, so no history before it is read again, and
+        // none is left once R reaches where it had read.
+        if let Some(regaining) = self.regaining.as_mut()
+            && let Some(at) = certified
+            && at.through.events > regaining.next
+        {
+            regaining.next = at.through.events;
+            regaining.read_ms = regaining.read_ms.max(at.read_ms);
+        }
+        if self
+            .regaining
+            .as_ref()
+            .is_some_and(|regaining| regaining.next >= regaining.through)
+        {
+            self.regaining = None;
+        }
+        if now.from().is_some() {
+            if self.omitting_since.is_none() {
+                self.omitting_since = Some(self.read_to());
+            }
+            if !self.rules_read_by.contains(&now) {
+                self.rules_read_by.push(now);
+            }
+        }
+    }
+
+    /// The events to read again before a pass reads on, after the first
+    /// up to the second, when its start changed which queue events go
+    /// without rows (a stop, or another writer's coverage of another C
+    /// taken): those it read without rows that the rule it holds now
+    /// copies have none and no summary covers them ([`Self::regain`]).
+    pub fn regain_after(&self) -> Option<(EventId, EventId)> {
+        self.regaining
+            .as_ref()
+            .map(|regaining| (regaining.next, regaining.through))
+    }
+
+    /// Give each of `events` (ascending, read after [`Self::regain_after`])
+    /// that the rule it read them by left without a row and the one it holds
+    /// now copies its queue row, marked to be written before R passes it, as
+    /// any queue row its read changed; done once the events reach where it
+    /// had read.
+    pub fn regain(&mut self, events: &[RunEvent]) {
+        let Some(regaining) = self.regaining.as_mut() else {
+            return;
+        };
+        let now = self.covering.unwritten();
+        let kept = Arc::make_mut(&mut self.kept);
+        let (after, through) = (regaining.next, regaining.through);
+        for event in events
+            .iter()
+            .filter(|event| event.id > after && event.id <= through)
+        {
+            // R before it: the position before it and the latest time read
+            // up to there, as the read of the events marked it.
+            let before = ReadTo {
+                event: EventId::new(event.id.as_i64() - 1),
+                read_ms: regaining.read_ms,
+            };
+            regaining.next = event.id;
+            if let Some(at) = timestamp_millis(&event.created_at) {
+                regaining.read_ms = regaining.read_ms.max(at);
+            }
+            if !regaining.before.iter().any(|rule| rule.omits(event)) || now.omits(event) {
+                continue;
+            }
+            let mut touched = BTreeSet::new();
+            kept.queue_rows.regain(event, &mut touched);
+            if let Err(at) = kept.queue.binary_search_by_key(&event.id, |kept| kept.id) {
+                kept.event_heap += event_heap_bytes(event);
+                kept.queue.insert(at, event.clone());
+            }
+            for (kind, key) in &touched {
+                let target = Target::Row(*kind, key.clone());
+                mark_dirtied(
+                    &mut self.marks,
+                    &mut self.dirtied,
+                    target,
+                    Dirtied::events(before),
+                );
+            }
+            self.touched.append(&mut touched);
+        }
+        if events
+            .last()
+            .is_none_or(|last| last.id >= regaining.through)
+            || regaining.next >= regaining.through
+        {
+            self.regaining = None;
+        }
+    }
+
+    /// Begin the coverage before a new process replays the events after its
+    /// R ([`Self::begin_coverage`]) when the store's `marks` hold one, so
+    /// that the replay leaves the omitted events of the store's (C, S] and
+    /// after it without rows as the builder that wrote them did. With none
+    /// held, the first pass begins it, C where that pass reads from.
+    pub fn begin_stored_coverage(&mut self, marks: Option<&Marks>) {
+        if marks.is_some_and(|marks| marks.omitted.is_some()) {
+            self.begin_coverage(marks);
+        }
     }
 
     /// The S of the coverage it holds when it is before its cursor (it took
@@ -2759,9 +2940,14 @@ impl Builder {
         self.covering.held()
     }
 
-    /// Omit `omission`'s kinds in place of the version's.
+    /// Omit `omission`'s kinds in place of the version's. Another set than
+    /// the one held forgets the coverage begun of it
+    /// ([`Self::begin_stored_coverage`]): the next pass begins it again.
     #[cfg(test)]
     pub(crate) fn set_omission(&mut self, omission: omitted::Omission) {
+        if omission != self.omission {
+            self.covering = omitted::Covering::default();
+        }
         self.omission = omission;
     }
 
@@ -2818,7 +3004,21 @@ impl Builder {
                 }
             }
         }
+        if let Some(regaining) = self.regaining_held() {
+            regaining.cut(&mut queue, &mut queue_ms);
+        }
         Some(self.split_certificate(core, core_ms, queue, queue_ms))
+    }
+
+    /// Where a read again pending ([`Self::regain_after`]) holds the queue
+    /// rows' R: the events after it may want their rows yet.
+    fn regaining_held(&self) -> Option<Dirtied> {
+        self.regaining.as_ref().map(|regaining| {
+            Dirtied::events(ReadTo {
+                event: regaining.next,
+                read_ms: regaining.read_ms,
+            })
+        })
     }
 
     /// Each R is cut only by unrecorded inputs of its own rows. W still
@@ -2864,8 +3064,9 @@ impl Builder {
     /// and lives that route its events; no input can be skipped.
     pub fn replay_queue_events(&mut self, events: &[RunEvent]) {
         let before = self.read_to();
+        let unwritten = self.covering.unwritten();
         let kept = Arc::make_mut(&mut self.kept);
-        kept.add_kind(events, &mut self.touched, true);
+        kept.add_kind(events, &mut self.touched, true, &unwritten);
         self.rows_after.get_or_insert(before);
         for event in events {
             self.events = self.events.max(event.id);
@@ -2890,6 +3091,20 @@ impl Builder {
     /// Page folds must have named their marks before the join.
     pub fn join_queue(&mut self, queue: Self) {
         assert_eq!(self.events, queue.events);
+        // The queue's replay read by the same rule of no row: a change of it
+        // reads again from the earlier of the two.
+        if let Some(since) = queue.omitting_since
+            && self
+                .omitting_since
+                .is_none_or(|held| since.event < held.event)
+        {
+            self.omitting_since = Some(since);
+        }
+        for rule in &queue.rules_read_by {
+            if !self.rules_read_by.contains(rule) {
+                self.rules_read_by.push(rule.clone());
+            }
+        }
         assert!(self.rows_after.is_none() && queue.rows_after.is_none());
         let is_queue = |target: &Target| matches!(target, Target::Row(LedgerKind::Queue, _));
         self.marks.retain(|target| !is_queue(target));
@@ -3025,7 +3240,12 @@ impl Builder {
                 }
             }
         }
-        if self.rows_through == observation.cursors {
+        if let Some(regaining) = self.regaining_held() {
+            regaining.cut(&mut queue_at, &mut queue_ms);
+        }
+        // A coverage behind its cursor offers no R until it is read up to
+        // it ([`Self::sessions_mark_from`] writes none).
+        if self.rows_through == observation.cursors && self.coverage_behind().is_none() {
             observation.rows = Some(self.split_certificate(at, read_ms, queue_at, queue_ms));
         }
         observation

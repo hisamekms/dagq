@@ -1,9 +1,10 @@
 //! The ledger (ADR-t1662-1 decisions 10, 13, 17 and 18, ADR-t1662-2,
 //! docs/design/measurement.md "台帳の形"): one row per run and per task
 //! ([`fold`]), per session or job of no run ([`session`]) and per interval
-//! or event of the queue as a whole ([`queue`]), folded from the
-//! EventStore alone, each event into the one row [`owner`] gives it
-//! ([`build`]), and per node and hour of its load ([`node`]), folded from
+//! or event of the queue as a whole ([`queue`], those of the kinds it does
+//! not copy after the coverage's start aside), folded from the EventStore
+//! alone, each event into the one row [`owner`] gives it ([`build`]), and
+//! per node and hour of its load ([`node`]), folded from
 //! the NodeSampleStore alone; kept by the `LedgerStore`, read one row by [`read`] and a
 //! window of rows by [`window`]. A view: a row is built again when
 //! [`LEDGER_V`] goes up or a later event arrives ([`rebuilds`]). A legacy
@@ -628,8 +629,20 @@ pub fn task_row(
 /// one row ([`owner`]). What builds the ledger writes these, a legacy row
 /// too: the store keeps a legacy row's values as first written and takes
 /// its records, their range and its detail (its sessions, jobs and
-/// Executions) from the new one.
+/// Executions) from the new one. It omits no queue event: [`build_omitting`]
+/// with [`queue::Unwritten::default`].
 pub fn build(events: &[RunEvent], now_ms: i64, built_at: &str) -> Vec<LedgerRow> {
+    build_omitting(events, now_ms, built_at, &queue::Unwritten::default())
+}
+
+/// [`build`], of whose queue's events those `unwritten` omits are no row's
+/// records ([`queue::queue_rows`]); every other row is the same.
+pub fn build_omitting(
+    events: &[RunEvent],
+    now_ms: i64,
+    built_at: &str,
+    unwritten: &queue::Unwritten,
+) -> Vec<LedgerRow> {
     use std::collections::BTreeSet;
     let pushes: Vec<RunEvent> = events
         .iter()
@@ -671,7 +684,9 @@ pub fn build(events: &[RunEvent], now_ms: i64, built_at: &str) -> Vec<LedgerRow>
             .map(|(task, events)| task_row(*task, events, &pushes, &pre_claim, now_ms, built_at)),
     );
     rows.extend(session::session_rows(&sessions, built_at));
-    rows.extend(queue::queue_rows(&queue, events, now_ms, built_at));
+    rows.extend(queue::queue_rows(
+        &queue, events, now_ms, built_at, unwritten,
+    ));
     rows
 }
 

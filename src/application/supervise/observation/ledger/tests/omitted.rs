@@ -43,6 +43,12 @@ fn omitting(mut builder: Builder) -> Builder {
     builder
 }
 
+/// `builder` omitting no kind, as the builder before the version's set.
+fn of_none(mut builder: Builder) -> Builder {
+    builder.set_omission(Omission::of([], EVERY));
+    builder
+}
+
 fn arrive(memory: &Memory, log: &Log, n: usize) {
     memory.events.replace(log.events[..n].to_vec());
 }
@@ -80,7 +86,7 @@ fn c_is_where_the_first_pass_reads_from_written_once() {
 
     let memory = Memory::default();
     arrive(&memory, &log, log.events.len());
-    drain(&memory, &mut Builder::default(), 2_000);
+    drain(&memory, &mut of_none(Builder::default()), 2_000);
     assert_eq!(coverage(&memory), None);
     assert!(memory.points.borrow().is_empty());
 
@@ -97,7 +103,7 @@ fn c_is_where_the_first_pass_reads_from_written_once() {
     // R and no coverage: a builder gone on from R covers from R.
     let memory = Memory::default();
     arrive(&memory, &log, half);
-    drain(&memory, &mut Builder::default(), 2_000);
+    drain(&memory, &mut of_none(Builder::default()), 2_000);
     let r = r_of(&memory).events;
     assert_eq!(r, log.events[half - 1].id);
     let mut builder = omitting(start_builder(&memory, ms(2_000)).unwrap());
@@ -235,12 +241,12 @@ fn a_store_of_r_past_s_or_other_kinds_holds_the_coverage() {
         let mut builder = match case {
             "r past s" => {
                 arrive(&memory, &log, half + 10);
-                drain(&memory, &mut Builder::default(), 2_000);
+                drain(&memory, &mut of_none(Builder::default()), 2_000);
                 assert!(r_of(&memory).events > held.through);
                 omitting(start_builder(&memory, ms(2_000)).unwrap())
             }
             _ => {
-                let mut builder = Builder::default();
+                let mut builder = of_none(Builder::default());
                 builder.set_omission(Omission::of([DENIED], EVERY));
                 builder
             }
@@ -302,7 +308,7 @@ fn a_builder_whose_coverage_another_wrote_first_takes_it_and_goes_on() {
     let half = log.events.len() / 2;
     let memory = Memory::default();
     arrive(&memory, &log, half);
-    drain(&memory, &mut Builder::default(), 2_000);
+    drain(&memory, &mut of_none(Builder::default()), 2_000);
     let r = r_of(&memory).events;
     let mut from_r = omitting(start_builder(&memory, ms(2_000)).unwrap());
     arrive(&memory, &log, half + 40);
@@ -352,12 +358,12 @@ fn a_builder_of_no_kind_on_a_store_of_a_coverage_stops() {
     let held = covers_c_to_s(&memory);
     let points = memory.points.borrow().clone();
     arrive(&memory, &log, log.events.len());
-    let mut from_start = Builder::default();
+    let mut from_start = of_none(Builder::default());
     assert!(!from_start.omission_stopped());
     drain(&memory, &mut from_start, 2_000);
     assert!(from_start.omission_stopped());
     assert_eq!(from_start.coverage(), None);
-    let mut from_r = start_builder(&memory, ms(2_000)).unwrap();
+    let mut from_r = of_none(start_builder(&memory, ms(2_000)).unwrap());
     pass(&memory, &mut from_r, 2_000);
     assert!(from_r.omission_stopped());
     assert_eq!(r_of(&memory).events, log.last());

@@ -283,7 +283,7 @@ fn a_page_swept_whose_read_fails_leaves_its_rows_marked() {
 fn covered_marks_do_not_pin_restarts_past_the_check_bound() {
     let mut log = Log::default();
     for _ in 0..CHECKS_PER_PASS + 17 {
-        log.add(None, None, "authorization_denied", json!({}), 1);
+        log.add(None, None, ONE_EVENT, json!({}), 1);
     }
     let memory = Memory::of(&log);
     let rows = crate::domain::ledger::build(&log.events, ms(2), BUILT);
@@ -297,7 +297,7 @@ fn covered_marks_do_not_pin_restarts_past_the_check_bound() {
     }
     // Inputs absent from the store must still hold R until written.
     for _ in 0..37 {
-        log.add(None, None, "authorization_denied", json!({}), 1);
+        log.add(None, None, ONE_EVENT, json!({}), 1);
     }
     memory.events.replace(log.events.clone());
     let mut previous = EventId::new(0);
@@ -370,7 +370,7 @@ fn covered_marks_do_not_pin_restarts_past_the_check_bound() {
 fn interrupted_catch_up_resumes_after_the_committed_page() {
     let mut log = Log::default();
     for _ in 0..EVENTS_PER_READ + 3 {
-        log.add(None, None, "authorization_denied", json!({}), 1);
+        log.add(None, None, ONE_EVENT, json!({}), 1);
     }
     let memory = Memory::of(&log);
     for mut row in crate::domain::ledger::build(&log.events[..EVENTS_PER_READ], ms(LATER), BUILT) {
@@ -434,7 +434,7 @@ fn interrupted_catch_up_resumes_after_the_committed_page() {
     for (key, row) in expected {
         assert_eq!(memory.row(key.0, &key.1), row, "{key:?}");
     }
-    log.add(None, None, "authorization_denied", json!({}), 2);
+    log.add(None, None, ONE_EVENT, json!({}), 2);
     memory.events.replace(log.events.clone());
     let mut builder = start_builder(&memory, ms(LATER)).unwrap();
     let built = pass(&memory, &mut builder, LATER);
@@ -483,7 +483,7 @@ fn task_check_rank_is_written_and_rotates_through_one_pass_restarts() {
     // Covered queue rows let catch-up checkpoint before it takes any task
     // marks. Fail the next page and discard the builder and pass result.
     for _ in 0..EVENTS_PER_READ + 3 {
-        log.add(None, None, "authorization_denied", json!({}), 1);
+        log.add(None, None, ONE_EVENT, json!({}), 1);
     }
     memory.events.replace(log.events.clone());
     for mut row in crate::domain::ledger::build(&log.events[count..], ms(2), BUILT) {

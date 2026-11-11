@@ -615,7 +615,7 @@ fn older_rows_of_no_position_are_written_while_an_event_comes_before_each_pass()
         log.add(
             None,
             None,
-            "authorization_denied",
+            ONE_EVENT,
             json!({"event": "authorization_denied", "role": "executor",
                    "capability": "telemetry.report", "reason": "not_on_resource",
                    "resource": {"kind": "run", "id": run_id(9)}}),

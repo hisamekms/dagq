@@ -1,7 +1,9 @@
 //! Which kind of ledger row an event of the EventStore is a record of.
 //! Every event is one row's, so that the rows of a window give back the
 //! events the functions of `stats`, `kpi` and `report` read
-//! ([`super::window`]); which row of the kind is the fold's
+//! ([`super::window`]), but the queue's of the kinds not copied to queue
+//! rows after the coverage's start ([`super::queue::Unwritten`]), which the
+//! window takes from the coverage; which row of the kind is the fold's
 //! ([`super::session`], [`super::queue`], [`super::run_row`],
 //! [`super::task_row`]).
 

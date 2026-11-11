@@ -32,6 +32,12 @@ use crate::domain::{RunEvent, RunId, TaskId};
 
 const BUILT: &str = "2030-01-01T00:00:00.000Z";
 
+/// A kind of the queue's events copied to queue rows, each a row of its
+/// own (a kind this version does not know, so none of
+/// [`crate::domain::ledger::queue::OMITTED_KINDS`]): what the
+/// tests of the pace of the writes fill the queue rows with.
+const ONE_EVENT: &str = "backend_failure_noted";
+
 /// The stores in memory: the events, the node samples, the steps and the rows, the
 /// rows written as `ledger_rows` writes them (a legacy row keeps its
 /// values, its records and their range follow), how many writes, and how
@@ -136,6 +142,9 @@ struct Memory {
     /// position, as `ledger_rows` and `ledger_omitted_points` hold them.
     omitted: RefCell<Option<Coverage>>,
     points: RefCell<BTreeMap<(String, EventId), Point>>,
+    /// Fails each read of the events after a cursor at or past it, as a
+    /// store that cannot be read.
+    reads_fail_from: Cell<Option<EventId>>,
     /// The clock of a pass on it ([`pass`]), moved by its writes of the run,
     /// task, queue and node rows.
     clock: Costed,
@@ -382,6 +391,11 @@ impl EventStore for Memory {
             crate::application::supervisor_service::caller::current(),
         ));
         assert_eq!(filter, &EventFilter::default());
+        if let Some(from) = self.reads_fail_from.get()
+            && after >= from
+        {
+            anyhow::bail!("the events after {after} cannot be read");
+        }
         let read: Vec<RunEvent> = self
             .events
             .borrow()
@@ -3540,6 +3554,7 @@ fn a_run_measured_from_inside_only_folds_its_executors_samples() {
 mod frozen;
 mod oldest_first;
 mod omitted;
+mod omitting;
 mod pages;
 mod pass_time;
 mod pushes_mixed;
@@ -5551,7 +5566,7 @@ fn every_row_a_store_lacks_has_an_input_after_r() {
     // all hold R from where the page's rows were marked, and those past
     // the marks taken first wait in the round past the bound.
     for _ in 0..HOLDING_R_PER_PASS + 3 {
-        log.add(None, None, "authorization_denied", json!({}), 3_300);
+        log.add(None, None, ONE_EVENT, json!({}), 3_300);
     }
     let memory = Memory::of(&log);
     memory.samples.replace(samples);

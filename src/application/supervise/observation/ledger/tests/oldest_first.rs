@@ -16,7 +16,7 @@ const GROWTH: usize = 2 * CHECKS_PER_PASS + 500;
 fn grow(log: &mut Log, memory: &Memory) {
     let from = log.events.len();
     for _ in 0..GROWTH {
-        log.add(None, None, "authorization_denied", json!({}), 1);
+        log.add(None, None, ONE_EVENT, json!({}), 1);
     }
     memory.events.replace(log.events.clone());
     for mut row in crate::domain::ledger::build(&log.events[from..], ms(2), BUILT) {

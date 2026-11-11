@@ -3,16 +3,18 @@
 //! the readers' values of the ledger it made held to those fixed
 //! ([`crate::application::ports::frozen`]).
 
+use super::omitting::{ends_cut, none, of_old_form};
 use super::*;
-use crate::application::ports::frozen::{check, values};
+use crate::application::ports::frozen::{check, differs, values};
 use crate::domain::ledger::owner::{self, Owner};
 use crate::domain::ledger::session::written::omitted::Omission;
 use crate::domain::ledger::testkit::frozen::{Input, Step, THREE, inputs};
 use crate::domain::ledger::testkit::omitted::counted;
 
-/// The store after `input`'s steps.
+/// The store after `input`'s steps by the builder of now (no kind
+/// omitted, [`none`]): the ledger the values were fixed of.
 fn built(input: &Input) -> Memory {
-    built_with(input, None, |_, _| {})
+    built_with(input, Some(&none()), |_, _| {})
 }
 
 /// The store after `input`'s steps by builders omitting `omission`'s kinds
@@ -335,7 +337,8 @@ fn an_event_of_no_time_is_the_latest_and_no_time_cursors_answer() {
 /// place several.
 const EVERY: u64 = 3;
 
-/// The three kinds omitted, as a builder of the next version omits them.
+/// The three kinds omitted, as the version's builder omits them, points
+/// closer than its.
 fn three() -> Omission {
     Omission::of(THREE, EVERY)
 }
@@ -345,8 +348,9 @@ fn three() -> Omission {
 /// the position read, and each kind's summary and points those counted of
 /// the input's events in (C, S]: (vii)'s runs' and tasks' events of the
 /// three kinds in the points' count alone, (viii)'s events of no time in L
-/// alone, (v)'s clock turned back in D. The readers' values are those
-/// fixed: no reader reads the coverage, and the rows are those of now.
+/// alone, (v)'s clock turned back in D. The readers' values of the ledger
+/// it makes are those of its ledger of now's form (a row of each omitted
+/// event in (C, S] given back, no coverage), and those the values fixed.
 #[test]
 fn the_coverage_of_each_input_is_counted_of_c_to_s_after_every_step() {
     let all = inputs();
@@ -371,9 +375,10 @@ fn the_coverage_of_each_input_is_counted_of_c_to_s_after_every_step() {
             assert_eq!(held, points, "{}", input.name);
         });
         assert!(covered > 0, "{}", input.name);
-        each.push((input, values(&memory, input)));
+        let old = built(input);
+        each.push((input, of_old_form(&memory, Some(&old), input, input.name)));
     }
-    check(&each);
+    check_ended_whole(&each);
 
     let of = |name: &str| all.iter().find(|input| input.name == name).unwrap();
     // (i) S at the last event read, where R is.
@@ -469,8 +474,7 @@ fn the_coverage_of_each_input_is_counted_of_c_to_s_after_every_step() {
     }
 }
 
-/// The version's builder omits no kind: it writes no coverage and no
-/// point, and reads no mark for one.
+/// The builder of no kind (of now) writes no coverage and no point.
 #[test]
 fn a_builder_of_no_kind_writes_no_coverage() {
     for input in inputs() {
@@ -490,22 +494,19 @@ fn split_and_single_r_builders_catch_up_to_the_same_rows_and_reader_values() {
         .filter(|input| matches!(input.name, "cut" | "queue and run"))
     {
         let split = built(&input);
-        let single = built_with(&input, None, |memory, _| {
+        let single = built_with(&input, Some(&none()), |memory, _| {
             if let Some(mark) = memory.rows_mark.borrow_mut().as_mut() {
                 mark.core = None;
                 mark.queue = None;
             }
         });
-        drain(
-            &split,
-            &mut start_builder(&split, ms(input.now)).unwrap(),
-            input.now,
-        );
-        drain(
-            &single,
-            &mut start_builder(&single, ms(input.now)).unwrap(),
-            input.now,
-        );
+        let of_now = |memory: &Memory| {
+            let mut builder = start_builder(memory, ms(input.now)).unwrap();
+            builder.set_omission(none());
+            builder
+        };
+        drain(&split, &mut of_now(&split), input.now);
+        drain(&single, &mut of_now(&single), input.now);
         assert_eq!(
             *split.rows.borrow(),
             *single.rows.borrow(),
@@ -521,21 +522,18 @@ fn split_and_single_r_builders_catch_up_to_the_same_rows_and_reader_values() {
     }
 }
 
-/// The store after `input`'s steps by builders omitting the three kinds
-/// from step `from` on (the builder of then sets them: C is where its next
-/// pass reads from), with the queue rows of the omitted events in (C, S]
-/// taken out, as a builder that omits them writes none; and the rows taken
-/// out. The coverage, its points and every other row stay.
+/// The store after `input`'s steps by the builder of now until step
+/// `from` and omitting the three kinds from it on (the builder of then sets
+/// them: C is where its next pass reads from), which writes no queue row of
+/// the omitted events in (C, S]; and the rows of those events of the ledger
+/// of now's form, those the builder of now wrote ([`built`]). The coverage,
+/// its points and every other row are the builder's.
 fn without_omitted_rows(input: &Input, from: usize) -> (Memory, Vec<LedgerRow>) {
     let memory = Memory::default();
+    let set = |n: usize| if n >= from { three() } else { none() };
     let mut builder = Builder::default();
-    let omit = |builder: &mut Builder, n: usize| {
-        if n >= from {
-            builder.set_omission(three());
-        }
-    };
     for (n, step) in input.steps.iter().enumerate() {
-        omit(&mut builder, n);
+        builder.set_omission(set(n));
         match *step {
             Step::Arrive(count) => {
                 memory.events.replace(input.log.events[..count].to_vec());
@@ -557,38 +555,22 @@ fn without_omitted_rows(input: &Input, from: usize) -> (Memory, Vec<LedgerRow>) 
             }
             Step::Start(secs) => {
                 builder = start_builder(&memory, ms(secs)).unwrap();
-                omit(&mut builder, n);
+                builder.set_omission(set(n));
             }
             Step::FromTheStart => {
                 builder = Builder::default();
-                omit(&mut builder, n);
+                builder.set_omission(set(n));
             }
         }
     }
-    let Some(coverage) = memory.omitted.borrow().clone() else {
-        return (memory, Vec::new());
-    };
-    let covered = |row: &LedgerRow| {
-        row.kind == LedgerKind::Queue
-            && row
-                .subject
-                .as_ref()
-                .is_some_and(|subject| THREE.contains(&subject.kind.as_str()))
-            && !row.records.is_empty()
-            && row.records.iter().all(|event| {
-                event.id > coverage.from
-                    && event.id <= coverage.through
-                    && owner::owner(event) == Owner::Queue
-            })
-    };
-    let mut taken = Vec::new();
-    memory.rows.borrow_mut().retain(|_, row| {
-        let out = covered(row);
-        if out {
-            taken.push(row.clone());
-        }
-        !out
-    });
+    let omitted = super::omitting::omitted_of(&memory);
+    let form = super::omitting::old_form(&memory, Some(&built(input)), ms(input.now));
+    let taken = omitted
+        .iter()
+        .map(|event| (LedgerKind::Queue, event.id.to_string()))
+        .filter(|key| !memory.rows.borrow().contains_key(key))
+        .map(|key| form.rows.borrow()[&key].clone())
+        .collect();
     (memory, taken)
 }
 
@@ -620,18 +602,17 @@ fn with_rows_given_back(
     values
 }
 
-/// The ledger of each input with the queue rows of the three kinds' omitted
-/// events in (C, S] taken out and the coverage of them held, read by the
-/// functions of now, gives every reader the values fixed of the ledger that
-/// holds those rows (the queue rows' value of the rows left with those
-/// taken out given back, so that the other rows are those fixed too): with
-/// C at 0, and with C past the first events where the inputs' builder sets
-/// the kinds after its first pass, the omitted events up to C left as queue
-/// rows. The reader omits no kind of its own (this version's set is empty):
-/// it reads the kinds of the coverage the store holds.
+/// The ledger of each input the builder omitting the three kinds makes (no
+/// queue row of their omitted events in (C, S], the coverage of them held),
+/// read by the functions of now, gives every reader the values fixed of the
+/// ledger of the builder of now, which holds those rows (the queue rows'
+/// value of the rows it makes with those given back, so that the other
+/// rows are those fixed too): with C at 0, and with C past the first events
+/// where the inputs' builder sets the kinds after its first pass, the
+/// omitted events up to C left as queue rows. The reader reads the kinds of
+/// the coverage the store holds.
 #[test]
 fn the_ledger_without_the_omitted_rows_gives_the_values_fixed() {
-    assert!(crate::domain::ledger::queue::OMITTED_KINDS.is_empty());
     let all = inputs();
     let mut past_c = 0;
     for from in [0, 2] {
@@ -662,11 +643,41 @@ fn the_ledger_without_the_omitted_rows_gives_the_values_fixed() {
                 past_c += 1;
             }
             let read = values(&memory, input);
-            each.push((input, with_rows_given_back(read, &memory, &taken)));
+            let given = with_rows_given_back(read, &memory, &taken);
+            let old = built(input);
+            assert_eq!(of_old_form(&memory, Some(&old), input, input.name), given);
+            each.push((input, given));
         }
-        check(&each);
+        check_ended_whole(&each);
     }
     assert!(past_c > 0);
+}
+
+/// The values of each input of `each` are those fixed, but those of an
+/// input whose last pass the builder of now left marks after (`cut`'s
+/// step (ii) and `on its way`'s last pass, cut by the writes) may not be: a builder that writes no row of
+/// the omitted events writes others in their place and records inputs past
+/// those the values were fixed of (ADR-t4644-1 decision 4), its values those
+/// of its ledger of now's form ([`of_old_form`], which each input's `each`
+/// is). `cut` differs.
+#[track_caller]
+fn check_ended_whole(each: &[(&Input, Vec<(String, Value)>)]) {
+    let differing: Vec<(&str, String)> = each
+        .iter()
+        .filter_map(|(input, values)| Some((input.name, differs(input, values)?)))
+        .collect();
+    for (name, differs) in &differing {
+        let input = each
+            .iter()
+            .find(|(input, _)| input.name == *name)
+            .unwrap()
+            .0;
+        assert!(ends_cut(input), "{differs}");
+    }
+    assert!(differing.iter().any(|(name, _)| *name == "cut"));
+    let names: Vec<&str> = each.iter().map(|(input, _)| input.name).collect();
+    let all: Vec<&str> = inputs().iter().map(|input| input.name).collect();
+    assert_eq!(names, all);
 }
 
 /// (vii) and (viii) on the ledger without the omitted rows: the token of

@@ -116,7 +116,7 @@ fn the_landing_slots_are_the_rows_a_rescan_of_every_attempt_gives() {
     for open in [false, true] {
         let log = log(open);
         let now = ms(100);
-        let slots = queue_rows(&[], &log.events, now, "b");
+        let slots = queue_rows(&[], &log.events, now, "b", &Unwritten::default());
         assert_eq!(
             slots,
             landing_slots_by_rescan(&log.events, now, "b"),
@@ -209,7 +209,13 @@ fn the_queue_rows_are_the_rows_a_rescan_of_every_attempt_gives() {
         ];
         expected.extend(landing_slots_by_rescan(&log.events, now, "b"));
         expected.sort_by_key(|row| row.inputs_from);
-        let rows = queue_rows(&queue_owned(&log), &log.events, now, "b");
+        let rows = queue_rows(
+            &queue_owned(&log),
+            &log.events,
+            now,
+            "b",
+            &Unwritten::default(),
+        );
         assert_eq!(rows, expected, "{open}");
         assert_eq!(rows.len(), if open { 6 } else { 5 });
     }
@@ -220,9 +226,9 @@ fn the_queue_rows_are_the_rows_a_rescan_of_every_attempt_gives() {
 #[test]
 fn an_attempt_reads_a_later_event_of_an_earlier_time() {
     let mut log = log(false);
-    let before = queue_rows(&[], &log.events, ms(100), "b");
+    let before = queue_rows(&[], &log.events, ms(100), "b", &Unwritten::default());
     log.add(None, None, "mark_added", json!({"mark": "late"}), 39);
-    let after = queue_rows(&[], &log.events, ms(100), "b");
+    let after = queue_rows(&[], &log.events, ms(100), "b", &Unwritten::default());
     assert_eq!(after, landing_slots_by_rescan(&log.events, ms(100), "b"));
     assert_eq!(before[0].inputs_through.events, EventId::new(4));
     assert_eq!(after[0].inputs_through.events, log.last());
@@ -248,7 +254,13 @@ fn a_book_read_a_part_at_a_time_folds_the_rows_of_all_at_once() {
     late.add(None, None, "mark_added", json!({"mark": "late"}), 39);
     for log in [log(false), late, gone_log()] {
         let now = ms(10_000);
-        let whole = queue_rows(&owned_of(&log.events), &log.events, now, "b");
+        let whole = queue_rows(
+            &owned_of(&log.events),
+            &log.events,
+            now,
+            "b",
+            &Unwritten::default(),
+        );
         for split in 0..=log.events.len() {
             let (mut lives, mut pre_claim, mut book) = (
                 Lives::default(),
@@ -511,7 +523,7 @@ fn the_rows_a_supervisors_end_ends_are_the_rows_a_scan_per_supervisor_gives() {
         ),
         plain(11, "supervisor_alive", "s5"),
     ];
-    let rows = queue_rows(&log.events, &log.events, now, "b");
+    let rows = queue_rows(&log.events, &log.events, now, "b", &Unwritten::default());
     assert_eq!(rows, expected);
 }
 
@@ -660,7 +672,13 @@ fn book_by_parts(log: &Log, splits: &[usize], now: i64) -> (Vec<LedgerRow>, Vec<
 fn the_slots_reached_by_runs_are_those_the_scan_per_event_reached() {
     let log = tangled_log();
     let now = ms(100);
-    let whole = queue_rows(&owned_of(&log.events), &log.events, now, "b");
+    let whole = queue_rows(
+        &owned_of(&log.events),
+        &log.events,
+        now,
+        "b",
+        &Unwritten::default(),
+    );
     let slot_rows: Vec<&LedgerRow> = whole
         .iter()
         .filter(|row| {
@@ -733,7 +751,7 @@ fn the_slots_cost_a_bound_linear_in_the_events() {
         assert!(looked >= usize::from(attempts) * events, "{looked}");
 
         let before = scanned_count();
-        queue_rows(&[], &log.events, ms(100), "b");
+        queue_rows(&[], &log.events, ms(100), "b", &Unwritten::default());
         let whole = scanned_count() - before;
         assert!(
             whole <= 2 * len,
@@ -900,7 +918,7 @@ fn a_queue_row_is_closed_once_no_later_event_reaches_it() {
 /// The heads of the rows the store holds of `events` folded at `now`
 /// ([`QueueHead::of`]), each settled with `settled`.
 fn heads_held(events: &[RunEvent], now: i64, settled: bool) -> Vec<QueueHead> {
-    queue_rows(&owned_of(events), events, now, "b")
+    queue_rows(&owned_of(events), events, now, "b", &Unwritten::default())
         .iter()
         .map(|row| {
             let mut head = QueueHead::of(row);
@@ -996,7 +1014,7 @@ fn a_book_made_again_from_the_rows_goes_on_as_the_fold_of_every_event() {
     let (before, after) = log.events.split_at(position);
     let now = ms(40);
     let owned = owned_of(&log.events);
-    let whole_rows = queue_rows(&owned, &log.events, now, "b");
+    let whole_rows = queue_rows(&owned, &log.events, now, "b", &Unwritten::default());
     for settled in [false, true] {
         let (mut lives, mut pre_claim, mut whole) = (
             Lives::default(),
@@ -1405,4 +1423,182 @@ fn wait_life_of(head: &QueueHead) -> Option<&str> {
         Of::Interval(started) => wait_life(started, &head.detail["interval"]),
         _ => None,
     }
+}
+
+/// The three kinds of the version's set by name.
+fn set() -> Vec<&'static str> {
+    OMITTED_KINDS.iter().map(|kind| kind.as_str()).collect()
+}
+
+/// The queue's events of each kind of the set before and after a position,
+/// of a kind of no set (a mark) and of a kind this version does not know,
+/// and the same kinds of a run (its telemetry token) and of a task (a
+/// refusal): the log and the position (C) between them.
+fn of_the_set_and_others() -> (Log, EventId) {
+    let mut log = Log::default();
+    let add = |log: &mut Log, secs: i64| {
+        for kind in set() {
+            log.add(None, None, kind, json!({"target": "job:1"}), secs);
+        }
+        log.add(None, None, "mark_added", json!({"mark": "m"}), secs + 1);
+        log.add(None, None, "screen_noted", json!({}), secs + 2);
+        log.add(Some(5), None, "authorization_denied", json!({}), secs + 3);
+    };
+    log.landed(1, &run_id(1), 0);
+    log.add(
+        Some(1),
+        Some(&run_id(1)),
+        "telemetry_token_issued",
+        json!({"target": "run"}),
+        5,
+    );
+    add(&mut log, 100);
+    let c = log.last();
+    add(&mut log, 200);
+    log.landed(2, &run_id(2), 300);
+    log.add(
+        Some(2),
+        Some(&run_id(2)),
+        "telemetry_token_revoked",
+        json!({"target": "run"}),
+        1_300,
+    );
+    add(&mut log, 1_400);
+    (log, c)
+}
+
+/// Whether `event` is the queue's of one of the set's kinds.
+fn of_the_set(event: &RunEvent) -> bool {
+    set().contains(&event.kind.as_str()) && owner(event) == Owner::Queue
+}
+
+/// Of the queue's events, those of the set after C are no queue row's
+/// records and those up to C are as before; every other kind (a mark, a
+/// kind this version does not know) gives the rows it gave; the rows of the
+/// runs, tasks and sessions (a run's token, a task's refusal) are those of
+/// no event omitted.
+#[test]
+fn the_queue_events_of_the_set_after_c_are_no_queue_rows_records() {
+    let (log, c) = of_the_set_and_others();
+    let now = ms(10_000);
+    let unwritten = Unwritten::of(set(), c, None);
+    let all = crate::domain::ledger::build(&log.events, now, "b");
+    let omitting = crate::domain::ledger::build_omitting(&log.events, now, "b", &unwritten);
+    let queue = |rows: &[LedgerRow]| -> Vec<LedgerRow> {
+        rows.iter()
+            .filter(|row| row.kind == LedgerKind::Queue)
+            .cloned()
+            .collect()
+    };
+    let others = |rows: &[LedgerRow]| -> Vec<LedgerRow> {
+        rows.iter()
+            .filter(|row| row.kind != LedgerKind::Queue)
+            .cloned()
+            .collect()
+    };
+    assert_eq!(others(&omitting), others(&all));
+    let records: BTreeSet<EventId> = queue(&omitting)
+        .iter()
+        .flat_map(|row| row.records.iter().map(|event| event.id))
+        .collect();
+    let mut after = 0;
+    for event in &log.events {
+        let omitted = of_the_set(event) && event.id > c;
+        assert_eq!(unwritten.omits(event), omitted, "{:?}", event.kind);
+        if owner(event) == Owner::Queue {
+            assert_eq!(records.contains(&event.id), !omitted, "{:?}", event.kind);
+        }
+        after += usize::from(omitted);
+    }
+    assert_eq!(after, 6);
+    // The rows left are those of every event less those of the omitted (a
+    // landing slot's records are none of its own).
+    let left: Vec<LedgerRow> = queue(&all)
+        .into_iter()
+        .filter(|row| {
+            row.records.is_empty() || !row.records.iter().all(|event| unwritten.omits(event))
+        })
+        .collect();
+    assert_eq!(queue(&omitting), left);
+    // The run's tokens and the task's refusals stay their rows' records.
+    let rows_of = |kind: LedgerKind| -> BTreeSet<EventId> {
+        omitting
+            .iter()
+            .filter(|row| row.kind == kind)
+            .flat_map(|row| row.records.iter().map(|event| event.id))
+            .collect()
+    };
+    let (runs, tasks) = (rows_of(LedgerKind::Run), rows_of(LedgerKind::Task));
+    for event in log
+        .events
+        .iter()
+        .filter(|event| set().contains(&event.kind.as_str()))
+    {
+        match owner(event) {
+            Owner::Run => assert!(runs.contains(&event.id)),
+            Owner::Task => assert!(tasks.contains(&event.id)),
+            Owner::Queue | Owner::Session => {}
+        }
+    }
+    assert!(
+        log.events
+            .iter()
+            .any(|event| owner(event) == Owner::Run && set().contains(&event.kind.as_str()))
+    );
+    assert!(
+        log.events
+            .iter()
+            .any(|event| owner(event) == Owner::Task && set().contains(&event.kind.as_str()))
+    );
+}
+
+/// An empty set (and none) omits no event: the queue rows of every event.
+#[test]
+fn an_empty_set_gives_the_queue_rows_of_every_event() {
+    let (log, c) = of_the_set_and_others();
+    let now = ms(10_000);
+    let owned = owned_of(&log.events);
+    let every = queue_rows(&owned, &log.events, now, "b", &Unwritten::default());
+    for unwritten in [
+        Unwritten::of([], EventId::new(0), None),
+        Unwritten::of([], c, None),
+        Unwritten::of([], c, Some(c)),
+    ] {
+        assert!(log.events.iter().all(|event| !unwritten.omits(event)));
+        assert_eq!(queue_rows(&owned, &log.events, now, "b", &unwritten), every);
+    }
+    let of_set = every
+        .iter()
+        .filter(|row| !row.records.is_empty() && row.records.iter().all(of_the_set))
+        .count();
+    assert_eq!(of_set, 9);
+}
+
+/// While the builder stops (its coverage's (C, S] held), the queue's events
+/// of the set in (C, S] are no row's records and those after S are rows
+/// again, as those up to C are.
+#[test]
+fn while_stopped_the_queue_events_of_the_set_after_s_are_rows() {
+    let (log, c) = of_the_set_and_others();
+    let s = log
+        .events
+        .iter()
+        .filter(|event| of_the_set(event) && event.id > c)
+        .nth(2)
+        .unwrap()
+        .id;
+    let now = ms(10_000);
+    let unwritten = Unwritten::of(set(), c, Some(s));
+    let rows = queue_rows(&owned_of(&log.events), &log.events, now, "b", &unwritten);
+    let records: BTreeSet<EventId> = rows
+        .iter()
+        .flat_map(|row| row.records.iter().map(|event| event.id))
+        .collect();
+    let mut kept_out = 0;
+    for event in log.events.iter().filter(|event| of_the_set(event)) {
+        let out = event.id > c && event.id <= s;
+        assert_eq!(records.contains(&event.id), !out);
+        kept_out += usize::from(out);
+    }
+    assert_eq!(kept_out, 3);
 }

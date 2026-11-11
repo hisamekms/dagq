@@ -504,22 +504,53 @@ fn build_pass_limited(
     built
 }
 
+/// Read again the events whose rule of no row the pass's start changed
+/// ([`Builder::regain_after`]: after the store's R alone), `per_read` at a
+/// time as the pass's events ([`within_pass`]), before the pass reads on
+/// or writes anything: those the builder left without rows that the rule
+/// it holds now copies get their rows, so that no input is left of neither
+/// a row nor the coverage. Whether it read them all: a pass that did not
+/// writes nothing (R stays before the events not read again) and the next
+/// goes on. A read short of where it had read fails the pass.
+fn regain_rows(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    bounds: (usize, usize),
+    timing: (Timing<'_>, Option<Instant>),
+    built: &mut Built,
+) -> Result<bool> {
+    while let Some((after, through)) = builder.regain_after() {
+        let Some(events) = within_pass(store, (after, through), bounds, timing, built)? else {
+            return Ok(false);
+        };
+        anyhow::ensure!(
+            !events.is_empty(),
+            "the events after {after} up to {through} to give their rows are not read"
+        );
+        builder.regain(&events);
+    }
+    Ok(true)
+}
+
 /// Read again the events from the S of the coverage the builder took from
 /// the store up to its cursor ([`Builder::coverage_behind`]), `per_read` at
-/// a time, before the pass writes anything: so that the S it writes covers
-/// every event it read. A read short of the cursor fails the pass.
+/// a time as the pass's events ([`within_pass`]), before the pass reads on
+/// or writes anything: so that the S it writes covers every event it read.
+/// Whether it read them all: a pass that did not writes nothing (no mark
+/// moves while the coverage is behind) and the next goes on from the S it
+/// folded up to. A read short of the cursor fails the pass.
 fn catch_up_coverage(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
-    per_read: usize,
-) -> Result<()> {
+    bounds: (usize, usize),
+    timing: (Timing<'_>, Option<Instant>),
+    built: &mut Built,
+) -> Result<bool> {
     while let Some(after) = builder.coverage_behind() {
-        let events = store.events_between(
-            after,
-            builder.events,
-            &EventFilter::default(),
-            per_read.max(1),
-        )?;
+        let Some(events) = within_pass(store, (after, builder.events), bounds, timing, built)?
+        else {
+            return Ok(false);
+        };
         anyhow::ensure!(
             !events.is_empty(),
             "the events after the coverage's S {after} up to {} are not read",
@@ -527,7 +558,43 @@ fn catch_up_coverage(
         );
         builder.catch_up_coverage(&events);
     }
-    Ok(())
+    Ok(true)
+}
+
+/// The next page of the events after the first of `range` up to the
+/// second, `per_read` at most, read as the pass's events (`built`'s, its
+/// events and pages): a page at least, then none once the pass read
+/// `per_pass` events or took
+/// [`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME) since
+/// `started`. None: the pass is cut at its bound behind the latest event,
+/// so that the next starts at once ([`goes_on`]).
+fn within_pass(
+    store: &dyn LedgerQueue,
+    (after, through): (EventId, EventId),
+    (per_read, per_pass): (usize, usize),
+    (timing, started): (Timing<'_>, Option<Instant>),
+    built: &mut Built,
+) -> Result<Option<Vec<RunEvent>>> {
+    if built.work.events > 0 && (built.work.events >= per_pass || pass_spent(timing.since(started)))
+    {
+        built.cut = true;
+        built.work.latest = store.latest_event_id()?.as_i64();
+        return Ok(None);
+    }
+    let read_started = timing.start();
+    let events = store.events_between(
+        after,
+        through,
+        &EventFilter::default(),
+        per_read
+            .min(per_pass.saturating_sub(built.work.events))
+            .max(1),
+    );
+    built.work.event_read += timing.since(read_started);
+    let events = events?;
+    built.work.events += events.len();
+    built.work.pages += 1;
+    Ok(Some(events))
 }
 
 /// One pass's reads, folds and writes. A builder that has not swept
@@ -555,13 +622,24 @@ fn pass(
     // Every builder, one that omits no kind too, so that a store of a
     // coverage of other kinds says it stops.
     builder.begin_coverage(store.ledger_marks()?.as_ref());
-    catch_up_coverage(store, builder, per_read)?;
+    let bounds = (per_read, per_pass);
+    if !regain_rows(store, builder, bounds, (timing, started), built)?
+        || !catch_up_coverage(store, builder, bounds, (timing, started), built)?
+    {
+        return Ok(());
+    }
+    // The events it read again are the pass's own: it reads on within the
+    // events and the time they left it, and is cut short of the latest.
+    let read_again = built.work.events > 0;
     let latest = store.latest_event_id()?;
     built.work.latest = latest.as_i64();
     let mut progress = Duration::ZERO;
     let reading_started = timing.start();
     let mut checkpoint_events = 0;
-    while latest > builder.events {
+    while latest > builder.events && built.work.events < per_pass {
+        if read_again && pass_spent(timing.since(started)) {
+            break;
+        }
         let started = timing.start();
         let read = store.events_between(
             builder.events,
@@ -1830,6 +1908,7 @@ fn resume_builder(
     let mut queue_builder = Builder::default();
     queue_builder.go_on_from_rows(queue.through);
     queue_builder.read_up_to(queue.read_ms);
+    queue_builder.begin_stored_coverage(marks);
     let since = store.ledger_tasks_open_since_at(queue.through.events)?;
     let heads = store.ledger_queue_heads_at(queue.through.events, since)?;
     let latest = store.latest_event_id()?;
@@ -1938,6 +2017,8 @@ fn start_builder_at(
             .and_then(|rows| rows.time_pending),
     );
     builder.read_up_to(read_ms);
+    // After the time read up to R: where it reads by the rule of no row from.
+    builder.begin_stored_coverage(marks);
     let now_ms = builder.folds_at_snapshot(now_ms, latest);
     let heads = if let Some(routing) = routing {
         builder.restore_routing_from(routing);

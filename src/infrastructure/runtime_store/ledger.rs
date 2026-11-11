@@ -2339,6 +2339,7 @@ mod tests {
             events,
             ledger::testkit::ms(40),
             "2030-01-01T00:00:00.000Z",
+            &ledger::queue::Unwritten::default(),
         );
         assert!(rows.len() >= 10);
         for row in &rows {

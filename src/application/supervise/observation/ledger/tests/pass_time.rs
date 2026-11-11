@@ -68,7 +68,7 @@ fn a_pass_writes_until_its_time_and_leaves_the_rest_to_the_next() {
 
 /// A clock each of whose reads is [`PASS_TIME`] after the one before: a
 /// pass on it has taken its time by its first look, before any write.
-struct Leaping(std::sync::Mutex<Instant>);
+pub(super) struct Leaping(pub(super) std::sync::Mutex<Instant>);
 
 impl crate::application::Clock for Leaping {
     fn system_time(&self) -> std::time::SystemTime {
@@ -206,12 +206,13 @@ fn a_pass_goes_on_while_it_stops_at_a_bound_and_leaves_the_ledger_behind() {
     assert!(pass_due(Some(at), at + interval, interval, false));
 }
 
-/// A refusal of a telemetry report: a queue row of its own.
+/// A queue row of its own, of a kind copied to queue rows ([`ONE_EVENT`]),
+/// in the payload of a refusal of a telemetry report.
 fn denied(log: &mut Log, secs: i64) {
     log.add(
         None,
         None,
-        "authorization_denied",
+        ONE_EVENT,
         json!({"event": "authorization_denied", "role": "executor",
                "capability": "telemetry.report", "reason": "not_on_resource",
                "resource": {"kind": "run", "id": run_id(9)}}),

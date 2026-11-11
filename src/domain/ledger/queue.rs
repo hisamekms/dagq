@@ -1,6 +1,7 @@
-//! The ledger's queue rows: one per interval or event of the queue as a
-//! whole, keyed by the id of the event that starts it. The kinds
-//! (`subject.kind`):
+//! The ledger's queue rows: one per interval of the queue as a whole, and
+//! one per other event of it but those of [`OMITTED_KINDS`] after C (the
+//! coverage's start, [`super::session::written::omitted`]), keyed by the
+//! id of the event that starts it. The kinds (`subject.kind`):
 //!
 //! - `slots_full`, `claim_hold`, `claim_deferral`: the waits before a claim
 //!   as [`crate::domain::pre_claim::pre_claim_intervals`] reads them; `landing_hold`: a hold on the
@@ -18,7 +19,12 @@
 //!   ([`crate::domain::stats::landing_utilization::spans`]); its records
 //!   are its run's.
 //! - any other kind: one event (main's history, a goal's attributes, an
-//!   update's step, a mark, a backend's failure), its kind the row's.
+//!   update's step, a mark, a backend's failure), its kind the row's. One
+//!   of [`OMITTED_KINDS`] after C is no row's record ([`Unwritten`]): what
+//!   builds the ledger reads it as an input all the same and the
+//!   coverage's summaries hold it, so that the common read takes it for a
+//!   window's edges; one up to C stays the row it was, and while the
+//!   builder stops, one after S is a row again.
 //!
 //! An interval with no end yet has no `ended_at` and is not settled
 //! ([`super::settle`]). Reads nothing but the events. The book is made
@@ -33,6 +39,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub use super::session::written::omitted::Unwritten;
 use super::{LEDGER_V, LedgerHead, LedgerKind, LedgerRow, Subject, findings};
 use crate::domain::{
     EventId, EventKind, RunEvent, RunId, TaskId, claim_hold,
@@ -48,11 +55,27 @@ use crate::domain::{
     supervisor_life::{Lives, supervisor_of},
 };
 
-/// The kinds of the queue's events not copied to queue rows (ADR-t4644-1
-/// decision 1): none in this version. What builds the ledger holds of the
-/// queue's events of these kinds the coverage of
+/// The kinds of the queue's events not copied to queue rows after C
+/// (ADR-t4644-1 decision 1): fixed to these three, any other kind (a new
+/// one too) is copied as before. No reader reads a value of one of them
+/// (docs/plans/ledger-queue-rows-readers-spike.md "判定": holds), and the
+/// row of one is that event's own, so all it bears on is where a window
+/// starts and ends (its latest id, a time cursor's answer, its first time,
+/// `queue_before`), which the common read takes from the coverage
+/// ([`super::window`]). What builds the ledger still reads each as an
+/// input (R moves past it). The same kinds of a run, a task or a session stay
+/// their rows' records. Putting a kind in or taking one out, and removing
+/// the rows held up to C, are left to the decision after goal 277: what
+/// builds the ledger stops on a store whose coverage is of another set
+/// ([`super::session::written::omitted::stops`]), so a change of this set
+/// alone stops every store that holds a coverage. What builds the ledger
+/// holds of the queue's events of these kinds the coverage of
 /// [`super::session::written::omitted`] instead.
-pub const OMITTED_KINDS: &[EventKind] = &[];
+pub const OMITTED_KINDS: &[EventKind] = &[
+    EventKind::AuthorizationDenied,
+    EventKind::TelemetryTokenIssued,
+    EventKind::TelemetryTokenRevoked,
+];
 
 /// What a queue row the store holds says of itself that [`QueueBook`] is
 /// made again by ([`QueueBook::from_heads`]): its head ([`LedgerHead`],
@@ -230,13 +253,22 @@ fn interval_row(
 /// whole EventStore: the supervisors' lives end intervals, and the runs'
 /// events give the landing slot's use) at `now_ms`, built at `built_at`,
 /// as [`QueueBook`] assigns them. Each of `owned` is the records of
-/// exactly one row.
+/// exactly one row, but those `unwritten` omits, of none: they are read as
+/// any other event is but give no row. With [`Unwritten::default`] it
+/// omits none.
 pub fn queue_rows(
     owned: &[RunEvent],
     all: &[RunEvent],
     now_ms: i64,
     built_at: &str,
+    unwritten: &Unwritten,
 ) -> Vec<LedgerRow> {
+    let owned: Vec<RunEvent> = owned
+        .iter()
+        .filter(|event| !unwritten.omits(event))
+        .cloned()
+        .collect();
+    let owned = owned.as_slice();
     let owns: HashSet<EventId> = owned.iter().map(|event| event.id).collect();
     let (mut lives, mut pre_claim, mut book) = (
         Lives::default(),
@@ -707,15 +739,31 @@ impl QueueBook {
         taken |= self.alert(event, touched);
         taken |= self.finding(event, touched);
         if !taken {
-            let about = supervisor_of(event)
-                .map(str::to_owned)
-                .or_else(|| event.goal_id.map(|goal| goal.to_string()))
-                .unwrap_or_default();
-            let mut row = Assigned::new(Of::Event, event, about);
-            row.ended_at = row.started_at;
-            self.rows.insert(event.id, row);
-            touched.insert((LedgerKind::Queue, event.id.to_string()));
+            self.own_event(event, touched);
         }
+    }
+
+    /// Give `event`, added before as no row's ([`Self::add`] not owned), the
+    /// row of one event of its own it would have had owned: what it moved of
+    /// the other rows (an attempt's reach, an end, a supervisor's rows) was
+    /// taken as it was added, and is not taken again. For the kinds of
+    /// [`OMITTED_KINDS`] alone, each a row of one event of its own; a key
+    /// that has a row already keeps it.
+    pub fn regain(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) {
+        if !self.rows.contains_key(&event.id) && !self.slot_of.contains_key(&event.id) {
+            self.own_event(event, touched);
+        }
+    }
+
+    fn own_event(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) {
+        let about = supervisor_of(event)
+            .map(str::to_owned)
+            .or_else(|| event.goal_id.map(|goal| goal.to_string()))
+            .unwrap_or_default();
+        let mut row = Assigned::new(Of::Event, event, about);
+        row.ended_at = row.started_at;
+        self.rows.insert(event.id, row);
+        touched.insert((LedgerKind::Queue, event.id.to_string()));
     }
 
     fn attempt(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) {
