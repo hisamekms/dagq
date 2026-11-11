@@ -51,7 +51,7 @@ ADRは方針と境界だけを持ち、ここの名前・値・形は候補で�
 
 - 人の端末の認証と資格の置き場は`application::login`と`infrastructure::credentials`の定義を読む。
 - `dagq member add|role|remove`（管理者）
-- `dagq runner register-code`（人が登録の値を得る）・`dagq runner enroll`（runnerの側）・`dagq runner list|revoke|share`
+- runnerのコマンド`dagq runner register-code|enroll|list|revoke|share`の意味は`application::runner_enroll`の`RunnerCommand`の定義を読む。
 
 ## 配置の設定の候補
 
