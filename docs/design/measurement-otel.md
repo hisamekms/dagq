@@ -32,10 +32,10 @@ related:
 | runの区間（`run_phase_changed`から畳んだもの） | runのspanの子のspan | 工程の名前、区間の始まりと終わり | `dagq.blocker`・`dagq.holds`・`dagq.attempt`・`dagq.cause`・`dagq.blocked_by`、内側の層（step）の被覆率は`dagq.coverage` |
 | `blocker: infra`の環境の待ち（`Phase::Environment`） | 上と同じ区間のspan | `environment_*`の工程の名前 | `dagq.blocker`は`infra` |
 | unattributedの区間 | runのspanの子のspan | `unattributed` | `dagq.blocker`を持たない |
-| runを持たない対象のsession（planner・job） | trace（対象ごとに1つ）の根のspan | `dagq.session`、登録からsessionの終わりまで | `dagq.target.kind`・`dagq.target.id`・`session.id` |
-| runの上のsession | runのspanの子のspan | `dagq.session`、登録からsessionの終わりまで | `session.id`、stepの抜けの数は`dagq.session.missing_steps` |
-| runの上のstep | stepの始まりを含むrunの区間のspanの子のspan（sessionのspanへはspan link） | stepの種類（`model_turn`・`tool_call`・`subagent`・`wait`）、sessionの始まり＋`offset_ms`から`duration_ms` | `session.id`と下の行と同じattribute |
-| runを持たない対象のstep | sessionのspanの子のspan | stepの種類（`model_turn`・`tool_call`・`subagent`・`wait`）、sessionの始まり＋`offset_ms`から`duration_ms` | `dagq.step.seq`、`gen_ai.operation.name`（`chat`・`execute_tool`・`invoke_agent`、`wait`は無し）、`gen_ai.request.model`、`gen_ai.tool.name`、コマンドの形は`dagq.command.*`、`process.exit.code`、`dagq.command.background`、`dagq.command.output_bytes` |
+| runを持たない対象のsession（planner・job） | trace（対象ごとに1つ）の根のspan | `dagq.session`、sessionの始まり（下の「時計はsupervisorのもの」）からsessionの終わりまで | `dagq.target.kind`・`dagq.target.id`・`session.id` |
+| runの上のsession | runのspanの子のspan | `dagq.session`、sessionの始まり（下の「時計はsupervisorのもの」）からsessionの終わりまで | `session.id`、stepの抜けの数は`dagq.session.missing_steps` |
+| runの上のstep | stepの始まりを含むrunの区間のspanの子のspan（sessionのspanへはspan link） | stepの種類（`model_turn`・`tool_call`・`subagent`・`wait`）、sessionの始まり（下の「時計はsupervisorのもの」）＋`offset_ms`から`duration_ms` | `session.id`と下の行と同じattribute |
+| runを持たない対象のstep | sessionのspanの子のspan | stepの種類（`model_turn`・`tool_call`・`subagent`・`wait`）、sessionの始まり（下の「時計はsupervisorのもの」）＋`offset_ms`から`duration_ms` | `dagq.step.seq`、`gen_ai.operation.name`（`chat`・`execute_tool`・`invoke_agent`、`wait`は無し）、`gen_ai.request.model`、`gen_ai.tool.name`、コマンドの形は`dagq.command.*`、`process.exit.code`、`dagq.command.background`、`dagq.command.output_bytes` |
 | runの資源（区間ごとに畳んだ窓） | 区間のspanのattribute | 区間と同じ | `dagq.resources.cpu_seconds`・`.cpu_limit`・`.memory_max_bytes`・`.throttled_seconds`・`.cpu_pressure`・`.load_average`（外から測ったか中から測ったかはrunのspanの`dagq.resources.source`） |
 | `environment_attached` | resource（その名乗りの下で測ったspanの） | — | `dagq.env.kind`、`host.id`（`node_id`）、`container.image.repo_digests`（`image_digest`）、`dagq.env.cpu_limit`、`dagq.env.mem_limit`、`host.arch`（`arch`） |
 | NodeSampleStoreの行 | spanにしない（nodeのresourceのmetricのdata point） | sampleの時刻 | `host.id`（`node_id`） |
@@ -45,7 +45,9 @@ related:
 - **idは記録から決まる**: traceのidは対象（taskか、runを持たない対象の種類とid）から、spanのidは記録の鍵（runのid、区間の始まりのevent id、`(session_id, seq)`）から決まる値にする。
   同じストアから写し直しても同じidになり、重複したspanを作らない。
 - **時計はsupervisorのもの**: 区間の境目はsupervisorの時計のまま写す。
-  stepはexecutorの時計を使わず、sessionの登録の時刻からの経過（`offset_ms`）で置く（[送る口](measurement.md#送る口)の「sessionの登録」）。
+  stepの`offset_ms`はexecutorの時計で測ったsessionの始まり（`StepReporter::push`が最初に受けた`from_ms`）からの経過で、時刻ではない（`src/application/step_report.rs`のmodule docと`StepReporter::push`のdoc comment）。
+  sessionの登録は始まりと同じではなく、agentの終わりに登録するcommandのsession（`CommandSteps::watch`のdoc comment）では登録がagentの動いた分だけ始まりより後になる。
+  そこで写すときは、登録の時刻と、各stepの受け取りの時刻（`received_at`）から`offset_ms`と`duration_ms`を引いた時刻のうち最も早いものをsupervisorの時計のsessionの始まりとし、stepとsessionのspanをそこから置く。
 - **親は区間**: runの上のstepの親は、そのstepの始まりを含むrunの区間のspanで、sessionのspanではない（区間はspan、stepはその子のspan）。
   stepが区間の境目をまたいでも親は始まりの区間のままで、子が親より長いこともOpenTelemetryで許される。
   同じsessionのstepはspan linkでsessionのspanに結ぶ。
