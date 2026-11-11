@@ -99,7 +99,7 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 
 ## 空き容量
 
-supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイルシステムの空きを確かめ、足りなければclaimと着地を控えて掃除し、それでも足りないときだけinboxに1件知らせる（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44、閾値はADR-t4473-1が改めた）。
+supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイルシステムの空きを確かめ、足りなければclaimと着地を控えて掃除し、それでも足りないときだけinboxに1件知らせる（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44）。
 
 ### 閾値
 
@@ -112,6 +112,7 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 - 空き（`statvfs(3)`）が読めないときは控えない。
 - `[disk]`はsupervisorの起動時にmain checkoutの作業ファイルから読み（[Run environment](run-environment.md)）、読めなければ既定値で、廃止したkeyは読み飛ばして、warnを出す。
 - 人の`integrate`と、検証が容量不足で落ちたときのやり直しも、着地と同じ必要量で確かめる。
+- 人とinboxは`dagq disk relax`で最低ライン以外の項を期限つきで緩め、記録はqueueのeventだけで、各passが最新の1件を読み再起動なしに効く（[ADR-t4727-1](../../adr/2026-11-11-t4727-1-disk-needs-may-be-relaxed-for-a-while-by-a-person-or-the-inbox.md)）。
 
 ### 判定と掃除
 
@@ -134,7 +135,6 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
   `[run.env]`のprogramが無いときと着地のbranchが解決しないときは、掃除を待たずにleaseを返す。
 - handoffはどの保留でもleaseを返さず、runをleaseごと次のprocessに渡す（[Handoff](handoff.md)、[ADR-t3048-1](../../adr/2026-10-21-t3048-1-handoff-hands-over-held-landings-leased.md)）。
   handoffを初めて読んだ周回では、runを進める前に掃除をdrainの扱いにして読み直す（`end_cleanup_for_handoff`）。
-- 人の答えを待つrunと着地slotを待つrunのうち何も動いていないものは、空き容量の掃除だけがビルド成果物を消す（[waiting](waiting.md)、着地slot待ちは上のRun worktrees）。
 
 ### queueのdirのビルドのキャッシュ
 
@@ -242,7 +242,7 @@ Spikeがclaimされたgoal（goalの無いSpikeはそれ自体）は、未完了
 
 - どのproviderでも動かせないworkerと、`dagq.toml`が選んだruntimeで動かせないworkerのtaskはclaimせずに飛ばす（[ADR-t813-2](../../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)）。
 - hotspotより先に、候補の`worker`にこのpassの経路（`domain::provider_switch::routes`）があるかを見て、頼んだproviderが使えなくてももう一方で動かせるtaskはそちらでclaimする。
-- 切り替えを止める設定のときは、頼んだproviderの控えが解けるのを待ち、実行ファイルが無いときはそれを持つsupervisorが動くまで控えたままである（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。
+- 切り替えを止める設定のときは、頼んだproviderの控えが解けるのを待ち、実行ファイルが無いときはそれを持つsupervisorが動くまで控えたままである（ADR-t1857-1）。
   例外は`--no-claude`で、Claudeを頼んだtaskも設定に依らずCodexでclaimする。
 - containerで動かすときはproviderの経路より先にcontainerを見て（`Supervisor::container_deferral`、[Container runtime](../container-runtime.md)）、hostでは動かさない。
 - containerを使えても、machineのメモリにworkerのcontainerの上限が入らないか、メモリを待つcontainerが在れば`container_memory_wait`で控える（`Supervisor::container_memory_deferral`）。

@@ -2,7 +2,9 @@
 //! and its landings (ADR-t4473-1): below the reserve no run is claimed
 //! (`claim_held`) and no landing starts (`landing_held`); above it, with no
 //! run moving, a waiting landing starts before a new claim, and a queue
-//! with no run size sample yet claims one run at a time. Which needs and
+//! with no run size sample yet claims one run at a time. A relaxation of
+//! the needs (ADR-t4727-1) is read from its newest record on the next
+//! pass, and one past its time is recorded expired once. Which needs and
 //! how many claims each reading gives are the unit tests of
 //! `domain::disk`.
 
@@ -455,6 +457,169 @@ fn a_moving_run_not_measured_counts_the_expectation_whole_and_holds_the_next_cla
         message.contains("remaining 10.0 GiB (measured 0, unmeasured 1)"),
         "{message}"
     );
+    for task in [second, third] {
+        assert_eq!(
+            queue.show(task).unwrap().runs[0].status(),
+            RunStatus::Integrated
+        );
+    }
+}
+
+/// A relaxation of the needs recorded `ago` before the test's clock, for
+/// an hour: `expected_bytes` and `no_remaining` as given.
+fn relax(wiring: &Wiring, expected: Option<u64>, no_remaining: bool, ago: u64) -> i64 {
+    wiring.queue_event_ago(
+        "disk_relaxed",
+        &serde_json::json!({
+            "expected_bytes": expected, "no_landing_expectation": false,
+            "no_remaining": no_remaining, "for_secs": 3600, "reason": "emergency",
+        }),
+        std::time::Duration::from_secs(ago),
+    )
+}
+
+/// ADR-t4727-1: the supervisor reads a relaxation on its next pass, with no
+/// restart. Under one that overrides the expectation alone (8 GiB), the
+/// moving run not measured still counts the samples' whole, so the claim
+/// is held, and `claim_held` names the relaxation; a relaxation recorded
+/// while it is held that counts the moving runs' remaining 0 lets the
+/// second task be claimed beside the first, which the room above the
+/// reserve for one expectation holds.
+#[test]
+fn a_relaxation_recorded_while_a_claim_is_held_lets_it_go_on_the_next_pass() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut wiring = Wiring::new(
+        "a_relaxation_recorded_while_a_claim_is_held_lets_it_go_on_the_next_pass",
+        Script {
+            receipts: vec![succeeded, succeeded, succeeded],
+            verdicts: vec![
+                verdict("pass", "meets the acceptance"),
+                verdict("pass", "meets the acceptance"),
+                verdict("pass", "meets the acceptance"),
+            ],
+        },
+    );
+    let measured = calls.clone();
+    wiring.moving_sizes = std::sync::Arc::new(move |_: &std::path::Path| {
+        measured.fetch_add(1, Ordering::SeqCst);
+        Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+    });
+    let (release, released) = std::sync::mpsc::channel();
+    let (second, third) = one_sample_and_two_ready(&wiring, released);
+    let first_relax = relax(&wiring, Some(8 * GIB), false, 0);
+    let mut relaxed = false;
+    let mut beside = false;
+    wiring.supervise_once_while(|queue| {
+        let (held, other) = if running(queue, second) {
+            (second, third)
+        } else if running(queue, third) {
+            (third, second)
+        } else {
+            return false;
+        };
+        if calls.load(Ordering::SeqCst) == 0 || queue_payloads(queue, "claim_held").is_empty() {
+            return false;
+        }
+        if !relaxed {
+            assert!(!claimed(queue, other));
+            relax(&wiring, None, true, 0);
+            relaxed = true;
+            return false;
+        }
+        if !claimed(queue, other) {
+            return false;
+        }
+        beside = running(queue, held);
+        let _ = release.send(());
+        true
+    });
+    assert!(beside);
+    let mut queue = wiring.queue();
+    // The first hold is the one the second relaxation ended; a later pass,
+    // with a run moving and another waiting to land, may hold again.
+    let held = queue_payloads(&queue, "claim_held");
+    assert!(!held.is_empty());
+    assert_eq!(
+        held[0]["threshold"],
+        serde_json::json!((5 * GIB + 8 * GIB + EXPECTED) as f64)
+    );
+    let disk = &held[0]["disk"];
+    assert_eq!(disk["expected"], 8 * GIB);
+    assert_eq!(disk["relaxed"]["expected_bytes"], 8 * GIB);
+    assert_eq!(disk["relaxed"]["no_remaining"], false);
+    assert_eq!(disk["relaxed"]["event_id"], first_relax);
+    let message = held[0]["message"].as_str().unwrap();
+    assert!(message.contains("relaxed until"), "{message}");
+    assert!(message.contains("the reserve is kept"), "{message}");
+    assert!(!queue_payloads(&queue, "claim_resumed").is_empty());
+    assert!(queue_payloads(&queue, "disk_relax_expired").is_empty());
+    for task in [second, third] {
+        assert_eq!(
+            queue.show(task).unwrap().runs[0].status(),
+            RunStatus::Integrated
+        );
+    }
+}
+
+/// ADR-t4727-1: a relaxation past its time (recorded two hours ago for
+/// one) relaxes nothing: the first pass records `disk_relax_expired` of it
+/// once, however many passes follow, and the claim beside the moving run
+/// not measured is held as with none (the reserve and the expectation
+/// twice) until the first run landed.
+#[test]
+fn a_relaxation_past_its_time_is_recorded_expired_once_and_relaxes_nothing() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut wiring = Wiring::new(
+        "a_relaxation_past_its_time_is_recorded_expired_once_and_relaxes_nothing",
+        Script {
+            receipts: vec![succeeded, succeeded, succeeded],
+            verdicts: vec![
+                verdict("pass", "meets the acceptance"),
+                verdict("pass", "meets the acceptance"),
+                verdict("pass", "meets the acceptance"),
+            ],
+        },
+    );
+    let measured = calls.clone();
+    wiring.moving_sizes = std::sync::Arc::new(move |_: &std::path::Path| {
+        measured.fetch_add(1, Ordering::SeqCst);
+        Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+    });
+    let (release, released) = std::sync::mpsc::channel();
+    let (second, third) = one_sample_and_two_ready(&wiring, released);
+    let relaxation = relax(&wiring, None, true, 2 * 3600);
+    let mut after = None;
+    let mut alone = false;
+    wiring.supervise_once_while(|queue| {
+        let (held, other) = if running(queue, second) {
+            (second, third)
+        } else if running(queue, third) {
+            (third, second)
+        } else {
+            return false;
+        };
+        if calls.load(Ordering::SeqCst) == 0 || queue_payloads(queue, "claim_held").is_empty() {
+            return false;
+        }
+        let passes = *after.get_or_insert(wiring.passes());
+        if wiring.passes() < passes + 5 {
+            return false;
+        }
+        alone = running(queue, held) && !claimed(queue, other);
+        let _ = release.send(());
+        true
+    });
+    assert!(alone);
+    let mut queue = wiring.queue();
+    let expired = queue_payloads(&queue, "disk_relax_expired");
+    assert_eq!(expired.len(), 1, "{expired:?}");
+    assert_eq!(expired[0]["relaxed"], relaxation);
+    let held = queue_payloads(&queue, "claim_held");
+    assert_eq!(
+        held[0]["threshold"],
+        serde_json::json!((5 * GIB + 2 * EXPECTED) as f64)
+    );
+    assert!(held[0]["disk"].get("relaxed").is_none(), "{held:?}");
     for task in [second, third] {
         assert_eq!(
             queue.show(task).unwrap().runs[0].status(),

@@ -521,6 +521,65 @@ impl<E: TransactionEntries> StoreQueue<E> {
         Ok(id)
     }
 
+    /// [`crate::application::EventStore::record_queue_event_if_newest`]:
+    /// the newest of `kinds` is read and `kind` written in one write
+    /// transaction, so a record made in between, or the same record by a
+    /// second supervisor, writes nothing.
+    pub fn record_queue_event_if_newest(
+        &self,
+        kinds: &[&str],
+        newest: EventId,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<Option<EventId>> {
+        crate::domain::check_event_target(kind, None, None)?;
+        let _read = read_before_port(self, Closing::Queue(kind, &payload))?;
+        let tx = self.write_entry("record_queue_event_if_newest")?;
+        let mut latest: Option<EventId> = None;
+        for kinded in kinds {
+            let event =
+                SqlRead::query_row(&tx, LATEST_QUEUE_EVENT_SQL, sql_params![kinded], event_row)
+                    .optional()?;
+            latest = latest.max(event.map(|event| event.id));
+        }
+        if latest != Some(newest) {
+            return Ok(None);
+        }
+        let id = queue_event(&tx, kind, &payload)?;
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
+    /// [`crate::application::EventStore::expire_disk_relax`]: the newest
+    /// of the relaxation's records is read, judged at the queue's clock and
+    /// its end written in one write transaction.
+    pub fn expire_disk_relax(&self, relaxed: EventId) -> Result<Option<EventId>> {
+        use crate::domain::disk::{RELAX_KINDS, RelaxState, expired_payload, relax_state};
+        let kind = EventKind::DiskRelaxExpired;
+        let tx = self.write_entry("expire_disk_relax")?;
+        let mut newest: Option<RunEvent> = None;
+        for kinded in RELAX_KINDS.map(EventKind::as_str) {
+            let event =
+                SqlRead::query_row(&tx, LATEST_QUEUE_EVENT_SQL, sql_params![kinded], event_row)
+                    .optional()?;
+            if let Some(event) = event
+                && newest.as_ref().is_none_or(|newest| newest.id < event.id)
+            {
+                newest = Some(event);
+            }
+        }
+        let now = crate::application::unix_millis(self.generators.clock.system_time());
+        let RelaxState::Expired(expired) = relax_state(newest.as_ref(), now) else {
+            return Ok(None);
+        };
+        if expired.event_id != relaxed.as_i64() {
+            return Ok(None);
+        }
+        let id = queue_event(&tx, kind, &expired_payload(&expired))?;
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
     /// Record `inbox_nudged` with `payload` unless one with the same
     /// `absent_since` and `attempt` is recorded, in one write transaction
     /// (ADR-t1433-5 decision 1 (3)): `false` when another supervisor
@@ -1579,6 +1638,18 @@ impl<E: TransactionEntries> EventStore for StoreQueue<E> {
     }
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
         StoreQueue::latest_queue_event(self, kinds)
+    }
+    fn record_queue_event_if_newest(
+        &self,
+        kinds: &[&str],
+        newest: EventId,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<Option<EventId>> {
+        StoreQueue::record_queue_event_if_newest(self, kinds, newest, kind, payload)
+    }
+    fn expire_disk_relax(&self, relaxed: EventId) -> Result<Option<EventId>> {
+        StoreQueue::expire_disk_relax(self, relaxed)
     }
     fn latest_events_by_supervisor(
         &self,

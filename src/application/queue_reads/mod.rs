@@ -724,6 +724,7 @@ impl QueueRead {
             | UseCase::RequestAdd
             | UseCase::RequestDecline
             | UseCase::Mark
+            | UseCase::DiskRelax
             // The host's commands ([`crate::application::queue_commands`]).
             | UseCase::Answer
             | UseCase::AskClose

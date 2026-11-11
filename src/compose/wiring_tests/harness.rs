@@ -426,6 +426,29 @@ impl Wiring {
             .expect("record the hold");
     }
 
+    /// Record the queue's own event `kind` with `payload` as recorded
+    /// `ago` before the test's stopped clock: its id.
+    pub(super) fn queue_event_ago(
+        &self,
+        kind: &str,
+        payload: &serde_json::Value,
+        ago: Duration,
+    ) -> i64 {
+        let millis = i64::try_from(STOPPED_AT.saturating_sub(ago).as_millis()).expect("millis");
+        let connection = connect(&self.db);
+        connection
+            .execute(
+                "INSERT INTO run_events(kind,payload,created_at) VALUES (?1,?2,?3)",
+                rusqlite::params![
+                    kind,
+                    payload.to_string(),
+                    crate::domain::marks::utc_text(millis)
+                ],
+            )
+            .expect("record the event");
+        connection.last_insert_rowid()
+    }
+
     /// The ids and the clock of this test's queue.
     pub(super) fn generators(&self) -> Generators {
         self.generators.clone()

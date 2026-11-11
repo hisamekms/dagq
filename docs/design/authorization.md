@@ -66,7 +66,7 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | 人の役割 | userの許可からの狭め |
 | --- | --- |
 | 管理者 | なし |
-| member | `service.install`・`queue.admin`・`review.setup`・`review.setup_approve`・`task.ready_bypass_review`・`workspace.cleanup`・`run.recover`・`service.lifecycle`・`runner.share`を拒む |
+| member | `service.install`・`queue.admin`・`disk.relax`・`review.setup`・`review.setup_approve`・`task.ready_bypass_review`・`workspace.cleanup`・`run.recover`・`service.lifecycle`・`runner.share`を拒む |
 | 当番（管理者かmemberに重ねる） | 重ねた役割に`run.recover`を戻す。grantsに無い許可は足さない |
 | 役割なし（hostのsocketのpeer） | なし |
 
@@ -91,7 +91,7 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | plan-review-job・goal-review-job・throughput-review-job | 読み取りだけ | throughput-review-jobは[スループットの見直し](supervisor-lifecycle/throughput-review.md) |
 | setup-review-job | 読み取りだけ | なし（[setup-review](supervisor-lifecycle/setup-review.md)） |
 | observer | 読み取り・`queue.watch`・`ci.read`・`finding.record`・`finding.resolve`・`finding.ask`・`eval.read` | `finding.resolve`と`finding.ask`はfindingだけ |
-| supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss` | なし。`queue.admin`は自動更新の確認のため（下の`auto-update`）。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
+| supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss` | なし。`queue.admin`は自動更新の確認のため（下の`auto-update`）。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`とevalの依頼は持たない |
 | supervisor（続き） | `observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply`・`token.issue`・`queue_broker.record` | 同上 |
 | wrapper | 読み取り・`session.run`・`session.record` | 自分のrunかplanner（tokenのprincipalのactor id）だけ（ADR-t3102-1決定4） |
 | integrator | 読み取り・`landing.land`・`landing.push` | なし |

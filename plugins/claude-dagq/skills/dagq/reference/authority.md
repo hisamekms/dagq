@@ -27,7 +27,7 @@ HTTP-authenticated people remain `user`; the registry role narrows user grants b
 | Human role | Restriction on user grants |
 | --- | --- |
 | Administrator | None |
-| Member | Refused `service.install`, `queue.admin`, `review.setup`, `review.setup_approve`, `task.ready_bypass_review`, `workspace.cleanup`, `run.recover`, `service.lifecycle`, and `runner.share` |
+| Member | Refused `service.install`, `queue.admin`, `disk.relax`, `review.setup`, `review.setup_approve`, `task.ready_bypass_review`, `workspace.cleanup`, `run.recover`, `service.lifecycle`, and `runner.share` |
 | On-call overlay on either role | Restores `run.recover` within user grants; never adds an ungranted capability |
 
 | Role | Runner capabilities |
@@ -61,6 +61,8 @@ An external `issue_token` authenticated with a person's token issues only that p
 `replan request --run RUN` (`replan.request`) asks the runtime to replan a long-running run: only the person and the inbox. `replan propose --run RUN` (`replan.propose`) is a worker's proposal on its own run only. `replan resolve ID` (`replan.resolve`) decides on an operation held `blocked` (continue, withdraw or plan again): only the person and the inbox. Parking a run and applying its replacement (`replan.park`, `replan.apply`) are the supervisor's alone, with no command. While a run's replanning holds its task, changing it, landing it and resuming it are refused for every role, the person's included. Each role's part in a replanning: `reference/replan.md`.
 
 `hold TASK|RUN --reason '...'` and `release TASK|RUN` (`task.hold`) hold a task and let it go: only the person and the inbox (what a hold does: the `dagq-recover` skill's `reference/hold.md`).
+
+`disk relax` (and `--clear`, `disk.relax`) relaxes for a while how much free disk space a claim and a landing need: only the person (an administrator, when people authenticate) and the inbox. Planners, workers, every job, the observer and the supervisor are refused (`authorization_denied`).
 
 `setup-review` (`review.setup`, `reference/review-setup.md`): only the person and the inbox. Approving beforehand with `--yes` (`review.setup_approve`) is the person's alone. Its job (`setup-review-job`) may only read the queue.
 

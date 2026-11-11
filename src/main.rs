@@ -775,6 +775,12 @@ enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    // ADR-t4727-1.
+    /// The free disk space a claim and a landing need: relax how it is reckoned for a while.
+    Disk {
+        #[command(subcommand)]
+        command: DiskCommand,
+    },
     // ADR-t1920-1.
     /// The landing branch's CI as the supervisor's [ci_watch] reads it.
     Ci {
@@ -2018,6 +2024,36 @@ enum CiCommand {
 }
 
 #[derive(Subcommand, Clone)]
+enum DiskCommand {
+    /// Relax for a while what free disk space a claim and a landing need, as a way out of an
+    /// emergency: the supervisor reads it on its next pass with no restart, and reckons as
+    /// before once --for is up or after --clear. The reserve is never relaxed. Only the person
+    /// (an administrator, when people authenticate) and the inbox at a person's word. Prints
+    /// what it recorded.
+    Relax {
+        /// The size a new run, and a landing, is expected to take, in place of the recent runs'
+        /// (e.g. 8GiB); kept as the samples' while there are none.
+        #[arg(long, value_parser = dagq::domain::disk::parse_size, conflicts_with = "clear")]
+        expected: Option<u64>,
+        /// A claim adds no expectation for a run waiting to land.
+        #[arg(long, conflicts_with = "clear")]
+        no_landing_expectation: bool,
+        /// The moving runs' remaining counts 0.
+        #[arg(long, conflicts_with = "clear")]
+        no_remaining: bool,
+        /// How long it lasts (e.g. 30m, 6h), at most 24h.
+        #[arg(long = "for", value_parser = dagq::domain::disk::parse_duration_secs, conflicts_with = "clear")]
+        for_secs: Option<u64>,
+        /// Why, recorded with it (needed but with --clear).
+        #[arg(long)]
+        reason: Option<String>,
+        /// End the relaxation in effect before its time.
+        #[arg(long)]
+        clear: bool,
+    },
+}
+
+#[derive(Subcommand, Clone)]
 enum RequestCommand {
     /// Record a person's words as a planning request (only the inbox, at a person's word, and a
     /// person at a plain terminal): the supervisor opens a planner of the runtime's for it, which
@@ -2891,6 +2927,9 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             },
         ),
         Command::Mark { .. } => queue(C::MarkWrite),
+        Command::Disk {
+            command: DiskCommand::Relax { .. },
+        } => queue(C::DiskRelax),
         Command::Agent { command } => match command {
             AgentCommand::Eval {
                 split, rerun, set, ..
@@ -3146,6 +3185,9 @@ fn authorized_in_application(command: &Command) -> bool {
         | Command::Note { .. }
         | Command::Mark { .. }
         | Command::Finding { .. } => true,
+        // The relaxation of the disk's needs (ADR-t4727-1), authorized by
+        // the queue service before it is recorded.
+        Command::Disk { .. } => true,
         // The planning requests (ADR-t1394-1), with the planner a decline
         // needs read from the queue.
         Command::Request { .. } => true,
@@ -4184,6 +4226,22 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
             UseCase::Mark,
             json!({"label": label, "note": note, "at": at.map(|at| at.text()),
                    "retract": retract}),
+        ),
+        Command::Disk {
+            command:
+                DiskCommand::Relax {
+                    expected,
+                    no_landing_expectation,
+                    no_remaining,
+                    for_secs,
+                    reason,
+                    clear,
+                },
+        } => (
+            UseCase::DiskRelax,
+            json!({"expected_bytes": expected, "no_landing_expectation": no_landing_expectation,
+                   "no_remaining": no_remaining, "for_secs": for_secs, "reason": reason,
+                   "clear": clear}),
         ),
         Command::Show { id, full, events } => (
             UseCase::Show,
@@ -7227,6 +7285,11 @@ mod tests {
             ("answer", &["1", "--text", "yes"]),
             ("hold", &["7", "--reason", "r"]),
             ("release", &["7"]),
+            (
+                "disk relax",
+                &["--no-remaining", "--for", "6h", "--reason", "r"],
+            ),
+            ("disk relax", &["--clear"]),
         ];
         for (command, needs) in DAGQ_COMMANDS {
             let forms: Vec<_> = samples.iter().filter(|(of, _)| of == command).collect();

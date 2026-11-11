@@ -1493,6 +1493,16 @@ fn integrator(
             Capability::Supervise,
         )?;
     }
+    // A record of the relaxation of the disk's needs is the person's and
+    // the inbox's (`disk.relax`, ADR-t4727-1), never a landing's: refused,
+    // and the refusal recorded, as for a supervisor.
+    if needs::writes_a_relaxation(op, &params.args) {
+        super::queue_service::authorize_supervisor_needs(
+            &mut *queue,
+            &actor,
+            Capability::DiskRelax,
+        )?;
+    }
     let store = queue.supervisor_store();
     let task = RunReads::run(&*store, &run)?.task_id();
     integrator_scope(op, &params.args, &run, task).map_err(BadOperation)?;

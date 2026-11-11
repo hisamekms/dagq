@@ -133,7 +133,18 @@ impl EventStore for SupervisorsAndEvents {
             .collect())
     }
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
-        unreachable!("latest_queue_event is not what the test reaches")
+        Ok(self
+            .events
+            .borrow()
+            .iter()
+            .rev()
+            .find(|event| {
+                event.run_id.is_none()
+                    && event.task_id.is_none()
+                    && event.goal_id.is_none()
+                    && kinds.contains(&event.kind.as_str())
+            })
+            .cloned())
     }
     fn latest_events_by_supervisor(
         &self,

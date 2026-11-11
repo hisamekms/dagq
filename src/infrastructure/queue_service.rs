@@ -6456,6 +6456,23 @@ where
     ) -> Result<crate::domain::EventId> {
         EventStore::record_queue_event(&self.queue, kind, payload)
     }
+    fn latest_relax_event(&self, kinds: &[&str]) -> Result<Option<crate::domain::RunEvent>> {
+        EventStore::latest_queue_event(&self.queue, kinds)
+    }
+    fn record_relax_event(
+        &self,
+        kinds: &[&str],
+        newest: Option<crate::domain::EventId>,
+        kind: EventKind,
+        payload: Value,
+    ) -> Result<Option<crate::domain::EventId>> {
+        match newest {
+            Some(newest) => {
+                EventStore::record_queue_event_if_newest(&self.queue, kinds, newest, kind, payload)
+            }
+            None => EventStore::record_queue_event(&self.queue, kind, payload).map(Some),
+        }
+    }
     fn proposals(&self, all: bool) -> Result<Value> {
         Ok(json!({"proposals": TaskReads::proposals(&self.queue, all)?}))
     }

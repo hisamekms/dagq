@@ -156,6 +156,11 @@ string_enum!(Capability {
     ServiceLifecycle => "service.lifecycle",
     BinaryInstall => "service.install",
     QueueAdmin => "queue.admin",
+    // Relaxing the disk's needs for a while (`disk relax`, ADR-t4727-1):
+    // a person's and the inbox's only, as an emergency's way out; of the
+    // people, an administrator's, as the queue's other operations of the
+    // whole queue (`queue.admin`).
+    DiskRelax => "disk.relax",
     // Landing and push (ADR-t728-2).
     IntegrationRequest => "landing.request",
     Land => "landing.land",
@@ -181,7 +186,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 79] = [
+    pub const ALL: [Self; 80] = [
         Self::ImagePublish,
         Self::RunnerClaim,
         Self::RunnerHeartbeat,
@@ -251,6 +256,7 @@ impl Capability {
         Self::ServiceLifecycle,
         Self::BinaryInstall,
         Self::QueueAdmin,
+        Self::DiskRelax,
         Self::IntegrationRequest,
         Self::Land,
         Self::Push,
@@ -744,6 +750,7 @@ fn human_role_permits(role: super::actor::HumanRole, capability: Capability) -> 
             C::RunnerShare
             | C::BinaryInstall
             | C::QueueAdmin
+            | C::DiskRelax
             | C::ReviewSetup
             | C::ReviewSetupApprove
             | C::TaskReadyBypassReview
@@ -815,6 +822,7 @@ const INBOX: &[Capability] = &[
     C::ServiceLifecycle,
     C::BinaryInstall,
     C::QueueAdmin,
+    C::DiskRelax,
     C::IntegrationRequest,
     C::TokenIssue,
 ];
@@ -1412,6 +1420,7 @@ mod tests {
             C::WorkspaceCleanup,
             C::RunRecover,
             C::ServiceLifecycle,
+            C::DiskRelax,
         ];
         for role in [TeamRole::Admin, TeamRole::Member] {
             for on_call in [false, true] {
@@ -1454,6 +1463,37 @@ mod tests {
                     StaticPolicy.authorize(&with_role, capability, &Resource::Queue)
                 );
             }
+        }
+    }
+
+    /// `disk relax` (ADR-t4727-1): the person and the inbox only; of the
+    /// people an administrator, a member refused whether on call or not;
+    /// the planner, the worker, every job, the observer and the control
+    /// side refused as not granted.
+    #[test]
+    fn only_the_person_and_the_inbox_relax_the_disks_needs() {
+        use crate::domain::{actor::HumanRole, queue_service::TeamRole};
+        let relax =
+            |actor: &ActorContext| StaticPolicy.authorize(actor, C::DiskRelax, &Resource::Queue);
+        for role in ActorRole::ALL {
+            let outcome = relax(&ActorContext::new(role, "actor"));
+            if matches!(role, ActorRole::User | ActorRole::Inbox) {
+                assert_eq!(outcome, Ok(()), "{role:?}");
+            } else {
+                assert_eq!(
+                    outcome.unwrap_err().reason,
+                    DenyReason::NotGranted,
+                    "{role:?}"
+                );
+            }
+        }
+        for on_call in [false, true] {
+            let person = |role| ActorContext::user().with_human_role(HumanRole { role, on_call });
+            assert_eq!(relax(&person(TeamRole::Admin)), Ok(()));
+            assert_eq!(
+                relax(&person(TeamRole::Member)).unwrap_err().reason,
+                DenyReason::HumanRole
+            );
         }
     }
 

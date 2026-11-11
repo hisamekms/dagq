@@ -59,7 +59,8 @@
 //!   full), `container_image_*`, `sccache_*`, `inbox_*`, the cleanup's
 //!   `build_outputs_removed`, `incremental_sessions_removed`,
 //!   `build_cache_removed`, `scratchpad_removed` and `run_tmp_removed`,
-//!   `backend_call_failed`, `headless_job_stopped` and
+//!   `backend_call_failed`, `disk_relax*` (the relaxation of the disk's
+//!   needs, ADR-t4727-1), `headless_job_stopped` and
 //!   `provider_executable_relocated` (named in full: the start of an AI
 //!   actor, `application::actor_executor`, writes it, though `provider_*`
 //!   is execution's).
@@ -169,6 +170,9 @@ event_kinds! {
     ClaimHeld => "claim_held",
     ClaimResumed => "claim_resumed",
     CleanupFailed => "cleanup_failed",
+    DiskRelaxCleared => "disk_relax_cleared",
+    DiskRelaxExpired => "disk_relax_expired",
+    DiskRelaxed => "disk_relaxed",
     ConcernDecided => "concern_decided",
     ConcernSendBackEscalated => "concern_send_back_escalated",
     ConflictPrecheck => "conflict_precheck",
@@ -783,6 +787,11 @@ impl EventKind {
                 | KpiPushAbandoned
                 | ClaimHeld
                 | ClaimResumed
+                // A relaxation of the disk's needs, its clearing and its end
+                // at its time (ADR-t4727-1).
+                | DiskRelaxed
+                | DiskRelaxCleared
+                | DiskRelaxExpired
                 // The `[conflicts]` a supervisor read again changed
                 // (ADR-0080).
                 | ConflictsConfigChanged
@@ -1688,6 +1697,9 @@ mod tests {
             (EventKind::ClaimHeld, "claim_held"),
             (EventKind::ClaimResumed, "claim_resumed"),
             (EventKind::CleanupFailed, "cleanup_failed"),
+            (EventKind::DiskRelaxCleared, "disk_relax_cleared"),
+            (EventKind::DiskRelaxExpired, "disk_relax_expired"),
+            (EventKind::DiskRelaxed, "disk_relaxed"),
             (EventKind::ConcernDecided, "concern_decided"),
             (
                 EventKind::ConcernSendBackEscalated,

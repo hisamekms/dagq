@@ -302,6 +302,7 @@ const SUPERVISE: &[&str] = &[
     "record_backend_failure",
     "record_queue_event",
     "record_queue_events",
+    "expire_disk_relax",
     "register_follow_ups",
     "register_recurring_draft",
     "record_draft_origin",
@@ -558,6 +559,48 @@ const PLANNING: &[(C, &[&str])] = &[
     (C::ProposalWithdraw, &["withdraw_proposal"]),
 ];
 
+/// Where the operations that write an event of the kind their caller names
+/// carry it: the index of the kind among their arguments, and whether that
+/// argument is a list of `[kind, payload]` pairs.
+const KIND_ARGS: [(&str, usize, bool); 10] = [
+    ("record_queue_event", 0, false),
+    ("record_queue_events", 0, true),
+    ("record_runtime_event", 1, false),
+    ("record_task_event", 1, false),
+    ("record_finding_event", 1, false),
+    ("finish_triage", 4, true),
+    ("prune_supervisor", 1, false),
+    ("record_kpi_breach", 0, false),
+    ("record_inbox_watcher_change", 0, false),
+    ("settle_eval_round", 1, false),
+];
+
+/// Whether `op` with `args` writes a record of the relaxation of the disk's
+/// needs ([`crate::domain::disk::RELAX_KINDS`], ADR-t4727-1), which needs
+/// `disk.relax`: the person's and the inbox's alone, through `disk relax`.
+/// A supervisor is refused it, and the refusal recorded, whatever the
+/// operation; it ends a relaxation only through `expire_disk_relax`, which
+/// the queue judges.
+pub(super) fn writes_a_relaxation(op: &str, args: &[Value]) -> bool {
+    let relax = |kind: &Value| {
+        kind.as_str().is_some_and(|kind| {
+            crate::domain::disk::RELAX_KINDS
+                .iter()
+                .any(|relax| relax.as_str() == kind)
+        })
+    };
+    KIND_ARGS
+        .iter()
+        .filter(|(name, _, _)| *name == op)
+        .any(|&(_, index, pairs)| match args.get(index) {
+            Some(Value::Array(events)) if pairs => {
+                events.iter().any(|event| event.get(0).is_some_and(relax))
+            }
+            Some(kind) if !pairs => relax(kind),
+            _ => false,
+        })
+}
+
 /// The capability the supervisor's operation `op` with `args` needs, on
 /// top of `scheduler.supervise`: why it is none of the supervisor's,
 /// otherwise. A submission is the supervisor's (`scheduler.supervise`)
@@ -568,6 +611,9 @@ const PLANNING: &[(C, &[&str])] = &[
 /// on a finding `finding.ask`.
 pub(super) fn supervisor_needs(op: &str, args: &[Value]) -> Result<C, String> {
     let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
+    if writes_a_relaxation(op, args) {
+        return Ok(C::DiskRelax);
+    }
     if op == "submit" {
         let restart = serde_json::from_value::<Submission>(arg(0)).is_ok_and(|submission| {
             submission.tasks.is_empty()
@@ -651,6 +697,45 @@ mod tests {
             "transition",
             &[json!(1), serde_json::to_value(action).unwrap()],
         )
+    }
+
+    /// ADR-t4727-1: an operation that writes an event of the kind its
+    /// caller names needs `disk.relax` for a record of the relaxation of
+    /// the disk's needs, which the supervisor's policy does not grant, so
+    /// it is refused and recorded; other kinds keep what the operation
+    /// needs. The supervisor ends a relaxation through `expire_disk_relax`
+    /// alone, which names no kind and no payload.
+    #[test]
+    fn no_operation_of_the_supervisor_writes_a_relaxation_but_its_judged_end() {
+        assert!(!grants(ActorRole::Supervisor).contains(&C::DiskRelax));
+        let args = |index: usize, pairs: bool, kind: &str| {
+            let mut args = vec![Value::Null; index];
+            args.push(if pairs {
+                json!([["claim_held", {}], [kind, {}]])
+            } else {
+                json!(kind)
+            });
+            args
+        };
+        for (op, index, pairs) in KIND_ARGS {
+            let usual = supervisor_needs(op, &[]);
+            assert!(usual.is_ok(), "{op} is an operation of the supervisor");
+            for kind in crate::domain::disk::RELAX_KINDS {
+                assert_eq!(
+                    supervisor_needs(op, &args(index, pairs, kind.as_str())),
+                    Ok(C::DiskRelax),
+                    "{op} {kind:?}"
+                );
+            }
+            assert_eq!(
+                supervisor_needs(op, &args(index, pairs, "claim_held")),
+                usual
+            );
+        }
+        assert_eq!(
+            supervisor_needs("expire_disk_relax", &[json!(7)]),
+            Ok(C::Supervise)
+        );
     }
 
     #[test]

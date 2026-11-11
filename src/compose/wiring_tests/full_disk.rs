@@ -129,3 +129,52 @@ fn a_session_dead_on_a_full_disk_resumes_once_there_is_room_and_lands() {
         prompts[1]
     );
 }
+
+/// ADR-t4727-1: under a relaxation of the needs, a session that died on a
+/// full disk is still an environment's failure: no recovery job and no
+/// `decide` ask, and once there is room the same run is resumed
+/// (`full_disk_resume`) and lands.
+#[test]
+fn a_session_dead_on_a_full_disk_under_a_relaxation_resumes_once_there_is_room() {
+    let wiring = Wiring::new(
+        "a_session_dead_on_a_full_disk_under_a_relaxation_resumes_once_there_is_room",
+        Script {
+            receipts: vec![died_on_a_full_disk, succeeded],
+            verdicts: vec![verdict("pass", "meets the acceptance")],
+        },
+    );
+    wiring.queue_event_ago(
+        "disk_relaxed",
+        &serde_json::json!({
+            "expected_bytes": 1u64 << 30, "no_landing_expectation": true,
+            "no_remaining": true, "for_secs": 3600, "reason": "emergency",
+        }),
+        std::time::Duration::ZERO,
+    );
+    let free = wiring.free.clone();
+    wiring
+        .agent
+        .on_next_turn(Box::new(move || free.store(0, Ordering::SeqCst)));
+    let task = wiring.ready_task(&[]);
+    wiring.supervise_once();
+    let mut queue = wiring.queue();
+    let detail = queue.show(task).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Failed, "{:?}", kinds(&detail));
+    assert!(payloads(&detail, "recovery_requested").is_empty());
+
+    wiring.free.store(u64::MAX, Ordering::SeqCst);
+    wiring.supervise_once();
+    let detail = queue.show(task).unwrap();
+    let all = kinds(&detail);
+    assert_eq!(detail.runs.len(), 1, "{all:?}");
+    assert_eq!(detail.runs[0].id(), run.id());
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated, "{all:?}");
+    let resumed = payloads(&detail, "auto_repaired")
+        .into_iter()
+        .filter(|p| p["repair"] == "full_disk_resume")
+        .count();
+    assert_eq!(resumed, 1, "{all:?}");
+    assert!(payloads(&detail, "recovery_requested").is_empty());
+    assert!(wiring.agent.recovery_prompts().is_empty());
+}

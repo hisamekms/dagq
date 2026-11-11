@@ -397,6 +397,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("replan propose", &[C::ReplanPropose]),
     ("hold", &[C::TaskHold]),
     ("release", &[C::TaskHold]),
+    ("disk relax", &[C::DiskRelax]),
     ("ask", &[C::AskOpen, C::FindingAsk, C::AskClose]),
     ("ask close", &[C::AskClose]),
     ("answer", &[C::AskAnswer]),

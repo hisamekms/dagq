@@ -85,6 +85,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 `identity.login`・`credential.preference`はuser専用。
 goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、hostのuserは人のownerの無いgoalだけ。
 代わりに答える人（`delegate.write`）はuserとinboxだけで、OIDCの人（inboxは親の人）の分を変える。
+空き容量の必要量の緩め（`disk.relax`）もuserとinboxだけ。
 
 権限ごとの持ち主とresourceの条件は[AuthorizationのPolicy](authorization.md#policy)を読む。
 
@@ -160,7 +161,6 @@ ADR-t728-1決定6の強制の最初のものだが、隔離ではない: 同じ�
 着地（rebase・rebase後の再検証・squash・mainの更新）とpushは、信頼する制御側の`Integrator`（actor `integrator:<pid>`）だけが行う（ADR-t728-2、[Authorization](authorization.md#着地とpushintegrator)）。
 
 - review-jobの`pass`は「着地してよい」というデータで、着地の実行ではない。supervisorはそれを`IntegrationRequest`に写してIntegratorに渡すだけ
-- 依頼を出せるのは`landing.request`を持つuser・inbox・supervisorだけ。worker・job・observer・plannerは出せない
 - reviewのpassは着地の関門を免除しない。
   依頼者の認可と承認の検査は`integrate::landing_refusal`、着地の記録と依頼者の区別は`IntegrationRequest`のdoc commentを入口にする。
 - 収束はコードの指摘が1件も無い差し戻しだけで、securityのreviewのagentの指摘はいつもコードの指摘に数えるので、それが残る差し戻しは収束せず人の`approve_landing`に上がる（ADR-t2599-1決定3・ADR-t1906-1、[Review](supervisor-lifecycle/review.md#reviewの流れ)の4a）

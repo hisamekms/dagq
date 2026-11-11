@@ -113,6 +113,20 @@ pub trait ServiceQueue:
     /// Record the queue broker's queue event `kind` with `payload`
     /// (`broker_record`), written as the principal's actor.
     fn record_broker_event(&self, kind: EventKind, payload: Value) -> Result<EventId>;
+    /// The newest of the queue's own events of `kinds`: `disk relax`'s
+    /// read of the newest of its records ([`crate::domain::disk::RELAX_KINDS`]).
+    fn latest_relax_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>>;
+    /// Record the queue event `kind` of `disk relax` with `payload`,
+    /// written as the principal's actor; with `newest`, only while the
+    /// newest of `kinds` is that event, compared and written in one write
+    /// transaction (`None` when another is newest and nothing is written).
+    fn record_relax_event(
+        &self,
+        kinds: &[&str],
+        newest: Option<EventId>,
+        kind: EventKind,
+        payload: Value,
+    ) -> Result<Option<EventId>>;
     /// The proposals as `dagq proposal list` prints them: the submitted
     /// and revising ones, or with `all` every one.
     fn proposals(&self, all: bool) -> Result<Value>;
@@ -1995,6 +2009,97 @@ struct FindingStatusParams {
     covered_by: Option<i64>,
 }
 
+/// `disk_relax`'s params: those of `dagq disk relax`, what it relaxes for
+/// how long and why, or `clear` to end the relaxation in effect.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiskRelaxParams {
+    #[serde(default)]
+    expected_bytes: Option<u64>,
+    #[serde(default)]
+    no_landing_expectation: bool,
+    #[serde(default)]
+    no_remaining: bool,
+    #[serde(default)]
+    for_secs: Option<u64>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    clear: bool,
+}
+
+/// `disk relax` on `queue` (ADR-t4727-1), authorized already: record the
+/// relaxation `p` asks for ([`crate::domain::disk::relax_request`]), or,
+/// with `clear`, end the one the newest record holds; with none, nothing is
+/// recorded. The supervisor reads it on its next pass.
+fn disk_relax(queue: &dyn ServiceQueue, p: DiskRelaxParams) -> Result<Value> {
+    use crate::domain::disk::RELAX_KINDS;
+    relax_with(
+        &|kinds| queue.latest_relax_event(kinds),
+        &|newest, kind, payload| {
+            queue.record_relax_event(&RELAX_KINDS.map(EventKind::as_str), newest, kind, payload)
+        },
+        p,
+    )
+}
+
+/// [`disk_relax`] with the queue's read of the newest record (`latest`)
+/// and its record (`record`, with the event that must still be the newest
+/// for a clear: a relaxation recorded since is not ended by it).
+fn relax_with(
+    latest: &dyn Fn(&[&str]) -> Result<Option<RunEvent>>,
+    record: &dyn Fn(Option<EventId>, EventKind, Value) -> Result<Option<EventId>>,
+    p: DiskRelaxParams,
+) -> Result<Value> {
+    use crate::domain::disk::{DiskRelax, RELAX_KINDS, relax_request};
+    let relax = DiskRelax {
+        expected: p.expected_bytes,
+        no_landing_expectation: p.no_landing_expectation,
+        no_remaining: p.no_remaining,
+    };
+    let reason = p.reason.filter(|reason| !reason.trim().is_empty());
+    if p.clear {
+        if relax.loosens() || p.for_secs.is_some() {
+            return Err(BadParams("--clear takes nothing to relax and no --for".into()).into());
+        }
+        let kinds = RELAX_KINDS.map(EventKind::as_str);
+        let Some(relaxed) = latest(&kinds)?.filter(|event| event.kind == EventKind::DiskRelaxed)
+        else {
+            return Ok(json!({
+                "cleared": false,
+                "message": "no relaxation of the disk's needs is in effect; nothing was recorded",
+            }));
+        };
+        let Some(id) = record(
+            Some(relaxed.id),
+            EventKind::DiskRelaxCleared,
+            json!({"relaxed": relaxed.id, "reason": reason}),
+        )?
+        else {
+            return Ok(json!({
+                "cleared": false,
+                "message": "another relaxation record came first; nothing was recorded: read the relaxation in effect again",
+            }));
+        };
+        return Ok(json!({
+            "cleared": true,
+            "relaxed": relaxed.id,
+            "event_id": id,
+            "message": "the relaxation of the disk's needs is ended: the supervisor's next pass reckons the needs as before it",
+        }));
+    }
+    let reason = reason.ok_or_else(|| BadParams("give why with --reason".into()))?;
+    let request = relax_request(relax, p.for_secs).map_err(BadParams)?;
+    let id = record(None, EventKind::DiskRelaxed, request.payload(&reason))?
+        .context("a relaxation is recorded whatever is newest")?;
+    let mut answer = request.payload(&reason);
+    answer["event_id"] = json!(id);
+    answer["message"] = json!(
+        "the disk's needs are relaxed from the supervisor's next pass, with no restart, until the time is up or disk relax --clear; the reserve is kept"
+    );
+    Ok(answer)
+}
+
 /// `mark`'s params: those of `dagq mark`, a label or the mark to retract.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2452,6 +2557,11 @@ fn run(
                 },
             };
             Dialogue::new(&mut store, actor, &StaticPolicy).mark(change)
+        }
+        UseCase::DiskRelax => {
+            gate.authorize(&store, Capability::DiskRelax, &Resource::Queue)?;
+            let p: DiskRelaxParams = params(use_case, raw)?;
+            disk_relax(&*store.0, p)
         }
         UseCase::Answer
         | UseCase::AskClose
@@ -4319,6 +4429,20 @@ pub(crate) mod tests {
             let mut log = self.log.lock().unwrap();
             log.push(json!({"broker_event": kind.as_str(), "payload": payload}));
             Ok(EventId::new(i64::try_from(log.len()).unwrap()))
+        }
+        fn latest_relax_event(&self, _: &[&str]) -> Result<Option<RunEvent>> {
+            Ok(None)
+        }
+        fn record_relax_event(
+            &self,
+            _: &[&str],
+            _: Option<EventId>,
+            kind: EventKind,
+            payload: Value,
+        ) -> Result<Option<EventId>> {
+            let mut log = self.log.lock().unwrap();
+            log.push(json!({"relax_event": kind.as_str(), "payload": payload}));
+            Ok(Some(EventId::new(i64::try_from(log.len()).unwrap())))
         }
         fn proposals(&self, all: bool) -> Result<Value> {
             Ok(json!({"proposals": [], "all": all}))
@@ -7275,6 +7399,11 @@ pub(crate) mod tests {
                 Capability::ReplanPropose,
             ),
             (UseCase::Mark, json!({"label": "m"}), Capability::MarkWrite),
+            (
+                UseCase::DiskRelax,
+                json!({"no_remaining": true, "for_secs": 3600, "reason": "r"}),
+                Capability::DiskRelax,
+            ),
         ];
         let callers = [
             (None, ActorRole::User),
@@ -9109,6 +9238,38 @@ pub(crate) mod tests {
         assert!(queue.denials.borrow().is_empty());
     }
 
+    /// ADR-t4727-1: an operation of a supervisor or a landing's integrator
+    /// that writes a record of the relaxation of the disk's needs needs
+    /// `disk.relax` (`needs::writes_a_relaxation`), which neither is
+    /// granted: refused as `authorization_denied`, the refusal recorded
+    /// once.
+    #[test]
+    fn a_supervisor_and_an_integrator_are_refused_the_relaxations_records() {
+        for actor in [
+            ActorContext::instance(ActorRole::Supervisor, 7),
+            ActorContext::instance(ActorRole::Integrator, 8),
+        ] {
+            let mut queue = Queue {
+                status: RunStatus::Running,
+                log: Default::default(),
+                denials: RefCell::default(),
+                reading: std::sync::Arc::default(),
+                human: std::sync::Arc::default(),
+            };
+            let error =
+                authorize_supervisor_needs(&mut queue, &actor, Capability::DiskRelax).unwrap_err();
+            let refused = error.downcast_ref::<AuthorizationError>().unwrap();
+            assert_eq!(refused.capability, Capability::DiskRelax);
+            assert_eq!(
+                respond(Err(error)).error.unwrap().code,
+                ServiceErrorCode::AuthorizationDenied
+            );
+            let denials = queue.denials.borrow();
+            assert_eq!(denials.len(), 1, "{denials:?}");
+            assert_eq!(denials[0]["capability"], "disk.relax");
+        }
+    }
+
     use super::super::heavy_reads::HeavyReadNote as Note;
     use super::super::heavy_reads::tests::{STEP, TestClock};
     use super::super::queue_reads::JobRead;
@@ -9607,5 +9768,111 @@ pub fn runner_work_http(backend: &dyn ServiceBackend, request: &ServiceRequest) 
         Err(_) => {
             ServiceResponse::failure(ServiceErrorCode::Failed, "runner work operation failed")
         }
+    }
+}
+
+#[cfg(test)]
+mod disk_relax_tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    fn params(raw: Value) -> DiskRelaxParams {
+        serde_json::from_value(raw).unwrap()
+    }
+
+    /// `disk relax` on a queue whose newest relaxation record is `latest`
+    /// (event 7): its answer and what it recorded.
+    fn relax(latest: Option<&str>, raw: Value) -> (Result<Value>, Vec<(EventKind, Value)>) {
+        relax_racing(latest, latest.map(|_| EventId::new(7)), raw)
+    }
+
+    /// [`relax`] when the newest record is `current` by the time it writes:
+    /// another record may have come in between.
+    fn relax_racing(
+        latest: Option<&str>,
+        current: Option<EventId>,
+        raw: Value,
+    ) -> (Result<Value>, Vec<(EventKind, Value)>) {
+        let recorded = RefCell::new(Vec::new());
+        let newest = latest.map(|kind| RunEvent {
+            id: EventId::new(7),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload: json!({}),
+            created_at: String::new(),
+            actor: None,
+        });
+        let answer = relax_with(
+            &|kinds| {
+                assert_eq!(
+                    kinds,
+                    crate::domain::disk::RELAX_KINDS.map(EventKind::as_str)
+                );
+                Ok(newest.clone())
+            },
+            &|newest, kind, payload| {
+                if newest.is_some_and(|newest| Some(newest) != current) {
+                    return Ok(None);
+                }
+                recorded.borrow_mut().push((kind, payload));
+                Ok(Some(EventId::new(8)))
+            },
+            params(raw),
+        );
+        (answer, recorded.into_inner())
+    }
+
+    /// Acceptance 1 and 2 of task 4727: a relaxation is recorded with what
+    /// it loosens, for how long and why; one with nothing to loosen, no
+    /// `--for`, one past the limit or no reason records nothing. `--clear`
+    /// ends the one in effect, and with none records nothing.
+    #[test]
+    fn disk_relax_records_a_checked_relaxation_and_clears_the_one_in_effect() {
+        let (answer, recorded) = relax(
+            None,
+            json!({"expected_bytes": 1u64 << 33, "for_secs": 3600, "reason": "full"}),
+        );
+        let answer = answer.unwrap();
+        assert_eq!(answer["event_id"], 8);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, EventKind::DiskRelaxed);
+        assert_eq!(recorded[0].1["expected_bytes"], 1u64 << 33);
+        assert_eq!(recorded[0].1["for_secs"], 3600);
+        assert_eq!(recorded[0].1["reason"], "full");
+        for refused in [
+            json!({"for_secs": 3600, "reason": "full"}),
+            json!({"no_remaining": true, "reason": "full"}),
+            json!({"no_remaining": true, "for_secs": 86_401, "reason": "full"}),
+            json!({"no_remaining": true, "for_secs": 3600}),
+            json!({"no_remaining": true, "for_secs": 3600, "reason": " "}),
+            json!({"clear": true, "no_remaining": true}),
+            json!({"clear": true, "for_secs": 60}),
+        ] {
+            let (answer, recorded) = relax(Some("disk_relaxed"), refused.clone());
+            assert!(answer.unwrap_err().is::<BadParams>(), "{refused}");
+            assert!(recorded.is_empty(), "{refused}");
+        }
+        let (answer, recorded) = relax(Some("disk_relaxed"), json!({"clear": true}));
+        assert_eq!(answer.unwrap()["cleared"], true);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, EventKind::DiskRelaxCleared);
+        assert_eq!(recorded[0].1["relaxed"], 7);
+        for ended in [None, Some("disk_relax_cleared"), Some("disk_relax_expired")] {
+            let (answer, recorded) = relax(ended, json!({"clear": true}));
+            assert_eq!(answer.unwrap()["cleared"], false);
+            assert!(recorded.is_empty());
+        }
+        // A relaxation recorded between the read and the clear's write is
+        // not ended by it.
+        let (answer, recorded) = relax_racing(
+            Some("disk_relaxed"),
+            Some(EventId::new(9)),
+            json!({"clear": true}),
+        );
+        assert_eq!(answer.unwrap()["cleared"], false);
+        assert!(recorded.is_empty());
     }
 }

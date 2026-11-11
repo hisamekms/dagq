@@ -2529,6 +2529,23 @@ impl EventStore for SupervisorQueue {
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>> {
         self.remote("latest_queue_event", vec![to_value(kinds)?])
     }
+    /// No operation of the supervisor writes a caller's event on what is
+    /// newest: the one end it records so is [`Self::expire_disk_relax`].
+    fn record_queue_event_if_newest(
+        &self,
+        _: &[&str],
+        _: EventId,
+        kind: EventKind,
+        _: serde_json::Value,
+    ) -> Result<Option<EventId>> {
+        anyhow::bail!(
+            "a supervisor does not record {} on what is newest",
+            kind.as_str()
+        )
+    }
+    fn expire_disk_relax(&self, relaxed: EventId) -> Result<Option<EventId>> {
+        self.remote("expire_disk_relax", vec![to_value(relaxed)?])
+    }
     fn latest_events_by_supervisor(
         &self,
         kinds: &[&str],

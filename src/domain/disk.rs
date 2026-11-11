@@ -302,6 +302,9 @@ pub struct DiskState {
     pub remaining: u64,
     /// Whether a run waits for its landing.
     pub landing_waiting: bool,
+    /// The relaxation of the needs in effect now ([`relax_state`]); `None`
+    /// outside one.
+    pub relaxed: Option<DiskRelaxed>,
 }
 
 /// Whether a claim and a landing may go now.
@@ -354,6 +357,9 @@ pub struct DiskNeeds {
     /// waits with no run moving (it goes first), or runs move with no
     /// expectation (a project with no samples runs one at a time).
     pub claims_wait: bool,
+    /// The relaxation these needs were reckoned under; `None` outside one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relaxed: Option<DiskRelaxed>,
 }
 
 /// The existing ordering and no-sample rules that defer claims without a hold.
@@ -390,7 +396,9 @@ impl DiskNeeds {
                 Some(ClaimsWaitReason::NoSamples) => "no samples; one run at a time",
                 None => "none",
             },
-        )
+        ) + &self
+            .relaxed
+            .map_or_else(String::new, |relaxed| format!("; {}", relaxed.message()))
     }
 }
 
@@ -398,18 +406,39 @@ impl DiskState {
     /// What a claim and a landing need free now, with the reserve `share`
     /// of the volume ([`reserve_bytes`]). No factor is applied: a run
     /// larger than expected may fail for want of space and is retried.
+    ///
+    /// Under a relaxation ([`Self::relaxed`], ADR-t4727-1) only the terms
+    /// it names are loosened: `expected` stands for the samples'
+    /// expectation, of a new run and of a landing, while there is one (a
+    /// project with no sample still runs one at a time); the waiting
+    /// landing's expectation is not added to a claim; the moving runs'
+    /// remaining counts 0. The reserve, a run with none moving and the
+    /// landing first with none moving are kept.
     pub fn needs(&self, share: f64) -> DiskNeeds {
         let reserve = reserve_bytes(self.total, share);
         let moving = self.moving > 0;
-        let landing = match (moving, self.expected) {
+        let relax = self
+            .relaxed
+            .map(|relaxed| relaxed.relax)
+            .unwrap_or_default();
+        let expected = self
+            .expected
+            .map(|sampled| relax.expected.unwrap_or(sampled));
+        let remaining = if relax.no_remaining {
+            0
+        } else {
+            self.remaining
+        };
+        let adds_landing = self.landing_waiting && !relax.no_landing_expectation;
+        let landing = match (moving, expected) {
             (true, Some(expected)) => reserve.saturating_add(expected),
             _ => reserve,
         };
-        let claim = match (moving, self.expected) {
+        let claim = match (moving, expected) {
             (true, Some(expected)) => reserve
                 .saturating_add(expected)
-                .saturating_add(self.remaining)
-                .saturating_add(if self.landing_waiting { expected } else { 0 }),
+                .saturating_add(remaining)
+                .saturating_add(if adds_landing { expected } else { 0 }),
             _ => reserve,
         };
         DiskNeeds {
@@ -418,22 +447,18 @@ impl DiskState {
             moving: self.moving,
             remaining: self.remaining,
             landing_waiting: self.landing_waiting,
-            claim_expected: if moving {
-                self.expected.unwrap_or(0)
+            claim_expected: if moving { expected.unwrap_or(0) } else { 0 },
+            claim_remaining: if moving && expected.is_some() {
+                remaining
             } else {
                 0
             },
-            claim_remaining: if moving && self.expected.is_some() {
-                self.remaining
+            landing_expected: if moving && adds_landing {
+                expected.unwrap_or(0)
             } else {
                 0
             },
-            landing_expected: if moving && self.landing_waiting {
-                self.expected.unwrap_or(0)
-            } else {
-                0
-            },
-            claims_wait_reason: if moving && self.expected.is_none() {
+            claims_wait_reason: if moving && expected.is_none() {
                 Some(ClaimsWaitReason::NoSamples)
             } else if !moving && self.landing_waiting {
                 Some(ClaimsWaitReason::LandingFirst)
@@ -441,14 +466,15 @@ impl DiskState {
                 None
             },
             reserve,
-            expected: self.expected,
+            expected,
             claim,
             landing,
             claims_wait: if moving {
-                self.expected.is_none()
+                expected.is_none()
             } else {
                 self.landing_waiting
             },
+            relaxed: self.relaxed,
             ..DiskNeeds::default()
         }
     }
@@ -490,7 +516,7 @@ impl DiskState {
             return Some(0);
         }
         let needs = self.needs(share);
-        let Some(expected) = self.expected else {
+        let Some(expected) = needs.expected else {
             return Some(1);
         };
         if expected == 0 {
@@ -603,6 +629,241 @@ pub fn gib(bytes: f64) -> String {
     format!("{:.1} GiB", bytes / f64::from(1u32 << 30))
 }
 
+/// The kinds of the records of a relaxation of the needs (ADR-t4727-1):
+/// the newest of them on the queue decides whether one is in effect
+/// ([`relax_state`]), so a pass reads that one event and no other.
+pub const RELAX_KINDS: [EventKind; 3] = [
+    EventKind::DiskRelaxed,
+    EventKind::DiskRelaxCleared,
+    EventKind::DiskRelaxExpired,
+];
+
+/// The longest a relaxation may last: 24 hours. It is a way out of an
+/// emergency, ended by its time rather than by someone remembering to undo
+/// it, so it is short enough that a forgotten one ends within a day, and
+/// long enough to last a night until a person frees the disk.
+pub const MAX_RELAX_SECS: u64 = 24 * 60 * 60;
+
+/// What a relaxation of the needs loosens (ADR-t4727-1); the reserve is
+/// never one of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DiskRelax {
+    /// The expectation of a new run, and of a landing, in place of the
+    /// samples'; `None` keeps the samples'.
+    #[serde(rename = "expected_bytes")]
+    pub expected: Option<u64>,
+    /// A claim adds no expectation for a waiting landing.
+    pub no_landing_expectation: bool,
+    /// The moving runs' remaining counts 0.
+    pub no_remaining: bool,
+}
+
+impl DiskRelax {
+    /// Whether it loosens anything.
+    pub fn loosens(&self) -> bool {
+        self.expected.is_some() || self.no_landing_expectation || self.no_remaining
+    }
+
+    /// The terms it loosens, for messages.
+    fn terms(&self) -> String {
+        let mut terms = Vec::new();
+        if let Some(expected) = self.expected {
+            terms.push(format!("expected {}", gib(expected as f64)));
+        }
+        if self.no_landing_expectation {
+            terms.push("no landing expectation".to_owned());
+        }
+        if self.no_remaining {
+            terms.push("no remaining".to_owned());
+        }
+        terms.join(", ")
+    }
+}
+
+/// A relaxation in effect: what it loosens, until when, and its record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DiskRelaxed {
+    #[serde(flatten)]
+    pub relax: DiskRelax,
+    /// Unix milliseconds it ends at.
+    pub until_millis: i64,
+    /// The id of its `disk_relaxed`.
+    pub event_id: i64,
+}
+
+impl DiskRelaxed {
+    /// What the needs' message says of it.
+    pub fn message(&self) -> String {
+        format!(
+            "relaxed until {} by disk relax (event {}): {}; the reserve is kept",
+            super::marks::utc_text(self.until_millis),
+            self.event_id,
+            self.relax.terms()
+        )
+    }
+}
+
+/// A relaxation as `disk relax` asks for it, checked ([`relax_request`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelaxRequest {
+    pub relax: DiskRelax,
+    /// How long it lasts from its record, in seconds.
+    pub for_secs: u64,
+}
+
+impl RelaxRequest {
+    /// The payload of its `disk_relaxed`, with the `reason` given.
+    pub fn payload(&self, reason: &str) -> serde_json::Value {
+        serde_json::json!({
+            "expected_bytes": self.relax.expected,
+            "no_landing_expectation": self.relax.no_landing_expectation,
+            "no_remaining": self.relax.no_remaining,
+            "for_secs": self.for_secs,
+            "reason": reason,
+        })
+    }
+}
+
+/// `relax` for `for_secs` as `disk relax` asks for it, or why it is
+/// refused: it loosens nothing, it has no duration, a duration of 0 or one
+/// past [`MAX_RELAX_SECS`], or an expectation of 0 (which would lift the
+/// bound on the claims of a pass).
+pub fn relax_request(relax: DiskRelax, for_secs: Option<u64>) -> Result<RelaxRequest, String> {
+    if !relax.loosens() {
+        return Err(
+            "give what to relax: --expected <SIZE>, --no-landing-expectation or --no-remaining (the reserve is never relaxed)"
+                .into(),
+        );
+    }
+    if relax.expected == Some(0) {
+        return Err("--expected must be above 0".into());
+    }
+    let Some(for_secs) = for_secs else {
+        return Err("give how long the relaxation lasts with --for <DURATION>".into());
+    };
+    if for_secs == 0 || for_secs > MAX_RELAX_SECS {
+        return Err(format!(
+            "--for must be above 0 and at most {} hours",
+            MAX_RELAX_SECS / 3600
+        ));
+    }
+    Ok(RelaxRequest { relax, for_secs })
+}
+
+/// Whether a relaxation is in effect, from the newest of the queue's
+/// [`RELAX_KINDS`] events (`latest`) at `now_millis`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelaxState {
+    /// None: the needs are reckoned as decided before it.
+    Normal,
+    /// One is in effect until its time.
+    Active(DiskRelaxed),
+    /// The newest is a relaxation past its time that no
+    /// `disk_relax_expired` records yet: the pass records one, and the
+    /// needs are reckoned as with none.
+    Expired(DiskRelaxed),
+}
+
+impl RelaxState {
+    /// The relaxation the needs are reckoned under.
+    pub fn in_effect(self) -> Option<DiskRelaxed> {
+        match self {
+            Self::Active(relaxed) => Some(relaxed),
+            Self::Normal | Self::Expired(_) => None,
+        }
+    }
+}
+
+/// [`RelaxState`] of `latest` at `now_millis`: a `disk_relaxed` is in
+/// effect from its record for its `for_secs`; a `disk_relax_cleared` or
+/// `disk_relax_expired` newer than it ended it. One whose payload or time
+/// does not read is none.
+pub fn relax_state(latest: Option<&RunEvent>, now_millis: i64) -> RelaxState {
+    let Some(event) = latest.filter(|event| event.kind == EventKind::DiskRelaxed) else {
+        return RelaxState::Normal;
+    };
+    let payload = &event.payload;
+    let flag = |name: &str| payload.get(name).and_then(serde_json::Value::as_bool) == Some(true);
+    let read = || {
+        let at = super::stats::timestamp_millis(&event.created_at)?;
+        let for_secs = payload.get("for_secs")?.as_u64()?;
+        let for_millis = i64::try_from(for_secs.checked_mul(1000)?).ok()?;
+        Some(DiskRelaxed {
+            relax: DiskRelax {
+                expected: payload
+                    .get("expected_bytes")
+                    .and_then(serde_json::Value::as_u64),
+                no_landing_expectation: flag("no_landing_expectation"),
+                no_remaining: flag("no_remaining"),
+            },
+            until_millis: at.saturating_add(for_millis),
+            event_id: event.id.as_i64(),
+        })
+    };
+    match read() {
+        Some(relaxed) if !relaxed.relax.loosens() => RelaxState::Normal,
+        Some(relaxed) if now_millis < relaxed.until_millis => RelaxState::Active(relaxed),
+        Some(relaxed) => RelaxState::Expired(relaxed),
+        None => RelaxState::Normal,
+    }
+}
+
+/// The payload of the `disk_relax_expired` of `relaxed`.
+pub fn expired_payload(relaxed: &DiskRelaxed) -> serde_json::Value {
+    serde_json::json!({
+        "relaxed": relaxed.event_id,
+        "until": super::marks::utc_text(relaxed.until_millis),
+    })
+}
+
+/// A size as `disk relax --expected` takes it: a whole number of bytes, or
+/// a number followed by `K`, `M`, `G` or `T` (powers of 1024, with or
+/// without `iB` / `B`).
+pub fn parse_size(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let digits = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(digits);
+    let shift = match unit.trim().to_ascii_uppercase().as_str() {
+        "" | "B" => 0,
+        "K" | "KB" | "KIB" => 10,
+        "M" | "MB" | "MIB" => 20,
+        "G" | "GB" | "GIB" => 30,
+        "T" | "TB" | "TIB" => 40,
+        _ => {
+            return Err(format!(
+                "{text:?} is not a size: give e.g. 8GiB or 8589934592"
+            ));
+        }
+    };
+    let number: f64 = number
+        .parse()
+        .map_err(|_| format!("{text:?} is not a size: give e.g. 8GiB or 8589934592"))?;
+    let bytes = number * (1u64 << shift) as f64;
+    if !bytes.is_finite() || bytes < 0.0 || bytes > u64::MAX as f64 {
+        return Err(format!("{text:?} is out of range"));
+    }
+    Ok(bytes.round() as u64)
+}
+
+/// A duration as `disk relax --for` takes it, in seconds: a whole number
+/// followed by `s`, `m`, `h` or `d`.
+pub fn parse_duration_secs(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let why = || format!("{text:?} is not a duration: give e.g. 30m, 6h or 1d");
+    let unit = text.chars().last().ok_or_else(why)?;
+    let scale = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86_400,
+        _ => return Err(why()),
+    };
+    let number: u64 = text[..text.len() - 1].parse().map_err(|_| why())?;
+    number.checked_mul(scale).ok_or_else(why)
+}
+
 /// A process with the path of the executable it runs (task 1590):
 /// `None` when that path could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,6 +957,7 @@ mod tests {
                 moving,
                 remaining,
                 landing_waiting: waiting,
+                relaxed: None,
             };
             let mut needs = state.needs(0.05);
             needs.measured = usize::from(remaining > 0);
@@ -1022,6 +1284,7 @@ mod tests {
                 moving,
                 remaining: 0,
                 landing_waiting: false,
+                relaxed: None,
             };
             assert!(state.verdict(DEFAULT_RESERVE_SHARE).claim, "{moving}");
         }
@@ -1150,6 +1413,7 @@ mod tests {
                 moving: 0,
                 remaining,
                 landing_waiting: false,
+                relaxed: None,
             };
             assert_eq!(
                 state.verdict(DEFAULT_RESERVE_SHARE),
@@ -1180,6 +1444,7 @@ mod tests {
             moving: 0,
             remaining: 0,
             landing_waiting: false,
+            relaxed: None,
         };
         assert_eq!(
             state.verdict(DEFAULT_RESERVE_SHARE),
@@ -1201,6 +1466,7 @@ mod tests {
             moving,
             remaining: 0,
             landing_waiting: false,
+            relaxed: None,
         };
         assert!(state(0).verdict(DEFAULT_RESERVE_SHARE).claim);
         assert!(!state(1).verdict(DEFAULT_RESERVE_SHARE).claim);
@@ -1230,6 +1496,7 @@ mod tests {
             moving: 0,
             remaining: 0,
             landing_waiting: false,
+            relaxed: None,
         };
         let verdict = |state: DiskState| state.verdict(DEFAULT_RESERVE_SHARE);
         let both = |claim, landing| DiskVerdict { claim, landing };
@@ -1321,6 +1588,7 @@ mod tests {
             moving,
             remaining: 0,
             landing_waiting,
+            relaxed: None,
         };
         let share = DEFAULT_RESERVE_SHARE;
         let e = Some(10 * GIB);
@@ -1387,6 +1655,251 @@ mod tests {
             ..state(0, e, 2, true)
         };
         assert_eq!(unread.claims(share), None);
+    }
+
+    /// A `disk_relaxed` (or another of [`RELAX_KINDS`]) on the queue,
+    /// recorded at 2026-11-03T00:00:00Z.
+    fn relax_record(kind: &str, payload: serde_json::Value) -> RunEvent {
+        RunEvent {
+            id: crate::domain::EventId::new(7),
+            payload,
+            created_at: "2026-11-03T00:00:00.000Z".into(),
+            ..event(kind, None, None)
+        }
+    }
+
+    fn relaxed(relax: DiskRelax) -> DiskRelaxed {
+        DiskRelaxed {
+            relax,
+            until_millis: NOW + DAY,
+            event_id: 7,
+        }
+    }
+
+    /// Acceptance 1 of task 4727: a relaxation needs something to loosen
+    /// and a duration above 0 and at most 24 h; an expectation of 0 is
+    /// refused. The payload carries what it loosens.
+    #[test]
+    fn a_relaxation_needs_a_term_and_a_duration_within_the_limit() {
+        let none = DiskRelax::default();
+        let remaining = DiskRelax {
+            no_remaining: true,
+            ..DiskRelax::default()
+        };
+        assert!(relax_request(none, Some(3600)).is_err());
+        assert!(relax_request(remaining, None).is_err());
+        assert!(relax_request(remaining, Some(0)).is_err());
+        assert!(relax_request(remaining, Some(MAX_RELAX_SECS + 1)).is_err());
+        let zero = DiskRelax {
+            expected: Some(0),
+            ..DiskRelax::default()
+        };
+        assert!(relax_request(zero, Some(60)).is_err());
+        let request = relax_request(remaining, Some(MAX_RELAX_SECS)).unwrap();
+        let payload = request.payload("why");
+        assert_eq!(payload["for_secs"], MAX_RELAX_SECS);
+        assert_eq!(payload["no_remaining"], true);
+        assert_eq!(payload["reason"], "why");
+        assert_eq!(MAX_RELAX_SECS, 24 * 3600);
+    }
+
+    #[test]
+    fn sizes_and_durations_read_as_the_command_line_takes_them() {
+        assert_eq!(parse_size("8GiB"), Ok(8 * GIB));
+        assert_eq!(parse_size("8g"), Ok(8 * GIB));
+        assert_eq!(parse_size("1.5G"), Ok(3 * GIB / 2));
+        assert_eq!(parse_size("512M"), Ok(512 << 20));
+        assert_eq!(parse_size("1024"), Ok(1024));
+        assert!(parse_size("8 parsecs").is_err());
+        assert!(parse_size("").is_err());
+        assert_eq!(parse_duration_secs("6h"), Ok(6 * 3600));
+        assert_eq!(parse_duration_secs("30m"), Ok(1800));
+        assert_eq!(parse_duration_secs("1d"), Ok(86_400));
+        assert_eq!(parse_duration_secs("90s"), Ok(90));
+        assert!(parse_duration_secs("6").is_err());
+        assert!(parse_duration_secs("h").is_err());
+        assert!(parse_duration_secs("").is_err());
+    }
+
+    /// Acceptance 2: the newest record decides; a relaxation is in effect
+    /// from its record for its duration, past it is expired (once: the
+    /// expired record then is the newest), and a clear or an expiry ends it.
+    #[test]
+    fn the_newest_record_decides_whether_a_relaxation_is_in_effect() {
+        let payload = serde_json::json!({
+            "expected_bytes": 4 * GIB, "no_landing_expectation": true,
+            "no_remaining": false, "for_secs": 3600, "reason": "r",
+        });
+        let record = relax_record("disk_relaxed", payload);
+        let until = NOW + 3600 * 1000;
+        let relaxed = DiskRelaxed {
+            relax: DiskRelax {
+                expected: Some(4 * GIB),
+                no_landing_expectation: true,
+                no_remaining: false,
+            },
+            until_millis: until,
+            event_id: 7,
+        };
+        assert_eq!(relax_state(None, NOW), RelaxState::Normal);
+        assert_eq!(relax_state(Some(&record), NOW), RelaxState::Active(relaxed));
+        assert_eq!(
+            relax_state(Some(&record), until - 1).in_effect(),
+            Some(relaxed)
+        );
+        assert_eq!(
+            relax_state(Some(&record), until),
+            RelaxState::Expired(relaxed)
+        );
+        assert_eq!(relax_state(Some(&record), until).in_effect(), None);
+        assert_eq!(expired_payload(&relaxed)["relaxed"], 7);
+        for ended in ["disk_relax_cleared", "disk_relax_expired"] {
+            let ended = relax_record(ended, serde_json::json!({"relaxed": 7}));
+            assert_eq!(relax_state(Some(&ended), NOW), RelaxState::Normal);
+        }
+        // A record that does not read relaxes nothing.
+        for payload in [
+            serde_json::json!({"no_remaining": true}),
+            serde_json::json!({"for_secs": 60}),
+        ] {
+            let record = relax_record("disk_relaxed", payload);
+            assert_eq!(relax_state(Some(&record), NOW), RelaxState::Normal);
+        }
+        let mut untimed = record.clone();
+        untimed.created_at = "never".into();
+        assert_eq!(relax_state(Some(&untimed), NOW), RelaxState::Normal);
+        assert!(
+            relaxed
+                .message()
+                .contains("expected 4.0 GiB, no landing expectation")
+        );
+    }
+
+    /// Acceptance 1 and 3: each term loosens its part of the needs alone,
+    /// out of a relaxation the needs are as before, and the reserve is
+    /// never loosened: below it both the claim and the landing are held.
+    #[test]
+    fn each_term_loosens_its_part_and_the_reserve_holds() {
+        let total = 200 * GIB; // the reserve is 10 GiB
+        let base = DiskState {
+            free: Some(40 * GIB),
+            total,
+            expected: Some(10 * GIB),
+            moving: 2,
+            remaining: 15 * GIB,
+            landing_waiting: true,
+            relaxed: None,
+        };
+        let needs = |relax: Option<DiskRelax>| {
+            DiskState {
+                relaxed: relax.map(relaxed),
+                ..base
+            }
+            .needs(DEFAULT_RESERVE_SHARE)
+        };
+        // reserve 10 + expected 10 + remaining 15 + landing 10.
+        let before = needs(None);
+        assert_eq!((before.claim, before.landing), (45 * GIB, 20 * GIB));
+        assert_eq!(before.relaxed, None);
+        assert!(!base.verdict(DEFAULT_RESERVE_SHARE).claim);
+        let expected = needs(Some(DiskRelax {
+            expected: Some(4 * GIB),
+            ..DiskRelax::default()
+        }));
+        assert_eq!((expected.claim, expected.landing), (33 * GIB, 14 * GIB));
+        assert_eq!(expected.expected, Some(4 * GIB));
+        assert!(expected.relaxed.is_some());
+        assert!(expected.message().contains("relaxed until"));
+        let landing = needs(Some(DiskRelax {
+            no_landing_expectation: true,
+            ..DiskRelax::default()
+        }));
+        assert_eq!((landing.claim, landing.landing), (35 * GIB, 20 * GIB));
+        assert_eq!(landing.landing_expected, 0);
+        let remaining = needs(Some(DiskRelax {
+            no_remaining: true,
+            ..DiskRelax::default()
+        }));
+        assert_eq!((remaining.claim, remaining.landing), (30 * GIB, 20 * GIB));
+        assert_eq!(remaining.claim_remaining, 0);
+        let all = DiskRelax {
+            expected: Some(4 * GIB),
+            no_landing_expectation: true,
+            no_remaining: true,
+        };
+        let loosest = needs(Some(all));
+        assert_eq!((loosest.claim, loosest.landing), (14 * GIB, 14 * GIB));
+        assert_eq!(loosest.reserve, before.reserve);
+        let relaxed_state = DiskState {
+            relaxed: Some(relaxed(all)),
+            ..base
+        };
+        assert!(relaxed_state.verdict(DEFAULT_RESERVE_SHARE).claim);
+        // 40 free less the reserve's 10 (the moving runs' remaining and the
+        // waiting landing count nothing): 7 claims of 4 GiB each.
+        assert_eq!(relaxed_state.claims(DEFAULT_RESERVE_SHARE), Some(7));
+        // Below the reserve nothing goes, relaxed or not.
+        let below = DiskState {
+            free: Some(10 * GIB - 1),
+            ..relaxed_state
+        };
+        assert_eq!(
+            below.verdict(DEFAULT_RESERVE_SHARE),
+            DiskVerdict {
+                claim: false,
+                landing: false
+            }
+        );
+        assert_eq!(below.claims(DEFAULT_RESERVE_SHARE), Some(0));
+    }
+
+    /// Acceptance 3: under a relaxation one run still goes with none
+    /// moving, a waiting landing still goes before a claim with none
+    /// moving, and a project with no sample still runs one at a time.
+    #[test]
+    fn a_relaxation_keeps_the_progress_and_the_landing_first() {
+        let all = relaxed(DiskRelax {
+            expected: Some(GIB),
+            no_landing_expectation: true,
+            no_remaining: true,
+        });
+        let idle = DiskState {
+            free: Some(11 * GIB),
+            total: 200 * GIB,
+            expected: Some(50 * GIB),
+            moving: 0,
+            remaining: 0,
+            landing_waiting: true,
+            relaxed: Some(all),
+        };
+        let needs = idle.needs(DEFAULT_RESERVE_SHARE);
+        assert_eq!(
+            needs.claims_wait_reason,
+            Some(ClaimsWaitReason::LandingFirst)
+        );
+        assert_eq!(
+            idle.verdict(DEFAULT_RESERVE_SHARE),
+            DiskVerdict {
+                claim: false,
+                landing: true
+            }
+        );
+        let alone = DiskState {
+            landing_waiting: false,
+            ..idle
+        };
+        assert!(alone.verdict(DEFAULT_RESERVE_SHARE).claim);
+        assert_eq!(alone.claims(DEFAULT_RESERVE_SHARE), Some(1));
+        let unsampled = DiskState {
+            free: Some(100 * GIB),
+            expected: None,
+            moving: 1,
+            landing_waiting: false,
+            ..idle
+        };
+        let needs = unsampled.needs(DEFAULT_RESERVE_SHARE);
+        assert_eq!(needs.claims_wait_reason, Some(ClaimsWaitReason::NoSamples));
+        assert!(!unsampled.verdict(DEFAULT_RESERVE_SHARE).claim);
     }
 
     fn executable(pid: u32, ppid: u32, executable: Option<&str>) -> ProcessExecutable {

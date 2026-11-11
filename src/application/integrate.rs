@@ -1214,8 +1214,11 @@ fn disk_refusal(run: &RunId, short: DiskShort) -> String {
     let expected = short
         .expected
         .map_or_else(|| "none yet".into(), |bytes| gib(bytes as f64));
+    let relaxed = short
+        .relaxed
+        .map_or_else(String::new, |relaxed| format!("; {}", relaxed.message()));
     format!(
-        "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the reserve of {}, [disk] reserve of dagq.toml as a share of the volume and at least {}, plus, while other runs move, what a run is expected to take from the sizes of the recent runs, {expected}); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
+        "not enough free disk space to land run {run}: {} free in the queue's directory, below the {} a landing's verification needs (the reserve of {}, [disk] reserve of dagq.toml as a share of the volume and at least {}, plus, while other runs move, what a run is expected to take from the sizes of the recent runs, {expected}{relaxed}); the run was not approved and is unchanged. Free disk space (dagq doctor lists the runs and their worktrees; the worktrees of ended runs nobody looks at any more, or other files on that disk) and run integrate again",
         gib(short.free as f64),
         gib(short.need as f64),
         gib(short.reserve as f64),
@@ -1232,6 +1235,8 @@ struct DiskShort {
     need: u64,
     reserve: u64,
     expected: Option<u64>,
+    /// The relaxation of the needs it was reckoned under (ADR-t4727-1).
+    relaxed: Option<crate::domain::disk::DiskRelaxed>,
 }
 
 impl DiskShort {
@@ -1241,6 +1246,7 @@ impl DiskShort {
             "needed_bytes": self.need,
             "reserve_bytes": self.reserve,
             "expected_bytes": self.expected,
+            "relaxed": self.relaxed,
         })
     }
 }
@@ -1248,8 +1254,10 @@ impl DiskShort {
 /// Whether `free` is short of what a landing's verification needs, with
 /// `total` the size of the volume, `moving` the runs moving besides it
 /// (`None` counts the queue's runs in [`MOVING_STATUSES`]) and the expectation from the
-/// recent runs' samples ([`crate::application::recent_run_samples`]):
-/// `None` with room or no reading.
+/// recent runs' samples ([`crate::application::recent_run_samples`]),
+/// under the relaxation of the needs in effect at `now_millis`, read from
+/// its newest record as the supervisor reads it (ADR-t4727-1; its end is
+/// the supervisor's to record): `None` with room or no reading.
 fn disk_short<L: super::RunLog + ?Sized>(
     queue: &L,
     config: &DiskConfig,
@@ -1262,6 +1270,10 @@ fn disk_short<L: super::RunLog + ?Sized>(
         return Ok(None);
     }
     let samples = crate::application::recent_run_samples(queue)?;
+    let kinds = crate::domain::disk::RELAX_KINDS.map(EventKind::as_str);
+    let relaxed =
+        crate::domain::disk::relax_state(queue.latest_queue_event(&kinds)?.as_ref(), now_millis)
+            .in_effect();
     let moving = match moving {
         Some(moving) => moving,
         None => {
@@ -1280,6 +1292,7 @@ fn disk_short<L: super::RunLog + ?Sized>(
             moving,
             remaining: 0,
             landing_waiting: false,
+            relaxed,
         },
         config.reserve,
     ))
@@ -1307,6 +1320,7 @@ fn landing_short(state: &DiskState, share: f64) -> Option<DiskShort> {
             need: needs.landing,
             reserve: needs.reserve,
             expected: needs.expected,
+            relaxed: needs.relaxed,
         }),
         _ => None,
     }
@@ -6860,6 +6874,7 @@ mod tests {
             moving,
             remaining: 0,
             landing_waiting: false,
+            relaxed: None,
         };
         let share = DiskConfig::default().reserve;
         let refusal = |state: DiskState| {
@@ -6923,6 +6938,29 @@ mod tests {
         let one = short(12 * GIB, 1).expect("short");
         assert_eq!((one.need, one.expected), (13 * GIB, Some(8 * GIB)));
         assert!(short(13 * GIB, 1).is_none());
+        // Under a relaxation in effect (ADR-t4727-1) the expectation it
+        // names stands for the samples'; past its time it relaxes nothing.
+        // The reserve is kept.
+        let relaxed = |at: &str| RunEvent {
+            id: EventId::new(2),
+            run_id: None,
+            kind: EventKind::DiskRelaxed.as_str().into(),
+            payload: json!({"expected_bytes": 2 * GIB, "for_secs": 3600, "reason": "r"}),
+            created_at: at.into(),
+            ..queue.events.borrow()[0].clone()
+        };
+        let relaxation = relaxed("2026-11-03T00:00:00Z");
+        queue.events.borrow_mut().push(relaxation);
+        assert!(short(7 * GIB, 1).is_none());
+        let under = short(7 * GIB - 1, 1).expect("short");
+        assert_eq!((under.need, under.expected), (7 * GIB, Some(2 * GIB)));
+        assert_eq!(under.relaxed.map(|relaxed| relaxed.event_id), Some(2));
+        let run = RunId::new("00000000-0000-4000-8000-000000000001").unwrap();
+        assert!(disk_refusal(&run, under).contains("relaxed until"));
+        assert_eq!(short(5 * GIB - 1, 0).map(|short| short.need), Some(5 * GIB));
+        let past = relaxed("2026-11-02T22:00:00Z");
+        queue.events.borrow_mut()[1] = past;
+        assert_eq!(short(12 * GIB, 1).map(|short| short.need), Some(13 * GIB));
     }
 
     #[test]
@@ -6933,6 +6971,7 @@ mod tests {
             need: 10 << 30,
             reserve: 5 << 30,
             expected: Some(5 << 30),
+            relaxed: None,
         };
         let Verdict::Held { reason, detail } = held(
             &run(Path::new(DIR)),

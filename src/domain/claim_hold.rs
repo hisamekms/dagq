@@ -745,6 +745,7 @@ mod tests {
             moving: 2,
             remaining: 16 * gib,
             landing_waiting: true,
+            relaxed: None,
         }
         .needs(0.05);
         needs.sample_count = 3;

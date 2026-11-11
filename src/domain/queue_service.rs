@@ -460,6 +460,7 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::RequestAdd
         | UseCase::RequestDecline
         | UseCase::Mark
+        | UseCase::DiskRelax
         | UseCase::Migrate
         | UseCase::CommitMessages
         | UseCase::Init => {
@@ -715,6 +716,9 @@ string_enum!(UseCase {
     RequestDecline => "request_decline",
     // Record a change mark, or retract one, as `dagq mark` does.
     Mark => "mark",
+    // Relax the disk's needs for a while, or end the relaxation, as `dagq
+    // disk relax` does (ADR-t4727-1).
+    DiskRelax => "disk_relax",
     // The dialogue and the operations a person or the inbox runs on the
     // host, and a planner as far as the policy grants it (ADR-t3102-2
     // decision 6 (4)), each as the command of its name runs it on the DB
@@ -917,6 +921,7 @@ impl UseCase {
             ("request", Some("add")) => Self::RequestAdd,
             ("request", Some("decline")) => Self::RequestDecline,
             ("mark", _) => Self::Mark,
+            ("disk", Some("relax")) => Self::DiskRelax,
             ("integrate" | "review" | "observe" | "throughput-review" | "setup-review", _)
             | ("up" | "down" | "inbox" | "install" | "auto-update" | "release-update", _)
             | ("service", Some("start" | "stop")) => Self::Control,

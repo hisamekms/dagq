@@ -1114,6 +1114,10 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             let (events,): (Vec<(EventKind, serde_json::Value)>,) = read(op, args)?;
             answer(EventStore::record_queue_events(&*store, events))
         }
+        "expire_disk_relax" => {
+            let (relaxed,): (EventId,) = read(op, args)?;
+            answer(EventStore::expire_disk_relax(&*store, relaxed))
+        }
         "latest_event_of" => {
             let (kind,): (String,) = read(op, args)?;
             answer(EventStore::latest_event_of(&*store, kind.as_str()))

@@ -778,6 +778,46 @@ mod tests {
         assert!(lease_is_stale(&lease(u32::MAX, T), T));
     }
 
+    /// ADR-t4727-1: the end of a relaxation is judged and written by the
+    /// queue in one write transaction, at its own clock and in its own
+    /// words. One not past its time is not ended. Two supervisors that both
+    /// read relaxation A past its time record its end once. A relaxation B
+    /// recorded after the read is not ended by A's end, and stays the
+    /// newest.
+    #[test]
+    fn a_relaxations_end_is_recorded_once_and_never_over_a_newer_one() {
+        use crate::domain::{EventKind, disk};
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let kinds = disk::RELAX_KINDS.map(EventKind::as_str);
+        let relax = |for_secs: u64| {
+            let payload = serde_json::json!({
+                "no_remaining": true, "for_secs": for_secs, "reason": "r",
+            });
+            queue
+                .record_queue_event(EventKind::DiskRelaxed, payload)
+                .unwrap()
+        };
+        let lasting = relax(3600);
+        assert_eq!(queue.expire_disk_relax(lasting).unwrap(), None);
+        // Past its time at once.
+        let a = relax(0);
+        let ended = queue.expire_disk_relax(a).unwrap().expect("ended once");
+        assert_eq!(queue.expire_disk_relax(a).unwrap(), None);
+        let newest = queue.latest_queue_event(&kinds).unwrap().unwrap();
+        assert_eq!(newest.id, ended);
+        assert_eq!(newest.payload["relaxed"], a.as_i64());
+        // B is recorded after a supervisor read A: A's end writes nothing.
+        let a = relax(0);
+        let b = relax(3600);
+        assert_eq!(queue.expire_disk_relax(a).unwrap(), None);
+        assert_eq!(queue.latest_queue_event(&kinds).unwrap().unwrap().id, b);
+        let expired = queue
+            .latest_events_of(EventKind::DiskRelaxExpired.as_str(), 10)
+            .unwrap();
+        assert_eq!(expired.len(), 1);
+    }
+
     /// The unix second the queue of [`failed_run`] stops at.
     const STOPPED: i64 = 1_900_000_000;
 

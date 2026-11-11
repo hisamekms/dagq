@@ -710,6 +710,38 @@ pub trait EventStore {
     fn latest_events_of(&self, kind: &str, limit: usize) -> Result<Vec<RunEvent>>;
     /// The newest event of the queue itself (on no run) of one of `kinds`.
     fn latest_queue_event(&self, kinds: &[&str]) -> Result<Option<RunEvent>>;
+    /// Record the queue's own event `kind` with `payload` only while the
+    /// newest of the queue's events of `kinds` is `newest`, compared and
+    /// written in one write transaction: its id, or `None` when another
+    /// is the newest now (one recorded since, or this record made already
+    /// by another caller), when nothing is written. A store without
+    /// transactions compares and writes one after the other.
+    fn record_queue_event_if_newest(
+        &self,
+        kinds: &[&str],
+        newest: EventId,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<Option<EventId>> {
+        if self.latest_queue_event(kinds)?.map(|event| event.id) != Some(newest) {
+            return Ok(None);
+        }
+        self.record_queue_event(kind, payload).map(Some)
+    }
+    /// Record `disk_relax_expired` of the relaxation of the disk's needs
+    /// recorded as event `relaxed` (ADR-t4727-1), only while it is the
+    /// newest of the relaxation's records
+    /// ([`crate::domain::disk::RELAX_KINDS`]) and past its time by the
+    /// store's own clock ([`crate::domain::disk::relax_state`]), judged and
+    /// written in one write transaction with the payload the store makes:
+    /// its id, or `None` when another record is the newest (one recorded
+    /// since, or this end recorded already) or it is not past its time.
+    /// Its time and words are no caller's, so no other operation writes
+    /// the relaxation's records for the supervisor. A store that cannot
+    /// judge it refuses.
+    fn expire_disk_relax(&self, relaxed: EventId) -> Result<Option<EventId>> {
+        anyhow::bail!("this store records no end of relaxation {relaxed}")
+    }
     /// For each of `supervisors`, the newest event of one of `kinds` whose
     /// payload names it as its `supervisor`, however many the others
     /// recorded since; one with none has no entry.

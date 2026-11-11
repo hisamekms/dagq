@@ -10,6 +10,7 @@ amends:
   - adr-0047 decision 44
 amended_by:
   - adr-t4542-1
+  - adr-t4727-1
 owners:
   - hisamekms
 tags:

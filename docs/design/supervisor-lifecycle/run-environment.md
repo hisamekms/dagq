@@ -49,6 +49,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   起動の組と、landing branchから選ぶsnapshotの境界は[Review](review.md#reviewのsubagent)。
 
 - `[disk]`はclaimと着地の検証の前に確かめる空き容量の最低ラインの割合（`reserve`）で、keyと既定は`domain::disk::DiskConfig`、読む時と読めないときと廃止したkeyの扱いは[claimを控える](claim-hold.md#空き容量)が持つ（ADR-0047の決定44、ADR-t4473-1）。
+  緊急に必要量を期限つきで緩めるのは設定でなくCLIとqueueの記録で、再起動は要らない（[閾値](claim-hold.md#閾値)）。
 
 - `[resume]`は`needs_session`のrunの衝突だけの試行の上限で、keyと既定、設定にしない上限は`domain::resume::ResumeConfig`が持つ（[Needs session](needs-session.md)の「試行の数え方」、ADR-0047の決定24）。
   supervisorが起動時に読み（`SuperviseOptions::resume`で上書きできる）、読めなければ既定値で動く。

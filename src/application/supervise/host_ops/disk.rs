@@ -25,8 +25,8 @@ use crate::domain::EventKind;
 use crate::domain::{
     Ask,
     disk::{
-        DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskNeeds, DiskState, RunSample,
-        expected_run_estimate, gib,
+        DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskNeeds, DiskRelaxed, DiskState, RELAX_KINDS,
+        RelaxState, RunSample, expected_run_estimate, gib, relax_state,
     },
 };
 
@@ -186,6 +186,7 @@ impl HostOpsState {
             .collect();
         self.apply_disk_answers(env, &unclosed)?;
         let (expected, sample_count) = self.expected_run_size(env)?;
+        let relaxed = self.relaxation(env)?;
         let free = self.free_bytes(env);
         // The moving runs' remaining, from their sizes measured off the
         // loop; one with no size to trust counts the expectation whole
@@ -203,6 +204,7 @@ impl HostOpsState {
             moving: in_flight,
             remaining,
             landing_waiting,
+            relaxed,
         };
         let mut needs = state.needs(self.disk_config.reserve);
         needs.sample_count = sample_count;
@@ -280,7 +282,7 @@ impl HostOpsState {
             AskStep::Forget => {}
         }
         if let Judged::Recorded { landings: hold, .. } = judged {
-            env.record_hold(claim_hold::LANDINGS, hold.as_ref())?;
+            env.record_hold(claim_hold::LANDINGS, hold.as_deref())?;
         }
         Ok(())
     }
@@ -327,6 +329,38 @@ impl HostOpsState {
             .map_or((None, 0), |(_, samples)| {
                 expected_run_estimate(samples, now)
             }))
+    }
+    /// The relaxation of the needs in effect this pass (ADR-t4727-1), from
+    /// the newest of its records alone ([`crate::domain::disk::relax_state`]):
+    /// a person's `disk relax` takes effect on the next pass, with no
+    /// restart, and one past its time is recorded `disk_relax_expired` by
+    /// the first pass that finds it, which reckons as with none. The queue
+    /// judges the end again in its write's own transaction, at its own
+    /// clock ([`crate::application::EventStore::expire_disk_relax`]): a
+    /// relaxation recorded since, or the end another supervisor recorded
+    /// first, leaves it unwritten. No other operation of the supervisor
+    /// writes the relaxation's records ([`crate::domain::disk::RELAX_KINDS`]).
+    fn relaxation(&self, env: &mut HostEnv<'_>) -> Result<Option<DiskRelaxed>> {
+        let kinds = RELAX_KINDS.map(EventKind::as_str);
+        let latest = env.queue.latest_queue_event(&kinds)?;
+        let now = crate::application::unix_millis(env.generators.clock.system_time());
+        let state = relax_state(latest.as_ref(), now);
+        if let RelaxState::Expired(relaxed) = state {
+            match env
+                .queue
+                .expire_disk_relax(crate::domain::EventId::new(relaxed.event_id))
+            {
+                Ok(None) => {}
+                Ok(Some(_)) => info!(
+                    "the relaxation of the disk's needs (event {}) reached its time: the needs are reckoned as before it",
+                    relaxed.event_id
+                ),
+                Err(error) => {
+                    warn!(error = %format_args!("{error:#}"), "the end of the disk's relaxation could not be recorded: {error:#}")
+                }
+            }
+        }
+        Ok(state.in_effect())
     }
     /// Ask for what the ended runs left to be cleaned for room, when
     /// [`asks_for_cleanup`] says so; the job does it off the loop, and
@@ -487,7 +521,7 @@ pub(in crate::application::supervise) enum Judged {
     /// landings (`landing_held` / `landing_resumed`).
     Recorded {
         ask: bool,
-        landings: Option<ClaimHold>,
+        landings: Option<Box<ClaimHold>>,
     },
 }
 
@@ -510,6 +544,7 @@ pub(in crate::application::supervise) fn judge_reading(
             disk: Some(*needs),
             ..HoldInputs::default()
         })
+        .map(Box::new)
     } else {
         None
     };
@@ -837,6 +872,7 @@ mod tests {
         claim_remaining: 0,
         landing_expected: 0,
         claims_wait_reason: None,
+        relaxed: None,
     };
 
     /// What a pass does with `free` free bytes while a cleanup for room
