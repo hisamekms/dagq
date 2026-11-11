@@ -140,10 +140,12 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - 着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - runは終わりから猶予の後で、telemetryのtokenの失効と資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
 - storeの印は、その位置までの全入力が行の記録か写さないqueueのeventの被覆で記録済みである約束で、Wはsession行、Rはqueueの行とrun・task・session・nodeの行で分かれたカーソルごとの位置で、Wの約束は保ち、queueの遅れはほかの読み直しを増やさない。
-- 写さないkindのeventも読んだ入力としてRを進め、被覆の始まりC・到達点Sと要約をR・Wと同じ書き込みで同じ範囲(C, S]を覆う形で下げずに保ち、停止の条件の間は据え置いて今どおり写す。
-  停止の条件と値の保証は[窓の端の補いの決定](../adr/2026-11-09-t4644-1-omit-unread-queue-events-and-read-window-edges.md)が持つ。
+- 写さないeventでもRを進め、R・Wと共に被覆の始まりC・到達点Sと(C, S]の要約を保つ。
+  S・要約を下げず、停止中は据え置いて行に写す（[停止の決定](../adr/2026-11-09-t4644-1-omit-unread-queue-events-and-read-window-edges.md)）。
+  要約は最初から別に上限つきに作り直し、読みには使わない。
+  更新後のSに全kindが届けば公開し、そのときだけCを最初のeventの前まで下げる。
 - 入力を記録済みなら確定待ちと版の更新はRを押さえず、追いつきの印と確認の順番を起動をまたいで保つ。
-- 増分の走査はRより後だけを読み、対象別・id指定の読みはRより前に及ぶが確定済みの履歴に比例しない（起動時のpushの要約は除く。`builder`のdoc）。
+- 増分の走査はRより後だけを読み、対象別・id指定の読みはRより前に及ぶが確定済みの履歴に比例しない（起動時のpushの要約と写さないqueueのeventの要約の作り直しは除く。`builder`のdoc）。
 - 古い版の作り直しは`builder`のdocが持つ。
   行の持ち主を変える版上げは直らない。
 - 読めない・書けない周回は印を残して次に任せ、runとtaskの結果を変えない。

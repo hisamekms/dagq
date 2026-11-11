@@ -174,6 +174,8 @@ fn write_omitted(conn: &impl SqlWrite, omitted: &Omitted) -> Result<bool> {
     if !coverage.supersedes(held.as_ref()) {
         return Ok(true);
     }
+    let mut persisted = coverage.clone();
+    persisted.replacing = None;
     let through = text(&InputsThrough {
         events: coverage.through,
         supervisor: None,
@@ -195,9 +197,12 @@ fn write_omitted(conn: &impl SqlWrite, omitted: &Omitted) -> Result<bool> {
             written::KEY,
             crate::domain::ledger::LEDGER_V,
             through,
-            text(coverage)?
+            text(&persisted)?
         ],
     )?;
+    if held.as_ref().is_some_and(|held| held.from != coverage.from) {
+        SqlWrite::execute(conn, "DELETE FROM ledger_omitted_points", sql_params![])?;
+    }
     for point in &omitted.points {
         SqlWrite::execute(
             conn,
@@ -273,6 +278,10 @@ fn event_in(conn: &impl SqlRead, id: EventId) -> Result<Option<RunEvent>> {
             .optional()?,
     )
 }
+
+/// One covering-index seek, including a full final page's empty tail.
+const KIND_HAS_AFTER_SQL: &str = "SELECT id FROM run_events INDEXED BY events_by_kind
+    WHERE kind=?1 AND id>?2 AND id<=?3 ORDER BY id LIMIT 1";
 
 /// The events of a kind in an id range by `events_by_kind`.
 fn events_of_kind_in(
@@ -1180,6 +1189,19 @@ impl<E: TransactionEntries> LedgerStore for StoreQueue<E> {
     fn ledger_omitted_point_at_or_before(&self, kind: &str, at: EventId) -> Result<Option<Point>> {
         let tx = self.read_entry("ledger_omitted_point_at_or_before")?;
         point_at_or_before_in(&tx, kind, at)
+    }
+
+    /// A bounded covering-index probe for a rebuild's final page.
+    fn ledger_kind_has_after(&self, kind: &str, after: EventId, upto: EventId) -> Result<bool> {
+        let tx = self.read_entry("ledger_kind_has_after")?;
+        Ok(SqlRead::query_row(
+            &tx,
+            KIND_HAS_AFTER_SQL,
+            sql_params![kind, after, upto],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some())
     }
 
     /// The coverage's row, whether the marks are held or not.

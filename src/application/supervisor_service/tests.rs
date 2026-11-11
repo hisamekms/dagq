@@ -3846,3 +3846,99 @@ fn the_push_records_past_the_answers_limit_are_read_by_rows_and_in_parts() {
         );
     }
 }
+
+/// A publication can replace points at the same S, during an edge read
+/// or between row pages. Both cases must repeat the complete window read,
+/// even if the first attempt failed against the replaced points.
+#[test]
+fn a_window_crossing_publication_repeats_after_the_points_are_replaced() {
+    use crate::application::LedgerStore;
+    use crate::domain::EventId;
+    use crate::domain::ledger::session::written::omitted::{Coverage, Point};
+    struct Publishing {
+        published: std::sync::atomic::AtomicBool,
+        between_pages: bool,
+    }
+    impl ServiceCaller for Publishing {
+        fn call(&self, _: UseCase, params: Value) -> Result<Value> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let params: SupervisorParams = serde_json::from_value(params)?;
+            let coverage = || {
+                let mut c = Coverage::start(
+                    &["authorization_denied".into()],
+                    EventId::new(if self.published.load(SeqCst) { 0 } else { 50 }),
+                );
+                c.through = EventId::new(100);
+                c
+            };
+            match params.op.as_str() {
+                "ledger_omitted_coverage" => Ok(serde_json::to_value(Some(coverage()))?),
+                "ledger_rows_covered" => {
+                    self.published.store(true, SeqCst);
+                    Ok(serde_json::to_value(forward::CoveredRows {
+                        rows: vec![],
+                        coverage: Some(coverage()),
+                    })?)
+                }
+                "ledger_omitted_points_after" => {
+                    assert!(!self.between_pages);
+                    self.published.store(true, SeqCst);
+                    Ok(serde_json::to_value(vec![Point {
+                        kind: "authorization_denied".into(),
+                        at: EventId::new(2),
+                        max_ms: Some(200),
+                        last: Some(EventId::new(2)),
+                        timed: Some(EventId::new(2)),
+                    }])?)
+                }
+                op => panic!("unexpected read {op}"),
+            }
+        }
+        fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+            unreachable!("no landing")
+        }
+        fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn take_back(&self, _: &LeaseToken, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn hand_over(&self) {}
+        fn sign_out(&self) {}
+        fn credential(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+    for between_pages in [false, true] {
+        let service = Arc::new(Publishing {
+            published: std::sync::atomic::AtomicBool::new(false),
+            between_pages,
+        });
+        let queue =
+            SupervisorQueues::new(service, ActorContext::instance(ActorRole::Supervisor, 7))
+                .queue();
+        let mut attempts = 0;
+        let mut result = None;
+        queue
+            .ledger_read_snapshot(&mut |read| {
+                attempts += 1;
+                let from = read.omitted_coverage()?.unwrap().from;
+                if between_pages {
+                    read.rows_after(crate::domain::ledger::LedgerKind::Queue, None, 1)?;
+                    assert_eq!(read.omitted_coverage()?.unwrap().from, EventId::new(0));
+                } else {
+                    let points =
+                        read.omitted_points_after("authorization_denied", EventId::new(0), 1)?;
+                    assert_eq!(points[0].at, EventId::new(2));
+                    if from != EventId::new(0) {
+                        anyhow::bail!("points were replaced during this attempt");
+                    }
+                }
+                result = Some(from);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(result, Some(EventId::new(0)));
+    }
+}

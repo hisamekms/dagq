@@ -1358,6 +1358,7 @@ pub struct Builder {
     omission: omitted::Omission,
     /// What it holds of their coverage ([`Self::begin_coverage`]).
     covering: omitted::Covering,
+    rebuild_limit: usize,
     /// The events read whose rule of no row a pass's start changed
     /// ([`Self::begin_coverage`]), to be read again and given their rows
     /// ([`Self::regain`]).
@@ -1528,6 +1529,7 @@ impl Default for Builder {
             older_rows: OlderRows::default(),
             omission: omitted::Omission::of_version(),
             covering: omitted::Covering::default(),
+            rebuild_limit: 256,
             regaining: None,
             omitting_since: None,
             rules_read_by: Vec::new(),
@@ -2751,6 +2753,7 @@ impl Builder {
         if let Some(omitted) = &mut marks.omitted {
             self.covering.wrote(omitted.coverage.through);
             omitted.points.clear();
+            omitted.coverage.replacing = None;
         }
         self.marks_written = Some(marks);
     }
@@ -2761,9 +2764,20 @@ impl Builder {
     /// read after its cursor. A builder that omits no kind holds none and
     /// writes none, and stops on a store of a coverage (of other kinds).
     pub fn begin_coverage(&mut self, marks: Option<&Marks>) {
+        self.begin_coverage_from(marks, None);
+    }
+
+    /// A coverage survives absent W/R too. Read it independently when the
+    /// store has no marks, without inventing a W or R for that store.
+    pub fn begin_coverage_from(
+        &mut self,
+        marks: Option<&Marks>,
+        fallback: Option<&omitted::Coverage>,
+    ) {
         let stored = marks
             .and_then(|marks| marks.omitted.as_ref())
-            .map(|omitted| &omitted.coverage);
+            .map(|omitted| &omitted.coverage)
+            .or(fallback);
         let r = marks
             .and_then(|marks| marks.rows)
             // Coverage needs the queue position, even when a legacy mark
@@ -2926,6 +2940,23 @@ impl Builder {
             .cloned()
             .collect();
         self.covering.read(&events, self.omission.every, to);
+    }
+
+    /// Advance the private rebuild once per pass, after the normal read
+    /// has advanced S. See [`omitted::Covering::rebuild`] for its bound.
+    pub fn rebuild_omitted<E>(
+        &mut self,
+        read: impl FnMut(&str, EventId, EventId, usize) -> Result<(Vec<RunEvent>, bool), E>,
+    ) -> Result<(), E> {
+        self.covering
+            .rebuild(self.omission.every, self.rebuild_limit, read)
+    }
+
+    /// Set a small rebuild page for tests; zero models the original
+    /// builder, to compare every public checkpoint on the same input.
+    #[cfg(test)]
+    pub(crate) fn set_rebuild_limit(&mut self, limit: usize) {
+        self.rebuild_limit = limit;
     }
 
     /// Whether it stopped covering the omitted queue events

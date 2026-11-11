@@ -8,6 +8,10 @@
 //! same; and the builder of the set records every input the other did, its
 //! R no earlier (ADR-t4644-1 decision 4).
 
+//! These original omission/race fixtures disable rebuilding to retain
+//! their nonzero C until the competing writer runs. The rebuilding tests
+//! separately compare enabled and disabled builders on the same arrivals.
+
 use super::*;
 use crate::application::ports::frozen::values;
 use crate::domain::ledger::owner::{self, Owner};
@@ -182,6 +186,7 @@ impl Side {
     fn new(omission: Omission) -> Self {
         let mut builder = Builder::default();
         builder.set_omission(omission.clone());
+        builder.set_rebuild_limit(0);
         Self {
             memory: Memory::default(),
             builder,
@@ -194,6 +199,7 @@ impl Side {
     fn start(&mut self, secs: i64) {
         self.builder = start_builder(&self.memory, ms(secs)).unwrap();
         self.builder.set_omission(self.omission.clone());
+        self.builder.set_rebuild_limit(0);
     }
 
     /// Take `step` of `input` as the builder's steps of the frozen inputs do.
@@ -222,6 +228,7 @@ impl Side {
             Step::FromTheStart => {
                 self.builder = Builder::default();
                 self.builder.set_omission(self.omission.clone());
+                self.builder.set_rebuild_limit(0);
             }
         }
     }
@@ -733,6 +740,7 @@ fn a_stop_after_reading_past_s_gives_the_events_after_s_their_rows() {
     let arrive = |count: usize| memory.events.replace(input.log.events[..count].to_vec());
     let mut set = Builder::default();
     set.set_omission(version());
+    set.set_rebuild_limit(0);
     arrive(n - 2);
     drain(&memory, &mut set, input.now);
     assert_eq!(memory.omitted.borrow().as_ref().unwrap().through, s);
@@ -745,6 +753,7 @@ fn a_stop_after_reading_past_s_gives_the_events_after_s_their_rows() {
     arrive(n - 1);
     let mut knows_no_s = start_builder(&memory, ms(input.now)).unwrap();
     knows_no_s.set_omission(none());
+    knows_no_s.set_rebuild_limit(0);
     drain(&memory, &mut knows_no_s, input.now);
     assert_eq!(r(&memory), Some(first));
     let key = |id: EventId| (LedgerKind::Queue, id.to_string());
@@ -807,11 +816,13 @@ fn a_builder_taking_a_coverage_of_another_c_records_every_input_either_way() {
     let cut_now = cut.now;
     let mut from_start = Builder::default();
     from_start.set_omission(version());
+    from_start.set_rebuild_limit(0);
     memory
         .before_steps
         .replace(Some(Box::new(move |memory: &Memory| {
             let mut later = start_builder(memory, ms(cut_now)).unwrap();
             later.set_omission(version());
+            later.set_rebuild_limit(0);
             let rows =
                 u32::try_from(crate::domain::ledger::testkit::frozen::WRITES_PER_PASS).unwrap();
             memory.clock.costs(PASS_TIME);
@@ -854,15 +865,18 @@ fn a_builder_taking_a_coverage_of_another_c_records_every_input_either_way() {
     memory.events.replace(input.log.events[..n / 2].to_vec());
     let mut of_now = Builder::default();
     of_now.set_omission(none());
+    of_now.set_rebuild_limit(0);
     drain(&memory, &mut of_now, now);
     let mut from_r = start_builder(&memory, ms(now)).unwrap();
     from_r.set_omission(version());
+    from_r.set_rebuild_limit(0);
     memory.events.replace(input.log.events.clone());
     memory
         .before_steps
         .replace(Some(Box::new(move |memory: &Memory| {
             let mut from_start = Builder::default();
             from_start.set_omission(version());
+            from_start.set_rebuild_limit(0);
             let built = build_pass_limited(
                 memory,
                 &mut from_start,
@@ -953,6 +967,7 @@ fn a_regained_row_moves_no_attempt_back_and_holds_r_at_the_time_read_before_it()
         let arrive = |count: usize| memory.events.replace(input.log.events[..count].to_vec());
         let mut set = Builder::default();
         set.set_omission(version());
+        set.set_rebuild_limit(0);
         arrive(s_at);
         drain(&memory, &mut set, input.now);
         let held = (memory.omitted.borrow().clone(), r(&memory));
@@ -971,6 +986,7 @@ fn a_regained_row_moves_no_attempt_back_and_holds_r_at_the_time_read_before_it()
         arrive(n - 2);
         let mut knows_no_s = start_builder(&memory, ms(input.now)).unwrap();
         knows_no_s.set_omission(none());
+        knows_no_s.set_rebuild_limit(0);
         drain(&memory, &mut knows_no_s, input.now);
         assert_eq!(r(&memory), Some(first), "{label}");
         arrive(n);
@@ -998,6 +1014,7 @@ fn a_regained_row_moves_no_attempt_back_and_holds_r_at_the_time_read_before_it()
         memory.unwritable.replace(None);
         let mut again = start_builder(&memory, ms(input.now)).unwrap();
         again.set_omission(version());
+        again.set_rebuild_limit(0);
         drain(&memory, &mut again, input.now);
         let old = of_now_drained(&input);
         let slot = |memory: &Memory| memory.rows.borrow().get(&key(start)).cloned();
@@ -1067,6 +1084,7 @@ fn taking_a_coverage_behind() -> (Input, Memory, Builder, Coverage) {
     // Read all by C 0, none of it written.
     let mut set = Builder::default();
     set.set_omission(version());
+    set.set_rebuild_limit(0);
     arrive(&memory, &input, 300);
     memory.refuses.set(true);
     memory.refuses_batch_marks.set(true);
@@ -1078,10 +1096,12 @@ fn taking_a_coverage_behind() -> (Input, Memory, Builder, Coverage) {
     arrive(&memory, &input, 100);
     let mut of_now = Builder::default();
     of_now.set_omission(none());
+    of_now.set_rebuild_limit(0);
     drain(&memory, &mut of_now, input.now);
     arrive(&memory, &input, 150);
     let mut other = start_builder(&memory, ms(input.now)).unwrap();
     other.set_omission(version());
+    other.set_rebuild_limit(0);
     drain(&memory, &mut other, input.now);
     let held = memory.omitted.borrow().clone().unwrap();
     assert_eq!((held.from, held.through), (id(100), id(150)));
@@ -1132,6 +1152,7 @@ fn writes_up_to(memory: &Memory, input: &Input, count: i64) {
     arrive(memory, input, count);
     let mut knows_no_s = start_builder(memory, ms(input.now)).unwrap();
     knows_no_s.set_omission(none());
+    knows_no_s.set_rebuild_limit(0);
     drain(memory, &mut knows_no_s, input.now);
     assert_eq!(r(memory), Some(EventId::new(count)));
 }

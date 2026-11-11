@@ -534,6 +534,9 @@ fn without_omitted_rows(input: &Input, from: usize) -> (Memory, Vec<LedgerRow>) 
     let mut builder = Builder::default();
     for (n, step) in input.steps.iter().enumerate() {
         builder.set_omission(set(n));
+        // Preserve the omitting builder's historical coverage and missing
+        // queue rows until a test explicitly starts rebuilding it.
+        builder.set_rebuild_limit(0);
         match *step {
             Step::Arrive(count) => {
                 memory.events.replace(input.log.events[..count].to_vec());
@@ -556,10 +559,12 @@ fn without_omitted_rows(input: &Input, from: usize) -> (Memory, Vec<LedgerRow>) 
             Step::Start(secs) => {
                 builder = start_builder(&memory, ms(secs)).unwrap();
                 builder.set_omission(set(n));
+                builder.set_rebuild_limit(0);
             }
             Step::FromTheStart => {
                 builder = Builder::default();
                 builder.set_omission(set(n));
+                builder.set_rebuild_limit(0);
             }
         }
     }
@@ -811,4 +816,637 @@ fn the_token_of_a_run_of_no_row_as_s_is_no_edge() {
             assert_ne!(value, &json!(token.as_i64()), "{name}");
         }
     }
+}
+
+/// Rebuild each input through the real pass, interleaving its arrivals
+/// with a small private fold. Both sides start from the omitting builder's
+/// sparse ledger with C after the first event. Only the queue-rows output
+/// is normalized with missing rows given back; windows read the real holes.
+#[test]
+fn rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold() {
+    let all = inputs();
+    let mut each = Vec::new();
+    for input in &all {
+        let (Step::Arrive(first), Step::Drain(secs)) = (input.steps[0], input.steps[1]) else {
+            panic!("{} starts with an arrival and drain", input.name);
+        };
+        // Read a prefix with rows, then establish the historical coverage
+        // with the omitting builder. Leave the first arrival's last three
+        // events for real rebuild passes, keeping the canonical log intact.
+        let mut setup = input.clone();
+        setup.steps = vec![
+            Step::Arrive(5),
+            Step::Drain(secs),
+            Step::Start(secs),
+            Step::Arrive(first - 3),
+            Step::Drain(secs),
+        ];
+        let mut sides = [0, 1].map(|_| {
+            let (memory, _) = without_omitted_rows(&setup, 2);
+            let mut builder = start_builder(&memory, ms(secs)).unwrap();
+            builder.set_omission(three());
+            (memory, builder)
+        });
+        let initial = sides[0].0.omitted.borrow().clone().unwrap();
+        assert!(initial.from > input.log.events[0].id, "{}", input.name);
+        assert!(initial.rebuilding.is_none());
+        let records = queue_records(&sides[0].0);
+        let omitted = super::omitting::omitted_of(&sides[0].0);
+        assert!(!omitted.is_empty(), "{}", input.name);
+        assert!(omitted.iter().all(|event| !records.contains(&event.id)));
+        let largest_kind = three()
+            .kinds
+            .iter()
+            .map(|kind| {
+                setup.log.events[..first - 3]
+                    .iter()
+                    .filter(|e| e.kind.as_str() == kind)
+                    .count()
+            })
+            .max()
+            .unwrap();
+        let limit = (largest_kind / 3).clamp(1, 64);
+        sides[0].1.set_rebuild_limit(limit);
+        sides[1].1.set_rebuild_limit(0);
+        let old = built(input);
+        let mut rounds = 0;
+        let mut moving_before_publication = 0;
+        let mut arrival_passes = 0;
+        let mut published = false;
+        let mut run_pass = |sides: &mut [(Memory, Builder); 2], secs| {
+            let previous = sides[0].0.omitted.borrow().clone().unwrap();
+            let new_events = sides[0].0.events.borrow().last().unwrap().id > previous.through;
+            let results = sides
+                .each_mut()
+                .map(|(memory, builder)| pass(memory, builder, secs));
+            assert_eq!(results[0].failure, results[1].failure, "{}", input.name);
+            assert_eq!(results[0].backlog, results[1].backlog, "{}", input.name);
+            rounds += 1;
+            if new_events {
+                arrival_passes += 1;
+            }
+            let memory = &sides[0].0;
+            let reference = &sides[1].0;
+            let held = memory.omitted.borrow().clone().unwrap();
+            let normal = reference.omitted.borrow().clone().unwrap();
+            assert_eq!(held.through, normal.through, "{}", input.name);
+            assert_eq!(*memory.rows_mark.borrow(), *reference.rows_mark.borrow());
+            assert_eq!(*memory.mark.borrow(), *reference.mark.borrow());
+            assert_eq!(
+                values(memory, input),
+                values(reference, input),
+                "{}",
+                input.name
+            );
+            assert_eq!(queue_records(memory), queue_records(reference));
+            // The row-given-back comparison reads every non-row value
+            // from the sparse ledger, before and after publication.
+            let form = super::omitting::old_form(memory, Some(&old), ms(input.now));
+            let taken: Vec<_> = form
+                .rows
+                .borrow()
+                .iter()
+                .filter(|(key, _)| !memory.rows.borrow().contains_key(key))
+                .map(|(_, row)| row.clone())
+                .collect();
+            assert_eq!(
+                with_rows_given_back(values(memory, input), memory, &taken),
+                of_old_form(memory, Some(&old), input, input.name)
+            );
+            if held.from == EventId::new(0) {
+                let (summaries, points) = counted(
+                    &memory.events.borrow(),
+                    &three().kinds,
+                    (EventId::new(0), held.through),
+                    EVERY,
+                );
+                assert_eq!(held.summaries, summaries, "{}", input.name);
+                assert_eq!(
+                    memory.points.borrow().values().cloned().collect::<Vec<_>>(),
+                    points
+                );
+                assert!(held.rebuilding.is_none());
+                published = true;
+            } else {
+                assert!(!published, "{} cannot undo publication", input.name);
+                let mut public = held.clone();
+                let private = public.rebuilding.take();
+                if let Some(private) = private {
+                    assert!(private.positions.values().all(|p| *p <= held.through));
+                }
+                assert_eq!(public, normal, "{}", input.name);
+                if held.through > previous.through {
+                    moving_before_publication += 1;
+                }
+            }
+            results[0].backlog == 0 || results[0].failure.is_some()
+        };
+        let mut steps = vec![
+            Step::Arrive(first - 2),
+            Step::Pass(secs),
+            Step::Arrive(first - 1),
+            Step::Pass(secs),
+            Step::Arrive(first),
+        ];
+        steps.extend_from_slice(&input.steps[1..]);
+        for step in steps {
+            match step {
+                Step::Arrive(n) => {
+                    for (memory, _) in &sides {
+                        memory.events.replace(input.log.events[..n].to_vec());
+                    }
+                }
+                Step::Pass(secs) => {
+                    run_pass(&mut sides, secs);
+                }
+                Step::Drain(secs) => {
+                    for _ in 0..DRAIN_PASSES {
+                        if run_pass(&mut sides, secs) {
+                            break;
+                        }
+                    }
+                }
+                Step::SessionWriteFails(secs) => {
+                    for (memory, _) in &sides {
+                        memory.batch_fails.set(1);
+                    }
+                    run_pass(&mut sides, secs);
+                    for (memory, _) in &sides {
+                        memory.batch_fails.set(0);
+                    }
+                }
+                Step::MarksGone => {
+                    for (memory, _) in &sides {
+                        memory.mark.replace(None);
+                        memory.rows_mark.replace(None);
+                    }
+                }
+                Step::Start(_) | Step::FromTheStart => {
+                    for (n, (memory, builder)) in sides.iter_mut().enumerate() {
+                        *builder = if matches!(step, Step::FromTheStart) {
+                            Builder::default()
+                        } else {
+                            let Step::Start(at) = step else {
+                                unreachable!()
+                            };
+                            start_builder(memory, ms(at)).unwrap()
+                        };
+                        builder.set_omission(three());
+                        builder.set_rebuild_limit(if n == 0 { limit } else { 0 });
+                    }
+                }
+            }
+        }
+        // At the canonical input's end, retain the frozen-value anchor
+        // (and its existing same-input allowance for a cut pass).
+        each.push((
+            input,
+            of_old_form(&sides[0].0, Some(&old), input, input.name),
+        ));
+        // Drain private work too: ordinary backlog does not count it.
+        for _ in 0..largest_kind + 3 {
+            run_pass(&mut sides, input.now);
+            if sides[0].0.omitted.borrow().as_ref().unwrap().from == EventId::new(0) {
+                break;
+            }
+        }
+        assert!(published, "{}", input.name);
+        assert!(rounds > 1 && arrival_passes >= 2, "{}", input.name);
+        assert!(
+            moving_before_publication > 0,
+            "{} advances S before publication",
+            input.name
+        );
+    }
+    check_ended_whole(&each);
+}
+
+/// A private page or tail-probe failure cannot suppress the normal
+/// mark-only or row-writing pass. Its entire checkpoint stays put even
+/// after earlier kinds were read; a normal row error still takes priority.
+#[test]
+fn a_failed_rebuild_read_still_writes_the_normal_marks_and_keeps_its_checkpoint() {
+    for stage in ["events_of_between", "ledger_kind_has_after"] {
+        for rows in ["none", "healthy", "unwritable"] {
+            let mut log = Log::default();
+            for n in 0..24 {
+                log.add(None, None, THREE[n % 3], json!({}), 1);
+            }
+            let input = Input {
+                name: "failing private read",
+                log: log.clone(),
+                steps: vec![
+                    Step::Arrive(6),
+                    Step::Drain(LATER),
+                    Step::Start(LATER),
+                    Step::Arrive(24),
+                    Step::Drain(LATER),
+                ],
+                now: LATER,
+                times: vec![1],
+                untils: vec![],
+            };
+            let mut sides = [0, 1].map(|_| {
+                let (memory, _) = without_omitted_rows(&input, 2);
+                let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+                builder.set_omission(three());
+                builder.set_rebuild_limit(1);
+                assert!(pass(&memory, &mut builder, LATER).failure.is_none());
+                (memory, builder)
+            });
+            sides[1].1.set_rebuild_limit(0);
+            let checkpoint = sides[0]
+                .0
+                .omitted
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .rebuilding
+                .clone();
+            assert!(checkpoint.is_some());
+            for kind in THREE {
+                log.add(None, None, kind, json!({}), 2);
+            }
+            if rows != "none" {
+                log.landed(9, &run_id(9), 3);
+                log.add(
+                    None,
+                    None,
+                    "session_opened",
+                    json!({"kind": "runtime_planner", "planner_id": 9}),
+                    4,
+                );
+            }
+            for (memory, _) in &sides {
+                memory.events.replace(log.events.clone());
+                if rows == "unwritable" {
+                    memory
+                        .unwritable
+                        .replace(Some((LedgerKind::Run, run_id(9))));
+                }
+            }
+            sides[0].0.rebuild_read_failure.set(Some((stage, THREE[2])));
+            let before_batches = sides[0].0.batches.get();
+            let results = sides
+                .each_mut()
+                .map(|(memory, builder)| pass(memory, builder, LATER));
+            let [(memory, builder), (reference, _)] = &mut sides;
+            assert_eq!(memory.failed_rebuild_reads.get(), 1, "{stage} {rows}");
+            let failure = results[0].failure.as_ref().unwrap();
+            if rows == "unwritable" {
+                assert_eq!(results[0].failure, results[1].failure);
+                assert!(failure.contains("cannot be written"), "{failure}");
+            } else {
+                assert!(results[1].failure.is_none());
+                assert!(failure.contains(stage), "{failure}");
+            }
+            assert!(
+                memory.batches.get() > before_batches,
+                "normal write still attempted"
+            );
+            assert_eq!(*memory.mark.borrow(), *reference.mark.borrow());
+            assert_eq!(*memory.rows_mark.borrow(), *reference.rows_mark.borrow());
+            assert_eq!(memory.mark.borrow().as_ref().unwrap().through, log.last());
+            let held = memory.omitted.borrow().clone().unwrap();
+            assert_eq!(held.from, EventId::new(6));
+            assert_eq!(held.through, log.last());
+            assert_eq!(held.rebuilding, checkpoint);
+            assert_eq!(held, reference.omitted.borrow().clone().unwrap());
+            assert_eq!(*memory.rows.borrow(), *reference.rows.borrow());
+            // The following healthy pass resumes the saved checkpoint,
+            // rather than a partially folded prefix of the failing pass.
+            memory.rebuild_read_failure.set(None);
+            memory.unwritable.replace(None);
+            assert!(pass(memory, builder, LATER).failure.is_none());
+            let next = memory.omitted.borrow().clone().unwrap();
+            assert!(
+                next.rebuilding
+                    .as_ref()
+                    .unwrap()
+                    .positions
+                    .iter()
+                    .all(|(kind, at)| *at > checkpoint.as_ref().unwrap().positions[kind])
+            );
+        }
+    }
+}
+
+/// Two actual builders, on the same arrivals: rebuilding never delays the
+/// public S, R, or queue writes. Heavy arrivals postpone only publication.
+#[test]
+fn rebuilding_follows_the_updated_s_while_arrivals_outpace_it_then_catches_up() {
+    use crate::domain::ledger::session::written::omitted::{Coverage, Omitted};
+    let mut log = Log::default();
+    for secs in 1..=100 {
+        if secs <= 96 {
+            log.add(None, None, "mark_added", json!({"mark": "prefix"}), secs);
+        } else {
+            log.add(None, None, THREE[0], json!({}), secs);
+        }
+    }
+    let setup = |limit| {
+        let memory = Memory::default();
+        memory.events.replace(log.events.clone());
+        let mut old = Builder::default();
+        old.set_omission(none());
+        drain(&memory, &mut old, LATER);
+        memory.write_omitted(&Omitted {
+            coverage: Coverage::start(&three().kinds, EventId::new(100)),
+            points: Vec::new(),
+        });
+        let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+        builder.set_omission(three());
+        builder.set_rebuild_limit(limit);
+        (memory, builder)
+    };
+    let (memory, mut builder) = setup(2);
+    let (reference, mut original) = setup(0);
+    let (quiet, mut without_arrivals) = setup(2);
+    let input = Input {
+        name: "arriving",
+        log: log.clone(),
+        steps: vec![],
+        now: LATER,
+        times: vec![50, 100],
+        untils: vec![EventId::new(100)],
+    };
+    let mut published = false;
+    for round in 0..32 {
+        let arrivals = if round == 0 {
+            1
+        } else if round < 5 {
+            // More than the two-event fold plus its one-event tail probe.
+            4
+        } else {
+            1
+        };
+        for _ in 0..arrivals {
+            log.add(None, None, THREE[0], json!({}), 101 + round);
+        }
+        memory.events.replace(log.events.clone());
+        reference.events.replace(log.events.clone());
+        assert!(pass(&memory, &mut builder, LATER).failure.is_none());
+        assert!(pass(&reference, &mut original, LATER).failure.is_none());
+        assert!(pass(&quiet, &mut without_arrivals, LATER).failure.is_none());
+        let quiet_coverage = quiet.omitted.borrow().clone().unwrap();
+        // Four initial events at two per pass publish in two passes when
+        // none arrive. The arriving side must remain unpublished longer.
+        assert_eq!(quiet_coverage.from == EventId::new(0), round >= 1);
+        assert_eq!(quiet_coverage.through, EventId::new(100));
+        assert!(!builder.omission_stopped());
+        let public = reference.omitted.borrow().clone().unwrap();
+        let held = memory.omitted.borrow().clone().unwrap();
+        assert_eq!(held.through, log.last());
+        assert_eq!(r_of(&memory).events, log.last());
+        assert_eq!(values(&memory, &input), values(&reference, &input));
+        if round == 0 {
+            assert_eq!(held.through, EventId::new(101));
+            assert_eq!(
+                held.rebuilding.as_ref().unwrap().positions[THREE[0]],
+                EventId::new(98)
+            );
+        }
+        if round < 5 {
+            assert_eq!(
+                held.from,
+                EventId::new(100),
+                "heavy arrivals alone delay publication"
+            );
+        }
+        if held.from == EventId::new(0) {
+            let (summaries, points) = counted(
+                &log.events,
+                &three().kinds,
+                (EventId::new(0), log.last()),
+                three().every,
+            );
+            assert_eq!(held.summaries, summaries);
+            assert_eq!(
+                memory.points.borrow().values().cloned().collect::<Vec<_>>(),
+                points
+            );
+            published = true;
+            break;
+        }
+        let mut held = held;
+        let private = held.rebuilding.take().unwrap();
+        assert!(private.positions.values().all(|p| *p <= held.through));
+        assert_eq!(held, public);
+    }
+    assert!(published);
+}
+
+/// Prefix and suffix folds cannot be merged: their apparent identical
+/// suffix summaries hide distinct backwards jumps across C.
+#[test]
+fn rebuilding_replays_the_suffix_instead_of_merging_it() {
+    use crate::domain::ledger::session::written::omitted::{Coverage, Covering};
+    for (middle, expected) in [(1, 199), (30, 170)] {
+        let mut log = Log::default();
+        for secs in [200, 50, middle, 100, 40] {
+            log.add(None, None, THREE[0], json!({}), secs);
+        }
+        let omission = three();
+        let mut public = Coverage::start(&omission.kinds, EventId::new(1));
+        public.read(&log.events[1..], omission.every, log.last(), &mut vec![]);
+        assert_eq!(public.summaries[THREE[0]].back_ms, 60_000);
+        let mut covering = Covering::default();
+        covering.begin(&omission, (Some(&public), None), log.last());
+        for round in 0..3 {
+            covering
+                .rebuild(omission.every, 2, |kind, after, upto, limit| {
+                    let events: Vec<_> = log
+                        .events
+                        .iter()
+                        .filter(|e| e.kind.as_str() == kind && e.id > after && e.id <= upto)
+                        .take(limit)
+                        .cloned()
+                        .collect();
+                    let complete = log
+                        .events
+                        .iter()
+                        .filter(|e| e.kind.as_str() == kind && e.id <= upto)
+                        .map(|e| e.id)
+                        .max()
+                        <= events.last().map(|e| e.id);
+                    Ok::<_, std::convert::Infallible>((events, complete))
+                })
+                .unwrap();
+            assert_eq!(covering.held().unwrap().from == EventId::new(0), round == 2);
+        }
+        let next = covering.to_write().unwrap();
+        assert_eq!(next.coverage.from, EventId::new(0));
+        assert_eq!(next.coverage.summaries[THREE[0]].back_ms, expected * 1000);
+        assert_eq!(
+            next.coverage.summaries,
+            counted(
+                &log.events,
+                &omission.kinds,
+                (EventId::new(0), log.last()),
+                omission.every
+            )
+            .0
+        );
+    }
+}
+
+/// In-progress folds survive restarts, no R and W rollback. A stop freezes
+/// both the public and private folds, including a builder already stopped.
+#[test]
+fn rebuilding_survives_marks_changes_and_freezes_on_a_stop() {
+    use crate::domain::ledger::session::written::omitted::{Coverage, Omitted};
+    let mut log = Log::default();
+    for secs in 1..=100 {
+        log.add(None, None, THREE[0], json!({}), secs);
+    }
+    let memory = Memory::default();
+    memory.events.replace(log.events.clone());
+    let mut old = Builder::default();
+    old.set_omission(none());
+    drain(&memory, &mut old, LATER);
+    memory.write_omitted(&Omitted {
+        coverage: Coverage::start(&three().kinds, EventId::new(100)),
+        points: vec![],
+    });
+    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+    builder.set_omission(three());
+    builder.set_rebuild_limit(2);
+    pass(&memory, &mut builder, LATER);
+    let first = memory.omitted.borrow().clone().unwrap();
+    assert!(first.rebuilding.is_some());
+    for mode in 0..3 {
+        match mode {
+            0 => {
+                memory.mark.replace(Some(
+                    crate::domain::ledger::session::written::SessionsWritten::at(EventId::new(0)),
+                ));
+            }
+            1 => {
+                memory.mark.borrow_mut().as_mut().unwrap().ledger_v -= 1;
+                memory.rows_mark.borrow_mut().as_mut().unwrap().ledger_v -= 1;
+            }
+            _ => {
+                memory.mark.replace(None);
+                memory.rows_mark.replace(None);
+            }
+        }
+        let before = memory.omitted.borrow().clone().unwrap();
+        builder = start_builder(&memory, ms(LATER)).unwrap();
+        builder.set_omission(three());
+        builder.set_rebuild_limit(2);
+        assert!(pass(&memory, &mut builder, LATER).failure.is_none());
+        let next = memory.omitted.borrow().clone().unwrap();
+        assert_eq!(
+            (next.from, next.through, &next.summaries),
+            (before.from, before.through, &before.summaries)
+        );
+        assert!(
+            next.rebuilding.as_ref().unwrap().positions[THREE[0]]
+                >= before.rebuilding.as_ref().unwrap().positions[THREE[0]]
+        );
+        let (previous, rebuilt) = (
+            before.rebuilding.as_ref().unwrap(),
+            next.rebuilding.as_ref().unwrap(),
+        );
+        assert!(rebuilt.points.starts_with(&previous.points));
+        for (kind, position) in &rebuilt.positions {
+            let (expected, _) = counted(
+                &log.events,
+                std::slice::from_ref(kind),
+                (EventId::new(0), *position),
+                three().every,
+            );
+            assert_eq!(rebuilt.summaries[kind], expected[kind]);
+            assert!(rebuilt.summaries[kind].seen >= previous.summaries[kind].seen);
+        }
+    }
+    // Stop on a queue R beyond S, even with a rebuild held.
+    let mut marks = memory.ledger_marks().unwrap().unwrap();
+    marks.omitted = None;
+    marks.rows = Some(crate::domain::ledger::session::written::RowsWritten::at(
+        crate::domain::ledger::session::written::Cursors {
+            events: EventId::new(101),
+            ..Default::default()
+        },
+        0,
+    ));
+    memory.write_ledger_marks(&marks).unwrap();
+    let stopped = memory.omitted.borrow().clone().unwrap();
+    builder = start_builder(&memory, ms(LATER)).unwrap();
+    builder.set_omission(three());
+    builder.set_rebuild_limit(2);
+    let reference = Memory::default();
+    reference.events.replace(memory.events.borrow().clone());
+    reference.rows.replace(memory.rows.borrow().clone());
+    reference.mark.replace(*memory.mark.borrow());
+    reference.rows_mark.replace(*memory.rows_mark.borrow());
+    let mut original_public = stopped.clone();
+    original_public.rebuilding = None;
+    reference.omitted.replace(Some(original_public.clone()));
+    reference.points.replace(memory.points.borrow().clone());
+    let mut original = start_builder(&reference, ms(LATER)).unwrap();
+    original.set_omission(three());
+    original.set_rebuild_limit(0);
+    for _ in 0..2 {
+        pass(&memory, &mut builder, LATER);
+        pass(&reference, &mut original, LATER);
+        assert_eq!(reference.omitted.borrow().as_ref(), Some(&original_public));
+        assert!(builder.omission_stopped());
+        assert_eq!(memory.omitted.borrow().as_ref(), Some(&stopped));
+    }
+    // A different stored set also stops and retains the private fold.
+    let mut different = stopped.clone();
+    different.kinds.push("other".into());
+    memory.omitted.replace(Some(different.clone()));
+    builder = Builder::default();
+    builder.set_omission(three());
+    builder.set_rebuild_limit(2);
+    pass(&memory, &mut builder, LATER);
+    assert!(builder.omission_stopped());
+    assert_eq!(memory.omitted.borrow().as_ref(), Some(&different));
+}
+
+/// The builder's read cursor can be beyond public S; neither a window
+/// nor rebuilding substitutes that cursor or an incomplete prefix for S.
+#[test]
+fn a_private_prefix_at_s_100_with_the_read_at_200_is_no_window_input() {
+    use crate::domain::ledger::session::written::omitted::{Coverage, Covering, Omitted};
+    let input = inputs().into_iter().find(|i| i.name == "reached").unwrap();
+    let memory = built(&input);
+    let before = values(&memory, &input);
+    let mut coverage = Coverage::start(&three().kinds, EventId::new(50));
+    coverage.read(
+        &input
+            .log
+            .events
+            .iter()
+            .filter(|e| e.id > EventId::new(50) && e.id <= EventId::new(100))
+            .cloned()
+            .collect::<Vec<_>>(),
+        three().every,
+        EventId::new(100),
+        &mut vec![],
+    );
+    let mut covering = Covering::default();
+    covering.begin(&three(), (Some(&coverage), None), EventId::new(200));
+    covering
+        .rebuild(three().every, 1, |kind, after, upto, limit| {
+            assert_eq!(upto, EventId::new(100));
+            let events = memory.ledger_events_of_kind(kind, after, upto, limit)?;
+            let complete = events.len() < limit
+                || !memory.ledger_kind_has_after(
+                    kind,
+                    events.last().expect("full page").id,
+                    upto,
+                )?;
+            Ok::<_, anyhow::Error>((events, complete))
+        })
+        .unwrap();
+    let next = covering.to_write().unwrap();
+    assert!(next.coverage.rebuilding.is_some());
+    memory.write_omitted(&Omitted {
+        coverage: next.coverage,
+        points: vec![],
+    });
+    assert_eq!(values(&memory, &input), before);
 }

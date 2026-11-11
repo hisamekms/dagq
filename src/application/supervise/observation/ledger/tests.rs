@@ -145,6 +145,10 @@ struct Memory {
     /// Fails each read of the events after a cursor at or past it, as a
     /// store that cannot be read.
     reads_fail_from: Cell<Option<EventId>>,
+    /// Fail one private rebuild read stage for a chosen kind, leaving the
+    /// ordinary event scan and the window reader available.
+    rebuild_read_failure: Cell<Option<(&'static str, &'static str)>>,
+    failed_rebuild_reads: Cell<usize>,
     /// The clock of a pass on it ([`pass`]), moved by its writes of the run,
     /// task, queue and node rows.
     clock: Costed,
@@ -226,7 +230,17 @@ impl Memory {
         if !omitted.coverage.supersedes(self.omitted.borrow().as_ref()) {
             return;
         }
-        self.omitted.replace(Some(omitted.coverage.clone()));
+        let publishing = self
+            .omitted
+            .borrow()
+            .as_ref()
+            .is_some_and(|held| held.from != omitted.coverage.from);
+        let mut coverage = omitted.coverage.clone();
+        coverage.replacing = None;
+        self.omitted.replace(Some(coverage));
+        if publishing {
+            self.points.borrow_mut().clear();
+        }
         let mut points = self.points.borrow_mut();
         for point in &omitted.points {
             points
@@ -377,7 +391,18 @@ impl EventStore for Memory {
         upto: EventId,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
-        unreachable!()
+        if let Some(("events_of_between", kind)) = self.rebuild_read_failure.get()
+            && kinds.contains(&kind)
+        {
+            self.failed_rebuild_reads
+                .set(self.failed_rebuild_reads.get() + 1);
+            anyhow::bail!("private rebuild events_of_between failed");
+        }
+        let mut events = self.read(|event| {
+            kinds.contains(&event.kind.as_str()) && event.id > after && event.id <= upto
+        });
+        events.truncate(limit);
+        Ok(events)
     }
     fn events_between(
         &self,
@@ -720,6 +745,14 @@ impl LedgerStore for Memory {
     }
     fn ledger_event(&self, id: EventId) -> Result<Option<RunEvent>> {
         Ok(self.read(|event| event.id == id).into_iter().next())
+    }
+    fn ledger_kind_has_after(&self, kind: &str, after: EventId, upto: EventId) -> Result<bool> {
+        if self.rebuild_read_failure.get() == Some(("ledger_kind_has_after", kind)) {
+            self.failed_rebuild_reads
+                .set(self.failed_rebuild_reads.get() + 1);
+            anyhow::bail!("private rebuild ledger_kind_has_after failed");
+        }
+        Ok(!self.ledger_events_of_kind(kind, after, upto, 1)?.is_empty())
     }
     fn ledger_events_of_kind(
         &self,

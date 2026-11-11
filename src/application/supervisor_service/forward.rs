@@ -3167,9 +3167,8 @@ impl LedgerStore for SupervisorQueue {
     }
     // What a window's edges read of the omitted queue events, each asked
     // of the service: the coverage with the pages ([`CoveredPages`]), then
-    // its points and events in (C, S], which no write changes (a point is
-    // never removed, an event never rewritten), so the reads stand for the
-    // snapshot the coverage was read of.
+    // its points and events in (C, S]. Publication replaces points once;
+    // ledger_read_snapshot repeats a read that crossed that change of C.
     fn ledger_omitted_coverage(
         &self,
     ) -> Result<Option<crate::domain::ledger::session::written::omitted::Coverage>> {
@@ -3340,11 +3339,26 @@ impl LedgerStore for SupervisorQueue {
         &self,
         read: &mut dyn FnMut(&dyn LedgerWindowRead) -> Result<()>,
     ) -> Result<()> {
-        read(&CoveredPages {
-            queue: self,
-            newest: std::cell::RefCell::new(None),
-            read_alone: std::cell::Cell::new(false),
-        })
+        let snapshot = CoveredPages::new(self);
+        let result = read(&snapshot);
+        // An ordinary S advance only appends immutable points. A rebuild
+        // changes their origin: validate the legacy C after every edge read,
+        // including one that failed against points replaced meanwhile.
+        if !snapshot.replaced.get()
+            && snapshot
+                .newest
+                .borrow()
+                .as_ref()
+                .is_some_and(|c| c.from.as_i64() > 0)
+        {
+            snapshot.take(self.ledger_omitted_coverage()?);
+        }
+        if snapshot.replaced.get() {
+            // C can fall only once, to zero. Every request of this second
+            // read is after publication; its points can only be appended.
+            return read(&CoveredPages::new(self));
+        }
+        result
     }
 
     // One page asked for: past the answer's limit asked again at a
@@ -3754,24 +3768,32 @@ pub struct CoveredRows {
     pub coverage: Option<crate::domain::ledger::session::written::omitted::Coverage>,
 }
 
-/// What a window reads through the service ([`LedgerStore::ledger_window`]):
-/// each page a request of its own, of the state of the store the service
-/// reads it at, and its coverage of the same snapshot. Its coverage is the
-/// newest of those that came with the pages read; a coverage only grows and
-/// its (C, S] is never written again, so no page read is of a later state
-/// than the coverage the edges read to, and the points and events of
-/// (C, S] the edges read after it are those of its snapshot. A row read by
-/// its key or in parts and the events of a run on its way come with no
-/// coverage: the coverage is asked again after them. The pages are of more than one state, as they were before a
-/// coverage (one snapshot over the pages is the service's to hold).
+/// Each page comes with its coverage, and edges use the newest one.
+/// Points are immutable while C stays fixed; publication replaces them
+/// once, so a read that observed a nonzero C validates it after its edges.
+/// A change of C during any part of the read repeats the entire callback
+/// after publication, even if S stayed fixed or the first attempt failed.
+/// Rows by key/in parts and run events ask for coverage after their reads.
+/// Pages still span states as before; the publication guard keeps all
+/// edge reads within one generation of the public summary and points.
 struct CoveredPages<'a> {
     queue: &'a SupervisorQueue,
     newest: std::cell::RefCell<Option<crate::domain::ledger::session::written::omitted::Coverage>>,
     /// A row was read with no coverage since the last.
     read_alone: std::cell::Cell<bool>,
+    replaced: std::cell::Cell<bool>,
 }
 
-impl CoveredPages<'_> {
+impl<'a> CoveredPages<'a> {
+    fn new(queue: &'a SupervisorQueue) -> Self {
+        Self {
+            queue,
+            newest: std::cell::RefCell::new(None),
+            read_alone: std::cell::Cell::new(false),
+            replaced: std::cell::Cell::new(false),
+        }
+    }
+
     /// Take `coverage`, read with or after the rows read so far, when it is
     /// newer than the one held.
     fn take(&self, coverage: Option<crate::domain::ledger::session::written::omitted::Coverage>) {
@@ -3779,7 +3801,12 @@ impl CoveredPages<'_> {
         let newer = match (&*newest, &coverage) {
             (_, None) => false,
             (None, Some(_)) => true,
-            (Some(held), Some(read)) => read.through > held.through,
+            (Some(held), Some(read)) => {
+                if held.from != read.from {
+                    self.replaced.set(true);
+                }
+                read.through > held.through || read.from < held.from
+            }
         };
         if newer {
             *newest = coverage;

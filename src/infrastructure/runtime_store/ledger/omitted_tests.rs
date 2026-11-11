@@ -236,6 +236,10 @@ fn the_points_are_sought_by_their_key_and_the_index_of_m() {
             "SEARCH ledger_omitted_points USING INDEX sqlite_autoindex_ledger_omitted_points_1 (kind=? AND at<?)",
         ),
         (
+            KIND_HAS_AFTER_SQL,
+            "SEARCH run_events USING COVERING INDEX events_by_kind (kind=? AND id>? AND id<?)",
+        ),
+        (
             EVENT_BY_ID_SQL,
             "SEARCH run_events USING INTEGER PRIMARY KEY (rowid=?)",
         ),
@@ -505,4 +509,143 @@ fn a_pass_written_while_the_snapshot_is_open_is_not_seen_in_it() {
         .unwrap();
     assert_eq!(held(&queue), Some(further));
     assert_eq!(w(&queue), next.id);
+}
+
+/// Private checkpoints and a publication share W/R's transaction. Stale
+/// checkpoints cannot erase progress, and a failed row CAS publishes none
+/// of the replacement points or summary, even when S itself stays put.
+#[test]
+fn a_rebuild_checkpoint_and_publication_are_atomic_with_the_marks() {
+    use crate::domain::ledger::session::written::omitted::{Covering, Omission};
+    use crate::domain::ledger::testkit::Log;
+    on_each(|queue| {
+        let omission = Omission::of([KIND], 2);
+        let mut log = Log::default();
+        for secs in [200, 50, 1, 100, 40] {
+            log.add(None, None, KIND, serde_json::json!({}), secs);
+        }
+        insert_events(queue, &log.events);
+        assert!(
+            queue
+                .ledger_kind_has_after(KIND, EventId::new(3), EventId::new(4))
+                .unwrap()
+        );
+        assert!(
+            !queue
+                .ledger_kind_has_after(KIND, EventId::new(4), EventId::new(4))
+                .unwrap()
+        );
+        assert!(
+            !queue
+                .ledger_kind_has_after("telemetry_token_revoked", EventId::new(0), log.last())
+                .unwrap()
+        );
+        assert_eq!(
+            queue
+                .events_of_between(&[KIND], EventId::new(1), EventId::new(4), 2)
+                .unwrap(),
+            log.events[1..3]
+        );
+        let mut public = Coverage::start(&omission.kinds, EventId::new(1));
+        let mut points = Vec::new();
+        public.read(&log.events[1..], omission.every, log.last(), &mut points);
+        queue
+            .write_ledger_marks(&marks(
+                5,
+                Some(Omitted {
+                    coverage: public.clone(),
+                    points,
+                }),
+            ))
+            .unwrap();
+        let mut covering = Covering::default();
+        covering.begin(
+            &omission,
+            (Some(&public), Some(EventId::new(5))),
+            EventId::new(5),
+        );
+        let advance = |covering: &mut Covering| {
+            covering
+                .rebuild(omission.every, 2, |kind, after, upto, limit| {
+                    let events: Vec<_> = log
+                        .events
+                        .iter()
+                        .filter(|e| e.kind.as_str() == kind && e.id > after && e.id <= upto)
+                        .take(limit)
+                        .cloned()
+                        .collect();
+                    let complete = log
+                        .events
+                        .iter()
+                        .filter(|e| e.kind.as_str() == kind && e.id <= upto)
+                        .map(|e| e.id)
+                        .max()
+                        <= events.last().map(|e| e.id);
+                    Ok::<_, std::convert::Infallible>((events, complete))
+                })
+                .unwrap();
+        };
+        advance(&mut covering);
+        let first = covering.to_write().unwrap();
+        assert!(
+            queue
+                .write_ledger_marks(&marks(5, Some(first.clone())))
+                .unwrap()
+        );
+        covering.wrote(EventId::new(5));
+        assert_eq!(held(queue), Some(first.coverage.clone()));
+        let original_points = all_points(queue);
+        // No coverage in an old-version/W-only/no-R write preserves it.
+        let mut rollback = marks(0, None);
+        rollback.sessions.ledger_v -= 1;
+        rollback.rows = None;
+        queue.write_ledger_marks(&rollback).unwrap();
+        assert_eq!(held(queue), Some(first.coverage.clone()));
+        advance(&mut covering);
+        let second = covering.to_write().unwrap();
+        assert!(
+            queue
+                .write_ledger_marks(&marks(5, Some(second.clone())))
+                .unwrap()
+        );
+        covering.wrote(EventId::new(5));
+        assert!(!queue.write_ledger_marks(&marks(77, Some(first))).unwrap());
+        assert_eq!(w(queue), EventId::new(5));
+        advance(&mut covering);
+        // The service serializes the candidate before its atomic write.
+        let publication: Omitted =
+            serde_json::from_value(serde_json::to_value(covering.to_write().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(publication.coverage.from, EventId::new(0));
+        let (sessions, _) = crate::domain::ledger::testkit::sessions_across();
+        let mut row =
+            crate::domain::ledger::session::session_rows(&sessions.events, BUILT_AT).remove(0);
+        // An incorrect expected row forces the whole transaction to fail.
+        row.built_at = "expected but absent".into();
+        assert!(
+            !queue
+                .write_session_rows_marked(
+                    &[(row.clone(), Some(row))],
+                    Some(&marks(9, Some(publication.clone())))
+                )
+                .unwrap()
+        );
+        assert_eq!(held(queue), Some(second.coverage));
+        assert_eq!(all_points(queue), original_points);
+        assert_eq!(w(queue), EventId::new(5));
+        assert!(
+            queue
+                .write_ledger_marks(&marks(5, Some(publication)))
+                .unwrap()
+        );
+        let final_coverage = held(queue).unwrap();
+        assert_eq!(final_coverage.from, EventId::new(0));
+        assert!(final_coverage.rebuilding.is_none());
+        assert!(final_coverage.replacing.is_none());
+        assert_eq!(final_coverage.summaries[KIND].back_ms, 199_000);
+        assert_eq!(
+            all_points(queue).iter().map(|p| p.at).collect::<Vec<_>>(),
+            vec![EventId::new(2), EventId::new(4)]
+        );
+    });
 }

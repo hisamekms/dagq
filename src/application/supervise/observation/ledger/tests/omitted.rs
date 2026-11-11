@@ -40,6 +40,8 @@ fn omission() -> Omission {
 
 fn omitting(mut builder: Builder) -> Builder {
     builder.set_omission(omission());
+    // Keep the original coverage/race fixtures before publication.
+    builder.set_rebuild_limit(0);
     builder
 }
 

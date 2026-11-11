@@ -271,6 +271,14 @@ pub trait LedgerStore {
         let _ = id;
         anyhow::bail!("this store gives no event by its id to a window's edges")
     }
+    /// Whether a kind has any event in (after, upto]. A bounded tail
+    /// probe certifies a full rebuild page without another pass. The
+    /// default uses the existing kind-read port (one event at most), so
+    /// service clients need no new operation; SQL stores seek only its id.
+    fn ledger_kind_has_after(&self, kind: &str, after: EventId, upto: EventId) -> Result<bool> {
+        Ok(!self.ledger_events_of_kind(kind, after, upto, 1)?.is_empty())
+    }
+
     /// The events of `kind` with `after < id <= upto`, oldest first, at
     /// most `limit`, by the index of kind and id: what a window's edges
     /// read of the omitted queue events near an edge. A store that does
@@ -757,6 +765,8 @@ pub trait LedgerStore {
     /// has nothing to hold together.
     /// The callback reads through the supplied port, which shares the open
     /// snapshot; calling the store's ordinary entries would begin nested reads.
+    /// A service client may repeat it once if publication replaces the public
+    /// points during the read. The callback must replace its result on retry.
     fn ledger_read_snapshot(
         &self,
         read: &mut dyn FnMut(&dyn LedgerWindowRead) -> Result<()>,
@@ -1015,7 +1025,8 @@ pub trait LedgerWindowRead {
     /// taken with: a read whose rows are of more than one state of the
     /// store (pages asked of the service one by one) gives the newest that
     /// came with them, so that no row read is of a later state than the
-    /// coverage (it only grows, and (C, S] is never written again).
+    /// coverage (S only grows; C falls only when a complete rebuild replaces
+    /// the summary and points atomically).
     fn omitted_coverage(&self) -> Result<Option<Coverage>> {
         Ok(None)
     }

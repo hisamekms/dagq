@@ -8,14 +8,15 @@
 //!
 //! - **C** (`from`): where the first pass that held no coverage started to
 //!   read (0 for a builder from its cursors' start, R for one gone on from
-//!   R), written once and never moved: the omitted events up to it stay the
-//!   queue rows' records they were.
+//!   R), lowered to zero only when a complete rebuild is published.
 //! - **S** (`through`): the position the builder read up to, and with it the
 //!   summary of each kind over (C, S] ([`KindSummary`]) and its points
 //!   ([`Point`]). S and the summaries are written together, in the
 //!   transaction of the marks W and R ([`super::Marks::omitted`]), so that
 //!   they always cover the same range: the store writes them only over a
-//!   coverage of the same C and kinds and a lower S
+//!   coverage of the same C and kinds and a lower S, or a private
+//!   rebuild further along. A complete rebuild alone lowers C to zero and
+//!   replaces all public points (ADR-t4665-1 decision 1)
 //!   ([`Coverage::supersedes`]), refuses the whole write (its rows, W and
 //!   R too) over one it conflicts with ([`Coverage::conflicts`]: another
 //!   builder's of another C, or further), and never removes them, whatever the
@@ -130,6 +131,14 @@ pub struct Point {
 /// set, those of no event in it too).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Coverage {
+    /// Unpublished fold from the first event. Window readers ignore it.
+    /// Kept in the coverage row's detail, apart from the public points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuilding: Option<Rebuilding>,
+    /// A publication's expected C, carried across the service boundary.
+    /// The store clears it before persisting the coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacing: Option<EventId>,
     pub kinds: Vec<String>,
     pub from: EventId,
     pub through: EventId,
@@ -140,6 +149,8 @@ impl Coverage {
     /// The coverage of nothing yet from `from` (C = S).
     pub fn start(kinds: &[String], from: EventId) -> Self {
         Self {
+            rebuilding: None,
+            replacing: None,
             kinds: kinds.to_vec(),
             from,
             through: from,
@@ -155,6 +166,8 @@ impl Coverage {
     /// stops every builder ([`stops`]) and no coverage supersedes it.
     pub fn unreadable() -> Self {
         Self {
+            rebuilding: None,
+            replacing: None,
             kinds: vec![String::new()],
             from: EventId::new(0),
             through: EventId::new(i64::MAX),
@@ -195,23 +208,45 @@ impl Coverage {
         self.through = self.through.max(to).max(last);
     }
 
-    /// Whether a store holding `stored` refuses a write carrying `self`
-    /// (its rows and marks too): one of another C or kinds, or a further S.
-    /// The same coverage again is no conflict, and writes nothing.
+    /// Refuse another C (except an explicit publication over that C),
+    /// another set, a lower S, or a missing/backwards private checkpoint.
+    /// A stale writer therefore cannot undo either public or private work.
     pub fn conflicts(&self, stored: Option<&Self>) -> bool {
         stored.is_some_and(|stored| {
-            stored.from != self.from || stored.kinds != self.kinds || stored.through > self.through
+            let publication = self.from == EventId::new(0) && self.replacing == Some(stored.from);
+            (!publication && stored.from != self.from)
+                || stored.kinds != self.kinds
+                || stored.through > self.through
+                || (!publication
+                    && stored.rebuilding.as_ref().is_some_and(|held| {
+                        self.rebuilding.as_ref().is_none_or(|next| {
+                            held.positions
+                                .iter()
+                                .any(|(kind, at)| next.positions.get(kind) < Some(at))
+                        })
+                    }))
         })
     }
 
-    /// Whether a store holding `stored` writes `self` in its place: none
-    /// held, or one of the same C and kinds whose S is lower. So S and the
-    /// summaries move together and never down.
+    /// Write a nonconflicting advance of S or the private checkpoint,
+    /// or a publication. Equal public S still permits private progress.
     pub fn supersedes(&self, stored: Option<&Self>) -> bool {
-        stored.is_none_or(|stored| {
-            stored.from == self.from && stored.kinds == self.kinds && stored.through < self.through
-        })
+        !self.conflicts(stored)
+            && stored.is_none_or(|stored| {
+                self.from != stored.from
+                    || stored.through < self.through
+                    || stored.rebuilding != self.rebuilding
+            })
     }
+}
+
+/// Private rebuild checkpoints: each kind's position and the same fold
+/// as the public coverage, with its own points. No reader uses these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rebuilding {
+    pub positions: BTreeMap<String, EventId>,
+    pub summaries: BTreeMap<String, KindSummary>,
+    pub points: Vec<Point>,
 }
 
 /// What a pass writes of the coverage with the marks: the coverage, and
@@ -283,7 +318,7 @@ impl Covering {
             (None, None) => State::Held(Coverage::start(&omission.kinds, at)),
             (None, Some(held)) => State::Held(held.clone()),
             (Some(stored), Some(held))
-                if held.from == stored.from && held.through >= stored.through =>
+                if !held.conflicts(Some(stored)) && held.through >= stored.through =>
             {
                 State::Held(held.clone())
             }
@@ -292,7 +327,9 @@ impl Covering {
                 State::Held(stored.clone())
             }
         };
-        if let Some(stored) = stored {
+        if let Some(stored) =
+            stored.filter(|stored| self.held().is_some_and(|held| held.from == stored.from))
+        {
             self.wrote(stored.through);
         }
     }
@@ -325,9 +362,86 @@ impl Covering {
         }
     }
 
+    /// Fold at most `limit` events of each kind (the runtime uses 256)
+    /// after its saved P, through the current pass's updated S only. The
+    /// indexed kind read excludes P, so no event is missed or folded twice;
+    /// the reader certifies the empty remainder through S. P never exceeds
+    /// S. With no arrivals it takes ceil(kind events / limit) passes (at least
+    /// one for an empty kind); a bounded tail probe certifies a full final
+    /// page: SQL seeks just an id; service clients read at most one extra
+    /// event, never folded. Thus a pass reads at most 257 events per kind
+    /// (771 for the three kinds). Each fold starts strictly after saved P,
+    /// so the probe cannot duplicate a fold.
+    /// With continuing arrivals it catches up when each kind's arrivals per
+    /// pass are fewer than the limit; otherwise only publication waits.
+    /// The public fold still advances normally. No prefix/suffix merge is
+    /// possible from its summaries. All kinds publish together, replacing
+    /// the public points, in the same transaction as S, W and R. A stopped
+    /// coverage does nothing; an error leaves the entire rebuild unchanged.
+    pub fn rebuild<E>(
+        &mut self,
+        every: u64,
+        limit: usize,
+        mut read: impl FnMut(&str, EventId, EventId, usize) -> Result<(Vec<RunEvent>, bool), E>,
+    ) -> Result<(), E> {
+        let State::Held(held) = &self.state else {
+            return Ok(());
+        };
+        if held.from == EventId::new(0) || limit == 0 {
+            return Ok(());
+        }
+        let mut next = held.clone();
+        let rebuilding = next.rebuilding.get_or_insert_with(|| Rebuilding {
+            positions: next
+                .kinds
+                .iter()
+                .map(|k| (k.clone(), EventId::new(0)))
+                .collect(),
+            summaries: next
+                .kinds
+                .iter()
+                .map(|k| (k.clone(), KindSummary::default()))
+                .collect(),
+            points: Vec::new(),
+        });
+        for kind in &next.kinds {
+            let at = rebuilding.positions[kind];
+            if at == next.through {
+                continue;
+            }
+            let (events, complete) = read(kind, at, next.through, limit)?;
+            let to = if complete {
+                next.through
+            } else {
+                events.last().expect("full page").id
+            };
+            let mut fold = Coverage::start(std::slice::from_ref(kind), EventId::new(0));
+            fold.through = at;
+            fold.summaries
+                .insert(kind.clone(), rebuilding.summaries[kind].clone());
+            fold.read(&events, every, to, &mut rebuilding.points);
+            rebuilding.positions.insert(kind.clone(), to);
+            rebuilding
+                .summaries
+                .insert(kind.clone(), fold.summaries.remove(kind).expect("kind"));
+        }
+        if rebuilding.positions.values().all(|at| *at == next.through) {
+            let rebuilding = next.rebuilding.take().expect("rebuild");
+            next.replacing = Some(next.from);
+            next.from = EventId::new(0);
+            next.summaries = rebuilding.summaries;
+            self.unwritten = rebuilding.points;
+        }
+        self.state = State::Held(next);
+        Ok(())
+    }
+
     /// Note that the store holds the coverage up to `through` and its points.
     pub fn wrote(&mut self, through: EventId) {
         self.unwritten.retain(|point| point.at > through);
+        if let State::Held(held) = &mut self.state {
+            held.replacing = None;
+        }
     }
 
     /// Whether it stopped: it moves and lowers nothing the store holds.

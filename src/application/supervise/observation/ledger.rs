@@ -621,7 +621,13 @@ fn pass(
 ) -> Result<()> {
     // Every builder, one that omits no kind too, so that a store of a
     // coverage of other kinds says it stops.
-    builder.begin_coverage(store.ledger_marks()?.as_ref());
+    let marks = store.ledger_marks()?;
+    let coverage = if marks.is_none() {
+        store.ledger_omitted_coverage()?
+    } else {
+        None
+    };
+    builder.begin_coverage_from(marks.as_ref(), coverage.as_ref());
     let bounds = (per_read, per_pass);
     if !regain_rows(store, builder, bounds, (timing, started), built)?
         || !catch_up_coverage(store, builder, bounds, (timing, started), built)?
@@ -741,9 +747,10 @@ fn pass(
         if builder.events >= latest {
             builder.finished_time();
         }
+        let rebuilding = rebuild_omitted(store, builder);
         built.sessions +=
             write_sessions_observed(store, builder, (now_ms, built_at), session_bytes, built)?;
-        return Ok(());
+        return rebuilding;
     }
     let rows = builder.rows_to_build(builder.kept());
     restore(store, builder, &rows)?;
@@ -781,6 +788,7 @@ fn pass(
     if built.row_conflict {
         return taken;
     }
+    let rebuilding = rebuild_omitted(store, builder);
     let sessions =
         write_sessions_observed(store, builder, (now_ms, built_at), session_bytes, built);
     if let Ok(written) = sessions {
@@ -788,7 +796,24 @@ fn pass(
     }
     // The other rows' failure first, as they were written first.
     taken?;
-    sessions.map(drop)
+    sessions?;
+    rebuilding
+}
+
+/// Once after the normal read and row writes: rebuilding cannot spend
+/// the normal writer's time budget or change which queue rows it writes.
+/// Its checkpoint is carried by the final W/R transaction, never a page
+/// checkpoint. A read error leaves the private fold unchanged; the normal
+/// W/R/S write is still attempted, and its errors take priority. The kind
+/// reads use EventStore's kind/id index; a full final page needs only a
+/// bounded tail probe to certify the empty tail.
+fn rebuild_omitted(store: &dyn LedgerQueue, builder: &mut Builder) -> Result<()> {
+    builder.rebuild_omitted(|kind, after, upto, limit| {
+        let events = store.events_of_between(&[kind], after, upto, limit)?;
+        let complete = events.len() < limit
+            || !store.ledger_kind_has_after(kind, events.last().expect("full page").id, upto)?;
+        Ok::<_, anyhow::Error>((events, complete))
+    })
 }
 
 /// Mark those of `rows` that read an input after `after`

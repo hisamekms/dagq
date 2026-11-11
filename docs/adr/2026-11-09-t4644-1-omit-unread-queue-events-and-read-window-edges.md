@@ -6,6 +6,8 @@ status: accepted
 created: 2026-11-09
 updated: 2026-11-09
 accepted_on: 2026-11-09
+amended_by:
+  - adr-t4665-1
 amends:
   - adr-t1662-1 decision 10
   - adr-t1662-1 decision 12
