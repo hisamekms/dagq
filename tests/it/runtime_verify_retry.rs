@@ -318,6 +318,6 @@ fn a_full_disk_without_room_is_held_without_a_retry() {
     assert_eq!(held[0]["first_failure"], Value::Null);
     assert_eq!(
         held[0]["disk"],
-        json!({"free_bytes": GIB / 2, "needed_bytes": 5 * GIB, "reserve_bytes": 5 * GIB, "expected_bytes": null})
+        json!({"free_bytes": GIB / 2, "needed_bytes": 5 * GIB, "reserve_bytes": 5 * GIB, "expected_bytes": null, "relaxed": null})
     );
 }
