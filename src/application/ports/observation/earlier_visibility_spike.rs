@@ -56,8 +56,9 @@ fn run(n: u8) -> String {
 /// before the range and in it, and `settled` units outside the range,
 /// each a task landed by a run with an ask answered, a follow-up's draft
 /// canceled, a proposal of its own, a planner's session opened and closed
-/// and a wait of the queue, all ended long before the range.
-fn history(settled: usize) -> Log {
+/// and a wait of the queue, all ended long before the range; in the order
+/// added.
+fn unnumbered(settled: usize) -> Log {
     let mut log = log_of_a_time();
     let near = (READ_AT_DAY - 1) * DAY;
     let before = 150 * DAY;
@@ -254,8 +255,23 @@ fn history(settled: usize) -> Log {
             t + 999,
         );
     }
+    log
+}
+
+/// [`unnumbered`] sorted by time and numbered.
+fn history(settled: usize) -> Log {
+    history_with(settled, |_| {}, |_| {})
+}
+
+/// [`history`] with the events `add` adds before it is numbered, and
+/// `fix` applied after (to the ids `numbered` puts in the payloads).
+fn history_with(settled: usize, add: impl FnOnce(&mut Log), fix: impl FnOnce(&mut Log)) -> Log {
+    let mut log = unnumbered(settled);
+    add(&mut log);
     log.events.sort_by_key(|event| event.created_at.clone());
-    numbered(log)
+    let mut log = numbered(log);
+    fix(&mut log);
+    log
 }
 
 fn rows_of(log: &Log) -> Vec<LedgerRow> {
@@ -309,6 +325,16 @@ struct Named {
     /// The tasks of a forecast's snapshot that names a task the range
     /// names: their plan's changes count on its samples (Spike 4670 (vii)).
     snapshot_tasks: BTreeSet<i64>,
+    /// The plan reviews named, as the text of the id (a session row's key
+    /// holds it so; a payload gives it as text or as a number).
+    review_keys: BTreeSet<String>,
+    /// Whether an actor `planner:<id>` names its planner (an ask a planner
+    /// opened names it so, [`crate::domain::stats::planner_routes`]).
+    actors: bool,
+    /// The tasks named only as members of a proposal the range names
+    /// (directly or through a goal), whose ends alone are read
+    /// ([`Shape::member_ends`]).
+    member_tasks: BTreeSet<i64>,
 }
 
 impl Named {
@@ -320,6 +346,44 @@ impl Named {
             self.reviews.extend(field("plan_review_id"));
             self.planners.extend(field("planner_id"));
             self.proposals.extend(field("proposal_id"));
+            self.note_ids(event);
+        }
+    }
+
+    /// Note the plan review's id of `event` as text and, when actors name,
+    /// the planner its actor names.
+    fn note_ids(&mut self, event: &RunEvent) {
+        let review = &event.payload["plan_review_id"];
+        self.review_keys.extend(
+            review
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| review.as_i64().map(|id| id.to_string())),
+        );
+        if self.actors {
+            self.planners.extend(
+                event
+                    .actor
+                    .as_ref()
+                    .and_then(|actor| actor.id.as_str().strip_prefix("planner:"))
+                    .and_then(|id| id.parse::<i64>().ok()),
+            );
+        }
+    }
+
+    /// Whether the session row of `key` (`{kind}/{id}/{what}/{round}`) is
+    /// one the prefix seek reads: of a planner or a plan review named.
+    fn prefix_names(&self, key: &str) -> bool {
+        let mut parts = key.splitn(3, '/');
+        let (Some(kind), Some(id)) = (parts.next(), parts.next()) else {
+            return false;
+        };
+        match kind {
+            "runtime_planner" => id
+                .parse::<i64>()
+                .is_ok_and(|id| self.planners.contains(&id)),
+            "plan_review" => self.review_keys.contains(id),
+            _ => false,
         }
     }
 
@@ -345,7 +409,7 @@ impl Named {
     /// Note as named the tasks a proposal the range names holds, of the
     /// rows left out `out`: a proposal's end is read of all its tasks'
     /// statuses (`improvement_proposals`).
-    fn note_members(&mut self, out: &[LedgerRow]) {
+    fn note_members(&mut self, out: &[LedgerRow], ends: bool) {
         for event in out.iter().flat_map(|row| &row.records) {
             if matches!(
                 event.kind.known(),
@@ -356,8 +420,54 @@ impl Named {
                 .and_then(Value::as_i64)
                 .is_some_and(|id| self.proposals.contains(&id))
             {
-                self.tasks.extend(event.task_id.map(|task| task.as_i64()));
+                self.add_member(event.task_id.map(|task| task.as_i64()), ends);
             }
+        }
+    }
+
+    fn add_member(&mut self, task: Option<i64>, ends: bool) {
+        let Some(task) = task else { return };
+        if !ends {
+            self.tasks.insert(task);
+        } else if !self.tasks.contains(&task) {
+            self.member_tasks.insert(task);
+        }
+    }
+
+    /// Note as members the tasks of the goals a proposal named holds
+    /// (`goal_submitted` naming it, then the goal's tasks by their
+    /// `task_created` and `task_goal_changed`), the proposals named being
+    /// those the range names and those the read findings link (`queue`).
+    fn note_goal_members(&mut self, queue: &[LedgerRow], out: &[LedgerRow], ends: bool) {
+        let records = || queue.iter().flat_map(|row| &row.records);
+        let mut proposals = self.proposals.clone();
+        proposals.extend(
+            records()
+                .filter(|e| e.kind == EventKind::FindingStatusChanged)
+                .filter(|e| e.payload["to"] == "proposed")
+                .filter_map(|e| e.payload["proposal_id"].as_i64()),
+        );
+        let goals: BTreeSet<i64> = records()
+            .filter_map(crate::domain::GoalSubmitted::of_event)
+            .filter(|(_, submitted)| proposals.contains(&submitted.proposal_id.as_i64()))
+            .map(|(goal, _)| goal.as_i64())
+            .collect();
+        let tasks: Vec<i64> = out
+            .iter()
+            .filter(|row| row.kind == LedgerKind::Task)
+            .flat_map(|row| &row.records)
+            .filter(|e| {
+                let goal = match e.kind.known() {
+                    Some(EventKind::TaskCreated) => e.payload["goal_id"].as_i64(),
+                    Some(EventKind::TaskGoalChanged) => e.payload["to"].as_i64(),
+                    _ => None,
+                };
+                goal.is_some_and(|goal| goals.contains(&goal))
+            })
+            .filter_map(|e| e.task_id.map(|task| task.as_i64()))
+            .collect();
+        for task in tasks {
+            self.add_member(Some(task), ends);
         }
     }
 
@@ -389,7 +499,7 @@ impl Named {
 /// for the landing with no end. What a builder would write of the row
 /// (or into a table of its own) as it writes it, which a store reads by
 /// an index of the open rows alone.
-fn open_at_end(row: &LedgerRow) -> bool {
+fn open_at_end(row: &LedgerRow, paired: bool) -> bool {
     if row.kind != LedgerKind::Run {
         return false;
     }
@@ -419,8 +529,70 @@ fn open_at_end(row: &LedgerRow) -> bool {
             );
         }
     }
-    (claimed && !ended) || asks.values().any(|open| *open) || opened > closed || waiting
+    // Paired as `take_earlier` and `stats::sessions::spans` pair them: a
+    // close ends the open its `opened_event_id` names, so a close naming
+    // none or one already closed ends nothing.
+    let closes: BTreeSet<EventId> = records
+        .iter()
+        .filter(|e| e.kind == EventKind::SessionClosed)
+        .filter_map(|e| crate::domain::sessions::SpanRef::of(e).opened_event_id)
+        .collect();
+    let session_open = if paired {
+        records
+            .iter()
+            .any(|e| e.kind == EventKind::SessionOpened && !closes.contains(&e.id))
+    } else {
+        opened > closed
+    };
+    (claimed && !ended) || asks.values().any(|open| *open) || session_open || waiting
 }
+
+/// Whether `event` is among the ends the shape of [`Shape::member_ends`]
+/// reads of a member task's left-out row `records`: its creation, its last
+/// change of goal, its last change of status and the reopenings after it.
+fn member_end(event: &RunEvent, records: &[RunEvent]) -> bool {
+    let last = |kind: EventKind| records.iter().rev().find(|e| e.kind == kind).map(|e| e.id);
+    match event.kind.known() {
+        Some(EventKind::TaskCreated) => true,
+        Some(EventKind::TaskGoalChanged) => last(EventKind::TaskGoalChanged) == Some(event.id),
+        Some(EventKind::TaskStatusChanged) => last(EventKind::TaskStatusChanged) == Some(event.id),
+        Some(EventKind::TaskReopened) => {
+            last(EventKind::TaskStatusChanged).is_none_or(|status| event.id > status)
+        }
+        _ => false,
+    }
+}
+
+/// The shapes of the parts Spike 4755 tries ((i-a) to (i-d) of
+/// docs/plans/ledger-window-earlier-visibility-spike.md), each off as
+/// Spike 4678 read it.
+#[derive(Debug, Clone, Copy, Default)]
+struct Shape {
+    /// The second step of the proposals named (their tasks).
+    members: bool,
+    /// (i-a): a left-out session row is read by the prefix of its key
+    /// alone (`runtime_planner/<id>/`, `plan_review/<id>/`) instead of
+    /// whole when any record names what the range names.
+    session_prefix: bool,
+    /// (i-a): an actor `planner:<id>` of the range names its planner.
+    actor_planners: bool,
+    /// (i-b): a member task's ends alone ([`member_end`]), not its records.
+    member_ends: bool,
+    /// (i-c): a run's sessions paired by `opened_event_id`.
+    paired: bool,
+    /// (i-d): the tasks of a goal a proposal named holds.
+    goal_members: bool,
+}
+
+/// Every shape of Spike 4755 on.
+const SHAPED: Shape = Shape {
+    members: true,
+    session_prefix: true,
+    actor_planners: true,
+    member_ends: true,
+    paired: true,
+    goal_members: true,
+};
 
 /// The parts of the earlier records `event` (of a run row) is of.
 fn parts_of_run_record(event: &RunEvent) -> Vec<Part> {
@@ -475,6 +647,20 @@ fn narrowed_with(
     narrowed: &[Part],
     members: bool,
 ) -> (LedgerWindow, Reads) {
+    let shape = Shape {
+        members,
+        ..Shape::default()
+    };
+    narrowed_shaped(rows, query, narrowed, shape)
+}
+
+/// [`narrowed`] with the parts read in `shape`.
+fn narrowed_shaped(
+    rows: &[LedgerRow],
+    query: &WindowQuery,
+    narrowed: &[Part],
+    shape: Shape,
+) -> (LedgerWindow, Reads) {
     let mut reads = Reads::default();
     let mut read = WindowRows::new(query, 0);
     let (queue, others): (Vec<_>, Vec<_>) = rows
@@ -487,7 +673,20 @@ fn narrowed_with(
     }
     let from = read.rows_from().expect("a read from a time");
     let (out, kept): (Vec<_>, Vec<_>) = others.into_iter().partition(|row| from.leaves_out(row));
-    let mut named = Named::default();
+    let mut named = Named {
+        actors: shape.actor_planners,
+        ..Named::default()
+    };
+    if shape.actor_planners {
+        // The range's records of the queue rows name a planner by an ask's
+        // actor too (an ask of no task or run is the queue's).
+        for event in queue.iter().flat_map(|row| &row.records) {
+            let at = crate::domain::stats::timestamp_millis(&event.created_at);
+            if at.is_some_and(|at| at >= from.ended_before_ms) {
+                named.note_ids(event);
+            }
+        }
+    }
     let mut taken: BTreeSet<(LedgerKind, String)> = BTreeSet::new();
     for row in &kept {
         named.note(row);
@@ -521,8 +720,11 @@ fn narrowed_with(
         }
     }
     named.note_snapshots(&queue);
-    if members {
-        named.note_members(&out);
+    if shape.members {
+        named.note_members(&out, shape.member_ends);
+    }
+    if shape.goal_members {
+        named.note_goal_members(&queue, &out, shape.member_ends);
     }
     let last_start = out
         .iter()
@@ -544,7 +746,7 @@ fn narrowed_with(
                 earlier.executions.extend(firsts.iter().filter_map(|e| {
                     executions::FirstExecution::of(e.actor, e.provider.clone(), e.at)
                 }));
-                let open = open_at_end(row);
+                let open = open_at_end(row, shape.paired);
                 for event in &row.records {
                     let parts = parts_of_run_record(event);
                     let keep = parts.iter().any(|part| {
@@ -564,11 +766,22 @@ fn narrowed_with(
             LedgerKind::Task => earlier.records.extend(
                 row.records
                     .iter()
-                    .filter(|event| !narrows(Part::TaskRecords) || named.names(event))
+                    .filter(|event| {
+                        let member = row
+                            .task_id
+                            .is_some_and(|task| named.member_tasks.contains(&task.as_i64()));
+                        !narrows(Part::TaskRecords)
+                            || named.names(event)
+                            || (member && member_end(event, &row.records))
+                    })
                     .cloned(),
             ),
             _ => {
-                let of_named = row.records.iter().any(|event| named.names(event));
+                let of_named = if shape.session_prefix {
+                    named.prefix_names(&row.key)
+                } else {
+                    row.records.iter().any(|event| named.names(event))
+                };
                 if !narrows(Part::SessionRecords) || of_named {
                     earlier.records.extend(row.records.iter().cloned());
                 }
@@ -2054,4 +2267,487 @@ fn u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_wh
     );
     let (kept, _) = bounded(&rows, &events, low, Some(end), &window_query);
     assert_eq!(misses(&kept, &answer(&every)), Vec::<String>::new());
+}
+
+// Spike 4755: (i-a) to (i-d) of the earlier records.
+
+/// The kpi answers (the four questions) and `stats --since --full`'s of the
+/// narrowed read of every part in `shape` that differ from those of every
+/// row, and what the read of the day's question returned.
+fn shape_misses(rows: &[LedgerRow], shape: Shape) -> (Vec<String>, Reads) {
+    let whole = select(rows.to_vec(), &whole_query());
+    let mut misses = Vec::new();
+    let mut reads = Reads::default();
+    for (n, query) in kpi_questions().iter().enumerate() {
+        let expected = kpi_value(
+            &whole,
+            &KpiQuery {
+                read_whole_ledger: true,
+                ..query.clone()
+            },
+        );
+        let (window, read) = narrowed_shaped(rows, &time_query(query), &PARTS, shape);
+        if n == 0 {
+            reads = read;
+        }
+        differences(
+            &kpi_value(&window, query),
+            &expected,
+            &format!("kpi[{n}]"),
+            &mut misses,
+        );
+    }
+    let sources = StatsSources {
+        config_file: &|| Ok(None),
+        conflicts_file: &|| Ok(None),
+        areas: None,
+        utc_offset_secs: 0,
+        counts_checks: true,
+        rust_toolchain: false,
+    };
+    let since = Cursor::Time((NOW - 2 * DAY) * 1000);
+    let query = StatsQuery {
+        since: Some(since),
+        full: true,
+        ..StatsQuery::default()
+    };
+    let base = WindowQuery {
+        since: Some(since),
+        now_ms: now_ms(NOW),
+        ..WindowQuery::default()
+    };
+    let expected = serde_json::to_value(
+        stats_of_window(&select(rows.to_vec(), &base), NOW, &query, &sources).unwrap(),
+    )
+    .unwrap();
+    let from = WindowQuery {
+        read_from_ms: Some((NOW - 2 * DAY) * 1000),
+        ..base
+    };
+    let (window, _) = narrowed_shaped(rows, &from, &PARTS, shape);
+    let got =
+        serde_json::to_value(stats_of_window(&window, NOW, &query, &sources).unwrap()).unwrap();
+    differences(&got, &expected, "stats", &mut misses);
+    (misses, reads)
+}
+
+/// What a read returned of the run, task and session rows, the earlier
+/// records and the first Executions: the queue rows are (ii)'s, read whole
+/// here.
+fn earlier_reads(reads: Reads) -> (usize, usize, usize) {
+    (reads.rows, reads.earlier, reads.executions)
+}
+
+/// What the reads of every row return of `rows`, in the units of
+/// [`Reads`], for the day's question: the read from a time of today (no
+/// part narrowed, [`earlier_today`]) and the read of every row (each row
+/// whole, so no earlier record), and the records its run, task and
+/// session rows hold.
+fn full_reads(rows: &[LedgerRow]) -> (Reads, Reads, usize) {
+    let (_, today) = narrowed_shaped(
+        rows,
+        &time_query(&kpi_questions()[0]),
+        &[],
+        Shape::default(),
+    );
+    let (queue, others): (Vec<&LedgerRow>, Vec<&LedgerRow>) =
+        rows.iter().partition(|row| row.kind == LedgerKind::Queue);
+    let every = Reads {
+        rows: others.len(),
+        earlier: 0,
+        executions: 0,
+        queue: queue.len(),
+    };
+    let records = others.iter().map(|row| row.records.len()).sum();
+    (today, every, records)
+}
+
+/// Print the reads of every row of `rows` beside `shaped`'s, and keep
+/// them in `fulls`.
+fn note_full(
+    label: &str,
+    rows: &[LedgerRow],
+    shaped: Reads,
+    fulls: &mut Vec<(Reads, Reads, usize)>,
+) {
+    let full = full_reads(rows);
+    eprintln!(
+        "{label}: shaped {shaped:?}; today {:?}; every row {:?} holding {} records",
+        full.0, full.1, full.2
+    );
+    fulls.push(full);
+}
+
+/// The shape Spike 4678 read: the proposals' tasks by their records.
+const OF_4678: Shape = Shape {
+    members: true,
+    session_prefix: false,
+    actor_planners: false,
+    member_ends: false,
+    paired: false,
+    goal_members: false,
+};
+
+const BEFORE: i64 = 149 * DAY;
+const NEAR: i64 = (READ_AT_DAY - 1) * DAY;
+
+/// (i-c): run 70 landed long ago with a session closed by a close of the
+/// old form (no `opened_event_id`), run 71 with two sessions and two
+/// closes of the second (the first never closed): both open at their
+/// row's end as the whole read pairs them, closed by a count of each.
+fn add_old_closes(log: &mut Log) {
+    let session = |tag: &str| json!({"kind": "review", "provider": "claude", "tag": tag});
+    let close = |closes: &str| json!({"kind": "review", "provider": "claude", "closes": closes});
+    log.landed(70, &run(70), BEFORE)
+        .add(
+            Some(70),
+            Some(&run(70)),
+            "session_opened",
+            session("70"),
+            BEFORE + 1,
+        )
+        .add(
+            Some(70),
+            Some(&run(70)),
+            "session_closed",
+            close(""),
+            BEFORE + 2,
+        );
+    log.landed(71, &run(71), BEFORE + 5000)
+        .add(
+            Some(71),
+            Some(&run(71)),
+            "session_opened",
+            session("71a"),
+            BEFORE + 5001,
+        )
+        .add(
+            Some(71),
+            Some(&run(71)),
+            "session_opened",
+            session("71b"),
+            BEFORE + 5002,
+        )
+        .add(
+            Some(71),
+            Some(&run(71)),
+            "session_closed",
+            close("71b"),
+            BEFORE + 5003,
+        )
+        .add(
+            Some(71),
+            Some(&run(71)),
+            "session_closed",
+            close("71b"),
+            BEFORE + 5004,
+        );
+}
+
+/// The ids [`add_old_closes`]' closes name, put back over those
+/// `numbered` gives: none for the old form, the tagged open's else.
+fn fix_old_closes(log: &mut Log) {
+    let opens: HashMap<String, i64> = log
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::SessionOpened)
+        .filter_map(|e| Some((e.payload["tag"].as_str()?.to_owned(), e.id.as_i64())))
+        .collect();
+    for event in &mut log.events {
+        let Some(closes) = event.payload["closes"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let payload = event.payload.as_object_mut().unwrap();
+        match opens.get(&closes) {
+            Some(id) => payload.insert("opened_event_id".into(), json!(id)),
+            None => payload.remove("opened_event_id"),
+        };
+    }
+}
+
+#[test]
+fn a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_pairs_it() {
+    let mut reads = Vec::new();
+    let mut fulls = Vec::new();
+    for settled in [30, 3000] {
+        let rows = rows_of(&history_with(settled, add_old_closes, fix_old_closes));
+        let of = |n: u8| {
+            rows.iter()
+                .find(|row| row.kind == LedgerKind::Run && row.key == run(n))
+                .unwrap()
+        };
+        // Paired, both runs leave a session open; counted, neither does.
+        for n in [70, 71] {
+            assert!(open_at_end(of(n), true), "run {n} paired");
+            assert!(!open_at_end(of(n), false), "run {n} counted");
+        }
+        let counted = Shape {
+            paired: false,
+            ..SHAPED
+        };
+        let (paired_misses, paired_reads) = shape_misses(&rows, SHAPED);
+        eprintln!("{settled}: paired {paired_reads:?} {paired_misses:?}");
+        assert_eq!(paired_misses, Vec::<String>::new());
+        if settled == 30 {
+            let (counted_misses, counted_reads) = shape_misses(&rows, counted);
+            eprintln!("{settled}: counted {counted_reads:?} {counted_misses:?}");
+            assert!(
+                !counted_misses.is_empty(),
+                "the count misses the open sessions"
+            );
+        }
+        note_full(&format!("(i-c) {settled}"), &rows, paired_reads, &mut fulls);
+        reads.push(paired_reads);
+    }
+    assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
+    assert!(
+        fulls[1].0.earlier > 50 * fulls[0].0.earlier / 2,
+        "{fulls:?}"
+    );
+    assert!(fulls[1].1.rows > 50 * fulls[0].1.rows / 2, "{fulls:?}");
+}
+
+/// (i-a): planner 70's session (headless) opened and closed long before
+/// the range; in the range, a `planner_question` it opened (its actor
+/// `planner:70`), one of no task (the queue's row) and one on task 62.
+fn add_planner_question(log: &mut Log) {
+    log.add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 70, "route": "headless"}),
+        BEFORE - 1000,
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"kind": "runtime_planner", "planner_id": 70, "session_id": "p-70"}),
+        BEFORE - 999,
+    );
+    for (ask, task) in [(7070, None), (7071, Some(62))] {
+        log.add(
+            task,
+            None,
+            "ask_opened",
+            json!({"ask_id": ask, "kind": "planner_question"}),
+            NEAR + 2000,
+        );
+        log.events.last_mut().unwrap().actor = Some(crate::domain::EventActor {
+            role: "planner".into(),
+            id: "planner:70".into(),
+            requested_by: None,
+        });
+    }
+}
+
+#[test]
+fn a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_ask_s_actor_names() {
+    let mut reads = Vec::new();
+    let mut fulls = Vec::new();
+    for settled in [30, 3000] {
+        let rows = rows_of(&history_with(settled, add_planner_question, |_| {}));
+        let prefix_alone = Shape {
+            actor_planners: false,
+            ..SHAPED
+        };
+        let (shaped, shaped_reads) = shape_misses(&rows, SHAPED);
+        eprintln!("{settled}: prefix and actors {shaped_reads:?} {shaped:?}");
+        assert_eq!(shaped, Vec::<String>::new());
+        if settled == 30 {
+            // Without the actor no read names planner 70: its route is
+            // `unknown` instead of `headless`.
+            for shape in [OF_4678, prefix_alone] {
+                let (misses, _) = shape_misses(&rows, shape);
+                eprintln!("{shape:?}: {} misses", misses.len());
+                assert!(
+                    misses.iter().any(|miss| miss.contains("planner_routes")),
+                    "{misses:?}"
+                );
+            }
+        }
+        note_full(&format!("(i-a) {settled}"), &rows, shaped_reads, &mut fulls);
+        reads.push(shaped_reads);
+    }
+    assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
+    assert!(
+        fulls[1].0.earlier > 50 * fulls[0].0.earlier / 2,
+        "{fulls:?}"
+    );
+    assert!(fulls[1].1.rows > 50 * fulls[0].1.rows / 2, "{fulls:?}");
+}
+
+/// (i-b): `count` priority changes of task 66 (of proposal 8, completed
+/// before the range) before the range.
+fn add_priorities(count: usize) -> impl FnOnce(&mut Log) {
+    move |log: &mut Log| {
+        for _ in 0..count {
+            log.add(
+                Some(66),
+                None,
+                "task_priority_changed",
+                json!({"priority": "high"}),
+                150 * DAY + 40_005,
+            );
+        }
+    }
+}
+
+#[test]
+fn a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_history() {
+    let whole_records = Shape {
+        member_ends: false,
+        ..SHAPED
+    };
+    let mut ends = Vec::new();
+    let mut fulls = Vec::new();
+    let mut records = Vec::new();
+    for count in [30, 3000] {
+        let rows = rows_of(&history_with(30, add_priorities(count), |_| {}));
+        let (misses, read) = shape_misses(&rows, SHAPED);
+        let (whole_misses, whole_read) = shape_misses(&rows, whole_records);
+        eprintln!(
+            "{count} changes of task 66: ends {read:?} {misses:?}; records {whole_read:?} {whole_misses:?}"
+        );
+        assert_eq!(misses, Vec::<String>::new());
+        assert_eq!(whole_misses, Vec::<String>::new());
+        note_full(&format!("(i-b) {count}"), &rows, read, &mut fulls);
+        ends.push(read);
+        records.push(whole_read);
+    }
+    assert_eq!(earlier_reads(ends[0]), earlier_reads(ends[1]));
+    assert!(
+        records[1].earlier >= records[0].earlier + 2970,
+        "{records:?}"
+    );
+    // Today's read and every row's records grow with task 66's history.
+    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 2970, "{fulls:?}");
+    assert!(fulls[1].2 >= fulls[0].2 + 2970, "{fulls:?}");
+}
+
+/// (i-d): goal 80 in proposal 9 (its `goal_submitted`, a finding the
+/// planner proposed linking it); its task 81 completes in the range, task
+/// 82 completed and task 83 was canceled before it. Task 83's creation
+/// names plan review 9, which the range names, so a read of what the
+/// range names takes that record of its row and not its end.
+fn add_goal_proposal(log: &mut Log) {
+    let before = 150 * DAY + 60_000;
+    let mut proposed = crate::domain::ledger::testkit::finding_record("proposed");
+    proposed["finding_id"] = json!(51);
+    proposed[crate::domain::ledger::findings::VALUES]["id"] = json!(51);
+    let mut recorded = proposed.clone();
+    recorded[crate::domain::ledger::findings::VALUES]["status"] = json!("open");
+    proposed["from"] = json!("open");
+    proposed["to"] = json!("proposed");
+    proposed["proposal_id"] = json!(9);
+    proposed["by"] = json!("planner");
+    log.add(None, None, "finding_recorded", recorded, before)
+        .add(None, None, "finding_status_changed", proposed, before + 1)
+        .add(
+            None,
+            None,
+            "goal_submitted",
+            json!({"proposal_id": 9}),
+            before + 2,
+        );
+    log.events.last_mut().unwrap().goal_id = Some(crate::domain::GoalId::new(80));
+    for task in [81, 82, 83] {
+        let mut created =
+            json!({"title": format!("t{task}"), "goal_id": 80, "status": "submitted"});
+        if task == 83 {
+            created["plan_review_id"] = json!(9);
+        }
+        log.add(Some(task), None, "task_created", created, before + 3);
+    }
+    log.landed(82, &run(82), before + 10);
+    log.add(
+        Some(83),
+        None,
+        "task_status_changed",
+        json!({"from": "submitted", "to": "canceled"}),
+        before + 20,
+    );
+    log.landed(81, &run(81), NEAR + 3000);
+}
+
+#[test]
+fn a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it() {
+    let mut reads = Vec::new();
+    let mut fulls = Vec::new();
+    for settled in [30, 3000] {
+        let rows = rows_of(&history_with(settled, add_goal_proposal, |_| {}));
+        let whole = select(rows.clone(), &whole_query());
+        let query = kpi_questions()[0].clone();
+        let running = |window: &LedgerWindow, query: &KpiQuery| {
+            kpi_value(window, query)["periods"][0]["kpis"]["improvement_proposals"].clone()
+        };
+        let expected = running(
+            &whole,
+            &KpiQuery {
+                read_whole_ledger: true,
+                ..query.clone()
+            },
+        );
+        let no_goal = Shape {
+            goal_members: false,
+            ..SHAPED
+        };
+        let (shaped, shaped_reads) = shape_misses(&rows, SHAPED);
+        let (window, _) = narrowed_shaped(&rows, &time_query(&query), &PARTS, SHAPED);
+        eprintln!(
+            "{settled}: whole {expected}, shaped {}; with {shaped_reads:?} {shaped:?}",
+            running(&window, &query)
+        );
+        assert_eq!(shaped, Vec::<String>::new());
+        if settled == 30 {
+            for shape in [OF_4678, no_goal] {
+                let (misses, _) = shape_misses(&rows, shape);
+                eprintln!("{shape:?}: {misses:?}");
+                assert!(
+                    misses
+                        .iter()
+                        .any(|miss| miss.contains("improvement_proposals")),
+                    "{misses:?}"
+                );
+            }
+        }
+        note_full(&format!("(i-d) {settled}"), &rows, shaped_reads, &mut fulls);
+        reads.push(shaped_reads);
+    }
+    assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
+    assert!(
+        fulls[1].0.earlier > 50 * fulls[0].0.earlier / 2,
+        "{fulls:?}"
+    );
+    assert!(fulls[1].1.rows > 50 * fulls[0].1.rows / 2, "{fulls:?}");
+}
+
+#[test]
+fn every_shape_returns_as_many_records_whatever_the_settled_history() {
+    let mut reads = Vec::new();
+    let mut fulls = Vec::new();
+    for settled in [30, 3000] {
+        let log = history_with(
+            settled,
+            |log| {
+                add_old_closes(log);
+                add_planner_question(log);
+                add_goal_proposal(log);
+                add_priorities(30)(log);
+            },
+            fix_old_closes,
+        );
+        let rows = rows_of(&log);
+        let (misses, read) = shape_misses(&rows, SHAPED);
+        eprintln!("{settled}: {read:?} {misses:?}");
+        assert_eq!(misses, Vec::<String>::new());
+        note_full(&format!("all {settled}"), &rows, read, &mut fulls);
+        reads.push(read);
+    }
+    assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
+    assert!(
+        fulls[1].0.earlier > 50 * fulls[0].0.earlier / 2,
+        "{fulls:?}"
+    );
+    assert!(fulls[1].1.rows > 50 * fulls[0].1.rows / 2, "{fulls:?}");
 }
