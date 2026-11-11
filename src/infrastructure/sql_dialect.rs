@@ -125,6 +125,18 @@ impl SqlDialect {
         self.json_expression(column, &path_literal(path), ty, TIGHT)
     }
 
+    /// A top-level JSON key used by the ledger's earlier seeks and their
+    /// expression indexes. Bind numeric IDs as integers in SQLite and text
+    /// in Postgres; no cast may wrap this expression in the read.
+    #[allow(dead_code)] // The earlier reads will use the indexes before replacing the whole read.
+    pub(crate) fn ledger_index_key(self, column: &str, key: &str) -> String {
+        debug_assert!(key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        match self {
+            Self::Sqlite => self.json_field(column, &format!("$.{key}"), JsonType::Text),
+            Self::Postgres => format!("{column}::jsonb ->> '{key}'"),
+        }
+    }
+
     /// [`SqlDialect::json_field`] with a space after the comma between the
     /// arguments.
     pub(crate) fn json_field_spaced(self, column: &str, path: &str, ty: JsonType) -> String {
@@ -331,6 +343,16 @@ impl SqlDialect {
         }
     }
 
+    /// Pin a SQLite lookup to its required index when competing indexes
+    /// would otherwise hide the selective key. Postgres has no INDEXED BY
+    /// clause and chooses its plan from the unchanged predicates.
+    pub(crate) fn indexed_by(self, index: &str) -> String {
+        match self {
+            Self::Sqlite => format!(" INDEXED BY {index}"),
+            Self::Postgres => String::new(),
+        }
+    }
+
     /// The key of a unique expression index that takes an absent `column` for
     /// the SQL literal `absent` (`0`, `''`), spelled as the dialect's index is:
     /// SQLite's `asks_open` is on `ifnull` and Postgres's base on `coalesce`.
@@ -525,6 +547,18 @@ pub(crate) fn formatted_time(format: &str, value: &str) -> String {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    #[test]
+    fn an_index_hint_is_written_only_for_sqlite() {
+        assert_eq!(
+            SqlDialect::Sqlite.indexed_by("events_by_opened_event"),
+            " INDEXED BY events_by_opened_event"
+        );
+        assert_eq!(
+            SqlDialect::Postgres.indexed_by("events_by_opened_event"),
+            ""
+        );
+    }
 
     #[test]
     fn an_index_key_is_spelled_as_each_dialect_s_index_is() {

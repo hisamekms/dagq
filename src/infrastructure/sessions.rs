@@ -2238,10 +2238,11 @@ fn queue_open_spans(conn: &impl SqlRead, kind: EventKind) -> Result<Option<Vec<O
 }
 
 /// Which `session_opened` [`queue_open_spans`] reads: those of the queue
-/// and of the job kind `?1`.
+/// and of the job kind `?1`. The unary `+` keeps SQLite from looking up
+/// every task-less event through a task index instead of the session kind.
 fn queue_opened_condition(dialect: super::sql_exec::SqlDialect) -> String {
     format!(
-        "o.task_id IS NULL AND o.goal_id IS NULL AND {}=?1",
+        "+o.task_id IS NULL AND o.goal_id IS NULL AND {}=?1",
         dialect.json_field("o.payload", "$.kind", JsonType::Text),
     )
 }
@@ -2273,15 +2274,18 @@ fn open_spans(
 /// The query of [`open_spans`]. Its `NOT EXISTS` finds the `session_closed`
 /// by `events_by_opened_event` (task 1333): `+o.id` drops the column's
 /// INTEGER affinity, which, applied to the expression, kept the index from
-/// being used and walked every `session_closed` once per span.
+/// being used and walked every `session_closed` once per span. SQLite pins
+/// this probe to that index: a competing task/kind index can walk every
+/// close of the task even when the opened-event expression is usable.
 fn open_spans_sql(dialect: super::sql_exec::SqlDialect, opened: &str, closed: &str) -> String {
     format!(
         "SELECT o.id, o.payload, o.created_at FROM run_events o
          WHERE o.kind='{SESSION_OPENED}' AND {opened}
-           AND NOT EXISTS (SELECT 1 FROM run_events c
+           AND NOT EXISTS (SELECT 1 FROM run_events c{closed_index}
                            WHERE c.kind='{SESSION_CLOSED}' AND {closed}
                              AND {c_opened_event_id}=+o.id)
          ORDER BY o.id",
+        closed_index = dialect.indexed_by("events_by_opened_event"),
         c_opened_event_id = dialect.json_field("c.payload", "$.opened_event_id", JsonType::Integer),
     )
 }
