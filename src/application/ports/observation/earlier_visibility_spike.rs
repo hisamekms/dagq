@@ -1252,3 +1252,806 @@ fn a_proposal_the_range_names_is_read_with_the_ends_of_its_tasks_before_the_rang
     );
     assert_eq!(kpi_value(&with, &query), expected);
 }
+
+// (iii) visibility, the follow-up: a run on its way, the session and queue
+// events past W and R a pass did not write, R and W apart, the owners' rows
+// R spares, and U_E (the section "追試 (iii) 可視性（Spike 4754）").
+
+/// The marks of a store: W, where the session rows record every session
+/// event up to, and R, the queue rows' and the run, task and node rows'
+/// positions, each its own.
+#[derive(Debug, Clone, Copy)]
+struct Marks {
+    w: EventId,
+    queue: EventId,
+    core: EventId,
+}
+
+/// A store of the history of `settled` units with a tail past it: a task
+/// claimed by run 70 before R (its row written, not ended, naming the run,
+/// the run's row not written as it has not ended) whose run records past R;
+/// a task event of it past R its row does not hold; run 3 resumed past R;
+/// run 12's row not written (its task ended); session and queue events
+/// past W and R, of which a pass wrote the rows of some only (planner
+/// 990001's session row and the row of mark `m-a`). R of the queue stands
+/// before W, with queue events between them. The rows, the events, the
+/// marks and the run on its way.
+fn store_apart(settled: usize) -> (Vec<LedgerRow>, Vec<RunEvent>, Marks, RunId) {
+    let mut events = history(settled).events;
+    let running = RunId::new(run(70)).unwrap();
+    let minute = 60_000;
+    let push = |events: &mut Vec<RunEvent>,
+                task: Option<i64>,
+                run: Option<&str>,
+                kind: &str,
+                payload: Value,
+                minutes_ago: i64| {
+        let id = EventId::new(events.last().unwrap().id.as_i64() + 1);
+        events.push(RunEvent {
+            id,
+            task_id: task.map(crate::domain::TaskId::new),
+            goal_id: None,
+            run_id: run.map(|run| RunId::new(run).unwrap()),
+            kind: kind.into(),
+            payload,
+            created_at: crate::domain::marks::utc_text(NOW * 1000 - minutes_ago * minute),
+            actor: None,
+        });
+        id
+    };
+    let planner = |id: i64| json!({"kind": "runtime_planner", "planner_id": id});
+    let closed = |id: i64, opened: EventId| {
+        json!({"kind": "runtime_planner", "planner_id": id,
+               "session_id": format!("p-{id}"), "opened_event_id": opened.as_i64()})
+    };
+    let r70 = run(70);
+    push(&mut events, Some(70), None, "task_created", json!({}), 180);
+    push(
+        &mut events,
+        Some(70),
+        Some(&r70),
+        "run_claimed",
+        json!({"from": "ready", "to": "in_progress", "provider": "claude"}),
+        180,
+    );
+    push(
+        &mut events,
+        Some(70),
+        Some(&r70),
+        "agent_started",
+        json!({}),
+        179,
+    );
+    let first = push(
+        &mut events,
+        None,
+        None,
+        "session_opened",
+        planner(990_001),
+        170,
+    );
+    let third = push(
+        &mut events,
+        None,
+        None,
+        "session_opened",
+        planner(990_003),
+        169,
+    );
+    let core = events.last().unwrap().id;
+    // Run 70's events past R: one of no task id, one of another task's id
+    // (an older or another writer's record); the whole read folds them by
+    // the run's id.
+    push(
+        &mut events,
+        None,
+        Some(&r70),
+        "first_commit_observed",
+        json!({}),
+        160,
+    );
+    push(
+        &mut events,
+        Some(70),
+        None,
+        "task_priority_changed",
+        json!({"priority": "high"}),
+        150,
+    );
+    push(
+        &mut events,
+        Some(3),
+        Some(&run(3)),
+        "agent_started",
+        json!({}),
+        145,
+    );
+    let queue = events.last().unwrap().id;
+    push(
+        &mut events,
+        None,
+        None,
+        "session_opened",
+        planner(990_004),
+        135,
+    );
+    push(
+        &mut events,
+        None,
+        None,
+        "mark_added",
+        json!({"mark": "m-b"}),
+        140,
+    );
+    push(
+        &mut events,
+        None,
+        None,
+        "claim_deferred",
+        json!({"supervisor": "s2", "reason": "paths"}),
+        130,
+    );
+    let w = events.last().unwrap().id;
+    push(
+        &mut events,
+        None,
+        None,
+        "session_closed",
+        closed(990_001, first),
+        120,
+    );
+    push(
+        &mut events,
+        None,
+        None,
+        "session_closed",
+        closed(990_003, third),
+        110,
+    );
+    let second = push(
+        &mut events,
+        None,
+        None,
+        "session_opened",
+        planner(990_002),
+        100,
+    );
+    push(
+        &mut events,
+        None,
+        None,
+        "session_closed",
+        closed(990_002, second),
+        90,
+    );
+    push(
+        &mut events,
+        None,
+        None,
+        "mark_added",
+        json!({"mark": "m-a"}),
+        80,
+    );
+    push(
+        &mut events,
+        Some(999),
+        Some(&r70),
+        "receipt_observed",
+        json!({}),
+        60,
+    );
+    push(
+        &mut events,
+        None,
+        None,
+        "inbox_watcher_absent",
+        json!({}),
+        50,
+    );
+    let up_to = |id: EventId, kinds: &[LedgerKind]| {
+        let upto = events.iter().take_while(|e| e.id <= id).count();
+        build(&events[..upto], NOW * 1000, "2030-01-01T00:00:00.000Z")
+            .into_iter()
+            .filter(|row| kinds.contains(&row.kind))
+            .collect::<Vec<_>>()
+    };
+    let mut rows = up_to(core, &[LedgerKind::Run, LedgerKind::Task]);
+    rows.extend(up_to(w, &[LedgerKind::Session]));
+    rows.extend(up_to(queue, &[LedgerKind::Queue]));
+    // No row of run 70, not ended (the builder writes a run's row once its
+    // life ended; run 7 of the history keeps the row `build` gives it, out
+    // of the range), nor (past a pass's bound of writes) of run 12.
+    rows.retain(|row| {
+        !(row.kind == LedgerKind::Run && [r70.as_str(), &run(12)].contains(&row.key.as_str()))
+    });
+    // A pass past the marks wrote two rows and stopped.
+    let further = build(&events, NOW * 1000, "2030-01-01T00:00:00.000Z");
+    for row in further.into_iter().filter(|row| {
+        (row.kind == LedgerKind::Session && row.key.contains("990001"))
+            || (row.kind == LedgerKind::Queue
+                && row.records.iter().any(|e| e.payload["mark"] == "m-a"))
+    }) {
+        rows.retain(|held| !(held.kind == row.kind && held.key == row.key));
+        rows.push(row);
+    }
+    (rows, events, Marks { w, queue, core }, running)
+}
+
+/// What a small read looked up to judge its events.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Looked {
+    /// The owners' rows (runs and tasks), each once.
+    owners: usize,
+    /// The task rows not ended, read once for the runs with no row.
+    open_tasks: usize,
+    /// The session and queue rows written past W and R.
+    past_the_marks: usize,
+}
+
+/// The small read of `candidates` with the marks apart: a run's event if
+/// its run row is saved with `inputs_through` at or past it, or, with no
+/// run row, if a saved task row not ended names the run in its
+/// `detail.runs` (the open task rows, read once, whatever the event's task
+/// id: the whole read's [`runs_on_their_way`]); a task's event if its row is
+/// saved with `inputs_through` at or past it, or (`spare`) at or before R
+/// of the run, task and node rows, its row not looked up; a session's event
+/// at or before W, a queue's at or before R of the queue, or one held by a
+/// row of its kind written past that mark. `one_mark` judges the session's
+/// and the queue's events by W alone, as one mark would.
+fn small_read_apart(
+    rows: &[LedgerRow],
+    candidates: &[RunEvent],
+    marks: Marks,
+    spare: bool,
+    one_mark: bool,
+) -> (BTreeSet<EventId>, Looked) {
+    let by_key: HashMap<(LedgerKind, &str), &LedgerRow> = rows
+        .iter()
+        .map(|row| ((row.kind, row.key.as_str()), row))
+        .collect();
+    let mut looked = Looked::default();
+    let mut past = |kind: LedgerKind, mark: EventId| -> BTreeSet<EventId> {
+        let past: Vec<&LedgerRow> = rows
+            .iter()
+            .filter(|row| row.kind == kind && row.inputs_through.events > mark)
+            .collect();
+        looked.past_the_marks += past.len();
+        past.iter()
+            .flat_map(|row| row.records.iter().map(|e| e.id))
+            .collect()
+    };
+    let queue_mark = if one_mark { marks.w } else { marks.queue };
+    let past_w = past(LedgerKind::Session, marks.w);
+    let past_r = past(LedgerKind::Queue, queue_mark);
+    let open: Vec<&LedgerRow> = rows
+        .iter()
+        .filter(|row| row.kind == LedgerKind::Task && row.ended_at.is_none())
+        .collect();
+    looked.open_tasks = open.len();
+    let open_runs: BTreeSet<String> = open
+        .into_iter()
+        .flat_map(crate::domain::ledger::window::runs_named)
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut look = |kind: LedgerKind, key: &str, looked: &mut Looked| {
+        if seen.insert((kind, key.to_owned())) {
+            looked.owners += 1;
+        }
+        by_key.get(&(kind, key)).copied()
+    };
+    let mut kept = BTreeSet::new();
+    for event in candidates {
+        let keep = match owner(event) {
+            Owner::Session => event.id <= marks.w || past_w.contains(&event.id),
+            Owner::Queue => event.id <= queue_mark || past_r.contains(&event.id),
+            Owner::Task if spare && event.id <= marks.core => true,
+            Owner::Task => look(
+                LedgerKind::Task,
+                &event.task_id.unwrap().to_string(),
+                &mut looked,
+            )
+            .is_some_and(|row| row.inputs_through.events >= event.id),
+            Owner::Run => {
+                let id = event.run_id.as_ref().unwrap().as_str();
+                match look(LedgerKind::Run, id, &mut looked) {
+                    Some(row) => row.inputs_through.events >= event.id,
+                    None => open_runs.contains(id),
+                }
+            }
+        };
+        if keep {
+            kept.insert(event.id);
+        }
+    }
+    (kept, looked)
+}
+
+/// What the whole read of the store `rows` reads, counted as [`Reads`]
+/// counts it (4678): every run, task and session row and every queue row
+/// (a read of no time leaves none out, so no earlier record and no first
+/// Execution), and the events of the runs on their way it folds of
+/// `events`; with their sum.
+fn whole_reads(rows: &[LedgerRow], events: &[RunEvent]) -> (Reads, usize, usize) {
+    let queue = rows
+        .iter()
+        .filter(|row| row.kind == LedgerKind::Queue)
+        .count();
+    let reads = Reads {
+        rows: rows.len() - queue,
+        queue,
+        ..Reads::default()
+    };
+    let on_their_way: BTreeSet<RunId> = runs_on_their_way(rows).into_iter().collect();
+    let folded = events
+        .iter()
+        .filter(|e| e.run_id.as_ref().is_some_and(|r| on_their_way.contains(r)))
+        .count();
+    (reads, folded, reads.rows + reads.queue + folded)
+}
+
+/// What the small read of `candidates` events reads, counted alike: the
+/// rows it looked up ([`Looked`]) and the candidate events themselves.
+const fn small_reads(looked: Looked, candidates: usize) -> usize {
+    looked.owners + looked.open_tasks + looked.past_the_marks + candidates
+}
+
+/// The events of the range: the last two days.
+fn of_the_range(events: &[RunEvent]) -> Vec<RunEvent> {
+    events
+        .iter()
+        .filter(|e| {
+            crate::domain::stats::timestamp_millis(&e.created_at)
+                .is_some_and(|at| at >= (NOW - 2 * DAY) * 1000)
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_them() {
+    let mut looks = Vec::new();
+    for settled in [30, 3000] {
+        let (rows, events, marks, running) = store_apart(settled);
+        assert_eq!(runs_on_their_way(&rows), vec![running.clone()]);
+        let whole = visible(&rows, &events);
+        let range = of_the_range(&events);
+        let expected: BTreeSet<EventId> = range
+            .iter()
+            .map(|e| e.id)
+            .filter(|id| whole.contains(id))
+            .collect();
+        let (small, looked) = small_read_apart(&rows, &range, marks, false, false);
+        // (iii-a) the run on its way: its events past R are seen, by its
+        // task row, as the whole read folds them.
+        let of_running: Vec<EventId> = range
+            .iter()
+            .filter(|e| e.run_id.as_ref() == Some(&running) && e.id > marks.core)
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(of_running.len(), 2);
+        // Neither carries the task id of the task row naming the run.
+        let task_ids: Vec<Option<i64>> = range
+            .iter()
+            .filter(|e| of_running.contains(&e.id))
+            .map(|e| e.task_id.map(|task| task.as_i64()))
+            .collect();
+        assert_eq!(task_ids, vec![None, Some(999)]);
+        assert!(
+            of_running
+                .iter()
+                .all(|id| whole.contains(id) && small.contains(id))
+        );
+        // (iii-b) the session and queue events past W and R the pass did
+        // not write fall out of the whole read, and out of the small one.
+        let dropped: Vec<EventId> = range
+            .iter()
+            .filter(|e| matches!(owner(e), Owner::Session | Owner::Queue))
+            .filter(|e| e.id > marks.queue && !whole.contains(&e.id))
+            .map(|e| e.id)
+            .collect();
+        assert!(dropped.len() >= 5, "{dropped:?}");
+        assert!(dropped.iter().all(|id| !small.contains(id)));
+        assert_eq!(small, expected, "{settled}");
+        // One mark for both: the queue's events between R and W are taken.
+        let (merged, _) = small_read_apart(&rows, &range, marks, false, true);
+        let extra: Vec<_> = merged.difference(&expected).collect();
+        assert_eq!(extra.len(), 2, "{extra:?}");
+        // The two rows the pass wrote past the marks hold what is seen past
+        // them: planner 990001's close and mark m-a.
+        assert_eq!(looked.past_the_marks, 2);
+        let written_past: Vec<EventId> = range
+            .iter()
+            .filter(|e| {
+                (e.kind == EventKind::SessionClosed && e.payload["planner_id"] == 990_001)
+                    || e.payload["mark"] == "m-a"
+            })
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(written_past.len(), 2);
+        assert!(
+            written_past
+                .iter()
+                .all(|id| *id > marks.w && whole.contains(id) && small.contains(id))
+        );
+        // Planner 990004's opening, between R of the queue and W, is in its
+        // row by W. Judged by R of the queue, the session rows past it are
+        // read too: the answer holds, the rows read grow.
+        let lower = Marks {
+            w: marks.queue,
+            ..marks
+        };
+        let (by_r, more) = small_read_apart(&rows, &range, lower, false, false);
+        assert_eq!(by_r, expected);
+        assert!(more.past_the_marks > looked.past_the_marks, "{more:?}");
+        // What each read reads, as 4678's `Reads` counts it.
+        let (every, folded, whole_total) = whole_reads(&rows, &events);
+        let small_total = small_reads(looked, range.len());
+        eprintln!(
+            "{settled}: range {}, visible {}, dropped past the marks {}, looked {looked:?}; small read {small_total}, whole read {every:?} + {folded} folded = {whole_total}",
+            range.len(),
+            expected.len(),
+            dropped.len()
+        );
+        looks.push((looked, small_total, whole_total));
+    }
+    assert_eq!(looks[0].0, looks[1].0);
+    assert_eq!(looks[0].1, looks[1].1);
+    assert!(looks[1].2 > 50 * looks[0].2 / 2, "{looks:?}");
+    assert!(looks[0].1 < looks[0].2, "{looks:?}");
+}
+
+#[test]
+fn r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows() {
+    let mut looks = Vec::new();
+    for settled in [30, 3000] {
+        let (rows, events, marks, _) = store_apart(settled);
+        let whole = visible(&rows, &events);
+        let range = of_the_range(&events);
+        let expected: BTreeSet<EventId> = range
+            .iter()
+            .map(|e| e.id)
+            .filter(|id| whole.contains(id))
+            .collect();
+        let (looked_up, full) = small_read_apart(&rows, &range, marks, false, false);
+        let (spared, less) = small_read_apart(&rows, &range, marks, true, false);
+        assert_eq!(looked_up, expected);
+        assert_eq!(spared, expected);
+        assert!(less.owners < full.owners, "{less:?} {full:?}");
+        let (_, _, whole_total) = whole_reads(&rows, &events);
+        let (full_total, less_total) = (
+            small_reads(full, range.len()),
+            small_reads(less, range.len()),
+        );
+        eprintln!(
+            "{settled}: looked {full:?} = {full_total}, spared by R {less:?} = {less_total}, whole read {whole_total}"
+        );
+        looks.push((less, less_total, whole_total));
+    }
+    assert_eq!(looks[0].0, looks[1].0);
+    assert_eq!(looks[0].1, looks[1].1);
+    assert!(looks[1].2 > 50 * looks[0].2 / 2, "{looks:?}");
+    // A run's event at or before R is not spared: run 12's task ended and
+    // its row was not written, so the whole read sees none of its events.
+    let (rows, events, marks, _) = store_apart(30);
+    let whole = visible(&rows, &events);
+    let unseen = events
+        .iter()
+        .filter(|e| e.run_id.as_ref().is_some_and(|r| r.as_str() == run(12)))
+        .filter(|e| e.id <= marks.core)
+        .count();
+    assert!(unseen > 0);
+    assert!(
+        events
+            .iter()
+            .filter(|e| e.run_id.as_ref().is_some_and(|r| r.as_str() == run(12)))
+            .all(|e| !whole.contains(&e.id))
+    );
+}
+
+/// Whether a bounded read keeps `event`'s row for it: a time at or before
+/// `end` (its `created_at`, or its payload's `at`, a cut's time, or one of
+/// no time the read can tell), or an Execution of any time (its
+/// `tokens_source`): [`LedgerWindow::execution_tokens`] reads every row's,
+/// whatever rows the window chose, and its first per actor and provider
+/// (`recorded_from`) whenever it ended.
+fn holds_for_the_window(event: &RunEvent, end: i64) -> bool {
+    let millis = crate::domain::stats::timestamp_millis;
+    let at = event
+        .payload
+        .get("at")
+        .map(|at| at.as_str().and_then(millis));
+    millis(&event.created_at).is_none_or(|created| created <= end)
+        || at.is_some_and(|at| at.is_none_or(|at| at <= end))
+        || event.payload.get("tokens_source").is_some()
+}
+
+/// Whether a read bounded by U_E `bound` leaves `row` out: its first input
+/// past `bound` and, with `end` (E), none of its records held for the
+/// window ([`holds_for_the_window`], Spike 4670 (vi)'s bound and the
+/// Executions); without, every row past `bound`.
+fn left_out(row: &LedgerRow, bound: EventId, end: Option<i64>) -> bool {
+    row.inputs_from > bound
+        && end.is_none_or(|end| !row.records.iter().any(|e| holds_for_the_window(e, end)))
+}
+
+/// The window `query` asks of the rows of `rows` a read bounded by `bound`
+/// keeps ([`left_out`]) and of the runs on their way, folded of `events`;
+/// and how many rows it left out.
+fn bounded(
+    rows: &[LedgerRow],
+    events: &[RunEvent],
+    bound: EventId,
+    end: Option<i64>,
+    query: &WindowQuery,
+) -> (LedgerWindow, usize) {
+    let mut kept: Vec<LedgerRow> = rows
+        .iter()
+        .filter(|row| !left_out(row, bound, end))
+        .cloned()
+        .collect();
+    let left = rows.len() - kept.len();
+    for run in runs_on_their_way(&kept) {
+        let of_run: Vec<RunEvent> = events
+            .iter()
+            .filter(|e| e.run_id.as_ref() == Some(&run))
+            .cloned()
+            .collect();
+        kept.extend(run_on_its_way(&run, &of_run, NOW * 1000));
+    }
+    (select(kept, query), left)
+}
+
+/// K of Spike 4670 (vi): the events a search for a time's id walks before
+/// it gives up and the read falls back to no bound.
+const K: usize = 64;
+
+/// U_E as a search of at most [`K`] events down the ids from the latest:
+/// the id of the first at or before `end`, none past K; and the events it
+/// walked.
+fn u_e_capped(events: &[RunEvent], end: i64) -> (Option<EventId>, usize) {
+    let mut walked = 0;
+    for event in events.iter().rev().take(K) {
+        walked += 1;
+        if crate::domain::stats::timestamp_millis(&event.created_at).is_some_and(|at| at <= end) {
+            return (Some(event.id), walked);
+        }
+    }
+    (None, walked)
+}
+
+/// `store_apart(settled)` with, written after E: a cut of the inbox's
+/// tokens whose time is in the window (recorded 5 minutes after E for the
+/// 10 minutes before it), a planner's turn on codex (the first Execution of
+/// that actor and provider), and `after` marks (each a queue row of its
+/// own); then, if `late`, one event of a time before E written last (a
+/// clock turned back), past the marks and in no row.
+fn store_after(
+    settled: usize,
+    after: usize,
+    end: i64,
+    late: bool,
+) -> (Vec<LedgerRow>, Vec<RunEvent>) {
+    let (mut rows, mut events, _, _) = store_apart(settled);
+    let first = events.len();
+    let push = |events: &mut Vec<RunEvent>, kind: &str, payload: Value, at: i64| {
+        let id = EventId::new(events.last().unwrap().id.as_i64() + 1);
+        events.push(RunEvent {
+            id,
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: crate::domain::marks::utc_text(at),
+            actor: None,
+        });
+    };
+    let tokens = json!({"input": 40, "output": 4, "cache_read": 0, "cache_creation": 0});
+    push(
+        &mut events,
+        "session_tokens",
+        json!({"kind": "inbox", "at": crate::domain::marks::utc_text(end - 10 * 60_000),
+               "final": false, "tokens": tokens, "tokens_source": "transcript",
+               "tokens_by_model": []}),
+        end + 5 * 60_000,
+    );
+    push(
+        &mut events,
+        "turn_finished",
+        json!({"planner_id": 990_009, "provider": "codex", "tokens": tokens,
+               "tokens_source": "model_usage", "tokens_by_model": []}),
+        end + 6 * 60_000,
+    );
+    let span = NOW * 1000 - end - 1;
+    for n in 0..after {
+        let at = end + 1 + i64::try_from(n).unwrap() * span / i64::try_from(after).unwrap();
+        push(
+            &mut events,
+            "mark_added",
+            json!({"mark": format!("after-{n}")}),
+            at,
+        );
+    }
+    let written = events.len();
+    if late {
+        push(&mut events, "inbox_watcher_absent", json!({}), end - 1000);
+    }
+    // A pass wrote the rows of the events after E (and only those).
+    let ids: BTreeSet<EventId> = events[first..written].iter().map(|e| e.id).collect();
+    let further = build(&events[..written], NOW * 1000, "2030-01-01T00:00:00.000Z");
+    for row in further
+        .into_iter()
+        .filter(|row| row.records.iter().any(|e| ids.contains(&e.id)))
+    {
+        rows.retain(|held| !(held.kind == row.kind && held.key == row.key));
+        rows.push(row);
+    }
+    (rows, events)
+}
+
+/// The rows a read bounded by `bound` (none: no bound) takes that start
+/// past the window's end `upto`, as [`bounded`] with `end` keeps them.
+fn read_past_the_end(rows: &[LedgerRow], bound: Option<EventId>, end: i64, upto: EventId) -> usize {
+    rows.iter()
+        .filter(|row| row.inputs_from > upto)
+        .filter(|row| bound.is_none_or(|bound| !left_out(row, bound, Some(end))))
+        .count()
+}
+
+#[test]
+fn u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_whole_read_counts() {
+    let sources = StatsSources {
+        config_file: &|| Ok(None),
+        conflicts_file: &|| Ok(None),
+        areas: None,
+        utc_offset_secs: 0,
+        counts_checks: true,
+        rust_toolchain: false,
+    };
+    let end = NOW * 1000 - 85 * 60_000;
+    let since = Cursor::Time((NOW - 2 * DAY) * 1000);
+    let query = StatsQuery {
+        since: Some(since),
+        until: Some(Cursor::Time(end)),
+        full: true,
+        ..StatsQuery::default()
+    };
+    let window_query = WindowQuery {
+        since: Some(since),
+        until: Some(Cursor::Time(end)),
+        now_ms: now_ms(NOW),
+        ..WindowQuery::default()
+    };
+    // `stats --since --until --full`, and the window's Executions of every
+    // record ([`LedgerWindow::execution_tokens`]: every row's, whatever rows
+    // the window chose, a cut by its payload's time).
+    let answer = |window: &LedgerWindow| {
+        json!({
+            "stats": serde_json::to_value(stats_of_window(window, NOW, &query, &sources).unwrap())
+                .unwrap(),
+            "execution_tokens": serde_json::to_value(window.execution_tokens()).unwrap(),
+        })
+    };
+    let misses = |window: &LedgerWindow, expected: &Value| {
+        let mut out = Vec::new();
+        differences(&answer(window), expected, "stats", &mut out);
+        out
+    };
+    let mut two = BTreeMap::new();
+    let mut searched = BTreeMap::new();
+    // The settled history before S (30, 3000 units) and the history after
+    // E (30, 3000 events), a clock turned back after the long one.
+    for (settled, after, late) in [
+        (30, 30, false),
+        (3000, 30, false),
+        (30, 3000, false),
+        (30, 3000, true),
+    ] {
+        let (rows, events) = store_after(settled, after, end, late);
+        let whole = visible(&rows, &events);
+        let by_time = |e: &&RunEvent| {
+            crate::domain::stats::timestamp_millis(&e.created_at).is_some_and(|at| at <= end)
+        };
+        let of_all = events.iter().filter(by_time).map(|e| e.id).max().unwrap();
+        let of_seen = events
+            .iter()
+            .filter(by_time)
+            .filter(|e| whole.contains(&e.id))
+            .map(|e| e.id)
+            .max()
+            .unwrap();
+        assert!(of_all > of_seen, "an invisible event near E");
+        let (every, _) = bounded(&rows, &events, EventId::new(i64::MAX), None, &window_query);
+        let expected = answer(&every);
+        // The two bounds the description names, of every event and of the
+        // visible ones: by the first input alone they lose the cut in the
+        // window and the first Execution of codex; kept as above, both
+        // answer as the whole read.
+        if after == 30 {
+            for (name, bound) in [("every", of_all), ("visible", of_seen)] {
+                let (plain, _) = bounded(&rows, &events, bound, None, &window_query);
+                let lost = misses(&plain, &expected);
+                assert!(lost.iter().any(|miss| miss.contains("inbox")), "{lost:?}");
+                let planner = |value: &Value| {
+                    value["execution_tokens"]["by_actor"]["runtime_planner"]["by_provider"]
+                        .get("codex")
+                        .is_some()
+                };
+                assert!(planner(&expected) && !planner(&answer(&plain)));
+                let (kept, reads) = bounded(&rows, &events, bound, Some(end), &window_query);
+                assert_eq!(misses(&kept, &expected), Vec::<String>::new(), "{name}");
+                two.insert(
+                    (settled, name),
+                    (
+                        reads,
+                        read_past_the_end(&rows, Some(bound), end, of_seen),
+                        read_past_the_end(&rows, None, end, of_seen),
+                    ),
+                );
+            }
+        }
+        let (capped, walked) = u_e_capped(&events, end);
+        assert!(walked <= K);
+        if let Some(bound) = capped {
+            assert!(bound >= of_seen);
+        }
+        let (window, reads) = bounded(
+            &rows,
+            &events,
+            capped.unwrap_or(EventId::new(i64::MAX)),
+            Some(end),
+            &window_query,
+        );
+        assert_eq!(
+            misses(&window, &expected),
+            Vec::<String>::new(),
+            "{settled} {after} {late}"
+        );
+        searched.insert(
+            (settled, after, late),
+            (
+                capped.is_some(),
+                walked,
+                reads,
+                read_past_the_end(&rows, capped, end, of_seen),
+                read_past_the_end(&rows, None, end, of_seen),
+            ),
+        );
+    }
+    eprintln!("(reads, rows past the end read, of the whole read): {two:#?}");
+    eprintln!("(found, walked, reads, rows past the end read, of the whole read): {searched:#?}");
+    // Before S the history does not count, for either bound and for K.
+    for name in ["every", "visible"] {
+        assert_eq!(two[&(30, name)], two[&(3000, name)]);
+    }
+    assert_eq!(two[&(30, "every")], two[&(30, "visible")]);
+    assert_eq!(searched[&(30, 30, false)], searched[&(3000, 30, false)]);
+    let near = searched[&(30, 30, false)];
+    assert!(near.0 && near.3 < near.4, "{near:?}");
+    // After E it does: past K the search gives up and the read takes every
+    // row past the end, as the whole read does (4670 (vi)'s fallback); a
+    // clock turned back gives a bound past them all.
+    let long = searched[&(30, 3000, false)];
+    assert!(!long.0 && long.1 == K && long.3 == long.4 && long.4 > 3000);
+    let late = searched[&(30, 3000, true)];
+    assert!(late.0 && late.1 == 1 && late.3 == late.4);
+    // By the first input alone, a bound below a row of the window (task
+    // 70's, started in it) changes the answer: `select` itself drops only
+    // rows starting past the end. Kept by the times of its records, that row
+    // stays and the answer holds.
+    let (rows, events, _, _) = store_apart(30);
+    let started = rows
+        .iter()
+        .find(|row| row.kind == LedgerKind::Task && row.key == "70")
+        .unwrap()
+        .inputs_from;
+    let (every, _) = bounded(&rows, &events, EventId::new(i64::MAX), None, &window_query);
+    let low = EventId::new(started.as_i64() - 1);
+    let (plain, _) = bounded(&rows, &events, low, None, &window_query);
+    assert!(
+        !misses(&plain, &answer(&every)).is_empty(),
+        "a bound too low misses rows of the window"
+    );
+    let (kept, _) = bounded(&rows, &events, low, Some(end), &window_query);
+    assert_eq!(misses(&kept, &answer(&every)), Vec::<String>::new());
+}
