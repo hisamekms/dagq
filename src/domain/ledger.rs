@@ -37,7 +37,9 @@ mod readers_tests;
 pub mod session;
 pub mod settle;
 pub mod steps;
-#[cfg(test)]
+// The store contracts lay their histories down with it too.
+#[cfg(any(test, feature = "store-contract"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod testkit;
 pub mod window;
 

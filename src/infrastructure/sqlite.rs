@@ -3096,6 +3096,14 @@ mod store_contract_tests {
         contract(|open| store_contract::leader_lifecycle(&open));
     }
     #[test]
+    fn ledger_earlier_answers_as_every_row() {
+        contract(|open| store_contract::ledger_earlier_answers_as_every_row(&open));
+    }
+    #[test]
+    fn ledger_earlier_past_an_old_writer() {
+        contract(|open| store_contract::ledger_earlier_past_an_old_writer(&open));
+    }
+    #[test]
     fn shared_spellings() {
         contract(|open| store_contract::shared_spellings(&open));
     }

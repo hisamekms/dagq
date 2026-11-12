@@ -7,6 +7,7 @@ mod cases;
 mod delegates;
 mod goal_landing_marks;
 mod goal_owners;
+pub(crate) mod ledger_earlier;
 mod ledger_first_executions;
 mod ledger_open;
 mod related;
@@ -17,6 +18,7 @@ pub use cases::*;
 pub use delegates::*;
 pub use goal_landing_marks::*;
 pub use goal_owners::*;
+pub use ledger_earlier::{ledger_earlier_answers_as_every_row, ledger_earlier_past_an_old_writer};
 pub use ledger_first_executions::*;
 pub use ledger_open::*;
 pub use related::related_cases;
@@ -173,6 +175,14 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         (
             "first executions parts",
             ledger_first_executions_parts::<S, F>,
+        ),
+        (
+            "ledger earlier answers as every row",
+            ledger_earlier_answers_as_every_row::<S, F>,
+        ),
+        (
+            "ledger earlier past an old writer",
+            ledger_earlier_past_an_old_writer::<S, F>,
         ),
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),

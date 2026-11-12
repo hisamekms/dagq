@@ -51,13 +51,18 @@
 //! - A run row comes when it holds a slot, an ask or a session to this day
 //!   ([`WindowRows::take_earlier`]).
 //! - The records of the task and session rows left out are among
-//!   [`LedgerWindow::events`] still (a store gives them without their rows,
-//!   and they are few beside the run rows' records): what a plan review
-//!   predicted, a proposal's planner and judge, the routes of a planner.
+//!   [`LedgerWindow::events`] still (a store gives them without their rows):
+//!   what a plan review predicted, a proposal's planner and judge, the routes
+//!   of a planner. A store that seeks them by what the rows read name
+//!   ([`named`]) gives those of what the range names alone, and of a task
+//!   named only as a member of a proposal named, its ends.
 //! - Of the run rows left out, what is read past their end
 //!   ([`EARLIER_RUN_KINDS`]) comes the same way, and their claims
 //!   ([`Earlier::claims`]), first Executions ([`Earlier::executions`]) and
-//!   what the landings' attempts read ([`Earlier::landings`]) apart.
+//!   what the landings' attempts read ([`Earlier::landings`]) apart: of
+//!   every such row, or of those left open and of the last landing's start
+//!   before the time with what the range names, as the store reads them
+//!   ([`crate::application::LedgerStore::ledger_earlier_named`]).
 //!
 //! All of this is read of one state of the rows
 //! ([`crate::application::LedgerStore::ledger_read_snapshot`]): a row that
@@ -432,11 +437,13 @@ pub fn ends_run_occupancy(event: &RunEvent) -> bool {
 /// the window keeps of it apart from its rows.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Earlier {
-    /// The claims of the runs left out, ascending id: a claim among
+    /// The claims of the runs left out (of those left open, as a store
+    /// that seeks reads them), ascending id: a claim among
     /// [`LedgerWindow::events`] would stand for a run the read does not hold.
     pub claims: Vec<RunEvent>,
     /// The first Execution of each actor and provider of the run rows left
-    /// out, by their entries.
+    /// out, by their entries, or of every run row: the least of them and
+    /// the rows read is the same either way ([`executions::window_after`]).
     pub executions: Vec<executions::FirstExecution>,
     /// What the landings' attempts and waits read of the runs left out
     /// ([`landing_utilization::reads`]), ascending id and with their runs: an
@@ -445,13 +452,14 @@ pub struct Earlier {
     pub landings: Vec<RunEvent>,
 }
 
-/// What a store reads of the rows a read from a time leaves out, whole: not
-/// the rows, which hold far more than their records.
+/// What a store reads of the rows a read from a time leaves out: not the
+/// rows, which hold far more than their records.
 #[derive(Debug, Default)]
 pub struct EarlierRecords {
-    /// Every record of the task and session rows, and those of
+    /// The records of the task and session rows, and those of
     /// [`EARLIER_RUN_KINDS`], [`RUN_END_STATUSES`] and
-    /// [`landing_utilization::reads`] of the run rows.
+    /// [`landing_utilization::reads`] of the run rows: every one, or those
+    /// a store seeks by what the rows read name ([`named`]).
     pub records: Vec<RunEvent>,
     pub executions: Vec<executions::FirstExecution>,
 }
@@ -662,6 +670,9 @@ struct ReadFrom {
     /// The rows taken or asked for, and those their rows and records name.
     asked: BTreeSet<(LedgerKind, String)>,
     wanted: BTreeSet<(LedgerKind, String)>,
+    /// What the rows taken name, for the store's read of what the rows left
+    /// out still give ([`named::Named`]).
+    named: named::Named,
 }
 
 impl ReadFrom {
@@ -671,6 +682,11 @@ impl ReadFrom {
         self.asked.insert((row.kind, row.key.clone()));
         if row.kind == LedgerKind::Node {
             return;
+        }
+        if row.kind == LedgerKind::Queue {
+            self.named.note_queue_row(row, self.ms);
+        } else {
+            self.named.note_row(row);
         }
         // A queue row's task is only that of the wait it stands for.
         if row.kind != LedgerKind::Queue
@@ -758,6 +774,13 @@ impl WindowRows {
             ended_before_ms: from.ms,
             inputs_through: from.queue_before,
         })
+    }
+
+    /// What the rows taken so far name, for a read from a time: what the
+    /// store seeks the records of the rows it leaves out by
+    /// ([`crate::application::LedgerWindowRead::earlier_named`]).
+    pub fn named(&self) -> Option<&named::Named> {
+        self.from.as_ref().map(|from| &from.named)
     }
 
     /// The rows not taken yet of the tasks the rows taken name and of the
@@ -1580,6 +1603,7 @@ pub(crate) fn through_ledger(events: &[RunEvent], until_secs: Option<i64>) -> Le
 }
 
 pub mod bounds;
+pub mod named;
 #[doc(hidden)]
 pub mod omitted;
 pub mod payload_text;

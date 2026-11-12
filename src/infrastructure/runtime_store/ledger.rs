@@ -405,6 +405,15 @@ fn marks_in(conn: &impl SqlRead) -> Result<Option<Marks>> {
 
 /// Write `row` on `conn` as [`LedgerStore::write_ledger_row`] says.
 fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
+    let written = upsert_row(conn, row)?;
+    write_left_open(conn, row)?;
+    kept_view(conn, View::First)?;
+    write_firsts(conn, crate::domain::ledger::builder::first_executions(row))?;
+    Ok(written)
+}
+
+/// The row of [`upsert`] alone, of neither view: whether it was not frozen.
+fn upsert_row(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
     let totals = &row.totals;
     let mut columns: Vec<(&str, SqlValue)> = vec![
         ("kind", row.kind.as_str().to_sql_value()),
@@ -517,9 +526,6 @@ fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
             .map(|(_, value)| value)
             .collect::<Vec<_>>(),
     )?;
-    write_left_open(conn, row)?;
-    kept_view(conn, View::First)?;
-    write_firsts(conn, crate::domain::ledger::builder::first_executions(row))?;
     Ok(!frozen)
 }
 
@@ -709,6 +715,62 @@ pub(crate) mod open_in {
     /// What the table holds, whatever its mark.
     pub(crate) fn entries(tx: &impl SqlRead) -> Result<BTreeMap<String, BTreeSet<Left>>> {
         left_open_entries(tx)
+    }
+
+    /// The parts of [`earlier_in_named`] sought by what is named.
+    pub(crate) use super::earlier::Sought;
+
+    /// Write `row` alone, as a binary that keeps neither table writes it.
+    pub(crate) fn write_row_alone(tx: &impl SqlWrite, row: &LedgerRow) -> Result<()> {
+        upsert_row(tx, row).map(|_| ())
+    }
+
+    /// Write `marks` as what builds the ledger writes them.
+    pub(crate) fn write_marks(tx: &impl SqlWrite, marks: &Marks) -> Result<()> {
+        write_mark(tx, &marks.sessions)?;
+        if let Some(rows) = &marks.rows {
+            write_rows_mark(tx, rows)?;
+        }
+        Ok(())
+    }
+
+    /// The keys of the run rows the table holds, whatever its mark.
+    pub(crate) fn left_open(tx: &impl SqlRead) -> Result<BTreeSet<String>> {
+        Ok(left_open_entries(tx)?.into_keys().collect())
+    }
+
+    /// The window `query` asks, read in `tx` as the store reads it.
+    pub(crate) fn window(
+        tx: &impl SqlRead,
+        query: &crate::domain::ledger::window::WindowQuery,
+    ) -> Result<crate::domain::ledger::window::LedgerWindow> {
+        crate::application::ledger_window_in(&LedgerSnapshot { tx }, query)
+    }
+
+    /// Which rows the read from a time of `query` leaves out and what the
+    /// rows it reads name.
+    pub(crate) fn named(
+        tx: &impl SqlRead,
+        query: &crate::domain::ledger::window::WindowQuery,
+    ) -> Result<(RowsFrom, crate::domain::ledger::window::named::Named)> {
+        crate::application::ledger_named_in(&LedgerSnapshot { tx }, query)?
+            .ok_or_else(|| anyhow::anyhow!("a read of every row"))
+    }
+
+    /// The read of the session rows by the range of their keys.
+    pub(crate) fn session_range_sql(
+        dialect: crate::infrastructure::sql_dialect::SqlDialect,
+    ) -> String {
+        super::earlier::session_range_sql(dialect)
+    }
+
+    /// [`LedgerStore::ledger_earlier_named`] in `tx`, with the parts sought.
+    pub(crate) fn earlier(
+        tx: &impl SqlRead,
+        from: &RowsFrom,
+        named: &crate::domain::ledger::window::named::Named,
+    ) -> Result<(EarlierRecords, Sought)> {
+        super::earlier::earlier_named_in(tx, from, named)
     }
 }
 
@@ -1447,13 +1509,27 @@ fn rows_from_in(
 }
 
 fn earlier_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<EarlierRecords> {
-    let dialect = SqlRead::dialect(tx);
-    let left_out = rows_left_out_sql(dialect, 2, 3);
-    let bound = (
+    let mut records = whole_records_in(tx, from)?;
+    records.extend(whole_run_records_in(tx, from)?);
+    Ok(EarlierRecords {
+        records,
+        executions: whole_executions_in(tx, from)?,
+    })
+}
+
+/// The values of [`rows_left_out_sql`] at `?2` to `?4`, after the kind.
+fn left_out_values(from: &RowsFrom) -> (i64, i64, String) {
+    (
         from.ended_before_ms,
         from.inputs_through.as_i64(),
         from.time_text(),
-    );
+    )
+}
+
+/// Every record of the task and session rows the read leaves out.
+fn whole_records_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<Vec<RunEvent>> {
+    let left_out = rows_left_out_sql(SqlRead::dialect(tx), 2, 3);
+    let bound = left_out_values(from);
     let mut records: Vec<RunEvent> = Vec::new();
     for kind in [LedgerKind::Task, LedgerKind::Session] {
         let read = SqlRead::query_map(
@@ -1470,6 +1546,14 @@ fn earlier_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<EarlierRecords> {
             records.extend(row?);
         }
     }
+    Ok(records)
+}
+
+/// What [`earlier_run_record_sql`] keeps of every run row the read leaves
+/// out.
+fn whole_run_records_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<Vec<RunEvent>> {
+    let dialect = SqlRead::dialect(tx);
+    let bound = left_out_values(from);
     let picked = SqlRead::query_map(
         tx,
         &format!(
@@ -1477,15 +1561,21 @@ fn earlier_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<EarlierRecords> {
                   WHERE r.kind=?1 AND {left_out} AND {kept}",
             record = dialect.json_element("j.value", JsonType::Text),
             records = dialect.json_elements("r.records"),
+            left_out = rows_left_out_sql(dialect, 2, 3),
             kept = earlier_run_record_sql(dialect),
         ),
         sql_params![LedgerKind::Run.as_str(), bound.0, bound.1, bound.2.as_str()],
         |r| Ok(serde_json::from_str::<RunEvent>(&r.get::<_, String>(0)?)),
     )?;
-    for event in picked {
-        records.push(event?);
-    }
-    let executions = SqlRead::query_map(
+    picked.into_iter().map(|event| Ok(event?)).collect()
+}
+
+/// The first Execution of each actor and provider of the run rows the
+/// read leaves out, of their details.
+fn whole_executions_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<Vec<FirstExecution>> {
+    let dialect = SqlRead::dialect(tx);
+    let bound = left_out_values(from);
+    Ok(SqlRead::query_map(
         tx,
         &format!(
             "SELECT {actor}, {provider}, MIN({at})
@@ -1496,6 +1586,7 @@ fn earlier_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<EarlierRecords> {
             actor = dialect.json_field_spaced("j.value", "$.actor", JsonType::Text),
             provider = dialect.json_field_spaced("j.value", "$.provider", JsonType::Text),
             at = dialect.json_field_spaced("j.value", "$.at", JsonType::Integer),
+            left_out = rows_left_out_sql(dialect, 2, 3),
         ),
         sql_params![LedgerKind::Run.as_str(), bound.0, bound.1, bound.2.as_str()],
         |r| {
@@ -1508,11 +1599,7 @@ fn earlier_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<EarlierRecords> {
     )?
     .into_iter()
     .filter_map(|(actor, provider, at)| FirstExecution::of(&actor?, provider?, at?))
-    .collect();
-    Ok(EarlierRecords {
-        records,
-        executions,
-    })
+    .collect())
 }
 
 struct LedgerSnapshot<'a, T> {
@@ -1577,6 +1664,13 @@ impl<T: SqlRead> crate::application::LedgerWindowRead for LedgerSnapshot<'_, T> 
     }
     fn earlier(&self, from: &RowsFrom) -> Result<EarlierRecords> {
         earlier_in(self.tx, from)
+    }
+    fn earlier_named(
+        &self,
+        from: &RowsFrom,
+        named: &crate::domain::ledger::window::named::Named,
+    ) -> Result<EarlierRecords> {
+        Ok(earlier::earlier_named_in(self.tx, from, named)?.0)
     }
     fn row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
         held_row(self.tx, kind, key)
@@ -1888,6 +1982,15 @@ impl<E: TransactionEntries> LedgerStore for StoreQueue<E> {
     fn ledger_earlier(&self, from: &RowsFrom) -> Result<EarlierRecords> {
         let tx = self.read_entry("ledger_earlier")?;
         earlier_in(&tx, from)
+    }
+
+    fn ledger_earlier_named(
+        &self,
+        from: &RowsFrom,
+        named: &crate::domain::ledger::window::named::Named,
+    ) -> Result<EarlierRecords> {
+        let tx = self.read_entry("ledger_earlier_named")?;
+        Ok(earlier::earlier_named_in(&tx, from, named)?.0)
     }
 
     /// The ids of the records come from SQLite's JSON functions over the
@@ -2773,6 +2876,8 @@ fn ledger_row(r: &SqlRow<'_>) -> SqlResult<Result<LedgerRow>> {
 
 #[cfg(test)]
 mod earlier_read_plan_tests;
+#[cfg(test)]
+mod earlier_tests;
 #[cfg(test)]
 mod omitted_tests;
 #[cfg(test)]
@@ -5108,6 +5213,7 @@ mod tests {
     }
 }
 
+mod earlier;
 mod visibility;
 
 mod small;

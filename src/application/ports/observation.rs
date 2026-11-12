@@ -797,14 +797,79 @@ pub trait LedgerStore {
         self.ledger_rows_after(kind, after, limit)
     }
     /// What the rows `from` leaves out still give
-    /// ([`crate::domain::ledger::window::EarlierRecords`]); a store that
-    /// leaves none out has none.
+    /// ([`crate::domain::ledger::window::EarlierRecords`]), read of every
+    /// row it leaves out; a store that leaves none out has none. A read
+    /// from a time asks [`Self::ledger_earlier_named`], which a store that
+    /// seeks by what the range names reads in proportion to it.
     fn ledger_earlier(
         &self,
         from: &crate::domain::ledger::window::RowsFrom,
     ) -> Result<crate::domain::ledger::window::EarlierRecords> {
         let _ = from;
         Ok(crate::domain::ledger::window::EarlierRecords::default())
+    }
+    /// [`Self::ledger_earlier`] read by what the rows read name (`named`,
+    /// [`crate::domain::ledger::window::named::Named`]), so that it is in
+    /// proportion to what the range names and to the runs left open, not
+    /// to the settled history outside the range
+    /// (docs/plans/ledger-window-earlier-visibility-spike.md, "読みの約束"
+    /// 3 to 5 as "追試 (i) earlier" updates them). The answers of every
+    /// window are those of [`Self::ledger_earlier`]:
+    ///
+    /// - The run rows left out (promise 3): of those the table of what each
+    ///   run row leaves open names (a slot, an ask or a landing's wait with
+    ///   no end, a session no close's `opened_event_id` pairs), each read
+    ///   whole by its key.
+    /// - The records of the task rows left out (promise 4): those of the
+    ///   tasks, plan reviews and proposals the range's records name (by the
+    ///   task, the plan review's id and `follow_up_registered`'s `task_id`),
+    ///   and the plan's changes of the tasks of a forecast's snapshot that
+    ///   names a task named. A task named only as a member of a proposal
+    ///   named (its `task_submitted` or `task_reopened` by the proposal, or
+    ///   of a goal a `goal_submitted` puts in the proposal or in one a
+    ///   finding read links, by its creation's or baseline's `goal_id` and
+    ///   its change of goal's `to`) gives its ends alone
+    ///   ([`crate::domain::ledger::window::named::member_end`]), each the
+    ///   last of its task and kind the whole read sees (a walk down past
+    ///   those no row holds yet, as many as the builder is behind), and the
+    ///   records of it that name a proposal named (its cancellation). A
+    ///   proposal a finding links that a `goal_submitted` puts a goal in is
+    ///   named so too, its own tasks and cancellation sought by it, since
+    ///   it runs on its goal's tasks. The
+    ///   session rows left out: those of the planners
+    ///   (by `planner_id` and by the asker `planner:<id>`, the actor or,
+    ///   with none, `asked_by`, of the records read and of the queue's
+    ///   from the time) and plan reviews named,
+    ///   by the range of their keys compared by their bytes, whatever the
+    ///   store's collation. Of the EventStore, the events a seek
+    ///   gives are kept as visible as the whole read holds them
+    ///   ([`LedgerWindowRead::visible_events`]).
+    /// - Promise 5: the run of the last `integration_started` of a time at
+    ///   or before the time among those the run rows left out hold, by id
+    ///   (a walk down the ids of the kind, as many as there are starts timed
+    ///   after it, of the rows read and of no row yet), and the first
+    ///   Execution of
+    ///   each actor and provider from the table of every run row's: its
+    ///   least with the rows read is that of every row, so that
+    ///   `recorded_from` and the coverage are the same.
+    ///
+    /// So it reads as many as the range names and the runs left open, and
+    /// the actors and providers. `improvement_proposals`' links of the
+    /// findings come of the queue's rows, which this does not read: a read
+    /// of every finding's row keeps them. A part goes back to
+    /// [`Self::ledger_earlier`]'s read when what it stands on cannot be
+    /// trusted: the run rows' unless the store holds the table of what they
+    /// leave open, filled through the write leader's generation, the first
+    /// Executions' unless it holds their table so filled, and every part read of the EventStore when
+    /// the visibility of its events cannot be judged. A store that keeps
+    /// none of these reads [`Self::ledger_earlier`].
+    fn ledger_earlier_named(
+        &self,
+        from: &crate::domain::ledger::window::RowsFrom,
+        named: &crate::domain::ledger::window::named::Named,
+    ) -> Result<crate::domain::ledger::window::EarlierRecords> {
+        let _ = named;
+        self.ledger_earlier(from)
     }
     /// Make the reads of `read` of one state of the rows, whatever is written
     /// meanwhile. A store whose [`Self::ledger_rows_from`] leaves nothing out
@@ -969,19 +1034,79 @@ fn window_rows(
     for kind in others {
         read.take_pages(|after, limit| snapshot.rows_from(kind, after, limit, &from))?;
     }
-    read.take_earlier(snapshot.earlier(&from)?);
+    // The rows those rows want first, so that what the earlier records are
+    // sought by is known; then those of the runs the earlier ones leave open.
+    take_wanted(snapshot, &mut read)?;
+    let named = read.named().cloned().unwrap_or_default();
+    read.take_earlier(snapshot.earlier_named(&from, &named)?);
+    take_wanted(snapshot, &mut read)?;
+    let mut read = with_runs_on_their_way(snapshot, read, query)?;
+    read.take_omitted_edges(query, &edges.now()?)?;
+    Ok(read)
+}
+
+/// Take into `read` the rows it wants of `snapshot` until none is left.
+fn take_wanted(
+    snapshot: &dyn LedgerWindowRead,
+    read: &mut crate::domain::ledger::window::WindowRows,
+) -> Result<()> {
     loop {
         let wanted = read.rows_wanted();
         if wanted.is_empty() {
-            break;
+            return Ok(());
         }
         for (kind, key) in wanted {
             read.take_row(snapshot.row(kind, &key)?);
         }
     }
-    let mut read = with_runs_on_their_way(snapshot, read, query)?;
-    read.take_omitted_edges(query, &edges.now()?)?;
-    Ok(read)
+}
+
+/// Which rows the read from a time of `query` leaves out of `snapshot` and
+/// what the rows it reads name, as [`LedgerStore::ledger_window`] takes
+/// them before it reads what the rows left out still give; none for a
+/// read of every row.
+#[cfg(any(test, feature = "store-contract"))]
+pub fn ledger_named_in(
+    snapshot: &dyn LedgerWindowRead,
+    query: &WindowQuery,
+) -> Result<
+    Option<(
+        crate::domain::ledger::window::RowsFrom,
+        crate::domain::ledger::window::named::Named,
+    )>,
+> {
+    let reads = OmittedReads(snapshot);
+    let edges = Edges(Some(&reads));
+    let mut read = crate::domain::ledger::window::WindowRows::new(query, 0);
+    take_queue_rows(snapshot, &mut read, &edges)?;
+    let Some(from) = read.rows_from() else {
+        return Ok(None);
+    };
+    for kind in LedgerKind::ALL
+        .into_iter()
+        .filter(|kind| *kind != LedgerKind::Queue)
+    {
+        read.take_pages(|after, limit| snapshot.rows_from(kind, after, limit, &from))?;
+    }
+    take_wanted(snapshot, &mut read)?;
+    Ok(Some((from, read.named().cloned().unwrap_or_default())))
+}
+
+/// The window `query` asks of `snapshot`, read as
+/// [`LedgerStore::ledger_window`] reads it in its snapshot: what a store's
+/// contract drives on a transaction of its own.
+#[cfg(any(test, feature = "store-contract"))]
+pub fn ledger_window_in(
+    snapshot: &dyn LedgerWindowRead,
+    query: &WindowQuery,
+) -> Result<LedgerWindow> {
+    use crate::domain::ledger::window::WindowRows;
+    let reads = OmittedReads(snapshot);
+    let edges = Edges(Some(&reads));
+    let read = window_rows(snapshot, query, WindowRows::new(query, 0), &edges)?;
+    let mut window = read.into_window(query);
+    crate::domain::ledger::window::bounds::answer(&mut window, query, &edges.now()?)?;
+    Ok(window)
 }
 
 /// The window `query` asks of `store` read as [`LedgerStore::ledger_window`]
@@ -1092,6 +1217,13 @@ impl LedgerWindowRead for NarrowQueue<'_> {
         from: &crate::domain::ledger::window::RowsFrom,
     ) -> Result<crate::domain::ledger::window::EarlierRecords> {
         self.0.earlier(from)
+    }
+    fn earlier_named(
+        &self,
+        from: &crate::domain::ledger::window::RowsFrom,
+        named: &crate::domain::ledger::window::named::Named,
+    ) -> Result<crate::domain::ledger::window::EarlierRecords> {
+        self.0.earlier_named(from, named)
     }
     fn row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
         self.0.row(kind, key)
@@ -1342,6 +1474,16 @@ pub trait LedgerWindowRead {
         &self,
         from: &crate::domain::ledger::window::RowsFrom,
     ) -> Result<crate::domain::ledger::window::EarlierRecords>;
+    /// [`LedgerStore::ledger_earlier_named`] of the snapshot: one that
+    /// seeks nothing by what is named reads [`Self::earlier`].
+    fn earlier_named(
+        &self,
+        from: &crate::domain::ledger::window::RowsFrom,
+        named: &crate::domain::ledger::window::named::Named,
+    ) -> Result<crate::domain::ledger::window::EarlierRecords> {
+        let _ = named;
+        self.earlier(from)
+    }
     fn row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
     fn run_events(&self, run: &RunId) -> Result<Vec<RunEvent>>;
     /// [`LedgerStore::ledger_omitted_coverage`] of the snapshot: none for
@@ -1419,6 +1561,13 @@ impl<T: LedgerStore + ?Sized> LedgerWindowRead for &T {
         from: &crate::domain::ledger::window::RowsFrom,
     ) -> Result<crate::domain::ledger::window::EarlierRecords> {
         self.ledger_earlier(from)
+    }
+    fn earlier_named(
+        &self,
+        from: &crate::domain::ledger::window::RowsFrom,
+        named: &crate::domain::ledger::window::named::Named,
+    ) -> Result<crate::domain::ledger::window::EarlierRecords> {
+        self.ledger_earlier_named(from, named)
     }
     fn row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
         self.ledger_row(kind, key)

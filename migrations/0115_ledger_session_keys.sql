@@ -1,0 +1,8 @@
+-- dagq-schema: compatible
+-- The read of the session rows a read from a time leaves out, by the range
+-- of their keys' prefix (`runtime_planner/<id>/` to `runtime_planner/<id>0`,
+-- src/infrastructure/runtime_store/ledger/earlier.rs): SQLite compares text
+-- by its bytes, so the primary key (kind, key) seeks the range and this
+-- store adds nothing. Postgres compares a key by the database's collation,
+-- which need not put '/' before '0', so its side indexes the session keys
+-- by their bytes (ledger_session_keys in migrations-postgres).

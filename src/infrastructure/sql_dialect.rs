@@ -125,10 +125,30 @@ impl SqlDialect {
         self.json_expression(column, &path_literal(path), ty, TIGHT)
     }
 
+    /// `expr` compared by the bytes of its text: Postgres compares a text
+    /// column by the database's collation, which may not order `/` before
+    /// `0` as a range of keys' prefix needs; SQLite's default is the bytes.
+    pub(crate) fn by_bytes(self, expr: &str) -> String {
+        match self {
+            Self::Sqlite => expr.to_owned(),
+            Self::Postgres => format!("({expr} COLLATE \"C\")"),
+        }
+    }
+
+    /// One row (`1`) when the table named `?1` is in the store's schema,
+    /// none when it is not.
+    pub(crate) fn table_exists_sql(self) -> String {
+        match self {
+            Self::Sqlite => "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1".into(),
+            Self::Postgres => "SELECT 1 FROM information_schema.tables
+              WHERE table_schema = current_schema() AND table_name = ?1"
+                .into(),
+        }
+    }
+
     /// A top-level JSON key used by the ledger's earlier seeks and their
     /// expression indexes. Bind numeric IDs as integers in SQLite and text
     /// in Postgres; no cast may wrap this expression in the read.
-    #[allow(dead_code)] // The earlier reads will use the indexes before replacing the whole read.
     pub(crate) fn ledger_index_key(self, column: &str, key: &str) -> String {
         debug_assert!(key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
         match self {
@@ -558,6 +578,42 @@ mod tests {
             SqlDialect::Postgres.indexed_by("events_by_opened_event"),
             ""
         );
+    }
+
+    /// A range of keys' prefix compares bytes in both: SQLite's text is
+    /// bytes already, Postgres takes the C collation the session keys'
+    /// index (`ledger_rows_session_keys`) is of.
+    #[test]
+    fn a_comparison_by_bytes_is_spelled_as_each_dialect_s_index_is() {
+        assert_eq!(SqlDialect::Sqlite.by_bytes("r.key"), "r.key");
+        assert_eq!(
+            SqlDialect::Postgres.by_bytes("r.key"),
+            "(r.key COLLATE \"C\")"
+        );
+    }
+
+    /// Whether a table is in the schema reads each store's own catalog.
+    #[test]
+    fn a_table_s_presence_is_read_of_each_dialect_s_catalog() {
+        let sqlite = SqlDialect::Sqlite.table_exists_sql();
+        assert!(sqlite.contains("sqlite_master") && sqlite.contains("name = ?1"));
+        let postgres = SqlDialect::Postgres.table_exists_sql();
+        assert!(
+            postgres.contains("information_schema.tables")
+                && postgres.contains("current_schema()")
+                && postgres.contains("table_name = ?1")
+        );
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE here(x)").unwrap();
+        for (name, held) in [("here", true), ("gone", false)] {
+            let rows = conn
+                .prepare(&sqlite)
+                .unwrap()
+                .query_map([name], |r| r.get::<_, i64>(0))
+                .unwrap()
+                .count();
+            assert_eq!(rows == 1, held, "{name}");
+        }
     }
 
     #[test]
