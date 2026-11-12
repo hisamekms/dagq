@@ -994,6 +994,130 @@ pub fn ledger_window_payload_text<S: LedgerStore + ?Sized>(
     })
 }
 
+/// [`LedgerStore::ledger_window`] with the queue's rows read by
+/// [`LedgerWindowRead::queue_records_after`] (their keys and records
+/// only), the same rows, records, edges and bounds otherwise: the
+/// prototype of a read of the queue's rows narrowed to what a window keeps
+/// of them (docs/plans/ledger-window-payload-text-spike.md), which no read
+/// of `stats`, `kpi` or `report` makes.
+#[doc(hidden)]
+pub fn ledger_window_narrow_queue<S: LedgerStore + ?Sized>(
+    store: &S,
+    query: &WindowQuery,
+) -> Result<LedgerWindow> {
+    use crate::domain::ledger::window::WindowRows;
+    narrow_queue_window(store, query, WindowRows::new, true, |read, edges| {
+        let mut window = read.into_window(query);
+        crate::domain::ledger::window::bounds::answer(&mut window, query, &edges.now()?)?;
+        Ok(window)
+    })
+}
+
+/// [`ledger_window_payload_text`] with the queue's rows read as
+/// [`ledger_window_narrow_queue`] reads them: the prototype of both
+/// (docs/plans/ledger-window-payload-text-spike.md).
+#[doc(hidden)]
+pub fn ledger_window_payload_text_narrow_queue<S: LedgerStore + ?Sized>(
+    store: &S,
+    query: &WindowQuery,
+) -> Result<crate::domain::ledger::window::payload_text::TextWindow> {
+    use crate::domain::ledger::window::WindowRows;
+    narrow_queue_window(store, query, WindowRows::payload_text, false, |read, _| {
+        Ok(read.into_text_window())
+    })
+}
+
+/// [`read_window`] of the snapshot with its queue's rows narrowed
+/// ([`NarrowQueue`]).
+fn narrow_queue_window<S: LedgerStore + ?Sized, T>(
+    store: &S,
+    query: &WindowQuery,
+    new: fn(&WindowQuery, usize) -> crate::domain::ledger::window::WindowRows,
+    omitted: bool,
+    mut finish: impl FnMut(crate::domain::ledger::window::WindowRows, &Edges<'_, '_>) -> Result<T>,
+) -> Result<T> {
+    let expected = match query.read_from_ms {
+        None => store.ledger_events_expected()?,
+        Some(_) => 0,
+    };
+    let mut taken = None;
+    store.ledger_read_snapshot(&mut |snapshot| {
+        let narrow = NarrowQueue(snapshot);
+        let reads = OmittedReads(&narrow);
+        let edges = Edges(omitted.then_some(&reads));
+        let read = window_rows(&narrow, query, new(query, expected), &edges)?;
+        taken = Some(finish(read, &edges)?);
+        Ok(())
+    })?;
+    taken.ok_or_else(|| anyhow::anyhow!("the ledger's snapshot read nothing"))
+}
+
+/// A snapshot whose queue's rows are read by
+/// [`LedgerWindowRead::queue_records_after`], every other read passed on.
+struct NarrowQueue<'a>(&'a dyn LedgerWindowRead);
+
+impl LedgerWindowRead for NarrowQueue<'_> {
+    fn rows_after(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        match kind {
+            LedgerKind::Queue => self.0.queue_records_after(after, limit),
+            _ => self.0.rows_after(kind, after, limit),
+        }
+    }
+    fn rows_from(
+        &self,
+        kind: LedgerKind,
+        after: Option<&str>,
+        limit: usize,
+        from: &crate::domain::ledger::window::RowsFrom,
+    ) -> Result<Vec<LedgerRow>> {
+        match kind {
+            LedgerKind::Queue => self.0.queue_records_after(after, limit),
+            _ => self.0.rows_from(kind, after, limit, from),
+        }
+    }
+    fn earlier(
+        &self,
+        from: &crate::domain::ledger::window::RowsFrom,
+    ) -> Result<crate::domain::ledger::window::EarlierRecords> {
+        self.0.earlier(from)
+    }
+    fn row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
+        self.0.row(kind, key)
+    }
+    fn run_events(&self, run: &RunId) -> Result<Vec<RunEvent>> {
+        self.0.run_events(run)
+    }
+    fn omitted_coverage(&self) -> Result<Option<Coverage>> {
+        self.0.omitted_coverage()
+    }
+    fn omitted_points_after(&self, kind: &str, after: EventId, limit: usize) -> Result<Vec<Point>> {
+        self.0.omitted_points_after(kind, after, limit)
+    }
+    fn omitted_point_at_or_before(&self, kind: &str, at: EventId) -> Result<Option<Point>> {
+        self.0.omitted_point_at_or_before(kind, at)
+    }
+    fn omitted_point_before_ms(&self, kind: &str, ms: i64) -> Result<Option<Point>> {
+        self.0.omitted_point_before_ms(kind, ms)
+    }
+    fn event(&self, id: EventId) -> Result<Option<RunEvent>> {
+        self.0.event(id)
+    }
+    fn events_of_kind(
+        &self,
+        kind: &str,
+        after: EventId,
+        upto: EventId,
+        limit: usize,
+    ) -> Result<Vec<RunEvent>> {
+        self.0.events_of_kind(kind, after, upto, limit)
+    }
+}
+
 /// What a window's edges read of a snapshot
 /// ([`crate::domain::ledger::window::omitted::OmittedRead`]).
 struct OmittedReads<'a>(&'a dyn LedgerWindowRead);
@@ -1253,6 +1377,15 @@ pub trait LedgerWindowRead {
     ) -> Result<Vec<RunEvent>> {
         let _ = (kind, after, upto, limit);
         anyhow::bail!("this snapshot gives no events of a kind")
+    }
+    /// [`Self::rows_after`] of the queue's rows with only what a window
+    /// keeps of one (its key and its records; the rest is left at its
+    /// default): the prototype of [`ledger_window_narrow_queue`], which no
+    /// read of `stats`, `kpi` or `report` makes. A snapshot without its
+    /// own reads the rows whole.
+    #[doc(hidden)]
+    fn queue_records_after(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
+        self.rows_after(LedgerKind::Queue, after, limit)
     }
 }
 

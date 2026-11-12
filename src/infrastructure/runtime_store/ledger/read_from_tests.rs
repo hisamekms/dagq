@@ -411,3 +411,49 @@ fn the_read_of_the_payloads_as_text_decodes_to_the_stores_window() {
         assert_eq!(text.rows, values.rows, "{query:?}");
     }
 }
+
+/// The store's read with the queue's rows narrowed to their keys and
+/// records ([`crate::application::ledger_window_narrow_queue`]), and with
+/// the payloads as text too, gives the window [`LedgerStore::ledger_window`]
+/// gives, read from a time or whole: a window keeps nothing of a queue row
+/// but its records.
+#[test]
+fn the_read_of_the_queue_rows_narrowed_gives_the_stores_window() {
+    let (_dir, queue, rows) = queue_of_rows();
+    assert!(rows.iter().any(|row| row.kind == LedgerKind::Queue));
+    // The narrowed page holds the same keys and records, nothing else.
+    queue
+        .ledger_read_snapshot(&mut |snapshot| {
+            let whole = snapshot.rows_after(LedgerKind::Queue, None, ROWS_PER_PAGE)?;
+            let narrow = snapshot.queue_records_after(None, ROWS_PER_PAGE)?;
+            let of = |rows: &[LedgerRow]| -> Vec<(String, Vec<EventId>)> {
+                rows.iter()
+                    .map(|row| (row.key.clone(), row.records.iter().map(|e| e.id).collect()))
+                    .collect()
+            };
+            assert_eq!(of(&narrow), of(&whole));
+            assert!(
+                narrow
+                    .iter()
+                    .all(|row| row.detail.is_null() && row.subject.is_none())
+            );
+            Ok(())
+        })
+        .unwrap();
+    let whole = WindowQuery {
+        read_from_ms: None,
+        ..read_from()
+    };
+    for query in [read_from(), whole] {
+        let values = queue.ledger_window(&query).unwrap();
+        let narrow = crate::application::ledger_window_narrow_queue(&queue, &query).unwrap();
+        let text = crate::application::ledger_window_payload_text_narrow_queue(&queue, &query)
+            .unwrap()
+            .into_window(&query);
+        for read in [&narrow, &text] {
+            assert_eq!(read.events(), values.events(), "{query:?}");
+            assert_eq!(held(read), held(&values), "{query:?}");
+            assert_eq!(read.rows, values.rows, "{query:?}");
+        }
+    }
+}

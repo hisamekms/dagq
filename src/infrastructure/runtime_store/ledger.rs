@@ -1245,6 +1245,69 @@ fn rows_after_in(
     rows.into_iter().collect()
 }
 
+/// The queue's rows of [`rows_after_in`] with only their keys and records
+/// selected and parsed, every other part at its default: the prototype
+/// [`crate::application::ledger_window_narrow_queue`] reads, by the same
+/// range of the primary key.
+fn queue_records_after_in(
+    tx: &impl SqlRead,
+    after: Option<&str>,
+    limit: usize,
+) -> Result<Vec<LedgerRow>> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let row = |r: &SqlRow<'_>| -> SqlResult<Result<LedgerRow>> {
+        let key: String = r.get("key")?;
+        let records: String = r.get("records")?;
+        Ok(serde_json::from_str(&records)
+            .map_err(anyhow::Error::from)
+            .map(|records| LedgerRow {
+                kind: LedgerKind::Queue,
+                key,
+                task_id: None,
+                ledger_v: 0,
+                built_at: String::new(),
+                inputs_from: EventId::new(0),
+                inputs_through: InputsThrough {
+                    events: EventId::new(0),
+                    supervisor: None,
+                    life_ended: Vec::new(),
+                    node_samples: None,
+                    steps: None,
+                    resources: None,
+                    inside_resources: None,
+                },
+                is_final: false,
+                started_at: None,
+                ended_at: None,
+                outcome: None,
+                totals: Totals::default(),
+                intervals: Vec::new(),
+                attributes: serde_json::Map::new(),
+                after_claim: None,
+                detail: Value::Null,
+                legacy: None,
+                subject: None,
+                records,
+            }))
+    };
+    let queue = LedgerKind::Queue.as_str();
+    let rows = match after {
+        Some(after) => SqlRead::query_map(
+            tx,
+            "SELECT key, records FROM ledger_rows WHERE kind=?1 AND key > ?2 ORDER BY key LIMIT ?3",
+            sql_params![queue, after, limit],
+            row,
+        )?,
+        None => SqlRead::query_map(
+            tx,
+            "SELECT key, records FROM ledger_rows WHERE kind=?1 ORDER BY key LIMIT ?2",
+            sql_params![queue, limit],
+            row,
+        )?,
+    };
+    rows.into_iter().collect()
+}
+
 fn rows_from_in(
     tx: &impl SqlRead,
     kind: LedgerKind,
@@ -1413,6 +1476,9 @@ impl<T: SqlRead> crate::application::LedgerWindowRead for LedgerSnapshot<'_, T> 
         from: &RowsFrom,
     ) -> Result<Vec<LedgerRow>> {
         rows_from_in(self.tx, kind, after, limit, from)
+    }
+    fn queue_records_after(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
+        queue_records_after_in(self.tx, after, limit)
     }
     fn earlier(&self, from: &RowsFrom) -> Result<EarlierRecords> {
         earlier_in(self.tx, from)

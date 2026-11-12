@@ -25,7 +25,11 @@
 //! (all but [`UNREAD_KINDS`]) and keeps the others' records without one,
 //! `text-kinds-synthetic` all but [`SYNTHETIC_UNREAD_KINDS`];
 //! `text-without:<kind>` leaves out the payloads of `<kind>` alone, to check
-//! that no read's answer changes without them. `parts
+//! that no read's answer changes without them. `narrow` makes the
+//! runtime's read with the queue's rows read narrowed to their keys and
+//! records (`dagq::application::ledger_window_narrow_queue`), and
+//! `<text candidate>-narrow` a `text` read so (`text-kinds-narrow`: (1)+(2)
+//! of the spike's document). `parts
 //! <dir>` reads the rows the store holds and prints what a copy of each of
 //! their parts takes, in a process of its own so that the copies count in no
 //! read's peak.
@@ -819,9 +823,31 @@ fn whole(dir: &Path, name: &str, candidate: &str) {
             let window = dagq::application::report::window(&queue, now).unwrap();
             fold(&window, now, &read, &queue)
         }
+        ("narrow", _) => {
+            // The runtime's query (its bounds too) with the queue's rows
+            // read narrowed to their keys and records.
+            let mut query = window_query(&read, now);
+            if let Read::Kpi(kpi_query) = &read {
+                query.bounds =
+                    kpi::declared(vec![kpi_query.clone()], now, host(), &config, Some(&areas));
+            }
+            let window = dagq::application::ledger_window_narrow_queue(&queue, &query).unwrap();
+            fold(&window, now, &read, &queue)
+        }
         _ if candidate.starts_with("text") => {
             let query = window_query(&read, now);
-            let text = dagq::application::ledger_window_payload_text(&queue, &query).unwrap();
+            // `<candidate>-narrow`: the same with the queue's rows read
+            // narrowed to their keys and records, (1)+(2).
+            let (candidate, narrow) = match candidate.strip_suffix("-narrow") {
+                Some(candidate) => (candidate, true),
+                None => (candidate, false),
+            };
+            let text = if narrow {
+                dagq::application::ledger_window_payload_text_narrow_queue(&queue, &query)
+            } else {
+                dagq::application::ledger_window_payload_text(&queue, &query)
+            }
+            .unwrap();
             let read_peak = peak().saturating_sub(base);
             let held = in_use().saturating_sub(base);
             let payload_bytes: usize = text.records.iter().map(|event| event.payload.len()).sum();
@@ -994,7 +1020,7 @@ fn main() {
         Some("parts") if args.len() == 3 => parts(Path::new(arg(2))),
         _ => {
             eprintln!(
-                "usage: kpi_read_memory prepare <dir> <events> [days] | whole <dir> <kpi|kpi-since|kpi-range|kpi-whole|observer|stats|stats-since> [lean|text] | parts <dir>"
+                "usage: kpi_read_memory prepare <dir> <events> [days] | whole <dir> <kpi|kpi-since|kpi-range|kpi-whole|observer|stats|stats-since> [lean|narrow|text[-kinds|-parts][-narrow]] | parts <dir>"
             );
             std::process::exit(2);
         }

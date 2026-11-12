@@ -23,8 +23,10 @@
 //! readers decode a payload where they read it, and drop it after, has no
 //! prototype here: its readers take today's [`RunEvent`]s.
 //!
-//! A later Spike that reads fewer of the queue rows' columns takes the same
-//! entry over its own store: the records it gives are turned to text alike.
+//! [`crate::application::ledger_window_payload_text_narrow_queue`] is the
+//! same read with the queue rows' columns narrowed to their keys and
+//! records ([`crate::application::LedgerWindowRead::queue_records_after`]):
+//! the records it gives are turned to text alike.
 
 use super::{
     Earlier, LedgerRow, LedgerWindow, RecordGoals, WindowQuery, WindowRows, of_records, settled,
