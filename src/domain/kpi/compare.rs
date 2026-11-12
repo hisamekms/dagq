@@ -207,7 +207,7 @@ fn named_change(marks: &[Mark], groups: &[Vec<Mark>], cursor: Cursor) -> Option<
 }
 
 /// A window of a comparison (unix ms, the start exclusive).
-type Window = (i64, i64);
+pub(super) type Window = (i64, i64);
 
 /// The split `spec` names and the windows before and after it, as
 /// [`compare`] compares them.
@@ -216,27 +216,42 @@ pub(super) fn spans(
     spec: CompareSpec,
     query: &KpiQuery,
 ) -> Result<(Option<Split>, Window, Window), String> {
-    let min_samples = context.min_samples;
-    let groups = overlapping_groups(&context.marks, &context.finishes, min_samples);
-    let at = |cursor: Cursor| {
-        context
-            .edges
-            .cursor_ms(cursor)
-            .ok_or("--compare names no event")
-    };
+    split_windows(
+        &context.marks,
+        &context.finishes,
+        context.min_samples,
+        spec,
+        query,
+        |cursor| context.edges.cursor_ms(cursor),
+    )
+}
+
+/// [`spans`] of `marks` and `finishes` (ascending) with `min_samples`, the
+/// time of a cursor given by `cursor_ms`: what a comparison's groups and
+/// windows are cut by, whether a context holds every event or the read
+/// gave them apart ([`super::range::cohort`]).
+pub(super) fn split_windows(
+    marks: &[Mark],
+    finishes: &[i64],
+    min_samples: usize,
+    spec: CompareSpec,
+    query: &KpiQuery,
+    cursor_ms: impl Fn(Cursor) -> Option<i64>,
+) -> Result<(Option<Split>, Window, Window), String> {
+    let groups = overlapping_groups(marks, finishes, min_samples);
+    let at = |cursor: Cursor| cursor_ms(cursor).ok_or("--compare names no event");
     Ok(match spec {
         CompareSpec::At(cursor) => {
             let time = match cursor {
                 // Split at the mark's effective time: a person's --at, or a
                 // pruned supervisor stop's last heartbeat, may precede recording.
-                Cursor::Event(id) => context
-                    .marks
+                Cursor::Event(id) => marks
                     .iter()
                     .find(|mark| mark.id == Some(id))
                     .map_or_else(|| at(cursor), |mark| Ok(mark_ms(mark)))?,
                 Cursor::Time(ms) => ms,
             };
-            let group = named_change(&context.marks, &groups, cursor);
+            let group = named_change(marks, &groups, cursor);
             let (first, last) = group.as_ref().map_or((time, time), |group| {
                 (mark_ms(&group[0]), mark_ms(&group[group.len() - 1]))
             });

@@ -39,6 +39,7 @@ pub mod config;
 pub mod observe;
 pub mod pair;
 pub mod push;
+pub mod range;
 pub mod report;
 pub mod trial;
 mod window;
@@ -1198,6 +1199,16 @@ fn spans(
 /// `--compare` window, worked out of those answers as [`kpi`] works them
 /// out. A query `kpi` refuses declares what it got to.
 pub fn bounds(input: &KpiInput<'_>, query: &KpiQuery) -> Vec<Bound> {
+    bounds_with(input, query, None)
+}
+
+/// [`bounds`] of [`kpi_with`]: a comparison's windows are cut of `cohort`
+/// when given, as [`kpi_with`] cuts them.
+pub fn bounds_with(
+    input: &KpiInput<'_>,
+    query: &KpiQuery,
+    cohort: Option<&range::Cohort>,
+) -> Vec<Bound> {
     let answered = |bound: &Bound| input.answers.is_some_and(|answers| answers.has(*bound));
     let mut cursors = vec![query.since, query.until, query.at];
     match query.compare {
@@ -1237,7 +1248,11 @@ pub fn bounds(input: &KpiInput<'_>, query: &KpiQuery) -> Vec<Bound> {
         times.extend(spans.iter().flat_map(|(_, span)| [span.start, span.end]));
     }
     if let Some(spec) = query.compare {
-        let context = Context::new(input, query);
+        let mut context = Context::new(input, query);
+        if let Some(cohort) = cohort {
+            context.marks.clone_from(&cohort.marks);
+            context.finishes.clone_from(&cohort.finishes);
+        }
         if let Ok((_, before, after)) = compare::spans(&context, spec, query) {
             times.extend([before.0, before.1, after.0, after.1]);
         }
@@ -1247,11 +1262,27 @@ pub fn bounds(input: &KpiInput<'_>, query: &KpiQuery) -> Vec<Bound> {
 
 /// The KPIs `query` asks for.
 pub fn kpi(input: &KpiInput<'_>, query: &KpiQuery) -> Result<Kpi, String> {
+    kpi_with(input, query, None)
+}
+
+/// [`kpi`] whose comparison's groups are cut of `cohort` (every mark and
+/// run finish, read apart from the window's events: [`range::cohort`])
+/// instead of the marks and finishes of `input`'s events; the same answer
+/// when `input` holds every event. `None` is [`kpi`].
+pub fn kpi_with(
+    input: &KpiInput<'_>,
+    query: &KpiQuery,
+    cohort: Option<&range::Cohort>,
+) -> Result<Kpi, String> {
     if query.last == 0 {
         return Err("--last must be at least 1".into());
     }
     let config = input.config;
-    let context = Context::new(input, query);
+    let mut context = Context::new(input, query);
+    if let Some(cohort) = cohort {
+        context.marks.clone_from(&cohort.marks);
+        context.finishes.clone_from(&cohort.finishes);
+    }
     let now_ms = input.now * 1000;
     let offset_ms = input.utc_offset_secs * 1000;
     let mut axes = vec![Axis::CHANGE, Axis::AREA];
