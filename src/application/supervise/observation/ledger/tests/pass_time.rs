@@ -426,3 +426,303 @@ fn the_time_bound_records_what_the_count_did_and_makes_the_same_ledger() {
     }
     assert!(ahead);
 }
+
+/// A clock each of whose reads is `.1` after the one before.
+struct Stepping(std::sync::Mutex<Instant>, Duration);
+
+impl crate::application::Clock for Stepping {
+    fn system_time(&self) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH
+    }
+
+    fn monotonic(&self) -> Instant {
+        let mut next = self.0.lock().unwrap();
+        let at = *next;
+        *next += self.1;
+        at
+    }
+}
+
+/// 100 events, tasks and queue rows in turn, read 10 a page.
+fn tasks_and_queue_rows() -> Log {
+    let mut log = Log::default();
+    for secs in 1..=100 {
+        if secs % 2 == 0 {
+            log.add(Some(secs), None, "task_created", json!({}), secs);
+        } else {
+            log.add(None, None, ONE_EVENT, json!({}), secs);
+        }
+    }
+    log
+}
+
+/// One pass of the builder read 10 events a page, of the events' bound of
+/// production, on `clock`.
+fn paged_pass(
+    memory: &Memory,
+    builder: &mut Builder,
+    clock: &dyn crate::application::Clock,
+) -> Built {
+    build_pass_limited(
+        memory,
+        builder,
+        (ms(LATER), BUILT),
+        Retain::default(),
+        None,
+        (10, EVENTS_PER_PASS, SESSION_BYTES_PER_WRITE),
+        Timing(Some(clock)),
+    )
+}
+
+/// The rows a builder with no clock writes from `memory`'s inputs up to
+/// `through` alone (its events and node samples), run until it caught up:
+/// what a store whose R is at `through` must record of them.
+fn rows_up_to(memory: &Memory, through: Cursors) -> BTreeMap<(LedgerKind, String), LedgerRow> {
+    let reference = Memory::default();
+    reference.events.replace(
+        memory
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| event.id <= through.events)
+            .cloned()
+            .collect(),
+    );
+    reference.samples.replace(
+        memory
+            .samples
+            .borrow()
+            .iter()
+            .filter(|sample| sample.id <= through.samples)
+            .cloned()
+            .collect(),
+    );
+    let mut builder = Builder::default();
+    for _ in 0..20 {
+        let built = build_pass(
+            &reference,
+            &mut builder,
+            (ms(LATER), BUILT),
+            Retain::default(),
+            None,
+        );
+        assert_eq!(built.failure, None);
+        if builder.backlog() == 0 {
+            break;
+        }
+    }
+    assert_eq!(builder.backlog(), 0, "the reference caught up");
+    reference.rows.take()
+}
+
+/// R of each kind records every input up to it: for the queue rows'
+/// position and for the run, task, session and node rows' one (each the
+/// position both share when it has none of its own), every row of that
+/// kind a builder with no clock writes from the inputs up to it alone
+/// ([`rows_up_to`]) is held by `memory` with its inputs no fewer. Whether R
+/// of each kind is held, and where.
+#[track_caller]
+fn r_records_every_input(memory: &Memory, label: &str) -> Option<(Cursors, Cursors)> {
+    let rows = (*memory.rows_mark.borrow())?;
+    let core = rows.core.map_or(rows.through, |position| position.through);
+    let queue = rows.queue.map_or(rows.through, |position| position.through);
+    for (through, kinds) in [
+        (
+            core,
+            &[
+                LedgerKind::Run,
+                LedgerKind::Task,
+                LedgerKind::Session,
+                LedgerKind::Node,
+            ][..],
+        ),
+        (queue, &[LedgerKind::Queue][..]),
+    ] {
+        let held = memory.rows.borrow();
+        for (key, row) in rows_up_to(memory, through) {
+            if !kinds.contains(&key.0) {
+                continue;
+            }
+            let stored = held.get(&key);
+            assert!(
+                stored.is_some_and(|stored| {
+                    stored.inputs_through.events >= row.inputs_through.events
+                        && stored.inputs_through.node_samples >= row.inputs_through.node_samples
+                }),
+                "{label}: R {through:?} past an input of {key:?} not recorded: {:?} of {:?}",
+                stored.map(|stored| &stored.inputs_through),
+                row.inputs_through
+            );
+        }
+    }
+    Some((core, queue))
+}
+
+/// The normal read of the events stops at the pass's time, whatever its
+/// count of events allows: on a clock that takes [`PASS_TIME`] at each
+/// look, every pass reads one page, short of the latest event, and is cut
+/// so that the next starts at once ([`goes_on`], [`pass_due`]) and reads on
+/// from where it stopped. R of each kind records every input up to it, and
+/// on a clock that leaves the pass its time the passes catch up: R of each
+/// kind at the latest event and every task's row written, none skipped. On
+/// that clock a fresh builder reads all 100 in one pass and is not cut.
+#[test]
+fn the_read_of_the_events_stops_at_the_pass_time_and_the_next_reads_on() {
+    let log = tasks_and_queue_rows();
+    let interval = Duration::from_secs(INTERVAL_SECS);
+    let leaping = Leaping(std::sync::Mutex::new(Instant::now()));
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    for page in 1..=4_usize {
+        let before = builder.events;
+        let built = paged_pass(&memory, &mut builder, &leaping);
+        let label = format!("page {page}");
+        assert_eq!(built.failure, None, "{label}");
+        assert_eq!(built.work.events, 10, "{label}: one page, not the count's");
+        assert_eq!(built.work.pages, 1, "{label}");
+        assert!(
+            builder.events > before,
+            "{label}: reads on from where it stopped"
+        );
+        assert_eq!(builder.events, log.events[page * 10 - 1].id, "{label}");
+        assert!(built.cut, "{label}");
+        assert_eq!(built.work.latest, log.last().as_i64(), "{label}");
+        assert!(goes_on(&built), "{label}: {:?}", built.marks.rows);
+        let at = Instant::now();
+        assert!(pass_due(Some(at), at, interval, goes_on(&built)), "{label}");
+        r_records_every_input(&memory, &label);
+    }
+
+    let stepping = Stepping(
+        std::sync::Mutex::new(Instant::now()),
+        Duration::from_micros(100),
+    );
+    let mut passes = 0;
+    loop {
+        let built = paged_pass(&memory, &mut builder, &stepping);
+        assert_eq!(built.failure, None);
+        r_records_every_input(&memory, "catching up");
+        passes += 1;
+        assert!(passes < 10, "passes {passes}");
+        if !goes_on(&built) {
+            break;
+        }
+    }
+    assert_eq!(builder.events, log.last());
+    let rows = memory.rows_mark.borrow().expect("R");
+    // A kind of no position of its own is at the one both share.
+    for position in [rows.core, rows.queue] {
+        let through = position.map_or(rows.through, |position| position.through);
+        assert_eq!(through.events, log.last(), "{rows:?}");
+    }
+    assert_eq!(memory.count(LedgerKind::Task), 50);
+
+    let memory = Memory::of(&log);
+    let mut fresh = Builder::default();
+    let stepping = Stepping(
+        std::sync::Mutex::new(Instant::now()),
+        Duration::from_micros(100),
+    );
+    let built = paged_pass(&memory, &mut fresh, &stepping);
+    assert_eq!(built.failure, None);
+    assert_eq!((built.work.events, built.work.pages), (100, 10));
+    assert!(!built.cut);
+    assert!(!goes_on(&built));
+    assert_eq!(fresh.events, log.last());
+    assert_eq!(r_of(&memory).events, log.last());
+}
+
+/// Runs worked, planners' sessions, queue rows and node samples, more than
+/// one pass on [`Stepping`] reads: the passes it cuts at their time, those
+/// whose reads took it short of the latest event and the one whose writes
+/// took it after reading up to there, leave R of each kind
+/// (the queue rows' and the run, task, session and node rows') where every
+/// input up to it is recorded by a stored row, whatever they left unread
+/// or unwritten; the next passes read on from where each stopped and catch
+/// up, R of each kind at the latest event and the last sample, every row
+/// of the inputs written.
+#[test]
+fn a_pass_cut_at_its_time_leaves_r_of_each_kind_before_what_it_did_not_record() {
+    let mut log = Log::default();
+    let start = node::bucket_of(T0);
+    let memory = Memory::default();
+    for n in 1..=12_u8 {
+        let secs = i64::from(n) * 1_000;
+        let run = run_id(n);
+        log.worked(i64::from(n), &run, secs)
+            .integrated(i64::from(n), &run, secs + 700)
+            .pushed(i64::from(n), &run, secs + 930);
+        log.add(
+            None,
+            None,
+            "claim_held",
+            json!({"supervisor": "s1"}),
+            secs + 940,
+        );
+        log.add(None, None, ONE_EVENT, json!({}), secs + 945);
+        log.add(
+            None,
+            None,
+            "session_opened",
+            json!({"kind": "runtime_planner", "planner_id": n}),
+            secs + 950,
+        );
+        let opened = log.last().as_i64();
+        log.add(
+            None,
+            None,
+            "session_closed",
+            json!({"kind": "runtime_planner", "planner_id": n,
+                   "opened_event_id": opened, "session_id": format!("p-{n}")}),
+            secs + 960,
+        );
+        memory
+            .samples
+            .borrow_mut()
+            .push(sample(i64::from(n), start + i64::from(n) * 600));
+    }
+    memory.events.replace(log.events.clone());
+    let stepping = Stepping(std::sync::Mutex::new(Instant::now()), PASS_TIME / 40);
+    let mut builder = Builder::default();
+    let (mut passes, mut cut_reading, mut cut_writing) = (0, 0, 0);
+    loop {
+        let built = paged_pass(&memory, &mut builder, &stepping);
+        let label = format!("pass {passes}");
+        assert_eq!(built.failure, None, "{label}");
+        passes += 1;
+        assert!(passes < 100, "{label}");
+        let r = r_records_every_input(&memory, &label);
+        if !goes_on(&built) {
+            break;
+        }
+        assert!(built.cut, "{label}");
+        let behind = r.is_some_and(|(core, queue)| core.events.min(queue.events) < log.last());
+        assert!(behind, "{label}: {r:?}");
+        if builder.events < log.last() {
+            // Its reads took its time: short of the latest event.
+            assert!(built.work.events > 0, "{label}");
+            cut_reading += 1;
+        } else if built.written > 0 {
+            // Read up to the latest, its writes took the rest.
+            cut_writing += 1;
+        }
+    }
+    assert!(cut_reading >= 2, "passes cut reading: {cut_reading}");
+    assert!(cut_writing >= 1, "passes cut writing: {cut_writing}");
+    assert_eq!(builder.events, log.last());
+    let (core, queue) = r_records_every_input(&memory, "caught up").expect("R");
+    assert_eq!((core.events, queue.events), (log.last(), log.last()));
+    assert_eq!(core.samples, 12);
+    let reference = rows_up_to(&memory, core);
+    for kind in [
+        LedgerKind::Run,
+        LedgerKind::Task,
+        LedgerKind::Session,
+        LedgerKind::Queue,
+        LedgerKind::Node,
+    ] {
+        let of_kind = reference.keys().filter(|key| key.0 == kind).count();
+        assert!(of_kind > 0, "{kind:?}");
+        assert_eq!(memory.count(kind), of_kind, "{kind:?}");
+    }
+}

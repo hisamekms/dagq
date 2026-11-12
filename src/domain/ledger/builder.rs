@@ -322,9 +322,12 @@ use pushes::PushesHeld;
 /// the stored row) waits for it.
 pub const INTERVAL_SECS: u64 = 60;
 
-/// How long one pass takes at most before it writes no more run, task,
-/// queue or node rows: from its start, its reads, folds and writes all
-/// counted ([`pass_spent`]). A pass past it, the marks it takes first
+/// How long one pass takes at most before it reads no more pages of the
+/// events (a page at least) and writes no more run, task, queue or node
+/// rows: from its start, its reads, folds and writes all counted
+/// ([`pass_spent`]). A pass whose reads took it stops reading short of the
+/// latest event and is cut there, R no further than the events it read,
+/// and the next pass reads on from there. A pass past it, the marks it takes first
 /// ([`HOLDING_R_PER_PASS`]) too, leaves those it has not written for the
 /// next pass (none skipped, so R stays before their inputs), which starts
 /// at once (the passes go on while one stops at a bound, see
@@ -338,7 +341,8 @@ pub const INTERVAL_SECS: u64 = 60;
 pub const PASS_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Whether a pass that has taken `elapsed` since its start has reached
-/// [`PASS_TIME`] and writes no more run, task, queue or node rows.
+/// [`PASS_TIME`] and reads no more pages of the events and writes no more
+/// run, task, queue or node rows.
 pub fn pass_spent(elapsed: std::time::Duration) -> bool {
     elapsed >= PASS_TIME
 }

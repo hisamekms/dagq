@@ -640,15 +640,17 @@ fn pass(
         return Ok(());
     }
     // The events it read again are the pass's own: it reads on within the
-    // events and the time they left it, and is cut short of the latest.
-    let read_again = built.work.events > 0;
+    // events and the time they left it. Each page is read only while the
+    // pass has time left (ADR-t4652-1 decision 1: its reads count), a page
+    // at least, so that a pass makes way; one stopped short of the latest
+    // is cut, and the next starts at once from where it stopped.
     let latest = store.latest_event_id()?;
     built.work.latest = latest.as_i64();
     let mut progress = Duration::ZERO;
     let reading_started = timing.start();
     let mut checkpoint_events = 0;
     while latest > builder.events && built.work.events < per_pass {
-        if read_again && pass_spent(timing.since(started)) {
+        if built.work.events > 0 && pass_spent(timing.since(started)) {
             break;
         }
         let started = timing.start();

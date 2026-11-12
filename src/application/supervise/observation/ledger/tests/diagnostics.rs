@@ -111,9 +111,12 @@ fn startup_end_and_progress_are_visible_at_info_with_bounded_details() {
     assert!(!text.contains("records:"));
 }
 
-/// Reads advance by a fixed ten seconds, independent of wall time. The
+/// Reads advance by a fixed thirty seconds, independent of wall time. The
 /// initial Instant is only an origin for these deterministic offsets.
 struct Stepped(std::sync::Mutex<Instant>);
+
+/// What each read of [`Stepped`] adds.
+const TICK: Duration = Duration::from_secs(30);
 
 impl Stepped {
     fn new() -> Self {
@@ -129,15 +132,29 @@ impl crate::application::Clock for Stepped {
     fn monotonic(&self) -> Instant {
         let mut next = self.0.lock().unwrap();
         let at = *next;
-        *next += Duration::from_secs(10);
+        *next += TICK;
         at
     }
 }
 
-/// Exercise the page loop itself with an injected clock: the first page
-/// is before the interval, the second is due, and the third is not due
-/// again. The next pass still takes longer than the interval but has
-/// already swept, so none of its pages logs first-pass progress.
+/// The lines of the first pass's progress in `output`.
+fn progress_lines(output: &LogLines) -> Vec<String> {
+    output
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|line| line.contains("the ledger first pass is reading"))
+        .cloned()
+        .collect()
+}
+
+/// Exercise the page loop itself with an injected clock whose page takes
+/// a minute: past [`PASS_TIME`] after its first page, the pass reads no
+/// second, measures the read and the sweep of that page and, a builder that
+/// has not swept, logs its progress once. The passes after it go on from
+/// there until they catch up; a pass of the builder that has swept logs no
+/// progress, however long its page takes.
 #[test]
 fn timed_pass_logs_only_due_first_pass_pages_and_measures_stages() {
     let output = LogLines::default();
@@ -162,44 +179,45 @@ fn timed_pass_logs_only_due_first_pass_pages_and_measures_stages() {
         log.add(None, None, "claim_held", json!({"supervisor": "s1"}), 202);
         let memory = Memory::of(&log);
         let mut builder = Builder::default();
-        let first = build_pass_timed(
-            &memory,
-            &mut builder,
-            (ms(1000), BUILT),
-            Retain::default(),
-            None,
-            (100, SESSION_BYTES_PER_WRITE),
-            Timing(Some(&clock)),
-        );
+        let timed = |memory: &Memory, builder: &mut Builder| {
+            build_pass_timed(
+                memory,
+                builder,
+                (ms(1000), BUILT),
+                Retain::default(),
+                None,
+                (100, SESSION_BYTES_PER_WRITE),
+                Timing(Some(&clock)),
+            )
+        };
+        let first = timed(&memory, &mut builder);
         assert!(first.failure.is_none(), "{first:?}");
-        assert_eq!((first.work.events, first.work.pages), (203, 3));
-        // Each read and sweep takes one clock tick. The page-loop clock
-        // is 50/100/150 seconds after its start, so only page 2 is due.
-        assert_eq!(first.work.event_read, Duration::from_secs(30));
-        assert_eq!(first.work.page_sweep, Duration::from_secs(30));
-        assert_eq!(first.work.final_sweep, Duration::from_secs(10));
-        assert!(
-            first.work.final_reads > 0,
-            "the queue rows remain past the task write bound"
-        );
-        // One more tick: the write bound looks at the clock once, and the
-        // pass, past [`PASS_TIME`], writes only the marks taken first.
-        assert_eq!(first.work.elapsed, Duration::from_secs(200));
-        let progress = output
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|line| line.contains("the ledger first pass is reading"))
-            .cloned()
-            .collect::<Vec<_>>();
+        assert_eq!((first.work.events, first.work.pages), (100, 1));
+        assert!(first.cut);
+        assert!(goes_on(&first));
+        // Each read and sweep takes one clock tick.
+        assert_eq!(first.work.event_read, TICK);
+        assert_eq!(first.work.page_sweep, TICK);
+        let progress = progress_lines(&output);
         assert_eq!(progress.len(), 1, "{progress:?}");
-        assert!(progress[0].contains("pages=2 "), "{progress:?}");
+        assert!(progress[0].contains("pages=1 "), "{progress:?}");
         assert!(
-            progress[0].contains(&format!("events={} ", log.events[199].id.as_i64())),
+            progress[0].contains(&format!("events={} ", log.events[99].id.as_i64())),
             "{progress:?}"
         );
-        assert!(!builder.sweeps_pages());
+
+        let mut passes = 1;
+        while builder.sweeps_pages() || builder.events < log.last() {
+            let built = timed(&memory, &mut builder);
+            assert!(built.failure.is_none(), "{built:?}");
+            assert!(built.work.pages <= 1, "{built:?}");
+            if builder.events < log.last() {
+                assert!(built.cut && goes_on(&built), "{built:?}");
+            }
+            passes += 1;
+            assert!(passes < 10, "passes {passes}");
+        }
+        assert_eq!(builder.events, log.last());
 
         log.add(
             None,
@@ -214,31 +232,11 @@ fn timed_pass_logs_only_due_first_pass_pages_and_measures_stages() {
         log.add(None, None, "claim_held", json!({"supervisor": "s2"}), 500);
         memory.events.replace(log.events.clone());
         output.0.lock().unwrap().clear();
-        let second = build_pass_timed(
-            &memory,
-            &mut builder,
-            (ms(1000), BUILT),
-            Retain::default(),
-            None,
-            (100, SESSION_BYTES_PER_WRITE),
-            Timing(Some(&clock)),
-        );
+        let second = timed(&memory, &mut builder);
         assert!(second.failure.is_none(), "{second:?}");
-        assert_eq!((second.work.events, second.work.pages), (203, 3));
-        assert_eq!(second.work.event_read, Duration::from_secs(30));
+        assert_eq!((second.work.events, second.work.pages), (100, 1));
+        assert_eq!(second.work.event_read, TICK);
         assert_eq!(second.work.page_sweep, Duration::ZERO);
-        assert_eq!(second.work.final_sweep, Duration::from_secs(10));
-        // One more tick: the marking before the writes looks at the clock
-        // once and, past `MARK_TIME`, marks the rest as if they read the
-        // events read since, not built.
-        assert_eq!(second.work.elapsed, Duration::from_secs(120));
-        assert!(
-            !output
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|line| line.contains("the ledger first pass is reading"))
-        );
+        assert!(progress_lines(&output).is_empty());
     });
 }
