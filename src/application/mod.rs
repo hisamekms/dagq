@@ -12,6 +12,7 @@ pub mod agent_eval;
 pub mod agent_job;
 pub mod areas;
 pub mod ask;
+pub mod audit;
 pub mod broker_relay;
 pub mod ci_watch;
 pub mod claim_view;

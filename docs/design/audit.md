@@ -23,6 +23,7 @@ related:
 誰が・何の権限で何をしたか、mainに入ったコードの来歴、権限境界が守られたか、記録が改ざんされていないかに答える記録の地図。
 目的・守る相手・記録する分類・段階案の理由は[ADR-t4840-1](../adr/2026-11-12-t4840-1-audit-purpose-threat-model-guarantee-levels-and-record-categories.md)、監査サービスと記録の形は[ADR-t4840-2](../adr/2026-11-12-t4840-2-one-audit-service-hash-chained-append-only-records-and-pluggable-stores.md)、守るpathと人が直接答える経路は[ADR-t4840-3](../adr/2026-11-12-t4840-3-protected-paths-and-weakening-operations-need-a-direct-human-answer.md)が持つ。
 記録の欄・actionの一覧・送り手・守るpathの具体と数値は、実装の前は[監査ログ 段0の設計資料](../plans/audit-log.md)が持ち、実装の後は定義のそばのdoc commentが持つ。
+記録の型は`src/domain/audit/record.rs`の`AuditRecord`、chainの検証は`src/domain/audit/chain.rs`の`verify`、use caseとactionの対応表とqueue serviceの入口ごとの特権のuse caseは`src/application/audit.rs`の`USE_CASES`と`SERVICE_ENTRIES`が入口。
 
 ## eventsとの線引き
 

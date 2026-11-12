@@ -706,6 +706,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/commands/delegates.rs", "DelegateStore", Some(Host), Internal), // an owner's delegates, beside the registry; the queue service runs it
     outer_port("src/application/commands/dialogue.rs", "DialogueStore", Some(Shared), Public(All)), // asks and notes
     outer_port("src/application/commands/mod.rs", "DenialLog", Some(Shared), Public(All)), // what a command refused
+    outer_port("src/application/audit.rs", "AuditAppend", Some(Shared), Public(All)), // the audit record, written in the transaction of any context's change
     outer_port("src/application/watch.rs", "AskNotifier", Some(Observation), Internal), // implemented by PushNotifier
     outer_port("src/application/watch.rs", "WatchRecord", Some(Observation), Internal),
     outer_port("src/application/watch.rs", "WatchSource", Some(Observation), Internal), // implemented by compose's ServiceWatch

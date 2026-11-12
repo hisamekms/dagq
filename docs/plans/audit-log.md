@@ -26,73 +26,16 @@ related:
 
 ## 1件の形
 
-| 欄 | 意味 |
-| --- | --- |
-| `schema_version` | recordの形の版。actionの版とは別 |
-| `seq` | 監査サービスが付ける取り込みの順の連番。chainの順 |
-| `prev_hash` | 一つ前の記録の`hash`。最初の記録は版ごとの固定の値 |
-| `hash` | この欄を除いた記録のJCS（RFC 8785）の正規化のSHA-256 |
-| `chain_version` | 正規化と算法の組の版（最初は`v1` = JCS＋SHA-256） |
-| `sender_id` | 送り手の識別（部品の名前とprocessの実体）。監査サービスが認証から付ける |
-| `sender_seq` | 送り手ごとの連番。`(sender_id, sender_seq)`が冪等の鍵で、欠けと切り詰めを見つける |
-| `at` | 事実が起きた時刻（UTC） |
-| `received_at` | 監査サービスが受けた時刻（UTC） |
-| `clock_source` | 時刻の出どころ（段0はhostの時計） |
-| `principal` | 主体。段0は今のactorの役割とid、段2から仮名のID |
-| `on_behalf_of` | 代行の連鎖（inboxが人の代わりに、など）。配列 |
-| `auth` | 認証の手段（socketのpeer・token・OIDC） |
-| `action` | action enumの値と版（下の「action enum v1」） |
-| `resource` | 対象（task・run・ask・commit・ref・設定のpath） |
-| `authority` | 許した・拒んだ根拠（capability・policyの規則・policyの版） |
-| `outcome` | 成功・失敗・拒否と理由 |
-| `change` | before/afterか、大きければそのhash |
-| `correlation` | request_id・goal・task・run_id・attempt・providerのsession id・reviewのjob id・causation（因果の元の`seq`）・W3C traceparent |
-| `attestation` | 送り手の経路から監査サービスが導く確かさ（enforced・observed・verified）と、その証拠。self_reportedはchainに入れずtelemetryの別の流れにする |
-| `answered_via` | Dの経路。`human_attested`か`relayed_by_inbox`。`AnswerAuthority`から導く |
-| `approved_blobs` / `diff_hash` / `tree_hash` | Fの判断と照合で、照合に使う差分が触る各fileのpathと変更後のblob hash（消したfileは削除の印）の組と、記録と表示にだけ使うdiff hash（ADR-t4840-2決定7の正規化とSHA-256）とtree hash |
-| `destination` / `direction` / `credential_ref` / `content_digest` / `via` / `policy_rule` | 外部アクセス（J）の記録だけ。段0のbrokerは書かない |
-
+欄と意味は`src/domain/audit/record.rs`の`AuditRecord`・`SenderInput`・`Admission`のdoc commentが持つ。
 照合を実装するtaskは、同じfileの中の同じ文脈の箇所を入れ替える手直し（diff hashが同じになるもの）が再承認になるtestを足す（ADR-t4840-2決定7）。
-
-人が直接答えた（`human_attested`）記録の`attestation`には、経路の証拠（制御端末の名前・呼び出しの親のprocessの連鎖・socketのpeer・答えるまでの時間）を持つ（ADR-t4840-3決定6）。
-中継の答えは人の原文のhashを持つ。
 
 ## action enum v1
 
-OCSFのclassはexportを作る段2で確かめる候補で、段0の実装はこの対応を表として持つだけにする。
-
-| action | 分類 | 送り手 | OCSFのclass |
-| --- | --- | --- | --- |
-| `landing.judged` | F | supervisor（reviewのpass・AIのland・上限の後の収束の判断。blob hashの組・diff hash・tree hash） | API Activity (6003) |
-| `landing.approved` | D・F | queue service（approve_landingのlandの答えと直接の`dagq integrate`の承認。blob hashの組と経路） | API Activity (6003) |
-| `landing.compared` | F | integrate（merge後の照合。組の一致・不一致と違ったfile） | API Activity (6003) |
-| `landing.merged` | F | integrate（mainのbefore/afterのsha・tree hash・diff hash・blob hashの組・rebaseと衝突の自動解消の有無） | API Activity (6003) |
-| `push.attempted` | F・J1 | integrate（remoteとrefのold sha。ackを待ってからpush） | API Activity (6003) |
-| `push.completed` | F・J1 | integrate（completedかfailed、remote refのold/newのsha） | API Activity (6003) |
-| `ask.answered` | D | queue service（askの本文のhash・選択肢・推奨と確信度・答え・経路） | API Activity (6003) |
-| `answer.applied` | D | queue service（答えが適用されたか、されなかった理由） | API Activity (6003) |
-| `authz.denied` | B | queue service（拒んだcapability・規則・policyの版。fail-open） | API Activity (6003) |
-| `authz.privileged` | B | queue service（弱める操作と特権の操作の許可: guardrailの無効化・plan reviewのbypass・force・手での復旧） | API Activity (6003) |
-| `config.changed` | G | integrate（着地した差分が`dagq.toml`・policy・`.dagq/agents`・守るpathの定義を変えたこと） | Device Config State Change (5019) |
-| `binary.installed` | G | updater（`install`と自動更新の前後の版とdigest、間の守るpathの変更の分類） | Application Lifecycle (6002) |
-| `schema.migrated` | G | queue service（migrateの前後のschemaの版） | Application Lifecycle (6002) |
-| `service.lifecycle` | G | supervisor・queue service（up・down・execの引き継ぎ） | Application Lifecycle (6002) |
-| `audit.checked` | I | 突き合わせのjob（verifyの結果、mainの全commitにFの記録があるか、pushの記録とremoteのrefが合うか、書けなかった拒否の件数） | API Activity (6003) |
-| `audit.policy_changed` | I | queue service（監査の範囲や保持の変更。人の直接の答えだけ） | API Activity (6003) |
-| `audit.corrected` | I | queue service（打ち消しの記録。元の`seq`を指す） | API Activity (6003) |
+actionの意味・分類・OCSFのclassは`src/domain/audit/mod.rs`の`AuditAction`のdoc commentが持つ。
 
 ## 送り手
 
-| 送り手 | 段0での位置 | 書くaction |
-| --- | --- | --- |
-| queue service | 状態を変えるuse caseの同じtransaction | `landing.approved`・`ask.answered`・`answer.applied`・`authz.*`・`schema.migrated`・`audit.policy_changed`・`audit.corrected`・`service.lifecycle` |
-| supervisor | queue serviceへの呼び出しの中 | `landing.judged`・`service.lifecycle` |
-| integrate（Integrator） | queue serviceへの呼び出しの中。pushの前はackを待つ | `landing.compared`・`landing.merged`・`push.*`・`config.changed` |
-| updater（`install`と自動更新） | queue serviceへの呼び出しの中 | `binary.installed` |
-| 突き合わせのjob | 制御側のjob（AI actorではない決定的なコード）で、queue serviceの呼び出しの中 | `audit.checked` |
-
-brokerとexecutorのtelemetryは段1から送り手になる。
-AI actor（worker・review・planner・inbox）は送り手にならない。
+送り手と書くactionは`src/domain/audit/mod.rs`の`Sender`と`AuditAction::senders`が持つ。
 
 ## 守るpathの最初の一覧
 

@@ -8,27 +8,11 @@
 
 use std::{collections::BTreeMap, ffi::OsString};
 
-/// The words that make a variable's name a credential's.
-const CREDENTIAL_WORDS: &[&str] = &["TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "KEY"];
-
-/// The credentials named without one of [`CREDENTIAL_WORDS`].
-const CREDENTIAL_NAMES: &[&str] = &[
-    "SSH_AUTH_SOCK",
-    "SSH_ASKPASS",
-    "GIT_ASKPASS",
-    "SUDO_ASKPASS",
-    crate::domain::store_setting::STORE_CONNECTION_ENV,
-    "DAGQ_DATABASE_URL_FILE",
-];
-
 /// Whether `name` names a credential, which no narrowed environment is
 /// given from the starting process, though it be allowed by name or
-/// prefix, unless its caller names it as an exception.
-pub fn credential(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    CREDENTIAL_NAMES.contains(&upper.as_str())
-        || CREDENTIAL_WORDS.iter().any(|word| upper.contains(word))
-}
+/// prefix, unless its caller names it as an exception: the judgment the
+/// audit record's redaction uses too.
+pub use crate::domain::audit::is_credential_name as credential;
 
 /// What one caller lets through of the starting process's environment.
 #[derive(Debug, Clone, Copy)]

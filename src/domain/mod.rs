@@ -1242,6 +1242,7 @@ pub mod actor_model;
 pub mod after_claim;
 pub mod agent_eval;
 pub mod areas;
+pub mod audit;
 pub mod authorization;
 pub mod background_wrapper;
 pub mod broker_relay;
