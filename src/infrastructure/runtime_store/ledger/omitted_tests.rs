@@ -649,3 +649,305 @@ fn a_rebuild_checkpoint_and_publication_are_atomic_with_the_marks() {
         );
     });
 }
+
+/// SQL narrows by owner and the shared kind list, preserves other owners,
+/// and rechecks selected keys after a competing row write. Batches are
+/// tested directly, so no production pause or real-time wait is involved.
+#[test]
+fn omitted_removal_filters_subjects_batches_keys_and_rechecks_the_snapshot() {
+    use crate::domain::ledger::testkit::{Log, ms};
+    use crate::domain::ledger::{self, queue::OMITTED_KINDS};
+    on_each(|queue| {
+        let mut log = Log::default();
+        for kind in OMITTED_KINDS {
+            for n in 0..=ROWS_PER_TRANSACTION {
+                log.add(
+                    None,
+                    None,
+                    kind.as_str(),
+                    serde_json::json!({}),
+                    i64::try_from(n).unwrap(),
+                );
+            }
+        }
+        let mut rows = ledger::build(&log.events, ms(10_000), BUILT_AT);
+        for row in &mut rows {
+            row.is_final = true;
+        }
+        // Equal record ids across a page boundary still have distinct keys.
+        let mut duplicate = rows[0].clone();
+        duplicate.key = "duplicate".into();
+        rows.push(duplicate);
+        let count = rows.len();
+        let mut unknown = rows[0].clone();
+        unknown.key = "unknown".into();
+        unknown.subject.as_mut().unwrap().kind = "not_omitted".into();
+        let mut kept = vec![unknown];
+        for kind in [
+            LedgerKind::Run,
+            LedgerKind::Task,
+            LedgerKind::Session,
+            LedgerKind::Node,
+        ] {
+            let mut other = rows[0].clone();
+            other.kind = kind;
+            kept.push(other);
+        }
+        for row in rows.iter().chain(&kept) {
+            queue.write_ledger_row(row).unwrap();
+        }
+        assert!(queue.omitted_queue_keys().unwrap().is_empty());
+        let kinds: Vec<_> = OMITTED_KINDS
+            .iter()
+            .map(|kind| kind.as_str().to_owned())
+            .collect();
+        let mut public = Coverage::start(&kinds, EventId::new(0));
+        let mut points = Vec::new();
+        public.read(&log.events, 4, log.last(), &mut points);
+        queue
+            .write_ledger_marks(&marks(
+                1,
+                Some(Omitted {
+                    coverage: public,
+                    points,
+                }),
+            ))
+            .unwrap();
+        let keys = queue.omitted_queue_keys().unwrap();
+        assert_eq!(keys.len(), count);
+        assert_eq!(
+            keys.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            count
+        );
+        // A selected row changes before deletion starts. Each write must
+        // read the current row rather than trust the unlocked selection.
+        let mut changed = rows[0].clone();
+        changed.subject.as_mut().unwrap().kind = "not_omitted".into();
+        queue.write_ledger_row(&changed).unwrap();
+        kept.push(changed);
+        let saved_marks = queue.ledger_marks().unwrap();
+        let saved_points = all_points(queue);
+        {
+            let tx = queue.write_tx("test_bound").unwrap();
+            assert!(
+                SqliteQueue::remove_omitted_queue_batch(&tx, &keys[..=ROWS_PER_TRANSACTION])
+                    .is_err()
+            );
+        }
+        let mut removed = 0;
+        let mut batches = 0;
+        for batch in keys.chunks(ROWS_PER_TRANSACTION) {
+            let tx = queue.write_tx("test_batch").unwrap();
+            let n = SqliteQueue::remove_omitted_queue_batch(&tx, batch).unwrap();
+            assert!(n <= ROWS_PER_TRANSACTION);
+            removed += n;
+            batches += 1;
+            tx.commit().unwrap();
+        }
+        assert!(batches > 1);
+        assert_eq!(removed, count - 1);
+        assert!(queue.omitted_queue_keys().unwrap().is_empty());
+        let tx = queue.write_tx("test_repeated_batch").unwrap();
+        assert_eq!(
+            SqliteQueue::remove_omitted_queue_batch(&tx, &keys[..ROWS_PER_TRANSACTION]).unwrap(),
+            0
+        );
+        tx.commit().unwrap();
+        for row in &kept {
+            assert_eq!(
+                queue.ledger_row(row.kind, &row.key).unwrap(),
+                Some(row.clone())
+            );
+        }
+        assert_eq!(queue.ledger_rows(LedgerKind::Queue).unwrap().len(), 2);
+        assert_eq!(queue.ledger_marks().unwrap(), saved_marks);
+        assert_eq!(all_points(queue), saved_points);
+    });
+}
+
+/// A retained history creates no write entry at all, regardless of its
+/// page count. Removing the writer identity makes any attempted write
+/// fail immediately; no timing assertion or production sleep is needed.
+#[test]
+fn a_retained_omitted_history_takes_no_write_entry_or_pause() {
+    use crate::domain::ledger::testkit::{Log, ms};
+    use crate::domain::ledger::{self, queue::OMITTED_KINDS};
+    let uri = format!(
+        "file:/ledger-omitted-no-write-{}?vfs=memdb",
+        uuid::Uuid::new_v4()
+    );
+    let mut queue = SqliteQueue::init(&uri).unwrap();
+    let mut log = Log::default();
+    for n in 0..(3 * ROWS_PER_TRANSACTION + 1) {
+        log.add(
+            None,
+            None,
+            OMITTED_KINDS[0].as_str(),
+            serde_json::json!({}),
+            i64::try_from(n).unwrap(),
+        );
+    }
+    for mut row in ledger::build(&log.events, ms(10_000), BUILT_AT) {
+        row.is_final = true;
+        queue.write_ledger_row(&row).unwrap();
+    }
+    let kinds = OMITTED_KINDS
+        .iter()
+        .map(|kind| kind.as_str().to_owned())
+        .collect::<Vec<_>>();
+    queue
+        .write_ledger_marks(&marks(
+            log.last().as_i64(),
+            Some(Omitted {
+                coverage: Coverage::start(&kinds, log.last()),
+                points: Vec::new(),
+            }),
+        ))
+        .unwrap();
+    queue.entries.write_identity = None;
+    assert!(queue.write_tx("would_fail").is_err());
+    assert_eq!(queue.remove_omitted_queue_rows().unwrap(), 0);
+    assert_eq!(queue.remove_omitted_queue_rows().unwrap(), 0);
+    assert_eq!(
+        queue.ledger_rows(LedgerKind::Queue).unwrap().len(),
+        log.events.len()
+    );
+}
+
+/// Candidate SQL seeks by subject, version and the record's id, skipping
+/// retained prefix/suffix, old versions and unfinished rows in the index.
+/// VM work and returned rows stay bounded when that history grows; invalid
+/// detail there also proves the production selector never decodes it.
+#[test]
+fn omitted_candidates_seek_the_public_range_without_reading_retained_history() {
+    use crate::domain::ledger::testkit::{Log, ms};
+    use crate::domain::ledger::{self, LEDGER_V};
+    use rusqlite::StatementStatus;
+
+    // Exercise one-row pages, including two keys with the same event id.
+    let read = |queue: &SqliteQueue| {
+        let mut after: Option<(i64, String)> = None;
+        let mut keys = Vec::new();
+        let mut steps = 0;
+        loop {
+            let sql = omitted_queue_candidates_sql(SqlDialect::Sqlite, after.is_some());
+            let mut statement = queue.conn.prepare(&sql).unwrap();
+            let params: Vec<rusqlite::types::Value> = vec![
+                "queue".to_owned().into(),
+                KIND.to_owned().into(),
+                i64::from(LEDGER_V).into(),
+                after.as_ref().map_or(1_000, |(id, _)| *id).into(),
+                2_000.into(),
+                1.into(),
+            ];
+            let mut params = params;
+            if let Some((_, key)) = &after {
+                params.push(key.clone().into());
+            }
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(params), |r| {
+                    Ok((r.get::<_, String>("key")?, r.get::<_, String>("records")?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            steps += statement.get_status(StatementStatus::VmStep);
+            let Some((key, records)) = rows.last() else {
+                break;
+            };
+            let records: serde_json::Value = serde_json::from_str(records).unwrap();
+            after = Some((records[0]["id"].as_i64().unwrap(), key.clone()));
+            keys.extend(rows.into_iter().map(|(key, _)| key));
+        }
+        (keys, steps)
+    };
+    on_each(|queue| {
+        let mut log = Log::default();
+        log.add(None, None, KIND, serde_json::json!({}), 0);
+        let mut template = ledger::build(&log.events, ms(10_000), BUILT_AT).remove(0);
+        template.is_final = true;
+        let row_at = |id: i64, key: String| {
+            let mut row = template.clone();
+            row.key = key;
+            row.records[0].id = EventId::new(id);
+            row.inputs_from = EventId::new(id);
+            row.inputs_through.events = EventId::new(id);
+            row
+        };
+        for (id, key) in [(1_100, "first"), (1_100, "second"), (1_500, "third")] {
+            queue.write_ledger_row(&row_at(id, key.into())).unwrap();
+        }
+        let mut public = coverage(2_000);
+        public.from = EventId::new(1_000);
+        queue
+            .write_ledger_marks(&marks(
+                2_000,
+                Some(Omitted {
+                    coverage: public,
+                    points: Vec::new(),
+                }),
+            ))
+            .unwrap();
+        let before = read(queue);
+        assert_eq!(before.0, vec!["first", "second", "third"]);
+        for n in 0..=ROWS_PER_TRANSACTION {
+            let n = i64::try_from(n).unwrap();
+            for (class, id) in [
+                ("prefix", n + 1),
+                ("suffix", n + 2_001),
+                ("old", n + 1_200),
+                ("unfinished", n + 1_200),
+            ] {
+                let mut row = row_at(id, format!("kept-{class}-{n}"));
+                if class == "old" {
+                    row.ledger_v -= 1;
+                }
+                if class == "unfinished" {
+                    row.is_final = false;
+                }
+                queue.write_ledger_row(&row).unwrap();
+            }
+        }
+        // These rows must not reach ledger_row's JSON decoding.
+        queue
+            .conn
+            .execute(
+                "UPDATE ledger_rows SET detail='not json' WHERE key LIKE 'kept-%'",
+                [],
+            )
+            .unwrap();
+        let after = read(queue);
+        assert_eq!(after.0, before.0);
+        assert!(
+            after.1 <= before.1 + 100,
+            "VM steps grew with retained history: {before:?} -> {after:?}"
+        );
+        assert_eq!(queue.omitted_queue_keys().unwrap(), before.0);
+        for after in [false, true] {
+            let sql = omitted_queue_candidates_sql(SqlDialect::Sqlite, after);
+            let mut statement = queue
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            let nulls = vec![rusqlite::types::Null; statement.parameter_count()];
+            let plan = statement
+                .query_map(rusqlite::params_from_iter(nulls), |r| {
+                    r.get::<_, String>("detail")
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(plan.len(), 1, "{plan:?}");
+            assert!(plan[0].contains("SEARCH ledger_rows USING INDEX ledger_rows_omitted_removal (kind=? AND subject_kind=? AND ledger_v=? AND <expr>>? AND <expr><?)"), "{plan:?}");
+        }
+        // The migration and selector use exactly the dialect's expressions.
+        let pg = omitted_queue_candidates_sql(SqlDialect::Postgres, false);
+        let migration = include_str!("../../../../migrations-postgres/ledger_omitted_removal.sql");
+        assert!(migration.contains(&SqlDialect::Postgres.json_field(
+            "records",
+            "$[0].id",
+            JsonType::Integer
+        )));
+        assert!(pg.contains(&SqlDialect::Postgres.json_array_length("records")));
+    });
+}

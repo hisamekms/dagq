@@ -383,6 +383,7 @@ const SUPERVISE: &[&str] = &[
     "remove_node_samples",
     "write_ledger_row_over",
     "remove_node_rows",
+    "remove_omitted_queue_rows",
     "remove_steps",
     "stage_ledger_row",
     "write_staged_ledger_row_over",

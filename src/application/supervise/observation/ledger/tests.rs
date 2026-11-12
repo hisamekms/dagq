@@ -887,6 +887,16 @@ impl LedgerStore for Memory {
         self.wait_rows.set(self.wait_rows.get() + rows.len());
         Ok(rows)
     }
+    fn remove_omitted_queue_rows(&self) -> Result<usize> {
+        let Some(coverage) = self.omitted.borrow().clone() else {
+            return Ok(0);
+        };
+        let mut rows = self.rows.borrow_mut();
+        let before = rows.len();
+        rows.retain(|_, row| !QueueHead::of(row).covered_for_removal(&coverage));
+        Ok(before - rows.len())
+    }
+
     fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
         let mut rows = self.rows.borrow_mut();
         let before = rows.len();
@@ -4187,6 +4197,10 @@ impl LedgerStore for HeldRows<'_> {
         self.count(rows.len());
         Ok(rows)
     }
+    fn remove_omitted_queue_rows(&self) -> Result<usize> {
+        Ok(0)
+    }
+
     fn remove_node_rows(&self, _: i64) -> Result<usize> {
         unreachable!("no retention here")
     }

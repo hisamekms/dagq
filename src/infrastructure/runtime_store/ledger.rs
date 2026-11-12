@@ -635,7 +635,109 @@ fn stops_after_sql(dialect: SqlDialect, after: bool) -> String {
     )
 }
 
+/// Seek settled, current-version single-event rows of one saved omitted
+/// kind in (C, S], using ledger_rows_omitted_removal. The lower bound is C
+/// on the first page and the last (event id, key) on later pages, so neither
+/// retained history outside the range nor earlier pages are walked. The
+/// id is the record's own, never a maximum of the rows' inputs.
+fn omitted_queue_candidates_sql(dialect: SqlDialect, after: bool) -> String {
+    let id = dialect.json_field("records", "$[0].id", JsonType::Integer);
+    let lower = if after {
+        format!("{id} >= ?4 AND ({id}, key) > (?4, ?7)")
+    } else {
+        format!("{id} > ?4")
+    };
+    format!(
+        "SELECT * FROM ledger_rows
+          WHERE kind=?1 AND subject_kind=?2 AND ledger_v=?3
+            AND final=TRUE AND {length}=1 AND {lower} AND {id} <= ?5
+          ORDER BY {id}, key LIMIT ?6",
+        length = dialect.json_array_length("records"),
+    )
+}
+
 impl<E: TransactionEntries> StoreQueue<E> {
+    /// Find eligible keys without a write lock, in one read snapshot of
+    /// the public coverage. SQL seeks only settled, current-version,
+    /// single-event rows of each saved omitted kind in (C, S], at most 200
+    /// per page. It does not read the retained prefix, suffix, unfinished
+    /// rows or other versions. Only eligible keys survive the read.
+    fn omitted_queue_keys(&self) -> Result<Vec<String>> {
+        use crate::domain::ledger::queue::{OMITTED_KINDS, QueueHead};
+        let tx = self.read_entry("ledger_omitted_candidates")?;
+        let Some(coverage) = held_coverage(&tx)? else {
+            return Ok(Vec::new());
+        };
+        let dialect = SqlRead::dialect(&tx);
+        let mut keys = Vec::new();
+        for kind in OMITTED_KINDS {
+            if !coverage.summaries.contains_key(kind.as_str()) {
+                continue;
+            }
+            let mut after: Option<(EventId, String)> = None;
+            loop {
+                let sql = omitted_queue_candidates_sql(dialect, after.is_some());
+                let mut params = vec![
+                    LedgerKind::Queue.as_str().to_sql_value(),
+                    kind.as_str().to_sql_value(),
+                    crate::domain::ledger::LEDGER_V.to_sql_value(),
+                    after
+                        .as_ref()
+                        .map_or(coverage.from, |(id, _)| *id)
+                        .as_i64()
+                        .to_sql_value(),
+                    coverage.through.as_i64().to_sql_value(),
+                    i64::try_from(ROWS_PER_TRANSACTION)?.to_sql_value(),
+                ];
+                if let Some((_, key)) = &after {
+                    params.push(key.to_sql_value());
+                }
+                let rows = SqlRead::query_map(&tx, &sql, &params, ledger_row)?
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()?;
+                let Some(last) = rows.last() else { break };
+                after = Some((last.records[0].id, last.key.clone()));
+                keys.extend(
+                    rows.iter()
+                        .filter(|row| QueueHead::of(row).covered_for_removal(&coverage))
+                        .map(|row| row.key.clone()),
+                );
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Recheck at most 200 candidate keys and their public coverage under
+    /// the same write lock. A row changed after selection is judged anew;
+    /// nothing changes the marks, coverage or points, even while stopped.
+    fn remove_omitted_queue_batch(tx: &impl SqlWrite, keys: &[String]) -> Result<usize> {
+        anyhow::ensure!(
+            keys.len() <= ROWS_PER_TRANSACTION,
+            "too many omitted queue candidates"
+        );
+        let Some(coverage) = held_coverage(tx)? else {
+            return Ok(0);
+        };
+        let mut removed = 0;
+        for key in keys {
+            let Some(row) = held_row(tx, LedgerKind::Queue, key)? else {
+                continue;
+            };
+            if crate::domain::ledger::queue::QueueHead::of(&row).covered_for_removal(&coverage) {
+                removed += SqlWrite::execute(
+                    tx,
+                    "DELETE FROM ledger_rows WHERE kind=?1 AND key=?2 AND subject_kind=?3",
+                    sql_params![
+                        LedgerKind::Queue.as_str(),
+                        key,
+                        row.subject.as_ref().unwrap().kind
+                    ],
+                )?;
+            }
+        }
+        Ok(removed)
+    }
+
     /// The queue heads a read of [`queue_heads_sql`] gives.
     fn queue_heads(
         &self,
@@ -2080,6 +2182,28 @@ impl<E: TransactionEntries> LedgerStore for StoreQueue<E> {
                 Ok(((key, index), serde_json::from_str(&event)?))
             })
             .collect()
+    }
+
+    /// After a successful builder pass, select eligible keys without a
+    /// write lock by seeking current, settled single-event rows of saved
+    /// omitted kinds within public (C, S], then delete these in batches of
+    /// at most 200 through in_batches, with its pause between writes. When
+    /// no eligible key is found, take no write lock or pause. Each
+    /// batch rechecks the rows against public (C, S] read under its lock:
+    /// only saved-summary kinds with settled, exactly current-version
+    /// single-event heads forgotten at S qualify. No marks, coverage,
+    /// points or other owners change, including while omission stops.
+    fn remove_omitted_queue_rows(&self) -> Result<usize> {
+        let keys = self.omitted_queue_keys()?;
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        in_batches(self, "ledger_omitted_removal", &keys, |tx, keys, _| {
+            removed += Self::remove_omitted_queue_batch(tx, keys)?;
+            Ok(())
+        })?;
+        Ok(removed)
     }
 
     /// Read the node rows with no lock, then write only those the

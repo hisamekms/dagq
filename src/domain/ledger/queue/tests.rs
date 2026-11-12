@@ -1602,3 +1602,47 @@ fn while_stopped_the_queue_events_of_the_set_after_s_are_rows() {
     }
     assert_eq!(kept_out, 3);
 }
+
+/// Removal is a property of the saved public summary and the settled
+/// head, independent of R and of the new builder's configured kind set.
+#[test]
+fn removal_requires_a_current_forgotten_event_in_the_saved_public_coverage() {
+    use crate::domain::ledger::session::written::omitted::Coverage;
+    let mut log = crate::domain::ledger::testkit::Log::default();
+    log.add(None, None, "authorization_denied", serde_json::json!({}), 1);
+    let row = super::queue_rows(
+        &log.events,
+        &log.events,
+        crate::domain::ledger::testkit::ms(100_000),
+        "built",
+        &Unwritten::default(),
+    )
+    .remove(0);
+    let mut head = QueueHead::of(&row);
+    head.head.is_final = true;
+    let mut coverage = Coverage::start(&["authorization_denied".to_owned()], EventId::new(0));
+    coverage.through = log.last();
+    assert!(head.covered_for_removal(&coverage));
+    for case in 0..11 {
+        let mut h = head.clone();
+        let mut c = coverage.clone();
+        match case {
+            0 => h.head.is_final = false,
+            1 => h.head.ledger_v -= 1,
+            2 => h.head.ledger_v += 1,
+            3 => c.from = log.last(),
+            4 => c.through = EventId::new(0),
+            5 => c.summaries.clear(),
+            6 => h.head.inputs_through.events = EventId::new(2),
+            7 => h.head.kind = LedgerKind::Run,
+            8 => {
+                h.subject_kind = "not_omitted".to_owned();
+                c.summaries
+                    .insert(h.subject_kind.clone(), Default::default());
+            }
+            9 => h.head.records.clear(),
+            _ => h.head.records.push(EventId::new(2)),
+        }
+        assert!(!h.covered_for_removal(&c), "case {case}");
+    }
+}

@@ -312,6 +312,10 @@ impl LedgerStore for WrittenOverAfterThePages<'_> {
     fn ledger_runs_past_their_rows(&self, _: EventId) -> Result<Vec<RunId>> {
         unreachable!("only the reads of a window here")
     }
+    fn remove_omitted_queue_rows(&self) -> Result<usize> {
+        Ok(0)
+    }
+
     fn remove_node_rows(&self, _: i64) -> Result<usize> {
         unreachable!("only the reads of a window here")
     }

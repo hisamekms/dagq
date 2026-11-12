@@ -86,6 +86,69 @@ fn queue_records(memory: &Memory) -> BTreeSet<EventId> {
         .collect()
 }
 
+/// Physical rows only: no coverage supplementation or row restoration.
+fn stored_omitted_queue_keys(memory: &Memory, through: EventId) -> Vec<String> {
+    memory
+        .rows
+        .borrow()
+        .values()
+        .filter(|row| row.kind == LedgerKind::Queue)
+        .filter(|row| {
+            row.subject
+                .as_ref()
+                .is_some_and(|s| THREE.contains(&s.kind.as_str()))
+        })
+        .filter(|row| row.records.iter().any(|event| event.id <= through))
+        .map(|row| row.key.clone())
+        .collect()
+}
+
+/// Every settled row of these fixtures is current and within the public
+/// reach. Untimed events have no ended_at and never settle, so acceptance
+/// 1 protects their rows even after publication.
+fn assert_published_omitted_rows_removed(memory: &Memory, through: EventId) {
+    let remaining: Vec<_> = stored_omitted_queue_keys(memory, through)
+        .into_iter()
+        .filter(|key| memory.rows.borrow()[&(LedgerKind::Queue, key.clone())].is_final)
+        .collect();
+    assert!(
+        remaining.is_empty(),
+        "published settled queue rows remain: {remaining:?}"
+    );
+}
+
+/// Compare all reader values, giving back only physical queue-row JSON
+/// removed by publication's wider coverage. Windows still read the actual
+/// sparse store. Compare recorded input as rows plus public coverage too.
+fn compare_after_removal(memory: &Memory, reference: &Memory, input: &Input) {
+    let missing: Vec<_> = reference
+        .rows
+        .borrow()
+        .iter()
+        .filter(|(key, row)| {
+            row.kind == LedgerKind::Queue && !memory.rows.borrow().contains_key(key)
+        })
+        .map(|(_, row)| row.clone())
+        .collect();
+    assert_eq!(
+        with_rows_given_back(values(memory, input), memory, &missing),
+        values(reference, input),
+        "{}",
+        input.name
+    );
+    let recorded = |store: &Memory| -> BTreeSet<EventId> {
+        queue_records(store)
+            .into_iter()
+            .chain(
+                super::omitting::omitted_of(store)
+                    .iter()
+                    .map(|event| event.id),
+            )
+            .collect()
+    };
+    assert_eq!(recorded(memory), recorded(reference));
+}
+
 /// Each input's readers' values of the ledger the builder of now makes
 /// are those fixed.
 #[test]
@@ -850,6 +913,13 @@ fn rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold() 
         let initial = sides[0].0.omitted.borrow().clone().unwrap();
         assert!(initial.from > input.log.events[0].id, "{}", input.name);
         assert!(initial.rebuilding.is_none());
+        let protected_prefix: Vec<_> = stored_omitted_queue_keys(&sides[0].0, initial.from)
+            .into_iter()
+            .filter(|key| !sides[0].0.rows.borrow()[&(LedgerKind::Queue, key.clone())].is_final)
+            .collect();
+        if input.name == "timeless" {
+            assert!(!protected_prefix.is_empty());
+        }
         let records = queue_records(&sides[0].0);
         let omitted = super::omitting::omitted_of(&sides[0].0);
         assert!(!omitted.is_empty(), "{}", input.name);
@@ -892,13 +962,7 @@ fn rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold() 
             assert_eq!(held.through, normal.through, "{}", input.name);
             assert_eq!(*memory.rows_mark.borrow(), *reference.rows_mark.borrow());
             assert_eq!(*memory.mark.borrow(), *reference.mark.borrow());
-            assert_eq!(
-                values(memory, input),
-                values(reference, input),
-                "{}",
-                input.name
-            );
-            assert_eq!(queue_records(memory), queue_records(reference));
+            compare_after_removal(memory, reference, input);
             // The row-given-back comparison reads every non-row value
             // from the sparse ledger, before and after publication.
             let form = super::omitting::old_form(memory, Some(&old), ms(input.now));
@@ -914,6 +978,17 @@ fn rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold() 
                 of_old_form(memory, Some(&old), input, input.name)
             );
             if held.from == EventId::new(0) {
+                assert_published_omitted_rows_removed(memory, held.through);
+                for key in &protected_prefix {
+                    assert!(
+                        memory
+                            .rows
+                            .borrow()
+                            .contains_key(&(LedgerKind::Queue, key.clone())),
+                        "{}: an unsettled prefix row was removed",
+                        input.name
+                    );
+                }
                 let (summaries, points) = counted(
                     &memory.events.borrow(),
                     &three().kinds,
@@ -1162,6 +1237,14 @@ fn rebuilding_follows_the_updated_s_while_arrivals_outpace_it_then_catches_up() 
     let (memory, mut builder) = setup(2);
     let (reference, mut original) = setup(0);
     let (quiet, mut without_arrivals) = setup(2);
+    assert_eq!(
+        stored_omitted_queue_keys(&memory, EventId::new(100)).len(),
+        4
+    );
+    assert_eq!(
+        stored_omitted_queue_keys(&quiet, EventId::new(100)).len(),
+        4
+    );
     let input = Input {
         name: "arriving",
         log: log.clone(),
@@ -1193,12 +1276,15 @@ fn rebuilding_follows_the_updated_s_while_arrivals_outpace_it_then_catches_up() 
         // none arrive. The arriving side must remain unpublished longer.
         assert_eq!(quiet_coverage.from == EventId::new(0), round >= 1);
         assert_eq!(quiet_coverage.through, EventId::new(100));
+        if quiet_coverage.from == EventId::new(0) {
+            assert_published_omitted_rows_removed(&quiet, quiet_coverage.through);
+        }
         assert!(!builder.omission_stopped());
         let public = reference.omitted.borrow().clone().unwrap();
         let held = memory.omitted.borrow().clone().unwrap();
         assert_eq!(held.through, log.last());
         assert_eq!(r_of(&memory).events, log.last());
-        assert_eq!(values(&memory, &input), values(&reference, &input));
+        compare_after_removal(&memory, &reference, &input);
         if round == 0 {
             assert_eq!(held.through, EventId::new(101));
             assert_eq!(
@@ -1214,6 +1300,7 @@ fn rebuilding_follows_the_updated_s_while_arrivals_outpace_it_then_catches_up() 
             );
         }
         if held.from == EventId::new(0) {
+            assert_published_omitted_rows_removed(&memory, held.through);
             let (summaries, points) = counted(
                 &log.events,
                 &three().kinds,
@@ -1449,4 +1536,129 @@ fn a_private_prefix_at_s_100_with_the_read_at_200_is_no_window_input() {
         points: vec![],
     });
     assert_eq!(values(&memory, &input), before);
+}
+
+/// Start with the actual old builder's ledger and its frozen reader
+/// values, then delete covered rows. Restore only physical-row output
+/// for the frozen comparison; the actual books and windows use no rows
+/// given back. Exercise no R, version loss, a removed kind and C > 0.
+#[test]
+fn deleting_existing_rows_preserves_all_frozen_values_and_books() {
+    use crate::domain::ledger::session::written::omitted::{Coverage, Omitted};
+    let all = inputs();
+    let mut each = Vec::new();
+    for input in &all {
+        let original = built(input);
+        let expected = values(&original, input);
+        assert_eq!(differs(input, &expected), None);
+        let modes: &[&str] = match input.name {
+            "reached" => &["published", "prefix"],
+            "no r" => &["published", "no coverage", "before tail"],
+            _ => &["published"],
+        };
+        for &mode in modes {
+            let memory = Memory::default();
+            memory.events.replace(original.events.borrow().clone());
+            memory.rows.replace(original.rows.borrow().clone());
+            memory.mark.replace(*original.mark.borrow());
+            memory.rows_mark.replace(*original.rows_mark.borrow());
+            let last_saved = memory
+                .rows
+                .borrow()
+                .values()
+                .flat_map(|r| r.records.iter().map(|e| e.id))
+                .max()
+                .unwrap();
+            let r = memory
+                .rows_mark
+                .borrow()
+                .map(|r| r.through.events)
+                .unwrap_or(last_saved);
+            let s = if mode == "before tail" {
+                EventId::new(last_saved.as_i64() - 1)
+            } else {
+                r
+            };
+            let c = if mode == "prefix" {
+                EventId::new(5)
+            } else {
+                EventId::new(0)
+            };
+            if mode != "no coverage" {
+                let kinds = three().kinds;
+                let (summaries, points) = counted(&memory.events.borrow(), &kinds, (c, s), EVERY);
+                let mut coverage = Coverage::start(&kinds, c);
+                coverage.through = s;
+                coverage.summaries = summaries;
+                memory.write_omitted(&Omitted { coverage, points });
+            }
+            let coverage = memory.omitted.borrow().clone();
+            let points = memory.points.borrow().clone();
+            let before: Vec<_> = memory.rows.borrow().values().cloned().collect();
+            let book = |memory: &Memory| {
+                let heads = memory.ledger_queue_heads().unwrap();
+                QueueBook::from_heads(&heads, &PreClaimBook::default(), last_saved)
+            };
+            let expected_book = book(&memory);
+            let n = memory.remove_omitted_queue_rows().unwrap();
+            let taken: Vec<_> = before
+                .into_iter()
+                .filter(|row| {
+                    !memory
+                        .rows
+                        .borrow()
+                        .contains_key(&(row.kind, row.key.clone()))
+                })
+                .collect();
+            assert_eq!(n, taken.len());
+            if mode == "published" {
+                assert!(n > 0, "{}", input.name);
+            }
+            if mode == "no coverage" {
+                assert_eq!(n, 0);
+            }
+            if input.name == "no r" {
+                let tail = input.log.last().to_string();
+                assert_eq!(
+                    memory
+                        .ledger_row(LedgerKind::Queue, &tail)
+                        .unwrap()
+                        .is_some(),
+                    mode == "before tail" || mode == "no coverage"
+                );
+            }
+            assert_eq!(book(&memory), expected_book, "{} {mode}", input.name);
+            assert_eq!(memory.omitted.borrow().clone(), coverage);
+            assert_eq!(*memory.points.borrow(), points);
+            assert_eq!(
+                with_rows_given_back(values(&memory, input), &memory, &taken),
+                expected,
+                "{} {mode}",
+                input.name
+            );
+            // A version bump invalidates R; coverage must still supply edges.
+            memory.mark.replace(None);
+            memory.rows_mark.replace(None);
+            assert_eq!(
+                with_rows_given_back(values(&memory, input), &memory, &taken),
+                expected
+            );
+            if mode == "published" {
+                // Restart with one kind removed, initializing the pass's
+                // omission state before any new input is folded.
+                let mut builder = start_builder(&memory, ms(input.now)).unwrap();
+                builder.set_omission(Omission::of(THREE[..2].iter().copied(), EVERY));
+                // Initialize omission against saved coverage without changing
+                // any input/row: begin_coverage is the pass's start operation.
+                builder.begin_coverage_from(None, coverage.as_ref());
+                assert!(builder.omission_stopped());
+                assert_eq!(
+                    with_rows_given_back(values(&memory, input), &memory, &taken),
+                    expected
+                );
+                each.push((input, expected.clone()));
+            }
+        }
+    }
+    check(&each);
 }

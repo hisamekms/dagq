@@ -3675,6 +3675,9 @@ impl LedgerStore for SupervisorQueue {
     fn ledger_runs_past_their_rows(&self, through: EventId) -> Result<Vec<RunId>> {
         self.remote("ledger_runs_past_their_rows", vec![to_value(through)?])
     }
+    fn remove_omitted_queue_rows(&self) -> Result<usize> {
+        self.remote("remove_omitted_queue_rows", vec![])
+    }
     fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
         self.remote("remove_node_rows", vec![to_value(before_day)?])
     }

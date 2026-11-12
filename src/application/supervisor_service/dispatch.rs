@@ -2783,6 +2783,7 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                     .collect::<Vec<_>>()
             }))
         }
+        "remove_omitted_queue_rows" => answer(LedgerStore::remove_omitted_queue_rows(&*store)),
         "remove_node_rows" => {
             let (before_day,): (i64,) = read(op, args)?;
             answer(LedgerStore::remove_node_rows(&*store, before_day))

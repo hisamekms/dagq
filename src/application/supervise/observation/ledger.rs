@@ -469,6 +469,11 @@ fn build_pass_limited(
             Err(error) => built.failure = Some(format!("the node rows' retention: {error:#}")),
         }
     }
+    if built.failure.is_none()
+        && let Err(error) = store.remove_omitted_queue_rows()
+    {
+        built.failure = Some(format!("the omitted queue rows' removal: {error:#}"));
+    }
     // A run's steps go only once its row holds them.
     if built.failure.is_none()
         && let Some(before) = retain.steps

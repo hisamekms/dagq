@@ -64,8 +64,8 @@ use crate::domain::{
 /// `queue_before`), which the common read takes from the coverage
 /// ([`super::window`]). What builds the ledger still reads each as an
 /// input (R moves past it). The same kinds of a run, a task or a session stay
-/// their rows' records. Putting a kind in or taking one out, and removing
-/// the rows held up to C, are left to the decision after goal 277: what
+/// their rows' records. Putting a kind in or taking one out is left to a
+/// separate decision: what
 /// builds the ledger stops on a store whose coverage is of another set
 /// ([`super::session::written::omitted::stops`]), so a change of this set
 /// alone stops every store that holds a coverage. What builds the ledger
@@ -108,6 +108,22 @@ impl QueueHead {
             outcome: row.outcome.clone(),
             detail: row.detail.clone(),
         }
+    }
+
+    /// A settled current-version single-event queue row whose kind has a
+    /// saved summary and whose event is inside the public (C, S]. Such a
+    /// head is forgotten at S; removing it leaves QueueBook unchanged.
+    pub fn covered_for_removal(
+        &self,
+        coverage: &super::session::written::omitted::Coverage,
+    ) -> bool {
+        OMITTED_KINDS
+            .iter()
+            .any(|kind| kind.as_str() == self.subject_kind)
+            && coverage.summaries.contains_key(&self.subject_kind)
+            && self.head.ledger_v == LEDGER_V
+            && matches!(self.head.records.as_slice(), [id] if *id > coverage.from && *id <= coverage.through)
+            && self.forgotten_at(coverage.through, Since::of(&[]))
     }
 
     /// Whether nothing made again at the position `at` reads this row, so

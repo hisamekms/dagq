@@ -718,6 +718,18 @@ pub trait LedgerStore {
     /// change nothing is written, and one stopped part way is finished by
     /// the next call. Returns how many rows were removed.
     fn remove_node_rows(&self, before_day: i64) -> Result<usize>;
+    /// Remove only current-version, settled single-event queue rows of
+    /// the fixed omitted kinds with a saved summary, inside the public
+    /// (C, S] read in the same transaction, and forgotten_at(S).
+    /// Missing coverage, old versions, unfinished rows and other owners
+    /// stay. Select without a write lock by seeking only current, settled
+    /// single-event rows of saved omitted kinds within (C, S]; retained
+    /// history outside it is not scanned. With no eligible keys, take no
+    /// write lock or pause. Recheck/delete at most 200 keys
+    /// per transaction, after each successful builder pass beside node
+    /// retention. Never change the version, marks or coverage.
+    fn remove_omitted_queue_rows(&self) -> Result<usize>;
+
     /// The events of the run `run` the EventStore holds, in id order: the
     /// input [`Self::ledger_window`] folds the row of a run on its way
     /// from, as the builder writes none of it until it ends.
