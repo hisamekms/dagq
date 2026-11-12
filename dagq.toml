@@ -482,6 +482,13 @@ provider = "claude"
 model = "claude-haiku-5-5"
 paths = ["docs/design/**"]
 
+# run の review の前に受け入れ条件の被覆だけを見る確認の job を有効にする（goal 278、ADR-t4836-1 決定4 の試行、job は task 4837）。
+# provider・model・effort は書かず既定のままにし、A/B の群や [roles] を継がない（ADR-t4836-1 決定2）。
+# 試行なので、有効化の mark と 14 日（不足なら 28 日）の判定は inbox か人が行い、外すときは enabled を消す。
+# この表を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 4837 を含んでから足した。
+[review.subagents."builtin:acceptance-precheck"]
+enabled = true
+
 # run の review の自動の手直しの上限の後に、acceptance_unmet をコードの指摘に数えるコードの path（方針は ADR-t2599-1、
 # 書式・既定・意味は domain::review_reason::CodePaths の doc comment）。paths が全部ここの外の acceptance_unmet は着地を止めず
 # follow_up の draft になる（docs・plugin・.dagq・scripts・.config は入れない）。値は [areas] の runtime・migrations・tests に合わせた。
