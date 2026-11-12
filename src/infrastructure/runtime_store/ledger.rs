@@ -91,6 +91,7 @@ fn held_row(conn: &impl SqlRead, kind: LedgerKind, key: &str) -> Result<Option<L
 /// `inputs_through`, its version as its `ledger_v`, nothing else. No
 /// reader of the rows of a [`LedgerKind`] reads it.
 fn write_mark(conn: &impl SqlWrite, mark: &SessionsWritten) -> Result<()> {
+    kept_view(conn, View::First)?;
     let through = text(&InputsThrough {
         events: mark.through,
         supervisor: None,
@@ -118,6 +119,7 @@ fn write_mark(conn: &impl SqlWrite, mark: &SessionsWritten) -> Result<()> {
 /// its version as its `ledger_v`, nothing else. No reader of the rows of a [`LedgerKind`]
 /// reads it.
 fn write_rows_mark(conn: &impl SqlWrite, mark: &RowsWritten) -> Result<()> {
+    kept_view(conn, View::First)?;
     let through = text(&MarkThrough {
         positions: InputsThrough {
             events: mark.through.events,
@@ -516,9 +518,14 @@ fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
             .collect::<Vec<_>>(),
     )?;
     write_left_open(conn, row)?;
-    // The row and its contribution commit together on every writer path,
-    // including legacy detail updates. No history scan is needed here.
-    for first in crate::domain::ledger::builder::first_executions(row) {
+    kept_view(conn, View::First)?;
+    write_firsts(conn, crate::domain::ledger::builder::first_executions(row))?;
+    Ok(!frozen)
+}
+
+/// Merge a run's minima with the view in the same transaction as the row.
+fn write_firsts(conn: &impl SqlWrite, firsts: Vec<FirstExecution>) -> Result<()> {
+    for first in firsts {
         SqlWrite::execute(
             conn,
             "INSERT INTO ledger_first_executions(actor, provider, at) VALUES (?1, ?2, ?3)
@@ -527,7 +534,24 @@ fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
             sql_params![first.actor, first.provider, first.at],
         )?;
     }
-    Ok(!frozen)
+    Ok(())
+}
+
+/// The two rebuildable views share the generation and bounded-fill protocol.
+/// Only these fixed table names enter the shared SQL.
+#[derive(Clone, Copy)]
+enum View {
+    Open,
+    First,
+}
+
+impl View {
+    fn mark(self) -> &'static str {
+        match self {
+            Self::Open => "ledger_open_filled",
+            Self::First => "ledger_first_executions_ready",
+        }
+    }
 }
 
 /// Write what `row` leaves open at its end ([`open::left_open`]) in place
@@ -572,12 +596,12 @@ fn leader_generation(conn: &impl SqlRead) -> Result<i64> {
     )?)
 }
 
-/// The mark of `ledger_open` as `conn` holds it: how far the filling went
+/// The mark of either view as `conn` holds it: how far the filling went
 /// and the last generation of the write leader it is kept through.
-fn mark_row(conn: &impl SqlRead) -> Result<Option<(Filled, i64)>> {
+fn mark_row(conn: &impl SqlRead, view: View) -> Result<Option<(Filled, i64)>> {
     let held = SqlRead::query_row(
         conn,
-        "SELECT through, generation FROM ledger_open_filled",
+        &format!("SELECT through, generation FROM {}", view.mark()),
         sql_params![],
         |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)),
     )
@@ -596,7 +620,11 @@ fn mark_row(conn: &impl SqlRead) -> Result<Option<(Filled, i64)>> {
 /// of the ledger ([`kept_filled`]), so one that does not (an older binary)
 /// leaves the mark behind, whatever it wrote of the rows and the marks.
 fn held_filled(conn: &impl SqlRead) -> Result<Filled> {
-    match mark_row(conn)? {
+    held_view(conn, View::Open)
+}
+
+fn held_view(conn: &impl SqlRead, view: View) -> Result<Filled> {
+    match mark_row(conn, view)? {
         Some((filled, generation)) if generation == leader_generation(conn)? => Ok(filled),
         _ => Ok(Filled::Not),
     }
@@ -608,7 +636,11 @@ fn held_filled(conn: &impl SqlRead) -> Result<Filled> {
 /// is removed, as a writer that kept no table may have come between, and
 /// the filling begins again from the first row.
 fn kept_filled(conn: &impl SqlWrite) -> Result<Filled> {
-    let Some((filled, generation)) = mark_row(conn)? else {
+    kept_view(conn, View::Open)
+}
+
+fn kept_view(conn: &impl SqlWrite, view: View) -> Result<Filled> {
+    let Some((filled, generation)) = mark_row(conn, view)? else {
         return Ok(Filled::Not);
     };
     let leader = leader_generation(conn)?;
@@ -618,12 +650,12 @@ fn kept_filled(conn: &impl SqlWrite) -> Result<Filled> {
     if generation.checked_add(1) == Some(leader) {
         SqlWrite::execute(
             conn,
-            "UPDATE ledger_open_filled SET generation=?1",
+            &format!("UPDATE {} SET generation=?1", view.mark()),
             sql_params![leader],
         )?;
         return Ok(filled);
     }
-    SqlWrite::execute(conn, "DELETE FROM ledger_open_filled", sql_params![])?;
+    SqlWrite::execute(conn, &format!("DELETE FROM {}", view.mark()), sql_params![])?;
     Ok(Filled::Not)
 }
 
@@ -666,16 +698,24 @@ pub(crate) mod open_in {
         held_filled(tx)
     }
 
+    pub(crate) fn first_held(tx: &impl SqlRead) -> Result<bool> {
+        Ok(held_view(tx, View::First)?.is_done())
+    }
+
+    pub(crate) fn first_fill(tx: &impl SqlWrite) -> Result<Filled> {
+        fill_view(tx, View::First)
+    }
+
     /// What the table holds, whatever its mark.
     pub(crate) fn entries(tx: &impl SqlRead) -> Result<BTreeMap<String, BTreeSet<Left>>> {
         left_open_entries(tx)
     }
 }
 
-/// Write `filled` as the mark of `ledger_open` on `conn`, kept through the
+/// Write `filled` as the view's mark on `conn`, kept through the
 /// generation of its writer.
-fn write_filled(conn: &impl SqlWrite, filled: &Filled) -> Result<()> {
-    SqlWrite::execute(conn, "DELETE FROM ledger_open_filled", sql_params![])?;
+fn write_filled(conn: &impl SqlWrite, view: View, filled: &Filled) -> Result<()> {
+    SqlWrite::execute(conn, &format!("DELETE FROM {}", view.mark()), sql_params![])?;
     let through = match filled {
         Filled::Not => return Ok(()),
         Filled::Through(key) => Some(key.clone()),
@@ -683,7 +723,12 @@ fn write_filled(conn: &impl SqlWrite, filled: &Filled) -> Result<()> {
     };
     SqlWrite::execute(
         conn,
-        "INSERT INTO ledger_open_filled(through, generation) VALUES (?1, ?2)",
+        match view {
+            View::Open => "INSERT INTO ledger_open_filled(through, generation) VALUES (?1, ?2)",
+            View::First => {
+                "INSERT INTO ledger_first_executions_ready(singleton, through, generation) VALUES (1, ?1, ?2)"
+            }
+        },
         sql_params![through, leader_generation(conn)?],
     )?;
     Ok(())
@@ -748,14 +793,26 @@ fn earlier_run_records_in(conn: &impl SqlRead, key: &str) -> Result<Vec<String>>
 /// ([`kept_filled`]) begins again from the first row, the entries held
 /// removed first.
 fn fill_left_open(conn: &impl SqlWrite) -> Result<Filled> {
-    let held = kept_filled(conn)?;
+    fill_view(conn, View::Open)
+}
+
+/// Both views use the same key, time and byte bounds, one transaction per part.
+fn fill_view(conn: &impl SqlWrite, view: View) -> Result<Filled> {
+    let held = kept_view(conn, view)?;
     let Some(after) = held.after() else {
         return Ok(held);
     };
     // From the first row, what the table held goes: every row is taken in
     // again, and one written meanwhile writes its own entries again.
     if after.is_none() {
-        SqlWrite::execute(conn, "DELETE FROM ledger_open", sql_params![])?;
+        SqlWrite::execute(
+            conn,
+            match view {
+                View::Open => "DELETE FROM ledger_open",
+                View::First => "DELETE FROM ledger_first_executions",
+            },
+            sql_params![],
+        )?;
     }
     let started = std::time::Instant::now();
     let limit = i64::try_from(open::ROWS_PER_FILL).unwrap_or(i64::MAX);
@@ -771,14 +828,41 @@ fn fill_left_open(conn: &impl SqlWrite) -> Result<Filled> {
     };
     let (mut bytes, mut taken) = (0, 0_usize);
     for key in &keys {
-        let texts = earlier_run_records_in(conn, key)?;
-        bytes += texts.iter().map(String::len).sum::<usize>();
-        let mut records = texts
-            .iter()
-            .map(|text| serde_json::from_str::<RunEvent>(text))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        records.sort_by_key(|event| event.id);
-        write_left(conn, key, &open::left_open_of(LedgerKind::Run, &records))?;
+        match view {
+            View::Open => {
+                let texts = earlier_run_records_in(conn, key)?;
+                bytes += texts.iter().map(String::len).sum::<usize>();
+                let mut records = texts
+                    .iter()
+                    .map(|text| serde_json::from_str::<RunEvent>(text))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                records.sort_by_key(|event| event.id);
+                write_left(conn, key, &open::left_open_of(LedgerKind::Run, &records))?;
+            }
+            View::First => {
+                let detail: Option<String> = SqlRead::query_row(
+                    conn,
+                    &format!(
+                        "SELECT {executions} FROM ledger_rows WHERE kind='run' AND key=?1",
+                        executions = SqlRead::dialect(conn).json_field_spaced(
+                            "detail",
+                            "$.executions",
+                            JsonType::Text
+                        )
+                    ),
+                    sql_params![key],
+                    |r| r.get(0),
+                )?;
+                let detail = detail.unwrap_or_else(|| "[]".into());
+                bytes += detail.len();
+                let executions: serde_json::Value = serde_json::from_str(&detail)?;
+                let detail = serde_json::json!({"executions": executions});
+                write_firsts(
+                    conn,
+                    crate::domain::ledger::builder::first_executions_of(&detail),
+                )?;
+            }
+        }
         taken += 1;
         if open::part_spent(bytes, started.elapsed()) {
             break;
@@ -786,7 +870,7 @@ fn fill_left_open(conn: &impl SqlWrite) -> Result<Filled> {
     }
     let last = taken.checked_sub(1).map(|at| keys[at].as_str());
     let filled = Filled::next(keys.len(), taken, last);
-    write_filled(conn, &filled)?;
+    write_filled(conn, view, &filled)?;
     Ok(filled)
 }
 
@@ -1633,8 +1717,24 @@ impl<E: TransactionEntries> LedgerStore for StoreQueue<E> {
         marks_in(&tx)
     }
 
-    /// Once done, a read alone: no pass takes the write lock for it again.
+    /// A ready row alone says nothing: only a completed fill kept through
+    /// the current leader generation certifies every run's contribution.
+    fn ledger_first_executions_ready(&self) -> Result<bool> {
+        Ok(held_view(
+            &self.read_entry("ledger_first_executions_ready")?,
+            View::First,
+        )?
+        .is_done())
+    }
+
+    /// Each incomplete view advances in its own bounded write transaction.
+    /// Once both are done, a pass reads alone and takes no write lock.
     fn fill_ledger_open(&self) -> Result<Filled> {
+        if !self.ledger_first_executions_ready()? {
+            let tx = self.write_entry("fill_ledger_first_executions")?;
+            fill_view(&tx, View::First)?;
+            tx.commit()?;
+        }
         let held = held_filled(&self.read_entry("ledger_open_filled")?)?;
         if held.is_done() {
             return Ok(held);

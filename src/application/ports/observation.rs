@@ -217,9 +217,16 @@ pub trait LedgerStore {
     /// transaction with the mark: what builds the ledger asks it once a
     /// pass until it is done, and again from the first row once a writer
     /// that keeps no table took the write leader over. A store that keeps
-    /// no such table is never filled.
+    /// no such table is never filled. The runtime store also advances its
+    /// first-Execution view, in a separate transaction with the same bounds.
     fn fill_ledger_open(&self) -> Result<crate::domain::ledger::open::Filled> {
         Ok(crate::domain::ledger::open::Filled::Not)
+    }
+    /// Whether the first-Execution view is complete in the current write
+    /// leader's generation. Missing, unversioned or stale marks are false;
+    /// callers then read the run details instead.
+    fn ledger_first_executions_ready(&self) -> Result<bool> {
+        Ok(false)
     }
     /// What each run row leaves open at its end, by the run's key (a row
     /// that leaves nothing open has no entry), once the store's mark says

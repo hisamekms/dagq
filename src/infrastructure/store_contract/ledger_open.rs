@@ -263,7 +263,7 @@ pub fn ledger_open_parts_bounded_by_bytes<S: ContractStore, F: Fn() -> Result<S>
 /// `open`'s store as the process `holder` after it took the write leader
 /// over: its writes are of the new generation. The holder before it
 /// releases first.
-fn taken_over<S: ContractStore, F: Fn() -> Result<S>>(
+pub(super) fn taken_over<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
     before: Option<(&str, i64)>,
     holder: &str,

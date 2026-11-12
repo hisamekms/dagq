@@ -3269,6 +3269,14 @@ mod store_contract_tests {
         contract(|open| store_contract::image_digests(&open));
     }
     #[test]
+    fn ledger_first_executions_generations() {
+        contract(|open| store_contract::ledger_first_executions_generations(&open));
+    }
+    #[test]
+    fn ledger_first_executions_parts() {
+        contract(|open| store_contract::ledger_first_executions_parts(&open));
+    }
+    #[test]
     fn ledger_open_written_with_its_rows() {
         contract(|open| store_contract::ledger_open_written_with_its_rows(&open));
     }

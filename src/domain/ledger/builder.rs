@@ -4064,25 +4064,31 @@ mod tests;
 /// including a clock turned back, compare independently of event or run order.
 /// This is a contribution to the ledger view, never a change to its row.
 pub fn first_executions(row: &LedgerRow) -> Vec<crate::domain::stats::executions::FirstExecution> {
+    if row.kind != LedgerKind::Run {
+        return Vec::new();
+    }
+    first_executions_of(&row.detail)
+}
+
+/// Minima from a run row's execution detail, also used by bounded view fills.
+pub fn first_executions_of(
+    detail: &serde_json::Value,
+) -> Vec<crate::domain::stats::executions::FirstExecution> {
     use crate::domain::stats::executions::FirstExecution;
     let mut first = std::collections::BTreeMap::new();
-    if row.kind == LedgerKind::Run {
-        for entry in row.detail["executions"].as_array().into_iter().flatten() {
-            let Some(execution) = entry["actor"]
-                .as_str()
-                .zip(entry["provider"].as_str())
-                .zip(entry["at"].as_i64())
-                .and_then(|((actor, provider), at)| {
-                    FirstExecution::of(actor, provider.to_owned(), at)
-                })
-            else {
-                continue;
-            };
-            first
-                .entry((execution.actor, execution.provider))
-                .and_modify(|at: &mut i64| *at = (*at).min(execution.at))
-                .or_insert(execution.at);
-        }
+    for entry in detail["executions"].as_array().into_iter().flatten() {
+        let Some(execution) = entry["actor"]
+            .as_str()
+            .zip(entry["provider"].as_str())
+            .zip(entry["at"].as_i64())
+            .and_then(|((actor, provider), at)| FirstExecution::of(actor, provider.to_owned(), at))
+        else {
+            continue;
+        };
+        first
+            .entry((execution.actor, execution.provider))
+            .and_modify(|at: &mut i64| *at = (*at).min(execution.at))
+            .or_insert(execution.at);
     }
     first
         .into_iter()

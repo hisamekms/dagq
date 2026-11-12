@@ -170,6 +170,17 @@ fn the_migration_backfills_the_view_and_publishes_readiness_afterwards() {
         .execute_batch(&format!("INSERT INTO ledger_first_executions_ready{mark}"))
         .unwrap();
     assert!(ready());
+    queue
+        .conn
+        .execute_batch(
+            crate::infrastructure::schema::MIGRATIONS
+                .iter()
+                .find(|sql| {
+                    sql.contains("ALTER TABLE ledger_first_executions_ready ADD COLUMN generation")
+                })
+                .unwrap(),
+        )
+        .unwrap();
     // A later writer with a clock further back replaces the minimum, and
     // writing the same or a later minimum cannot move it forwards.
     let mut row = rows().remove(0);

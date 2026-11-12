@@ -7,6 +7,7 @@ mod cases;
 mod delegates;
 mod goal_landing_marks;
 mod goal_owners;
+mod ledger_first_executions;
 mod ledger_open;
 mod related;
 mod runner_leases;
@@ -16,6 +17,7 @@ pub use cases::*;
 pub use delegates::*;
 pub use goal_landing_marks::*;
 pub use goal_owners::*;
+pub use ledger_first_executions::*;
 pub use ledger_open::*;
 pub use related::related_cases;
 pub use runner_leases::*;
@@ -163,6 +165,14 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         (
             "ledger open kept through generations",
             ledger_open_kept_through_generations::<S, F>,
+        ),
+        (
+            "first executions generations",
+            ledger_first_executions_generations::<S, F>,
+        ),
+        (
+            "first executions parts",
+            ledger_first_executions_parts::<S, F>,
         ),
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),
