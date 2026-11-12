@@ -168,16 +168,15 @@ ADR-t728-1決定6の強制の最初のものだが、隔離ではない: 同じ�
 
 ## answerと代行の記録
 
-inboxはaskのanswerと`dagq-recover`の手作業を、親の人の役割の範囲で代行できる（ADR-t728-3の決定1）。
-そのかわり記録で人自身と区別する（決定2）。
+inboxはaskのanswerと`dagq-recover`の手作業を代行でき、人の役割を持つOIDCの発行元のある配置だけ、権限は親の人の役割で狭まる（[AuthorizationのPolicy](authorization.md#policy)）。
+発行元の無いローカルの既定には役割が無く、inboxは今どおり代行できる（ADR-t3985-1決定6・7）。
+記録で人自身と区別する（ADR-t728-3決定2）。
 
 - eventのactorとanswerの`AnswerAuthority`は人自身とinboxの代行を区別し、answerには承認の分類（`answer_approves`）も残す
 - 区別はactorの型から決め、answerの文やpromptから推さない
 - inboxのterminalで人が打つ`!`のコマンドも`DAGQ_ROLE=inbox`を継ぐのでinboxの代行として記録される。
   人自身の操作として残したいときは、`DAGQ_ROLE`の無い別のterminalで打つ
 
-OIDCの発行元があれば、approve_landingの着地承認は最近のloginの人のtokenに限り、inboxとtokenの無いuserを拒む。
-他のanswerや発行元の無い配置の許否・記録は変わらない。
 許される代行には、inboxの誤解による操作を止められないリスクが残る。
 
 ## 将来の道筋
