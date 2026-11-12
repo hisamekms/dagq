@@ -97,6 +97,8 @@ runのfile・台帳の行・古いeventは通さない。
 
 ## 表
 
+`audit_records`: eventsと独立の監査の正本で、UPDATE・DELETEを拒み状態の変更と同じtransactionで書く。
+
 `members`・`member_credentials`: 人の登録簿と設定。
 `delegates`: ownerの代わりに答える人で、行とeventを1つのtransactionで書く。
 runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`image_publish.rs`
@@ -226,12 +228,12 @@ queueはrepositoryごとに1つで、場所は`src/infrastructure/location.rs`�
 
 ```text
 $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.local/share
-  queue.db                           SQLite（WALの -wal / -shm も隣に置かれる）
-  repository                         束縛先のGit common directory（人向けの逆引き）
-  runs/<run-id>/                     prompt、runner、worktree/、receipt、refusals.log、ログなどrunのファイル
-  logs/                              processごとのJSON Lines、自動更新の出力、launchd.log、rebind.jsonl
-  service/                           queue serviceのsocket・lock・token
-  backups/                           非互換のmigrateの前の複製
+  queue.db              SQLite（WALの -wal / -shm も隣に置かれる）
+  repository            束縛先のGit common directory（人向けの逆引き）
+  runs/<run-id>/        prompt、runner、worktree/、receipt、refusals.log、ログなどrunのファイル
+  logs/                 processごとのJSON Lines、自動更新の出力、launchd.log、rebind.jsonl
+  service/              queue serviceのsocket・lock・token
+  backups/              非互換のmigrateの前の複製
 ~/Library/LaunchAgents/com.dagq.<hash>.plist   upが書くsupervisorのLaunchAgent
 ```
 

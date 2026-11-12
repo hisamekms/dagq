@@ -18,6 +18,44 @@ use crate::domain::audit::{
 use crate::domain::authorization::Capability;
 use crate::domain::queue_service::{ControlCommand, UseCase};
 
+/// The fact written by the queue's repository-binding transaction, from
+/// its before/after values, independently of operational events. The
+/// control-side sender supplies its counter and the observed time.
+pub fn repository_binding_change(
+    sender_seq: u64,
+    before: Option<&str>,
+    after: &str,
+    at: String,
+) -> SenderInput {
+    use crate::domain::audit::{Authority, Correlation, Outcome, OutcomeStatus, Resource};
+    SenderInput {
+        sender_seq,
+        at,
+        action: AuditAction::AuthzPrivileged,
+        resource: Resource {
+            kind: "queue".into(),
+            id: "repository_binding".into(),
+        },
+        authority: Authority {
+            capability: Some(Capability::QueueAdmin.to_string()),
+            ..Authority::default()
+        },
+        outcome: Outcome {
+            status: OutcomeStatus::Succeeded,
+            reason: None,
+        },
+        change: Some(Change {
+            before: before.map(|binding| serde_json::json!({"git_common_dir": binding})),
+            after: Some(serde_json::json!({"git_common_dir": after})),
+            ..Change::default()
+        }),
+        correlation: Correlation::default(),
+        answered_via: None,
+        landing: None,
+        external: None,
+    }
+}
+
 /// The last record of the chain: what the next one follows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainHead {
@@ -330,7 +368,7 @@ pub const ORDINARY_CAPABILITIES: &[(Capability, &str)] = &[
     (C::RunnerClaim, RUNNER), (C::RunnerHeartbeat, RUNNER), (C::RunnerReport, RUNNER),
     (C::RunnerDeclare, RUNNER), (C::RunnerList, READ), (C::ImagePublish, RUNNER),
     (C::IdentityLogin, IDENTITY), (C::CredentialPreference, IDENTITY),
-    (C::QueueRead, READ), (C::QueueWatch, READ), (C::ExportFile, READ), (C::CiRead, READ),
+    (C::AuditRead, READ), (C::QueueRead, READ), (C::QueueWatch, READ), (C::ExportFile, READ), (C::CiRead, READ),
     (C::GoalWrite, PLANNING), (C::GoalReady, PLANNING), (C::GoalClose, PLANNING),
     (C::GoalReviewRequest, PLANNING), (C::TaskWrite, PLANNING), (C::FollowUpJudge, PLANNING),
     (C::TaskVerifyEdit, PLANNING), (C::TaskReady, PLANNING), (C::ProposalSubmit, PLANNING),
@@ -407,7 +445,7 @@ pub const SERVICE_ENTRIES: &[(UseCase, Entry)] = &[
     (UseCase::FindingDismiss, Ordinary(ACTOR)),
     (UseCase::List, Ordinary(READ)), (UseCase::Candidates, Ordinary(READ)),
     (UseCase::Graph, Ordinary(READ)), (UseCase::Status, Ordinary(READ)),
-    (UseCase::Asks, Ordinary(READ)), (UseCase::Events, Ordinary(READ)),
+    (UseCase::AuditVerify, Ordinary(READ)), (UseCase::Asks, Ordinary(READ)), (UseCase::Events, Ordinary(READ)),
     (UseCase::Timeline, Ordinary(READ)), (UseCase::Stats, Ordinary(READ)),
     (UseCase::Kpi, Ordinary(READ)), (UseCase::Forecast, Ordinary(READ)),
     (UseCase::Notes, Ordinary(READ)), (UseCase::Marks, Ordinary(READ)),
@@ -509,6 +547,32 @@ mod tests {
         chain::verify,
     };
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn repository_binding_fact_names_the_privilege_and_both_states() {
+        let input = repository_binding_change(7, Some("/old/.git"), "/new/.git", "at".into());
+        assert_eq!(input.action, AuditAction::AuthzPrivileged);
+        assert_eq!(input.authority.capability.as_deref(), Some("queue.admin"));
+        assert_eq!(input.resource.kind, "queue");
+        assert_eq!(input.resource.id, "repository_binding");
+        assert_eq!(input.sender_seq, 7);
+        let change = input.change.unwrap();
+        assert_eq!(
+            change.before,
+            Some(serde_json::json!({"git_common_dir": "/old/.git"}))
+        );
+        assert_eq!(
+            change.after,
+            Some(serde_json::json!({"git_common_dir": "/new/.git"}))
+        );
+        assert!(
+            repository_binding_change(1, None, "/new/.git", "at".into())
+                .change
+                .unwrap()
+                .before
+                .is_none()
+        );
+    }
 
     #[test]
     fn every_privileged_use_case_has_one_row() {

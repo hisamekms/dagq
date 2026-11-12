@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod agent_dir;
 mod agent_evals;
 pub mod asks;
+pub mod audit;
 pub mod background;
 pub mod binaries;
 pub mod broker_relay;

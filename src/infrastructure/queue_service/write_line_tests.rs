@@ -697,37 +697,15 @@ fn an_administration_that_reads_authenticates_off_the_line() {
     assert!(!message.contains("off its write line"), "{message}");
 }
 
-/// The service's complete migration dispatch must commit and report a
-/// compatible schema without taking the still-live remote holder's row.
+/// A standby can receive `migrate` after another migrator completed the
+/// pending schema it observed at startup. Completion must still report
+/// success without taking the still-live remote holder's row.
 #[test]
-fn compatible_migration_reports_success_while_another_holder_keeps_its_lease() {
+fn migration_completion_reports_success_while_another_holder_keeps_its_lease() {
     let (_dir, mut backend) = claimed_with(&LeaseToken::new("owner"), still());
-    use crate::infrastructure::schema::{MIGRATIONS, floor_for};
-    // Build a real earlier schema, with only compatible migrations pending.
-    // Keep the leader table in that prefix so the old holder's lease exists.
-    let leader_version = MIGRATIONS
-        .iter()
-        .position(|sql| sql.contains("CREATE TABLE write_leader ("))
-        .unwrap()
-        + 1;
-    let version = floor_for(SqliteQueue::SCHEMA_VERSION).max(leader_version as i64);
-    assert!(
-        version < SqliteQueue::SCHEMA_VERSION,
-        "a compatible tail is needed"
-    );
-    backend.db = backend.db.with_file_name("before-compatible.db");
+    backend.db = backend.db.with_file_name("already-migrated.db");
+    SqliteQueue::init(&backend.db).unwrap();
     let raw = rusqlite::Connection::open(&backend.db).unwrap();
-    for sql in &MIGRATIONS[..version as usize] {
-        raw.execute_batch(sql).unwrap();
-    }
-    raw.pragma_update(None, "application_id", 0x43545131)
-        .unwrap();
-    raw.pragma_update(None, "user_version", version).unwrap();
-    raw.execute(
-        "INSERT INTO schema_floor(singleton,floor) VALUES(1,?1)",
-        [floor_for(version)],
-    )
-    .unwrap();
     raw.execute("UPDATE write_leader SET holder='old-service', generation=7, lease_until_ms=9223372036854775807, acquired_at_ms=1", []).unwrap();
     raw.execute("INSERT INTO landed_commits(run_id,task_id,commit_sha,landed_at) VALUES (?1,1,'abc','then')", [RUN]).unwrap();
     let leader = || {
@@ -746,28 +724,21 @@ fn compatible_migration_reports_success_while_another_holder_keeps_its_lease() {
         .unwrap()
     };
     let before = leader();
-    assert!(
-        SqliteQueue::schema(&backend.db)
-            .unwrap()
-            .pending
-            .iter()
-            .all(|m| m.compatible)
-    );
+    assert!(SqliteQueue::schema(&backend.db).unwrap().pending.is_empty());
     backend.queue_dir = backend.queue_dir.join("different-queue");
     fs::create_dir(&backend.queue_dir).unwrap();
     let line = Arc::new(ServiceWriteLine::waiting(&backend.db).unwrap());
-    assert!(!line.take(&backend.db, "new-service", false).unwrap());
-    assert!(line.bootstrap.load(Ordering::SeqCst));
+    // The startup observation preceded the other migrator's commit. Do not
+    // depend on the compiled migrations ending with a compatible tail.
+    line.bootstrap.store(true, Ordering::SeqCst);
     backend.write_line = Some(line.clone());
     let backend = Arc::new(backend);
     let response = answered(&backend, request(None, UseCase::Migrate, json!({})));
     assert!(response.ok, "{response:?}");
     let report = response.result.unwrap();
+    assert_eq!(report["previous_version"], SqliteQueue::SCHEMA_VERSION);
     assert_eq!(report["schema_version"], SqliteQueue::SCHEMA_VERSION);
-    assert_eq!(
-        report["applied"].as_array().unwrap().len() as i64,
-        SqliteQueue::SCHEMA_VERSION - version
-    );
+    assert!(report["applied"].as_array().unwrap().is_empty());
     let missing = report["commit_messages_missing"].as_array().unwrap();
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0]["commit"], "abc");

@@ -70,7 +70,22 @@ enum MeCommand {
 }
 
 #[derive(Subcommand, Clone)]
+enum AuditCommand {
+    /// Verify the chain; exit 1 reports the first mismatching sequence and kind.
+    Verify {
+        /// Start at this admission sequence (inclusive), using its predecessor as anchor.
+        #[arg(long)]
+        since: Option<u64>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
 enum Command {
+    /// Read and verify the primary audit chain.
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
     /// Log in on your own terminal using a public OIDC client; no client secret.
     Login {
         /// Control-side destination; falls back to DAGQ_CONTROL_URL.
@@ -2770,6 +2785,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
     let one = |capability, resource| vec![(capability, resource)];
     let queue = |capability| vec![(capability, Resource::Queue)];
     match command {
+        Command::Audit { .. } => queue(C::AuditRead),
         Command::Delegate { .. } => queue(C::DelegateWrite),
         Command::Runner { command } => queue(match command {
             dagq::application::runner_enroll::RunnerCommand::RegisterCode => C::RunnerRegister,
@@ -3422,6 +3438,9 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
             goal: goal_id,
             format,
         }),
+        Command::Audit {
+            command: AuditCommand::Verify { since },
+        } => QueueRead::AuditVerify(reads::AuditVerifyRead { since }),
         Command::Status { role } => QueueRead::Status(reads::RoleRead { role }),
         Command::Asks { open, role, all } => QueueRead::Asks(reads::AsksRead { open, role, all }),
         Command::Events {
@@ -6503,6 +6522,9 @@ fn finish_output(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> ExitCode {
+    let audit_mismatch = result
+        .as_ref()
+        .is_ok_and(|value| value.get("audit_verified") == Some(&Value::Bool(false)));
     let result = result.and_then(|value| {
         if structured {
             tracing::info!(target: "dagq::telemetry::exit", result = %value, "dagq process stopped");
@@ -6522,6 +6544,7 @@ fn finish_output(
         Ok(())
     });
     match result {
+        Ok(()) if audit_mismatch => ExitCode::FAILURE,
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if !structured {
@@ -7210,6 +7233,44 @@ fn job_command(
 mod tests {
     use super::*;
 
+    #[test]
+    fn audit_verify_routes_with_its_own_capability_and_exit_status() {
+        let command = Command::Audit {
+            command: AuditCommand::Verify { since: Some(3) },
+        };
+        assert_eq!(
+            requests(&command),
+            vec![(Capability::AuditRead, Resource::Queue)]
+        );
+        assert_eq!(
+            UseCase::of_command(&["audit", "verify", "--since", "3"]),
+            Some(UseCase::AuditVerify)
+        );
+        assert_eq!(
+            queue_read(&command).unwrap().request(),
+            (UseCase::AuditVerify, json!({"since": 3}))
+        );
+        for (report, expected) in [
+            (
+                json!({"audit_verified": true, "checked": 3}),
+                ExitCode::SUCCESS,
+            ),
+            (
+                json!({"audit_verified": false, "seq": 2, "kind": "Hash"}),
+                ExitCode::FAILURE,
+            ),
+        ] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            assert_eq!(
+                finish_output(Ok(report.clone()), false, &mut out, &mut err),
+                expected
+            );
+            assert_eq!(serde_json::from_slice::<Value>(&out).unwrap(), report);
+            assert!(err.is_empty());
+        }
+    }
+
     /// The command a process runs, as its long holds of the queue record
     /// it: its subcommands, past the global options.
     #[test]
@@ -7342,6 +7403,8 @@ mod tests {
     fn denied_commands_need_what_the_table_says() {
         use dagq::application::execution::DAGQ_COMMANDS;
         let samples: &[(&str, &[&str])] = &[
+            ("audit", &["verify"]),
+            ("audit", &["verify", "--since", "3"]),
             ("login", &[]),
             ("logout", &[]),
             ("whoami", &[]),
@@ -8508,7 +8571,7 @@ mod tests {
     }
 
     /// The subcommands `DAGQ_COMMANDS` leaves out, each for a reason: the
-    /// ones that only read; the ones with a form that reads, which a rule
+    /// ordinary queue reads; the ones with a form that reads, which a rule
     /// on the name would deny as well (the CLI refuses the other form); and
     /// the ones that open no queue (`relay`): those that only carry bytes
     /// to the queue broker, which checks what passes, and the turn the

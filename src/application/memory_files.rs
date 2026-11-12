@@ -248,8 +248,15 @@ impl RunFiles for MemoryFiles {
             .any(|path| path.starts_with(dir));
         Ok(empty && self.dirs.lock().unwrap().remove(dir))
     }
-    fn append_line(&self, _: &Path, _: &str) -> io::Result<()> {
-        unimplemented!("no test appends to a run file")
+    fn append_line(&self, path: &Path, line: &str) -> io::Result<()> {
+        let mut bytes = match self.bytes(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        bytes.extend_from_slice(line.as_bytes());
+        bytes.push(b'\n');
+        self.write(path, &bytes)
     }
     /// A directory or file put is its own resolved path; no link is
     /// followed, as none is put.
@@ -283,5 +290,25 @@ impl RunFiles for MemoryFiles {
             .as_ref()
             .map_or(0, |ticks| ticks.load(std::sync::atomic::Ordering::SeqCst));
         UNIX_EPOCH + START + Duration::from_millis(ticks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appending_preserves_lines_and_honors_write_failure() {
+        let files = MemoryFiles::default();
+        let path = Path::new("rebind.jsonl");
+        files.append_line(path, "first").unwrap();
+        files.append_line(path, "second").unwrap();
+        assert_eq!(files.bytes(path).unwrap(), b"first\nsecond\n");
+        files.reject_writes_ending_with("rebind.jsonl");
+        assert_eq!(
+            files.append_line(path, "rejected").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(files.bytes(path).unwrap(), b"first\nsecond\n");
     }
 }

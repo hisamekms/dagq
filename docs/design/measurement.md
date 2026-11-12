@@ -44,29 +44,30 @@ SSOTは消えてはいけない正本、ビューはSSOTから作り直せるも
 計測の層（台帳と統計）はEventStore・SessionStepStore・NodeSampleStore・RunResourceStoreだけを読み、StateStoreを読まない（D1）。
 論理ストアのportは`application::ports`の`shared`の`EventStore`と`StateStore`で、ほかは`observation`に置く。
 
-| 論理ストア | 中身 | 区分 | 今のアダプタ |
-| --- | --- | --- | --- |
-| StateStore | 今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど） | SSOT | queue.dbの状態の表 |
-| EventStore | append-onlyの記録（runの遷移・claimの前の区間・今の判定の記録・判定済み期間（`kpi_breach_checked`）・queueの出来事・mainの履歴・[task/goal/findingの属性](attribute-records.md)・Executionのtoken） | SSOT | queue.dbの`run_events`。EventStoreとStateStoreは同じtransactionで確定する |
-| SessionStepStore | sessionのstep・中から測った資源と、対象と持ち主。`(session_id, seq)`で重複を除き、抜けを残す | SSOT | queue.dbの`session_steps`ほか |
-| NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ディスクの空き・待ちと着地待ちのrunのビルド成果物の合計と件数・共通の単位） | SSOT | queue.dbの`node_samples`（hostのCSVは写し。[hostの負荷](supervisor-lifecycle/host-metrics.md)） |
-| RunResourceStore | runの資源を外から測った窓 | SSOT | queue.dbの`run_resources` |
-| LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows`ほか |
-| ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
-| （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル。Claude Codeのtranscriptはhostの`$CLAUDE_CONFIG_DIR`か`~/.claude`にあり、containerのrunのものは[Container runtime](container-runtime.md)。sessionの有無の判断と区間の計測が読み、非対話のworkerの区間のトークン数はtranscriptでなくturnのstreamから取る（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る） |
-| 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIのLinuxの並列のjob（`.github/workflows/it-coverage-map.yml`）が1時間ごとに統合テストをテストごとのcoverageつきで流して作り直せる。macOSだけのコードとテストの結びつきは欠ける。GitHub Actionsのartifact `it-coverage-map`で、保持の期間を過ぎて消えてもよい。着地の検証は下の「着地の検証の対応表のcache」から読む |
-| agentのevalの記録 | evalの依頼・周・実行と費用・成績、productionのケースの集合の依頼・準備・ラベル・組み立てとdigest・disputedの人の決定（[Agent eval](agent-eval.md)） | SSOT | `run_events`の`agent_eval_*`と`agent_cases_*`で、周と集合の状態はこれだけから作り直す。queueのdirの`agent-evals/`とラベルのjobの出力（`agent-cases/<set id>/labels/`）は材料 |
-| 役割の起動のsnapshot | promptの組み立ての入力・資料の本文・mainのcommit、runのreviewの変更の記録 | 材料 | jobとrunのdirのファイル。保持期限か書き込み失敗で記録の無いjobはケースにせず理由つきで外し、過去のeventから作り直さない |
-| productionの集合のファイル | 集合のケースの一覧とpatch | ビュー | queueのdirの`agent-cases/<set id>/`の`cases.json`と`patches/`。`agent_cases_*`とgitの`<base>...<head>`の差分から作り直し、commitが辿れないケースは理由つきで飛ばす |
-| queueのbrokerの記録 | 動いているbrokerが起動ごとに書き、probeとrelayの見張りが読む自分の記録 | 材料 | `<queue dir>/broker/state.json`（寿命はbrokerの1回の起動で、起動し直せば作り直せる） |
-| runのrelayの記録 | 開いたrunのrelay（containerを起動し直す材料）で、relayの見張りが読む | 材料 | `<queue dir>/relay/<run>.json`（寿命はrunのrelayを開いてから閉じるまで） |
-| run branchのbundle | containerのrunのrun branch 1本 | 材料 | run dir。turnの終わりにcontainerが書き制御側が取り込む |
-| runの状態のファイル | containerのrunのHEADとstatus・turnの終わりの印と世代（workerの申告） | 材料 | run dir。turnの始めと終わりにcontainerが書き、検証・復旧・再計画の保留が読む |
-| cloneの作業と復元 | containerのrunの未commitの差分とuntracked（workerの申告）、復元するsnapshotの写しとその答え | 材料 | run dir。作業はturnの終わりにcontainerが書き再計画の保留が読む。写しは制御側が書きcontainerが次のturnの始めに当て、その答えをresumeの間に制御側が読む |
-| mainのbundle | 今のmain 1本 | 材料 | run dir。制御側が書き、次のturnの始めにcontainerが取り込む |
-| 手元の検証の記録 | workerの手元の検証の1回の実行ごとの記録とlog | 材料 | run dirの`local-checks/`（turnのenvが名指す）。pjのscriptが書き、runtimeがreceiptのcommitのtreeと照合してreviewの資料に載せる |
-| machineのメモリの予約と待ち | dagq専用のmachineの予約（持ち主・種類・上限・取った時刻）と待ちの列（同じ欄で時刻は待ち始め）。全てのqueueのclaim・wrapper・`integrate`が読む | 材料 | data homeの`dagq/machine/`のlockの下の`reservations/`と`waiting/`。寿命は持ち主のturnかverificationの間で、失っても記録の無いcontainerを上限で数えて安全側で、計測の層は読まない。待った区間の正本はEventStoreのevent |
-| 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | hostで`scripts/landing-it.sh`がartifact `it-coverage-map`から取ってqueueの外に置き、containerのverificationはrun dirの材料への写しだけを読む（置き場・取り直し・写し方はscriptの冒頭）。cacheも写しも消えてよい |
+|論理ストア|中身|区分|今のアダプタ|
+|---|---|---|---|
+|監査の記録|eventsとは別の正本。計測の層は読まない|SSOT|queue.dbの`audit_records`|
+|StateStore|今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど）|SSOT|queue.dbの状態の表|
+|EventStore|append-onlyの記録（runの遷移・claimの前の区間・今の判定の記録・判定済み期間（`kpi_breach_checked`）・queueの出来事・mainの履歴・[task/goal/findingの属性](attribute-records.md)・Executionのtoken）|SSOT|queue.dbの`run_events`。EventStoreとStateStoreは同じtransactionで確定する|
+|SessionStepStore|sessionのstep・中から測った資源と、対象と持ち主。`(session_id, seq)`で重複を除き、抜けを残す|SSOT|queue.dbの`session_steps`ほか|
+|NodeSampleStore|nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ディスクの空き・待ちと着地待ちのrunのビルド成果物の合計と件数・共通の単位）|SSOT|queue.dbの`node_samples`（hostのCSVは写し。[hostの負荷](supervisor-lifecycle/host-metrics.md)）|
+|RunResourceStore|runの資源を外から測った窓|SSOT|queue.dbの`run_resources`|
+|LedgerStore|台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない|ビュー|queue.dbの`ledger_rows`ほか|
+|ReportStore|統計の出力（日次・週次のレポート）|ビュー|queueのdirの`reports/`のファイルと`report_written`のevent|
+|（材料）|run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout|材料|queueのdirとrun dirのファイル。Claude Codeのtranscriptはhostの`$CLAUDE_CONFIG_DIR`か`~/.claude`にあり、containerのrunのものは[Container runtime](container-runtime.md)。sessionの有無の判断と区間の計測が読み、非対話のworkerの区間のトークン数はtranscriptでなくturnのstreamから取る（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る）|
+|統合テストのcoverageの対応表|「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻|ビュー|CIのLinuxの並列のjob（`.github/workflows/it-coverage-map.yml`）が1時間ごとに統合テストをテストごとのcoverageつきで流して作り直せる。macOSだけのコードとテストの結びつきは欠ける。GitHub Actionsのartifact `it-coverage-map`で、保持の期間を過ぎて消えてもよい。着地の検証は下の「着地の検証の対応表のcache」から読む|
+|agentのevalの記録|evalの依頼・周・実行と費用・成績、productionのケースの集合の依頼・準備・ラベル・組み立てとdigest・disputedの人の決定（[Agent eval](agent-eval.md)）|SSOT|`run_events`の`agent_eval_*`と`agent_cases_*`で、周と集合の状態はこれだけから作り直す。queueのdirの`agent-evals/`とラベルのjobの出力（`agent-cases/<set id>/labels/`）は材料|
+|役割の起動のsnapshot|promptの組み立ての入力・資料の本文・mainのcommit、runのreviewの変更の記録|材料|jobとrunのdirのファイル。保持期限か書き込み失敗で記録の無いjobはケースにせず理由つきで外し、過去のeventから作り直さない|
+|productionの集合のファイル|集合のケースの一覧とpatch|ビュー|queueのdirの`agent-cases/<set id>/`の`cases.json`と`patches/`。`agent_cases_*`とgitの`<base>...<head>`の差分から作り直し、commitが辿れないケースは理由つきで飛ばす|
+|queueのbrokerの記録|動いているbrokerが起動ごとに書き、probeとrelayの見張りが読む自分の記録|材料|`<queue dir>/broker/state.json`（寿命はbrokerの1回の起動で、起動し直せば作り直せる）|
+|runのrelayの記録|開いたrunのrelay（containerを起動し直す材料）で、relayの見張りが読む|材料|`<queue dir>/relay/<run>.json`（寿命はrunのrelayを開いてから閉じるまで）|
+|run branchのbundle|containerのrunのrun branch 1本|材料|run dir。turnの終わりにcontainerが書き制御側が取り込む|
+|runの状態のファイル|containerのrunのHEADとstatus・turnの終わりの印と世代（workerの申告）|材料|run dir。turnの始めと終わりにcontainerが書き、検証・復旧・再計画の保留が読む|
+|cloneの作業と復元|containerのrunの未commitの差分とuntracked（workerの申告）、復元するsnapshotの写しとその答え|材料|run dir。作業はturnの終わりにcontainerが書き再計画の保留が読む。写しは制御側が書きcontainerが次のturnの始めに当て、その答えをresumeの間に制御側が読む|
+|mainのbundle|今のmain 1本|材料|run dir。制御側が書き、次のturnの始めにcontainerが取り込む|
+|手元の検証の記録|workerの手元の検証の1回の実行ごとの記録とlog|材料|run dirの`local-checks/`（turnのenvが名指す）。pjのscriptが書き、runtimeがreceiptのcommitのtreeと照合してreviewの資料に載せる|
+|machineのメモリの予約と待ち|dagq専用のmachineの予約（持ち主・種類・上限・取った時刻）と待ちの列（同じ欄で時刻は待ち始め）。全てのqueueのclaim・wrapper・`integrate`が読む|材料|data homeの`dagq/machine/`のlockの下の`reservations/`と`waiting/`。寿命は持ち主のturnかverificationの間で、失っても記録の無いcontainerを上限で数えて安全側で、計測の層は読まない。待った区間の正本はEventStoreのevent|
+|着地の検証の対応表のcache|着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻|材料|hostで`scripts/landing-it.sh`がartifact `it-coverage-map`から取ってqueueの外に置き、containerのverificationはrun dirの材料への写しだけを読む（置き場・取り直し・写し方はscriptの冒頭）。cacheも写しも消えてよい|
 
 ## 区間とタグ
 

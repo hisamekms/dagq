@@ -309,6 +309,7 @@ impl<'c> WriteTx<'c> {
         tx.rows.set(0);
         let mut tx = tx;
         tx.identity = Some(identity.clone());
+        super::audit::ensure_started(&tx)?;
         Ok(tx)
     }
 

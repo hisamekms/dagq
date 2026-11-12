@@ -25,6 +25,9 @@ related:
 記録の欄・actionの一覧・送り手・守るpathの具体と数値は、実装の前は[監査ログ 段0の設計資料](../plans/audit-log.md)が持ち、実装の後は定義のそばのdoc commentが持つ。
 記録の型は`src/domain/audit/record.rs`の`AuditRecord`、chainの検証は`src/domain/audit/chain.rs`の`verify`、use caseとactionの対応表とqueue serviceの入口ごとの特権のuse caseは`src/application/audit.rs`の`USE_CASES`と`SERVICE_ENTRIES`が入口。
 
+一次の置き場と`dagq audit verify`の入口は`src/infrastructure/audit.rs`。
+SQLiteの監査は状態の変更と同じtransactionで確定し、UPDATE・DELETEを拒む。
+
 ## eventsとの線引き
 
 監査はeventsと別の記録で、eventsから導出しない。

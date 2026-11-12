@@ -359,6 +359,7 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         return "narrow the read with the options of its command (dagq <command> --help)";
     };
     match use_case {
+        UseCase::AuditVerify => "narrow the audit range with --since <seq>",
         UseCase::Events => {
             "narrow the window with --since / --until, take fewer with a smaller --limit, read \
              the next page with --after <cursor> (the cursor of the last answer), narrow with \
@@ -570,6 +571,7 @@ string_enum!(UseCase {
     Graph => "graph",
     Status => "status",
     Asks => "asks",
+    AuditVerify => "audit_verify",
     Events => "events",
     Timeline => "timeline",
     Stats => "stats",
@@ -910,6 +912,7 @@ impl UseCase {
             ("graph", _) => Self::Graph,
             ("status", _) => Self::Status,
             ("asks", _) => Self::Asks,
+            ("audit", Some("verify")) => Self::AuditVerify,
             ("events", _) => Self::Events,
             ("timeline", _) => Self::Timeline,
             ("stats", _) => Self::Stats,

@@ -324,12 +324,22 @@ mod tests {
         let tx = WriteTx::leader(&queue.conn, "migration_test", queue.write_hold_warn).unwrap();
         assert!(lock_migration(&tx, &identity).unwrap());
         assert!(
-            take_for_migration(&tx, false, true, true)
+            take_for_migration(&tx, false, true, false)
                 .unwrap()
                 .is_none()
         );
+        tx.execute_batch("CREATE TABLE compatible_under_holder(value INTEGER)")
+            .unwrap();
         tx.commit().unwrap();
         assert_eq!(queue.write_leader().unwrap().0, before);
+        assert_eq!(
+            queue
+                .conn
+                .query_row("SELECT count(*) FROM compatible_under_holder", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         let tx = WriteTx::leader(&queue.conn, "migration_test", queue.write_hold_warn).unwrap();
         assert!(lock_migration(&tx, &identity).unwrap());
         let (holder, taken) = take_for_migration(&tx, true, true, true).unwrap().unwrap();

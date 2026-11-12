@@ -50,6 +50,7 @@ use crate::domain::{Resource, SessionRole};
 /// A read of the queue, as one read use case of the service takes it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueueRead {
+    AuditVerify(AuditVerifyRead),
     List(ListRead),
     Candidates(CandidatesRead),
     Graph(GraphRead),
@@ -123,6 +124,13 @@ impl JobRead {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceStatusRead {}
+
+/// Verify from this admission sequence (inclusive); absent means genesis.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditVerifyRead {
+    pub since: Option<u64>,
+}
 
 /// `requests`' and `replans`' options: the one record `id` names whatever
 /// its status, or the open ones (every one with `all`).
@@ -633,6 +641,7 @@ impl QueueRead {
             })
         }
         let read = match use_case {
+            UseCase::AuditVerify => Self::AuditVerify(read(use_case, params)?),
             UseCase::List => Self::List(read(use_case, params)?),
             UseCase::Candidates => Self::Candidates(read(use_case, params)?),
             UseCase::Graph => Self::Graph(read(use_case, params)?),
@@ -765,6 +774,7 @@ impl QueueRead {
     /// What the command line's parser would refuse of these params.
     pub fn check(&self) -> Result<()> {
         match self {
+            Self::AuditVerify(_) => {}
             Self::List(read) => {
                 at_least_one("list's limit", read.limit)?;
                 if read.all && !read.status.is_empty() {
@@ -892,9 +902,11 @@ impl QueueRead {
     }
 
     /// The capability the command line asks the policy for this read:
-    /// `ci.read` for `ci failures`, `queue.read` for every other.
+    /// Independent audit reads need `audit.read`; CI reads need `ci.read`.
+    /// Other queue reads need `queue.read`.
     pub fn capability(&self) -> crate::domain::Capability {
         match self {
+            Self::AuditVerify(_) => crate::domain::Capability::AuditRead,
             Self::CiFailures(_) => crate::domain::Capability::CiRead,
             _ => crate::domain::Capability::QueueRead,
         }
@@ -906,6 +918,7 @@ impl QueueRead {
     pub fn request(&self) -> (UseCase, Value) {
         let cursor = |cursor: &Option<Cursor>| cursor.map(Cursor::text);
         match self {
+            Self::AuditVerify(read) => (UseCase::AuditVerify, json!(read)),
             Self::List(read) => (
                 UseCase::List,
                 json!({"status": read.status, "all": read.all, "goal": read.goal,
@@ -1051,6 +1064,9 @@ where
         QueueRead::Search(read) => planning::search(queue, read),
         QueueRead::Related(read) => planning::related(queue, read),
         QueueRead::Status(read) => observation::status(queue, sources, read),
+        QueueRead::AuditVerify(_) => {
+            anyhow::bail!("audit verification needs the primary audit adapter")
+        }
         QueueRead::Events(read) => observation::events(queue, read),
         QueueRead::Timeline(read) => observation::timeline(queue, sources, read),
         QueueRead::Stats(read) => observation::stats(queue, sources, read),

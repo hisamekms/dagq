@@ -30,6 +30,11 @@ HTTP-authenticated people remain `user`; the registry role narrows user grants b
 | Member | Refused `service.install`, `queue.admin`, `disk.relax`, `review.setup`, `review.setup_approve`, `task.ready_bypass_review`, `workspace.cleanup`, `run.recover`, `service.lifecycle`, and `runner.share` |
 | On-call overlay on either role | Restores `run.recover` within user grants; never adds an ungranted capability |
 
+| Role | Audit read |
+| --- | --- |
+| person (`user`), inbox | `audit.read` permits reading the audit chain (`audit verify`) |
+| Every other role, including planner, worker, all jobs and observer | `audit.read` is refused (`authorization_denied`) |
+
 | Role | Runner capabilities |
 | --- | --- |
 | user | `runner.register` for oneself; `runner.revoke` as owner or administrator, with human authentication |

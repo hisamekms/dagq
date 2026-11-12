@@ -478,6 +478,8 @@ impl<E: TransactionEntries> StoreQueue<E> {
     /// Point the queue at `common_dir` whatever it was bound to, and return
     /// the previous binding. Only the explicit `rebind` command calls this
     /// (ADR-0020); `init` and `supervise` go through `bind_repository`.
+    /// SQLite appends the privileged-operation audit record in this same
+    /// transaction; Postgres writes no audit at stage zero.
     pub fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
         let tx = self.write_entry("rebind_repository")?;
         let previous: Option<String> = SqlRead::query_row(
@@ -492,6 +494,13 @@ impl<E: TransactionEntries> StoreQueue<E> {
             "INSERT INTO queue_repository(singleton, git_common_dir) VALUES (1,?1)
              ON CONFLICT(singleton) DO UPDATE SET git_common_dir=excluded.git_common_dir",
             sql_params![common_dir],
+        )?;
+        crate::infrastructure::audit::record_repository_binding(
+            &tx,
+            &self.actor(),
+            previous.as_deref(),
+            common_dir,
+            self.generators.clock.timestamp(),
         )?;
         tx.commit()?;
         Ok(previous)

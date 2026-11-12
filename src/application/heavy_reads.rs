@@ -45,6 +45,7 @@ pub const fn is_heavy_read(use_case: UseCase) -> bool {
             | UseCase::ReportInputs
             | UseCase::Forecast
             | UseCase::Timeline
+            | UseCase::AuditVerify
             | UseCase::Events
     )
 }

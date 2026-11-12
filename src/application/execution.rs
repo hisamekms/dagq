@@ -301,8 +301,8 @@ pub fn runtime_executions(config: &RuntimeConfig) -> Vec<RuntimeExecution> {
 
 use Capability as C;
 
-/// The `dagq` subcommands a role may be denied (state changes, `watch`
-/// and `report`), and every capability a form of each may need
+/// The `dagq` subcommands a role may be denied (state changes, restricted
+/// reads, `watch` and `report`), and every capability a form of each may need
 /// (`docs/design/authorization.md`). A role that has none of them gets
 /// the command denied in its Claude settings. A command with a
 /// form that only reads (`observe --history`, `graph` without `--out`) is
@@ -310,6 +310,7 @@ use Capability as C;
 /// refuses its other form. A test in `main.rs` checks that every
 /// subcommand is here or on its list of the commands left out.
 pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
+    ("audit", &[C::AuditRead]),
     ("login", &[C::IdentityLogin]),
     ("logout", &[C::IdentityLogin]),
     ("whoami", &[C::IdentityLogin]),
@@ -705,6 +706,18 @@ mod tests {
                 "{role:?}"
             );
             assert!(!deny.contains(&"Bash(dagq graph:*)".to_owned()), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn audit_reads_are_denied_except_for_person_and_inbox() {
+        for role in ActorRole::ALL {
+            let denied = permission_deny(role).contains(&"Bash(dagq audit:*)".to_owned());
+            assert_eq!(
+                denied,
+                !matches!(role, ActorRole::User | ActorRole::Inbox),
+                "{role:?}"
+            );
         }
     }
 

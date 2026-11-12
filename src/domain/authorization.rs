@@ -47,6 +47,8 @@ string_enum!(Capability {
     CredentialPreference => "credential.preference",
     // Reading.
     QueueRead => "queue.read",
+    /// Read the independent audit chain; person and inbox only.
+    AuditRead => "audit.read",
     QueueWatch => "queue.watch",
     ExportFile => "queue.export",
     // The tests that fail already on the watched branch (`ci failures`,
@@ -186,7 +188,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 80] = [
+    pub const ALL: [Self; 81] = [
         Self::ImagePublish,
         Self::RunnerClaim,
         Self::RunnerHeartbeat,
@@ -199,6 +201,7 @@ impl Capability {
         Self::IdentityLogin,
         Self::CredentialPreference,
         Self::QueueRead,
+        Self::AuditRead,
         Self::QueueWatch,
         Self::ExportFile,
         Self::CiRead,
@@ -773,6 +776,7 @@ use Capability as C;
 const INBOX: &[Capability] = &[
     C::RunnerList,
     C::QueueRead,
+    C::AuditRead,
     C::QueueWatch,
     C::ExportFile,
     C::CiRead,
@@ -1274,6 +1278,22 @@ pub fn check_priority_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_read_is_only_the_person_and_inbox() {
+        for role in ActorRole::ALL {
+            let actor = ActorContext::instance(role, "audit-reader");
+            let decision = StaticPolicy.authorize(&actor, Capability::AuditRead, &Resource::Queue);
+            assert_eq!(
+                decision.is_ok(),
+                matches!(role, ActorRole::User | ActorRole::Inbox),
+                "{role:?}"
+            );
+            if let Err(error) = decision {
+                assert!(error.to_string().contains("audit.read"));
+            }
+        }
+    }
 
     #[test]
     fn landing_answer_policy_table_preserves_local_and_non_landing_answers() {

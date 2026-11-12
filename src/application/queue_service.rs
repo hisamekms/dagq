@@ -2654,7 +2654,8 @@ fn run(
         UseCase::Migrate | UseCase::CommitMessages | UseCase::Init | UseCase::Doctor => {
             unreachable!("the queue's administration is answered apart")
         }
-        UseCase::List
+        UseCase::AuditVerify
+        | UseCase::List
         | UseCase::Candidates
         | UseCase::Graph
         | UseCase::Status
@@ -7843,6 +7844,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn audit_verify_refuses_nonhuman_roles_at_the_service_boundary() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        for token in [
+            "worker",
+            "planner",
+            "review",
+            "recovery",
+            "plan-review",
+            "goal-review",
+            "throughput-review",
+            "observer",
+        ] {
+            let response = service.handle_from(
+                &request(Some(token), UseCase::AuditVerify, json!({})),
+                Peer::Owner,
+            );
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{token}: {response:?}"
+            );
+            assert_eq!(
+                response.error.unwrap().denied.unwrap().capability,
+                "audit.read"
+            );
+        }
+        for token in [None, Some("inbox")] {
+            let response = service.handle_from(
+                &request(token, UseCase::AuditVerify, json!({})),
+                Peer::Owner,
+            );
+            assert!(response.error.is_none(), "{response:?}");
+        }
+    }
+
+    #[test]
     fn the_user_the_inbox_and_a_planner_are_allowed_what_the_command_line_allows() {
         use crate::domain::authorization::grants;
         let backend = backend(RunStatus::Running);
@@ -7853,6 +7895,7 @@ pub(crate) mod tests {
         };
         // Each use case and the capability the command line asks for it.
         let cases = [
+            (UseCase::AuditVerify, json!({}), Capability::AuditRead),
             (UseCase::Show, json!({"id": 1}), Capability::QueueRead),
             (UseCase::List, json!({}), Capability::QueueRead),
             (

@@ -6719,6 +6719,10 @@ where
 
     /// As the command line reads it ([`ServiceReads`]), without cmux.
     fn read(&mut self, read: &QueueRead) -> Result<Value> {
+        if let QueueRead::AuditVerify(params) = read {
+            let tx = self.queue.read_entry("audit_verify")?;
+            return super::audit::verify(&tx, params.since);
+        }
         (self.reads)(&mut self.queue, &self.db, read)
     }
 

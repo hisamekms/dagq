@@ -380,6 +380,7 @@ pub(super) const TABLES: &[Table] = &[
     table("binary_updates", Host),
     table("headless_jobs", Host),
     table("asks", Shared), // an ask is opened and applied by the context of its kind
+    table("audit_records", Shared), // independent audit chain, written in each state transaction
     table("run_events", Shared), // each context writes its own kinds (src/domain/event_kind.rs)
     table("event_records", Shared), // the identity of the result's record each event was written for
     table("write_leader", Shared), // the write leader's row every write transaction will check first (ADR-t3986-1)
@@ -429,6 +430,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/runtime_store/run_resources.rs", Observation), // RunResourceStore
     store("src/infrastructure/headless_jobs.rs", Host),
     store("src/infrastructure/schema.rs", Host),
+    store("src/infrastructure/audit.rs", Shared), // AuditAppend
     store("src/infrastructure/asks.rs", Shared), // AskStore
     store("src/infrastructure/runtime_store/ask_store.rs", Shared), // AskStore
     store("src/infrastructure/event_actor.rs", Shared), // EventStore
