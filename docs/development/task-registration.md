@@ -67,7 +67,9 @@ llvm-covとcargo testの重ね方:
 
 runtimeのtaskの受け入れ条件と`--verify`の書き方。判断はunit test、ITは境界の代表の1 caseだけ（[testの制約](testing.md)の「判断と境界のtest」、[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）で、ITの境界は登録簿のidで名指す（[ADR-t3802-1](../adr/2026-10-31-t3802-1-integration-test-boundaries-in-a-named-registry-with-a-module-ratchet.md)）。
 
-- 受け入れ条件は判断の結果で書く: どの入力（状態・設定・時刻の値・answer）からどの出力・操作・状態の遷移になるかを並べ、「ITで〜を確かめる」のようにtestの層で書かない。ITを名指してよいのは、登録簿のidで確かめる境界（SQLite・Git・プロセス・復旧とadopt）だけにする。
+- 受け入れ条件は判断の結果で書く: どの入力（状態・設定・時刻の値・answer）からどの出力・操作・状態の遷移になるかを並べ、「ITで〜を確かめる」のようにtestの層で書かない。効果を求める条件は、観測できる値と、それを確かめるコマンド・event・testの名前を名指す。ITを名指してよいのは、登録簿のidで確かめる境界（SQLite・Git・プロセス・復旧とadopt）だけにする。
+- 比べるtestを求める受け入れ条件は、既存の実装・固定の値・外部の仕様など、比べる基準を名指す。試す対象の新しいコード同士を比べるだけの条件にしない。
+- 新しい処理を求める受け入れ条件は、その処理がどの入口・起動処理から呼ばれるかを名指す。
 - supervisorの配線（判断の結果がevent・ask・statusに届くこと）を確かめる受け入れ条件は、プロセスの中の配線のtestの層（[testの制約](testing.md)の「判断と境界のtest」、[ADR-t3841-1](../adr/2026-11-01-t3841-1-supervisor-wiring-tests-run-in-process-on-a-memdb-queue-with-port-fakes.md)）のtestで書き、ITと登録簿の境界の種類「supervisorの配線」の新しいidを名指さない。例: acceptanceに「(2) 配線の層（`src/compose`の`#[cfg(test)]`）のtestで、ready のtaskのclaimからreceiptの`already_satisfied`までを回すと`approve_close`のaskが開きleaseが解ける」。層のtestはlibのtestとして着地のunit test全件で流れるので、`--verify`はruntimeの組み合わせのllvm-covの行のままにする。既存の配線のITを層へ移すtaskは、移すtestの中身の行き先（層のtest・unit test・残すIT）の対応づけと、外す登録簿の項目と時間の関門の許可の一覧の項目をacceptanceに書く。
 - 新しい機能のtaskは、判断を`src/`の副作用のない関数に切り出して`#[cfg(test)]`のunit testで確かめる形でdescriptionを書く（関数の入力と出力、判断のcaseはunit testに並べること）。supervisorやfixtureを起動して判断のcaseを並べるITを前提にしない。
 - `--verify`や受け入れ条件に新しいITを名指すときは、そのITが代表する登録簿のidを添える。既存のidなら、その代表を入れ替えることと元の代表の行き先（消す・別のidの代表にする・unit testへ移す）を書く。新しいidを足すなら、descriptionかacceptanceにそのidと境界の種類と、既存のidで代表できない理由を書く（taskの文面がidを名指すことが新しいidの承認の一部で、`reason`が境界を書いていることはtest-rulesのreviewが見る（[testの制約](testing.md)の「判断と境界のtest」）。項目は足すtaskの`.config/it-boundaries.d/t<task ID>.toml`に入る）。
@@ -264,6 +266,7 @@ descriptionかacceptanceが文書の変更を求めるtaskは、登録の時に�
   旧い形を消すtaskが互換のtaskにだけ依存し、programの更新（または退役）に依存していなければ、それも欠けとみる。
   ADRがリンクする文書を消すtaskの移行中の行を足すtaskは、両方の形を通すprogramの変更に当たる。
   欠けていれば`revise`にする。
+- 受け入れ条件が、上の「受け入れ条件とITの名指し方」のとおり、比べるtestの基準、新しい処理が呼ばれる入口・起動処理、効果を確かめる観測できる値とコマンド・event・testの名前を、求める内容に応じて名指すこと。いずれかが欠けていれば、`incomplete_spec`を理由に`revise`にする。
 - 新しい機能のtaskの受け入れ条件や`--verify`が、判断のcase（状態の遷移・回数と上限・時間の判定・answerから操作への対応・文面・次の一手の選び方）をITで確かめる前提なら`revise`にし、上の「受け入れ条件とITの名指し方」のとおり判断を`src/`の副作用のない関数に切り出してunit testで確かめ、ITは登録簿のidの境界だけにするよう返す。新しいITを名指すのにidが添えられていないときも`revise`にする。
 - 新しいidを足すtaskは、descriptionかacceptanceがidと境界の種類を名指し、その境界が登録簿の既存のidで代表できないこと（同じ境界の2本目でないこと）を見る。登録簿（`.config/it-boundaries.d/*.toml`）の同じ種類の項目の`test`と`reason`を読み、既存のidで代表できる、または判断のcaseを並べるだけの境界なら`revise`にし、既存のidの代表の入れ替えか、判断のunit testへの切り出しに直させる。
 - taskのtitleが上の「taskのtitle」の接頭辞で始まり、changeに合うこと。外れていれば`revise`にする。
