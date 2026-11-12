@@ -1,0 +1,23 @@
+# Q2: could a pre-review acceptance check have caught it?
+
+The pre-review check under test ("the reading"): a light check that reads ONLY
+(1) the task's acceptance criteria (and description), (2) the run's diff `git diff BASE HEAD` for the attempt, and (3) the worker's receipt,
+and sends the run back to the worker when an acceptance item has no implementation or no real test evidence in the diff/receipt: a hollow test, an item deferred to a follow_up/later task, an implementation not wired from an entry point within the diff, an item missing or only partly done.
+It does NOT run tests and does NOT read files outside the diff (it may read the whole diff and the full text of the files the diff shows only as far as the hunks show them).
+
+Materials per run (read-only; do not run dagq, do not modify anything, do not run tests or builds):
+- Run dir `~/.local/share/dagq/77067154921b9014/runs/<RUN>/`: `review.md` has the task (title, description, acceptance) in `## Task`, the LATEST receipt in `## Receipt`, then commits and diff of the LATEST attempt. `receipt.json` is the latest receipt.
+- The diff of the attempt to judge: run `git -C /Users/shinnosukeooyama/.local/share/dagq/77067154921b9014/runs/8a2f2b0f-fcd9-4b7c-b6ab-eec08a353313/worktree-8a2f2b0f-fcd9-4b7c-b6ab-eec08a353313 diff BASE HEAD` (use `--stat` first; read the hunks relevant to the acceptance items; you may cap your reading of very large diffs and say so).
+- The receipt of an earlier attempt is not stored. When the attempt is not the last, use the latest receipt only as a hint and the reviewer's quotes of the receipt; say so in the ground.
+
+Two kinds of sample lines in your input file:
+
+A. `kind: sendback` — the line carries the reviewer's reason (`reason`) for an acceptance send-back at `attempt`. Decide whether the reading at that attempt would have found THIS gap:
+   - `holds`: the gap is visible from acceptance + diff + receipt (e.g. receipt says it is left to a follow_up; diff has no code/test for the item; the test in the diff compares the code with itself; a new function has no caller in the diff while the item needs it on the entry path).
+   - `does_not_hold`: finding it needs running tests/code, reasoning about failure/concurrency/edge paths that the diff does not show as missing, or reading code outside the diff.
+   - `unresolved`: the record does not let you decide (e.g. the receipt of that attempt is not available and the decision hinges on it; diff unavailable).
+   Also give `type_manual`: your own type of the reason among a (hollow test), b (deferred), c (not wired), d (item missing/partial), e (acceptance wording), f (other; mostly defect on an edge path).
+B. `kind: pass` — a run every review passed. Apply the reading blind (do not look for review results) to attempt 1 and decide whether the reading would SEND IT BACK for an acceptance gap:
+   - `would_send_back` (name the item and the ground), `would_pass`, or `unresolved`.
+
+Write to the output file one JSON line per input line: `{"run","task","kind","attempt","verdict","type_manual" (sendback only, else null),"ground"}` where ground is 1–3 sentences naming the place: the acceptance item number, the diff file and line/hunk or "no hunk for X", and the receipt sentence. Keep each run to about 10 minutes of reading. Reply with only the list of verdicts.

@@ -1,0 +1,19 @@
+# Classify review send-back reasons about acceptance criteria
+
+Each line of the batch file is one reason a run review (whole review = "whole", or a subagent job = "agent:NAME") gave with verdict revise or concern, already selected as touching the task's acceptance criteria (code acceptance_unmet, or the text names an acceptance item). Read ONLY the batch file (do not run dagq, do not open other files, do not run tests).
+
+For each line, decide:
+
+- `type`: the ONE main type
+  - `a` 形だけの test: a test that is claimed as evidence for an acceptance item but cannot fail / does not test the thing: the expected value shares the code under test, compares new code with new code, is structurally always passing, tests only a pure helper while the item asks for the path, removes the key and reads back, etc. (The point: a test exists and is cited, but it is hollow.)
+  - `b` 先送り: the worker moved (part of) an acceptance item to a follow_up, a later task, or "known limitation"/receipt admits it is left, and the reviewer says it may not be deferred.
+  - `c` 未接続: the implementation exists but is not wired into the entry point / startup / production path / service boundary (only tests or a fake call it, the CLI flag is not forwarded, the gate is never called).
+  - `d` 項目の抜け・一部だけ: an acceptance item (or a named part: a case, a field, a measurement, a list entry, a required test) is simply missing or done only partly, with no claim of a hollow test and not a wiring gap.
+  - `e` 受け入れ条件の書き方: the acceptance itself is ambiguous, contradicts an ADR/rule/another item or the facts, or cannot be measured; the reviewer asks a person to decide or rewrite the acceptance.
+  - `f` その他: everything else. Most often this is an implementation defect on an edge path (concurrency, failure, retry, rounding, wrong value) that the reviewer ties to an acceptance item. Put `f_kind`: `defect` for that, else `other` with a 3-word note.
+- `sec`: secondary types (list, may be empty) when the reason also fits another type.
+- `receipt`: what the reason text says about the worker's receipt for this item: `claimed` (the text says the receipt/summary mapped this item to evidence or said it was met), `not_claimed` (the text says the receipt has no mapping / no evidence / is silent on it, or admits it is unmet), `unknown` (the text does not say).
+- `precheck`: could a light check that reads ONLY the acceptance criteria, the run's diff and the receipt (no test run, no reading of files outside the diff) have found this? `yes` (the gap is visible from acceptance + diff + receipt: e.g. receipt defers it, the diff has no code/test for the item, the test in the diff visibly compares the code with itself, a function in the diff has no caller in the diff), `no` (needs running code/tests, reasoning about concurrency/failure paths, or reading code outside the diff), `unclear`.
+- `why`: one short sentence (Japanese or English) of the ground, quoting the decisive words of the reason.
+
+Write the result to the output file given in your prompt as JSONL: one line per input line, keys `id`, `type`, `sec`, `f_kind` (or null), `receipt`, `precheck`, `why`. Every input id must appear exactly once. Then reply with only the counts of each type and of precheck values.

@@ -1,0 +1,400 @@
+item,event_id,run,task,attempt,source,verdict,codes,type,secondary,f_kind,receipt,precheck
+0,1054232,008adf1b-9338-4545-8c1e-e9e498f84845,3589,1,whole,revise,acceptance_unmet code_defect docs_drift,b,f,,not_claimed,yes
+1,1054232,008adf1b-9338-4545-8c1e-e9e498f84845,3589,1,whole,revise,acceptance_unmet code_defect,f,a,defect,unknown,yes
+2,1054232,008adf1b-9338-4545-8c1e-e9e498f84845,3589,1,whole,revise,acceptance_unmet code_defect,b,f,,not_claimed,yes
+3,1056128,008adf1b-9338-4545-8c1e-e9e498f84845,3589,3,whole,revise,code_defect acceptance_unmet,b,f,,not_claimed,yes
+4,1056128,008adf1b-9338-4545-8c1e-e9e498f84845,3589,3,whole,revise,acceptance_unmet,f,a,defect,unknown,yes
+5,1056128,008adf1b-9338-4545-8c1e-e9e498f84845,3589,3,whole,revise,acceptance_unmet code_defect,b,f,,not_claimed,yes
+6,1057432,008adf1b-9338-4545-8c1e-e9e498f84845,3589,4,whole,revise,acceptance_unmet code_defect,f,a,defect,unknown,yes
+7,1057432,008adf1b-9338-4545-8c1e-e9e498f84845,3589,4,agent:receipt-evidence,revise,A-257,f,a,defect,claimed,yes
+8,1057703,008adf1b-9338-4545-8c1e-e9e498f84845,3589,5,whole,revise,code_defect acceptance_unmet,b,f,,not_claimed,yes
+9,1057703,008adf1b-9338-4545-8c1e-e9e498f84845,3589,5,whole,revise,acceptance_unmet code_defect,f,a,defect,unknown,yes
+10,1076829,01c85684-943e-493a-907a-464620d0ba3a,3690,2,whole,revise,repo_rule_violation,f,,other,unknown,unclear
+11,422147,042f7658-e7fc-4364-b1c1-cab0304d29b2,847,1,whole,concern,adr_conflict acceptance_unmet,e,,,not_claimed,yes
+12,1160829,066817bf-004e-465f-bca0-e2ea9adc9052,3977,1,whole,revise,test_gap acceptance_unmet,a,d,,unknown,unclear
+13,1160829,066817bf-004e-465f-bca0-e2ea9adc9052,3977,1,whole,revise,docs_drift,f,,other,unknown,yes
+15,1174566,0939863e-ecfd-4491-8bc2-539a03ecd2e1,4058,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+16,1080658,09f4492e-0455-4a44-a51d-90cf9724b3f6,3585,1,whole,revise,code_defect acceptance_unmet test_gap,f,,defect,unknown,no
+17,1437975,0c8ce680-c4d7-4d50-90f3-90dd5e2764d0,4652,2,whole,revise,docs_drift acceptance_unmet,f,,other,unknown,yes
+18,1437975,0c8ce680-c4d7-4d50-90f3-90dd5e2764d0,4652,2,whole,revise,acceptance_unmet,d,,,unknown,yes
+19,1265823,0cae8a83-4dc1-4bc9-ac54-778d7155e7bf,4400,1,whole,revise,acceptance_unmet docs_drift,f,,other,unknown,unclear
+20,1266601,0cae8a83-4dc1-4bc9-ac54-778d7155e7bf,4400,2,agent:adr-rules,revise,A-162,f,,other,unknown,yes
+21,1050255,0ef03052-13ea-406c-92e1-35ed4cb0a1be,3563,2,whole,revise,docs_drift acceptance_unmet,f,,other,unknown,no
+22,1147418,12c9ad0a-8a72-4315-b7cf-4efe29dcfa6b,3886,2,whole,concern,acceptance_ambiguous acceptance_unmet,b,e c,,not_claimed,yes
+23,1285181,12e3bfa9-8fa4-446a-9dae-ea8e91efc6d4,4452,2,whole,revise,code_defect acceptance_unmet test_gap,c,a,,unknown,yes
+24,1308501,12e3bfa9-8fa4-446a-9dae-ea8e91efc6d4,4452,5,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+25,1312109,12e3bfa9-8fa4-446a-9dae-ea8e91efc6d4,4452,6,whole,revise,acceptance_unmet,d,,,not_claimed,yes
+26,1312109,12e3bfa9-8fa4-446a-9dae-ea8e91efc6d4,4452,6,agent:receipt-evidence,revise,A-257,d,,,claimed,yes
+27,1045741,142f4b08-e75a-4f1d-9d57-0deca1ec0921,3461,2,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+28,1046413,142f4b08-e75a-4f1d-9d57-0deca1ec0921,3461,4,whole,revise,acceptance_unmet code_defect docs_drift,f,,defect,unknown,no
+29,1055393,158d5bc6-db54-4845-a74d-8c13971f920e,3582,2,whole,revise,code_defect acceptance_unmet,b,f,,not_claimed,yes
+31,1153130,1ebd0905-8f8f-4d7d-b8a7-4d8452c8a49b,3931,1,whole,revise,acceptance_unmet code_defect,f,,defect,claimed,no
+32,1228143,2010e4dd-add2-4e80-b6eb-b781aac1f791,4015,1,whole,revise,acceptance_unmet,d,,,claimed,no
+33,1075659,22db1afc-f6a3-4be0-a25f-129cd852fe75,3681,1,whole,revise,acceptance_unmet,d,b,,not_claimed,unclear
+34,1068193,23e391bf-44e2-4446-a0b7-d7efa413d212,3657,1,whole,revise,acceptance_unmet docs_drift,f,,other,unknown,unclear
+35,581414,250423f6-38eb-4679-ac42-a6b062740037,2422,2,whole,revise,test_gap acceptance_unmet,a,,,unknown,yes
+36,1066866,2726b89a-42c7-45de-abf5-bdf292ba7d6a,3641,1,whole,revise,acceptance_unmet test_gap,f,d,defect,unknown,unclear
+37,1097269,2b8f8c11-a6af-4e07-8d06-4904f9e6b710,3746,1,whole,revise,docs_drift acceptance_unmet,d,,,unknown,yes
+38,1158461,2bd231df-ebd3-442b-b904-faa898ac6377,3935,1,whole,revise,test_gap,a,d,,unknown,yes
+39,1159409,2bd231df-ebd3-442b-b904-faa898ac6377,3935,3,whole,revise,acceptance_unmet code_defect,f,a,defect,unknown,no
+40,1064643,2c5d47a0-cda7-4217-a40c-3c89ea778dcd,3597,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+41,1064643,2c5d47a0-cda7-4217-a40c-3c89ea778dcd,3597,1,whole,revise,acceptance_unmet test_gap,a,d,,unknown,unclear
+42,1439523,2c86f6dd-455b-4afa-a144-de16fdbcb276,4135,1,whole,revise,acceptance_unmet code_defect docs_drift test_gap,f,,other,unknown,no
+43,1195346,308ebb85-22eb-464b-adab-c6da586be2f1,3976,1,whole,revise,acceptance_unmet code_defect test_gap docs_drift,b,f,,not_claimed,yes
+44,1296878,322e3a2a-5f35-4fc1-93e0-5937dbca10d6,4092,1,agent:receipt-evidence,revise,A-059 A-219,f,,other,not_claimed,yes
+45,1400679,332fec87-50cd-4457-8c1f-81ef86d9eae7,4361,2,whole,revise,test_gap acceptance_unmet,a,d,,claimed,unclear
+46,1047199,37224eee-4d0f-4aad-af0e-da9beb0bbb25,3519,1,whole,concern,acceptance_conflict,e,,,not_claimed,yes
+47,1177648,380bb964-1a0c-4749-bbc5-3f6322ceb032,3989,1,whole,revise,acceptance_unmet docs_drift,d,,,unknown,yes
+48,1439248,393e252a-4f14-4f24-be59-b515bd07f316,4327,1,whole,revise,code_defect acceptance_unmet,f,a,defect,unknown,no
+49,1161448,3a50e82a-4b65-4fff-a3ae-e41c9af934b8,3942,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+50,1239412,3a72e48c-58f1-4690-8b96-38778957e803,4124,3,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+51,1165934,3a9fa943-b949-48d9-8cdd-d7249eca3bd1,3968,1,whole,revise,acceptance_unmet test_gap,d,a,,unknown,yes
+52,1166135,3a9fa943-b949-48d9-8cdd-d7249eca3bd1,3968,2,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+53,1166319,3a9fa943-b949-48d9-8cdd-d7249eca3bd1,3968,3,whole,revise,acceptance_unmet code_defect,c,f,,unknown,unclear
+54,1440961,3b514575-f1f8-4615-95ba-6fad4e460abc,4658,2,whole,revise,test_gap acceptance_unmet,a,,,unknown,yes
+55,1440961,3b514575-f1f8-4615-95ba-6fad4e460abc,4658,2,whole,revise,test_gap acceptance_unmet,d,,,unknown,yes
+56,1441018,3b514575-f1f8-4615-95ba-6fad4e460abc,4658,3,whole,revise,acceptance_unmet test_gap,d,,,unknown,yes
+57,1206992,3e0829f7-6760-4cd8-9184-fcc7e9eac111,3991,1,whole,concern,acceptance_ambiguous,e,,,unknown,yes
+58,1175938,42ca1bed-cb0f-444e-b59b-52c44fb78276,3987,1,whole,revise,acceptance_unmet,f,,defect,unknown,no
+59,1183212,42ca1bed-cb0f-444e-b59b-52c44fb78276,3987,2,whole,revise,docs_drift acceptance_unmet,f,,defect,unknown,no
+60,1080568,440555df-a963-4e5b-9e40-e2954ec9d67f,3178,3,whole,revise,acceptance_unmet code_defect test_gap docs_drift,f,,defect,unknown,no
+61,1409936,444e1d7d-1457-4ec1-b692-b59e02fb569b,4598,2,whole,revise,test_gap acceptance_unmet,f,a,defect,unknown,no
+62,1073437,44e4f734-9cb2-4ec0-999d-1cb437cf1da7,3672,2,whole,revise,acceptance_unmet repo_rule_violation,d,,,not_claimed,yes
+63,1073437,44e4f734-9cb2-4ec0-999d-1cb437cf1da7,3672,2,agent:receipt-evidence,revise,A-065 A-257,d,,,not_claimed,yes
+64,1270311,4a941cbf-6722-40f9-9d12-205e1325a126,4174,1,whole,revise,test_gap,d,,,claimed,yes
+65,1273891,4a941cbf-6722-40f9-9d12-205e1325a126,4174,3,agent:receipt-evidence,revise,A-059,f,,other,claimed,yes
+66,1328000,4adea518-8805-4078-b1bb-a855e22f4196,4472,1,whole,revise,acceptance_unmet docs_drift,b,d,,not_claimed,yes
+67,1113192,4c099e7b-071e-4e2d-82ed-ff62575c6356,3750,1,agent:receipt-evidence,revise,A-257,f,,other,claimed,yes
+68,1165965,4c73facc-6447-4d11-812e-8a2d4d87f017,4012,1,whole,revise,acceptance_unmet code_defect test_gap,a,f,,unknown,yes
+69,1165965,4c73facc-6447-4d11-812e-8a2d4d87f017,4012,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+70,1166188,4c73facc-6447-4d11-812e-8a2d4d87f017,4012,2,whole,revise,code_defect acceptance_unmet docs_drift,f,,defect,claimed,no
+71,1166188,4c73facc-6447-4d11-812e-8a2d4d87f017,4012,2,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+72,1166188,4c73facc-6447-4d11-812e-8a2d4d87f017,4012,2,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+73,1445509,4dae84e4-b6b0-4224-8d1e-ae237000b683,4332,1,whole,revise,acceptance_unmet,c,b,,not_claimed,yes
+74,1445509,4dae84e4-b6b0-4224-8d1e-ae237000b683,4332,1,whole,revise,acceptance_unmet test_gap,d,f,,unknown,unclear
+75,1448221,4dae84e4-b6b0-4224-8d1e-ae237000b683,4332,3,whole,revise,code_defect test_gap acceptance_unmet,f,,defect,unknown,no
+76,1451846,4dae84e4-b6b0-4224-8d1e-ae237000b683,4332,4,whole,revise,test_gap,d,,,unknown,yes
+77,1211096,4f28e7bd-b84a-4b1f-9bc9-752810707e6d,4120,1,whole,revise,local_slip,f,,other,claimed,no
+78,1211096,4f28e7bd-b84a-4b1f-9bc9-752810707e6d,4120,1,agent:receipt-evidence,revise,A-257,f,,other,claimed,no
+79,1215129,53f4a732-fb3e-45dd-80a1-37a66eec243a,4236,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+80,1443332,54310e37-590e-4eb7-b595-28372dc210a4,4653,1,whole,revise,acceptance_unmet code_defect test_gap docs_drift,f,,defect,unknown,no
+81,1443332,54310e37-590e-4eb7-b595-28372dc210a4,4653,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+82,1184150,561e5219-081d-4bc7-80a5-5dffa63a02e0,4014,1,whole,revise,acceptance_unmet,b,d,,not_claimed,yes
+83,1355501,582ad032-9117-442b-a3a1-ea272a76c0c3,4448,3,whole,revise,acceptance_unmet,f,,other,claimed,unclear
+84,1167808,5b9dff15-a35d-45af-a2dc-49bfc31d37ce,3966,1,whole,revise,acceptance_unmet test_gap,f,,other,unknown,no
+85,1168048,5b9dff15-a35d-45af-a2dc-49bfc31d37ce,3966,3,whole,revise,code_defect,f,,other,unknown,unclear
+86,1106973,5c8f882a-7dc4-4c61-ae12-27ccb239b17c,3767,1,whole,concern,test_gap acceptance_unmet,a,e,,claimed,no
+87,1120720,5e053c84-6911-4c9c-9bc3-70da510076fe,3812,2,whole,concern,acceptance_unmet acceptance_ambiguous,e,d,,claimed,no
+88,1169284,5e61c74a-b929-42a5-afc2-b27830fcd20a,3924,1,whole,revise,acceptance_unmet code_defect test_gap,c,d,,unknown,unclear
+89,1058241,5fa4e5f2-fdb8-4b4e-a4ea-822ea42ed301,3581,1,whole,revise,adr_design_mismatch acceptance_unmet code_defect test_gap,b,f a,,not_claimed,yes
+90,1058241,5fa4e5f2-fdb8-4b4e-a4ea-822ea42ed301,3581,1,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+91,1058241,5fa4e5f2-fdb8-4b4e-a4ea-822ea42ed301,3581,1,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+92,1058241,5fa4e5f2-fdb8-4b4e-a4ea-822ea42ed301,3581,1,agent:receipt-evidence,revise,A-257,b,a,,not_claimed,yes
+93,1059198,5fa4e5f2-fdb8-4b4e-a4ea-822ea42ed301,3581,2,whole,concern,acceptance_unmet,d,e,,unknown,unclear
+94,1059198,5fa4e5f2-fdb8-4b4e-a4ea-822ea42ed301,3581,2,whole,concern,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+95,1277509,61e2700f-bb7d-4775-b7dd-353373411b0f,4086,2,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+96,1181516,63d35bb2-beec-4ba0-8c36-12b78f2fe9de,4027,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+97,1181516,63d35bb2-beec-4ba0-8c36-12b78f2fe9de,4027,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+98,1181516,63d35bb2-beec-4ba0-8c36-12b78f2fe9de,4027,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+99,1181516,63d35bb2-beec-4ba0-8c36-12b78f2fe9de,4027,1,whole,revise,test_gap acceptance_unmet,a,,,unknown,unclear
+100,1114282,649a844a-d61f-46fe-a40b-6f2ce716dbee,3807,1,whole,revise,code_defect test_gap,f,,defect,unknown,no
+101,1052511,64a37abf-e0f1-4df3-90e3-22b8cf4b2a0f,3584,1,whole,revise,test_gap,a,d,,unknown,unclear
+102,1052835,64a37abf-e0f1-4df3-90e3-22b8cf4b2a0f,3584,2,whole,revise,code_defect test_gap,f,,defect,unknown,no
+103,1168596,64eb2518-6ad6-4375-a877-310af7093283,3986,1,whole,concern,adr_design_mismatch acceptance_unmet,f,e,other,unknown,unclear
+104,1173440,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,1,whole,revise,code_defect acceptance_unmet test_gap,f,,defect,unknown,no
+105,1174164,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,2,whole,concern,acceptance_conflict acceptance_unmet,e,a,,unknown,yes
+106,1174164,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,2,whole,concern,acceptance_unmet code_defect test_gap,f,b,defect,not_claimed,no
+107,1174164,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,2,agent:receipt-evidence,revise,A-257,a,e,,claimed,yes
+108,1179273,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,3,whole,revise,acceptance_unmet code_defect test_gap,f,b,defect,not_claimed,no
+109,1179273,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,3,agent:receipt-evidence,revise,A-257,b,f d,,not_claimed,yes
+110,1180271,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,4,whole,concern,acceptance_unmet out_of_scope_change test_gap,f,a e,other,unknown,unclear
+111,1181122,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,5,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+112,1181122,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,5,whole,revise,acceptance_unmet code_defect test_gap,f,a b,defect,not_claimed,no
+113,1183361,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,6,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+114,1183361,6580f3ce-c3c9-4a5d-8d80-bbd330aaecef,3976,6,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+115,1136998,6611e7b0-ca45-486e-8b57-2031ea1724c3,3813,1,whole,concern,adr_conflict repo_rule_violation,b,e,,not_claimed,yes
+116,1405535,69ead960-91f6-4793-ae8a-226fb330d1bc,4591,1,whole,revise,acceptance_unmet,d,,,unknown,yes
+117,1258413,6b7eb1ff-cd55-4fe3-8b48-12fa8fd8f3b1,4099,1,whole,revise,acceptance_unmet,d,,,unknown,unclear
+118,1258413,6b7eb1ff-cd55-4fe3-8b48-12fa8fd8f3b1,4099,1,whole,revise,acceptance_unmet,d,b,,not_claimed,yes
+119,1258413,6b7eb1ff-cd55-4fe3-8b48-12fa8fd8f3b1,4099,1,agent:receipt-evidence,revise,A-257,b,d,,not_claimed,yes
+120,1219043,6ba3c17c-9b65-4c96-b8bc-e9b49cf115ed,4245,1,whole,concern,acceptance_ambiguous,e,d,,claimed,yes
+121,1219043,6ba3c17c-9b65-4c96-b8bc-e9b49cf115ed,4245,1,agent:receipt-evidence,revise,A-257,d,e,,not_claimed,yes
+122,1247822,6d343882-1074-4dcf-bb96-13a95087d0a4,4257,1,whole,revise,acceptance_unmet test_gap,d,,,unknown,no
+123,1292581,6d6ebffc-703a-4aca-85e1-e4613dcf0cb9,4194,1,whole,revise,acceptance_unmet,d,,,unknown,yes
+124,1293021,6d6ebffc-703a-4aca-85e1-e4613dcf0cb9,4194,2,whole,revise,acceptance_unmet code_defect,f,d,defect,unknown,unclear
+125,1293366,6d6ebffc-703a-4aca-85e1-e4613dcf0cb9,4194,4,whole,revise,acceptance_unmet,f,,defect,unknown,unclear
+126,1275937,6ddc5f8a-8810-46fb-b5d6-c08208d81554,4251,2,whole,revise,test_gap code_defect,f,d,defect,unknown,no
+127,1210287,6ee476d7-9a4e-41a8-af8b-a43cec6530fd,4163,1,whole,concern,repo_rule_violation,f,,other,claimed,unclear
+128,1441785,71105c2a-9f48-413a-a861-a890b3111901,4645,1,whole,revise,code_defect acceptance_unmet,f,b,defect,not_claimed,no
+129,1441785,71105c2a-9f48-413a-a861-a890b3111901,4645,1,whole,revise,code_defect test_gap,f,,defect,unknown,no
+130,1442136,71105c2a-9f48-413a-a861-a890b3111901,4645,2,whole,revise,acceptance_unmet test_gap,c,a,,unknown,unclear
+131,1230246,717f8205-244d-43c5-ae29-3ab3c484100f,4104,1,whole,concern,acceptance_unmet,b,e,,not_claimed,yes
+132,1230246,717f8205-244d-43c5-ae29-3ab3c484100f,4104,1,agent:receipt-evidence,revise,A-257,b,,,not_claimed,yes
+133,1158184,73570c03-9283-4331-bfac-a92666c7f7cb,3843,1,whole,revise,acceptance_unmet test_gap,d,a b,,not_claimed,yes
+134,1158184,73570c03-9283-4331-bfac-a92666c7f7cb,3843,1,whole,revise,acceptance_unmet test_gap,a,d,,claimed,unclear
+135,1158184,73570c03-9283-4331-bfac-a92666c7f7cb,3843,1,whole,revise,acceptance_unmet test_gap,a,d,,claimed,unclear
+136,1158184,73570c03-9283-4331-bfac-a92666c7f7cb,3843,1,agent:receipt-evidence,revise,A-257,b,a d,,not_claimed,yes
+137,1158710,73570c03-9283-4331-bfac-a92666c7f7cb,3843,3,whole,revise,acceptance_unmet test_gap,d,a,,unknown,unclear
+138,1161148,73570c03-9283-4331-bfac-a92666c7f7cb,3843,5,whole,revise,test_gap acceptance_unmet,a,d,,claimed,unclear
+139,1161148,73570c03-9283-4331-bfac-a92666c7f7cb,3843,5,whole,revise,test_gap acceptance_unmet,d,,,unknown,yes
+140,1062090,759fe9a2-f8d7-434a-a8d8-61f7f58ab492,3590,2,whole,revise,acceptance_unmet code_defect,f,b,defect,not_claimed,no
+141,1062090,759fe9a2-f8d7-434a-a8d8-61f7f58ab492,3590,2,whole,revise,acceptance_unmet code_defect,f,b,defect,not_claimed,no
+142,1105906,75afff6a-cc8e-4efe-a2c0-339d494eddf1,1670,1,whole,concern,code_defect test_gap,a,f e b,,claimed,yes
+143,1105906,75afff6a-cc8e-4efe-a2c0-339d494eddf1,1670,1,whole,concern,acceptance_ambiguous,f,,other,claimed,yes
+144,1105906,75afff6a-cc8e-4efe-a2c0-339d494eddf1,1670,1,agent:receipt-evidence,revise,A-257,b,d,,not_claimed,yes
+145,1043013,76d08396-cbc5-4ced-9182-f078b5d46024,1384,3,whole,revise,test_gap,d,,,unknown,yes
+146,417619,7804dfef-4b2c-4c3a-98db-7353826b7849,3471,1,whole,revise,test_gap acceptance_unmet,a,,,unknown,yes
+147,420117,79255691-02c9-49e6-9bb9-635dac55a848,3406,1,whole,revise,acceptance_unmet,d,,,unknown,no
+148,1167976,7aa51570-3c4c-406e-9d10-f9844b19aac5,3967,1,whole,revise,acceptance_unmet,d,,,unknown,unclear
+149,1297259,7b5a0994-3d4e-4d87-ac3c-ab4bb5035294,4082,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+150,1297259,7b5a0994-3d4e-4d87-ac3c-ab4bb5035294,4082,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+151,1298132,7b5a0994-3d4e-4d87-ac3c-ab4bb5035294,4082,4,whole,revise,acceptance_unmet code_defect test_gap,f,a,defect,unknown,no
+152,1298132,7b5a0994-3d4e-4d87-ac3c-ab4bb5035294,4082,4,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+153,1378235,7b5a0994-3d4e-4d87-ac3c-ab4bb5035294,4082,5,whole,revise,docs_drift,d,,,unknown,yes
+154,1066374,7d1f8778-1e2c-44c1-8688-2cd4425666c7,3639,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+155,1066374,7d1f8778-1e2c-44c1-8688-2cd4425666c7,3639,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+156,1066711,7d1f8778-1e2c-44c1-8688-2cd4425666c7,3639,3,whole,revise,acceptance_unmet docs_drift,d,f,,unknown,yes
+157,1066711,7d1f8778-1e2c-44c1-8688-2cd4425666c7,3639,3,agent:receipt-evidence,revise,A-257,b,a,,not_claimed,yes
+158,1144676,7f210f3c-72a9-4637-a0bb-6e4d9ca19f50,3111,1,whole,revise,docs_drift,d,,,unknown,no
+159,1157404,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+160,1157587,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,2,whole,revise,acceptance_unmet code_defect,f,b,defect,not_claimed,no
+161,1157922,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,3,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+162,1157922,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,3,whole,revise,acceptance_unmet code_defect test_gap,f,a,defect,unknown,no
+163,1159766,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,4,whole,concern,acceptance_unmet out_of_scope_change,f,a e,other,unknown,unclear
+164,1159766,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,4,agent:receipt-evidence,revise,A-257,f,e a,other,not_claimed,yes
+165,1160874,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,5,whole,concern,acceptance_unmet out_of_scope_change,f,a e,other,unknown,unclear
+166,1160874,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,5,whole,concern,acceptance_unmet code_defect,f,b e,defect,not_claimed,no
+167,1160874,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,5,agent:receipt-evidence,concern,A-257,f,e,other,claimed,unclear
+168,1161898,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,6,whole,concern,acceptance_conflict acceptance_unmet,e,a b,,not_claimed,yes
+169,1161898,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,6,whole,concern,code_defect acceptance_unmet test_gap,f,,defect,unknown,no
+170,1161898,81be9ecb-8348-4058-95cf-0c140fb3c866,3976,6,agent:receipt-evidence,revise,A-257,a,b e,,claimed,yes
+171,1296009,85bde064-caea-4c76-ae53-155d20946e36,4443,2,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+172,1311442,85bde064-caea-4c76-ae53-155d20946e36,4443,4,whole,concern,code_defect acceptance_unmet,b,f,,not_claimed,yes
+173,1047321,860c9827-0f7f-4e00-aa62-ff437d91516e,3531,1,whole,revise,acceptance_unmet,f,,defect,claimed,no
+174,1047321,860c9827-0f7f-4e00-aa62-ff437d91516e,3531,1,whole,revise,acceptance_unmet,d,,,unknown,yes
+175,1152023,87457857-07bd-4aa2-b270-4da98d42dc30,3900,3,whole,concern,acceptance_unmet,b,e,,not_claimed,yes
+176,1152023,87457857-07bd-4aa2-b270-4da98d42dc30,3900,3,whole,concern,docs_drift acceptance_unmet,d,,,claimed,yes
+177,1153919,87457857-07bd-4aa2-b270-4da98d42dc30,3900,4,whole,revise,adr_design_mismatch code_defect,f,,defect,unknown,no
+178,1153919,87457857-07bd-4aa2-b270-4da98d42dc30,3900,4,whole,revise,test_gap,a,,,unknown,yes
+179,1080691,886c9a89-ee22-4b3a-9422-98a598ed51f2,3110,1,whole,concern,adr_conflict acceptance_unmet docs_drift,e,b,,not_claimed,yes
+180,1080691,886c9a89-ee22-4b3a-9422-98a598ed51f2,3110,1,whole,concern,acceptance_unmet code_defect test_gap,b,d,,not_claimed,yes
+181,1080691,886c9a89-ee22-4b3a-9422-98a598ed51f2,3110,1,whole,concern,acceptance_unmet code_defect test_gap,f,d,defect,unknown,no
+182,1080691,886c9a89-ee22-4b3a-9422-98a598ed51f2,3110,1,agent:receipt-evidence,revise,A-257,b,,,not_claimed,yes
+183,1080691,886c9a89-ee22-4b3a-9422-98a598ed51f2,3110,1,agent:receipt-evidence,revise,A-257,b,,,not_claimed,yes
+184,1163598,88eee852-740a-4cbb-a0ef-2c7021bc962f,3976,1,whole,concern,acceptance_conflict acceptance_unmet,e,a b,,not_claimed,yes
+185,1164529,88eee852-740a-4cbb-a0ef-2c7021bc962f,3976,2,whole,concern,acceptance_unmet out_of_scope_change,f,e a,other,unknown,unclear
+186,1167087,88eee852-740a-4cbb-a0ef-2c7021bc962f,3976,3,whole,concern,acceptance_unmet code_defect test_gap,f,a b,defect,not_claimed,no
+187,1167414,88eee852-740a-4cbb-a0ef-2c7021bc962f,3976,4,whole,revise,acceptance_unmet code_defect test_gap,f,a b,defect,not_claimed,no
+188,1167830,88eee852-740a-4cbb-a0ef-2c7021bc962f,3976,5,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+189,1281057,8ac7dd40-42a2-4cb1-83c8-8719e690a19c,4450,1,whole,revise,acceptance_unmet code_defect test_gap docs_drift,c,a f,,claimed,no
+190,1281057,8ac7dd40-42a2-4cb1-83c8-8719e690a19c,4450,1,whole,revise,code_defect acceptance_unmet test_gap,f,,defect,unknown,no
+191,1285610,8ac7dd40-42a2-4cb1-83c8-8719e690a19c,4450,2,whole,revise,code_defect test_gap,f,,defect,unknown,no
+192,1157227,8c1c4e03-db58-4683-8c6b-5fdf9e3bd920,3974,1,whole,revise,code_defect acceptance_unmet test_gap,f,,defect,unknown,no
+193,1298600,8d1a61e7-941c-47c1-8929-4d2756c5747c,4305,2,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+194,1237774,8d8d7909-77a6-4a64-acac-1f1bf1f210e1,4291,1,agent:adr-rules,revise,A-162,f,,other,claimed,yes
+195,1162303,8e5ac13a-dcf9-46c5-8eb0-a7583c17eaf8,3982,1,whole,revise,acceptance_unmet,d,,,unknown,yes
+196,1162515,8e5ac13a-dcf9-46c5-8eb0-a7583c17eaf8,3982,2,whole,revise,acceptance_unmet,d,,,unknown,yes
+197,1162745,8e5ac13a-dcf9-46c5-8eb0-a7583c17eaf8,3982,3,whole,revise,acceptance_unmet docs_drift,d,,,unknown,no
+198,1072143,92a6501f-dca1-401f-9362-98722c8e0934,3661,1,whole,revise,acceptance_unmet code_defect test_gap,f,a,defect,unknown,no
+199,1072369,92a6501f-dca1-401f-9362-98722c8e0934,3661,2,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+200,1072893,92a6501f-dca1-401f-9362-98722c8e0934,3661,3,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+201,1158535,92b08521-def0-46a1-8fa3-5f71aa19bfa4,3975,1,whole,revise,test_gap,d,,,unknown,unclear
+202,1444656,98918baf-eaab-446c-9859-9bff64af32af,4319,1,whole,revise,code_defect acceptance_unmet,f,,defect,claimed,no
+203,1444656,98918baf-eaab-446c-9859-9bff64af32af,4319,1,whole,revise,code_defect acceptance_unmet,f,d,defect,claimed,unclear
+204,1444656,98918baf-eaab-446c-9859-9bff64af32af,4319,1,whole,revise,test_gap,a,,,claimed,yes
+205,1058764,9a9fd74e-8b4a-43e9-8a72-003ce0df5b95,3589,1,whole,revise,acceptance_unmet code_defect,f,a,defect,unknown,no
+206,1059221,9a9fd74e-8b4a-43e9-8a72-003ce0df5b95,3589,3,whole,concern,acceptance_unmet code_defect test_gap,b,f,,not_claimed,yes
+207,533619,9ae33980-215a-4d9b-a51e-52731571b6a6,1513,1,whole,revise,acceptance_unmet code_defect,f,d,defect,unknown,no
+208,419506,9c77412d-7939-4318-a431-cc92c2e54eee,3439,2,whole,revise,code_defect acceptance_unmet repo_rule_violation,f,,defect,unknown,no
+209,1262450,9d08dd92-4193-4956-8665-108708bc461b,4100,1,whole,revise,acceptance_unmet,d,,,not_claimed,unclear
+210,1262450,9d08dd92-4193-4956-8665-108708bc461b,4100,1,agent:receipt-evidence,revise,A-059 A-065,d,,,claimed,yes
+211,1166670,9daa267e-37cc-4eac-a017-d199a8eb76b6,3943,1,whole,concern,acceptance_unmet test_gap,f,d,defect,unknown,unclear
+212,1174471,9daa267e-37cc-4eac-a017-d199a8eb76b6,3943,2,whole,revise,acceptance_unmet code_defect,b,f,,not_claimed,yes
+213,1175279,9daa267e-37cc-4eac-a017-d199a8eb76b6,3943,3,agent:receipt-evidence,revise,A-257,d,,,claimed,yes
+214,1071592,9f84c316-de41-43b0-aa0b-2ddeccafffea,3660,1,whole,revise,acceptance_unmet code_defect docs_drift,f,,defect,unknown,no
+215,1071754,9f84c316-de41-43b0-aa0b-2ddeccafffea,3660,2,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+216,1071754,9f84c316-de41-43b0-aa0b-2ddeccafffea,3660,2,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+217,1049031,9f8eb151-2edb-4759-91da-3243b5313ba9,3176,1,whole,revise,acceptance_unmet,b,c,,not_claimed,yes
+218,1049031,9f8eb151-2edb-4759-91da-3243b5313ba9,3176,1,whole,revise,test_gap acceptance_unmet,d,,,unknown,yes
+219,1049916,9f8eb151-2edb-4759-91da-3243b5313ba9,3176,2,whole,revise,acceptance_unmet,d,c,,claimed,no
+220,1049916,9f8eb151-2edb-4759-91da-3243b5313ba9,3176,2,agent:receipt-evidence,revise,A-059 A-219,d,,,claimed,yes
+221,1050731,9f8eb151-2edb-4759-91da-3243b5313ba9,3176,3,whole,revise,code_defect acceptance_unmet test_gap,f,,defect,unknown,no
+222,1052797,9f8eb151-2edb-4759-91da-3243b5313ba9,3176,4,whole,revise,code_defect acceptance_unmet test_gap,f,,defect,unknown,no
+223,1052797,9f8eb151-2edb-4759-91da-3243b5313ba9,3176,4,whole,revise,code_defect acceptance_unmet test_gap,f,,defect,unknown,no
+224,422329,a106d7ff-2a8b-40a4-80e4-bbce9103c84c,922,1,whole,revise,acceptance_unmet,f,,other,claimed,no
+225,1066059,a43f1b16-13c0-40ff-8eee-653265b0166a,3638,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+226,1053053,a4601533-27aa-43e5-8d11-abd70ba38aff,2412,2,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+227,1053504,a4601533-27aa-43e5-8d11-abd70ba38aff,2412,3,whole,revise,acceptance_unmet test_gap,d,,,unknown,yes
+228,1177637,a4f27e15-180e-48b7-bd50-553e52b0bc45,4008,1,whole,revise,acceptance_unmet code_defect,f,d,defect,unknown,no
+229,422790,a5bd6fef-23dc-481a-a67d-9320af9531e9,1527,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+230,422790,a5bd6fef-23dc-481a-a67d-9320af9531e9,1527,1,whole,revise,code_defect acceptance_unmet,f,b,defect,not_claimed,no
+231,422790,a5bd6fef-23dc-481a-a67d-9320af9531e9,1527,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+233,1170376,a72ee398-58d8-4a7f-ad70-422dda412211,3844,1,whole,revise,acceptance_unmet test_gap,b,d,,not_claimed,yes
+234,1170376,a72ee398-58d8-4a7f-ad70-422dda412211,3844,1,whole,revise,acceptance_unmet test_gap,b,d,,not_claimed,yes
+235,1170376,a72ee398-58d8-4a7f-ad70-422dda412211,3844,1,whole,revise,acceptance_unmet test_gap,a,d,,claimed,yes
+236,1170376,a72ee398-58d8-4a7f-ad70-422dda412211,3844,1,agent:receipt-evidence,revise,A-257,b,a,,not_claimed,yes
+237,1170376,a72ee398-58d8-4a7f-ad70-422dda412211,3844,1,agent:receipt-evidence,revise,A-257,b,d,,not_claimed,yes
+238,1170376,a72ee398-58d8-4a7f-ad70-422dda412211,3844,1,agent:receipt-evidence,revise,A-257,b,a,,not_claimed,yes
+239,1171487,a72ee398-58d8-4a7f-ad70-422dda412211,3844,3,whole,revise,test_gap acceptance_unmet,d,,,claimed,yes
+240,1171487,a72ee398-58d8-4a7f-ad70-422dda412211,3844,3,whole,revise,acceptance_unmet test_gap,a,d,,unknown,yes
+241,1236219,aa724835-518e-49aa-bc99-b7b654b2b117,4084,3,whole,revise,repo_rule_violation,d,,,not_claimed,yes
+242,1236219,aa724835-518e-49aa-bc99-b7b654b2b117,4084,3,agent:receipt-evidence,revise,A-066,d,,,not_claimed,yes
+243,1168804,aabedd90-5d59-4af8-bd91-39695416266f,3925,1,whole,revise,acceptance_unmet,f,,other,unknown,yes
+244,1168804,aabedd90-5d59-4af8-bd91-39695416266f,3925,1,whole,revise,acceptance_unmet local_slip,d,f,,unknown,yes
+245,1068826,ab2ef05a-9aeb-47eb-8995-5eb07d7d793b,3585,1,whole,revise,adr_design_mismatch acceptance_unmet code_defect,f,,defect,unknown,no
+246,1068826,ab2ef05a-9aeb-47eb-8995-5eb07d7d793b,3585,1,whole,revise,adr_design_mismatch acceptance_unmet code_defect,f,,defect,unknown,no
+247,1068826,ab2ef05a-9aeb-47eb-8995-5eb07d7d793b,3585,1,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+248,1068826,ab2ef05a-9aeb-47eb-8995-5eb07d7d793b,3585,1,agent:receipt-evidence,revise,A-257,f,a,defect,claimed,no
+249,1079298,ab2ef05a-9aeb-47eb-8995-5eb07d7d793b,3585,5,whole,revise,code_defect acceptance_unmet,b,f,,not_claimed,yes
+250,1387357,acb0f2f0-690a-41f2-a5d5-fe521122a839,4474,1,whole,concern,acceptance_ambiguous code_defect test_gap,e,f,,unknown,no
+251,1387357,acb0f2f0-690a-41f2-a5d5-fe521122a839,4474,1,agent:test-rules,concern,A-262,d,,,unknown,yes
+252,1444332,ae9142f4-c424-42ab-b34b-06bfabe916c0,4655,3,whole,concern,acceptance_ambiguous test_gap,a,e,,claimed,yes
+253,418212,af164433-33b5-4cd3-bee7-bdf5f42e5eb2,3415,1,whole,revise,test_gap acceptance_unmet,d,a,,claimed,yes
+254,1056276,b0be68c0-a060-4072-987a-4d3b953875b4,3600,1,whole,revise,acceptance_unmet,d,b,,not_claimed,yes
+255,1142038,b28308aa-5c3f-4dbc-a4b1-ead76c912b18,3842,1,agent:receipt-evidence,revise,A-057 A-257,d,b,,not_claimed,yes
+256,1164023,b38f2892-ed05-44f3-9ca8-6156c616cc6c,3960,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+257,1164023,b38f2892-ed05-44f3-9ca8-6156c616cc6c,3960,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+258,1164296,b38f2892-ed05-44f3-9ca8-6156c616cc6c,3960,2,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+259,1164296,b38f2892-ed05-44f3-9ca8-6156c616cc6c,3960,2,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+260,1164296,b38f2892-ed05-44f3-9ca8-6156c616cc6c,3960,2,whole,revise,acceptance_unmet code_defect,c,f,,unknown,yes
+261,1042336,b4317c79-d2bb-45a8-b5b2-e3e12ae5c6c4,2896,1,whole,revise,acceptance_unmet,d,,,not_claimed,yes
+262,1067441,b9351fe6-aaee-42f7-bc72-6e33e6289158,3654,2,whole,revise,acceptance_unmet code_defect,b,f,,not_claimed,yes
+263,1067441,b9351fe6-aaee-42f7-bc72-6e33e6289158,3654,2,whole,revise,acceptance_unmet code_defect docs_drift,f,,defect,unknown,no
+264,1067441,b9351fe6-aaee-42f7-bc72-6e33e6289158,3654,2,agent:receipt-evidence,revise,A-257,b,,,not_claimed,yes
+265,1067819,b9351fe6-aaee-42f7-bc72-6e33e6289158,3654,3,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+266,1067819,b9351fe6-aaee-42f7-bc72-6e33e6289158,3654,3,whole,revise,adr_design_mismatch test_gap,d,,,unknown,yes
+267,1069984,b9351fe6-aaee-42f7-bc72-6e33e6289158,3654,4,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+268,1130684,b9386c6b-b928-474d-b074-709459b96a4b,3168,1,whole,concern,adr_design_mismatch acceptance_unmet,f,e,other,unknown,no
+269,1130684,b9386c6b-b928-474d-b074-709459b96a4b,3168,1,whole,concern,acceptance_unmet docs_drift,d,,,claimed,yes
+270,1394488,b9845a34-dead-412b-89cc-4bd1d21d1200,4542,2,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+271,1428072,b9845a34-dead-412b-89cc-4bd1d21d1200,4542,4,whole,revise,docs_drift,d,f,,claimed,yes
+272,1428072,b9845a34-dead-412b-89cc-4bd1d21d1200,4542,4,agent:receipt-evidence,revise,A-257,d,,,claimed,yes
+273,557843,bb1ec06b-d83d-4474-a8ce-f19c465fb345,2401,2,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+274,557843,bb1ec06b-d83d-4474-a8ce-f19c465fb345,2401,2,whole,revise,acceptance_unmet test_gap,c,,,unknown,no
+275,557843,bb1ec06b-d83d-4474-a8ce-f19c465fb345,2401,2,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+276,1293551,bbe6940a-0222-4ca0-87a4-2bf8294f5d09,4445,1,whole,revise,code_defect acceptance_unmet,f,c,defect,unknown,no
+277,1293551,bbe6940a-0222-4ca0-87a4-2bf8294f5d09,4445,1,whole,revise,test_gap,a,,,claimed,unclear
+278,1293551,bbe6940a-0222-4ca0-87a4-2bf8294f5d09,4445,1,whole,revise,docs_drift local_slip,d,,,claimed,yes
+279,1294780,bbe6940a-0222-4ca0-87a4-2bf8294f5d09,4445,3,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+280,1295185,bbe6940a-0222-4ca0-87a4-2bf8294f5d09,4445,5,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+281,1295185,bbe6940a-0222-4ca0-87a4-2bf8294f5d09,4445,5,whole,revise,test_gap acceptance_unmet,d,,,unknown,yes
+282,1170950,bc045323-3a45-47c3-90a4-0d9e00dd639c,3845,1,whole,revise,test_gap acceptance_unmet,d,,,unknown,yes
+283,1279913,bdea9518-db77-4480-8a57-b4195ae25f8d,4449,1,whole,revise,test_gap acceptance_unmet,a,,,unknown,yes
+284,1279913,bdea9518-db77-4480-8a57-b4195ae25f8d,4449,1,whole,revise,test_gap,a,,,unknown,yes
+285,1164616,c0736b05-16e1-4758-a8b4-6f094cecd292,4006,1,whole,revise,code_defect,f,,defect,unknown,no
+286,1156731,c0db367b-ba5a-4f38-bee6-daaaee7dfb15,3936,1,whole,concern,acceptance_infeasible acceptance_unmet,e,b,,not_claimed,yes
+287,1156731,c0db367b-ba5a-4f38-bee6-daaaee7dfb15,3936,1,agent:receipt-evidence,revise,A-257,e,d,,not_claimed,yes
+288,1434253,c1b93a46-2083-47c5-aea9-d3ee569644a1,4616,1,whole,revise,acceptance_unmet test_gap,a,d,,unknown,unclear
+289,1434253,c1b93a46-2083-47c5-aea9-d3ee569644a1,4616,1,whole,revise,acceptance_unmet repo_rule_violation,d,,,unknown,yes
+290,1434253,c1b93a46-2083-47c5-aea9-d3ee569644a1,4616,1,whole,revise,acceptance_unmet,d,,,unknown,yes
+291,1434547,c1b93a46-2083-47c5-aea9-d3ee569644a1,4616,2,whole,revise,acceptance_unmet,d,,,unknown,yes
+292,1434547,c1b93a46-2083-47c5-aea9-d3ee569644a1,4616,2,whole,revise,acceptance_unmet,d,,,unknown,yes
+293,1434872,c1b93a46-2083-47c5-aea9-d3ee569644a1,4616,3,whole,revise,acceptance_unmet,f,d,defect,unknown,no
+294,1434872,c1b93a46-2083-47c5-aea9-d3ee569644a1,4616,3,whole,revise,acceptance_unmet,f,d,defect,unknown,no
+295,1434872,c1b93a46-2083-47c5-aea9-d3ee569644a1,4616,3,whole,revise,acceptance_unmet test_gap,a,d,,unknown,unclear
+296,1435224,c1b93a46-2083-47c5-aea9-d3ee569644a1,4616,4,whole,revise,acceptance_unmet,d,,,unknown,no
+297,1435224,c1b93a46-2083-47c5-aea9-d3ee569644a1,4616,4,agent:receipt-evidence,revise,A-257,f,,other,claimed,yes
+298,1165642,c2c8a9bb-0fe7-4391-ace1-00df125aec3f,4018,1,whole,revise,acceptance_unmet code_defect,b,f,,not_claimed,yes
+299,1165642,c2c8a9bb-0fe7-4391-ace1-00df125aec3f,4018,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+300,1165642,c2c8a9bb-0fe7-4391-ace1-00df125aec3f,4018,1,agent:receipt-evidence,revise,A-257,b,a,,not_claimed,yes
+301,1166014,c2c8a9bb-0fe7-4391-ace1-00df125aec3f,4018,2,whole,revise,acceptance_unmet code_defect,f,d,defect,unknown,no
+302,1171805,c2c8a9bb-0fe7-4391-ace1-00df125aec3f,4018,4,whole,revise,test_gap,d,a,,unknown,yes
+303,1061652,c69eddbc-5d3b-4281-82af-d4c616e25d6b,3544,1,whole,revise,acceptance_unmet,d,,,unknown,unclear
+304,1061652,c69eddbc-5d3b-4281-82af-d4c616e25d6b,3544,1,whole,revise,acceptance_unmet,f,d,other,unknown,yes
+305,1061652,c69eddbc-5d3b-4281-82af-d4c616e25d6b,3544,1,whole,revise,acceptance_unmet,f,,other,unknown,no
+306,1058739,c8f4d2b3-187e-4e62-9633-58d647f33f6c,3604,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+307,1058739,c8f4d2b3-187e-4e62-9633-58d647f33f6c,3604,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+308,1148930,caccdec9-8001-4508-94d6-f008029beccb,3801,1,whole,revise,local_slip,f,,defect,unknown,no
+309,1191991,cad136a0-363c-4961-a2ac-b58782fed616,4081,1,whole,revise,acceptance_unmet docs_drift test_gap,b,d,,not_claimed,yes
+310,1191991,cad136a0-363c-4961-a2ac-b58782fed616,4081,1,whole,revise,acceptance_unmet test_gap,f,,defect,unknown,no
+311,1192940,cad136a0-363c-4961-a2ac-b58782fed616,4081,2,whole,revise,acceptance_unmet code_defect docs_drift,f,d,defect,unknown,no
+312,1193936,cad136a0-363c-4961-a2ac-b58782fed616,4081,3,whole,revise,acceptance_unmet code_defect test_gap docs_drift,f,a,defect,unknown,no
+313,1045798,cd5ec5be-3613-4dd5-becd-bf0ae1cb1a76,3524,2,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+314,1214278,d3b886de-b83a-4ccd-858b-33512addb2ed,4164,1,whole,concern,adr_design_mismatch code_defect,f,e,defect,unknown,no
+315,1436679,d6197161-5ec1-4f70-ade2-508f6d3ff54a,4617,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+316,1436679,d6197161-5ec1-4f70-ade2-508f6d3ff54a,4617,1,whole,revise,acceptance_unmet docs_drift,f,,other,unknown,no
+317,1436679,d6197161-5ec1-4f70-ade2-508f6d3ff54a,4617,1,whole,revise,acceptance_unmet,d,,,not_claimed,yes
+318,1441851,d6ad7496-a636-4b4f-8fd9-7feec25f0579,4670,1,whole,revise,acceptance_unmet test_gap,f,a,other,unknown,no
+319,1441851,d6ad7496-a636-4b4f-8fd9-7feec25f0579,4670,1,whole,revise,acceptance_unmet docs_drift,f,,other,unknown,no
+320,1441851,d6ad7496-a636-4b4f-8fd9-7feec25f0579,4670,1,whole,revise,docs_drift,f,,other,unknown,no
+321,1441967,d6ad7496-a636-4b4f-8fd9-7feec25f0579,4670,2,whole,revise,acceptance_unmet test_gap,f,a,other,unknown,no
+322,1442097,d6ad7496-a636-4b4f-8fd9-7feec25f0579,4670,3,whole,revise,acceptance_unmet,d,,,unknown,no
+323,1442097,d6ad7496-a636-4b4f-8fd9-7feec25f0579,4670,3,whole,revise,test_gap acceptance_unmet,a,,,claimed,unclear
+324,1441154,d7116e8d-a224-4435-97a7-ed0fee4d3898,4662,1,whole,revise,acceptance_unmet code_defect,d,f,,unknown,no
+325,1441385,d7116e8d-a224-4435-97a7-ed0fee4d3898,4662,2,whole,revise,acceptance_unmet,b,d,,not_claimed,yes
+326,1441484,d7116e8d-a224-4435-97a7-ed0fee4d3898,4662,3,whole,revise,acceptance_unmet docs_drift,b,d,,not_claimed,yes
+327,1059772,d8883172-d771-4bf1-b218-761b821fe787,3613,2,agent:receipt-evidence,revise,A-257,f,d,other,claimed,yes
+328,1066453,d8c3c015-0f27-42d7-b586-b5e13474f4f6,3640,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+329,1066453,d8c3c015-0f27-42d7-b586-b5e13474f4f6,3640,1,whole,revise,acceptance_unmet,c,b,,not_claimed,yes
+330,1066453,d8c3c015-0f27-42d7-b586-b5e13474f4f6,3640,1,whole,revise,acceptance_unmet test_gap,d,a,,claimed,yes
+331,1066643,d8c3c015-0f27-42d7-b586-b5e13474f4f6,3640,2,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+332,1066643,d8c3c015-0f27-42d7-b586-b5e13474f4f6,3640,2,whole,revise,acceptance_unmet code_defect docs_drift test_gap,f,,defect,unknown,no
+333,1066643,d8c3c015-0f27-42d7-b586-b5e13474f4f6,3640,2,whole,revise,acceptance_unmet code_defect docs_drift test_gap,b,f,,not_claimed,yes
+334,1067751,d8c3c015-0f27-42d7-b586-b5e13474f4f6,3640,3,whole,revise,acceptance_unmet code_defect test_gap docs_drift,f,,defect,unknown,no
+335,1067751,d8c3c015-0f27-42d7-b586-b5e13474f4f6,3640,3,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+336,1169593,d9a7a515-9299-41d9-b521-1fb7ae235020,4013,1,whole,revise,adr_design_mismatch acceptance_unmet test_gap,f,a,defect,unknown,unclear
+337,1165243,d9b10901-d063-407f-a7e3-be4e15ce8cd2,4020,1,whole,revise,acceptance_unmet,f,,other,unknown,no
+338,1273753,da2103ee-e9f8-419c-98b3-876011d5a81b,4105,1,whole,concern,test_gap,a,,,unknown,no
+339,1297210,dbffdb67-cab6-4f2b-9437-df89e5326fbe,4297,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+340,1327484,dc488f4f-e881-4de2-b45f-acb9c60616b2,4569,1,whole,concern,acceptance_unmet test_gap,f,e,defect,claimed,no
+341,1167144,df7e4553-464f-4bbe-b6d5-8a3882a64589,4007,1,whole,concern,acceptance_ambiguous,e,,,not_claimed,yes
+342,1298362,e70cbf75-a69a-4257-9d14-bfc6c02362e0,4250,2,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+343,1153625,e8171a06-2313-4d2e-a471-ec0f44b3f21b,3921,1,whole,revise,acceptance_unmet,d,,,claimed,yes
+344,1296780,e8b828a3-1a75-460e-81a1-bb768bc9996f,4182,1,whole,revise,code_defect acceptance_unmet docs_drift,f,,defect,unknown,no
+345,1162940,e90e143f-4834-404c-9a2f-a25cb2e734d6,3945,2,whole,revise,acceptance_unmet code_defect,f,,other,unknown,no
+346,1072153,e9ca00ab-788d-4f34-b97b-1dc96124418e,3671,1,whole,revise,acceptance_unmet test_gap,d,a,,unknown,yes
+347,1072153,e9ca00ab-788d-4f34-b97b-1dc96124418e,3671,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+348,1072153,e9ca00ab-788d-4f34-b97b-1dc96124418e,3671,1,agent:receipt-evidence,revise,A-257,a,d,,claimed,yes
+349,1072438,e9ca00ab-788d-4f34-b97b-1dc96124418e,3671,2,whole,revise,test_gap acceptance_unmet,d,a b,,not_claimed,yes
+350,1053074,ebc09a55-c64f-4b26-a802-282c5a736475,3578,1,whole,revise,acceptance_unmet code_defect docs_drift,f,b,defect,not_claimed,no
+351,1053074,ebc09a55-c64f-4b26-a802-282c5a736475,3578,1,whole,revise,acceptance_unmet code_defect test_gap,f,d,defect,unknown,no
+352,1275007,eee35312-dfe2-4f84-b721-7f22786d5be3,4093,1,whole,concern,acceptance_unmet,b,e,,not_claimed,yes
+353,1275007,eee35312-dfe2-4f84-b721-7f22786d5be3,4093,1,whole,concern,code_defect acceptance_unmet,f,b,defect,unknown,no
+354,1275007,eee35312-dfe2-4f84-b721-7f22786d5be3,4093,1,whole,concern,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+355,1275007,eee35312-dfe2-4f84-b721-7f22786d5be3,4093,1,agent:receipt-evidence,revise,A-257,b,e,,not_claimed,yes
+356,1308537,eee35312-dfe2-4f84-b721-7f22786d5be3,4093,2,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+357,1375483,eee35312-dfe2-4f84-b721-7f22786d5be3,4093,4,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+358,1413160,f05833b1-c54f-407c-ba5e-758b2e452c6e,4071,1,whole,revise,acceptance_unmet docs_drift,d,,,unknown,yes
+359,1413160,f05833b1-c54f-407c-ba5e-758b2e452c6e,4071,1,whole,revise,acceptance_unmet docs_drift,d,,,unknown,yes
+360,1413160,f05833b1-c54f-407c-ba5e-758b2e452c6e,4071,1,whole,revise,code_defect test_gap,f,,defect,unknown,no
+361,1434481,f05833b1-c54f-407c-ba5e-758b2e452c6e,4071,3,whole,concern,out_of_scope_change acceptance_ambiguous,e,f,,unknown,yes
+362,1434481,f05833b1-c54f-407c-ba5e-758b2e452c6e,4071,3,agent:receipt-evidence,revise,A-257,d,,,not_claimed,yes
+363,1443383,f080cad7-ac60-4b94-af21-1ed17fd9e949,4660,1,whole,revise,acceptance_unmet code_defect,c,b,,not_claimed,unclear
+364,1443383,f080cad7-ac60-4b94-af21-1ed17fd9e949,4660,1,whole,revise,acceptance_unmet test_gap,d,,,unknown,yes
+365,1445996,f080cad7-ac60-4b94-af21-1ed17fd9e949,4660,2,whole,revise,adr_design_mismatch acceptance_unmet code_defect,f,c,defect,unknown,no
+366,1447743,f080cad7-ac60-4b94-af21-1ed17fd9e949,4660,6,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+367,1447743,f080cad7-ac60-4b94-af21-1ed17fd9e949,4660,6,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+368,1447743,f080cad7-ac60-4b94-af21-1ed17fd9e949,4660,6,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+369,1197243,f2a798db-35cb-4cfa-acaa-e8254edcb479,3947,1,whole,revise,acceptance_unmet repo_rule_violation,b,d,,not_claimed,yes
+370,1197243,f2a798db-35cb-4cfa-acaa-e8254edcb479,3947,1,whole,revise,acceptance_unmet,f,,other,unknown,yes
+371,1197243,f2a798db-35cb-4cfa-acaa-e8254edcb479,3947,1,agent:receipt-evidence,revise,A-257,b,d,,not_claimed,yes
+372,1072225,f4172e0e-3ef9-455f-b4b3-f692f35f10f7,3665,1,whole,revise,acceptance_unmet code_defect test_gap,b,f,,not_claimed,yes
+373,1072225,f4172e0e-3ef9-455f-b4b3-f692f35f10f7,3665,1,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+374,1072354,f4172e0e-3ef9-455f-b4b3-f692f35f10f7,3665,2,whole,revise,acceptance_unmet code_defect test_gap,f,,defect,unknown,no
+375,1072552,f4172e0e-3ef9-455f-b4b3-f692f35f10f7,3665,3,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+376,1219988,f629310a-c36b-4e23-b6bc-9587f3caaa75,3978,1,whole,concern,acceptance_unmet code_defect,b,f,,not_claimed,yes
+377,1219988,f629310a-c36b-4e23-b6bc-9587f3caaa75,3978,1,whole,concern,test_gap,a,,,unknown,no
+378,1219988,f629310a-c36b-4e23-b6bc-9587f3caaa75,3978,1,whole,concern,acceptance_conflict acceptance_unmet,e,b,,not_claimed,unclear
+379,1219988,f629310a-c36b-4e23-b6bc-9587f3caaa75,3978,1,whole,concern,docs_drift,d,,,unknown,yes
+380,1219988,f629310a-c36b-4e23-b6bc-9587f3caaa75,3978,1,agent:receipt-evidence,revise,A-257,b,a,,not_claimed,yes
+381,1239773,f629310a-c36b-4e23-b6bc-9587f3caaa75,3978,2,whole,revise,acceptance_unmet local_slip,f,,other,unknown,yes
+382,1239773,f629310a-c36b-4e23-b6bc-9587f3caaa75,3978,2,agent:receipt-evidence,revise,A-071 A-223,f,d,other,claimed,no
+383,549277,f6ff1087-ecde-4895-a87b-180dcb54e35e,2305,1,agent:receipt-evidence,revise,A-057 A-219 A-257,f,,other,claimed,no
+384,1356195,f701612f-b158-4ba5-8b8f-5e2a90ccca40,4473,1,whole,revise,code_defect test_gap,f,,defect,unknown,no
+385,1301402,f73f95bc-9451-472b-bdff-bbbebb5edc12,4178,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+386,1301402,f73f95bc-9451-472b-bdff-bbbebb5edc12,4178,1,whole,revise,acceptance_unmet code_defect,d,f,,unknown,no
+387,1160574,f7f03d3f-a938-4a34-a83d-920bb84f7fa1,3874,2,whole,revise,acceptance_unmet,d,,,not_claimed,yes
+388,1168376,f9acb9d7-b248-440d-8956-1369f63fab5a,3985,1,whole,revise,acceptance_unmet repo_rule_violation,f,,other,unknown,yes
+389,1078500,fcf3165a-55d9-4a56-90e0-fcfcf317acde,2471,1,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+390,1078500,fcf3165a-55d9-4a56-90e0-fcfcf317acde,2471,1,whole,revise,acceptance_unmet code_defect,f,c,defect,unknown,no
+391,1372553,fcf6b099-e808-4262-bb6f-e23018e55719,4059,1,whole,revise,acceptance_unmet code_defect,f,,defect,unknown,no
+392,1372553,fcf6b099-e808-4262-bb6f-e23018e55719,4059,1,whole,revise,acceptance_unmet code_defect,c,a,,unknown,no
+393,1377079,fcf6b099-e808-4262-bb6f-e23018e55719,4059,3,whole,revise,test_gap,a,d,,unknown,unclear
+394,420648,fd9d53a4-44ec-4bae-9aff-729a165c8d95,3386,1,whole,revise,acceptance_unmet adr_design_mismatch,b,c,,not_claimed,yes
+395,420648,fd9d53a4-44ec-4bae-9aff-729a165c8d95,3386,1,whole,revise,test_gap,a,,,unknown,unclear
+396,421136,fd9d53a4-44ec-4bae-9aff-729a165c8d95,3386,2,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+397,421136,fd9d53a4-44ec-4bae-9aff-729a165c8d95,3386,2,whole,revise,acceptance_unmet code_defect docs_drift,b,c,,not_claimed,yes
+398,421855,fd9d53a4-44ec-4bae-9aff-729a165c8d95,3386,4,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+399,1078393,feda32b8-9897-4d13-800d-188399cb2bd5,3654,1,whole,revise,acceptance_unmet code_defect test_gap,f,c a,defect,unknown,no
+400,1079629,feda32b8-9897-4d13-800d-188399cb2bd5,3654,3,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
+401,1079629,feda32b8-9897-4d13-800d-188399cb2bd5,3654,3,whole,revise,code_defect acceptance_unmet,f,,defect,unknown,no
