@@ -516,6 +516,17 @@ fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
             .collect::<Vec<_>>(),
     )?;
     write_left_open(conn, row)?;
+    // The row and its contribution commit together on every writer path,
+    // including legacy detail updates. No history scan is needed here.
+    for first in crate::domain::ledger::builder::first_executions(row) {
+        SqlWrite::execute(
+            conn,
+            "INSERT INTO ledger_first_executions(actor, provider, at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(actor, provider) DO UPDATE SET at=excluded.at
+             WHERE excluded.at < ledger_first_executions.at",
+            sql_params![first.actor, first.provider, first.at],
+        )?;
+    }
     Ok(!frozen)
 }
 
@@ -5000,3 +5011,6 @@ mod tests {
 mod visibility;
 
 mod small;
+
+#[cfg(test)]
+mod first_executions_tests;

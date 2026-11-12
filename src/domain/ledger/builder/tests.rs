@@ -2069,3 +2069,45 @@ fn byte_groups_preserve_order_and_put_r_on_the_last_even_when_oversized() {
         ]
     );
 }
+
+/// Each pair contributes its integer minimum, even across run order and
+/// repeated Executions of the same pair when the clock turns backwards.
+#[test]
+fn first_executions_compare_integer_times_across_runs_and_pairs() {
+    let mut log = Log::default();
+    log.landed(1, &run_id(1), 0).landed(2, &run_id(2), 1000);
+    let mut rows: Vec<_> = crate::domain::ledger::build(&log.events, ms(3000), BUILT)
+        .into_iter()
+        .filter(|r| r.kind == LedgerKind::Run)
+        .collect();
+    assert_eq!(rows.len(), 2);
+    rows[0].detail["executions"] = json!([
+        {"actor":"worker", "provider":"claude", "at":30},
+        {"actor":"worker", "provider":"claude", "at":20},
+        {"actor":"review", "provider":"codex", "at":40}
+    ]);
+    rows[1].detail["executions"] = json!([
+        {"actor":"worker", "provider":"claude", "at":-10},
+        {"actor":"worker", "provider":"codex", "at":50},
+        {"actor":"review", "provider":"codex", "at":60}
+    ]);
+    let mut first = std::collections::BTreeMap::new();
+    for row in rows.iter().rev() {
+        for execution in first_executions(row) {
+            first
+                .entry((execution.actor, execution.provider))
+                .and_modify(|at: &mut i64| *at = (*at).min(execution.at))
+                .or_insert(execution.at);
+        }
+    }
+    assert_eq!(
+        first,
+        std::collections::BTreeMap::from([
+            (("worker", "claude".to_owned()), -10),
+            (("worker", "codex".to_owned()), 50),
+            (("review", "codex".to_owned()), 40),
+        ])
+    );
+    rows[0].kind = LedgerKind::Task;
+    assert!(first_executions(&rows[0]).is_empty());
+}

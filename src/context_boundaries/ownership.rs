@@ -345,6 +345,8 @@ pub(super) const TABLES: &[Table] = &[
     table("session_workspaces", Execution),
     table("findings", Observation),
     table("ledger_rows", Observation), // the runtime's control does not read it
+    table("ledger_first_executions", Observation),
+    table("ledger_first_executions_ready", Observation),
     table("ledger_omitted_points", Observation), // the ledger's points, written with its marks
     table("ledger_open", Observation), // what each run row leaves open, written with the row
     table("ledger_open_filled", Observation), // how far ledger_open took in the rows written before it
