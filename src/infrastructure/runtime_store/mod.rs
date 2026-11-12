@@ -67,6 +67,8 @@ mod eval_rounds;
 mod ledger;
 #[cfg(any(test, feature = "store-contract"))]
 pub(crate) use ledger::open_in as ledger_open_in;
+#[cfg(any(test, feature = "store-contract"))]
+pub(crate) use ledger::views_in as ledger_views_in;
 mod node_samples;
 mod planning_records;
 #[cfg(test)]

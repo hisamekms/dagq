@@ -350,6 +350,11 @@ pub(super) const TABLES: &[Table] = &[
     table("ledger_omitted_points", Observation), // the ledger's points, written with its marks
     table("ledger_open", Observation), // what each run row leaves open, written with the row
     table("ledger_open_filled", Observation), // how far ledger_open took in the rows written before it
+    table("ledger_snapshot_targets", Observation), // the tasks each forecast's snapshot names, written with its queue row
+    table("ledger_main_commits", Observation), // main's commits by sha and revert target, written with their queue row
+    table("ledger_main_summaries", Observation), // main's record and CI's checks up to an event, written with the queue rows
+    table("ledger_answered_asks", Observation), // the keys of the asks the run-less answers answer, written with their queue row
+    table("ledger_queue_views_filled", Observation), // how far the queue rows' views took in the rows written before them
     table("node_samples", Observation), // the NodeSampleStore; host writes it through the port, the runtime's control does not read it
     table("node_sample_imports", Observation), // the imported CSV files, written with node_samples in one transaction
     table("session_steps", Observation), // the SessionStepStore; the runtime's control does not read it
@@ -418,6 +423,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/kpi_push.rs", Observation),
     store("src/infrastructure/runtime_store/queue_records.rs", Observation),
     store("src/infrastructure/runtime_store/ledger.rs", Observation),
+    store("src/infrastructure/runtime_store/ledger/queue_views.rs", Observation), // the queue rows' views, written with the rows
     store("src/infrastructure/runtime_store/node_samples.rs", Observation), // NodeSampleStore
     store("src/infrastructure/runtime_store/session_steps.rs", Observation), // SessionStepStore
     store("src/infrastructure/runtime_store/run_resources.rs", Observation), // RunResourceStore

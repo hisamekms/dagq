@@ -3305,6 +3305,26 @@ mod store_contract_tests {
         contract(|open| store_contract::ledger_open_kept_through_generations(&open));
     }
     #[test]
+    fn ledger_queue_views_written_with_their_rows() {
+        contract(|open| store_contract::ledger_queue_views_written_with_their_rows(&open));
+    }
+    #[test]
+    fn ledger_queue_views_count_what_a_read_names() {
+        contract(|open| store_contract::ledger_queue_views_count_what_a_read_names(&open));
+    }
+    #[test]
+    fn ledger_queue_views_filled_in_parts() {
+        contract(|open| store_contract::ledger_queue_views_filled_in_parts(&open));
+    }
+    #[test]
+    fn ledger_queue_views_pair_asks_whichever_comes_first() {
+        contract(|open| store_contract::ledger_queue_views_pair_asks_whichever_comes_first(&open));
+    }
+    #[test]
+    fn ledger_queue_views_kept_through_generations() {
+        contract(|open| store_contract::ledger_queue_views_kept_through_generations(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

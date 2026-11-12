@@ -31,6 +31,7 @@ pub mod owner;
 pub mod post_landing;
 pub mod provider_use;
 pub mod queue;
+pub mod queue_views;
 pub mod read;
 #[cfg(test)]
 mod readers_tests;

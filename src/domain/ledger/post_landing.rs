@@ -183,7 +183,7 @@ pub struct PostLandingBook {
 }
 
 /// A branch as one name: a full ref and its short name alike.
-fn branch_name(branch: &str) -> String {
+pub(crate) fn branch_name(branch: &str) -> String {
     branch
         .strip_prefix("refs/heads/")
         .unwrap_or(branch)

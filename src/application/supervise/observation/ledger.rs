@@ -819,6 +819,9 @@ fn fill_open(store: &dyn LedgerQueue) {
     if let Err(error) = store.fill_ledger_open() {
         warn!(error = %format_args!("{error:#}"), "the ledger's open runs could not be filled: {error:#}");
     }
+    if let Err(error) = store.fill_ledger_queue_views() {
+        warn!(error = %format_args!("{error:#}"), "the ledger's queue views could not be filled: {error:#}");
+    }
 }
 
 /// Once after the normal read and row writes: rebuilding cannot spend

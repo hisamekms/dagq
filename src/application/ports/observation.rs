@@ -228,6 +228,16 @@ pub trait LedgerStore {
     fn ledger_first_executions_ready(&self) -> Result<bool> {
         Ok(false)
     }
+    /// Take into the store's views of the queue rows
+    /// ([`crate::domain::ledger::queue_views`]) the queue rows written
+    /// before it kept them, a part past its mark at a time, bounded as
+    /// [`Self::fill_ledger_open`]'s parts are: what builds the ledger asks
+    /// it once a pass until it is done, and again from the first row once a
+    /// writer that keeps no views took the write leader over. A store that
+    /// keeps no such views is never filled.
+    fn fill_ledger_queue_views(&self) -> Result<crate::domain::ledger::open::Filled> {
+        Ok(crate::domain::ledger::open::Filled::Not)
+    }
     /// What each run row leaves open at its end, by the run's key (a row
     /// that leaves nothing open has no entry), once the store's mark says
     /// every run row is taken in; `None` before, and of a store that keeps

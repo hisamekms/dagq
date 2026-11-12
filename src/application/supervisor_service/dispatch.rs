@@ -2474,6 +2474,8 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
         }
         // A pass of the filling of what the run rows leave open.
         "fill_ledger_open" => answer(LedgerStore::fill_ledger_open(&*store)),
+        // A pass of the filling of the queue rows' views.
+        "fill_ledger_queue_views" => answer(LedgerStore::fill_ledger_queue_views(&*store)),
         // The session rows' mark, R beside it when the store holds one:
         // a reader of the session rows' mark alone reads it too.
         "ledger_sessions_written" => answer(LedgerStore::ledger_marks(&*store)),

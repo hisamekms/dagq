@@ -3158,6 +3158,9 @@ impl LedgerStore for SupervisorQueue {
     fn fill_ledger_open(&self) -> Result<crate::domain::ledger::open::Filled> {
         self.remote("fill_ledger_open", vec![])
     }
+    fn fill_ledger_queue_views(&self) -> Result<crate::domain::ledger::open::Filled> {
+        self.remote("fill_ledger_queue_views", vec![])
+    }
     fn sessions_written(
         &self,
     ) -> Result<Option<crate::domain::ledger::session::written::SessionsWritten>> {

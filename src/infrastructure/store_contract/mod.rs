@@ -10,6 +10,7 @@ mod goal_owners;
 pub(crate) mod ledger_earlier;
 mod ledger_first_executions;
 mod ledger_open;
+mod ledger_queue_views;
 mod related;
 mod runner_leases;
 mod search;
@@ -21,6 +22,7 @@ pub use goal_owners::*;
 pub use ledger_earlier::{ledger_earlier_answers_as_every_row, ledger_earlier_past_an_old_writer};
 pub use ledger_first_executions::*;
 pub use ledger_open::*;
+pub use ledger_queue_views::*;
 pub use related::related_cases;
 pub use runner_leases::*;
 pub use search::{search_cases, short_non_ascii};
@@ -183,6 +185,26 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         (
             "ledger earlier past an old writer",
             ledger_earlier_past_an_old_writer::<S, F>,
+        ),
+        (
+            "ledger queue views written with their rows",
+            ledger_queue_views_written_with_their_rows::<S, F>,
+        ),
+        (
+            "ledger queue views count what a read names",
+            ledger_queue_views_count_what_a_read_names::<S, F>,
+        ),
+        (
+            "ledger queue views filled in parts",
+            ledger_queue_views_filled_in_parts::<S, F>,
+        ),
+        (
+            "ledger queue views kept through generations",
+            ledger_queue_views_kept_through_generations::<S, F>,
+        ),
+        (
+            "ledger queue views pair asks whichever comes first",
+            ledger_queue_views_pair_asks_whichever_comes_first::<S, F>,
         ),
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),

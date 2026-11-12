@@ -201,6 +201,35 @@ impl Filled {
         }
     }
 
+    /// The mark a store holds (how far, and the last generation of the
+    /// write leader it is kept through, if any) as a reader takes it while
+    /// the write leader is of the generation `leader`: none but one kept
+    /// through that generation. A mark of no generation, or of another,
+    /// counts as none, so that a writer that kept no view in between
+    /// leaves the reader to the whole read.
+    pub fn held(mark: Option<(Self, Option<i64>)>, leader: i64) -> Self {
+        match mark {
+            Some((filled, Some(generation))) if generation == leader => filled,
+            _ => Self::Not,
+        }
+    }
+
+    /// What a writer of the generation `leader` that keeps the view does
+    /// with the mark it holds on its write: one of its own generation is
+    /// held, one of the generation just before carried on to it (no writer
+    /// came between), any other removed (none, or one that kept no view,
+    /// came between).
+    pub fn kept(mark: Option<(Self, Option<i64>)>, leader: i64) -> Kept {
+        match mark {
+            None => Kept::Held(Self::Not),
+            Some((filled, Some(generation))) if generation == leader => Kept::Held(filled),
+            Some((filled, Some(generation))) if generation.checked_add(1) == Some(leader) => {
+                Kept::CarriedOn(filled)
+            }
+            Some(_) => Kept::Behind,
+        }
+    }
+
     /// What a part of the filling leaves that read `keys` keys past
     /// [`Self::after`] and took in the first `taken` of them, the last
     /// `last`: done when it took every key it read and they were fewer
@@ -212,6 +241,17 @@ impl Filled {
             _ => Self::Done,
         }
     }
+}
+
+/// What [`Filled::kept`] does with a mark.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Kept {
+    /// The mark stays as it is (none: none).
+    Held(Filled),
+    /// The mark is carried on to the writer's generation.
+    CarriedOn(Filled),
+    /// The mark is removed and the filling begins again.
+    Behind,
 }
 
 #[cfg(test)]
