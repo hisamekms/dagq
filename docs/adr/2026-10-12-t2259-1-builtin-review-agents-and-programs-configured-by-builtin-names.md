@@ -19,6 +19,7 @@ amends:
   - adr-t1728-1 decision 13
   - adr-t1942-2 decision 4
 amended_by:
+  - adr-t4836-1
   - adr-t2389-1
   - adr-t2391-1
 owners:

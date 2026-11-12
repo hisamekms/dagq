@@ -7,6 +7,7 @@ created: 2026-10-17
 updated: 2026-10-17
 accepted_on: 2026-10-17
 amended_by:
+  - adr-t4836-1
   - adr-t3033-1
 supersedes:
   - adr-0050
