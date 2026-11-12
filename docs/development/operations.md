@@ -72,7 +72,7 @@ hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候
 - 台帳の追いつきとRを止める行:
   - `logs/supervise-*.jsonl`のINFOの`the ledger builder started`と`the ledger pass finished`を起動ごとに並べ、RとW、最新のeventとの差を比べる。Rは全入力が行の記録か写さないqueueのeventの被覆で記録済みとなった位置（[計測](../design/measurement.md#台帳を作る係)）、Wはsession行が記録した位置なので、Wだけ進んでもRが追いついたとは読まない。
   - 残る印の内訳と最古の阻害行、sweepで残した理由の数を合わせて読む。時間だけで付いた印とsessionの印はRを押さえない。最古の1件はeventの位置を押さえる代表で、他の入力のカーソルを押さえる行の一覧ではない。最古の行と、ほかのカーソルごとにそれを押さえる最も古い行は確認の順番によらず毎回先に調べるので、同じ行が起動をまたいで最古に残るなら、その行が入力を記録できていない（読めない・書けない・storeの行より遅れる）と読む。欄の意味は`domain::ledger::builder::MarkObservation`と`SweepCounts`、工程の量と所要は`application::supervise::observation::ledger::PassWork`のdoc commentが持つ。
-  - passが終わらない間は`the ledger first pass is reading`のevent位置と頁数の推移を見る。Rが無く先頭から読む起動や、passで印を書かなかった理由も同じログに出る。自動更新をまたぐ比較は起動時のRと前回書いたRを対応させ、読み直す量と残る理由を確かめる。
+  - 追いつきの間はpassが経過時間で短く切れ、間隔を待たずに続けて立つので、passごとの`the ledger pass finished`のR・W・最新のeventとの差の推移を見る。`the ledger first pass is reading`は1つのpass内の読みの経過時間を測り、60秒以上続いたときだけ出るので、頁の読みや処理が遅いときにevent位置と頁数を確かめる手掛かりにする。Rが無く先頭から読む起動や、passで印を書かなかった理由も同じログに出る。自動更新をまたぐ比較は起動時のRと前回書いたRを対応させ、読み直す量と残る理由を確かめる。
 - 2026-10-18の測定（plannerが15:00 JST頃にhostで取った値）:
   - `vm.swapusage`: `used` 35284 MB / `total` 36864 MB。
   - fseventsd（14日起動したまま）: `MEM` 36G・`CMPRS` 34G。
