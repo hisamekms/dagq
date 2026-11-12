@@ -27,6 +27,7 @@ tags:
 - [Persistence](persistence.md)
 - [Follow-up membership judgements](follow-up-membership.md)（所属の分類と必須の欄・acceptanceの版・出どころと深さ・所属の変更と人のadopt・旧schemaの移行）
 - [Authorization](authorization.md)
+- [監査](audit.md)（監査の記録の流れ・配置ごとの保証の段階・不変条件。実装の前の地図）
 - [Security](security.md)（信頼の区分・actorとcapability・host実行は助言的で隔離ではないこと・containerとqueue serviceへの道筋）
 - [Container runtime](container-runtime.md)（workerとintegrateのverificationをhostかcontainerで動かす適用先・使えないときのfail closedの境界・設定の読み込みと「使えるか」のportへの入口・後続の部品の置き場）
 - [Toolchain profiles](toolchain-profiles.md)（言語・道具の知識を持つprofileのportと組み込みの登録・`dagq.toml`の宣言と当て方・runtimeの共通の分類との分担・新しいprofileの足し方）

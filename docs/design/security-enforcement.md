@@ -59,3 +59,4 @@ pushの資格情報をIntegratorのプロセスだけに持たせ、supervisor�
 OIDCの発行元のある配置では、approve_landingの着地の承認を最近のloginの人のtokenに限り、inboxの代行とtokenの無いuserを拒む。
 発行元の無い配置の許否は変わらない。
 現在の代行の記録と残るリスクは[Security](security.md#answerと代行の記録)を入口にする。
+発行元の無い配置でも守るpathの着地の承認と弱める操作を人の直接の答えに限る決定（[ADR-t4840-3](../adr/2026-11-12-t4840-3-protected-paths-and-weakening-operations-need-a-direct-human-answer.md)）の境界と記録は、[監査](audit.md)を入口にする。

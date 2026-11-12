@@ -181,4 +181,4 @@ inboxはaskのanswerと`dagq-recover`の手作業を代行でき、人の役割�
 
 ## 将来の道筋
 
-模型を保ったまま強制の点を足す約束と、隔離・broker・承認の境界は[強制の境界と道筋](security-enforcement.md)を入口にする。
+強制の点を足す約束と隔離・broker・承認の境界は[強制の境界と道筋](security-enforcement.md)、監査は[監査](audit.md)を入口にする。

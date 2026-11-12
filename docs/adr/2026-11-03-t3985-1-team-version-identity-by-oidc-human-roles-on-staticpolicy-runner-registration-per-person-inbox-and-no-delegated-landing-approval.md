@@ -9,6 +9,8 @@ accepted_on: 2026-11-03
 amends:
   - adr-t728-3 decision 1
   - adr-t728-3 decision 3
+amended_by:
+  - adr-t4840-3
 owners:
   - hisamekms
 tags:
