@@ -633,6 +633,7 @@ fn pass(
         None
     };
     builder.begin_coverage_from(marks.as_ref(), coverage.as_ref());
+    fill_open(store);
     let bounds = (per_read, per_pass);
     if !regain_rows(store, builder, bounds, (timing, started), built)?
         || !catch_up_coverage(store, builder, bounds, (timing, started), built)?
@@ -805,6 +806,17 @@ fn pass(
     taken?;
     sessions?;
     rebuilding
+}
+
+/// One pass of the filling of what the run rows leave open at their end
+/// ([`crate::application::LedgerStore::fill_ledger_open`]), a bounded part
+/// of the rows a pass. A failure is logged and the pass goes on: the table
+/// is a view no write of the ledger waits for, and until it is filled its
+/// readers read every run row's records as before.
+fn fill_open(store: &dyn LedgerQueue) {
+    if let Err(error) = store.fill_ledger_open() {
+        warn!(error = %format_args!("{error:#}"), "the ledger's open runs could not be filled: {error:#}");
+    }
 }
 
 /// Once after the normal read and row writes: rebuilding cannot spend

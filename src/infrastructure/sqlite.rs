@@ -3269,6 +3269,26 @@ mod store_contract_tests {
         contract(|open| store_contract::image_digests(&open));
     }
     #[test]
+    fn ledger_open_written_with_its_rows() {
+        contract(|open| store_contract::ledger_open_written_with_its_rows(&open));
+    }
+    #[test]
+    fn ledger_open_counts_the_runs_left_open() {
+        contract(|open| store_contract::ledger_open_counts_the_runs_left_open(&open));
+    }
+    #[test]
+    fn ledger_open_filled_in_parts() {
+        contract(|open| store_contract::ledger_open_filled_in_parts(&open));
+    }
+    #[test]
+    fn ledger_open_parts_bounded_by_bytes() {
+        contract(|open| store_contract::ledger_open_parts_bounded_by_bytes(&open));
+    }
+    #[test]
+    fn ledger_open_kept_through_generations() {
+        contract(|open| store_contract::ledger_open_kept_through_generations(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

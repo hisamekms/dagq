@@ -65,6 +65,8 @@ mod coordination;
 pub(crate) use coordination::BACKEND_PARALLEL_SQL;
 mod eval_rounds;
 mod ledger;
+#[cfg(any(test, feature = "store-contract"))]
+pub(crate) use ledger::open_in as ledger_open_in;
 mod node_samples;
 mod planning_records;
 #[cfg(test)]

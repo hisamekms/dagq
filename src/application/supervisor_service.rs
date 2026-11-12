@@ -978,7 +978,7 @@ const RUN_RESOURCE_OPS: [&str; 4] = [
 /// folds): the supervisor principal's only, refused to a landing's
 /// integrator by the policy and to a control-side command whatever its
 /// principal holds ([`control::answer`]), as [`RUN_RESOURCE_OPS`].
-const LEDGER_OPS: [&str; 47] = [
+const LEDGER_OPS: [&str; 48] = [
     "ledger_row",
     "ledger_rows_of",
     "ledger_rows",
@@ -1006,6 +1006,7 @@ const LEDGER_OPS: [&str; 47] = [
     "write_ledger_row_over",
     "stage_ledger_row",
     "write_staged_ledger_row_over",
+    "fill_ledger_open",
     "ledger_sessions_written",
     "ledger_rows_covered",
     "ledger_omitted_coverage",

@@ -5,6 +5,9 @@ use crate::infrastructure::store_queue::StoreQueue;
 
 use super::*;
 use crate::application::LedgerStore;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::domain::ledger::open::{self, Filled, Left};
 use crate::domain::ledger::session::written::omitted::{self, Coverage, Omitted, Point};
 use crate::domain::ledger::session::written::{self, Marks, RowsWritten, SessionsWritten};
 use crate::domain::ledger::window::{
@@ -512,7 +515,268 @@ fn upsert(conn: &impl SqlWrite, row: &LedgerRow) -> Result<bool> {
             .map(|(_, value)| value)
             .collect::<Vec<_>>(),
     )?;
+    write_left_open(conn, row)?;
     Ok(!frozen)
+}
+
+/// Write what `row` leaves open at its end ([`open::left_open`]) in place
+/// of what `ledger_open` held of it, on `conn` with the row: a close the
+/// row's records took in since removes what it closed. A legacy row's
+/// records follow its writes, so they are taken as any row's.
+fn write_left_open(conn: &impl SqlWrite, row: &LedgerRow) -> Result<()> {
+    if row.kind != LedgerKind::Run {
+        return Ok(());
+    }
+    kept_filled(conn)?;
+    write_left(conn, &row.key, &open::left_open(row))
+}
+
+/// Write `left` as what the run row `key` leaves open, in place of what
+/// `ledger_open` held of it.
+fn write_left(conn: &impl SqlWrite, key: &str, left: &BTreeSet<Left>) -> Result<()> {
+    let kind = LedgerKind::Run.as_str();
+    SqlWrite::execute(
+        conn,
+        "DELETE FROM ledger_open WHERE kind=?1 AND key=?2",
+        sql_params![kind, key],
+    )?;
+    for left in left {
+        SqlWrite::execute(
+            conn,
+            "INSERT INTO ledger_open(kind, key, what) VALUES (?1, ?2, ?3)",
+            sql_params![kind, key, left.text()],
+        )?;
+    }
+    Ok(())
+}
+
+/// The generation of the write leader `conn` reads: in a write
+/// transaction, that of its own writer, which the fence matched.
+fn leader_generation(conn: &impl SqlRead) -> Result<i64> {
+    Ok(SqlRead::query_row(
+        conn,
+        "SELECT generation FROM write_leader WHERE singleton = 1",
+        sql_params![],
+        |r| r.get::<_, i64>(0),
+    )?)
+}
+
+/// The mark of `ledger_open` as `conn` holds it: how far the filling went
+/// and the last generation of the write leader it is kept through.
+fn mark_row(conn: &impl SqlRead) -> Result<Option<(Filled, i64)>> {
+    let held = SqlRead::query_row(
+        conn,
+        "SELECT through, generation FROM ledger_open_filled",
+        sql_params![],
+        |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)),
+    )
+    .optional()?;
+    Ok(held.and_then(|(through, generation)| {
+        Some((through.map_or(Filled::Done, Filled::Through), generation?))
+    }))
+}
+
+/// The store's mark of how far `ledger_open` took in the run rows written
+/// before it kept the table ([`Filled`]), as a reader takes it: none unless
+/// it is kept through the generation of the write leader now. Every
+/// process that writes the queue takes the write leader over, which moves
+/// its generation (ADR-t3986-1 decisions 2 and 4), and a binary that keeps
+/// the table carries the mark on to its generation with its first write
+/// of the ledger ([`kept_filled`]), so one that does not (an older binary)
+/// leaves the mark behind, whatever it wrote of the rows and the marks.
+fn held_filled(conn: &impl SqlRead) -> Result<Filled> {
+    match mark_row(conn)? {
+        Some((filled, generation)) if generation == leader_generation(conn)? => Ok(filled),
+        _ => Ok(Filled::Not),
+    }
+}
+
+/// [`held_filled`] in a write transaction of this binary, which keeps the
+/// table: a mark kept through the generation just before its writer's
+/// carries on to it, as no other writer came between; one further behind
+/// is removed, as a writer that kept no table may have come between, and
+/// the filling begins again from the first row.
+fn kept_filled(conn: &impl SqlWrite) -> Result<Filled> {
+    let Some((filled, generation)) = mark_row(conn)? else {
+        return Ok(Filled::Not);
+    };
+    let leader = leader_generation(conn)?;
+    if generation == leader {
+        return Ok(filled);
+    }
+    if generation.checked_add(1) == Some(leader) {
+        SqlWrite::execute(
+            conn,
+            "UPDATE ledger_open_filled SET generation=?1",
+            sql_params![leader],
+        )?;
+        return Ok(filled);
+    }
+    SqlWrite::execute(conn, "DELETE FROM ledger_open_filled", sql_params![])?;
+    Ok(Filled::Not)
+}
+
+/// What `ledger_open` on `conn` holds, by the run's key, whatever its mark.
+fn left_open_entries(conn: &impl SqlRead) -> Result<BTreeMap<String, BTreeSet<Left>>> {
+    let mut left: BTreeMap<String, BTreeSet<Left>> = BTreeMap::new();
+    for (key, what) in SqlRead::query_map(
+        conn,
+        "SELECT key, what FROM ledger_open WHERE kind=?1 ORDER BY key",
+        sql_params![LedgerKind::Run.as_str()],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )? {
+        if let Some(what) = Left::of_text(&what) {
+            left.entry(key).or_default().insert(what);
+        }
+    }
+    Ok(left)
+}
+
+/// What the store contracts drive of `ledger_open` on a transaction of
+/// either adapter (ADR-t3986-1 decision 10): the same functions the
+/// store's [`LedgerStore`] operations run in theirs.
+#[cfg(any(test, feature = "store-contract"))]
+pub(crate) mod open_in {
+    use super::*;
+
+    /// Write `row` as every write of a ledger row does, what it leaves
+    /// open with it.
+    pub(crate) fn write_row(tx: &impl SqlWrite, row: &LedgerRow) -> Result<()> {
+        upsert(tx, row).map(|_| ())
+    }
+
+    /// A part of the filling ([`LedgerStore::fill_ledger_open`]).
+    pub(crate) fn fill(tx: &impl SqlWrite) -> Result<Filled> {
+        fill_left_open(tx)
+    }
+
+    /// The mark as a reader takes it ([`LedgerStore::ledger_left_open`]).
+    pub(crate) fn held(tx: &impl SqlRead) -> Result<Filled> {
+        held_filled(tx)
+    }
+
+    /// What the table holds, whatever its mark.
+    pub(crate) fn entries(tx: &impl SqlRead) -> Result<BTreeMap<String, BTreeSet<Left>>> {
+        left_open_entries(tx)
+    }
+}
+
+/// Write `filled` as the mark of `ledger_open` on `conn`, kept through the
+/// generation of its writer.
+fn write_filled(conn: &impl SqlWrite, filled: &Filled) -> Result<()> {
+    SqlWrite::execute(conn, "DELETE FROM ledger_open_filled", sql_params![])?;
+    let through = match filled {
+        Filled::Not => return Ok(()),
+        Filled::Through(key) => Some(key.clone()),
+        Filled::Done => None,
+    };
+    SqlWrite::execute(
+        conn,
+        "INSERT INTO ledger_open_filled(through, generation) VALUES (?1, ?2)",
+        sql_params![through, leader_generation(conn)?],
+    )?;
+    Ok(())
+}
+
+/// The condition on a record `j.value` of a run row that keeps those of
+/// [`EARLIER_RUN_KINDS`], [`landing_utilization::KINDS`] and their
+/// statuses: what a read from a time picks of the run rows it leaves out,
+/// and what [`open::left_open_of`] reads.
+fn earlier_run_record_sql(dialect: SqlDialect) -> String {
+    let quoted = |values: &mut dyn Iterator<Item = &str>| {
+        values
+            .map(|value| format!("'{value}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "({kind} IN ({kinds}) OR {status} IN ({statuses}))",
+        kind = dialect.json_field_spaced("j.value", "$.kind", JsonType::Text),
+        status = dialect.json_field_spaced("j.value", "$.payload.status", JsonType::Text),
+        kinds = quoted(
+            &mut EARLIER_RUN_KINDS
+                .iter()
+                .chain(&landing_utilization::KINDS)
+                .map(|kind| kind.as_str())
+        ),
+        statuses = quoted(
+            &mut RUN_END_STATUSES
+                .iter()
+                .chain(&landing_utilization::LEAVING_STATUSES)
+                .copied()
+        ),
+    )
+}
+
+/// The records of the run row `key` [`earlier_run_record_sql`] keeps, as
+/// text: no other record of the row is parsed.
+fn earlier_run_records_in(conn: &impl SqlRead, key: &str) -> Result<Vec<String>> {
+    let dialect = SqlRead::dialect(conn);
+    Ok(SqlRead::query_map(
+        conn,
+        &format!(
+            "SELECT {record} FROM ledger_rows r, {records} j
+              WHERE r.kind=?1 AND r.key=?2 AND {kept}",
+            record = dialect.json_element("j.value", JsonType::Text),
+            records = dialect.json_elements("r.records"),
+            kept = earlier_run_record_sql(dialect),
+        ),
+        sql_params![LedgerKind::Run.as_str(), key],
+        |r| r.get::<_, String>(0),
+    )?)
+}
+
+/// Take into `ledger_open` a part of the run rows past the mark and move
+/// the mark past those taken, in one write transaction: of at most
+/// [`open::ROWS_PER_FILL`] keys read first, the rows one at a time, each
+/// of the records [`open::left_open_of`] reads alone, until the part is
+/// spent ([`open::part_spent`]: [`open::FILL_TIME`] or
+/// [`open::FILL_BYTES`] past the row that reached it). A row written
+/// meanwhile is taken as it is written then, so the table is that of the
+/// rows whichever the order. A mark that counts as none
+/// ([`kept_filled`]) begins again from the first row, the entries held
+/// removed first.
+fn fill_left_open(conn: &impl SqlWrite) -> Result<Filled> {
+    let held = kept_filled(conn)?;
+    let Some(after) = held.after() else {
+        return Ok(held);
+    };
+    // From the first row, what the table held goes: every row is taken in
+    // again, and one written meanwhile writes its own entries again.
+    if after.is_none() {
+        SqlWrite::execute(conn, "DELETE FROM ledger_open", sql_params![])?;
+    }
+    let started = std::time::Instant::now();
+    let limit = i64::try_from(open::ROWS_PER_FILL).unwrap_or(i64::MAX);
+    let run = LedgerKind::Run.as_str();
+    let statement = row_keys_after_sql(after.is_some());
+    let keys = match after {
+        Some(after) => SqlRead::query_map(conn, statement, sql_params![run, after, limit], |r| {
+            r.get::<_, String>(0)
+        })?,
+        None => SqlRead::query_map(conn, statement, sql_params![run, limit], |r| {
+            r.get::<_, String>(0)
+        })?,
+    };
+    let (mut bytes, mut taken) = (0, 0_usize);
+    for key in &keys {
+        let texts = earlier_run_records_in(conn, key)?;
+        bytes += texts.iter().map(String::len).sum::<usize>();
+        let mut records = texts
+            .iter()
+            .map(|text| serde_json::from_str::<RunEvent>(text))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        records.sort_by_key(|event| event.id);
+        write_left(conn, key, &open::left_open_of(LedgerKind::Run, &records))?;
+        taken += 1;
+        if open::part_spent(bytes, started.elapsed()) {
+            break;
+        }
+    }
+    let last = taken.checked_sub(1).map(|at| keys[at].as_str());
+    let filled = Filled::next(keys.len(), taken, last);
+    write_filled(conn, &filled)?;
+    Ok(filled)
 }
 
 /// The read of the rows [`crate::domain::pre_claim::rows::holds`] keeps
@@ -1048,34 +1312,14 @@ fn earlier_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<EarlierRecords> {
             records.extend(row?);
         }
     }
-    let quoted = |values: &mut dyn Iterator<Item = &str>| {
-        values
-            .map(|value| format!("'{value}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
     let picked = SqlRead::query_map(
         tx,
         &format!(
             "SELECT {record} FROM ledger_rows r, {records} j
-                  WHERE r.kind=?1 AND {left_out}
-                    AND ({kind} IN ({kinds}) OR {status} IN ({statuses}))",
+                  WHERE r.kind=?1 AND {left_out} AND {kept}",
             record = dialect.json_element("j.value", JsonType::Text),
             records = dialect.json_elements("r.records"),
-            kind = dialect.json_field_spaced("j.value", "$.kind", JsonType::Text),
-            status = dialect.json_field_spaced("j.value", "$.payload.status", JsonType::Text),
-            kinds = quoted(
-                &mut EARLIER_RUN_KINDS
-                    .iter()
-                    .chain(&landing_utilization::KINDS)
-                    .map(|kind| kind.as_str())
-            ),
-            statuses = quoted(
-                &mut RUN_END_STATUSES
-                    .iter()
-                    .chain(&landing_utilization::LEAVING_STATUSES)
-                    .copied()
-            ),
+            kept = earlier_run_record_sql(dialect),
         ),
         sql_params![LedgerKind::Run.as_str(), bound.0, bound.1, bound.2.as_str()],
         |r| Ok(serde_json::from_str::<RunEvent>(&r.get::<_, String>(0)?)),
@@ -1310,6 +1554,27 @@ impl<E: TransactionEntries> LedgerStore for StoreQueue<E> {
     fn ledger_marks(&self) -> Result<Option<Marks>> {
         let tx = self.read_entry("ledger_marks")?;
         marks_in(&tx)
+    }
+
+    /// Once done, a read alone: no pass takes the write lock for it again.
+    fn fill_ledger_open(&self) -> Result<Filled> {
+        let held = held_filled(&self.read_entry("ledger_open_filled")?)?;
+        if held.is_done() {
+            return Ok(held);
+        }
+        let tx = self.write_entry("fill_ledger_open")?;
+        let filled = fill_left_open(&tx)?;
+        tx.commit()?;
+        Ok(filled)
+    }
+
+    /// The table and its mark read in one read transaction.
+    fn ledger_left_open(&self) -> Result<Option<BTreeMap<String, BTreeSet<Left>>>> {
+        let tx = self.read_entry("ledger_left_open")?;
+        if !held_filled(&tx)?.is_done() {
+            return Ok(None);
+        }
+        Ok(Some(left_open_entries(&tx)?))
     }
 
     fn ledger_omitted_points_after(

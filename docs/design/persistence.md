@@ -100,7 +100,7 @@ runのfile・台帳の行・古いeventは通さない。
 `members`・`member_credentials`: 人の登録簿と設定。
 `delegates`: ownerの代わりに答える人で、行とeventを1つのtransactionで書く。
 runnerの登録とlease、imageのdigestの表: `src/domain/runner_lease.rs`・`image_publish.rs`
-`ledger_omitted_points`: 台帳の写さないeventの被覆の点（[計測](measurement.md#台帳を作る係)）。
+`ledger_omitted_points`・`ledger_open*`: 台帳の写さないeventの被覆の点、run行が残した開き（[計測](measurement.md#台帳を作る係)）。
 
 表と列の意味はmigrationとstore・domainのdoc commentが持つ。
 

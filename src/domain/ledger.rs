@@ -26,6 +26,7 @@ pub mod failure_cause;
 pub mod findings;
 pub mod fold;
 pub mod node;
+pub mod open;
 pub mod owner;
 pub mod post_landing;
 pub mod provider_use;

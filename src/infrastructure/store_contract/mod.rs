@@ -7,6 +7,7 @@ mod cases;
 mod delegates;
 mod goal_landing_marks;
 mod goal_owners;
+mod ledger_open;
 mod related;
 mod runner_leases;
 mod search;
@@ -15,6 +16,7 @@ pub use cases::*;
 pub use delegates::*;
 pub use goal_landing_marks::*;
 pub use goal_owners::*;
+pub use ledger_open::*;
 pub use related::related_cases;
 pub use runner_leases::*;
 pub use search::{search_cases, short_non_ascii};
@@ -142,6 +144,26 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("runner credentials", runner_credentials::<S, F>),
         ("runner leases", runner_leases::<S, F>),
         ("image digests", image_digests::<S, F>),
+        (
+            "ledger open written with its rows",
+            ledger_open_written_with_its_rows::<S, F>,
+        ),
+        (
+            "ledger open counts the runs left open",
+            ledger_open_counts_the_runs_left_open::<S, F>,
+        ),
+        (
+            "ledger open filled in parts",
+            ledger_open_filled_in_parts::<S, F>,
+        ),
+        (
+            "ledger open parts bounded by bytes",
+            ledger_open_parts_bounded_by_bytes::<S, F>,
+        ),
+        (
+            "ledger open kept through generations",
+            ledger_open_kept_through_generations::<S, F>,
+        ),
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),
         ("source search writes", source_search_writes::<S, F>),

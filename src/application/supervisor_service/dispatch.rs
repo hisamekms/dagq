@@ -2472,6 +2472,8 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             let (rows, mark) = staged_session_rows(&digest)?;
             answer(write_sessions_over(&*store, &rows, mark.as_ref()))
         }
+        // A pass of the filling of what the run rows leave open.
+        "fill_ledger_open" => answer(LedgerStore::fill_ledger_open(&*store)),
         // The session rows' mark, R beside it when the store holds one:
         // a reader of the session rows' mark alone reads it too.
         "ledger_sessions_written" => answer(LedgerStore::ledger_marks(&*store)),

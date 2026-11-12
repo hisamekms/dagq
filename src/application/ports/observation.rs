@@ -210,6 +210,33 @@ pub trait LedgerStore {
     ) -> Result<bool> {
         self.write_session_rows_marked(&[], Some(marks))
     }
+    /// Take into the store's table of what each run row leaves open at its
+    /// end ([`crate::domain::ledger::open`]) the run rows written before it
+    /// kept the table, a part past its mark at a time bounded by time and
+    /// bytes ([`crate::domain::ledger::open::part_spent`]), in one
+    /// transaction with the mark: what builds the ledger asks it once a
+    /// pass until it is done, and again from the first row once a writer
+    /// that keeps no table took the write leader over. A store that keeps
+    /// no such table is never filled.
+    fn fill_ledger_open(&self) -> Result<crate::domain::ledger::open::Filled> {
+        Ok(crate::domain::ledger::open::Filled::Not)
+    }
+    /// What each run row leaves open at its end, by the run's key (a row
+    /// that leaves nothing open has no entry), once the store's mark says
+    /// every run row is taken in; `None` before, and of a store that keeps
+    /// no such table: a reader then reads every run row's earlier records.
+    fn ledger_left_open(
+        &self,
+    ) -> Result<
+        Option<
+            std::collections::BTreeMap<
+                String,
+                std::collections::BTreeSet<crate::domain::ledger::open::Left>,
+            >,
+        >,
+    > {
+        Ok(None)
+    }
     /// The store's marks, if it holds the session rows' one: with R when it
     /// holds that too ([`crate::domain::ledger::session::written::rows_written_through`]).
     fn ledger_marks(&self) -> Result<Option<crate::domain::ledger::session::written::Marks>> {

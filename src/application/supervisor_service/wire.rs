@@ -151,6 +151,7 @@ whole!(
     crate::domain::ledger::session::written::Marks,
     crate::domain::ledger::session::written::omitted::Coverage,
     crate::domain::ledger::session::written::omitted::Point,
+    crate::domain::ledger::open::Filled,
     crate::domain::pre_claim::rows::Since,
     crate::domain::session_step::SessionStep,
     crate::domain::session_step::SessionResource,

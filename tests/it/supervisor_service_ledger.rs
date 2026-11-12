@@ -413,6 +413,7 @@ fn only_a_supervisor_reads_and_writes_what_builds_the_ledger() {
         ("write_ledger_row_over", json!([row, null])),
         ("stage_ledger_row", json!(["d", 0, 1, "{}"])),
         ("write_staged_ledger_row_over", json!(["d", null])),
+        ("fill_ledger_open", json!([])),
         ("ledger_row_part", json!(["run", run.as_str(), 0, 10])),
         ("ledger_row_keys", json!(["run", null, 1])),
         ("ledger_heads", json!(["session", null, 10])),

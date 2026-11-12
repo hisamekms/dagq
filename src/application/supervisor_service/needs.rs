@@ -387,6 +387,7 @@ const SUPERVISE: &[&str] = &[
     "remove_steps",
     "stage_ledger_row",
     "write_staged_ledger_row_over",
+    "fill_ledger_open",
     "write_session_rows_over",
     "write_staged_session_rows_over",
     "write_covered_session_rows_over",

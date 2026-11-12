@@ -3155,6 +3155,9 @@ impl LedgerStore for SupervisorQueue {
         let covered = marks.is_some_and(|marks| marks.omitted.is_some());
         self.send_session_rows(rows, marks, covered)
     }
+    fn fill_ledger_open(&self) -> Result<crate::domain::ledger::open::Filled> {
+        self.remote("fill_ledger_open", vec![])
+    }
     fn sessions_written(
         &self,
     ) -> Result<Option<crate::domain::ledger::session::written::SessionsWritten>> {

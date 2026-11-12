@@ -346,6 +346,8 @@ pub(super) const TABLES: &[Table] = &[
     table("findings", Observation),
     table("ledger_rows", Observation), // the runtime's control does not read it
     table("ledger_omitted_points", Observation), // the ledger's points, written with its marks
+    table("ledger_open", Observation), // what each run row leaves open, written with the row
+    table("ledger_open_filled", Observation), // how far ledger_open took in the rows written before it
     table("node_samples", Observation), // the NodeSampleStore; host writes it through the port, the runtime's control does not read it
     table("node_sample_imports", Observation), // the imported CSV files, written with node_samples in one transaction
     table("session_steps", Observation), // the SessionStepStore; the runtime's control does not read it
