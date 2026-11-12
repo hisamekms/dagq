@@ -193,6 +193,15 @@ impl OpenSpan {
     pub fn session_id(&self) -> Option<&str> {
         self.payload["session_id"].as_str()
     }
+
+    /// The person whose inbox's span it is (its hook's `parent`), or
+    /// `None` for the host's: the spans of each person, and the host's,
+    /// are told apart, as two of them run at once.
+    pub fn parent(&self) -> Option<&Value> {
+        self.payload
+            .get("parent")
+            .filter(|parent| !parent.is_null())
+    }
 }
 
 /// A run's `revise_requested` or `revise_unsent`, with its payload's
@@ -666,9 +675,32 @@ pub struct SessionHook {
     /// and PreToolUse give it (codex-cli 0.160.0), its SessionEnd does
     /// not.
     pub model: Option<String>,
+    /// The person whose inbox's hook it is (an inbox for a control side),
+    /// which the queue service writes from the caller's token, never from
+    /// the request, so the guardrail of each person's inbox reads its own
+    /// runs.
+    pub parent: Option<Value>,
 }
 
 impl SessionHook {
+    /// Whether `span` is this hook's session's: of its kind, its session
+    /// id and its parent ([`OpenSpan::parent`]), so a person's session
+    /// never reaches another person's span or the host's, even under the
+    /// same session id.
+    pub fn owns(&self, span: &OpenSpan) -> bool {
+        span.kind() == self.kind
+            && span.session_id() == Some(self.session_id.as_str())
+            && span.parent() == self.parent.as_ref()
+    }
+
+    /// The `issuer` and `subject` of the hook's [`parent`](Self::parent),
+    /// `None` for the host's: what tells one person's records of a session
+    /// id from another's.
+    pub fn parent_identity(&self) -> Option<(&str, &str)> {
+        let parent = self.parent.as_ref()?;
+        Some((parent["issuer"].as_str()?, parent["subject"].as_str()?))
+    }
+
     /// The hook's report of `event` (`open` for a `SessionStart`, `close`
     /// for a `SessionEnd`, `compact` for a PreCompact or PostCompact named
     /// by the input's `hook_event_name`, `guard` for a PreToolUse) from
@@ -727,6 +759,7 @@ impl SessionHook {
                 .and_then(|launch| serde_json::from_str::<Value>(&launch).ok())
                 .filter(Value::is_object),
             model: text("model"),
+            parent: None,
         }))
     }
 }
@@ -747,6 +780,8 @@ struct HookRecord {
     launch: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<Value>,
 }
 
 impl From<SessionHook> for HookRecord {
@@ -760,6 +795,7 @@ impl From<SessionHook> for HookRecord {
             planner_id: hook.planner_id,
             launch: hook.launch,
             model: hook.model,
+            parent: hook.parent,
         }
     }
 }
@@ -789,6 +825,7 @@ impl TryFrom<HookRecord> for SessionHook {
             planner_id: record.planner_id,
             launch: record.launch,
             model: record.model,
+            parent: record.parent,
         })
     }
 }
@@ -868,9 +905,11 @@ pub fn end_reason(reason: &str) -> &'static str {
 /// open goes on with it (`resume`, `compact`, a `clear` that kept the
 /// session id); one of a new session id (a `/clear` gave the session a new
 /// id, or another session of the kind started) closes the spans of its
-/// kind open as `inferred` (ADR-t655-1 decision 3) and opens its own: their
-/// `SessionEnd` was missed, and two sessions of a kind at once cannot be
-/// told apart. The terminal is not asked which session it runs
+/// kind and its parent (the person whose inbox it is, none for the host's)
+/// open as `inferred` (ADR-t655-1 decision 3) and opens its own, naming
+/// that parent: their `SessionEnd` was missed, and two sessions of a kind
+/// and a parent at once cannot be told apart, while another person's
+/// inbox runs beside it. The terminal is not asked which session it runs
 /// (ADR-t2159-1 decision 1), and the `workspace_id` an earlier binary
 /// recorded in a span is not read. An end closes the session's span; one
 /// already closed changes nothing. A compaction's hooks and the
@@ -881,9 +920,7 @@ pub fn end_reason(reason: &str) -> &'static str {
 /// `claude`, the plugin's hook's) and `model`: the hook input's, else the
 /// one its launch asked for with `model_unknown` [`MODEL_NOT_IN_HOOK`].
 pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> Vec<SpanChange> {
-    let own = |span: &&OpenSpan| {
-        HOOK_KINDS.contains(&span.kind()) && span.session_id() == Some(hook.session_id.as_str())
-    };
+    let own = |span: &&OpenSpan| hook.owns(span);
     match &hook.event {
         HookEvent::End { reason } => open
             .iter()
@@ -898,7 +935,7 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
         HookEvent::Start { source } => {
             let mut changes: Vec<SpanChange> = open
                 .iter()
-                .filter(|span| span.kind() == hook.kind)
+                .filter(|span| span.kind() == hook.kind && span.parent() == hook.parent.as_ref())
                 .map(|span| SpanChange::Close {
                     span: span.clone(),
                     reason: INFERRED,
@@ -926,6 +963,9 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
             if let Some(planner) = hook.planner_id {
                 payload["planner_id"] = json!(planner);
             }
+            if let Some(parent) = &hook.parent {
+                payload["parent"] = parent.clone();
+            }
             if let Some(launch) = &hook.launch {
                 payload["launch"] = launch.clone();
             }
@@ -944,23 +984,25 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
 /// a compaction's (`session_compacted`: a Codex inbox's PreCompact or
 /// PostCompact with its `trigger`, or a start of `source` `compact` of the
 /// session whose span is open, which goes on in it, Claude's inbox's too) and the guardrail's having run
-/// (`inbox_guardrail_reached`, which the caller records once a session).
-/// It names the session's open span (`opened_event_id`, null when none is
-/// open: its SessionStart's hook did not run) and the hook input's
-/// `model`. Any other report, and any other kind's, leaves none.
+/// (`inbox_guardrail_reached`, which the caller records once a session of
+/// a parent). It names the session's open span ([`SessionHook::owns`];
+/// `opened_event_id`, null when none is open: its SessionStart's hook did
+/// not run), the hook input's `model` and the parent of a person's inbox.
+/// Any other report, and any other kind's, leaves none.
 pub fn hook_mark(hook: &SessionHook, open: &[OpenSpan]) -> Option<(EventKind, Value)> {
     if hook.kind != INBOX {
         return None;
     }
-    let span = open
-        .iter()
-        .find(|span| span.kind() == INBOX && span.session_id() == Some(hook.session_id.as_str()));
+    let span = open.iter().find(|span| hook.owns(span));
     let mut payload = json!({
         "opened_event_id": span.map(|span| span.opened_event_id),
         "kind": hook.kind,
         "session_id": hook.session_id,
         "model": hook.model,
     });
+    if let Some(parent) = &hook.parent {
+        payload["parent"] = parent.clone();
+    }
     let kind = match &hook.event {
         HookEvent::Compact { hook, trigger } => {
             payload["hook"] = json!(hook);
@@ -992,9 +1034,11 @@ pub fn hook_mark(hook: &SessionHook, open: &[OpenSpan]) -> Option<(EventKind, Va
 ///   abolished) closes once its planner is over, or, naming none, once no
 ///   person's planner row is open.
 /// - An `inbox` span closes once a later inbox span of another session
-///   id is open (one an earlier binary's hook left open in another cmux
-///   workspace); the same session resumed or compacted goes on in its
-///   span. The latest inbox span is never closed this way.
+///   id and the same parent ([`OpenSpan::parent`]) is open (one an earlier
+///   binary's hook left open in another cmux workspace); the same session
+///   resumed or compacted goes on in its span, and another person's inbox
+///   closes none. The latest inbox span of each parent is never closed
+///   this way.
 ///
 /// No span closes by how long its transcript has been still: a resident
 /// inbox idles for long (ADR-t655-1).
@@ -1003,17 +1047,18 @@ pub fn inferred_hook_closes(
     planner_over: impl Fn(i64) -> bool,
     person_planners_open: bool,
 ) -> Vec<OpenSpan> {
-    let latest_inbox = open
-        .iter()
-        .filter(|span| span.kind() == INBOX)
-        .max_by_key(|span| span.opened_event_id);
+    let latest_inbox = |parent: Option<&Value>| {
+        open.iter()
+            .filter(|span| span.kind() == INBOX && span.parent() == parent)
+            .max_by_key(|span| span.opened_event_id)
+    };
     open.iter()
         .filter(|span| {
             let planner = span.payload["planner_id"].as_i64();
             match span.kind() {
                 RUNTIME_PLANNER => planner.is_some_and(&planner_over),
                 PLANNER => planner.map_or(!person_planners_open, &planner_over),
-                INBOX => latest_inbox.is_some_and(|latest| {
+                INBOX => latest_inbox(span.parent()).is_some_and(|latest| {
                     latest.opened_event_id > span.opened_event_id
                         && latest.session_id() != span.session_id()
                 }),
@@ -1693,6 +1738,7 @@ mod tests {
                 },
                 kind: RUNTIME_PLANNER,
                 model: None,
+                parent: None,
                 session_id: "s".into(),
                 transcript_path: Some("/t.jsonl".into()),
                 cwd: Some("/repo".into()),
@@ -1766,6 +1812,7 @@ mod tests {
             event,
             kind,
             model: None,
+            parent: None,
             session_id: session.into(),
             transcript_path: None,
             cwd: None,
@@ -2171,5 +2218,152 @@ mod tests {
         ];
         assert!(inferred_hook_closes(&same, |_| true, false).is_empty());
         assert!(inferred_hook_closes(&same[..1], |_| true, false).is_empty());
+    }
+
+    /// Under one session id, a person's hook reaches its own span alone:
+    /// A's start opens a span beside B's and the host's, B's end closes
+    /// B's, and the marks of a compaction and of the guardrail name the
+    /// span and the parent of their own session.
+    #[test]
+    fn one_session_id_of_different_people_reaches_its_own_span_alone() {
+        let a = json!({"issuer": "https://id.example", "subject": "a"});
+        let b = json!({"issuer": "https://id.example", "subject": "b"});
+        let hook = |event: HookEvent, parent: Option<&Value>| SessionHook {
+            event,
+            kind: INBOX,
+            model: None,
+            parent: parent.cloned(),
+            session_id: "s".into(),
+            transcript_path: None,
+            cwd: None,
+            planner_id: None,
+            launch: None,
+        };
+        let start = || HookEvent::Start {
+            source: "startup".into(),
+        };
+        let open = [
+            span(1, json!({"kind": INBOX, "session_id": "s", "parent": b})),
+            span(2, json!({"kind": INBOX, "session_id": "s"})),
+            // Another kind's span of the same session id is not the inbox's.
+            span(3, json!({"kind": PLANNER, "session_id": "s"})),
+        ];
+        // A's start is a new session: it opens its own, closing nothing.
+        let a_start = hook_changes(&hook(start(), Some(&a)), &open, &Value::Null);
+        assert_eq!(a_start.len(), 1);
+        assert_eq!(opened(&a_start[0])["parent"], a);
+        // B's and the host's go on in their own.
+        assert!(hook_changes(&hook(start(), Some(&b)), &open, &Value::Null).is_empty());
+        assert!(hook_changes(&hook(start(), None), &open, &Value::Null).is_empty());
+        // Each end closes its own span alone; A's closes none.
+        let end = || HookEvent::End {
+            reason: "other".into(),
+        };
+        let b_end = hook_changes(&hook(end(), Some(&b)), &open, &Value::Null);
+        assert_eq!(b_end.iter().map(closed).collect::<Vec<_>>(), [(1, EXITED)]);
+        let host_end = hook_changes(&hook(end(), None), &open, &Value::Null);
+        assert_eq!(
+            host_end.iter().map(closed).collect::<Vec<_>>(),
+            [(2, EXITED)]
+        );
+        assert!(hook_changes(&hook(end(), Some(&a)), &open, &Value::Null).is_empty());
+        // The marks name their own span and parent, A's none.
+        let compaction = || HookEvent::Compact {
+            hook: PRE_COMPACT.into(),
+            trigger: "auto".into(),
+        };
+        let (kind, b_mark) = hook_mark(&hook(compaction(), Some(&b)), &open).unwrap();
+        assert_eq!(kind, EventKind::SessionCompacted);
+        assert_eq!(
+            (b_mark["opened_event_id"].clone(), b_mark["parent"].clone()),
+            (json!(1), b.clone())
+        );
+        let (kind, host_mark) = hook_mark(&hook(HookEvent::Guard, None), &open).unwrap();
+        assert_eq!(kind, EventKind::InboxGuardrailReached);
+        assert_eq!(host_mark["opened_event_id"], 2);
+        assert_eq!(host_mark.get("parent"), None);
+        let (_, a_mark) = hook_mark(&hook(HookEvent::Guard, Some(&a)), &open).unwrap();
+        assert_eq!(a_mark["opened_event_id"], Value::Null);
+        assert_eq!(a_mark["parent"], a);
+        assert_eq!(
+            hook(HookEvent::Guard, Some(&b)).parent_identity(),
+            Some(("https://id.example", "b"))
+        );
+        assert_eq!(hook(HookEvent::Guard, None).parent_identity(), None);
+    }
+
+    /// Two people's inboxes, and the host's, run at once: a start of one
+    /// closes only the spans of its own parent, its span names that
+    /// parent, and the supervisor closes an inbox span only once a later
+    /// one of the same parent is open. An end closes its session's span
+    /// alone.
+    #[test]
+    fn the_inboxes_of_different_people_keep_their_own_spans() {
+        let a = json!({"issuer": "https://id.example", "subject": "a"});
+        let b = json!({"issuer": "https://id.example", "subject": "b"});
+        let hook = |event: HookEvent, session: &str, parent: Option<&Value>| SessionHook {
+            event,
+            kind: INBOX,
+            model: None,
+            parent: parent.cloned(),
+            session_id: session.into(),
+            transcript_path: None,
+            cwd: None,
+            planner_id: None,
+            launch: None,
+        };
+        let start = |session, parent| {
+            hook(
+                HookEvent::Start {
+                    source: "startup".into(),
+                },
+                session,
+                parent,
+            )
+        };
+        let a_opened = hook_changes(&start("a-1", Some(&a)), &[], &Value::Null);
+        assert_eq!(a_opened.len(), 1);
+        assert_eq!(opened(&a_opened[0])["parent"], a);
+        let host_opened = hook_changes(&start("h-1", None), &[], &Value::Null);
+        assert_eq!(opened(&host_opened[0]).get("parent"), None);
+        let mut open = vec![
+            span(1, opened(&a_opened[0]).clone()),
+            span(2, opened(&host_opened[0]).clone()),
+        ];
+        // B's start closes neither A's span nor the host's.
+        let b_opened = hook_changes(&start("b-1", Some(&b)), &open, &Value::Null);
+        assert_eq!(b_opened.len(), 1);
+        assert_eq!(opened(&b_opened[0])["parent"], b);
+        open.push(span(3, opened(&b_opened[0]).clone()));
+        assert!(inferred_hook_closes(&open, |_| false, false).is_empty());
+        // A's new session closes A's own span alone; so does the host's.
+        let a_next = hook_changes(&start("a-2", Some(&a)), &open, &Value::Null);
+        assert_eq!(a_next.len(), 2);
+        assert_eq!(closed(&a_next[0]), (1, INFERRED));
+        let host_next = hook_changes(&start("h-2", None), &open, &Value::Null);
+        assert_eq!(host_next.len(), 2);
+        assert_eq!(closed(&host_next[0]), (2, INFERRED));
+        // A later span of A's (its SessionStart missed by the binary that
+        // opened the first) closes A's first span alone.
+        open.push(span(
+            4,
+            json!({"kind": INBOX, "session_id": "a-2", "parent": a}),
+        ));
+        let ids: Vec<i64> = inferred_hook_closes(&open, |_| false, false)
+            .iter()
+            .map(|span| span.opened_event_id.as_i64())
+            .collect();
+        assert_eq!(ids, [1]);
+        // B's end closes B's span alone.
+        let b_end = hook(
+            HookEvent::End {
+                reason: "other".into(),
+            },
+            "b-1",
+            Some(&b),
+        );
+        let ended = hook_changes(&b_end, &open, &Value::Null);
+        assert_eq!(ended.len(), 1);
+        assert_eq!(closed(&ended[0]), (3, EXITED));
     }
 }

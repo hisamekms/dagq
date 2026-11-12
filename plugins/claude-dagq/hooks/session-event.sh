@@ -6,7 +6,8 @@
 # Records the session span of the inbox and planner sessions,
 # which the runtime does not start headless: only a session
 # with DAGQ_ROLE inbox or planner and DAGQ_QUEUE (which `dagq inbox` and the
-# supervisor put on the command they start) passes
+# supervisor put on the command they start), or DAGQ_INBOX_RELAY (the relay
+# of an inbox for a control side, which its dagq sends through), passes
 # the hook's stdin (session_id, transcript_path, cwd, source or reason) to
 # `dagq session-event open|close`, which reads the span's kind from
 # DAGQ_SESSION_KIND (else DAGQ_ROLE); it reads nothing of the terminal the
@@ -23,7 +24,7 @@ case "${DAGQ_ROLE:-}" in
   inbox | planner) ;;
   *) exit 0 ;;
 esac
-[ -n "${DAGQ_QUEUE:-}" ] || exit 0
+[ -n "${DAGQ_QUEUE:-}" ] || [ -n "${DAGQ_INBOX_RELAY:-}" ] || exit 0
 
 if [ -n "${DAGQ_BIN:-}" ]; then
   [ -x "$DAGQ_BIN" ] || exit 0
@@ -31,8 +32,11 @@ elif ! command -v dagq >/dev/null 2>&1; then
   exit 0
 fi
 
-# An explicit DAGQ_DB wins, as in session-start.sh.
-if [ -z "${DAGQ_DB:-}" ]; then
+# An explicit DAGQ_DB wins, as in session-start.sh. Through a relay no queue
+# is named: its dagq refuses a --db.
+if [ -n "${DAGQ_INBOX_RELAY:-}" ]; then
+  unset DAGQ_DB
+elif [ -z "${DAGQ_DB:-}" ]; then
   DAGQ_DB=$DAGQ_QUEUE
   export DAGQ_DB
 fi

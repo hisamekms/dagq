@@ -762,6 +762,50 @@ fn hook_commands_run_from_a_plugin_directory_with_a_space() {
     );
 }
 
+/// An inbox for a control side names its relay and no queue: the span hook
+/// still records, through the launcher with no `--db`, even beside a
+/// `DAGQ_DB` the person's terminal held.
+#[test]
+fn session_event_hook_of_an_inbox_through_its_relay_names_no_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("plugin");
+    fs::create_dir_all(root.join("hooks")).unwrap();
+    fs::create_dir_all(root.join("bin")).unwrap();
+    fs::copy(
+        plugin_root().join("hooks/session-event.sh"),
+        root.join("hooks/session-event.sh"),
+    )
+    .unwrap();
+    let log = root.join("calls.log");
+    let stub = root.join("bin/dagq");
+    crate::common::template::script_env(
+        &stub,
+        "#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"${DAGQ_DB:-}\" >> \"$STUB_PATH\"\n",
+        &[("STUB_PATH", log.to_str().unwrap())],
+    );
+    for db in [None, Some("/somewhere/queue.db")] {
+        let mut command = Command::new(root.join("hooks/session-event.sh"));
+        command
+            .arg("open")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("DAGQ_ROLE", "inbox")
+            .env("DAGQ_INBOX_RELAY", "/tmp/dagq-relay/inbox-1.sock")
+            .env("DAGQ_BIN", &stub)
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::null());
+        if let Some(db) = db {
+            command.env("DAGQ_DB", db);
+        }
+        let output = command.bounded_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "session-event open|\nsession-event open|\n"
+    );
+}
+
 /// Runs the span hook for `event` with a clean environment plus `env`, the
 /// hook's JSON `input` on stdin.
 fn session_event(

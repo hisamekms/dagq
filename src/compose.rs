@@ -154,8 +154,8 @@ pub use host::rebind;
 pub use host::{
     AutoUpdateJob, COMMAND_TARGET, HostMetricsSettings, LifecycleRoute, QueueBrokerControlPort,
     QueueBrokerOptions, QueueRelayControlPort, QueueRelayOptions, QueueServiceControlPort,
-    QueueServiceOptions, ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, down, inbox,
-    inbox_command, init_queue, init_through, install_restart_arguments, migrate_through,
+    QueueServiceOptions, ReleaseIndexPort, ReleaseUpdateJob, SccacheOptions, control_inbox, down,
+    inbox, inbox_command, init_queue, init_through, install_restart_arguments, migrate_through,
     queue_broker_start, queue_broker_status, queue_broker_stop, queue_service_start,
     queue_service_status, queue_service_stop, repair_rebound_worktrees, repository_common_dir,
     repository_queue_dir, run_command, service_commands, trace_command, up,
@@ -164,7 +164,8 @@ pub use observation::{
     CiWatchOptions, EnvironmentOptions, LedgerOptions, REPORTS_DIR, call_stats_read,
     doctor_on_this_host, graph_export_text, graph_svg_of, observe, observe_through, queue_agents,
     read_queue, service_detail, service_doctor, service_reads, throughput_review,
-    throughput_review_through, timeline_in, watch_in, watch_through_service, write_report_files,
+    throughput_review_through, timeline_in, watch_in, watch_through_relay, watch_through_service,
+    write_report_files,
 };
 #[cfg(feature = "test-paths")]
 pub use observation::{

@@ -256,27 +256,34 @@ fn exchange_with(
     super::queue_service::send_control(http, url, None, &request, within)
         .map_err(|_| anyhow::anyhow!("runner exchange unavailable; no credentials saved"))
 }
-/// Refuse before reading stdin/files or opening any local queue. The saved human
-/// login, rather than a host deployment variable, supplies the issuer binding.
+/// Refuse before reading stdin/files, opening the person's store or any
+/// local queue, or sending. The saved human login, rather than a host
+/// deployment variable, supplies the issuer binding. An inbox's relay
+/// (`DAGQ_INBOX_RELAY`) beside `DAGQ_CONTROL_URL` is `client_misconfigured`,
+/// as `Client::from_env` refuses the pair.
 pub fn run(
     command: &RunnerCommand,
     db_named: bool,
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<Value> {
-    let url = env("DAGQ_CONTROL_URL");
+    use crate::domain::queue_service::{
+        CONTROL_URL_ENV, CREDENTIAL_FILE_ENV, INBOX_RELAY_ENV, SOCKET_ENV, URL_ENV,
+    };
+    let named = |name: &str| env(name).is_some_and(|v| !v.trim().is_empty());
+    let url = env(CONTROL_URL_ENV);
     let role = env("DAGQ_ROLE");
-    let conflict = [
-        "DAGQ_SERVICE_SOCKET",
-        "DAGQ_SERVICE_URL",
-        "DAGQ_SERVICE_CREDENTIAL_FILE",
-    ]
-    .iter()
-    .any(|name| env(name).is_some_and(|v| !v.trim().is_empty()));
+    let relay = named(INBOX_RELAY_ENV);
+    let conflict = relay
+        || [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV]
+            .iter()
+            .any(|name| named(name));
     let url =
         app::destination(url.as_deref(), conflict, db_named, role.as_deref()).map_err(|error| {
             super::queue_service::ClientFailure::new(
                 if role.as_deref().is_some_and(|r| r != "user") {
                     "authorization_denied"
+                } else if relay && named(CONTROL_URL_ENV) {
+                    "client_misconfigured"
                 } else {
                     "runner_configuration"
                 },
@@ -654,6 +661,60 @@ mod tests {
                 .to_string()
                 .contains("authorization_denied")
             );
+        }
+    }
+    /// An inbox's relay beside `DAGQ_CONTROL_URL` is `client_misconfigured`
+    /// for every runner command, before any input, store or send: the
+    /// person's store and home are never looked up.
+    #[test]
+    fn a_relay_beside_the_control_url_is_misconfigured_before_any_input_or_store() {
+        use std::cell::RefCell;
+        for (name, command) in [
+            ("register-code", RunnerCommand::RegisterCode),
+            ("list", RunnerCommand::List),
+            (
+                "revoke",
+                RunnerCommand::Revoke {
+                    runner_id: "r".into(),
+                },
+            ),
+            (
+                "share",
+                RunnerCommand::Share {
+                    runner_id: "r".into(),
+                    remove: false,
+                },
+            ),
+            (
+                "enroll",
+                RunnerCommand::Enroll {
+                    file: Some("nonexistent".into()),
+                },
+            ),
+        ] {
+            for role in [None, Some("user")] {
+                let read = RefCell::new(Vec::new());
+                let error = run(&command, false, |variable| {
+                    read.borrow_mut().push(variable.to_owned());
+                    match variable {
+                        "DAGQ_CONTROL_URL" => Some("https://control.example".into()),
+                        "DAGQ_INBOX_RELAY" => Some("/tmp/dagq-1/relay.sock".into()),
+                        "DAGQ_ROLE" => role.map(str::to_owned),
+                        _ => Some("/somewhere".into()),
+                    }
+                })
+                .unwrap_err();
+                let failure = error
+                    .downcast_ref::<super::super::queue_service::ClientFailure>()
+                    .unwrap_or_else(|| panic!("{name}: {error:#}"));
+                assert_eq!(failure.code, "client_misconfigured", "{name}");
+                for unread in ["HOME", "XDG_CONFIG_HOME", "DAGQ_CREDENTIAL_STORE"] {
+                    assert!(
+                        !read.borrow().iter().any(|name| name == unread),
+                        "{name} read {unread}"
+                    );
+                }
+            }
         }
     }
 }

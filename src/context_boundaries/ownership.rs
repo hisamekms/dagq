@@ -594,6 +594,7 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/login/mod.rs", Host),
     module("src/application/runner_enroll.rs", Host),
     module("src/application/runner_process.rs", Host),
+    module("src/application/inbox_relay.rs", Host),
     module("src/application/oidc.rs", Host), // the check of an OIDC issuer's JWT, behind the team version's entry
     module("src/application/sccache.rs", Host),
     module("src/application/retention.rs", Host), // the observations' directories and the backups past their retention
@@ -716,6 +717,11 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/release_update.rs", "ReleaseIndex", Some(Host), Internal),
     outer_port("src/application/install.rs", "Binaries", Some(Host), Internal),
     outer_port("src/application/install.rs", "ReleaseInstaller", Some(Host), Internal),
+    outer_port("src/application/inbox_relay.rs", "InboxTokens", Some(Host), Internal), // the person's store the relay of an inbox for a control side reads its token from
+    outer_port("src/application/inbox_relay.rs", "RelaySend", Some(Host), Internal), // the relay's one HTTP request to the control side
+    outer_port("src/application/inbox_relay.rs", "InboxSession", Some(Host), Internal), // the person's machine the session of an inbox for a control side runs on: the issue, the relay, the agent, the revocation
+    outer_port("src/application/inbox_relay.rs", "InboxIssue", Some(Host), Internal), // the issue of an inbox's token and its keeping, under the lock of every dagq inbox of the user
+    outer_port("src/application/inbox_relay.rs", "OpenRelay", Some(Host), Internal), // the relay's socket the session closes at its end
     outer_port("src/application/queue_service.rs", "ServiceQueue", Some(Host), Internal),
     outer_port("src/application/queue_service.rs", "MemberStore", Some(Host), Internal),
     outer_port("src/application/queue_service.rs", "IssueFacts", Some(Host), Internal), // what a token's issue reads in its transaction (the registrations, a job's records); the queue service's store gives it

@@ -43,7 +43,7 @@ supervisorとそれが起動する`observe`・`throughput-review`もserviceを�
 
 ## 置き場所と形
 
-queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`service/`に置く（ファイルとmodeは`infrastructure::queue_service`のmodule doc）。
+queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）の`service/`に置く。
 
 ファイルの配置と排他、生存の判定は`infrastructure::queue_service`のmodule doc、socketの実pathの決め方は同moduleの`socket_path`。
 止めるsignalはserviceが答えたpidか、同moduleの`serves`が確かめた記録のpidにだけ送る。
@@ -84,6 +84,7 @@ runnerの登録・交換・更新・失効の入口はHTTPの`application::queue
 申告は割り当てにだけ使い、権限は登録の印が決める。
 外向きの入口だけが発行元のJWTを人の短いtokenに替え、hostのsocketの入口は人のtokenを発行も受けもしない。
 外向きの入口の人のtokenによるissue_tokenは、自分を親とするinboxのtokenだけを発行し、値を応答の中だけで返す。
+人のtokenは自分を親とするinboxのtokenだけを失効させ、親は本文でなくtokenのprincipalから取る。
 人のtokenの記録は制御側の手元のファイルだけにあり、制御側の入れ替えで失われると期限の内でもunauthenticatedになる。
 
 serviceは呼び出しのprincipal（`Principal`）をtokenから決め（tokenの無い人は[hostのCLI](queue-service-host-cli.md#principal)）、クライアントが名乗るrole（`DAGQ_ROLE`）は認可に使わない（ADR-t1233-1決定4、ADR-t1233-4決定4）。
@@ -137,7 +138,6 @@ executor-telemetry・runner・image-publisher以外の全role（workerとjobを�
 ユースケースの一覧は`domain::queue_service::UseCase`、CLIと違うparamsは`application::queue_reads`の各optionの型のdoc commentが持つ。
 
 paramsは書き出すファイルも実行するprogramも受け取らず、読み取りでserviceは別のprogramを起動しない（`graph --format svg`のd2も起動しない）。
-`domain::queue_service::UseCase::of_command`が、dagqのコマンドの引数（サブコマンドから）から行き先のユースケースを決める。
 
 ### 読み取りのroleとworkerが打つコマンド
 
@@ -163,6 +163,8 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
 `dagq`（`src/main.rs`の`execute`）は、環境がsocketかbrokerの宛てを名指せば、`DAGQ_ROLE`もqueueの解決（cwdや`--db`）も読まずにクライアントモードで動く（`infrastructure::queue_service::Client`）。
 チームの制御側へのHTTPSの宛ては環境`DAGQ_CONTROL_URL`で、送る入口は同moduleの`call_control`（runnerの資格の交換は`infrastructure::runner_enroll`）、人のtokenは`dagq login`の置き場から読み、転送する命令は`DAGQ_ROLE`が人でなければ断り、認証の3命令は手元で動く（分岐は`client_mode`のdoc comment）。
+人のマシンのinboxの宛ては`DAGQ_INBOX_RELAY`の中継のsocketで、親の`dagq inbox`がinboxのtokenを付けて送る（`application::inbox_relay`）。
+agentは人の資格の置き場とTCPを使わず、中継に届かなければDBにも別の経路にも戻らない。
 
 `login`・`logout`・`whoami`はクライアントモードで実行できず、socketかbrokerの宛ての環境ではactorの判定より前にCLIが`control_side_command`で拒む。
 この拒否では資格の置き場を開かず、発行元にもqueue serviceにも通信せず、拒否の記録も送らない。
@@ -180,7 +182,7 @@ wrapperもDBを開かず、届かなければそのerrorで終わる。
 ### Codexのsandboxからの到達（ADR-t1233-5決定4）
 
 - workerのturn（workspace-write、networkを開ける。ADR-t813-3決定4）: そのままsocketに届く
-- 読み取りだけのjob（goal reviewなど）: `--sandbox read-only`の代わりに、`:read-only`を継いでnetworkをCodexのnetwork proxy経由で開き、serviceのsocket（実path）だけを許すpermission profileで動かす（`AgentProvider::reach_queue_service`、設定は`codex::job_service_config`）。
+- 読み取りだけのjob（goal reviewなど）: `--sandbox read-only`の代わりに、`:read-only`を継いでnetworkをCodexのnetwork proxy経由で開き、serviceのsocket（実path。人のマシンのinboxでは中継のsocket）だけを許すpermission profileで動かす（`AgentProvider::reach_queue_service`、設定は`codex::job_service_config`）。
 - Claude Codeのagentはsandboxを持たないので何も足さない
 - Codexのworkerの`dagq ask`はserviceのユースケースとして送る（ADR-t1233-5決定5）
 
@@ -208,8 +210,7 @@ migrationを適用するのは入れ替えの口で起動したserviceの受け�
 supervisorが起動し直せないか、上限に達したか、届かないときは、不在をqueueのディレクトリのDBの外に1回記録して`[push]`で1回送り、serviceが戻ったらserviceを通してattention `queue_service_down`に残し、続く`queue_service_started`か`queue_service_running`で閉じる（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
 不在の間はqueueにattentionが無い。
 attentionの次の手は`dagq service status`。
-人はそれと`service.log`を見て、`up`か`service start`を打ち直す。
-`service.log`はローカルの動きで、配置の設定でstoreを選んだ制御側は標準出力と標準エラーに出すので、配置の側が集めたlogを見る（[計測のOpenTelemetryとの対応](measurement-otel.md)）。
+人はそれと`service.log`（制御側では配置の側が集めたlog）を見て、`up`か`service start`を打ち直す。
 生きているsupervisorも居ないときは`restart supervisor`が出る。
 
 `status`と`watch`は届かないとき記録をDBを開かずに読んで添える（返し方は[hostのCLI](queue-service-host-cli.md#届かないとき)）。

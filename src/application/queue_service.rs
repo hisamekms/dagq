@@ -72,6 +72,13 @@ pub trait IssueFacts {
     /// whether a supervisor kept as a token's parent is still there
     /// ([`crate::domain::queue_service::TokenIssuer::there`]).
     fn registered(&self, token: &crate::domain::LeaseToken) -> bool;
+    /// Record the queue's event `kind` with `payload` in the issue's write
+    /// transaction, so it commits with the token's record or neither does
+    /// (a person's `inbox_opened`, [`human_inbox_opened`]).
+    fn record(&self, kind: EventKind, payload: &Value) -> Result<()> {
+        let _ = (kind, payload);
+        Err(anyhow!("this issue's transaction records no event"))
+    }
     /// What the queue's records of the job `held` is of tell
     /// ([`crate::domain::queue_service::job_records_ended`]), the record of
     /// the start `starting` asks for left out while it runs, and with none,
@@ -127,6 +134,15 @@ pub trait ServiceQueue:
         kind: EventKind,
         payload: Value,
     ) -> Result<Option<EventId>>;
+    /// `status --role inbox`'s `inbox_guardrail` of an inbox whose parent
+    /// is the person `parent`: judged by that person's newest
+    /// `inbox_opened` ([`human_inbox_opened`],
+    /// found in the store by that parent), never another
+    /// person's launch.
+    fn inbox_guardrail_of(&self, parent: &crate::domain::oidc::OidcIdentity) -> Result<Value> {
+        let _ = parent;
+        Err(anyhow!("this queue judges no person's inbox"))
+    }
     /// The proposals as `dagq proposal list` prints them: the submitted
     /// and revising ones, or with `all` every one.
     fn proposals(&self, all: bool) -> Result<Value>;
@@ -941,6 +957,13 @@ impl QueueService<'_> {
         }
         if request.use_case == UseCase::RevokeToken {
             drop(checked);
+            if peer == Peer::Absent {
+                return respond(revoke_human_inbox_of(
+                    self.backend,
+                    &principal,
+                    &request.params,
+                ));
+            }
             return respond(revoke_token_of(self.backend, &principal, &request.params));
         }
         // The queue's administration runs on the DB itself, which may be
@@ -962,16 +985,26 @@ impl QueueService<'_> {
         // is the use case's: it is opened once.
         let opened = checked.map_or_else(|| self.open_on(connection, &actor), Ok);
         let heavy_reads = self.backend.heavy_reads();
+        let params = hook_of_parent(request.use_case, &request.params, &principal);
         respond(opened.and_then(|mut queue| {
-            run(
+            let mut answer = run(
                 &mut *queue,
                 &actor,
                 request.use_case,
-                &request.params,
+                &params,
                 heavy_reads,
                 notes,
                 &*self.backend.answer_authorizer(),
-            )
+            )?;
+            // A person's inbox's guardrail is that person's newest launch,
+            // not another person's.
+            if request.use_case == UseCase::Status
+                && let Some(parent) = &principal.parent_human
+                && answer.get("inbox_guardrail").is_some()
+            {
+                answer["inbox_guardrail"] = queue.inbox_guardrail_of(parent)?;
+            }
+            Ok(answer)
         }))
     }
 
@@ -1329,6 +1362,42 @@ impl std::error::Error for Replacing {}
 #[serde(deny_unknown_fields)]
 struct IssueTokenParams {
     principal: Principal,
+    /// The launch of the person's inbox the issue is asked at the open of
+    /// (`application::inbox_relay::issue_params`), recorded as its
+    /// `inbox_opened` with the parent the token's principal names; a
+    /// renewal's issue carries none and records nothing.
+    #[serde(default)]
+    opened: Option<Value>,
+}
+
+/// The params of `use_case` as the caller `principal` sent them, with a
+/// session hook's `parent` taken from the token, never the request: the
+/// person whose inbox it is, or none. The guardrail's run it records is
+/// then read for that person alone.
+pub fn hook_of_parent(use_case: UseCase, raw: &Value, principal: &Principal) -> Value {
+    let mut params = raw.clone();
+    if use_case == UseCase::SessionRecord
+        && let Some(hook) = params.get_mut("hook").and_then(Value::as_object_mut)
+    {
+        hook.remove("parent");
+        if let Some(parent) = &principal.parent_human {
+            hook.insert("parent".into(), json!(parent));
+        }
+    }
+    params
+}
+
+/// The `inbox_opened` the control side records for an inbox of the person
+/// `parent` at the open's issue: the launch the person's `dagq inbox` sent
+/// (its provider, model and guardrail), with the parent from the token's
+/// principal in place of anything the request named, so `status --role
+/// inbox` of that person's inbox judges its guardrail by it.
+pub fn human_inbox_opened(mut opened: Value, parent: &crate::domain::oidc::OidcIdentity) -> Value {
+    if !opened.is_object() {
+        opened = json!({});
+    }
+    opened["parent"] = json!(parent);
+    opened
 }
 
 /// The issue use case (`issue_token`, ADR-t3102-1 decision 2): the token
@@ -1363,21 +1432,49 @@ fn issue_token_of(
         authorizer: &StaticPolicy,
     }
     .authorize(&Store(&mut *queue), Capability::TokenIssue, &resource)?;
-    let child = Principal::human_inbox(parent.human.clone().expect("human token checked"));
+    let identity = parent.human.clone().expect("human token checked");
+    let child = Principal::human_inbox(identity.clone());
     let expires = parent
         .token_expires_at
         .ok_or_else(|| anyhow!("human token has no expiry"))?;
+    let opened = p.opened.map(|opened| human_inbox_opened(opened, &identity));
+    // The launch's `inbox_opened` is written in the issue's transaction
+    // after the token's record: a failure of either, or of the COMMIT,
+    // takes the new token back, so no token outlives an open not recorded.
     issuing_undone(
         || backend.hold_issues(),
         |held, then| queue.issuing(held, backend.now_ms(), then),
         &IssueHeld::Nothing,
-        &mut |_| {
+        &mut |facts| {
             let (token, record) = backend.issue_human(&child, expires)?;
+            if let Some(opened) = &opened
+                && let Err(error) = facts.record(EventKind::InboxOpened, opened)
+            {
+                return Err(IssueFailed {
+                    error,
+                    written: record,
+                }
+                .into());
+            }
             Ok((json!({"token": token, "expires_at": expires}), Some(record)))
         },
         |record| backend.revoke_record(&child, record),
     )
 }
+
+/// An issue whose record was written but whose transaction fails after it:
+/// [`issuing_undone`] takes the record back.
+#[derive(Debug)]
+struct IssueFailed {
+    error: anyhow::Error,
+    written: String,
+}
+impl std::fmt::Display for IssueFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)
+    }
+}
+impl std::error::Error for IssueFailed {}
 
 /// Revoke, as the service starts, the supervisors' sign-ins left over from
 /// registrations that ended (ADR-t3102-1 decision 2): one a supervisor
@@ -1508,6 +1605,50 @@ fn revoke_token_of(backend: &dyn ServiceBackend, caller: &Principal, raw: &Value
         },
         revoked => revoked,
     }
+}
+
+/// The revocation use case at the outward entrance (`revoke_token` with no
+/// peer): the token of the person `caller`'s own inbox, the inbox whose
+/// parent is the identity of the caller's token, revoked at the end of the
+/// session its `dagq inbox` relayed (ADR-t3102-1 decision 2). The parent is
+/// the token's, never the request's; any other caller or principal
+/// ([`crate::domain::queue_service::human_inbox_revoke`]) is
+/// `authorization_denied`, recorded, whatever the person's team role, so a
+/// member revokes their own as they had it issued (`service.lifecycle` is
+/// not asked). In a write transaction as the issue's, every record of that
+/// inbox is removed and committed; the answer is whether there was one.
+fn revoke_human_inbox_of(
+    backend: &dyn ServiceBackend,
+    caller: &Principal,
+    raw: &Value,
+) -> Result<Value> {
+    let p: IssueTokenParams = params(UseCase::RevokeToken, raw)?;
+    let actor = caller.actor();
+    let mut queue = backend.open(&actor)?;
+    let resource = Resource::Principal(p.principal.role);
+    if !crate::domain::queue_service::human_inbox_revoke(caller, &p.principal) {
+        return Err(refuse_recorded(
+            &mut *queue,
+            &actor,
+            Capability::TokenIssue,
+            &resource,
+            crate::domain::authorization::DenyReason::Resource,
+            "HTTP token revocation requires a human token and revokes only that person's inbox",
+        ));
+    }
+    let child = Principal::human_inbox(caller.human.clone().expect("human token checked"));
+    let _issues = backend.hold_issues()?;
+    queue.issuing(
+        &crate::domain::queue_service::IssueHeld::Nothing,
+        backend.now_ms(),
+        &mut |_| {
+            let mut revoked = false;
+            for (record, _) in backend.held_records(&child)? {
+                revoked |= backend.revoke_record(&child, &record)?;
+            }
+            Ok(json!(revoked))
+        },
+    )
 }
 
 /// Issue the token of `child` at `parent`'s request (ADR-t3102-1 decision
@@ -1726,10 +1867,17 @@ pub(super) fn issuing_undone<G>(
 ) -> Result<Value> {
     let _issues = hold()?;
     let mut wrote = None;
-    let issued = issuing(held, &mut |facts| {
-        let (value, written) = issue(facts)?;
-        wrote = written;
-        Ok(value)
+    let issued = issuing(held, &mut |facts| match issue(facts) {
+        Ok((value, written)) => {
+            wrote = written;
+            Ok(value)
+        }
+        Err(error) => {
+            if let Some(failed) = error.downcast_ref::<IssueFailed>() {
+                wrote = Some(failed.written.clone());
+            }
+            Err(error)
+        }
     });
     if issued.is_err()
         && let Some(record) = wrote
@@ -4460,6 +4608,9 @@ pub(crate) mod tests {
             log.push(json!({"relax_event": kind.as_str(), "payload": payload}));
             Ok(Some(EventId::new(i64::try_from(log.len()).unwrap())))
         }
+        fn inbox_guardrail_of(&self, parent: &crate::domain::oidc::OidcIdentity) -> Result<Value> {
+            Ok(json!({"of": parent}))
+        }
         fn proposals(&self, all: bool) -> Result<Value> {
             Ok(json!({"proposals": [], "all": all}))
         }
@@ -4468,6 +4619,9 @@ pub(crate) mod tests {
         }
         fn read(&mut self, read: &QueueRead) -> Result<Value> {
             self.reading.pass();
+            if self.human.lock().unwrap().guardrail_status && matches!(read, QueueRead::Status(_)) {
+                return Ok(json!({"read": "status", "inbox_guardrail": {"of": "the host"}}));
+            }
             Ok(json!({"read": format!("{read:?}")}))
         }
         /// Kept as asked, after its authorization.
@@ -4532,8 +4686,12 @@ pub(crate) mod tests {
             let result = then(&HumanFacts(self.human.clone()));
             let mut memory = self.human.lock().unwrap();
             memory.in_transaction = false;
+            let recorded = std::mem::take(&mut memory.recorded);
             if memory.fail_commit {
                 anyhow::bail!("COMMIT failed");
+            }
+            if result.is_ok() {
+                self.log.lock().unwrap().extend(recorded);
             }
             result
         }
@@ -5072,13 +5230,32 @@ pub(crate) mod tests {
         }
         fn held_records(
             &self,
-            _: &Principal,
+            principal: &Principal,
         ) -> Result<Vec<(String, crate::domain::queue_service::HeldToken)>> {
-            Ok(Vec::new())
+            let memory = self.human.lock().unwrap();
+            Ok(memory
+                .records
+                .iter()
+                .filter(|(_, (held, _))| held == principal)
+                .map(|(name, (held, _))| {
+                    (
+                        name.clone(),
+                        crate::domain::queue_service::HeldToken {
+                            principal: held.clone(),
+                            issued_by: None,
+                            issued_at: 0,
+                        },
+                    )
+                })
+                .collect())
         }
         fn revoke_record(&self, _: &Principal, name: &str) -> Result<bool> {
             let mut memory = self.human.lock().unwrap();
-            assert!(!memory.in_transaction, "undo after transaction completion");
+            if memory.revoking {
+                assert!(memory.in_transaction, "a revocation in its transaction");
+            } else {
+                assert!(!memory.in_transaction, "undo after transaction completion");
+            }
             Ok(memory.records.remove(name).is_some())
         }
         fn written_record(&self, _: &str) -> Result<Option<String>> {
@@ -5132,6 +5309,15 @@ pub(crate) mod tests {
         image_rows: Vec<crate::domain::image_publish::ImageDigest>,
         /// The member's credential row, as `member_credentials` keeps it.
         preference: Option<crate::domain::credential_preference::Preference>,
+        /// A revocation's records are removed in its write transaction.
+        revoking: bool,
+        /// A status read answers an `inbox_guardrail` of the host's.
+        guardrail_status: bool,
+        /// The events an issue wrote in its transaction, kept once it
+        /// commits.
+        recorded: Vec<Value>,
+        /// An issue's event fails to be written.
+        fail_record: bool,
     }
 
     struct HumanFacts(std::sync::Arc<Mutex<HumanMemory>>);
@@ -5149,6 +5335,15 @@ pub(crate) mod tests {
         }
         fn registered(&self, token: &crate::domain::LeaseToken) -> bool {
             Kept.registered(token)
+        }
+        fn record(&self, kind: EventKind, payload: &Value) -> Result<()> {
+            let mut memory = self.0.lock().unwrap();
+            assert!(memory.in_transaction, "an issue's event in its transaction");
+            anyhow::ensure!(!memory.fail_record, "the event could not be written");
+            memory
+                .recorded
+                .push(json!({"broker_event": kind.as_str(), "payload": payload}));
+            Ok(())
         }
         fn job(
             &self,
@@ -6247,6 +6442,254 @@ pub(crate) mod tests {
                     1100
                 ));
             }
+        }
+    }
+
+    /// The open's issue records the person's launch as `inbox_opened`,
+    /// with the parent of the token's principal in place of the request's;
+    /// a renewal's issue records nothing.
+    #[test]
+    fn a_persons_open_records_its_launch_and_a_renewal_records_nothing() {
+        use crate::domain::oidc::OidcIdentity;
+        let (backend, jwt) = human_fixture();
+        let human = exchange_human(&backend, &jwt).result.unwrap();
+        let token = human["token"].as_str().unwrap();
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let forged = Principal::human_inbox(OidcIdentity {
+            issuer: "https://other.example".into(),
+            subject: "forged".into(),
+        });
+        let opened = json!({"provider": "codex", "model": null, "guardrail": true,
+                            "parent": {"issuer": "x", "subject": "y"}});
+        let recorded = || -> Vec<Value> {
+            backend
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["broker_event"] == "inbox_opened")
+                .map(|entry| entry["payload"].clone())
+                .collect()
+        };
+        let response = service.handle_from(
+            &request(
+                Some(token),
+                UseCase::IssueToken,
+                json!({"principal": forged, "opened": opened}),
+            ),
+            Peer::Absent,
+        );
+        assert!(response.ok, "{response:?}");
+        let records = recorded();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["parent"], json!(jwt.identity));
+        assert_eq!(records[0]["provider"], "codex");
+        assert_eq!(records[0]["guardrail"], true);
+        let renewal = service.handle_from(
+            &request(
+                Some(token),
+                UseCase::IssueToken,
+                json!({"principal": forged}),
+            ),
+            Peer::Absent,
+        );
+        assert!(renewal.ok, "{renewal:?}");
+        assert_eq!(recorded().len(), 1);
+        // A refused issue records nothing either.
+        let refused = service.handle_from(
+            &request(
+                Some(renewal.result.unwrap()["token"].as_str().unwrap()),
+                UseCase::IssueToken,
+                json!({"principal": forged, "opened": {"provider": "claude"}}),
+            ),
+            Peer::Absent,
+        );
+        assert_eq!(code(&refused), Some(ServiceErrorCode::AuthorizationDenied));
+        assert_eq!(recorded().len(), 1);
+    }
+
+    /// The open's `inbox_opened` commits with the token's record: when it
+    /// cannot be written, or the COMMIT fails, the issue fails, no event is
+    /// kept and the new token does not authenticate.
+    #[test]
+    fn an_open_not_recorded_leaves_no_new_token() {
+        for fail_record in [true, false] {
+            let (backend, jwt) = human_fixture();
+            let human = exchange_human(&backend, &jwt).result.unwrap();
+            let token = human["token"].as_str().unwrap();
+            let service = QueueService {
+                backend: &backend,
+                build: "b",
+                pid: 1,
+            };
+            let before = backend.human.lock().unwrap().records.len();
+            {
+                let mut memory = backend.human.lock().unwrap();
+                memory.fail_record = fail_record;
+                memory.fail_commit = !fail_record;
+            }
+            let failed = service.handle_from(
+                &request(
+                    Some(token),
+                    UseCase::IssueToken,
+                    json!({"principal": Principal::human_inbox(jwt.identity.clone()),
+                           "opened": {"provider": "claude"}}),
+                ),
+                Peer::Absent,
+            );
+            assert!(!failed.ok, "{failed:?}");
+            assert!(failed.result.is_none());
+            let memory = backend.human.lock().unwrap();
+            assert_eq!(memory.records.len(), before, "fail_record {fail_record}");
+            assert!(
+                memory
+                    .records
+                    .values()
+                    .all(|(principal, _)| principal.parent_human.is_none()),
+                "no inbox token is left"
+            );
+            drop(memory);
+            assert!(
+                !backend
+                    .log
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["broker_event"] == "inbox_opened")
+            );
+        }
+    }
+
+    /// A session hook's `parent` is the caller's token's, never the
+    /// request's: a person's inbox's hook names that person, any other
+    /// caller's names none, and a forged one is dropped.
+    #[test]
+    fn a_hook_names_the_parent_of_the_callers_token_alone() {
+        use crate::domain::oidc::OidcIdentity;
+        let person = OidcIdentity {
+            issuer: "https://idp".into(),
+            subject: "a".into(),
+        };
+        let forged = json!({"op": "hook", "hook": {"kind": "inbox", "parent": {"issuer": "x", "subject": "y"}}});
+        let inbox = Principal::human_inbox(person.clone());
+        assert_eq!(
+            hook_of_parent(UseCase::SessionRecord, &forged, &inbox)["hook"]["parent"],
+            json!(person)
+        );
+        let host = Principal::of(&ActorContext::new(ActorRole::Inbox, "inbox"));
+        assert!(
+            hook_of_parent(UseCase::SessionRecord, &forged, &host)["hook"]
+                .get("parent")
+                .is_none()
+        );
+        assert_eq!(hook_of_parent(UseCase::Show, &forged, &inbox), forged);
+    }
+
+    /// `status --role inbox` of a person's inbox judges its guardrail by
+    /// that person's launch; the host's inbox and the user keep the
+    /// queue's newest.
+    #[test]
+    fn a_persons_inbox_status_judges_the_guardrail_by_its_parent() {
+        let (backend, jwt) = human_fixture();
+        backend.human.lock().unwrap().guardrail_status = true;
+        let human = exchange_human(&backend, &jwt).result.unwrap();
+        let token = human["token"].as_str().unwrap();
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let issued = service.handle_from(
+            &request(
+                Some(token),
+                UseCase::IssueToken,
+                json!({"principal": Principal::human_inbox(jwt.identity.clone())}),
+            ),
+            Peer::Absent,
+        );
+        let inbox = issued.result.unwrap()["token"].as_str().unwrap().to_owned();
+        let status = |token: Option<&str>, peer| {
+            service
+                .handle_from(
+                    &request(token, UseCase::Status, json!({"role": "inbox"})),
+                    peer,
+                )
+                .result
+                .unwrap()
+        };
+        assert_eq!(
+            status(Some(&inbox), Peer::Absent)["inbox_guardrail"],
+            json!({"of": jwt.identity})
+        );
+        assert_eq!(
+            status(Some(token), Peer::Absent)["inbox_guardrail"],
+            json!({"of": "the host"})
+        );
+        assert_eq!(
+            status(None, Peer::Owner)["inbox_guardrail"],
+            json!({"of": "the host"})
+        );
+    }
+
+    /// At the outward entrance a person's token revokes the token of that
+    /// person's inbox alone, whatever their team role, in the write
+    /// transaction, and answers whether there was one; another person's
+    /// inbox, another role and a caller that is no person's token are
+    /// `authorization_denied`, with nothing revoked.
+    #[test]
+    fn a_person_revokes_their_own_inbox_token_alone() {
+        use crate::domain::{oidc::OidcIdentity, queue_service::TeamRole};
+        for role in [TeamRole::Admin, TeamRole::Member] {
+            let (backend, jwt) = human_fixture();
+            backend.human.lock().unwrap().member.as_mut().unwrap().role = role;
+            let human = exchange_human(&backend, &jwt).result.unwrap();
+            let token = human["token"].as_str().unwrap();
+            let service = QueueService {
+                backend: &backend,
+                build: "b",
+                pid: 1,
+            };
+            let own = Principal::human_inbox(jwt.identity.clone());
+            let issued = service.handle_from(
+                &request(Some(token), UseCase::IssueToken, json!({"principal": own})),
+                Peer::Absent,
+            );
+            let inbox = issued.result.unwrap()["token"].as_str().unwrap().to_owned();
+            backend.human.lock().unwrap().revoking = true;
+            let revoke = |caller: &str, principal: &Principal| {
+                service.handle_from(
+                    &request(
+                        Some(caller),
+                        UseCase::RevokeToken,
+                        json!({"principal": principal}),
+                    ),
+                    Peer::Absent,
+                )
+            };
+            let other = Principal::human_inbox(OidcIdentity {
+                subject: "other".into(),
+                ..jwt.identity.clone()
+            });
+            let worker = Principal::of(&ActorContext::new(ActorRole::Worker, "w"));
+            for (caller, principal) in [(token, &other), (token, &worker), (inbox.as_str(), &own)] {
+                let refused = revoke(caller, principal);
+                assert_eq!(
+                    code(&refused),
+                    Some(ServiceErrorCode::AuthorizationDenied),
+                    "{role:?} {principal:?}"
+                );
+            }
+            assert!(backend.principal(&inbox).unwrap().is_some());
+            let revoked = revoke(token, &own);
+            assert_eq!(revoked.result, Some(json!(true)), "{role:?} {revoked:?}");
+            assert!(backend.principal(&inbox).unwrap().is_none());
+            assert_eq!(revoke(token, &own).result, Some(json!(false)));
+            // The person's own token stays.
+            assert!(backend.principal(token).unwrap().is_some());
         }
     }
 

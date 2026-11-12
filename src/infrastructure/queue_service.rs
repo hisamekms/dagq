@@ -150,7 +150,7 @@ pub fn socket_path(queue_dir: &Path) -> PathBuf {
 }
 
 /// The directory of the sockets that do not fit under their queue.
-fn short_socket_dir() -> PathBuf {
+pub(super) fn short_socket_dir() -> PathBuf {
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
     PathBuf::from(format!("/tmp/dagq-{uid}"))
@@ -158,7 +158,7 @@ fn short_socket_dir() -> PathBuf {
 
 /// Make the directory `socket` goes in when it is not the queue's own:
 /// this user's, mode 0700, and no link.
-fn prepare_socket_dir(socket: &Path) -> Result<()> {
+pub(super) fn prepare_socket_dir(socket: &Path) -> Result<()> {
     let dir = socket.parent().context("a socket needs a directory")?;
     match fs::create_dir(dir) {
         Ok(()) => {}
@@ -1853,6 +1853,7 @@ fn request_refused(past: RequestPastLimit) -> anyhow::Error {
             rejected: false,
             held: None,
             session_of_another_target: false,
+            relayed: false,
         },
     )
 }
@@ -2184,6 +2185,12 @@ pub enum ClientRoute {
     /// line attaches the person's ([`Client::with_bearer`]), a runner or a
     /// CI its own.
     Control { url: String, bearer: Option<Bearer> },
+    /// The relay of the person's inbox the agent runs in
+    /// ([`INBOX_RELAY_ENV`](crate::domain::queue_service::INBOX_RELAY_ENV)):
+    /// the unix socket of the `dagq inbox` that started it, which sends
+    /// each request to the control side with the inbox's token. This
+    /// client reads no token and opens no store: its requests carry none.
+    Relay(PathBuf),
 }
 
 /// Where the token of a call to a control side comes from
@@ -2197,6 +2204,13 @@ pub trait BearerSource: Send + Sync {
     /// new one. An error sends nothing and says what to do next (`dagq
     /// login`), never a token's value.
     fn token(&self, url: &str, renew: bool) -> Result<String>;
+    /// [`Self::token`] and whether reading it renewed it already (an
+    /// expired token renewed before the first send): [`call_control`]
+    /// counts such a renewal as its one. A source that does not tell
+    /// renews only when asked to.
+    fn token_read(&self, url: &str, renew: bool) -> Result<(String, bool)> {
+        self.token(url, renew).map(|token| (token, renew))
+    }
 }
 
 /// A [`BearerSource`] a route holds: compared by identity, and printed
@@ -2266,6 +2280,11 @@ const NEXT_CONTROL_SIDE: &str = "dagq service status, from the control side, say
 /// do next.
 const NEXT_CONTROL_URL: &str = "the control side's deployment (its TLS end and health check) \
                                 says why";
+/// What an inbox's `dagq` that gets no answer from its relay says to do
+/// next: the `dagq inbox` that relayed it ended, and the person opens it
+/// again.
+const NEXT_RELAY: &str = "the dagq inbox that started this inbox has ended or does not answer: \
+                          end this inbox and run dagq inbox again in the person's terminal";
 /// What the host's `dagq` that gets no answer says to do next
 /// (ADR-t3102-3 decision 2).
 const NEXT_HOST: &str = "dagq service status says why, and dagq up (or dagq service start) \
@@ -2291,6 +2310,31 @@ impl Client {
             CONTROL_URL_ENV, CREDENTIAL_FILE_ENV, SOCKET_ENV, URL_ENV, broker_address,
         };
         let named = |name: &str| env(name).filter(|value| !value.trim().is_empty());
+        if let Some(relay) = named(crate::domain::queue_service::INBOX_RELAY_ENV) {
+            let beside: Vec<&str> = [SOCKET_ENV, URL_ENV, CONTROL_URL_ENV, CREDENTIAL_FILE_ENV]
+                .into_iter()
+                .filter(|name| named(name).is_some())
+                .collect();
+            if !beside.is_empty() {
+                return Err(ClientFailure::new(
+                    "client_misconfigured",
+                    format!(
+                        "{} is set with {}, and an inbox's dagq goes through its relay alone: it \
+                         runs no command, opens no queue and reads no token",
+                        crate::domain::queue_service::INBOX_RELAY_ENV,
+                        beside.join(" and ")
+                    ),
+                ));
+            }
+            return Ok(Some(Self {
+                route: ClientRoute::Relay(PathBuf::from(relay)),
+                credential: None,
+                env_role: named(crate::domain::actor::ROLE_ENV),
+                next: NEXT_RELAY,
+                queue: None,
+                binding: None,
+            }));
+        }
         if let Some(url) = named(CONTROL_URL_ENV) {
             let beside: Vec<&str> = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV]
                 .into_iter()
@@ -2497,8 +2541,19 @@ impl Client {
                 call_control(&http, url, bearer, &request, timeout)
                     .map_err(|error| control_failure(error, use_case, self.next))?
             }
+            ClientRoute::Relay(socket) => {
+                let response = call(socket, &control_request(use_case, params), timeout)
+                    .map_err(|error| no_answer(&error, use_case, self.next))?;
+                relay_answer(response)?
+            }
         };
         answer_of(response)
+    }
+
+    /// Whether this client goes through an inbox's relay
+    /// ([`ClientRoute::Relay`]).
+    pub fn reaches_a_relay(&self) -> bool {
+        matches!(self.route, ClientRoute::Relay(_))
     }
 
     /// This client with `bearer` as the token of its calls to a control
@@ -2519,7 +2574,7 @@ impl Client {
         match &self.route {
             ClientRoute::Socket(socket) => hello(socket, PROBE_TIMEOUT)
                 .map_err(|error| self.not_answered(&error, UseCase::Hello).into()),
-            ClientRoute::Broker { .. } | ClientRoute::Control { .. } => {
+            ClientRoute::Broker { .. } | ClientRoute::Control { .. } | ClientRoute::Relay(_) => {
                 self.call_within(UseCase::Hello, Value::Null, PROBE_TIMEOUT)
             }
         }
@@ -2591,7 +2646,9 @@ impl Client {
             params: Value::Null,
         };
         let response = match &self.route {
-            ClientRoute::Socket(socket) => call(socket, &request, PROBE_TIMEOUT),
+            ClientRoute::Socket(socket) | ClientRoute::Relay(socket) => {
+                call(socket, &request, PROBE_TIMEOUT)
+            }
             ClientRoute::Broker { address, run } => {
                 // The broker lets through only a request with a token, and
                 // records the refusal of one without: with no token to
@@ -2652,6 +2709,83 @@ fn reach_control(http: &dyn ControlHttp, url: &str) -> Value {
     reach_of(response)
 }
 
+/// What the agent's client takes from its relay's `response`: the answer,
+/// unless the control side answers versions this client does not take,
+/// which stops with the range and the install guide as the person's
+/// client does ([`call_control`]).
+fn relay_answer(response: ServiceResponse) -> Result<ServiceResponse> {
+    if !crate::domain::queue_service::understands(&response) {
+        return Err(crate::application::login::ApiVersionMismatch {
+            minimum: response.min_api_version.into(),
+            maximum: response.api_version.into(),
+        }
+        .into());
+    }
+    Ok(response)
+}
+
+/// `use_case` with `params` sent through `http` to the control side at
+/// `url` with the person's token from `person`
+/// (`credentials::PersonBearer`, renewed once in all, on an expiry or a
+/// refusal, [`call_control`]): what the relay's parent alone does, for the
+/// inbox's `issue_token` and `revoke_token` (`application::inbox_relay`).
+/// The result, or why there is none.
+pub fn person_call_with(
+    http: &dyn ControlHttp,
+    person: &dyn BearerSource,
+    url: &str,
+    use_case: UseCase,
+    params: Value,
+) -> Result<Value> {
+    let request = control_request(use_case, params);
+    let response = call_control(http, url, Some(person), &request, CLIENT_TIMEOUT)
+        .map_err(|error| control_failure(error, use_case, NEXT_CONTROL_URL))?;
+    answer_of(response)
+}
+
+/// One request of an inbox's relay to the control side at `url` with
+/// `token` as its `Bearer` ([`send_control`]), as an answer whatever
+/// happens, which goes back to the agent's `dagq` as it is: a refusal of
+/// the client's own in the answer's shape (no answer is `unreachable`; a
+/// code the service has no name of, a `store_unavailable`, is `failed`
+/// with the code first in its message).
+pub fn relay_send(
+    http: &dyn ControlHttp,
+    url: &str,
+    token: Option<&str>,
+    request: &ServiceRequest,
+) -> ServiceResponse {
+    let error = match send_control(http, url, token, request, CLIENT_TIMEOUT) {
+        Ok(response) => return response,
+        Err(error) => error,
+    };
+    if error.is::<RequestPastLimit>() {
+        return ServiceResponse::failure(ServiceErrorCode::RequestTooLarge, format!("{error:#}"));
+    }
+    if error.is::<AnswerPastLimit>() {
+        return ServiceResponse::failure(ServiceErrorCode::ResponseTooLarge, format!("{error:#}"));
+    }
+    match error.downcast_ref::<ClientFailure>() {
+        Some(failure) => match failure.code.parse::<ServiceErrorCode>() {
+            Ok(code) => ServiceResponse::failure(code, failure.message.clone()),
+            Err(_) => {
+                let mut response = ServiceResponse::failure(
+                    ServiceErrorCode::Failed,
+                    format!("{}: {}", failure.code, failure.message),
+                );
+                if let Some(error) = response.error.as_mut() {
+                    error.relayed = true;
+                }
+                response
+            }
+        },
+        None => ServiceResponse::failure(
+            ServiceErrorCode::Unreachable,
+            format!("{error:#}; {NEXT_CONTROL_URL}"),
+        ),
+    }
+}
+
 /// Whether the token's `file` is one the queue at `db` issued: a file in
 /// that queue's `service/credentials/` ([`credential_path`]), the file's
 /// directory resolved and the queue's directory resolved with the two
@@ -2684,11 +2818,16 @@ fn answer_of(response: ServiceResponse) -> Result<Value> {
         .into());
     }
     if let Some(error) = response.error {
+        // A code a relay passed on is reported as the HTTPS route does.
+        let (code, message) = match error.relayed_code() {
+            Some((code, message)) => (code.to_owned(), message.to_owned()),
+            None => (error.code.as_str().to_owned(), error.message.clone()),
+        };
         return Err(ClientFailure {
             denied: error
                 .denied
                 .filter(|_| error.code == ServiceErrorCode::AuthorizationDenied),
-            ..ClientFailure::new(error.code.as_str(), error.message)
+            ..ClientFailure::new(&code, message)
         }
         .into());
     }
@@ -2871,7 +3010,8 @@ pub fn control_next(response: &ServiceResponse, bearer: bool, renewed: bool) -> 
 /// `request` to the control side at `url` with the token of `bearer`
 /// (none with `None`): read before the first send and, after an
 /// `unauthenticated`, once more as a renewal before the one send again
-/// ([`control_next`]). A token that does not read is `no_credential` and
+/// ([`control_next`]), unless the first read renewed it already
+/// ([`BearerSource::token_read`]), when the refusal asks for the login. A token that does not read is `no_credential` and
 /// sends nothing; an answer of versions this client does not take is
 /// [`ApiVersionMismatch`](crate::application::login::ApiVersionMismatch),
 /// the range it needs and to install a compatible `dagq`.
@@ -2883,20 +3023,24 @@ pub fn call_control(
     timeout: Duration,
 ) -> Result<ServiceResponse> {
     check_control_url(url)?;
-    let token = |renew| -> Result<Option<String>> {
+    let token = |renew| -> Result<Option<(String, bool)>> {
         bearer
-            .map(|source| source.token(url, renew))
+            .map(|source| source.token_read(url, renew))
             .transpose()
             .map_err(|error| ClientFailure::new("no_credential", format!("{error:#}")).into())
     };
-    let mut response = send_control(http, url, token(false)?.as_deref(), request, timeout)?;
-    let mut renewed = false;
+    let first = token(false)?;
+    // A renewal at the first read is the call's one.
+    let mut renewed = first.as_ref().is_some_and(|(_, renewed)| *renewed);
+    let sent = |read: &Option<(String, bool)>| read.as_ref().map(|(token, _)| token.clone());
+    let mut response = send_control(http, url, sent(&first).as_deref(), request, timeout)?;
     loop {
         match control_next(&response, bearer.is_some(), renewed) {
             ControlNext::Answer => break,
             ControlNext::Renew => {
                 renewed = true;
-                response = send_control(http, url, token(true)?.as_deref(), request, timeout)?;
+                let again = sent(&token(true)?);
+                response = send_control(http, url, again.as_deref(), request, timeout)?;
             }
             ControlNext::Login => {
                 return Err(ClientFailure::new(
@@ -6206,9 +6350,12 @@ struct IssueQueue<'a, T: super::sql_exec::SqlRead> {
     now_ms: i64,
 }
 
-impl<T: super::sql_exec::SqlRead> crate::application::queue_service::IssueFacts
+impl<T: super::sql_exec::SqlWrite> crate::application::queue_service::IssueFacts
     for IssueQueue<'_, T>
 {
+    fn record(&self, kind: EventKind, payload: &Value) -> Result<()> {
+        super::store_writes::record_queue_event_in(self.tx, kind, payload)
+    }
     fn member(
         &self,
         identity: &crate::domain::oidc::OidcIdentity,
@@ -6544,6 +6691,20 @@ where
             }
             None => EventStore::record_queue_event(&self.queue, kind, payload).map(Some),
         }
+    }
+
+    fn inbox_guardrail_of(&self, parent: &crate::domain::oidc::OidcIdentity) -> Result<Value> {
+        let opened = self
+            .queue
+            .latest_inbox_opened(Some((&parent.issuer, &parent.subject)))?;
+        let reached = self.queue.latest_inbox_event(
+            EventKind::InboxGuardrailReached,
+            Some((&parent.issuer, &parent.subject)),
+        )?;
+        Ok(crate::application::inbox_guardrail::judge_latest(
+            opened.as_ref(),
+            reached.as_ref(),
+        ))
     }
     fn proposals(&self, all: bool) -> Result<Value> {
         Ok(json!({"proposals": TaskReads::proposals(&self.queue, all)?}))

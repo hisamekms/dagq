@@ -439,6 +439,85 @@ pub fn inbox(
     OneShot::system().inbox(location, repo, environment, options)
 }
 
+/// `dagq inbox` with `DAGQ_CONTROL_URL` alone, at `url` (ADR-t3985-1
+/// decision 6), wired: [`lifecycle::control_inbox`] decides the agent
+/// without the host's steps (no queue resolved, no DB, no launchd or
+/// supervisor looked at), then
+/// [`crate::application::inbox_relay::run_session`] gets the inbox's
+/// token, opens the relay and runs the agent, with this machine's adapters
+/// ([`crate::infrastructure::inbox_relay::HostInboxSession`]). The agent is
+/// not exec'd but this process's foreground child in `cwd` (ADR-t2159-1
+/// decision 2 keeps it in the person's terminal): this process stays to
+/// relay and, when the agent ends or a `SIGHUP` or `SIGTERM` ends the
+/// session, to revoke the token. Should this process die first, the token
+/// ends with its expiry (no later than the person's) or the next open, and
+/// the agent's `dagq` stops at a relay that does not answer.
+pub fn control_inbox(
+    url: &str,
+    cwd: &Path,
+    environment: &UpEnvironment,
+    options: &InboxOptions,
+) -> Result<i32> {
+    use crate::infrastructure::inbox_relay;
+    let claude = ClaudeCode {
+        executable: crate::infrastructure::adapters::claude_at_entry(&options.agent)
+            .unwrap_or_else(|_| options.agent.clone()),
+    };
+    let codex = crate::infrastructure::codex::Codex::new(
+        crate::infrastructure::codex::codex_at_entry(&options.codex)
+            .unwrap_or_else(|_| options.codex.clone()),
+    );
+    let relay_path = inbox_relay::prepared_socket_path()?;
+    let settings_dir = inbox_relay::settings_dir()?;
+    let start = lifecycle::control_inbox(
+        &lifecycle::ControlInboxPorts {
+            files: &LocalRunFiles,
+            resolve_language: &|dir, user_config| {
+                crate::infrastructure::language::resolve_language(Some(dir), user_config)
+            },
+            roles: &crate::infrastructure::run_env::load_inbox_role,
+            codex_settings: &crate::infrastructure::codex_inbox::check_this_user_config,
+            codex_usable: &crate::infrastructure::codex_inbox::check_this_codex,
+        },
+        &InboxAgents {
+            claude: &claude,
+            codex: &codex,
+        },
+        &lifecycle::ControlInboxPlace {
+            url,
+            cwd,
+            settings_dir: &settings_dir,
+            relay: &relay_path,
+        },
+        environment,
+        &InboxOptions {
+            agent: claude.executable.clone(),
+            codex: codex.executable.clone(),
+            ..options.clone()
+        },
+    )?;
+    let person = inbox_relay::person(url).map_err(|error| {
+        anyhow::anyhow!("get the inbox's token: {error:#}; the inbox was not opened")
+    })?;
+    crate::application::inbox_relay::run_session(
+        &inbox_relay::HostInboxSession {
+            url,
+            person: &person,
+            relay: &relay_path,
+            command: &start.command,
+        },
+        &start.opened,
+        Arc::new(inbox_relay::StoreTokens {
+            url: url.to_owned(),
+            person: person.clone(),
+        }),
+        Arc::new(inbox_relay::HttpRelaySend {
+            url: url.to_owned(),
+            http: crate::infrastructure::oidc_keys::HttpsDocumentSource::for_control(),
+        }),
+    )
+}
+
 /// The programs the `[run.env]` of the `dagq.toml` in `checkout` names,
 /// resolved on `path`, the PATH of `up` and of the supervisor it starts
 /// (ADR-0049 decision 9).

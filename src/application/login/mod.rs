@@ -14,6 +14,25 @@ pub struct Credentials {
     pub token: String,
     pub refresh_token: Option<String>,
     pub identity: Identity,
+    /// The token of this person's inbox at the set's control side, which
+    /// `dagq inbox` got with [`Self::token`] and its relay sends the inbox's
+    /// requests with (ADR-t3985-1 decision 6): kept in the set, so bound to
+    /// its destination, gone with `logout` and replaced with the set by a
+    /// login; a renewal keeps it ([`read_token`]). Never in env or argv.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox: Option<InboxToken>,
+}
+/// An inbox's token and when it expires (Unix seconds, no later than the
+/// person's token it was issued with).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxToken {
+    pub token: String,
+    pub expires_at: i64,
+}
+impl std::fmt::Debug for InboxToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "InboxToken(.., expires_at: {})", self.expires_at)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Destination {
@@ -272,7 +291,29 @@ pub trait CredentialStore {
     fn load(&self) -> Result<Option<Credentials>>;
     fn save(&self, credentials: &Credentials) -> Result<()>;
     fn delete(&self) -> Result<()>;
+    /// Hold `lock` of the place this store keeps its set in, until what it
+    /// gives is dropped. Every process that reads and writes that set takes
+    /// the same lock whatever its environment (the OS's store is one per OS
+    /// user, a file's is its directory), so the store decides where the
+    /// lock lives and no caller names it.
+    fn hold(&self, lock: StoreLock) -> Result<StoreHold>;
 }
+
+/// Which of a store's locks [`CredentialStore::hold`] takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreLock {
+    /// Every change of the set, from its load to its save (`dagq login`,
+    /// `logout`, a renewal, an inbox's token kept or taken out), so none
+    /// undoes another.
+    Change,
+    /// An inbox token's ask to its keeping, by every `dagq inbox` of the
+    /// set, so a token issued earlier never replaces a later one (the later
+    /// issue revoked it). Taken before [`Self::Change`], never under it.
+    Issue,
+}
+
+/// A store's lock, held until it is dropped.
+pub type StoreHold = Box<dyn std::any::Any>;
 /// Bounded synchronous JSON transport; form replies may contain OAuth errors.
 pub trait LoginHttp {
     fn get(&self, url: &str) -> Result<Value>;
@@ -348,6 +389,7 @@ fn received(dest: &Destination, answer: Value, refresh: Option<String>) -> Resul
         token: token.into(),
         refresh_token: refresh,
         identity,
+        inbox: None,
     })
 }
 pub fn login(
@@ -520,7 +562,46 @@ pub fn read_token(
     http: &dyn LoginHttp,
     store: &dyn CredentialStore,
 ) -> Result<Credentials> {
+    read_set(control, RenewalOf::Terminal, rejected, now, http, store)
+}
+
+/// Whose a renewed set must stay for [`keep_renewal`]: the terminal's (a
+/// set renewed as another person is kept without the old set's inbox
+/// token) or the person an inbox was opened for (one renewed as another
+/// is not kept at all, [`PERSON_CHANGED`]).
+#[derive(Clone, Copy, Debug)]
+enum RenewalOf<'a> {
+    Terminal,
+    Person(&'a crate::domain::oidc::OidcIdentity),
+}
+
+/// [`read_token`] for `of`: the store's set renewed when [`renewal`] says
+/// so ([`renewed_set`]).
+fn read_set(
+    control: &str,
+    of: RenewalOf<'_>,
+    rejected: Rejected,
+    now: i64,
+    http: &dyn LoginHttp,
+    store: &dyn CredentialStore,
+) -> Result<Credentials> {
     let old = store.load()?.ok_or_else(|| anyhow::anyhow!(LOGIN_AGAIN))?;
+    renewed_set(old, control, of, rejected, now, http, store)
+}
+
+/// The set `old`, read once by the caller, as it is or renewed when
+/// [`renewal`] says so, and kept only through [`keep_renewal`]: the store is
+/// not read again, so what is given is `old` or its renewal, never a set
+/// read later (the default store may read another backend each time).
+fn renewed_set(
+    old: Credentials,
+    control: &str,
+    of: RenewalOf<'_>,
+    rejected: Rejected,
+    now: i64,
+    http: &dyn LoginHttp,
+    store: &dyn CredentialStore,
+) -> Result<Credentials> {
     match renewal(&old, control, now, rejected) {
         Renewal::Keep => Ok(old),
         Renewal::Login => bail!(LOGIN_AGAIN),
@@ -543,14 +624,175 @@ pub fn read_token(
                 )?;
                 let (jwt, refresh) =
                     refresh_response(&answer, old.refresh_token.as_deref().unwrap())?;
-                let fresh = received(dest, http.exchange(&dest.control_url, jwt)?, Some(refresh))?;
-                store.save(&fresh)?;
-                Ok(fresh)
+                received(dest, http.exchange(&dest.control_url, jwt)?, Some(refresh))
             };
-            attempt().map_err(|_| anyhow::anyhow!(LOGIN_AGAIN))
+            let fresh = attempt().map_err(|_| anyhow::anyhow!(LOGIN_AGAIN))?;
+            keep_renewal(&old, fresh, of, store)
         }
     }
 }
+
+/// The one way a renewed set reaches the store, in this order: `fresh` is
+/// checked against `old`'s person (its issuer and subject) and `of`'s,
+/// then takes over `old`'s inbox token when it is that same person, then
+/// is saved. A renewal for an inbox whose `fresh` names another person is
+/// [`PERSON_CHANGED`] with nothing saved, so the store keeps `old`; the
+/// terminal's keeps `fresh` without the inbox token, which stays with the
+/// person it was issued for.
+fn keep_renewal(
+    old: &Credentials,
+    mut fresh: Credentials,
+    of: RenewalOf<'_>,
+    store: &dyn CredentialStore,
+) -> Result<Credentials> {
+    let is = |identity: &Identity, person: &crate::domain::oidc::OidcIdentity| {
+        identity.issuer == person.issuer && identity.subject == person.subject
+    };
+    let same = fresh.identity.issuer == old.identity.issuer
+        && fresh.identity.subject == old.identity.subject;
+    if let RenewalOf::Person(person) = of {
+        ensure!(
+            same && is(&old.identity, person) && is(&fresh.identity, person),
+            PERSON_CHANGED
+        );
+    }
+    fresh.inbox = if same { old.inbox.clone() } else { None };
+    store
+        .save(&fresh)
+        .map_err(|_| anyhow::anyhow!(LOGIN_AGAIN))?;
+    Ok(fresh)
+}
+/// The set of `store` when it is for the control side at `control` (a
+/// trailing `/` aside); [`LOGIN_AGAIN`] when there is none (after `logout`)
+/// or it is another control side's, so nothing is sent there.
+fn set_for(control: &str, store: &dyn CredentialStore) -> Result<Credentials> {
+    let set = store.load()?.ok_or_else(|| anyhow::anyhow!(LOGIN_AGAIN))?;
+    ensure!(
+        control.trim_end_matches('/') == set.destination.control_url.trim_end_matches('/'),
+        LOGIN_AGAIN
+    );
+    Ok(set)
+}
+
+/// The token of `person` for `control` ([`read_token`]) while the set is
+/// still theirs ([`set_of_person`]), before a renewal and after it (a
+/// renewal whose exchange names another issuer or subject is
+/// [`PERSON_CHANGED`] before anything is kept, [`keep_renewal`], so nothing
+/// is sent with it and the store keeps the person's set), and whether reading it
+/// renewed it ([`Renewal::Refresh`]: expired, or `rejected`). Such a
+/// renewal is the call's one renewal, so the control side's refusal of the
+/// token it gave asks for the login rather than a second renewal.
+pub fn read_person_token(
+    control: &str,
+    person: &crate::domain::oidc::OidcIdentity,
+    rejected: Rejected,
+    now: i64,
+    http: &dyn LoginHttp,
+    store: &dyn CredentialStore,
+) -> Result<(String, bool)> {
+    // The one set checked to be the person's is the one renewed or given,
+    // and the one the renewal is told of.
+    let set = set_of_person(control, person, store)?;
+    let renewed = renewal(&set, control, now, rejected) == Renewal::Refresh;
+    let read = renewed_set(
+        set,
+        control,
+        RenewalOf::Person(person),
+        rejected,
+        now,
+        http,
+        store,
+    )?;
+    Ok((read.token, renewed))
+}
+
+/// Why an inbox stops when the store's set for its control side is no
+/// longer of the person it was opened for (a login as another person).
+pub const PERSON_CHANGED: &str = "the person logged in to this control side is not the one this \
+     inbox was opened for: open the inbox again with dagq inbox";
+
+/// The person of the set for `control` ([`set_for`]): the one an inbox
+/// opened now is bound to.
+pub fn person_of(
+    control: &str,
+    store: &dyn CredentialStore,
+) -> Result<crate::domain::oidc::OidcIdentity> {
+    let set = set_for(control, store)?;
+    Ok(crate::domain::oidc::OidcIdentity {
+        issuer: set.identity.issuer,
+        subject: set.identity.subject,
+    })
+}
+
+/// The set for `control` when it is still `person`'s ([`PERSON_CHANGED`]
+/// when another person logged in since).
+pub fn set_of_person(
+    control: &str,
+    person: &crate::domain::oidc::OidcIdentity,
+    store: &dyn CredentialStore,
+) -> Result<Credentials> {
+    let set = set_for(control, store)?;
+    ensure!(
+        set.identity.issuer == person.issuer && set.identity.subject == person.subject,
+        PERSON_CHANGED
+    );
+    Ok(set)
+}
+
+/// The inbox's token kept with `person`'s set for `control`, read on each
+/// request a relay sends, so a `logout` or another `dagq inbox`'s new token
+/// takes effect from the next one: `None` when the set holds none or it
+/// expired by `now`; [`LOGIN_AGAIN`] when there is no set for `control`,
+/// [`PERSON_CHANGED`] when it is another person's.
+pub fn read_inbox_token(
+    control: &str,
+    person: &crate::domain::oidc::OidcIdentity,
+    now: i64,
+    store: &dyn CredentialStore,
+) -> Result<Option<String>> {
+    Ok(set_of_person(control, person, store)?
+        .inbox
+        .filter(|inbox| now < inbox.expires_at)
+        .map(|inbox| inbox.token))
+}
+
+/// Keep `inbox` with `person`'s set for `control`, in place of the one it
+/// held; refused as [`read_inbox_token`] is.
+pub fn keep_inbox_token(
+    control: &str,
+    person: &crate::domain::oidc::OidcIdentity,
+    inbox: InboxToken,
+    store: &dyn CredentialStore,
+) -> Result<()> {
+    let mut set = set_of_person(control, person, store)?;
+    set.inbox = Some(inbox);
+    store.save(&set)
+}
+
+/// Take the inbox's token out of `person`'s set for `control`, whichever
+/// it is: the session's end revokes the person's inbox at the control
+/// side, which holds one token of it alone, so the store holds none
+/// either. Nothing to do with no set, one of another control side or of
+/// another person; a store that cannot be read is the error.
+pub fn forget_inbox_token(
+    control: &str,
+    person: &crate::domain::oidc::OidcIdentity,
+    store: &dyn CredentialStore,
+) -> Result<()> {
+    let Some(mut set) = store.load()? else {
+        return Ok(());
+    };
+    let same_place =
+        control.trim_end_matches('/') == set.destination.control_url.trim_end_matches('/');
+    let same_person =
+        set.identity.issuer == person.issuer && set.identity.subject == person.subject;
+    if !same_place || !same_person || set.inbox.is_none() {
+        return Ok(());
+    }
+    set.inbox = None;
+    store.save(&set)
+}
+
 pub fn whoami(http: &dyn LoginHttp, store: &dyn CredentialStore, now: i64) -> Result<Value> {
     let stored = store.load()?.ok_or_else(|| anyhow::anyhow!(LOGIN_AGAIN))?;
     let credentials = read_token(
@@ -632,6 +874,19 @@ impl CredentialStore for Stores<'_> {
                 }
             }
         }
+    }
+    /// The lock of the store `choice` reads and writes: the OS's alone, the
+    /// file's alone, or for [`StoreChoice::Auto`] both, the OS's first in
+    /// every process.
+    fn hold(&self, lock: StoreLock) -> Result<StoreHold> {
+        Ok(match self.choice {
+            StoreChoice::File => self.file.hold(lock)?,
+            StoreChoice::Os => self.os.hold(lock)?,
+            StoreChoice::Auto => {
+                let os = self.os.hold(lock)?;
+                Box::new((os, self.file.hold(lock)?))
+            }
+        })
     }
 }
 

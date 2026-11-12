@@ -1,6 +1,6 @@
 //! Boundary: a real CLI talks to a loopback issuer and exchange endpoint and
 //! saves one private file. No Keychain calls, real IdP or queue service.
-use crate::common::{Bounded, actor::WithoutActor};
+use crate::common::{self, Bounded, actor::WithoutActor};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::{
@@ -17,7 +17,9 @@ use std::{
 
 #[test]
 fn device_login_uses_loopback_http_and_private_terminal_credentials() {
-    let root = tempfile::tempdir().unwrap();
+    // Under no run directory: the file store refuses one, and a worker's
+    // `TMPDIR` is in its run directory.
+    let root = common::short_tempdir();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

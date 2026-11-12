@@ -2809,6 +2809,136 @@ pub fn inbox_opened(
     })
 }
 
+/// What `dagq inbox` for a control side reads before it starts anything
+/// ([`control_inbox`]): the files, the language and `[roles.inbox]` of
+/// the directory it was typed in, and the checks of Codex, as the host's
+/// inbox reads them ([`InboxPorts`]). Nothing of a queue: no DB, no
+/// supervisor, no launchd.
+pub struct ControlInboxPorts<'a> {
+    pub files: &'a dyn RunFiles,
+    pub resolve_language: &'a ResolveLanguage,
+    pub roles: &'a dyn Fn(&Path) -> Result<crate::domain::actor_model::RoleModels>,
+    pub codex_settings: &'a dyn Fn(&Path) -> std::result::Result<(), String>,
+    pub codex_usable: &'a dyn Fn(&Path, &Path) -> std::result::Result<(), String>,
+}
+
+/// Where `dagq inbox` for a control side opens its inbox: the control
+/// side's `url`, the directory it was typed in (`cwd`, the agent's), the
+/// directory the guardrail's settings go in (`settings_dir`, under the
+/// user's configuration, as there is no queue's directory), and the
+/// session's relay socket (`relay`).
+pub struct ControlInboxPlace<'a> {
+    pub url: &'a str,
+    pub cwd: &'a Path,
+    pub settings_dir: &'a Path,
+    pub relay: &'a Path,
+}
+
+/// The agent's command of a person's inbox for a control side and the
+/// `inbox_opened` its open's `issue_token` carries.
+pub struct ControlInboxStart {
+    pub command: CommandSpec,
+    pub opened: Value,
+}
+
+/// `dagq inbox` with `DAGQ_CONTROL_URL` alone (ADR-t3985-1 decision 6):
+/// the inbox's agent for the person's terminal, decided before the
+/// person's token is read. None of the host's steps is taken (no queue is
+/// resolved or opened, no launchd or supervisor is looked at, no
+/// `claude_forbidden` read: a person's machine runs no supervisor). Inside
+/// an inbox it is [`INBOX_INSIDE_REFUSED`]; any other role but the user's is
+/// refused by the caller first
+/// ([`super::inbox_relay::open_refusal`]). The provider and model are
+/// [`inbox_route`]'s from `[roles.inbox]` of `cwd` and the arguments, the
+/// agent and the plugin are checked as `up` checks them
+/// ([`require_agent`]), and the command is the provider's
+/// [`AgentProvider::inbox_command`] in `cwd` with
+/// [`super::prompt::control_inbox_prompt`], reaching only the relay's
+/// socket ([`AgentProvider::reach_queue_service`]: Codex's profile with
+/// that socket and no domain or writable root; Claude's agent has no
+/// sandbox to open), with the environment of
+/// [`super::inbox_relay::agent_env`] and none of
+/// [`super::inbox_relay::agent_env_removed`].
+pub fn control_inbox(
+    ports: &ControlInboxPorts,
+    agents: &InboxAgents,
+    place: &ControlInboxPlace,
+    environment: &UpEnvironment,
+    options: &InboxOptions,
+) -> Result<ControlInboxStart> {
+    ensure!(
+        environment.role.as_deref() != Some(INBOX_ROLE),
+        INBOX_INSIDE_REFUSED
+    );
+    let cwd = place.cwd;
+    let roles = (ports.roles)(cwd)
+        .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
+    let launch = inbox_route(
+        &roles,
+        options,
+        &InboxChecks {
+            claude_forbidden: false,
+            codex_usable: &|| (ports.codex_usable)(&options.codex, cwd),
+            codex_settings: &|| (ports.codex_settings)(cwd),
+        },
+    )
+    .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
+    let (agent, executable) = match launch.provider {
+        crate::domain::Provider::Claude => (agents.claude, &options.agent),
+        crate::domain::Provider::Codex => (agents.codex, &options.codex),
+    };
+    require_agent(
+        agent,
+        executable,
+        options.plugin_dir.as_deref(),
+        cwd,
+        "inbox",
+        launch.provider == crate::domain::Provider::Claude,
+    )
+    .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
+    let language = (ports.resolve_language)(cwd, environment.user_config.as_deref())
+        .map_err(|error| anyhow::anyhow!("{error:#}; the inbox was not opened"))?;
+    let plugin_dir = options
+        .plugin_dir
+        .as_deref()
+        .map(|dir| {
+            ports
+                .files
+                .canonicalize(dir)
+                .with_context(|| format!("plugin directory {}", dir.display()))
+        })
+        .transpose()?;
+    let prompt = with_instruction(
+        super::prompt::control_inbox_prompt(place.url),
+        language.as_ref(),
+    );
+    // Started through the actor executor as every AI actor is, on no
+    // queue: its program is the inbox for a control side alone.
+    let mut command = HostActorExecutor::for_a_control_side()
+        .with_provider(agent)
+        .spawn(ActorExecutionSpec::new(
+            session_actor(SessionRole::Inbox),
+            WorkspaceAccess::Write(cwd.to_path_buf()),
+            ActorProgram::ControlForeground {
+                cwd,
+                prompt,
+                plugin_dir: plugin_dir.as_deref(),
+                launch: &launch,
+                settings_dir: place.settings_dir,
+                relay: place.relay,
+            },
+        ))?
+        .foreground()?;
+    agent.apply_launch(&mut command, &launch);
+    agent.reach_queue_service(&mut command, place.relay);
+    let settings = agent.inbox_settings(place.settings_dir);
+    let hooks = agent.inbox_hooks()?;
+    Ok(ControlInboxStart {
+        command,
+        opened: inbox_opened(&launch, settings.as_deref(), hooks),
+    })
+}
+
 /// What a person looks at first after `up`: unfinished runs with whether their
 /// lease still has a live, heartbeating owner, and the runs that wait for
 /// review (`awaiting_integration`) or a resumed session (`needs_session`).
@@ -3291,6 +3421,152 @@ mod tests {
             provider,
             model: model.map(str::to_owned),
         }
+    }
+
+    /// An agent that makes the inbox's command and records the socket it
+    /// was let reach.
+    #[derive(Default)]
+    struct RelayAgent {
+        reached: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl AgentProvider for RelayAgent {
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn review_command(
+            &self,
+            _: &crate::domain::TaskRun,
+            _: &Path,
+            _: &str,
+            _: crate::domain::headless_job::JobAccess,
+        ) -> Result<CommandSpec> {
+            bail!("no review")
+        }
+        fn headless_command(
+            &self,
+            _: &Path,
+            _: &str,
+            _: crate::domain::headless_job::JobAccess,
+        ) -> Result<CommandSpec> {
+            bail!("no job")
+        }
+        fn turn_command(
+            &self,
+            _: &crate::application::TurnTarget<'_>,
+            _: &str,
+            _: crate::domain::turn::TurnSession<'_>,
+        ) -> Result<CommandSpec> {
+            bail!("no turn")
+        }
+        fn inbox_command(
+            &self,
+            prompt: &str,
+            _: Option<&Path>,
+            settings: &Path,
+            _: &Path,
+        ) -> Result<CommandSpec> {
+            let mut command = CommandSpec::new("/bin/codex");
+            command.arg(settings).arg("--").arg(prompt);
+            Ok(command)
+        }
+        fn reach_queue_service(&self, _: &mut CommandSpec, socket: &Path) {
+            self.reached.lock().unwrap().push(socket.to_owned());
+        }
+    }
+
+    /// `dagq inbox` for a control side: the agent in the directory it was
+    /// typed in, with the inbox's role and the relay's socket and none of
+    /// the person's routes, queue, login or store; its prompt names the
+    /// URL and no database; it may reach the relay's socket alone; and its
+    /// launch is what the open's issue carries. Inside an inbox nothing is
+    /// made.
+    #[test]
+    fn an_inbox_for_a_control_side_reaches_its_relay_alone() {
+        let agent = RelayAgent::default();
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let mut environment = UpEnvironment {
+            role: None,
+            queue: Some(PathBuf::from("/queue/queue.db")),
+            path: "/bin".into(),
+            config_home: None,
+            current_exe: PathBuf::from("/bin/dagq"),
+            claude_config: None,
+            user_config: None,
+            restart: false,
+            owner: None,
+        };
+        let relay = Path::new("/tmp/dagq-1/inbox-2.sock");
+        let start = |environment: &UpEnvironment| {
+            control_inbox(
+                &ControlInboxPorts {
+                    files: &files,
+                    resolve_language: &|_, _| Ok(None),
+                    roles: &|_| Ok(RoleModels::default()),
+                    codex_settings: &|_| Ok(()),
+                    codex_usable: &|_, _| Ok(()),
+                },
+                &InboxAgents {
+                    claude: &agent,
+                    codex: &agent,
+                },
+                &ControlInboxPlace {
+                    url: "https://control.example",
+                    cwd: Path::new("/work"),
+                    settings_dir: Path::new("/config/dagq/inbox"),
+                    relay,
+                },
+                environment,
+                &inbox_options(Some(Provider::Codex), None),
+            )
+        };
+        let started = start(&environment).unwrap();
+        let command = &started.command;
+        assert_eq!(command.get_current_dir(), Some(Path::new("/work")));
+        let env: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let last = |name: &str| {
+            env.iter()
+                .rev()
+                .find(|(named, _)| named == name)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(last("DAGQ_ROLE"), Some(Some("inbox".into())));
+        assert_eq!(
+            last(crate::domain::queue_service::INBOX_RELAY_ENV),
+            Some(Some(relay.display().to_string()))
+        );
+        for name in [
+            crate::domain::queue_service::CONTROL_URL_ENV,
+            QUEUE_ENV,
+            crate::domain::queue_service::CREDENTIAL_FILE_ENV,
+            "DAGQ_LOGIN_ISSUER",
+            "DAGQ_LOGIN_CLIENT_ID",
+            "DAGQ_CREDENTIAL_STORE",
+            "DAGQ_DB",
+        ] {
+            assert_eq!(last(name), Some(None), "{name} is removed");
+        }
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let prompt = args.last().unwrap();
+        assert!(prompt.contains("https://control.example"), "{prompt}");
+        assert!(!prompt.contains("queue.db"), "{prompt}");
+        assert_eq!(args[0], "/config/dagq/inbox");
+        assert_eq!(*agent.reached.lock().unwrap(), vec![relay.to_path_buf()]);
+        assert_eq!(started.opened["provider"], "codex");
+        environment.role = Some(INBOX_ROLE.into());
+        let refused = start(&environment).err().unwrap();
+        assert_eq!(refused.to_string(), INBOX_INSIDE_REFUSED);
     }
 
     /// The person's Codex settings are not looked at for a Claude inbox.

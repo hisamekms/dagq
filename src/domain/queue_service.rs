@@ -210,19 +210,62 @@ pub const SUPERVISOR_REGISTRATION_ENV: &str = "DAGQ_SUPERVISOR_REGISTRATION";
 /// every command (fail closed), and with none of them a stored credential
 /// alone never sends anything there.
 pub const CONTROL_URL_ENV: &str = "DAGQ_CONTROL_URL";
+/// The variable that names, to the agent of a person's inbox opened for a
+/// control side ([`CONTROL_URL_ENV`]), the unix socket of its relay: the
+/// `dagq inbox` that started it, which stays outside the agent's sandbox,
+/// takes each request on that socket and sends it to the control side with
+/// the inbox's token (ADR-t3985-1 decisions 6 and 8). With it, `dagq` opens
+/// no queue and no credential store and reads no token: it sends each
+/// command to the socket with none. Given with [`SOCKET_ENV`], [`URL_ENV`],
+/// [`CONTROL_URL_ENV`] or [`CREDENTIAL_FILE_ENV`], `dagq` refuses every
+/// command (fail closed).
+pub const INBOX_RELAY_ENV: &str = "DAGQ_INBOX_RELAY";
 /// The variables of a client-mode `dagq`: none of them reaches a child the
 /// control side starts.
-pub const CLIENT_ENV: [&str; 4] = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV, CONTROL_URL_ENV];
+pub const CLIENT_ENV: [&str; 5] = [
+    SOCKET_ENV,
+    URL_ENV,
+    CREDENTIAL_FILE_ENV,
+    CONTROL_URL_ENV,
+    INBOX_RELAY_ENV,
+];
+
+/// Whether `dagq inbox` opens a person's inbox for the control side
+/// [`CONTROL_URL_ENV`] names, on this machine, rather than the host's:
+/// when `env` names that URL and none of the other client variables.
+/// Beside another, client mode refuses it as it refuses every command.
+pub fn inbox_opens_for_a_control_side(env: impl Fn(&str) -> Option<String>) -> bool {
+    let named = |name: &str| env(name).is_some_and(|value| !value.trim().is_empty());
+    named(CONTROL_URL_ENV)
+        && [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV, INBOX_RELAY_ENV]
+            .into_iter()
+            .all(|name| !named(name))
+}
+
+/// Whether the token of a person (`caller`, a human token) revokes the
+/// inbox token held for `requested`: only that person's own inbox, the
+/// inbox whose parent is the caller's identity, whatever the person's team
+/// role (a member's own too, as its issue). Any other caller (an inbox's
+/// token, a human-parent inbox's too, a role's) and any other principal
+/// (another person's inbox, another role) are refused.
+pub fn human_inbox_revoke(caller: &Principal, requested: &Principal) -> bool {
+    caller.role == crate::domain::actor::ActorRole::User
+        && caller.human.is_some()
+        && caller.parent_human.is_none()
+        && requested.role == crate::domain::actor::ActorRole::Inbox
+        && requested.parent_human.is_some()
+        && requested.parent_human == caller.human
+}
 
 /// Whether a person's `login`, `logout` or `whoami` runs on its own
 /// terminal (`dagq`'s identity path, which `identity.login` authorizes for
 /// the user alone) rather than in client mode: when `env` names none of the
 /// client variables but [`CONTROL_URL_ENV`], which `login` reads as its
-/// destination and the other two do not read. With a socket, a broker or a
-/// token's file named, client mode refuses them (`control_side_command`,
+/// destination and the other two do not read. With a socket, a broker, a
+/// token's file or an inbox's relay named, client mode refuses them (`control_side_command`,
 /// or `client_misconfigured` beside [`CONTROL_URL_ENV`]).
 pub fn identity_runs_on_the_terminal(env: impl Fn(&str) -> Option<String>) -> bool {
-    [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV]
+    [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV, INBOX_RELAY_ENV]
         .into_iter()
         .all(|name| env(name).is_none_or(|value| value.trim().is_empty()))
 }
@@ -1075,6 +1118,24 @@ pub struct ServiceError {
     /// client cannot read).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub session_of_another_target: bool,
+    /// Whether a `failed` passes on a code a control side answered that
+    /// this build has no name of (a `store_unavailable`), as the message's
+    /// first word before `: `: an inbox's relay sets it, so the agent's
+    /// `dagq` reports that code as the HTTPS route does ([`Self::relayed_code`]);
+    /// a client that does not know the field reads the `failed`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relayed: bool,
+}
+
+impl ServiceError {
+    /// The code a relayed `failed` passes on and the rest of its message
+    /// ([`Self::relayed`]); `None` for any other error.
+    pub fn relayed_code(&self) -> Option<(&str, &str)> {
+        if !self.relayed || self.code != ServiceErrorCode::Failed {
+            return None;
+        }
+        self.message.split_once(": ")
+    }
 }
 
 /// A failure of a use case the caller tells apart from the others, as the
@@ -1293,6 +1354,7 @@ impl ServiceResponse {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }),
         }
     }
@@ -5387,5 +5449,105 @@ mod control_url_tests {
     fn the_control_url_is_a_client_variable() {
         assert!(CLIENT_ENV.contains(&CONTROL_URL_ENV));
         assert_eq!(CONTROL_URL_ENV, "DAGQ_CONTROL_URL");
+    }
+}
+
+#[cfg(test)]
+mod inbox_relay_tests {
+    use super::*;
+    use crate::domain::actor::{ActorContext, ActorRole};
+    use crate::domain::oidc::OidcIdentity;
+
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(named, _)| *named == name)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    /// `dagq inbox` opens a person's inbox for a control side only with
+    /// its URL alone: beside any other client variable it does not, and
+    /// without the URL it is the host's.
+    #[test]
+    fn an_inbox_opens_for_a_control_side_with_its_url_alone() {
+        assert!(inbox_opens_for_a_control_side(env_of(&[(
+            CONTROL_URL_ENV,
+            "https://c.example"
+        )])));
+        assert!(inbox_opens_for_a_control_side(env_of(&[
+            (CONTROL_URL_ENV, "https://c.example"),
+            (crate::domain::actor::ROLE_ENV, "worker"),
+            (SOCKET_ENV, " "),
+        ])));
+        assert!(!inbox_opens_for_a_control_side(env_of(&[])));
+        assert!(!inbox_opens_for_a_control_side(env_of(&[(
+            CONTROL_URL_ENV,
+            " "
+        )])));
+        for other in [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV, INBOX_RELAY_ENV] {
+            assert!(
+                !inbox_opens_for_a_control_side(env_of(&[
+                    (CONTROL_URL_ENV, "https://c.example"),
+                    (other, "/x"),
+                ])),
+                "{other}"
+            );
+        }
+    }
+
+    /// The relay's variable is a client one no child of the control side
+    /// inherits, and beside it `login`, `logout` and `whoami` are client
+    /// mode's to refuse.
+    #[test]
+    fn the_relay_is_a_client_variable() {
+        assert!(CLIENT_ENV.contains(&INBOX_RELAY_ENV));
+        assert_eq!(INBOX_RELAY_ENV, "DAGQ_INBOX_RELAY");
+        assert!(!identity_runs_on_the_terminal(env_of(&[(
+            INBOX_RELAY_ENV,
+            "/tmp/r.sock"
+        )])));
+    }
+
+    /// A person revokes their own inbox's token alone, whatever their team
+    /// role; another person's inbox, another role's principal and any
+    /// caller but a person's token (a person's inbox's too) are refused.
+    #[test]
+    fn a_person_revokes_only_their_own_inbox() {
+        let person = OidcIdentity {
+            issuer: "https://idp.example".into(),
+            subject: "a".into(),
+        };
+        let other = OidcIdentity {
+            subject: "b".into(),
+            ..person.clone()
+        };
+        let own = Principal::human_inbox(person.clone());
+        let theirs = Principal::human_inbox(other.clone());
+        for role in [TeamRole::Admin, TeamRole::Member] {
+            let mut caller = Principal::human(person.clone());
+            caller.human_role = Some(crate::domain::actor::HumanRole {
+                role,
+                on_call: false,
+            });
+            assert!(human_inbox_revoke(&caller, &own), "{role:?}");
+            assert!(!human_inbox_revoke(&caller, &theirs), "{role:?}");
+            for child in ActorRole::ALL {
+                let mut named = Principal::of(&ActorContext::new(child, "x"));
+                assert!(!human_inbox_revoke(&caller, &named), "{child:?}");
+                named.parent_human = Some(person.clone());
+                assert_eq!(
+                    human_inbox_revoke(&caller, &named),
+                    child == ActorRole::Inbox,
+                    "{child:?}"
+                );
+            }
+        }
+        assert!(!human_inbox_revoke(&own, &own));
+        for role in ActorRole::ALL {
+            let caller = Principal::of(&ActorContext::new(role, "x"));
+            assert!(!human_inbox_revoke(&caller, &own), "{role:?}");
+        }
     }
 }

@@ -164,15 +164,15 @@ impl Default for CiWatchOptions {
     }
 }
 
-/// Whether the inbox was opened with its guardrail, by the newest
-/// `inbox_opened` and `inbox_guardrail_reached`
+/// Whether the host's inbox was opened with its guardrail, by the newest
+/// `inbox_opened` of no person's inbox and `inbox_guardrail_reached`
 /// ([`crate::application::inbox_guardrail::judge_latest`]).
 fn inbox_guardrail<E: TransactionEntries>(queue: &StoreQueue<E>) -> Result<Value>
 where
     StoreQueue<E>: crate::application::SearchIndex,
 {
-    let opened = queue.latest_event_of(EventKind::InboxOpened.as_str())?;
-    let reached = queue.latest_event_of(EventKind::InboxGuardrailReached.as_str())?;
+    let opened = queue.latest_inbox_opened(None)?;
+    let reached = queue.latest_inbox_event(EventKind::InboxGuardrailReached, None)?;
     Ok(crate::application::inbox_guardrail::judge_latest(
         opened.as_ref(),
         reached.as_ref(),
@@ -1586,24 +1586,93 @@ impl crate::application::watch::WatchSource for ServiceWatch<'_> {
         role: Option<SessionRole>,
         limit: std::time::Duration,
     ) -> Result<crate::application::watch::WatchLook> {
-        let mut params = serde_json::json!({});
-        if let Some(after) = after {
-            params["after"] = serde_json::json!(after);
-        }
-        if let Some(role) = role {
-            params["role"] = serde_json::json!(role.as_str());
-        }
-        let answer = self.client.call_within(
-            crate::domain::queue_service::UseCase::WatchPoll,
-            params,
-            limit,
-        )?;
-        serde_json::from_value(answer).context("the queue service's answer to watch_poll")
+        watch_poll(self.client, after, role, limit)
     }
 
     fn outages(&self) -> Option<&dyn crate::application::watch::OutageNotices> {
         Some(self)
     }
+}
+
+/// One look of a watch as the queue service's `watch_poll` through
+/// `client`, past `after` for `role`, within `limit`.
+fn watch_poll(
+    client: &crate::infrastructure::queue_service::Client,
+    after: Option<crate::domain::EventId>,
+    role: Option<SessionRole>,
+    limit: std::time::Duration,
+) -> Result<crate::application::watch::WatchLook> {
+    let answer = client.call_within(
+        crate::domain::queue_service::UseCase::WatchPoll,
+        watch_poll_params(after, role),
+        limit,
+    )?;
+    serde_json::from_value(answer).context("the queue service's answer to watch_poll")
+}
+
+/// `watch` of the agent of a person's inbox for a control side, through
+/// its relay (`client`'s route): the same looks as a watch through the
+/// service ([`watch_through_service`]), each one `watch_poll` the relay
+/// sends, with the output of any watch. No queue's directory is read or
+/// written (no watcher's record, no outage told or notifier, which are
+/// the host's): a look that gets no answer ends the watch with its
+/// failure, and the watch goes to no DB and no service's socket instead.
+/// Narrowing it to the person's own asks is the control side's.
+pub fn watch_through_relay(
+    client: &crate::infrastructure::queue_service::Client,
+    options: &crate::application::watch::WatchOptions,
+) -> Result<Value> {
+    let clock = crate::infrastructure::clock::system().clock;
+    let call = |use_case, params, limit| client.call_within(use_case, params, limit);
+    watch_relayed(&call, clock.as_ref(), options)
+}
+
+/// One use case sent through a relay within a limit: the result, or the
+/// client's failure.
+type RelayCall<'a> =
+    dyn Fn(crate::domain::queue_service::UseCase, Value, std::time::Duration) -> Result<Value> + 'a;
+
+/// [`watch_through_relay`] with each look sent by `call`.
+fn watch_relayed(
+    call: &RelayCall<'_>,
+    clock: &dyn crate::application::Clock,
+    options: &crate::application::watch::WatchOptions,
+) -> Result<Value> {
+    crate::application::watch::watch_through(&RelayWatch { call }, clock, None, None, options)
+}
+
+/// A watch's looks through an inbox's relay, which knows no outage of a
+/// service.
+struct RelayWatch<'a> {
+    call: &'a RelayCall<'a>,
+}
+
+impl crate::application::watch::WatchSource for RelayWatch<'_> {
+    fn look(
+        &self,
+        after: Option<crate::domain::EventId>,
+        role: Option<SessionRole>,
+        limit: std::time::Duration,
+    ) -> Result<crate::application::watch::WatchLook> {
+        let answer = (self.call)(
+            crate::domain::queue_service::UseCase::WatchPoll,
+            watch_poll_params(after, role),
+            limit,
+        )?;
+        serde_json::from_value(answer).context("the queue service's answer to watch_poll")
+    }
+}
+
+/// The params of `watch_poll` past `after` for `role`.
+fn watch_poll_params(after: Option<crate::domain::EventId>, role: Option<SessionRole>) -> Value {
+    let mut params = serde_json::json!({});
+    if let Some(after) = after {
+        params["after"] = serde_json::json!(after);
+    }
+    if let Some(role) = role {
+        params["role"] = serde_json::json!(role.as_str());
+    }
+    params
 }
 
 /// A `watch` of the queue at `db` on `source`: the inbox's watcher's
@@ -2418,6 +2487,124 @@ pub(super) fn ci_watch_port(
 
 #[cfg(test)]
 mod tests {
+
+    /// A watch through an inbox's relay: each look is one `watch_poll`
+    /// with the cursor and the role, its output is any watch's (the events
+    /// and the cursor to go on from), the next watch goes on from that
+    /// cursor even after the relay got a new token between the two, and a
+    /// look that gets no answer ends the watch with that failure.
+    #[test]
+    fn a_watch_through_the_relay_looks_with_watch_poll_and_goes_on_from_its_cursor() {
+        use super::*;
+        use crate::application::inbox_relay::{InboxTokens, RelaySend, SessionGate, relay};
+        use crate::domain::queue_service::{
+            API_VERSION, ServiceErrorCode, ServiceRequest, ServiceResponse, UseCase,
+        };
+        use std::sync::Mutex;
+        struct Held(Mutex<String>, Mutex<usize>);
+        impl InboxTokens for Held {
+            fn read(&self) -> Result<Option<String>> {
+                Ok(Some(self.0.lock().unwrap().clone()))
+            }
+            fn renew(&self, last: Option<&str>) -> Result<String> {
+                let held = self.0.lock().unwrap().clone();
+                if Some(held.as_str()) != last {
+                    return Ok(held);
+                }
+                *self.1.lock().unwrap() += 1;
+                *self.0.lock().unwrap() = "new".into();
+                Ok("new".into())
+            }
+        }
+        /// Takes "old" for the first look alone, then "new"; each look
+        /// answers one event past its cursor.
+        struct Side(Mutex<Vec<(Option<String>, Value)>>);
+        impl RelaySend for Side {
+            fn send(&self, token: Option<&str>, request: &ServiceRequest) -> ServiceResponse {
+                let mut sent = self.0.lock().unwrap();
+                sent.push((token.map(str::to_owned), request.params.clone()));
+                assert_eq!(request.use_case, UseCase::WatchPoll);
+                if token == Some("old") && sent.len() > 1 || token.is_none() {
+                    return ServiceResponse::failure(ServiceErrorCode::Unauthenticated, "x");
+                }
+                let after = request.params["after"].as_i64().unwrap_or(10);
+                ServiceResponse::success(serde_json::json!({
+                    "after": after, "cursor": after + 1, "woken": true, "opened": [],
+                    "events": [{"id": after + 1, "kind": "ask_opened"}],
+                    "pulses": {}, "supervisors": [],
+                }))
+            }
+        }
+        let tokens = Held(Mutex::new("old".into()), Mutex::new(0));
+        let side = Side(Mutex::new(Vec::new()));
+        let gate = SessionGate::default();
+        let call = |use_case, params, _| {
+            let request = ServiceRequest {
+                caller: None,
+                api_version: API_VERSION,
+                token: None,
+                env_role: None,
+                queue: None,
+                binding: None,
+                use_case,
+                params,
+            };
+            let response = relay(&request, &tokens, &side, &gate);
+            match response.result {
+                Some(result) if response.ok => Ok(result),
+                _ => Err(anyhow::anyhow!("{:?}", response.error.unwrap().code)),
+            }
+        };
+        /// A clock that stands still: no look waits on real time.
+        struct Still(std::time::Instant);
+        impl crate::application::Clock for Still {
+            fn system_time(&self) -> std::time::SystemTime {
+                std::time::SystemTime::UNIX_EPOCH
+            }
+            fn monotonic(&self) -> std::time::Instant {
+                self.0
+            }
+        }
+        let still = Still(std::time::Instant::now());
+        let clock: &dyn crate::application::Clock = &still;
+        let options = |after| crate::application::watch::WatchOptions {
+            after,
+            timeout: Some(std::time::Duration::from_secs(5)),
+            interval: std::time::Duration::from_millis(10),
+            role: Some(SessionRole::Inbox),
+        };
+        let first = watch_relayed(&call, clock, &options(None)).unwrap();
+        assert_eq!(first["cursor"], 11, "{first}");
+        assert_eq!(first["events"][0]["id"], 11, "{first}");
+        let next = watch_relayed(
+            &call,
+            clock,
+            &options(Some(crate::domain::EventId::new(11))),
+        )
+        .unwrap();
+        assert_eq!(next["cursor"], 12, "{next}");
+        let sent = side.0.lock().unwrap().clone();
+        assert_eq!(sent[0].1, serde_json::json!({"role": "inbox"}));
+        assert_eq!(
+            sent[1],
+            (
+                Some("old".into()),
+                serde_json::json!({"after": 11, "role": "inbox"})
+            )
+        );
+        assert_eq!(
+            sent[2],
+            (
+                Some("new".into()),
+                serde_json::json!({"after": 11, "role": "inbox"})
+            )
+        );
+        assert_eq!(*tokens.1.lock().unwrap(), 1);
+        // A relay that answers nothing ends the watch with its failure.
+        let gone = |_, _, _| -> Result<Value> { Err(anyhow::anyhow!("unreachable: the relay")) };
+        let failed = watch_relayed(&gone, clock, &options(None)).unwrap_err();
+        assert!(format!("{failed:#}").contains("unreachable"), "{failed:#}");
+    }
     use super::{counts_checks, records_rust_toolchain};
     use crate::domain::toolchain::fake::REGISTRY;
 

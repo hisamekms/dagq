@@ -730,6 +730,49 @@ impl<E: TransactionEntries> StoreQueue<E> {
         )?)
     }
 
+    /// The newest `inbox_opened` of the inbox whose parent is the person
+    /// `parent` (its `issuer` and `subject`), or of the host's inbox (no
+    /// parent) for `None`: filtered in the query, so however many opens of
+    /// others come after it, it is found.
+    pub fn latest_inbox_opened(&self, parent: Option<(&str, &str)>) -> Result<Option<RunEvent>> {
+        self.latest_inbox_event(crate::domain::EventKind::InboxOpened, parent)
+    }
+
+    /// [`Self::latest_inbox_opened`] of the event `kind` (an
+    /// `inbox_guardrail_reached` too, whose `parent` the service writes).
+    pub fn latest_inbox_event(
+        &self,
+        kind: crate::domain::EventKind,
+        parent: Option<(&str, &str)>,
+    ) -> Result<Option<RunEvent>> {
+        let tx = self.read_entry("latest_inbox_event")?;
+        let dialect = SqlRead::dialect(&tx);
+        let issuer = dialect.json_field_spaced("payload", "$.parent.issuer", JsonType::Text);
+        let subject = dialect.json_field_spaced("payload", "$.parent.subject", JsonType::Text);
+        let kind = kind.as_str();
+        Ok(match parent {
+            Some((parent_issuer, parent_subject)) => SqlRead::query_row(
+                &tx,
+                &format!(
+                    "SELECT * FROM run_events WHERE kind=?1 AND {issuer}=?2 AND {subject}=?3 \
+                     ORDER BY id DESC LIMIT 1"
+                ),
+                sql_params![kind, parent_issuer, parent_subject],
+                event_row,
+            ),
+            None => SqlRead::query_row(
+                &tx,
+                &format!(
+                    "SELECT * FROM run_events WHERE kind=?1 AND {subject} IS NULL \
+                     ORDER BY id DESC LIMIT 1"
+                ),
+                sql_params![kind],
+                event_row,
+            ),
+        }
+        .optional()?)
+    }
+
     /// The newest event of the queue itself (on no task, goal or run) of one
     /// of `kinds`.
     /// One lookup per kind, so each walks `events_by_kind` from its newest
@@ -2488,6 +2531,51 @@ mod tests {
             lease.iter().all(|line| line.starts_with("SEARCH")),
             "{lease:#?}"
         );
+    }
+
+    /// A person's newest `inbox_opened` and the host's (no parent) are
+    /// found however many opens of another person come after them.
+    #[test]
+    fn an_inbox_s_newest_open_is_found_past_others_opens() {
+        use crate::domain::EventKind;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let open = |payload: serde_json::Value| {
+            queue
+                .record_queue_event(EventKind::InboxOpened, payload)
+                .unwrap()
+        };
+        let person = serde_json::json!({"issuer": "https://idp", "subject": "a"});
+        let other = serde_json::json!({"issuer": "https://idp", "subject": "b"});
+        open(serde_json::json!({"provider": "codex", "parent": person}));
+        let own = open(serde_json::json!({"provider": "claude", "parent": person}));
+        let host = open(serde_json::json!({"provider": "claude"}));
+        for _ in 0..600 {
+            open(serde_json::json!({"provider": "claude", "parent": other}));
+        }
+        let id = |parent| queue.latest_inbox_opened(parent).unwrap().map(|e| e.id);
+        assert_eq!(id(Some(("https://idp", "a"))), Some(own));
+        assert_eq!(id(None), Some(host));
+        assert_eq!(id(Some(("https://idp", "c"))), None);
+        // The guardrail's runs are read by their person as well: another
+        // person's later run is not this person's, nor the host's.
+        let reached = |payload| {
+            queue
+                .record_queue_event(EventKind::InboxGuardrailReached, payload)
+                .unwrap()
+        };
+        let host_run = reached(serde_json::json!({"session_id": "h"}));
+        reached(serde_json::json!({"session_id": "b", "parent": other}));
+        let run = |parent| {
+            queue
+                .latest_inbox_event(EventKind::InboxGuardrailReached, parent)
+                .unwrap()
+                .map(|e| e.id)
+        };
+        assert_eq!(run(Some(("https://idp", "a"))), None);
+        assert_eq!(run(None), Some(host_run));
+        let own_run = reached(serde_json::json!({"session_id": "a", "parent": person}));
+        assert_eq!(run(Some(("https://idp", "a"))), Some(own_run));
     }
 
     /// Each supervisor named gets its newest record of the kinds, however

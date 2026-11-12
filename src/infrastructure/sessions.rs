@@ -2122,18 +2122,34 @@ pub(super) fn record_hook(entries: &impl TransactionEntries, hook: &SessionHook)
     }))
 }
 
-/// Whether the guardrail's hook of `hook`'s session was recorded running.
+/// Whether the guardrail's hook of `hook`'s session was recorded running:
+/// of its session id and its parent ([`SessionHook::parent_identity`];
+/// none for the host's), so another person's run under the same session id
+/// does not stand for it.
 fn guardrail_reached(conn: &impl SqlRead, hook: &SessionHook) -> Result<bool> {
-    Ok(conn.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
-           AND {}=?2)",
-            conn.dialect()
-                .json_field("payload", "$.session_id", JsonType::Text),
-        ),
-        sql_params![EventKind::InboxGuardrailReached.as_str(), hook.session_id],
-        |r| r.get(0),
-    )?)
+    let dialect = conn.dialect();
+    let session = dialect.json_field("payload", "$.session_id", JsonType::Text);
+    let issuer = dialect.json_field("payload", "$.parent.issuer", JsonType::Text);
+    let subject = dialect.json_field("payload", "$.parent.subject", JsonType::Text);
+    let kind = EventKind::InboxGuardrailReached.as_str();
+    Ok(match hook.parent_identity() {
+        Some((parent_issuer, parent_subject)) => conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+           AND {session}=?2 AND {issuer}=?3 AND {subject}=?4)"
+            ),
+            sql_params![kind, hook.session_id, parent_issuer, parent_subject],
+            |r| r.get(0),
+        )?,
+        None => conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE kind=?1
+           AND {session}=?2 AND {subject} IS NULL)"
+            ),
+            sql_params![kind, hook.session_id],
+            |r| r.get(0),
+        )?,
+    })
 }
 
 /// Where a span of `hook` is recorded, and what its payload adds: a
@@ -4684,6 +4700,73 @@ pub(super) mod tests {
         assert_eq!(READS.get(), 4);
     }
 
+    /// One session id under two people's inboxes and the host's: each
+    /// start opens a span of its own, the guardrail's run is recorded once
+    /// for each, a compaction marks its own span and an end closes its own
+    /// alone.
+    #[test]
+    fn one_session_id_of_two_people_and_the_host_keeps_three_spans() {
+        use crate::domain::sessions::{HookEvent, INBOX};
+        let dir = tempfile::tempdir().unwrap();
+        ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let conn = &*queue.conn;
+        let a = json!({"issuer": "https://id.example", "subject": "a"});
+        let b = json!({"issuer": "https://id.example", "subject": "b"});
+        let of = |parent: Option<&Value>, event: HookEvent| SessionHook {
+            event,
+            parent: parent.cloned(),
+            ..hook(dir.path(), Some("startup"), INBOX, "s-1")
+        };
+        let people = [Some(&a), Some(&b), None];
+        let mut opened = Vec::new();
+        for parent in people {
+            let start = HookEvent::Start {
+                source: "startup".into(),
+            };
+            let started = record_hook(conn, &of(parent, start)).unwrap();
+            assert_eq!(started["closed"], json!([]), "{parent:?}");
+            opened.push(started["opened"].as_i64().unwrap());
+        }
+        // The guardrail of each, twice: recorded once for each.
+        for parent in people {
+            for _ in 0..2 {
+                record_hook(conn, &of(parent, HookEvent::Guard)).unwrap();
+            }
+        }
+        let reached = of_kind(&queue, EventKind::InboxGuardrailReached.as_str());
+        let spans = |events: &[RunEvent]| -> Vec<i64> {
+            events
+                .iter()
+                .map(|event| event.payload["opened_event_id"].as_i64().unwrap())
+                .collect()
+        };
+        assert_eq!(spans(&reached), opened);
+        assert_eq!(reached[0].payload["parent"], a);
+        assert_eq!(reached[1].payload["parent"], b);
+        assert_eq!(reached[2].payload.get("parent"), None);
+        // B's compaction marks B's span.
+        let compaction = HookEvent::Compact {
+            hook: "pre_compact".into(),
+            trigger: "auto".into(),
+        };
+        record_hook(conn, &of(Some(&b), compaction)).unwrap();
+        let compacted = of_kind(&queue, EventKind::SessionCompacted.as_str());
+        assert_eq!(spans(&compacted), [opened[1]]);
+        // B's end closes B's span alone.
+        let end = HookEvent::End {
+            reason: "prompt_input_exit".into(),
+        };
+        let ended = record_hook(conn, &of(Some(&b), end)).unwrap();
+        assert_eq!(ended["closed"], json!([opened[1]]));
+        let open: Vec<i64> = open_hook_spans(conn)
+            .unwrap()
+            .iter()
+            .map(|span| span.opened_event_id.as_i64())
+            .collect();
+        assert_eq!(open, [opened[0], opened[2]]);
+    }
+
     /// A `SessionStart` / `SessionEnd` the hook reported for `session` of
     /// `kind`, with its transcript under `dir`.
     fn hook(
@@ -4704,6 +4787,7 @@ pub(super) mod tests {
             },
             kind,
             model: None,
+            parent: None,
             session_id: session.into(),
             transcript_path: Some(dir.join(format!("{session}.jsonl")).display().to_string()),
             cwd: Some("/repo".into()),

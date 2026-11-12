@@ -107,6 +107,8 @@ providerの選択と拒否は`lifecycle::inbox_route`、inboxの設定だけを�
 runtimeはinboxを起動しないため、providerの控えもinboxを止めない。
 Claudeの起動を人が禁じたときの境界は`lifecycle::claude_forbidden`にある。
 providerごとの起動は[Provider lifecycle](../provider-lifecycle.md)のinboxの節を参照する。
+環境が`DAGQ_CONTROL_URL`だけの入口は`compose::control_inbox`（判断は`lifecycle::control_inbox`）である。
+そのときは`dagq inbox`がhostの手順（queueの解決・DB・launchd・supervisorの確かめ）を行わず、中継として残り、sessionの終わりでinboxのtokenを失効させる。
 
 起動の記録とguardrailの判定は`inbox_guardrail::judge`、Claudeに渡すsettingsは`adapters::ClaudeCode::inbox_command`のdoc commentにある（[ADR-t1228-2](../../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。
 guardrailが無いときの開き直しはpluginのdagq-recoverのreference/up-down.md「Open the inbox again」が正本である。

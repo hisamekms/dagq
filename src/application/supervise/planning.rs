@@ -391,6 +391,7 @@ mod tests {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             })
         };
         let bytes = PromptBytes::default;

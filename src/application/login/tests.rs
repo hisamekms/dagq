@@ -25,6 +25,7 @@ fn saved() -> Credentials {
             expires_at: 100,
             display_name: None,
         },
+        inbox: None,
     }
 }
 #[derive(Default)]
@@ -33,6 +34,7 @@ struct Store {
     calls: RefCell<Vec<&'static str>>,
     fails: Cell<bool>,
     save_fails: Cell<bool>,
+    holds: RefCell<Vec<StoreLock>>,
 }
 impl CredentialStore for Store {
     fn load(&self) -> Result<Option<Credentials>> {
@@ -51,6 +53,10 @@ impl CredentialStore for Store {
         ensure!(!self.fails.get(), "unavailable");
         *self.value.borrow_mut() = None;
         Ok(())
+    }
+    fn hold(&self, lock: StoreLock) -> Result<StoreHold> {
+        self.holds.borrow_mut().push(lock);
+        Ok(Box::new(()))
     }
 }
 struct Http {
@@ -134,6 +140,13 @@ fn doc(device: bool) -> Value {
 }
 fn exchange() -> Value {
     json!({"ok":true,"result":{"token":"new-dagq-secret","issuer":"returned-issuer","subject":"returned-subject","role":"admin","expires_at":200,"on_call":true},"api_version":2,"min_api_version":2})
+}
+/// The exchange of a renewal that names the person of `set`.
+fn same_person_exchange(set: &Credentials) -> Value {
+    let mut same = exchange();
+    same["result"]["issuer"] = json!(set.identity.issuer);
+    same["result"]["subject"] = json!(set.identity.subject);
+    same
 }
 fn options() -> LoginOptions {
     LoginOptions {
@@ -551,6 +564,9 @@ fn store_choice_routes_without_opening_the_other_store_and_cleans_old_file() {
         fn delete(&self) -> Result<()> {
             Err(OsStoreUnavailable.into())
         }
+        fn hold(&self, _: StoreLock) -> Result<StoreHold> {
+            Ok(Box::new(()))
+        }
     }
     let file = Store::default();
     let explicit = Stores {
@@ -749,4 +765,343 @@ fn approval_guidance_and_success_use_exchange_fields_for_both_flows() {
             )
         );
     }
+}
+
+/// A read of the person's token tells whether it renewed it: a fresh
+/// token is read as it is, an expired or refused one renewed (the call's
+/// one renewal), and a set of another person refused with nothing sent, as
+/// is a renewal whose exchange names another person.
+#[test]
+fn a_persons_token_read_tells_whether_it_renewed() {
+    let c = saved();
+    let control = c.destination.control_url.clone();
+    let person = crate::domain::oidc::OidcIdentity {
+        issuer: c.identity.issuer.clone(),
+        subject: c.identity.subject.clone(),
+    };
+    let store = Store::default();
+    store.save(&c).unwrap();
+    let http = Http::new(vec![]);
+    assert_eq!(
+        read_person_token(&control, &person, Rejected::No, 99, &http, &store).unwrap(),
+        (c.token.clone(), false)
+    );
+    assert!(http.sent.borrow().is_empty());
+    // The exchange of the same person's renewal.
+    let mut same = exchange();
+    same["result"]["issuer"] = json!(c.identity.issuer);
+    same["result"]["subject"] = json!(c.identity.subject);
+    for (rejected, now) in [(Rejected::No, 100), (Rejected::First, 99)] {
+        let store = Store::default();
+        store.save(&c).unwrap();
+        let http = Http::new(vec![
+            doc(true),
+            json!({"id_token":"fresh-id"}),
+            same.clone(),
+        ]);
+        assert_eq!(
+            read_person_token(&control, &person, rejected, now, &http, &store).unwrap(),
+            ("new-dagq-secret".to_owned(), true),
+            "{rejected:?}"
+        );
+        // A renewal whose exchange names another person gives no token.
+        let store = Store::default();
+        store.save(&c).unwrap();
+        let http = Http::new(vec![doc(true), json!({"id_token":"fresh-id"}), exchange()]);
+        let changed = read_person_token(&control, &person, rejected, now, &http, &store);
+        assert_eq!(
+            changed.unwrap_err().to_string(),
+            PERSON_CHANGED,
+            "{rejected:?}"
+        );
+    }
+    let other = crate::domain::oidc::OidcIdentity {
+        issuer: c.identity.issuer.clone(),
+        subject: "someone-else".into(),
+    };
+    let http = Http::new(vec![]);
+    let refused = read_person_token(&control, &other, Rejected::No, 100, &http, &store);
+    assert_eq!(refused.unwrap_err().to_string(), PERSON_CHANGED);
+    assert!(http.sent.borrow().is_empty());
+}
+
+/// The inbox's token lives in the person's set, bound to its destination:
+/// read only for that control side and only while it lasts, kept across a
+/// renewal, replaced by a login, gone with `logout`, and taken out only
+/// when it is still the one the relay put there.
+#[test]
+fn the_inbox_token_is_kept_in_the_set_of_its_destination_alone() {
+    let c = saved();
+    let control = c.destination.control_url.clone();
+    let store = Store::default();
+    let person = crate::domain::oidc::OidcIdentity {
+        issuer: c.identity.issuer.clone(),
+        subject: c.identity.subject.clone(),
+    };
+    // No set (never logged in, or logged out): the login's guide.
+    assert!(read_inbox_token(&control, &person, 0, &store).is_err());
+    store.save(&c).unwrap();
+    assert_eq!(
+        read_inbox_token(&control, &person, 0, &store).unwrap(),
+        None
+    );
+    let inbox = InboxToken {
+        token: "inbox-secret".into(),
+        expires_at: 100,
+    };
+    keep_inbox_token(&format!("{control}/"), &person, inbox.clone(), &store).unwrap();
+    assert_eq!(
+        read_inbox_token(&control, &person, 99, &store)
+            .unwrap()
+            .as_deref(),
+        Some("inbox-secret")
+    );
+    // Expired: read as none, so the relay gets a new one.
+    assert_eq!(
+        read_inbox_token(&control, &person, 100, &store).unwrap(),
+        None
+    );
+    // Another control side: never read or written, the login's guide.
+    for other in ["https://other.example", "http://127.0.0.1:9"] {
+        let error = read_inbox_token(other, &person, 0, &store).unwrap_err();
+        assert_eq!(error.to_string(), LOGIN_AGAIN);
+        assert!(keep_inbox_token(other, &person, inbox.clone(), &store).is_err());
+    }
+    // A renewal of the person's token keeps it.
+    let http = Http::new(vec![
+        doc(true),
+        json!({"id_token":"fresh-id"}),
+        same_person_exchange(&c),
+    ]);
+    read_token(&control, Rejected::First, 0, &http, &store).unwrap();
+    assert_eq!(store.load().unwrap().unwrap().inbox, Some(inbox.clone()));
+    assert_eq!(person_of(&control, &store).unwrap(), person);
+    // The session's end takes out whichever inbox token the set holds:
+    // the one its revocation revoked; another control side's set is left.
+    forget_inbox_token("https://other.example", &person, &store).unwrap();
+    assert!(store.load().unwrap().unwrap().inbox.is_some());
+    // A set of another person (a login as someone else since) is not
+    // read, kept in or cleared: the inbox stops and is opened again.
+    let other = crate::domain::oidc::OidcIdentity {
+        subject: "someone-else".into(),
+        ..person.clone()
+    };
+    let changed = read_inbox_token(&control, &other, 0, &store).unwrap_err();
+    assert_eq!(changed.to_string(), PERSON_CHANGED);
+    assert!(keep_inbox_token(&control, &other, inbox.clone(), &store).is_err());
+    forget_inbox_token(&control, &other, &store).unwrap();
+    assert!(store.load().unwrap().unwrap().inbox.is_some());
+    // A store that cannot be read is an error, not a clearing done.
+    store.fails.set(true);
+    assert!(forget_inbox_token(&control, &person, &store).is_err());
+    store.fails.set(false);
+    forget_inbox_token(&control, &person, &store).unwrap();
+    assert_eq!(store.load().unwrap().unwrap().inbox, None);
+    // A login replaces the set and the inbox's token with it.
+    keep_inbox_token(&control, &person, inbox.clone(), &store).unwrap();
+    let http = Http::new(vec![
+        doc(true),
+        start(),
+        json!({"id_token":"opaque-jwt"}),
+        exchange(),
+    ]);
+    login(&options(), &http, &store, &Interaction::new()).unwrap();
+    assert_eq!(store.load().unwrap().unwrap().inbox, None);
+    // The fake's login names its own identity: the person is the set's
+    // from here.
+    let person = person_of(&control, &store).unwrap();
+    // `logout` deletes the set (the store's `delete`): the next read is
+    // the login's guide.
+    keep_inbox_token(&control, &person, inbox, &store).unwrap();
+    store.delete().unwrap();
+    assert!(read_inbox_token(&control, &person, 0, &store).is_err());
+    forget_inbox_token(&control, &person, &store).unwrap();
+    // Its value is not in its debug form.
+    assert!(
+        !format!(
+            "{:?}",
+            InboxToken {
+                token: "inbox-secret".into(),
+                expires_at: 1
+            }
+        )
+        .contains("secret")
+    );
+}
+
+/// A renewal is checked before it is kept, in one place: one for an inbox
+/// that names another person is refused with nothing saved, so the store
+/// keeps the person's set and its inbox token; the terminal's keeps the new
+/// set but not the inbox token, which stays with the person it was issued
+/// for; the same person's keeps both.
+#[test]
+fn a_renewal_is_checked_before_it_is_kept_with_the_inbox_token() {
+    let inbox = InboxToken {
+        token: "inbox-secret".into(),
+        expires_at: 1000,
+    };
+    let mut c = saved();
+    c.inbox = Some(inbox.clone());
+    let control = c.destination.control_url.clone();
+    let person = crate::domain::oidc::OidcIdentity {
+        issuer: c.identity.issuer.clone(),
+        subject: c.identity.subject.clone(),
+    };
+    let renewing = |reply: Value| Http::new(vec![doc(true), json!({"id_token":"fresh-id"}), reply]);
+    // For an inbox, renewed as another person: nothing saved.
+    let store = Store::default();
+    store.save(&c).unwrap();
+    store.calls.borrow_mut().clear();
+    let refused = read_person_token(
+        &control,
+        &person,
+        Rejected::No,
+        100,
+        &renewing(exchange()),
+        &store,
+    );
+    assert_eq!(refused.unwrap_err().to_string(), PERSON_CHANGED);
+    // Read once, and nothing saved.
+    assert_eq!(*store.calls.borrow(), ["load"]);
+    let kept = store.load().unwrap().unwrap();
+    assert_eq!(
+        (kept.token, kept.refresh_token, kept.identity, kept.inbox),
+        (
+            c.token.clone(),
+            c.refresh_token.clone(),
+            c.identity.clone(),
+            c.inbox.clone()
+        )
+    );
+    // The terminal's, renewed as another person: the new set without the
+    // inbox token.
+    let store = Store::default();
+    store.save(&c).unwrap();
+    let fresh = read_token(&control, Rejected::No, 100, &renewing(exchange()), &store).unwrap();
+    assert_eq!(fresh.identity.subject, "returned-subject");
+    assert_eq!(fresh.inbox, None);
+    let kept = store.load().unwrap().unwrap();
+    assert_eq!(
+        (kept.token, kept.identity, kept.inbox),
+        (fresh.token, fresh.identity, None)
+    );
+    // The same person's, either way: the new set with the inbox token.
+    for for_inbox in [true, false] {
+        let store = Store::default();
+        store.save(&c).unwrap();
+        let http = renewing(same_person_exchange(&c));
+        let token = if for_inbox {
+            read_person_token(&control, &person, Rejected::No, 100, &http, &store)
+                .unwrap()
+                .0
+        } else {
+            read_token(&control, Rejected::No, 100, &http, &store)
+                .unwrap()
+                .token
+        };
+        assert_eq!(token, "new-dagq-secret");
+        let kept = store.load().unwrap().unwrap();
+        assert_eq!(kept.token, "new-dagq-secret");
+        assert_eq!(kept.inbox, Some(inbox.clone()), "{for_inbox}");
+    }
+}
+
+/// A set's lock is the lock of the store its set lives in: the file's or
+/// the OS's alone when chosen, both for the default (the OS's first).
+#[test]
+fn the_stores_lock_is_the_lock_of_the_store_its_set_lives_in() {
+    for (choice, os, file) in [
+        (StoreChoice::File, vec![], vec![StoreLock::Issue]),
+        (StoreChoice::Os, vec![StoreLock::Issue], vec![]),
+        (
+            StoreChoice::Auto,
+            vec![StoreLock::Issue],
+            vec![StoreLock::Issue],
+        ),
+    ] {
+        let (os_store, file_store) = (Store::default(), Store::default());
+        let stores = Stores {
+            choice,
+            os: &os_store,
+            file: &file_store,
+        };
+        drop(stores.hold(StoreLock::Issue).unwrap());
+        assert_eq!(*os_store.holds.borrow(), os, "{choice:?}");
+        assert_eq!(*file_store.holds.borrow(), file, "{choice:?}");
+    }
+    /// Says when its lock is taken.
+    struct Taken<'a>(&'a RefCell<Vec<&'static str>>, &'static str);
+    impl CredentialStore for Taken<'_> {
+        fn load(&self) -> Result<Option<Credentials>> {
+            unreachable!()
+        }
+        fn save(&self, _: &Credentials) -> Result<()> {
+            unreachable!()
+        }
+        fn delete(&self) -> Result<()> {
+            unreachable!()
+        }
+        fn hold(&self, _: StoreLock) -> Result<StoreHold> {
+            self.0.borrow_mut().push(self.1);
+            Ok(Box::new(()))
+        }
+    }
+    let taken = RefCell::new(Vec::new());
+    let stores = Stores {
+        choice: StoreChoice::Auto,
+        os: &Taken(&taken, "os"),
+        file: &Taken(&taken, "file"),
+    };
+    drop(stores.hold(StoreLock::Change).unwrap());
+    assert_eq!(*taken.borrow(), ["os", "file"]);
+}
+
+/// The person's token comes from the one set checked to be theirs: a
+/// store that reads another backend each time (the default's OS store, then
+/// its file) and gives another person's valid set on its second read never
+/// has that set's token sent, and the renewal is judged on the same set.
+#[test]
+fn the_persons_token_is_of_the_one_set_checked_to_be_theirs() {
+    /// Gives `sets` in turn, the last for every later read.
+    struct Switching(RefCell<VecDeque<Credentials>>);
+    impl CredentialStore for Switching {
+        fn load(&self) -> Result<Option<Credentials>> {
+            let mut sets = self.0.borrow_mut();
+            Ok(if sets.len() > 1 {
+                sets.pop_front()
+            } else {
+                sets.front().cloned()
+            })
+        }
+        fn save(&self, _: &Credentials) -> Result<()> {
+            panic!("nothing is renewed")
+        }
+        fn delete(&self) -> Result<()> {
+            unreachable!()
+        }
+        fn hold(&self, _: StoreLock) -> Result<StoreHold> {
+            Ok(Box::new(()))
+        }
+    }
+    let mine = saved();
+    let mut theirs = saved();
+    theirs.token = "their-dagq-secret".into();
+    theirs.identity.subject = "someone-else".into();
+    theirs.identity.expires_at = 1000;
+    let control = mine.destination.control_url.clone();
+    let person = crate::domain::oidc::OidcIdentity {
+        issuer: mine.identity.issuer.clone(),
+        subject: mine.identity.subject.clone(),
+    };
+    let http = Http::new(vec![]);
+    let store = Switching(RefCell::new(VecDeque::from([mine.clone(), theirs.clone()])));
+    assert_eq!(
+        read_person_token(&control, &person, Rejected::No, 99, &http, &store).unwrap(),
+        (mine.token.clone(), false)
+    );
+    // The first read is another person's: refused, nothing sent.
+    let store = Switching(RefCell::new(VecDeque::from([theirs, mine])));
+    let refused = read_person_token(&control, &person, Rejected::No, 99, &http, &store);
+    assert_eq!(refused.unwrap_err().to_string(), PERSON_CHANGED);
+    assert!(http.sent.borrow().is_empty());
 }

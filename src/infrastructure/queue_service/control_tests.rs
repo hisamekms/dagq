@@ -82,6 +82,9 @@ fn unauthenticated() -> Result<(u16, Vec<u8>)> {
 struct FakeBearer {
     asked: Mutex<Vec<(String, bool)>>,
     fails: Option<bool>,
+    /// The token it holds has expired: its first read renews it, gives
+    /// [`RENEWED`] and says so.
+    expired: bool,
 }
 
 impl FakeBearer {
@@ -89,6 +92,7 @@ impl FakeBearer {
         Self {
             asked: Mutex::new(Vec::new()),
             fails: None,
+            expired: false,
         }
     }
     /// Failing when asked to renew (`true`) or always (`false`).
@@ -96,6 +100,13 @@ impl FakeBearer {
         Self {
             asked: Mutex::new(Vec::new()),
             fails: Some(on_renewal_only),
+            expired: false,
+        }
+    }
+    fn expired() -> Self {
+        Self {
+            expired: true,
+            ..Self::giving()
         }
     }
     fn asked(&self) -> Vec<(String, bool)> {
@@ -110,8 +121,17 @@ impl BearerSource for FakeBearer {
             Some(on_renewal_only) if renew || !on_renewal_only => {
                 bail!(crate::application::login::LOGIN_AGAIN)
             }
-            _ => Ok(if renew { RENEWED } else { TOKEN }.to_owned()),
+            _ => Ok(if renew || self.expired {
+                RENEWED
+            } else {
+                TOKEN
+            }
+            .to_owned()),
         }
+    }
+    fn token_read(&self, url: &str, renew: bool) -> Result<(String, bool)> {
+        self.token(url, renew)
+            .map(|token| (token, renew || self.expired))
     }
 }
 
@@ -295,6 +315,78 @@ fn an_unauthenticated_answer_renews_once_and_sends_once_more() {
     assert_eq!(http.sent()[0].1, None);
 }
 
+/// The relay's parent sends the person's token for the inbox's
+/// `issue_token` (at the open and after a refusal) and its `revoke_token`
+/// (at the end) alone: in each, a refused or expired person's token is
+/// renewed once in all (an expiry's renewal at the first read is that one)
+/// and the request sent once more; a renewal that cannot be had, or a
+/// refusal of the renewed token, is the failure the open stops with (the
+/// login's guide) and the end only warns of, nothing sent again.
+#[test]
+fn the_persons_token_is_renewed_once_for_the_inbox_s_issue_and_revocation() {
+    for use_case in [UseCase::IssueToken, UseCase::RevokeToken] {
+        let call = |http: &FakeHttp, bearer: &FakeBearer| {
+            person_call_with(
+                http,
+                bearer,
+                "https://control.example/",
+                use_case,
+                json!({"principal": {}}),
+            )
+        };
+        let http = FakeHttp::answering(vec![
+            unauthenticated(),
+            answer(&ServiceResponse::success(json!({"ok": 1}))),
+        ]);
+        let bearer = FakeBearer::giving();
+        assert_eq!(
+            call(&http, &bearer).unwrap(),
+            json!({"ok": 1}),
+            "{use_case:?}"
+        );
+        let sent: Vec<_> = http.sent().into_iter().map(|(_, token, _)| token).collect();
+        assert_eq!(sent, vec![Some(TOKEN.into()), Some(RENEWED.into())]);
+        let renewals: Vec<_> = bearer.asked().into_iter().map(|(_, renew)| renew).collect();
+        assert_eq!(renewals, vec![false, true]);
+
+        let http = FakeHttp::answering(vec![unauthenticated(), unauthenticated()]);
+        let refused = call(&http, &FakeBearer::giving()).unwrap_err();
+        assert!(format!("{refused:#}").contains("dagq login"), "{refused:#}");
+        assert_eq!(http.sent().len(), 2);
+
+        let http = FakeHttp::answering(vec![unauthenticated()]);
+        let unrenewed = call(&http, &FakeBearer::failing(true)).unwrap_err();
+        assert_eq!(code_of(&unrenewed), "no_credential");
+        assert_eq!(http.sent().len(), 1);
+
+        // An expired token renewed at the first read is the one renewal:
+        // its refusal asks for the login (the open stops with its guide,
+        // the end warns of it), with no second renewal and nothing sent
+        // again.
+        let http = FakeHttp::answering(vec![unauthenticated()]);
+        let bearer = FakeBearer::expired();
+        let refused = call(&http, &bearer).unwrap_err();
+        assert_eq!(code_of(&refused), "unauthenticated", "{use_case:?}");
+        assert!(format!("{refused:#}").contains("dagq login"), "{refused:#}");
+        let sent: Vec<_> = http.sent().into_iter().map(|(_, token, _)| token).collect();
+        assert_eq!(sent, vec![Some(RENEWED.into())]);
+        let renewals: Vec<_> = bearer.asked().into_iter().map(|(_, renew)| renew).collect();
+        assert_eq!(renewals, vec![false]);
+        // A person's token that does not read (another person's set, or a
+        // renewal of another person's) sends nothing.
+        let http = FakeHttp::answering(vec![]);
+        let unread = call(&http, &FakeBearer::failing(false)).unwrap_err();
+        assert_eq!(code_of(&unread), "no_credential");
+        assert!(http.sent().is_empty(), "{use_case:?}");
+        // And it goes through when the control side takes it.
+        let http = FakeHttp::answering(vec![answer(&ServiceResponse::success(json!({"ok": 1})))]);
+        assert_eq!(
+            call(&http, &FakeBearer::expired()).unwrap(),
+            json!({"ok": 1})
+        );
+    }
+}
+
 /// [`control_next`] renews only an `unauthenticated` of a token read, once.
 #[test]
 fn only_an_unauthenticated_of_a_token_read_is_renewed_and_only_once() {
@@ -437,6 +529,12 @@ fn a_token_kept_for_another_control_side_is_not_sent() {
         fn delete(&self) -> Result<()> {
             panic!("nothing is deleted")
         }
+        fn hold(
+            &self,
+            _: crate::application::login::StoreLock,
+        ) -> Result<crate::application::login::StoreHold> {
+            Ok(Box::new(()))
+        }
     }
     struct NoIssuer;
     impl LoginHttp for NoIssuer {
@@ -473,6 +571,7 @@ fn a_token_kept_for_another_control_side_is_not_sent() {
                 expires_at: 1_000,
                 display_name: None,
             },
+            inbox: None,
         }))
     };
     let http = FakeHttp::answering(vec![]);
@@ -558,4 +657,129 @@ fn a_call_to_a_url_with_a_query_sends_nothing_and_a_path_is_kept() {
         http.sent()[0].0,
         "https://control.example/team/api/use-case/show"
     );
+}
+
+/// An inbox's relay is the route alone: beside a socket, a broker, a
+/// control side or a token's file it is `client_misconfigured`, and alone
+/// its client holds no token's file, so it reads none.
+#[test]
+fn an_inbox_relay_is_the_route_alone_and_reads_no_token() {
+    use crate::domain::queue_service::INBOX_RELAY_ENV;
+    let client = Client::from_env(env_of(&[
+        (INBOX_RELAY_ENV, "/tmp/dagq-1/inbox-2.sock"),
+        ("DAGQ_ROLE", "inbox"),
+    ]))
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        client.route,
+        ClientRoute::Relay(PathBuf::from("/tmp/dagq-1/inbox-2.sock"))
+    );
+    assert_eq!(client.credential, None);
+    assert_eq!(client.queue, None);
+    assert_eq!(client.binding, None);
+    for other in [SOCKET_ENV, URL_ENV, CONTROL_URL_ENV, CREDENTIAL_FILE_ENV] {
+        let value = if other == URL_ENV || other == CONTROL_URL_ENV {
+            "https://c.example"
+        } else {
+            "/x"
+        };
+        let refused = Client::from_env(env_of(&[(INBOX_RELAY_ENV, "/tmp/r.sock"), (other, value)]))
+            .unwrap_err();
+        assert_eq!(refused.code, "client_misconfigured", "{other}");
+        assert!(refused.message.contains(other), "{}", refused.message);
+    }
+    // An empty value names none.
+    assert!(
+        Client::from_env(env_of(&[(INBOX_RELAY_ENV, " ")]))
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// The relay's one request: the control side's answer as it is, with the
+/// inbox's token as the `Bearer` and nothing of the agent's request but
+/// its use case and params; whatever stops it is an answer in the shape of
+/// one, sent once (no answer and a page that is no use case's answer are
+/// `unreachable`, a `store_unavailable` keeps its code, which the agent's
+/// client reports as the HTTPS route does).
+#[test]
+fn the_relays_request_is_one_http_request_answered_as_it_is() {
+    let agent = ServiceRequest {
+        caller: None,
+        api_version: API_VERSION,
+        token: Some("agent".into()),
+        env_role: Some("inbox".into()),
+        queue: Some("/q.db".into()),
+        binding: Some("/r".into()),
+        use_case: UseCase::Show,
+        params: json!({"id": 1}),
+    };
+    let relayed = crate::application::inbox_relay::relayed(&agent);
+    let taken = ServiceResponse::success(json!({"id": 1}));
+    let http = FakeHttp::answering(vec![answer(&taken)]);
+    assert_eq!(
+        relay_send(&http, "https://c.example", Some(TOKEN), &relayed),
+        taken
+    );
+    let sent = http.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "https://c.example/api/use-case/show");
+    assert_eq!(sent[0].1.as_deref(), Some(TOKEN));
+    for name in ["token", "env_role", "queue", "binding"] {
+        assert!(sent[0].2.get(name).is_none(), "{name}: {:?}", sent[0].2);
+    }
+    let html = |status: u16| Ok((status, b"<html>Bad Gateway</html>".to_vec()));
+    for (given, code, named) in [
+        (
+            Err(anyhow!("connection reset")),
+            ServiceErrorCode::Unreachable,
+            None,
+        ),
+        (html(502), ServiceErrorCode::Unreachable, None),
+        (Ok((302, Vec::new())), ServiceErrorCode::Unreachable, None),
+        (
+            Ok((
+                503,
+                br#"{"error":{"code":"store_unavailable","message":"down"}}"#.to_vec(),
+            )),
+            ServiceErrorCode::Failed,
+            Some("store_unavailable"),
+        ),
+        (
+            Ok((200, vec![b' '; MAX_ANSWER_BYTES + 1])),
+            ServiceErrorCode::ResponseTooLarge,
+            None,
+        ),
+    ] {
+        let http = FakeHttp::answering(vec![given]);
+        let response = relay_send(&http, "https://c.example", Some(TOKEN), &relayed);
+        let error = response.error.clone().unwrap();
+        assert_eq!(error.code, code);
+        assert_eq!(error.relayed_code().map(|(code, _)| code), named);
+        assert!(!error.message.contains(TOKEN));
+        assert_eq!(http.sent().len(), 1);
+        // The agent's `dagq` reports the code the control side named.
+        let reported = answer_of(response).unwrap_err();
+        let failure = reported.downcast_ref::<ClientFailure>().unwrap();
+        assert_eq!(failure.code, named.unwrap_or(code.as_str()));
+    }
+}
+
+/// The agent's client takes its relay's answer as the person's client
+/// takes the control side's: versions it does not take stop with the
+/// range and the install guide.
+#[test]
+fn a_relays_answer_of_other_versions_stops_with_the_install_guide() {
+    let mut newer = ServiceResponse::success(json!({}));
+    newer.min_api_version = API_VERSION + 1;
+    newer.api_version = API_VERSION + 2;
+    let failed = relay_answer(newer).unwrap_err();
+    let mismatch = failed
+        .downcast_ref::<crate::application::login::ApiVersionMismatch>()
+        .unwrap();
+    assert_eq!(mismatch.minimum, u64::from(API_VERSION + 1));
+    assert!(failed.to_string().contains("install a compatible dagq"));
+    let taken = ServiceResponse::success(json!({}));
+    assert_eq!(relay_answer(taken.clone()).unwrap(), taken);
 }

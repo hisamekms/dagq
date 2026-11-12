@@ -354,6 +354,7 @@ mod tests {
             },
             kind,
             model: None,
+            parent: None,
             session_id: session.into(),
             transcript_path: Some(dir.join(format!("{session}.jsonl")).display().to_string()),
             cwd: Some("/repo".into()),

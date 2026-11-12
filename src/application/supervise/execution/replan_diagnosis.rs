@@ -2044,6 +2044,7 @@ mod tests {
                 rejected: true,
                 held: held.map(Box::new),
                 session_of_another_target: false,
+                relayed: false,
             })
         };
         for refusal in [
@@ -2099,6 +2100,7 @@ mod tests {
                 rejected: true,
                 held: held.map(Box::new),
                 session_of_another_target: false,
+                relayed: false,
             })
         };
         for refusal in [on_queue, through_service(Some(hold))] {

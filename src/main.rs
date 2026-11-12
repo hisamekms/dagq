@@ -4446,7 +4446,10 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
 /// (`no_credential`, [`dagq::domain::queue_service::control_role_refusal`]).
 fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) -> Result<Value> {
     use dagq::infrastructure::queue_service::{ClientFailure, ClientRoute};
-    let control = matches!(client.route, ClientRoute::Control { .. });
+    let relay = matches!(client.route, ClientRoute::Relay(_));
+    // An inbox's relay goes where `DAGQ_CONTROL_URL` goes, and is refused
+    // what it is refused.
+    let control = relay || matches!(client.route, ClientRoute::Control { .. });
     if matches!(
         cli.command,
         Command::Login { .. } | Command::Logout | Command::Whoami
@@ -4486,6 +4489,9 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
         }
         return Ok(located);
     }
+    if relay && let Some(answer) = relay_command(client, cli)? {
+        return Ok(answer);
+    }
     if let Some(call) = control_call(&cli.command) {
         if control {
             return Err(ClientFailure::new(
@@ -4509,6 +4515,10 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
         )
         .into());
     };
+    if relay {
+        // The relay puts the inbox's token on it: this process reads none.
+        return call_service(client, None, &cli.command, use_case, params);
+    }
     if control {
         if let Some(why) =
             dagq::domain::queue_service::control_role_refusal(client.env_role.as_deref())
@@ -4552,11 +4562,132 @@ fn located(route: &dagq::infrastructure::queue_service::ClientRoute) -> Value {
             "note": "dagq runs in client mode: its commands go to the control side's queue \
                      service at the URL with your login's token, and it opens no queue",
         }),
+        ClientRoute::Relay(socket) => json!({
+            "client_mode": true,
+            "inbox_relay": socket,
+            "db": null,
+            "db_exists": null,
+            "note": "dagq runs in client mode: its commands go through the relay of the dagq \
+                     inbox that started this inbox to the control side, and it opens no queue",
+        }),
     }
 }
 
+/// What the `dagq` of a person's inbox for a control side does with
+/// `cli`'s command through its relay (`client`'s route) that the other
+/// routes do not: `watch`, whose looks the relay sends as `watch_poll`
+/// ([`dagq::compose::watch_through_relay`]); an inbox's `session-event`,
+/// whose span its hook sends as the host's inbox's does; and `dagq inbox`,
+/// refused inside an inbox. `None` for any other command, which client
+/// mode refuses or sends as it does to a control side.
+fn relay_command(
+    client: &dagq::infrastructure::queue_service::Client,
+    cli: &Cli,
+) -> Result<Option<Value>> {
+    match &cli.command {
+        Command::Watch {
+            after,
+            timeout,
+            until_attention,
+            interval,
+            role,
+            cmux: _,
+        } => Ok(Some(dagq::compose::watch_through_relay(
+            client,
+            &dagq::application::watch::WatchOptions {
+                after: after.map(EventId::new),
+                timeout: (!until_attention)
+                    .then(|| Duration::from_secs(timeout.unwrap_or(DEFAULT_WATCH_TIMEOUT_SECS))),
+                interval: Duration::from_secs(*interval),
+                role: parse_role(role.clone())?,
+            },
+        )?)),
+        Command::SessionEvent { event, .. } => {
+            if session_hook_kind() != Some(dagq::domain::sessions::INBOX) {
+                return Ok(Some(
+                    json!({"recorded": false, "reason": "not an inbox's session"}),
+                ));
+            }
+            let Some(hook) = read_session_hook(event)? else {
+                return Ok(Some(json!({"recorded": false})));
+            };
+            Ok(Some(send_inbox_hook(client, &hook)?))
+        }
+        Command::Inbox { .. } => {
+            anyhow::bail!(dagq::application::lifecycle::INBOX_INSIDE_REFUSED)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `dagq inbox` with `DAGQ_CONTROL_URL` alone
+/// ([`dagq::compose::control_inbox`]): refused inside an inbox and for any
+/// other role but the user's, before any store is read, and with a queue
+/// named; else the agent runs as this process's child, whose exit code
+/// this process ends with.
+fn control_inbox(cli: Cli) -> Result<Value> {
+    use dagq::application::inbox_relay::{OpenRefusal, open_refusal};
+    use dagq::infrastructure::queue_service::ClientFailure;
+    let Command::Inbox {
+        plugin_dir,
+        repo: _,
+        claude,
+        codex,
+        provider,
+        model,
+    } = cli.command
+    else {
+        unreachable!("dagq inbox");
+    };
+    match open_refusal(env::var(dagq::domain::actor::ROLE_ENV).ok().as_deref()) {
+        Some(OpenRefusal::Inside) => {
+            anyhow::bail!(dagq::application::lifecycle::INBOX_INSIDE_REFUSED)
+        }
+        Some(OpenRefusal::Denied(role)) => {
+            return Err(ClientFailure::new(
+                "authorization_denied",
+                format!(
+                    "DAGQ_ROLE names {role}: a person opens their inbox in a terminal of their \
+                     own, and no other role's dagq opens one; nothing was read or sent"
+                ),
+            )
+            .into());
+        }
+        None => {}
+    }
+    if let Some(db) = &cli.db {
+        return Err(ClientFailure::new(
+            "queue_named",
+            format!(
+                "--db {} names a queue to open, and dagq inbox for a control side \
+                 ({CLIENT_MODE_SET}) opens none: run it without it",
+                db.display()
+            ),
+        )
+        .into());
+    }
+    let url = env::var(dagq::domain::queue_service::CONTROL_URL_ENV)
+        .context("DAGQ_CONTROL_URL is unset")?;
+    dagq::infrastructure::queue_service::check_control_url(&url)?;
+    let cwd = env::current_dir().context("working directory is unavailable")?;
+    let code = dagq::compose::control_inbox(
+        &url,
+        &cwd,
+        &up_environment()?,
+        &dagq::lifecycle::InboxOptions {
+            plugin_dir,
+            agent: claude,
+            codex,
+            provider: provider.as_deref().map(str::parse).transpose()?,
+            model,
+        },
+    )?;
+    std::process::exit(code);
+}
+
 /// How client mode's refusals name the variables that put `dagq` in it.
-const CLIENT_MODE_SET: &str = "DAGQ_SERVICE_SOCKET, DAGQ_SERVICE_URL or DAGQ_CONTROL_URL is set";
+const CLIENT_MODE_SET: &str =
+    "DAGQ_SERVICE_SOCKET, DAGQ_SERVICE_URL, DAGQ_CONTROL_URL or DAGQ_INBOX_RELAY is set";
 
 /// The control-side command `command` is when it runs through the queue
 /// service ([`dagq::domain::queue_service::UseCase::Control`]): `integrate`,
@@ -4928,11 +5059,12 @@ fn terminal_identity(command: &Command) -> Result<Value> {
     };
     let choice = login::StoreChoice::parse(env::var("DAGQ_CREDENTIAL_STORE").ok().as_deref())?;
     let file = credentials::FileCredentials::from_env(|name| env::var(name).ok())?;
-    let store = login::Stores {
+    let stores = login::Stores {
         choice,
         os: &credentials::OsCredentials,
         file: &file,
     };
+    let store = credentials::WritesLocked { store: &stores };
     let http = HttpsDocumentSource::for_login();
     let terminal = dagq::infrastructure::login::TerminalLogin;
     match command {
@@ -4944,7 +5076,9 @@ fn terminal_identity(command: &Command) -> Result<Value> {
             store.delete()?;
             Ok(json!({"logged_out": true}))
         }
-        Command::Whoami => login::whoami(&http, &store, terminal.now()),
+        Command::Whoami => {
+            credentials::with_terminal_store(|store| login::whoami(&http, store, terminal.now()))
+        }
         _ => unreachable!(),
     }
 }
@@ -5120,6 +5254,14 @@ fn execute(cli: Cli) -> Result<Value> {
     // and no other client variable stay on the terminal, where
     // `identity.login` authorizes them: the person's token is not sent for
     // them, and `DAGQ_CONTROL_URL` is `login`'s destination.
+    // `dagq inbox` with a control side alone opens the person's inbox on
+    // this machine: none of the host's steps, and not client mode, which
+    // would send it.
+    if matches!(cli.command, Command::Inbox { .. })
+        && dagq::domain::queue_service::inbox_opens_for_a_control_side(|name| env::var(name).ok())
+    {
+        return control_inbox(cli);
+    }
     let identity = matches!(
         cli.command,
         Command::Login { .. } | Command::Logout | Command::Whoami
@@ -5997,6 +6139,15 @@ fn record_inbox_hook(
             Client::host(&db, common_dir.as_deref(), |name| env::var(name).ok())
         }
     };
+    send_inbox_hook(&client, hook)
+}
+
+/// Send an inbox's hook's report `hook` through `client` within
+/// [`HOOK_TIMEOUT`]: the span as the service records it.
+fn send_inbox_hook(
+    client: &dagq::infrastructure::queue_service::Client,
+    hook: &dagq::domain::sessions::SessionHook,
+) -> Result<Value> {
     let op = dagq::application::session::SessionOp::Hook { hook: hook.clone() };
     let answer = client.call_within(op.use_case(), serde_json::to_value(&op)?, HOOK_TIMEOUT)?;
     Ok(answer["value"].clone())
@@ -6589,6 +6740,80 @@ mod daemon_output_tests {
         assert_eq!(located["control_url"], "http://127.0.0.1:9");
         assert_eq!(located["client_mode"], true);
         assert!(located["db"].is_null() && located["db_exists"].is_null());
+    }
+
+    /// Through an inbox's relay (`DAGQ_INBOX_RELAY`) client mode refuses
+    /// what the HTTPS route refuses, before anything is sent: a queue
+    /// named, the control side's diagnostics, the commands this process
+    /// does the steps of and the identity commands, each by its code, and
+    /// `dagq inbox` inside the inbox; `locate` names the relay and no DB;
+    /// a command it sends goes to the relay alone, and one that does not
+    /// answer is `unreachable`, with no queue or socket of the host's
+    /// looked at instead.
+    #[test]
+    fn an_inbox_relay_refuses_what_the_control_url_refuses() {
+        on_a_large_stack(an_inbox_relay_refuses_what_the_control_url_refuses_cases);
+    }
+
+    fn an_inbox_relay_refuses_what_the_control_url_refuses_cases() {
+        use dagq::infrastructure::queue_service::{Client, ClientFailure};
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("gone.sock");
+        let client = Client::from_env(|name| match name {
+            "DAGQ_INBOX_RELAY" => Some(socket.display().to_string()),
+            "DAGQ_ROLE" => Some("inbox".into()),
+            _ => None,
+        })
+        .unwrap()
+        .unwrap();
+        let failure = |argv: &[&str]| {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            client_mode(&client, &cli).unwrap_err()
+        };
+        let code = |argv: &[&str]| {
+            failure(argv)
+                .downcast_ref::<ClientFailure>()
+                .unwrap_or_else(|| panic!("{argv:?}"))
+                .code
+                .clone()
+        };
+        assert_eq!(code(&["dagq", "--db", "/q.db", "show", "1"]), "queue_named");
+        for argv in [
+            &["dagq", "doctor"][..],
+            &["dagq", "service", "status"],
+            &["dagq", "queue-broker", "status"],
+            &["dagq", "integrate", "1"],
+            &["dagq", "review", "1"],
+            &["dagq", "observe"],
+            &["dagq", "throughput-review"],
+            &["dagq", "setup-review"],
+            &["dagq", "login"],
+            &["dagq", "logout"],
+            &["dagq", "whoami"],
+        ] {
+            assert_eq!(code(argv), "control_side_command", "{argv:?}");
+        }
+        assert_eq!(
+            failure(&["dagq", "inbox"]).to_string(),
+            dagq::application::lifecycle::INBOX_INSIDE_REFUSED
+        );
+        let located = located(&client.route);
+        assert_eq!(located["inbox_relay"], json!(socket));
+        assert!(located["db"].is_null() && located["db_exists"].is_null());
+        // Sent, to the relay alone, which is gone.
+        for argv in [
+            &["dagq", "show", "1"][..],
+            &["dagq", "status", "--role", "inbox"],
+        ] {
+            let failed = failure(argv);
+            let failure = failed.downcast_ref::<ClientFailure>().unwrap();
+            assert_eq!(failure.code, "unreachable", "{argv:?}");
+            assert!(
+                failure.message.contains("dagq inbox"),
+                "{}",
+                failure.message
+            );
+        }
     }
 
     /// With a control side named and no other client variable, `login`,

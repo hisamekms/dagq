@@ -27,7 +27,9 @@ struct Received {
 #[test]
 fn a_command_goes_to_the_control_url_with_the_terminal_s_bearer() {
     let _test = common::test();
-    let root = tempfile::tempdir().unwrap();
+    // Under no run directory: the file store refuses one, and a worker's
+    // `TMPDIR` is in its run directory.
+    let root = common::short_tempdir();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
 

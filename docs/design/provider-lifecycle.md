@@ -90,7 +90,7 @@ providerは役割ごとに決まる（[Actor model](supervisor-lifecycle/actor-m
 ## inboxの起動
 
 `dagq inbox`はproviderの`AgentProvider::inbox_command`でinboxのcommandを作る（選び方と記録の手順は[`up` / `down`](supervisor-lifecycle/up-down.md#dagq-inbox)）。
-Claudeのinboxはqueueのdirに書くsettings（inboxのdenyだけ）とpluginで開く。
+Claudeのinboxはsettings（inboxのdenyだけ。hostではqueueのdir、人のマシンでは利用者の設定のdirに書く）とpluginで開く。
 Codexのinboxは起動の引数だけで開き、何も書かない（[ADR-t1181-1](../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定2）。
 使えないCodex（実行ファイルとlogin）も開かずに断り、Claudeに替えない。
 
@@ -110,8 +110,10 @@ Codexのinboxは起動の引数だけで開き、何も書かない（[ADR-t1181
   代わりに起動の記録に渡したhookのkeyとhashを残し、届かないhookの記録から欠けを読む（下の「inboxの区間」）。
 - 約束: 人のCodexの設定（`CODEX_HOME`か`~/.codex`の`config.toml`・`auth.json`）と`~/.claude`は書かない（[ADR-t3331-1](../adr/2026-10-25-t3331-1-codex-inbox-writes-no-person-settings-and-refuses-to-open-when-codex-would.md)）。
   TUIが自分で書き足す欄は、引数で止められるものは止め、止められないものはexecの前に人のfileを読むだけで確かめ、欠けていれば開かない。
-- 境界: sandboxはどこも書かせず、queue serviceのsocketへの接続だけを足す（`Codex::reach_queue_service`、jobと同じprofile。[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。
-  inboxの`dagq`はinboxのtokenとともにserviceへ送り、serviceがinboxのprincipalで認可する。
+- 境界: sandboxはどこも書かせず、1つのsocket（hostではqueue service、人のマシンでは中継）への接続だけを足す（`Codex::reach_queue_service`、jobと同じprofile。[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。
+  hostではinboxの`dagq`がinboxのtokenとともにserviceへ送る。
+  人のマシンではinboxの`dagq`はtokenを持たずに中継へ送り、sandboxの外の親だけが置き場のinboxのtokenをbearerに付けて制御側へ送る。
+  どちらも受けた側がinboxのprincipalで認可する。
   queueのdirとDBはsandboxから書けないので、それを書く制御側のコマンド（`up`・`integrate`など）はCodexのinboxからは動かず、人が自分のterminalで打つ。
   hookはsandboxの外のhostで動き、queueはinboxの身元の`dagq`で読む。
 
@@ -128,7 +130,7 @@ runtimeが起動するsessionとjobは、kindごとの区間として記録す�
 inboxの区間はproviderによらずhookが記録し、起動の記録（`inbox_opened`）と並べて読む（[ADR-t1181-1](../adr/2026-10-24-t1181-1-codex-inbox-provider-selection-gaps-unavailability-and-records.md)決定5）。
 
 - 境界: 起動の後の最初のSessionStartで開き、SessionEndで閉じる。
-  `/clear`の後の新しいsession idのSessionStartで、前の区間を閉じたと推定する（ADR-t2022-1と同じ）。
+  `/clear`の後の新しいsession idのSessionStartで、同じ人（hostはhost）の前の区間を閉じたと推定する（ADR-t2022-1と同じ）。
   同じsession idのcompaction（SessionStartの`source`が`compact`）は区間を閉じず、新しい区間も開かずに続ける。
   Codexのcompactionの前と後のhookの`trigger`は、compactionの印として区間の横に残す（`domain::sessions::hook_mark`）。
 - 落とし穴: Codexがcompactionの後に`source`の`compact`か`trigger`を送らなくなったら、compactionで区間を閉じたと推定する形に替える。

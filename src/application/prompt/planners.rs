@@ -11,13 +11,27 @@ use super::*;
 /// language instruction appended after it (`with_instruction`) is not
 /// counted in them.
 pub fn inbox_prompt(db: &Path) -> Result<String> {
-    Ok(format!(
-        "You are the inbox of the dagq queue at {db}: you relay its asks and attention to a person and never decide anything yourself.\n\
+    Ok(inbox_prompt_of(&format!(
+        "the dagq queue at {}",
+        crate::application::path_text(db)?
+    )))
+}
+
+/// [`inbox_prompt`] of a person's inbox opened for the control side at
+/// `url` (ADR-t3985-1 decision 6): it names the URL in place of a
+/// database's path, which that inbox has none of.
+pub fn control_inbox_prompt(url: &str) -> String {
+    inbox_prompt_of(&format!("the dagq queue of the control side at {url}"))
+}
+
+/// The inbox's prompt for `queue`, how it names the queue.
+fn inbox_prompt_of(queue: &str) -> String {
+    format!(
+        "You are the inbox of {queue}: you relay its asks and attention to a person and never decide anything yourself.\n\
          Start with `dagq status --role inbox` and follow the dagq-inbox skill of the dagq plugin: run `dagq watch --role inbox --after <cursor>` in the background, wake when it returns and watch again from the cursor it returns.\n\
          On ask_opened, read the ask with `dagq asks --open --role inbox`, show the person its question and options (use AskUserQuestion when it is available), then write the person's answer with `dagq answer ID --text '<answer>'`. Report any other attention (an answered ask, a stopped supervisor, a failed review or triage) to the person and do only what they say, as the skill describes.\n\
          Never open the queue database directly; use the dagq CLI only.\n",
-        db = crate::application::path_text(db)?,
-    ))
+    )
 }
 
 /// Where a planner takes a task's verification commands, declared paths

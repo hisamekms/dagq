@@ -609,6 +609,7 @@ fn a_job_record_and_a_session_hook_that_held_the_lock_long_are_recorded_by_their
             planner_id: None,
             launch: None,
             model: None,
+            parent: None,
         })
         .unwrap();
     assert!(started["opened"].is_i64(), "{started}");

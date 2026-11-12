@@ -193,6 +193,20 @@ pub enum ActorProgram<'a> {
         plugin_dir: Option<&'a Path>,
         launch: Option<&'a ActorLaunch>,
     },
+    /// The agent of a person's inbox for a team's control side (ADR-t3985-1
+    /// decision 6), started as [`Self::Foreground`] is but on no queue
+    /// ([`HostActorExecutor::for_a_control_side`]): its guardrail's settings
+    /// in `settings_dir`, the person's client variables taken out of its
+    /// environment, and its `dagq` sent through the session's `relay`
+    /// ([`super::inbox_relay::agent_env`]).
+    ControlForeground {
+        cwd: &'a Path,
+        prompt: String,
+        plugin_dir: Option<&'a Path>,
+        launch: &'a ActorLaunch,
+        settings_dir: &'a Path,
+        relay: &'a Path,
+    },
     /// The session wrapper `wrapper` (`planner-session --headless`) of a
     /// planner of the runtime's, which runs its agent one call per turn
     /// (ADR-t1394-2 decision 2): started without a workspace as a process
@@ -240,6 +254,7 @@ impl ActorProgram<'_> {
                 SessionAgent::Turn { run, .. } => run.actual_provider(),
                 SessionAgent::Planner(_) | SessionAgent::PlannerTurn { .. } => Provider::Claude,
             },
+            Self::ControlForeground { launch, .. } => launch.provider,
             Self::Foreground { launch, .. }
             | Self::PlannerSession { launch, .. }
             | Self::Headless { launch, .. } => {
@@ -261,7 +276,7 @@ impl ActorProgram<'_> {
                 ..
             }
             | Self::PlannerSession { .. } => &[ActorRole::Planner],
-            Self::Foreground { .. } => &[ActorRole::Inbox],
+            Self::Foreground { .. } | Self::ControlForeground { .. } => &[ActorRole::Inbox],
             Self::Headless {
                 program: HeadlessProgram::Review { .. } | HeadlessProgram::AgentJob(_),
                 ..
@@ -574,6 +589,14 @@ impl<'a> HostActorExecutor<'a> {
         }
     }
 
+    /// An executor of no queue, for the inbox a person opens for a team's
+    /// control side on their machine: it starts
+    /// [`ActorProgram::ControlForeground`] alone, every other program
+    /// naming a queue it does not have.
+    pub fn for_a_control_side() -> Self {
+        Self::new(Path::new(""))
+    }
+
     /// An agent whose executable was found again at its start
     /// ([`AgentProvider::relocated_executable`]) is recorded on `events`,
     /// on its run when it has one (ADR-t2079-1); without it, only logged.
@@ -826,6 +849,11 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 self.backend().as_str()
             );
         }
+        anyhow::ensure!(
+            !self.queue.as_os_str().is_empty()
+                || matches!(spec.program, ActorProgram::ControlForeground { .. }),
+            "an executor of no queue starts only the inbox for a control side"
+        );
         let ActorExecutionSpec {
             actor,
             program,
@@ -833,6 +861,26 @@ impl ActorExecutor for HostActorExecutor<'_> {
             ..
         } = spec;
         match program {
+            ActorProgram::ControlForeground {
+                cwd,
+                prompt,
+                plugin_dir,
+                launch,
+                settings_dir,
+                relay,
+            } => {
+                let mut command =
+                    self.provider()?
+                        .inbox_command(&prompt, plugin_dir, settings_dir, cwd)?;
+                command.current_dir(cwd);
+                for name in super::inbox_relay::agent_env_removed(
+                    std::env::vars_os().filter_map(|(name, _)| name.into_string().ok()),
+                ) {
+                    command.env_remove(name);
+                }
+                command.envs(super::inbox_relay::agent_env(launch, relay)?);
+                Ok(ActorHandle::Foreground(command))
+            }
             ActorProgram::RunSession {
                 run,
                 wrapper,
@@ -2043,6 +2091,62 @@ mod tests {
         // Nothing was started.
         assert!(fake.spawned.lock().unwrap().is_empty());
         assert!(fake.workspaces.lock().unwrap().is_empty());
+    }
+
+    /// The inbox for a control side starts through the executor on no
+    /// queue: its command names the relay and no queue, and the executor
+    /// of no queue starts nothing else.
+    #[test]
+    fn the_inbox_for_a_control_side_starts_on_no_queue_alone() {
+        let fake = Fake::default();
+        let launch = crate::domain::actor_model::ActorLaunch::default_of(
+            crate::domain::actor_model::ModelRole::Inbox,
+        );
+        let spec = |program| {
+            ActorExecutionSpec::new(
+                ActorContext::new(ActorRole::Inbox, "inbox"),
+                WorkspaceAccess::Write("/repo".into()),
+                program,
+            )
+        };
+        let command = HostActorExecutor::for_a_control_side()
+            .with_provider(&fake)
+            .spawn(spec(ActorProgram::ControlForeground {
+                cwd: Path::new("/repo"),
+                prompt: "You are the inbox".into(),
+                plugin_dir: None,
+                launch: &launch,
+                settings_dir: Path::new("/config/dagq/inbox"),
+                relay: Path::new("/tmp/dagq-1/inbox-2.sock"),
+            }))
+            .unwrap()
+            .foreground()
+            .unwrap();
+        assert_eq!(command.get_current_dir(), Some(Path::new("/repo")));
+        let env = env_of(&command);
+        let value = |name: &str| {
+            env.iter()
+                .find(|(named, _)| named == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value("DAGQ_ROLE"), Some("inbox"));
+        assert_eq!(
+            value(crate::domain::queue_service::INBOX_RELAY_ENV),
+            Some("/tmp/dagq-1/inbox-2.sock")
+        );
+        assert_eq!(value("DAGQ_QUEUE"), None);
+        let refused = HostActorExecutor::for_a_control_side()
+            .with_provider(&fake)
+            .spawn(spec(ActorProgram::Foreground {
+                cwd: Path::new("/repo"),
+                prompt: "You are the inbox".into(),
+                plugin_dir: None,
+                launch: None,
+            }))
+            .err()
+            .unwrap();
+        assert!(refused.to_string().contains("no queue"), "{refused:#}");
+        assert!(fake.spawned.lock().unwrap().is_empty());
     }
 
     /// A job whose agent does not start, started by `fake`.

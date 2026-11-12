@@ -476,6 +476,7 @@ mod tests {
             },
             kind: INBOX,
             model: None,
+            parent: None,
             session_id: "s".into(),
             transcript_path: None,
             cwd: None,

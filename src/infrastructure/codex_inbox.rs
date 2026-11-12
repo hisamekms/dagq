@@ -740,10 +740,23 @@ pub fn check_this_codex(executable: &Path, cwd: &Path) -> Result<(), String> {
 /// `dagq` with the queue of the inbox's environment (`DAGQ_DB`, else
 /// `DAGQ_QUEUE`) as `--db`, and `args`.
 fn dagq(launcher: &Path, args: &[&str]) -> Command {
+    dagq_in(launcher, args, |name| std::env::var_os(name))
+}
+
+/// [`dagq`] in the environment `env`. An inbox for a control side
+/// ([`crate::domain::queue_service::INBOX_RELAY_ENV`]) names no queue: its
+/// `dagq` goes through the relay, which refuses a `--db`.
+fn dagq_in(
+    launcher: &Path,
+    args: &[&str],
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Command {
     let mut command = Command::new(launcher);
     // An explicit `DAGQ_DB` wins, as for the Claude inbox's hooks.
-    let named = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-    if let Some(queue) =
+    let named = |name: &str| env(name).filter(|value| !value.is_empty());
+    if named(crate::domain::queue_service::INBOX_RELAY_ENV).is_some() {
+        command.env_remove("DAGQ_DB");
+    } else if let Some(queue) =
         named("DAGQ_DB").or_else(|| named(crate::application::lifecycle::QUEUE_ENV))
     {
         command.arg("--db").arg(queue);
@@ -853,6 +866,61 @@ pub fn run_hook(hook: InboxHook) -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// The hooks' `dagq` of an inbox for a control side names no queue,
+    /// even beside a `DAGQ_DB` or `DAGQ_QUEUE`, so its `status --role inbox`
+    /// and `session-event` go to the relay as the client of
+    /// `DAGQ_INBOX_RELAY` routes them; the host's inbox keeps its `--db`.
+    #[test]
+    fn the_hooks_dagq_of_an_inbox_through_its_relay_names_no_queue() {
+        use std::ffi::OsString;
+        let args = |command: &Command| -> Vec<String> {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let relay = |name: &str| -> Option<OsString> {
+            match name {
+                "DAGQ_INBOX_RELAY" => Some("/tmp/r/inbox-1.sock".into()),
+                "DAGQ_DB" => Some("/q/queue.db".into()),
+                "DAGQ_QUEUE" => Some("/q/queue.db".into()),
+                _ => None,
+            }
+        };
+        for (hook, want) in [
+            (
+                vec!["status", "--role", "inbox"],
+                vec!["status", "--role", "inbox"],
+            ),
+            (vec!["session-event", "open"], vec!["session-event", "open"]),
+        ] {
+            let command = dagq_in(Path::new("/bin/dagq"), &hook, relay);
+            assert_eq!(args(&command), want);
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(name, value)| name == "DAGQ_DB" && value.is_none())
+            );
+        }
+        let host = |name: &str| -> Option<OsString> {
+            (name == "DAGQ_QUEUE").then(|| "/q/queue.db".into())
+        };
+        assert_eq!(
+            args(&dagq_in(Path::new("/bin/dagq"), &["status"], host)),
+            ["--db", "/q/queue.db", "status"]
+        );
+        // The environment the agent is given routes that `dagq` to the
+        // relay alone.
+        let client = crate::infrastructure::queue_service::Client::from_env(|name| {
+            relay(name)
+                .filter(|_| name != "DAGQ_DB" && name != "DAGQ_QUEUE")
+                .map(|value| value.to_string_lossy().into_owned())
+        })
+        .unwrap()
+        .unwrap();
+        assert!(client.reaches_a_relay());
+    }
     use super::*;
 
     /// The command of each hook of the measurement whose launch arguments
@@ -1129,6 +1197,64 @@ mod tests {
         );
         // The options stay before the prompt.
         assert_eq!(&args[args.len() - 2..], ["--", "p"]);
+    }
+
+    /// The inbox for a control side reaches its relay's socket alone: the
+    /// same profile as the host's inbox with the relay's real path in
+    /// place of the queue service's, no `--sandbox read-only`, no domain
+    /// allowed and no root writable. Claude's inbox gets no sandbox
+    /// setting: its agent has none to open.
+    #[test]
+    fn the_codex_inbox_for_a_control_side_reaches_only_its_relay() {
+        use crate::application::AgentProvider;
+        let dir = tempfile::tempdir().unwrap();
+        let relay = dir.path().join("inbox-1.sock");
+        let codex = super::super::codex::Codex::new(PathBuf::from("/bin/codex"));
+        let mut command = inbox_command(
+            &codex.executable,
+            Path::new("/bin/dagq"),
+            dir.path(),
+            None,
+            None,
+            "p",
+        )
+        .unwrap();
+        codex.reach_queue_service(&mut command, &relay);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.iter().any(|arg| arg == "--sandbox"), "{args:?}");
+        let real = dir.path().canonicalize().unwrap().join("inbox-1.sock");
+        assert!(
+            args.contains(&format!(
+                r#"permissions.dagq_job.network.unix_sockets={{{}="allow"}}"#,
+                serde_json::to_string(real.to_str().unwrap()).unwrap()
+            )),
+            "{args:?}"
+        );
+        assert!(args.contains(&r#"permissions.dagq_job.extends=":read-only""#.to_owned()));
+        for wider in ["writable_roots", "filesystem", "allowed_domains", "domains"] {
+            assert!(
+                !args.iter().any(|arg| arg.contains(wider)),
+                "{wider}: {args:?}"
+            );
+        }
+        let claude = super::super::adapters::ClaudeCode {
+            executable: PathBuf::from("/bin/claude"),
+        };
+        let mut command = claude
+            .inbox_command("p", None, dir.path(), dir.path())
+            .unwrap();
+        let before: Vec<_> = command.get_args().map(ToOwned::to_owned).collect();
+        claude.reach_queue_service(&mut command, &relay);
+        let after: Vec<_> = command.get_args().map(ToOwned::to_owned).collect();
+        assert_eq!(before, after);
+        assert!(
+            !after
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("sandbox"))
+        );
     }
 
     /// A relative `CODEX_HOME` is read from the main checkout Codex starts

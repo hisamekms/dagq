@@ -27,6 +27,7 @@ pub mod health;
 pub mod heavy_reads;
 pub mod heavy_turn;
 pub mod inbox_guardrail;
+pub mod inbox_relay;
 pub mod inbox_watcher;
 pub mod inherit;
 pub mod install;

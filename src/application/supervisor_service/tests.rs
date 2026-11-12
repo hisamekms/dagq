@@ -14,6 +14,7 @@ fn failed(kind: Option<FailureKind>) -> ServiceError {
         rejected: false,
         held: None,
         session_of_another_target: false,
+        relayed: false,
     }
 }
 
@@ -49,6 +50,7 @@ fn a_services_failure_reads_as_the_queues_own_error() {
     assert_eq!(failure_kind(&taken), None);
     let taken = service_error(&ServiceError {
         session_of_another_target: true,
+        relayed: false,
         ..failed(None)
     });
     assert_eq!(
@@ -308,6 +310,7 @@ fn set_max_load_sends_the_value_alone_only_to_a_service_that_reads_no_source() {
             rejected: false,
             held: None,
             session_of_another_target: false,
+            relayed: false,
         })
     }
     assert_eq!(
@@ -506,6 +509,7 @@ impl ServiceCaller for PagedRuns {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }));
         }
         let runs: Vec<_> = self.runs.iter().skip(offset).take(page).collect();
@@ -1409,6 +1413,7 @@ impl ServiceCaller for Tokens {
                         rejected: false,
                         held: None,
                         session_of_another_target: false,
+                        relayed: false,
                     }))
                 }
             }
@@ -1859,6 +1864,7 @@ impl ServiceCaller for PagedSamples {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }));
         }
         Ok(Value::Array(
@@ -1984,6 +1990,7 @@ impl ServiceCaller for PagedResources {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }));
         }
         Ok(Value::Array(
@@ -2321,6 +2328,7 @@ impl ServiceCaller for PagedLedger {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }));
         }
         Ok(Value::Array(answer(page)))
@@ -2432,6 +2440,7 @@ impl ServiceCaller for RowInParts {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             })),
             "ledger_row_keys" => {
                 let after = params.args[1].as_str().map(str::to_owned);
@@ -2567,6 +2576,7 @@ impl ServiceCaller for RowsOfLedger {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }));
         }
         Ok(answer)
@@ -2678,6 +2688,7 @@ impl ServiceCaller for EventsOfKind {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }));
         }
         Ok(answer)
@@ -2800,6 +2811,7 @@ impl ServiceCaller for OlderDiagnosisService {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             })),
         }
     }
@@ -2944,6 +2956,7 @@ impl ServiceCaller for PagedEventsOf {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             })
         };
         let asked = usize::try_from(params.args[3].as_u64().unwrap()).unwrap();
@@ -3119,6 +3132,7 @@ impl ServiceCaller for PagedHeads {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }));
         }
         if params.op == "ledger_heads" {
@@ -3262,6 +3276,7 @@ impl ServiceCaller for PagedSettledWaits {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }));
         }
         let rows: Vec<_> = (1..=self.rows)
@@ -3399,6 +3414,7 @@ impl ServiceCaller for PagedWaits {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }));
         }
         if params.op == "ledger_supervisor_stops" {
@@ -3760,6 +3776,7 @@ impl ServiceCaller for PagedPushRecords {
                 rejected: false,
                 held: None,
                 session_of_another_target: false,
+                relayed: false,
             }));
         }
         Ok(answer)
