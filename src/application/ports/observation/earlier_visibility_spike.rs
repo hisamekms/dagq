@@ -3982,3 +3982,6 @@ fn every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row() {
     assert_eq!(counts[1].0, counts[3].0, "{counts:?}");
     assert!(counts[3].1 > 50 * counts[1].1 / 2, "{counts:?}");
 }
+
+// The rest of (ii) (Spike 4811).
+mod rest;
