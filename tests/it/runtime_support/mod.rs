@@ -1992,6 +1992,7 @@ pub fn session_receipt(run: &TaskRun, commit: &str, result: &str, summary: &str)
         "tests": {"status": "passed", "evidence_or_reason": "reran"},
         "e2e": {"status": "not_applicable", "evidence_or_reason": "none"},
         "subagent_review": {"status": "not_applicable", "evidence_or_reason": "session"},
+        "acceptance_items": [{"item": 1, "status": "met", "evidence": "stub implementation and tests"}],
         "summary": summary,
     })
 }
