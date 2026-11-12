@@ -41,7 +41,7 @@ fn evidence_fixture(evidence: &[EvidenceCheck]) -> (Fixture, PathBuf, PathBuf) {
 /// A receipt function for scripts: `receipt_tests COMMIT STATUS EVIDENCE`
 /// claims success with the given `tests` check.
 const RECEIPT_TESTS: &str = r#"receipt_tests() {
-  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"%s","evidence_or_reason":"%s"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs the e2e"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"summary":"done"}' "$RUN_ID" "$1" "$2" "$3" > "$RECEIPT.tmp"
+  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"%s","evidence_or_reason":"%s"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs the e2e"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"acceptance_items":[{"item":1,"status":"met","evidence":"stub implementation and tests"}],"summary":"done"}' "$RUN_ID" "$1" "$2" "$3" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }
 "#;

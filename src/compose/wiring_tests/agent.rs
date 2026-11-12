@@ -46,6 +46,7 @@ pub(super) fn already_satisfied(run: &RunId, worktree: &Path, git: &FakeGit) -> 
         "tests": {"status": "passed", "evidence_or_reason": "test -f seed.txt on the base"},
         "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
         "subagent_review": {"status": "not_applicable", "evidence_or_reason": "no change to review"},
+        "acceptance_items": [{"item": 1, "status": "met", "evidence": "test -f seed.txt on the base"}],
         "summary": "the base meets it",
         "base_checks": [{"command": "test -f seed.txt", "result": "passed"}],
     }))
@@ -62,6 +63,7 @@ pub(super) fn succeeded(run: &RunId, worktree: &Path, git: &FakeGit) -> Result<V
         "tests": {"status": "passed", "evidence_or_reason": "the change's tests"},
         "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
         "subagent_review": {"status": "not_applicable", "evidence_or_reason": "a small change"},
+        "acceptance_items": [{"item": 1, "status": "met", "evidence": "change.txt and the change tests"}],
         "summary": "made the change",
     }))
 }
@@ -122,6 +124,7 @@ pub(super) fn succeeded_at_the_head(run: &RunId, worktree: &Path, git: &FakeGit)
         "tests": {"status": "passed", "evidence_or_reason": "test -f seed.txt"},
         "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
         "subagent_review": {"status": "not_applicable", "evidence_or_reason": "no change"},
+        "acceptance_items": [{"item": 1, "status": "met", "evidence": "test -f seed.txt on the base"}],
         "summary": "the base meets it",
     }))
 }

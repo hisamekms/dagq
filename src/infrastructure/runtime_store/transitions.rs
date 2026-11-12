@@ -287,9 +287,10 @@ impl<E: TransactionEntries> StoreQueue<E> {
     }
 
     /// Validate an `awaiting_integration` run again under the lease that
-    /// reviews it, after its live session rewrote the receipt for a
-    /// `revise` verdict (ADR-0027 decision 2); `revise_finished` is the
-    /// record of why.
+    /// reviews it, after a live session's rewrite for a `revise` verdict
+    /// (ADR-0027 decision 2, recorded as `revise_finished`), or when the
+    /// adoption/retry acceptance precheck finds claims needing repair.
+    /// Validation's evidence park retains this lease until session exit.
     pub fn restart_validation(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         let tx = self.write_entry("restart_validation")?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;

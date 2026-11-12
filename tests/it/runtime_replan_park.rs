@@ -1948,7 +1948,7 @@ fn container_turns(clean: bool) -> String {
     let go = common::await_file("\"$RUN_DIR/go\"");
     format!(
         r#"commit_all() {{ git add -A; git diff --cached --quiet || git -c user.name=worker -c user.email=worker@example.invalid commit -q -m "$1"; }}
-receipt() {{ printf '{{"run_id":"%s","result":"succeeded","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"not_applicable","evidence_or_reason":"stub"}},"subagent_review":{{"status":"not_applicable","evidence_or_reason":"stub"}},"summary":"in the container"}}' "$DAGQ_RUN_ID" "$(git rev-parse HEAD)" > "$RUN_DIR/receipt.json"; }}
+receipt() {{ printf '{{"run_id":"%s","result":"succeeded","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"not_applicable","evidence_or_reason":"stub"}},"subagent_review":{{"status":"not_applicable","evidence_or_reason":"stub"}},"acceptance_items":[{{"item":1,"status":"met","evidence":"stub implementation and tests"}}],"summary":"in the container"}}' "$DAGQ_RUN_ID" "$(git rev-parse HEAD)" > "$RUN_DIR/receipt.json"; }}
 echo turn >> "$RUN_DIR/agent-turns"
 if [ ! -f "$RUN_DIR/worked" ]; then
   : > "$RUN_DIR/worked"

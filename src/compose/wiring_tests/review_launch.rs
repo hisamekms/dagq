@@ -483,3 +483,189 @@ fn a_treatments_claim_judgment_falls_back_from_its_planned_provider_with_a_reaso
         "{job}"
     );
 }
+
+/// A successful receipt with unbacked deferral goes through the ordinary
+/// evidence resume, before either the whole reviewer or selected agents.
+#[test]
+fn an_unanswered_acceptance_deferral_resumes_before_any_review_job() {
+    use super::{agent::succeeded_at_the_head, git::FakeGit};
+    use crate::domain::RunId;
+    use std::path::Path;
+
+    fn deferred(run: &RunId, worktree: &Path, git: &FakeGit) -> anyhow::Result<Value> {
+        let mut receipt = succeeded(run, worktree, git)?;
+        receipt["acceptance_items"][0]["status"] = json!("deferred");
+        receipt["acceptance_items"][0]["evidence"] =
+            json!("startup connection postponed without a question");
+        Ok(receipt)
+    }
+
+    // The second turn supplies met. A review may start only after this
+    // automatic resume, and the accepted head is the original commit.
+    let wiring = Wiring::new(
+        "an_unanswered_acceptance_deferral_resumes_before_any_review_job",
+        Script {
+            receipts: vec![deferred, succeeded_at_the_head],
+            verdicts: vec![verdict("concern", "a person looks")],
+        },
+    );
+    wiring.git.commit_files(
+        &[
+            ("dagq.toml", CONFIG),
+            (
+                ".dagq/agents/design/AGENT.md",
+                "---\ndescription: design checks\n---\nCheck design.\n",
+            ),
+        ],
+        &["change.txt"],
+    );
+    wiring.verifier.set_config(CONFIG);
+    let task = wiring.ready_task(&["true"]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    let parked = detail
+        .events
+        .iter()
+        .position(|event| {
+            event.kind.as_str() == "evidence_missing"
+                && event.payload["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("acceptance item 1 deferred"))
+        })
+        .expect("deferral parks for the worker");
+    let resumed = detail
+        .events
+        .iter()
+        .enumerate()
+        .skip(parked + 1)
+        .find(|(_, event)| event.kind.as_str() == "resume_started")
+        .map(|(index, _)| index)
+        .expect("the existing automatic resume starts");
+    assert!(
+        detail.events[..=resumed]
+            .iter()
+            .all(|event| event.kind.as_str() != "review_job_started")
+    );
+    assert_eq!(payloads(&detail, "review_job_started").len(), 3);
+    assert_eq!(wiring.agent.agent_jobs().len(), 2);
+    assert_eq!(payloads(&detail, "review_finished").len(), 1);
+    assert_eq!(payloads(&detail, "revise_requested").len(), 0);
+    assert!(wiring.agent.turn_sessions().len() >= 2);
+}
+
+/// Re-review of an older receipt holds a review lease. Acceptance gaps
+/// must go through validation's evidence park under that lease, before
+/// any new review jobs, and resume the worker without a review revise.
+#[test]
+fn retrying_an_old_receipt_parks_under_the_review_lease_before_any_new_job() {
+    use super::agent::succeeded_at_the_head;
+    use crate::application::RunFiles;
+    use crate::domain::{AskKind, RunStatus, run::RunHistory};
+    use std::path::Path;
+
+    let wiring = Wiring::new(
+        "retrying_an_old_receipt_parks_under_the_review_lease_before_any_new_job",
+        Script {
+            receipts: vec![succeeded, succeeded_at_the_head],
+            verdicts: vec![
+                json!("no verdict here"),
+                verdict("concern", "a person looks"),
+            ],
+        },
+    );
+    wiring.git.commit_files(
+        &[
+            ("dagq.toml", CONFIG),
+            (
+                ".dagq/agents/design/AGENT.md",
+                "---\ndescription: design checks\n---\nCheck design.\n",
+            ),
+        ],
+        &["change.txt"],
+    );
+    wiring.verifier.set_config(CONFIG);
+    let task = wiring.ready_task(&["true"]);
+    wiring.supervise_once();
+    let mut queue = wiring.queue();
+    let before = queue.show(task).unwrap();
+    let run = &before.runs[0];
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    let ask = before
+        .asks
+        .iter()
+        .find(|ask| ask.kind == AskKind::ApproveLanding)
+        .unwrap();
+    assert!(ask.options.iter().any(|option| option == "retry_review"));
+    // Model a receipt written before this gate existed. Its Git facts and
+    // other evidence remain sound, so the new acceptance gate rejects it.
+    let path = Path::new(run.receipt_path().unwrap());
+    let mut receipt: Value =
+        serde_json::from_str(&wiring.files.read_to_string(path).unwrap()).unwrap();
+    receipt.as_object_mut().unwrap().remove("acceptance_items");
+    wiring
+        .files
+        .write(path, receipt.to_string().as_bytes())
+        .unwrap();
+    let cursor = before.events.last().unwrap().id;
+    queue.answer(ask.id, "retry_review").unwrap();
+    wiring.supervise_once();
+
+    let detail = queue.show(task).unwrap();
+    let events: Vec<_> = detail
+        .events
+        .iter()
+        .filter(|event| event.id > cursor)
+        .collect();
+    let at = |kind: &str| {
+        events
+            .iter()
+            .position(|event| event.kind.as_str() == kind)
+            .unwrap()
+    };
+    let lease = events
+        .iter()
+        .position(|event| {
+            event.kind.as_str() == "lease_acquired" && event.payload["reason"] == "review"
+        })
+        .expect("the re-review leases the run before checking its receipt");
+    let parked = at("evidence_missing");
+    let resumed = at("resume_started");
+    assert!(at("review_retry_queued") < lease && lease < parked && parked < resumed);
+    assert!(
+        events[..=resumed].iter().all(|event| {
+            !matches!(event.kind.as_str(), "review_started" | "review_job_started")
+        })
+    );
+    let validation = events
+        .iter()
+        .find(|event| event.kind.as_str() == "validation_finished")
+        .unwrap();
+    assert_eq!(validation.payload["status"], "needs_session");
+    assert_eq!(validation.payload["code"], "evidence_missing");
+    assert!(
+        events[parked].payload["reason"]
+            .as_str()
+            .unwrap()
+            .contains("acceptance_items missing")
+    );
+    assert_eq!(events[parked].payload["checks"], json!([]));
+    assert!(at("validation_finished") < parked);
+    assert!(payloads(&detail, "landing_decided").is_empty());
+    assert!(payloads(&detail, "revise_requested").is_empty());
+    let history = RunHistory::from_events(&detail.events);
+    assert_eq!(history.resumes().counted, 1);
+    assert_eq!(history.revise_attempts(), 0);
+    // Only the rewritten met receipt starts the whole review and agents.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind.as_str() == "review_job_started")
+            .count(),
+        3
+    );
+    assert!(resumed < at("review_job_started"));
+    assert_eq!(detail.runs.len(), 1);
+    assert_eq!(detail.runs[0].id(), run.id());
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+}

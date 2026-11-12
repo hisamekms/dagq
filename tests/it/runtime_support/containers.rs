@@ -202,7 +202,7 @@ finish() {
   echo "change $(wc -l < "$RUN_DIR/stub-calls" | tr -d ' ')" >> change.txt
   git add change.txt
   git -c user.name=worker -c user.email=worker@example.invalid commit -q -m work
-  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"ran"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub"},"summary":"in the container"}' "$DAGQ_RUN_ID" "$(git rev-parse HEAD)" > "$RUN_DIR/receipt.json"
+  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"ran"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub"},"acceptance_items":[{"item":1,"status":"met","evidence":"stub implementation and tests"}],"summary":"in the container"}' "$DAGQ_RUN_ID" "$(git rev-parse HEAD)" > "$RUN_DIR/receipt.json"
   [ -f "$RUN_DIR/leave-notes" ] && echo notes > notes.txt
   say "working in the container"
 }

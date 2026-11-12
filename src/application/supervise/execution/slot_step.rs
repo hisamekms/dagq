@@ -379,6 +379,7 @@ impl Supervisor<'_> {
                     .context("validation already joined")?
                     .join()
                     .map_err(|_| anyhow!("validation thread panicked"))??;
+                self.check_acceptance_receipt(&slot.run, &mut validation)?;
                 validation.load = self.take_load(slot.run.id());
                 let run = self.queue.finish_validation(
                     slot.run.id(),

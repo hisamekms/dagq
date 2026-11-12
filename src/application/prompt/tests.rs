@@ -2132,9 +2132,19 @@ fn every_worker_text_that_writes_a_receipt_maps_the_acceptance_once() {
     );
     assert!(!codex.contains("map each acceptance criterion"), "{codex}");
     assert!(codex.contains("as you map the acceptance criteria to it"));
-    // The steps ask for no new command, and stay short.
+    // The schema and checks add no new command.
     for text in [ACCEPTANCE_MAP, ACCEPTANCE_REMAP] {
-        assert!(text.len() <= 600, "{}", text.len());
+        assert!(text.len() <= 2400, "{}", text.len());
+        for required in [
+            "acceptance_items",
+            "worker_questions",
+            "[acceptance:N]",
+            "baseline shares",
+            "entry/startup",
+            "deferred work",
+        ] {
+            assert!(text.contains(required), "{required}: {text}");
+        }
         assert!(!text.contains("cargo") && !text.contains('`'), "{text}");
     }
     let review = review_prompt(
@@ -3925,9 +3935,10 @@ fn prompt_describes_the_goal_the_context_and_its_company_and_keeps_one_shape_wit
             "{text}"
         );
         // The receipt example shows the optional follow_ups, and the scope rule names it.
+        assert!(text.contains("\"acceptance_items\":[{\"item\":1,\"status\":\"met\",\"evidence\":\"...\",\"worker_questions\":[]}]"));
         assert!(
                 text.contains(
-                    "\"summary\":\"...\",\"follow_ups\":[{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\",\"membership_proposal\":{\"classification\":\"required, out_of_scope or undecided\",\"acceptance_items\":[\"...\"],\"reason\":\"...\"}}]}\n"
+                    "\"follow_ups\":[{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\",\"membership_proposal\":{\"classification\":\"required, out_of_scope or undecided\",\"acceptance_items\":[\"...\"],\"reason\":\"...\"}}]}\n"
                 ),
                 "{text}"
             );

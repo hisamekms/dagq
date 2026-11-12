@@ -53,7 +53,7 @@ printf 'written by the codex stub agent for %s\n' "$thread" > e2e.txt
 git add e2e.txt
 git commit -q -m 'feat: e2e codex stub change'
 commit=$(git rev-parse HEAD)
-printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"test -f seed.txt exited 0"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub agent"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub agent"},"summary":"added e2e.txt with codex"}\n' \
+printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"test -f seed.txt exited 0"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub agent"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub agent"},"acceptance_items":[{"item":1,"status":"met","evidence":"stub implementation and tests"}],"summary":"added e2e.txt with codex"}\n' \
   "$DAGQ_RUN_ID" "$commit" > "$receipt.tmp"
 mv "$receipt.tmp" "$receipt"
 printf '{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"git commit","status":"in_progress"}}\n'

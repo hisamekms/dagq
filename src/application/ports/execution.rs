@@ -1617,7 +1617,8 @@ pub trait RunTransitions {
         token: &LeaseToken,
         validation: &Validation,
     ) -> Result<TaskRun>;
-    /// Validate a rewritten receipt again.
+    /// Validate an awaiting receipt again under its review lease, after a
+    /// rewrite or an acceptance precheck rejection on adoption/retry.
     fn restart_validation(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
     /// Apply a person's answer to an `approve_landing` ask.
     fn decide_landing(

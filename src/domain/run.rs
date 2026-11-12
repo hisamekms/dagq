@@ -526,8 +526,10 @@ pub fn decide_satisfied(mut run: TaskRun, reason: String) -> Result<TaskRun, Dom
     Ok(run)
 }
 
-/// `awaiting_integration` → `validating`: the live session rewrote its
-/// receipt for a `revise` verdict (ADR-0027 decision 2).
+/// `awaiting_integration` → `validating`: validate the receipt again,
+/// after a live session's rewrite for a `revise` verdict (ADR-0027 decision
+/// 2), or when adoption/retry finds acceptance claims needing repair.
+/// The review lease stays held through validation's evidence park.
 pub fn restart_validation(mut run: TaskRun) -> Result<TaskRun, DomainError> {
     require_status(&run, &[RunStatus::AwaitingIntegration], "validate again")?;
     run.status = RunStatus::Validating;

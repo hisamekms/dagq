@@ -770,6 +770,13 @@ pub(super) fn headless_provider_line(provider: Provider) -> String {
     format!("{line}{RUN_TMP_LINE}")
 }
 
+// The same receipt contract on the initial, resume and revise paths.
+macro_rules! acceptance_contract {
+    ($mapping:literal) => {
+        concat!($mapping, " Write acceptance_items as an array with exactly one {\"item\":N,\"status\":\"met\",\"evidence\":\"implementation and test references, or why testing is not applicable\",\"worker_questions\":[]} for each explicit task acceptance number; if none is numbered, treat the entire acceptance as item 1. Use status deferred for unmet work, describe it in evidence and reference queue ask IDs in worker_questions. Each referenced worker_question must belong to this run, explicitly name [acceptance:N] in its question and have a recorded answer. A follow_up deferring this task must also name its numbers in top-level acceptance_items:[N] and its worker_questions:[ID], separate from the goal membership_proposal; never hide deferral by omitting numbers. Before claiming met, check for a test whose comparison baseline shares the code under test, code uncalled from the entry/startup path, and deferred work. Fix these gaps within the existing local check scope; no new heavy checks. The runtime checks shape and recorded answers before review; review still judges the evidence and the answer.\n")
+    };
+}
+
 /// The worker's step before the receipt (ADR-t1420-1): each acceptance
 /// criterion is mapped to what meets it, a criterion nothing meets is
 /// fixed on the spot, and one the task cannot meet is an ask or a failed
@@ -781,7 +788,9 @@ pub(super) fn headless_provider_line(provider: Provider) -> String {
 /// requires another test or check command. A base that already satisfies the
 /// criteria uses ALREADY_SATISFIED; resume and revise use ACCEPTANCE_REMAP
 /// and FOLLOW_UP_PROPOSAL_AGAIN before rewriting the receipt.
-pub const ACCEPTANCE_MAP: &str = "Before the receipt, map each acceptance criterion to what meets it (a changed file, a test's name, the receipt's evidence, a document's section or a command that measures it) and fix on the spot any criterion nothing meets yet. Do not write succeeded with a criterion you cannot meet moved into follow_ups: when meeting it needs a person's decision (the acceptance or the scope changes), ask a worker_question with --because scope; when it needs work outside the task, write a failed receipt saying why. In summary, give each criterion's mapping in a short phrase.\n";
+pub const ACCEPTANCE_MAP: &str = acceptance_contract!(
+    "Before the receipt, map each acceptance criterion to what meets it (a changed file, a test's name, the receipt's evidence, a document's section or a command that measures it) and fix on the spot any criterion nothing meets yet. Do not write succeeded with a criterion you cannot meet moved into follow_ups: when meeting it needs a person's decision (the acceptance or the scope changes), ask a worker_question with --because scope; when it needs work outside the task, write a failed receipt saying why. In summary, give each criterion's mapping in a short phrase.\n"
+);
 
 /// The receipt of a worker whose base already meets every criterion
 /// (ADR-t1818-1 decision 1): `already_satisfied`, no commit, and the checks
@@ -812,7 +821,9 @@ pub const DOCS_CHECK: &str = "Then check against your diff the documents on what
 /// What a resumed or revised session adds before it rewrites the receipt
 /// (ADR-t1420-1): the mapping of the criteria its fix touched, again, with
 /// the documents checked against the diff (ADR-t1428-1).
-pub const ACCEPTANCE_REMAP: &str = "Before you rewrite it, map each acceptance criterion your fix touched to what meets it again and rewrite its phrase in summary, with the documents you checked against the diff; a criterion the task cannot meet is a worker_question (--because scope) or a failed receipt, not a follow_up.";
+pub const ACCEPTANCE_REMAP: &str = acceptance_contract!(
+    "Before you rewrite it, map each acceptance criterion your fix touched to what meets it again and rewrite its phrase in summary, with the documents you checked against the diff; a criterion the task cannot meet is a worker_question (--because scope) or a failed receipt, not a follow_up."
+);
 
 /// How the worker writes each follow_up (ADR-t1504-1 decision 5,
 /// ADR-t1504-2 decision 11): the problem and its evidence, and an optional
@@ -1895,14 +1906,14 @@ pub fn prompt_after(
          Implement the task, run the checks described below, and commit the result.\n\
          Do not merge, push, close the workspace, or modify the queue/runtime files.\n\
          {review}\
-         Task title: {title}\nDescription:\n{description}\nAcceptance criteria:\n{acceptance}\n\
+         Task title: {title}\nDescription:\n{description}\nAcceptance criteria:\n{acceptance}\nReceipt acceptance item numbers: {acceptance_numbers:?}\n\
          Verification commands (integrate runs them once after rebasing onto main; that run is the verification of record for the commit):\n{verification}\n\
          {local_checks}\n\
          {evidence}{paths}{decisions}{goal}{context}{predecessors}{siblings}{inherited}{known_failures}\
          Your assignment is this task only. Do not change what a sibling task owns; if you find work outside this task, record it in the receipt as follow_ups instead of doing it.\n\
          {acceptance_map}{docs_check}\
          Write a completion receipt to {receipt} using a temporary file in the same directory and atomic rename.\n\
-         Receipt JSON: {{\"run_id\":\"{run_id}\",\"result\":\"succeeded, failed or already_satisfied\",\"commit\":\"full Git SHA of the branch head\",\"tests\":{{\"status\":\"passed, failed or not_applicable\",\"evidence_or_reason\":\"...\"}},\"e2e\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"subagent_review\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"summary\":\"...\",\"follow_ups\":[{{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\",\"membership_proposal\":{{\"classification\":\"required, out_of_scope or undecided\",\"acceptance_items\":[\"...\"],\"reason\":\"...\"}}}}]}}\n\
+         Receipt JSON: {{\"run_id\":\"{run_id}\",\"result\":\"succeeded, failed or already_satisfied\",\"commit\":\"full Git SHA of the branch head\",\"tests\":{{\"status\":\"passed, failed or not_applicable\",\"evidence_or_reason\":\"...\"}},\"e2e\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"subagent_review\":{{\"status\":\"...\",\"evidence_or_reason\":\"...\"}},\"summary\":\"...\",\"acceptance_items\":[{{\"item\":1,\"status\":\"met\",\"evidence\":\"...\",\"worker_questions\":[]}}],\"follow_ups\":[{{\"title\":\"...\",\"description\":\"...\",\"category\":\"...\",\"membership_proposal\":{{\"classification\":\"required, out_of_scope or undecided\",\"acceptance_items\":[\"...\"],\"reason\":\"...\"}}}}]}}\n\
          Each of tests, e2e and subagent_review needs evidence when passed and a reason when not_applicable.\n\
          {already_satisfied}\
          follow_ups is optional: an array of work you found outside this task, each with a title, a description and a category, for the planner to decide on; omit it when there is none. {categories}\n\
@@ -1918,6 +1929,7 @@ pub fn prompt_after(
         reading = WORKER_READING,
         stop_background = route.stop(),
         review = review_line(route),
+        acceptance_numbers = crate::domain::validation::acceptance_numbers(task.acceptance()),
         acceptance_map = ACCEPTANCE_MAP,
         docs_check = DOCS_CHECK,
         already_satisfied = ALREADY_SATISFIED,

@@ -28,6 +28,7 @@ fn write_receipt(run: &ContainerRun, commit: &str) {
             "tests": {"status": "passed", "evidence_or_reason": "unit"},
             "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
             "subagent_review": {"status": "not_applicable", "evidence_or_reason": "small"},
+            "acceptance_items": [{"item":1,"status":"met","evidence":"stub implementation and tests"}],
             "summary": "done",
         })
         .to_string(),
@@ -1640,6 +1641,7 @@ fn a_host_runs_landing_of_the_same_commit_runs_the_tracked_hooks() {
             "tests": {"status": "passed", "evidence_or_reason": "unit"},
             "e2e": {"status": "not_applicable", "evidence_or_reason": "the runtime runs it"},
             "subagent_review": {"status": "not_applicable", "evidence_or_reason": "small"},
+            "acceptance_items": [{"item":1,"status":"met","evidence":"stub implementation and tests"}],
             "summary": "done",
         })
         .to_string(),

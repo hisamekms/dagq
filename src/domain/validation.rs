@@ -14,6 +14,163 @@ use super::{
     scope::{glob_matches, out_of_scope, scope_violation_reason},
 };
 
+/// Explicit acceptance labels are `(N)` (also `（N）`) or `N.` / `N)`
+/// at the start or after whitespace, sentence/list punctuation or a
+/// closing bracket. Bare `N.` / `N)` still require following whitespace.
+/// For bare labels a dot after an ASCII digit stays inside a version,
+/// so `v3.9.` does not expose item 9. Parenthesized labels may follow that
+/// dot; word interiors such as `foo(9)` stay excluded.
+/// With no labels the entire text is item 1; no semantic splitting or
+/// changes to the queue's task text occur. Shared by prompts and the gate.
+pub fn acceptance_numbers(text: &str) -> Vec<u32> {
+    let mut numbers = std::collections::BTreeSet::new();
+    for (offset, ch) in text.char_indices() {
+        let mut before = text[..offset].chars().rev();
+        let boundary = match before.next() {
+            None => true,
+            Some('.') if matches!(ch, '(' | '（') => true,
+            Some('.') => before.next().is_none_or(|ch| !ch.is_ascii_digit()),
+            Some(ch) => {
+                ch.is_whitespace()
+                    || "。、．，；;,:：!?！？・･)）]］}｝>＞」』】〕〉》".contains(ch)
+            }
+        };
+        if !boundary {
+            continue;
+        }
+        let rest = &text[offset..];
+        let (rest, closing) = match ch {
+            '(' => (&rest[1..], Some(')')),
+            '（' => (&rest[ch.len_utf8()..], Some('）')),
+            _ => (rest, None),
+        };
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            continue;
+        }
+        let tail = &rest[digits..];
+        let labelled = match closing {
+            Some(close) => tail.starts_with(close),
+            None => tail
+                .strip_prefix(['.', ')'])
+                .is_some_and(|after| after.starts_with(char::is_whitespace)),
+        };
+        if labelled
+            && let Ok(number) = rest[..digits].parse::<u32>()
+            && number > 0
+        {
+            numbers.insert(number);
+        }
+    }
+    if numbers.is_empty() {
+        vec![1]
+    } else {
+        numbers.into_iter().collect()
+    }
+}
+
+/// Receipt acceptance precheck (ADR-t4833-1), before any run review job.
+/// Empty means proceed to review; reasons mean return to the same worker
+/// through the evidence-missing automatic resume path, never a review
+/// revise. Failed receipts keep their existing failure path. Success and
+/// already-satisfied receipts, including old ones, require exactly one
+/// well-formed claim per task number. Missing/duplicate/unknown numbers,
+/// unknown statuses and blank evidence return reasons, never implicit met.
+///
+/// Each deferred claim and each follow-up's top-level `acceptance_items`
+/// array of task numbers needs a referenced `worker_questions` ID whose
+/// queue ask belongs to this run, is a worker_question, has a recorded
+/// nonblank answer and explicitly contains `[acceptance:N]`. One question
+/// may name several items. Goal references in membership_proposal do not
+/// name this task. Unnumbered improvement follow-ups do not block review;
+/// malformed references do. This checks shape and recorded answers only:
+/// evidence truth, test independence, startup connectivity and whether an
+/// answer allows deferral remain review's responsibility.
+pub fn acceptance_issues(
+    receipt: &Receipt,
+    acceptance: &str,
+    run: &RunId,
+    asks: &[super::Ask],
+) -> Vec<String> {
+    use super::receipt::AcceptanceStatus;
+    use serde::Deserialize;
+    if receipt.result() == super::ReceiptResult::Failed {
+        return Vec::new();
+    }
+    let expected = acceptance_numbers(acceptance);
+    let mut issues = Vec::new();
+    let claims = match receipt.acceptance_items() {
+        Ok(claims) => claims,
+        Err(reason) => return vec![format!("acceptance items {expected:?}: {reason}")],
+    };
+    let answered = |item: u32, references: &[i64]| {
+        asks.iter().any(|ask| {
+            references.contains(&ask.id.as_i64())
+                && ask.run_id.as_ref() == Some(run)
+                && ask.kind == super::AskKind::WorkerQuestion
+                && ask.answered_at.is_some()
+                && ask
+                    .answer
+                    .as_ref()
+                    .is_some_and(|answer| !answer.trim().is_empty())
+                && ask.question.contains(&format!("[acceptance:{item}]"))
+        })
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for claim in claims {
+        if !expected.contains(&claim.item) {
+            issues.push(format!("acceptance item {} does not exist", claim.item));
+        }
+        if !seen.insert(claim.item) {
+            issues.push(format!("acceptance item {} duplicated", claim.item));
+        }
+        if claim.evidence.trim().is_empty() {
+            issues.push(format!("acceptance item {} has blank evidence", claim.item));
+        }
+        if claim.status == AcceptanceStatus::Deferred
+            && !answered(claim.item, &claim.worker_questions)
+        {
+            issues.push(format!("acceptance item {} deferred without a referenced answered worker_question naming [acceptance:{}]", claim.item, claim.item));
+        }
+    }
+    for item in &expected {
+        if !seen.contains(item) {
+            issues.push(format!("acceptance item {item} missing"));
+        }
+    }
+    #[derive(Deserialize)]
+    struct FollowUpReferences {
+        #[serde(default)]
+        acceptance_items: Vec<u32>,
+        #[serde(default)]
+        worker_questions: Vec<i64>,
+    }
+    if let Some(follow_ups) = receipt.follow_ups().and_then(serde_json::Value::as_array) {
+        for follow_up in follow_ups {
+            if follow_up.get("acceptance_items").is_none()
+                && follow_up.get("worker_questions").is_none()
+            {
+                continue;
+            }
+            let references: FollowUpReferences = match serde_json::from_value(follow_up.clone()) {
+                Ok(references) => references,
+                Err(error) => {
+                    issues.push(format!("follow_up acceptance references: {error}"));
+                    continue;
+                }
+            };
+            for item in references.acceptance_items {
+                if !expected.contains(&item) {
+                    issues.push(format!("follow_up acceptance item {item} does not exist"));
+                } else if !answered(item, &references.worker_questions) {
+                    issues.push(format!("follow_up acceptance item {item} deferred without a referenced answered worker_question naming [acceptance:{item}]"));
+                }
+            }
+        }
+    }
+    issues
+}
+
 /// Why a run needs the runtime's e2e (ADR-t963-1 decision 2, ADR-t1233-2
 /// decision 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -125,10 +282,14 @@ pub struct Validation {
 
 impl Validation {
     /// Whether a rejection parks the run for a session instead of failing
-    /// it: only required evidence or a Spike's result is missing, or the
-    /// diff leaves the task's paths.
+    /// it: required evidence, acceptance claims or a Spike's result need
+    /// correction, or the diff leaves the task's paths. Acceptance gaps
+    /// use EvidenceMissing with their reasons even with no missing check;
+    /// their automatic resume keeps the existing limit and never counts
+    /// as a review revise.
     pub fn resumable(&self) -> bool {
-        !self.evidence_missing.is_empty()
+        self.code == Some(ReasonCode::EvidenceMissing)
+            || !self.evidence_missing.is_empty()
             || !self.spike_result_missing.is_empty()
             || !self.scope_violation.is_empty()
     }
@@ -544,6 +705,239 @@ mod tests {
 
     const BASE: &str = "0000000000000000000000000000000000000001";
     const HEAD: &str = "0000000000000000000000000000000000000002";
+
+    fn acceptance_receipt(items: serde_json::Value, follow_ups: serde_json::Value) -> Receipt {
+        Receipt::parse(
+            &serde_json::json!({
+                "run_id":"r", "result":"succeeded", "commit":"0".repeat(40),
+                "tests":{"status":"passed","evidence_or_reason":"tests"},
+                "e2e":{"status":"not_applicable","evidence_or_reason":"runtime"},
+                "subagent_review":{"status":"not_applicable","evidence_or_reason":"review"},
+                "acceptance_items": items, "follow_ups":follow_ups,
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn acceptance_ask() -> super::super::Ask {
+        serde_json::from_value(serde_json::json!({
+            "id":7,"kind":"worker_question","task_id":1,"run_id":"r",
+            "question":"May we defer [acceptance:1]?", "options":[],
+            "answer":"yes", "asked_by":"worker", "reason_category":"scope",
+            "created_at":1,"answered_at":2,"closed_at":null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn acceptance_numbering_is_explicit_or_the_whole_unnumbered_text() {
+        for (text, expected) in [
+            ("works, with 80% coverage", vec![1]),
+            ("1. first. 2. second.", vec![1, 2]),
+            ("(1) first (3) third", vec![1, 3]),
+            ("(1) a。(2) b", vec![1, 2]),
+            ("1. a。2. b", vec![1, 2]),
+            ("（1）項目がある。（2）次が着地する。", vec![1, 2]),
+            ("(1) a。(2) b。(3) c", vec![1, 2, 3]),
+            ("(1) a、(2) b．(3) c；(4) d;(5) e", vec![1, 2, 3, 4, 5]),
+            ("(1) [a](2) b）(3) c】(4) d", vec![1, 2, 3, 4]),
+            ("1. a.2. b", vec![1, 2]),
+            ("(1) a3.(2) b", vec![1, 2]),
+            ("foo(9), v3.0, v3.9. release", vec![1]),
+            ("（2） first\n4) next", vec![2, 4]),
+            ("1. first with foo(9), v3.0 and 80%", vec![1]),
+        ] {
+            assert_eq!(acceptance_numbers(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn acceptance_shapes_return_reasons_instead_of_implicit_met() {
+        use serde_json::json;
+        let run = RunId::new("r").unwrap();
+        for (items, reason) in [
+            (json!(null), "missing"),
+            (json!({}), "sequence"),
+            (json!([]), "item 1 missing"),
+            (json!([{"status":"met","evidence":"test"}]), "item"),
+            (
+                json!([{"item":1,"status":"unknown","evidence":"test"}]),
+                "unknown variant",
+            ),
+            (
+                json!([{"item":1,"status":"met","evidence":" "}]),
+                "blank evidence",
+            ),
+            (
+                json!([{"item":2,"status":"met","evidence":"test"}]),
+                "does not exist",
+            ),
+            (
+                json!([{"item":1,"status":"met","evidence":"test"},{"item":1,"status":"met","evidence":"test"}]),
+                "duplicated",
+            ),
+        ] {
+            let receipt = acceptance_receipt(items.clone(), json!([]));
+            let issues = acceptance_issues(&receipt, "works", &run, &[]);
+            assert!(
+                issues.iter().any(|issue| issue.contains(reason)),
+                "{items}: {issues:?}"
+            );
+        }
+        // A genuinely old file omits the field, and must be rewritten.
+        let mut old = serde_json::to_value(acceptance_receipt(json!([]), json!([]))).unwrap();
+        old.as_object_mut().unwrap().remove("acceptance_items");
+        let old = Receipt::parse(&old.to_string()).unwrap();
+        assert_eq!(
+            acceptance_issues(&old, "works", &run, &[]),
+            ["acceptance items [1]: acceptance_items missing"]
+        );
+    }
+
+    #[test]
+    fn acceptance_deferrals_require_referenced_answers_on_this_run_and_item() {
+        use serde_json::json;
+        let run = RunId::new("r").unwrap();
+        let receipt = acceptance_receipt(
+            json!([{"item":1,"status":"deferred","evidence":"unmet; ask 7", "worker_questions":[7]}]),
+            json!([]),
+        );
+        let ask = acceptance_ask();
+        assert!(acceptance_issues(&receipt, "works", &run, std::slice::from_ref(&ask)).is_empty());
+        assert!(!acceptance_issues(&receipt, "works", &run, &[]).is_empty());
+        for change in 0..7 {
+            let mut other = ask.clone();
+            match change {
+                0 => other.run_id = Some(RunId::new("other").unwrap()),
+                1 => other.kind = super::super::AskKind::ApproveLanding,
+                2 => other.question = "[acceptance:2]".into(),
+                3 => other.answer = None,
+                4 => other.answered_at = None,
+                5 => other.answer = Some(" ".into()),
+                _ => other.id = super::super::AskId::new(8),
+            }
+            assert!(
+                !acceptance_issues(&receipt, "works", &run, &[other]).is_empty(),
+                "case {change}"
+            );
+        }
+        let mut file = serde_json::to_value(&receipt).unwrap();
+        file["result"] = json!("already_satisfied");
+        assert!(
+            !acceptance_issues(
+                &Receipt::parse(&file.to_string()).unwrap(),
+                "works",
+                &run,
+                &[]
+            )
+            .is_empty()
+        );
+        file["result"] = json!("failed");
+        assert!(
+            acceptance_issues(
+                &Receipt::parse(&file.to_string()).unwrap(),
+                "works",
+                &run,
+                &[]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn met_items_and_follow_up_deferrals_share_the_answer_gate() {
+        use serde_json::json;
+        let run = RunId::new("r").unwrap();
+        let items = json!([{"item":1,"status":"met","evidence":"src and tests"}]);
+        for follow_up in [
+            json!({"title":"improvement"}),
+            json!({"title":"goal work","membership_proposal":{"acceptance_items":["(1)"]}}),
+        ] {
+            assert!(
+                acceptance_issues(
+                    &acceptance_receipt(items.clone(), json!([follow_up])),
+                    "works",
+                    &run,
+                    &[]
+                )
+                .is_empty()
+            );
+        }
+        for references in [json!([1]), json!([9]), json!(["1"])] {
+            let receipt = acceptance_receipt(
+                items.clone(),
+                json!([{"acceptance_items":references,"worker_questions":[7]}]),
+            );
+            assert!(!acceptance_issues(&receipt, "works", &run, &[]).is_empty());
+        }
+        let receipt = acceptance_receipt(
+            items,
+            json!([{"acceptance_items":[1],"worker_questions":[7]}]),
+        );
+        assert!(acceptance_issues(&receipt, "works", &run, &[acceptance_ask()]).is_empty());
+        let receipt = acceptance_receipt(
+            json!([
+                {"item":1,"status":"met","evidence":"test one"},
+                {"item":2,"status":"deferred","evidence":"ask 7","worker_questions":[7]}
+            ]),
+            json!([]),
+        );
+        let mut question = acceptance_ask();
+        question.question.push_str(" and [acceptance:2]");
+        for acceptance in ["(1) one (2) two", "(1) one。(2) two", "1. one。2. two"] {
+            assert!(
+                acceptance_issues(&receipt, acceptance, &run, &[acceptance_ask()])[0]
+                    .contains("item 2 deferred"),
+                "{acceptance}"
+            );
+            assert!(
+                acceptance_issues(&receipt, acceptance, &run, std::slice::from_ref(&question))
+                    .is_empty(),
+                "{acceptance}"
+            );
+            let follow_up = acceptance_receipt(
+                json!([
+                    {"item":1,"status":"met","evidence":"first criterion"},
+                    {"item":2,"status":"met","evidence":"second criterion"}
+                ]),
+                json!([{"acceptance_items":[2],"worker_questions":[7]}]),
+            );
+            assert!(
+                acceptance_issues(&follow_up, acceptance, &run, &[])[0]
+                    .contains("follow_up acceptance item 2 deferred"),
+                "{acceptance}"
+            );
+            assert!(
+                acceptance_issues(
+                    &follow_up,
+                    acceptance,
+                    &run,
+                    std::slice::from_ref(&question)
+                )
+                .is_empty(),
+                "{acceptance}"
+            );
+        }
+        let met = acceptance_receipt(
+            json!([
+                {"item":1,"status":"met","evidence":"independent baseline"},
+                {"item":2,"status":"met","evidence":"startup path test"}
+            ]),
+            json!([]),
+        );
+        assert!(acceptance_issues(&met, "1. one 2. two", &run, &[]).is_empty());
+        let incomplete = acceptance_receipt(
+            json!([
+                {"item":1,"status":"met","evidence":"independent baseline"}
+            ]),
+            json!([]),
+        );
+        assert_eq!(
+            acceptance_issues(&incomplete, "1. one 2. two", &run, &[]),
+            ["acceptance item 2 missing"]
+        );
+    }
 
     fn sha(text: &str) -> CommitSha {
         CommitSha::parse(text, "commit").unwrap()
@@ -1008,6 +1402,9 @@ mod tests {
         let mut spike = validation(Vec::new(), Vec::new());
         spike.spike_result_missing = vec!["spike_result".into()];
         assert!(spike.resumable());
+        let mut acceptance = validation(Vec::new(), Vec::new());
+        acceptance.code = Some(ReasonCode::EvidenceMissing);
+        assert!(acceptance.resumable());
     }
 
     /// A Spike's receipt: [`receipt_text`] with `spike_result`.

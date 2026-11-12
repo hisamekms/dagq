@@ -68,6 +68,49 @@ pub(super) enum ReviewRoute {
 }
 
 impl Supervisor<'_> {
+    /// Apply the pure acceptance gate before recording a successful
+    /// validation. Returning its reasons as missing evidence uses normal
+    /// session closure and auto-resume (including its existing limit),
+    /// without starting or counting any review job or revise. Synthetic
+    /// recovery handoffs carry no worker receipt and retain their path.
+    pub(super) fn check_acceptance_receipt(
+        &mut self,
+        run: &TaskRun,
+        validation: &mut Validation,
+    ) -> Result<()> {
+        if !validation.accepted
+            || !matches!(
+                validation.receipt["result"].as_str(),
+                Some("succeeded" | "already_satisfied")
+            )
+        {
+            return Ok(());
+        }
+        let receipt = Receipt::parse(&validation.receipt.to_string())?;
+        let issues = self.receipt_acceptance_issues(run, &receipt)?;
+        if !issues.is_empty() {
+            validation.accepted = false;
+            validation.already_satisfied = false;
+            validation.reason = Some(format!("acceptance receipt: {}", issues.join("; ")));
+            validation.code = Some(ReasonCode::EvidenceMissing);
+        }
+        Ok(())
+    }
+
+    fn receipt_acceptance_issues(
+        &mut self,
+        run: &TaskRun,
+        receipt: &Receipt,
+    ) -> Result<Vec<String>> {
+        let detail = self.queue.show(run.task_id())?;
+        Ok(crate::domain::validation::acceptance_issues(
+            receipt,
+            detail.task.acceptance(),
+            run.id(),
+            &detail.asks,
+        ))
+    }
+
     /// Record `landing_queued` as `run` starts to wait for the integration
     /// slot (`Phase::AwaitingSlot`): `stats` counts the wait from there to
     /// `integration_started` as its `landing_queue` phase (goal 36). `via`
@@ -598,7 +641,11 @@ impl Supervisor<'_> {
     /// step after validation, an adopter, the process an exec hands the run
     /// to): no program or agent's job, and no run once more. The review
     /// waits held (`ReviewHeld`), which the park takes as it stands; `None`
-    /// while nothing fences the task.
+    /// while nothing fences the task and the receipt's acceptance precheck
+    /// passes. An unbacked acceptance claim instead re-enters validation
+    /// under the same lease for its evidence park and ordinary resume,
+    /// including adoption/retry of old receipts; it does
+    /// not start a job or count a review revise.
     fn review_held_at_fence(
         &mut self,
         run: &TaskRun,
@@ -606,7 +653,26 @@ impl Supervisor<'_> {
         retried: bool,
     ) -> Result<Option<Phase>> {
         let Some(fence) = self.queue.turn_fence(run.task_id())? else {
-            return Ok(None);
+            // Adoption/retry may enter with a receipt accepted by an older
+            // runtime. Check it before creating any new review jobs too;
+            // a completed review that proceeds to landing is not replayed.
+            let path = Path::new(run.receipt_path().context("missing receipt path")?);
+            let receipt = Receipt::parse(&self.files.read_to_string(path)?)?;
+            let issues = self.receipt_acceptance_issues(run, &receipt)?;
+            if issues.is_empty() {
+                return Ok(None);
+            }
+            // Keep the review lease and use validation's evidence park,
+            // rather than a person's unleased landing decision. The
+            // normal validation step records evidence_missing and closes
+            // the session before the ordinary counted resume starts.
+            let run = self
+                .queue
+                .restart_validation(run.id(), self.registration.token())?;
+            return Ok(Some(Phase::Validating(
+                Some(self.validate(run)),
+                session.clone(),
+            )));
         };
         info!(run_id = %run.id(), "run {}: {}; its review does not start", run.id(), fence.describe());
         Ok(Some(Phase::ReviewHeld {

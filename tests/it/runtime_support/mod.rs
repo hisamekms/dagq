@@ -535,7 +535,7 @@ macro_rules! worker_helpers {
         r#"
 test -f seed.txt || exit 99
 receipt() {
-  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"ran"},"e2e":{"status":"not_applicable","evidence_or_reason":"no e2e surface"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"summary":"done"}' "${2:-$RUN_ID}" "$1" > "$RECEIPT.tmp"
+  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"ran"},"e2e":{"status":"not_applicable","evidence_or_reason":"no e2e surface"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"acceptance_items":[{"item":1,"status":"met","evidence":"stub implementation and tests"}],"summary":"done"}' "${2:-$RUN_ID}" "$1" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }
 commit() { printf 'change by %s\n' "$RUN_ID" > change.txt && git add change.txt && git commit -q -m "$1"; }
@@ -549,7 +549,7 @@ macro_rules! resume_receipt {
     () => {
         r#"
 receipt() {
-  printf '{"run_id":"%s","result":"%s","commit":"%s","tests":{"status":"passed","evidence_or_reason":"reran after the rebase"},"e2e":{"status":"not_applicable","evidence_or_reason":"no e2e surface"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"resumed session"},"summary":"%s"}' "$RUN_ID" "${2:-succeeded}" "$1" "${3:-resolved}" > "$RECEIPT.tmp"
+  printf '{"run_id":"%s","result":"%s","commit":"%s","tests":{"status":"passed","evidence_or_reason":"reran after the rebase"},"e2e":{"status":"not_applicable","evidence_or_reason":"no e2e surface"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"resumed session"},"acceptance_items":[{"item":1,"status":"met","evidence":"stub implementation and tests"}],"summary":"%s"}' "$RUN_ID" "${2:-succeeded}" "$1" "${3:-resolved}" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }
 "#
@@ -1763,7 +1763,7 @@ pub const RECEIPT_SPIKE: &str = r#"receipt_spike() {
   else
     result=''
   fi
-  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"ran"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs the e2e"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"summary":"done"%s}' "$RUN_ID" "$1" "$result" > "$RECEIPT.tmp"
+  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"ran"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs the e2e"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"acceptance_items":[{"item":1,"status":"met","evidence":"stub implementation and tests"}],"summary":"done"%s}' "$RUN_ID" "$1" "$result" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }
 "#;

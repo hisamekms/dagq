@@ -909,7 +909,7 @@ fn a_hold_whose_resuming_supervisor_died_is_settled_by_another_supervisor() {
 /// run waits with its own reason (no `hold_parked`) and the release passes.
 #[test]
 fn a_helper_left_by_a_turn_its_validation_sent_back_keeps_the_hold_settling() {
-    const RECEIPT_TESTS: &str = r#"receipt_tests() { printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"%s","evidence_or_reason":"%s"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs the e2e"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"summary":"done"}' "$DAGQ_RUN_ID" "$1" "$2" "$3" > "$RECEIPT.tmp"; mv "$RECEIPT.tmp" "$RECEIPT"; };"#;
+    const RECEIPT_TESTS: &str = r#"receipt_tests() { printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"%s","evidence_or_reason":"%s"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs the e2e"},"subagent_review":{"status":"passed","evidence_or_reason":"reviewed"},"acceptance_items":[{"item":1,"status":"met","evidence":"stub implementation and tests"}],"summary":"done"}' "$DAGQ_RUN_ID" "$1" "$2" "$3" > "$RECEIPT.tmp"; mv "$RECEIPT.tmp" "$RECEIPT"; };"#;
     let (dir, repo, db, backend) = headless_fixture(&[EvidenceCheck::Tests]);
     turns(
         dir.path(),

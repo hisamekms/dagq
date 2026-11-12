@@ -174,6 +174,13 @@ test（`tests/**`、`src/`の`#[cfg(test)]`）を足した・変えたworkerは�
 
 ## 受け入れ条件の対応づけ
 
+receiptの受け入れ条件の欄は[AcceptanceItemの定義](../../src/domain/receipt.rs)の書式に従い、各番号を満たす実装とtestの参照（testが該当しなければその理由）を空でない根拠として書く。
+番号が無い受け入れ条件は全文を番号1の1項目として扱う。
+先送りは`deferred`として未達の内容を根拠に書き、同じrunの質問文に`[acceptance:N]`で番号を名指した回答済みworker_questionを参照する。
+当該taskの条件を先送りするfollow_upにも、対応する番号と質問を定義どおり機械で読める参照として持たせ、goalへの所属の提案と区別し、番号を省いて隠さない。
+`met`を申告する前に、比べる基準が試す対象のコードを共有する形だけのtest、入口や起動処理から呼ばれない未接続、先送りが無いかを点検し、既存の手元の検証の範囲で直す。
+欄の形と質問への答えの存在をruntimeがreviewの前に確かめ、根拠の意味と答えとの整合はreviewが判定する。
+
 receiptの前に受け入れ条件の各項目を根拠へ対応づける（[ADR-t1420-1](../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)。仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「受け入れ条件の対応づけ」）。満たせない項目をfollow_upに回して`succeeded`にせず、下の「askにしないもの」とworkerのpromptのaskの規則どおり`worker_question`か`failed`のreceiptにする。このrepositoryでの根拠の書き方:
 
 - testは`<module>::<test>`の名前と流したコマンド（流す範囲は上の「testの範囲」の規則のまま）、文書はpathと節、測定は文書の節・CSVとscriptのpath・コマンドと`--since` / `--until`の区切り。

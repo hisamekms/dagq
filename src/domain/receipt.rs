@@ -25,10 +25,15 @@ pub struct Receipt {
     e2e: ReceiptCheck,
     subagent_review: ReceiptCheck,
     summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acceptance_items: Option<Value>,
     /// Follow-up tasks the agent proposes, as `{"title", "description",
     /// "category"}` objects (`category`: the worker's code for the kind of
     /// work, ADR-t947-3; a missing or unknown one never rejects the
-    /// receipt). Only its shape (an array) is checked here; `integrate`
+    /// receipt). A follow-up may also carry `acceptance_items: [N]`
+    /// naming this task's deferred criteria and `worker_questions: [ID]`.
+    /// These are separate from membership_proposal's goal references.
+    /// Only its shape (an array) is checked here; `integrate`
     /// registers each entry with a title as a draft task once the run lands,
     /// with its category, and a planner the runtime opens for the drafts
     /// (ADR-0044 decision 16) submits it for plan review, cancels it or asks
@@ -51,6 +56,33 @@ pub struct Receipt {
     /// commit made on top of it as `commit_mismatch`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     base_checks: Vec<BaseCheck>,
+}
+
+/// One task acceptance item in `acceptance_items`: `item` is its explicit
+/// number (or 1 for the entire unnumbered acceptance), `status` is the
+/// worker's claim, and `evidence` names implementation/tests or explains
+/// why testing does not apply. Deferred evidence describes the unmet work
+/// and the referenced questions. `worker_questions` holds queue ask IDs;
+/// each matching question must contain `[acceptance:N]` for this item.
+/// Missing or malformed arrays are retained at parse time so validation
+/// can return them to the worker, including receipts from older workers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptanceItem {
+    pub item: u32,
+    pub status: AcceptanceStatus,
+    pub evidence: String,
+    #[serde(default)]
+    pub worker_questions: Vec<i64>,
+}
+
+/// `met` claims completion; `deferred` discloses an unmet criterion.
+/// Neither claim nor an answered question proves acceptance: review
+/// judges the evidence and the answer's meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptanceStatus {
+    Met,
+    Deferred,
 }
 
 /// One check an `already_satisfied` receipt ran on the base: the command
@@ -90,6 +122,8 @@ struct ReceiptFile {
     subagent_review: ReceiptCheckFile,
     #[serde(default)]
     summary: String,
+    #[serde(default)]
+    acceptance_items: Option<Value>,
     #[serde(default)]
     follow_ups: Option<Value>,
     #[serde(default)]
@@ -145,6 +179,7 @@ impl Receipt {
             e2e: file.e2e.into(),
             subagent_review: file.subagent_review.into(),
             summary: file.summary,
+            acceptance_items: file.acceptance_items,
             follow_ups: file.follow_ups,
             spike_result: file.spike_result,
             base_checks: file.base_checks,
@@ -167,6 +202,16 @@ impl Receipt {
     /// Whether the receipt names `head` (a lowercase Git object ID).
     pub fn names_commit(&self, head: &str) -> bool {
         self.commit.to_ascii_lowercase() == head
+    }
+
+    /// Decode the acceptance claims without making malformed claims a
+    /// fatal receipt parse error. Validation supplies task/run context.
+    pub fn acceptance_items(&self) -> Result<Vec<AcceptanceItem>, String> {
+        let value = self
+            .acceptance_items
+            .clone()
+            .ok_or("acceptance_items missing")?;
+        serde_json::from_value(value).map_err(|error| format!("acceptance_items: {error}"))
     }
 
     pub fn summary(&self) -> &str {

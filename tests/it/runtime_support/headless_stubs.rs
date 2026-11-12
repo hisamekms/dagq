@@ -174,7 +174,7 @@ fail() {{
 }}
 commit() {{ printf 'change by %s turn %s\n' "$SESSION" "$TURN" >> change.txt && git add change.txt && git commit -q -m "$1"; }}
 receipt() {{
-  printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "${{DAGQ_RUN_ID:-$SESSION}}" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
+  printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"acceptance_items":[{{"item":1,"status":"met","evidence":"stub implementation and tests"}}],"summary":"turn %s"}}' "${{DAGQ_RUN_ID:-$SESSION}}" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
 ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --topic acceptance_conflict --question "$1" >/dev/null; }}
@@ -352,7 +352,7 @@ refused() {{ printf '{{"type":"item.completed","item":{{"id":"c%s","type":"comma
 commit() {{ printf 'change by %s turn %s
 ' "$THREAD" "$TURN" >> change.txt && git add change.txt && git commit -q -m "$1"; }}
 receipt() {{
-  printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "$DAGQ_RUN_ID" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
+  printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"acceptance_items":[{{"item":1,"status":"met","evidence":"stub implementation and tests"}}],"summary":"turn %s"}}' "$DAGQ_RUN_ID" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
 ask() {{ "$DAGQ" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question "$1" >/dev/null; }}

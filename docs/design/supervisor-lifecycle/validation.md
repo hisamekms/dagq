@@ -23,6 +23,9 @@ related:
 
 # Validation
 
+受け入れ条件の欄の検査は`domain::validation::acceptance_issues`を入口にする。
+受け入れ条件のdeferredが答えのあるworker_questionに名指されないうちはrunのreviewのjobを起動しない。
+
 `validating`のrunのreceiptとGitの照合は、sessionと同じleaseの下でrunごとのthreadが行う。
 sessionは開いたまま（[turnの後の扱い](headless-worker.md#turnの後の扱い)）でも終了済みでもよい。
 受理条件と確認の順は`domain::validation::judge`、receiptの構造の約束は`Receipt::check_requiring`を入口にする。

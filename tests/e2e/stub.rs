@@ -112,7 +112,7 @@ end_turn() {
 write_receipt() {
   sh -c 'test -f seed.txt'
   commit=$(git rev-parse HEAD)
-  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"%s"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub agent"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub agent"},"summary":"%s"}\n' \
+  printf '{"run_id":"%s","result":"succeeded","commit":"%s","tests":{"status":"passed","evidence_or_reason":"%s"},"e2e":{"status":"not_applicable","evidence_or_reason":"stub agent"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"stub agent"},"acceptance_items":[{"item":1,"status":"met","evidence":"stub implementation and tests"}],"summary":"%s"}\n' \
     "$sid" "$commit" "$1" "$2" > "$receipt.tmp"
   mv "$receipt.tmp" "$receipt"
 }

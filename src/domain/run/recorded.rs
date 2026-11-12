@@ -88,7 +88,7 @@ pub fn end_session(
 
 /// Validation's verdict on the run: an accepted receipt makes it
 /// `awaiting_integration` ([`super::accept`]); a rejection parks it
-/// `needs_session` when only its evidence or its paths are wrong, and
+/// `needs_session` when its evidence, acceptance claims or paths need repair, and
 /// fails it otherwise ([`super::reject`]). Recorded as
 /// `validation_finished` with the run's status, and a park also as
 /// `scope_violation` (which wins) or `evidence_missing`; those carry no
@@ -581,6 +581,29 @@ mod tests {
         assert_eq!(
             events[1].payload,
             json!({"code": "evidence_missing", "checks": ["e2e"], "reason": "why"})
+        );
+    }
+
+    #[test]
+    fn acceptance_gaps_park_as_missing_evidence_without_review_revises() {
+        let mut parked = validation(false, vec![], vec![]);
+        parked.code = Some(ReasonCode::EvidenceMissing);
+        parked.reason = Some("acceptance receipt: acceptance item 2 deferred".into());
+        let (run, events) = finish_validation(run(RunStatus::Validating), &parked).unwrap();
+        assert_eq!(run.status(), RunStatus::NeedsSession);
+        assert_eq!(
+            kinds(&events),
+            [
+                event_kind::VALIDATION_FINISHED,
+                event_kind::EVIDENCE_MISSING
+            ]
+        );
+        assert_eq!(
+            events[1].payload,
+            json!({
+                "code":"evidence_missing", "checks":[],
+                "reason":"acceptance receipt: acceptance item 2 deferred"
+            })
         );
     }
 
