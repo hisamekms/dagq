@@ -661,6 +661,15 @@ pub trait EventStore {
     ) -> Result<()> {
         self.record_runtime_event(id, kind, payload)
     }
+    /// Queue-level counterpart of [`Self::record_runtime_event_now`]: a
+    /// startup diagnostic whose uncertain write is abandoned, never held.
+    fn record_queue_event_now(
+        &self,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<EventId> {
+        self.record_queue_event(kind, payload)
+    }
     /// Record events of the queue itself in one transaction, none unless
     /// all; returns their ids. A store without transactions (a test's)
     /// records them one after another.

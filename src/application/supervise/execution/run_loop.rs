@@ -50,6 +50,14 @@ impl Supervisor<'_> {
     /// could not be recorded keeps the row, which goes stale with the
     /// leases for the next `up` or `down` to prune.
     ///
+    /// Startup can enter with diagnostics abandoned after the service did
+    /// not answer: the max-load display and start events are not resent,
+    /// since their writes may have happened without an answer. Hold reads
+    /// are made afresh; pending exec reconstruction runs at the beginning
+    /// of the first reconciliation, before applying hold answers or
+    /// starting new work. A further unanswered request leaves it pending
+    /// for another pass through this loop's outage handler.
+    ///
     /// The result, from `drive`: `outcome` is `stopped` when a stop
     /// was asked, `finished` when the loop ran out of work, and `handoff`
     /// when it hands over to another binary (with what the exec needs),

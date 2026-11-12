@@ -177,6 +177,8 @@ pub(super) struct Wiring {
     /// The CI watch's port; none by default, as `--once` without it.
     ci_watch: Option<supervise::CiWatchPort>,
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
+    startup_fault: Option<Arc<super::startup::Fault>>,
+    handoff: Option<crate::domain::LeaseToken>,
     /// The free bytes the supervisors read; `u64::MAX` (the default) reads
     /// none, so the disk holds nothing.
     pub(super) free: Arc<AtomicU64>,
@@ -250,6 +252,8 @@ impl Wiring {
             sessions,
             ci_watch: None,
             pass_probe: None,
+            startup_fault: None,
+            handoff: None,
             free: Arc::new(AtomicU64::new(u64::MAX)),
             moving_sizes: Arc::new(|_: &Path| Ok(None)),
             disk: Default::default(),
@@ -262,6 +266,25 @@ impl Wiring {
     pub(super) fn with_pass_probe(mut self, probe: Arc<super::pass_reads::PassProbe>) -> Self {
         self.generators.clock = probe.clock.clone();
         self.pass_probe = Some(probe);
+        self
+    }
+
+    pub(super) fn telemetry_revocations(
+        &self,
+    ) -> Vec<(
+        crate::domain::session_step::StepTarget,
+        Option<crate::domain::LeaseToken>,
+    )> {
+        self.tokens.revocations()
+    }
+
+    pub(super) fn with_startup_fault(
+        mut self,
+        token: crate::domain::LeaseToken,
+        fault: Arc<super::startup::Fault>,
+    ) -> Self {
+        self.handoff = Some(token);
+        self.startup_fault = Some(fault);
         self
     }
 
@@ -787,6 +810,8 @@ impl Wiring {
                 sessions: self.sessions.clone(),
                 ci_watch: self.ci_watch.clone(),
                 pass_probe: self.pass_probe.clone(),
+                startup_fault: self.startup_fault.clone(),
+                handoff: self.handoff.clone(),
                 planning: self.planning.get(),
                 supervisor_file: self.supervisor_file.clone(),
                 repository_startup_file: self.repository_startup_file.clone(),
@@ -877,6 +902,8 @@ struct Parts {
     sessions: Arc<FakeSessions>,
     ci_watch: Option<supervise::CiWatchPort>,
     pass_probe: Option<Arc<super::pass_reads::PassProbe>>,
+    startup_fault: Option<Arc<super::startup::Fault>>,
+    handoff: Option<crate::domain::LeaseToken>,
     planning: (Option<usize>, Duration),
     supervisor_file: Option<supervise::SupervisorFile>,
     repository_startup_file: Option<supervise::repository_config::RepositoryStartupFile>,
@@ -904,6 +931,10 @@ impl Parts {
         );
         let service: Arc<dyn ServiceCaller> = match &self.pass_probe {
             Some(probe) => probe.caller(service, self.stop.clone()),
+            None => service,
+        };
+        let service = match self.startup_fault {
+            Some(fault) => fault.caller(service),
             None => service,
         };
         let queues = SupervisorQueues::new(
@@ -1039,6 +1070,7 @@ impl Parts {
                 self.passes,
             )
         };
+        settings.handoff_token = self.handoff;
         settings.provider_fallback.jobs = self.job_fallback;
         settings.review_jobs.concurrency = self.review_concurrency;
         settings.review_jobs.agent = self.review_agent_timeout;

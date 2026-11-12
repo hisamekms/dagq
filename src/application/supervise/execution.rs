@@ -80,6 +80,7 @@ mod stages;
 mod stale;
 mod stall;
 mod stall_recovery;
+mod startup;
 mod stranded;
 mod sweeps;
 mod task_hold;
@@ -1226,13 +1227,13 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
                 .and_then(|registration| registration.binary_version);
             // The limits and providers this process resolved, over the ones
             // the registration had before the exec, in the same write.
-            queue.resume_registration(
+            startup::required(queue.resume_registration(
                 token,
                 pid,
                 settings.limits,
                 &layout.providers,
                 &layout.version,
-            )?;
+            ))?;
             let previous = &previous_version;
             info!(
                 "supervisor {token} handed off: version {} (was {}), pid {pid}, parallel {parallel}, db {}, repository {}",
@@ -1249,13 +1250,16 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             // limits in use and where each comes from (ADR-0062 decision 7,
             // task 698) and the providers' executables (ADR-t813-2) in the
             // same write.
-            queue.register_supervisor(
+            startup::required(queue.register_supervisor(
                 &token,
                 pid,
                 settings.limits,
                 &layout.providers,
                 &layout.version,
-            )?;
+            ))?;
+            // Registration flags are required along with the new row. An
+            // outage here keeps the original Err behaviour so a restart
+            // registers the requested mode, handoff and update policy in full.
             if let Some(mode) = settings.mode {
                 queue.set_supervisor_mode(&token, mode, None)?;
             }
@@ -1272,33 +1276,43 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             token
         }
     };
-    // For the time of the next claim `status` shows (ADR-t1479-1).
-    queue.set_max_load(&token, settings.max_load, Some(settings.max_load_source))?;
-    let mut config = serde_json::to_value(settings.stall)?;
-    config["supervisor"] = json!(token);
-    queue.record_queue_event(EventKind::StallConfigLoaded, config)?;
-    // The mark of this start or handoff (ADR-0051 decision 10): the mode
-    // `up` passed, else the registration's (a handoff keeps it).
-    let registration = queue
-        .supervisors()?
-        .into_iter()
-        .find(|registration| registration.token == token);
-    queue.record_queue_event(
-        EventKind::SupervisorStarted,
-        json!({
-            "supervisor": token,
-            "dagq_version": layout.version,
-            "parallel": parallel,
-            "mode": settings
-                .mode
-                .or(registration.as_ref().and_then(|r| r.mode))
-                .map(|mode| mode.as_str()),
-            "auto_update": registration.as_ref().is_some_and(|r| r.auto_update),
-            "no_claude": settings.no_claude,
-            "handoff": settings.handoff_token.is_some(),
-            "previous_version": previous_version,
-        }),
-    )?;
+    // Stop this sequence at the first unanswered request; these optional
+    // max-load display and start diagnostics are never replayed after an
+    // uncertain write. Required registration flags above still fail startup.
+    let startup_lost = startup::finish(
+        startup::Stage::Diagnostics,
+        (|| {
+            // For the time of the next claim `status` shows (ADR-t1479-1).
+            queue.set_max_load(&token, settings.max_load, Some(settings.max_load_source))?;
+            let mut config = serde_json::to_value(settings.stall)?;
+            config["supervisor"] = json!(token);
+            queue.record_queue_event_now(EventKind::StallConfigLoaded, config)?;
+            // The mark of this start or handoff (ADR-0051 decision 10): the mode
+            // `up` passed, else the registration's (a handoff keeps it).
+            let registration = queue
+                .supervisors()?
+                .into_iter()
+                .find(|registration| registration.token == token);
+            queue.record_queue_event_now(
+                EventKind::SupervisorStarted,
+                json!({
+                    "supervisor": token,
+                    "dagq_version": layout.version,
+                    "parallel": parallel,
+                    "mode": settings
+                        .mode
+                        .or(registration.as_ref().and_then(|r| r.mode))
+                        .map(|mode| mode.as_str()),
+                    "auto_update": registration.as_ref().is_some_and(|r| r.auto_update),
+                    "no_claude": settings.no_claude,
+                    "handoff": settings.handoff_token.is_some(),
+                    "previous_version": previous_version,
+                }),
+            )?;
+            Ok(())
+        })(),
+    )?
+    .is_none();
     // The heartbeat that stops sets the end's deadline at once, whatever
     // the loop does then.
     let heartbeat = {
@@ -1388,6 +1402,11 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         queue_hold: None,
         hold_continue: HashMap::new(),
         unanswered: reconcile::Unanswered::default(),
+        startup_handoff_records: HashMap::new(),
+        startup_handoff: settings
+            .handoff_token
+            .as_ref()
+            .map(|_| previous_version.clone()),
         utc_offset: settings.utc_offset,
         worker_plugin: ports.worker_plugin.clone(),
         claim: stages::ClaimState {
@@ -1472,12 +1491,17 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     // Before any job starts again: the jobs a gone supervisor left, and
     // after an exec those the previous binary of this process started.
     supervisor.tend_headless_jobs();
+    // Destructive read of the previous image's saved revocations: once
+    // per process, even when diagnostics or handoff defer to a later pass.
     if settings.handoff_token.is_some() {
-        // A review rebuilt under an open hold ask waits for it (task 437).
-        // An answer waits for the rebuilt slots (task 754).
-        supervisor.check_queue_hold(false)?;
         supervisor.take_telemetry_retries();
-        supervisor.rebuild_own_runs(previous_version.as_deref())?;
+    }
+    if startup_lost {
+        supervisor.unanswered.lost();
+        supervisor.host.queue_service_unreached();
+    } else if settings.handoff_token.is_some() {
+        let rebuilt = supervisor.finish_startup_handoff();
+        supervisor.startup_unanswered(rebuilt)?;
     }
     // `_signed_in` goes after `supervisor`, so the tokens its jobs' handles
     // revoke as they go are revoked while it is still signed in.
@@ -1709,6 +1733,10 @@ struct Supervisor<'a> {
     /// What the queue service may have done without its answer reaching
     /// this process, judged against the queue once it answers again.
     unanswered: reconcile::Unanswered,
+    /// Pending exec reconstruction, before reconciliation or any new work.
+    startup_handoff: Option<Option<String>>,
+    /// Fixed payload and history boundary of each uncertain handoff record.
+    startup_handoff_records: HashMap<RunId, (Value, i64)>,
     worker_plugin: Arc<dyn Fn(&Path) -> String + Send + Sync>,
     /// The notices of a question closed without its answer that could not
     /// be sent, by run: tried again a bounded number of times (task 1372).

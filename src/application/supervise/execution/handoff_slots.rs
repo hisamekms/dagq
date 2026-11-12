@@ -406,40 +406,86 @@ impl Supervisor<'_> {
         true
     }
 
-    /// The first step after the exec: a slot for every run whose lease
-    /// carries this process's token, rebuilt the way an adopted run's is
-    /// (ADR-0039) or from its `handoff.json`. A `needs_session` run without
-    /// one whose resumed session lives on is rebuilt from its events like an
-    /// adopted one (task 640). A run that cannot be rebuilt
-    /// gives its lease back, so the supervisor's resume or triage (or
-    /// `recover`) picks it up; one whose rebuild fails is abandoned like
-    /// any other runtime error.
+    /// Rebuild every unslotted run leased to the resumed registration from
+    /// its `handoff.json`, or with adoption's rules when no snapshot exists
+    /// (ADR-0039). A live resumed session without a snapshot is recovered
+    /// from its events; resumed sessions record `resume_adopted`. The
+    /// snapshot restores pending resume input and exit requests without
+    /// sending input twice. Review reconstruction backfills only missing
+    /// revise/conflict requests of the recorded attempt into `turns/`.
+    /// A run a person's `land` queued gives its lease back to approved
+    /// landings; leases held by another registration are never changed.
+    /// A run that cannot be rebuilt gives its lease back for resume,
+    /// triage or recovery. A phase reconstruction error other than an
+    /// unanswered service request abandons the run.
+    ///
+    /// Before takeover, record `supervisor_handed_off`. Retain its initial
+    /// history boundary and payload so an uncertain write can be read back
+    /// rather than recorded twice. Taking a snapshot removes its file, so
+    /// restore that file if reading or writing this record fails: the
+    /// snapshot must survive until the record settles. Runs already in a
+    /// slot are skipped when a later attempt resumes this reconstruction.
     pub(super) fn rebuild_own_runs(&mut self, previous_version: Option<&str>) -> Result<()> {
         self.on_planning(|planning, env| planning.interrupt_for_handoff(env))?;
         for run in self.queue.runs_leased_by(self.registration.token())? {
+            if self.claim.slots.runs().contains(run.id()) {
+                continue;
+            }
             let snapshot = handoff::take_snapshot(&*self.files, self.registration.token(), &run);
             let kind = snapshot.as_ref().map(handoff::Snapshot::kind);
-            self.queue.record_runtime_event(
-                run.id(),
-                EventKind::SupervisorHandedOff,
-                handed_off(
-                    self.registration.token(),
-                    self.layout.pid,
-                    previous_version,
-                    &self.layout.version,
-                    run.status(),
-                    kind,
-                ),
-            )?;
+            let payload = handed_off(
+                self.registration.token(),
+                self.layout.pid,
+                previous_version,
+                &self.layout.version,
+                run.status(),
+                kind,
+            );
+            // Read back an uncertain write before retrying it. Keep the
+            // snapshot until the record settles so the next pass can rebuild
+            // the same phase, including a resumed session's pending input.
+            let recorded = (|| {
+                let events = self.queue.run_events(run.id())?;
+                let (payload, after) = self
+                    .startup_handoff_records
+                    .entry(run.id().clone())
+                    .or_insert_with(|| {
+                        (
+                            payload,
+                            events
+                                .iter()
+                                .map(|event| event.id.as_i64())
+                                .max()
+                                .unwrap_or(0),
+                        )
+                    });
+                if !events.iter().any(|event| {
+                    event.kind.as_str() == "supervisor_handed_off"
+                        && event.id.as_i64() > *after
+                        && event.payload == *payload
+                }) {
+                    self.queue.record_runtime_event_now(
+                        run.id(),
+                        EventKind::SupervisorHandedOff,
+                        payload.clone(),
+                    )?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = recorded {
+                if let (Some(snapshot), Some(dir)) = (snapshot, run.run_dir()) {
+                    handoff::write_snapshot(
+                        &*self.files,
+                        self.registration.token(),
+                        Path::new(dir),
+                        snapshot,
+                    )?;
+                }
+                return Err(error);
+            }
             // The service out of reach leaves the run this process's, found
             // again by the reconciliation of the loop's first pass.
-            match self.take_over_own(&run, snapshot, Some(previous_version)) {
-                Err(error) if crate::application::supervisor_service::unreachable(&error) => {
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the queue service did not answer its takeover; it is reconciled once it does", run.id());
-                    self.unanswered.lost();
-                }
-                result => result?,
-            }
+            self.take_over_own(&run, snapshot, Some(previous_version))?;
         }
         Ok(())
     }

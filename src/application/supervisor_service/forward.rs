@@ -2508,6 +2508,16 @@ impl EventStore for SupervisorQueue {
             vec![to_value(kind)?, to_value(payload)?],
         )
     }
+    fn record_queue_event_now(
+        &self,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<EventId> {
+        self.remote_now(
+            "record_queue_event",
+            vec![to_value(kind)?, to_value(payload)?],
+        )
+    }
     fn record_queue_events(
         &self,
         events: Vec<(EventKind, serde_json::Value)>,

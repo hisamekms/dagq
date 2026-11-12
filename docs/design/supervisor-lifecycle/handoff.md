@@ -72,14 +72,9 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）�
 - **exec**: `main`は`supervise`の結果が`handoff`なら、queueの接続がすべて閉じた後で、自分の引数を引き継ぎの引数に組み直し（`handoff_arguments`、ADR-t813-2）、要求されたbinaryを`CommandExt::exec`で同じpidのまま起動する（SQLiteのfdはclose-on-execで開かれる）。
   execが失敗したら（fileが無い、実行できない）logに残し、同じbinaryのまま同じ引数で`supervise`をやり直すので、登録は前のbuild識別子で取り戻され、頼んだ側は「別のbuild識別子で戻った」として失敗を知る。
   登録済みのin-cmuxのsupervisorも同じプロセスのままで、launchd modeのsupervisorは同じpidなので`KeepAlive`は何もしない。
-- **取り戻し**: exec 後は同じ token と pid の登録を取り戻し、version と heartbeat を更新する。
-  lease と開始時刻を保ち、supervisor_handed_off を記録して slot を復元する。
-  handoff.json の resume と終了要求、送った依頼を復元し、依頼を二重に送らない。
-  snapshot が無ければ生きている wrapper の run を adopt と同じ条件で復元する。
-  復元した resume は resume_adopted を記録する。
-  review 中（`awaiting_integration`）の run は adopt と同じ `adopt_review` で組み立て直すので、記録した revise・衝突の依頼が `turns/` に無ければ、その試行の依頼だけを照合して 1 回だけ書く（[Review](review.md) の 7）。
-  人の `land` の答えで着地の列に並んだ run は lease を返し、承認の着地（`start_approved_landings`）が拾う。
-  既に他の supervisor が取った lease には触れない。
+- **取り戻し**: 入口は`supervise`と`Supervisor::finish_startup_handoff`（`execution/startup.rs`）。
+  exec後も同じtokenとpidの登録、leaseと開始時刻を保つ。
+  serviceへの要求の応答が失われても、引き継いだ仕事と失効の再試行を失わず、sessionへの依頼を二重に送らない。
 - **resumeの依頼を送る前**: resumeを始めて（`resume_started`・`session_opened`）から`resume_request_sent`までの待ち（wrapperとagentの登録）は、queueのprocessの行をpassごとに読むだけで、passを塞がない（`ResumeWatch`）。
   依頼の送信（`submit`）はsessionの次のturnの依頼を書くだけで、画面を読まない。
   resumeのslotは組み立て直せるので、この間に頼まれた引き継ぎは次のpassの先頭で受け取られ、`handoff.json`は`message_sent_at`なしで書かれ、次のプロセスは同じsessionに依頼を1回だけ送る（runをresumeし直さない。登録とresume timeoutの時計は引き継いだときから数え直す）。

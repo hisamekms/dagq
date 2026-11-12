@@ -209,7 +209,9 @@ impl PlanningState {
     /// their rows and spans under this token are closed, even when their
     /// proposal or goal is no longer a candidate. The rows of the ends
     /// held (verdicts and failures) are left for them to finish
-    /// (ADR-t3102-3 decision 5).
+    /// (ADR-t3102-3 decision 5). Both writes close only unfinished rows,
+    /// so a first pass can retry even when the service applied one without
+    /// answering: an interrupted row and its span are not closed twice.
     pub(in crate::application::supervise) fn interrupt_for_handoff(
         &mut self,
         env: &mut PlanningEnv<'_>,

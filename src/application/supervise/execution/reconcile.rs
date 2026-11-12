@@ -189,6 +189,8 @@ impl Supervisor<'_> {
     /// provisioning stopped the claims. A run whose lease could not be
     /// given back keeps the reconciliation for the next pass.
     pub(super) fn reconcile_unanswered(&mut self, stopping: bool) -> Result<()> {
+        // Exec startup is resumed here before any slot is stepped or claimed.
+        self.finish_startup_handoff()?;
         if !self.unanswered.lost
             && self.unanswered.in_doubt.is_empty()
             && self.unanswered.waits.is_empty()

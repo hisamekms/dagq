@@ -64,6 +64,7 @@ pub(super) struct MemoryTokens {
     /// What each token's issue records as its time.
     clock: Arc<dyn Clock>,
     tokens: Mutex<Tokens>,
+    revocations: Mutex<Vec<(StepTarget, Option<LeaseToken>)>>,
     /// Whether an issue holds the lock of the service's issues
     /// ([`ServiceBackend::hold_issues`]), and its waits.
     issuing: Arc<(Mutex<bool>, Condvar)>,
@@ -76,6 +77,7 @@ impl MemoryTokens {
             dir,
             clock,
             tokens: Mutex::default(),
+            revocations: Mutex::default(),
             issuing: Arc::default(),
         }
     }
@@ -83,6 +85,12 @@ impl MemoryTokens {
     /// The directory the tokens' files are named under, made nowhere.
     pub(super) fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Attempts made through the telemetry port, including an already
+    /// absent token: a saved revocation must still reach this port once.
+    pub(super) fn revocations(&self) -> Vec<(StepTarget, Option<LeaseToken>)> {
+        self.revocations.lock().unwrap().clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Tokens> {
@@ -264,6 +272,10 @@ impl TelemetryTokens for MemoryTokens {
         target: &StepTarget,
         issued_under: Option<&LeaseToken>,
     ) -> Result<bool> {
+        self.revocations
+            .lock()
+            .unwrap()
+            .push((target.clone(), issued_under.cloned()));
         Ok(self.revoke_under(&crate::domain::telemetry::actor_id(target), issued_under))
     }
 

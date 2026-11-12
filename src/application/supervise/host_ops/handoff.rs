@@ -14,7 +14,9 @@
 //! the state of its handoff and stop ([`Registration`]), with the decision
 //! on a handoff request read again ([`reread`]). The slots are
 //! 実行と着地's: the loop snapshots them before the exec and rebuilds them
-//! after it (`handoff_slots`).
+//! after it (`handoff_slots`). Registration is resumed by `supervise`;
+//! the retryable takeover and its ordering are documented at
+//! `Supervisor::finish_startup_handoff` in `execution/startup.rs`.
 
 use super::*;
 use crate::application::SupervisorRegistry;

@@ -152,6 +152,8 @@ supervisorはこれらのためにもqueue DBを開かない（`compose::supervi
   transactionを開く・閉じる操作や行を読み書きする操作は無い。
 - 約束: 届かない呼び出し（`ServiceUnreachable`）でDBを開いて代わりに行わない（fail closed）。
   起動のときは`reach_at_start`、passの途中は`Supervisor::run_loop`が扱い、その間は新しいclaimとjobを始めない。
+  起動時の失敗の境界は`execution/startup.rs`、引き継ぎの復旧を継ぐ入口は`Supervisor::run_loop`。
+  登録を確定したsupervisorは起動直後の一時的なserviceの不在だけでは終了せず、引き継いだ仕事を失わない。
 - 約束: 結果の記録（`resend::RESENT_OPS`）はserviceが取るまで持って送り直し、queueは最初の送信の識別子ごとに1回だけ、記録した順に取る（`resend`のmodule docと`Resending`）。
   何かを始める前のrunのeventと履歴から見つけ直すものは持たず（`EventStore::record_runtime_event_now`）、取られなければ呼び出し元の誤りにする。
   ループの終わりまでに取られなければqueueの`service/held/`に残し、次のsupervisorが送る。
