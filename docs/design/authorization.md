@@ -24,7 +24,6 @@ actorが何をしてよいかは、`src/domain/authorization.rs`の`Authorizer`�
 実装は静的なpolicyの`StaticPolicy`で、roleごとの許可の一覧（`grants(role)`）と、いくつかのroleのresourceの規則でできている。
 一覧に無い組み合わせは拒む（default deny）。
 resourceの持ち主や状態を規則が要るのに呼び出し元が知らない（`None`、`Resource::Unresolved`）ときも拒む（fail closed）。
-判定はClaudeを起動せずにunit testできる。
 
 host実行ではこの判定は助言的（advisory）で、sandboxでも隔離でもない。
 どのプロセスも`DAGQ_ROLE`を偽れる（ADR-t728-1の決定6）。
@@ -121,7 +120,7 @@ roleがcapabilityを持たないときの、storeを読む前の拒否は`Planni
 終了runのverifyを人とinboxが直せる約束は[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)。
 再開・復旧を待つtaskの優先度は[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)、draftの再検討は[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)。
 
-拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。
+拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかない。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。
 payloadは`src/application/commands/mod.rs`の`Gate`の記録と`Resource::record`が決める。
 記録に失敗しても拒否は拒否のまま返す。
 CLIのerrorの形は`src/main.rs`の`error_json`が持つ。
@@ -207,7 +206,7 @@ queueの読み取り・`watch`などはqueueの状態を変えない。
 - 宛ての環境の無いuser・inbox・plannerはserviceが答える読み取り・`watch`・`status`・`report`・`graph --out`をserviceへ送り、serviceがprincipalで認可する（読み取りは上の節、後の2つは`Gate`の`queue.export`）。
   CLIは届かなくてもDBを開かない（[hostのCLI](queue-service-host-cli.md)）。
 - 残り（3つのroleのserviceが答えないものと、ほかのrole）は`check_access`が（default deny）`requests`の全てで`StaticPolicy`に通す。
-  拒んだときだけ`ServiceDenials`でserviceが呼び出し元のprincipalの`authorization_denied`に記録する。
+  拒んだときだけ`ServiceDenials`でserviceがprincipalの`authorization_denied`に記録する（`DAGQ_CONTROL_URL`だけの環境のlogin・logout・whoamiは送らない。[principal](queue-service-host-cli.md#principal)）。
   通った後、supervisorが起動した`observe`・`throughput-review`はsupervisorのtokenでserviceを通り、送る経路の無いものはCLIが拒みDBを開かない（制御側のコマンドとDBの例外を含め[CLIでの解釈](supervisor-lifecycle/roles.md#cliでの解釈)）。
 
 ## Claudeのpermissions.deny（guardrail）
