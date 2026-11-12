@@ -12,6 +12,8 @@ related:
   - adr-0044
   - adr-t728-1
   - design-security
+  - design-authorization
+  - adr-t3985-1
 ---
 
 # Roles
@@ -33,6 +35,8 @@ related:
   `up` / `down` / `install`は打たない（CLIは許すが、inboxか人の`DAGQ_ROLE`の無いterminalが打つ）。
 - **inbox**: 人に届くものすべての窓口になるsession。
   openなask（worker・supervisor・job・observerの質問）を人に見せてanswerを書き戻し、それ以外のattentionを人に知らせ、人の指示があるときだけ`dagq-recover` skillの手順を実行する（workerのrunへの`run send`とplannerへの`planner send`はどれにも拒まれ（ADR-t1433-2）、workerとplannerへの答えは`answer`で記録する）。
+  OIDCの発行元のある配置ではapprove_landingの着地の承認を書けず、人が自分の最近のloginの資格で答え、inboxの権限は親の人の役割の範囲に狭まる。
+  発行元の無い配置では今どおり全てのaskのanswerを書き戻す（[Authorization](../authorization.md#policy)、[ADR-t3985-1](../../adr/2026-11-03-t3985-1-team-version-identity-by-oidc-human-roles-on-staticpolicy-runner-registration-per-person-inbox-and-no-delegated-landing-approval.md)）。
   人が頼んだ計画は人の言葉のまま`request add`で計画の依頼として記録し、runtimeのplannerに移譲する（[ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)、[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）。
   唯一の常駐sessionで、人が自分のterminalで打つ`dagq inbox`が`DAGQ_ROLE=inbox`で、`inbox_prompt`付きでその前面に起動する（`up`は開かない。[`dagq inbox`](up-down.md#dagq-inbox)）。
   初期promptは短く、CLIの手順を持たず（手順はskillが持つ）、skillを変えてもpromptは変わらない。

@@ -80,7 +80,7 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 | runner | `runner.declare`・`runner.claim`・`runner.heartbeat`・`runner.report` | 申告・pullは自分、報告・返却は割り当てrun |
 | image-publisher | `image.publish`だけ | なし |
 | inbox（続き） | `runner.list`・`delegate.write` | どちらも親の人の分だけ |
-| inbox | userと同じだが、`review.setup_approve`・`queue_broker.record`・`runner.list`以外のrunnerの行・`identity.login`・`goal.landing_mark`・`credential.preference`は持たない | 親の人の役割で狭める。OIDCの発行元のある配置の着地承認は拒む |
+| inbox | userと同じだが、`review.setup_approve`・`queue_broker.record`・`runner.list`以外のrunnerの行・`identity.login`・`goal.landing_mark`・`credential.preference`は持たない | 人の役割を持つOIDCの発行元のある配置だけ、親の人の役割で狭め着地承認を拒む |
 | planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge` | runはnoteだけでask不可。askは`planner_question`だけ、依頼のaskは担当planner本人だけ（`request.decline`と同じ所有の規則）。 |
 | planner（続き） | `task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss` | taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）で、`revising`のproposalのtaskは持ち主だけ（不明なら拒む）。 |
 | planner（続き） | `planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install` | `revisit`（`task.write`）はdraftだけで、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。 |
