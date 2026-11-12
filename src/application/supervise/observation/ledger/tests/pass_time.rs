@@ -558,7 +558,7 @@ fn r_records_every_input(memory: &Memory, label: &str) -> Option<(Cursors, Curso
     Some((core, queue))
 }
 
-/// The normal read of the events stops at the pass's time, whatever its
+/// The normal read of the events stops at the marking time, whatever its
 /// count of events allows: on a clock that takes [`PASS_TIME`] at each
 /// look, every pass reads one page, short of the latest event, and is cut
 /// so that the next starts at once ([`goes_on`], [`pass_due`]) and reads on
@@ -634,8 +634,7 @@ fn the_read_of_the_events_stops_at_the_pass_time_and_the_next_reads_on() {
 
 /// Runs worked, planners' sessions, queue rows and node samples, more than
 /// one pass on [`Stepping`] reads: the passes it cuts at their time, those
-/// whose reads took it short of the latest event and the one whose writes
-/// took it after reading up to there, leave R of each kind
+/// whose reads took it short of the latest event, leave R of each kind
 /// (the queue rows' and the run, task, session and node rows') where every
 /// input up to it is recorded by a stored row, whatever they left unread
 /// or unwritten; the next passes read on from where each stopped and catch
@@ -684,7 +683,7 @@ fn a_pass_cut_at_its_time_leaves_r_of_each_kind_before_what_it_did_not_record() 
     memory.events.replace(log.events.clone());
     let stepping = Stepping(std::sync::Mutex::new(Instant::now()), PASS_TIME / 40);
     let mut builder = Builder::default();
-    let (mut passes, mut cut_reading, mut cut_writing) = (0, 0, 0);
+    let (mut passes, mut cut_reading) = (0, 0);
     loop {
         let built = paged_pass(&memory, &mut builder, &stepping);
         let label = format!("pass {passes}");
@@ -702,18 +701,19 @@ fn a_pass_cut_at_its_time_leaves_r_of_each_kind_before_what_it_did_not_record() 
             // Its reads took its time: short of the latest event.
             assert!(built.work.events > 0, "{label}");
             cut_reading += 1;
-        } else if built.written > 0 {
-            // Read up to the latest, its writes took the rest.
-            cut_writing += 1;
         }
     }
     assert!(cut_reading >= 2, "passes cut reading: {cut_reading}");
-    assert!(cut_writing >= 1, "passes cut writing: {cut_writing}");
+    // Once the snapshot is complete, finish time-driven work at LATER.
+    drain(&memory, &mut builder, LATER);
     assert_eq!(builder.events, log.last());
     let (core, queue) = r_records_every_input(&memory, "caught up").expect("R");
     assert_eq!((core.events, queue.events), (log.last(), log.last()));
     assert_eq!(core.samples, 12);
     let reference = rows_up_to(&memory, core);
+    for (key, row) in &reference {
+        assert_eq!(memory.rows.borrow().get(key), Some(row), "{key:?}");
+    }
     for kind in [
         LedgerKind::Run,
         LedgerKind::Task,
@@ -724,5 +724,80 @@ fn a_pass_cut_at_its_time_leaves_r_of_each_kind_before_what_it_did_not_record() 
         let of_kind = reference.keys().filter(|key| key.0 == kind).count();
         assert!(of_kind > 0, "{kind:?}");
         assert_eq!(memory.count(kind), of_kind, "{kind:?}");
+    }
+}
+
+/// Reading a backlog uses only the marking share. The remaining share
+/// writes the earliest marks holding R, even as new pages add more marks
+/// than fit in the write share. Every pass advances R without skipping
+/// inputs; after catching up all rows equal a full fold.
+#[test]
+fn reading_a_backlog_reserves_time_to_write_the_marks_holding_r() {
+    use crate::domain::ledger::builder::MARK_TIME;
+
+    let log = tasks(400);
+    let memory = Memory::of(&log);
+    memory.clock.costs_each_read(MARK_TIME / 5);
+    memory.clock.costs(PASS_TIME / 40);
+    let mut builder = Builder::default();
+    let mut previous = EventId::new(0);
+    let mut reading_cuts = 0;
+    for turn in 0..40 {
+        let built = paged_pass(&memory, &mut builder, &memory.clock);
+        assert_eq!(built.failure, None);
+        assert!(built.written > 0, "pass {turn}");
+        assert!(built.work.elapsed <= PASS_TIME, "{:?}", built.work);
+        if builder.events < log.last() {
+            reading_cuts += 1;
+            assert_eq!(built.work.pages, 5);
+            assert_eq!(built.work.event_read, MARK_TIME);
+            assert_eq!(built.written, 20, "the write share remains");
+            assert!(built.cut);
+        }
+        let (core, _) = r_records_every_input(&memory, "reserved write time").expect("R");
+        assert!(core.events > previous, "pass {turn}: {core:?}");
+        // The earliest marks precede the lexical round (1, 10, 100, ...).
+        // All of the priority share fits before the write deadline.
+        let priority = i64::try_from(HOLDING_R_PER_PASS).unwrap();
+        assert!(core.events.as_i64() >= (previous.as_i64() + priority).min(400));
+        previous = core.events;
+        if !goes_on(&built) {
+            break;
+        }
+    }
+    assert!(reading_cuts >= 3);
+    assert_eq!(previous, log.last());
+    drain(&memory, &mut builder, LATER);
+    assert_eq!(
+        *memory.rows.borrow(),
+        rows_up_to(&memory, builder.cursors())
+    );
+}
+
+/// A single read can consume the whole pass. It must not start another
+/// page or a row write, and R cannot certify any of the unwritten input.
+#[test]
+fn a_page_consuming_the_pass_leaves_no_write_and_no_r_advance() {
+    let log = tasks_and_queue_rows();
+    let memory = Memory::of(&log);
+    memory.clock.costs_each_read(PASS_TIME);
+    let mut builder = Builder::default();
+    for page in 1..=4 {
+        let built = paged_pass(&memory, &mut builder, &memory.clock);
+        assert_eq!(built.failure, None);
+        assert_eq!((built.work.pages, built.work.events), (1, 10));
+        assert_eq!(built.work.elapsed, PASS_TIME);
+        assert_eq!(built.written, 0);
+        assert!(built.cut);
+        assert_eq!(builder.events, log.events[page * 10 - 1].id);
+        // The first event belongs only to the queue; core has no input
+        // before event 2 and may certify that empty prefix.
+        if let Some((core, queue)) = r_records_every_input(&memory, "read consumed pass") {
+            assert_eq!(
+                (core.events, queue.events),
+                (EventId::new(1), EventId::new(0))
+            );
+        }
+        assert!(memory.rows.borrow().is_empty());
     }
 }

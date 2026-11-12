@@ -570,8 +570,9 @@ fn catch_up_coverage(
 /// second, `per_read` at most, read as the pass's events (`built`'s, its
 /// events and pages): a page at least, then none once the pass read
 /// `per_pass` events or took
-/// [`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME) since
-/// `started`. None: the pass is cut at its bound behind the latest event,
+/// [`MARK_TIME`](crate::domain::ledger::builder::MARK_TIME) since
+/// `started`, reserving the rest of the pass for writes. None: the pass
+/// is cut at its bound behind the latest event,
 /// so that the next starts at once ([`goes_on`]).
 fn within_pass(
     store: &dyn LedgerQueue,
@@ -580,7 +581,8 @@ fn within_pass(
     (timing, started): (Timing<'_>, Option<Instant>),
     built: &mut Built,
 ) -> Result<Option<Vec<RunEvent>>> {
-    if built.work.events > 0 && (built.work.events >= per_pass || pass_spent(timing.since(started)))
+    if built.work.events > 0
+        && (built.work.events >= per_pass || marking_spent(timing.since(started)))
     {
         built.cut = true;
         built.work.latest = store.latest_event_id()?.as_i64();
@@ -642,7 +644,7 @@ fn pass(
     }
     // The events it read again are the pass's own: it reads on within the
     // events and the time they left it. Each page is read only while the
-    // pass has time left (ADR-t4652-1 decision 1: its reads count), a page
+    // pass has marking time left, reserving the rest for writes, a page
     // at least, so that a pass makes way; one stopped short of the latest
     // is cut, and the next starts at once from where it stopped.
     let latest = store.latest_event_id()?;
@@ -651,7 +653,7 @@ fn pass(
     let reading_started = timing.start();
     let mut checkpoint_events = 0;
     while latest > builder.events && built.work.events < per_pass {
-        if built.work.events > 0 && pass_spent(timing.since(started)) {
+        if built.work.events > 0 && marking_spent(timing.since(started)) {
             break;
         }
         let started = timing.start();

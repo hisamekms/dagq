@@ -171,6 +171,8 @@ struct Costed {
     /// What each pass's read of the latest event takes, once a pass
     /// ([`Self::costs_each_pass`]): a cost every pass pays before it writes.
     per_pass: std::sync::Mutex<Duration>,
+    /// Time spent reading each page of events.
+    per_read: std::sync::Mutex<Duration>,
 }
 
 impl Default for Costed {
@@ -181,6 +183,7 @@ impl Default for Costed {
             spent: std::sync::Mutex::default(),
             per_write: std::sync::Mutex::new(PASS_TIME / rows),
             per_pass: std::sync::Mutex::default(),
+            per_read: std::sync::Mutex::default(),
         }
     }
 }
@@ -194,6 +197,14 @@ impl Costed {
     /// Each pass's read of the latest event takes `per_pass`.
     fn costs_each_pass(&self, per_pass: Duration) {
         *self.per_pass.lock().unwrap() = per_pass;
+    }
+
+    fn costs_each_read(&self, per_read: Duration) {
+        *self.per_read.lock().unwrap() = per_read;
+    }
+
+    fn charge_read(&self) {
+        *self.spent.lock().unwrap() += *self.per_read.lock().unwrap();
     }
 
     fn charge_pass(&self) {
@@ -411,6 +422,7 @@ impl EventStore for Memory {
         filter: &EventFilter,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
+        self.clock.charge_read();
         self.callers.borrow_mut().push((
             "events_between",
             crate::application::supervisor_service::caller::current(),

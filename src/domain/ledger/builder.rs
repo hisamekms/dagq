@@ -198,7 +198,7 @@
 //!   pending on to that R as it reads it then. A pass reads them again,
 //!   and then the events after the S of a coverage it took up to its
 //!   cursor ([`Builder::coverage_behind`]), within its events and its time
-//!   ([`PASS_TIME`]) and, short of the end, writes nothing: R stays before
+//!   ([`MARK_TIME`]) and, short of the end, writes nothing: R stays before
 //!   the events not read again, and the next pass starts at once.
 //! - **What a pass reads**: the events after its cursor, [`EVENTS_PER_READ`]
 //!   at a time, and the events of each run and task it folds. Until the
@@ -322,11 +322,11 @@ use pushes::PushesHeld;
 /// the stored row) waits for it.
 pub const INTERVAL_SECS: u64 = 60;
 
-/// How long one pass takes at most before it reads no more pages of the
-/// events (a page at least) and writes no more run, task, queue or node
-/// rows: from its start, its reads, folds and writes all counted
-/// ([`pass_spent`]). A pass whose reads took it stops reading short of the
-/// latest event and is cut there, R no further than the events it read,
+/// How long one pass takes at most before it writes no more run, task,
+/// queue or node rows: from its start, its reads, folds and writes all counted
+/// ([`pass_spent`]). Reads stop earlier at [`MARK_TIME`] (a page at least),
+/// reserving time for the marks holding R. A pass stopped short of the
+/// latest event is cut there, R no further than the events it read,
 /// and the next pass reads on from there. A pass past it, the marks it takes first
 /// ([`HOLDING_R_PER_PASS`]) too, leaves those it has not written for the
 /// next pass (none skipped, so R stays before their inputs), which starts
@@ -341,13 +341,14 @@ pub const INTERVAL_SECS: u64 = 60;
 pub const PASS_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Whether a pass that has taken `elapsed` since its start has reached
-/// [`PASS_TIME`] and reads no more pages of the events and writes no more
+/// [`PASS_TIME`] and writes no more
 /// run, task, queue or node rows.
 pub fn pass_spent(elapsed: std::time::Duration) -> bool {
     elapsed >= PASS_TIME
 }
 
-/// How long since its start a pass builds at most the session and queue
+/// How long since its start a pass reads pages of events (a page at least,
+/// including regain and coverage catch-up) and builds the session and queue
 /// rows it marks before its writes ([`Builder::rows_to_mark`],
 /// [`marking_spent`]), half of [`PASS_TIME`]: the rows it has no time
 /// left to build are marked as if each read an input of the events read
@@ -355,8 +356,8 @@ pub fn pass_spent(elapsed: std::time::Duration) -> bool {
 /// keep the rest of the time and a later pass does not build them again.
 pub const MARK_TIME: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Whether a pass that has taken `elapsed` since its start builds no more
-/// rows to mark them ([`MARK_TIME`]).
+/// Whether a pass that has taken `elapsed` since its start reads no more
+/// pages of events or builds rows to mark them ([`MARK_TIME`]).
 pub fn marking_spent(elapsed: std::time::Duration) -> bool {
     elapsed >= MARK_TIME
 }

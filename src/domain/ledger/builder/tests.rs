@@ -2010,6 +2010,11 @@ fn coverage_checks_queue_r_even_when_a_legacy_mark_has_no_event_time() {
 /// A pass has taken its time at [`PASS_TIME`], not before.
 #[test]
 fn a_pass_is_spent_at_its_time_and_not_before() {
+    assert!(!marking_spent(
+        MARK_TIME - std::time::Duration::from_nanos(1)
+    ));
+    assert!(marking_spent(MARK_TIME));
+    assert!(!pass_spent(MARK_TIME));
     assert!(!pass_spent(std::time::Duration::ZERO));
     assert!(!pass_spent(PASS_TIME - std::time::Duration::from_nanos(1)));
     assert!(pass_spent(PASS_TIME));

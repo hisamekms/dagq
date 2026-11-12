@@ -1340,19 +1340,20 @@ fn a_read_again_pending_goes_on_after_the_r_another_writes() {
 #[test]
 fn a_coverage_taken_behind_is_read_up_to_within_each_pass() {
     let id = EventId::new;
-    for by_time in [false, true] {
-        let label = if by_time {
-            "by its time"
-        } else {
-            "by its events"
-        };
+    for mode in 0..3 {
+        let label = ["by its events", "by its time", "by its marking time"][mode];
         let (input, memory, mut set, held) = taking_a_coverage_behind();
         let rows_before = memory.rows.borrow().clone();
         let leaping = super::pass_time::Leaping(std::sync::Mutex::new(Instant::now()));
-        let (per_pass, most, timing) = if by_time {
-            (10_000, 20, Timing(Some(&leaping)))
-        } else {
-            (40, 40, Timing::default())
+        let (per_pass, most, timing) = match mode {
+            0 => (40, 40, Timing::default()),
+            1 => (10_000, 20, Timing(Some(&leaping))),
+            _ => {
+                memory
+                    .clock
+                    .costs_each_read(crate::domain::ledger::builder::MARK_TIME / 2);
+                (10_000, 40, Timing(Some(&memory.clock)))
+            }
         };
         let from = scans(&memory);
         let (mut passes, mut catching_up) = (0, 0);
