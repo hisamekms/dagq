@@ -1798,8 +1798,8 @@ pub(super) struct ReviewWatch {
     pub(super) retried: bool,
     /// When the review's jobs were first started, for its duration.
     pub(super) started: Instant,
-    /// Its jobs: the whole review's first, then the agents' in their
-    /// configured order.
+    /// Normal review: the whole review first, then agents in configured
+    /// order. The dedicated coverage stage holds only its precheck job.
     pub(super) jobs: Vec<ReviewJob>,
 }
 
@@ -1815,7 +1815,8 @@ pub(super) struct ReviewJob {
     /// Its run's pair as the run's claim recorded it: a treatment's job is
     /// planned on the provider the pair assigns its review
     /// (`Supervisor::review_job_route`, ADR-t4005-1 decision 5), and each
-    /// of its records names the run's group.
+    /// of its records names the run's group. The coverage precheck keeps
+    /// group metadata but has no assigned-review override.
     pub(super) pair: crate::domain::provider_trial::RunPair,
     /// What starts it.
     pub(super) input: ReviewJobInput,

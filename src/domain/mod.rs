@@ -941,19 +941,23 @@ pub const RECOVER_AGAIN: &str = "recover";
 /// something ([`fix_requested`]).
 pub fn review_anchor(events: &[RunEvent]) -> Option<&RunEvent> {
     events.iter().rev().find(|e| {
-        matches!(
+        (matches!(
             e.kind.known(),
-            Some(
-                EventKind::ValidationFinished
-                    | EventKind::ReviewStarted
-                    | EventKind::ReviewFinished
-                    | EventKind::ReviseRequested
-                    | EventKind::ReviseUnsent
-                    | EventKind::ReviseFinished
-                    | EventKind::ConflictPrecheck
-                    | EventKind::ConflictResolved
+            Some(EventKind::ReviewJobStarted | EventKind::ReviewJobFinished)
+        ) && e.payload["agent"] == review_builtins::ACCEPTANCE_PRECHECK)
+            || matches!(
+                e.kind.known(),
+                Some(
+                    EventKind::ValidationFinished
+                        | EventKind::ReviewStarted
+                        | EventKind::ReviewFinished
+                        | EventKind::ReviseRequested
+                        | EventKind::ReviseUnsent
+                        | EventKind::ReviseFinished
+                        | EventKind::ConflictPrecheck
+                        | EventKind::ConflictResolved
+                )
             )
-        )
     })
 }
 

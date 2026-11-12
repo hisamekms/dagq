@@ -78,6 +78,8 @@ impl ReviewSubagent {
 /// agent's job starts on when its table names none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewAgents {
+    /// Dedicated stage, independent of the selectable agents and role launch.
+    pub precheck: super::review_builtins::AcceptancePrecheck,
     pub agents: Vec<ReviewSubagent>,
     pub builtins: Vec<BuiltinSetting>,
     pub roles: RoleModels,

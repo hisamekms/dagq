@@ -429,8 +429,28 @@ impl<'a> RunHistory<'a> {
     /// `revise_requested` but those a `revise_unsent` withdrew (the request
     /// is recorded before it is typed).
     pub fn revise_attempts(&self) -> usize {
-        self.count(EventKind::ReviseRequested)
-            .saturating_sub(self.count(EventKind::ReviseUnsent))
+        let ordinary = |kind| {
+            self.events
+                .iter()
+                .filter(|e| {
+                    e.kind == kind
+                        && e.payload[super::super::review_jobs::precheck::REQUEST_FIELD] != true
+                })
+                .count()
+        };
+        ordinary(EventKind::ReviseRequested).saturating_sub(ordinary(EventKind::ReviseUnsent))
+    }
+
+    /// Dedicated coverage requests, counted before delivery and across adoption.
+    /// Failed deliveries still consume this finite budget, unlike ordinary revises.
+    pub fn precheck_returns(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|e| {
+                e.kind == EventKind::ReviseRequested
+                    && e.payload[super::super::review_jobs::precheck::REQUEST_FIELD] == true
+            })
+            .count()
     }
 
     /// The revise limit the latest review attempt read: what its
@@ -918,6 +938,78 @@ mod tests {
         assert_eq!(event_kind::INTEGRATION_APPROVED, "integration_approved");
         assert_eq!(event_kind::RESUME_STARTED, "resume_started");
         assert_eq!(event_kind::OBSERVATION, "observation");
+    }
+
+    #[test]
+    fn an_in_progress_coverage_stage_is_a_review_recovery_anchor() {
+        let mut events = vec![event(1, "review_finished", json!({"verdict": "pass"}))];
+        events.push(event(
+            2,
+            "review_job_started",
+            json!({"agent": "builtin:acceptance-precheck"}),
+        ));
+        assert_eq!(
+            crate::domain::review_anchor(&events).unwrap().id,
+            EventId::new(2)
+        );
+        events.push(event(
+            3,
+            "review_job_finished",
+            json!({"agent": "builtin:acceptance-precheck"}),
+        ));
+        assert_eq!(
+            crate::domain::review_anchor(&events).unwrap().id,
+            EventId::new(3)
+        );
+        events.push(event(4, "review_started", json!({})));
+        events.push(event(5, "review_job_finished", json!({"agent": "design"})));
+        assert_eq!(
+            crate::domain::review_anchor(&events).unwrap().id,
+            EventId::new(4)
+        );
+    }
+
+    #[test]
+    fn coverage_returns_survive_reconstruction_without_using_review_revises() {
+        let events = vec![
+            event(
+                1,
+                "revise_requested",
+                json!({"attempt": 1, "acceptance_precheck": true}),
+            ),
+            event(2, "resume_started", json!({})),
+            event(3, "revise_requested", json!({"attempt": 2})),
+            event(
+                4,
+                "revise_requested",
+                json!({"attempt": 3, "acceptance_precheck": true}),
+            ),
+            event(
+                5,
+                "revise_unsent",
+                json!({"attempt": 3, "acceptance_precheck": true}),
+            ),
+        ];
+        for _restart in 0..2 {
+            let history = RunHistory::from_events(&events);
+            assert_eq!(history.precheck_returns(), 2);
+            assert_eq!(history.revise_attempts(), 1);
+            assert!(matches!(
+                decide_revise(&history),
+                ReviseDecision::Request {
+                    attempt: 4,
+                    number: 2,
+                    ..
+                }
+            ));
+            assert_eq!(
+                crate::domain::review_jobs::precheck::next(
+                    crate::domain::review_jobs::precheck::Outcome::Missing,
+                    history.precheck_returns()
+                ),
+                crate::domain::review_jobs::precheck::Next::Review
+            );
+        }
     }
 
     #[test]

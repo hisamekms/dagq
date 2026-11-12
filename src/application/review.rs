@@ -1731,6 +1731,7 @@ mod tests {
             };
         match text {
             CONFIG => Ok(ReviewAgents {
+                precheck: Default::default(),
                 agents: vec![
                     agent("design", &["change.txt", "docs/**"]),
                     agent("unused", &["nothing/**"]),
@@ -1742,6 +1743,7 @@ mod tests {
             // `builtin:security` only a high effort, on `[roles.review]`'s
             // Codex.
             LAUNCHES => Ok(ReviewAgents {
+                precheck: Default::default(),
                 agents: vec![review_subagents::ReviewSubagent {
                     provider: Some(Provider::Claude),
                     model: Some("claude-haiku-5-5".to_owned()),
@@ -1757,6 +1759,7 @@ mod tests {
             // `design` names a model not Claude's on the role's Claude, and
             // `builtin:security` an effort no adapter takes.
             BAD_LAUNCHES => Ok(ReviewAgents {
+                precheck: Default::default(),
                 agents: vec![review_subagents::ReviewSubagent {
                     model: Some("gpt-5.5".to_owned()),
                     ..agent("design", &["docs/**"])
@@ -1768,6 +1771,7 @@ mod tests {
                 roles: RoleModels::default(),
             }),
             BUILTINS => Ok(ReviewAgents {
+                precheck: Default::default(),
                 agents: Vec::new(),
                 builtins: vec![
                     setting(BuiltinAgent::Security, false, None, None),

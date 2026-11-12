@@ -57,6 +57,7 @@ validationを通ったrunを、着地の前にheadlessのreview jobで判定し�
 ```text
 validationを通ったrun（awaiting_integration）
   → 0 プログラムのreview: 落ちたら4（agentは起動しない）
+  → 0a 有効な被覆の確認: 欠けは別の有限の回数でworkerへ戻し、上限後は通常のreviewへ進む
   → 1 開始: review.mdと各jobのpromptを書く
   → 2 headless実行: 全体のreviewとagentごとの読み取りだけのjobを並列に
   → 3 判定: 全jobがそろってから
@@ -91,6 +92,7 @@ validationを通ったrun（awaiting_integration）
 
 | 知りたいこと | コードの入口 |
 | --- | --- |
+| 受け入れ条件の被覆の確認 | `src/application/supervise/execution/landing.rs`の`Supervisor::start_acceptance_precheck` |
 | reviewの始まりと行き先 | `src/application/supervise/execution/`（以下同じ）の`landing.rs`の`Supervisor::begin_review`・`review_route`、`provider.rs` |
 | jobの起動・やり直し・判定 | `landing.rs`の`Supervisor::tend_review`、`jobs.rs`、`src/domain/review_jobs.rs` |
 | verdictごとの進め方 | `landing.rs`の`act_on_verdict`・`act_on_concern`、`src/domain/concern.rs` |
@@ -101,6 +103,9 @@ validationを通ったrun（awaiting_integration）
 ## reviewの流れ
 
 番号は上の図の段で、各段の手順と記録するeventは入口のdoc commentが持つ。
+
+段の順はプログラム→有効な被覆の確認→全体のreviewとsubagentで、被覆の欠けは通常のreviewを起動せずworkerへ戻す。
+確認の失敗・時間切れは通常のreviewへ進み、通常の判定の基準と必須のjobを弱めない。
 
 2. **headless実行**: 全体のreviewはinstructionsを読ませず、pjの規則はlanding branchの`.dagq/review/builtin-acceptance.md`だけ（ADR-t2259-1決定6）。
    jobの起動・停止・引き継ぎは[Headless job processes](headless-job-processes.md#記録)。

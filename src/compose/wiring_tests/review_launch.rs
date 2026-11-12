@@ -669,3 +669,258 @@ fn retrying_an_old_receipt_parks_under_the_review_lease_before_any_new_job() {
     assert_eq!(detail.runs[0].id(), run.id());
     assert!(queue.run_lease(run.id()).unwrap().is_none());
 }
+
+/// A demonstrated shared baseline returns a turn before any ordinary job.
+/// The worker then explicitly fails, keeping this test about that one return.
+#[test]
+fn acceptance_precheck_returns_shared_baseline_without_starting_any_review_job() {
+    let wiring = Wiring::new(
+        "acceptance_precheck_returns_shared_baseline_without_starting_any_review_job",
+        Script {
+            receipts: vec![succeeded, super::worker_trial::failed],
+            verdicts: vec![json!({"findings": [{"item": 1, "kind": "shared_baseline",
+                "evidence": "diff test compares wrappers that both call the new implementation"}]})],
+        },
+    );
+    let config =
+        format!("{CONFIG}\n[review.subagents.\"builtin:acceptance-precheck\"]\nenabled = true\n");
+    wiring.git.commit_files(
+        &[
+            ("dagq.toml", &config),
+            (
+                ".dagq/agents/design/AGENT.md",
+                "---\ndescription: design\n---\nCheck design.\n",
+            ),
+        ],
+        &["change.txt"],
+    );
+    wiring.verifier.set_config(&config);
+    let task = wiring.ready_task(&["true"]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    let jobs = payloads(&detail, "review_job_started");
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert_eq!(jobs[0]["agent"], "builtin:acceptance-precheck");
+    assert!(payloads(&detail, "review_started").is_empty());
+    assert!(payloads(&detail, "review_finished").is_empty());
+    assert!(wiring.agent.agent_jobs().is_empty());
+    let requests = payloads(&detail, "revise_requested");
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["acceptance_precheck"], true);
+    assert!(
+        requests[0]["reasons"][0]
+            .as_str()
+            .unwrap()
+            .contains("[acceptance:1]")
+    );
+    assert_eq!(wiring.agent.turn_sessions().len(), 2);
+}
+
+/// No demonstrated gap permits the unchanged whole review and both selected
+/// subagents to start. A concern deliberately stops the run before landing.
+#[test]
+fn acceptance_precheck_clear_starts_the_whole_review_and_subagent_jobs() {
+    let wiring = Wiring::new(
+        "acceptance_precheck_clear_starts_the_whole_review_and_subagent_jobs",
+        Script {
+            receipts: vec![succeeded],
+            verdicts: vec![
+                json!({"findings": []}),
+                verdict("concern", "a person looks"),
+            ],
+        },
+    );
+    let config =
+        format!("{CONFIG}\n[review.subagents.\"builtin:acceptance-precheck\"]\nenabled = true\n");
+    wiring.git.commit_files(
+        &[
+            ("dagq.toml", &config),
+            (
+                ".dagq/agents/design/AGENT.md",
+                "---\ndescription: design\n---\nCheck design.\n",
+            ),
+        ],
+        &["change.txt"],
+    );
+    wiring.verifier.set_config(&config);
+    let task = wiring.ready_task(&["true"]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    let jobs: Vec<_> = payloads(&detail, "review_job_started")
+        .iter()
+        .map(|p| p["agent"].clone())
+        .collect();
+    assert_eq!(
+        jobs,
+        [
+            json!("builtin:acceptance-precheck"),
+            Value::Null,
+            json!("design"),
+            json!("builtin:security")
+        ]
+    );
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert_eq!(payloads(&detail, "review_finished").len(), 1);
+    assert!(payloads(&detail, "revise_requested").is_empty());
+    assert_eq!(wiring.agent.agent_jobs().len(), 2);
+}
+
+/// Each group exercises one supervisor pipeline; the pure launch test covers
+/// their matrix. Separate cases keep each wiring test within five seconds.
+fn precheck_trial_group(percent: u8) {
+    let config = format!(
+        "{}\n[review.subagents.\"builtin:acceptance-precheck\"]\nenabled = true\n",
+        pair_config(percent)
+    );
+    let wiring = Wiring::new(
+        &format!("acceptance_precheck_launch_is_identical_in_both_provider_trial_groups_{percent}"),
+        Script {
+            receipts: vec![succeeded],
+            verdicts: vec![
+                json!({"findings": []}),
+                verdict("concern", "a person looks"),
+            ],
+        },
+    )
+    .with_codex();
+    wiring.git.commit_files(
+        &[
+            ("dagq.toml", &config),
+            (
+                ".dagq/agents/design-layers/AGENT.md",
+                "---\ndescription: design\n---\nCheck design.\n",
+            ),
+            (
+                ".dagq/agents/tests/AGENT.md",
+                "---\ndescription: tests\n---\nCheck tests.\n",
+            ),
+        ],
+        &["change.txt"],
+    );
+    wiring.verifier.set_config(&config);
+    let task = wiring.ready_task(&["true"]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    let jobs = payloads(&detail, "review_job_started");
+    let precheck = jobs[0];
+    assert_eq!(precheck["agent"], "builtin:acceptance-precheck");
+    assert_eq!(precheck["launch"]["provider"], "claude");
+    assert_eq!(precheck["launch"]["model"], "claude-haiku-5-5");
+    assert_eq!(precheck["launch"]["effort"], "low");
+    assert_eq!(jobs[1]["agent"], Value::Null);
+    assert_eq!(
+        jobs[1]["launch"]["provider"],
+        if percent == 0 { "codex" } else { "claude" }
+    );
+}
+
+#[test]
+fn acceptance_precheck_control_group_uses_dedicated_settings() {
+    precheck_trial_group(0);
+}
+
+#[test]
+fn acceptance_precheck_treatment_group_uses_dedicated_settings() {
+    precheck_trial_group(100);
+}
+
+#[test]
+fn acceptance_precheck_failure_proceeds_to_every_normal_review_job() {
+    let wiring = Wiring::new(
+        "acceptance_precheck_failure_proceeds_to_every_normal_review_job",
+        Script {
+            receipts: vec![succeeded],
+            verdicts: vec![
+                json!({"wiring_start_failed": true}),
+                verdict("concern", "a person looks"),
+            ],
+        },
+    );
+    let config =
+        format!("{CONFIG}\n[review.subagents.\"builtin:acceptance-precheck\"]\nenabled = true\n");
+    wiring.git.commit_files(
+        &[
+            ("dagq.toml", &config),
+            (
+                ".dagq/agents/design/AGENT.md",
+                "---\ndescription: design\n---\nCheck design.\n",
+            ),
+        ],
+        &["change.txt"],
+    );
+    wiring.verifier.set_config(&config);
+    let task = wiring.ready_task(&["true"]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    let jobs: Vec<_> = payloads(&detail, "review_job_started")
+        .iter()
+        .map(|p| p["agent"].clone())
+        .collect();
+    assert_eq!(
+        jobs,
+        [Value::Null, json!("design"), json!("builtin:security")]
+    );
+    let failures = payloads(&detail, "review_job_finished");
+    assert_eq!(failures[0]["agent"], "builtin:acceptance-precheck");
+    assert_eq!(failures[0]["outcome"], "start_failed");
+    assert_eq!(failures[0]["runs_again"], false);
+    assert!(payloads(&detail, "revise_requested").is_empty());
+}
+
+#[test]
+fn acceptance_precheck_return_limit_preserves_the_ordinary_review_budget() {
+    let missing = json!({"findings": [{"item": 1, "kind": "missing_item", "evidence": "no test evidence for item 1"}]});
+    let wiring = Wiring::new(
+        "acceptance_precheck_return_limit_preserves_the_ordinary_review_budget",
+        Script {
+            receipts: vec![succeeded, succeeded, succeeded],
+            verdicts: vec![
+                missing.clone(),
+                missing.clone(),
+                missing,
+                verdict("concern", "a person looks"),
+            ],
+        },
+    );
+    let config =
+        format!("{CONFIG}\n[review.subagents.\"builtin:acceptance-precheck\"]\nenabled = true\n");
+    wiring.git.commit_files(
+        &[
+            ("dagq.toml", &config),
+            (
+                ".dagq/agents/design/AGENT.md",
+                "---\ndescription: design\n---\nCheck design.\n",
+            ),
+        ],
+        &["change.txt"],
+    );
+    wiring.verifier.set_config(&config);
+    let task = wiring.ready_task(&["true"]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    let requests = payloads(&detail, "revise_requested");
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(requests.iter().all(|r| r["acceptance_precheck"] == true));
+    assert_eq!(
+        crate::domain::run::RunHistory::from_events(&detail.events).revise_attempts(),
+        0
+    );
+    let jobs: Vec<_> = payloads(&detail, "review_job_started")
+        .iter()
+        .map(|p| p["agent"].clone())
+        .collect();
+    assert_eq!(
+        jobs,
+        [
+            json!("builtin:acceptance-precheck"),
+            json!("builtin:acceptance-precheck"),
+            json!("builtin:acceptance-precheck"),
+            Value::Null,
+            json!("design"),
+            json!("builtin:security")
+        ]
+    );
+    let finished = payloads(&detail, "review_job_finished");
+    assert_eq!(finished[2]["limit_reached"], true);
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+}

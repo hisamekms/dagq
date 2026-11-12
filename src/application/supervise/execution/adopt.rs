@@ -1096,6 +1096,9 @@ fn review_resumption(
         // A revise request recorded but not sent asks a person, as it
         // did before the supervisor was replaced.
         Some(EventKind::ReviseUnsent) => {
+            if anchor.payload[crate::domain::review_jobs::precheck::REQUEST_FIELD] == true {
+                return ReviewResumption::Review;
+            }
             let unsent: ReviseUnsent = restore(&anchor.payload);
             // A revise the review's subagents decided (ADR-t1453-1
             // decision 7) is asked with their reasons, as the
@@ -2170,6 +2173,31 @@ mod tests {
         let mut asked = events.clone();
         asked.extend([parent, unjudged]);
         assert!(undecided(&asked).is_none());
+    }
+
+    #[test]
+    fn an_adopted_coverage_stage_restarts_review_and_never_uses_an_old_pass() {
+        for kind in ["review_job_started", "review_job_finished", "revise_unsent"] {
+            let events = [
+                pass(1),
+                event(
+                    2,
+                    kind,
+                    json!({
+                        "agent": "builtin:acceptance-precheck", "acceptance_precheck": true,
+                        "attempt": 1, "error": "coverage job or delivery failed",
+                    }),
+                ),
+            ];
+            assert!(matches!(
+                resumption(&events, true, false),
+                ReviewResumption::Review
+            ));
+            assert!(matches!(
+                resumption(&events, false, false),
+                ReviewResumption::Review
+            ));
+        }
     }
 
     #[test]

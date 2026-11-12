@@ -30,7 +30,8 @@ use crate::domain::concern::{
 use crate::domain::headless_job::{JobKind, JobSession, JobStop};
 use crate::domain::provider_trial::{self, RunPair};
 use crate::domain::resume::{SEND_BACK_NO_RESUME, send_back_resumes};
-use crate::domain::review_jobs::{self, JobMiss, ReviewJobId};
+use crate::domain::review_builtins::ACCEPTANCE_PRECHECK;
+use crate::domain::review_jobs::{self, JobMiss, ReviewJobId, precheck};
 use crate::domain::review_programs::{
     self as programs, AfterFailure, ProgramOutcome, ProgramsStep,
 };
@@ -262,8 +263,8 @@ impl Supervisor<'_> {
     }
     /// Review an accepted run whose session stays open (ADR-0027 decision
     /// 1): first its program reviews ([`Self::start_review_programs`]),
-    /// then, once they all pass, record `review_started` and start the
-    /// headless review: write `review.md`, then run the reviewer's command
+    /// then the optional coverage precheck. When it proceeds, record
+    /// `review_started`, write `review.md`, then run the reviewer's command
     /// with the task's acceptance and the verdict schema. A review that
     /// cannot even start is a failed one. Throughout, the supervisor keeps
     /// the run's lease and slot and the run stays `awaiting_integration`:
@@ -286,8 +287,8 @@ impl Supervisor<'_> {
     /// program job at a time in the configured order against the run's
     /// worktree, the built-ins first. A review that needs none (every
     /// built-in off and no `[review.programs.*]`, or no program whose paths
-    /// the range touches) goes to its agents at once and records nothing
-    /// of them. `retried` is whether this is their one
+    /// the range touches) proceeds to the optional coverage precheck without
+    /// recording programs. `retried` is whether this is their one
     /// retry, after a program that could not be read, start or finish.
     fn start_review_programs(
         &mut self,
@@ -370,8 +371,8 @@ impl Supervisor<'_> {
         )
     }
     /// The next step of `run`'s program reviews ([`programs::step`]): start
-    /// the next program; once every one exited 0, go on to the agents'
-    /// review; at the first that exited non-zero, send the worker back with
+    /// the next program; once every one exited 0, go on to the optional
+    /// coverage precheck; at the first non-zero exit, send the worker back with
     /// its output, starting no other program and no agent (ADR-t1895-2
     /// decision 3); at the first that could not start or finish, fail as a
     /// review does (decision 4).
@@ -634,8 +635,172 @@ impl Supervisor<'_> {
         if let Some(held) = self.review_held_at_fence(run, &session, retried)? {
             return Ok(held);
         }
-        self.begin_review(run, session, retried)
+        self.start_acceptance_precheck(run, session, retried)
     }
+    /// Optional coverage stage after programs and before any ordinary review
+    /// jobs. Read the switch and dedicated launch from landing main, never from
+    /// the run or its A/B group. A preparation/launch/reply/timeout failure is
+    /// recorded and falls through to all normal review jobs. No project rules
+    /// are read. The existing review job monitor supplies isolation, process
+    /// registration, concurrency and timeout/stop handling.
+    fn start_acceptance_precheck(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        retried: bool,
+    ) -> Result<Phase> {
+        let prepared = (|| -> Result<Option<ReviewWatch>> {
+            let main = self.repository.main_head()?;
+            let Some(config) = self
+                .repository
+                .file_in(main.as_str(), crate::application::review::CONFIG_FILE)?
+            else {
+                return Ok(None);
+            };
+            let settings = self.verifier.review_subagents_in(&config)?.precheck;
+            if !settings.enabled {
+                return Ok(None);
+            }
+            let events = self.queue.run_events(run.id())?;
+            let launch = precheck::launch(&settings, &RunPair::of_run(&events))
+                .map_err(anyhow::Error::msg)?;
+            let attempt = events
+                .iter()
+                .filter(|e| {
+                    e.kind == EventKind::ReviewJobStarted
+                        && e.payload["agent"] == ACCEPTANCE_PRECHECK
+                })
+                .count()
+                + 1;
+            let range = self.receipt_range(run, &main)?;
+            let dir = PathBuf::from(run.run_dir().context("missing run directory")?);
+            let diff = dir.join(format!("acceptance-precheck-{attempt}.patch"));
+            self.repository
+                .diff_to_file(&range.base, &range.head, &diff)?;
+            let receipt = self
+                .files
+                .read_to_string(Path::new(run.receipt_path().context("missing receipt")?))?;
+            let receipt: Value = serde_json::from_str(&receipt)?;
+            let items = dir.join(format!("acceptance-precheck-{attempt}-items.json"));
+            self.files.write(
+                &items,
+                serde_json::to_string(&receipt["acceptance_items"])?.as_bytes(),
+            )?;
+            let task = self.queue.show(run.task_id())?.task;
+            let acceptance = dir.join(format!("acceptance-precheck-{attempt}-acceptance.txt"));
+            self.files
+                .write(&acceptance, task.acceptance().as_bytes())?;
+            let prompt = crate::application::prompt::acceptance_precheck_prompt(
+                &acceptance.to_string_lossy(),
+                &diff.to_string_lossy(),
+                &items.to_string_lossy(),
+            );
+            self.files.write(
+                &dir.join(format!("acceptance-precheck-{attempt}.md")),
+                prompt.as_bytes(),
+            )?;
+            // Fixed instructions plus three paths fit in 16 KiB. An
+            // overlong path set skips this optional check rather than cutting inputs.
+            let prompt_bytes = PromptBytes {
+                total: prompt.len(),
+                limit: 16_000,
+                ..Default::default()
+            };
+            anyhow::ensure!(
+                prompt_bytes.total <= prompt_bytes.limit,
+                "coverage prompt paths exceed 16000 bytes"
+            );
+            Ok(Some(ReviewWatch {
+                session: session.clone(),
+                attempt,
+                retried,
+                started: self.generators.clock.monotonic(),
+                jobs: vec![ReviewJob {
+                    id: ReviewJobId::Agent(ACCEPTANCE_PRECHECK.to_owned()),
+                    written: AgentModel {
+                        provider: Some(launch.provider),
+                        model: launch.model,
+                        effort: launch.effort,
+                    },
+                    pair: RunPair {
+                        review: None,
+                        ..RunPair::of_run(&events)
+                    },
+                    input: ReviewJobInput::Whole {
+                        prompt,
+                        prompt_bytes,
+                        session_id: None,
+                    },
+                    builtin: Some(
+                        json!({"builtin": ACCEPTANCE_PRECHECK, "build": crate::VERSION,
+                        "digest": crate::application::prompt::acceptance_precheck_digest(), "rules": null}),
+                    ),
+                    again: false,
+                    state: ReviewJobState::Waiting(None),
+                    session: None,
+                    ran_with: None,
+                }],
+            }))
+        })();
+        match prepared {
+            Ok(Some(watch)) => self.go_on_with_review(run, watch),
+            Ok(None) => self.begin_review(run, session, retried),
+            Err(error) => {
+                self.record_review_job_finished(
+                    run,
+                    json!({"agent": ACCEPTANCE_PRECHECK,
+                    "outcome": "preparation_failed", "error": format!("{error:#}")}),
+                )?;
+                self.begin_review(run, session, retried)
+            }
+        }
+    }
+
+    /// The precheck never supplies an ordinary verdict. Persist its findings
+    /// as material, then either request a separately counted worker turn (at
+    /// most two per run), or run the whole review and every selected subagent.
+    fn finish_acceptance_precheck(&mut self, run: &TaskRun, watch: &ReviewWatch) -> Result<Phase> {
+        let verdict = match &watch.jobs[0].state {
+            ReviewJobState::Answered(ReviewAnswer::Whole(verdict)) => Some(verdict.clone()),
+            _ => None,
+        };
+        let outcome = match &verdict {
+            Some(v) if v.verdict == ReviewDecision::Revise => precheck::Outcome::Missing,
+            Some(_) => precheck::Outcome::Clear,
+            None => precheck::Outcome::Failed,
+        };
+        let events = self.queue.run_events(run.id())?;
+        let returns = RunHistory::from_events(&events).precheck_returns();
+        let next = precheck::next(outcome, returns);
+        let findings = verdict
+            .as_ref()
+            .map(|v| v.reasons.as_slice())
+            .unwrap_or_default();
+        let dir = Path::new(run.run_dir().context("missing run directory")?);
+        self.files.write(
+            &dir.join("acceptance-precheck-findings.json"),
+            serde_json::to_string(&json!({"findings": findings, "returns": returns,
+                "limit_reached": returns >= precheck::RETURN_LIMIT}))?
+            .as_bytes(),
+        )?;
+        if let precheck::Next::Return { number } = next {
+            let verdict = verdict.context("missing coverage verdict")?;
+            let sent_back = SentBack {
+                attempt: watch.attempt,
+                findings: verdict.sent_back_findings(None),
+            };
+            return self.send_revise_inner(
+                run,
+                watch.session.clone(),
+                verdict,
+                &ActorContext::review_job(run.id(), watch.attempt),
+                None,
+                (sent_back, Some(number)),
+            );
+        }
+        self.begin_review(run, watch.session.clone(), watch.retried)
+    }
+
     /// Past a replanning's fence (ADR-t1521-2) or while a hold fences the
     /// task (ADR-t1879-1) no review of `run` starts, whoever starts it (the
     /// step after validation, an adopter, the process an exec hands the run
@@ -1048,6 +1213,9 @@ impl Supervisor<'_> {
         self.reap_review_jobs(run, watch)?;
         self.start_review_jobs(run, watch, elsewhere)?;
         let attempt = watch.attempt;
+        if is_acceptance_precheck(watch) && watch.standing() != review_jobs::ReviewStanding::Open {
+            return self.finish_acceptance_precheck(run, watch).map(Some);
+        }
         match watch.standing() {
             review_jobs::ReviewStanding::Open => Ok(None),
             review_jobs::ReviewStanding::Answered => self.judge_review(run, watch).map(Some),
@@ -1127,6 +1295,16 @@ impl Supervisor<'_> {
                 Ok(answer) => {
                     finished["outcome"] = json!("answered");
                     finished["verdict"] = json!(answer.decision());
+                    if job.id.agent() == Some(ACCEPTANCE_PRECHECK)
+                        && let ReviewAnswer::Whole(verdict) = &answer
+                    {
+                        finished["findings"] = json!(verdict.reasons);
+                        finished["coverage"] = agent_job::read_reply(&reply).unwrap_or(Value::Null);
+                        let events = self.queue.run_events(run.id())?;
+                        let returns = RunHistory::from_events(&events).precheck_returns();
+                        finished["returns"] = json!(returns);
+                        finished["limit_reached"] = json!(returns >= precheck::RETURN_LIMIT);
+                    }
                     info!(run_id = %run.id(), "run {} review {attempt}: {} answered {}", run.id(), job.id.describe(), answer.decision().map_or("nothing", ReviewDecision::as_str));
                     job.state = ReviewJobState::Answered(answer);
                     return self.record_review_job_finished(run, finished);
@@ -1141,6 +1319,15 @@ impl Supervisor<'_> {
                 failed.into_error(),
             ),
         };
+        if job.id.agent() == Some(ACCEPTANCE_PRECHECK) {
+            finished["outcome"] = json!(miss.as_str());
+            finished["error"] = json!(error);
+            job.state = ReviewJobState::Missed {
+                why: error,
+                ran: true,
+            };
+            return self.record_review_job_finished(run, finished);
+        }
         // A job stopped at a login that ran out or the usage limit joins the
         // hold ask and waits with the review's other jobs kept; one whose
         // other provider cannot be used starts again where its route sends
@@ -1193,7 +1380,8 @@ impl Supervisor<'_> {
             self.review_job_route(&job.pair, &job.written),
             ReviewRoute::Manual(_)
         );
-        let again = !unusable
+        let again = job.id.agent() != Some(ACCEPTANCE_PRECHECK)
+            && !unusable
             && review_jobs::runs_again(
                 self.landing.retry_unreadable_review,
                 job.again,
@@ -1268,12 +1456,37 @@ impl Supervisor<'_> {
                 continue;
             }
             let job = &watch.jobs[index];
-            match self.review_job_route(&job.pair, &job.written) {
+            let route = if job.id.agent() == Some(ACCEPTANCE_PRECHECK) {
+                let planned = crate::domain::actor_model::RoleModels::default()
+                    .checked_agent_launch(ModelRole::Review, &job.written);
+                match planned {
+                    Ok(launch)
+                        if !(self.no_claude && launch.provider == Provider::Claude)
+                            && self.job_unusable(launch.provider).is_none() =>
+                    {
+                        ReviewRoute::Start(launch, false)
+                    }
+                    Ok(_) => ReviewRoute::Manual(
+                        "precheck provider unavailable; proceed to review".to_owned(),
+                    ),
+                    Err(error) => ReviewRoute::Manual(error),
+                }
+            } else {
+                self.review_job_route(&job.pair, &job.written)
+            };
+            match route {
                 ReviewRoute::Wait(why) => {
                     note_review_job_wait(run, attempt, &mut watch.jobs[index], why)
                 }
                 ReviewRoute::Manual(error) => {
                     warn!(run_id = %run.id(), "run {} review {attempt}: {} cannot run: {error}", run.id(), watch.jobs[index].id.describe());
+                    if job.id.agent() == Some(ACCEPTANCE_PRECHECK) {
+                        self.record_review_job_finished(
+                            run,
+                            json!({"agent": ACCEPTANCE_PRECHECK,
+                            "attempt": attempt, "outcome": "start_failed", "error": error}),
+                        )?;
+                    }
                     watch.jobs[index].state = ReviewJobState::Missed {
                         why: error,
                         ran: false,
@@ -1371,6 +1584,16 @@ impl Supervisor<'_> {
                 }
                 Ok(Err(started)) => {
                     let error = format!("it could not start: {started:#}");
+                    if job.id.agent() == Some(ACCEPTANCE_PRECHECK) {
+                        return self.start_missed(
+                            run,
+                            (attempt, retried),
+                            job,
+                            &output,
+                            &error,
+                            (true, &launch),
+                        );
+                    }
                     if let Some((provider, reason)) = self.job_provider_failed(
                         launch.provider,
                         job_start_failure(&started),
@@ -1639,6 +1862,15 @@ impl Supervisor<'_> {
             .as_str()
             .context("review wrote no path")?
             .to_owned();
+        let observations = run_dir.join("acceptance-precheck-findings.json");
+        if self.files.is_file(&observations) {
+            let mut text = self.files.read_to_string(Path::new(&path))?;
+            text.push_str(&format!(
+                "\nCoverage precheck observations (not a review verdict):\n{}\n",
+                self.files.read_to_string(&observations)?
+            ));
+            self.files.write(Path::new(&path), text.as_bytes())?;
+        }
         let detail = self.queue.show(run.task_id())?;
         // A person's answers to the run's approve_landing asks, read as
         // review.md reads them, for the whole review and each agent.
@@ -2050,6 +2282,19 @@ impl Supervisor<'_> {
         concern: Option<SentBackConcern>,
         sent_back: SentBack,
     ) -> Result<Phase> {
+        self.send_revise_inner(run, session, verdict, job, concern, (sent_back, None))
+    }
+
+    fn send_revise_inner(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        verdict: ReviewVerdict,
+        job: &ActorContext,
+        concern: Option<SentBackConcern>,
+        (sent_back, precheck_number): (SentBack, Option<usize>),
+    ) -> Result<Phase> {
+        let precheck = precheck_number.is_some();
         let carries = verdict.verdict == ReviewDecision::Concern;
         let ask = |why: String, verdict: ReviewVerdict, session| {
             landing_ask(Some(why), verdict, session, job, carries)
@@ -2083,7 +2328,15 @@ impl Supervisor<'_> {
             attempt,
             number,
             limit,
-        } = decide_revise(&history)
+        } = (if let Some(number) = precheck_number {
+            ReviseDecision::Request {
+                attempt: history.count(EventKind::ReviseRequested) + 1,
+                number,
+                limit: ReviseLimit::new(precheck::RETURN_LIMIT).expect("positive precheck limit"),
+            }
+        } else {
+            decide_revise(&history)
+        })
         else {
             let revises = (history.revise_attempts(), history.revise_limit());
             return self.past_revise_limit(run, session, verdict, job, sent_back, revises);
@@ -2092,6 +2345,7 @@ impl Supervisor<'_> {
             session_alive(self, run.id()).unwrap_or(false)
         }) {
             Ok(live) => live,
+            Err(_) if precheck => return self.begin_review(run, session, false),
             Err(why) => return Ok(ask(why, verdict, session)),
         };
         let task = self.queue.show(run.task_id())?.task;
@@ -2164,6 +2418,9 @@ impl Supervisor<'_> {
         // the attempt's request is not there (`adopted_start`), and
         // never a second time when it is.
         let mut requested = json!({"attempt": attempt, "reasons": verdict.reasons, "sent_at": super::file_time::request_sent_at(sent_at)});
+        if precheck {
+            requested[precheck::REQUEST_FIELD] = json!(true);
+        }
         if let Some(requested) = requested.as_object_mut() {
             let provider = run.actual_provider();
             requested.extend(worker.fields_raised(provider, raise.as_ref()));
@@ -2184,8 +2441,15 @@ impl Supervisor<'_> {
                 self.queue.record_runtime_event(
                     run.id(),
                     EventKind::ReviseUnsent,
-                    json!({"attempt": attempt, "error": why}),
+                    if precheck {
+                        json!({"attempt": attempt, "error": why, precheck::REQUEST_FIELD: true})
+                    } else {
+                        json!({"attempt": attempt, "error": why})
+                    },
                 )?;
+                if precheck {
+                    return self.begin_review(run, session, false);
+                }
                 return Ok(ask(why, verdict, session));
             }
         };
@@ -3496,6 +3760,11 @@ pub(super) fn after_unusable(route: ReviewRoute, failed: Provider) -> AfterUnusa
     }
 }
 
+/// A dedicated single-job stage; its answer never enters normal aggregation.
+fn is_acceptance_precheck(watch: &ReviewWatch) -> bool {
+    watch.jobs.len() == 1 && watch.jobs[0].id.agent() == Some(ACCEPTANCE_PRECHECK)
+}
+
 /// What the job `id` of a review answered in its `reply`, as its provider
 /// read it out: the whole review's verdict, which names no agent's result,
 /// or the one completed result of the agent, read as the eval reads an
@@ -3503,6 +3772,10 @@ pub(super) fn after_unusable(route: ReviewRoute, failed: Provider) -> AfterUnusa
 fn read_answer(id: &ReviewJobId, reply: &str) -> std::result::Result<ReviewAnswer, String> {
     match id {
         ReviewJobId::Whole => ReviewVerdict::parse(reply).map(ReviewAnswer::Whole),
+        ReviewJobId::Agent(agent) if agent == ACCEPTANCE_PRECHECK => {
+            precheck::parse(agent_job::read_reply(reply).ok_or("no coverage JSON")?)
+                .map(ReviewAnswer::Whole)
+        }
         ReviewJobId::Agent(agent) => {
             review_jobs::agent_result(agent, agent_job::read_reply(reply)).map(ReviewAnswer::Agent)
         }

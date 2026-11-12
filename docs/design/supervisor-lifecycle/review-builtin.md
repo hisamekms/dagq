@@ -27,6 +27,8 @@ related:
 未実装の部分の今の挙動は[Review](review.md)と[プログラムのreview](review-programs.md)の今の節のとおりである。
 実装したら、各文書の今の節をこの形に直し、名前・欄・既定値の意味は定義のそばのdoc commentに置き、この文書には流れ・境界だけを残すか消す。
 
+被覆の確認の入口は`src/application/supervise/execution/landing.rs`の`Supervisor::start_acceptance_precheck`。
+
 ## 何が変わるか
 
 - dagqのバイナリがbuilt-inのagentとprogramを持ち、`dagq.toml`の`builtin:<名前>`のtableで有効・無効と範囲を設定する。

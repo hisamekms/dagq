@@ -1,6 +1,6 @@
 //! The agent jobs of a run's review (ADR-t1895-1 decisions 2 to 5 and 7).
-//! Once its program reviews pass, a review runs its whole review as one
-//! job and each agent its paths selected as a job of its own, side by side
+//! After its programs and optional coverage precheck, a review runs its
+//! whole review and each selected agent as separate jobs, side by side
 //! within the supervisor's limit of agent jobs at once, which every run's
 //! review shares. It judges only once every job ended: a job that gave no
 //! answer runs once more on its own, one that gives none again fails the
@@ -10,6 +10,8 @@
 //!
 //! These are the decisions; `application::supervise::landing` starts,
 //! waits for and records the jobs.
+
+pub mod precheck;
 
 use serde_json::Value;
 

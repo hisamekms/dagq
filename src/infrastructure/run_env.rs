@@ -667,6 +667,8 @@ pub struct Config {
     /// leaves each to its defaults. `builtin:acceptance` is checked and
     /// not kept.
     pub review_builtins: Vec<BuiltinSetting>,
+    /// Optional coverage stage; never added to the parallel agent selection.
+    pub acceptance_precheck: review_builtins::AcceptancePrecheck,
     /// `[review.programs.<name>]` in file order (ADR-t1895-2); empty
     /// without any.
     pub review_programs: Vec<ReviewProgram>,
@@ -748,6 +750,7 @@ impl Config {
     /// project's and the built-ins' tables.
     pub fn review_agents(&self) -> ReviewAgents {
         ReviewAgents {
+            precheck: self.acceptance_precheck.clone(),
             agents: self.review_subagents.clone(),
             builtins: self.review_builtins.clone(),
             roles: self.roles.clone(),
@@ -857,6 +860,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // whether it is the table being read (no setting of it is kept).
     let mut acceptance_seen = false;
     let mut in_acceptance = false;
+    let mut precheck_seen = false;
+    let mut in_precheck = false;
     // The `[review.programs.<name>]` being read, finished at the next
     // table or the end of the file.
     let mut program_open: Option<ProgramTable> = None;
@@ -966,6 +971,16 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     "{CONFIG_FILE_NAME}:{number}: [{name}] names no agent; write [{REVIEW_SUBAGENTS_PREFIX}<agent>]"
                 );
                 subagent_keys.clear();
+                in_precheck = agent == review_builtins::ACCEPTANCE_PRECHECK;
+                if in_precheck {
+                    ensure!(
+                        !precheck_seen,
+                        "{CONFIG_FILE_NAME}:{number}: [{name}] is defined twice"
+                    );
+                    precheck_seen = true;
+                    table = Some(REVIEW_BUILTIN_TABLE);
+                    continue;
+                }
                 if agent == review_builtins::ACCEPTANCE {
                     ensure!(
                         !acceptance_seen,
@@ -1353,6 +1368,31 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 }
             }
             Some(REVIEW_BUILTIN_TABLE) => {
+                if in_precheck {
+                    ensure!(
+                        !subagent_keys.iter().any(|existing| existing == key),
+                        "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                    );
+                    subagent_keys.push(key.to_owned());
+                    let setting = &mut config.acceptance_precheck;
+                    match key {
+                        REVIEW_SUBAGENT_ENABLED => setting.enabled = parse_bool(rest.trim())?,
+                        REVIEW_SUBAGENT_PROVIDER => {
+                            setting.provider = Some(parse_string(rest.trim())?.parse()?)
+                        }
+                        REVIEW_SUBAGENT_MODEL => {
+                            setting.model = Some(launch_value(key, rest, number)?)
+                        }
+                        REVIEW_SUBAGENT_EFFORT => {
+                            setting.effort = Some(launch_value(key, rest, number)?)
+                        }
+                        _ => bail!(
+                            "{CONFIG_FILE_NAME}:{number}: unknown key {key} in acceptance-precheck; only enabled/provider/model/effort are allowed"
+                        ),
+                    }
+                    continue;
+                }
+
                 let section = if in_acceptance {
                     review_builtins::ACCEPTANCE.to_owned()
                 } else {
@@ -5094,6 +5134,32 @@ mod tests {
             let error = format!("{:#}", parse_config(text).unwrap_err());
             assert!(error.contains(expected), "{text:?}: {error}");
         }
+    }
+
+    #[test]
+    fn acceptance_precheck_is_optional_dedicated_and_never_selected_in_parallel() {
+        use crate::domain::Provider;
+        let off = parse_config("").unwrap().review_agents();
+        assert!(!off.precheck.enabled);
+        let parsed = parse_config("[review.subagents.\"builtin:acceptance-precheck\"]\nenabled = true\nprovider = \"codex\"\nmodel = \"gpt-5.5\"\neffort = \"low\"\n").unwrap();
+        let agents = parsed.review_agents();
+        assert!(agents.precheck.enabled);
+        assert_eq!(agents.precheck.launch().unwrap().provider, Provider::Codex);
+        assert!(
+            agents
+                .selectable()
+                .iter()
+                .all(|a| a.name != review_builtins::ACCEPTANCE_PRECHECK)
+        );
+        for key in ["paths = [\"src/**\"]", "rules = \"x\""] {
+            assert!(
+                parse_config(&format!(
+                    "[review.subagents.\"builtin:acceptance-precheck\"]\n{key}\n"
+                ))
+                .is_err()
+            );
+        }
+        assert!(parse_config("[review.subagents.\"builtin:acceptance-precheck\"]\nenabled = true\nenabled = false\n").is_err());
     }
 
     /// `[review.subagents."builtin:<name>"]` sets a built-in agent's

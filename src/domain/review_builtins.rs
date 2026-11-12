@@ -30,6 +30,40 @@ pub const PREFIX: &str = "builtin:";
 /// [`acceptance_rules_path`].
 pub const ACCEPTANCE: &str = "builtin:acceptance";
 
+/// Optional coverage-only job in its own stage, never a selectable subagent.
+/// Its landing-branch table accepts enabled/provider/model/effort only; no
+/// project rules or path filter are read. Off by default for a bounded trial.
+pub const ACCEPTANCE_PRECHECK: &str = "builtin:acceptance-precheck";
+
+/// Dedicated launch settings, independent of roles and provider-pair trials.
+/// Defaults start Claude Haiku at low effort; a different provider with no
+/// model uses that provider's default, always at low effort unless specified.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcceptancePrecheck {
+    pub enabled: bool,
+    pub provider: Option<Provider>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl AcceptancePrecheck {
+    /// The same launch for every A/B group. The pair is deliberately absent
+    /// from this decision's inputs, and no role settings are inherited.
+    pub fn launch(&self) -> Result<super::actor_model::ActorLaunch, String> {
+        use super::actor_model::{ModelRole, RoleModels};
+        let provider = self.provider.unwrap_or(Provider::Claude);
+        let written = AgentModel {
+            provider: Some(provider),
+            model: self
+                .model
+                .clone()
+                .or_else(|| (provider == Provider::Claude).then(|| "claude-haiku-5-5".to_owned())),
+            effort: Some(self.effort.clone().unwrap_or_else(|| "low".to_owned())),
+        };
+        RoleModels::default().checked_agent_launch(ModelRole::Review, &written)
+    }
+}
+
 /// Where a project's rules for the built-ins are, relative to the
 /// repository root.
 pub const RULES_DIR: &str = ".dagq/review";
