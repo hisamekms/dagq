@@ -317,7 +317,7 @@ pub(crate) fn stats_questions_past_their_end() -> Vec<StatsQuery> {
 }
 
 /// The window `stats` asks for `query`, read whole when `whole`.
-fn stats_window(query: &StatsQuery, whole: bool) -> WindowQuery {
+pub(super) fn stats_window(query: &StatsQuery, whole: bool) -> WindowQuery {
     let mut window = crate::application::stats::window_query(query, NOW);
     if whole {
         window.read_from_ms = None;
@@ -334,6 +334,7 @@ pub(crate) struct Returned {
     pub(crate) earlier: usize,
     pub(crate) by_range: usize,
     pub(crate) whole: usize,
+    pub(crate) small: usize,
 }
 
 /// A snapshot that counts what it returns ([`Returned`]), reading through
@@ -344,6 +345,7 @@ struct Counted<'a> {
     earlier: Cell<usize>,
     by_range: Cell<usize>,
     whole: Cell<usize>,
+    small: Cell<usize>,
 }
 
 impl<'a> Counted<'a> {
@@ -354,6 +356,7 @@ impl<'a> Counted<'a> {
             earlier: Cell::new(0),
             by_range: Cell::new(0),
             whole: Cell::new(0),
+            small: Cell::new(0),
         }
     }
 
@@ -363,6 +366,7 @@ impl<'a> Counted<'a> {
             earlier: self.earlier.get(),
             by_range: self.by_range.get(),
             whole: self.whole.get(),
+            small: self.small.get(),
         }
     }
 
@@ -395,7 +399,11 @@ impl LedgerWindowRead for Counted<'_> {
         self.snapshot.visible_events(events)
     }
     fn mark_events(&self, start_ms: i64, end_ms: i64) -> Result<WindowRead<Vec<RunEvent>>> {
-        self.snapshot.mark_events(start_ms, end_ms)
+        let read = self.snapshot.mark_events(start_ms, end_ms)?;
+        if let WindowRead::Complete(events) = &read {
+            self.small.set(self.small.get() + events.len());
+        }
+        Ok(read)
     }
     fn cursor_record_time(
         &self,
@@ -404,13 +412,21 @@ impl LedgerWindowRead for Counted<'_> {
         self.snapshot.cursor_record_time(cursor)
     }
     fn forecast_events(&self, start_ms: i64, end_ms: i64) -> Result<WindowRead<Vec<RunEvent>>> {
-        self.snapshot.forecast_events(start_ms, end_ms)
+        let read = self.snapshot.forecast_events(start_ms, end_ms)?;
+        if let WindowRead::Complete(events) = &read {
+            self.small.set(self.small.get() + events.len());
+        }
+        Ok(read)
     }
     fn run_finishes(&self, range: Option<(i64, i64)>) -> Result<WindowRead<Vec<RunFinish>>> {
         self.snapshot.run_finishes(range)
     }
     fn comparison_events(&self) -> Result<WindowRead<Vec<RunEvent>>> {
-        self.snapshot.comparison_events()
+        let read = self.snapshot.comparison_events()?;
+        if let WindowRead::Complete(events) = &read {
+            self.small.set(self.small.get() + events.len());
+        }
+        Ok(read)
     }
     fn rows_after(
         &self,
@@ -464,7 +480,10 @@ impl LedgerWindowRead for Counted<'_> {
         self.snapshot.omitted_point_before_ms(kind, ms)
     }
     fn event(&self, id: EventId) -> Result<Option<RunEvent>> {
-        self.snapshot.event(id)
+        let event = self.snapshot.event(id)?;
+        self.small
+            .set(self.small.get() + usize::from(event.is_some()));
+        Ok(event)
     }
     fn events_of_kind(
         &self,
@@ -473,10 +492,58 @@ impl LedgerWindowRead for Counted<'_> {
         upto: EventId,
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
-        self.snapshot.events_of_kind(kind, after, upto, limit)
+        let events = self.snapshot.events_of_kind(kind, after, upto, limit)?;
+        self.small.set(self.small.get() + events.len());
+        Ok(events)
     }
     fn reads_queue_by_kind(&self) -> bool {
         self.snapshot.reads_queue_by_kind()
+    }
+    fn reads_named_queue(&self) -> Result<bool> {
+        self.snapshot.reads_named_queue()
+    }
+    fn named_queue_records(
+        &self,
+        from: &RowsFrom,
+        names: &crate::domain::ledger::window::queue_lives::Names,
+        end_ms: i64,
+    ) -> Result<Option<Vec<RunEvent>>> {
+        let records = self.snapshot.named_queue_records(from, names, end_ms)?;
+        self.small
+            .set(self.small.get() + records.as_ref().map_or(0, Vec::len));
+        Ok(records)
+    }
+    fn queue_views_usable(&self) -> Result<bool> {
+        self.snapshot.queue_views_usable()
+    }
+    fn queue_rows_whole_by_views(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        let rows = self.snapshot.queue_rows_whole_by_views(after, limit)?;
+        self.count(&rows, false);
+        Ok(rows)
+    }
+    fn queue_main_before(
+        &self,
+        before: EventId,
+        from_ms: i64,
+    ) -> Result<crate::domain::ledger::window::queue_named::MainBefore> {
+        let before = self.snapshot.queue_main_before(before, from_ms)?;
+        self.small.set(self.small.get() + before.summaries_read);
+        self.count(&before.rows, true);
+        Ok(before)
+    }
+    fn queue_sought(
+        &self,
+        from: &RowsFrom,
+        wants: &crate::domain::ledger::window::queue_named::QueueWants,
+    ) -> Result<crate::domain::ledger::window::queue_named::QueueSought> {
+        let sought = self.snapshot.queue_sought(from, wants)?;
+        self.small.set(self.small.get() + sought.records.len());
+        self.count(&sought.rows, true);
+        Ok(sought)
     }
     fn queue_rows_whole(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
         let rows = self.snapshot.queue_rows_whole(after, limit)?;
@@ -488,7 +555,9 @@ impl LedgerWindowRead for Counted<'_> {
         // Each row of these is of `kind`, one read by its range.
         debug_assert!(
             rows.iter()
-                .all(|row| read_of(kind_of(row)) == QueueRead::Range)
+                .all(|row| read_of(kind_of(row)) == QueueRead::Range
+                    || crate::domain::ledger::window::queue_lives::KINDS.contains(&kind_of(row))
+                    || crate::domain::ledger::window::queue_from::BY_VIEWS.contains(&kind_of(row)))
         );
         self.count(&rows, true);
         Ok(rows)
@@ -520,7 +589,7 @@ pub(crate) fn counted_window(
 
 /// The answers a window gives `stats` of `query`: its JSON and the tokens
 /// of the Executions ([`LedgerWindow::execution_tokens`]).
-fn answers(window: &LedgerWindow, query: &StatsQuery) -> Result<(Value, Value)> {
+pub(super) fn answers(window: &LedgerWindow, query: &StatsQuery) -> Result<(Value, Value)> {
     let stats = serde_json::to_value(stats_of_window(window, NOW, query, &SOURCES)?)?;
     let tokens = serde_json::to_value(window.execution_tokens())?;
     Ok((stats, tokens))

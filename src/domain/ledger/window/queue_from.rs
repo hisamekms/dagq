@@ -36,14 +36,15 @@
 //! (main's records, the reverts and CI's failures, the goals' attributes,
 //! the baselines' marks, the findings) are read by their range too, what
 //! they hold of before S sought by what the range names
-//! ([`super::queue_named`]). The seeks that take the rest of (ii) from
-//! whole to their range are another read's (task 4807): each is a kind
-//! moved from [`QueueRead::Whole`] here with its own read.
+//! ([`super::queue_named`]). Waits, lives, marks, snapshots, samples,
+//! failures, repairs, stall config and run-less asks also use range reads
+//! with [`super::queue_lives`] when their views and visibility are usable;
+//! otherwise they keep full pages.
 
 use super::super::{LedgerKind, LedgerRow};
 use crate::domain::EventId;
 
-/// How a read from a time reads the queue rows of one subject kind.
+/// How a read from a time reads a subject kind before named views apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueRead {
     /// Every row of the kind, by key.

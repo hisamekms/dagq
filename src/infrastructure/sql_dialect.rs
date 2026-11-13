@@ -146,6 +146,42 @@ impl SqlDialect {
         }
     }
 
+    /// One row when an index is present in the current schema.
+    pub(crate) fn index_exists_sql(self) -> &'static str {
+        match self {
+            Self::Sqlite => "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1",
+            Self::Postgres => {
+                "SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname=?1"
+            }
+        }
+    }
+
+    /// The scalar or JSON spelling of a bound AskRef value, matching the
+    /// expression indexes on payload keys. SQLite binds the scalar itself;
+    /// Postgres binds its JSON text, so objects use jsonb's same spelling.
+    pub(crate) fn ask_key_parameter(self) -> &'static str {
+        match self {
+            Self::Sqlite => "?1",
+            Self::Postgres => "(?1::jsonb #>> '{}')",
+        }
+    }
+
+    /// Explicit null is distinct from an absent AskRef key.
+    pub(crate) fn ask_explicit_null(self) -> &'static str {
+        match self {
+            Self::Sqlite => "json_type(payload,'$.ask_id') = 'null'",
+            Self::Postgres => "payload::jsonb -> 'ask_id' = 'null'::jsonb",
+        }
+    }
+
+    /// A null AskRef parameter, typed on each adapter.
+    pub(crate) fn ask_null_parameter(self) -> &'static str {
+        match self {
+            Self::Sqlite => "CAST(?1 AS TEXT) IS NULL",
+            Self::Postgres => "?1::jsonb = 'null'::jsonb",
+        }
+    }
+
     /// A top-level JSON key used by the ledger's earlier seeks and their
     /// expression indexes. Bind numeric IDs as integers in SQLite and text
     /// in Postgres; no cast may wrap this expression in the read.

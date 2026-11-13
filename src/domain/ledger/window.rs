@@ -32,8 +32,7 @@
 //!
 //! [`WindowQuery::read_from_ms`] leaves out of the store's read the rows the
 //! periods of `kpi` from that time need nothing of ([`RowsFrom`]); without it
-//! every row is read. The queue rows of most kinds are read whole: most of
-//! what the folds that carry state read is theirs; those of the kinds
+//! every row is read. The queue rows are read kind by kind; those of the kinds
 //! [`queue_from`] reads by their range are the ones that reach the time,
 //! the last before it and those whose inputs pass `queue_before` (its module
 //! doc says why that answers as every row). With the store's views of the
@@ -43,7 +42,10 @@
 //! summary up to `queue_before`, which main's and CI's folds start from in
 //! place of the events up to it ([`WindowRows::take_main_before`]), and the
 //! commits, turns to red, goals' records since their last replacement,
-//! latest marks and linked findings ([`WindowRows::take_queue_sought`]). A run, session or task row is
+//! latest marks and linked findings ([`WindowRows::take_queue_sought`]).
+//! With their own views usable, waits, lives, marks, snapshots, samples and
+//! run-less asks use range and named reads too ([`queue_lives`]). A run,
+//! session or task row is
 //! left out when it ended before the time and each of its records stands
 //! before it, in time and in id ([`RowsFrom::leaves_out`]); a row with no
 //! time, a legacy one and a node row that reaches the time are read. A time
@@ -1751,3 +1753,5 @@ pub mod queue_named;
 
 #[cfg(test)]
 mod tests;
+
+pub mod queue_lives;

@@ -10,8 +10,10 @@ mod goal_owners;
 pub(crate) mod ledger_earlier;
 mod ledger_first_executions;
 mod ledger_open;
+pub(crate) mod ledger_queue_lives;
 pub(crate) mod ledger_queue_named;
 mod ledger_queue_views;
+pub use ledger_queue_lives::*;
 pub(crate) mod ledger_range;
 mod related;
 mod runner_leases;
@@ -237,6 +239,18 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         (
             "ledger queue named with only CI after a future main event",
             ledger_queue_named_with_only_ci_after_a_future_main_event::<S, F>,
+        ),
+        (
+            "ledger named queue",
+            ledger_queue_lives_answers_as_every_row::<S, F>,
+        ),
+        (
+            "ledger named queue past old writer",
+            ledger_queue_lives_past_an_old_writer::<S, F>,
+        ),
+        (
+            "ledger named queue old snapshot",
+            ledger_queue_lives_keeps_an_old_snapshot::<S, F>,
         ),
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),

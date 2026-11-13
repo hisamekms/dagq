@@ -1064,3 +1064,79 @@ fn queue_count_all(rows: &[LedgerRow]) -> usize {
         .filter(|row| row.kind == LedgerKind::Queue)
         .count()
 }
+
+/// Promise 6 plus (A)'s run-less ask seeks do not cover application in the
+/// range of an answer recorded before S. A later settled ask displaces both
+/// last-before-S rows, and an answered ask is absent from the open-ask view.
+#[test]
+fn a_run_less_ask_answered_before_s_and_applied_in_range_is_a_counterexample() {
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "ask_opened",
+        json!({"ask_id": 81, "kind": "planner_question"}),
+        (READ_AT_DAY - 25) * DAY,
+    )
+    .add(
+        None,
+        None,
+        "ask_answered",
+        json!({"ask_id": 81}),
+        (READ_AT_DAY - 24) * DAY,
+    )
+    .add(
+        None,
+        None,
+        "ask_opened",
+        json!({"ask_id": 82, "kind": "planner_question"}),
+        (READ_AT_DAY - 23) * DAY,
+    )
+    .add(
+        None,
+        None,
+        "ask_answered",
+        json!({"ask_id": 82}),
+        (READ_AT_DAY - 22) * DAY,
+    )
+    .add(
+        None,
+        None,
+        "auto_repaired",
+        json!({"ask_id": 81, "repair": "stale_lock", "layer": "runtime"}),
+        (READ_AT_DAY - 1) * DAY,
+    );
+    let rows = rows_of(&log);
+    let from_ms = (T0 + (READ_AT_DAY - 10) * DAY) * 1000;
+    let kinds = ["ask_opened", "ask_answered", "auto_repaired"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let narrowed = queue_ii(
+        &rows,
+        from_ms,
+        &kinds,
+        QueueShape {
+            asks: true,
+            ..QueueShape::default()
+        },
+    );
+    let records = |rows: &[LedgerRow]| {
+        let mut events: Vec<RunEvent> = rows.iter().flat_map(|row| row.records.clone()).collect();
+        events.sort_by_key(|e| e.id);
+        events.dedup_by_key(|e| e.id);
+        events
+    };
+    let after = log.events[3].id;
+    let whole =
+        crate::domain::stats::asks::human_waits(&records(&rows), after, log.last(), |_| true);
+    let got =
+        crate::domain::stats::asks::human_waits(&records(&narrowed), after, log.last(), |_| true);
+    assert_eq!(whole, (vec![], vec![24 * DAY]));
+    assert_eq!(got, (vec![], vec![]));
+    let (misses, _) = queue_misses(&rows, &narrowed);
+    assert!(
+        misses.iter().any(|path| path.contains("ask_apply_wait")),
+        "{misses:?}"
+    );
+}

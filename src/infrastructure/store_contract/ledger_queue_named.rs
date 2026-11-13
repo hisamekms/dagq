@@ -710,6 +710,19 @@ impl LedgerWindowRead for Counted<'_> {
     fn reads_queue_by_kind(&self) -> bool {
         self.snapshot.reads_queue_by_kind()
     }
+    fn reads_named_queue(&self) -> Result<bool> {
+        self.snapshot.reads_named_queue()
+    }
+    fn named_queue_records(
+        &self,
+        from: &RowsFrom,
+        names: &crate::domain::ledger::window::queue_lives::Names,
+        end_ms: i64,
+    ) -> Result<Option<Vec<RunEvent>>> {
+        let records = self.snapshot.named_queue_records(from, names, end_ms)?;
+        self.add(|r| r.small += records.as_ref().map_or(0, Vec::len));
+        Ok(records)
+    }
     fn queue_rows_whole(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
         let rows = self.snapshot.queue_rows_whole(after, limit)?;
         self.rows(&rows, false);

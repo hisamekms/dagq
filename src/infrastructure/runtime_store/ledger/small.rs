@@ -416,9 +416,15 @@ impl<T: SqlRead> Reader<'_, T> {
             sql_params![low, high],
             None,
         )?;
-        let at = self.snapshot_min(&snapshots, "at_secs", false)?;
-        let seen = self.snapshot_min(&snapshots, "triggers_through", true)?;
-        let snapshots = self.visible(&snapshots)?;
+        events.extend(self.forecast_of(&snapshots, end)?);
+        Ok(dedup(events))
+    }
+    /// The second stage, from snapshots already sought by their targets.
+    fn forecast_of(&self, snapshots: &[RunEvent], end: i64) -> Read<Vec<RunEvent>> {
+        let mut events = Vec::new();
+        let at = self.snapshot_min(snapshots, "at_secs", false)?;
+        let seen = self.snapshot_min(snapshots, "triggers_through", true)?;
+        let snapshots = self.visible(snapshots)?;
         events.extend(snapshots);
         let Some(at) = at.and_then(|at| at.checked_mul(1000)) else {
             return Ok(dedup(events));
@@ -552,6 +558,15 @@ pub(super) fn forecast_events(
     end: i64,
 ) -> Result<WindowRead<Vec<RunEvent>>> {
     read(tx, |r| r.forecast(start, end))
+}
+/// Marks after the supplied snapshots, without scanning unrelated snapshots
+/// between a target's first and last events.
+pub(super) fn forecast_of(
+    tx: &impl SqlRead,
+    snapshots: &[RunEvent],
+    end: i64,
+) -> Result<WindowRead<Vec<RunEvent>>> {
+    read(tx, |r| r.forecast_of(snapshots, end))
 }
 pub(super) fn run_finishes(
     tx: &impl SqlRead,

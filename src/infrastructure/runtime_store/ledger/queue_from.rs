@@ -11,36 +11,60 @@
 use super::*;
 use crate::domain::ledger::window::queue_from::by_range;
 
-/// The kinds read by their range, with the views trusted (`views`) or not,
-/// as a SQL list of literals.
-fn by_range_list(views: bool) -> String {
-    by_range(views)
-        .iter()
-        .map(|kind| format!("'{kind}'"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// A page of the queue rows (`?1` the kind) of the subject kinds read whole,
-/// past the key `?2` with `after`, at most the last parameter, by key.
+/// The whole-read kinds are disjoint ranges of the subject index. A NOT
+/// IN filter on the primary-key pages would still visit every settled row
+/// of the excluded kinds, even though it returned none of them.
 #[cfg(test)]
 pub(super) fn whole_sql(after: bool) -> String {
     whole_sql_with(after, false)
 }
 
-/// [`whole_sql`] with the views trusted (`views`, the kinds of
-/// [`crate::domain::ledger::window::queue_from::BY_VIEWS`] read by their
-/// range too) or not.
+#[cfg(test)]
 pub(super) fn whole_sql_with(after: bool, views: bool) -> String {
+    whole_sql_for(SqlDialect::Sqlite, after, views, false)
+}
+
+pub(super) fn whole_sql_for(dialect: SqlDialect, after: bool, views: bool, named: bool) -> String {
+    let mut excluded: Vec<&str> = by_range(views)
+        .iter()
+        .chain(
+            if named {
+                crate::domain::ledger::window::queue_lives::KINDS
+            } else {
+                &[]
+            }
+            .iter(),
+        )
+        .copied()
+        .collect();
+    excluded.sort_unstable();
+    excluded.dedup();
     let (key, limit) = if after {
-        ("AND key > ?2 ", "?3")
+        ("AND key > ?2", "?3")
     } else {
         ("", "?2")
     };
+    let table = format!(
+        "ledger_rows{}",
+        dialect.indexed_by("ledger_rows_by_subject_end")
+    );
+    let select =
+        |condition: &str| format!("SELECT * FROM {table} WHERE kind=?1 AND {condition} {key}");
+    let mut parts = vec![select("subject_kind IS NULL")];
+    let mut previous = None;
+    for kind in excluded {
+        let lower = previous.map_or(String::new(), |previous| {
+            format!("subject_kind > '{previous}' AND ")
+        });
+        parts.push(select(&format!("{lower}subject_kind < '{kind}'")));
+        previous = Some(kind);
+    }
+    if let Some(previous) = previous {
+        parts.push(select(&format!("subject_kind > '{previous}'")));
+    }
     format!(
-        "SELECT * FROM ledger_rows WHERE kind=?1 {key}AND COALESCE(subject_kind, '') NOT IN ({kinds})
-          ORDER BY key LIMIT {limit}",
-        kinds = by_range_list(views),
+        "SELECT * FROM ({}) r ORDER BY key LIMIT {limit}",
+        parts.join(" UNION ALL ")
     )
 }
 
@@ -87,9 +111,7 @@ pub(super) fn past_sql(dialect: SqlDialect) -> String {
     )
 }
 
-/// [`crate::application::LedgerWindowRead::queue_rows_whole`] of `tx`, or
-/// with the views trusted (`views`)
-/// [`crate::application::LedgerWindowRead::queue_rows_whole_by_views`].
+/// [`crate::application::LedgerWindowRead::queue_rows_whole`] of `tx`.
 pub(super) fn whole_in(
     tx: &impl SqlRead,
     after: Option<&str>,
@@ -98,7 +120,12 @@ pub(super) fn whole_in(
 ) -> Result<Vec<LedgerRow>> {
     let queue = LedgerKind::Queue.as_str();
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let statement = whole_sql_with(after.is_some(), views);
+    let statement = whole_sql_for(
+        tx.dialect(),
+        after.is_some(),
+        views,
+        super::queue_lives::ready(tx)?,
+    );
     let rows = match after {
         Some(after) => {
             SqlRead::query_map(tx, &statement, sql_params![queue, after, limit], ledger_row)?

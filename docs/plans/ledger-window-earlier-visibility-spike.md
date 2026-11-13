@@ -590,7 +590,7 @@ sh scripts/cargo-brief.sh cargo clippy --locked --all-targets -- -D warnings
 | (A) (ii-a) forecast の snapshot | holds（snapshot が確定した履歴の後のとき） | 範囲の task を名指す snapshot を builder の snapshot の target の表（`ledger_snapshot_targets(task_id, event_id)`）で引く | 同上 |
 | (A) (ii-f) `candidates_sampled` | holds | S 前の最後の標本（`events_by_kind` を id の降順）と範囲の標本、その supervisor の生存の行 | 2 / 2 |
 | (A) (ii-e) `update_failed`・`backend_call_failed`・`auto_repaired`・`stall_config_loaded` | holds | 4678 の約束 6 のまま（範囲の行。`stall_config_loaded` は E 以前の最後の 1 件で、kind ごとの S 前の最後の行と範囲の行が同じものを返す） | (ii-e) の kind の和 10 / 10 |
-| (A) (ii-e) run の無い ask と答え | holds | 範囲の答えが名指す ask の `ask_opened`（`json_extract(payload, '$.ask_id')` の部分の式の索引）と、開いたまま残した行の表の答えの無い ask | 同上 |
+| (A) (ii-e) run の無い ask と答え | holds | 範囲の答えと答えを適用する event が名指す ask の opening（`asks_by_id`）と answer（`ledger_answered_asks` の key から行）、開いたまま残した行の表の答えの無い ask。ask 1735 の回答による更新 | 同上（適用する event の反例は task 4807 で比較） |
 | (B) baseline の印 | holds | 基準の kind ごとに S 前の最新の印（`events_by_kind` を id の降順に歩き、印（task・goal の無い `attributes_baseline`、`finding` の値の無い `finding_baseline`）で時刻が S より前の最初の 1 件）。歩く数が S で閉じていない組の基準の record に比例しないよう、印だけの部分の索引（`WHERE kind = 'attributes_baseline' AND task_id IS NULL AND goal_id IS NULL`、`WHERE kind = 'finding_baseline' AND json_extract(payload, '$.finding') IS NULL`）を足す。名指す goal の基準は (E) の seek が読み、その組の印（基準の id の後の最初の印、同じ索引で `id > ? ORDER BY id LIMIT 1`）も読む。範囲の印は約束 6 の範囲の行。finding の基準の値の record は finding の行に入り、finding の行の読み（約束 6 と (F)）が持つ。task の基準は task 行の record で、範囲が名指す task の行は (i) の読みが丸ごと読み、その基準は読んだ印のうち後の最初のもので組を判じても全件と同じになる（`baseline::taken` は record の後の最初の印で決め、S 前の組の印はどれも窓の中なので、S 前の最新の印で閉じても取ることは変わらない） | 基準の kind の行（印と goal の基準）4 / 4。finding の行は数えていない（全部の kind を同時に狭めた test が数える） |
 | (C) main の記録 | holds（(D) の revert の target の seek と組で） | builder が S 以前の main の要約を保存する行（path・記録の届き・Git の読み・branch ごとの CI の最初と最後の check）を読み、範囲の record が名指す sha の commit を builder の commit の表（`ledger_main_commits(sha, reverts, event_id)`、`sha` と `reverts` の索引）で引く。revert の数は、範囲の run の着地の commit を target にする S 前の revert を (D) の seek で引かないと全件と違うので、(C) の test は (D) と同じ形（`landing`）で流した。試作は要約を S ちょうどで作った。実装は builder の pass ごとの要約のうち S 以前の最新と、その位置から S までの main の event を読む（pass の間隔に比例し、確定した履歴には比例しない） | 保存する行 5 / 5、sha の event 3 / 3、範囲の main の行 3 / 3。要約の path の量は S に main が持つ path の数（repository の大きさ）に比例する |
 | (D) `post_landing_book` | holds | (C) の形に、範囲の run の着地の commit を target にする revert（commit の表の `reverts` の索引）と、その commit を sha に持つ `ci_turned_red`（`json_extract(payload, '$.sha')` の部分の式の索引、`WHERE kind = 'ci_turned_red'`）を足す。CI の要約は branch ごと | [7, 5, 3] / [7, 5, 3] |
@@ -616,15 +616,23 @@ sh scripts/cargo-brief.sh cargo clippy --locked --all-targets -- -D warnings
   - finding の行（`finding`）: 範囲で読み、名指す proposal を結ぶもの。
 - main と CI の時計が進んで戻った場合も確定履歴に沿って要約を後退させない。main は書き手が時刻の境界で作って進める状態から S 以後の各窓の E に合うものを同じ要約行で選び、CI はその branch の S 時点の最初・最後の記録を索引で補う（task 4808、`ledger_queue_named_past_a_clock_set_back` と `an_early_clock_set_back_keeps_the_reads_bounded_with_3000_settled_units`。時計の反例を全確定単位より前に置き、30・300 と 30・3000 単位の答えと実際の返却量を比べた。main の各 kind の状態は `a_main_clock_regression_keeps_the_eligible_state_of_every_main_kind` でも比べた）。
 - 未来時刻の main の観測の後に S 前の CI の記録だけが続く場合も、最初の CI で時刻別の状態を作って進め、要約の後退と全 CI の再読を避ける（task 4808、共通の `ledger_queue_named_with_only_ci_after_a_future_main_event` は 30・300 件、SQLite の `only_ci_after_a_future_main_event_keeps_the_reads_bounded_with_3000_checks` は 30・3000 件で答えと返却量を比べる。間に別の main event を挟まない）。
+- task 4807: 待ち（`slots_full`・`claim_hold`・`landing_hold`）は約束 6 の範囲と S 前の最後の行で読む。根拠は `the_named_queue_answers_and_counts_with_3000_settled_units`。
+- task 4807: supervisor は最後の start と範囲の record・最後の sample が名指す token の kind ごとの S 前の最後の event を seek する。根拠は `the_named_queue_answers_and_counts_with_3000_settled_units` と `the_named_queue_seeks_use_their_indexes_and_the_whole_read_skips_excluded_kinds`。
+- task 4807: 読んだ mark の撤回を `events_by_retracted_mark` で補う。根拠は `the_named_queue_answers_and_counts_with_3000_settled_units`。
+- task 4807: task が名指す snapshot を表から seek し、その snapshot に必要な mark を 2 段目で補う。古い snapshot の mark の増え方の境は変えない。根拠は `the_named_queue_answers_and_counts_with_3000_settled_units` と `the_named_queue_keeps_the_marks_of_an_old_snapshot`。
+- task 4807: `candidates_sampled` と (ii-e) の失敗・修復・stall config は範囲と S 前の最後の行で読む。根拠は `the_named_queue_answers_and_counts_with_3000_settled_units`。
+- task 4807・ask 1735: run の無い ask は範囲の答えと答えを適用する event が名指す ask の opening と answer を seek し、未回答の ask を表から補う形に更新する。根拠は `names_include_answer_applications_and_the_last_sample_s_supervisor` と `the_named_queue_answers_and_counts_with_3000_settled_units`。表と印の有効性を判じられないときは全ページに戻る（`the_named_queue_shared_contract_answers_and_falls_back` と `the_named_queue_falls_back_past_an_old_writer_then_seeks_after_refilling`）。
 - 約束 1〜5・7 は変えない。
 
 ### 未解決
 
 この追試の 6 部分に unresolved は無い。限りは「比べなかった場合」と「判定」の注（(A) の 1 つの生存の履歴と 4756 の 3 本、(E) の基準で止まる場合、(C) の revert の理由、`diagram_draft` が `not_drawn` のまま）。
 
+実装の追試（task 4807）で、(A) の run の無い ask に反例が出た（`a_run_less_ask_answered_before_s_and_applied_in_range_is_a_counterexample`）。S 前に開いて答えた ask の答えを範囲内で適用し、別の ask の opening と answer が S 前の最後の行になっている場合、元の形は先の ask の opening と answer を読まず、全件の `ask_apply_wait` が 1 件あるのに 0 件になる。ask 1735 の回答で、適用する event が名指す ask も集めて opening と answer を補う形に広げ、operation 58 に `replan propose` した。task 4807 の共通の store の組はこの反例も全件と比べる。元の形の限界を示す試作の test は残す。
+
 ### 後続の draft への推奨
 
-goal 273（task 4660・4646）・Spike 4663・task 4805 と重ねない: `live_alert_stream` の records と (C, S] の写さない kind は goal 273 に、queue 行を要る列に絞ることは Spike 4663 に、待ちの fold の O(waits × open tasks) は task 4805 に任せる。この追試は「どの queue 行を読むか」だけを決めた。どの部分も holds なので、「範囲が決まらない」に足す kpi・report の問いは無い（forecast は 4756 のとおり snapshot が確定した履歴より古いときだけ全件に戻す）。
+goal 273（task 4660・4646）・Spike 4663・task 4805 と重ねない: `live_alert_stream` の records と (C, S] の写さない kind は goal 273 に、queue 行を要る列に絞ることは Spike 4663 に、待ちの fold の O(waits × open tasks) は task 4805 に任せる。この追試は「どの queue 行を読むか」だけを決めた。どの部分も holds なので、「範囲が決まらない」に足す kpi・report の問いは無い（forecast の snapshot が確定した履歴より古いときも全件に戻さず、snapshot から S までの mark を 2 段目で読む。増え方の境は 4670 の (vii) と planner の決定 A のとおり）。
 
 - 4806（表と索引）: snapshot の target の表、main の commit の表（`sha`・`reverts`・event の id）、main の要約の行（pass ごと、branch ごとの CI の最初と最後の check を含む）、開いたまま残した行の表に queue の答えの無い ask を足す。`run_events` に `supervisor`・`mark`（`mark_retracted`）・`ask_id`（`ask_opened`）・`sha`（`ci_turned_red`）・`proposal_id`（`finding_status_changed`）の部分の式の索引と、基準の印だけの部分の索引を足す。約 300〜400 行。
 - 4807（(ii-a)(ii-e)(ii-f) の読み）: 上の表の (A) の形。受け入れの比較は、この追試の `shared_lives` の 30 と 3000 単位の履歴と 4756 の単位ごとの生存の履歴。約 200 行。

@@ -1760,6 +1760,17 @@ impl<T: SqlRead> crate::application::LedgerWindowRead for LedgerSnapshot<'_, T> 
     fn reads_queue_by_kind(&self) -> bool {
         true
     }
+    fn reads_named_queue(&self) -> Result<bool> {
+        queue_lives::ready(self.tx)
+    }
+    fn named_queue_records(
+        &self,
+        from: &RowsFrom,
+        names: &crate::domain::ledger::window::queue_lives::Names,
+        end_ms: i64,
+    ) -> Result<Option<Vec<RunEvent>>> {
+        queue_lives::records(self.tx, from, names, end_ms)
+    }
     fn queue_rows_whole(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
         queue_from::whole_in(self.tx, after, limit, false)
     }
@@ -5371,3 +5382,5 @@ pub(crate) use queue_views::views_in;
 
 #[cfg(test)]
 mod queue_views_tests;
+
+mod queue_lives;

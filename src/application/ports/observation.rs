@@ -11,6 +11,7 @@ use crate::domain::environment::{
 };
 use crate::domain::host_metrics::{HostSample, ImportMark, NodeSample, SampleSource};
 use crate::domain::ledger::session::written::omitted::{Coverage, Point};
+use crate::domain::ledger::window::RowsFrom;
 use crate::domain::ledger::window::omitted::OmittedEdges;
 use crate::domain::ledger::{
     LedgerKind, LedgerRow,
@@ -934,10 +935,10 @@ pub trait LedgerStore {
     ///   ([`LedgerWindowRead::queue_main_before`],
     ///   [`LedgerWindowRead::queue_sought`]) after the rows that name it are
     ///   read and before the earlier records are sought, and again for what
-    ///   the rows read after those name; the others (the rest of (ii) among
-    ///   them) whole, as before, until a seek of their own (task 4807) moves
-    ///   them. `push::check_breaches`, `kpi` and `report` read through this
-    ///   same read.
+    ///   the rows read after those name. Waits, lives, marks, snapshots,
+    ///   samples and run-less asks use their ranges and named seeks when
+    ///   [`LedgerWindowRead::reads_named_queue`] is true; other kinds stay
+    ///   whole. `push::check_breaches`, `kpi` and `report` use this same read.
     /// - No upper bound: a row past the window's end E is read as it is now.
     ///   `stats` turns E into `Cursor::Time(E).event_id` and takes a run by
     ///   its `finished_event_id`, so a row left out by its time alone
@@ -1065,7 +1066,10 @@ fn take_queue_rows(
         read.take_omitted_before(&edges.now()?)?;
         return Ok(());
     };
-    let by_range = crate::domain::ledger::window::queue_from::by_range(views);
+    let mut by_range = crate::domain::ledger::window::queue_from::by_range(views);
+    if snapshot.reads_named_queue()? {
+        by_range.extend(crate::domain::ledger::window::queue_lives::KINDS);
+    }
     // The kinds read whole and those of each kind that reach the time
     // first: they give `queue_before`, past which the rest of each kind
     // read by its range is read.
@@ -1176,6 +1180,7 @@ fn window_rows(
     // The rows those rows want first, so that what the earlier records are
     // sought by is known; then those of the runs the earlier ones leave open.
     take_wanted(snapshot, &mut read)?;
+    take_named_queue(snapshot, query, &mut read, &from)?;
     // The queue rows read by the views of what those rows name first: the
     // findings they read name the proposals they link, which the earlier
     // records are sought by too.
@@ -1195,6 +1200,26 @@ fn window_rows(
     }
     read.take_omitted_edges(query, &edges.now()?)?;
     Ok(read)
+}
+
+/// Add the queue records whose keys the range names, before the earlier
+/// read collects the tasks named by snapshots.
+fn take_named_queue(
+    snapshot: &dyn LedgerWindowRead,
+    query: &WindowQuery,
+    read: &mut crate::domain::ledger::window::WindowRows,
+    from: &RowsFrom,
+) -> Result<()> {
+    if !snapshot.reads_named_queue()? {
+        return Ok(());
+    }
+    let names = read.queue_names(from);
+    let Some(events) = snapshot.named_queue_records(from, &names, query.now_ms)? else {
+        read.take_pages(|after, limit| snapshot.rows_after(LedgerKind::Queue, after, limit))?;
+        return Ok(());
+    };
+    read.take_queue_records(events);
+    Ok(())
 }
 
 /// Take into `read` the rows it wants of `snapshot` until none is left.
@@ -1703,13 +1728,45 @@ pub trait LedgerWindowRead {
     fn reads_queue_by_kind(&self) -> bool {
         false
     }
+    /// Whether the named queue seeks are usable in this snapshot. The
+    /// default keeps promise 6's full pages. Stores require the queue and
+    /// open-ask views filled through the current write leader's generation
+    /// and a decidable visibility predicate, including after an older writer.
+    /// Missing seek tables or indexes also keep the full-page fallback.
+    fn reads_named_queue(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Additional queue records sought by the range's names: each named
+    /// supervisor's start and last life event of each kind before S; each
+    /// mark's retraction; snapshots targeting its tasks; openings and answers
+    /// of asks named by answers or answer applications in the range, and asks
+    /// still open. Waits, samples and failures use promise 6's
+    /// range and last row before S; stall config's last such row and its
+    /// range give the last at E. Reads grow with the range and these names,
+    /// except marks between a snapshot and S, which grow with the target's
+    /// open period. Missing or unfilled views, a stale or absent generation,
+    /// or undecidable visibility keep full pages. `None` reports that the
+    /// supplemental read cannot be judged; the caller restores full pages.
+    fn named_queue_records(
+        &self,
+        from: &RowsFrom,
+        names: &crate::domain::ledger::window::queue_lives::Names,
+        end_ms: i64,
+    ) -> Result<Option<Vec<RunEvent>>> {
+        let _ = (from, names, end_ms);
+        Ok(None)
+    }
+
     /// A page of the queue's rows of the subject kinds a read from a time
     /// reads whole ([`crate::domain::ledger::window::queue_from::QueueRead::Whole`]),
     /// at most `limit` after the key `after` (`None`: from the first), by
     /// key: each kind of (ii) of the Spike's promise 6 is read so until a
     /// seek of its own moves it to its range (those of
     /// [`Self::queue_rows_whole_by_views`] with the views trusted). The
-    /// default reads [`Self::rows_after`]'s page and keeps those.
+    /// adapter also excludes the kinds supplied by [`Self::named_queue_records`]
+    /// when [`Self::reads_named_queue`] is true. The default reads
+    /// [`Self::rows_after`]'s page and keeps those.
     fn queue_rows_whole(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
         use crate::domain::ledger::window::queue_from::read_whole;
         let mut after = after.map(str::to_owned);
