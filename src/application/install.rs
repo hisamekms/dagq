@@ -4,11 +4,13 @@
 //! queue service started as a replacement's, which applies the queue's
 //! compatible migrations before it accepts (ADR-t3102-2 decision 2), and
 //! put in place of the old one by a rename that keeps the old one as
-//! `<name>.previous`; then every live supervisor that takes a handoff is
-//! asked to exec it, and the service is started again from the binary in
-//! place. The old
-//! binary goes back only when none of them took it; when some did, it stays
-//! and the ones that did not are named in a [`KeptBinary`] error
+//! `<name>.previous`. If install started the build's service and replaced
+//! the binary, the service is started again from the binary in place before
+//! any live supervisor is asked to exec it. Neither install nor the update
+//! job stops the service from the handoff request through the end of the
+//! watch. The old binary goes back when none of them took the handoff;
+//! when some did, it stays and the ones that did not are named in a
+//! [`KeptBinary`] error
 //! (ADR-t632-1). A build
 //! whose migrations would break the old binary goes through the drain
 //! instead, and only when asked to. `--rollback` does the same with
@@ -22,7 +24,9 @@
 //! than this binary.
 //!
 //! 未適用のmigrationがあるか使えるserviceが無ければ差し替えの前に新buildのserviceを起動し、
-//! 引き継ぎの後に配置したbinaryのものへ替える。それ以外は引き継いだsupervisorが替える。
+//! binaryを置き換えたときは、その後・引き継ぎの要求の前に配置したbinaryのものへ替える。
+//! installと更新のjobは引き継ぎの要求から見張りの終わりまでserviceを止めない。
+//! それ以外は引き継いだsupervisorが替える。
 //!
 //! The binaries are built, run and moved through [`Binaries`], the queue
 //! is read through [`QueueOpener`]; [`crate::compose`] builds the adapters.
@@ -441,6 +445,16 @@ pub fn previous_path(target: &Path) -> PathBuf {
 /// the queue at `db`'s live supervisors over to it (see the module). `db`
 /// is `None`, or names no file, outside a queue: then only the binary is
 /// replaced.
+///
+/// If install started the source build's service and replaced the binary,
+/// it starts the service from `options.target` before requesting any
+/// supervisor's handoff. A start that leaves no service is tried once more;
+/// if it still leaves none, install attempts to restore the binary and
+/// reports the stopped service and restoration result without requesting
+/// handoff.
+///
+/// 元のserviceを実際に起動してbinaryを置き換えた場合は、引き継ぎの要求前に配置したbinaryのserviceへ起動し直す。
+/// serviceが残らなければ一度再試行し、それでも無ければ要求せずbinaryの戻しを試み、停止したserviceと戻しの結果を報告する。
 pub fn install(
     ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
     db: Option<&Path>,
@@ -641,6 +655,54 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
     if !in_place {
         binaries.replace(&source, target)?;
     }
+    // Finish the service replacement before asking any supervisor to exec:
+    // its first requests must not race with our stopping the service. The
+    // replacement grant permits this before adopt records the binary.
+    let undo = Undo {
+        binaries,
+        target,
+        previous: &previous,
+        version: &version,
+        replaced_version: replaced_version.as_deref(),
+        in_place,
+    };
+    let service = (served && !in_place).then(|| {
+        let first = serve_in_place(binaries, target, db);
+        if first["outcome"] == "stopped" {
+            // There is no service to receive the handoff. Try once more
+            // while no supervisor has been asked to exec the binary.
+            serve_in_place(binaries, target, db)
+        } else {
+            first
+        }
+    });
+    if let Some(service) = service.as_ref().filter(|s| s["outcome"] == "stopped") {
+        let (error, restored) = undo.restore(
+            anyhow::anyhow!(service["error"].as_str().unwrap_or_default().to_owned()),
+            &format!("the queue service for {version} could not start before handoff"),
+        );
+        // No service can receive a handoff. A person's install returns
+        // this report directly; an update job recovers its supervisor and
+        // records the failure after the hold is dropped and service answers.
+        return Err(super::update::InstallFailed {
+            message: format!("{error:#}"),
+            report: json!({
+                "outcome": "failed",
+                "stage": "install",
+                "target": target,
+                "version": version,
+                "previous": previous,
+                "previous_version": replaced_version,
+                "migrated": migrated,
+                "kept": false,
+                "restored": restored,
+                "e2e": e2e,
+                "supervisors": [],
+                "queue_service": service,
+            }),
+        }
+        .into());
+    }
     let handed = if takes.is_empty() {
         Vec::new()
     } else {
@@ -654,27 +716,13 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
             options.handoff_timeout,
             options.poll,
         );
-        let undo = |error, supervisors| {
-            Undo {
-                binaries,
-                target,
-                previous: &previous,
-                version: &version,
-                replaced_version: replaced_version.as_deref(),
-                in_place,
-            }
-            .error(error, supervisors)
-        };
         match handed {
             // The binary is one file for every supervisor: it goes back
             // only when none of them took it (ADR-t632-1).
             Ok(handed) if handed.iter().all(|h| h.error.is_some()) => {
                 let error = handoff_failures(&handed)
                     .unwrap_or_else(|| anyhow::anyhow!("no supervisor took the handoff"));
-                return Err(undo(
-                    error,
-                    Some(handed.iter().map(Handed::report).collect()),
-                ));
+                return Err(undo.error(error, Some(handed.iter().map(Handed::report).collect())));
             }
             Ok(handed) => handed,
             // One of them may run it: the binary stays.
@@ -684,13 +732,10 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
                     target.display()
                 )));
             }
-            Err(error) => return Err(undo(error, None)),
+            Err(error) => return Err(undo.error(error, None)),
         }
     };
     binaries.adopt(db, target)?;
-    // The service that migrated runs from the build before it was put in
-    // place: the one of the binary in place takes over.
-    let service = (served && !in_place).then(|| serve_in_place(binaries, target, db));
     let failure = handoff_failures(&handed);
     let mut report = json!({
         "outcome": if failure.is_some() { "partially_handed_off" } else { "installed" },
@@ -860,7 +905,8 @@ impl KeptBinary {
     }
 }
 
-/// What an install undoes when its handoff failed for every supervisor.
+/// What an install undoes when no supervisor took the new binary, including
+/// a service start that failed before any handoff request.
 struct Undo<'a> {
     binaries: &'a dyn Binaries,
     target: &'a Path,
@@ -875,15 +921,33 @@ impl Undo<'_> {
     /// and say so around `error`; with each supervisor's outcome, as a
     /// [`HandoffFailed`].
     fn error(&self, error: anyhow::Error, supervisors: Option<Vec<Value>>) -> anyhow::Error {
+        let (error, restored) =
+            self.restore(error, &format!("the handoff to {} failed", self.version));
+        match supervisors {
+            Some(supervisors) => HandoffFailed {
+                message: format!("{error:#}"),
+                supervisors,
+                restored,
+            }
+            .into(),
+            None => error,
+        }
+    }
+
+    /// Restore the binary before returning a failed handoff or a service
+    /// start that left no receiver for its requests, with the restore's report.
+    /// `failure` names the stage that actually failed: a service start before
+    /// any handoff request must not be described as a failed handoff.
+    fn restore(&self, error: anyhow::Error, failure: &str) -> (anyhow::Error, Value) {
         let Self {
             target,
             previous,
             version,
             ..
         } = *self;
-        let (error, restored) = if self.in_place {
+        if self.in_place {
             let context = format!(
-                "the handoff to {version} failed; {} was {version} already and stays",
+                "{failure}; {} was {version} already and stays",
                 target.display()
             );
             (
@@ -894,7 +958,7 @@ impl Undo<'_> {
             match self.binaries.restore(target) {
                 Ok(()) => (
                     error.context(format!(
-                        "the handoff to {version} failed; the binary it replaced is back at {}",
+                        "{failure}; the binary it replaced is back at {}",
                         target.display()
                     )),
                     json!({
@@ -906,7 +970,7 @@ impl Undo<'_> {
                     let reason = format!("{restore:#}");
                     (
                         error.context(format!(
-                            "the handoff to {version} failed, and the binary it replaced could \
+                            "{failure}, and the binary it replaced could \
 not be put back at {} ({reason}); it is at {}",
                             target.display(),
                             previous.display()
@@ -915,15 +979,6 @@ not be put back at {} ({reason}); it is at {}",
                     )
                 }
             }
-        };
-        match supervisors {
-            Some(supervisors) => HandoffFailed {
-                message: format!("{error:#}"),
-                supervisors,
-                restored,
-            }
-            .into(),
-            None => error,
         }
     }
 }
@@ -1163,11 +1218,14 @@ pub fn parse_version(output: &str) -> Result<String> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
     use crate::application::port_fakes::SupervisorsAndEvents;
-    use crate::domain::{LeaseToken, SupervisorMode};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::UNIX_EPOCH;
 
     /// Every queue of the host takes the one e2e lock in dagq's data
     /// directory, the parent of the queue's directory (ADR-t1233-2
@@ -1183,67 +1241,6 @@ mod tests {
             e2e_lock_path(Path::new("/data/dagq/abc"))
         );
         assert_eq!(e2e_lock_path(Path::new("/")), None);
-    }
-
-    /// The clock at `secs` after the epoch.
-    struct At(i64);
-
-    impl Clock for At {
-        fn system_time(&self) -> SystemTime {
-            UNIX_EPOCH + Duration::from_secs(self.0.unsigned_abs())
-        }
-
-        fn monotonic(&self) -> std::time::Instant {
-            std::time::Instant::now()
-        }
-    }
-
-    /// Pid 1 is alive, every other pid is dead.
-    struct OnlyOne;
-
-    impl ProcessControl for OnlyOne {
-        fn alive(&self, pid: u32) -> bool {
-            pid == 1
-        }
-        fn terminate(&self, _: u32) -> Result<()> {
-            Ok(())
-        }
-        fn interrupt(&self, _: u32) -> Result<()> {
-            Ok(())
-        }
-        fn kill(&self, _: u32) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn registration(token: &str, pid: u32, heartbeat_at: i64) -> SupervisorRegistration {
-        SupervisorRegistration {
-            token: LeaseToken::new(token),
-            pid,
-            parallel: 2,
-            started_at: 0,
-            heartbeat_at,
-            mode: Some(SupervisorMode::Launchd),
-            workspace_id: None,
-            handoff_accepted: true,
-            handoff_binary: None,
-            auto_update: false,
-            max_waiting: None,
-            parallel_source: None,
-            max_waiting_source: None,
-            runtime_planners: None,
-            runtime_planners_source: None,
-            claim_spacing: None,
-            claim_spacing_source: None,
-            max_spikes: None,
-            max_spikes_source: None,
-            class_aging: None,
-            class_aging_source: None,
-            max_load: None,
-            max_load_source: None,
-            providers: None,
-            binary_version: Some("1.0.0".into()),
-        }
     }
 
     /// A replacement asks only the registrations whose process lives and
@@ -1373,5 +1370,279 @@ mod tests {
                 && error.contains("--from"),
             "{error}"
         );
+    }
+    /// Start includes an unread schema as well as pending migrations. Open
+    /// can still require a replacement with start=false. Failures must not
+    /// introduce a service restart after handoff, nor change adopt/restore.
+    #[test]
+    fn the_service_in_place_starts_before_handoff_only_when_install_served() {
+        for (pending, unread, fallback, in_place, failures, runs, handoff) in [
+            (true, false, None, false, 0, true, Handoff::Taken),
+            (false, true, None, false, 0, true, Handoff::Taken),
+            (
+                false,
+                false,
+                Some(OpenFailure::Unknown),
+                false,
+                0,
+                true,
+                Handoff::Taken,
+            ),
+            (
+                false,
+                false,
+                Some(OpenFailure::Unreachable),
+                false,
+                0,
+                true,
+                Handoff::Taken,
+            ),
+            (true, false, None, false, 1, true, Handoff::Taken),
+            (true, false, None, false, 1, false, Handoff::Taken),
+            (true, false, None, false, 2, false, Handoff::Taken),
+            (true, false, None, false, 0, true, Handoff::Failed),
+            (true, false, None, false, 0, true, Handoff::Partial),
+            (true, false, None, false, 0, true, Handoff::Unsettled),
+            (false, false, None, false, 0, true, Handoff::Taken),
+            (true, false, None, true, 0, true, Handoff::Taken),
+        ] {
+            let steps = Arc::new(InstallSteps {
+                calls: Default::default(),
+                registrations: std::sync::Mutex::new(if matches!(handoff, Handoff::Partial) {
+                    vec![
+                        registration("first", 1, 10_000),
+                        registration("second", 1, 10_000),
+                    ]
+                } else {
+                    vec![registration("first", 1, 10_000)]
+                }),
+                first_open: std::sync::Mutex::new(fallback),
+                schema: (!unread).then(|| SchemaCheck {
+                    pending: if pending {
+                        vec![PendingMigration {
+                            version: 1,
+                            compatible: true,
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    opens: true,
+                }),
+                handoff,
+                restart_failures: std::sync::atomic::AtomicUsize::new(failures),
+                in_place,
+                survives_failure: runs,
+                service_running: Arc::new(std::sync::atomic::AtomicBool::new(!matches!(
+                    fallback,
+                    Some(OpenFailure::Unreachable)
+                ))),
+                ..InstallSteps::default()
+            });
+            let files = crate::application::memory_files::MemoryFiles::default();
+            files.put(Path::new("/queue"), UNIX_EPOCH, "queue");
+            files.put(Path::new("/to"), UNIX_EPOCH, "old");
+            let queues =
+                |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+            let options = InstallOptions {
+                source: Source::Binary(PathBuf::from(if in_place { "/to" } else { "/source" })),
+                target: PathBuf::from("/to"),
+                allow_breaking: false,
+                restart: vec![],
+                handoff_timeout: Duration::ZERO,
+                poll: Duration::ZERO,
+                e2e: E2eGate::NotApplicable,
+            };
+            let result = install(
+                &Ports {
+                    binaries: &*steps,
+                    files: &files,
+                    processes: &OnlyOne,
+                    clock: &At(10_000),
+                    queues: &queues,
+                    down: &|| bail!("no drain"),
+                },
+                Some(Path::new("/queue")),
+                &options,
+            );
+            let served = pending || unread || fallback.is_some();
+            let mut expected = if pending || unread {
+                vec![
+                    "hold",
+                    if in_place {
+                        "serve /to"
+                    } else {
+                        "serve /source"
+                    },
+                    "open",
+                ]
+            } else if fallback.is_some() {
+                vec!["open", "hold", "serve /source", "open"]
+            } else {
+                vec!["open"]
+            };
+            if !in_place {
+                expected.push("replace");
+            }
+            if served && !in_place {
+                expected.push("serve /to");
+            }
+            let stopped = failures == 2 && !runs;
+            if failures > 0 && !runs {
+                expected.push("serve /to");
+            }
+            if stopped {
+                expected.push("restore");
+            } else {
+                expected.push("hand_off");
+                match handoff {
+                    Handoff::Taken => expected.push("adopt"),
+                    Handoff::Failed => expected.push("restore"),
+                    Handoff::Partial => expected.extend(["hand_off", "adopt"]),
+                    Handoff::Unsettled => {}
+                }
+            }
+            assert_eq!(
+                *steps.calls.lock().unwrap(),
+                expected,
+                "{pending} {unread} {fallback:?} {in_place} {failures} {runs} {handoff:?}"
+            );
+            if stopped {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("could not start before handoff"));
+                assert!(!error.to_string().contains("the handoff to"));
+                let report = &super::super::update::InstallFailed::of(&error)
+                    .unwrap()
+                    .report;
+                assert_eq!(
+                    report["queue_service"],
+                    json!({
+                        "outcome": "stopped",
+                        "error": "restart failed",
+                        "next": "no service of the queue answers: a supervisor's watch starts it again, else run `up`",
+                    })
+                );
+                assert_eq!(
+                    report["restored"],
+                    json!({"restored": true, "version": "old"})
+                );
+                assert_eq!(report["supervisors"], json!([]));
+                assert_eq!(report["outcome"], "failed");
+                continue;
+            }
+            let report = match handoff {
+                Handoff::Taken => result.unwrap(),
+                Handoff::Partial => KeptBinary::of(&result.unwrap_err()).unwrap().report.clone(),
+                Handoff::Failed => {
+                    assert_eq!(
+                        HandoffFailed::of(&result.unwrap_err()).unwrap().restored["restored"],
+                        true
+                    );
+                    continue;
+                }
+                Handoff::Unsettled => {
+                    assert!(super::super::lifecycle::HandoffUnsettled::is(
+                        &result.unwrap_err()
+                    ));
+                    continue;
+                }
+            };
+            if served && !in_place {
+                assert_eq!(
+                    report["queue_service"]["outcome"],
+                    if failures > 0 && runs {
+                        "kept"
+                    } else {
+                        "replaced"
+                    }
+                );
+                if failures > 0 && runs {
+                    assert_eq!(report["queue_service"]["error"], "restart failed");
+                }
+            } else {
+                assert!(report.get("queue_service").is_none());
+            }
+        }
+    }
+
+    /// The watched entry must return the stopped-service report directly:
+    /// there is no receiver for a handoff, recovery, or a failure record.
+    #[test]
+    fn a_stopped_service_report_leaves_install_watched_without_more_queue_calls() {
+        use super::super::supervisor_service::{ServiceCaller, undone, unreachable};
+        use super::super::update::{self, InstallFailed, JobPorts};
+        let steps = Arc::new(InstallSteps {
+            calls: Default::default(),
+            registrations: std::sync::Mutex::new(vec![registration("first", 1, 10_000)]),
+            first_open: std::sync::Mutex::new(None),
+            schema: Some(SchemaCheck {
+                pending: vec![PendingMigration {
+                    version: 1,
+                    compatible: true,
+                }],
+                opens: true,
+            }),
+            handoff: Handoff::Taken,
+            restart_failures: std::sync::atomic::AtomicUsize::new(2),
+            in_place: false,
+            survives_failure: false,
+            service_running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ..InstallSteps::default()
+        });
+        let files = crate::application::memory_files::MemoryFiles::default();
+        files.put(Path::new("/queue"), UNIX_EPOCH, "queue");
+        files.put(Path::new("/to"), UNIX_EPOCH, "old");
+        let queues = |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+        let options = InstallOptions {
+            source: Source::Binary(PathBuf::from("/source")),
+            target: PathBuf::from("/to"),
+            allow_breaking: false,
+            restart: vec![],
+            handoff_timeout: Duration::ZERO,
+            poll: Duration::ZERO,
+            e2e: E2eGate::NotApplicable,
+        };
+        let error = update::install_watched(
+            &JobPorts {
+                binaries: &*steps,
+                files: &files,
+                processes: &OnlyOne,
+                clock: &At(10_000),
+                queues: &queues,
+                restart: &|_| bail!("no supervisor was handed over"),
+                is_ancestor: &|_, _| bail!("no checkout is built"),
+            },
+            &|| bail!("no drain"),
+            Some(Path::new("/queue")),
+            &options,
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert_eq!(
+            *steps.calls.lock().unwrap(),
+            [
+                "open",
+                "hold",
+                "serve /source",
+                "open",
+                "replace",
+                "serve /to",
+                "serve /to",
+                "restore",
+            ]
+        );
+        let report = &InstallFailed::of(&error).unwrap().report;
+        assert_eq!(report["queue_service"]["outcome"], "stopped");
+        assert_eq!(report["queue_service"]["error"], "restart failed");
+        assert_eq!(report["restored"]["restored"], true);
+        // The same fake would reject a handoff if install sent one while
+        // stopped, rather than granting it as though the service existed.
+        let unanswered = steps
+            .call(
+                crate::domain::queue_service::UseCase::Supervisor,
+                json!({"op": "request_handoff", "args": ["first", "/to"]}),
+            )
+            .unwrap_err();
+        assert!(unreachable(&unanswered));
+        assert!(undone(&unanswered));
     }
 }

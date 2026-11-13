@@ -77,14 +77,13 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    pidが死んだsupervisorも上限を待たずに失敗にし、pidが生きている間はheartbeatが古く見えても失敗にせず上限まで待つ（判定は`lifecycle::hand_off`のdoc comment、古く見えた秒数は`Handed::report`の要素）。
    上限の直後に要求を受け取ったsupervisorの扱いは`lifecycle::hand_off`のdoc commentと[`up` / `down`](up-down.md)の引き継ぎが持つ。
    `hand_off`は最初の失敗で止まらず、引き継がせた全員の成功か失敗を待つ（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
-   fileは全員で1つなので、**全員が失敗したときだけ**`<to>.previous`を`<to>`に戻し（`restore`）、`install::HandoffFailed`のerrorで止まる。
+   fileは全員で1つなので、引き継ぎを要求した**全員が失敗したときだけ**`<to>.previous`を`<to>`に戻し（`restore`）、`install::HandoffFailed`のerrorで止まる。
    答えの切れた要求と取り下げは登録を読み直して照合し、取ったかが分からないsupervisorが残れば戻さずに`<to>`を残すerrorで止まる（`lifecycle::HandoffUnsettled`）。
    **一部だけが失敗したとき**は戻さず、失敗したsupervisorを名指して、`down --force`と`up`（新しいbinaryで起動し直す）か戻し（全員を前のbinaryに戻す）を案内する`install::KeptBinary`のerrorで止まる。
    CLIはこのerrorのときも結果をstdoutに出してから、errorをstderrに出して失敗で終わる。
    結果の形は`install::install`と`lifecycle::Handed::report`が持つ。
    queueが無ければ置き換えだけを行う。
    全員の失敗で戻したときのほかは、`<to>`のpathをqueueのbinaryとして記録する（6のdrainも置き換えの後に記録する）。
-   3で元のserviceを起動したときは、記録の後に`<to>`のserviceを同じ口で起動し直す（適用するものは残っていない）。
    引き継ぎの要求と取り下げは`up`のものと違い、要求を送るプロセスの実行fileでなく置いた`<to>`を名指す（`service.install`を持つprincipalは固定バイナリを置き換えられる）。
    全員の失敗と一部の失敗は、CLIでは7の`update_failed`の経路を通る。
 6. **drain**（決定14）: 人が非互換のmigrationを許したとき、liveな登録があれば`down --wait`（serviceを通る。serviceが答えなければ止めるものは無いとし、使用中の判定は下のserviceに任せる）で止め（同じqueueのDBを持つ別のlabelのagentも外す。[up / down](up-down.md)の`down`）、元のserviceを非互換も適用してよい入れ替えの口で起動し（使用中のsupervisor・run・wrapperが無いことの判定と`backups/`への複製と適用を1つのtransactionで行う。使用中のものが残れば適用せず受け付けず、何も置き換えずにerrorで止まる）、置き換えて`<to>`のserviceを起動し直し、新しいbinaryの`up`で起動し直す（`--claude`と`--codex`の解決は[Provider executables](../provider-executables.md)）。
@@ -107,7 +106,10 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
      askの答えはsupervisorの自動更新のpassもリリースのpassも適用しない（ビルドを起こさない）ので、inboxが答えを読み、人の言葉で問いに書いた手を打ってaskを閉じる（dagq-recover skillの`reference/update.md`の`update_failed`）。
 
 queue serviceとqueueのbrokerは5の引き継ぎでは止めない。
-3で元のserviceを起動したとき（未適用のmigrationがあるか、serviceが答えないかこのstepを読めないとき）と6では、queue serviceは`install`が入れ替え、置き換えの後に`<to>`のものへ替える。
+3で元のserviceを起動したとき（schemaが読めないか、未適用のmigrationがあるか、serviceが答えないかこのstepを読めないとき）は、queue serviceは`install`が置き換えの後・引き継ぎの要求の前に`<to>`のものへ替える。
+`install`と自動更新のjobは、引き継ぎの要求から7の見張りの終わりまでserviceを止めない。
+起動し直しの順と失敗時の扱いは`install::install`のdoc commentが持つ。
+6ではsupervisorを止めてからserviceを替える。
 5の間はsupervisorの見張りが触れないよう守る（`QueueServiceControl::hold`）。
 守りを知らない前のbuildの見張りがそれでも入れ替えると、migrationは受け付けの前に済んでいるが、そのbuildのserviceはこの後のstepを読めないので、`install`はそのstepのerrorで止まる。
 それ以外は、execした新しいbinaryのsupervisorが、queue serviceは登録とsign inの前に（記録は最初の見張りで）、brokerは最初の見張りで、前のbuildのものを1回だけ入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。

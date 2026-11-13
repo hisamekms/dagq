@@ -1060,6 +1060,7 @@ fn put_in_place(
     let report = match settle(
         ports,
         queue,
+        db,
         job,
         &registered,
         before.as_ref(),
@@ -1144,6 +1145,7 @@ enum Settled {
 fn settle(
     ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
     queue: &mut (impl AskStore + SupervisorRegistry + RunLog + ?Sized),
+    db: &Path,
     job: &Job,
     registered: &[SupervisorRegistration],
     before: Option<&SupervisorRegistration>,
@@ -1216,15 +1218,32 @@ fn settle(
                 // It failed before any handoff: only the job's own
                 // supervisor can be in doubt.
                 let serving = before.map(|before| before.token.clone());
-                let mut recovery = Recovery::read(&*queue, before)?;
+                let stopped = InstallFailed::of(&error)
+                    .filter(|failed| failed.report["queue_service"]["outcome"] == "stopped");
+                let mut recovery = match stopped {
+                    Some(stopped) if stopped.report["restored"]["restored"] == true => {
+                        match Recovery::after_service_restart(ports, &*queue, db, job, before) {
+                            Ok(recovery) => recovery,
+                            Err(recovery) => {
+                                return Err(InstallFailed {
+                                    message: format!("{error:#}; restoring the queue service failed: {recovery:#}"),
+                                    report: stopped.report.clone(),
+                                }.into());
+                            }
+                        }
+                    }
+                    // Do not start a target that could not be restored as
+                    // though it were the old binary. Keep its failure report.
+                    Some(_) => return Err(error),
+                    None => Recovery::read(&*queue, before)?,
+                };
                 let supervisor = recovery.bring_back(ports, before, serving.as_ref());
-                let failed = failed(
-                    queue,
-                    job,
-                    "install",
-                    &error,
-                    json!({"supervisor": supervisor}),
-                );
+                let mut details = json!({"supervisor": supervisor});
+                if let Some(stopped) = InstallFailed::of(&error) {
+                    details["queue_service"] = stopped.report["queue_service"].clone();
+                    details["restored"] = stopped.report["restored"].clone();
+                }
+                let failed = failed(queue, job, "install", &error, details);
                 return recovery.finish(ports, failed).map(Settled::Failed);
             }
         },
@@ -1323,10 +1342,16 @@ fn settle(
     recovery.finish(ports, failed).map(Settled::Failed)
 }
 
-/// The error of a person's `dagq install` whose handoff or watch failed
-/// (ADR-0073 decisions 13 and 14): `report` is the `update_failed` it
-/// recorded, with the ask it opened for the inbox, for the command to
-/// print beside the error.
+/// An install failure whose report the command prints beside the error.
+/// After a handoff or watch failure (ADR-0073 decisions 13 and 14), it is
+/// the `update_failed` recorded with its inbox ask. When the service could
+/// not start before handoff, no request was sent: it is the install's
+/// report of the stopped service and the binary restored. A person's
+/// install returns that report directly; an update job recovers its own
+/// supervisor: after starting the restored binary's service and waiting a
+/// bounded time for it to answer, it carries the service and restore reports
+/// into `update_failed` and its ask. A service that never answers returns
+/// this report with the recovery error instead of losing the install details.
 #[derive(Debug)]
 pub struct InstallFailed {
     pub message: String,
@@ -1493,6 +1518,7 @@ pub fn install_watched(
     match settle(
         ports,
         queue,
+        db,
         &job,
         &registered,
         None,
@@ -1816,7 +1842,53 @@ struct Recovery<'a> {
     left: Vec<(SupervisorRegistration, bool)>,
 }
 
+/// How long a job waits for queue reads after trying to start the restored
+/// binary's service. The start itself has Binaries::serve's adapter bound.
+const SERVICE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(20);
+
 impl<'a> Recovery<'a> {
+    /// After install restored the binary without sending any handoff, start
+    /// that binary's service ourselves: dropping the install's hold does not
+    /// make the supervisor's periodic watch run immediately. Even a failed
+    /// start may leave a service, or the watch may start one later. Retry only
+    /// the read of registrations, within a bound, before recovery and writes.
+    fn after_service_restart(
+        ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
+        queue: &(impl SupervisorRegistry + ?Sized),
+        db: &Path,
+        job: &Job,
+        own: Option<&'a SupervisorRegistration>,
+    ) -> Result<Self> {
+        let start_error = ports.binaries.serve(job.target, db, false).err();
+        let started = ports.clock.monotonic();
+        loop {
+            match Self::read(queue, own) {
+                Ok(recovery) => return Ok(recovery),
+                Err(error) if super::supervisor_service::unreachable(&error) => {
+                    let elapsed = ports.clock.since(started);
+                    if super::waited_out(elapsed, SERVICE_RECOVERY_TIMEOUT) {
+                        let error = error.context(format!(
+                            "the restored queue service did not answer within {}s",
+                            SERVICE_RECOVERY_TIMEOUT.as_secs()
+                        ));
+                        return Err(match start_error {
+                            Some(start) => error.context(format!(
+                                "starting {} failed: {start:#}",
+                                job.target.display()
+                            )),
+                            None => error,
+                        });
+                    }
+                    thread::sleep(
+                        job.poll
+                            .min(SERVICE_RECOVERY_TIMEOUT.saturating_sub(elapsed)),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     fn read(
         queue: &(impl SupervisorRegistry + ?Sized),
         own: Option<&'a SupervisorRegistration>,
@@ -2245,6 +2317,171 @@ pub fn restart_by_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hold release alone does not restore service. The job starts the old
+    /// binary's service, tolerates a delayed watch after a failed start, and
+    /// returns the original stopped report when neither start nor watch works.
+    #[test]
+    fn a_job_restarts_the_restored_service_and_waits_before_recording_its_failure() {
+        use crate::application::install::test_support::{
+            InstallQueue, InstallSteps, OnlyOne, registration,
+        };
+        use crate::application::{RunFiles, memory_files::MemoryFiles};
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst},
+        };
+        use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+        struct Ticks {
+            origin: Instant,
+            elapsed: AtomicU64,
+        }
+        impl Clock for Ticks {
+            fn system_time(&self) -> SystemTime {
+                UNIX_EPOCH + Duration::from_secs(10_000)
+            }
+            fn monotonic(&self) -> Instant {
+                self.origin
+            }
+            fn since(&self, _: Instant) -> Duration {
+                Duration::from_secs(self.elapsed.fetch_add(5, SeqCst) + 5)
+            }
+        }
+        for (start_fails, watch_after_reads, timed_out) in [
+            (false, None, false),
+            (true, Some(2), false),
+            (true, None, true),
+        ] {
+            let steps = Arc::new(InstallSteps {
+                registrations: Mutex::new(vec![SupervisorRegistration {
+                    binary_version: Some("old".into()),
+                    ..registration("first", 1, 10_000)
+                }]),
+                restart_failures: AtomicUsize::new(2),
+                restored_start_fails: start_fails,
+                watch_after_reads: Mutex::new(watch_after_reads),
+                ..InstallSteps::default()
+            });
+            let files = MemoryFiles::default();
+            let db = Path::new("/queue");
+            files.write(db, b"queue").unwrap();
+            files.write(Path::new("/to"), b"old").unwrap();
+            let queues =
+                |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+            let token = LeaseToken::new("first");
+            let job = Job {
+                subject: Subject::Commit("abc"),
+                token: Some(&token),
+                target: Path::new("/to"),
+                staged: Path::new("/staged"),
+                log: Some(Path::new("/job.log")),
+                restart: &[],
+                handoff_timeout: Duration::ZERO,
+                watch_timeout: Duration::ZERO,
+                poll: Duration::ZERO,
+                pid: 77,
+            };
+            let clock = Ticks {
+                origin: Instant::now(),
+                elapsed: AtomicU64::new(0),
+            };
+            let ports = JobPorts {
+                binaries: &*steps,
+                files: &files,
+                processes: &OnlyOne,
+                clock: &clock,
+                queues: &queues,
+                restart: &|_| bail!("the old supervisor is still serving"),
+                is_ancestor: &|_, _| bail!("no checkout comparison is needed"),
+            };
+            let mut queue = queues(db).open().unwrap();
+            let result = put_in_place(
+                &ports,
+                &mut *queue,
+                db,
+                &job,
+                Path::new("/source"),
+                PluginStep::Untouched,
+            );
+            let mut expected = vec![
+                "open",
+                "hold",
+                "serve /source",
+                "open",
+                "replace",
+                "serve /to",
+                "serve /to",
+                "restore",
+                "serve_restored /to",
+            ];
+            let reads = if timed_out {
+                4
+            } else if start_fails {
+                2
+            } else {
+                0
+            };
+            expected.extend(std::iter::repeat_n("read_unreachable", reads));
+            if start_fails && !timed_out {
+                expected.push("watch_service");
+            }
+            if !timed_out {
+                expected.extend(["ask update_failed", "record update_failed"]);
+            }
+            assert_eq!(
+                *steps.calls.lock().unwrap(),
+                expected,
+                "{start_fails} {watch_after_reads:?}"
+            );
+            let report = if timed_out {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("did not answer within 20s"));
+                assert!(error.to_string().contains("restored start failed"));
+                assert_eq!(clock.elapsed.load(SeqCst), 20);
+                assert!(steps.events.lock().unwrap().is_empty());
+                assert!(steps.asks.lock().unwrap().is_empty());
+                InstallFailed::of(&error).unwrap().report.clone()
+            } else {
+                assert_eq!(clock.elapsed.load(SeqCst), if start_fails { 10 } else { 0 });
+                let report = result.unwrap();
+                assert_eq!(report["outcome"], "failed");
+                assert_eq!(report["stage"], "install");
+                assert_eq!(report["commit"], "abc");
+                assert_eq!(report["pid"], 77);
+                assert_eq!(
+                    report["supervisor"],
+                    json!({"state": "running", "version": "old"})
+                );
+                let asks = steps.asks.lock().unwrap();
+                assert_eq!(asks.len(), 1);
+                assert_eq!(asks[0].kind, AskKind::UpdateFailed);
+                assert_eq!(report["ask_id"], asks[0].id.as_i64());
+                assert!(asks[0].question.contains("automatic update"));
+                assert!(asks[0].question.contains("could not start before handoff"));
+                assert!(!asks[0].question.contains("the handoff to new failed"));
+                let events = steps.events.lock().unwrap();
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].0, "update_failed");
+                assert_eq!(events[0].1["ask_id"], asks[0].id.as_i64());
+                assert_eq!(events[0].1["stage"], "install");
+                assert_eq!(events[0].1["queue_service"]["outcome"], "stopped");
+                assert_eq!(events[0].1["commit"], "abc");
+                report
+            };
+            assert_eq!(
+                report["queue_service"],
+                json!({
+                    "outcome": "stopped", "error": "restart failed",
+                    "next": "no service of the queue answers: a supervisor's watch starts it again, else run `up`",
+                })
+            );
+            assert_eq!(
+                report["restored"],
+                json!({"restored": true, "version": "old"})
+            );
+        }
+    }
 
     #[test]
     fn a_landing_changes_the_runtime_when_it_touches_its_sources_or_manifests() {
