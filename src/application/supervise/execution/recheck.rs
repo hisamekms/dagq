@@ -421,7 +421,13 @@ enum InContainer {
 /// One run the recheck checked: what it found, and the port of the
 /// sccache whose wrapper was taken out of the command's environment in a
 /// container (a run in a container whose command ran).
-type Checked = (Target, Finding, Option<u16>);
+type Checked = (Target, Finding, Option<u16>, Option<OomRecord>);
+
+struct OomRecord {
+    observation: crate::domain::run_container::oom::OomObservation,
+    command: String,
+    failure: verify_failure::VerifyFailure,
+}
 
 /// What a recheck's thread found: each run's [`Checked`], its write check
 /// of the build outputs, `None` when no command was to run on the host,
@@ -833,7 +839,16 @@ impl Supervisor<'_> {
             main_check: main.as_ref().map(MainCheck::outcome),
             ..Tally::default()
         };
-        for (target, finding, removed) in found {
+        for (target, finding, removed, oom) in found {
+            if let Some(oom) = oom {
+                let _ = crate::application::run_container::record_verification_oom(
+                    &*self.queue,
+                    &target.run_id,
+                    &oom.observation,
+                    &oom.command,
+                    &oom.failure,
+                );
+            }
             if let Some(port) = removed {
                 self.with_env(|env| {
                     crate::application::sccache::record_wrapper_removed(
@@ -1382,23 +1397,24 @@ fn recheck_runs(recheck: &Recheck<'_>, targets: Vec<Target>) -> Found {
         .zip(prepared)
         .map(|(target, prepared)| {
             let mut removed = None;
+            let mut oom = None;
             let finding = match prepared {
                 Ok(Prepared::Found(finding)) => Ok(finding),
                 Ok(Prepared::Command(ToRun { host: Some(_), .. })) if unwritable => {
                     Ok(Finding::Unwritable)
                 }
                 Ok(Prepared::Command(to_run)) => {
-                    run_command(recheck, &target, to_run, &mut removed)
+                    run_command(recheck, &target, to_run, &mut removed, &mut oom)
                 }
                 Err(error) => Err(error),
             }
             .unwrap_or_else(|error| Finding::Error(format!("{error:#}")));
-            (target, finding, removed)
+            (target, finding, removed, oom)
         })
         .collect::<Vec<Checked>>();
     let failed = checked
         .iter()
-        .find_map(|(target, finding, _)| match finding {
+        .find_map(|(target, finding, _, _)| match finding {
             Finding::Failed(failure)
                 if recheck::checks_main(failure, target.container.is_none()) =>
             {
@@ -1409,7 +1425,7 @@ fn recheck_runs(recheck: &Recheck<'_>, targets: Vec<Target>) -> Found {
     // With the attention open, a pass whose command passed on a run on the
     // host checks main too, so a fixed main ends it.
     let passed = || {
-        checked.iter().find_map(|(target, finding, _)| {
+        checked.iter().find_map(|(target, finding, _, _)| {
             (target.container.is_none()
                 && matches!(
                     finding,
@@ -1646,6 +1662,7 @@ fn run_command(
     target: &Target,
     to_run: ToRun,
     removed: &mut Option<u16>,
+    oom: &mut Option<OomRecord>,
 ) -> Result<Finding> {
     let Recheck {
         verifier,
@@ -1672,6 +1689,7 @@ fn run_command(
     let log = target
         .run_dir
         .join(format!("recheck-{}.log", &main.as_str()[..12]));
+    let mut oom_read = None;
     let status = match (host, &target.container, recheck.in_container) {
         (Some(runs), _, _) => run_on_host(
             recheck,
@@ -1694,6 +1712,7 @@ fn run_command(
                 command,
                 &log,
                 removed,
+                &mut oom_read,
             );
             match ran {
                 // Its limit is the command's, as on the host.
@@ -1736,6 +1755,20 @@ fn run_command(
         Some(timed_out) => timed_out.failure(),
         None => verify_failure::classify(&toolchains, command, code, signal, &output),
     };
+    let mut output = output;
+    if let (Some((name, since, memory)), Some(InContainer::Run { containers, .. })) =
+        (oom_read, recheck.in_container)
+    {
+        let observation = containers.read_oom(&name, since, memory);
+        if let Some(text) = observation.text() {
+            output.push_str(&format!("\n{text}"));
+        }
+        *oom = Some(OomRecord {
+            observation,
+            command: command.to_owned(),
+            failure: failure.clone(),
+        });
+    }
     Ok(Finding::Failed(RecheckFailure::CheckFailed {
         command: command.to_owned(),
         exit_code: code.unwrap_or(128),
@@ -1763,6 +1796,7 @@ fn run_in_container(
     command: &str,
     log: &Path,
     removed: &mut Option<u16>,
+    oom_read: &mut Option<(String, i64, u64)>,
 ) -> Result<crate::application::Exit> {
     let InRecheck {
         containers,
@@ -1797,6 +1831,14 @@ fn run_in_container(
     let mut env = verifier.run_env(run_dir)?;
     let wrapper = crate::domain::run_container::without_sccache_wrapper(&mut env).map(|t| t.port);
     let line = verification_line(containers, &prepared, run.id(), command, &env)?;
+    *oom_read = Some((
+        prepared
+            .queue
+            .verification_container(&prepared.id)
+            .unwrap_or_else(|_| prepared.id.clone()),
+        containers.oom_since(),
+        prepared.limits.memory_mib,
+    ));
     let status = verifier.run_to_log_for(run.id(), &line, run_dir, &[], log);
     // Only a command that ran went without the wrapper.
     let ran = match &status {

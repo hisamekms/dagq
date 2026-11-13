@@ -841,3 +841,270 @@ fn a_judgment_stopped_at_a_login_waits_for_the_hold_and_runs_again_on_its_head_a
     assert_eq!(close[0].recommendation.as_deref(), Some("close"));
     assert!(queue.run_lease(run.id()).unwrap().is_none());
 }
+
+/// One wiring and one deadline per test; short polling keeps the tests
+/// focused on the diagnostic effects rather than supervisor waits.
+fn oom_wiring(name: &str, state: crate::domain::run_container::oom::OomState) -> Wiring {
+    let wiring = Wiring::new(
+        name,
+        Script {
+            receipts: vec![succeeded; 3],
+            verdicts: vec![verdict("pass", "fine"); 3],
+        },
+    )
+    .with_tick(std::time::Duration::from_millis(10));
+    wiring
+        .verification_containers
+        .enabled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    *wiring.verification_containers.state.lock().unwrap() = state;
+    wiring.verifier.set_in_container(true);
+    wiring
+}
+
+/// The code failure is returned ready for the worker. Repeating the
+/// diagnostic through the shared recorder checks persisted attention
+/// deduplication without running another session's whole lifecycle.
+#[test]
+fn container_oom_code_failure_returns_to_worker_and_deduplicates_attention() {
+    let wiring = oom_wiring(
+        "container_oom_code_failure_returns_to_worker_and_deduplicates_attention",
+        crate::domain::run_container::oom::OomState::Observed,
+    );
+    let log = "test example ... FAILED\ntest result: FAILED. 0 passed; 1 failed";
+    wiring.verifier.results("cargo test", &[(1, log)]);
+    let task = wiring.ready_task(&["cargo test"]);
+    wiring.supervise_until_command("cargo test");
+    let detail = wiring.queue().show(task).unwrap();
+    assert_eq!(detail.runs.len(), 1);
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert!(payloads(&detail, "resume_started").is_empty());
+    assert_eq!(payloads(&detail, "container_oom_attention").len(), 1);
+    let initial = payloads(&detail, "container_oom_diagnostic");
+    assert_eq!(initial.len(), 1);
+    assert!(
+        detail.runs[0]
+            .last_error()
+            .unwrap()
+            .contains("container の cgroup で OOM の事態が起きた")
+    );
+    use crate::application::run_container::VerificationContainers;
+    let observation =
+        wiring
+            .verification_containers
+            .read_oom(initial[0]["container"].as_str().unwrap(), 0, 2048);
+    let repeated = crate::domain::verify_failure::VerifyFailure {
+        class: crate::domain::verify_failure::FailureClass::TestFailure,
+        evidence: "test example ... FAILED".into(),
+        profile: Some("rust"),
+    };
+    let _ = crate::application::run_container::record_verification_oom(
+        &wiring.queue(),
+        detail.runs[0].id(),
+        &observation,
+        "cargo test",
+        &repeated,
+    );
+    let detail = wiring.queue().show(task).unwrap();
+    assert_eq!(payloads(&detail, "container_oom_attention").len(), 1);
+    let diagnostics = payloads(&detail, "container_oom_diagnostic");
+    assert_eq!(diagnostics.len(), 2);
+    for p in diagnostics {
+        assert_eq!(p["failure"]["class"], "test_failure");
+        assert!(
+            p["possible_causes"]
+                .as_str()
+                .unwrap()
+                .contains("--memory 2048m")
+        );
+    }
+    assert_eq!(
+        wiring.verification_containers.reads.lock().unwrap().len(),
+        2
+    );
+}
+
+/// One unreadable observation is recorded, without attention or a new
+/// classification; the code failure still resumes the worker.
+#[test]
+fn unreadable_container_diagnostics_leave_the_code_failure_path_unchanged() {
+    let wiring = oom_wiring(
+        "unreadable_container_diagnostics_leave_the_code_failure_path_unchanged",
+        crate::domain::run_container::oom::OomState::Unreadable("podman events failed".into()),
+    );
+    wiring.verifier.results(
+        "cargo test",
+        &[(
+            1,
+            "test example ... FAILED\ntest result: FAILED. 0 passed; 1 failed",
+        )],
+    );
+    let task = wiring.ready_task(&["cargo test"]);
+    wiring.supervise_until_command("cargo test");
+    let detail = wiring.queue().show(task).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert!(payloads(&detail, "resume_started").is_empty());
+    assert!(payloads(&detail, "container_oom_attention").is_empty());
+    let diagnostics = payloads(&detail, "container_oom_diagnostic");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0]["oom"], "unreadable");
+    assert_eq!(diagnostics[0]["failure"]["class"], "test_failure");
+    assert_eq!(
+        wiring.verification_containers.reads.lock().unwrap().len(),
+        1
+    );
+    assert!(
+        !detail.runs[0]
+            .last_error()
+            .unwrap()
+            .contains("container の cgroup で OOM の事態が起きた")
+    );
+}
+
+/// An observed killed command retries once and remains held when that
+/// retry is killed too; its notice retains the diagnostic.
+#[test]
+fn container_oom_killed_retry_remains_held_when_killed_again() {
+    let wiring = oom_wiring(
+        "container_oom_killed_retry_remains_held_when_killed_again",
+        crate::domain::run_container::oom::OomState::Observed,
+    );
+    wiring.verifier.results("check", &[(137, ""), (137, "")]);
+    let task = wiring.ready_task(&["check"]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(payloads(&detail, "resume_started").is_empty());
+    assert_eq!(payloads(&detail, "verification_command").len(), 2);
+    assert_eq!(payloads(&detail, "container_oom_diagnostic").len(), 2);
+    assert_eq!(payloads(&detail, "container_oom_attention").len(), 1);
+    let held = payloads(&detail, "integration_held");
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0]["failure"]["class"], "killed");
+    assert!(
+        held[0]["container_oom"]
+            .as_str()
+            .unwrap()
+            .contains("container の cgroup で OOM の事態が起きた")
+    );
+    assert!(!attention(&wiring.status(), "kind", &json!("container_oom_attention")).is_empty());
+}
+
+/// The successful retry after a killed command lands as before and has
+/// no OOM read of its own.
+#[test]
+fn container_oom_killed_retry_lands_when_the_retry_passes() {
+    let wiring = oom_wiring(
+        "container_oom_killed_retry_lands_when_the_retry_passes",
+        crate::domain::run_container::oom::OomState::Observed,
+    );
+    wiring.verifier.results("check", &[(137, ""), (0, "")]);
+    let task = wiring.ready_task(&["check"]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert!(payloads(&detail, "resume_started").is_empty());
+    assert!(payloads(&detail, "integration_held").is_empty());
+    assert_eq!(payloads(&detail, "verification_command").len(), 2);
+    assert_eq!(payloads(&detail, "container_oom_diagnostic").len(), 1);
+    assert_eq!(
+        wiring.verification_containers.reads.lock().unwrap().len(),
+        1
+    );
+}
+
+/// Snapshot verification uses the same diagnostic port and event effects;
+/// its failing snapshot still waits instead of accepting the claim.
+#[test]
+fn a_container_snapshot_records_oom_without_accepting_its_failure() {
+    let wiring = Wiring::new(
+        "a_container_snapshot_records_oom_without_accepting_its_failure",
+        Script {
+            receipts: vec![already_satisfied],
+            verdicts: vec![verdict("pass", "fine")],
+        },
+    );
+    wiring
+        .verification_containers
+        .enabled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    *wiring.verification_containers.state.lock().unwrap() =
+        crate::domain::run_container::oom::OomState::Observed;
+    wiring.verifier.set_in_container(true);
+    wiring
+        .verifier
+        .results("test -f seed.txt", &[(1, "snapshot failed")]);
+    let task = wiring.ready_task(&["test -f seed.txt"]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    assert_eq!(payloads(&detail, "container_oom_diagnostic").len(), 1);
+    assert_eq!(payloads(&detail, "container_oom_attention").len(), 1);
+    assert!(payloads(&detail, "run_satisfied_closed").is_empty());
+    assert_eq!(
+        wiring.verification_containers.reads.lock().unwrap().len(),
+        1
+    );
+}
+
+/// A waiting container run's landing recheck shares verification's OOM
+/// reader and diagnostics while a killed check still judges no code.
+#[test]
+fn a_container_landing_recheck_records_oom_and_keeps_its_existing_verdict() {
+    let wiring = Wiring::new(
+        "a_container_landing_recheck_records_oom_and_keeps_its_existing_verdict",
+        Script {
+            receipts: vec![succeeded],
+            verdicts: vec![verdict("concern", "a person should look")],
+        },
+    );
+    let task = wiring.ready_task(&[]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    super::harness::connect(&wiring.db)
+        .execute(
+            "UPDATE task_runs SET worktree_path=?1 WHERE id=?2",
+            rusqlite::params![
+                format!("/wiring/queue/clones/{}", run.id()),
+                run.id().as_str()
+            ],
+        )
+        .unwrap();
+    wiring.git.allow_clean_merges();
+    wiring.git.move_main();
+    wiring
+        .verifier
+        .set_config("[recheck]\ncommand = 'recheck-command'\n");
+    wiring.verifier.set_in_container(true);
+    wiring
+        .verification_containers
+        .enabled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    *wiring.verification_containers.state.lock().unwrap() =
+        crate::domain::run_container::oom::OomState::Observed;
+    wiring.verifier.results("recheck-command", &[(137, "")]);
+    wiring.supervise_once();
+    let detail = wiring.queue().show(task).unwrap();
+    assert_eq!(
+        detail.runs[0].status(),
+        RunStatus::AwaitingIntegration,
+        "{:?}",
+        detail.events
+    );
+    let diagnostics = payloads(&detail, "container_oom_diagnostic");
+    assert_eq!(diagnostics.len(), 1, "{:?}", detail.events);
+    assert_eq!(diagnostics[0]["command"], "recheck-command");
+    assert_eq!(diagnostics[0]["failure"]["class"], "killed");
+    assert!(
+        diagnostics[0]["fact"]
+            .as_str()
+            .unwrap()
+            .contains("container の cgroup で OOM の事態が起きた")
+    );
+    assert_eq!(payloads(&detail, "container_oom_attention").len(), 1);
+    assert_eq!(
+        payloads(&detail, "landing_recheck_failed")[0]["action"],
+        "skipped"
+    );
+}

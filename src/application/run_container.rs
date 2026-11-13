@@ -142,6 +142,17 @@ impl RunningContainer {
 
 /// The containers of the runs of one queue in the dagq machine.
 pub trait RunContainers: Send + Sync {
+    /// Read the ended turn's died event through the shared Podman adapter.
+    fn turn_oom(
+        &self,
+        run: &RunId,
+        since: i64,
+        memory_mib: u64,
+    ) -> crate::domain::run_container::oom::OomObservation {
+        let _ = since;
+        crate::domain::run_container::oom::OomObservation::unreadable(run.as_str(), memory_mib)
+    }
+
     /// Make what a turn of `run` needs ready: the dagq machine running
     /// with the run as a user, the image built, the run's relay open, its
     /// build output volume made (when `dagq.toml` names its directory) and
@@ -319,6 +330,22 @@ pub struct PreparedVerification {
 /// 1 and 4, ADR-t2179-1 decisions 7 and 8): what makes a verification's
 /// parts ready, starts its commands' containers and removes what it left.
 pub trait VerificationContainers: Send + Sync {
+    /// Control-side time immediately before starting a container. The fake
+    /// port needs no wall clock; real adapters use Unix milliseconds.
+    fn oom_since(&self) -> i64 {
+        0
+    }
+    /// Read the ended named container, retaining the configured limit.
+    fn read_oom(
+        &self,
+        container: &str,
+        since: i64,
+        memory_mib: u64,
+    ) -> crate::domain::run_container::oom::OomObservation {
+        let _ = since;
+        crate::domain::run_container::oom::OomObservation::unreadable(container, memory_mib)
+    }
+
     /// Make the parts of a verification of `run`'s commit `commit` ready:
     /// the dagq machine, the image, the run's relay and the verification's
     /// own build output volume (when `dagq.toml` names its directory); a
@@ -470,6 +497,7 @@ pub struct PodmanActorExecutor<'a> {
     containers: &'a dyn RunContainers,
     sccache: Option<SccacheRecords<'a>>,
     memory: Option<MemoryRecords<'a>>,
+    oom_limit: Option<&'a dyn Fn(u64)>,
 }
 
 /// Where the executor records the wait of a turn's container for the dagq
@@ -532,7 +560,15 @@ impl<'a> PodmanActorExecutor<'a> {
             containers,
             sccache: None,
             memory: None,
+            oom_limit: None,
         }
+    }
+
+    /// Retain the limit actually passed to this turn's --memory for its
+    /// later diagnostic, even if host.toml changes while the turn runs.
+    pub fn with_oom_limit(mut self, record: &'a dyn Fn(u64)) -> Self {
+        self.oom_limit = Some(record);
+        self
     }
 
     /// Record the wait of the turn's container for the dagq machine's
@@ -761,6 +797,9 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
             .spawner
             .spawn(&podman, Streams::Files { stdout, stderr })
             .map_err(|error| anyhow!("start the run's container with podman: {error:#}"))?;
+        if let Some(record) = self.oom_limit {
+            record(prepared.limits.memory_mib);
+        }
         // Held by the container now: the turn's end removes both.
         reserved.started = true;
         if let Err(error) = self.containers.memory_started(run.id()) {
@@ -1054,6 +1093,63 @@ fn sccache_variables(
     })
 }
 
+/// Apply diagnostic effects after classification, never returning a
+/// diagnostic failure to verification's policy. A failed history read or
+/// write is recorded as unreadable when storage permits; a persistent
+/// storage failure is logged. The original observation's annotation is
+/// retained even when its bookkeeping fails. Neither failure changes the
+/// command's class or retry/hold path. Writes are never held for replay,
+/// so a diagnostic cannot add a pending write to verification's path.
+pub fn record_verification_oom(
+    events: &dyn super::EventStore,
+    run: &RunId,
+    observation: &crate::domain::run_container::oom::OomObservation,
+    command: &str,
+    failure: &crate::domain::verify_failure::VerifyFailure,
+) -> Option<String> {
+    verification_oom_effects(
+        observation,
+        command,
+        failure,
+        || {
+            Ok(events
+                .run_events(run)?
+                .iter()
+                .any(|event| event.kind == EventKind::ContainerOomAttention))
+        },
+        |kind, payload| events.record_runtime_event_now(run, kind, payload),
+    )
+}
+
+fn verification_oom_effects(
+    observation: &crate::domain::run_container::oom::OomObservation,
+    command: &str,
+    failure: &crate::domain::verify_failure::VerifyFailure,
+    history: impl FnOnce() -> Result<bool>,
+    mut record: impl FnMut(EventKind, serde_json::Value) -> Result<()>,
+) -> Option<String> {
+    use crate::domain::run_container::oom::{self, OomState};
+    let annotation = observation.text();
+    let applied = (|| -> Result<()> {
+        let diagnostic = oom::verification(observation, command, failure, history()?);
+        record(EventKind::ContainerOomDiagnostic, diagnostic.event.clone())?;
+        if diagnostic.attention {
+            record(EventKind::ContainerOomAttention, diagnostic.event)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = applied {
+        tracing::warn!("container OOM diagnostic unavailable: {error:#}");
+        let mut unreadable = observation.clone();
+        unreadable.state = OomState::Unreadable(format!("OOM diagnostic unavailable: {error:#}"));
+        let diagnostic = oom::verification(&unreadable, command, failure, true);
+        if let Err(error) = record(EventKind::ContainerOomDiagnostic, diagnostic.event) {
+            tracing::warn!("could not record unreadable container OOM diagnostic: {error:#}");
+        }
+    }
+    annotation
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1145,5 +1241,73 @@ mod tests {
             sccache_variables(&refused, run_dir, "t1").unwrap(),
             [("SCCACHE_ERROR_LOG".to_owned(), REFUSED_ERROR_LOG.to_owned())]
         );
+    }
+    #[test]
+    fn diagnostic_history_and_recording_failures_are_unreadable_without_propagation() {
+        use crate::domain::run_container::oom::{OomObservation, OomState};
+        use crate::domain::verify_failure::{FailureClass, VerifyFailure};
+        let observation = OomObservation {
+            state: OomState::Observed,
+            container: "c".into(),
+            memory_mib: 123,
+            machine_memory_mib: None,
+        };
+        let failure = VerifyFailure {
+            class: FailureClass::Killed,
+            evidence: "exit 137".into(),
+            profile: None,
+        };
+        // History, diagnostic write, attention write, persistent storage failure.
+        for (history_fails, fail_at, persistent, attempts) in [
+            (true, 0, false, 1),
+            (false, 1, false, 2),
+            (false, 2, false, 3),
+            (false, 1, true, 2),
+        ] {
+            let mut written = Vec::new();
+            let mut calls = 0;
+            let annotation = verification_oom_effects(
+                &observation,
+                "check",
+                &failure,
+                || {
+                    if history_fails {
+                        bail!("history unreadable");
+                    }
+                    Ok(false)
+                },
+                |kind, payload| {
+                    calls += 1;
+                    if persistent || calls == fail_at {
+                        bail!("record unavailable");
+                    }
+                    written.push((kind, payload));
+                    Ok(())
+                },
+            );
+            assert!(
+                annotation
+                    .unwrap()
+                    .contains("container の cgroup で OOM の事態が起きた")
+            );
+            assert_eq!(calls, attempts);
+            if !persistent {
+                let (kind, event) = written.last().unwrap();
+                assert_eq!(*kind, EventKind::ContainerOomDiagnostic);
+                assert_eq!(event["oom"], "unreadable");
+                assert!(
+                    event["unreadable"]
+                        .as_str()
+                        .unwrap()
+                        .contains("unavailable")
+                );
+                assert_eq!(event["failure"]["class"], "killed");
+                assert!(
+                    !written
+                        .iter()
+                        .any(|(kind, _)| *kind == EventKind::ContainerOomAttention)
+                );
+            }
+        }
     }
 }

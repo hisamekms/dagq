@@ -59,6 +59,11 @@ json_text() {{ printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }}
 # test's process may have (a worker's `[run.env]`).
 unset RUSTC_WRAPPER SCCACHE_ERROR_LOG SCCACHE_DIR SCCACHE_SERVER_PORT SCCACHE_IDLE_TIMEOUT DAGQ_SCCACHE_PROGRAM DAGQ_SCCACHE_GATE DAGQ_SCCACHE_TURN
 case "$1" in
+events)
+  # M5 formats the died record's optional field: true or absent.
+  # This models the output shape, not whether Podman misses events.
+  if [ -f "$S/died-oom" ]; then printf 'died:true\n'; else printf 'died:\n'; fi
+  ;;
 rm) eval "name=\${{$#}}"; rm -f "$S/containers/$name" ;;
 volume)
   case "$2" in

@@ -144,6 +144,7 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
     fs::write(run_dir.join("leave-notes"), "").unwrap();
     let state = dir.path().join("podman");
     let containers = containers(&state, &db, &repo);
+    fs::write(state.join("died-oom"), "").unwrap();
     let provider = dagq::infrastructure::adapters::ClaudeCode {
         executable: PathBuf::from("/nonexistent/claude-on-the-host"),
     };
@@ -340,6 +341,27 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
         .filter(|event| event.kind == EventKind::TurnFinished)
         .map(|event| &event.payload)
         .collect();
+    let oom: Vec<_> = detail
+        .events
+        .iter()
+        .filter(|e| e.kind.as_str() == "container_oom_diagnostic")
+        .collect();
+    assert_eq!(oom.len(), 2, "{:?}", detail.events);
+    for event in oom {
+        assert_eq!(event.payload["memory_mib"], 2048);
+        assert!(
+            event.payload["fact"]
+                .as_str()
+                .unwrap()
+                .contains("container の cgroup で OOM の事態が起きた")
+        );
+        assert!(
+            event.payload["possible_causes"]
+                .as_str()
+                .unwrap()
+                .contains("machine 全体のメモリ不足")
+        );
+    }
     assert_eq!(finished.len(), 2, "{:?}", detail.events);
     for turn in &finished {
         assert_eq!(turn["outcome"], "succeeded", "{turn}");
@@ -356,6 +378,21 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
     assert_eq!(receipt["commit"], head);
     let removed = format!("--connection dagq rm --force --ignore --time 0 {container}");
     let calls = calls(&state);
+    let events: Vec<_> = calls
+        .iter()
+        .filter(|call| call.starts_with("--connection dagq events "))
+        .collect();
+    assert_eq!(events.len(), 2, "{calls:?}");
+    for event in events {
+        assert!(
+            event.contains(&format!("--filter container={container}")),
+            "{event}"
+        );
+        assert!(
+            event.contains("--filter event=died --format died:{{.OOMKilled}}"),
+            "{event}"
+        );
+    }
     assert_eq!(
         calls.iter().filter(|call| **call == removed).count(),
         2,

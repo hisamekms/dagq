@@ -542,6 +542,12 @@ fn a_verification_set_to_the_container_runs_its_commands_there_and_leaves_nothin
     assert!(
         !calls
             .lines()
+            .any(|call| call.starts_with("--connection dagq events ")),
+        "{calls}"
+    );
+    assert!(
+        !calls
+            .lines()
             .any(|call| call.starts_with("--connection dagq exec ")),
         "{calls}"
     );

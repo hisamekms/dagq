@@ -285,6 +285,28 @@ impl PodmanRunContainers {
 }
 
 impl RunContainers for PodmanRunContainers {
+    fn turn_oom(
+        &self,
+        run: &RunId,
+        since: i64,
+        memory_mib: u64,
+    ) -> crate::domain::run_container::oom::OomObservation {
+        let name = self
+            .key()
+            .and_then(|key| key.run_container(run.as_str()).map_err(anyhow::Error::msg));
+        match name {
+            Ok(name) => read_oom(&self.podman, &name, since, memory_mib),
+            Err(why) => {
+                let mut o = crate::domain::run_container::oom::OomObservation::unreadable(
+                    run.as_str(),
+                    memory_mib,
+                );
+                o.state = crate::domain::run_container::oom::OomState::Unreadable(why.to_string());
+                o
+            }
+        }
+    }
+
     fn prepare(&self, run: &TaskRun) -> Result<PreparedRun> {
         let queue_dir = queue_dir_of(&self.db);
         let checkout = self
@@ -1008,6 +1030,18 @@ impl PodmanVerificationContainers {
 }
 
 impl VerificationContainers for PodmanVerificationContainers {
+    fn oom_since(&self) -> i64 {
+        super::podman_machine::unix_now_ms()
+    }
+    fn read_oom(
+        &self,
+        container: &str,
+        since: i64,
+        memory_mib: u64,
+    ) -> crate::domain::run_container::oom::OomObservation {
+        read_oom(&self.podman, container, since, memory_mib)
+    }
+
     fn prepare(
         &self,
         run: &TaskRun,
@@ -1291,6 +1325,39 @@ pub fn load_container_limits(host_wide: Option<&Path>) -> (ContainerLimits, Vec<
             ContainerLimits::default(),
             vec![format!("read {}: {error}", path.display())],
         ),
+    }
+}
+
+/// The single process boundary for turn, verification and recheck OOM
+/// reads (M5). A finite --until prevents streaming; the process deadline
+/// also bounds an unavailable machine. --rm remains on every run.
+pub fn read_oom(
+    podman: &PodmanCli,
+    container: &str,
+    since: i64,
+    memory_mib: u64,
+) -> crate::domain::run_container::oom::OomObservation {
+    use crate::domain::run_container::oom::{OomObservation, OomState, events_args, read_events};
+    let args = events_args(container, since, super::podman_machine::unix_now_ms());
+    let state = match podman.inside_within(&args, std::time::Duration::from_secs(10)) {
+        Ok(Some(output)) => read_events(
+            output.status.success(),
+            &String::from_utf8_lossy(&output.stdout),
+        ),
+        Ok(None) => OomState::Unreadable("podman events timed out".into()),
+        Err(error) => OomState::Unreadable(format!("podman events: {error:#}")),
+    };
+    let machine = super::podman_machine::PodmanCliWithin {
+        podman: podman.clone(),
+        limit: std::time::Duration::from_secs(10),
+    };
+    let machine_memory_mib =
+        crate::application::podman_machine::MachineMemory::memory_mib(&machine).ok();
+    OomObservation {
+        state,
+        container: container.into(),
+        memory_mib,
+        machine_memory_mib,
     }
 }
 

@@ -269,6 +269,24 @@ pub fn attention(
             continue;
         }
         let events = queue.run_events(run.id())?;
+        if let Some(event) = events
+            .iter()
+            .rev()
+            .find(|e| e.kind == EventKind::ContainerOomAttention)
+        {
+            attention.push(Attention {
+                run_id: Some(run.id().clone()),
+                task_id: Some(run.task_id()),
+                pid: None,
+                ask_id: None,
+                reason_category: None,
+                status: run.status().as_str().into(),
+                kind: event.kind.to_string(),
+                last_error: event.payload["reason"].as_str().map(truncate_reason),
+                last_error_code: None,
+                next: AttentionNext::CheckMachineMemory,
+            });
+        }
         // A turn or a verification of the run waits for the dagq machine's
         // memory (ADR-t3163-1 decision 4): the runtime's while it is short,
         // the person's once it has gone on long.

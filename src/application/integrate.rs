@@ -450,12 +450,48 @@ pub fn verify_snapshot(
             commands,
             &mut verification.commands,
             |planned, log| {
-                container.run_to_log(
+                let since = container.containers.oom_since();
+                let status = container.run_to_log(
                     verifier,
                     &planned.command,
                     &with_landing_env(&env, planned, &landing_env),
                     log,
-                )
+                );
+                let timed_out = status
+                    .as_ref()
+                    .err()
+                    .and_then(|e| e.downcast_ref::<verify_failure::CommandTimedOut>());
+                let read = status.as_ref().is_ok_and(|exit| {
+                    crate::domain::run_container::oom::should_read(exit.success, exit.code)
+                }) || timed_out.is_some();
+                if read {
+                    let output = files.read_to_string(log).unwrap_or_default();
+                    let failure = match (&status, timed_out) {
+                        (_, Some(timeout)) => timeout.failure(),
+                        (Ok(exit), _) => verify_failure::classify(
+                            &verifier.toolchains().unwrap_or_else(|_| Toolchains::none()),
+                            &planned.command,
+                            exit.code,
+                            exit.signal,
+                            &output,
+                        ),
+                        _ => unreachable!("only a command's failure is diagnosed"),
+                    };
+                    let observation = container.read_oom(since);
+                    if let Some(events) = containers.events {
+                        let annotation = super::run_container::record_verification_oom(
+                            events,
+                            run.id(),
+                            &observation,
+                            &planned.command,
+                            &failure,
+                        );
+                        if let Some(text) = annotation {
+                            let _ = files.write(log, format!("{output}\n{text}\n").as_bytes());
+                        }
+                    }
+                }
+                status
             },
         )?;
         return Ok(verification);
@@ -3157,6 +3193,25 @@ impl<'a> ContainerVerification<'a> {
         Ok(verification)
     }
 
+    fn read_oom(&self, since: i64) -> crate::domain::run_container::oom::OomObservation {
+        use crate::domain::run_container::oom::{OomObservation, OomState};
+        match self
+            .prepared
+            .queue
+            .verification_container(&self.prepared.id)
+        {
+            Ok(name) => self
+                .containers
+                .read_oom(&name, since, self.prepared.limits.memory_mib),
+            Err(why) => {
+                let mut observation =
+                    OomObservation::unreadable(&self.prepared.id, self.prepared.limits.memory_mib);
+                observation.state = OomState::Unreadable(why);
+                observation
+            }
+        }
+    }
+
     /// Run `command` with `env` in the verification's container, its
     /// output in `log`: through `podman` on the host, whose limit for the
     /// whole command is the verifier's. A container an earlier command
@@ -3310,6 +3365,7 @@ struct Checked {
     /// Those of the failed tests the tool ran again and saw pass (task 768).
     flaky_tests: Vec<String>,
     log: PathBuf,
+    oom_annotation: Option<String>,
 }
 
 impl Checked {
@@ -3348,6 +3404,7 @@ impl VerifyStep<'_> {
         let command = self.planned.command.as_str();
         let env: Vec<(String, String)> =
             self.run_env.iter().chain(self.extra_env).cloned().collect();
+        let oom_since = self.container.map(|c| c.containers.oom_since());
         let started = Instant::now();
         let (status, load) = sampled(self.load_average, LOAD_SAMPLE_INTERVAL, || {
             match self.container {
@@ -3389,7 +3446,7 @@ impl VerifyStep<'_> {
                 );
             }
         }
-        let checked = judge_command(
+        let mut checked = judge_command(
             self.toolchains,
             command,
             code,
@@ -3398,6 +3455,28 @@ impl VerifyStep<'_> {
             &output,
             log,
         );
+        if crate::domain::run_container::oom::should_read(checked.failure.is_none(), code)
+            && let (Some(container), Some(since), Some(failure)) =
+                (self.container, oom_since, &checked.failure)
+        {
+            let observation = container.read_oom(since);
+            checked.oom_annotation = super::run_container::record_verification_oom(
+                &*queue,
+                self.run.id(),
+                &observation,
+                command,
+                failure,
+            );
+            if let Some(text) = &checked.oom_annotation {
+                // Append only after classification; the annotation cannot
+                // supply a classifier mark on this command or its retry.
+                let mut annotated = self.files.read(log).unwrap_or_default();
+                annotated.extend_from_slice(format!("\n{text}\n").as_bytes());
+                if let Err(error) = self.files.write(log, &annotated) {
+                    warn!("could not append container OOM diagnostic: {error:#}");
+                }
+            }
+        }
         let exit_code = checked.exit_code;
         if let Some(steps) = self.steps {
             steps.command(
@@ -3499,7 +3578,17 @@ fn judge_command(
         failed_tests,
         flaky_tests,
         log: log.to_path_buf(),
+        oom_annotation: None,
     }
+}
+
+/// Preserve the host's existing payload shape; only a positive container
+/// observation adds the diagnostic to the notice's detail.
+fn oom_detail(mut payload: Value, checked: &Checked) -> Value {
+    if let Some(text) = &checked.oom_annotation {
+        payload["container_oom"] = json!(text);
+    }
+    payload
 }
 
 /// The verdict on the `index`th verification command `command`, which
@@ -3520,20 +3609,27 @@ fn verification_failed(
             failure.class.as_str(),
             failure.evidence,
             last.log.display()
-        ),
+        ) + &last
+            .oom_annotation
+            .as_ref()
+            .map(|s| format!(". {s}"))
+            .unwrap_or_default(),
         detail: Reason::new(ReasonCode::VerificationFailed)
             .with("index", index)
-            .on(json!({
-                "main": main,
-                "head": head,
-                "command": command,
-                "exit_code": last.exit_code,
-                "signal": last.signal,
-                "failure": failure.to_json(),
-                "failed_tests": last.tests_json(),
-                "failed_tests_omitted": last.omitted_json(),
-                "flaky_tests": last.flaky_tests,
-            })),
+            .on(oom_detail(
+                json!({
+                    "main": main,
+                    "head": head,
+                    "command": command,
+                    "exit_code": last.exit_code,
+                    "signal": last.signal,
+                    "failure": failure.to_json(),
+                    "failed_tests": last.tests_json(),
+                    "failed_tests_omitted": last.omitted_json(),
+                    "flaky_tests": last.flaky_tests,
+                }),
+                last,
+            )),
     }
 }
 
@@ -3583,10 +3679,10 @@ fn held(
             failure.class.as_str(),
             failure.evidence,
             run.task_id()
-        ),
+        ) + &last.oom_annotation.as_ref().map(|s| format!(". {s}")).unwrap_or_default(),
         detail: Reason::new(ReasonCode::VerificationEnvironment)
             .with("index", index)
-            .on(json!({
+            .on(oom_detail(json!({
                 "main": main,
                 "head": head,
                 "command": command,
@@ -3598,7 +3694,7 @@ fn held(
                 "first_failure": first.and_then(|first| first.failure.as_ref().map(|failure| failure.to_json())),
                 "first_log_path": first.and_then(|first| first.log.to_str()),
                 "disk": short.map(DiskShort::to_json),
-            })),
+            }), last)),
     }
 }
 

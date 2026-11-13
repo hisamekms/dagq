@@ -182,6 +182,9 @@ workerの実行全体は`application::run_container::PodmanActorExecutor`を入�
 
 ## verificationの実行
 
+終了後OOM→`run_container::read_oom`。
+診断のみ;分類/retry/held/handoff/flaky不変;成功/控え不可;Podman died.OOMKilled≠kill;見逃し得る;読めない≠OOMなし。
+
 `dagq.toml`がverificationをcontainerにしたrunの着地では、rebaseの後の検証のコマンドを1本ずつ、そのverificationのcontainerで流す（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定1）。
 結果・時間・失敗の分類の記録はhostと同じである。
 `integrate`の`ContainerVerification`が流れを持ち、準備・podman・片付けは`application::run_container::VerificationContainers`のport、containerの中は`dagq relay verify`が持つ。

@@ -125,7 +125,8 @@ pub(super) enum Outcome {
 
 /// The verification of a test: each command it is asked to run is
 /// recorded with where it ran and ends as the test says (passing unless
-/// named), its log written empty; the repository's `dagq.toml` is the
+/// named), with scripted exits and logs when supplied; otherwise its log
+/// is empty. The repository's `dagq.toml` is the
 /// defaults' but for its `[roles.<role>]` and `[worker.trial]`, which the
 /// checkout's `dagq.toml` a test sets gives ([`FakeVerifier::set_config`]), and the review's
 /// agents, programs, code paths and revise limit, read from the text a
@@ -136,6 +137,7 @@ pub(super) struct FakeVerifier {
     /// Commands that fail the next time each runs, then pass
     /// ([`FakeVerifier::fail_once`]).
     failing_once: Mutex<Vec<String>>,
+    results: Mutex<HashMap<String, std::collections::VecDeque<(i32, String)>>>,
     ran: Mutex<Vec<(String, PathBuf)>>,
     config: Mutex<String>,
     /// Whether `dagq.toml` sets the verification to the container.
@@ -160,12 +162,20 @@ impl FakeVerifier {
                 .map(|command| (*command).to_owned())
                 .collect(),
             failing_once: Mutex::default(),
+            results: Mutex::default(),
             ran: Mutex::default(),
             config: Mutex::default(),
             in_container: std::sync::atomic::AtomicBool::new(false),
             on_command: Mutex::default(),
             program_missing: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub(super) fn results(&self, command: &str, results: &[(i32, &str)]) {
+        self.results.lock().unwrap().insert(
+            command.into(),
+            results.iter().map(|(c, s)| (*c, (*s).into())).collect(),
+        );
     }
 
     /// The program `[run.env]` names cannot be executed from now on when
@@ -332,6 +342,14 @@ impl Verifier for FakeVerifier {
         Ok(String::new())
     }
 
+    fn recheck_config(&self) -> Result<crate::domain::recheck::RecheckConfig> {
+        Ok(crate::infrastructure::run_env::parse_config(&self.config.lock().unwrap())?.recheck)
+    }
+
+    fn toolchains(&self) -> Result<crate::domain::toolchain::Toolchains> {
+        Ok(crate::domain::toolchain::Toolchains::this_repository())
+    }
+
     fn runtimes(&self) -> Result<crate::domain::container_runtime::RuntimeConfig> {
         let mut runtimes = crate::domain::container_runtime::RuntimeConfig::default();
         if self.in_container.load(std::sync::atomic::Ordering::SeqCst) {
@@ -366,6 +384,16 @@ impl Verifier for FakeVerifier {
         };
         if let Some(hook) = hook {
             hook();
+        }
+        if let Some((code, output)) = self
+            .results
+            .lock()
+            .unwrap()
+            .get_mut(command)
+            .and_then(|r| r.pop_front())
+        {
+            self.files.write(log, output.as_bytes())?;
+            return Ok(exit(code));
         }
         self.files.write(log, b"")?;
         Ok(match self.outcome(command) {
@@ -621,3 +649,88 @@ impl Clock for StoppedClock {
 
 /// The unix second a test's clock stops at: 2026-11-01T00:00:00Z.
 pub(super) const STOPPED_AT: Duration = Duration::from_secs(1_793_491_200);
+
+/// Stateful verification port shared by the wiring's supervisor and direct
+/// integrate. Disabled by default, preserving held-runtime fixtures.
+pub(super) struct FakeVerificationContainers {
+    pub enabled: std::sync::atomic::AtomicBool,
+    pub state: Mutex<crate::domain::run_container::oom::OomState>,
+    pub reads: Mutex<Vec<String>>,
+}
+impl Default for FakeVerificationContainers {
+    fn default() -> Self {
+        Self {
+            enabled: false.into(),
+            state: Mutex::new(crate::domain::run_container::oom::OomState::Absent),
+            reads: Mutex::default(),
+        }
+    }
+}
+impl ContainerRuntime for FakeVerificationContainers {
+    fn availability(&self, target: RuntimeTarget) -> Availability {
+        if self.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+            Availability::Available
+        } else {
+            Nothing.availability(target)
+        }
+    }
+}
+impl VerificationContainers for FakeVerificationContainers {
+    fn prepare(&self, run: &TaskRun, _: &CommitSha, _: &Path) -> Result<PreparedVerification> {
+        anyhow::ensure!(
+            self.enabled.load(std::sync::atomic::Ordering::SeqCst),
+            "no verification container"
+        );
+        let dir = Path::new("/wiring/verification").join(run.id().as_str());
+        Ok(PreparedVerification {
+            id: uuid::Uuid::new_v4().to_string(),
+            queue: crate::domain::podman_machine::QueueKey::new("bbbbbbbbbbbbbbbb").unwrap(),
+            image: "fake".into(),
+            staged: dir.join("staged"),
+            materials: dir.join("materials"),
+            dir,
+            build_output: None,
+            limits: Default::default(),
+        })
+    }
+    fn publish_materials(&self, _: &PreparedVerification) -> Result<()> {
+        Ok(())
+    }
+    fn command_line(&self, args: &[String]) -> String {
+        args.last().unwrap().clone()
+    }
+    fn remove_container(&self, _: &PreparedVerification) -> Result<()> {
+        Ok(())
+    }
+    fn reserve_memory(
+        &self,
+        _: &TaskRun,
+        _: &PreparedVerification,
+        _: &mut dyn FnMut(
+            &crate::domain::machine_memory::MemoryAsk,
+            crate::domain::machine_memory::MemoryNote<'_>,
+        ),
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn finish(&self, _: &PreparedVerification) -> Result<()> {
+        Ok(())
+    }
+    fn remove_left(&self, _: &RunId) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+    fn read_oom(
+        &self,
+        container: &str,
+        _: i64,
+        memory_mib: u64,
+    ) -> crate::domain::run_container::oom::OomObservation {
+        self.reads.lock().unwrap().push(container.into());
+        crate::domain::run_container::oom::OomObservation {
+            state: self.state.lock().unwrap().clone(),
+            container: container.into(),
+            memory_mib,
+            machine_memory_mib: Some(8192),
+        }
+    }
+}

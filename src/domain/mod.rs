@@ -2831,6 +2831,7 @@ impl Serialize for AttentionNext {
 /// public contract (ADR-0016); whether one of these events is an attention
 /// also depends on its payload, see [`event_attention`].
 pub const ATTENTION_KINDS: &[&str] = &[
+    "container_oom_attention",
     "validation_finished",
     "supervision_finished",
     "integration_deferred",
@@ -3202,7 +3203,9 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         // A container waited past the long mark for the dagq machine's
         // memory (ADR-t3163-1 decision 4): the machine or a limit is too
         // small for the work, or a container does not end.
-        (Some(EventKind::ContainerMemoryWaitLong), _) => Some(AttentionNext::CheckMachineMemory),
+        (Some(EventKind::ContainerMemoryWaitLong | EventKind::ContainerOomAttention), _) => {
+            Some(AttentionNext::CheckMachineMemory)
+        }
         // The means to read the CI went away (ADR-t1920-1 decision 2); its
         // return is no attention.
         (Some(EventKind::CiWatchUnavailable), _) => Some(ci_watch::Unavailable::next_of(

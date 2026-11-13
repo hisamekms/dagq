@@ -1176,6 +1176,9 @@ impl<'a> Turns<'a> {
                 Ok(None) | Err(_) => None,
             }
         };
+        let oom_since = super::unix_millis(self.clock.system_time());
+        let oom_memory = std::cell::Cell::new(None);
+        let retain_limit = |memory| oom_memory.set(Some(memory));
         let spawned = match in_container {
             Some(_) => {
                 let containers = self
@@ -1191,6 +1194,7 @@ impl<'a> Turns<'a> {
                     service,
                     containers,
                 )
+                .with_oom_limit(&retain_limit)
                 .with_sccache_records(super::run_container::SccacheRecords {
                     events,
                     at: i64::try_from(unix_secs(self.clock)).unwrap_or(i64::MAX),
@@ -1247,6 +1251,22 @@ impl<'a> Turns<'a> {
                 Err(error)
             }
         };
+        if !*child_may_be_alive
+            && let (Some(run), Some(containers), Some(memory)) =
+                (in_container, self.containers, oom_memory.get())
+        {
+            let observation = containers.turn_oom(run.id(), oom_since, memory);
+            if let Some(mut payload) = crate::domain::run_container::oom::turn(&observation) {
+                payload["turn"] = serde_json::json!(turn);
+                if let Err(error) = self.queue.as_events().record_agent_event(
+                    Some(run.id()),
+                    crate::domain::EventKind::ContainerOomDiagnostic,
+                    payload,
+                ) {
+                    tracing::warn!(run_id = %run.id(), "could not record turn OOM diagnostic: {error:#}");
+                }
+            }
+        }
         // A container outlives its `podman` that was stopped: it is
         // removed at every turn's end, however the turn ended.
         if let (Some(run), Some(containers)) = (in_container, self.containers)

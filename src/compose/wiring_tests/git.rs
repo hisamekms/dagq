@@ -76,6 +76,7 @@ struct State {
     /// The paths the next merge of a run's head with a main other than the
     /// one named conflicts on, once ([`FakeGit::conflict_once_main_moves`]).
     conflict_next_merge: Option<(Vec<String>, CommitSha)>,
+    merge_clean: bool,
 }
 
 /// The repository in memory, its main checkout at `checkout`; clones share
@@ -114,6 +115,7 @@ impl FakeGit {
                 messages: HashMap::new(),
                 refs: HashMap::new(),
                 conflict_next_merge: None,
+                merge_clean: false,
             })),
         }
     }
@@ -122,6 +124,10 @@ impl FakeGit {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn allow_clean_merges(&self) {
+        self.lock().merge_clean = true;
     }
 
     /// Every commit holds `files` (path and text), and every range
@@ -633,17 +639,23 @@ impl Repository for FakeGit {
         Ok(Vec::new())
     }
 
-    /// The conflict a test asked for, once main moved
-    /// ([`FakeGit::conflict_once_main_moves`]); otherwise no tree is merged,
-    /// as a repository that cannot (the landing recheck cannot judge the
-    /// run).
+    fn guarded(&self) -> Result<Box<dyn Repository + Send + Sync>> {
+        Ok(Box::new(self.clone()))
+    }
+
+    /// The requested conflict once main moves, or a clean merge when the
+    /// test enabled it; otherwise this fake cannot merge a tree.
     fn merged_tree(&self, main: &str, _: &str) -> Result<std::result::Result<String, Vec<String>>> {
         let mut state = self.lock();
         match state.conflict_next_merge.take() {
             Some((paths, before)) if before.as_str() != main => Ok(Err(paths)),
             unmoved => {
                 state.conflict_next_merge = unmoved;
-                bail!("the wiring test's repository merges no tree")
+                if state.merge_clean {
+                    Ok(Ok(format!("merged tree on {main}")))
+                } else {
+                    bail!("the wiring test's repository merges no tree")
+                }
             }
         }
     }

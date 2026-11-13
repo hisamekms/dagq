@@ -23,7 +23,8 @@ use super::{
     agent::{FakeAgent, Script},
     git::FakeGit,
     host::{
-        FakeProcesses, FakeVerifier, MemoryVerificationTokens, Nothing, STOPPED_AT, StoppedClock,
+        FakeProcesses, FakeVerificationContainers, FakeVerifier, MemoryVerificationTokens, Nothing,
+        STOPPED_AT, StoppedClock,
     },
     service::{MemoryBackend, MemoryTokens},
     session::FakeSessions,
@@ -140,6 +141,7 @@ pub(super) struct Wiring {
     /// Keeps the test's memdb queue while the test runs.
     _memdb: Connection,
     deadline: Instant,
+    tick: Duration,
     generators: Generators,
     pid: u32,
     /// Whether the supervisor also runs Codex headless workers and jobs
@@ -167,6 +169,7 @@ pub(super) struct Wiring {
     /// Where the supervisor pauses for the test ([`supervise::Ports::pauses`]);
     /// nowhere by default.
     pauses: Option<supervise::Pauses>,
+    pub(super) verification_containers: Arc<FakeVerificationContainers>,
     pub(super) files: Arc<MemoryFiles>,
     pub(super) git: FakeGit,
     pub(super) agent: Arc<FakeAgent>,
@@ -227,9 +230,11 @@ impl Wiring {
         Self {
             name: name.to_owned(),
             verifier: Arc::new(FakeVerifier::new(files.clone(), &[])),
+            verification_containers: Arc::default(),
             db,
             _memdb: memdb,
             deadline,
+            tick: TICK,
             generators,
             pid,
             codex: false,
@@ -260,6 +265,13 @@ impl Wiring {
             supervisor_file: None,
             repository_startup_file: None,
         }
+    }
+
+    /// Polling interval of this wiring's supervisor; its overall deadline
+    /// is unchanged. Other tests retain their defaults.
+    pub(super) fn with_tick(mut self, tick: Duration) -> Self {
+        self.tick = tick;
+        self
     }
 
     /// Drive bounded, clock-controlled passes while counting this queue's reads.
@@ -321,7 +333,7 @@ impl Wiring {
             queue: &mut queue,
             repository: &self.git,
             verifier: &*self.verifier,
-            container: &Nothing,
+            container: &*self.verification_containers,
             remote: Some(&self.git),
             files: &*self.files,
             common_dir: "/wiring/repo/.git",
@@ -334,7 +346,7 @@ impl Wiring {
             retry_disk: None,
             sccache: None,
             verification_tokens: &MemoryVerificationTokens::default(),
-            verification_containers: &Nothing,
+            verification_containers: &*self.verification_containers,
             heavy_turn: None,
             steps: None,
             handing_off: None,
@@ -769,6 +781,20 @@ impl Wiring {
         self.supervise(false, None)
     }
 
+    /// Drain once the named verification command starts, leaving a code
+    /// failure ready for the worker without running an unrelated resume.
+    pub(super) fn supervise_until_command(&self, command: &str) -> Value {
+        let stop = Arc::new(AtomicBool::new(false));
+        let requested = stop.clone();
+        self.verifier.on_command(
+            command,
+            Box::new(move || requested.store(true, std::sync::atomic::Ordering::SeqCst)),
+        );
+        let outcome = self.supervise_with(stop, None);
+        assert_eq!(outcome["errors"], serde_json::json!([]), "{outcome}");
+        outcome
+    }
+
     /// [`Self::supervise_once`] whose outcome may name the errors of the
     /// runs it went on past (a resume that could not start), or the error
     /// the supervisor stopped on (`supervisor_failed`), which the caller
@@ -839,6 +865,7 @@ impl Wiring {
         let supervisor = {
             let parts = Parts {
                 service: self.service(),
+                tick: self.tick,
                 db: self.db.clone(),
                 pid: self.pid,
                 codex: self.codex,
@@ -857,6 +884,7 @@ impl Wiring {
                 git: self.git.clone(),
                 agent: self.agent.clone(),
                 verifier: self.verifier.clone(),
+                verification_containers: self.verification_containers.clone(),
                 processes: self.processes.clone(),
                 tokens: self.tokens.clone(),
                 sessions: self.sessions.clone(),
@@ -929,6 +957,7 @@ impl Wiring {
 
 /// What the supervisor's thread builds its ports of.
 struct Parts {
+    tick: Duration,
     service: Arc<dyn ServiceCaller>,
     db: PathBuf,
     pid: u32,
@@ -949,6 +978,7 @@ struct Parts {
     git: FakeGit,
     agent: Arc<FakeAgent>,
     verifier: Arc<FakeVerifier>,
+    verification_containers: Arc<FakeVerificationContainers>,
     processes: Arc<FakeProcesses>,
     tokens: Arc<MemoryTokens>,
     sessions: Arc<FakeSessions>,
@@ -1045,10 +1075,10 @@ impl Parts {
             repository: Arc::new(self.git.clone()),
             remote: Arc::new(self.git.clone()),
             verifier: self.verifier.clone(),
-            container: Arc::new(Nothing),
+            container: self.verification_containers.clone(),
             run_containers: Arc::new(Nothing),
             verification_tokens: Arc::new(MemoryVerificationTokens::default()),
-            verification_containers: Arc::new(Nothing),
+            verification_containers: self.verification_containers.clone(),
             sessions: &*self.sessions,
             workers,
             reviewer: agent as &dyn AgentProvider,
@@ -1122,6 +1152,8 @@ impl Parts {
                 self.passes,
             )
         };
+        settings.tick = self.tick;
+        settings.idle_poll = self.tick;
         settings.handoff_token = self.handoff;
         settings.provider_fallback.jobs = self.job_fallback;
         settings.review_jobs.concurrency = self.review_concurrency;

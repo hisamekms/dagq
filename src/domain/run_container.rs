@@ -24,6 +24,8 @@
 //!
 //! [Container runtime]: ../../docs/design/container-runtime.md
 
+pub mod oom;
+
 use std::path::{Path, PathBuf};
 
 use super::broker_relay::{CONTAINER_UID, FORWARD_PORT, container_env, run_socket_mount};

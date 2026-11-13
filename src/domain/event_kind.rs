@@ -186,6 +186,8 @@ event_kinds! {
     ContainerMemoryWaitEnded => "container_memory_wait_ended",
     ContainerMemoryWaitLong => "container_memory_wait_long",
     ContainerMemoryWaiting => "container_memory_waiting",
+    ContainerOomAttention => "container_oom_attention",
+    ContainerOomDiagnostic => "container_oom_diagnostic",
     ContainerRuntimeAvailable => "container_runtime_available",
     ContainerRuntimeUnavailable => "container_runtime_unavailable",
     CredentialPreferenceChanged => "credential_preference_changed",
@@ -1722,6 +1724,11 @@ mod tests {
             (
                 EventKind::ConflictsConfigChanged,
                 "conflicts_config_changed",
+            ),
+            (EventKind::ContainerOomAttention, "container_oom_attention"),
+            (
+                EventKind::ContainerOomDiagnostic,
+                "container_oom_diagnostic",
             ),
             (EventKind::ContainerImageBuilt, "container_image_built"),
             (EventKind::ContainerImageFailed, "container_image_failed"),
