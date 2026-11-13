@@ -60,7 +60,8 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     let mut options = install_options(Source::Binary("/built/dagq".into()));
     options.allow_breaking = true;
     // The new build's service finds the queue still in use after the
-    // drain: it applies nothing, and nothing is replaced or started.
+    // drain: it applies nothing and replaces nothing. Recovery tries the
+    // old service too; this fake refuses both starts, so no up is attempted.
     let refused = FakeBinaries::new(&[(27, true), (28, false)], false);
     *refused.serve_refuses.lock().unwrap() =
         Some("migrate refuses breaking migration(s) 28 while the queue is in use".into());
@@ -75,7 +76,16 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     assert!(error.contains("while the queue is in use"), "{error}");
     assert_eq!(
         refused.calls(),
-        ["probe /built/dagq", "serve /built/dagq breaking"]
+        [
+            "probe /built/dagq",
+            "serve /built/dagq breaking",
+            "serve /opt/bin/dagq"
+        ]
+    );
+    assert!(error.contains("service: failed:"), "{error}");
+    assert!(
+        error.contains("supervisor: failed: not attempted"),
+        "{error}"
     );
     assert_eq!(*drained.lock().unwrap(), 1);
     *drained.lock().unwrap() = 0;

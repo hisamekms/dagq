@@ -88,7 +88,9 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    全員の失敗で戻したときのほかは、`<to>`のpathをqueueのbinaryとして記録する（6のdrainも置き換えの後に記録する）。
    引き継ぎの要求と取り下げは`up`のものと違い、要求を送るプロセスの実行fileでなく置いた`<to>`を名指す（`service.install`を持つprincipalは固定バイナリを置き換えられる）。
    全員の失敗と一部の失敗は、CLIでは7の`update_failed`の経路を通る。
-6. **drain**（決定14）: 人が非互換のmigrationを許したとき、liveな登録があれば`down --wait`（serviceを通る。serviceが答えなければ止めるものは無いとし、使用中の判定は下のserviceに任せる）で止め（同じqueueのDBを持つ別のlabelのagentも外す。[up / down](up-down.md)の`down`）、元のserviceを非互換も適用してよい入れ替えの口で起動し（使用中のsupervisor・run・wrapperが無いことの判定と`backups/`への複製と適用を1つのtransactionで行う。使用中のものが残れば適用せず受け付けず、何も置き換えずにerrorで止まる）、置き換えて`<to>`のserviceを起動し直し、新しいbinaryの`up`で起動し直す（`--claude`と`--codex`の解決は[Provider executables](../provider-executables.md)）。
+6. **drain**（決定14）: 人が非互換のmigrationを許したとき、liveな登録があれば`down --wait`（serviceを通る。serviceが答えなければ止めるものは無いとし、使用中の判定は下のserviceに任せる）で止め（同じqueueのDBを持つ別のlabelのagentも外す。[up / down](up-down.md)の`down`）、元のserviceを非互換も適用してよい入れ替えの口で起動し（使用中のsupervisor・run・wrapperが無いことの判定と`backups/`への複製と適用を1つのtransactionで行う。使用中のものが残れば適用せず受け付けない）、置き換えて`<to>`のserviceを起動し直し、新しいbinaryの`up`で起動し直す（`--claude`と`--codex`の解決は[Provider executables](../provider-executables.md)）。
+   置き換えの前に非互換のmigrationが拒まれるか失敗したら、旧binaryのserviceが答えなければ起こし、止めた登録があれば同じ引数で旧binaryのsupervisorを起こし直してからerrorで止まる。
+   serviceの起動に失敗したらsupervisorは起こさず、errorは元の理由とservice・supervisorそれぞれの復旧結果を残す。
    止めた登録がin-cmuxでもlaunchd modeで起動する（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
    止めた登録がflagで与えた値（[claimを控える](claim-hold.md)loadの上限を含む）は起動し直す`up`に同じflagで渡るので、drainの後に`up`を打ち直す必要はない（どの値をどう引き継ぐかは`install_breaking`のdoc comment）。
    drainは7の見張りの対象外: 前のbinaryは非互換のmigrationの後のDBを開けないので戻せず、supervisorの起動し直しは上の`up`が行う（その`up`の失敗はerrorで止まる）。

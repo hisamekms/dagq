@@ -89,6 +89,8 @@ pub(crate) struct InstallSteps {
     pub(crate) handoff: Handoff,
     pub(crate) restart_failures: std::sync::atomic::AtomicUsize,
     pub(crate) in_place: bool,
+    pub(crate) breaking_failure: Option<String>,
+    pub(crate) up_fails: bool,
     pub(crate) unsupported_job: Option<PathBuf>,
     pub(crate) previous_version: Option<String>,
     pub(crate) job_checks: std::sync::Mutex<Vec<PathBuf>>,
@@ -118,6 +120,8 @@ impl Default for InstallSteps {
             handoff: Handoff::Taken,
             restart_failures: std::sync::atomic::AtomicUsize::new(0),
             in_place: false,
+            breaking_failure: None,
+            up_fails: false,
             unsupported_job: None,
             previous_version: None,
             job_checks: Default::default(),
@@ -180,7 +184,15 @@ impl Binaries for InstallSteps {
         Ok(self.schema.clone())
     }
     fn serve(&self, binary: &Path, _: &Path, breaking: bool) -> Result<Value> {
-        assert!(!breaking);
+        if breaking {
+            self.note(format!("serve_breaking {}", binary.display()));
+            if let Some(reason) = &self.breaking_failure {
+                bail!("{reason}");
+            }
+            self.service_running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return Ok(json!({"applied": 1}));
+        }
         use std::sync::atomic::Ordering::SeqCst;
         if binary == Path::new("/to") && self.binary_restored.load(SeqCst) {
             assert!(!self.hold_active.load(SeqCst));
@@ -231,8 +243,16 @@ impl Binaries for InstallSteps {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-    fn run(&self, _: &Path, _: &[String]) -> Result<Value> {
-        bail!("the compatible install does not drain")
+    fn run(&self, binary: &Path, arguments: &[String]) -> Result<Value> {
+        self.note(format!("run {} {}", binary.display(), arguments.join(" ")));
+        ensure!(
+            self.service_runs(Path::new("/queue")),
+            "up needs the service"
+        );
+        if self.up_fails {
+            bail!("up failed");
+        }
+        Ok(json!({"started": true}))
     }
 }
 

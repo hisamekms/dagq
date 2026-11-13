@@ -1083,7 +1083,8 @@ impl HandoffFailed {
 /// replacement's that may apply breaking migrations (ADR-t3102-2 decision
 /// 2: it judges the queue unused, backs it up and migrates it in one
 /// transaction before it accepts, and a queue still in use is refused and
-/// nothing replaced), replace the binary, start the service again from it,
+/// nothing replaced; restore the old service and drained supervisor on
+/// refusal), replace the binary, start the service again from it,
 /// and start the supervisor again with the new binary's `up`, in the mode
 /// and with the parallelism the drained one had.
 ///
@@ -1128,10 +1129,15 @@ first (it replaces the service), then this install again",
     } else {
         (ports.down)()?
     };
-    let migrated = binaries.serve(source, db, true).with_context(|| {
-        format!(
-            "the supervisor was drained but {version} could not migrate the queue; nothing was \
-replaced, and `up` starts the old binary again"
+    let migrated = binaries.serve(source, db, true).map_err(|cause| {
+        restore_before_replace(
+            ports,
+            db,
+            &live,
+            options,
+            cause.context(format!(
+                "{version} could not migrate the queue; nothing was replaced"
+            )),
         )
     })?;
     binaries.replace(source, &options.target)?;
@@ -1163,6 +1169,87 @@ again"
         report["queue_service"] = service;
     }
     Ok(report)
+}
+
+/// Recover from a refusal before replacing the binary. `target` still
+/// names the old binary. Restore its service before any `up` needs the
+/// queue; reuse an answering service when a caller left it running.
+/// The caller's cause and both recovery outcomes survive in the error.
+fn restore_before_replace(
+    ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
+    db: &Path,
+    live: &[SupervisorRegistration],
+    options: &InstallOptions,
+    cause: anyhow::Error,
+) -> anyhow::Error {
+    let service = if ports.binaries.service_runs(db) {
+        Recovery::AlreadyRunning
+    } else {
+        match ports.binaries.serve(&options.target, db, false) {
+            Ok(_) => Recovery::Started,
+            Err(error) => Recovery::Failed(format!("{error:#}")),
+        }
+    };
+    let supervisor = match recovery_supervisor(&service, !live.is_empty()) {
+        SupervisorRecovery::Start => {
+            let started = path_text(db).and_then(|db| {
+                let arguments = restart_arguments(db, &live[0], live, &options.restart);
+                ports.binaries.run(&options.target, &arguments)
+            });
+            match started {
+                Ok(_) => Recovery::Started,
+                Err(error) => Recovery::Failed(format!("{error:#}")),
+            }
+        }
+        SupervisorRecovery::NotDrained => Recovery::NotDrained,
+        SupervisorRecovery::ServiceFailed => {
+            Recovery::Failed("not attempted because the queue service failed".into())
+        }
+    };
+    let message = format!("{cause:#}; {}", recovery_message(&service, &supervisor));
+    cause.context(message)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Recovery {
+    Started,
+    AlreadyRunning,
+    Failed(String),
+    NotDrained,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SupervisorRecovery {
+    Start,
+    NotDrained,
+    ServiceFailed,
+}
+
+/// A supervisor needs an answering service, and only drained registrations
+/// are restarted. With no drained registration, restore just the service.
+fn recovery_supervisor(service: &Recovery, drained: bool) -> SupervisorRecovery {
+    if !drained {
+        SupervisorRecovery::NotDrained
+    } else if matches!(service, Recovery::Failed(_)) {
+        SupervisorRecovery::ServiceFailed
+    } else {
+        SupervisorRecovery::Start
+    }
+}
+
+/// Keep recovery results separate from the original error's cause chain.
+fn recovery_message(service: &Recovery, supervisor: &Recovery) -> String {
+    let outcome = |result: &Recovery| match result {
+        Recovery::Started => "started".to_owned(),
+        Recovery::AlreadyRunning => "already_running".to_owned(),
+        Recovery::Failed(reason) => format!("failed: {reason}"),
+        Recovery::NotDrained => "not_drained".to_owned(),
+    };
+    format!(
+        "old binary recovery: service: {}; supervisor: {}",
+        outcome(service),
+        outcome(supervisor)
+    )
 }
 
 /// Start the service of the binary put in place at `target` for the queue
@@ -1294,6 +1381,185 @@ mod tests {
     use super::*;
     use crate::application::port_fakes::SupervisorsAndEvents;
     use std::time::UNIX_EPOCH;
+
+    /// Decision cases have literal expectations, independent of the wiring.
+    #[test]
+    fn recovery_requires_a_service_and_a_drained_registration() {
+        for (service, drained, expected) in [
+            (Recovery::Started, true, SupervisorRecovery::Start),
+            (Recovery::AlreadyRunning, true, SupervisorRecovery::Start),
+            (
+                Recovery::Failed("no socket".into()),
+                true,
+                SupervisorRecovery::ServiceFailed,
+            ),
+            (Recovery::Started, false, SupervisorRecovery::NotDrained),
+            (
+                Recovery::Failed("no socket".into()),
+                false,
+                SupervisorRecovery::NotDrained,
+            ),
+        ] {
+            assert_eq!(recovery_supervisor(&service, drained), expected);
+        }
+        for (service, supervisor, expected) in [
+            (
+                Recovery::Started,
+                Recovery::Started,
+                "old binary recovery: service: started; supervisor: started",
+            ),
+            (
+                Recovery::AlreadyRunning,
+                Recovery::Failed("up failed".into()),
+                "old binary recovery: service: already_running; supervisor: failed: up failed",
+            ),
+            (
+                Recovery::Failed("no socket".into()),
+                Recovery::NotDrained,
+                "old binary recovery: service: failed: no socket; supervisor: not_drained",
+            ),
+        ] {
+            assert_eq!(recovery_message(&service, &supervisor), expected);
+        }
+    }
+
+    /// The install entry drains a service-aware queue, then restores the old
+    /// service before up. Direct recovery also supports a service left alive.
+    #[test]
+    fn a_refused_breaking_install_restores_the_old_service_before_up() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        for (drain, service_fails, up_fails, already_running, refuses) in [
+            (true, false, false, false, true),
+            (true, true, false, false, true),
+            (true, false, true, false, true),
+            (false, false, false, false, true),
+            (true, false, false, true, true),
+            // Post-replacement failures keep the installed binary.
+            (true, false, true, false, false),
+        ] {
+            let live = if drain {
+                vec![SupervisorRegistration {
+                    auto_update: true,
+                    max_waiting: Some(3),
+                    runtime_planners: Some(4),
+                    max_load: Some(6.0),
+                    max_load_source: Some(SettingSource::Flag),
+                    ..registration("first", 1, 10_000)
+                }]
+            } else {
+                vec![]
+            };
+            let steps = Arc::new(InstallSteps {
+                registrations: std::sync::Mutex::new(live.clone()),
+                schema: Some(SchemaCheck {
+                    pending: vec![PendingMigration {
+                        version: 117,
+                        compatible: false,
+                    }],
+                    opens: true,
+                }),
+                breaking_failure: refuses.then(|| "queue is in use by run active".into()),
+                restart_failures: AtomicUsize::new(usize::from(service_fails)),
+                up_fails,
+                ..Default::default()
+            });
+            let files = crate::application::memory_files::MemoryFiles::default();
+            files.put(Path::new("/queue"), UNIX_EPOCH, "queue");
+            files.put(Path::new("/to"), UNIX_EPOCH, "old");
+            let queues =
+                |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+            let down = || {
+                steps.note("down");
+                steps.service_running.store(false, SeqCst);
+                // This queue really becomes unreachable after the drain.
+                let error = match queues(Path::new("/queue")).open() {
+                    Ok(_) => panic!("drain must stop the service"),
+                    Err(error) => error,
+                };
+                assert!(super::super::supervisor_service::unreachable(&error));
+                Ok(json!({"drained": true}))
+            };
+            let ports = Ports {
+                binaries: &*steps,
+                files: &files,
+                processes: &OnlyOne,
+                clock: &At(10_000),
+                queues: &queues,
+                down: &down,
+            };
+            let options = InstallOptions {
+                source: Source::Binary("/source".into()),
+                target: "/to".into(),
+                allow_breaking: true,
+                restart: vec!["--max-waiting=9".into()],
+                handoff_timeout: Duration::ZERO,
+                poll: Duration::ZERO,
+                e2e: E2eGate::NotApplicable,
+            };
+            let error = if already_running {
+                restore_before_replace(
+                    &ports,
+                    Path::new("/queue"),
+                    &live,
+                    &options,
+                    anyhow::anyhow!("queue is in use by run active"),
+                )
+            } else {
+                // No live supervisor and no answering service: no down is needed.
+                if !drain {
+                    steps.service_running.store(false, SeqCst);
+                }
+                install(&ports, Some(Path::new("/queue")), &options).unwrap_err()
+            };
+            let text = error.to_string();
+            let mut expected = if already_running {
+                vec![]
+            } else if drain {
+                vec!["open", "down", "open", "serve_breaking /source"]
+            } else {
+                vec!["open", "serve_breaking /source"]
+            };
+            if !already_running {
+                if !refuses {
+                    expected.extend(["replace", "adopt"]);
+                }
+                expected.push("serve /to");
+            }
+            if drain && !service_fails {
+                expected.push("run /to --db /queue up --parallel 2 --auto-update --runtime-planners 4 --max-load 6 --max-waiting=9");
+            }
+            assert_eq!(*steps.calls.lock().unwrap(), expected);
+            if !refuses {
+                assert!(
+                    text.contains("is installed and the queue migrated"),
+                    "{text}"
+                );
+                assert!(!text.contains("old binary recovery"), "{text}");
+                continue;
+            }
+            assert!(text.contains("queue is in use by run active"), "{text}");
+            let service = if already_running {
+                "already_running"
+            } else if service_fails {
+                "failed: restart failed"
+            } else {
+                "started"
+            };
+            let supervisor = if !drain {
+                "not_drained"
+            } else if service_fails {
+                "failed: not attempted because the queue service failed"
+            } else if up_fails {
+                "failed: up failed"
+            } else {
+                "started"
+            };
+            assert!(
+                text.contains(&format!("service: {service}; supervisor: {supervisor}")),
+                "{text}"
+            );
+        }
+    }
 
     /// Every queue of the host takes the one e2e lock in dagq's data
     /// directory, the parent of the queue's directory (ADR-t1233-2
