@@ -147,6 +147,7 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
                 // deployment metadata supplied by the caller.
                 let mut direct = wiring.queue().with_actor(ActorContext::user());
                 let command = QueueCommand::Answer(AnswerParams {
+                    original_text: None,
                     id: ask.id.as_i64(),
                     text: LAND_WITH_A_REASON.into(),
                 });

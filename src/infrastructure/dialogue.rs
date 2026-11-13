@@ -24,6 +24,10 @@ pub struct DialogueQueue<'a, E: TransactionEntries> {
 }
 
 impl<E: TransactionEntries> DenialLog for DialogueQueue<'_, E> {
+    fn record_privileged(&self, payload: Value) -> Result<()> {
+        DenialLog::record_privileged(&*self.queue, payload)
+    }
+
     fn record_denial(&self, payload: Value) -> Result<()> {
         DenialLog::record_denial(&*self.queue, payload)
     }

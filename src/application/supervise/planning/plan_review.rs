@@ -1107,6 +1107,7 @@ impl PlanningState {
                 }
                 Ok(None) => {}
                 Err(error) => {
+                    env.queue.answer_application_failed(answered.id)?;
                     warn!(ask_id = %answered.id, error = %format_args!("{error:#}"), "the answer of ask {} could not be applied: {error:#}", answered.id)
                 }
             }

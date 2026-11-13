@@ -821,6 +821,7 @@ impl<E: TransactionEntries> StoreQueue<E> {
             "UPDATE asks SET closed_at=?2 WHERE id=?1",
             sql_params![id, self.generators.clock.now()],
         )?;
+        super::asks::audit_judgment(&tx, &ask, "applied", None, Some("no_runtime_planner"))?;
         let payload = json!({"ask_id": id, "reason": why});
         if ask.request_id.is_some() {
             super::store_writes::record_queue_event_in(

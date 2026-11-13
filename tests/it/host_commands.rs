@@ -298,6 +298,7 @@ fn each_host_command_runs_through_the_service_as_on_the_db_and_is_refused_a_work
             vec!["answer", "1", "--text", "yes"],
             &inbox,
             QueueCommand::Answer(commands::AnswerParams {
+                original_text: None,
                 id: 1,
                 text: "yes".to_owned(),
             }),
@@ -504,6 +505,7 @@ fn each_host_command_runs_in_client_mode_as_on_the_db() {
         (
             vec!["answer", "1", "--text", "yes"],
             QueueCommand::Answer(commands::AnswerParams {
+                original_text: None,
                 id: 1,
                 text: "yes".to_owned(),
             }),

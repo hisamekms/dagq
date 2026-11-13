@@ -28,6 +28,9 @@ impl<E: TransactionEntries> PlanningStore for StoreQueue<E> {
         super::proposals::owner_actor(&tx, proposal)
     }
 
+    fn record_privileged(&self, payload: Value) -> Result<()> {
+        crate::application::commands::DenialLog::record_privileged(self, payload)
+    }
     fn record_denial(&self, payload: Value) -> Result<()> {
         crate::application::commands::DenialLog::record_denial(self, payload)
     }

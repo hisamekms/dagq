@@ -1018,16 +1018,32 @@ fn link_request(
 
 /// What the request commands record a refusal on: the queue itself.
 impl<E: TransactionEntries> crate::application::commands::DenialLog for StoreQueue<E> {
-    fn record_denial(&self, payload: serde_json::Value) -> Result<()> {
+    fn record_privileged(&self, mut payload: serde_json::Value) -> Result<()> {
+        if let Some(use_case) = self.audit_use_case {
+            payload["use_case"] = serde_json::json!(use_case);
+        }
+        payload["audit_grant"] = serde_json::json!(true);
         if let Some(log) = &self.denial_log {
             return log(payload);
         }
-        crate::application::EventStore::record_queue_event(
-            self,
-            EventKind::AuthorizationDenied,
-            payload,
-        )
-        .map(drop)
+        let tx = self.write_entry("authorization_grant")?;
+        super::audit::control(
+            &tx,
+            crate::application::audit::authorization_fact(&payload, true),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn record_denial(&self, mut payload: serde_json::Value) -> Result<()> {
+        if let Some(use_case) = self.audit_use_case {
+            payload["use_case"] = serde_json::json!(use_case);
+        }
+        if let Some(log) = &self.denial_log {
+            return log(payload);
+        }
+        self.record_refusal(EventKind::AuthorizationDenied, payload)
+            .map(drop)
     }
 }
 

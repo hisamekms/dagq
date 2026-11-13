@@ -167,6 +167,9 @@ impl<E: TransactionEntries> StoreQueue<E> {
                 }
             }
         };
+        if outcome.created {
+            audit_judgment(&tx, &outcome.ask, "opened", None, None)?;
+        }
         tx.commit()?;
         Ok(outcome)
     }
@@ -268,13 +271,8 @@ impl<E: TransactionEntries> StoreQueue<E> {
                     sql_params![id, now],
                 )?;
                 // Applied: `stats` reads `ask_closed` as the answer applied.
-                ask_event(
-                    &tx,
-                    ask.task_id,
-                    ask.run_id.as_ref(),
-                    EventKind::AskClosed,
-                    json!({"ask_id": id, "kind": ask.kind}),
-                )?;
+                let applied = read_ask(&tx, id)?;
+                record_ask_closed(&tx, &applied)?;
             }
             let answered = read_ask(&tx, id)?;
             tx.commit()?;
@@ -499,16 +497,19 @@ impl<E: TransactionEntries> StoreQueue<E> {
             "UPDATE asks SET closed_at=?2 WHERE id=?1",
             sql_params![id, self.generators.clock.now()],
         )?;
-        ask_event(
-            &tx,
-            ask.task_id,
-            ask.run_id.as_ref(),
-            EventKind::AskClosed,
-            json!({"ask_id": id, "kind": ask.kind}),
-        )?;
+        record_ask_closed(&tx, &ask)?;
         let closed = read_ask(&tx, id)?;
         tx.commit()?;
         Ok(closed)
+    }
+
+    /// An application attempt failed and the answer remains pending for retry.
+    pub fn answer_application_failed(&mut self, id: AskId) -> Result<()> {
+        let tx = self.write_entry("answer_application_failed")?;
+        let ask = read_ask(&tx, id)?;
+        audit_judgment(&tx, &ask, "applied", None, Some("application_failed"))?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Asks matching `query`, oldest first. A pure read.
@@ -662,6 +663,7 @@ impl<E: TransactionEntries> StoreQueue<E> {
         }
         ask_event(&tx, None, None, EventKind::AskOpened, payload)?;
         let opened = read_ask(&tx, id)?;
+        audit_judgment(&tx, &opened, "opened", None, None)?;
         tx.commit()?;
         Ok(opened)
     }
@@ -989,8 +991,8 @@ impl<E: TransactionEntries> StoreQueue<E> {
 
     /// Close the `queue_hold` asks of `reason` and `subject` nobody closed
     /// (task 377): an open one is answered `answer` by the runtime
-    /// (`ask_answered` with `runtime_closed`), an answered one's answer is
-    /// applied by this close (`ask_closed`). The asks closed.
+    /// (`ask_answered` with `runtime_closed`), an answered one is closed
+    /// (`ask_closed`) and audited as superseded. The asks closed.
     pub fn close_hold_asks(
         &mut self,
         reason: AskReason,
@@ -1014,13 +1016,7 @@ impl<E: TransactionEntries> StoreQueue<E> {
                 write_answer(&tx, &ask, answer, Answerer::RUNTIME, now, &mut payload)?;
                 ask_event(&tx, None, None, EventKind::AskAnswered, payload)?;
             } else {
-                ask_event(
-                    &tx,
-                    None,
-                    None,
-                    EventKind::AskClosed,
-                    json!({"ask_id": ask.id, "kind": ask.kind}),
-                )?;
+                record_ask_discarded(&tx, &ask, "runtime_closed")?;
             }
             SqlWrite::execute(
                 &tx,
@@ -1105,6 +1101,7 @@ pub(super) fn discard_by_runtime(
 ) -> Result<()> {
     let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "reason": reason,
                              "note": note, "discarded": true});
+    audit_judgment(tx, ask, "applied", None, Some(reason))?;
     let kind = if ask.is_open() {
         payload["runtime_closed"] = json!(true);
         write_answer(tx, ask, note, Answerer::RUNTIME, now, &mut payload)?;
@@ -1140,14 +1137,8 @@ pub(super) fn close_by_runtime(
             payload,
         )?;
     } else {
-        // An answer given before is applied by this close.
-        ask_event(
-            tx,
-            ask.task_id,
-            ask.run_id.as_ref(),
-            EventKind::AskClosed,
-            json!({"ask_id": ask.id, "kind": ask.kind}),
-        )?;
+        // Superseded by runtime state, without applying the pending answer.
+        record_ask_discarded(tx, ask, "runtime_closed")?;
     }
     tx.execute(
         "UPDATE asks SET closed_at=?2 WHERE id=?1",
@@ -1390,6 +1381,7 @@ fn insert_ask_about(tx: &impl SqlWrite, ask: &NewAsk, subject: Option<&str>) -> 
         payload,
     )?;
     let created = read_ask(tx, id)?;
+    audit_judgment(tx, &created, "opened", None, None)?;
     Ok(AskOutcome {
         ask: created,
         created: true,
@@ -1428,6 +1420,18 @@ pub(super) fn write_answer(
             approval
         ],
     )?;
+    let mut answered = ask.clone();
+    answered.answer = Some(text.to_owned());
+    audit_judgment(conn, &answered, "answered", Some(answerer), None)?;
+    if ask.kind == AskKind::ApproveLanding && approval {
+        super::audit::control(
+            conn,
+            crate::application::audit::authorization_fact(
+                &json!({"use_case": "approve_landing", "capability": "ask.answer", "reason": "allowed", "ask_id": ask.id}),
+                true,
+            ),
+        )?;
+    }
     payload["answered_by"] = json!(answerer.by);
     payload["authority"] = json!(answerer.authority);
     payload["approval"] = json!(approval);
@@ -1449,12 +1453,40 @@ pub(super) fn write_answer(
 /// transaction that closes it: `stats` reads it as the answer applied
 /// (task 468) when nothing else that names the ask applied it (task 568).
 pub(super) fn record_ask_closed(conn: &impl SqlWrite, ask: &Ask) -> Result<()> {
+    audit_judgment(conn, ask, "applied", None, None)?;
     ask_event(
         conn,
         ask.task_id,
         ask.run_id.as_ref(),
         EventKind::AskClosed,
         json!({"ask_id": ask.id, "kind": ask.kind}),
+    )
+}
+
+/// A closed answer was superseded without being applied; the operational
+/// close is retained, but the audit must not claim application succeeded.
+pub(super) fn record_ask_discarded(conn: &impl SqlWrite, ask: &Ask, reason: &str) -> Result<()> {
+    audit_judgment(conn, ask, "applied", None, Some(reason))?;
+    ask_event(
+        conn,
+        ask.task_id,
+        ask.run_id.as_ref(),
+        EventKind::AskClosed,
+        json!({"ask_id": ask.id, "kind": ask.kind}),
+    )
+}
+
+/// Record a judgment from the use case's ask, never from an event stream.
+pub(super) fn audit_judgment(
+    tx: &impl SqlWrite,
+    ask: &Ask,
+    phase: &str,
+    answerer: Option<Answerer>,
+    failure: Option<&str>,
+) -> Result<()> {
+    super::audit::control(
+        tx,
+        crate::application::ask::judgment(ask, phase, answerer, failure),
     )
 }
 
@@ -1499,6 +1531,7 @@ pub(super) fn deliver_ask_in(
         "UPDATE asks SET closed_at=?2 WHERE id=?1",
         sql_params![id, now],
     )?;
+    audit_judgment(conn, &ask, "applied", None, None)?;
     ask_event(
         conn,
         ask.task_id,

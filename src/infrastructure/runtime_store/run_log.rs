@@ -452,6 +452,43 @@ impl<E: TransactionEntries> StoreQueue<E> {
         Ok(())
     }
 
+    /// A control-side refusal use case writes both sinks from the same
+    /// refusal facts. Generic operational event writes cannot create audits.
+    pub(crate) fn record_refusal(
+        &self,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<EventId> {
+        anyhow::ensure!(
+            matches!(
+                kind,
+                EventKind::AuthorizationDenied | EventKind::QueueServiceUnauthenticated
+            ),
+            "not a refusal kind"
+        );
+        let mut audit_failed = false;
+        let result = (|| {
+            let tx = self.write_entry("record_refusal")?;
+            // Failure is counted once per call, even if both sinks fail.
+            let mut lost = 0;
+            crate::application::audit::write_refusal(
+                || {
+                    crate::infrastructure::audit::control(
+                        &tx,
+                        crate::application::audit::authorization_fact(&payload, false),
+                    )
+                },
+                &mut lost,
+            );
+            audit_failed = lost != 0;
+            let id = queue_event(&tx, kind, &payload)?;
+            tx.commit()?;
+            Ok(id)
+        })();
+        crate::infrastructure::audit::count_refusal_failure(audit_failed || result.is_err());
+        result
+    }
+
     /// Record an event of the queue itself, on no task, goal or run (the
     /// observer's `observe_started` / `observe_finished`); returns its id.
     pub fn record_queue_event(
@@ -1619,6 +1656,17 @@ impl<E: TransactionEntries> RunReads for StoreQueue<E> {
 /// `run_events` table and transactions as the state the other ports
 /// change (ADR-t1662-2 D1).
 impl<E: TransactionEntries> EventStore for StoreQueue<E> {
+    fn audit_privileged_operation(&self, operation: &str) -> Result<()> {
+        anyhow::ensure!(
+            matches!(operation, "down_force" | "guardrail_disable"),
+            "unknown privileged lifecycle operation"
+        );
+        crate::application::commands::DenialLog::record_privileged(
+            self,
+            serde_json::json!({"use_case": operation, "operation": operation, "capability": "service.lifecycle", "reason": "allowed"}),
+        )
+    }
+
     fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
         StoreQueue::update_events(self, limit)
     }

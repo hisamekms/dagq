@@ -1190,6 +1190,7 @@ impl SessionWatch {
                             "error": format!("{error:#}"),
                         })),
                     )?;
+                    sv.queue.answer_application_failed(ask.id)?;
                     warn!(ask_id = %ask.id, run_id = %run.id(), error = %format_args!("{error:#}"), "answer of ask {} could not be sent to run {} in workspace {}: {error:#}; it is left to the inbox", ask.id, run.id(), self.workspace);
                 }
             }

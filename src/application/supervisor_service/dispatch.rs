@@ -1110,6 +1110,10 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             let (kind, payload): (EventKind, serde_json::Value) = read(op, args)?;
             answer(EventStore::record_queue_event(&*store, kind, payload))
         }
+        "audit_privileged_operation" => {
+            let (operation,): (String,) = read(op, args)?;
+            answer(EventStore::audit_privileged_operation(&*store, &operation))
+        }
         "record_queue_events" => {
             let (events,): (Vec<(EventKind, serde_json::Value)>,) = read(op, args)?;
             answer(EventStore::record_queue_events(&*store, events))
@@ -2072,6 +2076,10 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 text.as_str(),
                 answerer,
             ))
+        }
+        "answer_application_failed" => {
+            let (id,): (AskId,) = read(op, args)?;
+            answer(AskStore::answer_application_failed(&mut *store, id))
         }
         "close_ask" => {
             let (id,): (AskId,) = read(op, args)?;

@@ -395,6 +395,9 @@ impl AskStore for JobQueue {
     ) -> Result<Ask> {
         unreachable!("answer_as is not what the test reaches")
     }
+    fn answer_application_failed(&mut self, _: AskId) -> Result<()> {
+        unreachable!("host job never applies a landing answer")
+    }
     fn close_ask(&mut self, id: AskId) -> Result<Ask> {
         unreachable!("close_ask is not what the test reaches")
     }

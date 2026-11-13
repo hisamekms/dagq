@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 use super::{
-    asks::{insert_ask, read_ask, record_ask_closed},
+    asks::{insert_ask, read_ask},
     follow_up_membership, sessions,
     store_writes::insert_task,
     task_store::{close_goal_in, goal_event},
@@ -763,7 +763,7 @@ impl<E: TransactionEntries> GoalReviewStore for StoreQueue<E> {
                 close()?;
                 // Nothing else names the ask: `ask_closed` ends its wait
                 // (task 568).
-                record_ask_closed(&tx, &ask)?;
+                super::asks::record_ask_discarded(&tx, &ask, "no_longer_applicable")?;
                 tx.commit()?;
                 return Ok(None);
             }
@@ -810,6 +810,7 @@ impl<E: TransactionEntries> GoalReviewStore for StoreQueue<E> {
             }
         }
         close()?;
+        super::asks::audit_judgment(&tx, &ask, "applied", None, None)?;
         goal_event(
             &tx,
             goal,

@@ -297,6 +297,11 @@ pub fn scope(command: ControlCommand, op: &str, args: &[Value]) -> Result<(), St
     let (queue_kinds, run_kinds) = recorded_kinds(command);
     let named = match op {
         CONTROL_QUEUE => true,
+        "audit_privileged_operation" => matches!(
+            (command, args.first().and_then(Value::as_str)),
+            (ControlCommand::Down, Some("down_force"))
+                | (ControlCommand::Inbox, Some("guardrail_disable"))
+        ),
         "record_queue_event" => kind(0).is_some_and(|kind| queue_kinds.contains(&kind)),
         "record_runtime_event" => kind(1).is_some_and(|kind| run_kinds.contains(&kind)),
         BEGIN_LANDING | END_LANDING | APPROVE_INTEGRATION => command == ControlCommand::Integrate,

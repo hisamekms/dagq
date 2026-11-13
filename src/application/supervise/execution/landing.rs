@@ -2971,6 +2971,7 @@ impl Supervisor<'_> {
             match self.apply_landing_answer(&run, ask.id, &answer, action) {
                 Ok(()) => self.record_rest(run.id(), None, cause),
                 Err(error) => {
+                    self.queue.answer_application_failed(ask.id)?;
                     warn!(run_id = %run.id(), ask_id = %ask.id, error = %format_args!("{error:#}"), "run {}: the answer {answer:?} of ask {} could not be applied: {error:#}", run.id(), ask.id);
                 }
             }

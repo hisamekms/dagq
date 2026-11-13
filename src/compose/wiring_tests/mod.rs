@@ -18,6 +18,7 @@ mod service;
 mod session;
 
 mod already_satisfied;
+mod audit_judgments;
 mod ci_freshness;
 mod disk_holds;
 mod eval_isolation;

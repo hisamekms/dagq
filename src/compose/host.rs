@@ -1775,6 +1775,7 @@ where
     use crate::application::queue_commands::QueueCommand as C;
     use crate::application::screen::{self, RunTarget};
     use crate::domain::{AskId, EventId, PlannerId, RunId, StaticPolicy, TaskId};
+    queue.set_audit_use_case(command.use_case());
     let actor = queue.actor();
     let one_shot = OneShot {
         user_config: crate::infrastructure::language::user_config_file(),
@@ -1795,8 +1796,11 @@ where
         C::Answer(params) => {
             let mut store = crate::infrastructure::dialogue::DialogueQueue { queue };
             serde_json::to_value(
-                Dialogue::new(&mut store, &actor, answer_policy)
-                    .answer(AskId::new(params.id), &params.text)?,
+                Dialogue::new(&mut store, &actor, answer_policy).answer_with_original(
+                    AskId::new(params.id),
+                    &params.text,
+                    params.original_text.as_deref(),
+                )?,
             )?
         }
         C::AskClose(params) => {

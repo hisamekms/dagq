@@ -75,6 +75,7 @@ impl<S: PostgresSession> PostgresQueue<S> {
             max_spike_cycles: None,
             replacement: None,
             denial_log: None,
+            audit_use_case: None,
         })
     }
 

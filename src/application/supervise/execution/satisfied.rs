@@ -499,6 +499,7 @@ impl Supervisor<'_> {
                 continue;
             }
             if let Err(error) = self.apply_satisfied_answer(&run, ask.id, answer, parallel) {
+                self.queue.answer_application_failed(ask.id)?;
                 warn!(run_id = %run.id(), ask_id = %ask.id, error = %format_args!("{error:#}"), "run {}: the answer {} of ask {} could not be applied: {error:#}", run.id(), answer.as_str(), ask.id);
             }
         }

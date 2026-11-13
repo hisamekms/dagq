@@ -514,6 +514,7 @@ const OTHERS: &[(C, &[&str])] = &[
         &[
             "answer_as",
             "close_ask",
+            "answer_application_failed",
             "close_installed_update_ask",
             "close_hold_asks",
             "close_stuck_exit_asks",
@@ -614,6 +615,9 @@ pub(super) fn writes_a_relaxation(op: &str, args: &[Value]) -> bool {
 /// on a finding `finding.ask`.
 pub(super) fn supervisor_needs(op: &str, args: &[Value]) -> Result<C, String> {
     let arg = |index: usize| args.get(index).cloned().unwrap_or(Value::Null);
+    if op == "audit_privileged_operation" {
+        return Ok(C::ServiceLifecycle);
+    }
     if writes_a_relaxation(op, args) {
         return Ok(C::DiskRelax);
     }

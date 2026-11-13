@@ -2403,6 +2403,8 @@ fn decide_triage_in(
         "UPDATE asks SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
         sql_params![ask_id, now],
     )?;
+    let applied_ask = crate::infrastructure::asks::read_ask(conn, ask_id)?;
+    crate::infrastructure::asks::audit_judgment(conn, &applied_ask, "applied", None, None)?;
     let result = conn.query_row(
         "SELECT * FROM task_runs WHERE id=?1",
         sql_params![id],

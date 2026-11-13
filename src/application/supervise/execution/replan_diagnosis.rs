@@ -1978,6 +1978,7 @@ impl Supervisor<'_> {
                     applied = true;
                 }
                 Err(error) => {
+                    self.queue.answer_application_failed(ask.id)?;
                     warn!(ask_id = %ask.id, error = %format_args!("{error:#}"), "the answer of ask {} could not be applied to replan operation {}: {error:#}", ask.id, op.id);
                 }
             }

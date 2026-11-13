@@ -2306,6 +2306,9 @@ impl AskStore for SupervisorQueue {
             vec![to_value(id)?, to_value(text)?, to_value(answerer)?],
         )
     }
+    fn answer_application_failed(&mut self, id: AskId) -> Result<()> {
+        self.remote("answer_application_failed", vec![to_value(id)?])
+    }
     fn close_ask(&mut self, id: AskId) -> Result<Ask> {
         self.remote("close_ask", vec![to_value(id)?])
     }
@@ -2399,6 +2402,10 @@ impl AskStore for SupervisorQueue {
 }
 
 impl EventStore for SupervisorQueue {
+    fn audit_privileged_operation(&self, operation: &str) -> Result<()> {
+        self.remote("audit_privileged_operation", vec![to_value(operation)?])
+    }
+
     fn request_as(&self, requester: Option<&ActorContext>) -> Option<String> {
         let requested = requester.map(|actor| actor.actor_id().to_owned());
         self.requested_by.replace(requested)

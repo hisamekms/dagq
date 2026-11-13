@@ -550,7 +550,7 @@ pub(super) fn decide_correction(
     {
         // Reopened by another answer meanwhile: nothing left to settle.
         close()?;
-        super::asks::record_ask_closed(&tx, &ask)?;
+        super::asks::record_ask_discarded(&tx, &ask, "no_longer_applicable")?;
         tx.commit()?;
         return Ok(None);
     }

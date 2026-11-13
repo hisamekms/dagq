@@ -122,6 +122,42 @@ pub(super) fn record_repository_binding(
     Ok(())
 }
 
+/// Append facts of a control-side use case using the authenticated connection's
+/// actor. The caller owns the transaction and no request may supply a principal.
+pub(super) fn control(tx: &impl SqlWrite, mut input: SenderInput) -> Result<()> {
+    if tx.dialect() != SqlDialect::Sqlite {
+        return Ok(());
+    }
+    let principal = tx.query_row("SELECT dagq_actor_role(), dagq_actor_id()", &[], |r| {
+        Ok(Principal {
+            role: r.get(0)?,
+            id: r.get(1)?,
+        })
+    })?;
+    input.sender_seq = tx.query_row("SELECT COALESCE(MAX(sender_seq),0)+1 FROM audit_records WHERE sender_id='queue_service:decisions'", &[], |r| r.get(0))?;
+    let at = crate::application::timestamp(std::time::SystemTime::now());
+    input.at = at.clone();
+    append_in(
+        tx,
+        input,
+        Caller {
+            sender: Sender::QueueService,
+            sender_instance: "decisions".into(),
+            principal,
+            on_behalf_of: Vec::new(),
+            auth: "control_side".into(),
+            assurance: AssuranceClaim::Chained(Attestation::Enforced),
+            evidence: Default::default(),
+            clock_source: "host".into(),
+        },
+        at,
+    )?;
+    Ok(())
+}
+
+pub(super) use crate::application::audit::count_refusal_failure;
+pub use crate::application::audit::lost_refusals;
+
 fn startup_input(at: String, config: &[u8]) -> SenderInput {
     SenderInput {
         sender_seq: 1,

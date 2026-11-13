@@ -44,6 +44,10 @@ pub trait PlanningStore {
     fn proposal_owner(&self, proposal: ProposalId) -> Result<Option<String>>;
     /// Record a refusal as the queue event `authorization_denied`.
     fn record_denial(&self, payload: Value) -> Result<()>;
+    /// Retain a privileged authorization grant, independently of ordinary grants.
+    fn record_privileged(&self, _payload: Value) -> Result<()> {
+        Ok(())
+    }
 
     fn add(&mut self, task: NewTask) -> Result<Task>;
     /// `authorized` is what the edit was authorized with; the store
@@ -435,6 +439,9 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     /// that cannot be written does not turn the refusal into another error.
     fn authorize(&mut self, capability: Capability, resource: Resource) -> Result<()> {
         let Err(error) = self.authorizer.authorize(self.actor, capability, &resource) else {
+            if crate::application::audit::privileged(capability) {
+                self.store.record_privileged(serde_json::json!({"capability": capability, "resource": resource.record(), "reason": "allowed"}))?;
+            }
             return Ok(());
         };
         self.record(&error, &resource);

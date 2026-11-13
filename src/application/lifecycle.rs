@@ -2767,10 +2767,11 @@ pub fn inbox(
     agent.reach_queue_service(&mut command, &ports.queue_service.socket(&db));
     let settings = agent.inbox_settings(db.parent().unwrap_or(Path::new(".")));
     let hooks = agent.inbox_hooks()?;
-    queue.record_queue_event(
-        EventKind::InboxOpened,
-        inbox_opened(&launch, settings.as_deref(), hooks),
-    )?;
+    let opened = inbox_opened(&launch, settings.as_deref(), hooks);
+    if opened["guardrail"] == false {
+        queue.audit_privileged_operation("guardrail_disable")?;
+    }
+    queue.record_queue_event(EventKind::InboxOpened, opened)?;
     Ok(command)
 }
 
@@ -3030,6 +3031,9 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     let (launchd, processes) = (ports.launchd, ports.processes);
     let queue = (ports.queues)(&location.db).open()?;
     let queue = &*queue;
+    if options.force {
+        queue.audit_privileged_operation("down_force")?;
+    }
     // Every registration's workspace is reported, whichever path this
     // `down` takes: a queue can hold supervisors of both modes at once.
     let registrations = queue.supervisors()?;

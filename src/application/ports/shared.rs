@@ -489,6 +489,8 @@ pub trait AskStore {
         answerer: crate::domain::Answerer,
     ) -> Result<Ask>;
     fn close_ask(&mut self, id: AskId) -> Result<Ask>;
+    /// Retain a failed application attempt while leaving the answer pending.
+    fn answer_application_failed(&mut self, id: AskId) -> Result<()>;
     /// Answered `approve_landing` asks nobody closed.
     fn landing_answers(&self) -> Result<Vec<Ask>>;
     /// Answered `decide` asks of the triage nobody closed.
@@ -556,6 +558,12 @@ pub struct AskQuery {
 /// transaction of [`StateStore`]'s ports (D1); this port appends the events
 /// that change no state. The measurement layer reads only this store.
 pub trait EventStore {
+    /// A lifecycle operation was authorized past an optional safety gate.
+    /// Implementations with a queue must retain it before the operation proceeds.
+    fn audit_privileged_operation(&self, _operation: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// The latest `limit` steps of the automatic update (its `update_*`
     /// queue events), newest first in their jobs' order: each job's
     /// `update_started` behind the steps the job wrote before it

@@ -70,6 +70,9 @@ impl<E: TransactionEntries> AskStore for StoreQueue<E> {
     ) -> Result<crate::domain::Ask> {
         StoreQueue::answer_as(self, id, text, answerer)
     }
+    fn answer_application_failed(&mut self, id: crate::domain::AskId) -> Result<()> {
+        StoreQueue::answer_application_failed(self, id)
+    }
     fn close_ask(&mut self, id: AskId) -> Result<crate::domain::Ask> {
         StoreQueue::close_ask(self, id)
     }

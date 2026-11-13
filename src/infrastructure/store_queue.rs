@@ -48,6 +48,8 @@ pub struct StoreQueue<E: TransactionEntries> {
     /// Where a refusal of the policy is recorded instead of on this
     /// connection (the independent denial recorder).
     pub(super) denial_log: Option<DenialRecorder>,
+    /// The trusted dispatcher's concrete use case for authorization records.
+    pub(super) audit_use_case: Option<crate::domain::queue_service::UseCase>,
 }
 
 /// What records a refusal of the policy, given its event's payload.
@@ -73,6 +75,11 @@ impl<E: TransactionEntries> TransactionEntries for StoreQueue<E> {
 }
 
 impl<E: TransactionEntries> StoreQueue<E> {
+    /// Attach the parsed dispatch entry, never a caller-provided audit field.
+    pub fn set_audit_use_case(&mut self, use_case: crate::domain::queue_service::UseCase) {
+        self.audit_use_case = Some(use_case);
+    }
+
     /// The queue reading the time and creating IDs through `generators`
     /// instead of the system clock and random UUIDs.
     pub fn with_generators(mut self, generators: Generators) -> Self {

@@ -25,7 +25,7 @@ use std::path::Path;
 use tracing::warn;
 
 use super::{
-    asks::{deliver_ask_in, insert_ask, read_ask, record_ask_closed},
+    asks::{deliver_ask_in, insert_ask, read_ask},
     proposals, sessions,
     store_rows::{enum_col, read_task},
     store_writes::{event, insert_dependency},
@@ -1351,7 +1351,7 @@ where
         if !plan_answer_applies(&tx, &ask, &text)? {
             close()?;
             // Nothing else names the ask: `ask_closed` ends its wait (task 568).
-            record_ask_closed(&tx, &ask)?;
+            super::asks::record_ask_discarded(&tx, &ask, "no_longer_applicable")?;
             tx.commit()?;
             return Ok(None);
         }
@@ -1425,6 +1425,7 @@ where
             }
         };
         close()?;
+        super::asks::audit_judgment(&tx, &ask, "applied", None, None)?;
         record_plan_outcome(&tx, proposal_id, ask_id, &text)?;
         event(
             &tx,

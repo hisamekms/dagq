@@ -34,12 +34,17 @@ pub struct ServiceDenials<'a> {
 
 impl DenialLog for ServiceDenials<'_> {
     fn record_denial(&self, payload: Value) -> Result<()> {
-        ensure!(self.db.is_file(), "no queue at {}", self.db.display());
+        let exists = self.db.is_file();
+        if !exists {
+            super::audit::count_refusal_failure(true);
+        }
+        ensure!(exists, "no queue at {}", self.db.display());
         // The DB a link names is its target's: its directory's service
         // serves it.
         let db = std::fs::canonicalize(self.db).unwrap_or_else(|_| self.db.to_path_buf());
         Client::host(&db, self.binding, self.env)
             .call_within(UseCase::DenialRecord, payload, RECORD_TIMEOUT)
             .map(drop)
+            .inspect_err(|_| super::audit::count_refusal_failure(true))
     }
 }

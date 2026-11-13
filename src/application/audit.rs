@@ -56,6 +56,107 @@ pub fn repository_binding_change(
     }
 }
 
+/// Policy revision identifying the compiled role/resource rules. This source
+/// digest changes whenever policy code changes, independently of the binary version.
+pub fn policy_version() -> String {
+    crate::application::ask::digest(include_str!("../domain/authorization.rs"))
+}
+
+/// A grant worth retaining; ordinary reads and writes generate no grant audit.
+pub fn privileged(capability: Capability) -> bool {
+    matches!(
+        capability,
+        Capability::TaskReadyBypassReview | Capability::RunRecover | Capability::DiskRelax
+    )
+}
+
+/// Pure loss accounting, saturating so telemetry never wraps.
+pub fn lost_refusal_count(current: u64, failed: bool) -> u64 {
+    current.saturating_add(u64::from(failed))
+}
+
+/// Attempt a refusal write without changing the refusal's result. The caller
+/// supplies its counter so tests and each service instance own their telemetry.
+/// The counting decision is pure (`lost_refusal_count`).
+pub fn write_refusal(write: impl FnOnce() -> anyhow::Result<()>, lost: &mut u64) {
+    *lost = lost_refusal_count(*lost, write().is_err());
+}
+
+/// Refusals must survive an unavailable audit store. This counter is telemetry,
+/// not a queue state or a source of authorization decisions.
+static LOST_REFUSALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Number of refusal audit writes this process could not retain.
+pub fn lost_refusals() -> u64 {
+    LOST_REFUSALS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn count_refusal_failure(failed: bool) {
+    let _ = LOST_REFUSALS.try_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |n| Some(crate::application::audit::lost_refusal_count(n, failed)),
+    );
+}
+
+/// Authority facts shared by the refusal/grant use case and its audit. Callers
+/// pass fixed reason codes and resource metadata, never submitted credentials.
+pub fn authorization_fact(payload: &serde_json::Value, allowed: bool) -> SenderInput {
+    use crate::domain::audit::{Authority, Correlation, Outcome, OutcomeStatus, Resource};
+    let capability = payload
+        .get("capability")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    SenderInput {
+        sender_seq: 0,
+        at: String::new(),
+        action: if allowed {
+            AuditAction::AuthzPrivileged
+        } else {
+            AuditAction::AuthzDenied
+        },
+        resource: Resource {
+            kind: "authorization".into(),
+            id: payload
+                .get("use_case")
+                .and_then(|v| v.as_str())
+                .or(capability.as_deref())
+                .unwrap_or("unauthenticated")
+                .to_owned(),
+        },
+        authority: Authority {
+            capability,
+            rule: Some(
+                payload
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allowed")
+                    .to_owned(),
+            ),
+            policy_version: Some(policy_version()),
+        },
+        outcome: Outcome {
+            status: if allowed {
+                OutcomeStatus::Succeeded
+            } else {
+                OutcomeStatus::Denied
+            },
+            reason: payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+        },
+        change: Some(Change {
+            after: Some(payload.clone()),
+            ..Change::default()
+        }),
+        correlation: Correlation::default(),
+        answered_via: None,
+        landing: None,
+        external: None,
+    }
+}
+
 /// The last record of the chain: what the next one follows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainHead {

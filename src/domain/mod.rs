@@ -1546,6 +1546,10 @@ pub struct Answerer {
     #[serde(deserialize_with = "interned::text")]
     pub by: interned::Text,
     pub authority: AnswerAuthority,
+    /// Digest of the person's exact words supplied by the inbox. Missing
+    /// means no original was supplied; a direct or runtime answer ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_text_hash: Option<[u8; 32]>,
 }
 
 impl Answerer {
@@ -1553,17 +1557,20 @@ impl Answerer {
     pub const PERSON: Self = Self {
         by: ANSWERED_BY_PERSON,
         authority: AnswerAuthority::User,
+        original_text_hash: None,
     };
     /// The runtime withdrawing, superseding or closing an ask itself.
     /// These answers approve nothing, regardless of ask kind.
     pub const RUNTIME: Self = Self {
         by: ANSWERED_BY_RUNTIME,
         authority: AnswerAuthority::Runtime,
+        original_text_hash: None,
     };
     /// The inbox, answering at a person's word.
     pub const INBOX: Self = Self {
         by: "inbox",
         authority: AnswerAuthority::Delegated,
+        original_text_hash: None,
     };
 }
 

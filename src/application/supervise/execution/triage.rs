@@ -404,6 +404,7 @@ impl Supervisor<'_> {
                     self.request_cleanup(Some(decided.task_id()));
                 }
                 Err(error) => {
+                    self.queue.answer_application_failed(ask.id)?;
                     warn!(run_id = %run.id(), ask_id = %ask.id, error = %format_args!("{error:#}"), "run {}: the answer {answer:?} of ask {} could not be applied: {error:#}", run.id(), ask.id)
                 }
             }

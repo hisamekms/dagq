@@ -567,7 +567,7 @@ fn close_plan_asks(conn: &impl SqlWrite, task_id: TaskId, now: i64) -> Result<()
         } else {
             // An answer given before is closed unapplied: `ask_closed` ends
             // its wait (task 568).
-            super::asks::record_ask_closed(conn, &ask)?;
+            super::asks::record_ask_discarded(conn, &ask, "proposal_withdrawn")?;
         }
         conn.execute(
             "UPDATE asks SET closed_at=?2 WHERE id=?1",

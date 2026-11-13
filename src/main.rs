@@ -1557,6 +1557,9 @@ enum Command {
         id: i64,
         #[arg(long)]
         text: String,
+        /// The person's exact words when the inbox relays an answer (hashed).
+        #[arg(long)]
+        original_text: Option<String>,
     },
     /// List asks nobody closed, oldest first.
     Asks {
@@ -3634,7 +3637,12 @@ fn queue_command(command: &Command) -> Result<Option<QueueCommand>> {
     let run = |run: &String| commands::RunParams { run: run.clone() };
     let planner = |planner: &i64| commands::PlannerParams { planner: *planner };
     Ok(Some(match command {
-        Command::Answer { id, text } => QueueCommand::Answer(commands::AnswerParams {
+        Command::Answer {
+            id,
+            text,
+            original_text,
+        } => QueueCommand::Answer(commands::AnswerParams {
+            original_text: original_text.clone(),
             id: *id,
             text: text.clone(),
         }),

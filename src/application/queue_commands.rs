@@ -97,6 +97,9 @@ pub enum QueueCommand {
 pub struct AnswerParams {
     pub id: i64,
     pub text: String,
+    /// Exact relayed words; the service retains only their digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_text: Option<String>,
 }
 
 /// `ask close`'s: the ask.
@@ -638,6 +641,7 @@ mod tests {
         let planner = || PlannerParams { planner: 2 };
         vec![
             QueueCommand::Answer(AnswerParams {
+                original_text: None,
                 id: 3,
                 text: "yes".to_owned(),
             }),

@@ -92,8 +92,11 @@ impl Supervisor<'_> {
             if !apply || !queue_hold::applies(&ask.options, answer) {
                 continue;
             }
-            if matches!(answer, DONE | CANCEL_AFFECTED) {
-                self.apply_hold_answer(ask, answer)?;
+            if matches!(answer, DONE | CANCEL_AFFECTED)
+                && let Err(error) = self.apply_hold_answer(ask, answer)
+            {
+                self.queue.answer_application_failed(ask.id)?;
+                return Err(error);
             }
         }
         // The asks remain open and keep their real cause. An explicit ban

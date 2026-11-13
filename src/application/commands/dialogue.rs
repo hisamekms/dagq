@@ -128,6 +128,17 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
     /// `answer`: the user's own, or the inbox's at a person's word
     /// (delegated), which the ask's row and `ask_answered` record.
     pub fn answer(&mut self, id: AskId, text: &str) -> Result<Ask> {
+        self.answer_with_original(id, text, None)
+    }
+
+    /// The inbox may supply the person's exact words separately from its answer.
+    /// Only their hash is retained, and only delegated authority uses it.
+    pub fn answer_with_original(
+        &mut self,
+        id: AskId,
+        text: &str,
+        original: Option<&str>,
+    ) -> Result<Ask> {
         let ask = self.authorize_ask(Capability::AskAnswer, id)?;
         let actor = self.gate.actor;
         if let Err(error) = self
@@ -145,7 +156,7 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
             );
             return Err(error.into());
         }
-        let Some(answerer) = self.gate.actor.answerer() else {
+        let Some(mut answerer) = self.gate.actor.answerer() else {
             // A policy that let another actor answer names no authority
             // for it: refused rather than recorded as someone else's.
             let error = AuthorizationError {
@@ -156,6 +167,10 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
             super::record(&*self.store, &error, &Resource::Ask { id, run: None });
             return Err(error.into());
         };
+        if answerer.authority == crate::domain::AnswerAuthority::Delegated {
+            use sha2::{Digest, Sha256};
+            answerer.original_text_hash = original.map(|s| Sha256::digest(s.as_bytes()).into());
+        }
         self.store.answer(id, text, answerer)
     }
 

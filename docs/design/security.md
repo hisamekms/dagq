@@ -115,7 +115,8 @@ goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
 - queue serviceは、[ユースケース](queue-service.md#ユースケース)と読み取りを、principalのactorで`StaticPolicy`に通す（`DAGQ_ROLE`は使わない）。
   principalはtokenから、tokenもroleも無い要求ではhostのsocketのpeerの資格からuserとして決める（[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)決定1）。
-  拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す（runner_httpの拒否記録は未実装）。
+  拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。
+  同じ拒否の事実を監査にも送り、記録が書けなくても拒否のerrorは変えず、書けなかった件数を数える。
   worker（resumeも）・headlessのjob・observerはserviceだけを使い（[クライアントモード](queue-service.md#クライアントモード)）、人・inbox・plannerはserviceが答えるコマンドをDBを開かず送る（[hostのCLI](queue-service-host-cli.md#送る範囲)）。
   閉じたのはCLIの経路で、同じユーザーのプロセスはDBもtokenも読め、userとしてもつなげるので、hostでは助言的なまま（ADR-t3102-1決定5）
 - serviceへ送らない状態を変えないコマンド（制御側の診断・fileを書く読み取りと、supervisorなどのもの）は、roleを問わず`check_access`が`StaticPolicy`に通す（default deny）。
@@ -173,7 +174,9 @@ inboxはaskのanswerと`dagq-recover`の手作業を代行でき、人の役割�
 記録で人自身と区別する（ADR-t728-3決定2）。
 
 - eventのactorとanswerの`AnswerAuthority`は人自身とinboxの代行を区別し、answerには承認の分類（`answer_approves`）も残す
-- 区別はactorの型から決め、answerの文やpromptから推さない
+- 監査の回答経路は`AnswerAuthority`から決め、answerの文やpromptから推さない。
+  人自身とinboxの中継を区別し、中継では人の原文を渡した場合のhashと、渡していない場合を残す。
+  問いを開いた時点の判断の前提、回答、適用の成否は、それぞれのuse caseが状態の変更と同じtransactionで監査に残す
 - inboxのterminalで人が打つ`!`のコマンドも`DAGQ_ROLE=inbox`を継ぐのでinboxの代行として記録される。
   人自身の操作として残したいときは、`DAGQ_ROLE`の無い別のterminalで打つ
 

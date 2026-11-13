@@ -278,11 +278,13 @@ fn opened_for(
     use_case: UseCase,
     params: &Value,
 ) -> Result<Box<dyn ServiceQueue>> {
-    if request_reads_only(use_case, params) {
-        backend.open_read(actor)
+    let mut queue = if request_reads_only(use_case, params) {
+        backend.open_read(actor)?
     } else {
-        backend.open(actor)
-    }
+        backend.open(actor)?
+    };
+    queue.set_audit_use_case(use_case);
+    Ok(queue)
 }
 
 /// The operations of [`dispatch`] that only read the queue: one the

@@ -4929,6 +4929,22 @@ fn write_queue<B: QueueStorage>(
     storage.write_queue(line, db)
 }
 
+/// Count a refusal whose queued writer is dropped before reaching the sink.
+/// Once started, the sink owns failure accounting.
+struct PendingRefusal(bool);
+
+impl PendingRefusal {
+    fn started(mut self) {
+        self.0 = false;
+    }
+}
+
+impl Drop for PendingRefusal {
+    fn drop(&mut self) {
+        super::audit::count_refusal_failure(self.0);
+    }
+}
+
 /// Run `write`, which uses [`write_queue`], on `line`: here on its thread or
 /// with no line, and otherwise in its turn, waiting up to the line's
 /// [`ServiceWriteLine::record_wait`]. Past that it goes on in the line and
@@ -5069,12 +5085,19 @@ where
                 reader.clone(),
                 storage.clone(),
             );
+            let refusal = payload["audit_grant"] != true;
+            let pending = PendingRefusal(refusal);
             on_line(line.as_ref(), move || {
-                let queue = write_queue(&storage, writing.as_ref(), &db)?
+                pending.started();
+                let queue = write_queue(&storage, writing.as_ref(), &db)
+                    .inspect_err(|_| super::audit::count_refusal_failure(refusal))?
                     .with_generators(generators)
                     .with_actor(reader);
-                EventStore::record_queue_event(&queue, EventKind::AuthorizationDenied, payload)
-                    .map(drop)
+                if payload["audit_grant"] == true {
+                    DenialLog::record_privileged(&queue, payload)
+                } else {
+                    DenialLog::record_denial(&queue, payload)
+                }
             })
         });
         Ok(Box::new(ServiceSqlite {
@@ -5545,11 +5568,15 @@ migrate's request: schema {} to {}",
         let db = self.db.clone();
         let generators = self.generators.clone();
         let storage = self.storage.clone();
+        let pending = PendingRefusal(true);
         on_line(self.write_line.as_ref(), move || {
-            let queue = write_queue(&storage, line.as_ref(), &db)?
+            pending.started();
+            let queue = write_queue(&storage, line.as_ref(), &db)
+                .inspect_err(|_| super::audit::count_refusal_failure(true))?
                 .with_generators(generators)
                 .with_actor(Self::own_actor());
-            EventStore::record_queue_event(&queue, EventKind::QueueServiceUnauthenticated, payload)
+            queue
+                .record_refusal(EventKind::QueueServiceUnauthenticated, payload)
                 .map(drop)
         })
     }
@@ -6354,6 +6381,15 @@ impl<T: super::sql_exec::SqlWrite> crate::application::queue_service::IssueFacts
     for IssueQueue<'_, T>
 {
     fn record(&self, kind: EventKind, payload: &Value) -> Result<()> {
+        if kind == EventKind::InboxOpened && payload["guardrail"] == false {
+            super::audit::control(
+                self.tx,
+                crate::application::audit::authorization_fact(
+                    &json!({"use_case": UseCase::IssueToken, "operation": "guardrail_disable", "capability": "token.issue", "reason": "allowed"}),
+                    true,
+                ),
+            )?;
+        }
         super::store_writes::record_queue_event_in(self.tx, kind, payload)
     }
     fn member(
@@ -6499,6 +6535,9 @@ impl<E: TransactionEntries> DenialLog for ServiceSqlite<E>
 where
     StoreQueue<E>: crate::application::SearchIndex,
 {
+    fn record_privileged(&self, payload: Value) -> Result<()> {
+        DenialLog::record_privileged(&self.queue, payload)
+    }
     fn record_denial(&self, payload: Value) -> Result<()> {
         DenialLog::record_denial(&self.queue, payload)
     }
@@ -6649,6 +6688,10 @@ impl<E: TransactionEntries> ServiceQueue for ServiceSqlite<E>
 where
     StoreQueue<E>: crate::application::SearchIndex,
 {
+    fn set_audit_use_case(&mut self, use_case: UseCase) {
+        self.queue.set_audit_use_case(use_case);
+    }
+
     fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value> {
         let detail = TaskReads::show(&mut self.queue, id)?;
         Ok(if full {

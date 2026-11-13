@@ -109,6 +109,9 @@ pub trait ServiceQueue:
     + super::commands::replans::ReplanStore
     + super::agent_cases::CaseSetStore
 {
+    /// The trusted dispatcher attaches the actual entry to authorization facts.
+    fn set_audit_use_case(&mut self, _use_case: UseCase) {}
+
     /// Task `id` as `dagq show` prints it: the whole detail with `full`,
     /// else its view with the last `events` events.
     fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value>;
@@ -635,23 +638,42 @@ struct InitParams {}
 struct OwnDenials<'a> {
     backend: &'a dyn ServiceBackend,
     actor: &'a ActorContext,
+    use_case: UseCase,
 }
 
 impl DenialLog for OwnDenials<'_> {
-    fn record_denial(&self, payload: Value) -> Result<()> {
-        self.backend.open_read(self.actor)?.record_denial(payload)
+    fn record_privileged(&self, payload: Value) -> Result<()> {
+        self.backend
+            .open_read(self.actor)?
+            .record_privileged(payload)
+    }
+    fn record_denial(&self, mut payload: Value) -> Result<()> {
+        payload["use_case"] = json!(self.use_case);
+        self.backend
+            .open_read(self.actor)
+            .inspect_err(|_| super::audit::count_refusal_failure(true))?
+            .record_denial(payload)
     }
 }
 
 /// Authorize `admin` for `actor` on the queue, recording a refusal, and do
 /// it in the service's process.
-fn admin_of(backend: &dyn ServiceBackend, actor: &ActorContext, admin: &Admin) -> Result<Value> {
+fn admin_of(
+    backend: &dyn ServiceBackend,
+    actor: &ActorContext,
+    admin: &Admin,
+    use_case: UseCase,
+) -> Result<Value> {
     Gate {
         actor,
         authorizer: &StaticPolicy,
     }
     .authorize(
-        &OwnDenials { backend, actor },
+        &OwnDenials {
+            backend,
+            actor,
+            use_case,
+        },
         admin.capability(),
         &Resource::Queue,
     )?;
@@ -807,13 +829,16 @@ impl QueueService<'_> {
                 | UseCase::RunnerRefresh
                 | UseCase::RunnerRevoke
         ) {
+            let _ = self
+                .backend
+                .record_unauthenticated(json!({"use_case": request.use_case, "reason": "socket"}));
             return runner_refusal();
         }
         if matches!(
             request.use_case,
             UseCase::ImagePublisherExchange | UseCase::ImagePublish
         ) {
-            return image_refusal(); // Only the HTTP composition answers them.
+            return unauthenticated_refusal(self.backend, request.use_case, image_refusal()); // Only HTTP answers them.
         }
         let hello = || {
             ServiceResponse::success(json!({
@@ -854,6 +879,7 @@ impl QueueService<'_> {
                 &OwnDenials {
                     backend: self.backend,
                     actor: &actor,
+                    use_case: request.use_case,
                 },
                 Capability::QueueRead,
                 &Resource::Queue,
@@ -910,6 +936,7 @@ impl QueueService<'_> {
                 &OwnDenials {
                     backend: self.backend,
                     actor: &actor,
+                    use_case: request.use_case,
                 },
                 Capability::CredentialPreference,
                 &Resource::Queue,
@@ -976,7 +1003,7 @@ impl QueueService<'_> {
         ) {
             Ok(Some(admin)) => {
                 drop(checked);
-                return respond(admin_of(self.backend, &actor, &admin));
+                return respond(admin_of(self.backend, &actor, &admin, request.use_case));
             }
             Ok(None) => {}
             Err(error) => return respond(Err(error)),
@@ -1413,6 +1440,7 @@ fn issue_token_of(
     let p: IssueTokenParams = params(UseCase::IssueToken, raw)?;
     let actor = parent.actor();
     let mut queue = backend.open(&actor)?;
+    queue.set_audit_use_case(UseCase::IssueToken);
     if !external {
         return issue_token(backend, &mut *queue, parent, &p.principal, process);
     }
@@ -1431,7 +1459,7 @@ fn issue_token_of(
         actor: &actor,
         authorizer: &StaticPolicy,
     }
-    .authorize(&Store(&mut *queue), Capability::TokenIssue, &resource)?;
+    .authorize(&Store(&mut *queue, None), Capability::TokenIssue, &resource)?;
     let identity = parent.human.clone().expect("human token checked");
     let child = Principal::human_inbox(identity.clone());
     let expires = parent
@@ -1568,11 +1596,12 @@ fn revoke_token_of(backend: &dyn ServiceBackend, caller: &Principal, raw: &Value
     let child = p.principal;
     let actor = caller.actor();
     let mut queue = backend.open(&actor)?;
+    queue.set_audit_use_case(UseCase::RevokeToken);
     let down = super::commands::operations::Operation::Down;
     let (capability, _) = down.request();
     authorize_operation(&mut *queue, &actor, &down)?;
     let resource = Resource::Principal(child.role);
-    let store = Store(&mut *queue);
+    let store = Store(&mut *queue, None);
     let key = child.credential_key();
     let revoked = store.0.issuing(
         &crate::domain::queue_service::IssueHeld::Nothing,
@@ -1692,7 +1721,7 @@ pub(super) fn issue_token(
     }
     let actor = parent.actor();
     let resource = Resource::Principal(child.role);
-    let store = Store(queue);
+    let store = Store(queue, None);
     Gate {
         actor: &actor,
         authorizer: &StaticPolicy,
@@ -1929,7 +1958,7 @@ pub(super) fn refuse_recorded(
         "why"
     };
     payload[key] = json!(why);
-    if let Err(record) = Store(queue).record_denial(payload) {
+    if let Err(record) = Store(queue, None).record_denial(payload) {
         warn!("could not record the refusal ({refused}): {record:#}");
     }
     anyhow::Error::new(refused).context(RefusedBecause(why.to_owned()))
@@ -1955,7 +1984,7 @@ pub(super) fn authorize_supervisor(
     actor: &ActorContext,
     registered: bool,
 ) -> Result<()> {
-    let store = Store(queue);
+    let store = Store(queue, None);
     let gate = Gate {
         actor,
         authorizer: &StaticPolicy,
@@ -1987,7 +2016,7 @@ pub(super) fn authorize_supervisor_needs(
     actor: &ActorContext,
     capability: Capability,
 ) -> Result<()> {
-    let store = Store(queue);
+    let store = Store(queue, None);
     let gate = Gate {
         actor,
         authorizer: &StaticPolicy,
@@ -2004,7 +2033,7 @@ pub(super) fn authorize_operation(
     actor: &ActorContext,
     operation: &super::commands::operations::Operation,
 ) -> Result<()> {
-    super::commands::operations::authorize(actor, &StaticPolicy, &Store(queue), operation)
+    super::commands::operations::authorize(actor, &StaticPolicy, &Store(queue, None), operation)
 }
 
 /// Check that the integrator `actor` may land `run`, recording a refusal
@@ -2015,7 +2044,7 @@ pub(super) fn authorize_integrator(
     actor: &ActorContext,
     run: &RunId,
 ) -> Result<()> {
-    let store = Store(queue);
+    let store = Store(queue, None);
     let gate = Gate {
         actor,
         authorizer: &StaticPolicy,
@@ -2557,7 +2586,8 @@ fn run(
     notes: &mut RequestNotes,
     answer_policy: &dyn Authorizer,
 ) -> Result<Value> {
-    let mut store = Store(queue);
+    queue.set_audit_use_case(use_case);
+    let mut store = Store(queue, Some(use_case));
     // The executor's telemetry principal reaches `telemetry_report` alone
     // and a role without `telemetry.report` never reaches it (ADR-t1662-3
     // decision 9): each is refused, and recorded, before its params are
@@ -2615,7 +2645,11 @@ fn run(
             unreachable!("answer command")
         };
         return serde_json::to_value(
-            Dialogue::new(&mut store, actor, answer_policy).answer(AskId::new(p.id), &p.text)?,
+            Dialogue::new(&mut store, actor, answer_policy).answer_with_original(
+                AskId::new(p.id),
+                &p.text,
+                p.original_text.as_deref(),
+            )?,
         )
         .map_err(Into::into);
     }
@@ -3028,7 +3062,7 @@ fn run(
 }
 
 /// A [`ServiceQueue`] as the [`Dialogue`] commands' store.
-struct Store<'a>(&'a mut dyn ServiceQueue);
+struct Store<'a>(&'a mut dyn ServiceQueue, Option<UseCase>);
 
 impl super::commands::replans::ReplanStore for Store<'_> {
     fn run_task(&self, run: &RunId) -> Result<Option<TaskId>> {
@@ -3070,7 +3104,17 @@ impl super::commands::replans::ReplanStore for Store<'_> {
 }
 
 impl DenialLog for Store<'_> {
-    fn record_denial(&self, payload: Value) -> Result<()> {
+    fn record_privileged(&self, mut payload: Value) -> Result<()> {
+        if let Some(use_case) = self.1 {
+            payload["use_case"] = json!(use_case);
+        }
+        self.0.record_privileged(payload)
+    }
+
+    fn record_denial(&self, mut payload: Value) -> Result<()> {
+        if let Some(use_case) = self.1 {
+            payload["use_case"] = json!(use_case);
+        }
         self.0.record_denial(payload)
     }
 }
@@ -3632,6 +3676,20 @@ pub fn stop_by_hand(
     Ok(report)
 }
 
+/// Fail-open authentication refusal, without recording submitted credentials.
+fn unauthenticated_refusal(
+    backend: &dyn ServiceBackend,
+    use_case: UseCase,
+    response: ServiceResponse,
+) -> ServiceResponse {
+    if let Err(error) = backend
+        .record_unauthenticated(json!({"use_case": use_case, "reason": "authentication_failed"}))
+    {
+        warn!("could not record authentication refusal: {error:#}");
+    }
+    response
+}
+
 /// Uniform refusal: neither failed JWT verification nor registry state is revealed.
 pub fn human_refusal() -> ServiceResponse {
     ServiceResponse::failure(
@@ -3757,19 +3815,50 @@ pub fn runner_refusal() -> ServiceResponse {
 /// ownership inside its write transaction. Declarations bind to the runner
 /// token's id, never an id supplied in the request.
 ///
-/// Refusal auditing (authorization_denied and queue_service_unauthenticated)
-/// is deferred to task 4075 by the decision in ask 1585. Ask StaticPolicy
-/// directly here; Gate will also record refusals when that auditing is added.
+/// Refusal auditing belongs to the audit service (D/B, task 4843), including
+/// HTTP refusals. Authenticated actor identification remains the responsibility
+/// of task 4075 (goal 250); records use the principal returned by that boundary.
 pub fn runner_http(
     backend: &dyn ServiceBackend,
     request: &ServiceRequest,
     configured: bool,
 ) -> ServiceResponse {
     use crate::domain::runner_registration::{Change, Outcome, REFRESH_SECONDS, SHORT_SECONDS};
+    let actor = std::cell::RefCell::new(None::<ActorContext>);
+    let unauthenticated = || {
+        if let Err(error) = backend.record_unauthenticated(
+            json!({"use_case": request.use_case, "reason": "runner_authentication_failed"}),
+        ) {
+            warn!("could not record runner refusal: {error:#}");
+        }
+        runner_refusal()
+    };
     if !configured {
-        return runner_refusal();
+        return unauthenticated();
     }
-    let denied = || {
+    let denied = |rule: &str| {
+        let capability = match request.use_case {
+            UseCase::RunnerCode => Capability::RunnerRegister,
+            UseCase::RunnerRevoke => Capability::RunnerRevoke,
+            UseCase::RunnerDeclare => Capability::RunnerDeclare,
+            UseCase::RunnerShare => Capability::RunnerShare,
+            _ => Capability::RunnerList,
+        };
+        let payload =
+            json!({"use_case": request.use_case, "reason": rule, "capability": capability});
+        let result = match actor.borrow().as_ref() {
+            Some(actor) => OwnDenials {
+                backend,
+                actor,
+                use_case: request.use_case,
+            }
+            .record_denial(payload),
+            None => backend.record_unauthenticated(payload),
+        };
+        if let Err(error) = result {
+            warn!("could not record runner denial: {error:#}");
+        }
+
         ServiceResponse::failure(
             ServiceErrorCode::AuthorizationDenied,
             "runner operation denied",
@@ -3787,14 +3876,15 @@ pub fn runner_http(
                 | UseCase::RunnerList
         ) {
             let Some(token) = request.token.as_deref() else {
-                return Ok(runner_refusal());
+                return Ok(unauthenticated());
             };
             let Some(principal) = backend.principal(token)? else {
-                return Ok(runner_refusal());
+                return Ok(unauthenticated());
             };
             if principal.check().is_err() {
-                return Ok(runner_refusal());
+                return Ok(unauthenticated());
             }
+            *actor.borrow_mut() = Some(principal.actor());
             let capability = match request.use_case {
                 UseCase::RunnerCode => Capability::RunnerRegister,
                 UseCase::RunnerRevoke => Capability::RunnerRevoke,
@@ -3803,11 +3893,10 @@ pub fn runner_http(
                 UseCase::RunnerList => Capability::RunnerList,
                 _ => unreachable!(),
             };
-            if StaticPolicy
-                .authorize(&principal.actor(), capability, &Resource::Queue)
-                .is_err()
+            if let Err(error) =
+                StaticPolicy.authorize(&principal.actor(), capability, &Resource::Queue)
             {
-                return Ok(denied());
+                return Ok(denied(error.reason.as_str()));
             }
             if request.use_case == UseCase::RunnerDeclare {
                 runner_id = principal
@@ -3815,7 +3904,7 @@ pub fn runner_http(
                     .strip_prefix("runner:")
                     .map(str::to_owned);
                 if runner_id.is_none() {
-                    return Ok(denied());
+                    return Ok(denied("runner_operation_denied"));
                 }
             } else {
                 human = if request.use_case == UseCase::RunnerList {
@@ -3824,7 +3913,7 @@ pub fn runner_http(
                     principal.human
                 };
                 if human.is_none() {
-                    return Ok(runner_refusal());
+                    return Ok(unauthenticated());
                 }
             }
         }
@@ -3832,10 +3921,10 @@ pub fn runner_http(
         // Overflow refuses before a write so an issued credential always has
         // exactly the same expiry in the response and in persistence.
         let Some(expires_at) = now.checked_add(SHORT_SECONDS) else {
-            return Ok(runner_refusal());
+            return Ok(unauthenticated());
         };
         let Some(refresh_expires_at) = now.checked_add(REFRESH_SECONDS) else {
-            return Ok(runner_refusal());
+            return Ok(unauthenticated());
         };
         let input = |name| request.params.get(name).and_then(Value::as_str);
         let mut values = None;
@@ -3861,7 +3950,7 @@ pub fn runner_http(
                     input("runner_id"),
                     request.params.get("shared").and_then(Value::as_bool),
                 ) else {
-                    return Ok(denied());
+                    return Ok(denied("runner_operation_denied"));
                 };
                 Change::Share {
                     caller: human.unwrap(),
@@ -3886,7 +3975,7 @@ pub fn runner_http(
                 } else {
                     "refresh"
                 }) else {
-                    return Ok(runner_refusal());
+                    return Ok(unauthenticated());
                 };
                 let (refresh, refresh_hash) = backend.runner_secret()?;
                 let (token, token_hash) = backend.runner_secret()?;
@@ -3910,14 +3999,14 @@ pub fn runner_http(
             }
             UseCase::RunnerRevoke => {
                 let Some(id) = input("runner_id") else {
-                    return Ok(denied());
+                    return Ok(denied("runner_operation_denied"));
                 };
                 Change::Revoke {
                     caller: human.unwrap(),
                     runner_id: id.into(),
                 }
             }
-            _ => return Ok(runner_refusal()),
+            _ => return Ok(unauthenticated()),
         };
         Ok(match backend.runner_change(&action, now)? {
             Outcome::Code => ServiceResponse::success(
@@ -3932,8 +4021,8 @@ pub fn runner_http(
             Outcome::Updated => ServiceResponse::success(json!({"updated": true})),
             Outcome::Listed(rows) => ServiceResponse::success(json!({"runners": rows})),
             Outcome::Revoked => ServiceResponse::success(json!({"revoked": true})),
-            Outcome::Unauthenticated => runner_refusal(),
-            Outcome::Denied => denied(),
+            Outcome::Unauthenticated => unauthenticated(),
+            Outcome::Denied => denied("runner_operation_denied"),
         })
     };
     match run() {
@@ -4003,6 +4092,7 @@ pub fn credential_preference_http(
         let log = OwnDenials {
             backend,
             actor: &actor,
+            use_case: request.use_case,
         };
         if let Err(refused) =
             gate.authorize(&log, Capability::CredentialPreference, &Resource::Queue)
@@ -4064,11 +4154,19 @@ pub fn runner_github_verified(
     use crate::domain::runner_registration::{Change, Outcome, SHORT_SECONDS, github_owner};
     let run = || -> Result<ServiceResponse> {
         let Some(owner) = jwt.and_then(|jwt| github_owner(config, jwt)) else {
-            return Ok(runner_refusal());
+            return Ok(unauthenticated_refusal(
+                backend,
+                UseCase::RunnerGithub,
+                runner_refusal(),
+            ));
         };
         let now = backend.now_ms() / 1000;
         let Some(expiry) = now.checked_add(SHORT_SECONDS) else {
-            return Ok(runner_refusal());
+            return Ok(unauthenticated_refusal(
+                backend,
+                UseCase::RunnerGithub,
+                runner_refusal(),
+            ));
         };
         let (token, hash) = backend.runner_secret()?;
         let (_, runner_id) = backend.runner_secret()?;
@@ -4084,7 +4182,7 @@ pub fn runner_github_verified(
                 Outcome::Issued(id) => ServiceResponse::success(
                     json!({"runner_id": id, "token": token, "expires_at": expiry}),
                 ),
-                _ => runner_refusal(),
+                _ => unauthenticated_refusal(backend, UseCase::RunnerGithub, runner_refusal()),
             },
         )
     };
@@ -4120,10 +4218,18 @@ pub fn image_publisher_exchange(
     use crate::domain::image_publish::{PublisherToken, TOKEN_SECONDS, publisher};
     let run = || -> Result<ServiceResponse> {
         let Some(publisher) = jwt.and_then(|jwt| publisher(binding, jwt)) else {
-            return Ok(image_refusal());
+            return Ok(unauthenticated_refusal(
+                backend,
+                UseCase::ImagePublisherExchange,
+                image_refusal(),
+            ));
         };
         let Some(expires_at) = (backend.now_ms() / 1000).checked_add(TOKEN_SECONDS) else {
-            return Ok(image_refusal());
+            return Ok(unauthenticated_refusal(
+                backend,
+                UseCase::ImagePublisherExchange,
+                image_refusal(),
+            ));
         };
         let (token, hash) = backend.runner_secret()?;
         let (_, id) = backend.runner_secret()?;
@@ -4180,6 +4286,7 @@ pub fn image_publish(backend: &dyn ServiceBackend, request: &ServiceRequest) -> 
             &OwnDenials {
                 backend,
                 actor: &actor,
+                use_case: request.use_case,
             },
             Capability::ImagePublish,
             &Resource::Queue,
@@ -4202,7 +4309,7 @@ pub fn image_publish(backend: &dyn ServiceBackend, request: &ServiceRequest) -> 
                 PublishOutcome::Recorded(row) | PublishOutcome::Resent(row) => {
                     ServiceResponse::success(serde_json::to_value(row)?)
                 }
-                PublishOutcome::Unauthenticated => image_refusal(),
+                PublishOutcome::Unauthenticated => unauthenticated("publisher_not_active"),
             },
         )
     };
@@ -5423,8 +5530,25 @@ pub(crate) mod tests {
             code(&runner_http(&backend, &local, true)),
             Some(ServiceErrorCode::Unauthenticated)
         );
-        // Refusal records are deliberately deferred to the auditing use case.
-        assert_eq!(*backend.log.lock().unwrap(), before_refusals);
+        let log = backend.log.lock().unwrap();
+        assert_eq!(&log[..before_refusals.len()], before_refusals.as_slice());
+        assert_eq!(
+            &log[1..3],
+            &[
+                json!({"use_case": "runner_code", "reason": "runner_authentication_failed"}),
+                json!({"use_case": "runner_code", "reason": "socket"}),
+            ]
+        );
+        let mut expected = Vec::new();
+        for _ in 0..7 {
+            expected.push(json!({"use_case": "runner_code", "capability": "runner.register", "reason": "not granted"}));
+            expected.push(json!({"use_case": "runner_revoke", "capability": "runner.revoke", "reason": "not granted"}));
+        }
+        expected.push(json!({"use_case": "runner_code", "reason": "runner_authentication_failed"}));
+        assert_eq!(&log[before_refusals.len()..], expected.as_slice());
+        let text = serde_json::to_string(&*log).unwrap();
+        assert!(!text.contains(value));
+        assert!(!text.contains(&human));
     }
 
     #[test]
@@ -5518,7 +5642,7 @@ pub(crate) mod tests {
             records().last().unwrap(),
             &json!({"event": "authorization_denied", "role": "user",
                     "capability": "credential.preference", "reason": "not on this resource",
-                    "resource": {"kind": "queue"}})
+                    "use_case": "credential_preference", "resource": {"kind": "queue"}})
         );
         // Nor by the inbox, a planner, a job or a runner: each refusal is
         // recorded as that principal.
@@ -5545,7 +5669,7 @@ pub(crate) mod tests {
                 added,
                 [json!({"event": "authorization_denied", "role": role,
                         "capability": "credential.preference", "reason": "not granted",
-                        "resource": {"kind": "queue"}})],
+                        "use_case": "credential_preference", "resource": {"kind": "queue"}})],
                 "{token}"
             );
         }
@@ -5630,7 +5754,7 @@ pub(crate) mod tests {
                 records()[before..].to_vec(),
                 [json!({"event": "authorization_denied", "role": role,
                         "capability": "credential.preference", "reason": "not granted",
-                        "resource": {"kind": "queue"}})],
+                        "use_case": "credential_preference", "resource": {"kind": "queue"}})],
                 "{token}"
             );
         }
@@ -10282,10 +10406,18 @@ pub(crate) mod tests {
             code(&runner_work_http(&backend, &report)),
             Some(ServiceErrorCode::LeaseLost)
         );
+        let after = backend.log.lock().unwrap();
         assert_eq!(
-            backend.log.lock().unwrap().len(),
-            3,
+            &after[..3],
+            log.as_slice(),
             "reports do not read main or claim rules"
+        );
+        assert_eq!(
+            &after[3..],
+            &vec![
+                json!({"use_case": "runner_poll", "capability": "runner.claim", "reason": "not granted"});
+                4
+            ]
         );
     }
 }
@@ -10313,20 +10445,42 @@ pub fn runner_work_http(backend: &dyn ServiceBackend, request: &ServiceRequest) 
     use crate::domain::runner_assignment::{LeaseReport, Operation, Outcome, Poll, ResultReport};
     let execute = || -> Result<ServiceResponse> {
         let Some(token) = request.token.as_deref() else {
-            return Ok(runner_refusal());
+            return Ok(unauthenticated_refusal(
+                backend,
+                request.use_case,
+                runner_refusal(),
+            ));
         };
         let Some(principal) = backend.principal(token)? else {
-            return Ok(runner_refusal());
+            return Ok(unauthenticated_refusal(
+                backend,
+                request.use_case,
+                runner_refusal(),
+            ));
         };
         if principal.check().is_err() {
-            return Ok(runner_refusal());
+            return Ok(unauthenticated_refusal(
+                backend,
+                request.use_case,
+                runner_refusal(),
+            ));
         }
         let capability = match request.use_case {
             UseCase::RunnerPoll => Capability::RunnerClaim,
             UseCase::RunnerReport => Capability::RunnerReport,
             _ => Capability::RunnerHeartbeat,
         };
+        let actor = principal.actor();
+        let log = OwnDenials {
+            backend,
+            actor: &actor,
+            use_case: request.use_case,
+        };
         if !crate::domain::authorization::grants(principal.role).contains(&capability) {
+            let payload = json!({"use_case": request.use_case, "capability": capability, "reason": crate::domain::authorization::DenyReason::NotGranted.as_str()});
+            if let Err(error) = log.record_denial(payload) {
+                warn!("could not record runner capability refusal: {error:#}");
+            }
             return Ok(ServiceResponse::failure(
                 ServiceErrorCode::AuthorizationDenied,
                 "runner capability denied",
@@ -10382,14 +10536,22 @@ pub fn runner_work_http(backend: &dyn ServiceBackend, request: &ServiceRequest) 
                 ServiceResponse::success(json!({"remaining_seconds": remaining_seconds}))
             }
             Outcome::Released => ServiceResponse::success(json!({"released": true})),
-            Outcome::Denied => ServiceResponse::failure(
-                ServiceErrorCode::AuthorizationDenied,
-                "run is not assigned to this runner",
-            ),
+            Outcome::Denied => {
+                let payload = json!({"use_case": request.use_case, "capability": capability, "reason": "not_assigned", "resource": {"kind": "runner_assignment"}});
+                if let Err(error) = log.record_denial(payload) {
+                    warn!("could not record runner assignment refusal: {error:#}");
+                }
+                ServiceResponse::failure(
+                    ServiceErrorCode::AuthorizationDenied,
+                    "run is not assigned to this runner",
+                )
+            }
             Outcome::LeaseLost => {
                 ServiceResponse::failure(ServiceErrorCode::LeaseLost, "runner lease lost")
             }
-            Outcome::Unauthenticated => runner_refusal(),
+            Outcome::Unauthenticated => {
+                unauthenticated_refusal(backend, request.use_case, runner_refusal())
+            }
         })
     };
     match execute() {

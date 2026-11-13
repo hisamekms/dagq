@@ -153,8 +153,10 @@ string_enum!(
     /// A push's end: completed or failed, with the remote ref's old and
     /// new sha.
     PushCompleted => "push.completed",
-    /// An answer to an ask: the hash of the ask's text, the options, the
-    /// recommendation and its confidence, the answer and its path.
+    /// A judgment snapshot: at opening (`change.after.phase=opened`) the
+    /// question hash and decision context, at answering (`answered`) also
+    /// the answer hash and authority-derived path. Opening and answering
+    /// each append once in their own state transaction.
     AskAnswered => "ask.answered",
     /// Whether an answer was applied, or why not.
     AnswerApplied => "answer.applied",
