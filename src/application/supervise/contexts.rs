@@ -31,6 +31,7 @@ pub(super) struct PassEnv<
     pub(super) verifier: &'s Arc<dyn Verifier + Send + Sync>,
     pub(super) spawner: &'s dyn Spawner,
     pub(super) sessions: &'s dyn SessionWrappers,
+    pub(super) service_access: &'s dyn crate::application::queue_service::ServiceAccess,
     pub(super) token: &'s LeaseToken,
 }
 
@@ -85,6 +86,7 @@ impl<'s> PassEnv<'s> {
             verifier,
             spawner,
             sessions,
+            service_access,
             token,
         } = self;
         PassEnv {
@@ -97,6 +99,7 @@ impl<'s> PassEnv<'s> {
             verifier,
             spawner,
             sessions,
+            service_access,
             token,
         }
     }
@@ -113,6 +116,7 @@ impl<'s> PassEnv<'s> {
             verifier,
             spawner,
             sessions,
+            service_access,
             token,
         } = self;
         PassEnv {
@@ -125,6 +129,7 @@ impl<'s> PassEnv<'s> {
             verifier,
             spawner,
             sessions,
+            service_access,
             token,
         }
     }

@@ -21,6 +21,11 @@ use crate::application::install::{
     parse_version, previous_path,
 };
 
+/// Host binary operations for install and update jobs. Schema checks run
+/// the new build as a child with the caller's actor environment. After
+/// clearing client routing variables, `schema` restores the credential-file
+/// variable so the check uses the caller's credential: an update job's own
+/// token rather than the supervisor's that started it.
 pub struct LocalBinaries;
 
 /// Whether `migrate --check` failed with the words of no service that
@@ -210,6 +215,19 @@ impl Binaries for LocalBinaries {
     fn sends_install_steps(&self, binary: &Path) -> bool {
         // Clap refuses an unknown argument before it prints the help.
         output(binary, &["install", "--sends-steps", "--help"]).is_ok()
+    }
+
+    fn accepts_update_job(&self, binary: &Path) -> bool {
+        output(
+            binary,
+            &["auto-update", "--job-credential", "probe", "--help"],
+        )
+        .is_ok()
+            && output(
+                binary,
+                &["release-update", "--job-credential", "probe", "--help"],
+            )
+            .is_ok()
     }
 
     fn schema(&self, binary: &Path, db: &Path) -> Result<Option<SchemaCheck>> {

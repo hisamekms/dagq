@@ -89,6 +89,9 @@ pub(crate) struct InstallSteps {
     pub(crate) handoff: Handoff,
     pub(crate) restart_failures: std::sync::atomic::AtomicUsize,
     pub(crate) in_place: bool,
+    pub(crate) unsupported_job: Option<PathBuf>,
+    pub(crate) previous_version: Option<String>,
+    pub(crate) job_checks: std::sync::Mutex<Vec<PathBuf>>,
     pub(crate) survives_failure: bool,
     pub(crate) service_running: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) hold_active: Arc<std::sync::atomic::AtomicBool>,
@@ -115,6 +118,9 @@ impl Default for InstallSteps {
             handoff: Handoff::Taken,
             restart_failures: std::sync::atomic::AtomicUsize::new(0),
             in_place: false,
+            unsupported_job: None,
+            previous_version: None,
+            job_checks: Default::default(),
             survives_failure: false,
             service_running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             hold_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -148,6 +154,11 @@ impl Binaries for InstallSteps {
         bail!("the binary is already built")
     }
     fn version(&self, binary: &Path) -> Result<String> {
+        if binary == Path::new("/to.previous")
+            && let Some(version) = &self.previous_version
+        {
+            return Ok(version.clone());
+        }
         Ok(if binary == Path::new("/to") && !self.in_place {
             "old"
         } else {
@@ -160,6 +171,10 @@ impl Binaries for InstallSteps {
     }
     fn takes_handoff(&self, _: &Path) -> bool {
         true
+    }
+    fn accepts_update_job(&self, binary: &Path) -> bool {
+        self.job_checks.lock().unwrap().push(binary.to_owned());
+        self.unsupported_job.as_deref() != Some(binary)
     }
     fn schema(&self, _: &Path, _: &Path) -> Result<Option<SchemaCheck>> {
         Ok(self.schema.clone())

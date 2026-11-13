@@ -52,11 +52,10 @@ logの保持は[Logs](commands.md#log)を参照する。
 
 ### queueへの経路
 
-jobはDBを開かず、起動したsupervisorのprincipalでqueue serviceの制御側のユースケースへ読みと記録を送る（[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
-service.installの認可には登録のtokenのfileが必要で、tokenの無いjobは断られる。
+jobはDBを開かず、起動元のsupervisorがjobごとに発行する自分のprincipalでqueue serviceの制御側のユースケースへ読みと記録を送る（[hostのCLI](../queue-service-host-cli.md#制御側のコマンド)）。
+service.installの認可にもそのjobのtokenのfileを使い、supervisorの資格のfileは持たない。
 checkout・ビルド・cargo installの子へ資格情報を渡さない（`update_job_command`と`without_credential`）。
-execの引き継ぎはtokenも継ぐが、登録が終われば失効し、jobは別のprincipalに替えずerrorで終わる。
-そのため起動元を戻す際は失敗の記録とaskを先に済ませる（`update::Recovery`、ADR-t3102-1決定2）。
+更新のjobはjobごとの自分のprincipalで送る（発行と寿命は[Authorization](../authorization.md)）。
 
 ### ビルド
 
@@ -102,10 +101,12 @@ drainはせず、互換のmigrationは入れ替えの口のserviceが適用す�
 引き継ぎ後の見張り・戻し・失敗の記録は`update::settle`で、人のinstallも共有する。
 見張りの成功は新しいbuildでheartbeatが進んだことで判定する（`update::watch`）。
 固定バイナリは全員で1つなので、全員が失敗し、戻すfileが置き換え前のbuildと一致するときだけ戻す。
+更新のjobはjobのprincipalを受け付けないbuildへは戻さずupdate_failed（restored: false）とaskにし、入れる前の確認でも受け付けなければ何も入れ替えない（判定の入口は`install::check_update_job`）。
 一部が新しいbinaryで動いていれば戻さず、失敗したsupervisorだけを戻してaskで人へ渡す（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
 
 ### supervisorを戻す
 
+binaryを戻さないときは、戻したbinaryへの引き継ぎもそのbinaryでの起動し直しもせず、置いてあるbinaryのままのbring_backを使う。
 戻す相手と登録の読み方は`update::Recovery`、戻す必要の判断は`bringing_back`、modeごとの起動し直しは`restart`が持つ。
 登録済みのin-cmuxのsupervisorはjobが起動し直さず、workspaceも閉じない。
 jobには停止後にupを打つprincipalが無いので、askに載るコマンドを人かinboxが停止の完了後に打つ（`restart_by_update`）。

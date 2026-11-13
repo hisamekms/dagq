@@ -1311,6 +1311,7 @@ impl Supervisor<'_> {
                 files: &self.files,
                 repository: &self.repository,
                 verifier: &self.verifier,
+                service_access: self.service_access,
                 spawner: self.spawner,
                 sessions: self.sessions,
                 token: self.registration.token(),

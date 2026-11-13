@@ -33,6 +33,7 @@ actorの型と環境変数は[Roles](supervisor-lifecycle/roles.md#actors)。
 ## 固定バイナリを戻したときの窓
 
 判定は、呼ばれた`dagq`のバイナリが持つpolicyで決まる。
+更新jobはそのprincipalを拒むbuildへ戻さない。
 固定バイナリを前のものに戻すと（[`install --rollback`](supervisor-lifecycle/install.md)、自動更新の見張りの`restore`（[Auto-update](supervisor-lifecycle/auto-update.md)））、新しいバイナリが起動してまだ走っているjobの`dagq`の呼び出しは戻したバイナリに届く。
 戻したバイナリが`DAGQ_ROLE`の未知の値をfail closedにするparseを持たず、新しいroleを知らなければ、そのroleは制限を受けない。
 jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに制限し、ほかのjobの状態を変える呼び出しを拒まない（今のバイナリは知らないroleを拒む）。
@@ -175,8 +176,8 @@ Codexのinboxのhookもこの約束を持つ（[ADR-t2159-1](../adr/2026-10-09-t
   launchdのsupervisorは`DAGQ_ROLE`を持たない（user）ので、`up`を打ったのがplannerでも起動は通る。
   exec の引き継ぎは同じ環境のまま自分をexecするので、同じroleで判定される。
   起動したプロセスのeventのactorは、呼び出し元ではなく`supervisor:<pid>`（`event_actor`）
-- `auto-update`と`release-update`は、supervisorが自分の環境（`supervisor:<pid>`）とtokenで起動する。
-  `install`とjobは新しいbuildの確認を同じ環境の子として打つので、roleは`queue.admin`と`service.lifecycle`も持つ。
+- `auto-update`と`release-update`はsupervisorのenvで起動し、その資格fileを持たずjobごとのprincipalで送る。
+  確認も呼び出し元のprincipalで認可する（`LocalBinaries::schema`）。
   子の`up`は`install`だけが呼び出し元のprincipalで打ち、更新のjobは打たずlaunchdに任せるか打つ`up`をaskで人とinboxに知らせる（[supervisorを戻す](supervisor-lifecycle/auto-update.md#supervisorを戻す)）。
   人とinboxとplannerも`install`と同じ権限で打てる（手順の再現と復旧）。
   `observe`（`observe.run`）もsupervisorが自分の環境で起動し、その中のagentだけがobserverになる

@@ -9,6 +9,7 @@ accepted_on: 2026-09-26
 supersedes:
   - adr-0045
 amended_by:
+  - adr-t4638-1
   - adr-t614-1
   - adr-t632-1
   - adr-t618-1

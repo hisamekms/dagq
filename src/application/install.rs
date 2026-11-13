@@ -79,6 +79,13 @@ pub trait Binaries {
         let _ = binary;
         true
     }
+    /// Whether the build accepts update-job principals. The credential
+    /// argument and the service's support shipped together; probing clap
+    /// avoids running a job or opening a queue (ADR-t4638-1).
+    fn accepts_update_job(&self, binary: &Path) -> bool {
+        let _ = binary;
+        true
+    }
     /// `binary --db <db> migrate --check`: the schema facts the queue's
     /// service read, judged by `binary`; none when no service that answers
     /// them runs on the queue, which nothing else reads.
@@ -518,6 +525,26 @@ pub fn install_built(
     options: &InstallOptions,
     built: Built,
 ) -> Result<Value> {
+    install_built_as(ports, db, options, built, false)
+}
+
+/// Install by an update job: every build placed at target must keep its
+/// credential usable, including the one restored after a failed handoff.
+pub(super) fn install_by_update_job(
+    ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
+    db: Option<&Path>,
+    options: &InstallOptions,
+) -> Result<Value> {
+    install_built_as(ports, db, options, built(ports, db, options)?, true)
+}
+
+fn install_built_as(
+    ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
+    db: Option<&Path>,
+    options: &InstallOptions,
+    built: Built,
+    update_job: bool,
+) -> Result<Value> {
     let Ports {
         binaries, files, ..
     } = *ports;
@@ -527,6 +554,7 @@ pub fn install_built(
         binary: source,
         e2e,
     } = built;
+    check_update_job(binaries, &source, update_job)?;
     let version = binaries
         .version(&source)
         .with_context(|| format!("{} does not report its version", source.display()))?;
@@ -665,6 +693,7 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
         version: &version,
         replaced_version: replaced_version.as_deref(),
         in_place,
+        update_job,
     };
     let service = (served && !in_place).then(|| {
         let first = serve_in_place(binaries, target, db);
@@ -905,6 +934,34 @@ impl KeptBinary {
     }
 }
 
+/// A job cannot replace the target with a build whose service refuses its
+/// principal, even after launchd or reach_at_start starts that service.
+/// Human install and rollback send as their caller and bypass this gate.
+pub(super) fn check_update_job(
+    binaries: &dyn Binaries,
+    binary: &Path,
+    update_job: bool,
+) -> Result<()> {
+    ensure!(
+        !update_job || binaries.accepts_update_job(binary),
+        "{} does not accept the update job's principal",
+        binary.display()
+    );
+    Ok(())
+}
+
+/// A refused previous build needs a person's rollback. Keep that advice
+/// out of candidate checks, where the installed binary was never replaced.
+pub(super) fn check_update_job_restore(
+    binaries: &dyn Binaries,
+    binary: &Path,
+    update_job: bool,
+) -> Result<()> {
+    check_update_job(binaries, binary, update_job).context(
+        "the previous build was left unrestored; the installed binary stays in place; a person can run `install --rollback`",
+    )
+}
+
 /// What an install undoes when no supervisor took the new binary, including
 /// a service start that failed before any handoff request.
 struct Undo<'a> {
@@ -914,6 +971,7 @@ struct Undo<'a> {
     version: &'a str,
     replaced_version: Option<&'a str>,
     in_place: bool,
+    update_job: bool,
 }
 
 impl Undo<'_> {
@@ -953,6 +1011,16 @@ impl Undo<'_> {
             (
                 error.context(context.clone()),
                 json!({"restored": false, "reason": context}),
+            )
+        } else if let Err(reason) =
+            check_update_job_restore(self.binaries, previous, self.update_job)
+        {
+            let reason = format!("{reason:#}");
+            (
+                error.context(reason.clone()),
+                // Recovery may start the binary still in place to record
+                // the failure; this never starts the refused previous build.
+                json!({"restored": false, "reason": reason, "kept_for_job": true}),
             )
         } else {
             match self.binaries.restore(target) {
@@ -1371,6 +1439,97 @@ mod tests {
             "{error}"
         );
     }
+    /// Exercise the real install entry points, including Undo after every
+    /// handoff failed. Human rollback must never consult the job gate.
+    #[test]
+    fn only_job_installs_gate_the_source_and_the_previous_build() {
+        for (job, rollback, unsupported, restored) in [
+            (true, false, "/source", false),
+            (true, false, "/to.previous", false),
+            (true, false, "/unrelated", true),
+            (false, false, "/source", true),
+            (false, true, "/to.previous", true),
+        ] {
+            let steps = Arc::new(InstallSteps {
+                handoff: Handoff::Failed,
+                unsupported_job: Some(unsupported.into()),
+                ..Default::default()
+            });
+            let files = crate::application::memory_files::MemoryFiles::default();
+            files.put(Path::new("/queue"), UNIX_EPOCH, "queue");
+            files.put(Path::new("/to"), UNIX_EPOCH, "old");
+            files.put(Path::new("/to.previous"), UNIX_EPOCH, "previous");
+            let queues =
+                |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+            let ports = Ports {
+                binaries: &*steps,
+                files: &files,
+                processes: &OnlyOne,
+                clock: &At(10_000),
+                queues: &queues,
+                down: &|| bail!("no drain"),
+            };
+            let options = InstallOptions {
+                source: if rollback {
+                    Source::Rollback
+                } else {
+                    Source::Binary("/source".into())
+                },
+                target: "/to".into(),
+                allow_breaking: false,
+                restart: vec![],
+                handoff_timeout: Duration::ZERO,
+                poll: Duration::ZERO,
+                e2e: E2eGate::NotApplicable,
+            };
+            let error = if job {
+                install_by_update_job(&ports, Some(Path::new("/queue")), &options)
+            } else {
+                install(&ports, Some(Path::new("/queue")), &options)
+            }
+            .unwrap_err();
+            let calls = steps.calls.lock().unwrap();
+            assert_eq!(calls.iter().any(|c| c == "restore"), restored, "{calls:?}");
+            if job && unsupported == "/source" {
+                assert!(
+                    calls.is_empty(),
+                    "source refused before any side effects: {calls:?}"
+                );
+                assert!(
+                    error
+                        .to_string()
+                        .contains("does not accept the update job's principal")
+                );
+            } else {
+                let report = &HandoffFailed::of(&error).expect("handoff failed").restored;
+                assert_eq!(report["restored"], restored);
+                if !restored {
+                    assert!(
+                        report["reason"]
+                            .as_str()
+                            .unwrap()
+                            .contains("does not accept")
+                    );
+                    assert!(
+                        report["reason"]
+                            .as_str()
+                            .unwrap()
+                            .contains("the previous build was left unrestored")
+                    );
+                    assert!(
+                        report["reason"]
+                            .as_str()
+                            .unwrap()
+                            .contains("install --rollback")
+                    );
+                }
+            }
+            if !job {
+                assert!(steps.job_checks.lock().unwrap().is_empty());
+            }
+        }
+    }
+
     /// Start includes an unread schema as well as pending migrations. Open
     /// can still require a replacement with start=false. Failures must not
     /// introduce a service restart after handoff, nor change adopt/restore.

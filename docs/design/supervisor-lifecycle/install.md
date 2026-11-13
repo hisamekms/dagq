@@ -48,6 +48,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
      checkoutのbuildとe2eはそのcheckoutの`target/`を使い、このlockを取らない。
 2. **確認**（決定12）: 元のbuild識別子を読み、使い捨てのqueueで起動できることを確かめる。
    通らなければ何も置き換えない。
+   更新のjobのinstallでは元がjobのprincipalを受け付けなければ入れず、人のinstallと--rollbackはこの判定を通らない。
    引き継ぎを受けるliveな登録があるのに、元が引き継ぎより前のbinaryなら、execしたsupervisorが引数で止まるので、何も置き換えずに`down`と`up`を案内するerrorで止まる（そのようなbinaryに戻すときも同じ）。
 3. **schema**: queueのDBがあれば元の`migrate --check`を読む。
    `migrate --check`はqueue serviceに聞く。
@@ -78,6 +79,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    上限の直後に要求を受け取ったsupervisorの扱いは`lifecycle::hand_off`のdoc commentと[`up` / `down`](up-down.md)の引き継ぎが持つ。
    `hand_off`は最初の失敗で止まらず、引き継がせた全員の成功か失敗を待つ（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
    fileは全員で1つなので、引き継ぎを要求した**全員が失敗したときだけ**`<to>.previous`を`<to>`に戻し（`restore`）、`install::HandoffFailed`のerrorで止まる。
+   更新のjobのinstallでは戻す先がjobのprincipalを受け付けなければ戻さず、人のinstallと--rollbackはこの判定を通らない。
    答えの切れた要求と取り下げは登録を読み直して照合し、取ったかが分からないsupervisorが残れば戻さずに`<to>`を残すerrorで止まる（`lifecycle::HandoffUnsettled`）。
    **一部だけが失敗したとき**は戻さず、失敗したsupervisorを名指して、`down --force`と`up`（新しいbinaryで起動し直す）か戻し（全員を前のbinaryに戻す）を案内する`install::KeptBinary`のerrorで止まる。
    CLIはこのerrorのときも結果をstdoutに出してから、errorをstderrに出して失敗で終わる。
@@ -93,6 +95,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
 7. **見張り**（ADR-0073の決定13・14）: 5で引き継がせたsupervisorのそれぞれが、新しいbuild識別子のまま、取り戻したときより後のheartbeatを期限の内に書くのを待ち、確かめ終えるまで`install`は成功を返さない（`update::install_watched`）。
    判定・戻し・起動し直しは[自動更新の見張り](auto-update.md#入れ替えと見張り)と同じ`update::settle`を通る。
    全員が失敗すれば`.previous`が置き換えた前のbuild識別子と同じときだけ固定バイナリを戻し、一部だけなら戻さず（ADR-t632-1）、失敗したsupervisorだけをそれぞれ戻す。
+   更新のjobでは戻す先がjobのprincipalを受け付けなければ戻さず、人のinstallと--rollbackはこの判定を通らない。
    戻すときの元の登録は`install::install`を呼ぶ前に読んだ記録から取り、ビルドと関門の間に登録したsupervisorも引き継ぎの後に読み直して足す（`update::registered_since`）。
    queueが無い・liveなsupervisorが居ない・6のdrainのときは見張らない。
    - **inboxに知らせる**: 見張りの失敗と5の引き継ぎの段の失敗は、人の`install`のものと分かる`update_failed`のqueue eventを書き、`update_failed`のask（新しいkindは作らない。jobのaskと並んで開ける理由は`INSTALL_SOURCE`のdoc comment）を開く。

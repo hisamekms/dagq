@@ -1006,6 +1006,9 @@ fn put_in_place(
     plugin: PluginStep,
 ) -> Result<Value> {
     let pid = job.pid;
+    if let Err(error) = install::check_update_job(ports.binaries, binary, true) {
+        return failed(queue, job, "check", &error, json!({}));
+    }
     let schema = match ports.binaries.schema(binary, db) {
         Ok(schema) => schema,
         Err(error) => return failed(queue, job, "check", &error, json!({})),
@@ -1036,7 +1039,7 @@ fn put_in_place(
     // before it is not a handed-over supervisor's successor.
     let handoff_from = ports.clock.now();
     let no_drain = || -> Result<Value> { bail!("the automatic update never drains") };
-    let installed = install::install(
+    let installed = install::install_by_update_job(
         &install::Ports {
             binaries: ports.binaries,
             files: ports.files,
@@ -1221,7 +1224,10 @@ fn settle(
                 let stopped = InstallFailed::of(&error)
                     .filter(|failed| failed.report["queue_service"]["outcome"] == "stopped");
                 let mut recovery = match stopped {
-                    Some(stopped) if stopped.report["restored"]["restored"] == true => {
+                    Some(stopped)
+                        if stopped.report["restored"]["restored"] == true
+                            || stopped.report["restored"]["kept_for_job"] == true =>
+                    {
                         match Recovery::after_service_restart(ports, &*queue, db, job, before) {
                             Ok(recovery) => recovery,
                             Err(recovery) => {
@@ -1801,6 +1807,34 @@ fn observe(
     Ok(())
 }
 
+/// Issue before spawn; the job binds its own process before doing work.
+/// update_started, recorded by the supervisor after spawn, is reporting,
+/// not the token's lifetime. A failed spawn returns the unused token; if
+/// the start record fails, the running job still owns and returns it.
+/// The command receives only its own credential file, never the parent's.
+pub(crate) fn spawn_job(
+    access: &dyn super::queue_service::ServiceAccess,
+    db: &Path,
+    name: &str,
+    command: &mut super::CommandSpec,
+    spawner: &dyn super::Spawner,
+    streams: super::Streams<'_>,
+) -> Result<Box<dyn super::Spawned>> {
+    let principal = crate::domain::queue_service::Principal::update_job(name);
+    let issued = access.issue(db, &principal)?;
+    command
+        .env_remove(crate::domain::queue_service::CREDENTIAL_FILE_ENV)
+        .arg("--job-credential")
+        .arg(&issued.file);
+    match spawner.spawn(command, streams) {
+        Ok(job) => Ok(job),
+        Err(error) => {
+            let _ = access.revoke(db, &principal.actor_id);
+            Err(error)
+        }
+    }
+}
+
 /// Put the replaced binary back at the target, only when `.previous` is the
 /// build the supervisor ran before (ADR-0045 decision 13): a `.previous`
 /// of another build was not put there by this update.
@@ -1822,19 +1856,23 @@ fn restore(
             ),
         });
     }
+    if let Err(error) = install::check_update_job_restore(
+        ports.binaries,
+        &previous,
+        !matches!(job.subject, Subject::Install),
+    ) {
+        return json!({"restored": false, "reason": format!("{error:#}")});
+    }
     match ports.binaries.restore(job.target) {
         Ok(()) => json!({"restored": true, "version": kept}),
         Err(error) => json!({"restored": false, "reason": format!("{error:#}")}),
     }
 }
 
-/// The bring-backs of a failed install or watch, judged from the
-/// registrations read once before the first of them, as the job's steps go
-/// under the token of its own supervisor (`own`, the job's; none for a
-/// person's install): stopping that supervisor ends its registration and
-/// revokes the token (ADR-t3102-1 decision 2), so it is stopped and started
-/// again only once the job recorded its failure ([`Self::finish`]), and
-/// every other one at once, its registration not read again.
+/// Bring-backs use a single registration snapshot. The starting supervisor
+/// is recovered after the failure record and ask, so an interruption during
+/// its restart leaves an actionable failure for the inbox. The job's own
+/// principal remains usable across that supervisor's sign_out.
 struct Recovery<'a> {
     registrations: Vec<SupervisorRegistration>,
     own: Option<&'a SupervisorRegistration>,
@@ -1847,9 +1885,9 @@ struct Recovery<'a> {
 const SERVICE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 
 impl<'a> Recovery<'a> {
-    /// After install restored the binary without sending any handoff, start
-    /// that binary's service ourselves: dropping the install's hold does not
-    /// make the supervisor's periodic watch run immediately. Even a failed
+    /// After install failed without sending any handoff, start the service
+    /// of the binary in place (restored, or kept for the job's principal).
+    /// Dropping the install's hold does not make the supervisor's periodic watch run immediately. Even a failed
     /// start may leave a service, or the watch may start one later. Retry only
     /// the read of registrations, within a bound, before recovery and writes.
     fn after_service_restart(
@@ -2297,9 +2335,9 @@ pub fn restart(
 /// update's), which runs no `up`: one of the retired in-cmux mode is left
 /// to a person, the error naming the `up` to run, which [`bring_back`]
 /// reports in the `update_failed` ask. The job has no principal to call
-/// that `up` as: the token of the supervisor that started it ends with that
-/// supervisor (ADR-t3102-1 decision 2), and the job does not call it as the
-/// user. A person's `install` starts it as its caller ([`restart`]).
+/// that `up` as: its own principal has no supervisor-start capability,
+/// and the job does not call it as the user. A person's `install` starts it
+/// as its caller ([`restart`]).
 pub fn restart_by_update(
     registration: &SupervisorRegistration,
     db: &str,
@@ -2317,6 +2355,225 @@ pub fn restart_by_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jobs_check_before_install_and_gate_the_watch_restore() {
+        use crate::application::install::test_support::{At, InstallQueue, InstallSteps, OnlyOne};
+        use crate::application::memory_files::MemoryFiles;
+        for unsupported in ["/source", "/to.previous", "/unrelated"] {
+            let steps = Arc::new(InstallSteps {
+                unsupported_job: Some(unsupported.into()),
+                ..Default::default()
+            });
+            let files = MemoryFiles::default();
+            files.put(Path::new("/queue"), std::time::UNIX_EPOCH, "queue");
+            let queues =
+                |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+            let ports = JobPorts {
+                binaries: &*steps,
+                files: &files,
+                processes: &OnlyOne,
+                clock: &At(10_000),
+                queues: &queues,
+                restart: &|_| bail!("no restart"),
+                is_ancestor: &|_, _| bail!("no ancestry"),
+            };
+            for subject in [
+                Subject::Commit("abc"),
+                Subject::Release("1.2.3"),
+                Subject::Install,
+            ] {
+                let job = Job {
+                    subject,
+                    token: None,
+                    target: Path::new("/to"),
+                    staged: Path::new("/staged"),
+                    log: None,
+                    restart: &[],
+                    handoff_timeout: Duration::ZERO,
+                    watch_timeout: Duration::ZERO,
+                    poll: Duration::ZERO,
+                    pid: 77,
+                };
+                let restored = restore(&ports, &job, Some("new"));
+                assert_eq!(
+                    restored["restored"],
+                    unsupported != "/to.previous" || matches!(subject, Subject::Install)
+                );
+                if unsupported == "/to.previous" && !matches!(subject, Subject::Install) {
+                    let reason = restored["reason"].as_str().unwrap();
+                    assert!(reason.contains("the previous build was left unrestored"));
+                    assert!(reason.contains("install --rollback"));
+                }
+                if unsupported == "/source" && !matches!(subject, Subject::Install) {
+                    let mut queue = queues(Path::new("/queue")).open().unwrap();
+                    let failure = put_in_place(
+                        &ports,
+                        &mut *queue,
+                        Path::new("/queue"),
+                        &job,
+                        Path::new("/source"),
+                        PluginStep::Untouched,
+                    )
+                    .unwrap();
+                    assert_eq!(failure["stage"], "check");
+                    assert_eq!(
+                        failure["error"],
+                        "/source does not accept the update job's principal"
+                    );
+                    let asks = steps.asks.lock().unwrap();
+                    let question = &asks.last().expect("a check-stage ask").question;
+                    assert!(
+                        question
+                            .contains("The build did not pass its check, so nothing was replaced.")
+                    );
+                    assert!(
+                        question.contains("/source does not accept the update job's principal")
+                    );
+                    assert!(!question.contains("install --rollback"));
+                    assert!(!question.contains("the previous build was left unrestored"));
+                    drop(asks);
+                    let calls = steps.calls.lock().unwrap();
+                    assert!(
+                        !calls
+                            .iter()
+                            .any(|c| c == "replace" || c.starts_with("serve")),
+                        "{calls:?}"
+                    );
+                    assert_eq!(
+                        steps.asks.lock().unwrap().len(),
+                        if matches!(subject, Subject::Commit(_)) {
+                            1
+                        } else {
+                            2
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_job_records_its_failure_and_asks_when_the_previous_build_refuses_it() {
+        use crate::application::install::test_support::{At, Handoff, InstallQueue, InstallSteps};
+        use crate::application::memory_files::MemoryFiles;
+        // Signals change the fake's state immediately; recovery never
+        // waits on a real process or elapsed wall time in this unit test.
+        struct Stops(std::sync::atomic::AtomicBool);
+        impl ProcessControl for Stops {
+            fn alive(&self, pid: u32) -> bool {
+                pid == 1 && self.0.load(std::sync::atomic::Ordering::SeqCst)
+            }
+            fn terminate(&self, _: u32) -> Result<()> {
+                self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn interrupt(&self, pid: u32) -> Result<()> {
+                self.terminate(pid)
+            }
+            fn kill(&self, pid: u32) -> Result<()> {
+                self.terminate(pid)
+            }
+        }
+        // Handoff failure (install's Undo) and watch failure (restore).
+        for (subject, handoff, service_failures) in [
+            (Subject::Commit("abc"), Handoff::Failed, 0),
+            (Subject::Commit("abc"), Handoff::Taken, 0),
+            (Subject::Commit("abc"), Handoff::Taken, 2),
+            (Subject::Release("1.2.3"), Handoff::Failed, 0),
+            (Subject::Release("1.2.3"), Handoff::Taken, 0),
+            (Subject::Release("1.2.3"), Handoff::Taken, 2),
+        ] {
+            let steps = Arc::new(InstallSteps {
+                unsupported_job: Some("/to.previous".into()),
+                previous_version: Some("old".into()),
+                restart_failures: std::sync::atomic::AtomicUsize::new(service_failures),
+                handoff,
+                ..Default::default()
+            });
+            let files = MemoryFiles::default();
+            files.put(Path::new("/queue"), std::time::UNIX_EPOCH, "queue");
+            files.put(Path::new("/to"), std::time::UNIX_EPOCH, "old");
+            let queues =
+                |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+            let processes = Stops(std::sync::atomic::AtomicBool::new(true));
+            let ports = JobPorts {
+                binaries: &*steps,
+                files: &files,
+                processes: &processes,
+                clock: &At(10_000),
+                queues: &queues,
+                restart: &|_| bail!("manual recovery"),
+                is_ancestor: &|_, _| bail!("no ancestry"),
+            };
+            let job = Job {
+                subject,
+                token: None,
+                target: Path::new("/to"),
+                staged: Path::new("/staged"),
+                log: None,
+                restart: &[],
+                handoff_timeout: Duration::ZERO,
+                watch_timeout: Duration::ZERO,
+                poll: Duration::ZERO,
+                pid: 77,
+            };
+            let mut queue = queues(Path::new("/queue")).open().unwrap();
+            let failure = put_in_place(
+                &ports,
+                &mut *queue,
+                Path::new("/queue"),
+                &job,
+                Path::new("/source"),
+                PluginStep::Untouched,
+            )
+            .unwrap();
+            assert_eq!(failure["restored"]["restored"], false);
+            assert!(
+                failure["restored"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("does not accept")
+            );
+            let calls = steps.calls.lock().unwrap();
+            assert!(
+                !calls
+                    .iter()
+                    .any(|c| c == "restore" || c == "serve_restored /to"),
+                "{calls:?}"
+            );
+            assert_eq!(
+                calls.iter().filter(|c| c.as_str() == "hand_off").count(),
+                usize::from(service_failures == 0)
+            );
+            assert!(
+                !steps
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(kind, _)| kind == "update_restored")
+            );
+            assert!(
+                steps
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(kind, _)| kind == "update_failed")
+            );
+            let asks = steps.asks.lock().unwrap();
+            assert_eq!(asks.len(), 1);
+            let question = &asks[0].question;
+            for text in [
+                "the previous build was left unrestored",
+                "does not accept the update job's principal",
+                "install --rollback",
+            ] {
+                assert!(question.contains(text), "missing {text:?} in {question}");
+            }
+        }
+    }
 
     /// Hold release alone does not restore service. The job starts the old
     /// binary's service, tolerates a delayed watch after a failed start, and

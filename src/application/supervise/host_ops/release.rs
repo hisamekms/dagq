@@ -366,7 +366,7 @@ impl HostOpsState {
             logs.join(format!("{name}.build.log")),
             logs.join(format!("{name}.json")),
         );
-        let command = release_job_command(
+        let mut command = release_job_command(
             layout,
             env.token,
             version,
@@ -374,8 +374,12 @@ impl HostOpsState {
             &options.update,
             plugin_only,
         );
-        let job = env.spawner.spawn(
-            &command,
+        let job = crate::application::update::spawn_job(
+            env.service_access,
+            &layout.db,
+            &name,
+            &mut command,
+            env.spawner,
             Streams::Files {
                 stdout: &report,
                 stderr: &log,
@@ -655,13 +659,10 @@ fn release_job_command(
     if let Some(dir) = &layout.plugin_dir {
         command.arg("--plugin-dir").arg(dir);
     }
-    // It sends its steps through the service as this supervisor, with the
-    // token of its registration (ADR-t3102-1 decision 2), which an exec's
-    // handoff keeps and the registration's end revokes; a supervisor whose
-    // service runs in its own process has none, and the job is refused.
-    if let Some(file) = layout.service_credential.get() {
-        command.env(crate::domain::queue_service::CREDENTIAL_FILE_ENV, file);
-    }
+    // Only the job's own file is passed by the start, as an argument.
+    // Never inherit the supervisor's credential, including from the host.
+    command.env_remove(crate::domain::queue_service::CREDENTIAL_FILE_ENV);
+
     if let Some(cargo) = &update.cargo {
         command.arg("--cargo").arg(cargo);
     }
@@ -696,6 +697,10 @@ mod tests {
     #[test]
     fn the_release_job_is_given_the_supervisors_providers_and_no_cmux() {
         let layout = Layout::for_test(Path::new("/q"));
+        layout
+            .service_credential
+            .set("/parent/credential".into())
+            .unwrap();
         let command = release_job_command(
             &layout,
             &LeaseToken::new("token-1"),
@@ -704,6 +709,12 @@ mod tests {
             &UpdateSettings::default(),
             true,
         );
+        assert!(command.get_envs().any(|(key, value)| key
+            == crate::domain::queue_service::CREDENTIAL_FILE_ENV
+            && value.is_none()));
+        assert!(!command.get_envs().any(|(key, value)| key
+            == crate::domain::queue_service::CREDENTIAL_FILE_ENV
+            && value.is_some()));
         assert_eq!(command.get_program(), "/opt/bin/dagq");
         let args: Vec<_> = command
             .get_args()

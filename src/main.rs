@@ -5253,7 +5253,7 @@ fn resolve_observe_interval(interval: Option<u64>, once: bool) -> Duration {
 ///   envのactorがsupervisorでなければ止まる。
 ///   serviceでの認可はsupervisorの操作と同じ（Authorization）。
 /// - `queue-broker serve`は`service.lifecycle`の認可を通った後、brokerのプロセスとしてqueueを開かず、自分の要求をtokenもactorの環境も持たない`user`としてserviceに送る（Queue broker）。
-/// - `up`・`down`・`inbox`・`service start`・`service stop`・`install`と更新のjob（`auto-update`・`release-update`）は認可の後、queueの読み書きを呼び出し元のprincipal（更新のjobは起動したsupervisorのtoken）で制御側のコマンドのstepとしてserviceに送り、queueを開かない（hostのCLI）。
+/// - `up`・`down`・`inbox`・`service start`・`service stop`・`install`と更新のjob（`auto-update`・`release-update`）は認可の後、queueの読み書きを呼び出し元のprincipal（更新のjobはjobごとに発行された自分のprincipal）で制御側のコマンドのstepとしてserviceに送り、queueを開かない（hostのCLI）。
 /// - `service serve`はserviceとして、DBの無い所への`init`はDBを開く経路の例外としてqueueを開き（`migrate`・`doctor`・既存のqueueへの`init`はserviceのユースケース）、`supervise`はqueueをserviceで扱い、`service status`と`queue-broker`の`status`・`start`・`stop`はqueueを開かない（statusとdoctor、Queue broker）。
 /// - それ以外（宛ての無いworker・job・observerなどの`dagq`）はqueueを開かずに断る（fail closed）。
 ///
@@ -5624,7 +5624,7 @@ fn execute(cli: Cli) -> Result<Value> {
     }
     // The automatic update's and the release update's jobs, which their
     // supervisor starts: they reach the queue only through its service, as
-    // that supervisor (ADR-t3102-1 decision 2).
+    // their own job principal, passed by the supervisor at the start.
     if let Command::AutoUpdate {
         commit,
         token,

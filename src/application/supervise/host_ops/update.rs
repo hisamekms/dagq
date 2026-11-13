@@ -289,9 +289,13 @@ impl HostOpsState {
             logs.join(format!("{name}.build.log")),
             logs.join(format!("{name}.json")),
         );
-        let command = update_job_command(layout, env.token, head, &build_log, &options.update);
-        let job = env.spawner.spawn(
-            &command,
+        let mut command = update_job_command(layout, env.token, head, &build_log, &options.update);
+        let job = crate::application::update::spawn_job(
+            env.service_access,
+            &layout.db,
+            &name,
+            &mut command,
+            env.spawner,
             Streams::Files {
                 stdout: &report,
                 stderr: &log,
@@ -443,13 +447,10 @@ fn update_job_command(
     if let Some(dir) = &layout.plugin_dir {
         command.arg("--plugin-dir").arg(dir);
     }
-    // It sends its steps through the service as this supervisor, with the
-    // token of its registration (ADR-t3102-1 decision 2), which an exec's
-    // handoff keeps and the registration's end revokes; a supervisor whose
-    // service runs in its own process has none, and the job is refused.
-    if let Some(file) = layout.service_credential.get() {
-        command.env(crate::domain::queue_service::CREDENTIAL_FILE_ENV, file);
-    }
+    // Only the job's own file is passed by the start, as an argument.
+    // Never inherit the supervisor's credential, including from the host.
+    command.env_remove(crate::domain::queue_service::CREDENTIAL_FILE_ENV);
+
     if let Some(build) = &update.build_command {
         command.arg("--build-command").arg(build);
     }
@@ -493,6 +494,10 @@ mod tests {
     #[test]
     fn the_update_job_is_given_the_supervisors_providers_and_no_cmux() {
         let layout = Layout::for_test(Path::new("/q"));
+        layout
+            .service_credential
+            .set("/parent/credential".into())
+            .unwrap();
         let update = UpdateSettings {
             poll: Some(Duration::from_millis(20)),
             ..UpdateSettings::default()
@@ -504,6 +509,12 @@ mod tests {
             Path::new("/q/logs/update.build.log"),
             &update,
         );
+        assert!(command.get_envs().any(|(key, value)| key
+            == crate::domain::queue_service::CREDENTIAL_FILE_ENV
+            && value.is_none()));
+        assert!(!command.get_envs().any(|(key, value)| key
+            == crate::domain::queue_service::CREDENTIAL_FILE_ENV
+            && value.is_some()));
         assert_eq!(command.get_program(), "/opt/bin/dagq");
         let args: Vec<_> = command
             .get_args()

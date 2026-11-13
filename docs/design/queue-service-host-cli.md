@@ -89,7 +89,7 @@ hostのCLIもクライアントモードも同じ経路だが、brokerを通る�
 queueの読み取りに加え、書けるのはコマンド自身の記録だけで、範囲の入口は`control::scope`。
 呼び出し元は依頼者を名乗れず、supervisorだけの資源・負荷・台帳の操作も使えない。
 upの引き継ぎで渡せるbinaryはsocketのpeerの実行ファイルだけで、他のpathは拒否として記録する（`control::handoff_refusal`）。
-更新のjobは起動したsupervisorのprincipalで送る（[Auto-update](supervisor-lifecycle/auto-update.md#queueへの経路)）。
+更新のjobは起動元のsupervisorがjobごとに発行する自分のprincipalで送る（発行と寿命は[Authorization](authorization.md)、経路は[Auto-update](supervisor-lifecycle/auto-update.md#queueへの経路)）。
 更新のjobのtokenの発行の前提は`domain::queue_service::update_job_issue_refusal`が持つ。
 
 着地の承認はserviceの時計とプロセスでleaseを確かめ、記録と同じtransactionで再検査する（`control::APPROVE_INTEGRATION`）。

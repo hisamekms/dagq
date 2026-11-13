@@ -954,7 +954,7 @@ exec {quoted_bin} \"$@\"\n"
             u.kind == EventKind::UpdateFailed && u.payload["commit"] == broken_commit.as_str()
         })
         .unwrap();
-    let assert_supervisor_actor = |kind: EventKind, commit: &str| {
+    let assert_update_actor = |kind: EventKind, commit: &str| {
         let event = updates()
             .into_iter()
             .find(|event| event.kind == kind && event.payload["commit"] == commit)
@@ -962,18 +962,34 @@ exec {quoted_bin} \"$@\"\n"
         let actor = event
             .actor
             .unwrap_or_else(|| panic!("{} has no actor", event.kind));
+        let started = updates()
+            .into_iter()
+            .find(|event| {
+                event.kind == EventKind::UpdateStarted && event.payload["commit"] == commit
+            })
+            .expect("the supervisor recorded the job's start");
+        let job_name = Path::new(started.payload["log"].as_str().unwrap())
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(
             (actor.role.as_str(), actor.id.as_str(), actor.requested_by),
-            ("supervisor", supervisor_actor_id.as_str(), None),
+            ("updater", format!("updater:{job_name}").as_str(), None),
             "{} actor",
             event.kind
         );
+        let parent = started.actor.expect("the start has the supervisor's actor");
+        assert_eq!(
+            (parent.role.as_str(), parent.id.as_str()),
+            ("supervisor", supervisor_actor_id.as_str())
+        );
     };
-    assert_supervisor_actor(EventKind::UpdateInstalled, &source);
-    assert_supervisor_actor(EventKind::UpdateFailed, &broken_commit);
+    assert_update_actor(EventKind::UpdateInstalled, &source);
+    assert_update_actor(EventKind::UpdateFailed, &broken_commit);
     assert_eq!(failed.payload["stage"], "install", "{failed:?}");
-    // Every supervisor failed the handoff: each is brought back (task 716),
-    // the job's own once the failure is recorded under its token.
+    // Every supervisor failed the handoff: each is brought back, with the
+    // starting supervisor recovered after the job records its failure.
     assert_eq!(failed.payload["kept"], false, "{failed:?}");
     assert_eq!(
         failed.payload["supervisors"][0]["supervisor"]["state"], "brought_back_after_this_record",

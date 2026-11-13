@@ -572,3 +572,234 @@ fn an_update_jobs_bind_and_the_sweeps_exclude_each_other() {
         ServiceErrorCode::Unauthenticated
     );
 }
+
+/// A fake OS spawn runs the real job's first binding from the file the
+/// supervisor's start passed. No issue or authorization is faked here.
+struct JobSpawn<'a> {
+    backend: std::sync::Arc<MemoryBackend>,
+    tokens: &'a super::service::MemoryTokens,
+    control: ControlCommand,
+    pid: u32,
+    token: std::sync::Mutex<Option<String>>,
+}
+impl crate::application::Spawner for JobSpawn<'_> {
+    fn spawn(
+        &self,
+        command: &crate::application::CommandSpec,
+        _: crate::application::Streams<'_>,
+    ) -> anyhow::Result<Box<dyn crate::application::Spawned>> {
+        use crate::domain::queue_service::CREDENTIAL_FILE_ENV;
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == CREDENTIAL_FILE_ENV && value.is_none())
+        );
+        let args: Vec<_> = command.get_args().collect();
+        let index = args
+            .iter()
+            .position(|arg| *arg == "--job-credential")
+            .unwrap();
+        let token = self.tokens.read(std::path::Path::new(args[index + 1]))?;
+        assert_eq!(
+            send(
+                &self.backend,
+                &token,
+                UseCase::Control,
+                control_step(self.control, "bind_job_token", json!([]), self.pid),
+                self.pid
+            )
+            .result,
+            Some(json!(true))
+        );
+        *self.token.lock().unwrap() = Some(token);
+        Ok(Box::new(JobProcess(self.pid)))
+    }
+}
+struct JobProcess(u32);
+impl crate::application::Spawned for JobProcess {
+    fn id(&self) -> u32 {
+        self.0
+    }
+    fn try_wait(&mut self) -> anyhow::Result<Option<crate::application::Exit>> {
+        Ok(None)
+    }
+    fn kill(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn wait(&mut self) -> anyhow::Result<crate::application::Exit> {
+        anyhow::bail!("fake job must not be waited")
+    }
+}
+
+struct RefusingSpawn;
+impl crate::application::Spawner for RefusingSpawn {
+    fn spawn(
+        &self,
+        _: &crate::application::CommandSpec,
+        _: crate::application::Streams<'_>,
+    ) -> anyhow::Result<Box<dyn crate::application::Spawned>> {
+        anyhow::bail!("spawn failed")
+    }
+}
+
+#[test]
+fn a_supervisors_spawned_jobs_record_after_sign_out_and_service_replacement() {
+    use crate::application::{CommandSpec, Streams, queue_service::ServiceAccess};
+    for (command_name, control, expected_actor) in [
+        (
+            "auto-update",
+            ControlCommand::AutoUpdate,
+            "updater:auto-update",
+        ),
+        (
+            "release-update",
+            ControlCommand::ReleaseUpdate,
+            "updater:release-update",
+        ),
+    ] {
+        let test = Test::new(command_name);
+        let access = test.wiring.update_job_access(&test.lease);
+        let mut never_started = CommandSpec::new("dagq");
+        assert!(
+            crate::application::update::spawn_job(
+                &access,
+                &test.wiring.db,
+                "not-started",
+                &mut never_started,
+                &RefusingSpawn,
+                Streams::Null
+            )
+            .is_err()
+        );
+        assert!(
+            !test
+                .backend
+                .principals()
+                .unwrap()
+                .iter()
+                .any(|p| p.actor_id == "updater:not-started")
+        );
+        let (pid, _) = test.wiring.processes().start();
+        let spawn = JobSpawn {
+            backend: test.backend.clone(),
+            tokens: test.wiring.tokens(),
+            control,
+            pid,
+            token: Default::default(),
+        };
+        let mut command = CommandSpec::new("dagq");
+        command.arg(command_name).env(
+            crate::domain::queue_service::CREDENTIAL_FILE_ENV,
+            "/parent/token",
+        );
+        let child = crate::application::update::spawn_job(
+            &access,
+            &test.wiring.db,
+            command_name,
+            &mut command,
+            &spawn,
+            Streams::Null,
+        )
+        .unwrap();
+        assert_eq!(child.id(), pid);
+        let job = spawn.token.lock().unwrap().clone().unwrap();
+        let principal = test.backend.principal(&job).unwrap().unwrap();
+        assert_eq!(
+            json!(principal),
+            json!({"role": "updater", "actor_id": expected_actor})
+        );
+        access.queues.service.sign_out();
+        assert!(test.read_supervisors(&job, pid).ok);
+        // Restore through the host's binary port (in memory here).
+        // The compatibility decisions are covered by install/update's unit
+        // tests; this test keeps the real authentication across instances.
+        let binaries = crate::application::install::test_support::InstallSteps::default();
+        crate::application::install::Binaries::restore(
+            &binaries,
+            std::path::Path::new("/target/dagq"),
+        )
+        .unwrap();
+        assert!(
+            binaries
+                .binary_restored
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        // reach_at_start can now create
+        // another instance on this very queue. Its authentication reads the
+        // persisted job token, independently of the signed-out parent.
+        let replacement = test.wiring.service_backend();
+        assert!(!std::sync::Arc::ptr_eq(&replacement, &test.backend));
+        for kind in ["update_restored", "update_failed"] {
+            let response = send(
+                &replacement,
+                &job,
+                UseCase::Control,
+                control_step(
+                    control,
+                    "record_queue_event",
+                    json!([kind, {"restored": true, "pid": pid}]),
+                    pid,
+                ),
+                pid,
+            );
+            assert!(response.ok, "{response:?}");
+        }
+        let response = send(
+            &replacement,
+            &job,
+            UseCase::Control,
+            control_step(
+                control,
+                "open_update_ask",
+                json!([
+                    "update_failed",
+                    "the update failed",
+                    ["retry", "skip"],
+                    "supervisor",
+                    null,
+                    null
+                ]),
+                pid,
+            ),
+            pid,
+        );
+        assert!(response.ok, "{response:?}");
+        let response = send(
+            &replacement,
+            &job,
+            UseCase::Control,
+            control_step(
+                control,
+                "request_handoff",
+                json!([test.lease, "/restored/dagq"]),
+                pid,
+            ),
+            pid,
+        );
+        assert!(response.ok, "{response:?}");
+        let response = send(
+            &replacement,
+            &job,
+            UseCase::Control,
+            control_step(control, "return_job_token", json!([]), pid),
+            pid,
+        );
+        assert_eq!(response.result, Some(json!(true)));
+        assert_eq!(
+            refused(&send(
+                &replacement,
+                &job,
+                UseCase::Control,
+                control_step(control, "supervisors", json!([]), pid),
+                pid
+            )),
+            ServiceErrorCode::Unauthenticated
+        );
+        // The parent still has no token and cannot issue again.
+        assert!(
+            access
+                .issue(&test.wiring.db, &Principal::update_job("after-signout"))
+                .is_err()
+        );
+    }
+}

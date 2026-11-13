@@ -682,6 +682,24 @@ impl Wiring {
         ))
     }
 
+    /// The same service-token adapter the supervisor uses, signed in on
+    /// this in-process service. Its issue goes through StaticPolicy.
+    pub(super) fn update_job_access(
+        &self,
+        lease: &crate::domain::LeaseToken,
+    ) -> crate::application::supervisor_service::ServiceTokens {
+        let service = self.service();
+        service.sign_in(lease, self.pid).unwrap();
+        crate::application::supervisor_service::ServiceTokens {
+            queues: SupervisorQueues::new(
+                service,
+                ActorContext::instance(ActorRole::Supervisor, self.pid),
+            ),
+            files: self.tokens.clone(),
+            telemetry_files: self.tokens.clone(),
+        }
+    }
+
     /// The backend of this test's queue service ([`Self::service`]), for a
     /// test that sends its requests to the service itself, the test's
     /// processes and tokens with it.

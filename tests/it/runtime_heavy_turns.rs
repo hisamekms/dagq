@@ -51,7 +51,7 @@ fn passing_build(marker: &Path) -> String {
 
 /// Options of a supervisor with the automatic update on (`register`), its
 /// job's build and e2e the stubs `build` and `e2e`, on the queue's service
-/// ([`served`]), to which the job sends its steps as that supervisor.
+/// ([`served`]), to which the job sends steps as its own principal.
 fn update_options(register: bool, build: String, e2e: Option<String>) -> SuperviseOptions {
     let base = supervise_options(4, true);
     SuperviseOptions {
@@ -150,14 +150,18 @@ fn await_update_failed(db: &Path) {
     });
 }
 
-/// The update's job ended: its log holds its outcome or its error. Its own
-/// end goes unrecorded when the pass of the supervisor that started it
-/// ended first: the job's steps go under that registration's token, which
-/// ends with it.
+/// The job's stdout report is written after its terminal record and token
+/// return, including when its starting supervisor's pass already ended.
+/// Successful handling of a failed e2e need not write any error to stderr.
 fn await_job_ended(db: &Path) {
     await_that(db, "the update job's end", || {
-        let log = job_log(db);
-        log.contains("\"outcome\"") || log.contains("\"error\"")
+        updates(db)
+            .into_iter()
+            .find(|update| update.kind == EventKind::UpdateStarted)
+            .and_then(|started| started.payload["report"].as_str().map(PathBuf::from))
+            .and_then(|report| fs::read(report).ok())
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|report| report["outcome"] == "failed" && report["stage"] == "e2e")
     });
 }
 
