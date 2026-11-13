@@ -1678,6 +1678,7 @@ fn the_service_revokes_at_its_start_the_tokens_of_ended_registrations() {
             parent: "user".to_owned(),
             process: Some(asked),
             registration: None,
+            job: None,
         };
         let principal = Principal::supervisor(&LeaseToken::new(token), pid);
         let file = service::issue_by(&queue_dir, &principal, &issuer, 1)

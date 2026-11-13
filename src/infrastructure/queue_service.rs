@@ -98,6 +98,10 @@ use crate::domain::{
 pub const TOKENS_DIR: &str = "tokens";
 /// The tokens' values in [`SERVICE_DIR`].
 pub const CREDENTIALS_DIR: &str = "credentials";
+/// The processes bound to the update jobs' tokens in [`SERVICE_DIR`]
+/// ([`bind_update_job`]), each by its token's record's name: apart from the
+/// records, so a binding never writes a record a revocation removed.
+const JOBS_DIR: &str = "jobs";
 /// The file in [`SERVICE_DIR`] [`TelemetryLock`] locks.
 const TELEMETRY_LOCK_FILE: &str = "telemetry.lock";
 /// The file in [`SERVICE_DIR`] an issue of a token bound to a session
@@ -532,9 +536,10 @@ pub fn held(queue_dir: &Path, key: &str) -> Result<Option<HeldToken>> {
         Err(error) => return Err(error).context("read a token's record"),
     };
     let record: TokenRecord = serde_json::from_slice(&bytes).context("a token's record")?;
+    let name = sha256_hex(token.trim().as_bytes());
     Ok(Some(HeldToken {
+        issued_by: with_bound_job(queue_dir, &name, &record.principal, record.issued_by),
         principal: record.principal,
-        issued_by: record.issued_by,
         issued_at: record.issued_at,
     }))
 }
@@ -677,7 +682,9 @@ fn write_token(
 /// that cannot be removed is an error that leaves both, so the token is
 /// still found to revoke again. A file left once its record is gone is
 /// only logged: the value it holds authenticates nothing, and the next
-/// issue replaces it.
+/// issue replaces it. An update job's binding ([`bind_update_job`]) goes
+/// after the record, so a job that gives its token back or is issued one
+/// again leaves none.
 pub fn revoke(queue_dir: &Path, actor_id: &str) -> Result<bool> {
     let file = credential_path(queue_dir, actor_id);
     let token = match fs::read_to_string(&file) {
@@ -690,6 +697,16 @@ pub fn revoke(queue_dir: &Path, actor_id: &str) -> Result<bool> {
         Err(error) if error.kind() == ErrorKind::NotFound => false,
         Err(error) => return Err(error).context("remove a token's record"),
     };
+    // An update job's binding goes with its record (given back, or issued
+    // again); one left authenticates nothing and is only logged.
+    match fs::remove_file(job_path(queue_dir, &sha256_hex(token.trim().as_bytes()))) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => warn!(
+            actor_id,
+            "an update job's binding could not be removed: {error}"
+        ),
+    }
     match fs::remove_file(&file) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -839,7 +856,8 @@ pub fn revoke_under(
 /// ([`crate::domain::queue_service::job_token_ended`]): its
 /// record, and its value when the actor's file still holds that token (a
 /// token issued again since the look, as another supervisor's resume
-/// does, is left), never a supervisor's sign-in; the actor ids of those
+/// does, is left), never a supervisor's sign-in nor an update job's token
+/// (the service's sweeps judge them in its write transaction); the actor ids of those
 /// revoked. A record that does not read is left for a person to look at,
 /// and one that cannot be removed for the next sweep.
 pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Result<Vec<String>> {
@@ -860,8 +878,11 @@ pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Res
         };
         // A supervisor's sign-in is the service's to judge, which reads its
         // registration in the transaction that revokes it: one swept here
-        // could be of a supervisor not registered yet.
+        // could be of a supervisor not registered yet. An update job's
+        // likewise, which the service binds to its job in that transaction
+        // (ADR-t4629-1): one swept here could be bound since it was read.
         if record.principal.role == crate::domain::ActorRole::Supervisor
+            || record.principal.role == crate::domain::ActorRole::Updater
             || !ended(&record.principal)
             || (crate::domain::queue_service::is_job(record.principal.role)
                 && !crate::domain::queue_service::job_token_ended(
@@ -932,11 +953,12 @@ pub fn held_records(queue_dir: &Path, principal: &Principal) -> Result<Vec<(Stri
         .filter(|(_, record)| record.principal == *principal)
         .filter_map(|(path, record)| {
             let name = path.file_stem()?.to_str()?.to_owned();
+            let issued_by = with_bound_job(queue_dir, &name, &record.principal, record.issued_by);
             Some((
                 name,
                 HeldToken {
                     principal: record.principal,
-                    issued_by: record.issued_by,
+                    issued_by,
                     issued_at: record.issued_at,
                 },
             ))
@@ -1000,10 +1022,131 @@ fn sweep_one(queue_dir: &Path, record: &Path, principal: &Principal) -> Result<(
         Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
     }
     match fs::remove_file(record) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("remove a token's record"),
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("remove a token's record"),
     }
+    // An update job's binding goes with its record.
+    if principal.role == ActorRole::Updater
+        && let Some(name) = record.file_stem().and_then(|name| name.to_str())
+    {
+        let _ = fs::remove_file(job_path(queue_dir, name));
+    }
+    Ok(())
+}
+
+/// The file the process bound to the update job's token whose record is
+/// named `name` is kept in ([`JOBS_DIR`]).
+fn job_path(queue_dir: &Path, name: &str) -> PathBuf {
+    service_dir(queue_dir)
+        .join(JOBS_DIR)
+        .join(format!("{name}.json"))
+}
+
+/// `issued_by`, kept with the token whose record is named `name`, with the
+/// process bound to it as an update job's ([`bind_update_job`]).
+fn with_bound_job(
+    queue_dir: &Path,
+    name: &str,
+    principal: &Principal,
+    issued_by: Option<TokenIssuer>,
+) -> Option<TokenIssuer> {
+    let mut issuer = issued_by?;
+    if principal.role == ActorRole::Updater && issuer.job.is_none() {
+        issuer.job = fs::read(job_path(queue_dir, name))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    }
+    Some(issuer)
+}
+
+/// Bind `job` to the update job's `token` as its job's process
+/// ([`crate::domain::queue_service::bind_update_job`]), in the issue's
+/// write transaction (the caller's,
+/// [`crate::application::queue_service::bind_update_job`]): the process
+/// kept bound to it as read back from its file once the binding is written
+/// (the one bound before, when one was), `None` for a token not an update
+/// job's or no longer kept. The binding is its own file beside the records,
+/// written whole and linked into place only when none is there, so of two
+/// bindings at once one is kept; it authenticates nothing, and a token
+/// revoked meanwhile stays revoked (the revocation removes the file with
+/// the record). A binding that cannot be written or read back is an error.
+pub fn bind_update_job(
+    queue_dir: &Path,
+    token: &str,
+    job: SessionProcess,
+) -> Result<Option<SessionProcess>> {
+    let Some(record) = lookup_record(queue_dir, token)? else {
+        return Ok(None);
+    };
+    if record.principal.role != ActorRole::Updater || record.issued_by.is_none() {
+        return Ok(None);
+    }
+    let name = sha256_hex(token.as_bytes());
+    let file = job_path(queue_dir, &name);
+    match fs::read(&file) {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let dir = service_dir(queue_dir).join(JOBS_DIR);
+            private_dir(&dir)?;
+            let temporary = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+            write_private(&temporary, &serde_json::to_vec(&job)?)?;
+            let linked = fs::hard_link(&temporary, &file);
+            let _ = fs::remove_file(&temporary);
+            match linked {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error).context("bind the update job's process to its token");
+                }
+            }
+        }
+        Err(error) => return Err(error).context("read the update job's binding"),
+    }
+    let kept = fs::read(&file).context("read back the update job's binding")?;
+    serde_json::from_slice(&kept)
+        .map(Some)
+        .context("the update job's binding does not read")
+}
+
+/// Give back the update job's `token` at the request of `job`
+/// ([`crate::application::queue_service::return_update_job`]): its own
+/// record, its file when it holds it and its binding go
+/// ([`revoke_record`]) only when it is bound to no process or to `job`
+/// ([`crate::domain::queue_service::update_job_return_refusal`]); another
+/// token the principal's file holds since stays. Whether it was revoked. A
+/// binding that does not read is an error, and the token stays.
+pub fn return_update_job(
+    queue_dir: &Path,
+    token: &str,
+    job: Option<&SessionProcess>,
+) -> Result<bool> {
+    let Some(record) = lookup_record(queue_dir, token)? else {
+        return Ok(false);
+    };
+    if record.principal.role != ActorRole::Updater {
+        return Ok(false);
+    }
+    let name = sha256_hex(token.as_bytes());
+    let bound = match record
+        .issued_by
+        .as_ref()
+        .and_then(|issuer| issuer.job.clone())
+    {
+        Some(bound) => Some(bound),
+        None => match fs::read(job_path(queue_dir, &name)) {
+            Ok(bytes) => Some(
+                serde_json::from_slice::<SessionProcess>(&bytes)
+                    .context("the update job's binding does not read")?,
+            ),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("read the update job's binding"),
+        },
+    };
+    if crate::domain::queue_service::update_job_return_refusal(bound.as_ref(), job).is_some() {
+        return Ok(false);
+    }
+    revoke_record(queue_dir, &record.principal, &name)
 }
 
 /// The principal `token` was issued for, `None` for one never issued or
@@ -4071,29 +4214,13 @@ accepts: schema {} to {}",
     if let Some(gate) = exchanges.rulesets.clone() {
         watch_rulesets(gate, backend.clone(), options.stop.clone());
     }
-    let starting = backend.clone();
-    let swept = if write_line.leading() {
-        on_line(backend.write_line.as_ref(), move || {
-            // The identity the line keeps is the one of the service's start.
-            if let Some(line) = &starting.write_line {
-                let _ = line.queue();
-            }
-            match crate::application::queue_service::revoke_ended_sign_ins(&*starting) {
-                Ok(revoked) if !revoked.is_empty() => {
-                    info!(
-                        "revoked the tokens of supervisors whose registration ended: {revoked:?}"
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => return Err(error),
-            }
-            Ok(())
-        })
-    } else {
-        Ok(())
-    };
-    if let Err(error) = swept {
-        warn!("the supervisors' tokens could not be swept: {error:#}");
+    // Before the first request is accepted when the service leads at
+    // once; else at the turn of the loop below that first finds it leads.
+    let mut start_sweep = StartSweep::default();
+    if let Some(swept) = start_sweep.once_leading(&backend)
+        && let Err(error) = swept.recv_timeout(write_line.record_wait)
+    {
+        warn!("the start's sweep was not answered in the line's record wait: {error}");
     }
     let mut http = http
         .map(|(listener, tls)| {
@@ -4124,6 +4251,8 @@ accepts: schema {} to {}",
         if let Err(error) = write_line.renew_if_idle() {
             warn!("the write leader could not be renewed: {error:#}");
         }
+        // Not waited for: the sweep goes on in the line.
+        drop(start_sweep.once_leading(&backend));
         reads.tick();
         if checked.elapsed() >= QUEUE_CHECK {
             checked = Instant::now();
@@ -4203,6 +4332,82 @@ accepts: schema {} to {}",
     info!(pid, outcome, "the queue service stopped: {outcome}");
     drop(lock);
     Ok(json!({"outcome": outcome, "pid": pid, "served": served}))
+}
+
+/// The sweep, as the service starts, of the tokens left over from
+/// supervisors' sign-ins whose registration ended and from update jobs that
+/// ended ([`crate::application::queue_service::revoke_ended_sign_ins`],
+/// [`crate::application::queue_service::revoke_ended_update_jobs`]). It
+/// revokes in write transactions, so it goes on the write line once the
+/// service leads it, ahead of every write accepted after it: at the start
+/// when the start takes the leader at once, where [`serve`] waits for it
+/// (up to the line's record wait) before it accepts a request; else at the
+/// first turn of the serving loop that finds [`TakeoverWorker`] took it,
+/// where no one waits for it, so a DB lock another process holds keeps no
+/// hello unanswered (a read may authenticate before it ends, as one did
+/// before the leader was taken). It goes on the line once a service's
+/// life; a failure is logged and not retried (a supervisor's sweep revokes
+/// what it left).
+#[derive(Debug)]
+struct StartSweep {
+    due: bool,
+}
+
+impl Default for StartSweep {
+    fn default() -> Self {
+        Self { due: true }
+    }
+}
+
+impl StartSweep {
+    /// Put the sweep with `backend` on its write line when the sweep is
+    /// still due and the line leads: where its answer comes, `None` when
+    /// nothing was put.
+    fn once_leading(
+        &mut self,
+        backend: &Arc<SqliteServiceBackend>,
+    ) -> Option<std::sync::mpsc::Receiver<LineAnswer>> {
+        let line = backend
+            .write_line
+            .as_ref()
+            .filter(|line| self.due && line.leading())?;
+        self.due = false;
+        let starting = backend.clone();
+        let put = line.line.enqueue(move || {
+            let swept = (|| {
+                // The identity the line keeps is the one of the service's start.
+                if let Some(line) = &starting.write_line {
+                    let _ = line.queue();
+                }
+                let revoked = crate::application::queue_service::revoke_ended_sign_ins(&*starting)?;
+                if !revoked.is_empty() {
+                    info!(
+                        "revoked the tokens of supervisors whose registration ended: {revoked:?}"
+                    );
+                }
+                let revoked =
+                    crate::application::queue_service::revoke_ended_update_jobs(&*starting)?;
+                if !revoked.is_empty() {
+                    info!("revoked the tokens of update jobs that ended: {revoked:?}");
+                }
+                Ok(())
+            })();
+            if let Err(error) = &swept {
+                warn!("the supervisors' tokens could not be swept: {error:#}");
+            }
+            LineAnswer {
+                response: crate::application::queue_service::respond(swept.map(|()| Value::Null)),
+                notes: RequestNotes::default(),
+            }
+        });
+        match put {
+            Ok(answer) => Some(answer),
+            Err(error) => {
+                warn!("the supervisors' tokens could not be swept: {error:#}");
+                None
+            }
+        }
+    }
 }
 
 /// Acquisition can wait for the DB's write lock. Keep it off the socket's
@@ -5513,6 +5718,14 @@ migrate's request: schema {} to {}",
 
     fn hold_issues(&self) -> Result<Box<dyn std::any::Any>> {
         Ok(Box::new(exclusive(&self.queue_dir, ISSUES_LOCK_FILE)?))
+    }
+
+    fn bind_update_job(&self, token: &str, job: SessionProcess) -> Result<Option<SessionProcess>> {
+        bind_update_job(&self.queue_dir, token, job)
+    }
+
+    fn return_update_job(&self, token: &str, job: Option<SessionProcess>) -> Result<bool> {
+        return_update_job(&self.queue_dir, token, job.as_ref())
     }
 
     fn revoke_at_stop(&self, key: String) {
@@ -8767,6 +8980,109 @@ mod tests {
         // Its record gone (revoked): its file is not taken back.
         fs::remove_file(record_path(dir.path(), &read_token(&issued.file).unwrap())).unwrap();
         assert_eq!(taken(&SignedIn::default()), None);
+    }
+
+    /// ADR-t4629-1: an update job's binding is answered as read back from
+    /// its file: the job's process once written, the one bound before to
+    /// a later bind, and none for a token no longer kept; a binding that
+    /// cannot be written, or does not read back, is an error, so the job
+    /// does not go on unbound.
+    #[test]
+    fn an_update_jobs_binding_is_read_back_and_a_failed_write_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = Principal::supervisor(&LeaseToken::new("parent"), 1);
+        let principal = Principal::update_job("update-1");
+        let issued = issue_by(dir.path(), &principal, &TokenIssuer::of(&parent, None), 1).unwrap();
+        let token = fs::read_to_string(&issued.file).unwrap();
+        let token = token.trim();
+        let job = SessionProcess {
+            pid: 7,
+            start: "job".into(),
+        };
+        // Its directory cannot be made: an error, and nothing bound.
+        let jobs = service_dir(dir.path()).join(JOBS_DIR);
+        fs::write(&jobs, b"").unwrap();
+        assert!(bind_update_job(dir.path(), token, job.clone()).is_err());
+        fs::remove_file(&jobs).unwrap();
+        assert_eq!(
+            bind_update_job(dir.path(), token, job.clone()).unwrap(),
+            Some(job.clone())
+        );
+        let child = SessionProcess {
+            pid: 8,
+            start: "child".into(),
+        };
+        assert_eq!(
+            bind_update_job(dir.path(), token, child).unwrap(),
+            Some(job.clone())
+        );
+        // A binding that does not read back is an error.
+        let kept = job_path(dir.path(), &sha256_hex(token.as_bytes()));
+        let bytes = fs::read(&kept).unwrap();
+        fs::write(&kept, b"not a process").unwrap();
+        assert!(bind_update_job(dir.path(), token, job.clone()).is_err());
+        fs::write(&kept, bytes).unwrap();
+        // Given back: no token kept, nothing bound, the binding gone too.
+        assert!(revoke(dir.path(), &principal.credential_key()).unwrap());
+        assert_eq!(
+            bind_update_job(dir.path(), token, job.clone()).unwrap(),
+            None
+        );
+        // Another principal's token binds nothing.
+        let worker = issue(
+            dir.path(),
+            &Principal::worker(&RunId::new("r1").unwrap(), TaskId::new(1)),
+            1,
+        )
+        .unwrap();
+        let worker = fs::read_to_string(&worker.file).unwrap();
+        assert_eq!(
+            bind_update_job(dir.path(), worker.trim(), job).unwrap(),
+            None
+        );
+    }
+
+    /// ADR-t4629-1: an update job's binding goes with its token, whether
+    /// the job gives it back or its supervisor has it issued again, so no
+    /// job leaves one beside the records; another job's stays.
+    #[test]
+    fn an_update_jobs_binding_goes_when_its_token_is_given_back_or_issued_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = Principal::supervisor(&LeaseToken::new("parent"), 1);
+        let job = SessionProcess {
+            pid: 7,
+            start: "job".into(),
+        };
+        let bound = |principal: &Principal| {
+            let issued =
+                issue_by(dir.path(), principal, &TokenIssuer::of(&parent, None), 1).unwrap();
+            let token = read_token(&issued.file).unwrap();
+            assert_eq!(
+                bind_update_job(dir.path(), &token, job.clone()).unwrap(),
+                Some(job.clone())
+            );
+            let binding = job_path(dir.path(), &sha256_hex(token.as_bytes()));
+            assert!(binding.exists(), "{}", binding.display());
+            binding
+        };
+        let given_back = Principal::update_job("update-1");
+        let other = Principal::update_job("update-2");
+        let binding = bound(&given_back);
+        let others = bound(&other);
+        assert!(revoke(dir.path(), &given_back.credential_key()).unwrap());
+        assert!(!binding.exists(), "{}", binding.display());
+        // Issued again: the earlier token's binding goes with it.
+        let earlier = bound(&given_back);
+        let later = issue_by(dir.path(), &given_back, &TokenIssuer::of(&parent, None), 2).unwrap();
+        assert!(!earlier.exists(), "{}", earlier.display());
+        assert_eq!(
+            fs::read_dir(service_dir(dir.path()).join(JOBS_DIR))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert!(others.exists(), "{}", others.display());
+        assert!(later.file.exists());
     }
 
     #[test]

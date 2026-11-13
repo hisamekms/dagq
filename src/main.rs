@@ -1128,6 +1128,13 @@ enum Command {
         /// (tests shorten it).
         #[arg(long, hide = true, default_value_t = 500)]
         poll_ms: u64,
+        // ADR-t4629-1.
+        /// The file of this job's own token, which its supervisor asked the queue service for: the
+        /// job binds it to its process before anything else (and does not go on otherwise), the job
+        /// and the new build's check and install it runs send with it, and the job gives it
+        /// back at its end. Without it, they send with the token the environment names.
+        #[arg(long)]
+        job_credential: Option<PathBuf>,
     },
     // ADR-t618-1 decision 5.
     /// The release update's job, which a supervisor of a release build starts: `cargo install`
@@ -1168,6 +1175,13 @@ enum Command {
         /// already.
         #[arg(long)]
         plugin_only: bool,
+        // ADR-t4629-1.
+        /// The file of this job's own token, which its supervisor asked the queue service for: the
+        /// job binds it to its process before anything else (and does not go on otherwise), the job
+        /// and the new build's check and install it runs send with it, and the job gives it
+        /// back at its end. Without it, they send with the token the environment names.
+        #[arg(long)]
+        job_credential: Option<PathBuf>,
     },
     // ADR-0044 decision 4, ADR-t1222-1.
     /// Run the observer job once: a headless agent under DAGQ_ROLE=observer (Claude by default, or
@@ -5250,6 +5264,21 @@ fn resolve_observe_interval(interval: Option<u64>, once: bool) -> Duration {
 /// - headlessのjobは読み取りだけの制限を受け、状態を変えるコマンドは拒まれる。
 ///   判定は`StaticPolicy`（Authorization）で、どのjobにもCLIの書き込みを与えない。
 fn execute(cli: Cli) -> Result<Value> {
+    // An update job given its own token sends with it, and so does every
+    // `dagq` it starts with its environment (ADR-t4629-1).
+    if let Command::AutoUpdate {
+        job_credential: Some(file),
+        ..
+    }
+    | Command::ReleaseUpdate {
+        job_credential: Some(file),
+        ..
+    } = &cli.command
+    {
+        // SAFETY: the job's process has started no thread yet, so nothing
+        // reads the environment while it is set.
+        unsafe { env::set_var(dagq::domain::queue_service::CREDENTIAL_FILE_ENV, file) };
+    }
     if let Command::Runner { command } = &cli.command {
         return dagq::infrastructure::runner_enroll::run(command, cli.db.is_some(), |name| {
             env::var(name).ok()
@@ -5612,9 +5641,28 @@ fn execute(cli: Cli) -> Result<Value> {
         handoff_timeout,
         watch_timeout,
         poll_ms,
+        job_credential,
     } = cli.command
     {
-        return one_shot.auto_update(
+        // Its own token bound to its process before anything else, or it
+        // does not go on (and gives the token back).
+        if job_credential.is_some()
+            && let Err(error) = dagq::application::supervisor_service::control::bind_job_token(
+                one_shot.job_token_caller(
+                    &location,
+                    dagq::domain::queue_service::ControlCommand::AutoUpdate,
+                ),
+            )
+        {
+            dagq::application::supervisor_service::control::return_job_token(
+                one_shot.job_token_caller(
+                    &location,
+                    dagq::domain::queue_service::ControlCommand::AutoUpdate,
+                ),
+            );
+            return Err(error);
+        }
+        let updated = one_shot.auto_update(
             &location,
             &dagq::compose::AutoUpdateJob {
                 commit,
@@ -5633,6 +5681,16 @@ fn execute(cli: Cli) -> Result<Value> {
                 poll: Duration::from_millis(poll_ms),
             },
         );
+        // Its own token goes back once its records are written.
+        if job_credential.is_some() {
+            dagq::application::supervisor_service::control::return_job_token(
+                one_shot.job_token_caller(
+                    &location,
+                    dagq::domain::queue_service::ControlCommand::AutoUpdate,
+                ),
+            );
+        }
+        return updated;
     }
     if let Command::ReleaseUpdate {
         release,
@@ -5647,10 +5705,29 @@ fn execute(cli: Cli) -> Result<Value> {
         handoff_timeout,
         watch_timeout,
         plugin_only,
+        job_credential,
     } = cli.command
     {
         use dagq::infrastructure::adapters::executable;
-        return one_shot.release_update(
+        // Its own token bound to its process before anything else, or it
+        // does not go on (and gives the token back).
+        if job_credential.is_some()
+            && let Err(error) = dagq::application::supervisor_service::control::bind_job_token(
+                one_shot.job_token_caller(
+                    &location,
+                    dagq::domain::queue_service::ControlCommand::ReleaseUpdate,
+                ),
+            )
+        {
+            dagq::application::supervisor_service::control::return_job_token(
+                one_shot.job_token_caller(
+                    &location,
+                    dagq::domain::queue_service::ControlCommand::ReleaseUpdate,
+                ),
+            );
+            return Err(error);
+        }
+        let updated = one_shot.release_update(
             &location,
             &dagq::compose::ReleaseUpdateJob {
                 version: release,
@@ -5666,6 +5743,15 @@ fn execute(cli: Cli) -> Result<Value> {
                 plugin_only,
             },
         );
+        if job_credential.is_some() {
+            dagq::application::supervisor_service::control::return_job_token(
+                one_shot.job_token_caller(
+                    &location,
+                    dagq::domain::queue_service::ControlCommand::ReleaseUpdate,
+                ),
+            );
+        }
+        return updated;
     }
     // A repository queue already resolved the working directory; `--repo`
     // overrides it for a `--db` queue used from elsewhere or a moved checkout.

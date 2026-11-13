@@ -348,7 +348,17 @@ pub(super) struct MemoryBackend {
     pub(super) sqlite: SqliteServiceBackend,
     pub(super) tokens: Arc<MemoryTokens>,
     pub(super) processes: Arc<FakeProcesses>,
+    /// Run once by the next [`ServiceBackend::held_records`], after it
+    /// read the records: a test's look into a sweep's transaction.
+    pub(super) on_held_records: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Run once by the next [`ServiceBackend::bind_update_job`], before it
+    /// binds: a test's look at the transaction the bind runs in, whose
+    /// error is the binding's, as a write that failed (nothing bound).
+    pub(super) on_bind: std::sync::Mutex<Option<BindHook>>,
 }
+
+/// A test's look at the next update job's binding ([`MemoryBackend::on_bind`]).
+pub(super) type BindHook = Box<dyn FnOnce() -> Result<()> + Send>;
 
 impl ServiceBackend for MemoryBackend {
     fn answer_authorizer(&self) -> Box<dyn crate::domain::Authorizer + '_> {
@@ -456,13 +466,22 @@ impl ServiceBackend for MemoryBackend {
     }
 
     fn held_records(&self, principal: &Principal) -> Result<Vec<(String, HeldToken)>> {
-        Ok(self
+        let held = self
             .tokens
             .records()
             .into_iter()
             .filter(|(_, record)| record.principal == *principal)
             .map(|(value, record)| (sha256_hex(value.as_bytes()), record.held()))
-            .collect())
+            .collect();
+        let hook = self
+            .on_held_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok(held)
     }
 
     fn revoke_record(&self, principal: &Principal, name: &str) -> Result<bool> {
@@ -493,6 +512,51 @@ impl ServiceBackend for MemoryBackend {
             .files
             .get(&file)
             .map(|value| sha256_hex(value.as_bytes())))
+    }
+
+    fn bind_update_job(&self, token: &str, job: SessionProcess) -> Result<Option<SessionProcess>> {
+        let hook = self
+            .on_bind
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook {
+            hook()?;
+        }
+        let mut tokens = self.tokens.lock();
+        Ok(tokens
+            .records
+            .get_mut(token)
+            .filter(|record| record.principal.role == ActorRole::Updater)
+            .and_then(|record| record.issued_by.as_mut())
+            .and_then(|issuer| {
+                crate::domain::queue_service::bind_update_job(issuer, job);
+                issuer.job.clone()
+            }))
+    }
+
+    fn return_update_job(&self, token: &str, job: Option<SessionProcess>) -> Result<bool> {
+        let mut tokens = self.tokens.lock();
+        let Some(record) = tokens
+            .records
+            .get(token)
+            .filter(|record| record.principal.role == ActorRole::Updater)
+        else {
+            return Ok(false);
+        };
+        let bound = record
+            .issued_by
+            .as_ref()
+            .and_then(|issuer| issuer.job.as_ref());
+        if crate::domain::queue_service::update_job_return_refusal(bound, job.as_ref()).is_some() {
+            return Ok(false);
+        }
+        let file = self.tokens.file(&record.principal.credential_key());
+        tokens.records.remove(token);
+        if tokens.files.get(&file).map(String::as_str) == Some(token) {
+            tokens.files.remove(&file);
+        }
+        Ok(true)
     }
 
     fn hold_issues(&self) -> Result<Box<dyn std::any::Any>> {

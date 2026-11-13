@@ -1267,6 +1267,33 @@ impl OneShot {
         )
     }
 
+    /// The caller of `command`'s steps, the update job's, as this process's
+    /// caller (its own token, ADR-t4629-1), for
+    /// [`crate::application::supervisor_service::control::bind_job_token`]
+    /// and [`crate::application::supervisor_service::control::return_job_token`].
+    pub fn job_token_caller(
+        &self,
+        location: &QueueLocation,
+        command: ControlCommand,
+    ) -> Result<Arc<dyn crate::application::supervisor_service::ServiceCaller>> {
+        let db = location
+            .db
+            .canonicalize()
+            .context("queue must already be initialized")?;
+        let binding = binding_of(location)?;
+        let env = match self.lifecycle_route {
+            LifecycleRoute::Socket(env) => env,
+            #[cfg(feature = "test-paths")]
+            LifecycleRoute::InProcess => {
+                anyhow::bail!("an in-process command holds no update job's token")
+            }
+        };
+        Ok(Arc::new(service::ControlCaller::new(
+            service::Client::host(&db, binding.as_deref(), env),
+            lifecycle_call(command),
+        )?))
+    }
+
     /// The release update's job (see [`update::run_release`]): install
     /// release `job.version` with cargo under the queue's update directory
     /// and put it in place of `job.target`, handing the supervisor

@@ -81,6 +81,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 |runner|—|—|—|—|—|—|—|—|—|—|—|—|—|—|`runner.declare`・`runner.claim`・`runner.heartbeat`・`runner.report`（自分）|—|
 |image-publisher|—|—|—|—|—|—|—|—|—|—|—|—|—|—|`image.publish`だけ|—|
 |executor-telemetry|—|—|— / —|—|—|— / —|—|— / —・— / — / —|—|—|—|—|—|△ 自分のtokenの対象に登録されたsessionだけ|—|—|
+|updater|読み取り|—|— / —|—|—|— / —|—|— / —・— / — / —|—|△ 更新・install・serviceの起動と停止・`migrate`だけ|—|—|—|—|—|—|
 
 `identity.login`・`credential.preference`はuser専用。
 goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、hostのuserは人のownerの無いgoalだけ。
@@ -100,7 +101,7 @@ goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、
   表のsessionの列はこれも含まない（plannerは自分のplannerへのものも拒まれる）。
   plannerを閉じるCLIは無い
 - executorのtelemetryはtokenの対象に制御側が登録したsessionだけを送れ、agentにはtokenを渡さない（hostでは助言的）。
-  発行・登録・失効の入口は`application::telemetry_tokens`、登録の認可は`TelemetryTokens::register_telemetry_session`のdoc commentが持つ（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)）。
+  登録の認可は`TelemetryTokens::register_telemetry_session`のdoc commentが持つ（ADR-t1662-3）。
 
 この表と`StaticPolicy`は全roleのallowとdenyをunit test（`src/domain/authorization.rs`）が網羅する。表を変えるときは先にコードを変え、この表と[Authorization](authorization.md#policy)の表を合わせる。
 

@@ -1625,6 +1625,25 @@ fn tokens(
             let revoked = queue.issuing(&IssueHeld::Nothing, backend.now_ms(), &mut |facts| {
                 if let Some(held) = backend.held(&actor_id)? {
                     role = Some(held.principal.role);
+                    // An update job's is its own parent's to give back while
+                    // its job may run (ADR-t4629-1).
+                    if held.principal.role == ActorRole::Updater
+                        && held
+                            .issued_by
+                            .as_ref()
+                            .is_none_or(|kept| kept.parent != issuer.parent)
+                        && !crate::domain::queue_service::update_job_token_ended(
+                            &held,
+                            backend.now_ms() / 1000,
+                            |job| backend.session_ended(job),
+                        )
+                    {
+                        return Err(super::queue_service::Replacing(
+                            "the update job's token is another supervisor's, and its job may \
+                             still run",
+                        )
+                        .into());
+                    }
                     if let Some(why) =
                         revoke_refusal(&held, &issuer.parent, parent_there(backend, facts), || {
                             facts.job(&held, None)
@@ -1679,6 +1698,15 @@ fn tokens(
                             .is_none_or(|session| backend.session_ended(session))
                             && (!is_job(principal.role)
                                 || job_token_ended(held.issued_by.as_ref(), there, job))
+                            // An update job's once its job ended, whatever
+                            // became of the supervisor that asked for it
+                            // (ADR-t4629-1).
+                            && (principal.role != ActorRole::Updater
+                                || crate::domain::queue_service::update_job_token_ended(
+                                    &held,
+                                    backend.now_ms() / 1000,
+                                    |job| backend.session_ended(job),
+                                ))
                             && revoke_refusal(&held, &issuer.parent, there, job).is_none()
                     });
                     if ended && backend.revoke_record(&principal, &record)? {

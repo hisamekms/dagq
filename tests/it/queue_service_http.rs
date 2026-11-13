@@ -182,11 +182,23 @@ fn a_jwt_over_loopback_is_exchanged_and_its_human_token_carries_a_use_case() {
                 start: "ended".into(),
             }),
             registration: None,
+            job: None,
         },
         1,
     )
     .unwrap();
     let stale_token = service::read_token(&stale.file).unwrap();
+    // An update job's token never bound and issued long ago: its job ended
+    // (ADR-t4629-1), and nothing but the service's sweeps refuses it.
+    let parent = Principal::supervisor(&dagq::domain::LeaseToken::new("parent"), dead);
+    let job = service::issue_by(
+        queue.dir(),
+        &Principal::update_job("update-1"),
+        &dagq::domain::queue_service::TokenIssuer::of(&parent, None),
+        1,
+    )
+    .unwrap();
+    let job_token = service::read_token(&job.file).unwrap();
     let raw = rusqlite::Connection::open(&stored).unwrap();
     raw.execute(
         "UPDATE write_leader SET holder='elsewhere', lease_until_ms=9223372036854775807",
@@ -238,9 +250,12 @@ fn a_jwt_over_loopback_is_exchanged_and_its_human_token_carries_a_use_case() {
         "{refused_write}"
     );
     assert!(stale.file.exists(), "the waiting service has not swept");
+    assert!(job.file.exists(), "the waiting service has not swept");
     let (status, refused) = post(address, "show", Some(&stale_token), &show);
     assert_eq!(status, 401, "{refused}");
     assert_eq!(refused["error"]["code"], "unauthenticated", "{refused}");
+    let (status, waited) = post(address, "show", Some(&job_token), &show);
+    assert_ne!(status, 401, "{waited}");
     // A schema the service cannot read must fail closed too, before a
     // migrate can make the deferred startup sweep possible.
     raw.pragma_update(
@@ -287,11 +302,18 @@ fn a_jwt_over_loopback_is_exchanged_and_its_human_token_carries_a_use_case() {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-    // Acquisition does not give a leftover credential its access back,
-    // even though it is still stored after the skipped startup sweep.
-    assert!(stale.file.exists());
-    let (status, refused) = post(address, "show", Some(&stale_token), &show);
-    assert_eq!(status, 401, "{refused}");
+    // The startup sweep the wait put off runs once the service leads:
+    // neither leftover credential gets its access back.
+    {
+        let _waiting = common::within(TIMEOUT, "the startup sweep after the acquisition");
+        while stale.file.exists() || job.file.exists() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    for leftover in [&stale_token, &job_token] {
+        let (status, refused) = post(address, "show", Some(leftover), &show);
+        assert_eq!(status, 401, "{refused}");
+    }
     let (status, shown) = post(address, "show", Some(&worker), &show);
     assert_eq!(status, 200, "{shown}");
     assert_eq!(shown["ok"], true, "{shown}");

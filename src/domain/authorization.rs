@@ -987,6 +987,20 @@ const INTEGRATOR: &[Capability] = &[C::QueueRead, C::Land, C::Push];
 /// nothing else, not even a read (ADR-t1662-3 decision 9).
 const EXECUTOR_TELEMETRY: &[Capability] = &[C::TelemetryReport];
 
+/// An update job (ADR-t4629-1) sends what the automatic and the release
+/// update's jobs send: the reads, the update's records and asks, the
+/// install's handoff and its watch (`service.install`), the queue's
+/// administration its new build's check and migrations need
+/// (`queue.admin`), and the service's stop and start the install's steps
+/// make (`service.lifecycle`). No claim, no run lease, no landing, no
+/// token issue and no supervisor's start (`scheduler.supervise`).
+const UPDATE_JOB: &[Capability] = &[
+    C::QueueRead,
+    C::QueueAdmin,
+    C::ServiceLifecycle,
+    C::BinaryInstall,
+];
+
 /// The allowlist of `role`. The inbox has the user's (ADR-t728-3 decision
 /// 1: it acts at a person's word) but the approval of `setup-review`'s
 /// changes beforehand; the record tells the two apart.
@@ -1014,6 +1028,7 @@ pub const fn grants(role: ActorRole) -> &'static [Capability] {
         ActorRole::Integrator => INTEGRATOR,
         ActorRole::ExecutorTelemetry => EXECUTOR_TELEMETRY,
         ActorRole::ImagePublisher => &[C::ImagePublish],
+        ActorRole::Updater => UPDATE_JOB,
     }
 }
 
@@ -1107,7 +1122,8 @@ fn wrapper_owns(actor: &ActorContext, resource: &Resource) -> bool {
 /// token of a principal of role `child` it starts (`issue_token`,
 /// ADR-t3102-1 decision 2, default deny): the user starts the supervisor
 /// and the inbox; the supervisor its runs' workers and session wrappers,
-/// the planners and their wrappers, the executors' telemetry and its jobs;
+/// the planners and their wrappers, the executors' telemetry, its jobs and
+/// its update jobs (ADR-t4629-1, whose capabilities are all its own);
 /// the user and the inbox the job a command of theirs starts (`observe`,
 /// `setup-review`), only one whose capabilities are all the parent's, as
 /// the answer hands the parent the token's file (ADR-t728-1 decision 5),
@@ -1131,6 +1147,7 @@ pub fn starts(parent: ActorRole, child: ActorRole) -> bool {
             parent == R::Supervisor
         }
         R::ExecutorTelemetry => matches!(parent, R::Supervisor | R::User | R::Inbox),
+        R::Updater => parent == R::Supervisor && within(),
         R::Observer
         | R::PlanReviewJob
         | R::GoalReviewJob
@@ -1820,6 +1837,8 @@ mod tests {
         ] {
             assert_eq!(parents(child), anyone, "{child:?}");
         }
+        // An update job's only by the supervisor that starts it.
+        assert_eq!(parents(R::Updater), [R::Supervisor.as_str()]);
         assert!(parents(R::Integrator).is_empty());
         assert!(parents(R::User).is_empty());
         let refused = StaticPolicy
@@ -1844,6 +1863,59 @@ mod tests {
             Resource::Principal(R::Worker).record(),
             serde_json::json!({"kind": "principal", "role": "worker"})
         );
+    }
+
+    /// ADR-t4629-1: an update job holds what its job sends, all of it the
+    /// supervisor's that starts it (ADR-t728-1 decision 5), and is refused
+    /// the claim, a run's lease, the landing, a token's issue and a
+    /// supervisor's start, as any state it was not granted.
+    #[test]
+    fn an_update_job_sends_its_jobs_steps_and_nothing_more() {
+        use ActorRole as R;
+        let job = ActorContext::instance(R::Updater, "u1");
+        for capability in [
+            C::QueueRead,
+            C::QueueAdmin,
+            C::ServiceLifecycle,
+            C::BinaryInstall,
+        ] {
+            assert!(
+                allowed(&job, capability, &Resource::Queue),
+                "{capability:?}"
+            );
+            assert!(
+                grants(R::Supervisor).contains(&capability),
+                "{capability:?}"
+            );
+        }
+        for capability in [
+            C::RunnerClaim,
+            C::Supervise,
+            C::Land,
+            C::Push,
+            C::IntegrationRequest,
+            C::TokenIssue,
+            C::TaskWrite,
+            C::TaskReady,
+            C::AskAnswer,
+            C::NoteWrite,
+        ] {
+            let refused = StaticPolicy
+                .authorize(&job, capability, &Resource::Queue)
+                .unwrap_err();
+            assert_eq!(refused.reason, DenyReason::NotGranted, "{capability:?}");
+        }
+        assert!(!allowed(
+            &job,
+            C::TokenIssue,
+            &Resource::Principal(R::Supervisor)
+        ));
+        assert!(!allowed(
+            &job,
+            C::TokenIssue,
+            &Resource::Principal(R::Updater)
+        ));
+        assert_eq!(R::Updater.env_value(), None);
     }
 
     #[test]

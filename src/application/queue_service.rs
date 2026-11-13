@@ -496,6 +496,35 @@ pub trait ServiceBackend: Send + Sync {
     /// own (a supervisor's in-process one) keeps none, and the supervisor
     /// gives its token back at its end instead.
     fn revoke_at_stop(&self, _key: String) {}
+    /// Bind `job`, the process of the request the update job's `token`
+    /// authenticates, to that token as its job's when none is bound yet
+    /// ([`crate::domain::queue_service::bind_update_job`], ADR-t4629-1),
+    /// called in the issue's write transaction ([`bind_update_job`]): the
+    /// process kept bound to it, read back once the binding is written (the
+    /// one bound before, when one was), `None` for a token not an update
+    /// job's or no longer kept. A backend that keeps no such token binds
+    /// none.
+    fn bind_update_job(
+        &self,
+        _token: &str,
+        _job: crate::domain::queue_service::SessionProcess,
+    ) -> Result<Option<crate::domain::queue_service::SessionProcess>> {
+        Ok(None)
+    }
+    /// Give back the update job's `token` at the request of `job`, the
+    /// process the connection confirms (ADR-t4629-1), called in the issue's
+    /// write transaction ([`return_update_job`]): that token's own record
+    /// revoked, with its binding, only when
+    /// [`crate::domain::queue_service::update_job_return_refusal`] lets
+    /// `job` give it back; whether it was revoked. A backend that keeps no
+    /// such token revokes none.
+    fn return_update_job(
+        &self,
+        _token: &str,
+        _job: Option<crate::domain::queue_service::SessionProcess>,
+    ) -> Result<bool> {
+        Ok(false)
+    }
     /// [`TelemetryTokens::issue_telemetry`], keeping `issuer` with the
     /// token.
     fn issue_telemetry_as(
@@ -625,6 +654,25 @@ impl Admin {
     pub fn capability(&self) -> Capability {
         Capability::QueueAdmin
     }
+
+    /// Whether an update job's principal ([`ActorRole::Updater`],
+    /// ADR-t4629-1) runs it: its new build's check and migrations
+    /// (`migrate`, `migrate --check` and the messages `migrate` sends) and
+    /// `doctor`'s read. Never `init`, which binds the queue to the client's
+    /// repository.
+    pub fn sent_by_update_job(&self) -> bool {
+        !matches!(self, Self::Init { .. })
+    }
+
+    /// The command the administration is, as a refusal names it.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Migrate | Self::CommitMessages(_) => "migrate",
+            Self::SchemaFacts => "migrate --check",
+            Self::Init { .. } => "init",
+            Self::Doctor { .. } => "doctor",
+        }
+    }
 }
 
 /// `init`'s params: none.
@@ -677,6 +725,19 @@ fn admin_of(
         admin.capability(),
         &Resource::Queue,
     )?;
+    if actor.role() == ActorRole::Updater && !admin.sent_by_update_job() {
+        return Err(update_job_refusal(
+            &OwnDenials {
+                backend,
+                actor,
+                use_case,
+            },
+            actor,
+            admin.capability(),
+            &Resource::Queue,
+            admin.name(),
+        ));
+    }
     backend.admin(actor, admin)
 }
 
@@ -959,6 +1020,7 @@ impl QueueService<'_> {
                 &principal,
                 &request.params,
                 process,
+                request.token.as_deref(),
                 notes,
             ));
         }
@@ -1562,6 +1624,102 @@ pub fn revoke_ended_sign_ins(backend: &dyn ServiceBackend) -> Result<Vec<String>
     Ok(revoked)
 }
 
+/// Revoke, as the service starts, the update jobs' tokens whose job ended
+/// (ADR-t4629-1): the process bound to one ended, or one never bound was
+/// issued long enough ago
+/// ([`crate::domain::queue_service::update_job_token_ended`]), each judged
+/// again in a write transaction, as [`revoke_ended_sign_ins`] judges a
+/// sign-in. The supervisor that asked for one is not looked at. The keys
+/// revoked; one that cannot be judged or revoked is logged and left, for
+/// a supervisor's sweep to revoke (`revoke_principal`).
+pub fn revoke_ended_update_jobs(backend: &dyn ServiceBackend) -> Result<Vec<String>> {
+    use crate::domain::queue_service::update_job_token_ended;
+    let mut revoked = Vec::new();
+    let jobs = backend
+        .principals()?
+        .into_iter()
+        .filter(|principal| principal.role == ActorRole::Updater);
+    for principal in jobs {
+        let key = principal.credential_key();
+        let done = backend.open(&principal.actor()).and_then(|mut queue| {
+            queue.issuing(
+                &crate::domain::queue_service::IssueHeld::Nothing,
+                backend.now_ms(),
+                &mut |_| {
+                    let mut any = false;
+                    for (record, held) in backend.held_records(&principal)? {
+                        if update_job_token_ended(&held, backend.now_ms() / 1000, |job| {
+                            backend.session_ended(job)
+                        }) && backend.revoke_record(&principal, &record)?
+                        {
+                            any = true;
+                        }
+                    }
+                    Ok(json!(any))
+                },
+            )
+        });
+        match done {
+            Ok(Value::Bool(true)) => {
+                if !revoked.contains(&key) {
+                    revoked.push(key);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => warn!("the token of {key} could not be judged or revoked: {error:#}"),
+        }
+    }
+    Ok(revoked)
+}
+
+/// The binding use case of an update job's own `token` (ADR-t4629-1):
+/// `job`, the job's process as its connection confirms it, bound to that
+/// token in the issue's write transaction, in which the sweeps
+/// ([`revoke_ended_update_jobs`] and a supervisor's `revoke_principal`)
+/// read, judge and remove the update jobs' tokens, so none of them revokes
+/// a token bound since it read it. `true` only once the binding read back
+/// is `job`'s ([`crate::domain::queue_service::update_job_binding_refusal`]);
+/// a token no longer kept, one bound to another process, or a binding that
+/// could not be written or read back is an error, and the job does not go
+/// on.
+pub(crate) fn bind_update_job(
+    backend: &dyn ServiceBackend,
+    queue: &mut dyn ServiceQueue,
+    token: &str,
+    job: &crate::domain::queue_service::SessionProcess,
+) -> Result<Value> {
+    queue.issuing(
+        &crate::domain::queue_service::IssueHeld::Nothing,
+        backend.now_ms(),
+        &mut |_| {
+            let bound = backend.bind_update_job(token, job.clone())?;
+            match crate::domain::queue_service::update_job_binding_refusal(bound.as_ref(), job) {
+                None => Ok(json!(true)),
+                Some(why) => Err(anyhow!(why)),
+            }
+        },
+    )
+}
+
+/// The give-back use case of an update job's own `token` (ADR-t4629-1):
+/// at the request of `job`, the job's process as its connection confirms
+/// it, in the issue's write transaction, so no bind or sweep goes between
+/// its read and its revocation ([`ServiceBackend::return_update_job`]).
+/// Only that token goes, not another the principal's key holds since, and
+/// one bound to another process stays. Whether it was revoked.
+pub(crate) fn return_update_job(
+    backend: &dyn ServiceBackend,
+    queue: &mut dyn ServiceQueue,
+    token: &str,
+    job: Option<crate::domain::queue_service::SessionProcess>,
+) -> Result<Value> {
+    queue.issuing(
+        &crate::domain::queue_service::IssueHeld::Nothing,
+        backend.now_ms(),
+        &mut |_| Ok(json!(backend.return_update_job(token, job.clone())?)),
+    )
+}
+
 /// Whether `held`, a supervisor's sign-in, is left over from a
 /// registration that ended
 /// ([`crate::domain::queue_service::supervisor_token_ended`]), its
@@ -1783,6 +1941,28 @@ pub(super) fn issue_token(
                 // the first's.
                 use crate::domain::queue_service::{Reissue, reissue};
                 let held = backend.held(&key)?;
+                if child.role == ActorRole::Updater {
+                    // Over another supervisor's only once its job ended,
+                    // over its own parent's always (ADR-t4629-1).
+                    let ended = held.as_ref().is_some_and(|held| {
+                        crate::domain::queue_service::update_job_token_ended(
+                            held,
+                            backend.now_ms() / 1000,
+                            |job| backend.session_ended(job),
+                        )
+                    });
+                    if let Some(why) = crate::domain::queue_service::update_job_issue_refusal(
+                        parent,
+                        &issuer,
+                        held.as_ref(),
+                        ended,
+                    ) {
+                        return Err(Replacing(why).into());
+                    }
+                    let file = Issued::new(backend.issue_as(child, &issuer)?);
+                    let wrote = backend.written_record(&key)?;
+                    return Ok((serde_json::to_value(file)?, wrote));
+                }
                 let kept = held.as_ref().map(|held| held.issued_by.clone());
                 match reissue(
                     child,
@@ -1951,17 +2131,51 @@ pub(super) fn refuse_recorded(
         capability,
         reason,
     };
+    refuse_logged(&Store(queue, None), refused, resource, why)
+}
+
+/// [`refuse_recorded`]'s refusal `refused` of `resource` for `why`,
+/// recorded in `log`.
+fn refuse_logged(
+    log: &dyn DenialLog,
+    refused: AuthorizationError,
+    resource: &Resource,
+    why: &str,
+) -> anyhow::Error {
     let mut payload = super::commands::denial(&refused, resource);
-    let key = if reason == crate::domain::authorization::DenyReason::NotHeld {
+    let key = if refused.reason == crate::domain::authorization::DenyReason::NotHeld {
         "not_held"
     } else {
         "why"
     };
     payload[key] = json!(why);
-    if let Err(record) = Store(queue, None).record_denial(payload) {
+    if let Err(record) = log.record_denial(payload) {
         warn!("could not record the refusal ({refused}): {record:#}");
     }
     anyhow::Error::new(refused).context(RefusedBecause(why.to_owned()))
+}
+
+/// The refusal of an update job's (ADR-t4629-1) host command or queue
+/// administration the policy alone lets through (its `queue.admin` reaches
+/// `rebind` and `init`, which bind the queue to a repository), recorded as
+/// that job's in `log`.
+fn update_job_refusal(
+    log: &dyn DenialLog,
+    actor: &ActorContext,
+    capability: Capability,
+    resource: &Resource,
+    what: &str,
+) -> anyhow::Error {
+    refuse_logged(
+        log,
+        AuthorizationError {
+            role: actor.role(),
+            capability,
+            reason: crate::domain::authorization::DenyReason::Resource,
+        },
+        resource,
+        &format!("an update job does not run {what}"),
+    )
 }
 
 /// Why a refusal of [`refuse_recorded`] was made, which its answer says
@@ -2656,6 +2870,18 @@ fn run(
     if let Some(command) = QueueCommand::parse(use_case, raw)? {
         if let Some((capability, resource)) = command.authorization() {
             authorize_as(&store, actor, capability, &resource)?;
+            // An update job runs none of the host's commands: of them, its
+            // `queue.admin` lets `rebind` through the policy alone
+            // (ADR-t4629-1).
+            if actor.role() == ActorRole::Updater {
+                return Err(update_job_refusal(
+                    &store,
+                    actor,
+                    capability,
+                    &resource,
+                    &format!("dagq {}", use_case.as_str().replace('_', "-")),
+                ));
+            }
         }
         take_place(heavy_reads, use_case, notes)?;
         return store.0.command(&command);
@@ -4328,6 +4554,22 @@ pub(crate) mod tests {
     use anyhow::anyhow;
 
     use super::*;
+
+    /// ADR-t4629-1: an update job's `queue.admin` runs its new build's check
+    /// and migrations and `doctor`'s read, never `init`, which binds the
+    /// queue to a repository.
+    #[test]
+    fn an_update_job_administers_only_its_checks_and_migrations() {
+        for (admin, sent) in [
+            (Admin::Migrate, true),
+            (Admin::SchemaFacts, true),
+            (Admin::CommitMessages(Vec::new()), true),
+            (Admin::Doctor { full: true }, true),
+            (Admin::Init { binding: None }, false),
+        ] {
+            assert_eq!(admin.sent_by_update_job(), sent, "{}", admin.name());
+        }
+    }
 
     /// The service's refusal of an `events_of_between` too wide for one
     /// answer reaches the client as the request's error with why.

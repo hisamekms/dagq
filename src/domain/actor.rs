@@ -87,6 +87,17 @@ string_enum!(
     /// no process runs as it, no `DAGQ_ROLE` names it, and no token issues it
     /// as a child.
     ImagePublisher => "image-publisher",
+    /// The principal of one automatic or release update's job (ADR-t4629-1),
+    /// the deterministic control side's and no AI actor (not the reserved
+    /// `update-job`):
+    /// a token a live supervisor asks the queue service for before it
+    /// starts the job, good for what the job sends (the reads, the update's
+    /// records and asks, the install's handoff and its watch, and the
+    /// queue's administration and service lifecycle the install's steps
+    /// need) and nothing else. It ends with the job, never with the
+    /// supervisor that asked for it. A queue service's principal only, as
+    /// executor-telemetry: no `DAGQ_ROLE` names it.
+    Updater => "updater",
 });
 
 // How far an actor is trusted (ADR-t728-1 decision 1): a person, the
@@ -98,7 +109,7 @@ string_enum!(TrustLevel {
 });
 
 impl ActorRole {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::User,
         Self::Runner,
         Self::Inbox,
@@ -116,6 +127,7 @@ impl ActorRole {
         Self::Integrator,
         Self::ExecutorTelemetry,
         Self::ImagePublisher,
+        Self::Updater,
     ];
 
     /// The trust of the role: fixed by the role, never inferred from a
@@ -123,9 +135,11 @@ impl ActorRole {
     pub const fn trust(self) -> TrustLevel {
         match self {
             Self::User => TrustLevel::Human,
-            Self::Supervisor | Self::Wrapper | Self::Integrator | Self::ExecutorTelemetry => {
-                TrustLevel::TrustedControlPlane
-            }
+            Self::Supervisor
+            | Self::Wrapper
+            | Self::Integrator
+            | Self::ExecutorTelemetry
+            | Self::Updater => TrustLevel::TrustedControlPlane,
             Self::Runner
             | Self::ImagePublisher
             | Self::Inbox
@@ -159,11 +173,15 @@ impl ActorRole {
     }
 
     /// `DAGQ_ROLE` of the role; the user has none, and neither has the
-    /// runner, executor's telemetry and image publisher roles, queue service
-    /// principals only.
+    /// runner, executor's telemetry, image publisher and update job roles,
+    /// queue service principals only.
     pub const fn env_value(self) -> Option<&'static str> {
         match self {
-            Self::User | Self::Runner | Self::ExecutorTelemetry | Self::ImagePublisher => None,
+            Self::User
+            | Self::Runner
+            | Self::ExecutorTelemetry
+            | Self::ImagePublisher
+            | Self::Updater => None,
             other => Some(other.as_str()),
         }
     }
@@ -400,7 +418,8 @@ impl ActorContext {
                     ActorRole::User
                     | ActorRole::Runner
                     | ActorRole::ExecutorTelemetry
-                    | ActorRole::ImagePublisher,
+                    | ActorRole::ImagePublisher
+                    | ActorRole::Updater,
                 )
                 | Err(_) => {
                     return Err(DomainError::UnknownValue {
@@ -556,7 +575,8 @@ mod tests {
                 ActorRole::Supervisor
                 | ActorRole::Wrapper
                 | ActorRole::Integrator
-                | ActorRole::ExecutorTelemetry => TrustLevel::TrustedControlPlane,
+                | ActorRole::ExecutorTelemetry
+                | ActorRole::Updater => TrustLevel::TrustedControlPlane,
                 _ => TrustLevel::UntrustedAgent,
             };
             assert_eq!(role.trust(), expected, "{role:?}");

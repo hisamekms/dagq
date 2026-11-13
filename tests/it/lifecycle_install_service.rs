@@ -400,8 +400,9 @@ fn job(db: &Path, credential: Option<&Path>, args: &[&str]) -> std::process::Out
 /// The automatic update's and the release update's jobs send their steps
 /// with the token of the supervisor that started them: a build that fails
 /// is recorded as `update_failed`, with the inbox's ask, as that
-/// supervisor. With the service gone, a job fails as out of reach and
-/// records nothing.
+/// supervisor. Given their own token's file, they bind it first, send as
+/// the update job and give it back at their end. With the service gone, a
+/// job fails as out of reach and records nothing.
 #[test]
 fn the_update_jobs_record_as_the_supervisor_that_started_them() {
     use common::service::{queue, start};
@@ -420,11 +421,29 @@ fn the_update_jobs_record_as_the_supervisor_that_started_them() {
     std::fs::create_dir_all(&not_a_repository).unwrap();
     let to = dir.join("bin").join("dagq");
     let path = |path: &Path| path.to_str().unwrap().to_owned();
-    let auto_update = |credential| {
-        job(
-            &queue.db,
-            credential,
-            &[
+    // An automatic update's step, from this process.
+    let step = |call: Value| {
+        serde_json::to_value(ControlParams {
+            control: ControlCall {
+                command: ControlCommand::AutoUpdate,
+                task: None,
+                yes: false,
+                pid,
+            },
+            call: serde_json::from_value(call).unwrap(),
+        })
+        .unwrap()
+    };
+    // The job's own token (ADR-t4629-1), when it is given one.
+    let with_own = |mut args: Vec<String>, own: Option<&Path>| {
+        if let Some(own) = own {
+            args.extend(["--job-credential".to_owned(), path(own)]);
+        }
+        args
+    };
+    let auto_update = |credential, own: Option<&Path>| {
+        let args = with_own(
+            [
                 "auto-update",
                 "--commit",
                 "c0ffee",
@@ -440,36 +459,53 @@ fn the_update_jobs_record_as_the_supervisor_that_started_them() {
                 "/opt/bin/claude",
                 "--codex",
                 "/opt/bin/codex",
-            ],
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            own,
+        );
+        job(
+            &queue.db,
+            credential,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
         )
     };
-    let output = auto_update(Some(&issued.file));
+    let release_update = |own: Option<&Path>| {
+        let args = with_own(
+            [
+                "release-update",
+                "--release",
+                "0.0.0-none",
+                "--token",
+                registration.as_str(),
+                "--to",
+                &path(&to),
+                "--log",
+                &path(&dir.join("release.build.log")),
+                "--cargo",
+                "/usr/bin/false",
+                "--claude",
+                "/opt/bin/claude",
+                "--codex",
+                "/opt/bin/codex",
+                "--plugin-dir",
+                &path(dir),
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            own,
+        );
+        job(
+            &queue.db,
+            Some(&issued.file),
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+    };
+    let output = auto_update(Some(&issued.file), None);
     assert!(output.status.success(), "{output:?}");
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["outcome"], "failed", "{report}");
-    let output = job(
-        &queue.db,
-        Some(&issued.file),
-        &[
-            "release-update",
-            "--release",
-            "0.0.0-none",
-            "--token",
-            registration.as_str(),
-            "--to",
-            &path(&to),
-            "--log",
-            &path(&dir.join("release.build.log")),
-            "--cargo",
-            "/usr/bin/false",
-            "--claude",
-            "/opt/bin/claude",
-            "--codex",
-            "/opt/bin/codex",
-            "--plugin-dir",
-            &path(dir),
-        ],
-    );
+    let output = release_update(None);
     assert!(output.status.success(), "{output:?}");
     let failed = recorded(&queue.db, "update_failed");
     let supervisor = Some(format!("supervisor:{pid}"));
@@ -481,17 +517,94 @@ fn the_update_jobs_record_as_the_supervisor_that_started_them() {
         "{failed:?}"
     );
 
+    // Given its own token, which the supervisor asks the service for, each
+    // job sends as the update job in place of the supervisor's token its
+    // environment names, and gives its token back at its end.
+    let supervisor_token = service::read_token(&issued.file).unwrap();
+    let own_token = |job: &str| {
+        let answer = common::service::call(
+            &queue,
+            Some(&supervisor_token),
+            UseCase::Supervisor,
+            json!({"op": "issue_token", "args": [Principal::update_job(job)]}),
+        );
+        assert_eq!(answer["ok"], true, "{answer}");
+        let file: std::path::PathBuf =
+            serde_json::from_value(answer["result"]["file"].clone()).unwrap();
+        let value = service::read_token(&file).unwrap();
+        (file, value)
+    };
+    let given_back = |file: &Path, value: &str| {
+        assert!(!file.exists(), "{}", file.display());
+        let answer = common::service::call(
+            &queue,
+            Some(value),
+            UseCase::Control,
+            step(json!({"op": "supervisors"})),
+        );
+        assert_eq!(answer["error"]["code"], "unauthenticated", "{answer}");
+    };
+    let (auto_file, auto_token) = own_token("auto");
+    let output = auto_update(Some(&issued.file), Some(&auto_file));
+    assert!(output.status.success(), "{output:?}");
+    given_back(&auto_file, &auto_token);
+    let (release_file, release_token) = own_token("release");
+    let output = release_update(Some(&release_file));
+    assert!(output.status.success(), "{output:?}");
+    given_back(&release_file, &release_token);
+    let failed = recorded(&queue.db, "update_failed");
+    assert_eq!(failed.len(), 4, "{failed:?}");
+    assert_eq!(failed[2].0["commit"], "c0ffee", "{failed:?}");
+    assert_eq!(failed[2].1.as_deref(), Some("updater:auto"), "{failed:?}");
+    assert_eq!(failed[3].0["release"], "0.0.0-none", "{failed:?}");
+    assert_eq!(
+        failed[3].1.as_deref(),
+        Some("updater:release"),
+        "{failed:?}"
+    );
+    // It binds its token before anything else: one another process (this
+    // test's, standing for a job that runs) bound first does not go on and
+    // records nothing, and its give-back leaves that job's token to it;
+    // only the bound process gives it back.
+    let (bound_file, bound_token) = own_token("bound");
+    let bound = common::service::call(
+        &queue,
+        Some(&bound_token),
+        UseCase::Control,
+        step(json!({"op": "bind_job_token"})),
+    );
+    assert_eq!(bound["ok"], true, "{bound}");
+    let refused = auto_update(Some(&issued.file), Some(&bound_file));
+    assert!(!refused.status.success(), "{refused:?}");
+    assert_eq!(recorded(&queue.db, "update_failed").len(), 4);
+    assert!(bound_file.exists(), "{}", bound_file.display());
+    let kept = common::service::call(
+        &queue,
+        Some(&bound_token),
+        UseCase::Control,
+        step(json!({"op": "supervisors"})),
+    );
+    assert_eq!(kept["ok"], true, "{kept}");
+    let returned = common::service::call(
+        &queue,
+        Some(&bound_token),
+        UseCase::Control,
+        step(json!({"op": "return_job_token"})),
+    );
+    assert_eq!(returned["result"], true, "{returned}");
+    given_back(&bound_file, &bound_token);
+
     // A job of a supervisor that names its role without its token is
     // refused, and one whose service is gone fails as out of reach; the
     // queue is opened for neither.
-    let refused = auto_update(None);
+    let refused = auto_update(None, None);
     assert!(!refused.status.success(), "{refused:?}");
     dagq::compose::queue_service_stop(&queue.db, None, |_| None).unwrap();
-    let unreached = auto_update(Some(&issued.file));
+    let unreached = auto_update(Some(&issued.file), None);
     assert!(!unreached.status.success(), "{unreached:?}");
     let stderr = String::from_utf8_lossy(&unreached.stderr);
     assert!(stderr.contains("dagq service status"), "{stderr}");
-    assert_eq!(recorded(&queue.db, "update_failed").len(), 2);
+    assert_eq!(recorded(&queue.db, "update_failed").len(), 4);
 }
 
 /// An update job whose watch fails stops its own supervisor to bring it

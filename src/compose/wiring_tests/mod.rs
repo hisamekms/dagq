@@ -38,6 +38,7 @@ mod ruleset_gate;
 mod task_release;
 mod triage;
 mod unapplied_decisions;
+mod update_job_token;
 mod worker_trial;
 
 mod repository_config;

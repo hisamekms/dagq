@@ -675,32 +675,66 @@ impl Wiring {
     /// the memdb queue, its tokens in memory.
     fn service(&self) -> Arc<dyn ServiceCaller> {
         let tokens = self.tokens.clone();
-        let (reads, writes, detail, commands) = super::super::wiring_service_use_cases();
         Arc::new(InProcessCaller::on(
-            Arc::new(MemoryBackend {
-                sqlite: SqliteServiceBackend {
-                    storage: crate::infrastructure::queue_service::SqliteStorage,
-                    oidc_configured: false,
-                    db: self.db.clone(),
-                    queue_dir: self.tokens.dir().to_owned(),
-                    generators: self.generators.clone(),
-                    reads,
-                    writes,
-                    detail,
-                    commands,
-                    at_stop: None,
-                    stands_for: None,
-                    doctor: None,
-                    write_line: None,
-                    heavy_reads: None,
-                    ruleset_gate: None,
-                },
-                tokens: self.tokens.clone(),
-                processes: self.processes.clone(),
-            }),
+            self.service_backend(),
             self.tokens.dir().to_owned(),
             Arc::new(move |file: &Path| tokens.read(file)),
         ))
+    }
+
+    /// The backend of this test's queue service ([`Self::service`]), for a
+    /// test that sends its requests to the service itself, the test's
+    /// processes and tokens with it.
+    pub(super) fn service_backend(&self) -> Arc<MemoryBackend> {
+        self.service_backend_on(self.generators.clone())
+    }
+
+    /// [`Self::service_backend`] on a clock stopped at `at`: the service
+    /// reads the time (a sweep's now) at `at`, while the tokens are issued
+    /// on the test's clock, so a test moves the service past a token's
+    /// limit without waiting.
+    pub(super) fn service_backend_at(&self, at: SystemTime) -> Arc<MemoryBackend> {
+        self.service_backend_on(Generators {
+            clock: Arc::new(StoppedClock::new(at, Instant::now())),
+            ids: self.generators.ids.clone(),
+        })
+    }
+
+    fn service_backend_on(&self, generators: Generators) -> Arc<MemoryBackend> {
+        let (reads, writes, detail, commands) = super::super::wiring_service_use_cases();
+        Arc::new(MemoryBackend {
+            sqlite: SqliteServiceBackend {
+                storage: crate::infrastructure::queue_service::SqliteStorage,
+                oidc_configured: false,
+                db: self.db.clone(),
+                queue_dir: self.tokens.dir().to_owned(),
+                generators,
+                reads,
+                writes,
+                detail,
+                commands,
+                at_stop: None,
+                stands_for: None,
+                doctor: None,
+                write_line: None,
+                heavy_reads: None,
+                ruleset_gate: None,
+            },
+            tokens: self.tokens.clone(),
+            processes: self.processes.clone(),
+            on_held_records: std::sync::Mutex::default(),
+            on_bind: std::sync::Mutex::default(),
+        })
+    }
+
+    /// The processes of this test ([`FakeProcesses`]).
+    pub(super) fn processes(&self) -> &FakeProcesses {
+        &self.processes
+    }
+
+    /// The tokens of this test's queue service ([`MemoryTokens`]).
+    pub(super) fn tokens(&self) -> &MemoryTokens {
+        &self.tokens
     }
 
     /// One planner pass with the test's planner limit and timeout.

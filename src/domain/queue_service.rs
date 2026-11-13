@@ -1244,6 +1244,20 @@ impl ControlCommand {
     pub const fn acts_on_registrations(self) -> bool {
         self.lifecycle() || self.installs()
     }
+
+    /// Whether an update job's principal ([`ActorRole::Updater`],
+    /// ADR-t4629-1) sends this command's steps: the update jobs' own, the
+    /// install they do, and the stop and start of the queue's service and
+    /// broker it makes. Never `up`, `down` or `dagq inbox`, which start or
+    /// stop a supervisor or the inbox, nor a landing, a review or an
+    /// observation.
+    pub const fn sent_by_update_job(self) -> bool {
+        self.installs()
+            || matches!(
+                self,
+                Self::ServiceStart | Self::ServiceStop | Self::BrokerStart | Self::BrokerStop
+            )
+    }
 }
 
 /// The command a request of [`UseCase::Control`] is a step of, as its
@@ -1669,6 +1683,29 @@ impl Principal {
         }
     }
 
+    /// The principal of the update job `job` (ADR-t4629-1): the one
+    /// automatic or release update's job a supervisor starts, named by the
+    /// name the supervisor gives that job (its logs' name), its actor id
+    /// `updater:<job>` and its token kept under it. A name with `@` is
+    /// refused by [`Self::check`].
+    pub fn update_job(job: &str) -> Self {
+        Self {
+            role: ActorRole::Updater,
+            actor_id: format!("{}:{job}", ActorRole::Updater.as_str()),
+            run_id: None,
+            task_id: None,
+            target: None,
+            registration: None,
+            session: None,
+            landing: None,
+            human: None,
+            human_role: None,
+            auth_time: None,
+            parent_human: None,
+            token_expires_at: None,
+        }
+    }
+
     /// The session wrapper of `target`, a run (of `task`) or a planner,
     /// with its hook (ADR-t3102-1 decision 4): its actor id is the
     /// wrapper's ([`wrapper_actor_id`]), and a run's names the run and its
@@ -1774,6 +1811,20 @@ impl Principal {
             (None, ActorRole::Planner) => refuse("planner of no planner".to_owned()),
             (None, role) if role.trust() == super::TrustLevel::UntrustedAgent => Ok(()),
             (None, ActorRole::Inbox) if self.run_id.is_none() && self.task_id.is_none() => Ok(()),
+            // One job, named: no run, task, target nor registration, and
+            // by a name its credential key is swept by ([`swept_token_key`]):
+            // none with `@`, which only a key of a session or a registration
+            // carries, so a token of it never outlives its job's process.
+            (None, ActorRole::Updater)
+                if self.run_id.is_none()
+                    && self.task_id.is_none()
+                    && self
+                        .actor_id
+                        .strip_prefix("updater:")
+                        .is_some_and(|job| !job.trim().is_empty() && !job.contains('@')) =>
+            {
+                Ok(())
+            }
             (Some(target), ActorRole::Planner)
                 if target.kind == super::session_step::TargetKind::Planner
                     && self.actor_id == format!("planner:{}", target.id)
@@ -2018,6 +2069,14 @@ pub struct TokenIssuer {
     /// before the service kept it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registration: Option<LeaseToken>,
+    /// The process of the update job an update job's token was issued for
+    /// ([`ActorRole::Updater`], ADR-t4629-1), whose end ends the token:
+    /// bound by the job's own binding step as it starts
+    /// ([`bind_update_job`]), as its parent asks for the token before it
+    /// starts the job and so before its pid is known. `None` before that
+    /// step, and for every other principal's token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<SessionProcess>,
 }
 
 impl TokenIssuer {
@@ -2030,6 +2089,7 @@ impl TokenIssuer {
                 .registration
                 .clone()
                 .filter(|_| parent.role == ActorRole::Supervisor),
+            job: None,
         }
     }
 
@@ -2382,6 +2442,121 @@ pub fn job_token_ended(
     match issued_by {
         Some(issuer) if issuer.judged() => !there(issuer),
         _ => job().ended(),
+    }
+}
+
+/// How long an update job's token may stay unbound ([`bind_update_job`])
+/// after its issue (unix seconds) before it is taken as ended: its job
+/// never started, or never reached the service.
+pub const UPDATE_JOB_UNBOUND_SECS: i64 = 600;
+
+/// Why the token of an update job ([`Principal::update_job`]) may not be
+/// issued at the request of `parent`, asking as `issuer`, over `held`, the
+/// token its key holds already (`held_ended`: whether that one is taken as
+/// ended, [`update_job_token_ended`]); `None` when it may (ADR-t4629-1).
+/// Only a supervisor under its registration asks for one (whether that
+/// registration is live is read in the issue's transaction, as
+/// [`IssueHeld::Registered`]); a token held by another supervisor is not
+/// replaced while its job may still run, and one held by the same
+/// supervisor is replaced, the one before revoked by the issue.
+pub fn update_job_issue_refusal(
+    parent: &Principal,
+    issuer: &TokenIssuer,
+    held: Option<&HeldToken>,
+    held_ended: bool,
+) -> Option<&'static str> {
+    if parent.role != ActorRole::Supervisor || parent.registration.is_none() {
+        return Some(
+            "an update job's token is asked for only by a supervisor, under its registration",
+        );
+    }
+    let held = held?;
+    let same = held
+        .issued_by
+        .as_ref()
+        .is_some_and(|kept| kept.parent == issuer.parent);
+    (!same && !held_ended)
+        .then_some("the update job's token is another supervisor's, and its job may still run")
+}
+
+/// Whether the update job's token `held` is taken as ended at `now` (unix
+/// seconds), `ended` saying whether a process is known to have ended
+/// ([`SessionProcess::ended`]): the job's process bound to it ended, or,
+/// unbound, it was issued longer than [`UPDATE_JOB_UNBOUND_SECS`] ago. The
+/// supervisor that asked for it is never looked at: its sign-out and the
+/// end of its registration leave the token to its job (ADR-t4629-1).
+pub fn update_job_token_ended(
+    held: &HeldToken,
+    now: i64,
+    ended: impl Fn(&SessionProcess) -> bool,
+) -> bool {
+    match held
+        .issued_by
+        .as_ref()
+        .and_then(|issuer| issuer.job.as_ref())
+    {
+        Some(job) => ended(job),
+        None => now.saturating_sub(held.issued_at) > UPDATE_JOB_UNBOUND_SECS,
+    }
+}
+
+/// Bind `process` to the update job's token kept with `issuer` as the
+/// job's ([`TokenIssuer::job`]): whether it was bound now, `false` when
+/// one was bound already, which stays.
+///
+/// The order (ADR-t4629-1): the supervisor asks for the token before it
+/// starts the job, whose pid it does not know yet, and hands the job the
+/// token's file (`--job-credential`). The job's command binds it, as it
+/// starts and before its build and any child that sends with the same file
+/// (its new build's check, migrations and install), by a step of its own
+/// that names its process as its connection confirms it; no other request
+/// binds. The service binds in the issue's write transaction, in which the
+/// sweeps read, judge and remove the update jobs' tokens, so a sweep sees a
+/// token bound or unbound throughout and never revokes one bound since it
+/// read it; and it answers only once it read back the binding kept as
+/// that process's ([`update_job_binding_refusal`]): the job goes on only
+/// then, and ends otherwise. The token is not bound to the
+/// `update_started` the supervisor records after the start: the job's end
+/// is told by the bound process alone, and an unbound token ends
+/// [`UPDATE_JOB_UNBOUND_SECS`] after its issue.
+pub fn bind_update_job(issuer: &mut TokenIssuer, process: SessionProcess) -> bool {
+    if issuer.job.is_some() {
+        return false;
+    }
+    issuer.job = Some(process);
+    true
+}
+
+/// Why the update job's process `job` may not go on with its token after
+/// its binding ([`bind_update_job`]), `bound` being the process the service
+/// read back as kept bound to that token (`None` for a token no longer
+/// kept, given back or swept); `None` once `job` is the one kept.
+pub fn update_job_binding_refusal(
+    bound: Option<&SessionProcess>,
+    job: &SessionProcess,
+) -> Option<&'static str> {
+    match bound {
+        None => Some("the update job's token is no longer kept: it was given back or swept"),
+        Some(bound) if bound != job => Some("the update job's token is bound to another process"),
+        Some(_) => None,
+    }
+}
+
+/// Why `job`, the process that gives an update job's token back as the
+/// connection confirms it (`None` when it confirms none), may not
+/// (ADR-t4629-1): the token is bound to another process, `bound`, which
+/// goes on with it, as one whose bind was refused, started twice or issued
+/// the token again, does not end another job's. One never bound is given
+/// back by whoever sends it. `None` when `job` may.
+pub fn update_job_return_refusal(
+    bound: Option<&SessionProcess>,
+    job: Option<&SessionProcess>,
+) -> Option<&'static str> {
+    match bound {
+        Some(bound) if Some(bound) != job => {
+            Some("the update job's token is bound to another process")
+        }
+        _ => None,
     }
 }
 
@@ -3692,6 +3867,7 @@ mod tests {
             parent: parent.to_owned(),
             process: None,
             registration: None,
+            job: None,
         };
         let there = |_: &TokenIssuer| true;
         let unrecorded = |supervisors: Vec<String>, command: bool| {
@@ -5035,6 +5211,7 @@ mod tests {
                 parent: "user".to_owned(),
                 process,
                 registration: None,
+                job: None,
             }),
             issued_at: 0,
         };
@@ -5552,5 +5729,215 @@ mod inbox_relay_tests {
             let caller = Principal::of(&ActorContext::new(role, "x"));
             assert!(!human_inbox_revoke(&caller, &own), "{role:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod update_job_tests {
+    use super::*;
+
+    /// The process that gives a token back is its bound one, or the token
+    /// was never bound: another process's give-back, or one the
+    /// connection confirms no process of, leaves a bound token alone.
+    #[test]
+    fn only_the_bound_process_gives_an_update_jobs_token_back() {
+        let job = SessionProcess {
+            pid: 7,
+            start: "job".into(),
+        };
+        let other = SessionProcess {
+            pid: 8,
+            start: "other".into(),
+        };
+        assert_eq!(update_job_return_refusal(None, Some(&other)), None);
+        assert_eq!(update_job_return_refusal(None, None), None);
+        assert_eq!(update_job_return_refusal(Some(&job), Some(&job)), None);
+        let reused = SessionProcess {
+            pid: 7,
+            start: "later".into(),
+        };
+        for returning in [Some(&other), Some(&reused), None] {
+            assert!(update_job_return_refusal(Some(&job), returning).is_some());
+        }
+    }
+
+    fn supervisor(token: &str) -> Principal {
+        Principal::supervisor(&LeaseToken::new(token), 7)
+    }
+
+    fn held(parent: &Principal, job: Option<SessionProcess>, issued_at: i64) -> HeldToken {
+        let mut issuer = TokenIssuer::of(parent, None);
+        issuer.job = job;
+        HeldToken {
+            principal: Principal::update_job("update-1"),
+            issued_by: Some(issuer),
+            issued_at,
+        }
+    }
+
+    fn process(start: &str) -> SessionProcess {
+        SessionProcess {
+            pid: 42,
+            start: start.to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_update_job_sends_only_its_updates_and_installs_steps() {
+        use ControlCommand as C;
+        let sent: Vec<_> = [
+            C::Integrate,
+            C::Review,
+            C::Observe,
+            C::ThroughputReview,
+            C::SetupReview,
+            C::Up,
+            C::Down,
+            C::Inbox,
+            C::ServiceStart,
+            C::ServiceStop,
+            C::BrokerStart,
+            C::BrokerStop,
+            C::Install,
+            C::AutoUpdate,
+            C::ReleaseUpdate,
+        ]
+        .into_iter()
+        .filter(|command| command.sent_by_update_job())
+        .map(ControlCommand::as_str)
+        .collect();
+        assert_eq!(
+            sent,
+            [
+                "service_start",
+                "service_stop",
+                "broker_start",
+                "broker_stop",
+                "install",
+                "auto_update",
+                "release_update"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_update_job_is_one_named_job_of_no_run() {
+        let job = Principal::update_job("update-1");
+        assert_eq!(job.check(), Ok(()));
+        assert!(job.names_itself());
+        assert_eq!(job.credential_key(), "updater:update-1");
+        assert!(Principal::update_job(" ").check().is_err());
+        // A name the sweeps could not key it by is no update job's.
+        let unswept = Principal::update_job("update@1");
+        assert_eq!(swept_token_key(&unswept), None);
+        assert!(unswept.check().is_err());
+        let mut of_run = Principal::update_job("update-1");
+        of_run.run_id = Some(RunId::new("r1").unwrap());
+        assert!(of_run.check().is_err());
+        assert!(supervisor_revokes(&job.credential_key()));
+        assert_eq!(swept_token_key(&job), Some(job.credential_key()));
+    }
+
+    #[test]
+    fn only_a_registered_supervisor_asks_and_another_ones_live_token_stays() {
+        let parent = supervisor("s1");
+        let other = supervisor("s2");
+        let child = Principal::update_job("update-1");
+        let issuer = TokenIssuer::of(&parent, None);
+        // A live registration is what the issue's transaction checks.
+        let under = issue_held(&parent, &child);
+        assert_eq!(under, IssueHeld::Registered(LeaseToken::new("s1")));
+        let live = HeldFacts {
+            registration_expired: Some(false),
+            ..HeldFacts::default()
+        };
+        assert_eq!(not_held(&under, &live), None);
+        // A parent whose registration ended, or is not in the queue.
+        for gone in [Some(true), None] {
+            let facts = HeldFacts {
+                registration_expired: gone,
+                ..HeldFacts::default()
+            };
+            assert!(not_held(&under, &facts).is_some(), "{gone:?}");
+        }
+        assert_eq!(
+            update_job_issue_refusal(&parent, &issuer, None, false),
+            None
+        );
+        // Not a supervisor, or one with no registration.
+        assert!(update_job_issue_refusal(&Principal::user(), &issuer, None, false).is_some());
+        let mut unregistered = supervisor("s1");
+        unregistered.registration = None;
+        assert!(update_job_issue_refusal(&unregistered, &issuer, None, false).is_some());
+        // Another parent's token of the same job, while its job may run.
+        let others = held(&other, Some(process("now")), 0);
+        assert!(update_job_issue_refusal(&parent, &issuer, Some(&others), false).is_some());
+        assert_eq!(
+            update_job_issue_refusal(&parent, &issuer, Some(&others), true),
+            None
+        );
+        // The same parent issues again: the one before is replaced.
+        let own = held(&parent, None, 0);
+        assert_eq!(
+            update_job_issue_refusal(&parent, &issuer, Some(&own), false),
+            None
+        );
+    }
+
+    #[test]
+    fn the_job_alone_ends_its_token_never_its_parents_sign_out() {
+        let parent = supervisor("s1");
+        let ended = |job: &SessionProcess| job.ended(job.start == "now", Some("now"));
+        // Bound to the job's process: ends with it.
+        let running = held(&parent, Some(process("now")), 0);
+        assert!(!update_job_token_ended(&running, 10_000, ended));
+        let gone = held(&parent, Some(process("then")), 0);
+        assert!(update_job_token_ended(&gone, 1, ended));
+        // The parent's sign-out and registration end are not read: a token
+        // whose supervisor is gone lives while its job does.
+        let mut signed_out = running.clone();
+        if let Some(issuer) = signed_out.issued_by.as_mut() {
+            issuer.registration = None;
+            issuer.process = Some(process("then"));
+        }
+        assert!(!update_job_token_ended(&signed_out, 10_000, ended));
+        // Unbound: kept for a while after its issue, then taken as ended.
+        let unbound = held(&parent, None, 100);
+        assert!(!update_job_token_ended(
+            &unbound,
+            100 + UPDATE_JOB_UNBOUND_SECS,
+            ended
+        ));
+        assert!(update_job_token_ended(
+            &unbound,
+            101 + UPDATE_JOB_UNBOUND_SECS,
+            ended
+        ));
+    }
+
+    #[test]
+    fn the_first_request_binds_the_job_and_a_later_one_does_not_rebind() {
+        let mut issuer = TokenIssuer::of(&supervisor("s1"), None);
+        assert!(bind_update_job(&mut issuer, process("job")));
+        assert!(!bind_update_job(&mut issuer, process("child")));
+        assert_eq!(issuer.job, Some(process("job")));
+        // Kept in the record as it is read back.
+        let read: TokenIssuer =
+            serde_json::from_value(serde_json::to_value(&issuer).unwrap()).unwrap();
+        assert_eq!(read, issuer);
+        let older: TokenIssuer =
+            serde_json::from_value(serde_json::json!({"parent": "user"})).unwrap();
+        assert_eq!(older.job, None);
+    }
+
+    /// The job goes on only once the binding read back is its own process:
+    /// not when the token is gone (given back or swept before the bind),
+    /// nor when another process is bound to it.
+    #[test]
+    fn a_job_goes_on_only_once_its_own_binding_is_kept() {
+        let job = process("job");
+        assert_eq!(update_job_binding_refusal(Some(&job), &job), None);
+        assert!(update_job_binding_refusal(None, &job).is_some());
+        assert!(update_job_binding_refusal(Some(&process("other")), &job).is_some());
     }
 }

@@ -668,6 +668,10 @@ impl Supervisor<'_> {
             if crate::domain::queue_service::is_job(principal.role) {
                 return true;
             }
+            // An update job's likewise, once its job ended (ADR-t4629-1).
+            if principal.role == crate::domain::ActorRole::Updater {
+                return true;
+            }
             let Some(run) = &principal.run_id else {
                 return false;
             };

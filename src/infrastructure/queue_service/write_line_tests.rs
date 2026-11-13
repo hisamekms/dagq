@@ -908,3 +908,67 @@ fn refused_requests_do_not_postpone_the_lease_renewal() {
     assert_eq!(queue.write_leader().unwrap().0.lease_until_ms, i64::MAX);
     line.stop(&fixture.backend.db).unwrap();
 }
+
+/// ADR-t4629-1: a service that starts waiting for the write leader (one
+/// with no proof of its queue's lock, as a queue whose DB is a link into
+/// another directory has, while another holder's lease runs) sweeps the
+/// update jobs' tokens whose job ended once it takes the leader, on its
+/// write line: the one of a job that ended authenticates while the service
+/// waits and is refused after, the one of a job in its grace stays, and
+/// the sweep goes on the line once.
+#[test]
+fn a_service_that_takes_the_leader_after_its_start_then_sweeps_the_ended_update_jobs() {
+    let lease = LeaseToken::new("owner");
+    let (_dir, mut backend) = claimed_with(&lease, still());
+    open(&backend.db)
+        .take_write_leader("another", crate::domain::write_leader::LEASE, true)
+        .unwrap()
+        .unwrap();
+    let line = Arc::new(ServiceWriteLine::waiting(&backend.db).unwrap());
+    backend.write_line = Some(line.clone());
+    let backend = Arc::new(backend);
+    let parent = Principal::supervisor(&lease, 1);
+    let issued = |job: &str, at: i64| {
+        let principal = Principal::update_job(job);
+        let file = issue_by(
+            &backend.queue_dir,
+            &principal,
+            &TokenIssuer::of(&parent, None),
+            at,
+        )
+        .unwrap()
+        .file;
+        (principal, read_token(&file).unwrap(), file)
+    };
+    // Never bound and issued long before the service's now: its job ended.
+    let (ended, ended_token, ended_file) = issued("update-1", 1);
+    let (live, live_token, _) = issued("update-2", backend.now_ms() / 1000);
+
+    let mut sweep = StartSweep::default();
+    assert!(sweep.once_leading(&backend).is_none());
+    assert!(!line.take(&backend.db, "starting", false).unwrap());
+    assert!(sweep.once_leading(&backend).is_none());
+    assert_eq!(backend.principal(&ended_token).unwrap(), Some(ended));
+
+    // The leader taken later, as the takeover worker takes it.
+    assert!(line.take(&backend.db, "starting", true).unwrap());
+    let swept = sweep.once_leading(&backend).expect("the sweep on the line");
+    assert!(swept.recv_timeout(BOUND).unwrap().response.ok);
+    assert!(!ended_file.exists(), "{}", ended_file.display());
+    assert_eq!(backend.principal(&ended_token).unwrap(), None);
+    let refused = answered(
+        &backend,
+        request(
+            Some(ended_token),
+            UseCase::Supervisor,
+            json!({"op": "supervisors", "args": []}),
+        ),
+    );
+    assert_eq!(
+        refused.error.map(|error| error.code),
+        Some(ServiceErrorCode::Unauthenticated)
+    );
+    assert_eq!(backend.principal(&live_token).unwrap(), Some(live));
+    assert!(sweep.once_leading(&backend).is_none());
+    line.stop(&backend.db).unwrap();
+}

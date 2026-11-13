@@ -97,6 +97,7 @@ CLIの引数だけで所有や状態を信頼せず、applicationがqueueから�
 |wrapper|読み取り・`session.run`・`session.record`|自分のrunかplanner（tokenのprincipalのactor id）だけ（ADR-t3102-1決定4）|
 |integrator|読み取り・`landing.land`・`landing.push`|なし|
 |executor-telemetry|`telemetry.report`だけ|tokenの対象に制御側が登録したsessionだけ|
+|updater|読み取り・`queue.admin`・`service.lifecycle`・`service.install`|更新・install・serviceの起動と停止・`migrate`・`doctor`だけ|
 
 旧値の`DAGQ_ROLE=reviewer`はreview-jobとして読む（[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）。
 
@@ -159,7 +160,6 @@ CLIはqueueの場所を決めた直後、queueやログを開く前に`operation
 workspaceを閉じる手順の入口は[dagq-recoverのsession](../../plugins/claude-dagq/skills/dagq-recover/reference/session.md#the-commands)。
 終わったrunのwrapperの停止はsupervisorの[自分の掃除](supervisor-lifecycle/background-recovery-job.md#終わったrunの掃除)が担う。
 plannerはruntimeだけが立て、人が頼む相手ではないので、起動・停止と更新は人かinboxが担う（[Roles](supervisor-lifecycle/roles.md)）。
-続きの依頼の境界は[ADR-t1533-1](../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)。
 
 拒否はserviceが呼び出し元のprincipalで記録し、CLIはqueueを開かない（`CommandDenials`と[hostのCLI](queue-service-host-cli.md#送る範囲)）。
 queueが無い・serviceが答えないときは記録できず、拒否は拒否のまま返す。
@@ -172,7 +172,7 @@ Codexのinboxのhookもこの約束を持つ（[ADR-t2159-1](../adr/2026-10-09-t
 `supervise`と`auto-update`はruntimeの制御側（信頼する制御側。ADR-t728-1の決定2）のプロセスを始めるコマンドで、呼び出し元の環境で判定する:
 
 - `supervise`は`scheduler.supervise`で判定する。
-  launchdのsupervisorは`DAGQ_ROLE`を持たない（user）ので、`up`を打ったのがplannerでも起動は通る（登録済みのin-cmuxのものは`DAGQ_ROLE=supervisor`で動く）。
+  launchdのsupervisorは`DAGQ_ROLE`を持たない（user）ので、`up`を打ったのがplannerでも起動は通る。
   exec の引き継ぎは同じ環境のまま自分をexecするので、同じroleで判定される。
   起動したプロセスのeventのactorは、呼び出し元ではなく`supervisor:<pid>`（`event_actor`）
 - `auto-update`と`release-update`は、supervisorが自分の環境（`supervisor:<pid>`）とtokenで起動する。
@@ -197,6 +197,7 @@ host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユ
 serviceはtokenのprincipalをactorとして認可し、一覧に無い操作を拒む（default deny）。
 ユースケースの入口は`src/application/queue_service.rs`の`QueueService`で、対話にはCLIと同じapplicationの判定を使う（ADR-t1233-1決定4）。
 token発行の前提と発行が同じtransactionに属する約束は`issue_token`のdoc commentと[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)。
+更新のjobのprincipalは登録の生きた起動元のsupervisorが起動前に親と対象を検査し発行し、失効はjob終了とprocess消滅後の掃除で親のsign_outでない（ADR-t4629-1）。
 supervisorの操作の判定は`supervisor_service::answer`、integratorが自分の着地だけを操作する制約は`integrator_scope`。
 wrapperの操作と制御側のコマンドの判定は`QueueService`のdoc commentと[制御側のコマンド](queue-service-host-cli.md#制御側のコマンド)。
 
@@ -219,5 +220,5 @@ guardrailが迂回できる限界と、規則をwildcardで広げない約束は
 ## CIの見張り（ADR-t1920-1）
 
 [ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)。
-読むコマンド`dagq ci failures`のcapabilityは`ci.read`で、誰が持つかはPolicyの表のとおり（一覧はworkerとrunの全体のreviewにはpromptとrun directoryのファイルで渡す）。
+読むコマンド`dagq ci failures`のcapabilityは`ci.read`。
 guardrailの対応は`DAGQ_COMMANDS`、findingの判断の入口は`Dialogue`。

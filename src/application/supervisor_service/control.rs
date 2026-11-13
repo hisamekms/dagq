@@ -75,7 +75,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::super::commands::operations::Operation;
@@ -107,6 +107,61 @@ pub const CONTROL_QUEUE: &str = "control_queue";
 /// or a session as read by the caller, without a live lease. An existing
 /// approval writes nothing; `integration_approved` is written only here.
 pub const APPROVE_INTEGRATION: &str = "approve_integration";
+
+/// The step an update job ends with when it sent as its own principal
+/// ([`crate::domain::ActorRole::Updater`], ADR-t4629-1): the service
+/// revokes the token the request carries, that job's own and no other's.
+/// Every other principal is refused it.
+pub const RETURN_JOB_TOKEN: &str = "return_job_token";
+
+/// The step an update job that sends as its own principal starts with
+/// (ADR-t4629-1): the service binds the token the request carries to the
+/// job's process as the connection confirms it
+/// ([`crate::application::queue_service::bind_update_job`]), and answers
+/// `true` only once that binding is kept. Every other principal is refused
+/// it.
+pub const BIND_JOB_TOKEN: &str = "bind_job_token";
+
+/// Bind the update job's own token to this process as its job's through
+/// `caller`, the job's command's ([`BIND_JOB_TOKEN`],
+/// [`crate::domain::queue_service::bind_update_job`], ADR-t4629-1), before
+/// the job's build and before any child sends with the same file: `Ok`
+/// only once the service answered the binding kept. A caller that could
+/// not be made, a service that did not answer, a refusal or any other
+/// answer is the job's error: it does not go on with a token the sweeps
+/// would take as unbound while it runs.
+pub fn bind_job_token(caller: Result<Arc<dyn ServiceCaller>>) -> Result<()> {
+    let answer = caller
+        .and_then(|caller| job_token_step(&*caller, BIND_JOB_TOKEN))
+        .context("the update job's token could not be bound to its process")?;
+    anyhow::ensure!(
+        answer == Value::Bool(true),
+        "the queue service did not answer the update job's token bound to its process: {answer}"
+    );
+    Ok(())
+}
+
+/// Give the update job's own token back at the job's end through `caller`
+/// ([`RETURN_JOB_TOKEN`], ADR-t4629-1): whether the service revoked it. A
+/// failure is logged and left to the service's sweeps, which revoke it once
+/// the job's process is gone.
+pub fn return_job_token(caller: Result<Arc<dyn ServiceCaller>>) -> bool {
+    match caller.and_then(|caller| job_token_step(&*caller, RETURN_JOB_TOKEN)) {
+        Ok(answer) => answer == Value::Bool(true),
+        Err(error) => {
+            tracing::warn!(
+                "the update job's token was not given back: {error:#}; the service revokes it \
+                 once the job's process is gone"
+            );
+            false
+        }
+    }
+}
+
+/// The step `op` with no arguments through `caller`: the service's answer.
+fn job_token_step(caller: &dyn ServiceCaller, op: &str) -> Result<Value> {
+    caller.call(UseCase::Supervisor, json!({"op": op, "args": []}))
+}
 
 /// The steps of the telemetry of a command's agent or verification: the
 /// token of a target of no run, issued and revoked by the service under no
@@ -281,6 +336,8 @@ fn lifecycle_ops(command: ControlCommand) -> &'static [&'static str] {
             "cancel_handoff",
             "open_update_ask",
             "close_installed_update_ask",
+            BIND_JOB_TOKEN,
+            RETURN_JOB_TOKEN,
         ],
         _ => &[],
     }
@@ -349,20 +406,40 @@ fn own_hold(command: ControlCommand, args: &[Value]) -> bool {
 
 /// Answer the step `params` of the control-side command of `principal` on
 /// `backend` (see the module's documentation), sent from the process
-/// `process` when the connection tells it. `notes` takes what a job's read
-/// met among the heavy reads ([`super::jobs`]).
+/// `process` when the connection tells it, with `token`, the request's.
+/// `notes` takes what a job's read met among the heavy reads
+/// ([`super::jobs`]).
 pub fn answer(
     backend: &dyn ServiceBackend,
     principal: &Principal,
     params: &Value,
     process: Option<u32>,
+    token: Option<&str>,
     notes: &mut super::super::queue_service::RequestNotes,
 ) -> Result<Value> {
     let actor = principal.actor();
     let ControlParams { control, call } = serde_json::from_value(params.clone())
         .map_err(|error| BadOperation(format!("{UNREAD_PARAMS}: {error}")))?;
     let mut queue = super::opened_for(backend, &actor, UseCase::Control, params)?;
-    super::super::queue_service::authorize_operation(&mut *queue, &actor, &operation(&control)?)?;
+    let operation = operation(&control)?;
+    super::super::queue_service::authorize_operation(&mut *queue, &actor, &operation)?;
+    // An update job sends its update's and its install's steps alone
+    // (ADR-t4629-1): never `up`, which starts a supervisor.
+    if principal.role == crate::domain::ActorRole::Updater && !control.command.sent_by_update_job()
+    {
+        let (capability, resource) = operation.request();
+        return Err(super::super::queue_service::refuse_recorded(
+            &mut *queue,
+            &actor,
+            capability,
+            &resource,
+            crate::domain::authorization::DenyReason::Resource,
+            &format!(
+                "an update job does not run dagq {}",
+                control.command.as_str().replace('_', "-")
+            ),
+        ));
+    }
     let op = call.op.as_str();
     // The runs' resources and the host's load samples are the supervisor's
     // measures and the ledger's reads and writes its builder's: no command
@@ -390,7 +467,23 @@ pub fn answer(
             ),
         ));
     }
-    scope(control.command, op, &call.args).map_err(BadOperation)?;
+    if let Err(why) = scope(control.command, op, &call.args) {
+        // An update job's step outside its update's and install's is a
+        // refusal recorded as the job's (ADR-t4629-1); any other caller's,
+        // a request no command makes.
+        if principal.role == crate::domain::ActorRole::Updater {
+            let (capability, resource) = operation.request();
+            return Err(super::super::queue_service::refuse_recorded(
+                &mut *queue,
+                &actor,
+                capability,
+                &resource,
+                crate::domain::authorization::DenyReason::Resource,
+                &why,
+            ));
+        }
+        return Err(BadOperation(why).into());
+    }
     // The caller's records are its own: no other actor and no requester
     // (its landing's go with the integrator's token, at its request).
     if call.acting.is_some() || call.requested_by.is_some() {
@@ -537,6 +630,47 @@ pub fn answer(
         }
         "job_read" | "record_finding" => {
             return super::jobs(&mut *queue, backend, &call, notes);
+        }
+        BIND_JOB_TOKEN => {
+            let refusal = |why: &str| {
+                BadOperation(format!(
+                    "{BIND_JOB_TOKEN} binds an update job's own token to its process, and {why}"
+                ))
+            };
+            if principal.role != crate::domain::ActorRole::Updater {
+                return Err(refusal(&format!("{} holds none", principal.role.as_str())).into());
+            }
+            // Only the job's own process, as the connection confirms it.
+            let job = control
+                .process(process)
+                .and_then(|pid| backend.process_of(pid))
+                .ok_or_else(|| refusal("the connection confirms no process of the job's"))?;
+            let token = token.ok_or_else(|| refusal("the request carries no token"))?;
+            return super::super::queue_service::bind_update_job(backend, &mut *queue, token, &job);
+        }
+        RETURN_JOB_TOKEN => {
+            if principal.role != crate::domain::ActorRole::Updater {
+                return Err(BadOperation(format!(
+                    "{RETURN_JOB_TOKEN} gives back an update job's own token, and {} holds none",
+                    principal.role.as_str()
+                ))
+                .into());
+            }
+            // Only the request's token, and only from its bound process.
+            let job = control
+                .process(process)
+                .and_then(|pid| backend.process_of(pid));
+            let token = token.ok_or_else(|| {
+                BadOperation(format!(
+                    "{RETURN_JOB_TOKEN} gives back the request's token, and it carries none"
+                ))
+            })?;
+            return super::super::queue_service::return_update_job(
+                backend,
+                &mut *queue,
+                token,
+                job,
+            );
         }
         _ => {}
     }
@@ -782,6 +916,72 @@ fn landing_key(run: &RunId, pid: u32) -> String {
 mod tests {
     use super::*;
 
+    /// A job's caller that answers `answer` (`None`: does not answer) and
+    /// keeps the steps it was sent.
+    struct JobCaller {
+        answer: Option<Value>,
+        sent: std::sync::Mutex<Vec<Value>>,
+    }
+
+    impl ServiceCaller for JobCaller {
+        fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+            assert_eq!(use_case, UseCase::Supervisor);
+            self.sent.lock().unwrap().push(params);
+            self.answer
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("the service did not answer"))
+        }
+        fn with_token(&self, _: &std::path::Path) -> Result<Arc<dyn ServiceCaller>> {
+            unreachable!("no landing here")
+        }
+        fn sign_in(&self, _: &crate::domain::LeaseToken, _: u32) -> Result<()> {
+            unreachable!("a job signs in as no supervisor")
+        }
+        fn take_back(&self, _: &crate::domain::LeaseToken, _: u32) -> Result<()> {
+            unreachable!("a job signs in as no supervisor")
+        }
+        fn hand_over(&self) {}
+        fn sign_out(&self) {}
+        fn credential(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    fn job_caller(answer: Option<Value>) -> Arc<JobCaller> {
+        Arc::new(JobCaller {
+            answer,
+            sent: std::sync::Mutex::default(),
+        })
+    }
+
+    /// ADR-t4629-1: the job binds its token by its own step and goes on
+    /// only once the service answered the binding kept; it gives the token
+    /// back by its own step, where a caller that could not be made or a
+    /// service that does not answer is no error of the job's.
+    #[test]
+    fn an_update_job_binds_its_token_first_and_gives_it_back_last() {
+        let bound = job_caller(Some(json!(true)));
+        bind_job_token(Ok(bound.clone())).unwrap();
+        assert_eq!(
+            *bound.sent.lock().unwrap(),
+            [json!({"op": BIND_JOB_TOKEN, "args": []})]
+        );
+        // No binding answered kept: the job does not go on.
+        assert!(bind_job_token(Ok(job_caller(Some(json!({"db": "/q/queue.db"}))))).is_err());
+        assert!(bind_job_token(Ok(job_caller(None))).is_err());
+        assert!(bind_job_token(Err(anyhow::anyhow!("no queue"))).is_err());
+        let returned = job_caller(Some(json!(true)));
+        assert!(return_job_token(Ok(returned.clone())));
+        assert_eq!(
+            *returned.sent.lock().unwrap(),
+            [json!({"op": RETURN_JOB_TOKEN, "args": []})]
+        );
+        // Revoked nothing, did not answer, or no caller: logged, not failed.
+        assert!(!return_job_token(Ok(job_caller(Some(json!(false))))));
+        assert!(!return_job_token(Ok(job_caller(None))));
+        assert!(!return_job_token(Err(anyhow::anyhow!("no queue"))));
+    }
+
     fn call(command: ControlCommand) -> ControlCall {
         ControlCall {
             command,
@@ -1010,7 +1210,11 @@ mod tests {
                     .is_ok();
                 let expected = matches!(
                     role,
-                    ActorRole::User | ActorRole::Inbox | ActorRole::Planner | ActorRole::Supervisor
+                    ActorRole::User
+                        | ActorRole::Inbox
+                        | ActorRole::Planner
+                        | ActorRole::Supervisor
+                        | ActorRole::Updater
                 );
                 assert_eq!(allowed, expected, "{command:?} {role:?}");
             }

@@ -89,6 +89,7 @@ queueの読み取りに加え、書けるのはコマンド自身の記録だけ
 呼び出し元は依頼者を名乗れず、supervisorだけの資源・負荷・台帳の操作も使えない。
 upの引き継ぎで渡せるbinaryはsocketのpeerの実行ファイルだけで、他のpathは拒否として記録する（`control::handoff_refusal`）。
 更新のjobは起動したsupervisorのprincipalで送る（[Auto-update](supervisor-lifecycle/auto-update.md#queueへの経路)）。
+更新のjobのtokenの発行の前提は`domain::queue_service::update_job_issue_refusal`が持つ。
 
 着地の承認はserviceの時計とプロセスでleaseを確かめ、記録と同じtransactionで再検査する（`control::APPROVE_INTEGRATION`）。
 着地のslotとtokenは同じtransactionで発行し、接続から確かめたコマンド自身のプロセスだけが取得・失効できる。
