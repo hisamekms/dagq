@@ -39,11 +39,11 @@ fn unit_run(k: usize) -> String {
     format!("{k:08x}-2222-4222-8222-222222222222")
 }
 
-fn run(n: u8) -> String {
+pub(crate) fn run(n: u8) -> String {
     run_id(n)
 }
 
-fn turn(log: &mut Log, task: i64, run: &str, provider: &str, secs: i64) {
+pub(crate) fn turn(log: &mut Log, task: i64, run: &str, provider: &str, secs: i64) {
     let tokens = json!({"input": 5, "output": 7, "cache_read": 0, "cache_creation": 0});
     log.add(
         Some(task),
@@ -607,7 +607,7 @@ pub(crate) fn lay_down(tx: &impl SqlWrite, log: &Log) -> Result<Laid> {
 }
 
 /// Insert `e` into the EventStore with its id.
-fn insert_event(tx: &impl SqlWrite, e: &crate::domain::RunEvent) -> Result<()> {
+pub(crate) fn insert_event(tx: &impl SqlWrite, e: &crate::domain::RunEvent) -> Result<()> {
     let actor = e.actor.as_ref();
     tx.execute(
         "INSERT INTO run_events(id, task_id, goal_id, run_id, kind, payload, created_at, actor_role, actor_id)
@@ -628,7 +628,7 @@ fn insert_event(tx: &impl SqlWrite, e: &crate::domain::RunEvent) -> Result<()> {
 }
 
 /// Remove what [`lay_down`] laid down, and the rows and tables.
-fn clear(tx: &impl SqlWrite, laid: &Laid) -> Result<()> {
+pub(crate) fn clear(tx: &impl SqlWrite, laid: &Laid) -> Result<()> {
     for table in [
         "ledger_rows",
         "ledger_open",
@@ -711,7 +711,7 @@ pub(crate) fn time_query(query: &KpiQuery) -> WindowQuery {
     }
 }
 
-fn whole_query() -> WindowQuery {
+pub(crate) fn whole_query() -> WindowQuery {
     WindowQuery {
         now_ms: now_ms(NOW),
         ..WindowQuery::default()
@@ -731,7 +731,7 @@ pub(crate) fn kpi_value(window: &LedgerWindow, query: &KpiQuery) -> Result<Value
 }
 
 /// The paths of `a` and `b` whose values differ, at most a few.
-fn differences(a: &Value, b: &Value, path: &str, out: &mut Vec<String>) {
+pub(crate) fn differences(a: &Value, b: &Value, path: &str, out: &mut Vec<String>) {
     if out.len() >= 16 {
         return;
     }

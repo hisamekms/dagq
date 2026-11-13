@@ -861,7 +861,10 @@ pub trait LedgerStore {
     ///   Execution of
     ///   each actor and provider from the table of every run row's: its
     ///   least with the rows read is that of every row, so that
-    ///   `recorded_from` and the coverage are the same.
+    ///   `recorded_from` and the coverage are the same; and the first
+    ///   Execution of each actor and provider of the session rows left out,
+    ///   whose records are read only of the planners and plan reviews named
+    ///   (a session of no run, an inbox's, gives its first one so).
     ///
     /// So it reads as many as the range names and the runs left open, and
     /// the actors and providers. `improvement_proposals`' links of the
@@ -900,7 +903,55 @@ pub trait LedgerStore {
     /// ([`crate::domain::ledger::window::WindowRows`]), so that a read holds
     /// no row's records twice, no queue row and no run row's steps.
     /// [`WindowQuery::read_from_ms`] leaves rows out of that read
-    /// (`domain::ledger::window`'s "A read from a time"); `since` does not.
+    /// (`domain::ledger::window`'s "A read from a time"); `since` does not
+    /// (`stats` gives a time `--since` as both).
+    ///
+    /// # The range a read from a time reads
+    ///
+    /// With `read_from_ms` the time S, the store's SQL (the reads of
+    /// [`LedgerWindowRead`] in one snapshot, of the SQL the adapters share)
+    /// gives the rows that can bear on the range (S, E], and no more of the
+    /// settled history before S than what the range names; the window's own
+    /// selection ([`crate::domain::ledger::window::WindowRows::into_window`])
+    /// still decides what is in it, so the conditions take more than it
+    /// keeps (the records the window's cursors, the attributes' and
+    /// findings' baselines and what looks back past S stand on):
+    ///
+    /// - Lower bound: a run, session or task row is left out only when it
+    ///   ended before S and each of its records stands before S both in
+    ///   time and in id (at or before `queue_before`, the queue's last
+    ///   record of S or before it), a node row only when it holds no sample
+    ///   of S's second on ([`crate::domain::ledger::window::RowsFrom::leaves_out`],
+    ///   [`LedgerWindowRead::rows_from`]); what they still give comes by
+    ///   [`Self::ledger_earlier_named`]. The queue's rows are read kind by
+    ///   kind ([`crate::domain::ledger::window::queue_from`]): the kinds the
+    ///   Spike's promise 6 judged to answer as every row by their range, and
+    ///   the others (those of (ii) among them) whole, as before, until a seek
+    ///   of their own (tasks 4807 and 4808) moves them ([`LedgerWindowRead::queue_rows_reaching`],
+    ///   [`LedgerWindowRead::queue_rows_past`]). `push::check_breaches`,
+    ///   `kpi` and `report` read through this same read.
+    /// - No upper bound: a row past the window's end E is read as it is now.
+    ///   `stats` turns E into `Cursor::Time(E).event_id` and takes a run by
+    ///   its `finished_event_id`, so a row left out by its time alone
+    ///   changes the answer once a clock turned back (a run recorded wholly
+    ///   after E in time whose end's id is at or before that id is in the
+    ///   period), and a row left out by its first input (`inputs_from`)
+    ///   takes from `stats`' cut of the tokens and from
+    ///   [`LedgerWindow::execution_tokens`] (whose `recorded_from` is of
+    ///   every row's Executions) inputs they read, as a run on its way
+    ///   started after E shows (docs/plans/ledger-window-earlier-visibility-spike.md,
+    ///   "追試 (iii) 可視性", (iii-d), unresolved: the bound is left out of
+    ///   the promise). What a bound would save is near now, at most a few
+    ///   rows; the settled history the read must not grow with is before S.
+    /// - Clocks: neither bound assumes the clocks kept their order. A time
+    ///   does not follow an id, so a row is left out only by what both say
+    ///   (docs/plans/ledger-window-read-preconditions-spike.md, (vi)): one
+    ///   left out stands before every period from S by id, whatever its
+    ///   times, and before S in time, whatever its ids; and without an
+    ///   upper bound no row is left out by where E falls in time. A history
+    ///   whose clock turned back or drifted, or turned back just before the
+    ///   read, answers as every row.
+    ///
     /// The rows of the runs on their way (of a task not ended, with no row
     /// of their own) are folded at `query`'s now from their events by the
     /// one fold ([`crate::domain::ledger::window::run_on_its_way`]) and
@@ -993,11 +1044,42 @@ impl Edges<'_, '_> {
 /// queue's records.
 fn take_queue_rows(
     snapshot: &dyn LedgerWindowRead,
+    query: &WindowQuery,
     read: &mut crate::domain::ledger::window::WindowRows,
     edges: &Edges<'_, '_>,
 ) -> Result<()> {
-    read.take_pages(|after, limit| snapshot.rows_after(LedgerKind::Queue, after, limit))?;
+    use crate::domain::ledger::window::queue_from::BY_RANGE;
+    let Some(from_ms) = query
+        .read_from_ms
+        .filter(|_| snapshot.reads_queue_by_kind())
+    else {
+        read.take_pages(|after, limit| snapshot.rows_after(LedgerKind::Queue, after, limit))?;
+        read.take_omitted_before(&edges.now()?)?;
+        return Ok(());
+    };
+    // The kinds read whole and those of each kind that reach the time
+    // first: they give `queue_before`, past which the rest of each kind
+    // read by its range is read.
+    read.take_pages(|after, limit| snapshot.queue_rows_whole(after, limit))?;
+    let mut taken = std::collections::BTreeSet::new();
+    for kind in BY_RANGE {
+        for row in snapshot.queue_rows_reaching(kind, from_ms)? {
+            if taken.insert(row.key.clone()) {
+                read.take(row);
+            }
+        }
+    }
     read.take_omitted_before(&edges.now()?)?;
+    let queue_before = read
+        .rows_from()
+        .map_or(EventId::new(0), |from| from.inputs_through);
+    for kind in BY_RANGE {
+        for row in snapshot.queue_rows_past(kind, from_ms, queue_before)? {
+            if taken.insert(row.key.clone()) {
+                read.take(row);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1013,7 +1095,7 @@ pub(crate) fn rows_from_of<S: LedgerStore + ?Sized>(
     store.ledger_read_snapshot(&mut |snapshot| {
         let reads = OmittedReads(snapshot);
         let mut read = crate::domain::ledger::window::WindowRows::new(query, 0);
-        take_queue_rows(snapshot, &mut read, &Edges(Some(&reads)))?;
+        take_queue_rows(snapshot, query, &mut read, &Edges(Some(&reads)))?;
         from = read.rows_from();
         Ok(())
     })?;
@@ -1027,7 +1109,7 @@ fn window_rows(
     mut read: crate::domain::ledger::window::WindowRows,
     edges: &Edges<'_, '_>,
 ) -> Result<crate::domain::ledger::window::WindowRows> {
-    take_queue_rows(snapshot, &mut read, edges)?;
+    take_queue_rows(snapshot, query, &mut read, edges)?;
     let others = LedgerKind::ALL
         .into_iter()
         .filter(|kind| *kind != LedgerKind::Queue);
@@ -1088,7 +1170,7 @@ pub fn ledger_named_in(
     let reads = OmittedReads(snapshot);
     let edges = Edges(Some(&reads));
     let mut read = crate::domain::ledger::window::WindowRows::new(query, 0);
-    take_queue_rows(snapshot, &mut read, &edges)?;
+    take_queue_rows(snapshot, query, &mut read, &edges)?;
     let Some(from) = read.rows_from() else {
         return Ok(None);
     };
@@ -1545,6 +1627,89 @@ pub trait LedgerWindowRead {
     #[doc(hidden)]
     fn queue_records_after(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
         self.rows_after(LedgerKind::Queue, after, limit)
+    }
+    /// Whether a read from a time reads the queue's rows kind by kind
+    /// ([`crate::domain::ledger::window::queue_from`]): by
+    /// [`Self::queue_rows_whole`] those of the kinds read whole, and by
+    /// [`Self::queue_rows_reaching`] and [`Self::queue_rows_past`] those
+    /// read by their range. A snapshot that does not (the default, and the
+    /// service's client, which reads its pages one by one) reads every
+    /// queue row by [`Self::rows_after`], as a read of every row does; the
+    /// answers are the same either way.
+    fn reads_queue_by_kind(&self) -> bool {
+        false
+    }
+    /// A page of the queue's rows of the subject kinds a read from a time
+    /// reads whole ([`crate::domain::ledger::window::queue_from::QueueRead::Whole`]),
+    /// at most `limit` after the key `after` (`None`: from the first), by
+    /// key: each kind of (ii) of the Spike's promise 6 is read so until a
+    /// seek of its own (tasks 4807 and 4808) moves it to its range. The
+    /// default reads [`Self::rows_after`]'s page and keeps those.
+    fn queue_rows_whole(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
+        use crate::domain::ledger::window::queue_from::read_whole;
+        let mut after = after.map(str::to_owned);
+        loop {
+            let page = self.rows_after(LedgerKind::Queue, after.as_deref(), limit)?;
+            let Some(last) = page.last() else {
+                return Ok(page);
+            };
+            after = Some(last.key.clone());
+            let kept: Vec<LedgerRow> = page.into_iter().filter(read_whole).collect();
+            if !kept.is_empty() {
+                return Ok(kept);
+            }
+        }
+    }
+    /// The queue's rows of the subject kind `kind`, one read by its range,
+    /// that reach the time `from_ms` (not ended, ended at it or after it,
+    /// or started at it or after it) and every row of the last end before
+    /// it, by key
+    /// ([`crate::domain::ledger::window::queue_from::reaching`]): what the
+    /// range of the time on holds, and no row ended before the last end
+    /// before it, however long that history. The default reads every queue
+    /// row and keeps those.
+    fn queue_rows_reaching(&self, kind: &str, from_ms: i64) -> Result<Vec<LedgerRow>> {
+        let rows = every_queue_row(self)?;
+        Ok(crate::domain::ledger::window::queue_from::reaching(
+            &rows, kind, from_ms,
+        ))
+    }
+    /// The queue's rows of the subject kind `kind`, one read by its range,
+    /// that ended before `from_ms` and read inputs past `queue_before`, by
+    /// key ([`crate::domain::ledger::window::queue_from::past_of`]): those
+    /// a row read after the time's last queue record can still hold, as
+    /// many as were folded past it. The default reads every queue row and
+    /// keeps those.
+    fn queue_rows_past(
+        &self,
+        kind: &str,
+        from_ms: i64,
+        queue_before: EventId,
+    ) -> Result<Vec<LedgerRow>> {
+        let rows = every_queue_row(self)?;
+        Ok(crate::domain::ledger::window::queue_from::past_of(
+            &rows,
+            kind,
+            from_ms,
+            queue_before,
+        ))
+    }
+}
+
+/// Every queue row of `snapshot`, by its pages.
+fn every_queue_row<R: LedgerWindowRead + ?Sized>(snapshot: &R) -> Result<Vec<LedgerRow>> {
+    let mut rows: Vec<LedgerRow> = Vec::new();
+    loop {
+        let after = rows.last().map(|row| row.key.clone());
+        let page = snapshot.rows_after(
+            LedgerKind::Queue,
+            after.as_deref(),
+            crate::domain::ledger::window::ROWS_PER_PAGE,
+        )?;
+        if page.is_empty() {
+            return Ok(rows);
+        }
+        rows.extend(page);
     }
 }
 

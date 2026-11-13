@@ -376,11 +376,17 @@ pub(crate) fn earlier_named_in(
         records.extend(whole_run_records_in(conn, from)?);
     }
     let executions = firsts && held_view(conn, View::First)?.is_done();
-    let executions_read = if executions {
+    let mut executions_read = if executions {
         table_executions(conn)?
     } else {
         whole_executions_in(conn, from)?
     };
+    // The session rows left out but those named give their first
+    // Executions here: their records are not read (`judged`), and the table
+    // holds the run rows' alone.
+    if judged {
+        executions_read.extend(left_out_executions_in(conn, from, LedgerKind::Session)?);
+    }
     records.sort_by_key(|event| event.id);
     records.dedup_by_key(|event| event.id);
     Ok((

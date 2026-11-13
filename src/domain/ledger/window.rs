@@ -32,8 +32,11 @@
 //!
 //! [`WindowQuery::read_from_ms`] leaves out of the store's read the rows the
 //! periods of `kpi` from that time need nothing of ([`RowsFrom`]); without it
-//! every row is read. The queue rows are always read, whole: most of what
-//! the folds that carry state read is theirs. A run, session or task row is
+//! every row is read. The queue rows of most kinds are read whole: most of
+//! what the folds that carry state read is theirs; those of the kinds
+//! [`queue_from`] reads by their range are the ones that reach the time,
+//! the last before it and those whose inputs pass `queue_before` (its module
+//! doc says why that answers as every row). A run, session or task row is
 //! left out when it ended before the time and each of its records stands
 //! before it, in time and in id ([`RowsFrom::leaves_out`]); a row with no
 //! time, a legacy one and a node row that reaches the time are read. A time
@@ -279,7 +282,11 @@ pub struct WindowQuery {
     pub now_ms: i64,
     /// Read no row the periods from this time need nothing of (unix ms;
     /// module doc): none reads every row. Apart from `since`, which is the
-    /// window `stats` answers of and moves its answer.
+    /// window `stats` answers of and moves its answer: `stats` gives the
+    /// time of a time `--since` here too (`application::stats::window_query`).
+    /// There is no time the read stops at: a row past the window's end is
+    /// read as it is now ([`crate::application::LedgerStore::ledger_window`]
+    /// says why).
     pub read_from_ms: Option<i64>,
     /// The bounds the reader takes inside the window past its edges
     /// ([`bounds`]): each period of `kpi` and of its comparison (the last
@@ -442,8 +449,9 @@ pub struct Earlier {
     /// [`LedgerWindow::events`] would stand for a run the read does not hold.
     pub claims: Vec<RunEvent>,
     /// The first Execution of each actor and provider of the run rows left
-    /// out, by their entries, or of every run row: the least of them and
-    /// the rows read is the same either way ([`executions::window_after`]).
+    /// out, by their entries, or of every run row's before the time: the
+    /// least of them and the rows read is the same either way
+    /// ([`executions::window_after`]).
     pub executions: Vec<executions::FirstExecution>,
     /// What the landings' attempts and waits read of the runs left out
     /// ([`landing_utilization::reads`]), ascending id and with their runs: an
@@ -803,8 +811,19 @@ impl WindowRows {
     /// (a claim with no end), an ask or a session to this day is wanted whole.
     /// A close the rows left out do not give may be among the rows read: that
     /// run is read whole too, as its session may count in the periods.
+    ///
+    /// Of the first Executions only those before the time are taken: every
+    /// Execution of a row left out counts by a time before it
+    /// ([`RowsFrom::leaves_out`]), so one at it or after it is of a row read
+    /// (a store's table of every run row's gives those too), which gives its
+    /// own up to the window's end and none past it.
     pub fn take_earlier(&mut self, earlier: EarlierRecords) {
-        self.earlier.executions = earlier.executions;
+        let before = self.from.as_ref().map_or(i64::MAX, |from| from.ms);
+        self.earlier.executions = earlier
+            .executions
+            .into_iter()
+            .filter(|execution| execution.at < before)
+            .collect();
         let mut claimed = BTreeSet::new();
         let mut ended = BTreeSet::new();
         let mut asks: HashMap<(RunId, Option<String>), bool> = HashMap::new();
@@ -1607,6 +1626,7 @@ pub mod named;
 #[doc(hidden)]
 pub mod omitted;
 pub mod payload_text;
+pub mod queue_from;
 
 #[cfg(test)]
 mod tests;

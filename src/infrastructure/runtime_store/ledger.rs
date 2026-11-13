@@ -808,6 +808,15 @@ pub(crate) mod open_in {
         crate::application::ledger_window_in(&LedgerSnapshot { tx }, query)
     }
 
+    /// `read` of the reads of the window's snapshot in `tx`, as the store
+    /// gives them to [`LedgerStore::ledger_read_snapshot`]'s callback.
+    pub(crate) fn with_snapshot<R>(
+        tx: &impl SqlRead,
+        read: impl FnOnce(&dyn crate::application::LedgerWindowRead) -> R,
+    ) -> R {
+        read(&LedgerSnapshot { tx })
+    }
+
     /// Which rows the read from a time of `query` leaves out and what the
     /// rows it reads name.
     pub(crate) fn named(
@@ -1643,6 +1652,22 @@ fn whole_run_records_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<Vec<RunEve
 /// The first Execution of each actor and provider of the run rows the
 /// read leaves out, of their details.
 fn whole_executions_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<Vec<FirstExecution>> {
+    left_out_executions_in(tx, from, LedgerKind::Run)
+}
+
+/// The first Execution of each actor and provider of the rows of `kind`
+/// `from` leaves out, by their entries (`detail.executions`): of the run
+/// rows when no table holds them, and of the session rows, whose records a
+/// read that seeks by what the range names gives only of the planners and
+/// plan reviews named, so that the first Execution of a session of no run
+/// (an inbox's) left out is still that of every row. A `GROUP BY` that
+/// returns one row an actor and provider and walks every row of the kind
+/// left out.
+fn left_out_executions_in(
+    tx: &impl SqlRead,
+    from: &RowsFrom,
+    kind: LedgerKind,
+) -> Result<Vec<FirstExecution>> {
     let dialect = SqlRead::dialect(tx);
     let bound = left_out_values(from);
     Ok(SqlRead::query_map(
@@ -1658,7 +1683,7 @@ fn whole_executions_in(tx: &impl SqlRead, from: &RowsFrom) -> Result<Vec<FirstEx
             at = dialect.json_field_spaced("j.value", "$.at", JsonType::Integer),
             left_out = rows_left_out_sql(dialect, 2, 3),
         ),
-        sql_params![LedgerKind::Run.as_str(), bound.0, bound.1, bound.2.as_str()],
+        sql_params![kind.as_str(), bound.0, bound.1, bound.2.as_str()],
         |r| {
             Ok((
                 r.get::<_, Option<String>>(0)?,
@@ -1731,6 +1756,23 @@ impl<T: SqlRead> crate::application::LedgerWindowRead for LedgerSnapshot<'_, T> 
     }
     fn queue_records_after(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
         queue_records_after_in(self.tx, after, limit)
+    }
+    fn reads_queue_by_kind(&self) -> bool {
+        true
+    }
+    fn queue_rows_whole(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
+        queue_from::whole_in(self.tx, after, limit)
+    }
+    fn queue_rows_reaching(&self, kind: &str, from_ms: i64) -> Result<Vec<LedgerRow>> {
+        queue_from::reaching_in(self.tx, kind, from_ms)
+    }
+    fn queue_rows_past(
+        &self,
+        kind: &str,
+        from_ms: i64,
+        queue_before: EventId,
+    ) -> Result<Vec<LedgerRow>> {
+        queue_from::past_in(self.tx, kind, from_ms, queue_before)
     }
     fn earlier(&self, from: &RowsFrom) -> Result<EarlierRecords> {
         earlier_in(self.tx, from)
@@ -2947,6 +2989,8 @@ mod earlier_read_plan_tests;
 mod earlier_tests;
 #[cfg(test)]
 mod omitted_tests;
+#[cfg(test)]
+mod queue_from_tests;
 #[cfg(test)]
 mod read_from_tests;
 #[cfg(test)]
@@ -5281,6 +5325,7 @@ mod tests {
 }
 
 mod earlier;
+mod queue_from;
 mod visibility;
 
 mod small;

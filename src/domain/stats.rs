@@ -1009,6 +1009,12 @@ pub struct LiveSnapshot {
     /// `execution_tokens`' `recorded_from` and `coverage`
     /// ([`executions::window_after`]).
     pub earlier_executions: Vec<executions::FirstExecution>,
+    /// What the landings' attempts read of the run rows a read from a time
+    /// left out ([`crate::domain::ledger::window::Earlier::landings`]):
+    /// taken with the events' for `landing_utilization`, as `kpi` takes
+    /// them, so that an attempt the start of a run left out ended is not
+    /// counted open. None of a read of every row.
+    pub earlier_landings: Vec<RunEvent>,
 }
 
 impl Default for LiveSnapshot {
@@ -1027,6 +1033,7 @@ impl Default for LiveSnapshot {
             judged: None,
             ledger: None,
             earlier_executions: Vec::new(),
+            earlier_landings: Vec::new(),
         }
     }
 }
@@ -1414,8 +1421,18 @@ pub fn stats_answering(
         })
         .unwrap_or(window_until)
         .min(window_until);
+    let landings = (!live.earlier_landings.is_empty()).then(|| {
+        let mut landings: Vec<RunEvent> = events
+            .iter()
+            .filter(|event| landing_utilization::reads(event))
+            .chain(&live.earlier_landings)
+            .cloned()
+            .collect();
+        landings.sort_by_key(|event| event.id);
+        landings
+    });
     let landing_utilization = landing_utilization::landing_utilization(
-        events,
+        landings.as_deref().unwrap_or(events),
         window_from,
         window_until,
         now * 1000,

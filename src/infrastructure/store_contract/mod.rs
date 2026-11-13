@@ -11,6 +11,7 @@ pub(crate) mod ledger_earlier;
 mod ledger_first_executions;
 mod ledger_open;
 mod ledger_queue_views;
+pub(crate) mod ledger_range;
 mod related;
 mod runner_leases;
 mod search;
@@ -23,6 +24,7 @@ pub use ledger_earlier::{ledger_earlier_answers_as_every_row, ledger_earlier_pas
 pub use ledger_first_executions::*;
 pub use ledger_open::*;
 pub use ledger_queue_views::*;
+pub use ledger_range::ledger_range_answers_as_every_row;
 pub use related::related_cases;
 pub use runner_leases::*;
 pub use search::{search_cases, short_non_ascii};
@@ -205,6 +207,10 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         (
             "ledger queue views pair asks whichever comes first",
             ledger_queue_views_pair_asks_whichever_comes_first::<S, F>,
+        ),
+        (
+            "ledger range answers as every row",
+            ledger_range_answers_as_every_row::<S, F>,
         ),
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),

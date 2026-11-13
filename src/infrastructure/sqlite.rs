@@ -3326,6 +3326,10 @@ mod store_contract_tests {
         contract(|open| store_contract::ledger_queue_views_kept_through_generations(&open));
     }
     #[test]
+    fn ledger_range_answers_as_every_row() {
+        contract(|open| store_contract::ledger_range_answers_as_every_row(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

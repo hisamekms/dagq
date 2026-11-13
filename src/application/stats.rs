@@ -99,12 +99,14 @@ pub fn stall_config(
 }
 
 /// The window of the ledger `stats` of `query` reads at `now` (unix
-/// seconds): its cursors only, as `stats` filters by `--goal` itself.
+/// seconds): its cursors only, as `stats` filters by `--goal` itself, and
+/// the range the store reads ([`read_from_ms`]).
 pub fn window_query(query: &StatsQuery, now: i64) -> WindowQuery {
     WindowQuery {
         since: query.since,
         until: query.until,
         now_ms: now_ms(now),
+        read_from_ms: read_from_ms(query, now),
         bounds: if query.full || query.since.is_some() {
             Declared::default()
         } else {
@@ -112,6 +114,33 @@ pub fn window_query(query: &StatsQuery, now: i64) -> WindowQuery {
         },
         ..WindowQuery::default()
     }
+}
+
+/// Where the store's read of the ledger for `stats` of `query` at `now`
+/// (unix seconds) may start (unix ms, [`WindowQuery::read_from_ms`]): the
+/// time of a time `--since`, so that the store reads the rows that can bear
+/// on the window from it and no more of the settled history before it than
+/// the window names (`--until` bounds no read:
+/// [`crate::application::LedgerStore::ledger_window`] says why). `None`
+/// reads every row: without `--since`, with an event id as `--since` (only
+/// a time once the events are read), with `--goal`, which counts by the
+/// goal of every task an event names whatever its time, as `kpi`'s read
+/// does ([`crate::domain::kpi::read_from_ms`]), and when the window is cut
+/// down before `--since`: a `--since` past a time `--until` or past now, or
+/// an event id as `--until`, whose time the read cannot compare before the
+/// events are read. The window then starts before `--since`, and a read
+/// from it would leave out what that start reads.
+pub fn read_from_ms(query: &StatsQuery, now: i64) -> Option<i64> {
+    use crate::domain::stats::Cursor;
+    let Some(Cursor::Time(since)) = query.since else {
+        return None;
+    };
+    let end = match query.until {
+        None => now_ms(now),
+        Some(Cursor::Time(until)) => until.min(now_ms(now)),
+        Some(Cursor::Event(_)) => return None,
+    };
+    (query.goal_id.is_none() && since <= end).then_some(since)
 }
 
 /// The bound `stats` without `--full` and `--since` takes inside its
@@ -192,6 +221,7 @@ pub fn of_window(
         judged: Some(window.judgments()),
         ledger: Some(window.run_times()),
         earlier_executions: window.earlier().executions.clone(),
+        earlier_landings: window.earlier().landings.clone(),
     };
     let mut stats = aggregate(
         window.answers(),
