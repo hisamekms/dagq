@@ -11,6 +11,7 @@ use crate::domain::ledger::{
 use crate::domain::marks::utc_text;
 use crate::domain::sessions::TOKEN_CUT_CLOSED_WINDOW_MS;
 use crate::domain::stats::executions::executions;
+use crate::domain::stats::main_log::fold_main_log;
 use crate::domain::{RunId, event_kind};
 
 const T0: i64 = 1_900_000_000_000;

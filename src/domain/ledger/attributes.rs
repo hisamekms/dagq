@@ -122,11 +122,6 @@ pub fn fold(events: &[RunEvent], window_end: Option<i64>) -> Folded {
 
 /// [`fold`] for a window that ends at `end`: an event, a time or both.
 pub fn fold_within(events: &[RunEvent], end: super::WindowEnd) -> Folded {
-    let is_mark = |event: &RunEvent| {
-        event.kind == EventKind::AttributesBaseline
-            && event.task_id.is_none()
-            && event.goal_id.is_none()
-    };
     let Some(taken) = super::baseline::taken(events, end, is_mark, is_baseline) else {
         return Folded::BeforeBaseline;
     };
@@ -142,6 +137,40 @@ pub fn fold_within(events: &[RunEvent], end: super::WindowEnd) -> Folded {
         }
     }
     Folded::Attributes(attributes)
+}
+
+/// Whether `event` puts a goal's attributes in place of whatever came
+/// before it, as [`fold_within`] applies it: a `goal_created` or a goal's
+/// `attributes_baseline` that holds the goal, or a `goal_updated` with its
+/// `new`. A reader of a goal's records from a time reads none before the
+/// last such record its windows all take (a baseline's by its group's
+/// mark, [`super::baseline`]).
+pub fn replaces_goal(event: &RunEvent) -> bool {
+    if event.task_id.is_some() || event.goal_id.is_none() {
+        return false;
+    }
+    let payload = &event.payload;
+    match event.kind.known() {
+        Some(EventKind::GoalCreated | EventKind::AttributesBaseline) => {
+            restore::<GoalCreated>(payload)
+                .goal
+                .and_then(goal_of)
+                .is_some()
+        }
+        Some(EventKind::GoalUpdated) => restore::<GoalUpdated>(payload)
+            .new
+            .and_then(goal_of)
+            .is_some(),
+        _ => false,
+    }
+}
+
+/// Whether `event` is the queue's mark that closes a group of the tasks'
+/// and goals' baselines (an `attributes_baseline` of no task and no goal).
+pub fn is_mark(event: &RunEvent) -> bool {
+    event.kind == EventKind::AttributesBaseline
+        && event.task_id.is_none()
+        && event.goal_id.is_none()
 }
 
 /// A task's or goal's `attributes_baseline` (not the queue's mark).

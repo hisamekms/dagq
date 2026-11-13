@@ -9,11 +9,12 @@
 //! `queue_before`), so that what the latter two walk is the range and what
 //! was folded past it, not the settled rows of the kind.
 use super::*;
-use crate::domain::ledger::window::queue_from::BY_RANGE;
+use crate::domain::ledger::window::queue_from::by_range;
 
-/// The kinds read by their range as a SQL list of literals.
-fn by_range_list() -> String {
-    BY_RANGE
+/// The kinds read by their range, with the views trusted (`views`) or not,
+/// as a SQL list of literals.
+fn by_range_list(views: bool) -> String {
+    by_range(views)
         .iter()
         .map(|kind| format!("'{kind}'"))
         .collect::<Vec<_>>()
@@ -22,7 +23,15 @@ fn by_range_list() -> String {
 
 /// A page of the queue rows (`?1` the kind) of the subject kinds read whole,
 /// past the key `?2` with `after`, at most the last parameter, by key.
+#[cfg(test)]
 pub(super) fn whole_sql(after: bool) -> String {
+    whole_sql_with(after, false)
+}
+
+/// [`whole_sql`] with the views trusted (`views`, the kinds of
+/// [`crate::domain::ledger::window::queue_from::BY_VIEWS`] read by their
+/// range too) or not.
+pub(super) fn whole_sql_with(after: bool, views: bool) -> String {
     let (key, limit) = if after {
         ("AND key > ?2 ", "?3")
     } else {
@@ -31,7 +40,7 @@ pub(super) fn whole_sql(after: bool) -> String {
     format!(
         "SELECT * FROM ledger_rows WHERE kind=?1 {key}AND COALESCE(subject_kind, '') NOT IN ({kinds})
           ORDER BY key LIMIT {limit}",
-        kinds = by_range_list(),
+        kinds = by_range_list(views),
     )
 }
 
@@ -78,15 +87,18 @@ pub(super) fn past_sql(dialect: SqlDialect) -> String {
     )
 }
 
-/// [`crate::application::LedgerWindowRead::queue_rows_whole`] of `tx`.
+/// [`crate::application::LedgerWindowRead::queue_rows_whole`] of `tx`, or
+/// with the views trusted (`views`)
+/// [`crate::application::LedgerWindowRead::queue_rows_whole_by_views`].
 pub(super) fn whole_in(
     tx: &impl SqlRead,
     after: Option<&str>,
     limit: usize,
+    views: bool,
 ) -> Result<Vec<LedgerRow>> {
     let queue = LedgerKind::Queue.as_str();
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let statement = whole_sql(after.is_some());
+    let statement = whole_sql_with(after.is_some(), views);
     let rows = match after {
         Some(after) => {
             SqlRead::query_map(tx, &statement, sql_params![queue, after, limit], ledger_row)?

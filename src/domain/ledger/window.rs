@@ -36,7 +36,14 @@
 //! what the folds that carry state read is theirs; those of the kinds
 //! [`queue_from`] reads by their range are the ones that reach the time,
 //! the last before it and those whose inputs pass `queue_before` (its module
-//! doc says why that answers as every row). A run, session or task row is
+//! doc says why that answers as every row). With the store's views of the
+//! queue rows trusted, main's record and CI's, the goals' records, the
+//! baselines' marks and the findings are read so too, and of before the
+//! time what the range names of them is sought ([`queue_named`]): main's
+//! summary up to `queue_before`, which main's and CI's folds start from in
+//! place of the events up to it ([`WindowRows::take_main_before`]), and the
+//! commits, turns to red, goals' records since their last replacement,
+//! latest marks and linked findings ([`WindowRows::take_queue_sought`]). A run, session or task row is
 //! left out when it ended before the time and each of its records stands
 //! before it, in time and in id ([`RowsFrom::leaves_out`]); a row with no
 //! time, a legacy one and a node row that reaches the time are read. A time
@@ -248,6 +255,7 @@ use omitted::OmittedEdges;
 
 use super::{
     LedgerKind, LedgerRow, WindowEnd, attributes, findings, node, post_landing,
+    queue_views::MainSummary,
     read::{LedgerValues, read},
     session::row_executions,
 };
@@ -263,7 +271,7 @@ use crate::domain::{
         executions::{self, Execution, ExecutionStats},
         landing_utilization,
         ledger_times::LedgerTimes,
-        main_log::{MainLog, MainMissing, fold_main_log},
+        main_log::{MainLog, MainMissing, fold_main_log_from},
         timestamp_millis,
     },
 };
@@ -509,6 +517,10 @@ pub struct LedgerWindow {
     earlier: Earlier,
     /// The answers of the bounds the query declared ([`bounds`]).
     answers: Option<bounds::Answers>,
+    /// Main's record up to an event before a read's time, which main's and
+    /// CI's folds start from in place of the records up to it
+    /// ([`WindowRows::take_main_before`]); none of a read that took them.
+    main_before: Option<MainSummary>,
 }
 
 /// The runs the task row `row` names ([`super::fold::TaskLife::runs`]),
@@ -666,6 +678,9 @@ pub struct WindowRows {
     /// The records as text, of a read that holds them so
     /// ([`payload_text`]); none of the runtime's reads.
     text: Option<payload_text::TextRecords>,
+    /// Main's record up to an event of before the time, in place of its
+    /// events up to it ([`Self::take_main_before`]).
+    main_before: Option<MainSummary>,
 }
 
 /// What a read from a time keeps track of as it takes the rows.
@@ -681,6 +696,12 @@ struct ReadFrom {
     /// What the rows taken name, for the store's read of what the rows left
     /// out still give ([`named::Named`]).
     named: named::Named,
+    /// What the rows taken name of the queue rows the store's views seek
+    /// ([`queue_named`]), and what was asked of them so far.
+    queue: queue_named::QueueNames,
+    sought: Option<queue_named::QueueWants>,
+    /// Whether main's record before the time was taken of its summary.
+    main_taken: bool,
 }
 
 impl ReadFrom {
@@ -693,8 +714,20 @@ impl ReadFrom {
         }
         if row.kind == LedgerKind::Queue {
             self.named.note_queue_row(row, self.ms);
+            for event in &row.records {
+                self.queue.note_snapshot(event);
+                self.queue.note_revert_targets(event);
+            }
+            for event in row
+                .records
+                .iter()
+                .filter(|event| timestamp_millis(&event.created_at).is_none_or(|at| at >= self.ms))
+            {
+                self.queue.note_queue_record(event);
+            }
         } else {
             self.named.note_row(row);
+            self.queue.note_row(row);
         }
         // A queue row's task is only that of the wait it stands for.
         if row.kind != LedgerKind::Queue
@@ -737,11 +770,82 @@ impl WindowRows {
             goals: RecordGoals::new(),
             earlier: Earlier::default(),
             earlier_records: Vec::new(),
-            from: query.read_from_ms.map(|ms| ReadFrom {
-                ms,
-                ..ReadFrom::default()
+            from: query.read_from_ms.map(|ms| {
+                let mut from = ReadFrom {
+                    ms,
+                    ..ReadFrom::default()
+                };
+                if let Some(goal) = query.goal_id {
+                    from.queue.note_goal(goal.as_i64());
+                }
+                from
             }),
             text: None,
+            main_before: None,
+        }
+    }
+
+    /// Whether main's record before the time is to be taken of its summary
+    /// ([`Self::take_main_before`]): once, by a read from a time.
+    pub fn wants_main_before(&self) -> bool {
+        self.from.as_ref().is_some_and(|from| !from.main_taken)
+    }
+
+    /// Take main's record of before the time as a store's views give it
+    /// ([`queue_named::MainBefore`]): its summary, which main's and CI's
+    /// folds read in place of the events up to it, and the records of the
+    /// rows after it, among the window's (a record of a row taken too
+    /// counts once). What those records name is sought with the rest
+    /// ([`Self::queue_wants`]).
+    pub fn take_main_before(&mut self, before: queue_named::MainBefore) {
+        let Some(from) = &mut self.from else {
+            return;
+        };
+        from.main_taken = true;
+        for row in before.rows {
+            for event in row.records {
+                from.queue.note_queue_record(&event);
+                self.earlier_records.push(event);
+            }
+        }
+        self.main_before = before.summary;
+    }
+
+    /// What the store's views are to seek of the queue rows read by them,
+    /// of what the rows taken so far name and was not sought yet; none once
+    /// nothing is left, and for a read of every row.
+    pub fn queue_wants(&self) -> Option<queue_named::QueueWants> {
+        let from = self.from.as_ref()?;
+        let wants = from
+            .queue
+            .wants(from.ms, from.named.proposals(), self.main_before.as_ref());
+        let wants = match &from.sought {
+            Some(sought) => wants.less(sought),
+            None => wants,
+        };
+        (!wants.is_empty()).then_some(wants)
+    }
+
+    /// Take what the store's views found of `wants` ([`queue_named`]): the
+    /// records among the window's, a record of a row taken too counting
+    /// once, and the finding rows as the rows they are.
+    pub fn take_queue_sought(
+        &mut self,
+        wants: &queue_named::QueueWants,
+        sought: queue_named::QueueSought,
+    ) {
+        if let Some(from) = &mut self.from {
+            for event in &sought.records {
+                from.queue.note_revert_targets(event);
+            }
+            match &mut from.sought {
+                Some(asked) => asked.extend(wants),
+                None => from.sought = Some(wants.clone()),
+            }
+        }
+        self.earlier_records.extend(sought.records);
+        for row in sought.rows {
+            self.take(row);
         }
     }
 
@@ -973,6 +1077,7 @@ impl WindowRows {
         });
         let mut window = of_records(self.records, self.rows, &self.goals, query);
         window.earlier = earlier;
+        window.main_before = self.main_before;
         window
     }
 }
@@ -1162,6 +1267,7 @@ fn of_records(
         filters: Filters::default(),
         earlier: Earlier::default(),
         answers: None,
+        main_before: None,
     };
     let filters = Filters::of(&window, query);
     let mut chosen: Vec<LedgerRow> = rows
@@ -1520,27 +1626,41 @@ impl LedgerWindow {
     /// commits, the paths and the reach recorded by then, a later
     /// recovery or reach not among them.
     pub fn main_log(&self) -> MainLog {
-        fold_main_log(self.events())
+        fold_main_log_from(self.main_seed(), self.events())
     }
 
     /// Main's history for the window, as `conflict_hotspots` spans it, or
     /// why it has none (`記録が無い`).
     pub fn main_history(&self) -> History {
         let events = self.events();
-        fold_main_log(events).history_for(events, self.after, self.upto)
+        fold_main_log_from(self.main_seed(), events).history_for(events, self.after, self.upto)
     }
 
     /// Whether main's history covers the window's times.
     pub fn main_covers(&self) -> Result<(), MainMissing> {
         let events = self.events();
-        fold_main_log(events).covers(events, self.start_ms, Some(self.end_ms))
+        fold_main_log_from(self.main_seed(), events).covers(
+            events,
+            self.start_ms,
+            Some(self.end_ms),
+        )
     }
 
     /// The reverts and CI's failures after the landings, matched to their
     /// runs as the records give them at the window's end: every row's,
     /// whatever the filters ([`post_landing::fold`]).
     pub fn post_landing_book(&self) -> post_landing::PostLandingBook {
-        post_landing::fold(self.events(), self.end_ms)
+        post_landing::fold_from(self.main_seed(), self.events(), self.end_ms)
+    }
+
+    /// The prefix at this window's end, in original id order even when a
+    /// timestamp between S and E belonged to an older event. An event-id
+    /// cursor imposes no time ceiling, so uses the full prefix.
+    fn main_seed(&self) -> Option<&MainSummary> {
+        let summary = self.main_before.as_ref()?;
+        self.end
+            .ms
+            .map_or(Some(summary), |end| summary.state_at(end))
     }
 
     /// What befell each of the window's runs (its chosen run rows, by the
@@ -1627,6 +1747,7 @@ pub mod named;
 pub mod omitted;
 pub mod payload_text;
 pub mod queue_from;
+pub mod queue_named;
 
 #[cfg(test)]
 mod tests;

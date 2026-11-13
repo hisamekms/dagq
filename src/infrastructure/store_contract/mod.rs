@@ -10,6 +10,7 @@ mod goal_owners;
 pub(crate) mod ledger_earlier;
 mod ledger_first_executions;
 mod ledger_open;
+pub(crate) mod ledger_queue_named;
 mod ledger_queue_views;
 pub(crate) mod ledger_range;
 mod related;
@@ -23,6 +24,11 @@ pub use goal_owners::*;
 pub use ledger_earlier::{ledger_earlier_answers_as_every_row, ledger_earlier_past_an_old_writer};
 pub use ledger_first_executions::*;
 pub use ledger_open::*;
+pub use ledger_queue_named::{
+    ledger_queue_named_answers_as_every_row, ledger_queue_named_goes_back_whole,
+    ledger_queue_named_past_a_clock_set_back, ledger_queue_named_past_an_old_writer,
+    ledger_queue_named_with_only_ci_after_a_future_main_event,
+};
 pub use ledger_queue_views::*;
 pub use ledger_range::ledger_range_answers_as_every_row;
 pub use related::related_cases;
@@ -211,6 +217,26 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         (
             "ledger range answers as every row",
             ledger_range_answers_as_every_row::<S, F>,
+        ),
+        (
+            "ledger queue named answers as every row",
+            ledger_queue_named_answers_as_every_row::<S, F>,
+        ),
+        (
+            "ledger queue named goes back whole",
+            ledger_queue_named_goes_back_whole::<S, F>,
+        ),
+        (
+            "ledger queue named past an old writer",
+            ledger_queue_named_past_an_old_writer::<S, F>,
+        ),
+        (
+            "ledger queue named past a clock set back",
+            ledger_queue_named_past_a_clock_set_back::<S, F>,
+        ),
+        (
+            "ledger queue named with only CI after a future main event",
+            ledger_queue_named_with_only_ci_after_a_future_main_event::<S, F>,
         ),
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),

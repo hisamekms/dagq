@@ -143,6 +143,15 @@ fn answered(conn: &impl SqlRead, ask: &Left) -> Result<bool> {
 }
 
 /// The latest summary the store keeps.
+/// Whether the latest summary is one a binary before them wrote, holding no
+/// record of what a reader takes of it ([`MainSummary::holds_record`]): the
+/// views are then made again, whatever their mark says.
+pub(in crate::infrastructure::runtime_store) fn older_summaries(
+    conn: &impl SqlRead,
+) -> Result<bool> {
+    Ok(latest_summary(conn)?.is_some_and(|summary| !summary.holds_record()))
+}
+
 fn latest_summary(conn: &impl SqlRead) -> Result<Option<MainSummary>> {
     SqlRead::query_row(
         conn,
@@ -194,23 +203,64 @@ fn summarize(
 }
 
 /// Write the summary after `event` folded on `last`, the latest the store
-/// keeps, in place of `last` unless it is kept; the next.
+/// keeps, in place of `last` unless it is kept; the next. When an event
+/// crosses a main time, including a CI check following a future main event,
+/// the writer builds missing time alternatives from the prefix once;
+/// ordinary writes advance the existing ones. This rebuild is never done
+/// by the window reader.
 fn advance(conn: &impl SqlWrite, last: &MainSummary, event: &RunEvent) -> Result<MainSummary> {
     let id = event.id.as_i64();
     // The commits past a base's head its completion applies: their
     // changes, read of the row that records each.
     let mut changes = std::collections::HashMap::new();
-    if event.kind == EventKind::MainPathsRecorded
-        && let Some(head) = event.payload["head"].as_str()
-        && let Some(at) = last.commits.iter().position(|sha| sha == head)
-    {
-        for sha in &last.commits[at + 1..] {
-            if let Some(change) = recorded_changes(conn, sha, id)? {
-                changes.insert(sha.clone(), change);
-            }
+    for sha in last.path_changes(event) {
+        if let Some(change) = recorded_changes(conn, &sha, id)? {
+            changes.insert(sha, change);
         }
     }
-    let next = last.then(event, &|sha| changes.get(sha).cloned());
+    let mut next = last.then(event, &|sha| changes.get(sha).cloned());
+    if last.clock_went_back(event)
+        && let Some(now) = crate::domain::stats::timestamp_millis(&event.created_at)
+    {
+        // Reuse the latest prefix valid at the new time. Only the crossed
+        // clock span and the unsummarized tail need replay, not all settled
+        // history before that prefix.
+        let (base, _) =
+            super::queue_named::summary_by(conn, last.through.unwrap_or(EventId::new(0)), now)?;
+        let after = base
+            .as_ref()
+            .and_then(|base| base.through)
+            .map_or(0, |id| id.as_i64());
+        let texts: Vec<String> = SqlRead::query_map(
+            conn,
+            &format!(
+                "SELECT records FROM {} WHERE {} AND inputs_from > ?1 AND inputs_from <= ?2 ORDER BY inputs_from",
+                view_rows_from(SqlRead::dialect(conn)),
+                view_rows_sql()
+            ),
+            sql_params![after, id],
+            |r| r.get(0),
+        )?;
+        let mut events = Vec::new();
+        for text in texts {
+            events.extend(serde_json::from_str::<Vec<RunEvent>>(&text)?);
+        }
+        if let Some(base) = &base {
+            let needed: BTreeSet<String> = events
+                .iter()
+                .flat_map(|event| base.path_changes(event))
+                .collect();
+            for sha in needed {
+                if let Some(value) = recorded_changes(conn, &sha, id)? {
+                    changes.insert(sha, value);
+                }
+            }
+        }
+        changes.extend(views::commit_changes(&events));
+        next = next.with_clock_alternatives(base.as_ref(), &events, now, &|sha| {
+            changes.get(sha).cloned()
+        });
+    }
     if let Some(through) = last.through.filter(|_| !last.kept()) {
         SqlWrite::execute(
             conn,
@@ -320,9 +370,18 @@ fn refold(conn: &impl SqlWrite, id: i64, reached: i64) -> Result<()> {
 /// ([`open::ROWS_PER_FILL`], [`open::part_spent`]). A mark that counts as
 /// none begins again from the first row, the views removed first. A row
 /// written meanwhile past the mark has its summary left to the filling, so
-/// that the summaries fold the events in the order of their ids.
+/// that the summaries fold the events in the order of their ids. A mark
+/// done over summaries that hold no record (an older binary's) counts as
+/// none.
 pub(super) fn fill_views(conn: &impl SqlWrite) -> Result<Filled> {
-    let held = kept_view(conn, View::Queue)?;
+    let mut held = kept_view(conn, View::Queue)?;
+    // Summaries a binary before them wrote hold no record of what a reader
+    // takes of them ([`MainSummary::holds_record`]): the views are made
+    // again from the first row, as of a mark of none.
+    if held.is_done() && older_summaries(conn)? {
+        write_filled(conn, View::Queue, &Filled::Not)?;
+        held = Filled::Not;
+    }
     let Some(after) = held.after() else {
         return Ok(held);
     };
@@ -444,6 +503,26 @@ pub(crate) mod views_in {
     /// The mark as a reader takes it.
     pub(crate) fn held(tx: &impl SqlRead) -> Result<Filled> {
         held_view(tx, View::Queue)
+    }
+
+    /// Whether a read from a time reads by the views
+    /// ([`crate::application::LedgerWindowRead::queue_views_usable`]).
+    pub(crate) fn usable(tx: &impl SqlRead) -> Result<bool> {
+        super::super::queue_named::usable_in(tx)
+    }
+
+    /// Remove what the views and their mark hold.
+    pub(crate) fn clear_views(tx: &impl SqlWrite) -> Result<()> {
+        for table in [
+            "ledger_snapshot_targets",
+            "ledger_main_commits",
+            "ledger_main_summaries",
+            "ledger_answered_asks",
+            "ledger_queue_views_filled",
+        ] {
+            SqlWrite::execute(tx, &format!("DELETE FROM {table}"), sql_params![])?;
+        }
+        Ok(())
     }
 
     /// What the views hold, whatever their mark.

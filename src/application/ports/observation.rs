@@ -925,11 +925,19 @@ pub trait LedgerStore {
     ///   [`LedgerWindowRead::rows_from`]); what they still give comes by
     ///   [`Self::ledger_earlier_named`]. The queue's rows are read kind by
     ///   kind ([`crate::domain::ledger::window::queue_from`]): the kinds the
-    ///   Spike's promise 6 judged to answer as every row by their range, and
-    ///   the others (those of (ii) among them) whole, as before, until a seek
-    ///   of their own (tasks 4807 and 4808) moves them ([`LedgerWindowRead::queue_rows_reaching`],
-    ///   [`LedgerWindowRead::queue_rows_past`]). `push::check_breaches`,
-    ///   `kpi` and `report` read through this same read.
+    ///   Spike's promise 6 judged to answer as every row by their range
+    ///   ([`LedgerWindowRead::queue_rows_reaching`],
+    ///   [`LedgerWindowRead::queue_rows_past`]); with the store's views of the
+    ///   queue rows trusted ([`LedgerWindowRead::queue_views_usable`]) main's
+    ///   record, CI's, the goals', the baselines' marks and the findings too,
+    ///   what the range names of them before S sought by the views
+    ///   ([`LedgerWindowRead::queue_main_before`],
+    ///   [`LedgerWindowRead::queue_sought`]) after the rows that name it are
+    ///   read and before the earlier records are sought, and again for what
+    ///   the rows read after those name; the others (the rest of (ii) among
+    ///   them) whole, as before, until a seek of their own (task 4807) moves
+    ///   them. `push::check_breaches`, `kpi` and `report` read through this
+    ///   same read.
     /// - No upper bound: a row past the window's end E is read as it is now.
     ///   `stats` turns E into `Cursor::Time(E).event_id` and takes a run by
     ///   its `finished_event_id`, so a row left out by its time alone
@@ -1047,8 +1055,8 @@ fn take_queue_rows(
     query: &WindowQuery,
     read: &mut crate::domain::ledger::window::WindowRows,
     edges: &Edges<'_, '_>,
+    views: bool,
 ) -> Result<()> {
-    use crate::domain::ledger::window::queue_from::BY_RANGE;
     let Some(from_ms) = query
         .read_from_ms
         .filter(|_| snapshot.reads_queue_by_kind())
@@ -1057,12 +1065,17 @@ fn take_queue_rows(
         read.take_omitted_before(&edges.now()?)?;
         return Ok(());
     };
+    let by_range = crate::domain::ledger::window::queue_from::by_range(views);
     // The kinds read whole and those of each kind that reach the time
     // first: they give `queue_before`, past which the rest of each kind
     // read by its range is read.
-    read.take_pages(|after, limit| snapshot.queue_rows_whole(after, limit))?;
+    if views {
+        read.take_pages(|after, limit| snapshot.queue_rows_whole_by_views(after, limit))?;
+    } else {
+        read.take_pages(|after, limit| snapshot.queue_rows_whole(after, limit))?;
+    }
     let mut taken = std::collections::BTreeSet::new();
-    for kind in BY_RANGE {
+    for kind in &by_range {
         for row in snapshot.queue_rows_reaching(kind, from_ms)? {
             if taken.insert(row.key.clone()) {
                 read.take(row);
@@ -1073,12 +1086,44 @@ fn take_queue_rows(
     let queue_before = read
         .rows_from()
         .map_or(EventId::new(0), |from| from.inputs_through);
-    for kind in BY_RANGE {
+    for kind in &by_range {
         for row in snapshot.queue_rows_past(kind, from_ms, queue_before)? {
             if taken.insert(row.key.clone()) {
                 read.take(row);
             }
         }
+    }
+    Ok(())
+}
+
+/// Whether a read from a time of `query` reads the queue rows of
+/// [`crate::domain::ledger::window::queue_from::BY_VIEWS`] by their range,
+/// seeking what the range names of before it by the store's views
+/// ([`LedgerWindowRead::queue_views_usable`]).
+fn reads_by_views(snapshot: &dyn LedgerWindowRead, query: &WindowQuery) -> Result<bool> {
+    if query.read_from_ms.is_none() || !snapshot.reads_queue_by_kind() {
+        return Ok(false);
+    }
+    snapshot.queue_views_usable()
+}
+
+/// Take into `read` what the store's views give of the queue rows read by
+/// them before the time of `from` ([`crate::domain::ledger::window::queue_named`]):
+/// main's summary and its events after it once, then the seeks of what the
+/// rows taken so far name and were not sought yet.
+fn take_queue_named(
+    snapshot: &dyn LedgerWindowRead,
+    read: &mut crate::domain::ledger::window::WindowRows,
+    from: &crate::domain::ledger::window::RowsFrom,
+) -> Result<()> {
+    if read.wants_main_before() {
+        read.take_main_before(
+            snapshot.queue_main_before(from.inputs_through, from.ended_before_ms)?,
+        );
+    }
+    while let Some(wants) = read.queue_wants() {
+        let sought = snapshot.queue_sought(from, &wants)?;
+        read.take_queue_sought(&wants, sought);
     }
     Ok(())
 }
@@ -1095,7 +1140,8 @@ pub(crate) fn rows_from_of<S: LedgerStore + ?Sized>(
     store.ledger_read_snapshot(&mut |snapshot| {
         let reads = OmittedReads(snapshot);
         let mut read = crate::domain::ledger::window::WindowRows::new(query, 0);
-        take_queue_rows(snapshot, query, &mut read, &Edges(Some(&reads)))?;
+        let views = reads_by_views(snapshot, query)?;
+        take_queue_rows(snapshot, query, &mut read, &Edges(Some(&reads)), views)?;
         from = read.rows_from();
         Ok(())
     })?;
@@ -1109,7 +1155,8 @@ fn window_rows(
     mut read: crate::domain::ledger::window::WindowRows,
     edges: &Edges<'_, '_>,
 ) -> Result<crate::domain::ledger::window::WindowRows> {
-    take_queue_rows(snapshot, query, &mut read, edges)?;
+    let views = reads_by_views(snapshot, query)?;
+    take_queue_rows(snapshot, query, &mut read, edges, views)?;
     let others = LedgerKind::ALL
         .into_iter()
         .filter(|kind| *kind != LedgerKind::Queue);
@@ -1129,10 +1176,23 @@ fn window_rows(
     // The rows those rows want first, so that what the earlier records are
     // sought by is known; then those of the runs the earlier ones leave open.
     take_wanted(snapshot, &mut read)?;
+    // The queue rows read by the views of what those rows name first: the
+    // findings they read name the proposals they link, which the earlier
+    // records are sought by too.
+    if views {
+        take_queue_named(snapshot, &mut read, &from)?;
+    }
     let named = read.named().cloned().unwrap_or_default();
     read.take_earlier(snapshot.earlier_named(&from, &named)?);
     take_wanted(snapshot, &mut read)?;
+    if views {
+        take_queue_named(snapshot, &mut read, &from)?;
+    }
     let mut read = with_runs_on_their_way(snapshot, read, query)?;
+    // A run on its way may have landed a commit recorded before the time.
+    if views {
+        take_queue_named(snapshot, &mut read, &from)?;
+    }
     read.take_omitted_edges(query, &edges.now()?)?;
     Ok(read)
 }
@@ -1170,7 +1230,8 @@ pub fn ledger_named_in(
     let reads = OmittedReads(snapshot);
     let edges = Edges(Some(&reads));
     let mut read = crate::domain::ledger::window::WindowRows::new(query, 0);
-    take_queue_rows(snapshot, query, &mut read, &edges)?;
+    let views = reads_by_views(snapshot, query)?;
+    take_queue_rows(snapshot, query, &mut read, &edges, views)?;
     let Some(from) = read.rows_from() else {
         return Ok(None);
     };
@@ -1181,6 +1242,9 @@ pub fn ledger_named_in(
         read.take_pages(|after, limit| snapshot.rows_from(kind, after, limit, &from))?;
     }
     take_wanted(snapshot, &mut read)?;
+    if views {
+        take_queue_named(snapshot, &mut read, &from)?;
+    }
     Ok(Some((from, read.named().cloned().unwrap_or_default())))
 }
 
@@ -1643,7 +1707,8 @@ pub trait LedgerWindowRead {
     /// reads whole ([`crate::domain::ledger::window::queue_from::QueueRead::Whole`]),
     /// at most `limit` after the key `after` (`None`: from the first), by
     /// key: each kind of (ii) of the Spike's promise 6 is read so until a
-    /// seek of its own (tasks 4807 and 4808) moves it to its range. The
+    /// seek of its own moves it to its range (those of
+    /// [`Self::queue_rows_whole_by_views`] with the views trusted). The
     /// default reads [`Self::rows_after`]'s page and keeps those.
     fn queue_rows_whole(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
         use crate::domain::ledger::window::queue_from::read_whole;
@@ -1693,6 +1758,134 @@ pub trait LedgerWindowRead {
             from_ms,
             queue_before,
         ))
+    }
+    /// Whether a read from a time may read the queue rows of
+    /// [`crate::domain::ledger::window::queue_from::BY_VIEWS`] by their
+    /// range and seek what the range names of before it by the store's
+    /// views of the queue rows ([`Self::queue_main_before`],
+    /// [`Self::queue_sought`]): the store holds the views and their mark
+    /// is one kept through the write leader's generation now, filled to
+    /// its end (a mark of no generation or of another, one filled part
+    /// way, or none count as none), the latest summary of main's record
+    /// holds what a reader takes of it
+    /// ([`crate::domain::ledger::queue_views::MainSummary::holds_record`]),
+    /// and the visibility of the events it seeks can be judged
+    /// ([`Self::visible_events`]). A mark is not judged by where it stands
+    /// against the ledger's mark R: an older binary may write queue rows
+    /// without the views and leave R as it was, and its generation leaves
+    /// the mark behind. When not, those kinds are read whole, by every
+    /// page, as before. The default (and the service's client) is not.
+    fn queue_views_usable(&self) -> Result<bool> {
+        Ok(false)
+    }
+    /// [`Self::queue_rows_whole`] of the kinds a read by the views reads
+    /// whole: those of neither
+    /// [`crate::domain::ledger::window::queue_from::BY_RANGE`] nor
+    /// [`crate::domain::ledger::window::queue_from::BY_VIEWS`]. The
+    /// default reads [`Self::rows_after`]'s pages and keeps those.
+    fn queue_rows_whole_by_views(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        use crate::domain::ledger::window::queue_from::read_whole_with;
+        let mut after = after.map(str::to_owned);
+        loop {
+            let page = self.rows_after(LedgerKind::Queue, after.as_deref(), limit)?;
+            let Some(last) = page.last() else {
+                return Ok(page);
+            };
+            after = Some(last.key.clone());
+            let kept: Vec<LedgerRow> = page
+                .into_iter()
+                .filter(|row| read_whole_with(row, true))
+                .collect();
+            if !kept.is_empty() {
+                return Ok(kept);
+            }
+        }
+    }
+    /// Main's record before a read's time by the views: the latest summary
+    /// of main's record and CI's checks
+    /// ([`crate::domain::ledger::queue_views::MainSummary`]) through
+    /// `queue_before` or before it with a main state at `from_ms` (S)
+    /// ([`crate::domain::ledger::queue_views::MainSummary::for_read_from`]),
+    /// including its clock alternatives when a regression crossed future events,
+    /// and the queue rows of the kinds it
+    /// folds ([`crate::domain::ledger::window::queue_named::SUMMARIZED_KINDS`])
+    /// past it, by their event (the rows of a summary's span, at most
+    /// [`crate::domain::ledger::queue_views::SUMMARY_EVERY`] and those since
+    /// written out of order, and the range's). Main's and CI's folds read
+    /// the summary in place of the events up to it
+    /// ([`crate::domain::stats::main_log::fold_main_log_from`],
+    /// [`crate::domain::ledger::post_landing::fold_from`]), so that the fold
+    /// of every event is read in proportion to a summary's span and the
+    /// range, not to the settled history (a summary's commits and paths are
+    /// as many as main's). A CI check past S does not move that summary
+    /// back: each branch whose summary reaches past S instead contributes
+    /// its earliest and latest queue row at S or before it, by a branch/time
+    /// index (at most two per spelling, short and full ref), up to the
+    /// summary's event. These rows are included and counted with the rows
+    /// after the summary; all summary rows probed are counted separately.
+    /// Main's clock alternatives are built by the writer from the eligible
+    /// id subsequence when time regresses, including when only CI checks
+    /// follow a future main event, then advanced with the prefix. The first
+    /// check supplies its missing main state; later checks update that state
+    /// without replaying the prefix.
+    /// A future main event before settled history therefore does not move
+    /// the chosen summary back across that history. Ordinary increasing
+    /// time adds no alternatives. The read returns one summary row with
+    /// its alternatives after S; each window selects its state at E. This
+    /// preserves id order when a future timestamp lies between S and E.
+    /// Summaries written before these main and CI bounds are untrusted
+    /// until filled again. Only when [`Self::queue_views_usable`].
+    fn queue_main_before(
+        &self,
+        queue_before: EventId,
+        from_ms: i64,
+    ) -> Result<crate::domain::ledger::window::queue_named::MainBefore> {
+        let _ = (queue_before, from_ms);
+        anyhow::bail!("this snapshot keeps no views of the queue rows")
+    }
+    /// The queue's records before `from`'s time that what the range names
+    /// bears on, sought by the views and the indexes of the EventStore
+    /// ([`crate::domain::ledger::window::queue_named`]), each judged
+    /// visible as the whole read sees it in the same snapshot:
+    ///
+    /// - main's commits of `wants.shas` by the table of the commits by
+    ///   their sha, those that revert one of `wants.landed` by the commit
+    ///   they revert, and CI's turns to red on one of `wants.landed` by
+    ///   their sha: as many as the range's runs landed and its records
+    ///   name. Every retained revert names its target, including imports
+    ///   before S and reverts in a compound event fetched by another sha.
+    ///   Newly returned records are named too, to a fixed point, each name
+    ///   sought once, so every returned Fact has its target's evidence;
+    /// - each goal of `wants.goals` by its records down the ids to the last
+    ///   that replaces it before the time (a baseline by its group's mark
+    ///   before it too), and that mark: as many as the goal's records since
+    ///   it was last replaced, not its history. A goal nothing of the range
+    ///   names (no task read, no record of the range, not `--goal`) is not
+    ///   read: no answer reads a goal but by a task of it or by `--goal`;
+    /// - of each goal of a forecast's snapshot read (`wants.closes`), its
+    ///   `goal_closed` past the snapshot up the ids to the first before the
+    ///   time (a forecast's score takes a goal's first close after its
+    ///   snapshot): as many as the range's closes of the goal and one, not
+    ///   as it was closed before;
+    /// - each baseline's latest mark before the time (`wants.marks`), by
+    ///   the marks alone: as many as the marks of the range and those no
+    ///   row holds yet;
+    /// - the finding rows, whole, of the findings a `proposed` links to a
+    ///   proposal of `wants.proposals` or to one a `goal_submitted` of a
+    ///   goal of `wants.goals` names: as many as those proposals' findings.
+    ///
+    /// Only when [`Self::queue_views_usable`].
+    fn queue_sought(
+        &self,
+        from: &crate::domain::ledger::window::RowsFrom,
+        wants: &crate::domain::ledger::window::queue_named::QueueWants,
+    ) -> Result<crate::domain::ledger::window::queue_named::QueueSought> {
+        let _ = (from, wants);
+        anyhow::bail!("this snapshot keeps no views of the queue rows")
     }
 }
 

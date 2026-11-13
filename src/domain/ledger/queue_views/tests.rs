@@ -586,3 +586,223 @@ fn a_run_less_ask_pairs_by_its_key_of_any_value() {
         .collect();
     assert_eq!(open, expected, "{left:?}");
 }
+
+/// Main's fold and what befell the landings, read from each summary with
+/// the events a read from a time gives after it (those of the kinds the
+/// views read after the summary, the kinds read whole, and every commit's
+/// record before it as the seeks by sha may give them), are those of every
+/// event: the commits with their times and changes, the paths, the reach,
+/// the reading, the evidence of the reverts and CI's record of each
+/// branch, with a rewrite and an import of the reverts among them.
+#[test]
+fn the_folds_from_each_summary_and_the_events_after_it_are_those_of_every_event() {
+    use crate::domain::ledger::post_landing;
+    use crate::domain::ledger::window::queue_named::SUMMARIZED_KINDS;
+    use crate::domain::stats::main_log::fold_main_log_from;
+    let mut queue = main_log(5);
+    queue.add(
+        "main_reverts_imported",
+        json!({"since": 1_799_000_000, "at": 3, "heads": ["u4"], "reverts": [], "unread": []}),
+    );
+    queue.add(
+        "main_rewritten",
+        json!({"from": "u4", "head": "u3", "base": "u3", "at": 4}),
+    );
+    queue.paths("u3", &["u3.rs", "a.rs"]);
+    queue.commits(Some("u3"), &[("w1", "w1.rs", Some("u3.rs"), Some("c2"))]);
+    queue.observed("w1", 1_900_000_900);
+    queue.ci("main", "w1");
+    // A run that landed c2 on main, read in the range.
+    let id = EventId::new(i64::try_from(queue.0.len()).unwrap() + 1);
+    let run = crate::domain::RunId::new("00000001-1111-4111-8111-111111111111").unwrap();
+    for (n, (kind, payload)) in [
+        ("run_integrated", json!({"result_commit": "c2"})),
+        ("push_finished", json!({"branch": "main"})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = EventId::new(id.as_i64() + i64::try_from(n).unwrap());
+        queue.0.push(RunEvent {
+            id,
+            task_id: None,
+            goal_id: None,
+            run_id: Some(run.clone()),
+            kind: kind.into(),
+            payload,
+            created_at: utc_text(T0_MS + id.as_i64() * 1000),
+            actor: None,
+        });
+    }
+    let events = &queue.0;
+    let end = T0_MS + 1_000_000_000;
+    let (log, book) = (fold_main_log(events), post_landing::fold(events, end));
+    assert!(book.of_run(&run).reverts.count > 0);
+    let changes = commit_changes(events);
+    let mut summary = MainSummary::default();
+    for event in events.iter().filter(|event| summarized(event)) {
+        summary = summary.then(event, &|sha| changes.get(sha).cloned());
+        assert!(summary.holds_record());
+        let through = event.id;
+        let read_after = |e: &RunEvent| {
+            e.id > through
+                || e.kind == EventKind::MainCommitsRecorded
+                || !SUMMARIZED_KINDS.iter().any(|kind| e.kind == *kind)
+        };
+        let given: Vec<RunEvent> = events.iter().filter(|e| read_after(e)).cloned().collect();
+        assert_eq!(
+            fold_main_log_from(Some(&summary), &given),
+            log,
+            "at {through}"
+        );
+        assert_eq!(
+            post_landing::fold_from(Some(&summary), &given, end),
+            book,
+            "at {through}"
+        );
+    }
+    // A summary of a binary before the record holds none, and neither
+    // does the next folded on it.
+    let mut old = summary.clone();
+    old.record = None;
+    assert!(!old.holds_record());
+    let next = old.then(&events[0], &|_| None);
+    assert!(!next.holds_record());
+    let mut old = serde_json::to_value(&summary).unwrap();
+    old["record"].as_object_mut().unwrap().remove("ci_by_time");
+    let old: MainSummary = serde_json::from_value(old).unwrap();
+    assert!(!old.holds_record());
+    assert!(!old.then(&events[0], &|_| None).holds_record());
+    assert!(MainSummary::default().holds_record());
+}
+
+#[test]
+fn ci_s_clock_does_not_move_main_s_summary_back() {
+    let mut queue = Queue::default();
+    queue.ci("refs/heads/release", "late");
+    queue.0[0].created_at = utc_text(T0_MS + 10_000);
+    queue.observed("base", 1_900_000_002);
+    queue.ci("release", "earlier");
+    queue.ci("main", "base");
+    let mut summary = summaries(&queue.0).pop().unwrap();
+    assert!(summary.folds_by(T0_MS + 4_000));
+    assert!(!summary.folds_by(T0_MS + 1_000));
+    assert_eq!(
+        summary.take_late_ci(T0_MS + 4_000),
+        BTreeSet::from(["release".to_owned(), "refs/heads/release".to_owned()])
+    );
+    assert!(!summary.ci.contains_key("release"));
+    assert!(summary.ci.contains_key("main"));
+    assert!(summary.take_late_ci(T0_MS + 4_000).is_empty());
+    // A summary of checks alone has no main clock bound.
+    let summary = summaries(&queue.0[..1]).pop().unwrap();
+    assert!(summary.folds_by(T0_MS));
+}
+
+/// The first check after a future main event supplies the missing main
+/// state. Further checks advance it without rebuilding main's prefix.
+#[test]
+fn ci_alone_after_a_future_main_event_keeps_a_state_before_it() {
+    use crate::domain::ledger::post_landing;
+    use crate::domain::stats::main_log::fold_main_log_from;
+    let mut queue = main_log(2);
+    queue.observed("future", 1_900_001_000);
+    let future = T0_MS + 1_000_000;
+    queue.0.last_mut().unwrap().created_at = utc_text(future);
+    let before_checks = queue.0.len();
+    for _ in 0..3 {
+        queue.ci("release", "base");
+    }
+    let mut summary = summaries(&queue.0[..before_checks]).pop().unwrap();
+    for (n, check) in queue.0[before_checks..].iter().enumerate() {
+        assert_eq!(summary.clock_went_back(check), n == 0);
+        summary = summaries(&queue.0[..before_checks + n + 1]).pop().unwrap();
+        let end = timestamp_millis(&check.created_at).unwrap();
+        let seed = summary.clone().at_time(end).unwrap();
+        assert_eq!(seed.through, Some(check.id));
+        assert_eq!(seed.ci["release"].latest.id, check.id);
+        let eligible: Vec<RunEvent> = queue.0[..before_checks + n + 1]
+            .iter()
+            .filter(|event| timestamp_millis(&event.created_at).unwrap() <= end)
+            .cloned()
+            .collect();
+        assert_eq!(
+            fold_main_log_from(Some(&seed), &eligible),
+            fold_main_log(&eligible)
+        );
+        assert_eq!(
+            post_landing::fold_from(Some(&seed), &eligible, end),
+            post_landing::fold(&eligible, end)
+        );
+    }
+}
+
+/// Every main kind can carry a future timestamp before ordinary history.
+/// Alternatives must fold the eligible id subsequence, including paths
+/// and rewrites, rather than just repair the last observation's fields.
+#[test]
+fn a_main_clock_regression_keeps_the_eligible_state_of_every_main_kind() {
+    use crate::domain::ledger::post_landing;
+    use crate::domain::stats::main_log::fold_main_log_from;
+    let kinds = [
+        "main_commits_recorded",
+        "main_paths_recorded",
+        "main_observed",
+        "main_read_failed",
+        "main_read_recovered",
+        "main_rewritten",
+    ];
+    for kind in kinds {
+        let mut queue = main_log(4);
+        queue.add("main_rewritten", json!({"base": "c1", "head": "new"}));
+        queue.paths("c1", &["new.rs"]);
+        queue.observed("new", 1_900_000_999);
+        let future = T0_MS + 1_000_000;
+        queue
+            .0
+            .iter_mut()
+            .find(|event| event.kind.as_str() == kind)
+            .unwrap()
+            .created_at = utc_text(future);
+        let summary = summaries(&queue.0).pop().unwrap();
+        assert!(!summary.folds_by(future - 1), "{kind}");
+        assert!(!summary.before_times.is_empty(), "{kind}");
+        let seed = summary.clone().at_time(future - 1).unwrap();
+        let eligible: Vec<RunEvent> = queue
+            .0
+            .iter()
+            .filter(|event| timestamp_millis(&event.created_at).unwrap() < future)
+            .cloned()
+            .collect();
+        assert_eq!(
+            fold_main_log_from(Some(&seed), &eligible),
+            fold_main_log(&eligible),
+            "{kind}"
+        );
+        assert_eq!(
+            post_landing::fold_from(Some(&seed), &eligible, future - 1),
+            post_landing::fold(&eligible, future - 1),
+            "{kind}"
+        );
+        assert_eq!(
+            summary.at_time(future).unwrap().commits,
+            summaries(&queue.0).pop().unwrap().commits
+        );
+    }
+}
+
+/// The commits past a base's head and those of a window's times are those
+/// of the summary's history.
+#[test]
+fn a_summary_names_its_commits_past_a_head_and_from_a_time() {
+    let queue = main_log(3);
+    let last = summaries(&queue.0).pop().unwrap();
+    assert_eq!(last.commits_past("u0"), ["u1", "u2"]);
+    assert!(last.commits_past("gone").is_empty());
+    // main_log's commits are each at 1_900_000_000 (the first of a record).
+    assert_eq!(
+        last.commits_from(1_900_000_000_000).len(),
+        last.commits.len()
+    );
+    assert!(last.commits_from(1_900_000_001_000).is_empty());
+}

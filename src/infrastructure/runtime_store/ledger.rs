@@ -1761,7 +1761,32 @@ impl<T: SqlRead> crate::application::LedgerWindowRead for LedgerSnapshot<'_, T> 
         true
     }
     fn queue_rows_whole(&self, after: Option<&str>, limit: usize) -> Result<Vec<LedgerRow>> {
-        queue_from::whole_in(self.tx, after, limit)
+        queue_from::whole_in(self.tx, after, limit, false)
+    }
+    fn queue_views_usable(&self) -> Result<bool> {
+        queue_named::usable_in(self.tx)
+    }
+    fn queue_rows_whole_by_views(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<LedgerRow>> {
+        queue_from::whole_in(self.tx, after, limit, true)
+    }
+    fn queue_main_before(
+        &self,
+        queue_before: EventId,
+        from_ms: i64,
+    ) -> Result<crate::domain::ledger::window::queue_named::MainBefore> {
+        queue_named::main_before_in(self.tx, queue_before, from_ms)
+    }
+    fn queue_sought(
+        &self,
+        from: &RowsFrom,
+        wants: &crate::domain::ledger::window::queue_named::QueueWants,
+    ) -> Result<crate::domain::ledger::window::queue_named::QueueSought> {
+        let _ = from;
+        queue_named::sought_in(self.tx, wants)
     }
     fn queue_rows_reaching(&self, kind: &str, from_ms: i64) -> Result<Vec<LedgerRow>> {
         queue_from::reaching_in(self.tx, kind, from_ms)
@@ -1936,11 +1961,15 @@ impl<E: TransactionEntries> LedgerStore for StoreQueue<E> {
         Ok(filled)
     }
 
-    /// Once done, a read alone, as [`Self::fill_ledger_open`].
+    /// Once done, a read alone, as [`Self::fill_ledger_open`]; a mark done
+    /// over summaries an older binary wrote is not done.
     fn fill_ledger_queue_views(&self) -> Result<Filled> {
-        let held = held_view(&self.read_entry("ledger_queue_views_filled")?, View::Queue)?;
-        if held.is_done() {
-            return Ok(held);
+        {
+            let read = self.read_entry("ledger_queue_views_filled")?;
+            let held = held_view(&read, View::Queue)?;
+            if held.is_done() && !queue_views::older_summaries(&read)? {
+                return Ok(held);
+            }
         }
         let tx = self.write_entry("fill_ledger_queue_views")?;
         let filled = fill_view(&tx, View::Queue)?;
@@ -2991,6 +3020,8 @@ mod earlier_tests;
 mod omitted_tests;
 #[cfg(test)]
 mod queue_from_tests;
+#[cfg(test)]
+mod queue_named_tests;
 #[cfg(test)]
 mod read_from_tests;
 #[cfg(test)]
@@ -5326,6 +5357,7 @@ mod tests {
 
 mod earlier;
 mod queue_from;
+pub(super) mod queue_named;
 mod visibility;
 
 mod small;

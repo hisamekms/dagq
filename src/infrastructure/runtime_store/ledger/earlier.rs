@@ -318,7 +318,7 @@ fn last_start(conn: &impl SqlRead, from: &RowsFrom) -> Result<Vec<RunEvent>> {
 
 /// Whether the store holds the table `name` (one of a schema before it
 /// does not).
-fn has_table(conn: &impl SqlRead, name: &str) -> Result<bool> {
+pub(super) fn has_table(conn: &impl SqlRead, name: &str) -> Result<bool> {
     Ok(!SqlRead::query_map(
         conn,
         &SqlRead::dialect(conn).table_exists_sql(),

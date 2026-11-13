@@ -19,7 +19,8 @@ use super::{
     timestamp_millis,
 };
 use crate::domain::{
-    EventId, RunEvent, event_kind::EventKind, marks::utc_text, supervisor_life::supervisor_life_end,
+    EventId, RunEvent, event_kind::EventKind, ledger::queue_views::MainSummary, marks::utc_text,
+    supervisor_life::supervisor_life_end,
 };
 
 /// How often a supervisor that reads main fine records its reach while the
@@ -360,13 +361,93 @@ pub struct MainLog {
 /// record goes on from the merge base, the later record winning. Reads
 /// neither Git nor the state.
 pub fn fold_main_log(events: &[RunEvent]) -> MainLog {
+    fold_main_log_from(None, events)
+}
+
+/// [`fold_main_log`] of every event of main's record, the events up to
+/// `seed`'s ([`MainSummary::through`]) given by `seed` and those after it
+/// by `events` (ascending id): what the fold of all of them gives, as a
+/// read from a time reads main's record of before it. Of the events up to
+/// the seed only the commits a `main_commits_recorded` records are read
+/// (the reader seeks those it names by their sha): their changes, and in
+/// the history the commit's own record in place of the seed's sha and
+/// time alone. The commits of the seed are in the history with their
+/// time, so that a window's times count them as the fold of every event
+/// does; the changes of those not given are none.
+pub fn fold_main_log_from(seed: Option<&MainSummary>, events: &[RunEvent]) -> MainLog {
     let mut log = MainLog::default();
     let mut seen: HashSet<String> = HashSet::new();
     let mut paths: Option<HashSet<String>> = None;
     // The parts of a base by its head: its count and the parts seen.
     let mut bases: HashMap<String, (u64, BTreeSet<u64>, HashSet<String>)> = HashMap::new();
+    let through = seed.and_then(|seed| seed.through);
+    if let Some(seed) = seed {
+        let at = seed
+            .record
+            .as_ref()
+            .map(|record| record.commits_at.as_slice())
+            .unwrap_or_default();
+        log.history.commits = seed
+            .commits
+            .iter()
+            .enumerate()
+            .map(|(n, sha)| MainCommit {
+                sha: sha.clone(),
+                at: at.get(n).copied().unwrap_or_default(),
+                changes: Vec::new(),
+                reverts: RevertOf::Unrecorded,
+            })
+            .collect();
+        seen = seed.commits.iter().cloned().collect();
+        paths = seed
+            .paths
+            .as_ref()
+            .map(|paths| paths.iter().cloned().collect());
+        bases = seed
+            .bases
+            .iter()
+            .map(|(head, base)| {
+                (
+                    head.clone(),
+                    (
+                        base.parts,
+                        base.seen.clone(),
+                        base.paths.iter().cloned().collect(),
+                    ),
+                )
+            })
+            .collect();
+        log.head.clone_from(&seed.head);
+        log.recorded_through = seed.recorded_through;
+        log.since = seed.since;
+        log.reading = seed.reading();
+    }
     for event in events {
         let payload = &event.payload;
+        if through.is_some_and(|through| event.id <= through) {
+            // Folded by the seed: only a commit's own record is taken.
+            if event.kind == EventKind::MainCommitsRecorded {
+                for commit in payload["commits"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(commit_of)
+                {
+                    log.changed
+                        .entry(commit.sha.clone())
+                        .or_insert_with(|| changed_files(&commit.changes));
+                    if let Some(held) = log
+                        .history
+                        .commits
+                        .iter_mut()
+                        .find(|held| held.sha == commit.sha)
+                    {
+                        *held = commit;
+                    }
+                }
+            }
+            continue;
+        }
         match event.kind.known() {
             Some(EventKind::MainCommitsRecorded) => {
                 for commit in payload["commits"]

@@ -44,6 +44,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Serialize;
 use serde_json::Value;
 
+use super::queue_views::MainSummary;
 use crate::domain::{
     EventKind, RunEvent, RunId, TaskId,
     stats::{main_log::reverts_of, revert::RevertOf, timestamp_millis},
@@ -194,10 +195,41 @@ pub(crate) fn branch_name(branch: &str) -> String {
 /// `end_ms`, ascending id, each once) into the reverts and failures
 /// matched to the runs that landed what they name.
 pub fn fold(events: &[RunEvent], end_ms: i64) -> PostLandingBook {
+    fold_from(None, events, end_ms)
+}
+
+/// [`fold`] of every event, the record of main and CI up to `seed`'s
+/// ([`MainSummary::through`]) given by `seed` (where the evidence of the
+/// reverts speaks from and reaches, CI's earliest and latest check of each
+/// branch) and the rest by `events`, as a read from a time reads them: the
+/// reverts and failures of the landings it reads are among `events` (the
+/// reader seeks them by the commits landed), and a record of `events` the
+/// seed folded too counts once, as its values are the earliest, the latest
+/// or one per commit or event.
+pub fn fold_from(seed: Option<&MainSummary>, events: &[RunEvent], end_ms: i64) -> PostLandingBook {
     let mut book = PostLandingBook {
         end_ms,
         ..PostLandingBook::default()
     };
+    if let Some(seed) = seed {
+        if let Some(record) = &seed.record {
+            if let Some(from) = record.reverts_from {
+                book.reverts_record.begins(from);
+            }
+            if let Some(reach) = record.reverts_reach {
+                book.reverts_record.reaches(reach);
+            }
+        }
+        for (branch, checks) in &seed.ci {
+            let record = book.ci_records.entry(branch.clone()).or_default();
+            for check in [&checks.earliest, &checks.latest] {
+                if let Some(at) = timestamp_millis(&check.created_at) {
+                    record.begins(at);
+                    record.reaches(at);
+                }
+            }
+        }
+    }
     let mut landed: HashMap<String, Target> = HashMap::new();
     let mut recorded: HashSet<String> = HashSet::new();
     let mut reverts: BTreeMap<String, (i64, String)> = BTreeMap::new();
@@ -358,7 +390,7 @@ pub fn fold(events: &[RunEvent], end_ms: i64) -> PostLandingBook {
 
 /// The commit a `run_integrated` landed: `result_commit`, or `commit` of
 /// an older payload.
-fn landed_commit(payload: &Value) -> Option<String> {
+pub(crate) fn landed_commit(payload: &Value) -> Option<String> {
     ["result_commit", "commit"]
         .iter()
         .find_map(|key| payload[*key].as_str().filter(|sha| !sha.is_empty()))
@@ -374,6 +406,14 @@ fn commits_of<'a>(payload: &'a Value, key: &str) -> impl Iterator<Item = &'a Val
 }
 
 impl PostLandingBook {
+    /// CI's record of `branch`: when it speaks from and how far it reaches
+    /// (unix milliseconds), none of a branch it never watched.
+    pub fn ci_record(&self, branch: &str) -> Option<(Option<i64>, Option<i64>)> {
+        self.ci_records
+            .get(branch)
+            .map(|record| (record.from, record.reach))
+    }
+
     /// The window's end the events were read to (unix milliseconds).
     pub fn end_ms(&self) -> i64 {
         self.end_ms

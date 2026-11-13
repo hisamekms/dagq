@@ -3331,6 +3331,28 @@ mod store_contract_tests {
         contract(|open| store_contract::ledger_range_answers_as_every_row(&open));
     }
     #[test]
+    fn ledger_queue_named_answers_as_every_row() {
+        contract(|open| store_contract::ledger_queue_named_answers_as_every_row(&open));
+    }
+    #[test]
+    fn ledger_queue_named_goes_back_whole() {
+        contract(|open| store_contract::ledger_queue_named_goes_back_whole(&open));
+    }
+    #[test]
+    fn ledger_queue_named_past_an_old_writer() {
+        contract(|open| store_contract::ledger_queue_named_past_an_old_writer(&open));
+    }
+    #[test]
+    fn ledger_queue_named_past_a_clock_set_back() {
+        contract(|open| store_contract::ledger_queue_named_past_a_clock_set_back(&open));
+    }
+    #[test]
+    fn ledger_queue_named_with_only_ci_after_a_future_main_event() {
+        contract(|open| {
+            store_contract::ledger_queue_named_with_only_ci_after_a_future_main_event(&open)
+        });
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

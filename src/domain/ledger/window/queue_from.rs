@@ -31,10 +31,14 @@
 //! `candidates_sampled`, the updates and failures, the asks and repairs of
 //! no run, `stall_config_loaded`, main's records, the reverts and CI's
 //! failures, the goals' attributes, the findings that link a proposal, the
-//! inbox watcher's state) or a kind no reader was judged for. The seeks
-//! that take the kinds of (ii) from whole to their range are other reads'
-//! (tasks 4807 and 4808): each is a kind moved from [`QueueRead::Whole`]
-//! here with its own read.
+//! inbox watcher's state) or a kind no reader was judged for. With the
+//! store's views of the queue rows trusted, the kinds of [`BY_VIEWS`]
+//! (main's records, the reverts and CI's failures, the goals' attributes,
+//! the baselines' marks, the findings) are read by their range too, what
+//! they hold of before S sought by what the range names
+//! ([`super::queue_named`]). The seeks that take the rest of (ii) from
+//! whole to their range are another read's (task 4807): each is a kind
+//! moved from [`QueueRead::Whole`] here with its own read.
 
 use super::super::{LedgerKind, LedgerRow};
 use crate::domain::EventId;
@@ -53,13 +57,56 @@ pub enum QueueRead {
 /// range ([`QueueRead::Range`]); every other kind is read whole.
 pub const BY_RANGE: &[&str] = &["claim_deferral", "landing_slot", "live_alert"];
 
+/// The subject kinds whose queue rows a read from a time reads by their
+/// range when the store's views of the queue rows can be trusted
+/// ([`crate::application::LedgerWindowRead::queue_views_usable`]), the rows
+/// of before the range they hold sought by what the range names
+/// ([`super::queue_named`]): main's record and CI's (its summary up to S
+/// and the commits and failures by their sha), the goals' records (each
+/// goal named from its last record that replaces it), the baselines' marks
+/// (the latest of each before S), and the findings (those that link a
+/// proposal named). The kinds of main's record a summary holds no value of
+/// (`main_rewritten`, `main_reverts_imported`) stay whole.
+pub const BY_VIEWS: &[&str] = &[
+    "main_commits_recorded",
+    "main_paths_recorded",
+    "main_observed",
+    "main_read_failed",
+    "main_read_recovered",
+    "ci_checked",
+    "ci_turned_red",
+    "goal_created",
+    "goal_updated",
+    "goal_status_changed",
+    "goal_closed",
+    "goal_reopened",
+    "attributes_baseline",
+    "finding_baseline",
+    "finding",
+];
+
 /// How a read from a time reads the queue rows of the subject kind `kind`.
 pub fn read_of(kind: &str) -> QueueRead {
-    if BY_RANGE.contains(&kind) {
+    read_of_with(kind, false)
+}
+
+/// How a read from a time reads the queue rows of the subject kind `kind`,
+/// with the store's views of the queue rows trusted (`views`) or not.
+pub fn read_of_with(kind: &str, views: bool) -> QueueRead {
+    if BY_RANGE.contains(&kind) || (views && BY_VIEWS.contains(&kind)) {
         QueueRead::Range
     } else {
         QueueRead::Whole
     }
+}
+
+/// The subject kinds read by their range, with the views trusted or not.
+pub fn by_range(views: bool) -> Vec<&'static str> {
+    let mut kinds = BY_RANGE.to_vec();
+    if views {
+        kinds.extend_from_slice(BY_VIEWS);
+    }
+    kinds
 }
 
 /// The subject kind of the queue row `row` (none: empty, read whole).
@@ -72,7 +119,13 @@ pub fn kind_of(row: &LedgerRow) -> &str {
 /// Whether a read from a time reads the queue row `row` whole: one of a
 /// kind read whole.
 pub fn read_whole(row: &LedgerRow) -> bool {
-    row.kind == LedgerKind::Queue && read_of(kind_of(row)) == QueueRead::Whole
+    read_whole_with(row, false)
+}
+
+/// [`read_whole`] with the store's views of the queue rows trusted
+/// (`views`) or not.
+pub fn read_whole_with(row: &LedgerRow, views: bool) -> bool {
+    row.kind == LedgerKind::Queue && read_of_with(kind_of(row), views) == QueueRead::Whole
 }
 
 /// Whether the queue row `row` of a kind read by its range reaches the

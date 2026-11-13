@@ -67,10 +67,14 @@ pub fn fold(events: &[RunEvent], window_end: Option<i64>) -> Folded {
     fold_within(events, super::WindowEnd::secs(window_end))
 }
 
+/// Whether `event` is the queue's mark that closes a group of the
+/// findings' baselines (a `finding_baseline` without the values).
+pub fn is_mark(event: &RunEvent) -> bool {
+    event.kind == EventKind::FindingBaseline && values(event).is_none()
+}
+
 /// [`fold`] for a window that ends at `end`: an event, a time or both.
 pub fn fold_within(events: &[RunEvent], end: super::WindowEnd) -> Folded {
-    let is_mark =
-        |event: &RunEvent| event.kind == EventKind::FindingBaseline && values(event).is_none();
     let is_record =
         |event: &RunEvent| event.kind == EventKind::FindingBaseline && values(event).is_some();
     let Some(taken) = super::baseline::taken(events, end, is_mark, is_record) else {
