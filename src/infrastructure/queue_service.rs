@@ -66,8 +66,9 @@ use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::queue_commands::QueueCommand;
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
-    Admin, Issued, Peer, QueueService, QueueServiceControl, Replaced, RequestNotes, ServiceAccess,
-    ServiceBackend, ServiceProbe, ServiceQueue, TelemetryTokens, on_write_line,
+    Admin, Issued, Peer, QueueService, QueueServiceControl, REPLACEMENT_WAIT, Replaced,
+    RequestNotes, ServiceAccess, ServiceBackend, ServiceProbe, ServiceQueue, TelemetryTokens,
+    on_write_line,
 };
 use crate::application::session::{AgentStart, ReasonParams, SessionOp, WrapperStore};
 use crate::application::{
@@ -2081,6 +2082,91 @@ pub fn call(socket: &Path, request: &ServiceRequest, timeout: Duration) -> Resul
     serde_json::from_slice(&answer).context("the queue service's answer does not read")
 }
 
+/// The pause between attempts during a replacement.
+const RETRY_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Decide whether a transport failure may be sent again, and for how long
+/// to pause. A write whose delivery is uncertain must keep that uncertainty.
+fn retry_delay(
+    error: &anyhow::Error,
+    reads_only: bool,
+    elapsed: Duration,
+    limit: Duration,
+) -> Option<Duration> {
+    use crate::application::supervisor_service::ServiceUnreachable;
+    let retryable = if let Some(lost) = error.downcast_ref::<ServiceUnreachable>() {
+        !lost.maybe_done || reads_only
+    } else if let Some(lost) = error.downcast_ref::<NotConnected>() {
+        matches!(
+            lost.source.kind(),
+            ErrorKind::NotFound | ErrorKind::ConnectionRefused
+        )
+    } else {
+        reads_only
+            && (error.downcast_ref::<AnswerTimedOut>().is_some()
+                || error.downcast_ref::<serde_json::Error>().is_some()
+                || error.downcast_ref::<std::io::Error>().is_some())
+    };
+    let left = limit.min(REPLACEMENT_WAIT).saturating_sub(elapsed);
+    (retryable && !left.is_zero()).then(|| RETRY_INTERVAL.min(left))
+}
+
+/// Run a transport attempt, keeping one replacement budget across its
+/// failures and waits. The grace period bounds when another attempt may
+/// start; every attempt retains the caller's remaining answer deadline.
+fn retry_transport<T>(
+    reads_only: bool,
+    timeout: Duration,
+    attempt: impl FnMut(Duration) -> Result<T>,
+) -> Result<T> {
+    let started = Instant::now();
+    retry_transport_with(
+        reads_only,
+        timeout,
+        attempt,
+        || started.elapsed(),
+        thread::sleep,
+    )
+}
+
+fn retry_transport_with<T>(
+    reads_only: bool,
+    timeout: Duration,
+    mut attempt: impl FnMut(Duration) -> Result<T>,
+    elapsed: impl Fn() -> Duration,
+    mut wait_for: impl FnMut(Duration),
+) -> Result<T> {
+    let limit = timeout.min(REPLACEMENT_WAIT);
+    let mut attempt_limit = timeout;
+    loop {
+        let error = match attempt(attempt_limit) {
+            Ok(answer) => return Ok(answer),
+            Err(error) => error,
+        };
+        let Some(wait) = retry_delay(&error, reads_only, elapsed(), limit) else {
+            return Err(error);
+        };
+        wait_for(wait);
+        let waited = elapsed();
+        attempt_limit = timeout.saturating_sub(waited);
+        if waited >= limit || attempt_limit.is_zero() {
+            return Err(error);
+        }
+    }
+}
+
+fn call_retry(
+    socket: &Path,
+    request: &ServiceRequest,
+    timeout: Duration,
+) -> Result<ServiceResponse> {
+    retry_transport(
+        crate::application::queue_service::request_reads_only(request.use_case, &request.params),
+        timeout,
+        |limit| call(socket, request, limit),
+    )
+}
+
 /// What is left until `deadline`: a timeout once nothing is.
 fn left(deadline: std::time::Instant) -> std::io::Result<Duration> {
     let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -2628,7 +2714,25 @@ impl Client {
         params: Value,
         timeout: Duration,
     ) -> Result<Value> {
+        self.call_within_retrying(use_case, params, timeout, true)
+    }
+
+    /// One watch attempt: the watch owns the replacement budget so its
+    /// timeout (including zero) and recorded-outage notices are not held
+    /// behind a transport retry. Its single answer still gets the look floor.
+    pub(crate) fn watch_poll_within(&self, params: Value, timeout: Duration) -> Result<Value> {
+        self.call_within_retrying(UseCase::WatchPoll, params, timeout, false)
+    }
+
+    fn call_within_retrying(
+        &self,
+        use_case: UseCase,
+        params: Value,
+        timeout: Duration,
+        retry: bool,
+    ) -> Result<Value> {
         self.check_destination()?;
+        let send = if retry { call_retry } else { call };
         let token = match &self.credential {
             Some(file) => Some(
                 read_token(file)
@@ -2652,7 +2756,7 @@ impl Client {
                     use_case,
                     params,
                 };
-                call(socket, &request, timeout)
+                send(socket, &request, timeout)
                     .map_err(|error| self.not_answered(&error, use_case))?
             }
             ClientRoute::Broker { address, run } => {
@@ -2685,6 +2789,9 @@ impl Client {
                     .map_err(|error| control_failure(error, use_case, self.next))?
             }
             ClientRoute::Relay(socket) => {
+                // The relay process has its own lifecycle; replacing the
+                // queue service does not replace this socket. A watch owns
+                // its retry budget across relayed looks.
                 let response = call(socket, &control_request(use_case, params), timeout)
                     .map_err(|error| no_answer(&error, use_case, self.next))?;
                 relay_answer(response)?
@@ -2723,18 +2830,17 @@ impl Client {
         }
     }
 
-    /// [`Self::call_within`] for a look the caller is not held on
-    /// (`status`, ADR-t3102-3 decision 2): a service on a socket has to
-    /// answer `hello` within [`PROBE_TIMEOUT`] before the look is sent, so
-    /// one that takes the call and never answers, whose backlog is full or
-    /// that answers a little at a time is unreachable within it, and one
-    /// that answers `hello` has `limit` to answer the look.
+    /// A status look with one `limit` across the hello and the request.
+    /// Each hello has at most [`PROBE_TIMEOUT`]; an absent service is
+    /// retried within the replacement grace period, capped by `limit`.
     pub fn look_within(&self, use_case: UseCase, params: Value, limit: Duration) -> Result<Value> {
         self.check_destination()?;
+        let started = Instant::now();
         if let ClientRoute::Socket(socket) = &self.route {
-            hello(socket, PROBE_TIMEOUT).map_err(|error| self.not_answered(&error, use_case))?;
+            retry_transport(true, limit, |left| hello(socket, PROBE_TIMEOUT.min(left)))
+                .map_err(|error| self.not_answered(&error, use_case))?;
         }
-        self.call_within(use_case, params, limit)
+        self.call_within(use_case, params, limit.saturating_sub(started.elapsed()))
     }
 
     /// That the token goes only to the service that issued it: the host's
@@ -5988,7 +6094,7 @@ impl SocketCaller {
     /// user's, a peer of the service's own OS user (ADR-t3102-1 decision
     /// 1): the supervisor's issue at its parent's request.
     fn as_user(&self, request: &ServiceRequest) -> Result<Value> {
-        let response = call(&self.socket, request, self.timeout).map_err(|error| {
+        let response = call_retry(&self.socket, request, self.timeout).map_err(|error| {
             use crate::application::supervisor_service::ServiceUnreachable;
             if let Some(past) = error.downcast_ref::<RequestPastLimit>() {
                 request_refused(*past)
@@ -6043,7 +6149,7 @@ fn supervisor_request(use_case: UseCase, params: Value, token: Option<String>) -
 impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
         let request = supervisor_request(use_case, params, self.signed_in.token());
-        let response = call(&self.socket, &request, self.timeout).map_err(|error| {
+        let response = call_retry(&self.socket, &request, self.timeout).map_err(|error| {
             use crate::application::supervisor_service::ServiceUnreachable;
             if let Some(past) = error.downcast_ref::<RequestPastLimit>() {
                 request_refused(*past)
@@ -6406,7 +6512,7 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
             use_case: UseCase::Control,
             params,
         };
-        let response = call(&self.socket, &request, CLIENT_TIMEOUT).map_err(|error| {
+        let response = call_retry(&self.socket, &request, CLIENT_TIMEOUT).map_err(|error| {
             use crate::application::supervisor_service::ServiceUnreachable;
             let failure = self.client.not_answered(&error, UseCase::Control);
             // A request past the limit was never sent, and an answer past it
@@ -7630,6 +7736,174 @@ mod write_line_tests;
 mod tests {
     use super::*;
 
+    /// Delivery certainty and read classification govern every retry; the
+    /// caller's limit and the replacement budget both bound its pause.
+    #[test]
+    fn transport_retries_only_safe_requests_within_both_deadlines() {
+        use crate::application::supervisor_service::ServiceUnreachable;
+        let second = Duration::from_secs(1);
+        let errors = [
+            (
+                anyhow::Error::new(ServiceUnreachable::not_done("absent")),
+                false,
+                true,
+            ),
+            (
+                anyhow::Error::new(ServiceUnreachable::not_done("absent")),
+                true,
+                true,
+            ),
+            (
+                anyhow::Error::new(ServiceUnreachable::maybe_done("EOF")),
+                false,
+                false,
+            ),
+            (
+                anyhow::Error::new(ServiceUnreachable::maybe_done("EOF")),
+                true,
+                true,
+            ),
+            (anyhow!("unrelated failure"), true, false),
+            (anyhow::Error::new(AnswerPastLimit), true, false),
+        ];
+        for (error, reads, retry) in errors {
+            assert_eq!(
+                retry_delay(&error, reads, second, 60 * second),
+                retry.then_some(Duration::from_millis(200))
+            );
+            assert_eq!(retry_delay(&error, reads, 30 * second, 60 * second), None);
+            assert_eq!(retry_delay(&error, reads, 31 * second, 60 * second), None);
+            assert_eq!(retry_delay(&error, reads, second, second), None);
+            assert_eq!(
+                retry_delay(&error, reads, Duration::ZERO, Duration::from_millis(50)),
+                retry.then_some(Duration::from_millis(50))
+            );
+        }
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::ConnectionRefused,
+            ErrorKind::PermissionDenied,
+        ] {
+            let error = anyhow::Error::new(NotConnected {
+                socket: "/queue.sock".into(),
+                source: std::io::Error::from(kind),
+            });
+            for reads in [false, true] {
+                assert_eq!(
+                    retry_delay(&error, reads, second, 30 * second).is_some(),
+                    kind != ErrorKind::PermissionDenied
+                );
+            }
+        }
+        for answer in [b"".as_slice(), b"not JSON".as_slice()] {
+            for reads in [false, true] {
+                let unread = serde_json::from_slice::<ServiceResponse>(answer).unwrap_err();
+                assert_eq!(
+                    retry_delay(&anyhow::Error::new(unread), reads, second, 30 * second).is_some(),
+                    reads
+                );
+            }
+        }
+    }
+
+    /// The production retry loop reaches the recovered service, preserves
+    /// uncertain writes, and ends after one budget across all attempts.
+    #[test]
+    fn transport_attempts_recover_or_stop_without_resending_uncertain_writes() {
+        use crate::application::supervisor_service::ServiceUnreachable;
+        use std::cell::Cell;
+        for (reads, maybe_done, recovers, expected_attempts) in [
+            (false, false, true, 2),
+            (true, true, true, 2),
+            (false, true, true, 1),
+            (true, false, false, 3),
+        ] {
+            let elapsed = Cell::new(Duration::ZERO);
+            let attempts = Cell::new(0);
+            let result = retry_transport_with(
+                reads,
+                Duration::from_millis(500),
+                |limit| {
+                    assert!(limit <= Duration::from_millis(500));
+                    attempts.set(attempts.get() + 1);
+                    if recovers && attempts.get() == 2 {
+                        Ok("recovered")
+                    } else {
+                        Err(anyhow::Error::new(if maybe_done {
+                            ServiceUnreachable::maybe_done("EOF")
+                        } else {
+                            ServiceUnreachable::not_done("absent")
+                        }))
+                    }
+                },
+                || elapsed.get(),
+                |wait| elapsed.set(elapsed.get() + wait),
+            );
+            assert_eq!(attempts.get(), expected_attempts);
+            assert_eq!(result.is_ok(), recovers && expected_attempts == 2);
+            if !recovers {
+                assert_eq!(elapsed.get(), Duration::from_millis(500));
+            }
+        }
+    }
+
+    /// Returning during the grace period must not shorten the caller's
+    /// answer deadline: writes and heavy reads may finish after it ends.
+    #[test]
+    fn a_retried_attempt_keeps_the_callers_remaining_answer_deadline() {
+        use crate::application::supervisor_service::ServiceUnreachable;
+        use std::cell::Cell;
+        for reads in [false, true] {
+            let elapsed = Cell::new(Duration::ZERO);
+            let attempts = Cell::new(0);
+            let answer = retry_transport_with(
+                reads,
+                Duration::from_secs(300),
+                |limit| {
+                    attempts.set(attempts.get() + 1);
+                    if attempts.get() == 1 {
+                        assert_eq!(limit, Duration::from_secs(300));
+                        elapsed.set(Duration::from_millis(800));
+                        Err(ServiceUnreachable::not_done("connection refused").into())
+                    } else {
+                        assert_eq!(limit, Duration::from_secs(299));
+                        elapsed.set(Duration::from_secs(61));
+                        Ok("finished")
+                    }
+                },
+                || elapsed.get(),
+                |wait| elapsed.set(elapsed.get() + wait),
+            )
+            .unwrap();
+            assert_eq!(answer, "finished");
+            assert_eq!(attempts.get(), 2);
+        }
+    }
+
+    #[test]
+    fn retry_reads_use_the_services_connection_classification() {
+        use crate::application::queue_service::request_reads_only;
+        use crate::application::supervisor_service;
+        // These are reads for transport, but not forwarded supervisor
+        // operations with an `op` for its read-count probe to inspect.
+        for use_case in [UseCase::Hello, UseCase::Status, UseCase::WatchPoll] {
+            assert!(request_reads_only(use_case, &json!({})));
+            assert!(!supervisor_service::request_reads_only(
+                use_case,
+                &json!({})
+            ));
+        }
+        assert!(request_reads_only(
+            UseCase::Supervisor,
+            &json!({"op": "all_runs"})
+        ));
+        assert!(!request_reads_only(UseCase::IssueToken, &json!({})));
+        assert!(!request_reads_only(
+            UseCase::Supervisor,
+            &json!({"op": "unknown"})
+        ));
+    }
+
     /// The service's `authorization_denied` of a report reaches the
     /// executor as a refusal that sending again cannot pass, told apart
     /// from a service that did not answer, which stays as it came.
@@ -7852,11 +8126,14 @@ mod tests {
             format!("{refused:#}").contains(&format!("past the {MAX_REQUEST_BYTES} bytes")),
             "{refused:#}"
         );
-        // One within the limit goes to the socket, where nothing answers.
-        let small = caller
-            .call(UseCase::Supervisor, json!({"op": "all_runs", "args": []}))
-            .unwrap_err();
-        assert!(unreachable(&small), "{small:#}");
+        // A request within the limit is ready to send. Delivery and retry
+        // outcomes are tested with the injected transport loop above.
+        let small = supervisor_request(
+            UseCase::Supervisor,
+            json!({"op": "all_runs", "args": []}),
+            None,
+        );
+        assert!(request_line(&small).is_ok());
         // A client-mode command's is refused so too.
         let request = ServiceRequest {
             caller: None,

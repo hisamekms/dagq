@@ -1268,6 +1268,12 @@ impl QueueService<'_> {
     }
 }
 
+/// The grace period for a queue service replacement: requests that can
+/// safely be resent may start another attempt within this long, and
+/// unrecorded outages met by watches wait at most this long. It does not
+/// shorten a request's answer deadline; a caller's shorter deadline caps it.
+pub const REPLACEMENT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The connection a use case runs on (ADR-0045 decision 18): a read
 /// (`show`, the proposals', the evals' and the case sets' and the whole
 /// queue's reads) on a read-only one, a watch's look on the live queue
@@ -1291,6 +1297,13 @@ pub fn on_write_line(use_case: UseCase, params: &Value) -> bool {
         connection(use_case, params),
         Connection::Supervisor | Connection::Write
     )
+}
+
+/// Whether any service request only reads, using the same classification
+/// as its connection. Transport retries use this broader judgement; the
+/// supervisor's operation counter keeps its forwarded-operation predicate.
+pub(crate) fn request_reads_only(use_case: UseCase, params: &Value) -> bool {
+    !on_write_line(use_case, params)
 }
 
 fn connection(use_case: UseCase, params: &Value) -> Connection {

@@ -1,0 +1,9 @@
+[[test]]
+name = "host_client::the_user_the_inbox_and_a_planner_go_through_the_service_and_never_open_the_db"
+reason = "Process/socket boundary: real host CLI requests to an absent service must exhaust the replacement grace period without opening the DB. The command/principal paths share this existing representative; retry decisions and synthetic time are covered by unit tests."
+task = 4627
+
+[[test]]
+name = "host_client::a_status_of_a_service_that_never_answers_is_unreachable_at_once"
+reason = "Process/socket boundary: the real status command must bound unanswered hello probes across the replacement period and return unreachable. The grace-period judgement is covered with synthetic time in unit tests."
+task = 4627

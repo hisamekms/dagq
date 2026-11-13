@@ -366,8 +366,8 @@ pub fn look(
 }
 
 /// Where a `watch` takes its looks: the queue it opened, or the queue
-/// service, whose `watch_poll` a client-mode watch calls. An error ends
-/// the watch at once: a service that does not answer is returned as that,
+/// service, whose `watch_poll` a client-mode watch calls. A service that
+/// does not answer after its replacement grace period is returned as that,
 /// never as a timeout or no events, but the same recorded outage only once
 /// ([`OutageNotices`]).
 pub trait WatchSource {
@@ -380,6 +380,12 @@ pub trait WatchSource {
         role: Option<SessionRole>,
         limit: Duration,
     ) -> Result<WatchLook>;
+
+    /// Whether this failure is the service out of reach, rather than a
+    /// refusal or a local error. Only this kind may wait for replacement.
+    fn unreachable(&self, _error: &anyhow::Error) -> bool {
+        false
+    }
 
     /// What the source knows of the outages of the queue's service a look
     /// meets ([`OutageNotices`]); `None` for one that has no service, the
@@ -585,13 +591,14 @@ pub fn look_limit(remaining: Option<Duration>) -> Duration {
 /// (ADR-t3102-3 decision 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FailedLook {
-    /// End the watch with the failure: no outage is recorded.
+    /// End the watch with the failure: no outage is recorded and the
+    /// replacement grace period has elapsed.
     Fail,
     /// End the watch with the failure, and note that a watch of its role
     /// returned the outage that began at `since`.
     Tell { since: i64 },
-    /// Look again after this long: a watch of its role returned the
-    /// outage already.
+    /// Look again after this long: a replacement may still be underway,
+    /// or a watch of its role returned the recorded outage already.
     Wait(Duration),
     /// The timeout passed while the watch waited out the outage that began
     /// at `since`.
@@ -601,15 +608,23 @@ enum FailedLook {
 /// The step after a failed look: `recorded` is the start of the outage the
 /// supervisor recorded (`None`: none), `told` whether a watch of the role
 /// returned it, `remaining` the time left of the watch's timeout (`None`:
-/// it has none), and `interval` its wait between looks.
+/// it has none), `interval` its wait between looks, and
+/// `replacement_elapsed` the time since the first attempt of this look.
 fn failed_look(
     recorded: Option<i64>,
     told: bool,
     remaining: Option<Duration>,
     interval: Duration,
+    replacement_elapsed: Duration,
 ) -> FailedLook {
     let Some(since) = recorded else {
-        return FailedLook::Fail;
+        let left = super::queue_service::REPLACEMENT_WAIT.saturating_sub(replacement_elapsed);
+        let left = remaining.map_or(left, |remaining| left.min(remaining));
+        return if left.is_zero() {
+            FailedLook::Fail
+        } else {
+            FailedLook::Wait(interval.min(left))
+        };
     };
     if !told {
         return FailedLook::Tell { since };
@@ -641,8 +656,20 @@ fn look_through(
             .timeout
             .map(|timeout| super::time_left(clock.since(started), timeout))
     };
+    let replacement_started = clock.monotonic();
+    let mut retrying_unrecorded = false;
     loop {
-        let error = match source.look(after, options.role, look_limit(remaining())) {
+        let mut limit = look_limit(remaining());
+        if retrying_unrecorded {
+            limit = limit.min(
+                super::queue_service::REPLACEMENT_WAIT
+                    .saturating_sub(clock.since(replacement_started)),
+            );
+            if let Some(remaining) = remaining() {
+                limit = limit.min(remaining);
+            }
+        }
+        let error = match source.look(after, options.role, limit) {
             Ok(look) => return Ok(Looked::Look(look)),
             Err(error) => error,
         };
@@ -651,7 +678,16 @@ fn look_through(
         let told = outages
             .zip(recorded)
             .is_some_and(|(outages, since)| outages.told(options.role, since));
-        match failed_look(recorded, told, remaining(), options.interval) {
+        if recorded.is_none() && !source.unreachable(&error) {
+            return Err(error);
+        }
+        match failed_look(
+            recorded,
+            told,
+            remaining(),
+            options.interval,
+            clock.since(replacement_started),
+        ) {
             FailedLook::Fail => return Err(error),
             FailedLook::Tell { since } => {
                 if let Some(Err(told)) = outages.map(|outages| outages.tell(options.role, since)) {
@@ -665,6 +701,13 @@ fn look_through(
                     let _ = record.heartbeat(clock.now());
                 }
                 source.wait_out(wait);
+                retrying_unrecorded = recorded.is_none();
+                if retrying_unrecorded
+                    && (clock.since(replacement_started) >= super::queue_service::REPLACEMENT_WAIT
+                        || remaining().is_some_and(|left| left.is_zero()))
+                {
+                    return Err(error);
+                }
             }
         }
     }
@@ -1262,8 +1305,8 @@ mod tests {
     }
 
     /// ADR-t3102-3 decision 2: a look the service did not answer ends the
-    /// watch when no outage is recorded, and the first time a watch of its
-    /// role meets a recorded one (to be noted as told); after that the
+    /// watch after the grace period when no outage is recorded, and the
+    /// first time a watch of its role meets a recorded one (to be noted as told); after that the
     /// watch waits it out, the interval or what is left of its timeout,
     /// until the timeout passes, and with no timeout it waits on.
     #[test]
@@ -1272,34 +1315,90 @@ mod tests {
         let interval = Duration::from_secs(5);
         for told in [false, true] {
             assert_eq!(
-                failed_look(None, told, Some(second), interval),
+                failed_look(None, told, Some(second), interval, Duration::from_secs(30)),
                 FailedLook::Fail
             );
         }
         assert_eq!(
-            failed_look(Some(100), false, Some(Duration::ZERO), interval),
+            failed_look(
+                Some(100),
+                false,
+                Some(Duration::ZERO),
+                interval,
+                Duration::from_secs(30)
+            ),
             FailedLook::Tell { since: 100 }
         );
         assert_eq!(
-            failed_look(Some(100), false, None, interval),
+            failed_look(Some(100), false, None, interval, Duration::from_secs(30)),
             FailedLook::Tell { since: 100 }
         );
         assert_eq!(
-            failed_look(Some(100), true, Some(60 * second), interval),
+            failed_look(
+                Some(100),
+                true,
+                Some(60 * second),
+                interval,
+                Duration::from_secs(30)
+            ),
             FailedLook::Wait(interval)
         );
         assert_eq!(
-            failed_look(Some(100), true, Some(second), interval),
+            failed_look(
+                Some(100),
+                true,
+                Some(second),
+                interval,
+                Duration::from_secs(30)
+            ),
             FailedLook::Wait(second)
         );
         assert_eq!(
-            failed_look(Some(100), true, None, interval),
+            failed_look(Some(100), true, None, interval, Duration::from_secs(30)),
             FailedLook::Wait(interval)
         );
         assert_eq!(
-            failed_look(Some(100), true, Some(Duration::ZERO), interval),
+            failed_look(
+                Some(100),
+                true,
+                Some(Duration::ZERO),
+                interval,
+                Duration::from_secs(30)
+            ),
             FailedLook::WaitedOut { since: 100 }
         );
+    }
+
+    /// Unrecorded replacement failures wait only within both budgets.
+    #[test]
+    fn an_unrecorded_outage_waits_within_the_replacement_and_watch_deadlines() {
+        let second = Duration::from_secs(1);
+        for told in [false, true] {
+            assert_eq!(
+                failed_look(None, told, None, 5 * second, second),
+                FailedLook::Wait(5 * second)
+            );
+            assert_eq!(
+                failed_look(None, told, None, 5 * second, 29 * second),
+                FailedLook::Wait(second)
+            );
+            assert_eq!(
+                failed_look(None, told, None, 5 * second, 30 * second),
+                FailedLook::Fail
+            );
+            assert_eq!(
+                failed_look(None, told, None, 5 * second, 31 * second),
+                FailedLook::Fail
+            );
+            assert_eq!(
+                failed_look(None, told, Some(second), 5 * second, second),
+                FailedLook::Wait(second)
+            );
+            assert_eq!(
+                failed_look(None, told, Some(Duration::ZERO), 5 * second, second),
+                FailedLook::Fail
+            );
+        }
     }
 
     /// A clock stopped at its instant: a watch with no timeout never reads
@@ -1336,6 +1435,7 @@ mod tests {
         looks: std::sync::Mutex<std::collections::VecDeque<Option<i64>>>,
         told: std::sync::Mutex<Option<i64>>,
         waits: std::sync::Mutex<Vec<Duration>>,
+        clock: Option<std::sync::Arc<super::super::heavy_reads::tests::TestClock>>,
     }
 
     impl Outages {
@@ -1344,6 +1444,7 @@ mod tests {
                 looks: std::sync::Mutex::new(looks.iter().copied().collect()),
                 told: std::sync::Mutex::new(Some(told)),
                 waits: std::sync::Mutex::default(),
+                clock: None,
             }
         }
 
@@ -1353,6 +1454,10 @@ mod tests {
     }
 
     impl WatchSource for Outages {
+        fn unreachable(&self, error: &anyhow::Error) -> bool {
+            error.downcast_ref::<Down>().is_some()
+        }
+
         fn look(
             &self,
             after: Option<EventId>,
@@ -1382,12 +1487,18 @@ mod tests {
 
         fn wait_out(&self, duration: Duration) {
             self.waits.lock().unwrap().push(duration);
+            if let Some(clock) = &self.clock {
+                clock.advance(duration);
+            }
         }
     }
 
     impl OutageNotices for Outages {
         fn recorded(&self, error: &anyhow::Error) -> Option<i64> {
-            error.downcast_ref::<Down>().map(|down| down.0)
+            error
+                .downcast_ref::<Down>()
+                .filter(|down| down.0 != 0)
+                .map(|down| down.0)
         }
         fn told(&self, role: Option<SessionRole>, since: i64) -> bool {
             role == Some(SessionRole::Inbox) && *self.told.lock().unwrap() == Some(since)
@@ -1396,6 +1507,66 @@ mod tests {
             assert_eq!(role, Some(SessionRole::Inbox));
             *self.told.lock().unwrap() = Some(since);
             Ok(())
+        }
+    }
+
+    #[test]
+    fn an_unrecorded_outage_is_retried_until_the_service_answers() {
+        let clock = super::super::heavy_reads::tests::TestClock::still();
+        let options = WatchOptions {
+            after: Some(EventId::new(7)),
+            timeout: Some(Duration::from_secs(10)),
+            interval: Duration::from_secs(1),
+            role: Some(SessionRole::Inbox),
+        };
+        let source = Outages::new(100, &[Some(0), Some(0), None]);
+        let result = look_through(
+            &source,
+            clock.as_ref(),
+            &mut None,
+            &options,
+            clock.monotonic(),
+            options.after,
+        )
+        .unwrap();
+        assert!(matches!(result, Looked::Look(look) if look.cursor == EventId::new(7)));
+        assert_eq!(*source.waits.lock().unwrap(), [Duration::from_secs(1); 2]);
+        assert_eq!(*source.told.lock().unwrap(), Some(100));
+    }
+
+    #[test]
+    fn an_unrecorded_outage_ends_at_the_shorter_deadline_without_an_extra_look() {
+        for (timeout, attempts, waits) in [
+            (None, 6, vec![Duration::from_secs(5); 6]),
+            (
+                Some(Duration::from_secs(1)),
+                1,
+                vec![Duration::from_secs(1)],
+            ),
+            (Some(Duration::ZERO), 1, vec![]),
+        ] {
+            let clock = super::super::heavy_reads::tests::TestClock::still();
+            let mut source = Outages::new(100, &[Some(0); 7]);
+            source.clock = Some(clock.clone());
+            let options = WatchOptions {
+                after: Some(EventId::new(7)),
+                timeout,
+                interval: Duration::from_secs(5),
+                role: Some(SessionRole::Inbox),
+            };
+            let error = look_through(
+                &source,
+                clock.as_ref(),
+                &mut None,
+                &options,
+                clock.monotonic(),
+                options.after,
+            )
+            .map(|_| ())
+            .unwrap_err();
+            assert_eq!(error.downcast_ref::<Down>().map(|down| down.0), Some(0));
+            assert_eq!(source.left(), 7 - attempts);
+            assert_eq!(*source.waits.lock().unwrap(), waits);
         }
     }
 

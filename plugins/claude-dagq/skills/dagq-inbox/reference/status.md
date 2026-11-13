@@ -7,7 +7,7 @@ Read this when what `status`, `watch` or `show` says, or what to do about an att
 What each part of the output holds: `"$DAGQ" status --help`. What to do with it:
 
 - No supervisor serves the queue, or the only one is stale (died or hangs): `up` on the person's word; orphaned runs go through the `dagq-recover` skill, one run at a time. A stale one whose process is still alive is not replaced: report it and let the person stop that process (`down --force` if it is the only one).
-- `status` fails as `unreachable` when the queue's service does not answer: the queue cannot be read, not that nothing waits. Handle it as `watch.md` says for a watch.
+- `status` retries reads through a short service replacement for up to 30 seconds, then fails as `unreachable` when the queue's service does not answer: the queue cannot be read, not that nothing waits. Handle it as `watch.md` says for a watch.
 - Count the runs holding a slot, waiting to land and waiting for a person from the counts `status` gives, never from the number of runs listed.
 - `inbox_guardrail` names the newest inbox's `provider`, where it was chosen (`source`) and the model asked for. The inbox opened without its guardrail (`guardrail` `false`), or a Codex inbox whose guardrail hook has not run (`guardrail_by` `pre_tool_use` with `reached` still `false` after shell commands ran: `claude-and-codex.md`): tell the person and, after your handoff, have them reopen it with `dagq inbox` (`dagq-recover`'s `reference/up-down.md`, "Open the inbox again"). A `claude` or `codex` typed again in the inbox's terminal has no guardrail whatever this says.
 - No watch runs: start the one of `watch.md`. When none ran for long, tell the person: asks opened meanwhile reached nobody.

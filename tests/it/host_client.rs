@@ -99,24 +99,16 @@ fn unauthenticated(queue: &Queue) -> Vec<Value> {
 fn the_user_the_inbox_and_a_planner_go_through_the_service_and_never_open_the_db() {
     let queue = queue();
     let task = queue.run.task_id().to_string();
-    // A queue no service ever ran for is not opened either: each command
-    // says no service answers, `status` and `watch` too, and nothing is
-    // written (ADR-t3105-1 decision 3).
-    for args in [
-        &["show", task.as_str()][..],
-        &["status"],
-        &["watch", "--timeout", "30"],
-        &["note", "--task", &task, "--text", "unserved"],
-    ] {
-        let output = unserved(&queue.db, args);
-        assert_eq!(code(&output), "unreachable", "{args:?}");
-        assert!(
-            printed(&output)["error"]
-                .as_str()
-                .unwrap()
-                .contains("dagq up")
-        );
-    }
+    // One read represents a queue no service ever ran for: it is not
+    // opened instead, and the error names how to start its service.
+    let output = unserved(&queue.db, &["show", &task]);
+    assert_eq!(code(&output), "unreachable");
+    assert!(
+        printed(&output)["error"]
+            .as_str()
+            .unwrap()
+            .contains("dagq up")
+    );
     assert!(events(&queue.db, "observation").is_empty());
     let missing = unserved(&queue.dir().join("missing.db"), &["list"]);
     assert!(!missing.status.success());
@@ -229,32 +221,26 @@ fn the_user_the_inbox_and_a_planner_go_through_the_service_and_never_open_the_db
     let woken = printed(&watched);
     assert_eq!(woken["events"][0]["kind"], "ask_opened", "{woken}");
 
-    // With the service stopped, nothing it answers opens the DB instead:
-    // each says the service does not answer, and `watch` says so at once.
+    // One write and the inbox watch represent the stopped service:
+    // neither opens the DB instead, even after the replacement wait.
     assert!(invoke(&queue.db, &["service", "stop"]).status.success());
-    for args in [
-        &["show", task.as_str()][..],
-        &["status"],
-        &["list"],
-        &["note", "--task", &task, "--text", "lost"],
-    ] {
-        let output = invoke(&queue.db, args);
-        assert_eq!(code(&output), "unreachable", "{args:?}");
-        assert!(
-            printed(&output)["error"]
-                .as_str()
-                .unwrap()
-                .contains("dagq up"),
-            "{args:?}"
-        );
-    }
+    let output = invoke(&queue.db, &["note", "--task", &task, "--text", "lost"]);
+    assert_eq!(code(&output), "unreachable");
+    assert!(
+        printed(&output)["error"]
+            .as_str()
+            .unwrap()
+            .contains("dagq up")
+    );
     let started = Instant::now();
     let watched = invoke_with(
         &as_inbox,
         &queue.db,
         &["watch", "--role", "inbox", "--until-attention"],
     );
-    assert!(started.elapsed() < Duration::from_secs(20));
+    let took = started.elapsed();
+    assert!(took >= Duration::from_secs(30), "{took:?}");
+    assert!(took < Duration::from_secs(45), "{took:?}");
     assert_eq!(code(&watched), "unreachable");
     // Nothing reached the queue while the service was gone.
     assert!(
@@ -431,8 +417,8 @@ fn a_watch_of_a_service_whose_backlog_is_full_is_unreachable_within_its_timeout(
 }
 
 /// A service that takes the call and never answers holds `status` no
-/// longer than the probe's wait: the service has to answer `hello` before
-/// the look is sent (ADR-t3102-3 decision 2).
+/// longer than the replacement wait: hello probes share the status
+/// deadline, and an unanswered status still returns unreachable.
 #[test]
 fn a_status_of_a_service_that_never_answers_is_unreachable_at_once() {
     let queue = queue();
@@ -444,7 +430,8 @@ fn a_status_of_a_service_that_never_answers_is_unreachable_at_once() {
     let status = unserved(&queue.db, &["status"]);
     let took = started.elapsed();
     assert_eq!(code(&status), "unreachable");
-    assert!(took < Duration::from_secs(10), "{took:?}");
+    assert!(took >= Duration::from_secs(29), "{took:?}");
+    assert!(took < Duration::from_secs(45), "{took:?}");
     let _ = fs::remove_file(&socket);
 }
 

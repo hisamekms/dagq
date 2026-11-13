@@ -12,6 +12,7 @@ related:
   - adr-t3102-1
   - adr-t3102-2
   - adr-t3102-3
+  - adr-t4627-1
   - adr-t3105-1
   - adr-t3745-1
   - design-queue-service
@@ -139,7 +140,11 @@ proposalの持ち主は環境の名乗りでなくprincipalから決める（`qu
 
 ## 届かないとき
 
-statusとwatchは届かないとき空の答えに替えず、DBへ戻らずに失敗する。
+clientは要求が届かなかったと分かる失敗を読み書きとも送り直し、答えを読めず届いたか分からない失敗は読み取りだけを送り直す。
+送り直しを始められる期間を過ぎても、送った要求の応答期限は元の呼び出しの残り時間を保つ。
+statusも読み取りとして、serviceの入れ替えの短い不在を上限30秒まで待つ（[ADR-t4627-1](../adr/2026-11-13-t4627-1-wait-through-short-queue-service-replacements.md)）。
+watchは不在の記録が無い届かないlookを同じ上限まで待ってやり直し、timeoutがあれば残りの時間で頭打ちにする。
+上限を過ぎたstatusとwatchは届かないことを空の答えに替えず、DBへ戻らずに失敗する。
 停止の記録があれば次の手とともにerrorへ添える（[落ちたときの知らせ](queue-service.md#落ちたときの知らせadr-t3102-3決定12)）。
 watchは同じ停止をroleごとに1回だけ返し、その後は停止を待つので、停止中の待ちを通常の空の答えと混同しない（`application::watch::look_through`）。
-待ちの時間の境界は`application::watch::look_limit`、statusの接続と応答の期限は`infrastructure::queue_service::Client::look_within`を読む。
+送り直しの判断は`infrastructure::queue_service::retry_delay`、watchの待ちは`application::watch::failed_look`、statusの接続と応答の期限は`infrastructure::queue_service::Client::look_within`を読む。

@@ -1580,6 +1580,12 @@ impl crate::application::watch::OutageNotices for ServiceWatch<'_> {
 }
 
 impl crate::application::watch::WatchSource for ServiceWatch<'_> {
+    fn unreachable(&self, error: &anyhow::Error) -> bool {
+        error
+            .downcast_ref::<crate::infrastructure::queue_service::ClientFailure>()
+            .is_some_and(|failure| failure.code == "unreachable")
+    }
+
     fn look(
         &self,
         after: Option<crate::domain::EventId>,
@@ -1602,11 +1608,7 @@ fn watch_poll(
     role: Option<SessionRole>,
     limit: std::time::Duration,
 ) -> Result<crate::application::watch::WatchLook> {
-    let answer = client.call_within(
-        crate::domain::queue_service::UseCase::WatchPoll,
-        watch_poll_params(after, role),
-        limit,
-    )?;
+    let answer = client.watch_poll_within(watch_poll_params(after, role), limit)?;
     serde_json::from_value(answer).context("the queue service's answer to watch_poll")
 }
 
@@ -1623,7 +1625,7 @@ pub fn watch_through_relay(
     options: &crate::application::watch::WatchOptions,
 ) -> Result<Value> {
     let clock = crate::infrastructure::clock::system().clock;
-    let call = |use_case, params, limit| client.call_within(use_case, params, limit);
+    let call = |_use_case, params, limit| client.watch_poll_within(params, limit);
     watch_relayed(&call, clock.as_ref(), options)
 }
 
@@ -1648,6 +1650,12 @@ struct RelayWatch<'a> {
 }
 
 impl crate::application::watch::WatchSource for RelayWatch<'_> {
+    fn unreachable(&self, error: &anyhow::Error) -> bool {
+        error
+            .downcast_ref::<crate::infrastructure::queue_service::ClientFailure>()
+            .is_some_and(|failure| failure.code == "unreachable")
+    }
+
     fn look(
         &self,
         after: Option<crate::domain::EventId>,
