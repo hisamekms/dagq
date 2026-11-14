@@ -102,7 +102,9 @@ fn finding_change(log: &mut Log, finding: i64, from: &str, to: &str, secs: i64) 
 /// task when the range names it: the units add none.)
 fn named_units(log: &mut Log, settled: usize) {
     for k in 0..settled {
-        let t = 11 * DAY + i64::try_from(k).unwrap() * 139 * DAY / i64::try_from(settled).unwrap();
+        let t = 11 * DAY
+            + i64::try_from(k).unwrap() * super::ledger_earlier::units_span(139 * DAY)
+                / i64::try_from(settled).unwrap();
         let unit = i64::try_from(k).unwrap();
         let priority = if k % 2 == 0 { "high" } else { "normal" };
         let after = if k == 0 {
@@ -474,7 +476,13 @@ fn named_cases(log: &mut Log) {
 /// a whole number of summaries ([`SUMMARY_EVERY`]), so that the summary
 /// before the range is as far from it whatever the units.
 pub(crate) fn named_history(settled: usize) -> Log {
-    let mut log = history(30, 0);
+    named_history_with(settled, 0)
+}
+
+/// [`named_history`] with `member_changes` changes of the plan of task 66
+/// ([`history`]'s, of a proposal the range names).
+pub(crate) fn named_history_with(settled: usize, member_changes: usize) -> Log {
+    let mut log = history(30, member_changes);
     let mut added = Log::default();
     named_cases(&mut added);
     named_units(&mut added, settled);
@@ -528,7 +536,7 @@ pub(crate) fn named_history(settled: usize) -> Log {
     renumbered(events)
 }
 
-fn renumbered(mut events: Vec<RunEvent>) -> Log {
+pub(crate) fn renumbered(mut events: Vec<RunEvent>) -> Log {
     let ids: std::collections::HashMap<i64, i64> = events
         .iter()
         .enumerate()
@@ -628,6 +636,13 @@ impl LedgerWindowRead for Counted<'_> {
         cursor: EventId,
     ) -> Result<WindowRead<crate::application::CursorRecordTime>> {
         self.snapshot.cursor_record_time(cursor)
+    }
+    fn cursor_record_time_through(
+        &self,
+        cursor: EventId,
+        end_ms: i64,
+    ) -> Result<WindowRead<crate::application::CursorRecordTime>> {
+        self.snapshot.cursor_record_time_through(cursor, end_ms)
     }
     fn forecast_events(&self, start_ms: i64, end_ms: i64) -> Result<WindowRead<Vec<RunEvent>>> {
         self.snapshot.forecast_events(start_ms, end_ms)
@@ -780,13 +795,22 @@ pub(crate) fn counted_window(
     tx: &impl SqlRead,
     query: &WindowQuery,
 ) -> Result<(LedgerWindow, Returned)> {
+    counted(tx, |snapshot| ledger_window_in(snapshot, query))
+}
+
+/// What `read` gives of a snapshot of `tx`, with what the store returned
+/// to it.
+pub(crate) fn counted<T>(
+    tx: &impl SqlRead,
+    read: impl FnOnce(&dyn LedgerWindowRead) -> Result<T>,
+) -> Result<(T, Returned)> {
     view::with_snapshot(tx, |snapshot| {
         let counted = Counted {
             snapshot,
             returned: Cell::new(Returned::default()),
         };
-        let window = ledger_window_in(&counted, query)?;
-        Ok((window, counted.returned.get()))
+        let taken = read(&counted)?;
+        Ok((taken, counted.returned.get()))
     })
 }
 
@@ -796,7 +820,7 @@ const HOST: Host = Host {
     rust_toolchain: false,
 };
 
-fn areas() -> AreaMap {
+pub(crate) fn areas() -> AreaMap {
     AreaMap::new(vec![
         ("core".to_owned(), vec!["src/c*.rs".to_owned()]),
         ("base".to_owned(), vec!["src/base.rs".to_owned()]),
@@ -1154,7 +1178,7 @@ pub fn ledger_queue_named_with_only_ci_after_a_future_main_event<
     ledger_queue_named_ci_only_with(open, 30, 300)
 }
 
-fn ci_only_history(settled: usize) -> Log {
+pub(crate) fn ci_only_history(settled: usize) -> Log {
     let mut log = named_history(30);
     observed(&mut log, "future-ci-only", NOW - T0 + DAY);
     for n in 0..settled {
@@ -1182,7 +1206,7 @@ pub(crate) fn ledger_queue_named_ci_only_with<S: ContractStore, F: Fn() -> Resul
     compare_named_histories(open, small, large, ci_only_history)
 }
 
-fn clock_history(settled: usize) -> Log {
+pub(crate) fn clock_history(settled: usize) -> Log {
     let mut log = named_history(settled);
     let first = log
         .events

@@ -13,7 +13,7 @@ use crate::domain::{
 use std::cell::Cell;
 const MIN: i64 = 60_000;
 const T0: i64 = 1_790_812_800_000;
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Log {
     events: Vec<RunEvent>,
     next_run: i64,
@@ -1582,4 +1582,78 @@ fn forecasts_seek_the_first_visible_target_event_when_no_previous_end_exists() {
             })
             .unwrap();
     }
+}
+
+/// The cursor's time of the events up to a window's end: an event a clock
+/// ahead of the DB's wrote past the end at or before the cursor is passed
+/// over, by each of the three paths, as the window's events are taken (of a
+/// time at or before its end); an end before every event at or before the
+/// cursor is no time.
+#[test]
+fn a_cursor_s_time_through_an_end_passes_over_a_clock_ahead() {
+    let end = T0 + 1_000 * MIN;
+    let through = |events: &[RunEvent], cursor: EventId| {
+        events
+            .iter()
+            .filter(|e| e.id <= cursor)
+            .filter_map(|e| crate::domain::stats::timestamp_millis(&e.created_at))
+            .filter(|ms| *ms <= end)
+            .max()
+    };
+    let mut log = Log::default();
+    log.mark("in time", None, T0 + 100 * MIN);
+    log.mark("ahead of the DB", None, T0 + 5_000 * MIN);
+    let cursor = log.mark("after it", None, T0 + 200 * MIN);
+    let queue = save(&log, &[]);
+    queue
+        .ledger_read_snapshot(&mut |read| {
+            let answer = complete(read.cursor_record_time_through(cursor, end)?);
+            assert_eq!(answer.path, CursorTimePath::Recent);
+            assert_eq!(Some(answer.millis), through(&whole(read), cursor));
+            assert_eq!(answer.millis, T0 + 200 * MIN);
+            let ahead = complete(read.cursor_record_time(cursor)?);
+            assert_eq!(ahead.millis, T0 + 5_000 * MIN);
+            let none = complete(read.cursor_record_time_through(cursor, T0 + 50 * MIN)?);
+            assert_eq!(none.millis, i64::MIN);
+            Ok(())
+        })
+        .unwrap();
+    // More than the walk's candidates after the cursor, up to the end: the
+    // aggregate of those at or before the cursor and the end.
+    for n in 0..150 {
+        log.mark("after cursor", None, T0 + (300 + n) * MIN);
+    }
+    let queue = save(&log, &[]);
+    queue
+        .ledger_read_snapshot(&mut |read| {
+            let answer = complete(read.cursor_record_time_through(cursor, end)?);
+            assert_eq!(answer.path, CursorTimePath::Aggregate);
+            assert_eq!(Some(answer.millis), through(&whole(read), cursor));
+            Ok(())
+        })
+        .unwrap();
+    // The latest at or before the cursor and the end hidden from the
+    // snapshot: the walk past it.
+    let mut hidden_log = log.clone();
+    let hidden = hidden_log.claim(Some(88), attributes("v9", 9), T0 + 900 * MIN);
+    let late = hidden_log.mark("late cursor", None, T0 + 240 * MIN);
+    let hidden_ids: Vec<_> = hidden_log
+        .events
+        .iter()
+        .filter(|e| e.run_id.as_ref() == Some(&hidden.1))
+        .map(|e| e.id)
+        .collect();
+    for n in 0..150 {
+        hidden_log.mark("newer", None, T0 + (600 + n) * MIN);
+    }
+    let queue = save(&hidden_log, &hidden_ids);
+    queue
+        .ledger_read_snapshot(&mut |read| {
+            let answer = complete(read.cursor_record_time_through(late, end)?);
+            assert_eq!(answer.path, CursorTimePath::VisibleWalk);
+            assert_eq!(Some(answer.millis), through(&whole(read), late));
+            assert_eq!(answer.millis, T0 + 449 * MIN);
+            Ok(())
+        })
+        .unwrap();
 }

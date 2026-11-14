@@ -65,6 +65,9 @@ pub struct Named {
     linked: BTreeSet<i64>,
     /// The tasks of each forecast's snapshot of the queue's records.
     snapshots: Vec<Vec<i64>>,
+    /// The tasks whose task rows the read holds, whole: a seek of what is
+    /// named takes their records of no run from those rows.
+    held: BTreeSet<i64>,
 }
 
 fn field(event: &RunEvent, key: &str) -> Option<i64> {
@@ -80,6 +83,9 @@ impl Named {
             return;
         }
         self.tasks.extend(row.task_id.map(|task| task.as_i64()));
+        if row.kind == LedgerKind::Task {
+            self.held.extend(row.task_id.map(|task| task.as_i64()));
+        }
         for event in &row.records {
             self.tasks.extend(event.task_id.map(|task| task.as_i64()));
             self.reviews.extend(field(event, "plan_review_id"));
@@ -309,6 +315,12 @@ impl Named {
     /// Whether a member task `task` is read whole instead (named itself).
     pub fn names_task(&self, task: i64) -> bool {
         self.tasks.contains(&task)
+    }
+
+    /// Whether the read holds the task row of `task`, whole: its records
+    /// of no run are that row's, and only its runs' are sought.
+    pub fn holds_task(&self, task: i64) -> bool {
+        self.held.contains(&task)
     }
 }
 

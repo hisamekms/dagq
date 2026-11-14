@@ -44,30 +44,40 @@ fn queue_wide(kind: &RecordedKind) -> bool {
         || kind.is_in(findings::KINDS)
 }
 
+/// The kinds of no run that are a session's or a job's whatever they name
+/// ([`of_session`]): a span's, the observer's, a throughput review's, a
+/// goal review's rearming and a job of no run its supervisor stopped.
+pub const SESSION_KINDS: [EventKind; 11] = [
+    EventKind::SessionOpened,
+    EventKind::SessionClosed,
+    EventKind::SessionTurns,
+    EventKind::SessionTokens,
+    EventKind::ObserveStarted,
+    EventKind::ObserveFinished,
+    EventKind::ThroughputReviewStarted,
+    EventKind::ThroughputReviewFinished,
+    EventKind::ThroughputReviewReported,
+    EventKind::GoalReviewRearmed,
+    EventKind::HeadlessJobStopped,
+];
+
+/// The payload keys an event of no run of any other kind is a session's
+/// or a job's by ([`of_session`]), when one is there and not null: a
+/// runtime planner's, a plan review's and a goal review's id. A store
+/// seeks those of no run that may be a session's by these and
+/// [`SESSION_KINDS`], and keeps the ones [`owner`] gives to one.
+pub const SESSION_KEYS: [&str; 3] = ["planner_id", "plan_review_id", "goal_review_id"];
+
 /// Whether an event of no run is a session's or a job's: a span's, a
 /// runtime planner's (it names its `planner_id`), a plan review's or a
 /// goal review's (they name their id), the observer's or a throughput
 /// review's, or a job of no run its supervisor stopped.
 fn of_session(event: &RunEvent) -> bool {
-    let kind = &event.kind;
     let job = JobRef::of(&event.payload);
-    kind.is_in(&[
-        EventKind::SessionOpened,
-        EventKind::SessionClosed,
-        EventKind::SessionTurns,
-        EventKind::SessionTokens,
-    ]) || SpanRef::of(event).planner_id.is_some()
+    event.kind.is_in(&SESSION_KINDS)
+        || SpanRef::of(event).planner_id.is_some()
         || job.plan_review_id.is_some()
         || job.goal_review_id.is_some()
-        || kind.is_in(&[
-            EventKind::ObserveStarted,
-            EventKind::ObserveFinished,
-            EventKind::ThroughputReviewStarted,
-            EventKind::ThroughputReviewFinished,
-            EventKind::ThroughputReviewReported,
-        ])
-        || *kind == EventKind::GoalReviewRearmed
-        || *kind == EventKind::HeadlessJobStopped
 }
 
 /// The kind of row `event` is a record of: the queue's for its own kinds,

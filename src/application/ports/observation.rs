@@ -1281,13 +1281,63 @@ pub fn ledger_window_in(
     snapshot: &dyn LedgerWindowRead,
     query: &WindowQuery,
 ) -> Result<LedgerWindow> {
+    ledger_window_of(snapshot, query, 0)
+}
+
+/// [`ledger_window_in`] with room for `expected` events
+/// ([`LedgerStore::ledger_events_expected`], read before the snapshot, for
+/// a read of every row; 0 for a read from a time).
+pub fn ledger_window_of(
+    snapshot: &dyn LedgerWindowRead,
+    query: &WindowQuery,
+    expected: usize,
+) -> Result<LedgerWindow> {
     use crate::domain::ledger::window::WindowRows;
     let reads = OmittedReads(snapshot);
     let edges = Edges(Some(&reads));
-    let read = window_rows(snapshot, query, WindowRows::new(query, 0), &edges)?;
+    let read = window_rows(snapshot, query, WindowRows::new(query, expected), &edges)?;
     let mut window = read.into_window(query);
     crate::domain::ledger::window::bounds::answer(&mut window, query, &edges.now()?)?;
     Ok(window)
+}
+
+/// The time of the event id cursor `cursor` of `snapshot` before its window
+/// is read, as a window ending at `end_ms` answers its
+/// [`crate::domain::ledger::window::bounds::Bound::TimeThrough`]: the latest
+/// time at or before `end_ms` of the visible events at or before it
+/// ([`LedgerWindowRead::cursor_record_time_through`]; the window holds no
+/// event past its end) with that of the omitted queue events of (C, S]
+/// through it (one past `end_ms` taken as the latest at or before
+/// `end_ms`). `Some(None)` when no event is at or before it; `None` when the
+/// snapshot cannot say ([`record_time`]). A caller that reads a window by
+/// this time takes the window's own answer as the time, and reads again if
+/// that answer does not stand where the read assumed.
+pub fn cursor_time_in(
+    snapshot: &dyn LedgerWindowRead,
+    cursor: EventId,
+    end_ms: i64,
+) -> Result<Option<Option<i64>>> {
+    let Some(of_records) = record_time(snapshot.cursor_record_time_through(cursor, end_ms)?) else {
+        return Ok(None);
+    };
+    let reads = OmittedReads(snapshot);
+    let edges = OmittedEdges::of(&reads)?;
+    let omitted = match edges.max_ms_through(cursor)? {
+        Some(ms) if ms > end_ms => edges.at_or_before_through(end_ms, cursor)?.1,
+        ms => ms,
+    };
+    Ok(Some(of_records.max(omitted)))
+}
+
+/// What a read of an event id cursor's time of the records gives: its time
+/// (`Some(None)` when no event is at or before it), or `None` when the
+/// snapshot cannot say: no such read, its candidates ran out, or a time off
+/// the record's form.
+pub fn record_time(read: WindowRead<CursorRecordTime>) -> Option<Option<i64>> {
+    match read {
+        WindowRead::Complete(found) => Some((found.millis != i64::MIN).then_some(found.millis)),
+        WindowRead::Unavailable | WindowRead::Exhausted | WindowRead::OffTimeForm => None,
+    }
 }
 
 /// The window `query` asks of `store` read as [`LedgerStore::ledger_window`]
@@ -1599,6 +1649,23 @@ pub trait LedgerWindowRead {
         Ok(WindowRead::Unavailable)
     }
 
+    /// [`Self::cursor_record_time`] of the visible events of a time at or
+    /// before `end_ms` alone, the events a window ending at `end_ms` holds
+    /// (one of a clock ahead of the DB's past it is none of them), by the
+    /// same three paths over the time index cut at `end_ms`: the K latest
+    /// at or before it, else `MAX(created_at)` of those at or before the
+    /// cursor and `end_ms` when a visible event has it, else the walk past
+    /// invisible ones. Reads as few events as [`Self::cursor_record_time`],
+    /// however long the history before the cursor.
+    fn cursor_record_time_through(
+        &self,
+        cursor: EventId,
+        end_ms: i64,
+    ) -> Result<WindowRead<CursorRecordTime>> {
+        let _ = (cursor, end_ms);
+        Ok(WindowRead::Unavailable)
+    }
+
     /// Two-stage forecast input for finishes in `(start_ms, end_ms]`.
     /// First reads visible task completed/canceled and goal_closed events;
     /// for each target seeks its previous visible end in descending id, or
@@ -1739,13 +1806,17 @@ pub trait LedgerWindowRead {
 
     /// Additional queue records sought by the range's names: each named
     /// supervisor's start and last life event of each kind before S; each
-    /// mark's retraction; snapshots targeting its tasks; openings and answers
+    /// mark's retraction; of each task's or goal's finish from S, the
+    /// snapshots naming it after its end before that finish (a score takes
+    /// a target's first finish after a snapshot), with the second stage of
+    /// [`Self::forecast_events`] from them; openings and answers
     /// of asks named by answers or answer applications in the range, and asks
     /// still open. Waits, samples and failures use promise 6's
     /// range and last row before S; stall config's last such row and its
     /// range give the last at E. Reads grow with the range and these names,
-    /// except marks between a snapshot and S, which grow with the target's
-    /// open period. Missing or unfilled views, a stale or absent generation,
+    /// except a finish's snapshots and the marks between them and S, which
+    /// grow with that target's open period alone (not with the periods it
+    /// ended before). Missing or unfilled views, a stale or absent generation,
     /// or undecidable visibility keep full pages. `None` reports that the
     /// supplemental read cannot be judged; the caller restores full pages.
     fn named_queue_records(

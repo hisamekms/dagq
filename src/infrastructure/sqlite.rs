@@ -3353,6 +3353,26 @@ mod store_contract_tests {
         });
     }
     #[test]
+    fn ledger_report_answers_as_every_row() {
+        contract(|open| store_contract::ledger_report_answers_as_every_row(&open));
+    }
+    #[test]
+    fn ledger_report_past_the_queue_and_the_clocks() {
+        contract(|open| store_contract::ledger_report_past_the_queue_and_the_clocks(&open));
+    }
+    #[test]
+    fn ledger_report_keeps_an_old_snapshot() {
+        contract(|open| store_contract::ledger_report_keeps_an_old_snapshot(&open));
+    }
+    #[test]
+    fn ledger_report_past_a_named_task_s_history() {
+        contract(|open| store_contract::ledger_report_past_a_named_task_s_history(&open));
+    }
+    #[test]
+    fn ledger_report_past_a_target_s_ends() {
+        contract(|open| store_contract::ledger_report_past_a_target_s_ends(&open));
+    }
+    #[test]
     fn all_cases_run_in_order_on_the_same_database() {
         contract(|open| store_contract::run(&open));
     }

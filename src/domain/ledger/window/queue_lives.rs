@@ -48,19 +48,29 @@ pub const LIFE_KINDS: &[&str] = &[
     "ask_answered",
 ];
 
-/// Keys the records and task rows of the range name.
+/// Keys the records of the range name. A forecast's snapshots are sought
+/// by the finishes from S instead, each one's period's
+/// ([`crate::application::LedgerWindowRead::named_queue_records`]).
 #[derive(Debug, Default)]
 pub struct Names {
     pub supervisors: BTreeSet<String>,
     pub asks: BTreeSet<Option<String>>,
     pub marks: BTreeSet<EventId>,
-    pub tasks: BTreeSet<i64>,
 }
 
 /// Match AskRef's key after an indexed lookup of its SQL aliases. SQL
 /// booleans and numbers can have the same scalar representation on SQLite.
 pub fn ask_matches(event: &crate::domain::RunEvent, key: &Option<String>) -> bool {
     &crate::domain::run::restore_payload::<crate::domain::run::AskRef>(&event.payload).key() == key
+}
+
+/// Whether the forecast's snapshot `event` forecasts the goal `goal`, as
+/// its score reads its goals.
+pub fn names_goal(event: &crate::domain::RunEvent, goal: i64) -> bool {
+    event.kind == EventKind::ForecastRecorded
+        && event.payload["goals"]
+            .as_array()
+            .is_some_and(|goals| goals.iter().any(|row| row["id"].as_i64() == Some(goal)))
 }
 
 impl Names {
@@ -124,15 +134,10 @@ impl WindowRows {
         self.take(row);
     }
 
-    /// Names for the queue seeks, from the records held and the task rows
-    /// that reach S. The last sample before S also names its supervisor.
+    /// Names for the queue seeks, from the records held. The last sample
+    /// before S also names its supervisor.
     pub fn queue_names(&self, from: &RowsFrom) -> Names {
         let mut names = Names::default();
-        for row in &self.rows {
-            if row.kind == super::LedgerKind::Task && !from.leaves_out(row) {
-                names.tasks.extend(row.task_id.map(|task| task.as_i64()));
-            }
-        }
         for event in &self.records {
             let reaches = crate::domain::stats::timestamp_millis(&event.created_at)
                 .is_none_or(|at| at >= from.ended_before_ms);
@@ -228,6 +233,34 @@ mod tests {
             BTreeSet::from([Some("81".into()), Some("82".into())])
         );
         assert_eq!(names.marks, BTreeSet::from([log.events[2].id]));
+    }
+    #[test]
+    fn a_snapshot_names_a_goal_by_its_goals_alone() {
+        let mut log = Log::default();
+        log.add(
+            None,
+            None,
+            "forecast_recorded",
+            serde_json::json!({"tasks": [{"id": 7}], "goals": [{"id": 3, "p50_secs": 60}]}),
+            1,
+        )
+        .add(
+            None,
+            None,
+            "forecast_recorded",
+            serde_json::json!({"tasks": [{"id": 3}]}),
+            2,
+        )
+        .add(
+            None,
+            None,
+            "mark_recorded",
+            serde_json::json!({"goals": [{"id": 3}]}),
+            3,
+        );
+        let named: Vec<bool> = log.events.iter().map(|e| names_goal(e, 3)).collect();
+        assert_eq!(named, [true, false, false]);
+        assert!(!names_goal(&log.events[0], 7));
     }
     #[test]
     fn forecast_claims_stay_out_of_slot_occupancy() {

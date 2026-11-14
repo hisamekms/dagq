@@ -43,6 +43,16 @@ fn named() -> Named {
 }
 
 #[test]
+fn only_a_task_row_read_is_held_and_a_run_row_names_its_task_alone() {
+    let mut named = named();
+    assert!(named.names_task(5) && !named.holds_task(5));
+    let mut row = LedgerRow::new(LedgerKind::Task, "6".into(), Some(TaskId::new(6)), "");
+    row.records = vec![event(4, Some(6), None, "task_priority_changed", json!({}))];
+    named.note_row(&row);
+    assert!(named.holds_task(6) && !named.holds_task(5));
+}
+
+#[test]
 fn the_rows_read_name_their_tasks_reviews_planners_and_proposals() {
     let named = named();
     assert_eq!(named.tasks(), &BTreeSet::from([5]));

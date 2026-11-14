@@ -180,7 +180,7 @@ pub(crate) fn values(store: &(impl LedgerStore + ?Sized), input: &Input) -> Vec<
         reason: Some("not drawn".into()),
         svg: None,
     };
-    let window = report::window_for(
+    let window = report::window(
         store,
         now,
         &setup,

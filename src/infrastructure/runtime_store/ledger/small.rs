@@ -296,6 +296,50 @@ impl<T: SqlRead> Reader<'_, T> {
             },
         })
     }
+    /// [`Self::cursor`] of the events of a time at or before `end` alone.
+    fn cursor_through(&self, cursor: EventId, end: i64) -> Read<CursorRecordTime> {
+        let end = marks::utc_text(end);
+        let (recent, _) = self.walk(
+            &self.table("events_by_time"),
+            "created_at >= '' AND created_at <= ?1",
+            "created_at DESC, id DESC",
+            sql_params![end.clone()],
+            |e| e.id <= cursor,
+        )?;
+        if let Some(e) = recent {
+            return Ok(CursorRecordTime {
+                millis: ms(&e),
+                path: CursorTimePath::Recent,
+            });
+        }
+        let at: Option<String> = SqlRead::query_row(
+            self.tx,
+            "SELECT MAX(created_at) FROM run_events WHERE id <= ?1 AND created_at <= ?2",
+            sql_params![cursor, end.clone()],
+            |r| r.get(0),
+        )
+        .map_err(anyhow::Error::from)?;
+        let Some(at) = at else {
+            return Ok(CursorRecordTime {
+                millis: i64::MIN,
+                path: CursorTimePath::Aggregate,
+            });
+        };
+        let event = self.first(
+            "events_by_time",
+            "created_at >= '' AND id <= ?1 AND created_at <= ?2",
+            "created_at DESC, id DESC",
+            sql_params![cursor, end],
+        )?;
+        Ok(CursorRecordTime {
+            millis: event.as_ref().map_or(i64::MIN, ms),
+            path: if event.as_ref().is_some_and(|e| e.created_at == at) {
+                CursorTimePath::Aggregate
+            } else {
+                CursorTimePath::VisibleWalk
+            },
+        })
+    }
     fn task_end(&self) -> String {
         format!(
             "kind = 'task_status_changed' AND {} IN ('completed', 'canceled')",
@@ -418,6 +462,71 @@ impl<T: SqlRead> Reader<'_, T> {
         )?;
         events.extend(self.forecast_of(&snapshots, end)?);
         Ok(dedup(events))
+    }
+    /// Each visible finish of a target at or after `from` in time, with
+    /// the period of the snapshots its score takes (a score takes each
+    /// target's first finish after a snapshot, by id): after the target's
+    /// end before that finish by id, through the finish. With no end
+    /// before it, a task's period has no start (its snapshots are sought by
+    /// the view of the snapshots' tasks) and a goal's starts at its first
+    /// event, as [`Self::forecast`]'s. As many as the finishes from `from`,
+    /// each one's previous end and a goal's first event.
+    fn finish_periods(&self, from: i64) -> Read<Vec<FinishPeriod>> {
+        let after = "created_at >= ?1";
+        let from = marks::utc_text(from);
+        let mut candidates = self.query(
+            &self.table("task_ends_by_time"),
+            &format!("{} AND task_id IS NOT NULL AND {after}", self.task_end()),
+            "id",
+            sql_params![from.clone()],
+            None,
+        )?;
+        candidates.extend(self.query(
+            &self.table("goal_ends_by_time"),
+            &format!("kind = 'goal_closed' AND goal_id IS NOT NULL AND {after}"),
+            "id",
+            sql_params![from],
+            None,
+        )?);
+        let mut periods = Vec::new();
+        for finish in self.visible(&candidates)? {
+            let (target, column, value, index, condition) = match (finish.goal_id, finish.task_id) {
+                (Some(goal), _) if finish.kind == EventKind::GoalClosed => (
+                    SnapshotTarget::Goal(goal.as_i64()),
+                    "goal_id",
+                    goal.to_sql_value(),
+                    "goal_ends_by_goal",
+                    "kind = 'goal_closed'".to_owned(),
+                ),
+                (_, Some(task)) if finish.kind != EventKind::GoalClosed => (
+                    SnapshotTarget::Task(task.as_i64()),
+                    "task_id",
+                    task.to_sql_value(),
+                    "task_ends_by_task",
+                    self.task_end(),
+                ),
+                _ => continue,
+            };
+            let previous = self.first(
+                index,
+                &format!("{column} = ?1 AND {condition} AND id < ?2"),
+                "id DESC",
+                &[value.clone(), finish.id.to_sql_value()],
+            )?;
+            let after = match (previous, target) {
+                (Some(previous), _) => previous.id.as_i64(),
+                (None, SnapshotTarget::Task(_)) => i64::MIN,
+                (None, SnapshotTarget::Goal(_)) => self
+                    .first("events_by_goal", "goal_id = ?1", "id", &[value])?
+                    .map_or(i64::MIN, |first| first.id.as_i64() - 1),
+            };
+            periods.push(FinishPeriod {
+                target,
+                after,
+                through: finish.id.as_i64(),
+            });
+        }
+        Ok(periods)
     }
     /// The second stage, from snapshots already sought by their targets.
     fn forecast_of(&self, snapshots: &[RunEvent], end: i64) -> Read<Vec<RunEvent>> {
@@ -552,12 +661,43 @@ pub(super) fn cursor_time(
 ) -> Result<WindowRead<CursorRecordTime>> {
     read(tx, |r| r.cursor(cursor))
 }
+pub(super) fn cursor_time_through(
+    tx: &impl SqlRead,
+    cursor: EventId,
+    end_ms: i64,
+) -> Result<WindowRead<CursorRecordTime>> {
+    read(tx, |r| r.cursor_through(cursor, end_ms))
+}
 pub(super) fn forecast_events(
     tx: &impl SqlRead,
     start: i64,
     end: i64,
 ) -> Result<WindowRead<Vec<RunEvent>>> {
     read(tx, |r| r.forecast(start, end))
+}
+/// What a forecast's snapshot names and a finish ends: a task or a goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SnapshotTarget {
+    Task(i64),
+    Goal(i64),
+}
+
+/// A finish of `target` and the event ids of the snapshots its score takes:
+/// after `after` through `through` (the finish).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FinishPeriod {
+    pub(super) target: SnapshotTarget,
+    pub(super) after: i64,
+    pub(super) through: i64,
+}
+
+/// The finishes at or after `from_ms` and their snapshots' periods
+/// ([`Reader::finish_periods`]).
+pub(super) fn finish_periods(
+    tx: &impl SqlRead,
+    from_ms: i64,
+) -> Result<WindowRead<Vec<FinishPeriod>>> {
+    read(tx, |r| r.finish_periods(from_ms))
 }
 /// Marks after the supplied snapshots, without scanning unrelated snapshots
 /// between a target's first and last events.

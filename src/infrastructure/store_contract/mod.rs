@@ -15,6 +15,7 @@ pub(crate) mod ledger_queue_named;
 mod ledger_queue_views;
 pub use ledger_queue_lives::*;
 pub(crate) mod ledger_range;
+pub(crate) mod ledger_report;
 mod related;
 mod runner_leases;
 mod search;
@@ -33,6 +34,11 @@ pub use ledger_queue_named::{
 };
 pub use ledger_queue_views::*;
 pub use ledger_range::ledger_range_answers_as_every_row;
+pub use ledger_report::{
+    ledger_report_answers_as_every_row, ledger_report_keeps_an_old_snapshot,
+    ledger_report_past_a_named_task_s_history, ledger_report_past_a_target_s_ends,
+    ledger_report_past_the_queue_and_the_clocks,
+};
 pub use related::related_cases;
 pub use runner_leases::*;
 pub use search::{search_cases, short_non_ascii};
@@ -251,6 +257,26 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         (
             "ledger named queue old snapshot",
             ledger_queue_lives_keeps_an_old_snapshot::<S, F>,
+        ),
+        (
+            "ledger report answers as every row",
+            ledger_report_answers_as_every_row::<S, F>,
+        ),
+        (
+            "ledger report past the queue and the clocks",
+            ledger_report_past_the_queue_and_the_clocks::<S, F>,
+        ),
+        (
+            "ledger report old snapshot",
+            ledger_report_keeps_an_old_snapshot::<S, F>,
+        ),
+        (
+            "ledger report past a named task's history",
+            ledger_report_past_a_named_task_s_history::<S, F>,
+        ),
+        (
+            "ledger report past a target's ends",
+            ledger_report_past_a_target_s_ends::<S, F>,
         ),
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),

@@ -2240,7 +2240,7 @@ impl OneShot {
             last,
             ..KpiQuery::default()
         };
-        let window = crate::application::report::window_for(
+        let window = crate::application::report::window(
             queue,
             now,
             &setup,
@@ -2292,7 +2292,7 @@ impl OneShot {
         StoreQueue<E>: crate::application::SearchIndex,
     {
         use crate::application::report;
-        let window = report::window(queue, self.generators.clock.now())?;
+        let window = report::diagram_window(queue, self.generators.clock.now())?;
         Ok(serde_json::to_value(report::report_inputs(
             params,
             queue.repository_binding()?,
@@ -2347,8 +2347,7 @@ impl OneShot {
         let now = self.generators.clock.now();
         let host_wide = crate::infrastructure::kpi_config::host_wide_file();
         let setup = report_setup(db, checkout, host_wide.as_deref(), now, self.profiles)?;
-        let window =
-            report::window_for(queue, now, &setup, vec![report::report_query(period, at)])?;
+        let window = report::window(queue, now, &setup, vec![report::report_query(period, at)])?;
         let made = report::make_with(&window, &setup, now, period, at, diagram.into())?;
         if params.print {
             return Ok(serde_json::to_value(made)?);

@@ -29,7 +29,8 @@
 //! on the page (see `crate::domain::kpi::report::svg`).
 
 use crate::domain::LeaseToken;
-use std::collections::{BTreeMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,16 +39,19 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::{LedgerStore, QueueRecords, RunFiles, kpi::Host};
+use super::{LedgerStore, LedgerWindowRead, QueueRecords, RunFiles, kpi::Host, ledger_window_of};
 use crate::domain::{
+    EventId, RunEvent, TaskId,
     areas::AreaMap,
     kpi::{
         DAY_MS, KpiConfig, KpiQuery, Period,
+        range::{self, RangeReads, Undecided},
         report::{self, DiagramSection, INDEX_FILE, Keep, Report, ReportFile},
     },
     ledger::{
         attributes::Folded,
         findings,
+        window::bounds::Answers,
         window::{LedgerWindow, WindowQuery},
     },
     marks,
@@ -98,37 +102,315 @@ pub struct Written {
     pub removed: Vec<PathBuf>,
 }
 
-/// The ledger's window a report at the unix second `now` reads: every
-/// row up to `now`, of which each period's KPIs, the findings and the
-/// host's load are made.
-pub fn window(ledger: &(impl LedgerStore + ?Sized), now: i64) -> Result<LedgerWindow> {
-    ledger.ledger_window(&WindowQuery {
-        now_ms: super::stats::now_ms(now),
-        ..WindowQuery::default()
-    })
-}
-
-/// [`window`] for the KPIs of `queries` ([`make_with`] of each period and
-/// `at`, or the observer's days and weeks): the bounds they take inside it
-/// are declared with its query ([`super::kpi::declared`]) and answered by
-/// its read.
-pub fn window_for(
+/// The ledger's window the KPIs of `queries` are made of at the unix
+/// second `now` with `setup` (each report [`make_with`] makes, the ones
+/// [`write_due`] owes, the observer's days and weeks, the check of the
+/// targets of `super::push`), and the findings, the goals and the
+/// near-term diagram of its end: the bounds the queries take inside it
+/// declared with its query ([`super::kpi::declared`]) and answered by its
+/// read, all of one snapshot ([`LedgerStore::ledger_read_snapshot`]).
+///
+/// # The range it reads
+///
+/// Each query's range is decided by [`crate::domain::kpi::range::plan`]
+/// of the query, now and `setup`'s `[kpi]` settings, an event id `--at`
+/// taking the time the snapshot gives it ([`super::cursor_time_in`]); the
+/// read is from the earliest of their starts
+/// ([`WindowQuery::read_from_ms`]), the union of the ranges, with no upper
+/// bound, so a report with an old `--at` (a backfill) reads as `kpi
+/// --at` does and one without reads up to now. Through that time the
+/// store's read ([`LedgerStore::ledger_window`], "The range a read from a
+/// time reads") gives what the periods need of the settled history before
+/// it by its indexes and seeks, whatever the clocks did: the marks by
+/// when they took effect, their retractions, each claim's previous one,
+/// the queue rows by their kinds' ranges and what the range names of them
+/// (the waits, the supervisors' lives, the snapshots, main's and CI's
+/// record, the goals' and the findings'). The forecast's snapshots of
+/// before it are those a task's or a goal's finish in it scores: those
+/// naming that target since its end before the finish, not those of the
+/// periods it ended before. A snapshot older than that settled history is
+/// no reason to read every row: the marks from it to the range are read as
+/// the second step of the forecast's read, as many as that target's open
+/// period holds (a goal's snapshots too). The findings unsettled and
+/// the near-term tasks are folds of the window's end, which such a read
+/// answers as every row.
+///
+/// Every row is read, as before the range, when any query has no range
+/// ([`crate::domain::kpi::range::Undecided`]: one asking for the whole
+/// ledger, `--last 0`, an event id cursor that names no event or whose time
+/// the snapshot cannot give within its limit of candidates or off the
+/// record's form, a comparison), when there is no query, and when the
+/// window read from the time does not answer an event id cursor's time as
+/// the range was decided by ([`read_holds`]; read again whole in the same
+/// snapshot). The cursor's time is that of the events at or before it that
+/// the window holds, of a time up to its end: an event a clock ahead of the
+/// DB's wrote past now is none of them.
+/// The store reads the queue rows of a kind whole again itself when it
+/// cannot use its views of them (none, a mark of them missing or not of
+/// the rows' position, or a visibility it cannot judge). The answers are
+/// those of every row either way.
+pub fn window(
     ledger: &(impl LedgerStore + ?Sized),
     now: i64,
     setup: &ReportSetup,
     queries: Vec<KpiQuery>,
 ) -> Result<LedgerWindow> {
-    ledger.ledger_window(&WindowQuery {
+    if !queries.iter().any(names_an_event) {
+        // No range of these needs a read: the store's own snapshot.
+        let mut query = window_query(now, setup, &queries);
+        query.read_from_ms = read_from(
+            &queries,
+            &setup.config,
+            now,
+            setup.host.utc_offset_secs,
+            &SnapshotCursors::of(None),
+        );
+        return ledger.ledger_window(&query);
+    }
+    let expected = ledger.ledger_events_expected()?;
+    let mut taken = None;
+    ledger.ledger_read_snapshot(&mut |snapshot| {
+        taken = Some(window_in(snapshot, now, setup, &queries, expected)?);
+        Ok(())
+    })?;
+    taken.context("the ledger's snapshot read nothing")
+}
+
+/// Whether `query` names an event id, whose time only the snapshot gives.
+fn names_an_event(query: &KpiQuery) -> bool {
+    let event = |cursor: Option<Cursor>| matches!(cursor, Some(Cursor::Event(_)));
+    event(query.at)
+        || event(query.since)
+        || event(query.until)
+        || match query.compare {
+            Some(crate::domain::kpi::CompareSpec::At(cursor)) => event(Some(cursor)),
+            Some(crate::domain::kpi::CompareSpec::Windows(windows)) => windows
+                .iter()
+                .any(|(a, b)| event(Some(*a)) || event(Some(*b))),
+            None => false,
+        }
+}
+
+/// The window's query of `queries` at `now`, with no range yet.
+fn window_query(now: i64, setup: &ReportSetup, queries: &[KpiQuery]) -> WindowQuery {
+    WindowQuery {
         now_ms: super::stats::now_ms(now),
         bounds: super::kpi::declared(
-            queries,
+            queries.to_vec(),
             now,
             setup.host,
             &setup.config,
             setup.areas.as_ref(),
         ),
         ..WindowQuery::default()
-    })
+    }
+}
+
+/// [`window`] of `snapshot`, with room for `expected` events if it reads
+/// every row.
+pub fn window_in(
+    snapshot: &dyn LedgerWindowRead,
+    now: i64,
+    setup: &ReportSetup,
+    queries: &[KpiQuery],
+    expected: usize,
+) -> Result<LedgerWindow> {
+    let mut query = window_query(now, setup, queries);
+    let cursors = SnapshotCursors::of(Some((snapshot, query.now_ms)));
+    query.read_from_ms = read_from(
+        queries,
+        &setup.config,
+        now,
+        setup.host.utc_offset_secs,
+        &cursors,
+    );
+    if let Some(error) = cursors.failed.into_inner() {
+        return Err(error);
+    }
+    if query.read_from_ms.is_none() {
+        return ledger_window_of(snapshot, &query, expected);
+    }
+    let window = ledger_window_of(snapshot, &query, 0)?;
+    let only_at = queries.iter().all(|query| {
+        !names_an_event(&KpiQuery {
+            at: None,
+            ..query.clone()
+        })
+    });
+    if read_holds(&cursors.taken.borrow(), window.answers(), only_at) {
+        return Ok(window);
+    }
+    drop(window);
+    query.read_from_ms = None;
+    ledger_window_of(snapshot, &query, expected)
+}
+
+/// Whether a window read from the range decided by the event id cursors'
+/// times `taken` holds what its queries need, by the window's `answers` of
+/// those cursors: each one answered as taken, or later when every event
+/// cursor is an `--at` (`only_at`; a later `--at` starts its periods later,
+/// in what was read, and any other cursor must stand where it was taken).
+/// An earlier time, no time, or no answer does not: the window is read
+/// again of every row.
+fn read_holds(taken: &[(EventId, i64)], answers: Option<&Answers>, only_at: bool) -> bool {
+    taken.iter().all(
+        |(id, ms)| match answers.and_then(|answers| answers.time_through(*id)) {
+            Some(Some(answer)) => answer == *ms || (only_at && answer > *ms),
+            _ => false,
+        },
+    )
+}
+
+/// What [`range::plan`] takes as an event id cursor's time of what the
+/// snapshot found ([`super::cursor_time_in`]): its time, `None` when no
+/// event is at or before it ([`Undecided::NoEvent`] then), and
+/// [`Undecided::OutOfTimeOrder`] when the snapshot could not say.
+fn cursor_of(cursor: EventId, found: Option<Option<i64>>) -> range::Read<Option<i64>> {
+    found.ok_or(Undecided::OutOfTimeOrder(cursor))
+}
+
+/// The start of the union of the ranges of `queries` at `now` with
+/// `config` ([`crate::domain::kpi::range::plan`]), the event id cursors'
+/// times read by `reads`: none when there is no query or any has no
+/// range, which reads every row.
+pub fn read_from(
+    queries: &[KpiQuery],
+    config: &KpiConfig,
+    now: i64,
+    utc_offset_secs: i64,
+    reads: &impl RangeReads,
+) -> Option<i64> {
+    // A comparison's cohort is cut by the goals of the window's tasks; no
+    // query of a report compares, and one that did reads every row (its
+    // cohort's reads are none of `reads`).
+    let goals = HashMap::new();
+    let mut from: Option<i64> = None;
+    for query in queries {
+        let plan = range::plan(query, config, now, utc_offset_secs, reads, &goals).ok()?;
+        from = Some(from.map_or(plan.range.from_ms, |from| from.min(plan.range.from_ms)));
+    }
+    from
+}
+
+/// The reads [`range::plan`] takes of a snapshot for a report's queries:
+/// the time of an event id cursor ([`super::cursor_time_in`]) of a window
+/// ending at the time with it, each one taken kept to be checked against
+/// the window's answer; no other read, so a query that would need one (a
+/// comparison's cohort) has no range. Of no snapshot, no cursor has a time.
+struct SnapshotCursors<'a> {
+    snapshot: Option<(&'a dyn LedgerWindowRead, i64)>,
+    taken: RefCell<Vec<(EventId, i64)>>,
+    failed: RefCell<Option<anyhow::Error>>,
+}
+
+impl<'a> SnapshotCursors<'a> {
+    const fn of(snapshot: Option<(&'a dyn LedgerWindowRead, i64)>) -> Self {
+        Self {
+            snapshot,
+            taken: RefCell::new(Vec::new()),
+            failed: RefCell::new(None),
+        }
+    }
+}
+
+impl RangeReads for SnapshotCursors<'_> {
+    fn recorded_effective(&self, _: i64, _: i64) -> range::Read<Vec<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn retractions_of(&self, _: EventId) -> range::Read<Vec<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn claims_written(&self, _: i64, _: i64) -> range::Read<Vec<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn previous_claim_with(&self, _: &str, _: EventId) -> range::Read<Option<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn start_announcing(
+        &self,
+        _: &str,
+        _: &str,
+        _: EventId,
+        _: EventId,
+    ) -> range::Read<Option<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn start_before_in_time(&self, _: i64) -> range::Read<Option<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn cursor_time(&self, cursor: EventId) -> range::Read<Option<i64>> {
+        let Some((snapshot, end_ms)) = self.snapshot else {
+            return Err(Undecided::Fallback);
+        };
+        match super::cursor_time_in(snapshot, cursor, end_ms) {
+            Ok(found) => {
+                if let Some(Some(ms)) = found {
+                    self.taken.borrow_mut().push((cursor, ms));
+                }
+                cursor_of(cursor, found)
+            }
+            Err(error) => {
+                self.failed.borrow_mut().get_or_insert(error);
+                Err(Undecided::Fallback)
+            }
+        }
+    }
+    fn finishes_written(&self, _: i64, _: i64) -> range::Read<Vec<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn previous_finish(&self, _: &RunEvent) -> range::Read<Option<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn first_of_target(&self, _: &RunEvent) -> range::Read<Option<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn snapshots_between(&self, _: EventId, _: EventId) -> range::Read<Vec<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn plan_changes_written(&self, _: i64, _: i64) -> range::Read<Vec<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn marks_after(&self, _: EventId) -> range::Read<Vec<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+    fn run_finishes(&self) -> range::Read<Vec<(TaskId, i64)>> {
+        Err(Undecided::Fallback)
+    }
+    fn comparison_events(&self) -> range::Read<Vec<RunEvent>> {
+        Err(Undecided::Fallback)
+    }
+}
+
+/// The window [`report_inputs`] draws its near-term diagram of at the unix
+/// second `now`: a fold of the window's end, which a read from any time up
+/// to now answers as every row, so it is [`window`]'s of
+/// [`diagram_queries`] with [`diagram_setup`] (the service has the report's
+/// own settings only with the report).
+pub fn diagram_window(ledger: &(impl LedgerStore + ?Sized), now: i64) -> Result<LedgerWindow> {
+    window(ledger, now, &diagram_setup(), diagram_queries())
+}
+
+/// What [`diagram_window`] decides its range with: the default `[kpi]`
+/// settings in UTC, and nothing drawn or written.
+pub fn diagram_setup() -> ReportSetup {
+    ReportSetup {
+        root: PathBuf::new(),
+        host: Host {
+            utc_offset_secs: 0,
+            cores: None,
+            rust_toolchain: false,
+        },
+        config: KpiConfig::default(),
+        keep: Keep::default(),
+        build: String::new(),
+        diagram: DiagramRenderer(Arc::new(|_| anyhow::bail!("no diagram is drawn here"))),
+        areas: None,
+    }
+}
+
+/// The query [`diagram_window`]'s range is of: today's report.
+pub fn diagram_queries() -> Vec<KpiQuery> {
+    vec![report_query(Period::Day, None)]
 }
 
 /// The query of the KPIs of the report of `period` that holds `at`
@@ -561,7 +843,7 @@ pub fn write_due(
         .collect();
     for (period, label, at) in owed {
         if read.is_none() {
-            read = Some(window_for(ledger, now, setup, queries.clone())?);
+            read = Some(window(ledger, now, setup, queries.clone())?);
         }
         let window = read.as_ref().context("the ledger's window was read")?;
         let diagram = drawn
@@ -720,6 +1002,196 @@ fn write_index(files: &dyn RunFiles, root: &Path, now: i64) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reads that give an event id cursor's time by `cursor` and nothing
+    /// else.
+    struct Cursors(fn(EventId) -> range::Read<Option<i64>>);
+
+    impl RangeReads for Cursors {
+        fn recorded_effective(&self, _: i64, _: i64) -> range::Read<Vec<RunEvent>> {
+            unreachable!()
+        }
+        fn retractions_of(&self, _: EventId) -> range::Read<Vec<RunEvent>> {
+            unreachable!()
+        }
+        fn claims_written(&self, _: i64, _: i64) -> range::Read<Vec<RunEvent>> {
+            unreachable!()
+        }
+        fn previous_claim_with(&self, _: &str, _: EventId) -> range::Read<Option<RunEvent>> {
+            unreachable!()
+        }
+        fn start_announcing(
+            &self,
+            _: &str,
+            _: &str,
+            _: EventId,
+            _: EventId,
+        ) -> range::Read<Option<RunEvent>> {
+            unreachable!()
+        }
+        fn start_before_in_time(&self, _: i64) -> range::Read<Option<RunEvent>> {
+            unreachable!()
+        }
+        fn cursor_time(&self, cursor: EventId) -> range::Read<Option<i64>> {
+            (self.0)(cursor)
+        }
+        fn finishes_written(&self, _: i64, _: i64) -> range::Read<Vec<RunEvent>> {
+            unreachable!()
+        }
+        fn previous_finish(&self, _: &RunEvent) -> range::Read<Option<RunEvent>> {
+            unreachable!()
+        }
+        fn first_of_target(&self, _: &RunEvent) -> range::Read<Option<RunEvent>> {
+            unreachable!()
+        }
+        fn snapshots_between(&self, _: EventId, _: EventId) -> range::Read<Vec<RunEvent>> {
+            unreachable!()
+        }
+        fn plan_changes_written(&self, _: i64, _: i64) -> range::Read<Vec<RunEvent>> {
+            unreachable!()
+        }
+        fn marks_after(&self, _: EventId) -> range::Read<Vec<RunEvent>> {
+            unreachable!()
+        }
+        fn run_finishes(&self) -> range::Read<Vec<(TaskId, i64)>> {
+            Err(Undecided::Fallback)
+        }
+        fn comparison_events(&self) -> range::Read<Vec<RunEvent>> {
+            Err(Undecided::Fallback)
+        }
+    }
+
+    /// A window read from the range of the cursors' times taken holds what
+    /// its queries need only when it answers each as taken, or later for
+    /// `--at`s alone; else it is read again of every row.
+    #[test]
+    fn a_window_holds_its_queries_only_when_it_answers_the_cursors_as_taken() {
+        use crate::domain::ledger::window::bounds::Bound;
+        let (a, b) = (EventId::new(7), EventId::new(9));
+        let answered = |pairs: &[(EventId, Option<i64>)]| {
+            let mut answers = Answers::default();
+            for (id, ms) in pairs {
+                answers.set(Bound::TimeThrough(*id), *id, *ms);
+            }
+            answers
+        };
+        let taken = [(a, 1_000), (b, 2_000)];
+        let same = answered(&[(a, Some(1_000)), (b, Some(2_000))]);
+        assert!(read_holds(&taken, Some(&same), true));
+        assert!(read_holds(&taken, Some(&same), false));
+        let later = answered(&[(a, Some(1_500)), (b, Some(2_000))]);
+        assert!(read_holds(&taken, Some(&later), true));
+        assert!(!read_holds(&taken, Some(&later), false));
+        let earlier = answered(&[(a, Some(999)), (b, Some(2_000))]);
+        assert!(!read_holds(&taken, Some(&earlier), true));
+        let none = answered(&[(a, None), (b, Some(2_000))]);
+        assert!(!read_holds(&taken, Some(&none), true));
+        let missing = answered(&[(b, Some(2_000))]);
+        assert!(!read_holds(&taken, Some(&missing), true));
+        assert!(!read_holds(&taken, None, true));
+        assert!(read_holds(&[], None, false));
+    }
+
+    /// An event id cursor's time found is the plan's; no event at or before
+    /// it is none (the plan's `NoEvent`, every row); a snapshot that cannot
+    /// say is out of time order (every row).
+    #[test]
+    fn a_cursor_s_time_the_snapshot_cannot_give_has_no_range() {
+        use crate::application::{CursorRecordTime, CursorTimePath, WindowRead, record_time};
+        let id = EventId::new(5);
+        let found = |millis| {
+            WindowRead::Complete(CursorRecordTime {
+                millis,
+                path: CursorTimePath::Aggregate,
+            })
+        };
+        assert_eq!(cursor_of(id, record_time(found(42))), Ok(Some(42)));
+        assert_eq!(cursor_of(id, record_time(found(i64::MIN))), Ok(None));
+        for read in [
+            WindowRead::Unavailable,
+            WindowRead::Exhausted,
+            WindowRead::OffTimeForm,
+        ] {
+            assert_eq!(
+                cursor_of(id, record_time(read)),
+                Err(Undecided::OutOfTimeOrder(id))
+            );
+        }
+        let config = KpiConfig::default();
+        let now = 400 * DAY_MS / 1000;
+        let at = report_query(Period::Day, Some(Cursor::Event(id)));
+        let none = Cursors(|_| Ok(None));
+        assert_eq!(
+            range::plan(&at, &config, now, 0, &none, &HashMap::new()),
+            Err(Undecided::NoEvent(id))
+        );
+    }
+
+    /// The read is from the earliest start of the queries' ranges, each as
+    /// [`range::plan`] decides it (an event id `--at` by its time), and of
+    /// every row when there is no query or any has no range.
+    #[test]
+    fn the_read_is_from_the_union_of_the_ranges_and_whole_when_one_has_none() {
+        let config = KpiConfig::default();
+        let now = 400 * DAY_MS / 1000;
+        let found = Cursors(|id| Ok(Some(id.as_i64())));
+        let start = |query: &KpiQuery| {
+            range::plan(query, &config, now, 0, &found, &HashMap::new())
+                .unwrap()
+                .range
+                .from_ms
+        };
+        let day = report_query(Period::Day, None);
+        let week = report_query(Period::Week, None);
+        let past = report_query(Period::Day, Some(Cursor::Time(100 * DAY_MS)));
+        let at_event = report_query(Period::Day, Some(Cursor::Event(EventId::new(50 * DAY_MS))));
+        assert_eq!(
+            read_from(std::slice::from_ref(&day), &config, now, 0, &found),
+            Some(start(&day))
+        );
+        assert_eq!(
+            read_from(&[day.clone(), week.clone()], &config, now, 0, &found),
+            Some(start(&day).min(start(&week)))
+        );
+        assert_eq!(
+            read_from(
+                &[day.clone(), past.clone(), at_event.clone()],
+                &config,
+                now,
+                0,
+                &found
+            ),
+            Some(start(&at_event))
+        );
+        assert!(start(&at_event) < start(&past) && start(&past) < start(&day));
+        assert_eq!(read_from(&[], &config, now, 0, &found), None);
+        let whole = KpiQuery {
+            read_whole_ledger: true,
+            ..day.clone()
+        };
+        let compared = KpiQuery {
+            compare: Some(crate::domain::kpi::CompareSpec::At(Cursor::Time(
+                300 * DAY_MS,
+            ))),
+            ..day.clone()
+        };
+        for undecided in [whole, compared] {
+            assert_eq!(
+                read_from(&[day.clone(), undecided], &config, now, 0, &found),
+                None
+            );
+        }
+        for cursors in [
+            Cursors(|_| Ok(None)),
+            Cursors(|id| Err(Undecided::OutOfTimeOrder(id))),
+            Cursors(|_| Err(Undecided::Fallback)),
+        ] {
+            assert_eq!(
+                read_from(&[day.clone(), at_event.clone()], &config, now, 0, &cursors),
+                None
+            );
+        }
+    }
 
     /// The window of the events `log` (kind, task, payload), each a minute
     /// apart, at their end.

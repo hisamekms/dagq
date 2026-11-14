@@ -5,8 +5,8 @@
 use std::cell::Cell;
 
 use super::earlier::{
-    BY_TASK_SQL, STARTS_DOWN_SQL, by_payload_sql, by_task_kind_down_sql, by_task_kind_sql,
-    session_range_sql,
+    BY_TASK_SQL, STARTS_DOWN_SQL, by_payload_sql, by_task_held_sql, by_task_kind_down_sql,
+    by_task_kind_sql, session_range_sql,
 };
 use super::*;
 use crate::application::LedgerWindowRead;
@@ -206,6 +206,7 @@ fn the_seeks_by_what_is_named_walk_no_table_whole() {
     let mut statements = vec![
         session_range_sql(dialect),
         BY_TASK_SQL.to_owned(),
+        by_task_held_sql(dialect),
         STARTS_DOWN_SQL.to_owned(),
         super::earlier::run_row_sql(dialect),
         by_payload_sql(dialect, None, "plan_review_id"),

@@ -3,6 +3,7 @@ use crate::application::{kpi::Host, report::DiagramRenderer};
 use crate::domain::kpi::{
     KpiConfig,
     config::{KpiSettings, Target},
+    read_from_ms,
 };
 use crate::domain::ledger::{
     LedgerKind, LedgerRow, build,
@@ -613,4 +614,67 @@ fn after_stopping_across_midnight_only_the_latest_finished_periods_are_checked()
     assert_eq!(checked.len(), 4);
     assert_eq!(checked[2]["label"], "2026-11-09");
     assert_eq!(checked[3]["label"], "2026-W45");
+}
+
+/// `report_inputs`' window ([`report::diagram_window`]) is read once
+/// through the store's window, from today's report's range under the
+/// default `[kpi]` settings in UTC, with no upper bound.
+#[test]
+fn the_diagram_window_reads_from_today_s_report_s_range() {
+    let now = T0 + 100 * DAY;
+    let ledger = probe(history(now), false);
+    let window = report::diagram_window(&ledger, now).unwrap();
+    let whole = probe(history(now), true);
+    let every = report::diagram_window(&whole, now).unwrap();
+    let queries = ledger.queries.borrow();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(
+        queries[0].read_from_ms,
+        read_from_ms(
+            &report::report_query(Period::Day, None),
+            &KpiConfig::default(),
+            now,
+            0
+        )
+    );
+    assert!(queries[0].read_from_ms.is_some());
+    assert_eq!(queries[0].now_ms, crate::application::stats::now_ms(now));
+    assert_eq!(queries[0].until, None);
+    assert_eq!(
+        report::diagram_draft(&window),
+        report::diagram_draft(&every)
+    );
+}
+
+/// A query of no range ([`crate::domain::kpi::range::Undecided`]: here the
+/// whole ledger asked for) makes the report's window read every row, the
+/// others' ranges notwithstanding; without it the read is from the
+/// earliest start of theirs.
+#[test]
+fn a_report_window_with_a_query_of_no_range_reads_every_row() {
+    let now = T0 + 100 * DAY;
+    let day = report::report_query(Period::Day, None);
+    let week = report::report_query(Period::Week, None);
+    let ledger = probe(history(now), false);
+    report::window(
+        &ledger,
+        now,
+        &setup(),
+        vec![
+            day.clone(),
+            KpiQuery {
+                read_whole_ledger: true,
+                ..week.clone()
+            },
+        ],
+    )
+    .unwrap();
+    report::window(&ledger, now, &setup(), vec![day.clone(), week.clone()]).unwrap();
+    let queries = ledger.queries.borrow();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0].read_from_ms, None);
+    let start = |query: &KpiQuery| {
+        read_from_ms(query, &setup().config, now, setup().host.utc_offset_secs).unwrap()
+    };
+    assert_eq!(queries[1].read_from_ms, Some(start(&day).min(start(&week))));
 }

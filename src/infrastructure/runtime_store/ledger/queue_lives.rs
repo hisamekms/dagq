@@ -138,11 +138,38 @@ pub(super) fn records(
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
     events.extend(open.into_iter().flat_map(|row| row.records));
+    // The snapshots the score of a finish from S takes: those of the
+    // period since its target's end before it, not of the periods it
+    // ended before (each scored by its own end), nor of its open period
+    // after the range's last end (no end scores them yet).
+    let periods = match small::finish_periods(tx, from.ended_before_ms)? {
+        crate::application::WindowRead::Complete(periods) => periods,
+        _ => return Ok(None),
+    };
     let mut snapshots = Vec::new();
-    for task in &names.tasks {
-        snapshots.extend(query(tx,
-            "SELECT e.* FROM ledger_snapshot_targets t CROSS JOIN run_events e WHERE e.id=t.snapshot_event_id AND t.task_id=?1 ORDER BY e.id", sql_params![task])?);
+    for period in periods {
+        let (after, through) = (period.after, period.through);
+        match period.target {
+            small::SnapshotTarget::Task(task) => {
+                snapshots.extend(query(
+                    tx,
+                    TASK_SNAPSHOTS_SQL,
+                    sql_params![task, after, through],
+                )?);
+            }
+            small::SnapshotTarget::Goal(goal) => snapshots.extend(
+                query(
+                    tx,
+                    &goal_snapshots_sql(tx.dialect()),
+                    sql_params![after, through],
+                )?
+                .into_iter()
+                .filter(|e| crate::domain::ledger::window::queue_lives::names_goal(e, goal)),
+            ),
+        }
     }
+    snapshots.sort_by_key(|e| e.id);
+    snapshots.dedup_by_key(|e| e.id);
     let snapshots = visible(tx, &snapshots)?;
     // Spike 4670 (vii), decision A and 4756's does_not_hold: this
     // second stage grows with the target's open period, even for an old
@@ -163,6 +190,20 @@ pub(super) fn records(
     events.sort_by_key(|e| e.id);
     events.dedup_by_key(|e| e.id);
     Ok(Some(events))
+}
+
+/// A task's snapshots of a finish's period, by the view of the snapshots'
+/// tasks: `?1` the task, after `?2` through `?3` by event id.
+pub(super) const TASK_SNAPSHOTS_SQL: &str = "SELECT e.* FROM ledger_snapshot_targets t CROSS JOIN run_events e WHERE e.id=t.snapshot_event_id AND t.task_id=?1 AND t.snapshot_event_id > ?2 AND t.snapshot_event_id <= ?3 ORDER BY e.id";
+
+/// The snapshots of a goal's finish's period, after `?1` through `?2` by
+/// event id: the view holds no goal, so those of the period are read and
+/// the goal's kept, as many as the goal's open period holds.
+pub(super) fn goal_snapshots_sql(dialect: SqlDialect) -> String {
+    format!(
+        "SELECT * FROM run_events{} WHERE kind='forecast_recorded' AND id > ?1 AND id <= ?2 ORDER BY id",
+        dialect.indexed_by("events_by_kind")
+    )
 }
 
 /// Open queue rows are sought by the open view's kind/key prefix.

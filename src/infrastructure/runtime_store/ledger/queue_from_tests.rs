@@ -141,7 +141,8 @@ fn the_named_queue_falls_back_past_an_old_writer_then_seeks_after_refilling() {
 #[test]
 fn the_named_queue_seeks_use_their_indexes_and_the_whole_read_skips_excluded_kinds() {
     use super::queue_lives::{
-        ANSWERS_SQL, OPEN_SQL, ask_sql, last_sql, legacy_null_sql, retractions_sql,
+        ANSWERS_SQL, OPEN_SQL, TASK_SNAPSHOTS_SQL, ask_sql, goal_snapshots_sql, last_sql,
+        legacy_null_sql, retractions_sql,
     };
     let queue = queue();
     for (sql, index) in [
@@ -163,6 +164,8 @@ fn the_named_queue_seeks_use_their_indexes_and_the_whole_read_skips_excluded_kin
             "asks_by_explicit_null",
         ),
         (ANSWERS_SQL.to_owned(), "answered_asks_by_ask"),
+        (TASK_SNAPSHOTS_SQL.to_owned(), "snapshot_targets_by_task"),
+        (goal_snapshots_sql(SqlDialect::Sqlite), "events_by_kind"),
     ] {
         let steps = plan(&queue.conn, &sql);
         assert!(

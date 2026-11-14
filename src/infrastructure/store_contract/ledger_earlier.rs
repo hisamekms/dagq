@@ -393,12 +393,42 @@ fn cases(log: &mut Log, member_changes: usize) {
     );
 }
 
+std::thread_local! {
+    /// The share of their span the settled units of the histories are
+    /// spread over from their first: all of it unless a reader asks them
+    /// nearer their start ([`with_units_nearer`]).
+    static UNITS_SHARE: std::cell::Cell<(i64, i64)> = const { std::cell::Cell::new((1, 1)) };
+}
+
+/// The span `span` (seconds) the settled units of a history are spread
+/// over, cut to the share [`with_units_nearer`] asks.
+pub(crate) fn units_span(span: i64) -> i64 {
+    let (num, den) = UNITS_SHARE.get();
+    span * num / den
+}
+
+/// `f` with the settled units of the histories it lays down spread over
+/// `num / den` of their span, nearer their first: so that a reader whose
+/// range starts earlier than the others' (the weeks of a report) still
+/// finds them all before it.
+pub(crate) fn with_units_nearer<T>(num: i64, den: i64, f: impl FnOnce() -> T) -> T {
+    /// Puts the share back however `f` ends, a panic too.
+    struct Restore((i64, i64));
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            UNITS_SHARE.set(self.0);
+        }
+    }
+    let _restore = Restore(UNITS_SHARE.replace((num, den)));
+    f()
+}
+
 /// The settled units outside the range: each a task submitted to a
 /// proposal of its own and landed by a run with an ask answered and a
 /// follow-up's draft canceled, and a planner's session; all ended long
 /// before it.
 fn settled_units(log: &mut Log, settled: usize) {
-    let span = 139 * DAY;
+    let span = units_span(139 * DAY);
     for k in 0..settled {
         let t = 11 * DAY + i64::try_from(k).unwrap() * span / i64::try_from(settled).unwrap();
         let task = 100_000 + i64::try_from(k).unwrap();

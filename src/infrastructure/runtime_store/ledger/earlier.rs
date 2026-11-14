@@ -64,6 +64,34 @@ pub(super) fn by_task_kind_down_sql(kind: EventKind) -> String {
 /// Every event of the task `?1`, by `events_by_task`.
 pub(super) const BY_TASK_SQL: &str = "SELECT * FROM run_events WHERE task_id = ?1 ORDER BY id";
 
+/// The events of the task `?1` a row other than its task row may own, by
+/// `events_by_task`: those of its runs, and those of no run of a kind or
+/// with a key a session's are ([`owner::SESSION_KINDS`],
+/// [`owner::SESSION_KEYS`]; the caller keeps those [`owner::owner`] gives
+/// to no task). Of a task whose row the read holds, whose own records are
+/// that row's.
+pub(super) fn by_task_held_sql(dialect: SqlDialect) -> String {
+    use crate::domain::ledger::owner;
+    let kinds = owner::SESSION_KINDS
+        .iter()
+        .map(|kind| format!("'{}'", kind.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let keys = owner::SESSION_KEYS
+        .iter()
+        .map(|key| {
+            format!(
+                "{} IS NOT NULL",
+                dialect.json_field("payload", &format!("$.{key}"), JsonType::Text)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!(
+        "SELECT * FROM run_events WHERE task_id = ?1 AND (run_id IS NOT NULL OR kind IN ({kinds}) OR {keys}) ORDER BY id"
+    )
+}
+
 /// A page of the `integration_started` below the id `?1`, down the ids by
 /// `events_by_kind`, at most `?2`.
 pub(super) const STARTS_DOWN_SQL: &str = "SELECT * FROM run_events
@@ -118,7 +146,23 @@ fn by_payload(
 fn sought(conn: &impl SqlRead, named: &Named) -> Result<(Vec<RunEvent>, Named)> {
     let mut taken = Vec::new();
     for &task in named.tasks() {
-        taken.extend(events(conn, BY_TASK_SQL, sql_params![task])?);
+        // A task row the read holds already gives the task's own records:
+        // reading them again would grow with its history. Its runs' and
+        // the sessions' events that name it (a planner's revision of its
+        // proposal) are of other rows, sought still.
+        if named.holds_task(task) {
+            let held = events(
+                conn,
+                &by_task_held_sql(SqlRead::dialect(conn)),
+                sql_params![task],
+            )?;
+            taken.extend(held.into_iter().filter(|event| {
+                crate::domain::ledger::owner::owner(event)
+                    != crate::domain::ledger::owner::Owner::Task
+            }));
+        } else {
+            taken.extend(events(conn, BY_TASK_SQL, sql_params![task])?);
+        }
         taken.extend(by_payload(
             conn,
             Some(EventKind::FollowUpRegistered),

@@ -820,7 +820,8 @@ fn whole(dir: &Path, name: &str, candidate: &str) {
             serde_json::to_value(stats::stats(&queue, now, query, sources).unwrap()).unwrap()
         }),
         ("lean", Read::Observer) => {
-            let window = dagq::application::report::window(&queue, now).unwrap();
+            // The observer's read of every row, as this measures it.
+            let window = queue.ledger_window(&window_query(&read, now)).unwrap();
             fold(&window, now, &read, &queue)
         }
         ("narrow", _) => {

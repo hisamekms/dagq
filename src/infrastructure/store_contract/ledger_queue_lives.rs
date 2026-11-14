@@ -9,7 +9,7 @@ use crate::infrastructure::sql_exec::{SqlRead, SqlWrite, sql_params};
 use anyhow::{Result, ensure};
 use serde_json::json;
 
-fn log(settled: usize, shared: bool, in_range_config: bool) -> Log {
+pub(crate) fn log(settled: usize, shared: bool, in_range_config: bool) -> Log {
     let mut log = history(0, 0);
     // As in Spike 4756's near_snapshot fixture, the snapshots of the
     // settled history do not forecast a task open in the range.
@@ -20,7 +20,9 @@ fn log(settled: usize, shared: bool, in_range_config: bool) -> Log {
     }
 
     for n in 0..settled {
-        let at = 11 * DAY + i64::try_from(n).unwrap() * 130 * DAY / i64::try_from(settled).unwrap();
+        let at = 11 * DAY
+            + i64::try_from(n).unwrap() * fixture::units_span(130 * DAY)
+                / i64::try_from(settled).unwrap();
         let token = if shared { "u".into() } else { format!("u{n}") };
         if !shared || n == 0 {
             log.add(
@@ -371,7 +373,7 @@ fn renumber(mut log: Log) -> Log {
 /// Keep mark references aligned with the EventStore's ids just as the
 /// common fixture aligns session references. Leader operations may have
 /// recorded events before this history is laid down.
-fn lay_down(tx: &impl SqlWrite, log: &Log) -> Result<fixture::Laid> {
+pub(crate) fn lay_down(tx: &impl SqlWrite, log: &Log) -> Result<fixture::Laid> {
     let past: Option<i64> = tx.query_row("SELECT MAX(id) FROM run_events", sql_params![], |r| {
         r.get(0)
     })?;
@@ -386,7 +388,7 @@ fn lay_down(tx: &impl SqlWrite, log: &Log) -> Result<fixture::Laid> {
     fixture::lay_down(tx, &log)
 }
 
-fn fill(tx: &impl SqlWrite) -> Result<()> {
+pub(crate) fn fill(tx: &impl SqlWrite) -> Result<()> {
     for _ in 0..10000 {
         if views::fill(tx)?.is_done() {
             return Ok(());
@@ -654,7 +656,7 @@ pub fn ledger_queue_lives_past_an_old_writer<S: ContractStore, F: Fn() -> Result
     Ok(())
 }
 
-fn reset(tx: &impl SqlWrite) -> Result<()> {
+pub(crate) fn reset(tx: &impl SqlWrite) -> Result<()> {
     for table in [
         "ledger_snapshot_targets",
         "ledger_answered_asks",
@@ -667,15 +669,11 @@ fn reset(tx: &impl SqlWrite) -> Result<()> {
     Ok(())
 }
 
-/// The old snapshot is deliberately kept. The second-stage mark records
-/// grow with the target's open period (4670 (vii), decision A, 4756's
-/// does_not_hold); they are excluded from the bounded-count assertion.
-pub fn ledger_queue_lives_keeps_an_old_snapshot<S: ContractStore, F: Fn() -> Result<S>>(
-    open: &F,
-) -> Result<()> {
-    let store = open()?;
-    let tx = store.write_entry("contract_queue_old_snapshot")?;
-    let mut history = log(30, true, true);
+/// [`log`] of `settled` shared units whose snapshot of task 2, open in the
+/// range, is from before every unit: the units' marks are of its open
+/// period.
+pub(crate) fn old_snapshot_log(settled: usize) -> Log {
+    let mut history = log(settled, true, true);
     for event in &mut history.events {
         if event.kind == crate::domain::EventKind::ForecastRecorded
             && event.payload["tasks"]
@@ -686,7 +684,165 @@ pub fn ledger_queue_lives_keeps_an_old_snapshot<S: ContractStore, F: Fn() -> Res
             event.payload["at_secs"] = json!(T0 + 3 * DAY);
         }
     }
-    let laid = lay_down(&tx, &renumber(history))?;
+    renumber(history)
+}
+
+/// The task whose ends [`ends_log`] repeats before the range.
+pub(crate) const REOPENED_TASK: i64 = 950;
+/// The goal [`ends_log`] forecasts alone before its first close.
+pub(crate) const FORECAST_GOAL: i64 = 7100;
+/// The planner whose revision of a proposal [`ends_log`] records on
+/// [`REOPENED_TASK`] (its anchor) before the range, its session closed then.
+pub(crate) const REVISING_PLANNER: i64 = 77;
+
+/// [`log`] of `settled` shared units with, in each unit, a snapshot of
+/// [`REOPENED_TASK`] and its close and reopening (the periods it ended
+/// before the range, each scored by its own end), its last snapshot after
+/// the units and its close in the range; and [`FORECAST_GOAL`] opened after
+/// the units, a snapshot of it alone (no task), a later snapshot of other
+/// targets, and its first close in the range.
+pub(crate) fn ends_log(settled: usize) -> Log {
+    let log = log(settled, true, true);
+    let units: Vec<i64> = log
+        .events
+        .iter()
+        .filter(|e| {
+            e.kind == crate::domain::EventKind::ForecastRecorded
+                && e.payload["tasks"][0]["id"]
+                    .as_i64()
+                    .is_some_and(|id| id >= 900_000)
+        })
+        .map(|e| crate::domain::stats::timestamp_millis(&e.created_at).unwrap() / 1000 - T0)
+        .collect();
+    assert_eq!(units.len(), settled, "a snapshot of each unit");
+    ends_with(log, units)
+}
+
+/// [`ends_log`] of no unit but [`REOPENED_TASK`]'s `cycles` snapshots,
+/// closes and reopenings, spread as [`log`] spreads its units: the periods
+/// the task ended before the range alone grow.
+pub(crate) fn cycles_log(cycles: usize) -> Log {
+    let units = (0..cycles)
+        .map(|n| {
+            11 * DAY
+                + i64::try_from(n).unwrap() * fixture::units_span(130 * DAY)
+                    / i64::try_from(cycles).unwrap()
+                + 16
+        })
+        .collect();
+    ends_with(log(0, true, true), units)
+}
+
+/// `log` with [`ends_log`]'s task and goal, the task closed and reopened
+/// after each time of `units`.
+fn ends_with(mut log: Log, units: Vec<i64>) -> Log {
+    let forecast = |at: i64, tasks: serde_json::Value, goals: serde_json::Value| json!({"at_secs": T0 + at, "method": 1, "tasks": tasks, "goals": goals});
+    let row = |id: i64| json!([{"id": id, "p50_secs": 3600, "p90_secs": 7200}]);
+    let task = Some(REOPENED_TASK);
+    log.add(
+        task,
+        None,
+        "task_created",
+        json!({"title": "t950", "status": "ready", "priority": "high"}),
+        10 * DAY,
+    );
+    for at in units {
+        log.add(
+            None,
+            None,
+            "forecast_recorded",
+            forecast(at + 5, row(REOPENED_TASK), json!([])),
+            at + 5,
+        )
+        .add(
+            task,
+            None,
+            "task_status_changed",
+            json!({"from": "ready", "to": "completed"}),
+            at + 6,
+        )
+        .add(
+            task,
+            None,
+            "task_status_changed",
+            json!({"from": "completed", "to": "ready"}),
+            at + 7,
+        );
+    }
+    let before = 160 * DAY;
+    let near = (READ_AT_DAY - 1) * DAY;
+    let goal = |log: &mut Log, kind: &str, payload: serde_json::Value, at: i64| {
+        log.add(None, None, kind, payload, at);
+        log.events.last_mut().unwrap().goal_id = Some(crate::domain::GoalId::new(FORECAST_GOAL));
+    };
+    // A planner's revision of the task's proposal before the range: a
+    // record of the planner's session, closed then, on the task.
+    log.add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": REVISING_PLANNER}),
+        before + 50,
+    )
+    .add(
+        task,
+        None,
+        "plan_revise_sent",
+        json!({"proposal_id": 8000, "planner_id": REVISING_PLANNER, "opened": false}),
+        before + 55,
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"kind": "runtime_planner", "planner_id": REVISING_PLANNER, "session_id": "p-77"}),
+        before + 60,
+    );
+    goal(
+        &mut log,
+        "goal_created",
+        json!({"goal": {"title": "g7100", "status": "open", "priority": "normal"}}),
+        before + 30,
+    );
+    log.add(
+        None,
+        None,
+        "forecast_recorded",
+        forecast(before + 35, json!([]), row(FORECAST_GOAL)),
+        before + 35,
+    )
+    .add(
+        None,
+        None,
+        "forecast_recorded",
+        forecast(before + 40, row(REOPENED_TASK), json!([])),
+        before + 40,
+    )
+    .add(
+        task,
+        None,
+        "task_status_changed",
+        json!({"from": "ready", "to": "completed"}),
+        near + 700,
+    );
+    goal(
+        &mut log,
+        "goal_closed",
+        json!({"verdict": "achieved"}),
+        near + 710,
+    );
+    renumber(log)
+}
+
+/// The old snapshot is deliberately kept. The second-stage mark records
+/// grow with the target's open period (4670 (vii), decision A, 4756's
+/// does_not_hold); they are excluded from the bounded-count assertion.
+pub fn ledger_queue_lives_keeps_an_old_snapshot<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+) -> Result<()> {
+    let store = open()?;
+    let tx = store.write_entry("contract_queue_old_snapshot")?;
+    let laid = lay_down(&tx, &old_snapshot_log(30))?;
     fill(&tx)?;
     answers(&tx)?;
     clear(&tx, &laid)?;

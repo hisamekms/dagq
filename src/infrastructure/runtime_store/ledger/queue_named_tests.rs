@@ -204,3 +204,33 @@ fn postgres_makes_the_same_indexes_of_the_views_seeks() {
         .is_ok()
     );
 }
+
+/// The report's read past a task closed and reopened 3000 times before
+/// the range (and closed again in it), against 30 times: the snapshots of
+/// the periods it ended before and the marks from them are not read.
+#[test]
+fn the_report_s_reads_past_3000_ends_of_a_task_return_as_many() {
+    let uri = format!(
+        "file:/ledger-report-ends-{}?vfs=memdb",
+        uuid::Uuid::new_v4()
+    );
+    let _keeper = SqliteQueue::init(&uri).unwrap();
+    crate::infrastructure::store_contract::ledger_report::ledger_report_past_a_task_s_cycles(
+        &|| SqliteQueue::open(&uri),
+        3000,
+    )
+    .unwrap();
+}
+
+/// The store contract of the report's read with 3000 settled units.
+#[test]
+fn the_report_s_reads_return_as_many_with_3000_settled_units() {
+    let uri = format!("file:/ledger-report-{}?vfs=memdb", uuid::Uuid::new_v4());
+    let _keeper = SqliteQueue::init(&uri).unwrap();
+    crate::infrastructure::store_contract::ledger_report::ledger_report_with(
+        &|| SqliteQueue::open(&uri),
+        30,
+        3000,
+    )
+    .unwrap();
+}

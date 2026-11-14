@@ -51,7 +51,7 @@ fn alert() -> Value {
 /// all ended long before every range: a deferral ended of a task
 /// canceled, and an alert started and ended.
 fn settled_queue_units(log: &mut Log, settled: usize) {
-    let span = 100 * DAY;
+    let span = super::ledger_earlier::units_span(100 * DAY);
     log.add(
         None,
         None,
@@ -410,6 +410,13 @@ impl LedgerWindowRead for Counted<'_> {
         cursor: EventId,
     ) -> Result<WindowRead<crate::application::CursorRecordTime>> {
         self.snapshot.cursor_record_time(cursor)
+    }
+    fn cursor_record_time_through(
+        &self,
+        cursor: EventId,
+        end_ms: i64,
+    ) -> Result<WindowRead<crate::application::CursorRecordTime>> {
+        self.snapshot.cursor_record_time_through(cursor, end_ms)
     }
     fn forecast_events(&self, start_ms: i64, end_ms: i64) -> Result<WindowRead<Vec<RunEvent>>> {
         let read = self.snapshot.forecast_events(start_ms, end_ms)?;

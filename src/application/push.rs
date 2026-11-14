@@ -20,7 +20,6 @@ use super::{
 use crate::domain::kpi::{
     KpiQuery, Period,
     push::{self, PushConfig, PushMessage},
-    read_from_ms,
     report::Report,
 };
 
@@ -81,10 +80,9 @@ pub struct BreachCheck {
 /// After downtime across local midnight, the next job checks the latest
 /// finished day and week at that time, without backfilling older periods.
 ///
-/// Read one ledger window with
-/// [`WindowQuery::read_from_ms`](crate::domain::ledger::window::WindowQuery::read_from_ms)
-/// set to the earliest [`read_from_ms`] of the unchecked day and week queries
-/// (`last: 2`), including the baseline and breach streak history both need.
+/// Read one ledger window of the unchecked day and week queries (`last: 2`)
+/// by [`report::window`]: from the earliest start of their ranges, which
+/// takes in the baseline and the breach streak history both need.
 pub fn check_breaches(
     queue: &(impl QueueRecords + ?Sized),
     ledger: &(impl LedgerStore + ?Sized),
@@ -122,24 +120,12 @@ pub fn check_breaches(
     let push_day = push
         .filter(|push| push.breach)
         .map(|push| (day, push.max_breach_per_day));
-    let from = queries
-        .iter()
-        .filter_map(|(query, _)| {
-            read_from_ms(query, &setup.config, now, setup.host.utc_offset_secs)
-        })
-        .min();
-    let window = ledger.ledger_window(&crate::domain::ledger::window::WindowQuery {
-        now_ms: super::stats::now_ms(now),
-        read_from_ms: from,
-        bounds: super::kpi::declared(
-            queries.iter().map(|(query, _)| query.clone()).collect(),
-            now,
-            setup.host,
-            &setup.config,
-            setup.areas.as_ref(),
-        ),
-        ..Default::default()
-    })?;
+    let window = report::window(
+        ledger,
+        now,
+        setup,
+        queries.iter().map(|(query, _)| query.clone()).collect(),
+    )?;
     for (query, label) in &queries {
         let period = query.period;
         let kpi = super::kpi::of_window(
