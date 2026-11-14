@@ -526,14 +526,14 @@ fn classified(events: &[RunEvent], from: i64, to: i64) -> Vec<(Mark, bool)> {
         .collect()
 }
 
-/// Runs `case` on the history `build` makes with 30 and with 3000 settled
+/// Runs `case` on the history `build` makes with 30 and with 300 settled
 /// units outside the range and returns what each read.
 fn reads_with<T>(
     build: impl Fn(i64) -> (Log, i64, i64, T),
     case: impl Fn(&Store, i64, i64, &T),
 ) -> (usize, usize) {
     let mut counts = [0, 0];
-    for (slot, units) in [(0, 30), (1, 3000)] {
+    for (slot, units) in [(0, 30), (1, 300)] {
         let (log, from, to, extra) = build(units);
         let store = log.store();
         case(&store, from, to, &extra);

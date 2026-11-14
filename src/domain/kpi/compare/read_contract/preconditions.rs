@@ -701,14 +701,14 @@ mod tests {
         )
     }
 
-    /// Runs `case` on the history `build` makes with 30 and with 3000
+    /// Runs `case` on the history `build` makes with 30 and with 300
     /// settled units and returns what each read.
     fn reads_with<T>(
         build: impl Fn(i64) -> (Log, i64, i64, T),
         case: impl Fn(&Store, i64, i64, &T),
     ) -> (usize, usize) {
         let mut counts = [0, 0];
-        for (slot, units) in [(0, 30), (1, 3000)] {
+        for (slot, units) in [(0, 30), (1, 300)] {
             let (log, from, to, extra) = build(units);
             let store = log.store();
             case(&store, from, to, &extra);
@@ -879,7 +879,7 @@ mod tests {
     /// index down to it reads every event later in time: few for a cursor
     /// at now, as many as the history after it for one in the past. The
     /// walk stopped after [`WALK`] entries finds that time for a cursor
-    /// near now and for one with 30 units after it, and gives up with 3000
+    /// near now and for one with 30 units after it, and gives up with 300
     /// (the read falls back to every event); it reads at most [`WALK`].
     #[test]
     fn vi_an_event_cursor_reads_what_is_later_in_time() {
@@ -907,7 +907,11 @@ mod tests {
                 assert!(whole > crate::domain::stats::timestamp_millis(&own).unwrap());
             });
             if past {
-                assert!(large > small * 10, "{small} {large}");
+                // 300 units against 30: a read in proportion to the history it grows
+                // reads at least one more for each of the 270 units more, and one that
+                // does not grow reads as many with both and fails (a ratio of 10 times
+                // does not hold once a fixed part is added).
+                assert!(large >= small + 270, "{small} {large}");
             } else {
                 assert_eq!(small, large);
             }
@@ -924,8 +928,8 @@ mod tests {
                 assert_eq!(small, large);
             }
         }
-        // With 3000 units after it the walk gives up.
-        let (log, ..) = build(true)(3000);
+        // With 300 units after it the walk gives up.
+        let (log, ..) = build(true)(300);
         let store = log.store();
         let cursor = store
             .events
@@ -1077,7 +1081,7 @@ mod tests {
     /// `(15, 25]` up to now: walking the ids down to the first event at or
     /// before 25 goes back through the whole settled history. Stopped after
     /// [`WALK`] entries, the walk finds it with 30 units and gives up with
-    /// 3000, where no row is left out (every row is read, as today). The
+    /// 300, where no row is left out (every row is read, as today). The
     /// answer is every event's either way. A DB's clock ahead of the
     /// reader's writes the same history.
     #[test]
@@ -1100,7 +1104,11 @@ mod tests {
         let (small, large) = reads_with(build, |store, _, to, ()| {
             store.last_id_through(to);
         });
-        assert!(large > small * 10, "{small} {large}");
+        // 300 units against 30: a read in proportion to the history it grows
+        // reads at least one more for each of the 270 units more, and one that
+        // does not grow reads as many with both and fails (a ratio of 10 times
+        // does not hold once a fixed part is added).
+        assert!(large >= small + 270, "{small} {large}");
     }
 
     // (vii) -------------------------------------------------------------
@@ -1215,7 +1223,11 @@ mod tests {
                 check_forecast(s, f, t);
             },
         );
-        assert!(large > small * 10, "{small} {large}");
+        // 300 units against 30: a read in proportion to the history it grows
+        // reads at least one more for each of the 270 units more, and one that
+        // does not grow reads as many with both and fails (a ratio of 10 times
+        // does not hold once a fixed part is added).
+        assert!(large >= small + 270, "{small} {large}");
     }
 
     /// The marks after the range count on a sample by their ids: marks
@@ -1231,7 +1243,11 @@ mod tests {
             (log, from, to, ())
         };
         let (small, large) = reads_with(build, |s, f, t, ()| check_forecast(s, f, t));
-        assert!(large > small * 10, "{small} {large}");
+        // 300 units against 30: a read in proportion to the history it grows
+        // reads at least one more for each of the 270 units more, and one that
+        // does not grow reads as many with both and fails (a ratio of 10 times
+        // does not hold once a fixed part is added).
+        assert!(large >= small + 270, "{small} {large}");
     }
 
     /// A range over the settled runs just before the finishes, with

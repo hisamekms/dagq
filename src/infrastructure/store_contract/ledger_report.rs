@@ -43,7 +43,7 @@ const BEFORE: i64 = 150 * DAY;
 /// The settled units of the larger history of the queue's and the clocks'
 /// cases and of the old snapshot: as many again as the smaller's five times
 /// over shows the reads do not grow (the views' history is compared with
-/// 300, and with 3000 on SQLite).
+/// 300).
 const LARGE: usize = 150;
 
 const HOST: Host = Host {

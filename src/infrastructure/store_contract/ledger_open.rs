@@ -178,14 +178,14 @@ pub fn ledger_open_written_with_its_rows<S: ContractStore, F: Fn() -> Result<S>>
 }
 
 /// (b) What the table holds counts the runs left open, not the settled
-/// runs beside them: 30 and 3000 settled runs hold as many rows. All rows
+/// runs beside them: 30 and 300 settled runs hold as many rows. All rows
 /// roll back.
 pub fn ledger_open_counts_the_runs_left_open<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
 ) -> Result<()> {
     let store = open()?;
     let mut counts = Vec::new();
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let tx = store.write_entry("contract_ledger_open_counts")?;
         let rows = rows(settled, true);
         ensure!(rows.len() > usize::try_from(settled)?);

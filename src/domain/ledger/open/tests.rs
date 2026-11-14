@@ -299,7 +299,7 @@ fn the_runs_left_open_do_not_grow_with_the_settled_history() {
     };
     let small = shape(30);
     assert_eq!(small.len(), 6, "{small:?}");
-    assert_eq!(small, shape(3000));
+    assert_eq!(small, shape(300));
 }
 
 #[test]

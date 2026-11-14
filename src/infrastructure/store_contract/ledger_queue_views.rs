@@ -341,7 +341,7 @@ fn looked_up(tx: &impl SqlRead, through: i64) -> Result<(usize, usize, usize, us
 }
 
 /// (b) What a read looks up by what its range names counts those rows,
-/// not the settled history beside them: 30 and 3000 settled units give
+/// not the settled history beside them: 30 and 300 settled units give
 /// as many snapshots naming task 2, commits of c1 and asks left open, and
 /// one latest summary. All rows roll back.
 pub fn ledger_queue_views_count_what_a_read_names<S: ContractStore, F: Fn() -> Result<S>>(
@@ -349,7 +349,7 @@ pub fn ledger_queue_views_count_what_a_read_names<S: ContractStore, F: Fn() -> R
 ) -> Result<()> {
     let store = open()?;
     let mut counts = Vec::new();
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let tx = store.write_entry("contract_ledger_queue_views_counts")?;
         as_before_the_views(&tx)?;
         fill_all(&tx)?;

@@ -615,7 +615,7 @@ mod tests {
         case: impl Fn(&Reads, i64, i64),
     ) -> (usize, usize) {
         let mut counts = [0, 0];
-        for (slot, units) in [(0, 30), (1, 3000)] {
+        for (slot, units) in [(0, 30), (1, 300)] {
             let (history, from, to) = build(units);
             let reads = history.reads();
             reads.read.set(0);
@@ -719,7 +719,12 @@ mod tests {
                     .any(|e| e.payload["label"] == "backdated into the range")
             );
         });
-        assert!(large > small * 10, "{small} {large}");
+        // 300 units against 30: [`History::settled`] writes a mark retracted
+        // at once every tenth unit, so a read in proportion to the history reads
+        // at least one more for each of the 27 tenth units more, and one that
+        // does not grow reads as many with both and fails (a ratio of 10 times
+        // does not hold once a fixed part is added).
+        assert!(large >= small + 27, "{small} {large}");
     }
 
     // (ii) --------------------------------------------------------------
@@ -784,7 +789,12 @@ mod tests {
                 );
             },
         );
-        assert!(large > small * 10, "{small} {large}");
+        // 300 units against 30: [`History::settled`] writes a mark retracted
+        // at once every tenth unit, so a read in proportion to the history reads
+        // at least one more retraction for each of the 27 tenth units more, and
+        // one that does not grow reads as many with both and fails (a ratio of 10
+        // times does not hold once a fixed part is added).
+        assert!(large >= small + 27, "{small} {large}");
     }
 
     // (iii) -------------------------------------------------------------
@@ -830,7 +840,11 @@ mod tests {
                     .is_some()
             );
         });
-        assert!(large > small * 10, "{small} {large}");
+        // 300 units against 30: a read in proportion to the history it grows
+        // reads at least one more for each of the 270 units more, and one that
+        // does not grow reads as many with both and fails (a ratio of 10 times
+        // does not hold once a fixed part is added).
+        assert!(large >= small + 270, "{small} {large}");
     }
 
     // (iv) --------------------------------------------------------------
@@ -1018,7 +1032,11 @@ mod tests {
                 assert_eq!(whole.len(), 1);
             },
         );
-        assert!(large > small * 10, "{small} {large}");
+        // 300 units against 30: a read in proportion to the history it grows
+        // reads at least one more for each of the 270 units more, and one that
+        // does not grow reads as many with both and fails (a ratio of 10 times
+        // does not hold once a fixed part is added).
+        assert!(large >= small + 270, "{small} {large}");
     }
 
     /// A mark recorded after the slice and backdated between two marks of

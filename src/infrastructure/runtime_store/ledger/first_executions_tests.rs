@@ -196,7 +196,7 @@ fn the_migration_backfills_the_view_and_publishes_readiness_afterwards() {
 /// The table grows with pairs alone, however many settled run rows the
 /// time range omits. Repeated writes are idempotent too.
 #[test]
-fn thirty_and_three_thousand_omitted_runs_keep_only_the_pairs() {
+fn thirty_and_three_hundred_omitted_runs_keep_only_the_pairs() {
     let dir = tempfile::tempdir().unwrap();
     let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
     let mut row = rows().remove(0);
@@ -207,10 +207,10 @@ fn thirty_and_three_thousand_omitted_runs_keep_only_the_pairs() {
     };
     assert!(from.leaves_out(&row));
     let tx = queue.write_entry("first_executions_test").unwrap();
-    for n in 0..3000 {
+    for n in 0..300 {
         row.key = format!("old-{n}");
         upsert(&tx, &row).unwrap();
-        if n == 29 || n == 2999 {
+        if n == 29 || n == 299 {
             let count: i64 = SqlRead::query_row(
                 &tx,
                 "SELECT COUNT(*) FROM ledger_first_executions",

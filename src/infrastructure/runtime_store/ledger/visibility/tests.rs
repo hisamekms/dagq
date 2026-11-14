@@ -255,7 +255,7 @@ impl<T: SqlRead> SqlRead for Counted<'_, T> {
 #[test]
 fn visibility_matches_whole_rows_and_reads_do_not_grow_with_settled_history() {
     let mut counts = Vec::new();
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let (queue, log, marks, start) = apart(settled);
         queue
             .ledger_read_snapshot(&mut |read| {

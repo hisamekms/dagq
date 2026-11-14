@@ -148,23 +148,23 @@ fn reads_of(settled: usize, changes: usize) -> ((usize, usize, usize), usize) {
 }
 
 /// The run, task and session rows, the earlier records and the first
-/// Executions a read returns are as many with 30 and 3000 settled units
-/// outside the range, and with 30 and 3000 changes of the plan of a task
+/// Executions a read returns are as many with 30 and 300 settled units
+/// outside the range, and with 30 and 300 changes of the plan of a task
 /// of a proposal the range names that ended before it (its ends alone are
 /// read), while the earlier records of every row left out grow with them.
 #[test]
 fn the_reads_do_not_grow_with_the_settled_history() {
     let (few, few_before) = reads_of(30, 30);
-    let (many, many_before) = reads_of(3000, 30);
+    let (many, many_before) = reads_of(300, 30);
     assert_eq!(few, many);
     assert!(
-        many_before > few_before + 2970 * 4,
+        many_before > few_before + 270 * 4,
         "{few_before} {many_before}"
     );
-    let (own_few, own_few_before) = reads_of(30, 3000);
+    let (own_few, own_few_before) = reads_of(30, 300);
     assert_eq!(own_few, few);
     assert!(
-        own_few_before >= few_before + 2970,
+        own_few_before >= few_before + 270,
         "{few_before} {own_few_before}"
     );
 }

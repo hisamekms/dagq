@@ -338,7 +338,7 @@ fn an_event_cursor_across_a_clock_turned_back_is_found_near_now_and_in_the_past(
         if past {
             // The latest events and one aggregate, however long the history
             // after the cursor (with 30 units the latest events still hold
-            // it, with 3000 the aggregate finds it), for each of the two
+            // it, with 300 the aggregate finds it), for each of the two
             // reads of the cursor (its own and `plan`'s).
             assert!(
                 small <= 2 * (WALK + 1) && large == 2 * (WALK + 1),

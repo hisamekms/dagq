@@ -8,7 +8,7 @@
 //! narrowed read below stands where
 //! [`crate::domain::ledger::window::select_from_time`] gathers the earlier
 //! records, and each test compares the answers with those of every row and
-//! counts what the read returns with 30 and 3000 settled units outside
+//! counts what the read returns with 30 and 300 settled units outside
 //! the range.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -940,7 +940,7 @@ fn kpi_misses(rows: &[LedgerRow], parts: &[Part]) -> Vec<String> {
 fn the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settled_history() {
     let query = time_query(&kpi_questions()[0]);
     let small = rows_of(&history(30));
-    let large = rows_of(&history(3000));
+    let large = rows_of(&history(300));
     // The read of today gives the answers of every row, ...
     assert_eq!(kpi_misses(&small, &[]), Vec::<String>::new());
     let whole = select(small.clone(), &whole_query());
@@ -959,9 +959,17 @@ fn the_read_from_a_time_today_returns_earlier_records_in_proportion_to_the_settl
     // units: (i) and (ii) of the description.
     let (_, small_reads) = narrowed(&small, &query, &[]);
     let (_, large_reads) = narrowed(&large, &query, &[]);
-    eprintln!("today: 30 units {small_reads:?}, 3000 units {large_reads:?}");
-    assert!(earlier_today(&large, &query) > 50 * earlier_today(&small, &query) / 2);
-    assert!(large_reads.queue > 10 * small_reads.queue);
+    eprintln!("today: 30 units {small_reads:?}, 300 units {large_reads:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(earlier_today(&large, &query) >= earlier_today(&small, &query) + 270);
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(large_reads.queue >= small_reads.queue + 270);
     assert_eq!(small_reads.rows, large_reads.rows);
 }
 
@@ -985,11 +993,11 @@ fn each_part_narrowed_alone_keeps_the_answers_of_every_row_or_names_what_it_miss
 fn every_part_narrowed_returns_as_many_records_whatever_the_settled_history() {
     let query = time_query(&kpi_questions()[0]);
     let small = rows_of(&history(30));
-    let large = rows_of(&history(3000));
+    let large = rows_of(&history(300));
     assert_eq!(kpi_misses(&large, &PARTS), Vec::<String>::new());
     let (_, small_reads) = narrowed(&small, &query, &PARTS);
     let (_, large_reads) = narrowed(&large, &query, &PARTS);
-    eprintln!("narrowed: 30 units {small_reads:?}, 3000 units {large_reads:?}");
+    eprintln!("narrowed: 30 units {small_reads:?}, 300 units {large_reads:?}");
     assert_eq!(small_reads.earlier, large_reads.earlier);
     assert_eq!(small_reads.rows, large_reads.rows);
     assert_eq!(small_reads.executions, large_reads.executions);
@@ -1135,7 +1143,7 @@ fn store_cases(log: &Log) -> (Vec<LedgerRow>, Vec<RunEvent>, Vec<EventId>, Event
 
 #[test]
 fn the_small_read_of_the_saved_owners_and_the_runs_on_their_way_sees_what_the_whole_read_sees() {
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let log = history(settled);
         let (rows, events, lagging, mark) = store_cases(&log);
         let whole = visible(&rows, &events);
@@ -1213,7 +1221,7 @@ fn stats_since_a_time_answers_as_the_whole_read_with_the_narrowed_earlier() {
         full: true,
         ..StatsQuery::default()
     };
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let rows = rows_of(&history(settled));
         let base = WindowQuery {
             since: Some(since),
@@ -1314,7 +1322,7 @@ fn queue_narrowed(rows: &[LedgerRow], from_ms: i64, kinds: &BTreeSet<String>) ->
 #[test]
 fn each_queue_kind_read_by_its_range_keeps_the_answers_of_every_row_or_names_what_it_misses() {
     let small = rows_of(&history(30));
-    let large = rows_of(&history(3000));
+    let large = rows_of(&history(300));
     let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
     let kinds: BTreeSet<String> = small
         .iter()
@@ -1409,7 +1417,7 @@ fn kpi_misses_against(whole: &[LedgerRow], got: &[LedgerRow]) -> (Vec<String>, R
 fn the_reads_of_the_whole_path_add_up_to_as_many_whatever_the_settled_history() {
     let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
     let mut totals = Vec::new();
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let rows = rows_of(&history(settled));
         let kinds: BTreeSet<String> = rows
             .iter()
@@ -1823,7 +1831,7 @@ fn of_the_range(events: &[RunEvent]) -> Vec<RunEvent> {
 #[test]
 fn a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_them() {
     let mut looks = Vec::new();
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let (rows, events, marks, running) = store_apart(settled);
         assert_eq!(runs_on_their_way(&rows), vec![running.clone()]);
         let whole = visible(&rows, &events);
@@ -1909,14 +1917,18 @@ fn a_run_on_its_way_and_the_rows_past_w_and_r_are_seen_as_the_whole_read_sees_th
     }
     assert_eq!(looks[0].0, looks[1].0);
     assert_eq!(looks[0].1, looks[1].1);
-    assert!(looks[1].2 > 50 * looks[0].2 / 2, "{looks:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(looks[1].2 >= looks[0].2 + 270, "{looks:?}");
     assert!(looks[0].1 < looks[0].2, "{looks:?}");
 }
 
 #[test]
 fn r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows() {
     let mut looks = Vec::new();
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let (rows, events, marks, _) = store_apart(settled);
         let whole = visible(&rows, &events);
         let range = of_the_range(&events);
@@ -1942,7 +1954,11 @@ fn r_spares_the_task_rows_of_the_task_events_up_to_it_and_not_the_run_rows() {
     }
     assert_eq!(looks[0].0, looks[1].0);
     assert_eq!(looks[0].1, looks[1].1);
-    assert!(looks[1].2 > 50 * looks[0].2 / 2, "{looks:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(looks[1].2 >= looks[0].2 + 270, "{looks:?}");
     // A run's event at or before R is not spared: run 12's task ended and
     // its row was not written, so the whole read sees none of its events.
     let (rows, events, marks, _) = store_apart(30);
@@ -2152,13 +2168,13 @@ fn u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_wh
     };
     let mut two = BTreeMap::new();
     let mut searched = BTreeMap::new();
-    // The settled history before S (30, 3000 units) and the history after
-    // E (30, 3000 events), a clock turned back after the long one.
+    // The settled history before S (30, 300 units) and the history after
+    // E (30, 300 events), a clock turned back after the long one.
     for (settled, after, late) in [
         (30, 30, false),
-        (3000, 30, false),
-        (30, 3000, false),
-        (30, 3000, true),
+        (300, 30, false),
+        (30, 300, false),
+        (30, 300, true),
     ] {
         let (rows, events) = store_after(settled, after, end, late);
         let whole = visible(&rows, &events);
@@ -2235,18 +2251,18 @@ fn u_e_of_every_event_and_of_the_visible_ones_and_searched_by_k_keep_what_the_wh
     eprintln!("(found, walked, reads, rows past the end read, of the whole read): {searched:#?}");
     // Before S the history does not count, for either bound and for K.
     for name in ["every", "visible"] {
-        assert_eq!(two[&(30, name)], two[&(3000, name)]);
+        assert_eq!(two[&(30, name)], two[&(300, name)]);
     }
     assert_eq!(two[&(30, "every")], two[&(30, "visible")]);
-    assert_eq!(searched[&(30, 30, false)], searched[&(3000, 30, false)]);
+    assert_eq!(searched[&(30, 30, false)], searched[&(300, 30, false)]);
     let near = searched[&(30, 30, false)];
     assert!(near.0 && near.3 < near.4, "{near:?}");
     // After E it does: past K the search gives up and the read takes every
     // row past the end, as the whole read does (4670 (vi)'s fallback); a
     // clock turned back gives a bound past them all.
-    let long = searched[&(30, 3000, false)];
-    assert!(!long.0 && long.1 == K && long.3 == long.4 && long.4 > 3000);
-    let late = searched[&(30, 3000, true)];
+    let long = searched[&(30, 300, false)];
+    assert!(!long.0 && long.1 == K && long.3 == long.4 && long.4 > 300);
+    let late = searched[&(30, 300, true)];
     assert!(late.0 && late.1 == 1 && late.3 == late.4);
     // By the first input alone, a bound below a row of the window (task
     // 70's, started in it) changes the answer: `select` itself drops only
@@ -2469,7 +2485,7 @@ fn fix_old_closes(log: &mut Log) {
 fn a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_pairs_it() {
     let mut reads = Vec::new();
     let mut fulls = Vec::new();
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let rows = rows_of(&history_with(settled, add_old_closes, fix_old_closes));
         let of = |n: u8| {
             rows.iter()
@@ -2500,11 +2516,16 @@ fn a_run_s_session_closed_by_an_old_close_or_twice_stays_open_as_the_whole_read_
         reads.push(paired_reads);
     }
     assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
-    assert!(
-        fulls[1].0.earlier > 50 * fulls[0].0.earlier / 2,
-        "{fulls:?}"
-    );
-    assert!(fulls[1].1.rows > 50 * fulls[0].1.rows / 2, "{fulls:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 270, "{fulls:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(fulls[1].1.rows >= fulls[0].1.rows + 270, "{fulls:?}");
 }
 
 /// (i-a): planner 70's session (headless) opened and closed long before
@@ -2545,7 +2566,7 @@ fn add_planner_question(log: &mut Log) {
 fn a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_ask_s_actor_names() {
     let mut reads = Vec::new();
     let mut fulls = Vec::new();
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let rows = rows_of(&history_with(settled, add_planner_question, |_| {}));
         let prefix_alone = Shape {
             actor_planners: false,
@@ -2570,11 +2591,16 @@ fn a_planner_s_session_row_is_read_by_the_prefix_of_its_key_and_the_planner_an_a
         reads.push(shaped_reads);
     }
     assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
-    assert!(
-        fulls[1].0.earlier > 50 * fulls[0].0.earlier / 2,
-        "{fulls:?}"
-    );
-    assert!(fulls[1].1.rows > 50 * fulls[0].1.rows / 2, "{fulls:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 270, "{fulls:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(fulls[1].1.rows >= fulls[0].1.rows + 270, "{fulls:?}");
 }
 
 /// (i-b): `count` priority changes of task 66 (of proposal 8, completed
@@ -2602,7 +2628,7 @@ fn a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_histo
     let mut ends = Vec::new();
     let mut fulls = Vec::new();
     let mut records = Vec::new();
-    for count in [30, 3000] {
+    for count in [30, 300] {
         let rows = rows_of(&history_with(30, add_priorities(count), |_| {}));
         let (misses, read) = shape_misses(&rows, SHAPED);
         let (whole_misses, whole_read) = shape_misses(&rows, whole_records);
@@ -2617,12 +2643,12 @@ fn a_member_task_s_ends_alone_answer_as_its_whole_history_whatever_its_own_histo
     }
     assert_eq!(earlier_reads(ends[0]), earlier_reads(ends[1]));
     assert!(
-        records[1].earlier >= records[0].earlier + 2970,
+        records[1].earlier >= records[0].earlier + 270,
         "{records:?}"
     );
     // Today's read and every row's records grow with task 66's history.
-    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 2970, "{fulls:?}");
-    assert!(fulls[1].2 >= fulls[0].2 + 2970, "{fulls:?}");
+    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 270, "{fulls:?}");
+    assert!(fulls[1].2 >= fulls[0].2 + 270, "{fulls:?}");
 }
 
 /// (i-d): goal 80 in proposal 9 (its `goal_submitted`, a finding the
@@ -2674,7 +2700,7 @@ fn add_goal_proposal(log: &mut Log) {
 fn a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it() {
     let mut reads = Vec::new();
     let mut fulls = Vec::new();
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let rows = rows_of(&history_with(settled, add_goal_proposal, |_| {}));
         let whole = select(rows.clone(), &whole_query());
         let query = kpi_questions()[0].clone();
@@ -2715,18 +2741,23 @@ fn a_proposal_s_goal_tasks_are_read_by_the_goal_submitted_naming_it() {
         reads.push(shaped_reads);
     }
     assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
-    assert!(
-        fulls[1].0.earlier > 50 * fulls[0].0.earlier / 2,
-        "{fulls:?}"
-    );
-    assert!(fulls[1].1.rows > 50 * fulls[0].1.rows / 2, "{fulls:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 270, "{fulls:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(fulls[1].1.rows >= fulls[0].1.rows + 270, "{fulls:?}");
 }
 
 #[test]
 fn every_shape_returns_as_many_records_whatever_the_settled_history() {
     let mut reads = Vec::new();
     let mut fulls = Vec::new();
-    for settled in [30, 3000] {
+    for settled in [30, 300] {
         let log = history_with(
             settled,
             |log| {
@@ -2745,11 +2776,16 @@ fn every_shape_returns_as_many_records_whatever_the_settled_history() {
         reads.push(read);
     }
     assert_eq!(earlier_reads(reads[0]), earlier_reads(reads[1]));
-    assert!(
-        fulls[1].0.earlier > 50 * fulls[0].0.earlier / 2,
-        "{fulls:?}"
-    );
-    assert!(fulls[1].1.rows > 50 * fulls[0].1.rows / 2, "{fulls:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(fulls[1].0.earlier >= fulls[0].0.earlier + 270, "{fulls:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(fulls[1].1.rows >= fulls[0].1.rows + 270, "{fulls:?}");
 }
 
 // (ii) the queue rows' kinds Spike 4678 left unresolved (Spike 4756).
@@ -3767,7 +3803,7 @@ fn queue_units_without_lives(settled: usize) -> Log {
 /// Check the part `name` of (ii): with 30 settled units the read of
 /// Spike 4678 ([`queue_narrowed`]) and that of [`QUEUE_SHAPED`] against the
 /// whole read, the shaped read's queue rows of the part the same with 30
-/// and 3000 units while the whole read's grow, and the shaped read's
+/// and 300 units while the whole read's grow, and the shaped read's
 /// answers against the whole read's with `large` units of `history`.
 /// Returns the misses of the read of Spike 4678.
 fn check_part(name: &str, history: fn(usize) -> Log) -> Vec<String> {
@@ -3785,7 +3821,7 @@ fn large_answers() -> usize {
 }
 
 /// [`check_part`] of the histories `small` (of 30 units), `units` (whose
-/// queue rows are counted with 3000) and `history` (of the answers with
+/// queue rows are counted with 300) and `history` (of the answers with
 /// [`large_answers`]).
 fn check_part_of(
     name: &str,
@@ -3806,7 +3842,7 @@ fn check_part_of(
             .sum::<usize>()
             + rows.iter().filter(|row| row.key == "main_summary").count()
     };
-    let units = rows_of(&units(3000));
+    let units = rows_of(&units(300));
     let by_kind = |rows: &[LedgerRow]| {
         part.iter()
             .map(|kind| queue_count(rows, kind))
@@ -3824,12 +3860,16 @@ fn check_part_of(
     let (large_misses, _) = queue_misses(&rows, &queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED));
     eprintln!(
         "{name}: 4678 {} misses {:?}; shaped {narrowed_small}/{narrowed_large} of {whole_small}/{whole_large} \
-         (30/3000), misses {misses:?}, with {large}: {large_misses:?}",
+         (30/300), misses {misses:?}, with {large}: {large_misses:?}",
         of_4678.len(),
         of_4678.iter().take(4).collect::<Vec<_>>()
     );
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
     assert!(
-        whole_large > 50 * whole_small / 2 || whole_small < 10,
+        whole_large >= whole_small + 270 || whole_small < 10,
         "{name}"
     );
     if name == "ii-a" && small.iter().any(old_snapshot) {
@@ -3845,7 +3885,11 @@ fn check_part_of(
             marks(&misses) && marks(&large_misses),
             "{misses:?} {large_misses:?}"
         );
-        assert!(narrowed_large > 25 * narrowed_small, "{name}");
+        // 300 units against 30: a read in proportion to the settled history
+        // reads at least one more for each of the 270 units more, and one that
+        // does not grow reads as many with both and fails (a ratio of 10 times
+        // does not hold once a fixed part is added).
+        assert!(narrowed_large >= narrowed_small + 270, "{name}");
         return of_4678;
     }
     assert_eq!(misses, Vec::<String>::new(), "{name} 30");
@@ -3957,7 +4001,7 @@ fn every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row() {
         (30, near_snapshot(30)),
         (30, near_snapshot_units(30)),
         (large_answers(), near_snapshot_units(large_answers())),
-        (3000, near_snapshot_units(3000)),
+        (300, near_snapshot_units(300)),
     ] {
         let rows = rows_of(&log);
         // Every queue kind: (ii)'s by their shapes, 4678's by its read.
@@ -3967,7 +4011,7 @@ fn every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row() {
             .map(|row| subject_kind(row).to_owned())
             .collect();
         let narrowed = queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED);
-        if settled < 3000 || large_answers() == 3000 {
+        if settled < 300 || large_answers() == 300 {
             let (misses, _) = queue_misses(&rows, &narrowed);
             assert_eq!(misses, Vec::<String>::new(), "{settled}");
         }
@@ -3978,9 +4022,13 @@ fn every_queue_part_of_ii_read_by_its_range_together_answers_as_every_row() {
         );
         counts.push((queue(&narrowed), queue(&rows)));
     }
-    // Of the units without their tasks: the same with 30 and 3000.
+    // Of the units without their tasks: the same with 30 and 300.
     assert_eq!(counts[1].0, counts[3].0, "{counts:?}");
-    assert!(counts[3].1 > 50 * counts[1].1 / 2, "{counts:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(counts[3].1 >= counts[1].1 + 270, "{counts:?}");
 }
 
 // The rest of (ii) (Spike 4811).

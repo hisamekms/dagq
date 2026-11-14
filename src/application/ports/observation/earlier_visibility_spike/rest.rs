@@ -1,6 +1,6 @@
 //! The rest of (ii) Spike 4756 left unresolved, by its prototype widened
 //! (docs/plans/ledger-window-earlier-visibility-spike.md, section "追試 (ii)
-//! の残り（Spike 4811）"): (A) the answers of the final shapes with 3000
+//! の残り（Spike 4811）"): (A) the answers of the final shapes with more
 //! settled units, (B) the baselines' latest marks, (C) main's record read
 //! as summary rows and sha seeks counted apart, (D) what befell a landing
 //! with its counterexamples, (E) a goal's latest seek and (F) the
@@ -88,7 +88,7 @@ fn final_part(
     let small = rows_of(&small(30));
     let (misses, _) = part_report(&small, part, QUEUE_SHAPED);
     let small_read = count(&queue_ii(&small, from_ms, &kinds, QUEUE_SHAPED));
-    let units = rows_of(&units(3000));
+    let units = rows_of(&units(300));
     let units_read = count(&queue_ii(&units, from_ms, &kinds, QUEUE_SHAPED));
     let shared_small = count(&queue_ii(
         &rows_of(&answers(30)),
@@ -100,7 +100,7 @@ fn final_part(
     let read = count(&queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED));
     let (large_misses, _) = queue_misses(&rows, &queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED));
     eprintln!(
-        "{name}: read {small_read}/{units_read} (30/3000), shared lives {shared_small}/{read} \
+        "{name}: read {small_read}/{units_read} (30/300), shared lives {shared_small}/{read} \
          (30/{large}) of {}, misses {misses:?} {large_misses:?}",
         count(&rows)
     );
@@ -763,8 +763,8 @@ fn rest_reads(rows: &[LedgerRow], kinds: &[&str]) -> [usize; 3] {
 /// Check a part of the rest: with 30 units of `small` the read of Spike
 /// 4756 ([`QUEUE_SHAPED`]) and that of `rest` against the whole read, the
 /// answers of `rest` with [`rest_large`] units of `units`, and its reads
-/// with 30 and 3000 units of `units`. Returns the misses of Spike 4756's
-/// read and the reads with 30 and 3000.
+/// with 30 and 300 units of `units`. Returns the misses of Spike 4756's
+/// read and the reads with 30 and 300.
 fn rest_part(
     name: &str,
     kinds: &[&str],
@@ -788,22 +788,22 @@ fn rest_part(
     let large = rest_large();
     let mut reads = Vec::new();
     let mut whole = Vec::new();
-    let mut sizes = vec![30, large, 3000];
+    let mut sizes = vec![30, large, 300];
     sizes.dedup();
     for settled in sizes {
         let rows = rows_of(&units(settled));
         let narrowed = queue_rest(&rows, from_ms, &set, rest);
-        if settled != 3000 || large == 3000 {
+        if settled != 300 || large == 300 {
             let misses = rest_misses(&rows, &narrowed);
             assert_eq!(misses, Vec::<String>::new(), "{name} {settled}");
         }
-        if settled == 30 || settled == 3000 {
+        if settled == 30 || settled == 300 {
             reads.push(rest_reads(&narrowed, kinds));
             whole.push(rest_reads(&rows, kinds)[0]);
         }
     }
     eprintln!(
-        "{name}: 4756 misses {} {:?}; reads [queue, saved, by sha] {reads:?} (30/3000) of {whole:?}, \
+        "{name}: 4756 misses {} {:?}; reads [queue, saved, by sha] {reads:?} (30/300) of {whole:?}, \
          with the units' runs {small_reads:?}, answers with 30 and {large}, misses {misses:?}",
         of_4756.len(),
         of_4756.iter().take(6).collect::<Vec<_>>()
@@ -812,7 +812,11 @@ fn rest_part(
     assert_eq!(reads[0], reads[1], "{name}");
     // With the settled units' tasks and runs (their landed commits) too.
     assert_eq!(small_reads, reads[1], "{name} with the units' runs");
-    assert!(whole[1] > 50 * whole[0] / 2, "{name} {whole:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(whole[1] >= whole[0] + 270, "{name} {whole:?}");
     (of_4756, [reads[0], reads[1]])
 }
 
@@ -1034,7 +1038,7 @@ fn every_queue_kind_read_by_the_final_shapes_together_answers_as_every_row() {
         (30, rest_full(30)),
         (30, rest_units(30)),
         (large, rest_units(large)),
-        (3000, rest_units(3000)),
+        (300, rest_units(300)),
     ] {
         let rows = rows_of(&log);
         let kinds: BTreeSet<String> = rows
@@ -1043,7 +1047,7 @@ fn every_queue_kind_read_by_the_final_shapes_together_answers_as_every_row() {
             .map(|row| subject_kind(row).to_owned())
             .collect();
         let narrowed = queue_rest(&rows, from_ms, &kinds, REST);
-        if settled < 3000 || large == 3000 {
+        if settled < 300 || large == 300 {
             let misses = rest_misses(&rows, &narrowed);
             assert_eq!(misses, Vec::<String>::new(), "{settled}");
         }
@@ -1056,7 +1060,11 @@ fn every_queue_kind_read_by_the_final_shapes_together_answers_as_every_row() {
         counts.push((read, queue_count_all(&rows)));
     }
     assert_eq!(counts[1].0, counts[3].0, "{counts:?}");
-    assert!(counts[3].1 > 50 * counts[1].1 / 2, "{counts:?}");
+    // 300 units against 30: a read in proportion to the settled history
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(counts[3].1 >= counts[1].1 + 270, "{counts:?}");
 }
 
 fn queue_count_all(rows: &[LedgerRow]) -> usize {

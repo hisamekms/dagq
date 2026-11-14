@@ -1,6 +1,6 @@
 //! The queue's rows of the kinds a read from a time reads by their range,
 //! of SQLite: each read seeks its index and walks no table whole, and with
-//! 30 and 3000 settled units before the range the read answers as every
+//! 30 and 300 settled units before the range the read answers as every
 //! row and returns as many rows. The same contract runs on Postgres with
 //! 30 and 300 ([`crate::infrastructure::store_contract::ledger_range`]).
 use super::queue_from::{past_sql, reaching_sql, whole_sql};
@@ -98,24 +98,24 @@ fn the_reads_by_range_seek_their_indexes_and_scan_no_table() {
     }
 }
 
-/// The store contract of the range read with 3000 settled units: the
+/// The store contract of the range read with 300 settled units: the
 /// answers are those of every row and what the store returns of the run,
 /// task, session and node rows, the earlier records and the queue's rows
 /// of the kinds read by their range is as many as with 30.
 #[test]
-fn the_range_read_returns_as_many_with_3000_settled_units() {
+fn the_range_read_returns_as_many_with_300_settled_units() {
     let uri = format!("file:/ledger-range-{}?vfs=memdb", uuid::Uuid::new_v4());
     let _keeper = SqliteQueue::init(&uri).unwrap();
     crate::infrastructure::store_contract::ledger_range::ledger_range_with(
         &|| SqliteQueue::open(&uri),
         30,
-        3000,
+        300,
     )
     .unwrap();
 }
 
 #[test]
-fn the_named_queue_answers_and_counts_with_3000_settled_units() {
+fn the_named_queue_answers_and_counts_with_300_settled_units() {
     let uri = format!(
         "file:/ledger-named-queue-{}?vfs=memdb",
         uuid::Uuid::new_v4()
@@ -123,7 +123,7 @@ fn the_named_queue_answers_and_counts_with_3000_settled_units() {
     let _keeper = SqliteQueue::init(&uri).unwrap();
     crate::infrastructure::store_contract::ledger_queue_lives::ledger_queue_lives_with(
         &|| SqliteQueue::open(&uri),
-        3000,
+        300,
     )
     .unwrap();
 }

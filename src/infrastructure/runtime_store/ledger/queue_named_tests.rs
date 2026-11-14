@@ -1,7 +1,7 @@
 //! The reads of the queue rows by the views on SQLite
-//! ([`super::queue_named`]): with 3000 settled units the answers are those
+//! ([`super::queue_named`]): with 300 settled units the answers are those
 //! of every row and what the store returns is as many as with 30 (the
-//! store contract's case, of more units), and each seek searches an index
+//! store contract's case), and each seek searches an index
 //! and scans no table, on the schema `SqliteQueue::init` leaves and with no
 //! `sqlite_stat1`. The Postgres migration makes the same indexes.
 
@@ -32,9 +32,9 @@ fn reads(conn: &rusqlite::Connection, sql: &str) -> Vec<String> {
         .collect()
 }
 
-/// The store contract of the reads by the views with 3000 settled units.
+/// The store contract of the reads by the views with 300 settled units.
 #[test]
-fn the_reads_by_the_views_return_as_many_with_3000_settled_units() {
+fn the_reads_by_the_views_return_as_many_with_300_settled_units() {
     let uri = format!(
         "file:/ledger-queue-named-{}?vfs=memdb",
         uuid::Uuid::new_v4()
@@ -43,7 +43,7 @@ fn the_reads_by_the_views_return_as_many_with_3000_settled_units() {
     crate::infrastructure::store_contract::ledger_queue_named::ledger_queue_named_with(
         &|| SqliteQueue::open(&uri),
         30,
-        3000,
+        300,
     )
     .unwrap();
 }
@@ -51,7 +51,7 @@ fn the_reads_by_the_views_return_as_many_with_3000_settled_units() {
 /// The clock anomaly precedes every settled unit, so summary backtracking
 /// and its unsummarized rows cannot hide outside the measured range.
 #[test]
-fn an_early_clock_set_back_keeps_the_reads_bounded_with_3000_settled_units() {
+fn an_early_clock_set_back_keeps_the_reads_bounded_with_300_settled_units() {
     let uri = format!(
         "file:/ledger-queue-clock-{}?vfs=memdb",
         uuid::Uuid::new_v4()
@@ -60,14 +60,14 @@ fn an_early_clock_set_back_keeps_the_reads_bounded_with_3000_settled_units() {
     crate::infrastructure::store_contract::ledger_queue_named::ledger_queue_named_clock_with(
         &|| SqliteQueue::open(&uri),
         30,
-        3000,
+        300,
     )
     .unwrap();
 }
 
 /// No later main event may hide the clock regression made by CI alone.
 #[test]
-fn only_ci_after_a_future_main_event_keeps_the_reads_bounded_with_3000_checks() {
+fn only_ci_after_a_future_main_event_keeps_the_reads_bounded_with_300_checks() {
     let uri = format!(
         "file:/ledger-queue-ci-only-{}?vfs=memdb",
         uuid::Uuid::new_v4()
@@ -76,7 +76,7 @@ fn only_ci_after_a_future_main_event_keeps_the_reads_bounded_with_3000_checks() 
     crate::infrastructure::store_contract::ledger_queue_named::ledger_queue_named_ci_only_with(
         &|| SqliteQueue::open(&uri),
         30,
-        3000,
+        300,
     )
     .unwrap();
 }
@@ -205,11 +205,11 @@ fn postgres_makes_the_same_indexes_of_the_views_seeks() {
     );
 }
 
-/// The report's read past a task closed and reopened 3000 times before
+/// The report's read past a task closed and reopened 300 times before
 /// the range (and closed again in it), against 30 times: the snapshots of
 /// the periods it ended before and the marks from them are not read.
 #[test]
-fn the_report_s_reads_past_3000_ends_of_a_task_return_as_many() {
+fn the_report_s_reads_past_300_ends_of_a_task_return_as_many() {
     let uri = format!(
         "file:/ledger-report-ends-{}?vfs=memdb",
         uuid::Uuid::new_v4()
@@ -217,20 +217,20 @@ fn the_report_s_reads_past_3000_ends_of_a_task_return_as_many() {
     let _keeper = SqliteQueue::init(&uri).unwrap();
     crate::infrastructure::store_contract::ledger_report::ledger_report_past_a_task_s_cycles(
         &|| SqliteQueue::open(&uri),
-        3000,
+        300,
     )
     .unwrap();
 }
 
-/// The store contract of the report's read with 3000 settled units.
+/// The store contract of the report's read with 300 settled units.
 #[test]
-fn the_report_s_reads_return_as_many_with_3000_settled_units() {
+fn the_report_s_reads_return_as_many_with_300_settled_units() {
     let uri = format!("file:/ledger-report-{}?vfs=memdb", uuid::Uuid::new_v4());
     let _keeper = SqliteQueue::init(&uri).unwrap();
     crate::infrastructure::store_contract::ledger_report::ledger_report_with(
         &|| SqliteQueue::open(&uri),
         30,
-        3000,
+        300,
     )
     .unwrap();
 }

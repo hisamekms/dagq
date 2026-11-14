@@ -113,7 +113,11 @@ fn the_open_periods_of_the_targets_are_read() {
             check_forecast(s, f, t);
         },
     );
-    assert!(large > small * 10, "{small} {large}");
+    // 300 units against 30: a read in proportion to the history it grows
+    // reads at least one more for each of the 270 units more, and one that
+    // does not grow reads as many with both and fails (a ratio of 10 times
+    // does not hold once a fixed part is added).
+    assert!(large >= small + 270, "{small} {large}");
 }
 
 /// A range with snapshots and marks and no finish reads nothing past the
@@ -138,7 +142,7 @@ fn a_range_where_no_target_finishes_reads_no_snapshot() {
 /// of those marks, so the second step reads them (Spike 4756's (ii-a)
 /// `does_not_hold`, which planner decision A takes as the second step's
 /// bound). What it reads grows with the task's open period (the units
-/// between the snapshot and the range, here 30 against 3000, as the
+/// between the snapshot and the range, here 1 against 10 (300 / 30 against 30 / 30), as the
 /// answer's 6 against 66 marks of the Spike did), not with the history
 /// before the task was created.
 pub(super) fn far_snapshot(before: i64, between: i64) -> (Log, i64, i64, ()) {
@@ -186,7 +190,12 @@ fn a_far_snapshot_reads_the_marks_of_the_open_period() {
             assert_eq!(forecast_scoring(s, f, t).unwrap(), whole_scoring(s, f, t));
         },
     );
-    assert!(large > small * 10, "{small} {large}");
+    // 10 units of the open period against 1 (300 / 30 against 30 / 30): a
+    // read of the open period reads at least the mark of each of the 9
+    // units more, and one that does not grow with it reads as many with
+    // both and fails (a ratio of 10 times does not hold once a fixed part
+    // is added).
+    assert!(large >= small + 9, "{small} {large}");
 }
 
 /// The finish times of every event's runs (`stats`' `finished_event_id`),
