@@ -281,8 +281,13 @@ fn a_page_swept_whose_read_fails_leaves_its_rows_marked() {
 /// each bounded pass must not replay their history forever.
 #[test]
 fn covered_marks_do_not_pin_restarts_past_the_check_bound() {
+    const CHECKS: usize = 20;
+    let shares = Shares {
+        checks_per_pass: CHECKS,
+        ..Shares::PRODUCTION
+    };
     let mut log = Log::default();
-    for _ in 0..CHECKS_PER_PASS + 17 {
+    for _ in 0..CHECKS + 17 {
         log.add(None, None, ONE_EVENT, json!({}), 1);
     }
     let memory = Memory::of(&log);
@@ -302,7 +307,7 @@ fn covered_marks_do_not_pin_restarts_past_the_check_bound() {
     memory.events.replace(log.events.clone());
     let mut previous = EventId::new(0);
     for _ in 0..20 {
-        let mut builder = start_builder(&memory, ms(2)).unwrap();
+        let mut builder = start_sharing(&memory, ms(2), shares);
         let built = build_pass(
             &memory,
             &mut builder,
@@ -320,7 +325,7 @@ fn covered_marks_do_not_pin_restarts_past_the_check_bound() {
     }
     assert_eq!(previous, log.last());
     memory.scans.borrow_mut().clear();
-    let mut builder = start_builder(&memory, ms(2)).unwrap();
+    let mut builder = start_sharing(&memory, ms(2), shares);
     let built = build_pass(
         &memory,
         &mut builder,
@@ -342,7 +347,7 @@ fn covered_marks_do_not_pin_restarts_past_the_check_bound() {
         })
         .collect();
     for _ in 0..30 {
-        let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+        let mut builder = start_sharing(&memory, ms(LATER), shares);
         let built = build_pass(
             &memory,
             &mut builder,
@@ -368,24 +373,28 @@ fn covered_marks_do_not_pin_restarts_past_the_check_bound() {
 /// result, but not R. Startup scans only the tail, then new input only.
 #[test]
 fn interrupted_catch_up_resumes_after_the_committed_page() {
+    const PAGE: usize = 20;
+    let shares = Shares {
+        events_per_read: PAGE,
+        ..Shares::PRODUCTION
+    };
     let mut log = Log::default();
-    for _ in 0..EVENTS_PER_READ + 3 {
+    for _ in 0..PAGE + 3 {
         log.add(None, None, ONE_EVENT, json!({}), 1);
     }
     let memory = Memory::of(&log);
-    for mut row in crate::domain::ledger::build(&log.events[..EVENTS_PER_READ], ms(LATER), BUILT) {
+    for mut row in crate::domain::ledger::build(&log.events[..PAGE], ms(LATER), BUILT) {
         row.is_final = true;
         memory
             .rows
             .borrow_mut()
             .insert((row.kind, row.key.clone()), row);
     }
-    let checkpoint = log.events[EVENTS_PER_READ - 1].id;
-    memory.broken.replace(Some((
-        LedgerKind::Queue,
-        log.events[EVENTS_PER_READ].id.to_string(),
-    )));
-    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+    let checkpoint = log.events[PAGE - 1].id;
+    memory
+        .broken
+        .replace(Some((LedgerKind::Queue, log.events[PAGE].id.to_string())));
+    let mut builder = start_sharing(&memory, ms(LATER), shares);
     let discarded = pass(&memory, &mut builder, LATER);
     assert!(discarded.failure.unwrap().contains("does not parse"));
     assert_eq!(discarded.marks.cursors, builder.cursors());
@@ -394,11 +403,11 @@ fn interrupted_catch_up_resumes_after_the_committed_page() {
         memory.rows_mark.borrow().unwrap().through.events,
         checkpoint
     );
-    assert_eq!(memory.row_reads.get(), EVENTS_PER_READ + 1);
+    assert_eq!(memory.row_reads.get(), PAGE + 1);
     drop(builder);
     memory.broken.replace(None);
     memory.scans.borrow_mut().clear();
-    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+    let mut builder = start_sharing(&memory, ms(LATER), shares);
     let built = pass(&memory, &mut builder, LATER);
     assert_eq!(built.failure, None);
     assert_eq!(built.work.events, 3);
@@ -413,11 +422,11 @@ fn interrupted_catch_up_resumes_after_the_committed_page() {
     // The same tail on an empty store measures the normal read/fold/CAS
     // calls, separately from the covered history's one read per row.
     let tail = Memory::of(&Log {
-        events: log.events[EVENTS_PER_READ..].to_vec(),
+        events: log.events[PAGE..].to_vec(),
     });
     let tail_built = pass(&tail, &mut Builder::default(), LATER);
     assert_eq!(tail_built.failure, None);
-    assert!(memory.row_reads.get() <= EVENTS_PER_READ + 1 + tail.row_reads.get());
+    assert!(memory.row_reads.get() <= PAGE + 1 + tail.row_reads.get());
     let inputs = Inputs::new(&log.events, ms(LATER), BUILT, true);
     let expected: BTreeMap<_, _> = inputs
         .rows
@@ -436,7 +445,7 @@ fn interrupted_catch_up_resumes_after_the_committed_page() {
     }
     log.add(None, None, ONE_EVENT, json!({}), 2);
     memory.events.replace(log.events.clone());
-    let mut builder = start_builder(&memory, ms(LATER)).unwrap();
+    let mut builder = start_sharing(&memory, ms(LATER), shares);
     let built = pass(&memory, &mut builder, LATER);
     assert_eq!(built.failure, None);
     assert_eq!(built.work.events, 1);
@@ -453,7 +462,14 @@ fn interrupted_catch_up_resumes_after_the_committed_page() {
 /// the restored rank as well as the covered inputs.
 #[test]
 fn task_check_rank_is_written_and_rotates_through_one_pass_restarts() {
-    let count = CHECKS_PER_PASS + 17;
+    const CHECKS: usize = 20;
+    const PAGE: usize = 50;
+    let shares = Shares {
+        events_per_read: PAGE,
+        checks_per_pass: CHECKS,
+        ..Shares::PRODUCTION
+    };
+    let count = CHECKS + 17;
     let mut log = Log::default();
     for id in 1..=count {
         log.add(
@@ -473,16 +489,16 @@ fn task_check_rank_is_written_and_rotates_through_one_pass_restarts() {
             .borrow_mut()
             .insert((row.kind, row.key.clone()), row);
     }
-    let mut builder = start_builder(&memory, ms(2)).unwrap();
+    let mut builder = start_sharing(&memory, ms(2), shares);
     assert_eq!(pass(&memory, &mut builder, 2).failure, None);
     let first = memory.rows_mark.borrow().unwrap();
-    assert_eq!(first.take_offset, CHECKS_PER_PASS);
-    assert_eq!(first.through.events, log.events[CHECKS_PER_PASS - 1].id);
+    assert_eq!(first.take_offset, CHECKS);
+    assert_eq!(first.through.events, log.events[CHECKS - 1].id);
     drop(builder);
 
     // Covered queue rows let catch-up checkpoint before it takes any task
     // marks. Fail the next page and discard the builder and pass result.
-    for _ in 0..EVENTS_PER_READ + 3 {
+    for _ in 0..PAGE + 3 {
         log.add(None, None, ONE_EVENT, json!({}), 1);
     }
     memory.events.replace(log.events.clone());
@@ -495,12 +511,11 @@ fn task_check_rank_is_written_and_rotates_through_one_pass_restarts() {
     }
     memory.broken.replace(Some((
         LedgerKind::Queue,
-        log.events
-            [first.position(true).unwrap().through.events.as_i64() as usize + EVENTS_PER_READ]
+        log.events[first.position(true).unwrap().through.events.as_i64() as usize + PAGE]
             .id
             .to_string(),
     )));
-    let mut builder = start_builder(&memory, ms(2)).unwrap();
+    let mut builder = start_sharing(&memory, ms(2), shares);
     assert!(
         pass(&memory, &mut builder, 2)
             .failure
@@ -514,7 +529,7 @@ fn task_check_rank_is_written_and_rotates_through_one_pass_restarts() {
     drop(builder);
     memory.broken.replace(None);
 
-    let mut builder = start_builder(&memory, ms(2)).unwrap();
+    let mut builder = start_sharing(&memory, ms(2), shares);
     let second = pass(&memory, &mut builder, 2);
     assert_eq!(second.failure, None);
     assert_eq!(
@@ -522,14 +537,14 @@ fn task_check_rank_is_written_and_rotates_through_one_pass_restarts() {
         log.last().as_i64() - checkpoint.position(true).unwrap().through.events.as_i64()
     );
     let mark = memory.rows_mark.borrow().unwrap();
-    assert_eq!(mark.take_offset, (CHECKS_PER_PASS * 2) % count);
+    assert_eq!(mark.take_offset, (CHECKS * 2) % count);
     assert!(mark.through.events > first.through.events);
     assert_eq!(mark.through.events, log.last());
     for id in 1..=count {
         let row = build(&Target::Task(TaskId::new(id as i64)), &inputs, &[]).unwrap();
         assert_eq!(memory.row(row.kind, &row.key), row, "task {id}");
     }
-    let mut builder = start_builder(&memory, ms(2)).unwrap();
+    let mut builder = start_sharing(&memory, ms(2), shares);
     let caught_up = pass(&memory, &mut builder, 2);
     assert_eq!(caught_up.failure, None);
     assert_eq!(caught_up.work.events, 0);
@@ -769,4 +784,91 @@ fn prefix_clock_work_survives_a_failed_final_mark_write() {
         memory.rows_mark.borrow().unwrap().through.events,
         log.last()
     );
+}
+
+/// A pass reads the steps `STEPS` at a time and the windows of resources
+/// `RESOURCES` at a time (the builder's [`Shares`], production's
+/// [`Shares::PRODUCTION`] far more): a full read goes on from
+/// its last id, the resources while either of their reads is full, and a
+/// short read, an empty one too, stops. The run's row holds what a pass
+/// reading them all at once makes of them.
+#[test]
+fn steps_and_resources_are_read_a_share_at_a_time_until_a_short_read() {
+    const STEPS: usize = 5;
+    const RESOURCES: usize = 3;
+    let run = run_id(1);
+    let store = || {
+        let mut log = Log::default();
+        log.landed(1, &run, 0);
+        let attachment = attach(&mut log, &run, 1);
+        let memory = Memory::of(&log);
+        let target = session_of(&memory, &run, "s", 0);
+        let steps: Vec<_> = (1..=10)
+            .map(|seq| Step::new(seq, StepKind::ModelTurn, seq * 10, 5))
+            .collect();
+        steps_in(&memory, &target, "s", &steps, ms(2));
+        let samples: Vec<_> = (1..=7)
+            .map(|seq| ResourceSample::new(seq, seq * 10, 5))
+            .collect();
+        memory
+            .record_resources(&target, "s", &samples, ms(2))
+            .unwrap();
+        for n in 0..4 {
+            measured(
+                &memory,
+                &run,
+                attachment,
+                (2 + 10 * n, 7 + 10 * n),
+                Some(1.0),
+                n == 3,
+            );
+        }
+        memory
+    };
+    let memory = store();
+    let mut builder = Builder::default();
+    builder.shares = Shares {
+        steps_per_read: STEPS,
+        resources_per_read: RESOURCES,
+        ..Shares::PRODUCTION
+    };
+    let built = pass(&memory, &mut builder, LATER);
+    assert_eq!(built.failure, None);
+    let reads = |kind| reads_of(&memory, kind);
+    assert_eq!(reads("steps"), [(0, STEPS), (5, STEPS), (10, 0)]);
+    assert_eq!(reads("resources"), [(0, RESOURCES), (3, 1), (4, 0)]);
+    assert_eq!(
+        reads("inside_resources"),
+        [(0, RESOURCES), (3, RESOURCES), (6, 1)]
+    );
+    assert_eq!(
+        (builder.steps, builder.resources, builder.inside_resources),
+        (10, 4, 7)
+    );
+
+    let whole = store();
+    let at_once = pass(&whole, &mut Builder::default(), LATER);
+    assert_eq!(at_once.failure, None);
+    assert_eq!(reads_of(&whole, "steps"), [(0, 10)]);
+    assert_eq!(
+        memory.row(LedgerKind::Run, &run),
+        whole.row(LedgerKind::Run, &run)
+    );
+}
+
+/// The reads of `kind` `memory` was asked for: after which id, how many.
+fn reads_of(memory: &Memory, kind: &str) -> Vec<(i64, usize)> {
+    memory
+        .scans
+        .borrow()
+        .iter()
+        .filter(|(of, _, _)| *of == kind)
+        .map(|(_, after, read)| (*after, *read))
+        .collect()
+}
+
+/// A new process's builder over `memory` at `now_ms`, holding `shares` and
+/// replaying the events a page of them at a time ([`start_builder`]).
+fn start_sharing(memory: &Memory, now_ms: i64, shares: Shares) -> Builder {
+    start_builder_timed(memory, now_ms, Timing::default(), shares).unwrap()
 }

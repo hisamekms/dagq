@@ -436,6 +436,46 @@ pub const HOLDING_R_PER_PASS: usize = 16;
 /// its cursors' start reads every event once, a page at a time.
 pub const EVENTS_PER_READ: usize = 5_000;
 
+/// How many events, steps, windows of resources, marks and session rows
+/// a builder's passes read, look at or write at a time
+/// ([`Builder::shares`]). Production holds [`Shares::PRODUCTION`], these
+/// constants; tests hold small shares, so that a few rows cross a bound
+/// and take the path past it (cut there, go on from it, stop short of it)
+/// without as many rows as production's bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shares {
+    /// [`EVENTS_PER_READ`] in production: a page of events a pass and a
+    /// start's replay read, and the events after which a catching-up pass
+    /// writes its session rows and marks.
+    pub events_per_read: usize,
+    /// [`STEPS_PER_READ`] in production.
+    pub steps_per_read: usize,
+    /// [`RESOURCES_PER_READ`] in production.
+    pub resources_per_read: usize,
+    /// [`CHECKS_PER_PASS`] in production: the marks a pass takes, and the
+    /// rows of a share a sweep folds at a time.
+    pub checks_per_pass: usize,
+    /// [`SESSION_ROWS_PER_WRITE`] in production.
+    pub session_rows_per_write: usize,
+}
+
+impl Shares {
+    /// The constants' shares, which every builder outside tests holds.
+    pub const PRODUCTION: Self = Self {
+        events_per_read: EVENTS_PER_READ,
+        steps_per_read: STEPS_PER_READ,
+        resources_per_read: RESOURCES_PER_READ,
+        checks_per_pass: CHECKS_PER_PASS,
+        session_rows_per_write: SESSION_ROWS_PER_WRITE,
+    };
+}
+
+impl Default for Shares {
+    fn default() -> Self {
+        Self::PRODUCTION
+    }
+}
+
 /// How many steps after the step cursor a pass reads at a time.
 pub const STEPS_PER_READ: usize = 5_000;
 
@@ -1258,6 +1298,9 @@ impl Kept {
 /// folds of the queue as a whole read of the events up to its cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Builder {
+    /// How many inputs and rows its passes read, look at or write at a
+    /// time: [`Shares::PRODUCTION`] but in tests.
+    pub shares: Shares,
     /// The last EventStore event read.
     pub events: EventId,
     /// The latest time (unix ms) of an event read, or that the mark R it
@@ -1500,6 +1543,7 @@ fn mark_dirtied(
 impl Default for Builder {
     fn default() -> Self {
         Self {
+            shares: Shares::PRODUCTION,
             events: EventId::new(0),
             read_ms: i64::MIN,
             samples: 0,
@@ -1543,6 +1587,14 @@ impl Default for Builder {
 }
 
 impl Builder {
+    /// A builder whose passes read, look at and write `shares` at a time.
+    pub fn with_shares(shares: Shares) -> Self {
+        Self {
+            shares,
+            ..Self::default()
+        }
+    }
+
     /// Its cursor over the events with the latest time read up to it.
     const fn read_to(&self) -> ReadTo {
         ReadTo {

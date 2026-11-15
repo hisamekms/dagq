@@ -1804,10 +1804,12 @@ fn recorded_inputs_ignore_version_and_finality_but_require_every_input() {
 }
 
 /// With an unchanged set, persisted ranks cover even the rows after the
-/// check bound when each process lives for only one pass.
+/// check bound when each process lives for only one pass (a bound of
+/// `CHECKS`, the share [`CHECKS_PER_PASS`] is in production).
 #[test]
 fn persisted_take_rank_visits_marks_across_restarts() {
-    let count = CHECKS_PER_PASS * 3 + 17;
+    const CHECKS: usize = 20;
+    let count = CHECKS * 3 + 17;
     let mut seen = BTreeSet::new();
     let mut offset = 0;
     for _ in 0..4 {
@@ -1816,7 +1818,7 @@ fn persisted_take_rank_visits_marks_across_restarts() {
             .marks
             .extend((1..=count).map(|id| Target::Task(TaskId::new(id as i64))));
         builder.resume_taking(offset);
-        seen.extend(builder.take(CHECKS_PER_PASS));
+        seen.extend(builder.take(CHECKS));
         offset = builder.rows_mark().unwrap().take_offset;
     }
     assert_eq!(seen.len(), count);

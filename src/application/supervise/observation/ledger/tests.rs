@@ -7,7 +7,9 @@ use crate::application::{
 };
 use crate::domain::environment::{Resources, RunResource};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
-use crate::domain::ledger::builder::{HOLDING_R_PER_PASS, PASS_TIME};
+use crate::domain::ledger::builder::{
+    CHECKS_PER_PASS, HOLDING_R_PER_PASS, PASS_TIME, SESSION_ROWS_PER_WRITE,
+};
 use crate::domain::ledger::queue::QueueBook;
 use crate::domain::ledger::read::read;
 use crate::domain::ledger::session::SessionBook;
@@ -1190,7 +1192,7 @@ fn timed_pass(memory: &Memory, builder: &mut Builder, now_ms: i64, retain: Retai
         (now_ms, BUILT),
         retain,
         None,
-        (EVENTS_PER_READ, SESSION_BYTES_PER_WRITE),
+        (builder.shares.events_per_read, SESSION_BYTES_PER_WRITE),
         Timing(Some(&memory.clock)),
     )
 }
@@ -2761,14 +2763,18 @@ fn settled_sessions(settled: i64) -> Log {
 /// start over a store that holds the session and queue rows settled: after
 /// its first pass, which reads every event, it keeps as many events with a
 /// few settled rows as with more than that pass looks at
-/// ([`CHECKS_PER_PASS`]), those of the rows not settled only, and the
+/// (`CHECKS`, the share [`CHECKS_PER_PASS`] is in production), those of the rows not settled only, and the
 /// passes leave the rows as the fold of every event makes them.
 #[test]
 fn a_new_builder_keeps_no_event_of_the_rows_the_store_holds_settled_after_its_first_pass() {
+    const CHECKS: usize = 20;
     let kept_after_restart = |settled: i64| {
         let log = settled_sessions(settled);
         let memory = Memory::of(&log);
-        let mut before = Builder::default();
+        let mut before = Builder::with_shares(Shares {
+            checks_per_pass: CHECKS,
+            ..Shares::PRODUCTION
+        });
         while pass(&memory, &mut before, LATER).backlog > 0 {}
         let held = memory.rows.borrow().clone();
         assert!(
@@ -2779,7 +2785,10 @@ fn a_new_builder_keeps_no_event_of_the_rows_the_store_holds_settled_after_its_fi
                 >= usize::try_from(settled).unwrap()
         );
 
-        let mut builder = Builder::default();
+        let mut builder = Builder::with_shares(Shares {
+            checks_per_pass: CHECKS,
+            ..Shares::PRODUCTION
+        });
         let first = pass(&memory, &mut builder, LATER);
         assert_eq!(first.failure, None);
         while pass(&memory, &mut builder, LATER).backlog > 0 {}
@@ -2792,7 +2801,7 @@ fn a_new_builder_keeps_no_event_of_the_rows_the_store_holds_settled_after_its_fi
         }
         first.kept
     };
-    let more = i64::try_from(CHECKS_PER_PASS).unwrap();
+    let more = i64::try_from(CHECKS).unwrap();
     let (few, many) = (kept_after_restart(3), kept_after_restart(more));
     assert_eq!(few.events(), many.events());
     assert_eq!((few.sessions, few.queue), (1, 0));
@@ -3810,10 +3819,14 @@ fn a_builder_going_on_from_the_session_rows_held_writes_the_rows_of_every_event(
 /// event of the EventStore, and it is the book of every event.
 #[test]
 fn the_session_book_made_again_reads_no_event_however_many_sessions_settled() {
+    const CHECKS: usize = 20;
     let read_making_it = |settled: i64| {
         let log = settled_sessions(settled);
         let memory = Memory::of(&log);
-        let mut builder = Builder::default();
+        let mut builder = Builder::with_shares(Shares {
+            checks_per_pass: CHECKS,
+            ..Shares::PRODUCTION
+        });
         while pass(&memory, &mut builder, LATER).backlog > 0 {}
         assert!(
             memory
@@ -3829,7 +3842,7 @@ fn the_session_book_made_again_reads_no_event_however_many_sessions_settled() {
         assert_eq!(&book, builder.kept().session_rows());
         (memory.read.get(), memory.read_all.get(), book.row_count())
     };
-    let more = i64::try_from(CHECKS_PER_PASS).unwrap();
+    let more = i64::try_from(CHECKS).unwrap();
     let (few, many) = (read_making_it(3), read_making_it(more));
     assert_eq!((few.0, few.1), (0, 0));
     assert_eq!((many.0, many.1), (0, 0));
@@ -3896,10 +3909,14 @@ fn a_builder_going_on_from_the_queue_rows_held_writes_the_rows_of_every_event() 
 /// of the queue no later event reaches are not among them, the landing is.
 #[test]
 fn the_queue_book_made_again_reads_no_event_however_many_queue_rows_settled() {
+    const CHECKS: usize = 20;
     let read_making_it = |settled: i64| {
         let log = settled_sessions(settled);
         let memory = Memory::of(&log);
-        let mut builder = Builder::default();
+        let mut builder = Builder::with_shares(Shares {
+            checks_per_pass: CHECKS,
+            ..Shares::PRODUCTION
+        });
         while pass(&memory, &mut builder, LATER).backlog > 0 {}
         let held = memory
             .rows
@@ -3917,7 +3934,7 @@ fn the_queue_book_made_again_reads_no_event_however_many_queue_rows_settled() {
             book.row_count(),
         )
     };
-    let more = i64::try_from(CHECKS_PER_PASS).unwrap();
+    let more = i64::try_from(CHECKS).unwrap();
     let (few, many) = (read_making_it(3), read_making_it(more));
     assert_eq!((few.0, few.1), (0, 0));
     assert_eq!((many.0, many.1), (0, 0));
@@ -5000,16 +5017,18 @@ fn sessions_and_tasks(planners: i64, tasks: i64) -> Log {
 }
 
 /// The session rows a pass changed are written that pass, past
-/// [`WRITES_PER_PASS`], [`SESSION_ROWS_PER_WRITE`] a write, the last with
+/// [`WRITES_PER_PASS`], `PER_WRITE` a write (the share [`SESSION_ROWS_PER_WRITE`] is in production), the last with
 /// the mark of the pass's position; the task rows keep their bound and their order, and are
 /// written by the next passes, which write no mark again while no event
 /// came in.
 #[test]
 fn the_session_rows_a_pass_changed_are_written_that_pass_past_the_bound_with_the_mark() {
+    const PER_WRITE: usize = 20;
     let bound = i64::try_from(WRITES_PER_PASS).unwrap();
     let log = sessions_and_tasks(bound + 50, bound + 30);
     let memory = Memory::of(&log);
     let mut builder = Builder::default();
+    builder.shares.session_rows_per_write = PER_WRITE;
     let built = pass(&memory, &mut builder, LATER);
     assert_eq!(built.failure, None);
     assert_eq!(built.sessions, WRITES_PER_PASS + 50);
@@ -5023,7 +5042,7 @@ fn the_session_rows_a_pass_changed_are_written_that_pass_past_the_bound_with_the
             .borrow()
             .contains_key(&(LedgerKind::Task, "1".into()))
     );
-    let batches = (WRITES_PER_PASS + 50).div_ceil(SESSION_ROWS_PER_WRITE);
+    let batches = (WRITES_PER_PASS + 50).div_ceil(PER_WRITE);
     assert!(batches > 1);
     assert_eq!(memory.batches.get(), batches);
     assert_eq!(*memory.mark.borrow(), Some(SessionsWritten::at(log.last())));
@@ -5302,7 +5321,8 @@ fn a_builder_whose_cursor_was_set_past_its_book_writes_no_mark() {
 /// that mark after a start again writes the session rows of every event.
 #[test]
 fn a_later_chunk_that_fails_leaves_the_mark_from_before_true() {
-    let planners = i64::try_from(SESSION_ROWS_PER_WRITE * 2).unwrap();
+    const PER_WRITE: usize = 20;
+    let planners = i64::try_from(PER_WRITE * 2).unwrap();
     let log = sessions_and_tasks(planners, 0);
     let memory = Memory::default();
     memory.events.replace(log.events[..20].to_vec());
@@ -5310,6 +5330,7 @@ fn a_later_chunk_that_fails_leaves_the_mark_from_before_true() {
     let before = sessions_written_through(&memory).unwrap();
     assert_eq!(before, Some(id_at(&log, 20)));
     let mut builder = Builder::default();
+    builder.shares.session_rows_per_write = PER_WRITE;
     builder.events = before.unwrap();
     restore_sessions(&memory, &mut builder).unwrap();
     memory.events.replace(log.events.clone());
@@ -5319,10 +5340,7 @@ fn a_later_chunk_that_fails_leaves_the_mark_from_before_true() {
     let failed = pass(&memory, &mut builder, LATER);
     assert!(failed.failure.is_some());
     let written = memory.count(LedgerKind::Session);
-    assert!(
-        written > 10 && written < SESSION_ROWS_PER_WRITE * 2,
-        "{written}"
-    );
+    assert!(written > 10 && written < PER_WRITE * 2, "{written}");
     assert_eq!(sessions_written_through(&memory).unwrap(), before);
     drop(builder);
     let mut started_again = Builder::default();

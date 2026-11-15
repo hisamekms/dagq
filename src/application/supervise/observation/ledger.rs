@@ -46,10 +46,9 @@ use crate::domain::EventFilter;
 use crate::domain::host_metrics::{local_day, oldest_kept_day};
 use crate::domain::ledger::builder::pushes::{self, PushesHeld};
 use crate::domain::ledger::builder::{
-    Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, MarkObservation,
-    RESOURCES_PER_READ, ReadTo, RunResources, RunSteps, SESSION_BYTES_PER_WRITE,
-    SESSION_ROWS_PER_WRITE, STEPS_PER_READ, SweepCounts, Target, behind, build, hour,
-    keeps_settled, marking_spent, pass_spent, row_groups, writes,
+    Builder, EVENTS_PER_READ, Inputs, KeptSize, MarkObservation, ReadTo, RunResources, RunSteps,
+    SESSION_BYTES_PER_WRITE, Shares, SweepCounts, Target, behind, build, hour, keeps_settled,
+    marking_spent, pass_spent, row_groups, writes,
 };
 use crate::domain::ledger::queue::{QueueBook, QueueHead, cut};
 use crate::domain::ledger::session::SessionsHeld;
@@ -156,7 +155,7 @@ pub struct Built {
     /// The marks left for the next pass.
     pub backlog: usize,
     /// Whether it stopped at one of its bounds with work left: its time
-    /// ([`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME)), the marks it looks at ([`CHECKS_PER_PASS`]) or the
+    /// ([`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME)), the marks it looks at ([`Shares::checks_per_pass`]) or the
     /// events it reads ([`goes_on`]).
     pub cut: bool,
     /// The node rows the retention removed.
@@ -373,7 +372,8 @@ pub fn build_pass(
     retain: Retain,
     classifier: Option<&crate::domain::command_rules::CommandClassifier>,
 ) -> Built {
-    build_pass_reading(store, builder, at, retain, classifier, EVENTS_PER_READ)
+    let per_read = builder.shares.events_per_read;
+    build_pass_reading(store, builder, at, retain, classifier, per_read)
 }
 
 /// [`build_pass`], reading the events `per_read` at a time.
@@ -611,7 +611,7 @@ fn within_pass(
 /// the rows the store holds settled no more than a page's events: their
 /// records dropped, a later event that changes one gives them back from
 /// the store's row first ([`restore`]). Every pass folds those rows a
-/// share of [`CHECKS_PER_PASS`] at a time, and of the rows marked only
+/// share of [`Shares::checks_per_pass`] at a time, and of the rows marked only
 /// those it takes.
 fn pass(
     store: &dyn LedgerQueue,
@@ -626,6 +626,7 @@ fn pass(
     ),
     built: &mut Built,
 ) -> Result<()> {
+    let shares = builder.shares;
     // Every builder, one that omits no kind too, so that a store of a
     // coverage of other kinds says it stops.
     let marks = store.ledger_marks()?;
@@ -687,7 +688,7 @@ fn pass(
             // can fail or the process can stop. The session writer certifies
             // W and R together. With pending sessions, defer to the pass's
             // bounded end instead of adding row reads for a checkpoint.
-            if checkpoint_events >= EVENTS_PER_READ && builder.sessions_mark().is_some() {
+            if checkpoint_events >= shares.events_per_read && builder.sessions_mark().is_some() {
                 built.sessions += write_sessions_observed(
                     store,
                     builder,
@@ -721,17 +722,18 @@ fn pass(
     let samples = store.node_samples_after(builder.samples)?;
     builder.mark_samples(&samples);
     loop {
-        let new = store.steps_after(builder.steps, STEPS_PER_READ)?;
+        let new = store.steps_after(builder.steps, shares.steps_per_read)?;
         builder.mark_steps(&new);
-        if new.len() < STEPS_PER_READ {
+        if new.len() < shares.steps_per_read {
             break;
         }
     }
     loop {
-        let outside = store.run_resources_after(builder.resources, RESOURCES_PER_READ)?;
-        let inside = store.resources_after(builder.inside_resources, RESOURCES_PER_READ)?;
+        let per_read = shares.resources_per_read;
+        let outside = store.run_resources_after(builder.resources, per_read)?;
+        let inside = store.resources_after(builder.inside_resources, per_read)?;
         builder.mark_resources(&outside, &inside);
-        if outside.len() < RESOURCES_PER_READ && inside.len() < RESOURCES_PER_READ {
+        if outside.len() < per_read && inside.len() < per_read {
             break;
         }
     }
@@ -867,8 +869,8 @@ fn mark_rows_timed(
     }
 }
 
-/// Write the marks a pass takes ([`Builder::take`], [`CHECKS_PER_PASS`]
-/// of them, those holding R first) until the pass that started at
+/// Write the marks a pass takes ([`Builder::take`], the builder's
+/// [`Shares::checks_per_pass`] of them, those holding R first) until the pass that started at
 /// `started` has taken [`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME) ([`pass_spent`]; a pass without a
 /// clock writes every one), and put back the rest for the next pass; the
 /// session rows aside
@@ -889,9 +891,10 @@ fn write_taken(
     rows: &BTreeSet<(LedgerKind, String)>,
     aside: Vec<Target>,
 ) -> Result<()> {
-    let taken = builder.take(CHECKS_PER_PASS);
+    let checks_per_pass = builder.shares.checks_per_pass;
+    let taken = builder.take(checks_per_pass);
     // Marks past those it looks at may be left.
-    built.cut |= taken.len() >= CHECKS_PER_PASS;
+    built.cut |= taken.len() >= checks_per_pass;
     // Each session or queue row is built as its write comes, after the
     // time is looked at: what the pass leaves is not folded for nothing.
     let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, &BTreeSet::new());
@@ -1055,7 +1058,7 @@ fn fold_sessions(
 }
 
 /// Fold every session row marked ([`Builder::take_sessions`]), whatever
-/// [`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME), [`SESSION_ROWS_PER_WRITE`] at a time, and write
+/// [`PASS_TIME`](crate::domain::ledger::builder::PASS_TIME), the builder's [`Shares::session_rows_per_write`] at a time, and write
 /// those that change in chunks of at most as many rows and `bytes` of them
 /// (each row's text, as it crosses to the queue service; a row past
 /// `bytes` alone is a chunk of its own), each in one transaction
@@ -1091,18 +1094,19 @@ fn write_sessions(
     ),
 ) -> Result<usize> {
     let targets = builder.take_sessions();
+    let per_write = builder.shares.session_rows_per_write;
     let mut written = 0;
     // The chunk filled last, written once the next row would take it past
     // its bounds, or with the mark at the end.
     let mut pending = SessionChunk::default();
-    for (index, share) in targets.chunks(SESSION_ROWS_PER_WRITE).enumerate() {
-        let after = (index + 1) * SESSION_ROWS_PER_WRITE;
+    for (index, share) in targets.chunks(per_write).enumerate() {
+        let after = (index + 1) * per_write;
         let folded = match fold_sessions(store, builder, at, share) {
             Ok(folded) => folded,
             Err(error) => {
                 keep_all(builder, queue.into_iter().map(|(target, ..)| target));
                 keep_all(builder, pending.targets());
-                keep_all(builder, targets[index * SESSION_ROWS_PER_WRITE..].to_vec());
+                keep_all(builder, targets[index * per_write..].to_vec());
                 return Err(error);
             }
         };
@@ -1133,7 +1137,7 @@ fn write_sessions(
                 }
             }
             let size = serde_json::to_vec(&row.1).map_or(0, |text| text.len());
-            if !pending.takes(size, bytes) {
+            if !pending.takes(size, (per_write, bytes)) {
                 match write_chunk(store, builder, std::mem::take(&mut pending).rows, None) {
                     Ok(Some(count)) => written += count,
                     Ok(None) => {
@@ -1187,10 +1191,10 @@ struct SessionChunk {
 
 impl SessionChunk {
     /// Whether a row of `size` bytes goes in without taking it past
-    /// [`SESSION_ROWS_PER_WRITE`] rows or `bytes`: always into an empty one.
-    fn takes(&self, size: usize, bytes: usize) -> bool {
+    /// `rows` rows or `bytes`: always into an empty one.
+    fn takes(&self, size: usize, (rows, bytes): (usize, usize)) -> bool {
         self.rows.is_empty()
-            || (self.rows.len() < SESSION_ROWS_PER_WRITE
+            || (self.rows.len() < rows
                 && row_groups(&[self.bytes, size], bytes, None::<()>).len() == 1)
     }
 
@@ -1413,15 +1417,15 @@ fn sweep_page(
     Ok(())
 }
 
-/// Fold the session and queue rows of `rows` [`CHECKS_PER_PASS`] at a
-/// time ([`Inputs::of`]), so that no pass holds the folds of every row:
+/// Fold the session and queue rows of `rows` the builder's
+/// [`Shares::checks_per_pass`] at a time ([`Inputs::of`]), so that no pass holds the folds of every row:
 /// mark each share's rows that read an input after `after`
 /// ([`Builder::mark_rows_after`]), every share before any read of the
 /// store, so that a read that fails leaves every mark; then with `sweeps`
 /// sweep those still marked, the stored rows of a share's in one read
 /// ([`crate::application::LedgerStore::ledger_rows_of`]), so that a sweep
 /// asks as many reads as it has shares, not rows: those the store holds settled and up to date
-/// are settled now, past [`CHECKS_PER_PASS`], so that the records [`Kept`]
+/// are settled now, past that share, so that the records [`Kept`]
 /// read of every event from its cursors' start do not
 /// wait for the marks of every run and task before them.
 ///
@@ -1438,11 +1442,12 @@ fn fold_rows(
     const CALLER: &str = "ledger.fold_rows";
     let _caller = crate::application::supervisor_service::caller::scope(CALLER);
     let rows: Vec<&(LedgerKind, String)> = rows.iter().collect();
+    let per_share = builder.shares.checks_per_pass;
     let share_of = |share: &[&(LedgerKind, String)]| -> BTreeSet<(LedgerKind, String)> {
         share.iter().map(|row| (*row).clone()).collect()
     };
     if after.is_some() {
-        for share in rows.chunks(CHECKS_PER_PASS) {
+        for share in rows.chunks(per_share) {
             let inputs = Inputs::of(builder.kept(), now_ms, built_at, &share_of(share));
             builder.mark_rows_after(after, &inputs.rows);
         }
@@ -1450,7 +1455,7 @@ fn fold_rows(
     if !sweeps {
         return Ok(());
     }
-    for share in rows.chunks(CHECKS_PER_PASS) {
+    for share in rows.chunks(per_share) {
         let inputs = Inputs::of(builder.kept(), now_ms, built_at, &share_of(share));
         let targets = builder.rows_to_sweep(inputs.rows.keys());
         if targets.is_empty() {
@@ -1893,13 +1898,16 @@ fn read_by_id(store: &dyn LedgerQueue, ids: &[EventId]) -> Result<Vec<RunEvent>>
 /// Neither R exceeds W, so session restoration never trusts an unrecorded
 /// session prefix. A read that fails gives no builder: the next pass retries.
 pub fn start_builder(store: &dyn LedgerQueue, now_ms: i64) -> Result<Builder> {
-    start_builder_timed(store, now_ms, Timing::default())
+    start_builder_timed(store, now_ms, Timing::default(), Shares::PRODUCTION)
 }
 
+/// [`start_builder`] on `timing`, the builder holding `shares` and its
+/// replay reading the events a page of them at a time.
 fn start_builder_timed(
     store: &dyn LedgerQueue,
     now_ms: i64,
     timing: Timing<'_>,
+    shares: Shares,
 ) -> Result<Builder> {
     let _caller =
         crate::application::supervisor_service::caller::scope("ledger.start_builder_timed");
@@ -1918,7 +1926,7 @@ fn start_builder_timed(
         .min(queue.map_or(EventId::new(0), |at| at.through.events));
     let (builder, reason) = if core.is_none() && queue.is_none() {
         (
-            Builder::default(),
+            Builder::with_shares(shares),
             crate::domain::ledger::session::written::restart_reason(marks.as_ref(), &heads),
         )
     } else {
@@ -1928,6 +1936,7 @@ fn start_builder_timed(
                 now_ms,
                 (core.unwrap_or(zero), queue.unwrap_or(zero)),
                 marks.as_ref(),
+                shares,
             )?,
             None,
         )
@@ -1946,15 +1955,16 @@ fn resume_builder(
     now_ms: i64,
     (core, queue): (RowPosition, RowPosition),
     marks: Option<&Marks>,
+    shares: Shares,
 ) -> Result<Builder> {
     if core == queue {
-        return start_builder_at(store, now_ms, core, marks, None, false);
+        return start_builder_at(store, now_ms, (core, shares), marks, None, false);
     }
 
     // The streams replay only their own missing prefix, to their join at
     // the later event cursor. Queue replay supplies routing when core is
     // ahead: no core target read or session reconstruction moves back to Q.
-    let mut queue_builder = Builder::default();
+    let mut queue_builder = Builder::with_shares(shares);
     queue_builder.go_on_from_rows(queue.through);
     queue_builder.read_up_to(queue.read_ms);
     queue_builder.begin_stored_coverage(marks);
@@ -1976,7 +1986,7 @@ fn resume_builder(
     fold_older_waits(store, &mut queue_builder)?;
     replay_startup(store, &mut queue_builder, core.through.events, now_ms, true)?;
     let routing = (queue.through.events < core.through.events).then_some(&queue_builder);
-    let mut builder = start_builder_at(store, now_ms, core, marks, routing, true)?;
+    let mut builder = start_builder_at(store, now_ms, (core, shares), marks, routing, true)?;
     replay_startup(store, &mut builder, queue.through.events, now_ms, false)?;
     builder.join_queue(queue_builder);
     Ok(builder)
@@ -2001,7 +2011,7 @@ fn replay_startup(
             builder.events,
             until,
             &EventFilter::default(),
-            EVENTS_PER_READ,
+            builder.shares.events_per_read,
         )?;
         anyhow::ensure!(
             !events.is_empty(),
@@ -2046,12 +2056,12 @@ fn replay_startup(
 fn start_builder_at(
     store: &dyn LedgerQueue,
     now_ms: i64,
-    position: RowPosition,
+    (position, shares): (RowPosition, Shares),
     marks: Option<&Marks>,
     routing: Option<&Builder>,
     wait_only: bool,
 ) -> Result<Builder> {
-    let mut builder = Builder::default();
+    let mut builder = Builder::with_shares(shares);
     let latest = store.latest_event_id()?;
     let (r, read_ms) = (position.through, position.read_ms);
     builder.go_on_from_rows(r);
@@ -2332,7 +2342,7 @@ fn pass_of_watch_timed(
     };
     let mut builder = match builder {
         Some(builder) => builder,
-        None => match start_builder_timed(store, at.0, timing) {
+        None => match start_builder_timed(store, at.0, timing, Shares::PRODUCTION) {
             Ok(builder) => builder,
             Err(error) => return (None, failed("start the builder", &error)),
         },

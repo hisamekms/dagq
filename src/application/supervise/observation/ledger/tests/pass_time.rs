@@ -224,29 +224,42 @@ fn denied(log: &mut Log, secs: i64) {
 /// event comes in before each, so that each pass marks the rows it read
 /// again: a pass folds only the rows it writes and those the new event
 /// changed, not again those the passes before left marked, and the later
-/// passes write the rest of 5,000 queue rows of one page a share each until
-/// R reaches the events.
+/// passes write the rest of `ONE_PAGE` queue rows of one page (a read of
+/// `ONE_PAGE` events, the page [`EVENTS_PER_READ`] is in production) a
+/// share each until R reaches the events.
 #[test]
 fn later_passes_go_on_whatever_each_pays_before_it_writes() {
+    const ONE_PAGE: usize = 300;
     let mut log = Log::default();
-    for secs in 1..=i64::try_from(EVENTS_PER_READ).unwrap() {
+    for secs in 1..=i64::try_from(ONE_PAGE).unwrap() {
         denied(&mut log, secs);
     }
     let memory = Memory::of(&log);
     memory.clock.costs_each_pass(PASS_TIME * 3 / 5);
     memory.clock.costs(Duration::from_millis(4));
+    let one_page = |builder: &mut Builder| {
+        build_pass_timed(
+            &memory,
+            builder,
+            (ms(LATER), BUILT),
+            Retain::default(),
+            None,
+            (ONE_PAGE, SESSION_BYTES_PER_WRITE),
+            Timing(Some(&memory.clock)),
+        )
+    };
     let mut builder = Builder::default();
-    let first = pass(&memory, &mut builder, LATER);
+    let first = one_page(&mut builder);
     assert_eq!(first.failure, None);
     let mut written = first.written;
     let mut each = Vec::new();
     let mut passes = 1;
-    let mut secs = i64::try_from(EVENTS_PER_READ).unwrap();
+    let mut secs = i64::try_from(ONE_PAGE).unwrap();
     while builder.backlog() > 0 {
         secs += 1;
         denied(&mut log, secs);
         memory.events.replace(log.events.clone());
-        let built = pass(&memory, &mut builder, LATER);
+        let built = one_page(&mut builder);
         assert_eq!(built.failure, None);
         passes += 1;
         each.push(built.written);
@@ -263,25 +276,28 @@ fn later_passes_go_on_whatever_each_pays_before_it_writes() {
     let (last, before) = each.split_last().unwrap();
     assert!(before.iter().all(|&rows| rows == 100), "{each:?}");
     assert!((1..=100).contains(last), "{each:?}");
-    assert!(written >= EVENTS_PER_READ, "{written}");
-    let last = pass(&memory, &mut builder, LATER);
+    assert!(written >= ONE_PAGE, "{written}");
+    let last = one_page(&mut builder);
     assert_eq!((last.failure, last.backlog), (None, 0));
     assert_eq!(r_of(&memory).events, log.last());
 }
 
-/// The rows of one page of events: 5,000 queue rows of one event each,
-/// read in one page, hold R at the same place until the last of them is
-/// written, and the passes writing them ([`CHECKS_PER_PASS`] a pass) go on
-/// back to back all the same, R not moving between the first two.
+/// The rows of one page of events: 50 queue rows of one event each, read
+/// in one page, hold R at the same place until the last of them is
+/// written, and the passes writing them (`CHECKS` a pass, the share
+/// [`CHECKS_PER_PASS`] is in production) go on back to back all the same,
+/// R not moving between the first two.
 #[test]
 fn passes_go_on_over_the_queue_rows_of_one_page_while_r_stays() {
+    const CHECKS: usize = 20;
     let mut log = Log::default();
-    for secs in 1..=i64::try_from(EVENTS_PER_READ).unwrap() {
+    for secs in 1..=50 {
         denied(&mut log, secs);
     }
     let memory = Memory::of(&log);
     memory.clock.costs(Duration::from_micros(500));
     let mut builder = Builder::default();
+    builder.shares.checks_per_pass = CHECKS;
     let interval = Duration::from_secs(INTERVAL_SECS);
     let origin = Instant::now();
     let mut watch = LedgerWatch::default();
@@ -297,7 +313,7 @@ fn passes_go_on_over_the_queue_rows_of_one_page_while_r_stays() {
         rs.push(r_of(&memory).events);
         watch.reaped(&built);
     }
-    assert_eq!(written[..3], [CHECKS_PER_PASS, CHECKS_PER_PASS, 1_000]);
+    assert_eq!(written[..3], [CHECKS, CHECKS, 10]);
     assert_eq!(rs[0], rs[1], "R stays while the page's rows are written");
     assert!(rs[0] < log.last());
     assert_eq!(rs[2], log.last());
