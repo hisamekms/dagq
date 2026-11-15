@@ -59,7 +59,10 @@ pub fn repository_binding_change(
 /// Policy revision identifying the compiled role/resource rules. This source
 /// digest changes whenever policy code changes, independently of the binary version.
 pub fn policy_version() -> String {
-    crate::application::ask::digest(include_str!("../domain/authorization.rs"))
+    crate::application::ask::digest(concat!(
+        include_str!("../domain/authorization.rs"),
+        include_str!("../domain/direct_human.rs"),
+    ))
 }
 
 /// A grant worth retaining; ordinary reads and writes generate no grant audit.
@@ -151,7 +154,13 @@ pub fn authorization_fact(payload: &serde_json::Value, allowed: bool) -> SenderI
             ..Change::default()
         }),
         correlation: Correlation::default(),
-        answered_via: None,
+        answered_via: (allowed
+            && (payload["capability"] == "task.ready_bypass_review"
+                || matches!(
+                    payload["operation"].as_str(),
+                    Some("down_force" | "guardrail_disable")
+                )))
+        .then_some(crate::domain::audit::AnsweredVia::HumanAttested),
         landing: None,
         external: None,
     }
@@ -408,6 +417,8 @@ pub struct UseCaseRow {
     pub use_case: PrivilegedUseCase,
     pub capabilities: &'static [Capability],
     pub duty: AuditDuty,
+    /// Direct-human policy; landing answers use it only for protected paths.
+    pub weakening: Option<crate::domain::direct_human::WeakeningOperation>,
 }
 
 const fn row(
@@ -419,6 +430,24 @@ const fn row(
         use_case,
         capabilities,
         duty,
+        weakening: match use_case {
+            PrivilegedUseCase::PlanReviewBypass => {
+                Some(crate::domain::direct_human::WeakeningOperation::PlanReviewBypass)
+            }
+            PrivilegedUseCase::Force => {
+                Some(crate::domain::direct_human::WeakeningOperation::Force)
+            }
+            PrivilegedUseCase::GuardrailDisable => {
+                Some(crate::domain::direct_human::WeakeningOperation::GuardrailDisable)
+            }
+            PrivilegedUseCase::AuditPolicyChange => {
+                Some(crate::domain::direct_human::WeakeningOperation::AuditPolicyChange)
+            }
+            PrivilegedUseCase::ApproveLandingAnswer => {
+                Some(crate::domain::direct_human::WeakeningOperation::ProtectedLanding)
+            }
+            _ => None,
+        },
     }
 }
 

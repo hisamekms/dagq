@@ -12,7 +12,7 @@ use dagq::application::commands::planning::Planning;
 use dagq::application::inherit::{CarriedBranches, InheritedByHand, KeptHead, keep_head};
 use dagq::domain::EventKind;
 use dagq::domain::{
-    ActorContext, ActorRole, AskReason, HEARTBEAT_TIMEOUT_SECS, LeaseToken, StaticPolicy,
+    AskReason, HEARTBEAT_TIMEOUT_SECS, LeaseToken,
     actor_model::{ActorLaunch, ModelRole},
 };
 use dagq::infrastructure::adapters::RunRepositories;
@@ -101,8 +101,8 @@ fn decide_ask(queue: &SqliteQueue, run: &TaskRun) -> dagq::domain::Ask {
     ask.clone()
 }
 
-/// ADR-t1962-1: the inbox carries the failed (or interrupted) run with
-/// commits over by hand: the task is ready without plan review, the
+/// The inbox hands the failed (or interrupted) run's retry to a person,
+/// who carries its commits over by hand: the task is ready without plan review, the
 /// recovery job's `decide` ask is closed, `triage_finished` records who,
 /// why and the head kept under `refs/dagq/runs/<run-id>`, and the next run
 /// records `run_inherited` and starts from it, keeping the recorded head
@@ -142,7 +142,12 @@ fn carried_over_by_the_inbox(interrupted: bool) {
     };
     let bypassed_before = bypassed(&queue.show(TaskId::new(1)).unwrap());
 
-    let output = ready_inherit(&INBOX, &db);
+    let denied = refusal(&ready_inherit(&INBOX, &db));
+    assert!(
+        denied.contains("requires a direct human answer"),
+        "{denied}"
+    );
+    let output = ready_inherit(&[], &db);
     assert!(
         output.status.success(),
         "{}",
@@ -161,7 +166,7 @@ fn carried_over_by_the_inbox(interrupted: bool) {
     assert_eq!(bypassed(&detail), bypassed_before);
     let retries = inherit_retries(&detail, &first);
     assert_eq!(retries.len(), 1);
-    assert_eq!(retries[0]["by"], "inbox");
+    assert_eq!(retries[0]["by"], "user");
     assert_eq!(retries[0]["reason"], REASON);
     assert_eq!(retries[0]["inherit"]["head"], json!(head));
     assert_eq!(
@@ -176,7 +181,7 @@ fn carried_over_by_the_inbox(interrupted: bool) {
         .unwrap();
     assert_eq!(
         serde_json::to_value(&recorded.actor).unwrap()["role"],
-        "inbox"
+        "user"
     );
 
     // A writer that raced the record, or a refused `ready --inherit`
@@ -213,7 +218,7 @@ fn carried_over_by_the_inbox(interrupted: bool) {
         "{prompt}"
     );
     assert!(
-        prompt.contains("inbox carried its work over by hand"),
+        prompt.contains("user carried its work over by hand"),
         "{prompt}"
     );
 }
@@ -229,9 +234,9 @@ fn the_inbox_carries_an_interrupted_run_over_by_hand_and_the_next_run_inherits_i
 }
 
 /// A run without commits of its own, a live process or lease, a latest run
-/// that did not fail, a task with no run, and another actor than user or
-/// inbox are refused with the reason, and the task, the ask and the ref
-/// stay as they were.
+/// that did not fail, a task with no run, and another actor than a person
+/// (a worker, a planner) are refused with the reason, and the task, the ask
+/// and the ref stay as they were.
 #[test]
 fn ready_inherit_is_refused_with_its_reason_and_changes_nothing() {
     let (_dir, repo, db) = fixture();
@@ -255,7 +260,7 @@ fn ready_inherit_is_refused_with_its_reason_and_changes_nothing() {
     };
 
     // Nothing of its own on the branch: a plain ready retries.
-    let error = refusal(&ready_inherit(&INBOX, &db));
+    let error = refusal(&ready_inherit(&[], &db));
     assert!(error.contains("holds no commit of its own"), "{error}");
     assert!(error.contains("plain `dagq ready`"), "{error}");
     assert_eq!(unchanged(&mut queue), before);
@@ -299,7 +304,7 @@ fn ready_inherit_is_refused_with_its_reason_and_changes_nothing() {
             [run.id()],
         )
         .unwrap();
-    let error = refusal(&ready_inherit(&INBOX, &db));
+    let error = refusal(&ready_inherit(&[], &db));
     assert!(error.contains("still alive"), "{error}");
     db_conn
         .execute(
@@ -313,7 +318,7 @@ fn ready_inherit_is_refused_with_its_reason_and_changes_nothing() {
             rusqlite::params![run.id(), std::process::id()],
         )
         .unwrap();
-    let error = refusal(&ready_inherit(&INBOX, &db));
+    let error = refusal(&ready_inherit(&[], &db));
     assert!(error.contains("is leased"), "{error}");
     db_conn
         .execute("DELETE FROM run_leases WHERE run_id=?1", [run.id()])
@@ -323,7 +328,7 @@ fn ready_inherit_is_refused_with_its_reason_and_changes_nothing() {
     // A task with no run, and a task whose latest run has just started.
     add_ready_task(&mut queue, "second", &[]);
     let error = refusal(&common::cli::invoke_with(
-        &INBOX,
+        &[],
         &db,
         &["ready", "2", "--inherit", "--reason", REASON],
     ));
@@ -331,7 +336,7 @@ fn ready_inherit_is_refused_with_its_reason_and_changes_nothing() {
     let running = provision_under(&repo, &db, "live");
     assert_eq!(running.task_id(), TaskId::new(2));
     let error = refusal(&common::cli::invoke_with(
-        &INBOX,
+        &[],
         &db,
         &["ready", "2", "--inherit", "--reason", REASON],
     ));
@@ -482,7 +487,7 @@ fn a_retry_by_hand_leaves_the_automatic_one() {
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]).with_triages(&[escalate()]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let output = ready_inherit(&INBOX, &db);
+    let output = ready_inherit(&[], &db);
     assert!(output.status.success(), "{}", refusal(&output));
 
     // The next run fails too; its job's `retry_inherit` is applied. The
@@ -496,10 +501,10 @@ fn a_retry_by_hand_leaves_the_automatic_one() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     assert!(detail.runs.len() >= 3, "{:?}", event_kinds(&detail));
-    assert_eq!(inherit_retries(&detail, &detail.runs[0])[0]["by"], "inbox");
+    assert_eq!(inherit_retries(&detail, &detail.runs[0])[0]["by"], "user");
     let automatic = inherit_retries(&detail, &detail.runs[1]);
     assert_eq!(automatic.len(), 1, "{:?}", event_kinds(&detail));
-    assert_ne!(automatic[0]["by"], "inbox");
+    assert_ne!(automatic[0]["by"], "user");
 }
 
 /// ADR-t1962-1: the retry by hand has no once-per-task limit. After the
@@ -602,7 +607,7 @@ fn answered_decide(queue: &mut SqliteQueue, run: &TaskRun) -> AskId {
     ask
 }
 
-/// The inbox's `ready --inherit` through the use cases the CLI calls:
+/// A recently authenticated person's retry through the use cases the CLI calls:
 /// the read, the head written with Git, and the record, which settles the
 /// ref.
 fn inherit(queue: &mut SqliteQueue) -> anyhow::Result<InheritedByHand> {
@@ -619,9 +624,13 @@ fn read_and_keep(
     queue: &mut SqliteQueue,
     branches: &dyn CarriedBranches,
 ) -> anyhow::Result<(InheritToRead, KeptHead)> {
-    let inbox = ActorContext::instance(ActorRole::Inbox, 1);
-    let read =
-        Planning::new(queue, &inbox, &StaticPolicy).ready_inherit_read(TaskId::new(1), REASON)?;
+    let person = common::human::authenticated(100);
+    let read = Planning::new(
+        queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_read(TaskId::new(1), REASON)?;
     let kept = keep_head(read.run.as_ref(), branches)?;
     Ok((read, kept))
 }
@@ -633,13 +642,13 @@ fn record(
     read: InheritToRead,
     kept: KeptHead,
 ) -> anyhow::Result<InheritedByHand> {
-    let inbox = ActorContext::instance(ActorRole::Inbox, 1);
-    let recorded = Planning::new(queue, &inbox, &StaticPolicy).ready_inherit_by_caller(
-        TaskId::new(1),
-        REASON,
-        read.at,
-        kept.head.clone(),
-    );
+    let person = common::human::authenticated(100);
+    let recorded = Planning::new(
+        queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_by_caller(TaskId::new(1), REASON, read.at, kept.head.clone());
     let branches = RunRepositories {
         containers: &NoContainers,
     };
@@ -790,13 +799,13 @@ fn not_carried_over(db: &Path, run: &TaskRun) {
     assert!(decide_ask(&queue, run).closed_at.is_none());
 }
 
-/// Acceptance (1) of task 3294: the inbox's client-mode `dagq` (the
-/// service's socket and its token, no queue's path) carries the run over
-/// through the queue service and prints what the command line prints on
-/// the DB; it chooses and keeps the head with its own Git, as the service
-/// runs none; the record is the inbox's; and a planner's client-mode
-/// `dagq` is refused by the service as `authorization_denied`, with
-/// nothing changed.
+/// Acceptance (1) of task 3294: a person's client-mode `dagq` (the
+/// service's socket, no queue's path), confirmed on its terminal, carries
+/// the run over through the queue service and prints what the command line
+/// prints on the DB; it chooses and keeps the head with its own Git, as the
+/// service runs none; the record is the person's; and a planner's and the
+/// inbox's client-mode `dagq` (with their tokens) are refused by the
+/// service as `authorization_denied`, with nothing changed.
 #[test]
 fn a_client_mode_ready_inherit_carries_the_run_over_through_the_service() {
     use crate::common::{Bounded, WithoutActor, service::OwnedByTest};
@@ -827,22 +836,31 @@ fn a_client_mode_ready_inherit_carries_the_run_over_through_the_service() {
     });
     let elsewhere = queue_dir.join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
-    let in_client_mode = |principal: &Principal, role: &str| {
-        let credential = service::issue(&queue_dir, principal, 1).unwrap().file;
-        std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
+    // A role's `dagq` goes with its token; a person's (`None`) with none,
+    // on its terminal.
+    let in_client_mode = |principal: Option<(&Principal, &str)>| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"));
+        command
             .without_actor_env()
             .owned_by_test()
             .current_dir(&elsewhere)
             .env("XDG_CONFIG_HOME", &config)
             .env(SOCKET_ENV, service::socket_path(&queue_dir))
-            .env(CREDENTIAL_FILE_ENV, credential)
-            .env("DAGQ_ROLE", role)
-            .args(["ready", "1", "--inherit", "--reason", REASON])
-            .bounded_output()
-            .unwrap()
+            .args(["ready", "1", "--inherit", "--reason", REASON]);
+        match principal {
+            Some((principal, role)) => {
+                let credential = service::issue(&queue_dir, principal, 1).unwrap().file;
+                command
+                    .env(CREDENTIAL_FILE_ENV, credential)
+                    .env("DAGQ_ROLE", role)
+                    .bounded_output()
+                    .unwrap()
+            }
+            None => common::human::output(&mut command).unwrap(),
+        }
     };
 
-    let output = in_client_mode(&Principal::planner(planner.as_i64()), "planner");
+    let output = in_client_mode(Some((&Principal::planner(planner.as_i64()), "planner")));
     assert!(!output.status.success());
     let error: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(
@@ -856,7 +874,28 @@ fn a_client_mode_ready_inherit_carries_the_run_over_through_the_service() {
     not_carried_over(&db, &run);
     assert_eq!(run_ref(&repo, &run), None);
 
-    let output = in_client_mode(&inbox, "inbox");
+    let output = in_client_mode(Some((&inbox, "inbox")));
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(
+        error["queue_service"]["code"], "authorization_denied",
+        "{error}"
+    );
+    assert!(
+        error["denied"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("requires a direct human answer"),
+        "{error}"
+    );
+    not_carried_over(&db, &run);
+    assert_eq!(run_ref(&repo, &run), None);
+    assert_eq!(
+        common::human::attested_through_the_service(&db),
+        Vec::<String>::new()
+    );
+
+    let output = in_client_mode(None);
     assert!(
         output.status.success(),
         "{}",
@@ -900,12 +939,15 @@ fn a_client_mode_ready_inherit_carries_the_run_over_through_the_service() {
     assert_eq!(detail.task.status(), TaskStatus::Ready);
     let retries = inherit_retries(&detail, &run);
     assert_eq!(retries.len(), 1);
-    assert_eq!(retries[0]["by"], "inbox");
+    assert_eq!(retries[0]["by"], "user");
     let recorded = crate::common::service::events(&db, "triage_finished")
         .into_iter()
         .rfind(|event| event["payload"]["action"] == "retry_inherit")
         .unwrap();
-    assert_eq!(recorded["actor"]["id"], json!(inbox.actor().actor_id()));
+    assert_eq!(recorded["actor"]["role"], "user", "{recorded}");
+    // The person's confirmation reached the queue through the service,
+    // which alone stamps its socket's peer on the grant.
+    assert!(!common::human::attested_through_the_service(&db).is_empty());
 }
 
 /// Acceptance (3) of task 3294: a head that cannot be kept under
@@ -918,7 +960,7 @@ fn a_head_that_cannot_be_kept_refuses_ready_inherit_with_nothing_recorded() {
     let blocker = format!("refs/dagq/runs/{}/blocker", run.id());
     git(&repo, &["update-ref", &blocker, run.base_commit().as_str()]);
 
-    let error = refusal(&ready_inherit(&INBOX, &db));
+    let error = refusal(&ready_inherit(&[], &db));
     assert!(error.contains("could not be kept"), "{error}");
     assert!(error.contains("nothing is carried over"), "{error}");
     not_carried_over(&db, &run);
@@ -933,7 +975,7 @@ fn a_head_that_cannot_be_kept_refuses_ready_inherit_with_nothing_recorded() {
     );
 
     git(&repo, &["update-ref", "-d", &blocker]);
-    let output = ready_inherit(&INBOX, &db);
+    let output = ready_inherit(&[], &db);
     assert!(
         output.status.success(),
         "{}",
@@ -959,18 +1001,18 @@ fn a_refused_record_puts_the_runs_ref_back_as_it_was() {
     .unwrap();
 
     git(&repo, &["update-ref", &name, &base]);
-    let error = refusal(&ready_inherit(&INBOX, &db));
+    let error = refusal(&ready_inherit(&[], &db));
     assert!(error.contains("is leased"), "{error}");
     assert_eq!(run_ref(&repo, &run).as_deref(), Some(base.as_str()));
     git(&repo, &["update-ref", "-d", &name]);
-    let error = refusal(&ready_inherit(&INBOX, &db));
+    let error = refusal(&ready_inherit(&[], &db));
     assert!(error.contains("is leased"), "{error}");
     assert_eq!(run_ref(&repo, &run), None);
     not_carried_over(&db, &run);
 
     conn.execute("DELETE FROM run_leases WHERE run_id=?1", [run.id()])
         .unwrap();
-    let output = ready_inherit(&INBOX, &db);
+    let output = ready_inherit(&[], &db);
     assert!(
         output.status.success(),
         "{}",
@@ -988,11 +1030,15 @@ fn the_record_refuses_a_run_that_moved_since_the_read_and_applies_once() {
     let (_dir, repo, db) = fixture();
     let clock = ManualClock::at(clock_start());
     let (mut queue, run, head) = interrupted_with_a_commit(&repo, &db, &clock);
-    let inbox = ActorContext::instance(ActorRole::Inbox, 1);
+    let person = common::human::authenticated(100);
     let task = TaskId::new(1);
-    let read = Planning::new(&mut queue, &inbox, &StaticPolicy)
-        .ready_inherit_read(task, REASON)
-        .unwrap();
+    let read = Planning::new(
+        &mut queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_read(task, REASON)
+    .unwrap();
     assert_eq!(read.at.run.as_ref().unwrap().status, RunStatus::Interrupted);
     let events = queue.show(task).unwrap().events.len();
     Connection::open(&db)
@@ -1002,9 +1048,13 @@ fn the_record_refuses_a_run_that_moved_since_the_read_and_applies_once() {
             [run.id()],
         )
         .unwrap();
-    let error = Planning::new(&mut queue, &inbox, &StaticPolicy)
-        .ready_inherit_by_caller(task, REASON, read.at.clone(), Some(sha(&head)))
-        .unwrap_err();
+    let error = Planning::new(
+        &mut queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_by_caller(task, REASON, read.at.clone(), Some(sha(&head)))
+    .unwrap_err();
     assert!(
         format!("{error:#}").contains("changed while it was read"),
         "{error:#}"
@@ -1013,16 +1063,20 @@ fn the_record_refuses_a_run_that_moved_since_the_read_and_applies_once() {
     assert_eq!(detail.task.status(), TaskStatus::InProgress);
     assert_eq!(detail.events.len(), events);
 
-    let read = Planning::new(&mut queue, &inbox, &StaticPolicy)
-        .ready_inherit_read(task, REASON)
-        .unwrap();
+    let read = Planning::new(
+        &mut queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_read(task, REASON)
+    .unwrap();
     let mut record = || {
-        Planning::new(&mut queue, &inbox, &StaticPolicy).ready_inherit_by_caller(
-            task,
-            REASON,
-            read.at.clone(),
-            Some(sha(&head)),
+        Planning::new(
+            &mut queue,
+            &person,
+            &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
         )
+        .ready_inherit_by_caller(task, REASON, read.at.clone(), Some(sha(&head)))
     };
     record().unwrap();
     let error = record().unwrap_err();
@@ -1071,10 +1125,14 @@ fn a_refused_caller_leaves_the_head_another_carry_over_recorded() {
     let (_dir, repo, db) = fixture();
     let clock = ManualClock::at(clock_start());
     let (mut queue, run, earlier) = interrupted_with_a_commit(&repo, &db, &clock);
-    let inbox = ActorContext::instance(ActorRole::Inbox, 1);
-    let read = Planning::new(&mut queue, &inbox, &StaticPolicy)
-        .ready_inherit_read(TaskId::new(1), REASON)
-        .unwrap();
+    let person = common::human::authenticated(100);
+    let read = Planning::new(
+        &mut queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_read(TaskId::new(1), REASON)
+    .unwrap();
     let worktree = Path::new(run.worktree_path().unwrap());
     fs::write(worktree.join("more.txt"), "more\n").unwrap();
     git(worktree, &["add", "more.txt"]);
@@ -1148,10 +1206,14 @@ fn a_ready_inherit_writes_the_head_before_its_record_and_holds_no_lock() {
     git(&repo, &["update-ref", "-d", &name]);
     let (read, kept) = read_and_keep(&mut queue, &branches).unwrap();
     assert_eq!(run_ref(&repo, &run).as_deref(), Some(head.as_str()));
-    let inbox = ActorContext::instance(ActorRole::Inbox, 1);
-    Planning::new(&mut queue, &inbox, &StaticPolicy)
-        .ready_inherit_by_caller(TaskId::new(1), REASON, read.at, kept.head.clone())
-        .unwrap();
+    let person = common::human::authenticated(100);
+    Planning::new(
+        &mut queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_by_caller(TaskId::new(1), REASON, read.at, kept.head.clone())
+    .unwrap();
     drop(kept);
     assert_eq!(run_ref(&repo, &run).as_deref(), Some(head.as_str()));
     let detail = queue.show(TaskId::new(1)).unwrap();
@@ -1196,14 +1258,18 @@ impl CarriedBranches for ReadBeforeThePause<'_> {
 /// `retry_inherit`'s.
 #[test]
 fn a_caller_paused_after_reading_the_ref_writes_nothing_over_a_recorded_head() {
-    let inbox = ActorContext::instance(ActorRole::Inbox, 1);
+    let person = common::human::authenticated(100);
     // Another `ready --inherit`, with a later head.
     let (_dir, repo, db) = fixture();
     let clock = ManualClock::at(clock_start());
     let (mut queue, run, earlier) = interrupted_with_a_commit(&repo, &db, &clock);
-    let read = Planning::new(&mut queue, &inbox, &StaticPolicy)
-        .ready_inherit_read(TaskId::new(1), REASON)
-        .unwrap();
+    let read = Planning::new(
+        &mut queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_read(TaskId::new(1), REASON)
+    .unwrap();
     let paused = ReadBeforeThePause {
         head: sha(&earlier),
         before: None,
@@ -1232,9 +1298,13 @@ fn a_caller_paused_after_reading_the_ref_writes_nothing_over_a_recorded_head() {
     let (_dir, repo, db) = fixture();
     let clock = ManualClock::at(clock_start());
     let (mut queue, run, head) = interrupted_with_a_commit(&repo, &db, &clock);
-    let read = Planning::new(&mut queue, &inbox, &StaticPolicy)
-        .ready_inherit_read(TaskId::new(1), REASON)
-        .unwrap();
+    let read = Planning::new(
+        &mut queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_read(TaskId::new(1), REASON)
+    .unwrap();
     let branches = RunRepositories {
         containers: &NoContainers,
     };

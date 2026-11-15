@@ -11,6 +11,7 @@
 use serde_json::{Value, json};
 
 use crate::domain::RunEvent;
+use crate::domain::sessions::{GUARDRAIL_SETTINGS as SETTINGS, inbox_guardrail_by as guardrail_by};
 
 /// What a person does to get an inbox with the guardrail: the procedure is
 /// in the `dagq-recover` skill's `reference/up-down.md`.
@@ -66,26 +67,6 @@ pub fn judge(opened: Option<&Value>, reached: bool) -> Value {
     }
     view
 }
-
-/// How the guardrail went with the launch `payload` records, if it did:
-/// see [`judge`].
-fn guardrail_by(payload: &Value) -> Option<&'static str> {
-    if payload["provider"] == "codex" {
-        let hooked = payload["hooks"]
-            .as_array()
-            .is_some_and(|hooks| hooks.iter().any(|hook| hook["hook"] == GUARDRAIL_HOOK));
-        return hooked.then_some(GUARDRAIL_HOOK);
-    }
-    let settings = if payload["provider"].is_null() {
-        !payload["settings"].is_null() || payload["guardrail"] == true
-    } else {
-        !payload["settings"].is_null()
-    };
-    settings.then_some(SETTINGS)
-}
-
-/// `guardrail_by` of an inbox whose guardrail is Claude's settings.
-const SETTINGS: &str = "settings";
 
 /// [`judge`] of the newest `inbox_opened` (`opened`) and the newest
 /// `inbox_guardrail_reached` (`reached`): the guardrail's hook counts as

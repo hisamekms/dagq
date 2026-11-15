@@ -756,6 +756,9 @@ fn the_supervisor_records_the_outage_outside_the_queue_and_holds_its_claims() {
 /// `down` stops it once no supervisor runs.
 #[test]
 fn up_starts_the_service_and_down_stops_it() {
+    if common::human::rerun_on_terminal() {
+        return;
+    }
     let mut fixture = common::lifecycle::fixture();
     fixture.options.queue_service = true;
     fixture.environment.current_exe =

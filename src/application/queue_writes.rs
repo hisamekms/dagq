@@ -1129,9 +1129,11 @@ mod tests {
     }
 
     #[test]
-    fn the_user_and_the_inbox_run_every_planning_command_but_the_planners_decline() {
+    fn planning_writes_require_direct_authority_for_bypass_and_keep_other_grants() {
         for actor in [
-            ActorContext::user(),
+            ActorContext::user().with_direct_human(Some(
+                crate::domain::direct_human::test_support::evidence(&json!({"id": 1})),
+            )),
             ActorContext::new(ActorRole::Inbox, "inbox:1"),
         ] {
             for (write, capability) in every_write() {
@@ -1139,6 +1141,11 @@ mod tests {
                 if capability == Capability::RequestDecline {
                     let refusal = refusal.expect("a person declines no request");
                     assert_eq!(refusal.capability, capability);
+                    assert_eq!(recorded, 1);
+                } else if capability == Capability::TaskReadyBypassReview
+                    && actor.role() == ActorRole::Inbox
+                {
+                    assert_eq!(refusal.unwrap().reason, DenyReason::DirectHuman);
                     assert_eq!(recorded, 1);
                 } else {
                     assert!(refusal.is_none(), "{actor:?} {write:?}: {refusal:?}");

@@ -982,7 +982,49 @@ impl QueueService<'_> {
         if waiting {
             return respond(Err(crate::application::NotLeader.into()));
         }
-        let actor = principal.actor();
+        let (params, evidence) = crate::domain::direct_human::extract(&request.params);
+        let evidence = evidence
+            .filter(|e| {
+                peer == Peer::Owner
+                    && principal.role == ActorRole::User
+                    && request.env_role.is_none()
+                    && self.backend.answer_authorizer().team_version() == Some(false)
+                    && crate::domain::direct_human::host_evidence_valid(e, &params)
+            })
+            .map(|mut e| {
+                e.socket_peer = Some(format!("owner; pid={process:?}"));
+                e
+            });
+        let mut actor = principal.actor().with_direct_human(evidence);
+        let mut clean_request = request.clone();
+        clean_request.params = params;
+        let request = &clean_request;
+        let mut checked = checked;
+        if let Some(operation) =
+            crate::domain::direct_human::operation(request.use_case.as_str(), &request.params)
+        {
+            // Authentication may own the write-line connection. Release it
+            // before a refusal opens the writer; accepted calls reopen below
+            // with their checked decision and host evidence attached.
+            drop(checked.take());
+            let policy = self.backend.answer_authorizer();
+            let log = OwnDenials {
+                backend: self.backend,
+                actor: &actor,
+                use_case: request.use_case,
+            };
+            let gate = Gate {
+                actor: &actor,
+                authorizer: &*policy,
+            };
+            if let Err(error) = gate
+                .refuse_ungranted(&log, operation.capability(), &Resource::Queue)
+                .and_then(|()| gate.weakening(&log, operation, &Resource::Queue))
+            {
+                return respond(Err(error));
+            }
+            actor = actor.with_direct_decision_checked();
+        }
         if request.use_case == UseCase::CredentialPreference {
             // A principal the policy does not grant `credential.preference`
             // is refused and recorded as itself, as over HTTP; the one it
@@ -1018,6 +1060,7 @@ impl QueueService<'_> {
             return respond(super::supervisor_service::control::answer(
                 self.backend,
                 &principal,
+                &actor,
                 &request.params,
                 process,
                 request.token.as_deref(),
@@ -1339,6 +1382,11 @@ pub(crate) fn request_reads_only(use_case: UseCase, params: &Value) -> bool {
 }
 
 fn connection(use_case: UseCase, params: &Value) -> Connection {
+    // The direct-human envelope is the transport's: the command routes as
+    // it would without it, here and for the client's retries alike.
+    if params.get("_direct_human").is_some() {
+        return connection(use_case, &crate::domain::direct_human::extract(params).0);
+    }
     match use_case {
         UseCase::Supervisor | UseCase::Control
             if super::supervisor_service::request_reads_only(use_case, params) =>
@@ -1572,6 +1620,21 @@ fn issue_token_of(
     let expires = parent
         .token_expires_at
         .ok_or_else(|| anyhow!("human token has no expiry"))?;
+    if p.opened
+        .as_ref()
+        .is_some_and(crate::domain::direct_human::guardrail_off)
+    {
+        let policy = backend.answer_authorizer();
+        Gate {
+            actor: &actor,
+            authorizer: &*policy,
+        }
+        .weakening(
+            &Store(&mut *queue, None),
+            crate::domain::direct_human::WeakeningOperation::GuardrailDisable,
+            &resource,
+        )?;
+    }
     let opened = p.opened.map(|opened| human_inbox_opened(opened, &identity));
     // The launch's `inbox_opened` is written in the issue's transaction
     // after the token's record: a failure of either, or of the COMMIT,
@@ -2690,7 +2753,7 @@ struct DenialParams {
 /// match on the reasons fails to compile when one is added and not listed.
 fn deny_reason(name: &str) -> Option<crate::domain::authorization::DenyReason> {
     use crate::domain::authorization::DenyReason as R;
-    const ALL: [R; 9] = [
+    const ALL: [R; 10] = [
         R::NotGranted,
         R::Reserved,
         R::Resource,
@@ -2700,6 +2763,7 @@ fn deny_reason(name: &str) -> Option<crate::domain::authorization::DenyReason> {
         R::NotHeld,
         R::HumanRole,
         R::RecentLogin,
+        R::DirectHuman,
     ];
     const fn listed(reason: R) -> usize {
         match reason {
@@ -2712,6 +2776,7 @@ fn deny_reason(name: &str) -> Option<crate::domain::authorization::DenyReason> {
             R::NotHeld => 6,
             R::HumanRole => 7,
             R::RecentLogin => 8,
+            R::DirectHuman => 9,
         }
     }
     ALL.into_iter()
@@ -6875,7 +6940,9 @@ pub(crate) mod tests {
             issuer: "https://other.example".into(),
             subject: "forged".into(),
         });
+        // A guarded Codex launch: its hook went with it, as status judges.
         let opened = json!({"provider": "codex", "model": null, "guardrail": true,
+                            "hooks": [{"hook": "pre_tool_use"}],
                             "parent": {"issuer": "x", "subject": "y"}});
         let recorded = || -> Vec<Value> {
             backend

@@ -519,6 +519,13 @@ pub(in crate::infrastructure) fn attach_event_actors(
     conn.create_scalar_function("dagq_requested_by", 0, flags, move |_| {
         Ok(state.requested_by())
     })?;
+    let state = actors.clone();
+    conn.create_scalar_function("dagq_direct_human", 0, flags, move |_| {
+        Ok(state
+            .get()
+            .direct_human()
+            .map(|e| serde_json::to_string(e).expect("evidence JSON")))
+    })?;
     Ok(actors)
 }
 

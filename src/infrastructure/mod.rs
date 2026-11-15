@@ -27,6 +27,7 @@ pub mod delegates;
 pub mod denials;
 pub mod deployment_config;
 pub mod dialogue;
+mod direct_human;
 pub mod draft_planners;
 pub mod e2e_gate;
 pub mod environment;

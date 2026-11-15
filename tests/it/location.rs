@@ -73,7 +73,11 @@ fn invoke(cwd: &Path, env: &[(&str, &Path)], args: &[&str]) -> Output {
     {
         crate::common::cli::reach(&mut run, Path::new(db), words);
     }
-    run.bounded_output().unwrap()
+    if common::human::weakening(words) {
+        common::human::output(&mut run).unwrap()
+    } else {
+        run.bounded_output().unwrap()
+    }
 }
 
 fn ok(cwd: &Path, env: &[(&str, &Path)], args: &[&str]) -> Value {

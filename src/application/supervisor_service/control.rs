@@ -412,17 +412,17 @@ fn own_hold(command: ControlCommand, args: &[Value]) -> bool {
 pub fn answer(
     backend: &dyn ServiceBackend,
     principal: &Principal,
+    actor: &crate::domain::ActorContext,
     params: &Value,
     process: Option<u32>,
     token: Option<&str>,
     notes: &mut super::super::queue_service::RequestNotes,
 ) -> Result<Value> {
-    let actor = principal.actor();
     let ControlParams { control, call } = serde_json::from_value(params.clone())
         .map_err(|error| BadOperation(format!("{UNREAD_PARAMS}: {error}")))?;
-    let mut queue = super::opened_for(backend, &actor, UseCase::Control, params)?;
+    let mut queue = super::opened_for(backend, actor, UseCase::Control, params)?;
     let operation = operation(&control)?;
-    super::super::queue_service::authorize_operation(&mut *queue, &actor, &operation)?;
+    super::super::queue_service::authorize_operation(&mut *queue, actor, &operation)?;
     // An update job sends its update's and its install's steps alone
     // (ADR-t4629-1): never `up`, which starts a supervisor.
     if principal.role == crate::domain::ActorRole::Updater && !control.command.sent_by_update_job()
@@ -430,7 +430,7 @@ pub fn answer(
         let (capability, resource) = operation.request();
         return Err(super::super::queue_service::refuse_recorded(
             &mut *queue,
-            &actor,
+            actor,
             capability,
             &resource,
             crate::domain::authorization::DenyReason::Resource,
@@ -457,7 +457,7 @@ pub fn answer(
     if let Some(measure) = measure {
         return Err(super::super::queue_service::refuse_recorded(
             &mut *queue,
-            &actor,
+            actor,
             Capability::Supervise,
             &crate::domain::Resource::Queue,
             crate::domain::authorization::DenyReason::Resource,
@@ -475,7 +475,7 @@ pub fn answer(
             let (capability, resource) = operation.request();
             return Err(super::super::queue_service::refuse_recorded(
                 &mut *queue,
-                &actor,
+                actor,
                 capability,
                 &resource,
                 crate::domain::authorization::DenyReason::Resource,
@@ -492,7 +492,7 @@ pub fn answer(
     if super::needs::READS.contains(&op) {
         super::super::queue_service::authorize_supervisor_needs(
             &mut *queue,
-            &actor,
+            actor,
             Capability::QueueRead,
         )?;
     }
@@ -516,7 +516,7 @@ pub fn answer(
             }
             // Only the command's own process, as the connection confirms
             // it, takes a slot under its pid (a refusal recorded).
-            let pid = landing_process(&mut *queue, &actor, &control, process, &run)?;
+            let pid = landing_process(&mut *queue, actor, &control, process, &run)?;
             let store = queue.supervisor_store();
             of_named_task(store, &control, &run)?;
             // A lease the caller makes for its landing: none another holds.
@@ -548,7 +548,7 @@ pub fn answer(
             let (run,): (RunId,) = read(op, args)?;
             // Only the landing the command's own process began: one naming
             // another command's process ends none of its landings.
-            let pid = landing_process(&mut *queue, &actor, &control, process, &run)?;
+            let pid = landing_process(&mut *queue, actor, &control, process, &run)?;
             let key = landing_key(&run, pid);
             let store = queue.supervisor_store();
             of_named_task(store, &control, &run)?;
@@ -576,7 +576,7 @@ pub fn answer(
             if under.is_some() || target.run_id().is_some() {
                 return Err(anyhow::Error::new(NotOwnLease));
             }
-            own_target(queue.supervisor_store(), &control, &actor, &target)?;
+            own_target(queue.supervisor_store(), &control, actor, &target)?;
             // Issued as `issue_token` issues it at a parent's request: only
             // to the command whose process the start names, that process
             // the connection's (a step naming another's asks as none), and
@@ -598,7 +598,7 @@ pub fn answer(
             if under.is_some() || target.run_id().is_some() {
                 return Err(anyhow::Error::new(NotOwnLease));
             }
-            own_target(queue.supervisor_store(), &control, &actor, &target)?;
+            own_target(queue.supervisor_store(), &control, actor, &target)?;
             return reply(
                 backend
                     .telemetry()
@@ -612,7 +612,7 @@ pub fn answer(
         }
         "register_telemetry_session" => {
             let (target, session_id): (StepTarget, String) = read(op, args)?;
-            own_target(queue.supervisor_store(), &control, &actor, &target)?;
+            own_target(queue.supervisor_store(), &control, actor, &target)?;
             return reply(queue.register_session(&target, &session_id, backend.now_ms()));
         }
         APPROVE_INTEGRATION => {
@@ -683,7 +683,7 @@ pub fn answer(
         if !std::path::Path::new(&binary).is_absolute() {
             return Err(super::super::queue_service::refuse_recorded(
                 &mut *queue,
-                &actor,
+                actor,
                 Capability::BinaryInstall,
                 &crate::domain::Resource::Queue,
                 crate::domain::authorization::DenyReason::Resource,
@@ -696,7 +696,7 @@ pub fn answer(
         if let Some(why) = handoff_refusal(&binary, process, |pid| backend.executable_of(pid)) {
             return Err(super::super::queue_service::refuse_recorded(
                 &mut *queue,
-                &actor,
+                actor,
                 Capability::ServiceLifecycle,
                 &crate::domain::Resource::Queue,
                 crate::domain::authorization::DenyReason::Resource,

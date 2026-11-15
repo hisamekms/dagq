@@ -1,0 +1,5 @@
+# 6.57s (stress 5, median, local load); 3.43s on main's CI before this task
+[[test]]
+name = "runtime_inherit_by_hand::a_retry_by_hand_leaves_the_automatic_one"
+reason = "境界（CLI・SQLite・Git・supervisor）: 人が制御端末で確かめた ready --inherit の引き継ぎの後も、supervisor が回す次の run の回復の job の retry_inherit が適用されることを、実の supervisor・Git・pty の CLI で確かめる。引き継ぎの判断は application::commands::planning と application::inherit の unit test"
+task = 4849

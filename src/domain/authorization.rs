@@ -531,6 +531,8 @@ impl Resource {
 /// Why a request was refused. It names no id or text of the resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenyReason {
+    /// A weakening operation cannot be relayed by an agent.
+    DirectHuman,
     /// The role's allowlist lacks the capability.
     NotGranted,
     /// The authenticated person's registry role narrows the user grant.
@@ -559,6 +561,9 @@ impl DenyReason {
     /// The reason as the error and the record name it.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::DirectHuman => {
+                "requires a direct human answer: run this dagq command in a separate terminal with no DAGQ_ROLE and confirm the target on its TTY; for a team deployment, run dagq login again"
+            }
             Self::NotGranted => "not granted",
             Self::HumanRole => "restricted by human role",
             Self::RecentLogin => {
@@ -599,6 +604,14 @@ impl std::error::Error for AuthorizationError {}
 
 /// Decides whether `actor` may use `capability` on `resource`.
 pub trait Authorizer {
+    fn authorize_weakening(
+        &self,
+        actor: &ActorContext,
+        operation: super::direct_human::WeakeningOperation,
+    ) -> Result<(), AuthorizationError> {
+        super::direct_human::authorize(actor, operation, self.team_version(), 0)
+    }
+
     /// Approval is fail-closed without a policy-owned deployment. Actor
     /// construction and missing entry-point metadata never imply local mode.
     fn authorize_answer(
@@ -681,6 +694,14 @@ impl AnswerPolicy {
     }
 }
 impl Authorizer for AnswerPolicy {
+    fn authorize_weakening(
+        &self,
+        actor: &ActorContext,
+        operation: super::direct_human::WeakeningOperation,
+    ) -> Result<(), AuthorizationError> {
+        super::direct_human::authorize(actor, operation, self.issuer, self.now)
+    }
+
     fn authorize(
         &self,
         actor: &ActorContext,

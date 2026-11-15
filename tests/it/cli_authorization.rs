@@ -447,7 +447,16 @@ fn the_inbox_readies_at_a_persons_word_and_the_record_tells_it_from_the_user() {
         ("DAGQ_ROLE", "inbox".to_owned()),
         ("DAGQ_ACTOR_ID", "inbox".to_owned()),
     ];
-    allowed_as(&inbox, &db, &["ready", "1", "--bypass-review"]);
+    // Delegated bypass is refused; the successful user fixture confirms on
+    // its own controlling TTY. Keep the existing actor-record boundary test.
+    let refusal = denied_as(&inbox, &db, &["ready", "1", "--bypass-review"]);
+    assert!(
+        refusal["denied"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("direct human")
+    );
+    assert_eq!(ok(&db, &["show", "1"])["task"]["status"], "draft");
     ok(&db, &["ready", "2", "--bypass-review"]);
     let events = ok(
         &db,
@@ -471,7 +480,14 @@ fn the_inbox_readies_at_a_persons_word_and_the_record_tells_it_from_the_user() {
             .unwrap_or_else(|| panic!("task {task} was not readied: {events}"))["actor"]["role"]
             .clone()
     };
-    assert_eq!(readied_by(1), "inbox");
+    assert!(
+        !events
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["task_id"] == 1 && event["payload"]["to"] == "ready")
+    );
+    assert_eq!(denials(&db)[0]["actor"]["role"], "inbox");
     assert_eq!(readied_by(2), "user");
 }
 

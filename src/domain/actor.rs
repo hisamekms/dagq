@@ -198,6 +198,10 @@ pub struct HumanRole {
 /// The actor a command runs as, or an AI actor the runtime starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ActorContext {
+    #[serde(skip)]
+    direct_human: Option<super::direct_human::Evidence>,
+    #[serde(skip)]
+    direct_decision_checked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     human_role: Option<HumanRole>,
     /// The person an inbox authenticated against its human parent acts
@@ -221,6 +225,8 @@ impl ActorContext {
     /// `role` as `actor_id`; the trust is the role's.
     pub fn new(role: ActorRole, actor_id: impl Into<String>) -> Self {
         Self {
+            direct_human: None,
+            direct_decision_checked: false,
             human_role: None,
             parent_human: None,
             human_token: false,
@@ -261,6 +267,30 @@ impl ActorContext {
         self.human_token = human_token;
         self.auth_time = auth_time;
         self
+    }
+
+    /// Evidence admitted by the host service, never inherited through env.
+    pub(crate) fn with_direct_human(
+        mut self,
+        evidence: Option<super::direct_human::Evidence>,
+    ) -> Self {
+        self.direct_human = evidence;
+        self
+    }
+
+    /// The entrance checked recent OIDC authentication before dispatching to
+    /// a use case whose static capability policy owns no deployment clock.
+    pub(crate) fn with_direct_decision_checked(mut self) -> Self {
+        self.direct_decision_checked = true;
+        self
+    }
+
+    pub(crate) fn direct_decision_checked(&self) -> bool {
+        self.direct_decision_checked
+    }
+
+    pub fn direct_human(&self) -> Option<&super::direct_human::Evidence> {
+        self.direct_human.as_ref()
     }
 
     pub fn human_login(&self) -> (bool, Option<i64>) {

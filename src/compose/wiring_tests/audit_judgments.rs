@@ -42,8 +42,36 @@ fn ask_answer_application_and_worker_refusal_reach_the_audit_service() {
     let actors = [
         ActorContext::new(ActorRole::User, "person-a"),
         ActorContext::new(ActorRole::Inbox, "inbox-a"),
-        ActorContext::new(ActorRole::Inbox, "inbox-b"),
+        ActorContext::new(ActorRole::User, "person-b").with_direct_human(Some(
+            crate::domain::direct_human::test_support::evidence(
+                &json!({"id": asks[2].id, "text": "land"}),
+            ),
+        )),
     ];
+    // The protected-path producer owns this classification; the answer
+    // entry must use the stored ask, not the client's answer text.
+    sql.execute(
+        "UPDATE asks SET subject='protected_paths' WHERE id=?1",
+        [asks[2].id.as_i64()],
+    )
+    .unwrap();
+    let mut relayed = wiring
+        .queue()
+        .with_actor(ActorContext::new(ActorRole::Inbox, "inbox-b"));
+    assert!(
+        crate::compose::wiring_run_command_with_policy(
+            &mut relayed,
+            Path::new("/wiring/queue"),
+            &QueueCommand::Answer(AnswerParams {
+                id: asks[2].id.as_i64(),
+                text: "land".into(),
+                original_text: None
+            }),
+            &AnswerPolicy::new(Some(false), 100),
+        )
+        .is_err()
+    );
+    assert!(queue.read_ask(asks[2].id).unwrap().answer.is_none());
     for ((ask, actor), original) in asks.iter().zip(&actors).zip([None, Some("abc"), None]) {
         let mut writer = wiring.queue().with_actor(actor.clone());
         crate::compose::wiring_run_command_with_policy(
@@ -93,7 +121,7 @@ fn ask_answer_application_and_worker_refusal_reach_the_audit_service() {
     for ((ask, actor), via) in asks.iter().zip(&actors).zip([
         AnsweredVia::HumanAttested,
         AnsweredVia::RelayedByInbox,
-        AnsweredVia::RelayedByInbox,
+        AnsweredVia::HumanAttested,
     ]) {
         let of_ask: Vec<_> = records
             .iter()
@@ -118,6 +146,11 @@ fn ask_answer_application_and_worker_refusal_reach_the_audit_service() {
         assert_eq!(facts["confidence"], "low");
         let answered = of_ask.iter().find(|r| r.answered_via == Some(via)).unwrap();
         assert_eq!(answered.principal.id, actor.actor_id());
+        if actor.actor_id() == "person-b" {
+            let evidence: serde_json::Value =
+                serde_json::from_str(&answered.attestation.evidence["direct_human"]).unwrap();
+            assert_eq!(evidence["terminal"], "/dev/ttys009");
+        }
         let hash = &answered.change.as_ref().unwrap().after.as_ref().unwrap()["original_text_hash"];
         if actor.actor_id() == "inbox-a" {
             assert_eq!(
@@ -142,7 +175,19 @@ fn ask_answer_application_and_worker_refusal_reach_the_audit_service() {
         .iter()
         .filter(|r| r.action == AuditAction::AuthzDenied)
         .collect();
-    assert_eq!(denials.len(), 1);
+    assert_eq!(denials.len(), 2);
+    assert!(denials.iter().any(|r| {
+        r.principal.role == "inbox"
+            && r.authority
+                .rule
+                .as_deref()
+                .unwrap()
+                .contains("direct human")
+    }));
+    let denials: Vec<_> = denials
+        .into_iter()
+        .filter(|r| r.principal.role == "worker")
+        .collect();
     assert_eq!(denials[0].principal.role, "worker");
     assert_eq!(denials[0].principal.id, "worker-a");
     assert_eq!(denials[0].resource.id, "answer");
@@ -174,4 +219,113 @@ fn ask_answer_application_and_worker_refusal_reach_the_audit_service() {
             .unwrap(),
         i64::try_from(before).unwrap()
     );
+}
+
+#[test]
+fn direct_host_decisions_and_relay_refusals_reach_production_audit_writers() {
+    use crate::application::queue_service::{Peer, QueueService};
+    use crate::domain::direct_human::test_support::evidence;
+    use crate::domain::queue_service::{API_VERSION, ServiceRequest, UseCase};
+    let wiring = Wiring::new(
+        "direct_human",
+        Script {
+            receipts: vec![],
+            verdicts: vec![],
+        },
+    );
+    let backend = wiring.service_backend();
+    let service = QueueService {
+        backend: &*backend,
+        build: "test",
+        pid: 1,
+    };
+    let sql = super::harness::connect(&wiring.db);
+    let (pid, start) = wiring.processes().start();
+    let inbox = crate::application::queue_service::ServiceAccess::issue(
+        wiring.tokens(),
+        &wiring.db,
+        &crate::domain::queue_service::Principal::inbox(
+            crate::domain::queue_service::SessionProcess { pid, start },
+        ),
+    )
+    .unwrap();
+    let inbox_token = wiring.tokens().read(&inbox.file).unwrap();
+    let task = wiring.ready_task(&["true"]);
+    sql.execute(
+        "UPDATE tasks SET status='draft' WHERE id=?1",
+        [task.as_i64()],
+    )
+    .unwrap();
+    let calls = [
+        (UseCase::Ready, json!({"id": task, "bypass_review": true})),
+        (
+            UseCase::Control,
+            json!({"control": {"command": "down", "yes": false, "pid": 31},
+            "call": {"op": "audit_privileged_operation", "args": ["down_force"]}}),
+        ),
+        (
+            UseCase::Control,
+            json!({"control": {"command": "inbox", "yes": false, "pid": 31},
+            "call": {"op": "audit_privileged_operation", "args": ["guardrail_disable"]}}),
+        ),
+    ];
+    for (use_case, params) in calls {
+        let mut req = ServiceRequest {
+            caller: None,
+            api_version: API_VERSION,
+            token: None,
+            env_role: None,
+            queue: None,
+            binding: None,
+            use_case,
+            params: params.clone(),
+        };
+        let refused = service.handle_from_process(&req, Peer::Owner, Some(31));
+        assert_eq!(
+            refused.error.unwrap().code,
+            crate::domain::queue_service::ServiceErrorCode::AuthorizationDenied
+        );
+        // An inbox token (and its DAGQ_ROLE) cannot upgrade itself even
+        // by sending plausible host confirmation metadata.
+        req.params["_direct_human"] = json!(evidence(&params));
+        req.token = Some(inbox_token.clone());
+        req.env_role = Some("inbox".into());
+        let relayed = service.handle_from_process(&req, Peer::Owner, Some(pid));
+        assert_eq!(
+            relayed.error.unwrap().code,
+            crate::domain::queue_service::ServiceErrorCode::AuthorizationDenied
+        );
+        req.token = None;
+        req.env_role = None;
+        let accepted = service.handle_from_process(&req, Peer::Owner, Some(31));
+        assert!(accepted.ok, "{accepted:?}");
+    }
+    let records: Vec<AuditRecord> = sql
+        .prepare("SELECT record FROM audit_records ORDER BY seq")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|s| serde_json::from_str(&s.unwrap()).unwrap())
+        .collect();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| r.action == AuditAction::AuthzDenied)
+            .count(),
+        6
+    );
+    let grants: Vec<_> = records
+        .iter()
+        .filter(|r| r.action == AuditAction::AuthzPrivileged)
+        .collect();
+    assert_eq!(grants.len(), 3);
+    for grant in grants {
+        assert_eq!(grant.answered_via, Some(AnsweredVia::HumanAttested));
+        let evidence: serde_json::Value =
+            serde_json::from_str(&grant.attestation.evidence["direct_human"]).unwrap();
+        assert_eq!(evidence["terminal"], "/dev/ttys009");
+        assert_eq!(evidence["parent_chain"], json!([31, 17, 1]));
+        assert_eq!(evidence["elapsed_ms"], 400);
+        assert!(evidence["socket_peer"].as_str().unwrap().contains("31"));
+    }
 }

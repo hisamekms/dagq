@@ -2767,6 +2767,36 @@ impl Client {
         params: Value,
         timeout: Duration,
     ) -> Result<Value> {
+        let mut params = params;
+        if matches!(self.route, ClientRoute::Socket(_))
+            && self.env_role.is_none()
+            && std::env::var_os(crate::domain::actor::ROLE_ENV).is_none()
+        {
+            let mut weakening =
+                crate::domain::direct_human::operation(use_case.as_str(), &params).is_some();
+            if use_case == UseCase::Answer {
+                // Read the stored classification; the service checks it again.
+                let asks = self.call_within_retrying(
+                    UseCase::Asks,
+                    json!({"open": true}),
+                    timeout,
+                    self.through_replacement,
+                )?;
+                weakening = asks["asks"].as_array().is_some_and(|asks| {
+                    asks.iter().any(|ask| {
+                        ask["id"] == params["id"]
+                            && ask["kind"] == "approve_landing"
+                            && ask["subject"]
+                                == crate::domain::direct_human::PROTECTED_PATHS_SUBJECT
+                    })
+                });
+            }
+            if weakening
+                && let Some(evidence) = super::direct_human::confirm(use_case.as_str(), &params)?
+            {
+                params["_direct_human"] = serde_json::to_value(evidence)?;
+            }
+        }
         self.call_within_retrying(use_case, params, timeout, self.through_replacement)
     }
 
@@ -6584,6 +6614,14 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
             control: self.control,
             call: step,
         })?;
+        let mut params = params;
+        if crate::domain::direct_human::operation(UseCase::Control.as_str(), &params).is_some()
+            && self.client.env_role.is_none()
+            && let Some(evidence) =
+                super::direct_human::confirm(UseCase::Control.as_str(), &params)?
+        {
+            params["_direct_human"] = serde_json::to_value(evidence)?;
+        }
         self.client.check_destination()?;
         let token = match &self.client.credential {
             Some(file) => Some(
@@ -6720,7 +6758,7 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessControlC
         );
         let step = serde_json::from_value(params)
             .context("a control-side command's step does not read")?;
-        let request = ServiceRequest {
+        let mut request = ServiceRequest {
             caller: None,
             api_version: API_VERSION,
             token: None,
@@ -6733,6 +6771,15 @@ impl crate::application::supervisor_service::ServiceCaller for InProcessControlC
                 call: step,
             })?,
         };
+        // This test-only transport collects the same terminal proof as the
+        // socket caller; a non-interactive fixture remains unauthorized.
+        if crate::domain::direct_human::operation(UseCase::Control.as_str(), &request.params)
+            .is_some()
+            && let Some(evidence) =
+                super::direct_human::confirm(UseCase::Control.as_str(), &request.params)?
+        {
+            request.params["_direct_human"] = serde_json::to_value(evidence)?;
+        }
         // Through the request's text and the answer's, as on the socket.
         let request: ServiceRequest = serde_json::from_slice(&serde_json::to_vec(&request)?)?;
         let response = QueueService {
@@ -6793,7 +6840,7 @@ impl<T: super::sql_exec::SqlWrite> crate::application::queue_service::IssueFacts
     for IssueQueue<'_, T>
 {
     fn record(&self, kind: EventKind, payload: &Value) -> Result<()> {
-        if kind == EventKind::InboxOpened && payload["guardrail"] == false {
+        if kind == EventKind::InboxOpened && crate::domain::direct_human::guardrail_off(payload) {
             super::audit::control(
                 self.tx,
                 crate::application::audit::authorization_fact(
@@ -8021,6 +8068,12 @@ mod tests {
             UseCase::Supervisor,
             &json!({"op": "unknown"})
         ));
+        // A person's confirmation travels beside the command, not in it.
+        let read = json!({"id": 3, "reason": "r"});
+        let mut confirmed = read.clone();
+        confirmed["_direct_human"] = json!({"target": "t"});
+        assert!(request_reads_only(UseCase::ReadyInheritRead, &read));
+        assert!(request_reads_only(UseCase::ReadyInheritRead, &confirmed));
     }
 
     /// The service's `authorization_denied` of a report reaches the

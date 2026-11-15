@@ -12,7 +12,7 @@ Attention `triage by hand`: an ended run's recovery job failed; the run stays as
 
 ## Carry a run's work over by hand
 
-When the person wants an ended run's committed work carried to a new run (a `retry_inherit` answer that matched no option, or one the job may no longer use): `"$DAGQ" ready ID --inherit --reason '<why, in the person's words>'`, only by user or inbox.
+When the person wants an ended run's committed work carried to a new run (a `retry_inherit` answer that matched no option, or one the job may no longer use): `"$DAGQ" ready ID --inherit --reason '<why, in the person's words>'`, typed by the person in their own terminal without `DAGQ_ROLE`, confirming the target on its TTY; the inbox cannot relay this.
 
 - It needs an ended run with commits of its own; with none use plain `ready ID`, and while `triaging (runtime)`, wait. A refusal changes nothing.
 - With a broken verify, fix it first (below).

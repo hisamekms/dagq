@@ -31,4 +31,6 @@ When `integrate` reports that its push failed, or `status` shows `push main`, ru
 
 ## approve_landing answers
 
+For protected paths, the person types `dagq answer ID --text '<answer>'` in their own terminal without `DAGQ_ROLE` and confirms the target on its TTY. The inbox cannot relay this or unset its role. Ordinary local approvals may still be relayed; with an OIDC issuer all landing approvals require the person's recent login.
+
 The supervisor applies the ask's options itself and closes the ask; another answer is the inbox's to read and close. Never ask the person to pick a reason code. Never edit the run's worktree, `recover` it or open a session for it.

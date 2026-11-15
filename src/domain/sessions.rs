@@ -863,6 +863,29 @@ pub const SESSION_START: &str = "session_start";
 /// `inbox_opened`'s `hooks` and its `guardrail_by`.
 pub const GUARDRAIL_HOOK: &str = "pre_tool_use";
 
+/// `guardrail_by` of an inbox whose guardrail is Claude's settings.
+pub const GUARDRAIL_SETTINGS: &str = "settings";
+
+/// How the guardrail went with the launch `payload` (`inbox_opened`)
+/// records, if it did: the one judgment `status` shows and the
+/// direct-human gate classifies a launch by, so no launch passes one as
+/// guarded while the other reads it as off
+/// (`application::inbox_guardrail::judge`).
+pub fn inbox_guardrail_by(payload: &Value) -> Option<&'static str> {
+    if payload["provider"] == "codex" {
+        let hooked = payload["hooks"]
+            .as_array()
+            .is_some_and(|hooks| hooks.iter().any(|hook| hook["hook"] == GUARDRAIL_HOOK));
+        return hooked.then_some(GUARDRAIL_HOOK);
+    }
+    let settings = if payload["provider"].is_null() {
+        !payload["settings"].is_null() || payload["guardrail"] == true
+    } else {
+        !payload["settings"].is_null()
+    };
+    settings.then_some(GUARDRAIL_SETTINGS)
+}
+
 /// Why the span of a hook names no model it read: the hook's input had
 /// none, so `model` is the one the launch asked for (null for the
 /// provider's default).

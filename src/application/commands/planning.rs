@@ -290,8 +290,7 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         self.store.transition(task, TaskAction::Draft, authorized)
     }
 
-    /// `ready`, or `ready --bypass-review` past plan review: the user's and
-    /// the inbox's at a person's word, which the event's actor tells apart.
+    /// `ready --bypass-review` requires a directly attested human decision.
     pub fn ready(&mut self, task: TaskId, bypass_review: bool) -> Result<Task> {
         let (capability, action) = if bypass_review {
             (Capability::TaskReadyBypassReview, TaskAction::BypassReview)
@@ -438,7 +437,20 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
     /// refused actor) and returned as the [`AuthorizationError`]. A record
     /// that cannot be written does not turn the refusal into another error.
     fn authorize(&mut self, capability: Capability, resource: Resource) -> Result<()> {
-        let Err(error) = self.authorizer.authorize(self.actor, capability, &resource) else {
+        let decision = self
+            .authorizer
+            .authorize(self.actor, capability, &resource)
+            .and_then(|()| {
+                if capability == Capability::TaskReadyBypassReview {
+                    self.authorizer.authorize_weakening(
+                        self.actor,
+                        crate::domain::direct_human::WeakeningOperation::PlanReviewBypass,
+                    )
+                } else {
+                    Ok(())
+                }
+            });
+        let Err(error) = decision else {
             if crate::application::audit::privileged(capability) {
                 self.store.record_privileged(serde_json::json!({"capability": capability, "resource": resource.record(), "reason": "allowed"}))?;
             }
@@ -486,8 +498,8 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
 }
 
 impl<S: PlanningStore + InheritStore + ?Sized> Planning<'_, S> {
-    /// What `ready --inherit` reads before its head is chosen (a person's,
-    /// the user's or the inbox's at their word, retry of an `in_progress`
+    /// What `ready --inherit` reads before its head is chosen (a person's
+    /// direct retry, which the inbox cannot relay, of an `in_progress`
     /// task whose latest run failed or was interrupted, carrying that run's
     /// branch over to the next run without plan review, ADR-t1962-1): the
     /// task's status it is authorized with (`task.ready_bypass_review`) and
@@ -1310,15 +1322,29 @@ mod tests {
     }
 
     #[test]
-    fn the_user_and_the_inbox_may_run_every_planning_command() {
+    fn the_inbox_may_plan_but_only_a_direct_person_bypasses_review() {
         for actor in [
-            ActorContext::user(),
+            ActorContext::user().with_direct_human(Some(
+                crate::domain::direct_human::test_support::evidence(&json!({"id": 1})),
+            )),
             ActorContext::instance(ActorRole::Inbox, 1),
         ] {
             for (name, command) in commands() {
                 let (outcome, denials) = run(&actor, TaskStatus::InProgress, None, command);
-                assert!(matches!(outcome, Outcome::Allowed), "{actor:?} {name}");
-                assert!(denials.is_empty());
+                let bypass = matches!(
+                    name,
+                    "ready --bypass-review"
+                        | "ready --inherit"
+                        | "ready --inherit (read)"
+                        | "ready --inherit (images)"
+                );
+                let allowed = actor.role() == ActorRole::User || !bypass;
+                assert_eq!(
+                    matches!(outcome, Outcome::Allowed),
+                    allowed,
+                    "{actor:?} {name}"
+                );
+                assert_eq!(denials.is_empty(), allowed);
             }
         }
     }
@@ -1614,7 +1640,9 @@ mod tests {
                     status: Some(status),
                     ..Store::default()
                 };
-                let me = ActorContext::user();
+                let me = ActorContext::user().with_direct_human(Some(
+                    crate::domain::direct_human::test_support::evidence(&json!({"id": 1})),
+                ));
                 let error =
                     command(&mut Planning::new(&mut store, &me, &StaticPolicy)).unwrap_err();
                 assert_eq!(error.to_string(), reached, "{status:?}");

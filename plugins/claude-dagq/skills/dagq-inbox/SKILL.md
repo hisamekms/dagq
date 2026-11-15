@@ -34,7 +34,7 @@ Run `"$DAGQ" watch --role inbox --until-attention --after <cursor>` under `run_i
 It prints each open ask in full, oldest first. One at a time:
 
 1. Show the person the question as written, its `reason_category`, `asked_by`, the task and run, and the options. Use `AskUserQuestion` with the options as choices (Codex: a numbered list). Show the asker's `recommendation` and `confidence` when set. Add no recommendation of your own.
-2. Write the person's exact answer. With an OIDC issuer, ask them to submit `approve_landing`'s `land` in their own CLI; see `reference/asks.md`.
+2. Write the person's exact answer. Protected-path answers and OIDC landing approvals need the person's own CLI (`reference/asks.md`).
 
 ```sh
 "$DAGQ" answer <id> --text '<the answer>'
@@ -69,6 +69,6 @@ Report each in a list (task, status, `next`, gist of `last_error`); act with `da
 
 ## Where your authority ends
 
-Yourself: `status`, `watch`, `asks`, `show`, `goal list` (`reference/status.md`), `answer` with the person's words, and `ask close` after carrying out an answer. With an OIDC issuer, `approve_landing`'s `land` needs the person's own CLI (`reference/asks.md`); never read or carry their credentials. Only when the person says so: what `dagq-recover` describes (`up` / `down` / `install`, `integrate` after a review by hand, `recover`, a retry `ready`, `ready --bypass-review`, `cancel`). Reach sessions only with `answer`, `run log` / `planner log` and `planner request`. Never answer on the person's behalf, never pick a default, and never `add` or `goal add`: registering work is a runtime planner's, reached by `request add` on the person's word; `goal close` only on the person's word (a finished goal is its goal review's).
+Yourself: `status`, `watch`, `asks`, `show`, `goal list` (`reference/status.md`), `answer` with the person's words, and `ask close` after carrying out an answer. Weakening operations and protected-path answers need the person's own TTY without `DAGQ_ROLE` (`reference/asks.md`); never carry credentials. Only when the person says so: what `dagq-recover` describes (`up` / `down` / `install`, `integrate` after a review by hand, `recover`, a retry `ready`, `cancel`). Reach sessions only with `answer`, `run log` / `planner log` and `planner request`. Never answer on the person's behalf, never pick a default, and never `add` or `goal add`: registering work is a runtime planner's, reached by `request add` on the person's word; `goal close` only on the person's word (a finished goal is its goal review's).
 
 What you do is recorded as the inbox's, apart from the person's own: events carry actor `inbox`, answers `authority: delegated` (the person's own are `user`). A `!` command here counts as yours; the person's own goes in a terminal without `DAGQ_ROLE`. `skills/dagq/reference/authority.md`.

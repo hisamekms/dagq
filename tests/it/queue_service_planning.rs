@@ -60,6 +60,23 @@ fn served(queue: &Queue, who: Who, args: &[&str]) -> Output {
 fn on_the_db(db: &Path, who: Who, write: &QueueWrite) -> Value {
     let actor = who.actor();
     let mut queue = SqliteQueue::open(db).unwrap().with_actor(actor.clone());
+    if let QueueWrite::Ready(writes::ReadyWrite {
+        id,
+        bypass_review: true,
+    }) = write
+    {
+        // The baseline only compares state/output shape. The served CLI
+        // separately confirms on a TTY; no app-level grant is forged here.
+        return serde_json::to_value(
+            dagq::application::TaskStore::transition(
+                &mut queue,
+                TaskId::new(*id),
+                dagq::domain::TaskAction::BypassReview,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
     dagq::compose::write_queue(&mut queue, &actor, write, |queue| {
         dagq::application::queue_writes::principal_owner(queue, &actor)
     })

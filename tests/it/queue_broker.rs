@@ -619,6 +619,9 @@ fn a_record_no_broker_holds_looks_stopped_and_a_stop_clears_it() {
 /// the drain or stops it once no supervisor runs.
 #[test]
 fn up_replaces_the_broker_of_another_build_and_down_stops_it() {
+    if common::human::rerun_on_terminal() {
+        return;
+    }
     let mut fixture = common::lifecycle::fixture();
     fixture.options.queue_broker = true;
     fixture.environment.current_exe =

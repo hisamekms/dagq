@@ -42,6 +42,22 @@ pub struct Gate<'a> {
 }
 
 impl Gate<'_> {
+    /// Require a direct decision, retaining every refusal through the same
+    /// sink as other authorization decisions. The operation's own writer
+    /// retains the successful decision.
+    pub fn weakening(
+        &self,
+        log: &dyn DenialLog,
+        operation: crate::domain::direct_human::WeakeningOperation,
+        resource: &Resource,
+    ) -> Result<()> {
+        if let Err(error) = self.authorizer.authorize_weakening(self.actor, operation) {
+            record(log, &error, resource);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     /// Refuse, before the store is read, a capability the actor has on no
     /// resource: `named` is the resource as the command names it, its
     /// owner unknown; what the owner decides is left to [`Self::authorize`].
@@ -164,6 +180,54 @@ mod audit_tests {
             }
             assert_eq!(*log.lost.borrow(), u64::from(fail));
         }
+    }
+
+    #[test]
+    fn weakening_denials_and_direct_grants_retain_the_route() {
+        use crate::domain::direct_human::{WeakeningOperation as W, test_support::evidence};
+        let direct = ActorContext::user().with_direct_human(Some(evidence(&json!({"id": 7}))));
+        for operation in [
+            W::PlanReviewBypass,
+            W::Force,
+            W::AuditPolicyChange,
+            W::GuardrailDisable,
+        ] {
+            let log = Recorder::default();
+            let inbox = ActorContext::new(ActorRole::Inbox, "inbox");
+            let gate = Gate {
+                actor: &inbox,
+                authorizer: &StaticPolicy,
+            };
+            assert!(gate.weakening(&log, operation, &Resource::Queue).is_err());
+            assert_eq!(log.denied.borrow().len(), 1);
+            let denied =
+                crate::application::audit::authorization_fact(&log.denied.borrow()[0], false);
+            assert_eq!(
+                denied.action,
+                crate::domain::audit::AuditAction::AuthzDenied
+            );
+            assert!(denied.outcome.reason.unwrap().contains("no DAGQ_ROLE"));
+            Gate {
+                actor: &direct,
+                authorizer: &StaticPolicy,
+            }
+            .weakening(&log, operation, &Resource::Queue)
+            .unwrap();
+        }
+        let marked: Vec<_> = crate::application::audit::USE_CASES
+            .iter()
+            .filter_map(|row| row.weakening)
+            .collect();
+        assert_eq!(marked.len(), 5);
+        assert!(marked.contains(&W::AuditPolicyChange));
+        let grant = crate::application::audit::authorization_fact(
+            &json!({"capability": "task.ready_bypass_review", "reason": "allowed"}),
+            true,
+        );
+        assert_eq!(
+            grant.answered_via,
+            Some(crate::domain::audit::AnsweredVia::HumanAttested)
+        );
     }
 
     #[test]

@@ -86,12 +86,12 @@ pub fn invoke_with(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Output {
     }
     command.envs(super::service::host_client_env(db, &reach, args));
     super::ledger::build_before(db, args);
-    command
-        .arg("--db")
-        .arg(db)
-        .args(args)
-        .bounded_output()
-        .unwrap()
+    command.arg("--db").arg(db).args(args);
+    if !env.iter().any(|(key, _)| *key == "DAGQ_ROLE") && super::human::weakening(args) {
+        super::human::output(&mut command).unwrap()
+    } else {
+        command.bounded_output().unwrap()
+    }
 }
 
 /// [`invoke_with`] of a role but the user, the inbox and a planner run

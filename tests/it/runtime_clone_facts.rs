@@ -392,16 +392,24 @@ fn ready_inherit_of_a_cut_off_container_run_carries_the_head_its_facts_only_turn
     let latest = cut_off_turn(&run, "more");
     recover(&db, &run);
     let mut queue = SqliteQueue::open(&db).unwrap();
-    let inbox = dagq::domain::ActorContext::instance(dagq::domain::ActorRole::Inbox, 1);
+    let person = crate::common::human::authenticated(100);
     let branches = dagq::infrastructure::adapters::RunRepositories { containers: &fake };
     use dagq::application::commands::planning::Planning;
     let reason = "the turn's work is in its clone";
-    let read = Planning::new(&mut queue, &inbox, &dagq::domain::StaticPolicy)
-        .ready_inherit_read(TaskId::new(1), reason)
-        .unwrap();
+    let read = Planning::new(
+        &mut queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_read(TaskId::new(1), reason)
+    .unwrap();
     let kept = dagq::application::inherit::keep_head(read.run.as_ref(), &branches).unwrap();
-    let recorded = Planning::new(&mut queue, &inbox, &dagq::domain::StaticPolicy)
-        .ready_inherit_by_caller(TaskId::new(1), reason, read.at, kept.head.clone());
+    let recorded = Planning::new(
+        &mut queue,
+        &person,
+        &dagq::domain::authorization::AnswerPolicy::new(Some(true), 100),
+    )
+    .ready_inherit_by_caller(TaskId::new(1), reason, read.at, kept.head.clone());
     let inherited = kept.settle(&branches, recorded, |_| true).unwrap();
     assert_eq!(inherited.head.as_str(), latest);
     assert_eq!(kept_ref(&repo, &run), Some(latest.clone()));
@@ -410,20 +418,20 @@ fn ready_inherit_of_a_cut_off_container_run_carries_the_head_its_facts_only_turn
     assert_eq!(detail.task.status(), TaskStatus::Ready);
 }
 
-/// The inbox's client-mode `dagq` (the service's socket and its token, no
-/// queue's path) carrying a cut-off container run over runs the run's
+/// A person's client-mode `dagq` (the service's socket, no queue's path),
+/// confirmed on its terminal, carrying a cut-off container run over runs the run's
 /// facts-only turn as the command line on the DB does, in the containers
 /// of the queue the service answered for: it makes that queue's machine
 /// and starts it, counts the turn's process and the run among the
 /// machine's users (under the queue's data root), and readies the image,
 /// which this machine
 /// cannot list. The image's failure reaches the queue only through the
-/// service, as the inbox's record, and the carry-over is refused with
+/// service, as the person's record, and the carry-over is refused with
 /// nothing else recorded, the ref untouched and no Git of the service's.
 #[test]
 fn a_client_mode_ready_inherit_runs_a_cut_off_container_run_s_facts_only_turn_in_its_queue() {
-    use crate::common::{Bounded, WithoutActor};
-    use dagq::domain::queue_service::{CREDENTIAL_FILE_ENV, Principal, SOCKET_ENV, SessionProcess};
+    use crate::common::WithoutActor;
+    use dagq::domain::queue_service::SOCKET_ENV;
     use dagq::infrastructure::queue_service as service;
     let (dir, repo, db, _fake) = container_queue();
     let run = claim_in_container(&db, &repo, TaskId::new(1));
@@ -437,16 +445,6 @@ fn a_client_mode_ready_inherit_runs_a_cut_off_container_run_s_facts_only_turn_in
     );
     fs::write(&git_log, "").unwrap();
     let queue_dir = fs::canonicalize(&db).unwrap().parent().unwrap().to_owned();
-    let pid = std::process::id();
-    let inbox = Principal::inbox(SessionProcess {
-        pid,
-        start: dagq::application::ProcessControl::session_start(
-            &dagq::infrastructure::adapters::SystemProcesses,
-            pid,
-        )
-        .unwrap(),
-    });
-    let credential = service::issue(&queue_dir, &inbox, 1).unwrap().file;
     let calls = machine_without_images(&db);
     let path = std::env::join_paths(
         std::iter::once(db.parent().unwrap().join("bin"))
@@ -455,24 +453,22 @@ fn a_client_mode_ready_inherit_runs_a_cut_off_container_run_s_facts_only_turn_in
     .unwrap();
     let elsewhere = dir.path().join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
+    command
         .without_actor_env()
         .owned_by_test()
         .current_dir(&elsewhere)
         .env("PATH", path)
         .env("XDG_CONFIG_HOME", &config)
         .env(SOCKET_ENV, service::socket_path(&queue_dir))
-        .env(CREDENTIAL_FILE_ENV, credential)
-        .env("DAGQ_ROLE", "inbox")
         .args([
             "ready",
             "1",
             "--inherit",
             "--reason",
             "the turn's work is in its clone",
-        ])
-        .bounded_output()
-        .unwrap();
+        ]);
+    let output = crate::common::human::output(&mut command).unwrap();
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("facts-only turn"), "{error}");
@@ -497,7 +493,10 @@ fn a_client_mode_ready_inherit_runs_a_cut_off_container_run_s_facts_only_turn_in
     assert!(!elsewhere.join("machine").exists());
     let failed = crate::common::service::events(&db, "container_image_failed");
     assert_eq!(failed.len(), 1, "{failed:?}");
-    assert_eq!(failed[0]["actor"]["role"], "inbox", "{failed:?}");
+    assert_eq!(failed[0]["actor"]["role"], "user", "{failed:?}");
+    // The person's confirmed read went through the service, which alone
+    // stamps its socket's peer on the grant.
+    assert!(!crate::common::human::attested_through_the_service(&db).is_empty());
     assert_eq!(kept_ref(&repo, &run), None);
     assert_eq!(
         fs::read_to_string(&git_log).unwrap(),

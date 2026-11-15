@@ -48,6 +48,9 @@ fn recorded(queue: &SqliteQueue, kind: &str) -> Vec<(Value, Option<String>)> {
 /// the user's, and the test's process never opened the queue.
 #[test]
 fn up_down_and_the_service_s_start_and_stop_reach_the_queue_only_through_it() {
+    if common::human::rerun_on_terminal() {
+        return;
+    }
     let mut fixture = fixture();
     let _stop = serve_on_up(&mut fixture);
     let db = fixture.location.db.clone();

@@ -140,6 +140,16 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
         original: Option<&str>,
     ) -> Result<Ask> {
         let ask = self.authorize_ask(Capability::AskAnswer, id)?;
+        if let Some(operation) = crate::domain::direct_human::answer_operation(&ask) {
+            self.gate.weakening(
+                &*self.store,
+                operation,
+                &Resource::Ask {
+                    id,
+                    run: ask.run_id.clone(),
+                },
+            )?;
+        }
         let actor = self.gate.actor;
         if let Err(error) = self
             .gate
@@ -299,6 +309,7 @@ mod tests {
     #[derive(Default)]
     struct Store {
         ask_kind: Option<AskKind>,
+        subject: Option<String>,
         denials: RefCell<Vec<Value>>,
         answerer: Option<Answerer>,
         writer: Option<String>,
@@ -343,7 +354,7 @@ mod tests {
                 answer: None,
                 asked_by: "supervisor".into(),
                 reason_category: AskReason::RecoveryFailed,
-                subject: None,
+                subject: self.subject.clone(),
                 affected: Vec::new(),
                 created_at: 0,
                 answered_at: None,
@@ -544,6 +555,53 @@ mod tests {
 
     fn worker() -> ActorContext {
         ActorContext::worker(&RunId::new("r1").unwrap(), TaskId::new(1))
+    }
+
+    #[test]
+    fn protected_landing_answers_require_direct_human_and_ordinary_answers_relay() {
+        use crate::domain::direct_human::{PROTECTED_PATHS_SUBJECT, test_support::evidence};
+        let policy = crate::domain::authorization::AnswerPolicy::new(Some(false), 100);
+        for protected in [false, true] {
+            let mut store = Store {
+                ask_kind: Some(AskKind::ApproveLanding),
+                subject: protected.then(|| PROTECTED_PATHS_SUBJECT.into()),
+                ..Store::default()
+            };
+            let inbox = ActorContext::new(ActorRole::Inbox, "inbox");
+            let result = Dialogue::new(&mut store, &inbox, &policy).answer(AskId::new(1), "land");
+            if protected {
+                assert_eq!(
+                    result
+                        .unwrap_err()
+                        .downcast_ref::<AuthorizationError>()
+                        .unwrap()
+                        .reason,
+                    DenyReason::DirectHuman
+                );
+                assert_eq!(store.denials.borrow().len(), 1);
+                assert!(store.answerer.is_none());
+            } else {
+                assert_eq!(result.unwrap_err().to_string(), "store: answer");
+                assert_eq!(
+                    store.answerer.unwrap().authority,
+                    AnswerAuthority::Delegated
+                );
+                assert_eq!(
+                    crate::application::ask::answered_via(store.answerer.unwrap().authority),
+                    Some(crate::domain::audit::AnsweredVia::RelayedByInbox)
+                );
+            }
+            let direct = ActorContext::user()
+                .with_direct_human(Some(evidence(&serde_json::json!({"id": 1}))));
+            assert_eq!(
+                Dialogue::new(&mut store, &direct, &policy)
+                    .answer(AskId::new(1), "land")
+                    .unwrap_err()
+                    .to_string(),
+                "store: answer"
+            );
+            assert_eq!(store.answerer.unwrap().authority, AnswerAuthority::User);
+        }
     }
 
     #[test]

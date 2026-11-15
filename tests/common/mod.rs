@@ -27,6 +27,7 @@ pub mod actor;
 pub mod attributes;
 pub mod cleanup;
 pub mod cli;
+pub mod human;
 pub mod install;
 pub mod ledger;
 pub mod lifecycle;

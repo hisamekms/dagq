@@ -1584,6 +1584,9 @@ fn a_supervisors_token_goes_with_the_end_of_its_registration() {
 /// `unknown_token`) and its file is gone.
 #[test]
 fn up_and_down_revoke_the_tokens_of_the_registrations_they_prune() {
+    if common::human::rerun_on_terminal() {
+        return;
+    }
     use dagq::application::supervisor_service::ServiceCaller;
     use dagq::domain::LeaseToken;
 

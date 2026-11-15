@@ -114,6 +114,9 @@ fn down_interrupts_an_in_cmux_supervisor_and_leaves_its_workspace_to_a_person() 
 /// registration; its workspace is left to a person all the same.
 #[test]
 fn down_force_kills_an_in_cmux_supervisor_and_leaves_its_workspace_to_a_person() {
+    if common::human::rerun_on_terminal() {
+        return;
+    }
     let fixture = fixture();
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();
@@ -136,6 +139,9 @@ fn down_force_kills_an_in_cmux_supervisor_and_leaves_its_workspace_to_a_person()
 
 #[test]
 fn down_reports_not_running_without_a_live_registration_and_still_unloads_the_agent() {
+    if common::human::rerun_on_terminal() {
+        return;
+    }
     let fixture = fixture();
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
@@ -205,6 +211,9 @@ fn down_reports_not_running_without_a_live_registration_and_still_unloads_the_ag
 /// heartbeating one are still stopped.
 #[test]
 fn down_prunes_reused_pids_without_signalling_them() {
+    if common::human::rerun_on_terminal() {
+        return;
+    }
     for force in [false, true] {
         let fixture = fixture();
         let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
@@ -323,6 +332,9 @@ fn down_signals_a_silent_supervisor_when_process_listing_fails() {
 /// only the in-cmux one has a workspace, which is left to a person.
 #[test]
 fn down_stops_a_launchd_and_an_in_cmux_supervisor_in_one_call() {
+    if common::human::rerun_on_terminal() {
+        return;
+    }
     let fixture = fixture();
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let agent_pid = std::process::id();
@@ -498,6 +510,9 @@ fn down_wait_returns_stopped_once_the_registration_is_gone_or_the_process_died()
 
 #[test]
 fn down_force_kills_after_the_unload_and_drops_the_registration() {
+    if common::human::rerun_on_terminal() {
+        return;
+    }
     let fixture = fixture();
     let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
     let pid = std::process::id();

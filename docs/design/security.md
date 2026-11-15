@@ -24,7 +24,9 @@ related:
 
 # Security
 
-dagqのセキュリティの模型の全体を1か所にまとめる。決定の理由は[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)（信頼の区分・actor・default denyのcapability・hostは助言的）、[ADR-t728-2](../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)（Integrator）、[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)（inboxのanswerと代行）。コマンドごとのcapabilityとresourceの写し、resourceの規則の細部は[Authorization](authorization.md)、actorの型・環境変数・起動・eventのactorは[Roles](supervisor-lifecycle/roles.md#actors)が持ち、この文書はそれらを重複して書かない。
+dagqのセキュリティの模型の全体を1か所にまとめる。
+決定の理由は[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)（信頼の区分・actor・default denyのcapability・hostは助言的）、[ADR-t728-2](../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)（Integrator）、[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)（inboxのanswerと代行）。
+コマンドごとのcapabilityとresourceの写し、resourceの規則の細部は[Authorization](authorization.md)、actorの型・環境変数・起動・eventのactorは[Roles](supervisor-lifecycle/roles.md#actors)が持つ。
 
 原則: AI actorは提案・生成・評価をしてよいが、自分に権限を与えること、特権の状態遷移を確定すること、割り当ての外の外部副作用を起こすことはできない。認可はRustのコードとpolicyのdataが決め、AIの出力やpromptの指示では決めない。promptの指示はUXで、enforcementではない。
 
@@ -68,7 +70,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 |role|読み取り・watch|計画（goal・task・proposal）|`ready` / `--bypass-review`|note・mark|ask を開く|answer / ask close|finding|計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose` / `replan resolve`）|session|運用（up・down・install・init・migrate・rebind・plan・setup-review）|supervise・recover・review・observe|着地の依頼（`integrate`）|着地の実行・push|telemetryの送信（`telemetry_report`）|runner・image|`audit.read`|
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 |user|○|○|○ / ○|○|○|○ / ○|○|○ / —・○ / — / ○|○|○|○|○|—|—|`runner.share`（管理者）・`runner.list`（所有者か管理者）|○|
-|inbox|○|○|○ / ○|○|○|○ / ○|○|○ / —・○ / — / ○|○|○（`--yes`は—）|○|○|—|—|`runner.list`（親の人の範囲）|○|
+|inbox|○|○|○ / —|○|○|○ / ○|○|○ / —・○ / — / ○|○|○（`--yes`・`down --force`・guardrailを切った起動は—）|○|○|—|—|`runner.list`（親の人の範囲）|○|
 |planner|○|△ task・proposalの所有・状態はPolicyの規則。`goal ready`・`goal review`は—|— / —|○（runにはnoteだけ）|△ `planner_question`だけ（所有はPolicyの規則）、runに紐づくものは—|— / —|resolve・dismiss（recordは—）|— / △ 自分が立てられた依頼だけ・— / — / —|—|○（setup-reviewは—）|—|—|—|—|—|—|
 |worker|読み取り（`watch`・`queue.export`・`ci.read`は—）|—|— / —|△ noteだけ、自分のrunとtask|△ 自分のrunかtaskの`worker_question`だけ|— / —|—|— / —・— / △ 自分のrunだけ / —|—|—|—|—|—|—|—|—|
 |review-job|読み取り|—|— / —|—|—|— / —|—|— / —・— / — / —|—|—|—|—|—|—|—|—|
@@ -88,7 +90,7 @@ goalの印（`goal.landing_mark`）もuserだけで、人はownerか管理者、
 代わりに答える人（`delegate.write`）はuserとinboxだけで、OIDCの人（inboxは親の人）の分を変える。
 空き容量の必要量の緩め（`disk.relax`）もuserとinboxだけ。
 
-権限ごとの持ち主とresourceの条件は[AuthorizationのPolicy](authorization.md#policy)を読む。
+表の○でも弱める操作と守るpathの承認は人の直接の答えだけ（[answerと代行の記録](#answerと代行の記録)）。
 
 - plannerの運用の権限はADR-t728-1（上）の決定7に従う（`dagq-planner` skillの「Where your authority ends」はこの行と一致させる。規則は[文書の規則](../development/documents.md)の「権限の表を写す文書」）
 - sessionの画面とlogを読む・送る`screen.read`・`screen.send`（[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定7）はuserとinboxだけが持つ。
@@ -171,13 +173,13 @@ ADR-t728-1決定6の強制の最初のものだが、隔離ではない: 同じ�
 ## answerと代行の記録
 
 inboxはaskのanswerと`dagq-recover`の手作業を代行でき、人の役割を持つOIDCの発行元のある配置だけ、権限は親の人の役割で狭まる（[AuthorizationのPolicy](authorization.md#policy)）。
-発行元の無いローカルの既定には役割が無く、inboxは今どおり代行できる（ADR-t3985-1決定6・7）。
-記録で人自身と区別する（ADR-t728-3決定2）。
+弱める操作と守るpathの承認はinboxを拒み、普通の承認はローカルで中継できる。
+hostではDAGQ_ROLEの無いTTYの確認をhuman_attestedと記録するが、同じUIDのagentはこの経路を偽れる。
 
 - eventのactorとanswerの`AnswerAuthority`は人自身とinboxの代行を区別し、answerには承認の分類（`answer_approves`）も残す
 - 監査の回答経路は`AnswerAuthority`から決め、answerの文やpromptから推さない。
   人自身とinboxの中継を区別し、中継では人の原文を渡した場合のhashと、渡していない場合を残す。
-  問いを開いた時点の判断の前提、回答、適用の成否は、それぞれのuse caseが状態の変更と同じtransactionで監査に残す
+  判断の前提・回答・適用の成否の記録は[監査](audit.md)が持つ
 - inboxのterminalで人が打つ`!`のコマンドも`DAGQ_ROLE=inbox`を継ぐのでinboxの代行として記録される。
   人自身の操作として残したいときは、`DAGQ_ROLE`の無い別のterminalで打つ
 

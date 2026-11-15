@@ -134,6 +134,14 @@ pub(super) fn control(tx: &impl SqlWrite, mut input: SenderInput) -> Result<()> 
             id: r.get(1)?,
         })
     })?;
+    let evidence: Option<String> = tx.query_row("SELECT dagq_direct_human()", &[], |r| r.get(0))?;
+    let mut assurance_evidence = std::collections::BTreeMap::new();
+    if let Some(evidence) = evidence {
+        assurance_evidence.insert("direct_human".into(), evidence);
+        if input.action == AuditAction::AuthzPrivileged {
+            input.answered_via = Some(crate::domain::audit::AnsweredVia::HumanAttested);
+        }
+    }
     input.sender_seq = tx.query_row("SELECT COALESCE(MAX(sender_seq),0)+1 FROM audit_records WHERE sender_id='queue_service:decisions'", &[], |r| r.get(0))?;
     let at = crate::application::timestamp(std::time::SystemTime::now());
     input.at = at.clone();
@@ -147,7 +155,7 @@ pub(super) fn control(tx: &impl SqlWrite, mut input: SenderInput) -> Result<()> 
             on_behalf_of: Vec::new(),
             auth: "control_side".into(),
             assurance: AssuranceClaim::Chained(Attestation::Enforced),
-            evidence: Default::default(),
+            evidence: assurance_evidence,
             clock_source: "host".into(),
         },
         at,

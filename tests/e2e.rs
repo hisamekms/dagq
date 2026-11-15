@@ -196,7 +196,11 @@ fn dagq_output(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> std::proces
     for (key, value) in extra {
         command.env(key, value);
     }
-    command.bounded_output().unwrap()
+    if common::human::weakening(args) {
+        common::human::output(&mut command).unwrap()
+    } else {
+        command.bounded_output().unwrap()
+    }
 }
 
 /// [`dagq`] with its stdout and stderr in files of `env`'s data home

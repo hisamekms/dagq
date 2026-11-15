@@ -2736,6 +2736,12 @@ pub fn inbox(
         "the start of this process could not be read, so the inbox's token cannot be bound to \
          its session; the inbox was not opened",
     )?;
+    let settings = agent.inbox_settings(db.parent().unwrap_or(Path::new(".")));
+    let hooks = agent.inbox_hooks()?;
+    let opened = inbox_opened(&launch, settings.as_deref(), hooks);
+    if crate::domain::direct_human::guardrail_off(&opened) {
+        queue.audit_privileged_operation("guardrail_disable")?;
+    }
     let credential = ports
         .queue_service
         .issue(
@@ -2765,12 +2771,6 @@ pub fn inbox(
         path_text(&credential)?,
     );
     agent.reach_queue_service(&mut command, &ports.queue_service.socket(&db));
-    let settings = agent.inbox_settings(db.parent().unwrap_or(Path::new(".")));
-    let hooks = agent.inbox_hooks()?;
-    let opened = inbox_opened(&launch, settings.as_deref(), hooks);
-    if opened["guardrail"] == false {
-        queue.audit_privileged_operation("guardrail_disable")?;
-    }
     queue.record_queue_event(EventKind::InboxOpened, opened)?;
     Ok(command)
 }
