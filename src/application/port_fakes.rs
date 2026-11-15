@@ -12,7 +12,8 @@ use std::cell::RefCell;
 /// the queue's events ([`EventStore::latest_events_of`],
 /// [`EventStore::latest_events_by_supervisor`],
 /// [`EventStore::latest_queue_event`], [`EventStore::record_queue_event`],
-/// [`EventStore::all_events`]), newest last.
+/// [`EventStore::record_runtime_event`], [`EventStore::all_events`]),
+/// newest last.
 #[derive(Default)]
 pub(crate) struct SupervisorsAndEvents {
     pub(crate) registrations: Vec<SupervisorRegistration>,
@@ -88,7 +89,19 @@ impl EventStore for SupervisorsAndEvents {
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()> {
-        unreachable!("record_runtime_event is not what the test reaches")
+        let mut events = self.events.borrow_mut();
+        let event = EventId::new(i64::try_from(events.len())? + 1);
+        events.push(RunEvent {
+            id: event,
+            task_id: None,
+            goal_id: None,
+            run_id: Some(id.clone()),
+            kind: kind.as_str().into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        });
+        Ok(())
     }
     fn last_observe(&self, mode: &str) -> Result<Option<i64>> {
         unreachable!("last_observe is not what the test reaches")

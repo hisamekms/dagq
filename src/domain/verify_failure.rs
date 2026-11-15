@@ -8,7 +8,8 @@
 //! the repository declares (ADR-t2268-1 decision 4), are here: a full
 //! disk's error and errno, a signal and the shell's exit of 128 + N, the
 //! conventional exit 124 of `timeout(1)`, and the limit of the whole
-//! command ([`CommandTimedOut`]). The marks of a language's tools and the
+//! command ([`CommandTimedOut`], which is still the code's when the log
+//! shows tests failed in time before the kill, ADR-t4950-1). The marks of a language's tools and the
 //! tests they name are the declared profiles'
 //! ([`crate::domain::toolchain`]), and those of the project's own tools
 //! the marks it declares ([`crate::domain::verify_marks`]); an output none
@@ -37,7 +38,8 @@ pub enum FailureClass {
     /// or the shell's exit 128 + N).
     Killed,
     /// A test ran out of its time, the command exited 124 (`timeout(1)`),
-    /// or it ran past its limit for the whole command.
+    /// or it ran past its limit for the whole command with no test failed
+    /// in time before ([`CommandTimedOut::judge`]).
     Timeout,
     /// Every test that failed passed when the tool ran it again (task 768,
     /// ADR-t768-1).
@@ -93,12 +95,43 @@ pub struct CommandTimedOut {
 }
 
 impl CommandTimedOut {
-    /// The failure integrate records for the command.
+    /// The failure integrate records for the command when its log shows no
+    /// test that failed before the kill ([`Self::judge`]).
     pub fn failure(self) -> VerifyFailure {
         VerifyFailure {
             class: FailureClass::Timeout,
             evidence: self.to_string(),
             profile: None,
+        }
+    }
+
+    /// Why the command killed at its limit failed, read from `log` by
+    /// `toolchains`' profiles and the project's marks (ADR-t4950-1), with
+    /// the tests the event names. Tests that failed before the kill and did
+    /// not run out of time ([`code_failed_tests`]) are the code's
+    /// `test_failure`, its evidence the line of the first of them, and
+    /// those are the tests named: the worker's, not retried as the host's.
+    /// Without one (no failed test, only tests out of time or killed, an
+    /// output nothing declared reads), or with a full disk, a tool's kill
+    /// or a project's host mark that names no test anywhere in the log, it
+    /// is [`Self::failure`]'s `timeout`,
+    /// with the failed tests as any `timeout` names them.
+    pub fn judge(self, toolchains: &Toolchains, log: &str) -> (VerifyFailure, FailedTests) {
+        let text = strip_ansi(log);
+        let failed = code_failures(toolchains, &text);
+        match failed.first() {
+            Some(first) => {
+                let line = text.lines().nth(first.at).unwrap_or_default();
+                (
+                    VerifyFailure {
+                        class: FailureClass::TestFailure,
+                        evidence: shorten(line),
+                        profile: first.profile,
+                    },
+                    limited(failed.into_iter().map(|named| named.name)),
+                )
+            }
+            None => (self.failure(), failed_tests(toolchains, log)),
         }
     }
 }
@@ -285,26 +318,133 @@ impl FailedTests {
 /// output nothing declared reads.
 pub fn failed_tests(toolchains: &Toolchains, log: &str) -> FailedTests {
     let text = strip_ansi(log);
-    let marked = text.lines().enumerate().flat_map(|(index, line)| {
+    limited(
+        named_failures(toolchains, &text)
+            .into_iter()
+            .map(|named| named.name),
+    )
+}
+
+/// The failed tests `log` names that did not run out of time, were not
+/// killed and did not pass on the tool's retry (ADR-t4950-1): a test any
+/// line names with a profile's or the project's host mark (out of time,
+/// killed) is left out wherever else it is named, and so is one a profile
+/// names as passed when run again. None when the log shows a full disk, a
+/// tool's kill or a project's host mark that names no test, which also
+/// leave failed tests behind. What a command killed at its limit had
+/// already shown broken in the code ([`CommandTimedOut::judge`]).
+pub fn code_failed_tests(toolchains: &Toolchains, log: &str) -> FailedTests {
+    let text = strip_ansi(log);
+    limited(
+        code_failures(toolchains, &text)
+            .into_iter()
+            .map(|named| named.name),
+    )
+}
+
+/// A failed test, the index of the line that names it first and the
+/// profile that named it (`None` for a project's mark).
+struct NamedFailure {
+    at: usize,
+    name: String,
+    profile: Option<&'static str>,
+}
+
+/// Every line of `text` (without colors) that names a failed test, by the
+/// profiles and the project's marks that name a test, in the order of the
+/// lines (a test may come more than once).
+fn every_failure(toolchains: &Toolchains, text: &str) -> Vec<NamedFailure> {
+    let marked = text.lines().enumerate().flat_map(|(at, line)| {
         toolchains
             .marks()
             .iter()
             .find_map(|mark| mark.test_on(line.trim()))
-            .map(|name| (index, name))
+            .map(|name| NamedFailure {
+                at,
+                name,
+                profile: None,
+            })
     });
-    let mut found: Vec<(usize, String)> = toolchains
+    let mut found: Vec<NamedFailure> = toolchains
         .profiles()
-        .flat_map(|profile| profile.failed_tests(&text))
+        .flat_map(|profile| {
+            profile
+                .failed_tests(text)
+                .into_iter()
+                .map(|(at, name)| NamedFailure {
+                    at,
+                    name,
+                    profile: Some(profile.name()),
+                })
+        })
         .chain(marked)
         .collect();
     // Stable: a line two profiles name keeps the first's.
-    found.sort_by_key(|(index, _)| *index);
-    let mut names: Vec<String> = Vec::new();
-    for (_, name) in found {
-        if !names.contains(&name) {
-            names.push(name);
+    found.sort_by_key(|named| named.at);
+    found
+}
+
+/// [`every_failure`] with each test once, at its first line.
+fn once(every: Vec<NamedFailure>) -> Vec<NamedFailure> {
+    let mut once: Vec<NamedFailure> = Vec::new();
+    for named in every {
+        if !once.iter().any(|kept| kept.name == named.name) {
+            once.push(named);
         }
     }
+    once
+}
+
+fn named_failures(toolchains: &Toolchains, text: &str) -> Vec<NamedFailure> {
+    once(every_failure(toolchains, text))
+}
+
+/// [`named_failures`] without the tests named on a host mark's line or
+/// passed on the tool's retry ([`code_failed_tests`]).
+fn code_failures(toolchains: &Toolchains, text: &str) -> Vec<NamedFailure> {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    // What the host did first, as in [`classify`]: a full disk, a tool's
+    // kill or a project's host mark that names no test also leaves failed
+    // tests behind, so none is the code's.
+    let host_anywhere = lines.iter().any(|line| out_of_space(line))
+        || toolchains
+            .profiles()
+            .any(|profile| profile.killed_line(&lines).is_some())
+        || lines.iter().any(|line| {
+            toolchains.marks().iter().any(|mark| {
+                matches!(mark.class, MarkClass::Host(_))
+                    && mark.is_on(line)
+                    && mark.test_on(line).is_none()
+            })
+        });
+    if host_anywhere {
+        return Vec::new();
+    }
+    let on_host_line = |at: usize| {
+        let line = lines.get(at).copied().unwrap_or_default();
+        toolchains.profiles().any(|profile| {
+            profile.test_host_line(&[line]).is_some() || profile.killed_line(&[line]).is_some()
+        }) || toolchains
+            .marks()
+            .iter()
+            .any(|mark| matches!(mark.class, MarkClass::Host(_)) && mark.is_on(line))
+    };
+    let every = every_failure(toolchains, text);
+    let host: Vec<String> = every
+        .iter()
+        .filter(|named| on_host_line(named.at))
+        .map(|named| named.name.clone())
+        .collect();
+    let flaky = flaky_tests(toolchains, text);
+    once(every)
+        .into_iter()
+        .filter(|named| !host.contains(&named.name) && !flaky.contains(&named.name))
+        .collect()
+}
+
+/// `names` cut to [`MAX_FAILED_TESTS`], counting the rest.
+fn limited(names: impl Iterator<Item = String>) -> FailedTests {
+    let mut names: Vec<String> = names.collect();
     let omitted = names.len().saturating_sub(MAX_FAILED_TESTS);
     names.truncate(MAX_FAILED_TESTS);
     FailedTests { names, omitted }
@@ -738,6 +878,115 @@ test it::a timed out: x did not happen within 30s\n";
         let failure = classify(&toolchains, "check", Some(100), None, log);
         assert_eq!(failure.evidence, "TIMEOUT [ 60.0s] dagq::it it::b");
         assert_eq!(failure.profile, Some("rust"));
+    }
+
+    #[test]
+    fn a_command_killed_at_its_limit_with_tests_failed_before_it_is_the_codes() {
+        let limit = CommandTimedOut { limit_secs: 3600 };
+        let rust = Toolchains::this_repository().with_marks(within_declared());
+        let log = "        PASS [   0.1s] (1/9) dagq::it a::ok\n\
+        FAIL [   4.9s] (2/9) dagq::it auth::denies\n\
+     TIMEOUT [ 600.0s] (3/9) dagq::it slow::hangs\n\
+        FAIL [   1.2s] (4/9) dagq::it auth::allows\n";
+        let (failure, tests) = limit.judge(&rust, log);
+        assert_eq!(failure.class, FailureClass::TestFailure);
+        assert!(!failure.class.is_environmental());
+        assert_eq!(
+            failure.evidence,
+            "FAIL [   4.9s] (2/9) dagq::it auth::denies"
+        );
+        assert_eq!(failure.profile, Some("rust"));
+        assert_eq!(tests.names, ["auth::denies", "auth::allows"]);
+        assert_eq!(tests.omitted, 0);
+        assert_eq!(code_failed_tests(&rust, log), tests);
+
+        // Past the limit of names, the rest are counted.
+        let many: String = (0..MAX_FAILED_TESTS + 3)
+            .map(|n| format!("        FAIL [ 1.0s] dagq::it it::t{n}\n"))
+            .collect();
+        let (failure, tests) = limit.judge(&rust, &many);
+        assert_eq!(failure.class, FailureClass::TestFailure);
+        assert_eq!(tests.names.len(), MAX_FAILED_TESTS);
+        assert_eq!(tests.omitted, 3);
+
+        // Another profile's failed tests and its out of time ones alike.
+        let (failure, tests) = limit.judge(&fake::only_fake(), "HUNG a::slow\nBROKEN b::bad\n");
+        assert_eq!(
+            (failure.class, failure.profile, failure.evidence.as_str()),
+            (FailureClass::TestFailure, Some("fake"), "BROKEN b::bad")
+        );
+        assert_eq!(tests.names, ["b::bad"]);
+    }
+
+    #[test]
+    fn a_command_killed_at_its_limit_without_a_test_failed_in_time_stays_a_timeout() {
+        let limit = CommandTimedOut { limit_secs: 3600 };
+        let rust = Toolchains::this_repository().with_marks(within_declared());
+        let timeout = limit.failure();
+        for (why, log) in [
+            ("nothing failed", "        PASS [   0.1s] dagq::it a::ok\n"),
+            ("an empty log", ""),
+            (
+                "only out of time",
+                "     TIMEOUT [ 600.0s] dagq::it slow::hangs\n  TRY 2 TMT [ 600.0s] dagq::it slow::other\n",
+            ),
+            (
+                "killed by the tool",
+                "     SIGKILL [   1.0s] dagq::it a::killed\n",
+            ),
+            // The project's timeout line, then cargo test's own names of
+            // the same test.
+            (
+                "the project's timeout",
+                "test runtime_x::waits timed out: the run did not happen within 20s\n\
+---- runtime_x::waits stdout ----\nfailures:\n    runtime_x::waits\n",
+            ),
+            // Failed once, passed on the tool's retry.
+            (
+                "flaky",
+                "  TRY 1 FAIL [ 0.1s] dagq::it a::b\n  TRY 2 PASS [ 0.1s] dagq::it a::b\n",
+            ),
+            // A full disk or a tool's kill leaves failed tests behind.
+            (
+                "a full disk",
+                "        FAIL [   4.9s] dagq::it a::b\nwrite failed: No space left on device\n",
+            ),
+            (
+                "a kill under the tool",
+                "        FAIL [   4.9s] dagq::it a::b\nCaused by:\n  process didn't exit successfully: `x` (signal: 9, SIGKILL: kill)\n",
+            ),
+            // Failed, then out of time on the retry.
+            (
+                "out of time on its retry",
+                "  TRY 1 FAIL [ 0.1s] dagq::it a::b\n  TRY 2 TMT [ 60.0s] dagq::it a::b\n",
+            ),
+        ] {
+            let (failure, _) = limit.judge(&rust, log);
+            assert_eq!(failure, timeout, "{why}");
+            assert!(code_failed_tests(&rust, log).is_empty(), "{why}");
+        }
+        // A project's host mark that names no test.
+        let marked = fake::only_fake().with_marks(marks(&[("oom", "killed", "OOM*")]));
+        assert_eq!(
+            limit.judge(&marked, "BROKEN a::b\nOOM in the box\n").0,
+            timeout
+        );
+        assert_eq!(
+            limit.judge(&marked, "BROKEN a::b\n").0.class,
+            FailureClass::TestFailure
+        );
+        // The tests a timeout names are named as before.
+        let (_, tests) = limit.judge(&rust, "     TIMEOUT [ 600.0s] dagq::it slow::hangs\n");
+        assert_eq!(tests.names, ["slow::hangs"]);
+        // A repository that declares no profile, or one that does not read
+        // the output, cannot tell a failed test: the host's timeout.
+        let failed = "        FAIL [   4.9s] dagq::it auth::denies\n";
+        let [(_, undeclared), _, (_, only_fake)] = every_declaration();
+        for toolchains in [&undeclared, &only_fake] {
+            let (failure, tests) = limit.judge(toolchains, failed);
+            assert_eq!(failure, timeout);
+            assert!(tests.is_empty());
+        }
     }
 
     #[test]

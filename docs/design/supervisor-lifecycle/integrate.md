@@ -10,6 +10,7 @@ related:
   - adr-t639-1
   - adr-t768-1
   - adr-t3344-1
+  - adr-t4950-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-review
   - design-supervisor-lifecycle-validation
@@ -111,6 +112,9 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - コマンドの起動と止め方は`infrastructure::adapters::run_shell_to_log`、環境は`verification_command`が持つ（[Run environment](run-environment.md#run-environment)）。
 - 1本のコマンドの時間の上限は`dagq.toml`の`[verification] command_timeout_secs`（秒）で、宣言が無ければ60分で、置き換えたコマンドにもlanding recheckにも同じく掛かる（[Run environment](run-environment.md#run-environment)）。
   上限で止めたコマンドは`timeout`の失敗で、下のhostの失敗のやり直しに入り、死んだ着地の解放の猶予も同じ上限に従う。
+  例外: 着地の検証で止めたコマンドのログに時間切れでない落ちたtest（宣言したprofileと印が読むもの）があれば`test_failure`で、やり直さず`needs_session`にし、落ちたtestと上限を`verification_command`とworkerへの知らせに残す（`CommandTimedOut::judge`、[ADR-t4950-1](../../adr/2026-11-16-t4950-1-a-verification-killed-at-its-limit-with-failed-tests-is-the-codes.md)）。
+  やり直しのログも同じに読む。
+  landing recheckはこの例外を持たず、上限で止めたコマンドは`timeout`のまま（ADR-t4950-1決定5）。
 - 失敗の分類は`domain::verify_failure::classify`、印の出どころは[Toolchain profiles](../toolchain-profiles.md)、Rustの印とnextestのstatusの集合は`domain::toolchain::rust`が持つ。
 - `dagq.toml`の着地の検証は、名指すtaskのコマンドを置き換える（ADR-t1925-1、[Validation](validation.md#着地の検証)）。
   下の2つのやり直しは置き換えたコマンドにも効く。
@@ -119,6 +123,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 ## hostの失敗のやり直し
 
 - hostの分類（`FailureClass::is_environmental`）の失敗は、workerをresumeせず同じ試行の中で1回だけやり直す（ADR-t639-1）。
+  上限で止めたコマンドが`timeout`になるのは、ログに時間切れでない落ちたtestが無いときだけ（上の「検証のコマンド」、ADR-t4950-1）。
 - なおhostの分類で落ちるか、やり直す空きが無ければ、leaseの無い着地待ちへ控え（`held`）、inboxのattentionになる。
   人がhostを直して`dagq integrate`を打てば、新しい試行で検証からやり直す（`domain::run_attention`）。
 - 分類の集合は人の判断なしに広げない（ADR-t639-1）。

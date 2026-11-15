@@ -166,7 +166,9 @@ pub trait ToolchainProfile: Sync {
     fn flaky_line(&self, lines: &[&str]) -> Option<usize>;
 
     /// After the flaky tests: the line where the tool says a test was
-    /// killed or ran out of its time.
+    /// killed or ran out of its time. Also asked of one line alone, with
+    /// [`Self::killed_line`], to tell a failed test out of time from one
+    /// that failed in time ([`crate::domain::verify_failure::code_failed_tests`]).
     fn test_host_line(&self, lines: &[&str]) -> Option<(ToolHostClass, usize)>;
 
     /// After the conventional exit of a timeout: why the code failed, and

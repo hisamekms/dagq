@@ -11,6 +11,7 @@ tags:
 related:
   - adr-t2268-1
   - adr-t639-1
+  - adr-t4950-1
   - adr-t768-1
   - adr-t2257-1
   - adr-t614-1
@@ -54,6 +55,7 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
 - 印を当てる順は共通の分類が持ち、profileはその順の決まった段で呼ばれる。
   hostの原因を先に見て、流し直しで通ったtestを時間切れより先に見る、という約束は`classify`のdoc commentにある。
 - 「落ちたtestが全て流し直しで通った」の判定（`flaky`）は共通の分類が行い、profileは落ちたtestと通ったtestの名前と、それを示す行だけを返す。
+- コマンド全体の上限で止めたコマンドは`classify`を通らず`CommandTimedOut::judge`が読む: profileと印が落ちたと名指したtestから、時間切れかkillの行で名指されたものと流し直しで通ったものを除いて1件でも残れば`test_failure`、残らないか、ログに容量の不足・道具のkill・testを名指さないhostの印があれば`timeout`（[ADR-t4950-1](../adr/2026-11-16-t4950-1-a-verification-killed-at-its-limit-with-failed-tests-is-the-codes.md)）。
 - 分類したprofileの名前は`VerifyFailure::profile`に残り、flakyのやり直しはそのprofileのenvだけを足す。
 - projectに固有の印（このrepositoryの`tests/common`の`within`の時間切れの行など）はprofileにも共通の分類にも置かず、`dagq.toml`の`[verify_marks.<name>]`が宣言する（`domain::verify_marks`、ADR-t2268-1決定2）。
   印が当てられる分類は型で閉じ（`MarkClass`はprofileと同じ`ToolHostClass`と`ToolCodeClass`）、分類の集合を広げない。

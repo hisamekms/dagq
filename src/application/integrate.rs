@@ -2699,7 +2699,7 @@ fn land(
                 steps,
             };
             let first = step.run(
-                queue,
+                &*queue,
                 index,
                 &integrate_verify_log(run_dir, attempt, index),
                 None,
@@ -2750,7 +2750,7 @@ fn land(
                     ));
                 }
                 let retried = step.run(
-                    queue,
+                    &*queue,
                     index,
                     &integrate_retry_log(run_dir, attempt, index),
                     Some(&last),
@@ -3364,6 +3364,11 @@ struct Checked {
     failed_tests: Option<verify_failure::FailedTests>,
     /// Those of the failed tests the tool ran again and saw pass (task 768).
     flaky_tests: Vec<String>,
+    /// The limit for the whole command, in seconds, when the verifier
+    /// killed it there (`limit_secs` of `verification_command`); its
+    /// failure is still the code's when tests failed in time before the
+    /// kill (ADR-t4950-1).
+    limit_secs: Option<u64>,
     log: PathBuf,
     oom_annotation: Option<String>,
 }
@@ -3396,7 +3401,7 @@ impl VerifyStep<'_> {
     )]
     fn run(
         &self,
-        queue: &mut dyn Queue,
+        queue: &dyn super::EventStore,
         index: usize,
         log: &Path,
         retry_of: Option<&Checked>,
@@ -3461,7 +3466,7 @@ impl VerifyStep<'_> {
         {
             let observation = container.read_oom(since);
             checked.oom_annotation = super::run_container::record_verification_oom(
-                &*queue,
+                queue,
                 self.run.id(),
                 &observation,
                 command,
@@ -3501,6 +3506,7 @@ impl VerifyStep<'_> {
             "failed_tests": checked.tests_json(),
             "failed_tests_omitted": checked.omitted_json(),
             "flaky_tests": checked.flaky_tests,
+            "limit_secs": checked.limit_secs,
             "duration_secs": duration_secs,
             "load_avg_mean": load.load_avg_mean,
             "load_avg_max": load.load_avg_max,
@@ -3536,22 +3542,30 @@ fn judge_command(
     log: &Path,
 ) -> Checked {
     let exit_code = code.unwrap_or(128);
-    let failure = match timed_out {
-        Some(timed_out) => Some(timed_out.failure()),
-        None => (exit_code != 0)
-            .then(|| verify_failure::classify(toolchains, command, code, signal, output)),
+    // Killed at its limit: tests that had failed in time before the kill
+    // are the code's, not the host's (ADR-t4950-1).
+    let (failure, mut failed_tests) = match timed_out {
+        Some(timed_out) => {
+            let (failure, tests) = timed_out.judge(toolchains, output);
+            (Some(failure), Some(tests))
+        }
+        None => {
+            let failure = (exit_code != 0)
+                .then(|| verify_failure::classify(toolchains, command, code, signal, output));
+            let tests = failure
+                .as_ref()
+                .filter(|failure| {
+                    matches!(
+                        failure.class,
+                        verify_failure::FailureClass::TestFailure
+                            | verify_failure::FailureClass::Timeout
+                            | verify_failure::FailureClass::Flaky
+                    )
+                })
+                .map(|_| verify_failure::failed_tests(toolchains, output));
+            (failure, tests)
+        }
     };
-    let mut failed_tests = failure
-        .as_ref()
-        .filter(|failure| {
-            matches!(
-                failure.class,
-                verify_failure::FailureClass::TestFailure
-                    | verify_failure::FailureClass::Timeout
-                    | verify_failure::FailureClass::Flaky
-            )
-        })
-        .map(|_| verify_failure::failed_tests(toolchains, output));
     // A successful retry still records the flaky tests, including those of
     // a summary alone. Keep the same name limit as failed commands.
     if failure.is_none() {
@@ -3577,6 +3591,7 @@ fn judge_command(
         failure,
         failed_tests,
         flaky_tests,
+        limit_secs: timed_out.map(|timed_out| timed_out.limit_secs),
         log: log.to_path_buf(),
         oom_annotation: None,
     }
@@ -3609,11 +3624,12 @@ fn verification_failed(
             failure.class.as_str(),
             failure.evidence,
             last.log.display()
-        ) + &last
-            .oom_annotation
-            .as_ref()
-            .map(|s| format!(". {s}"))
-            .unwrap_or_default(),
+        ) + &killed_after_failed_tests(last)
+            + &last
+                .oom_annotation
+                .as_ref()
+                .map(|s| format!(". {s}"))
+                .unwrap_or_default(),
         detail: Reason::new(ReasonCode::VerificationFailed)
             .with("index", index)
             .on(oom_detail(
@@ -3627,10 +3643,31 @@ fn verification_failed(
                     "failed_tests": last.tests_json(),
                     "failed_tests_omitted": last.omitted_json(),
                     "flaky_tests": last.flaky_tests,
+                    "limit_secs": last.limit_secs,
                 }),
                 last,
             )),
     }
+}
+
+/// For the worker's notice of a command killed at its limit after tests
+/// had failed in time (ADR-t4950-1): the limit and the tests' names, so
+/// the session sees which to fix without the log; empty otherwise.
+fn killed_after_failed_tests(last: &Checked) -> String {
+    let (Some(limit), Some(tests)) = (last.limit_secs, &last.failed_tests) else {
+        return String::new();
+    };
+    if tests.names.is_empty() {
+        return String::new();
+    }
+    let more = match tests.omitted {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    format!(
+        ". It ran past its {limit} s limit and was killed, after these tests had failed (not out of time): {}{more}",
+        tests.names.join(", ")
+    )
 }
 
 /// The verdict on a verification command that failed on the host: `last`
@@ -5126,6 +5163,9 @@ mod tests {
         landing: Option<landing_verification::LandingVerification>,
         /// `[run.env]`.
         run_env: Vec<(String, String)>,
+        /// Kill every command at this limit for the whole command, in
+        /// seconds, as the verifier does past `command_timeout_secs`.
+        limit_secs: Option<u64>,
     }
 
     impl ScriptedVerifier {
@@ -5137,6 +5177,7 @@ mod tests {
                 container,
                 landing: None,
                 run_env: Vec::new(),
+                limit_secs: None,
             }
         }
     }
@@ -5180,6 +5221,10 @@ mod tests {
             env: &[(String, String)],
             _: &Path,
         ) -> Result<super::super::Exit> {
+            if let Some(limit_secs) = self.limit_secs {
+                self.ran.borrow_mut().push(command.to_owned());
+                return Err(verify_failure::CommandTimedOut { limit_secs }.into());
+            }
             let mut ran = self.ran.borrow_mut();
             let success = self.passes[ran.len()];
             ran.push(command.to_owned());
@@ -6820,8 +6865,126 @@ mod tests {
                 "failed_tests": ["runtime_claim::waits", "b::breaks"],
                 "failed_tests_omitted": 0,
                 "flaky_tests": [],
+                "limit_secs": null,
             })
         );
+    }
+
+    /// ADR-t4950-1: a command the verifier killed at its limit after tests
+    /// had failed in time is the code's `test_failure`, not the host's
+    /// `timeout`: not retried, its event names the tests and the limit,
+    /// and its verdict resumes the worker with them. The retry of a
+    /// command that only ran out of time reads its log alike.
+    #[test]
+    fn a_command_killed_at_its_limit_after_failed_tests_goes_back_to_the_worker() {
+        let files = MemoryFiles::default();
+        let dir = Path::new(DIR);
+        let task_run = run(dir);
+        let queue = crate::application::port_fakes::SupervisorsAndEvents::default();
+        let mut verifier = ScriptedVerifier::new(Vec::new(), false);
+        verifier.limit_secs = Some(3600);
+        let toolchains = Toolchains::this_repository();
+        let planned = landing_verification::Planned {
+            command: "sh scripts/landing-it.sh".to_owned(),
+            replaces: Vec::new(),
+        };
+        let step = VerifyStep {
+            verifier: &verifier,
+            container: None,
+            load_average: || None,
+            files: &files,
+            run: &task_run,
+            worktree: dir,
+            run_env: &[],
+            toolchains: &toolchains,
+            planned: &planned,
+            extra_env: &[],
+            attempt: 1,
+            steps: None,
+        };
+        let failed = "        PASS [   0.1s] (1/9) dagq::it a::ok\n\
+        FAIL [   4.9s] (2/9) dagq::it auth::denies\n\
+     TIMEOUT [ 600.0s] (3/9) dagq::it slow::hangs\n\
+        FAIL [   1.2s] (4/9) dagq::it auth::allows\n";
+        let log = integrate_verify_log(dir, 1, 1);
+        files.write(&log, failed.as_bytes()).unwrap();
+        let first = step.run(&queue, 1, &log, None).unwrap();
+        let failure = first.failure.clone().expect("failed");
+        assert_eq!(failure.class, verify_failure::FailureClass::TestFailure);
+        // Not the host's: the landing does not retry it nor hold the run.
+        assert!(!failure.class.is_environmental());
+        assert_eq!(
+            failure.evidence,
+            "FAIL [   4.9s] (2/9) dagq::it auth::denies"
+        );
+        let events = queue.events.borrow().clone();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::VerificationCommand);
+        let payload = &events[0].payload;
+        assert_eq!(payload["failure"], failure.to_json());
+        assert_eq!(
+            payload["failed_tests"],
+            json!(["auth::denies", "auth::allows"])
+        );
+        assert_eq!(payload["failed_tests_omitted"], 0);
+        assert_eq!(payload["limit_secs"], 3600);
+        assert_eq!(
+            (payload["exit_code"].clone(), payload["signal"].clone()),
+            (json!(128), json!(9))
+        );
+        let Verdict::Deferred { reason, detail } = verification_failed(
+            &sha(BASE),
+            &sha(HEAD),
+            planned.command.as_str(),
+            1,
+            &first,
+            &failure,
+        ) else {
+            panic!("not deferred");
+        };
+        assert_eq!(detail["code"], "verification_failed");
+        assert_eq!(detail["limit_secs"], 3600);
+        assert_eq!(
+            detail["failed_tests"],
+            json!(["auth::denies", "auth::allows"])
+        );
+        assert!(
+            reason.ends_with(
+                ". It ran past its 3600 s limit and was killed, after these tests had failed (not out of time): auth::denies, auth::allows"
+            ),
+            "{reason}"
+        );
+
+        // Only out of time: the host's timeout, retried; the retry that
+        // shows a failed test is the code's as the first run would be.
+        let hung = "     TIMEOUT [ 600.0s] (3/9) dagq::it slow::hangs\n";
+        let log = integrate_verify_log(dir, 2, 1);
+        files.write(&log, hung.as_bytes()).unwrap();
+        let timed_out = step.run(&queue, 1, &log, None).unwrap();
+        let failure = timed_out.failure.clone().expect("failed");
+        assert_eq!(
+            failure,
+            verify_failure::CommandTimedOut { limit_secs: 3600 }.failure()
+        );
+        assert!(failure.class.is_environmental());
+        assert_eq!(queue.events.borrow()[1].payload["limit_secs"], 3600);
+        assert_eq!(timed_out.tests_json(), json!(["slow::hangs"]));
+        let retry_log = integrate_retry_log(dir, 2, 1);
+        files.write(&retry_log, failed.as_bytes()).unwrap();
+        let retried = step.run(&queue, 1, &retry_log, Some(&timed_out)).unwrap();
+        assert_eq!(
+            retried.failure.as_ref().map(|failure| failure.class),
+            Some(verify_failure::FailureClass::TestFailure)
+        );
+        let payload = queue.events.borrow()[2].payload.clone();
+        assert_eq!(payload["retry"], true);
+        assert_eq!(payload["retry_of"]["failure"]["class"], "timeout");
+        assert_eq!(
+            payload["failed_tests"],
+            json!(["auth::denies", "auth::allows"])
+        );
+        // A failure not killed at the limit names no limit.
+        assert_eq!(checked(Some(101), None, "").limit_secs, None);
     }
 
     #[test]
