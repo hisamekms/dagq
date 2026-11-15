@@ -1304,11 +1304,23 @@ impl RequestedServiceAccess {
     /// sign-in whose registration ended (the `revoke_token` use case):
     /// whether one was revoked. A service that does not answer is a
     /// failure that says so; the queue's files are never touched here.
+    /// It is sent once ([`Self::revoking`]).
     pub fn revoke_ended(&self, principal: &Principal) -> Result<bool> {
         let revoked = self
-            .client
+            .revoking()
             .call(UseCase::RevokeToken, json!({"principal": principal}))?;
         serde_json::from_value(revoked).context("the queue service's answer to a revocation")
+    }
+
+    /// The client of [`Self::revoke_ended`], which sends once: `up` and
+    /// `down` only do their best there, so an absent service is their
+    /// answer rather than a replacement to wait out for each pruned
+    /// registration.
+    fn revoking(&self) -> Client {
+        Client {
+            through_replacement: false,
+            ..self.client.clone()
+        }
     }
 }
 
@@ -1812,6 +1824,7 @@ impl ServiceTelemetrySink {
                 next: NEXT_CONTROL_SIDE,
                 queue: None,
                 binding: None,
+                through_replacement: true,
             },
         }
     }
@@ -2501,6 +2514,10 @@ pub struct Client {
     /// sent with each call for the service to refuse when the queue is
     /// bound to another ([`ServiceRequest::binding`]).
     pub binding: Option<String>,
+    /// Whether a call it sends again during a queue service replacement
+    /// (ADR-t4627-1): a client-mode command's does; the broker's own calls
+    /// do not, since an absent service is its answer to a run's request.
+    through_replacement: bool,
 }
 
 /// What a worker's or a job's client that gets no answer says to do next.
@@ -2562,6 +2579,7 @@ impl Client {
                 next: NEXT_RELAY,
                 queue: None,
                 binding: None,
+                through_replacement: true,
             }));
         }
         if let Some(url) = named(CONTROL_URL_ENV) {
@@ -2588,6 +2606,7 @@ impl Client {
                 next: NEXT_CONTROL_URL,
                 queue: None,
                 binding: None,
+                through_replacement: true,
             }));
         }
         let route = match (named(SOCKET_ENV), named(URL_ENV)) {
@@ -2625,6 +2644,7 @@ impl Client {
             next: NEXT_CONTROL_SIDE,
             queue: None,
             binding: None,
+            through_replacement: true,
         }))
     }
 
@@ -2641,6 +2661,7 @@ impl Client {
             next: NEXT_HOST,
             queue: None,
             binding: None,
+            through_replacement: true,
         })
     }
 
@@ -2679,6 +2700,7 @@ impl Client {
             // directory.
             queue: Some(std::path::absolute(db).unwrap_or_else(|_| db.to_path_buf())),
             binding: binding.map(str::to_owned),
+            through_replacement: true,
         }
     }
 
@@ -2695,6 +2717,9 @@ impl Client {
             next: NEXT_CONTROL_SIDE,
             queue: None,
             binding: None,
+            // An absent service is the broker's `unreachable` answer to a
+            // run's request, given within the run's own wait.
+            through_replacement: false,
         }
     }
 
@@ -2714,7 +2739,7 @@ impl Client {
         params: Value,
         timeout: Duration,
     ) -> Result<Value> {
-        self.call_within_retrying(use_case, params, timeout, true)
+        self.call_within_retrying(use_case, params, timeout, self.through_replacement)
     }
 
     /// One watch attempt: the watch owns the replacement budget so its
@@ -2837,8 +2862,13 @@ impl Client {
         self.check_destination()?;
         let started = Instant::now();
         if let ClientRoute::Socket(socket) = &self.route {
-            retry_transport(true, limit, |left| hello(socket, PROBE_TIMEOUT.min(left)))
-                .map_err(|error| self.not_answered(&error, use_case))?;
+            let probe = |left: Duration| hello(socket, PROBE_TIMEOUT.min(left));
+            if self.through_replacement {
+                retry_transport(true, limit, probe)
+            } else {
+                probe(limit)
+            }
+            .map_err(|error| self.not_answered(&error, use_case))?;
         }
         self.call_within(use_case, params, limit.saturating_sub(started.elapsed()))
     }
@@ -3364,6 +3394,7 @@ impl ServiceWrapperStore {
                 next: NEXT_CONTROL_SIDE,
                 queue: None,
                 binding: None,
+                through_replacement: true,
             },
             target,
         }
@@ -6052,6 +6083,11 @@ pub struct SocketCaller {
     /// The token is another process's (the supervisor that started this
     /// job command): this one neither issues nor revokes it.
     adopted: bool,
+    /// Whether a call is sent again during a replacement (ADR-t4627-1): a
+    /// job command's and an integrator's are, as a client-mode `dagq`'s.
+    /// The supervisor's own are sent once, since it starts, replaces and
+    /// drains its service on an absent one's answer.
+    through_replacement: bool,
 }
 
 impl SocketCaller {
@@ -6064,6 +6100,7 @@ impl SocketCaller {
             timeout: SUPERVISOR_TIMEOUT,
             signed_in: SignedIn::default(),
             adopted: false,
+            through_replacement: false,
         }
     }
 
@@ -6079,6 +6116,7 @@ impl SocketCaller {
         let caller = Self {
             adopted: true,
             timeout: CLIENT_TIMEOUT,
+            through_replacement: true,
             ..Self::new(db)
         };
         let key = Principal::supervisor(registration, pid).credential_key();
@@ -6094,7 +6132,12 @@ impl SocketCaller {
     /// user's, a peer of the service's own OS user (ADR-t3102-1 decision
     /// 1): the supervisor's issue at its parent's request.
     fn as_user(&self, request: &ServiceRequest) -> Result<Value> {
-        let response = call_retry(&self.socket, request, self.timeout).map_err(|error| {
+        let send = if self.through_replacement {
+            call_retry
+        } else {
+            call
+        };
+        let response = send(&self.socket, request, self.timeout).map_err(|error| {
             use crate::application::supervisor_service::ServiceUnreachable;
             if let Some(past) = error.downcast_ref::<RequestPastLimit>() {
                 request_refused(*past)
@@ -6149,7 +6192,12 @@ fn supervisor_request(use_case: UseCase, params: Value, token: Option<String>) -
 impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
         let request = supervisor_request(use_case, params, self.signed_in.token());
-        let response = call_retry(&self.socket, &request, self.timeout).map_err(|error| {
+        let send = if self.through_replacement {
+            call_retry
+        } else {
+            call
+        };
+        let response = send(&self.socket, &request, self.timeout).map_err(|error| {
             use crate::application::supervisor_service::ServiceUnreachable;
             if let Some(past) = error.downcast_ref::<RequestPastLimit>() {
                 request_refused(*past)
@@ -6176,6 +6224,7 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
             timeout: self.timeout,
             signed_in: SignedIn::default(),
             adopted: true,
+            through_replacement: self.through_replacement,
         };
         caller.signed_in.adopt(file, &read_token)?;
         Ok(Arc::new(caller))
@@ -6546,6 +6595,8 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
             timeout: SUPERVISOR_TIMEOUT,
             signed_in: SignedIn::default(),
             adopted: true,
+            // The integrator of a control-side command's landing.
+            through_replacement: true,
         };
         caller.signed_in.adopt(file, &read_token)?;
         Ok(Arc::new(caller))
@@ -8063,6 +8114,7 @@ mod tests {
                 next: NEXT_CONTROL_SIDE,
                 queue: None,
                 binding: None,
+                through_replacement: true,
             }))
         );
         assert_eq!(
@@ -8081,6 +8133,7 @@ mod tests {
                 next: NEXT_CONTROL_SIDE,
                 queue: None,
                 binding: None,
+                through_replacement: true,
             }))
         );
         let both = Client::from_env(env_of(&[
@@ -8101,6 +8154,45 @@ mod tests {
         ]))
         .unwrap_err();
         assert_eq!(injected.code, "client_misconfigured");
+    }
+
+    /// Only a client-mode command's requests wait out a replacement
+    /// (ADR-t4627-1), read from each caller's choice without a clock. The
+    /// supervisor's own calls, which start and drain the service on an
+    /// absent one's answer, the broker's own, which answer a run
+    /// `unreachable` within its wait, and `up`'s and `down`'s best-effort
+    /// revoke send once; a client-mode command's waits (a job command's in
+    /// `a_job_s_caller_waits_as_a_client_does`). The retry itself is the
+    /// injected transport loop's
+    /// (`transport_attempts_recover_or_stop_without_resending_uncertain_writes`).
+    #[test]
+    fn only_a_client_mode_commands_requests_wait_out_an_absent_service() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let db = dir.path().join("queue.db");
+        // Sent once.
+        assert!(!SocketCaller::new(&db).through_replacement);
+        assert!(!Client::broker(dir.path()).through_replacement);
+        let access = RequestedServiceAccess::user(&db, None);
+        assert!(!access.revoking().through_replacement);
+        // The revoke's client differs from its access's in that alone.
+        assert_eq!(
+            Client {
+                through_replacement: true,
+                ..access.revoking()
+            },
+            access.client
+        );
+        // Sent again within the replacement's wait.
+        assert!(access.client.through_replacement);
+        assert!(Client::host(&db, None, env_of(&[])).through_replacement);
+        let socket = socket_path(dir.path());
+        let worker = Client::from_env(env_of(&[(
+            crate::domain::queue_service::SOCKET_ENV,
+            socket.to_str().unwrap(),
+        )]))
+        .unwrap()
+        .unwrap();
+        assert!(worker.through_replacement);
     }
 
     /// A request past the limit the service reads is not sent: the client
@@ -8580,6 +8672,10 @@ mod tests {
         fs::write(&file, "token").unwrap();
         let caller = SocketCaller::adopt(&db, &registration, 7).unwrap();
         assert_eq!(caller.timeout, CLIENT_TIMEOUT);
+        // It also waits out a replacement as a client does, where the
+        // supervisor's own caller sends once (ADR-t4627-1).
+        assert!(caller.through_replacement);
+        assert!(!SocketCaller::new(&db).through_replacement);
     }
 
     /// A job tells the refusal of its read from the others, through a
@@ -8654,6 +8750,7 @@ mod tests {
             next: "look",
             queue: None,
             binding: None,
+            through_replacement: true,
         };
         let error = client
             .call_within(UseCase::Stats, json!({}), Duration::from_millis(500))
@@ -8799,6 +8896,7 @@ mod tests {
             next: NEXT_CONTROL_SIDE,
             queue: None,
             binding: None,
+            through_replacement: true,
         };
         let answer = serde_json::to_vec(&ServiceResponse::success(json!({"id": 3}))).unwrap();
         let (address, broker) = one_shot_broker(200, answer);
