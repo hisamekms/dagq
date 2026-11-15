@@ -3293,9 +3293,77 @@ mod store_contract_tests {
     fn ledger_queue_named_answers_as_every_row() {
         contract(|open| store_contract::ledger_queue_named_answers_as_every_row(&open));
     }
-    #[test]
-    fn ledger_queue_named_goes_back_whole() {
-        contract(|open| store_contract::ledger_queue_named_goes_back_whole(&open));
+    /// `ledger_queue_named_goes_back_whole`, one test of each state of
+    /// [`store_contract::WHOLE_STATES`], so that they run in parallel; the
+    /// states and their checks are the case's, and Postgres runs the case
+    /// whole ([`store_contract::run`]).
+    mod ledger_queue_named_goes_back_whole {
+        use super::*;
+        use store_contract::WholeState;
+
+        fn of(state: WholeState) {
+            contract(|open| store_contract::ledger_queue_named_goes_back_whole_of(&open, state));
+        }
+        /// Every state has its test here (the match is exhaustive) and is
+        /// one of the case's, once.
+        #[test]
+        fn every_state_is_tested() {
+            let states: std::collections::BTreeSet<String> = store_contract::WHOLE_STATES
+                .iter()
+                .map(|state| {
+                    let _tested: fn() = match state {
+                        WholeState::NoMark => of_no_mark,
+                        WholeState::NoGeneration => of_a_mark_of_no_generation,
+                        WholeState::AnotherGeneration => of_a_mark_of_another_generation,
+                        WholeState::PartWay => of_a_mark_filled_part_way,
+                        WholeState::SummaryWithoutRecord => of_a_summary_without_its_record,
+                        WholeState::NoCiByTime => of_a_record_without_ci_by_time,
+                        WholeState::NoMainByTime => of_a_record_without_main_by_time,
+                        WholeState::NoRowMarks => of_no_marks_of_the_rows,
+                        WholeState::NoTables => of_no_tables,
+                    };
+                    format!("{state:?}")
+                })
+                .collect();
+            assert_eq!(states.len(), 9);
+            assert_eq!(store_contract::WHOLE_STATES.len(), 9);
+        }
+        #[test]
+        fn of_no_mark() {
+            of(WholeState::NoMark);
+        }
+        #[test]
+        fn of_a_mark_of_no_generation() {
+            of(WholeState::NoGeneration);
+        }
+        #[test]
+        fn of_a_mark_of_another_generation() {
+            of(WholeState::AnotherGeneration);
+        }
+        #[test]
+        fn of_a_mark_filled_part_way() {
+            of(WholeState::PartWay);
+        }
+        #[test]
+        fn of_a_summary_without_its_record() {
+            of(WholeState::SummaryWithoutRecord);
+        }
+        #[test]
+        fn of_a_record_without_ci_by_time() {
+            of(WholeState::NoCiByTime);
+        }
+        #[test]
+        fn of_a_record_without_main_by_time() {
+            of(WholeState::NoMainByTime);
+        }
+        #[test]
+        fn of_no_marks_of_the_rows() {
+            of(WholeState::NoRowMarks);
+        }
+        #[test]
+        fn of_no_tables() {
+            of(WholeState::NoTables);
+        }
     }
     #[test]
     fn ledger_queue_named_past_an_old_writer() {
@@ -3315,9 +3383,64 @@ mod store_contract_tests {
     fn ledger_report_answers_as_every_row() {
         contract(|open| store_contract::ledger_report_answers_as_every_row(&open));
     }
-    #[test]
-    fn ledger_report_past_the_queue_and_the_clocks() {
-        contract(|open| store_contract::ledger_report_past_the_queue_and_the_clocks(&open));
+    /// `ledger_report_past_the_queue_and_the_clocks`, one test of each
+    /// history of [`store_contract::QUEUE_AND_CLOCKS`], so that they run in
+    /// parallel; the histories, their units and their checks are the
+    /// case's, and Postgres runs the case whole ([`store_contract::run`]).
+    mod ledger_report_past_the_queue_and_the_clocks {
+        use super::*;
+        use store_contract::QueueAndClocks;
+
+        fn of(history: QueueAndClocks) {
+            contract(|open| {
+                store_contract::ledger_report_past_the_queue_and_the_clocks_of(&open, history)
+            });
+        }
+        /// Every history has its test here (the match is exhaustive) and is
+        /// one of the case's, once.
+        #[test]
+        fn every_history_is_tested() {
+            let histories: std::collections::BTreeSet<String> = store_contract::QUEUE_AND_CLOCKS
+                .iter()
+                .map(|history| {
+                    let _tested: fn() = match history {
+                        QueueAndClocks::SharedLives => of_lives_shared_by_the_units,
+                        QueueAndClocks::UnsharedLives => of_a_life_of_each_unit,
+                        QueueAndClocks::ClockSetBack => of_a_clock_set_back,
+                        QueueAndClocks::ClocksInTheRange => of_the_clocks_in_the_range,
+                        QueueAndClocks::CiOnly => of_ci_alone_after_a_future_main_event,
+                        QueueAndClocks::RangeClocks => of_the_range_s_clocks,
+                    };
+                    format!("{history:?}")
+                })
+                .collect();
+            assert_eq!(histories.len(), 6);
+            assert_eq!(store_contract::QUEUE_AND_CLOCKS.len(), 6);
+        }
+        #[test]
+        fn of_lives_shared_by_the_units() {
+            of(QueueAndClocks::SharedLives);
+        }
+        #[test]
+        fn of_a_life_of_each_unit() {
+            of(QueueAndClocks::UnsharedLives);
+        }
+        #[test]
+        fn of_a_clock_set_back() {
+            of(QueueAndClocks::ClockSetBack);
+        }
+        #[test]
+        fn of_the_clocks_in_the_range() {
+            of(QueueAndClocks::ClocksInTheRange);
+        }
+        #[test]
+        fn of_ci_alone_after_a_future_main_event() {
+            of(QueueAndClocks::CiOnly);
+        }
+        #[test]
+        fn of_the_range_s_clocks() {
+            of(QueueAndClocks::RangeClocks);
+        }
     }
     #[test]
     fn ledger_report_keeps_an_old_snapshot() {
@@ -3331,8 +3454,176 @@ mod store_contract_tests {
     fn ledger_report_past_a_target_s_ends() {
         contract(|open| store_contract::ledger_report_past_a_target_s_ends(&open));
     }
-    #[test]
-    fn all_cases_run_in_order_on_the_same_database() {
-        contract(|open| store_contract::run(&open));
+    /// `store_contract::run` in its order on the same database, as the
+    /// Postgres example runs it: each case meets the rows the cases before
+    /// it leave, and answers as alone. The cases named in `apart!` (the
+    /// heavy ones whose writes roll back; the ones past an old writer
+    /// commit and leave rows, and run in every test after them) run each
+    /// in a test of its own,
+    /// after every case before it, and are checked to leave the database's
+    /// whole content ([`content`]) as they found it, so that the test of the
+    /// other cases (`the_cases_not_apart`) and the tests after them meet
+    /// what `run` gives them ([`store_contract::run_apart`]); the tests run
+    /// in parallel. Each case runs in full: its units and checks are its
+    /// own test's and Postgres's.
+    mod all_cases_run_in_order_on_the_same_database {
+        use super::*;
+
+        /// The whole content of the database at `uri`: its schema and the
+        /// rows of every table, each table's sorted, but what the store
+        /// writes of the clock alone, which no run of `run` gives twice
+        /// alike: `queue_write_held_long` (a write held past its threshold,
+        /// recorded in a write of its own), the id `run_events` counts to
+        /// with it, and the write leader's lease (its holder, generation and
+        /// take are kept).
+        fn content(uri: &str) -> Result<String> {
+            use rusqlite::types::Value;
+            let conn = Connection::open_with_flags(
+                uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | OpenFlags::SQLITE_OPEN_URI
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let schema: Vec<(String, String, Option<String>)> = conn
+                .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut content = format!("{schema:?}\n");
+            for (kind, name, _) in &schema {
+                if kind != "table" {
+                    continue;
+                }
+                let select = match name.as_str() {
+                    "run_events" => {
+                        "SELECT * FROM run_events WHERE kind <> 'queue_write_held_long'".to_owned()
+                    }
+                    "sqlite_sequence" => {
+                        "SELECT * FROM sqlite_sequence WHERE name <> 'run_events'".to_owned()
+                    }
+                    "write_leader" => {
+                        "SELECT singleton, holder, generation, acquired_at_ms FROM write_leader"
+                            .to_owned()
+                    }
+                    name => format!("SELECT * FROM \"{}\"", name.replace('"', "\"\"")),
+                };
+                let mut rows = conn.prepare(&select)?;
+                let columns = rows.column_count();
+                let mut rows: Vec<String> = rows
+                    .query_map([], |r| {
+                        (0..columns)
+                            .map(|i| r.get::<_, Value>(i))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .map(|row| format!("{row:?}"))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                rows.sort();
+                content.push_str(&format!("{name}: {rows:?}\n"));
+            }
+            Ok(content)
+        }
+
+        fn in_order(full: Option<&str>) {
+            let uri = format!("file:/store-contract-{}?vfs=memdb", uuid::Uuid::new_v4());
+            let _keeper = SqliteQueue::init(&uri).unwrap();
+            store_contract::run_apart(&|| SqliteQueue::open(&uri), APART, full, &|| content(&uri))
+                .unwrap();
+        }
+
+        /// Each name a test of a case of `run` apart, and the case's name.
+        macro_rules! apart {
+            ($($test:ident => $case:literal,)*) => {
+                const APART: &[&str] = &[$($case),*];
+                $(
+                    #[test]
+                    fn $test() {
+                        in_order(Some($case));
+                    }
+                )*
+            };
+        }
+
+        #[test]
+        fn the_cases_not_apart() {
+            in_order(None);
+        }
+
+        /// `run` has a case of each state and of each history its split
+        /// cases name.
+        #[test]
+        fn run_has_a_case_of_each_split_part() {
+            let names: Vec<&str> =
+                store_contract::cases::<SqliteQueue, fn() -> Result<SqliteQueue>>()
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect();
+            let of = |prefix: &str| names.iter().filter(|n| n.starts_with(prefix)).count();
+            assert_eq!(
+                of("ledger queue named goes back whole of "),
+                store_contract::WHOLE_STATES.len()
+            );
+            assert_eq!(
+                of("ledger report past the queue and the clocks of "),
+                store_contract::QUEUE_AND_CLOCKS.len()
+            );
+        }
+
+        /// The content sees a committed row and not one rolled back.
+        #[test]
+        fn the_content_changes_with_a_committed_row_alone() {
+            let uri = format!("file:/store-contract-{}?vfs=memdb", uuid::Uuid::new_v4());
+            let _keeper = SqliteQueue::init(&uri).unwrap();
+            let before = content(&uri).unwrap();
+            let queue = SqliteQueue::open(&uri).unwrap();
+            let tx = queue.write_entry("contract_content").unwrap();
+            tx.execute_batch(
+                "CREATE TABLE content_probe (id INTEGER PRIMARY KEY);
+                 INSERT INTO content_probe VALUES (1);",
+            )
+            .unwrap();
+            drop(tx);
+            assert_eq!(content(&uri).unwrap(), before);
+            let tx = queue.write_entry("contract_content").unwrap();
+            tx.execute_batch("CREATE TABLE content_probe (id INTEGER PRIMARY KEY)")
+                .unwrap();
+            SqliteQueue::commit(tx).unwrap();
+            let schema = content(&uri).unwrap();
+            assert_ne!(schema, before);
+            let tx = queue.write_entry("contract_content").unwrap();
+            tx.execute_batch("INSERT INTO content_probe VALUES (1)")
+                .unwrap();
+            SqliteQueue::commit(tx).unwrap();
+            assert_ne!(content(&uri).unwrap(), schema);
+        }
+
+        apart! {
+            ledger_earlier_answers_as_every_row => "ledger earlier answers as every row",
+            ledger_range_answers_as_every_row => "ledger range answers as every row",
+            ledger_queue_named_answers_as_every_row => "ledger queue named answers as every row",
+            ledger_queue_named_goes_back_whole_of_no_mark => "ledger queue named goes back whole of no mark",
+            ledger_queue_named_goes_back_whole_of_a_mark_of_no_generation => "ledger queue named goes back whole of a mark of no generation",
+            ledger_queue_named_goes_back_whole_of_a_mark_of_another_generation => "ledger queue named goes back whole of a mark of another generation",
+            ledger_queue_named_goes_back_whole_of_a_mark_filled_part_way => "ledger queue named goes back whole of a mark filled part way",
+            ledger_queue_named_goes_back_whole_of_a_summary_without_its_record => "ledger queue named goes back whole of a summary without its record",
+            ledger_queue_named_goes_back_whole_of_a_record_without_ci_by_time => "ledger queue named goes back whole of a record without ci_by_time",
+            ledger_queue_named_goes_back_whole_of_a_record_without_main_by_time => "ledger queue named goes back whole of a record without main_by_time",
+            ledger_queue_named_goes_back_whole_of_no_marks_of_the_rows => "ledger queue named goes back whole of no marks of the rows",
+            ledger_queue_named_goes_back_whole_of_no_tables => "ledger queue named goes back whole of no tables",
+            ledger_queue_named_past_a_clock_set_back => "ledger queue named past a clock set back",
+            ledger_queue_named_with_only_ci_after_a_future_main_event => "ledger queue named with only CI after a future main event",
+            ledger_queue_lives_answers_as_every_row => "ledger named queue",
+            ledger_queue_lives_keeps_an_old_snapshot => "ledger named queue old snapshot",
+            ledger_report_answers_as_every_row => "ledger report answers as every row",
+            ledger_report_past_the_queue_and_the_clocks_of_lives_shared_by_the_units => "ledger report past the queue and the clocks of lives shared by the units",
+            ledger_report_past_the_queue_and_the_clocks_of_a_life_of_each_unit => "ledger report past the queue and the clocks of a life of each unit",
+            ledger_report_past_the_queue_and_the_clocks_of_a_clock_set_back => "ledger report past the queue and the clocks of a clock set back",
+            ledger_report_past_the_queue_and_the_clocks_of_the_clocks_in_the_range => "ledger report past the queue and the clocks of the clocks in the range",
+            ledger_report_past_the_queue_and_the_clocks_of_ci_alone_after_a_future_main_event => "ledger report past the queue and the clocks of CI alone after a future main event",
+            ledger_report_past_the_queue_and_the_clocks_of_the_range_s_clocks => "ledger report past the queue and the clocks of the range's clocks",
+            ledger_report_keeps_an_old_snapshot => "ledger report old snapshot",
+            ledger_report_past_a_named_task_s_history => "ledger report past a named task's history",
+            ledger_report_past_a_target_s_ends => "ledger report past a target's ends",
+            kpi_compare_groups_read_by_their_range => "kpi compare groups",
+            ledger_queue_lives_forecast_through_kpi => "kpi forecast through the entry",
+        }
     }
 }

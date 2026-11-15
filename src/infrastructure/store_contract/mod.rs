@@ -28,16 +28,17 @@ pub use ledger_earlier::{ledger_earlier_answers_as_every_row, ledger_earlier_pas
 pub use ledger_first_executions::*;
 pub use ledger_open::*;
 pub use ledger_queue_named::{
-    ledger_queue_named_answers_as_every_row, ledger_queue_named_goes_back_whole,
-    ledger_queue_named_past_a_clock_set_back, ledger_queue_named_past_an_old_writer,
+    WHOLE_STATES, WholeState, ledger_queue_named_answers_as_every_row,
+    ledger_queue_named_goes_back_whole_of, ledger_queue_named_past_a_clock_set_back,
+    ledger_queue_named_past_an_old_writer,
     ledger_queue_named_with_only_ci_after_a_future_main_event,
 };
 pub use ledger_queue_views::*;
 pub use ledger_range::ledger_range_answers_as_every_row;
 pub use ledger_report::{
-    ledger_report_answers_as_every_row, ledger_report_keeps_an_old_snapshot,
-    ledger_report_past_a_named_task_s_history, ledger_report_past_a_target_s_ends,
-    ledger_report_past_the_queue_and_the_clocks,
+    QUEUE_AND_CLOCKS, QueueAndClocks, ledger_report_answers_as_every_row,
+    ledger_report_keeps_an_old_snapshot, ledger_report_past_a_named_task_s_history,
+    ledger_report_past_a_target_s_ends, ledger_report_past_the_queue_and_the_clocks_of,
 };
 pub use related::related_cases;
 pub use runner_leases::*;
@@ -130,8 +131,15 @@ fn sequence<T>(cases: &[(&str, T)], mut run: impl FnMut(&T) -> Result<()>) -> Re
 
 /// All contracts against `open`; errors name the failing case.
 pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
-    type Case<F> = fn(&F) -> Result<()>;
-    let cases: &[(&str, Case<F>)] = &[
+    sequence(&cases::<S, F>(), |case| case(open))
+}
+
+/// A case of [`run`].
+pub(crate) type Case<F> = fn(&F) -> Result<()>;
+
+/// [`run`]'s cases with their names, in its order.
+pub(crate) fn cases<S: ContractStore, F: Fn() -> Result<S>>() -> Vec<(&'static str, Case<F>)> {
+    vec![
         ("leader lifecycle", leader_lifecycle::<S, F>),
         ("leader singleton", leader_singleton::<S, F>),
         ("stale writer", stale_writer::<S, F>),
@@ -230,10 +238,40 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
             "ledger queue named answers as every row",
             ledger_queue_named_answers_as_every_row::<S, F>,
         ),
+        ("ledger queue named goes back whole of no mark", |open| {
+            ledger_queue_named_goes_back_whole_of(open, WholeState::NoMark)
+        }),
         (
-            "ledger queue named goes back whole",
-            ledger_queue_named_goes_back_whole::<S, F>,
+            "ledger queue named goes back whole of a mark of no generation",
+            |open| ledger_queue_named_goes_back_whole_of(open, WholeState::NoGeneration),
         ),
+        (
+            "ledger queue named goes back whole of a mark of another generation",
+            |open| ledger_queue_named_goes_back_whole_of(open, WholeState::AnotherGeneration),
+        ),
+        (
+            "ledger queue named goes back whole of a mark filled part way",
+            |open| ledger_queue_named_goes_back_whole_of(open, WholeState::PartWay),
+        ),
+        (
+            "ledger queue named goes back whole of a summary without its record",
+            |open| ledger_queue_named_goes_back_whole_of(open, WholeState::SummaryWithoutRecord),
+        ),
+        (
+            "ledger queue named goes back whole of a record without ci_by_time",
+            |open| ledger_queue_named_goes_back_whole_of(open, WholeState::NoCiByTime),
+        ),
+        (
+            "ledger queue named goes back whole of a record without main_by_time",
+            |open| ledger_queue_named_goes_back_whole_of(open, WholeState::NoMainByTime),
+        ),
+        (
+            "ledger queue named goes back whole of no marks of the rows",
+            |open| ledger_queue_named_goes_back_whole_of(open, WholeState::NoRowMarks),
+        ),
+        ("ledger queue named goes back whole of no tables", |open| {
+            ledger_queue_named_goes_back_whole_of(open, WholeState::NoTables)
+        }),
         (
             "ledger queue named past an old writer",
             ledger_queue_named_past_an_old_writer::<S, F>,
@@ -263,8 +301,41 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
             ledger_report_answers_as_every_row::<S, F>,
         ),
         (
-            "ledger report past the queue and the clocks",
-            ledger_report_past_the_queue_and_the_clocks::<S, F>,
+            "ledger report past the queue and the clocks of lives shared by the units",
+            |open| {
+                ledger_report_past_the_queue_and_the_clocks_of(open, QueueAndClocks::SharedLives)
+            },
+        ),
+        (
+            "ledger report past the queue and the clocks of a life of each unit",
+            |open| {
+                ledger_report_past_the_queue_and_the_clocks_of(open, QueueAndClocks::UnsharedLives)
+            },
+        ),
+        (
+            "ledger report past the queue and the clocks of a clock set back",
+            |open| {
+                ledger_report_past_the_queue_and_the_clocks_of(open, QueueAndClocks::ClockSetBack)
+            },
+        ),
+        (
+            "ledger report past the queue and the clocks of the clocks in the range",
+            |open| {
+                ledger_report_past_the_queue_and_the_clocks_of(
+                    open,
+                    QueueAndClocks::ClocksInTheRange,
+                )
+            },
+        ),
+        (
+            "ledger report past the queue and the clocks of CI alone after a future main event",
+            |open| ledger_report_past_the_queue_and_the_clocks_of(open, QueueAndClocks::CiOnly),
+        ),
+        (
+            "ledger report past the queue and the clocks of the range's clocks",
+            |open| {
+                ledger_report_past_the_queue_and_the_clocks_of(open, QueueAndClocks::RangeClocks)
+            },
         ),
         (
             "ledger report old snapshot",
@@ -292,8 +363,64 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("search", search_cases::<S, F>),
         ("related", related_cases::<S, F>),
         ("short non-ASCII", short_non_ascii::<S, F>),
-    ];
-    sequence(cases, |case| case(open))
+    ]
+}
+
+/// [`run`] in its order on one database, but each case named in `apart`
+/// runs only when it is `full`, and then must leave the database as it
+/// found it (`state`, the whole content of the database, the same before
+/// and after it), and is the last to run. A case of `apart` thus changes
+/// nothing the cases after it read, and each case meets the database the
+/// whole of [`run`] gives it: a store's tests may run [`run`] as one test
+/// of each case of `apart` (`full`) and one of none (`full` of `None`, every
+/// case not apart), in parallel. Errors name the failing case, as [`run`]'s
+/// do, and a name of `apart` that is no case.
+pub(crate) fn run_apart<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    apart: &[&str],
+    full: Option<&str>,
+    state: &dyn Fn() -> Result<String>,
+) -> Result<()> {
+    sequence_apart(&cases::<S, F>(), apart, full, state, |case| case(open))
+}
+
+/// [`run_apart`] of named `cases`, each run by `run`.
+fn sequence_apart<T>(
+    cases: &[(&str, T)],
+    apart: &[&str],
+    full: Option<&str>,
+    state: &dyn Fn() -> Result<String>,
+    mut run: impl FnMut(&T) -> Result<()>,
+) -> Result<()> {
+    for name in apart.iter().chain(full.iter()) {
+        anyhow::ensure!(
+            cases.iter().any(|(case, _)| case == name),
+            "store contract: no case {name}"
+        );
+    }
+    anyhow::ensure!(
+        full.is_none_or(|full| apart.contains(&full)),
+        "store contract: {full:?} is not apart"
+    );
+    for (name, case) in cases {
+        if !apart.contains(name) {
+            run(case).with_context(|| format!("store contract: {name}"))?;
+        } else if full == Some(*name) {
+            let before = state()?;
+            run(case).with_context(|| format!("store contract: {name}"))?;
+            let after = state()?;
+            let changed: Vec<&str> = after
+                .lines()
+                .filter(|line| !before.lines().any(|was| was == *line))
+                .collect();
+            anyhow::ensure!(
+                after == before,
+                "store contract: {name} leaves the database other than it found it: {changed:?}"
+            );
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 /// What [`OfSnapshot`] opens: `read` of one snapshot of a contract's
@@ -460,6 +587,65 @@ mod tests {
         });
         assert_eq!(seen, [1, 2]);
         assert!(format!("{:#}", result.unwrap_err()).contains("second"));
+    }
+
+    /// The cases of `[("a", 1), ("b", 2), ("c", 3), ("d", 4)]` with "b"
+    /// and "d" apart, of `full`, against a database whose content is the
+    /// cases run that wrote (`writes`): what ran, or the error.
+    fn apart_of(full: Option<&str>, writes: &[i32]) -> Result<Vec<i32>> {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let written = std::cell::RefCell::new(Vec::new());
+        sequence_apart(
+            &[("a", 1), ("b", 2), ("c", 3), ("d", 4)],
+            &["b", "d"],
+            full,
+            &|| Ok(format!("{:?}", written.borrow())),
+            |n| {
+                seen.borrow_mut().push(*n);
+                if writes.contains(n) {
+                    written.borrow_mut().push(*n);
+                }
+                Ok(())
+            },
+        )
+        .map(|()| seen.into_inner())
+    }
+
+    #[test]
+    fn the_cases_apart_run_alone_after_every_case_before_them() {
+        assert_eq!(apart_of(None, &[]).unwrap(), [1, 3]);
+        assert_eq!(apart_of(Some("b"), &[]).unwrap(), [1, 2]);
+        assert_eq!(apart_of(Some("d"), &[1, 3]).unwrap(), [1, 3, 4]);
+    }
+
+    #[test]
+    fn a_case_apart_that_changes_the_database_fails_the_run() {
+        let error = apart_of(Some("d"), &[4]).unwrap_err();
+        assert!(
+            error.to_string().contains("d leaves the database"),
+            "{error}"
+        );
+        assert!(apart_of(Some("b"), &[1, 3]).is_ok());
+    }
+
+    #[test]
+    fn a_name_apart_that_is_no_case_fails_the_run() {
+        let run = |apart: &[&str], full| {
+            sequence_apart(&[("a", 1)], apart, full, &|| Ok(String::new()), |_| Ok(()))
+        };
+        assert!(
+            run(&["z"], None)
+                .unwrap_err()
+                .to_string()
+                .contains("no case z")
+        );
+        assert!(
+            run(&[], Some("a"))
+                .unwrap_err()
+                .to_string()
+                .contains("not apart")
+        );
+        assert!(run(&["a"], Some("a")).is_ok());
     }
 
     #[test]

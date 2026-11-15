@@ -17,24 +17,6 @@
 # the unit tests. A change here is checked by `sh scripts/landing-it.sh --self-test`.
 
 [[test]]
-name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database"
-reason = "1,038〜1,303 s in the unit stage of the landing verification (2026-11-15)"
-task = "4979"
-restore = "goal 291 (2): make it light or split it to run in parallel"
-
-[[test]]
-name = "infrastructure::sqlite::store_contract_tests::ledger_report_past_the_queue_and_the_clocks"
-reason = "310〜503 s in the unit stage of the landing verification (2026-11-15)"
-task = "4979"
-restore = "goal 291 (2): make it light or split it to run in parallel"
-
-[[test]]
-name = "infrastructure::sqlite::store_contract_tests::ledger_queue_named_goes_back_whole"
-reason = "135〜274 s in the unit stage of the landing verification (2026-11-15)"
-task = "4979"
-restore = "goal 291 (2): make it light or split it to run in parallel"
-
-[[test]]
 name = "application::supervise::observation::ledger::tests::frozen::rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold"
 reason = "281〜334 s in the unit stage of the landing verification (2026-11-15)"
 task = "4979"

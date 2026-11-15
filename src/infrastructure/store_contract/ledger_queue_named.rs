@@ -1969,13 +1969,62 @@ fn reads_as(tx: &impl SqlRead, views: bool) -> Result<()> {
 /// another generation and filled part way, of summaries an older binary
 /// wrote, of no marks of the rows (whose events' visibility then cannot be
 /// judged) and of no tables; and once filled again, by the views again.
-pub fn ledger_queue_named_goes_back_whole<S: ContractStore, F: Fn() -> Result<S>>(
+/// Each state is one of [`WHOLE_STATES`], laid on a history of its own
+/// (one fresh, trusted history each) by
+/// [`ledger_queue_named_goes_back_whole_of`]; [`super::run`] runs them one
+/// after another, and a store's tests may run them apart and in parallel.
+#[derive(Clone, Copy, Debug)]
+pub enum WholeState {
+    /// No row of the views' mark; marked again, by the views.
+    NoMark,
+    /// A mark of no generation; marked again, by the views.
+    NoGeneration,
+    /// A mark of another generation; marked again, by the views.
+    AnotherGeneration,
+    /// A mark filled part way (through the first queue row); marked again,
+    /// by the views.
+    PartWay,
+    /// Main's latest summary as an older binary wrote it, with no record;
+    /// once filled again from the first row, by the views.
+    SummaryWithoutRecord,
+    /// The record of main's latest summary without its `ci_by_time` (an
+    /// older clock representation); once filled again, by the views.
+    NoCiByTime,
+    /// The record without its `main_by_time`; once filled again, by the
+    /// views.
+    NoMainByTime,
+    /// No marks of the rows (the visibility of what is sought cannot be
+    /// judged); once they are written again, by the views.
+    NoRowMarks,
+    /// No tables of the views (a schema before them).
+    NoTables,
+}
+
+/// Every [`WholeState`], in the order [`super::run`] runs them.
+pub const WHOLE_STATES: &[WholeState] = &[
+    WholeState::NoMark,
+    WholeState::NoGeneration,
+    WholeState::AnotherGeneration,
+    WholeState::PartWay,
+    WholeState::SummaryWithoutRecord,
+    WholeState::NoCiByTime,
+    WholeState::NoMainByTime,
+    WholeState::NoRowMarks,
+    WholeState::NoTables,
+];
+
+/// The case of `state` alone ([`WholeState`]): on a fresh
+/// history whose views are filled, the store left in `state` reads the
+/// kinds of the views whole and answers as every row, and once trusted
+/// again reads by the views and answers so (of no tables, the history as
+/// laid down reads by the views before they go). Its writes roll back.
+pub fn ledger_queue_named_goes_back_whole_of<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
+    state: WholeState,
 ) -> Result<()> {
     let store = open()?;
     let tx = store.write_entry("contract_ledger_queue_named_whole")?;
     let laid = lay_down_named(&tx, &named_history(30))?;
-    reads_as(&tx, true)?;
     let mark = |through: Option<&str>, generation: Option<i64>| -> Result<()> {
         tx.execute("DELETE FROM ledger_queue_views_filled", sql_params![])?;
         tx.execute(
@@ -1989,76 +2038,100 @@ pub fn ledger_queue_named_goes_back_whole<S: ContractStore, F: Fn() -> Result<S>
         sql_params![],
         |r| r.get(0),
     )?;
-    tx.execute("DELETE FROM ledger_queue_views_filled", sql_params![])?;
-    reads_as(&tx, false)?;
-    mark(None, None)?;
-    reads_as(&tx, false)?;
-    mark(None, Some(generation.unwrap_or(0) + 7))?;
-    reads_as(&tx, false)?;
-    let first: String = tx.query_row(
-        "SELECT MIN(key) FROM ledger_rows WHERE kind='queue'",
-        sql_params![],
-        |r| r.get(0),
-    )?;
-    mark(Some(&first), generation)?;
-    reads_as(&tx, false)?;
-    mark(None, generation)?;
-    reads_as(&tx, true)?;
-    // Summaries an older binary wrote hold no record: whole, until the
-    // filling makes them again from the first row.
-    let latest: String = tx.query_row(
-        "SELECT summary FROM ledger_main_summaries ORDER BY through DESC LIMIT 1",
-        sql_params![],
-        |r| r.get(0),
-    )?;
-    let mut old: Value = serde_json::from_str(&latest)?;
-    old.as_object_mut().unwrap().remove("record");
-    tx.execute(
-        "UPDATE ledger_main_summaries SET summary=?1 WHERE through=(SELECT MAX(through) FROM ledger_main_summaries)",
-        sql_params![old.to_string()],
-    )?;
-    reads_as(&tx, false)?;
-    fill_views(&tx)?;
-    reads_as(&tx, true)?;
-    // Either older clock representation is untrusted even with a record.
-    for field in ["ci_by_time", "main_by_time"] {
+    // Main's latest summary with `edit` made to it, as an older binary
+    // wrote it.
+    let older_summary = |edit: &dyn Fn(&mut Value)| -> Result<()> {
         let latest: String = tx.query_row(
             "SELECT summary FROM ledger_main_summaries ORDER BY through DESC LIMIT 1",
             sql_params![],
             |r| r.get(0),
         )?;
         let mut old: Value = serde_json::from_str(&latest)?;
-        old["record"].as_object_mut().unwrap().remove(field);
+        edit(&mut old);
         tx.execute(
-        "UPDATE ledger_main_summaries SET summary=?1 WHERE through=(SELECT MAX(through) FROM ledger_main_summaries)",
-        sql_params![old.to_string()],
-    )?;
-        reads_as(&tx, false)?;
-        fill_views(&tx)?;
-        reads_as(&tx, true)?;
+            "UPDATE ledger_main_summaries SET summary=?1 WHERE through=(SELECT MAX(through) FROM ledger_main_summaries)",
+            sql_params![old.to_string()],
+        )?;
+        Ok(())
+    };
+    match state {
+        WholeState::NoMark => {
+            tx.execute("DELETE FROM ledger_queue_views_filled", sql_params![])?;
+            reads_as(&tx, false)?;
+            mark(None, generation)?;
+        }
+        WholeState::NoGeneration => {
+            mark(None, None)?;
+            reads_as(&tx, false)?;
+            mark(None, generation)?;
+        }
+        WholeState::AnotherGeneration => {
+            mark(None, Some(generation.unwrap_or(0) + 7))?;
+            reads_as(&tx, false)?;
+            mark(None, generation)?;
+        }
+        WholeState::PartWay => {
+            let first: String = tx.query_row(
+                "SELECT MIN(key) FROM ledger_rows WHERE kind='queue'",
+                sql_params![],
+                |r| r.get(0),
+            )?;
+            mark(Some(&first), generation)?;
+            reads_as(&tx, false)?;
+            mark(None, generation)?;
+        }
+        // Summaries an older binary wrote hold no record: whole, until the
+        // filling makes them again from the first row.
+        WholeState::SummaryWithoutRecord => {
+            older_summary(&|old| {
+                old.as_object_mut().unwrap().remove("record");
+            })?;
+            reads_as(&tx, false)?;
+            fill_views(&tx)?;
+        }
+        // Either older clock representation is untrusted even with a record.
+        WholeState::NoCiByTime | WholeState::NoMainByTime => {
+            let field = if matches!(state, WholeState::NoCiByTime) {
+                "ci_by_time"
+            } else {
+                "main_by_time"
+            };
+            older_summary(&|old| {
+                old["record"].as_object_mut().unwrap().remove(field);
+            })?;
+            reads_as(&tx, false)?;
+            fill_views(&tx)?;
+        }
+        WholeState::NoRowMarks => {
+            let marks = view::with_snapshot(&tx, |snapshot| snapshot.ledger_marks())?
+                .ok_or_else(|| anyhow::anyhow!("the marks"))?;
+            for kind in [
+                crate::domain::ledger::session::written::KIND,
+                crate::domain::ledger::session::written::ROWS_KIND,
+            ] {
+                tx.execute("DELETE FROM ledger_rows WHERE kind=?1", sql_params![kind])?;
+            }
+            reads_as(&tx, false)?;
+            view::write_marks(&tx, &marks)?;
+        }
+        // Of the history as laid down it reads by the views (the other
+        // states read so once trusted again).
+        WholeState::NoTables => {
+            reads_as(&tx, true)?;
+            for table in [
+                "ledger_main_summaries",
+                "ledger_main_commits",
+                "ledger_queue_views_filled",
+            ] {
+                tx.execute(&format!("DROP TABLE {table}"), sql_params![])?;
+            }
+            reads_as(&tx, false)?;
+            drop(laid);
+            drop(tx);
+            return Ok(());
+        }
     }
-    // No marks of the rows: the visibility of what is sought cannot be
-    // judged.
-    let marks = view::with_snapshot(&tx, |snapshot| snapshot.ledger_marks())?
-        .ok_or_else(|| anyhow::anyhow!("the marks"))?;
-    for kind in [
-        crate::domain::ledger::session::written::KIND,
-        crate::domain::ledger::session::written::ROWS_KIND,
-    ] {
-        tx.execute("DELETE FROM ledger_rows WHERE kind=?1", sql_params![kind])?;
-    }
-    reads_as(&tx, false)?;
-    view::write_marks(&tx, &marks)?;
     reads_as(&tx, true)?;
-    // No tables (a schema before them).
-    for table in [
-        "ledger_main_summaries",
-        "ledger_main_commits",
-        "ledger_queue_views_filled",
-    ] {
-        tx.execute(&format!("DROP TABLE {table}"), sql_params![])?;
-    }
-    reads_as(&tx, false)?;
     drop(laid);
     drop(tx);
     Ok(())

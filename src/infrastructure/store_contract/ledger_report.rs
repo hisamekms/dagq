@@ -618,36 +618,88 @@ pub(crate) fn ledger_report_with<S: ContractStore, F: Fn() -> Result<S>>(
 /// row and as many returned of both (of the clocks' range history, the
 /// rows, earlier records and queue rows by range: its queue units are of
 /// the kinds read whole).
-pub fn ledger_report_past_the_queue_and_the_clocks<S: ContractStore, F: Fn() -> Result<S>>(
+///
+/// Each history is one of [`QUEUE_AND_CLOCKS`], compared on its own by
+/// [`ledger_report_past_the_queue_and_the_clocks_of`]; [`super::run`] runs
+/// them one after another, and a store's tests may run them apart and in
+/// parallel.
+#[derive(Clone, Copy, Debug)]
+pub enum QueueAndClocks {
+    /// The queue rows' waits, lives, retractions, snapshots, samples,
+    /// failures and run-less asks, a life shared by the units.
+    SharedLives,
+    /// The same, one life per unit.
+    UnsharedLives,
+    /// A clock set back before the units
+    /// ([`super::ledger_queue_named::clock_history`]).
+    ClockSetBack,
+    /// [`clocks_in_the_range`].
+    ClocksInTheRange,
+    /// CI alone after a main event ahead of now
+    /// ([`super::ledger_queue_named::ci_only_history`]).
+    CiOnly,
+    /// The range's clock turned back and ahead
+    /// ([`super::ledger_range::range_history`]).
+    RangeClocks,
+}
+
+/// Every [`QueueAndClocks`], in the order [`super::run`] compares them.
+pub const QUEUE_AND_CLOCKS: &[QueueAndClocks] = &[
+    QueueAndClocks::SharedLives,
+    QueueAndClocks::UnsharedLives,
+    QueueAndClocks::ClockSetBack,
+    QueueAndClocks::ClocksInTheRange,
+    QueueAndClocks::CiOnly,
+    QueueAndClocks::RangeClocks,
+];
+
+/// The case of `history` alone ([`QueueAndClocks`]), with 30 and
+/// [`LARGE`] settled units.
+pub fn ledger_report_past_the_queue_and_the_clocks_of<S: ContractStore, F: Fn() -> Result<S>>(
     open: &F,
+    history: QueueAndClocks,
 ) -> Result<()> {
-    for history in [shared_lives, unshared_lives] {
-        compare(open, 30, LARGE, Fixture::Lives(history), equal)?;
+    match history {
+        QueueAndClocks::SharedLives => {
+            compare(open, 30, LARGE, Fixture::Lives(shared_lives), equal)?;
+        }
+        QueueAndClocks::UnsharedLives => {
+            compare(open, 30, LARGE, Fixture::Lives(unshared_lives), equal)?;
+        }
+        QueueAndClocks::ClockSetBack => {
+            compare(
+                open,
+                30,
+                LARGE,
+                Fixture::Named(super::ledger_queue_named::clock_history),
+                equal,
+            )?;
+        }
+        QueueAndClocks::ClocksInTheRange => {
+            compare(open, 30, LARGE, Fixture::Named(clocks_in_the_range), equal)?;
+        }
+        // CI's checks alone, written after main's event ahead of now with
+        // times before it: the report's event cursor stands behind that
+        // event, and its time is that of the events up to the window's end.
+        // The checks are a day after the cases, before the days' ranges but
+        // inside the weeks of this week's report, the backfill's week and the
+        // observer's (their range's history, not the settled history before
+        // it): of the others.
+        QueueAndClocks::CiOnly => {
+            compare(
+                open,
+                30,
+                LARGE,
+                Fixture::Named(super::ledger_queue_named::ci_only_history),
+                |n, a, b| matches!(n, 1 | 2 | 4) || a == b,
+            )?;
+        }
+        QueueAndClocks::RangeClocks => {
+            compare(open, 30, LARGE, Fixture::Range, |_, a, b| {
+                (a.rows, a.earlier, a.by_range) == (b.rows, b.earlier, b.by_range)
+            })?;
+        }
     }
-    compare(
-        open,
-        30,
-        LARGE,
-        Fixture::Named(super::ledger_queue_named::clock_history),
-        equal,
-    )?;
-    compare(open, 30, LARGE, Fixture::Named(clocks_in_the_range), equal)?;
-    // CI's checks alone, written after main's event ahead of now with times
-    // before it: the report's event cursor stands behind that event, and
-    // its time is that of the events up to the window's end. The checks are
-    // a day after the cases, before the days' ranges but inside the weeks of
-    // this week's report, the backfill's week and the observer's (their
-    // range's history, not the settled history before it): of the others.
-    compare(
-        open,
-        30,
-        LARGE,
-        Fixture::Named(super::ledger_queue_named::ci_only_history),
-        |n, a, b| matches!(n, 1 | 2 | 4) || a == b,
-    )?;
-    compare(open, 30, LARGE, Fixture::Range, |_, a, b| {
-        (a.rows, a.earlier, a.by_range) == (b.rows, b.earlier, b.by_range)
-    })?;
     Ok(())
 }
 
