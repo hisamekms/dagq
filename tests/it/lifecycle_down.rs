@@ -480,6 +480,7 @@ fn down_wait_returns_stopped_once_the_registration_is_gone_or_the_process_died()
                 polls: AtomicUsize::new(0),
             },
             &DownOptions {
+                keep_service: false,
                 wait: true,
                 force: false,
                 poll: Duration::from_millis(20),

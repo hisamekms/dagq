@@ -54,6 +54,8 @@ runの復旧は`doctor` / `recover`の責務である。
 別labelのagentを扱う入口は`lifecycle::remove_stray_agents_for_up`で、別のqueueのagentには触れない。
 
 起動と停止の依存はservice、broker、supervisorの順で、停止は逆になる。
+`down --wait`をinstallのdrainとして呼ぶときは、serviceとbrokerを残し、停止の要求も送らない選びがある。
+installが旧serviceから使用中のものが無いことを確かめ終えてから、brokerとserviceを止める。
 待たずに停止するときの責任の引き渡しは`lifecycle::down`のdoc commentにある。
 brokerはhostのprocessであり、podmanでは動かさない（[ADR-t2114-1](../../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)、[Queue broker](../queue-broker.md#起動と停止)）。
 `up`のprocess自身はmigrateしない。

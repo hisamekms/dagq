@@ -462,3 +462,21 @@ impl AskStore for JobQueue {
         unreachable!("close_blocked_asks is not what the test reaches")
     }
 }
+
+impl CoordinationReads for JobQueue {
+    fn holds_lease(&self, _: &RunId, _: &LeaseToken) -> Result<bool> {
+        panic!("holds_lease")
+    }
+    fn run_leases(&self) -> Result<Vec<RunLease>> {
+        panic!("run_leases")
+    }
+    fn run_lease(&self, _: &RunId) -> Result<Option<RunLease>> {
+        panic!("run_lease")
+    }
+    fn processes(&self, _: &RunId) -> Result<Vec<RunProcess>> {
+        panic!("processes")
+    }
+    fn backend_slots(&self, _: Option<&LeaseToken>) -> Result<(i64, Option<i64>)> {
+        panic!("backend_slots")
+    }
+}

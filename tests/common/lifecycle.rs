@@ -491,6 +491,7 @@ pub fn down(
             launchd,
             processes,
             &DownOptions {
+                keep_service: false,
                 wait,
                 force,
                 poll: Duration::from_millis(20),

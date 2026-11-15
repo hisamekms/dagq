@@ -1047,6 +1047,7 @@ fn put_in_place(
             clock: ports.clock,
             queues: ports.queues,
             down: &no_drain,
+            stop_records: None,
         },
         Some(db),
         &InstallOptions {
@@ -1444,6 +1445,7 @@ pub const WATCH_TIMEOUT: Duration = Duration::from_secs(60);
 pub fn install_watched(
     ports: &JobPorts<'_, impl HostOpsQueue + ?Sized>,
     down: &dyn Fn() -> Result<Value>,
+    stop_records: Option<&dyn Fn(crate::domain::EventKind, Value) -> Result<()>>,
     db: Option<&Path>,
     options: &InstallOptions,
     watch_timeout: Duration,
@@ -1456,6 +1458,7 @@ pub fn install_watched(
         clock: ports.clock,
         queues: ports.queues,
         down,
+        stop_records,
     };
     let built = install::built(&install_ports, db, options)?;
     // The binary of a build before this one (a rollback's, a given one or

@@ -1,0 +1,4 @@
+[[test]]
+name = "lifecycle_service::up_down_and_the_service_s_start_and_stop_reach_the_queue_only_through_it"
+reason = "境界（プロセス・SQLite）: 実serviceのsocketを通るup・down・service start/stopが、クライアントでDBを開かず本人のactorで記録し、停止前に記録を残すことを確かめる。実processの停止確認を含み、手元のstressで約31秒を要するため、値だけのunit testには移せない"
+task = 4890

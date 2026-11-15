@@ -101,6 +101,16 @@ pub trait Binaries {
     /// nothing, and leaves the running one as it was when it refused before
     /// it took over ([`super::queue_service::QueueServiceControl::replace`]).
     fn serve(&self, binary: &Path, db: &Path, breaking: bool) -> Result<Value>;
+    /// Stop the old broker before its service, recording each stop through
+    /// the still-answering service. Failure prevents any migration attempt.
+    fn stop_services(
+        &self,
+        db: &Path,
+        record: &dyn Fn(crate::domain::EventKind, Value) -> Result<()>,
+    ) -> Result<()> {
+        let _ = (db, record);
+        bail!("these binaries cannot stop the queue services")
+    }
     /// Hold the queue's service at `db` against the supervisors' watch
     /// until the hold is dropped ([`super::queue_service::QueueServiceControl::hold`]).
     fn hold_service(&self, db: &Path) -> Result<super::queue_service::ServiceHold> {
@@ -437,8 +447,11 @@ pub struct Ports<'a, P: ?Sized> {
     pub clock: &'a dyn Clock,
     /// Opens the queue at a database path, as host運用's ports `P`.
     pub queues: &'a dyn Fn(&Path) -> Arc<dyn QueueOpener<P>>,
-    /// `down --wait` on the queue, for a breaking migration's drain.
+    /// `down --wait` keeping service and broker for the post-drain check.
     pub down: &'a dyn Fn() -> Result<Value>,
+    /// Record install's post-drain stops as the existing down command,
+    /// understood by the old service. None uses the supplied queue port.
+    pub stop_records: Option<&'a dyn Fn(crate::domain::EventKind, Value) -> Result<()>>,
 }
 
 /// Where the binary a replacement kept goes: `<target>.previous`.
@@ -1079,7 +1092,10 @@ impl HandoffFailed {
 }
 
 /// The drain of ADR-0045 decision 14: stop the live supervisors and wait
-/// for their runs (`down --wait`), start the new binary's service as a
+/// for their runs (`down --wait` keeping service and broker), inspect queue
+/// use through the old service, then stop broker and service. A remaining
+/// user, unreadable queue or failed stop restores the old service and
+/// supervisor without attempting migration. Start the new binary's service as a
 /// replacement's that may apply breaking migrations (ADR-t3102-2 decision
 /// 2: it judges the queue unused, backs it up and migrates it in one
 /// transaction before it accepts, and a queue still in use is refused and
@@ -1109,9 +1125,8 @@ fn install_breaking(
     options: &InstallOptions,
 ) -> Result<Value> {
     let binaries = ports.binaries;
-    // With no service answering nothing runs on the queue to drain: the
-    // breaking build's service judges the queue unused itself before it
-    // migrates.
+    // Without an answering service there are no known supervisors to
+    // drain. The post-drain read must still succeed before migrating.
     let live = match (ports.queues)(db).open() {
         Ok(queue) => live_supervisors(ports.clock, ports.processes, &*queue)?,
         Err(error) if super::supervisor_service::unreachable(&error) => Vec::new(),
@@ -1129,6 +1144,23 @@ first (it replaces the service), then this install again",
     } else {
         (ports.down)()?
     };
+    let ready = (|| {
+        let queue = (ports.queues)(db)
+            .open()
+            .context("could not read queue use after the drain")?;
+        let found = read_queue_use(&*queue).context("could not read queue use after the drain")?;
+        ensure_queue_unused(&found, &|pid| ports.processes.alive(pid))?;
+        binaries
+            .stop_services(db, &|kind, payload| match ports.stop_records {
+                Some(record) => record(kind, payload),
+                None => queue.record_queue_event(kind, payload).map(|_| ()),
+            })
+            .context("could not stop the old queue services")?;
+        Ok(())
+    })();
+    if let Err(cause) = ready {
+        return Err(restore_before_replace(ports, db, &live, options, cause));
+    }
     let migrated = binaries.serve(source, db, true).map_err(|cause| {
         restore_before_replace(
             ports,
@@ -1169,6 +1201,50 @@ again"
         report["queue_service"] = service;
     }
     Ok(report)
+}
+
+/// Read only operations already understood by the old service. Include
+/// processes of ended runs too: their wrapper may still be alive.
+fn read_queue_use(
+    queue: &(impl HostOpsQueue + ?Sized),
+) -> Result<crate::domain::queue_use::QueueUse> {
+    use crate::domain::queue_use::QueueUse;
+    let mut found = QueueUse {
+        supervisors: queue
+            .supervisors()?
+            .into_iter()
+            .map(|s| (s.token.to_string(), i64::from(s.pid)))
+            .collect(),
+        ..QueueUse::default()
+    };
+    for run in queue.all_runs()? {
+        found
+            .runs
+            .push((run.id().to_string(), run.status().as_str().to_owned()));
+        for process in queue.processes(run.id())? {
+            if process.role == "wrapper" && process.exited_at.is_none() {
+                found
+                    .wrappers
+                    .push((process.run_id.to_string(), i64::from(process.pid)));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The preflight is an extra guard; the service still judges queue use
+/// and applies migrations together in its own transaction.
+fn ensure_queue_unused(
+    found: &crate::domain::queue_use::QueueUse,
+    alive: &dyn Fn(u32) -> bool,
+) -> Result<()> {
+    let users = crate::domain::queue_use::queue_users(found, alive);
+    ensure!(
+        users.is_empty(),
+        "queue is in use by {}; nothing was replaced",
+        users.join(", ")
+    );
+    Ok(())
 }
 
 /// Recover from a refusal before replacing the binary. `target` still
@@ -1427,7 +1503,7 @@ mod tests {
     /// service before up. Direct recovery also supports a service left alive.
     #[test]
     fn a_refused_breaking_install_restores_the_old_service_before_up() {
-        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        use std::sync::atomic::AtomicUsize;
         for (drain, service_fails, up_fails, already_running, refuses) in [
             (true, false, false, false, true),
             (true, true, false, false, true),
@@ -1470,13 +1546,7 @@ mod tests {
                 |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
             let down = || {
                 steps.note("down");
-                steps.service_running.store(false, SeqCst);
-                // This queue really becomes unreachable after the drain.
-                let error = match queues(Path::new("/queue")).open() {
-                    Ok(_) => panic!("drain must stop the service"),
-                    Err(error) => error,
-                };
-                assert!(super::super::supervisor_service::unreachable(&error));
+                steps.registrations.lock().unwrap().clear();
                 Ok(json!({"drained": true}))
             };
             let ports = Ports {
@@ -1486,6 +1556,7 @@ mod tests {
                 clock: &At(10_000),
                 queues: &queues,
                 down: &down,
+                stop_records: None,
             };
             let options = InstallOptions {
                 source: Source::Binary("/source".into()),
@@ -1505,19 +1576,32 @@ mod tests {
                     anyhow::anyhow!("queue is in use by run active"),
                 )
             } else {
-                // No live supervisor and no answering service: no down is needed.
-                if !drain {
-                    steps.service_running.store(false, SeqCst);
-                }
                 install(&ports, Some(Path::new("/queue")), &options).unwrap_err()
             };
             let text = error.to_string();
             let mut expected = if already_running {
                 vec![]
             } else if drain {
-                vec!["open", "down", "open", "serve_breaking /source"]
+                vec![
+                    "open",
+                    "down",
+                    "open",
+                    "stop_broker",
+                    "record queue_broker_stopped",
+                    "stop_service",
+                    "record queue_service_stopped",
+                    "serve_breaking /source",
+                ]
             } else {
-                vec!["open", "serve_breaking /source"]
+                vec![
+                    "open",
+                    "open",
+                    "stop_broker",
+                    "record queue_broker_stopped",
+                    "stop_service",
+                    "record queue_service_stopped",
+                    "serve_breaking /source",
+                ]
             };
             if !already_running {
                 if !refuses {
@@ -1558,6 +1642,153 @@ mod tests {
                 text.contains(&format!("service: {service}; supervisor: {supervisor}")),
                 "{text}"
             );
+        }
+    }
+
+    /// The real entry reads the old service after down. Literal expected
+    /// causes and ordering exercise the guard independently of its predicate.
+    #[test]
+    fn breaking_preflight_refuses_users_unreadable_queues_and_failed_stops() {
+        use std::sync::atomic::Ordering::SeqCst;
+        for case in [
+            "claimed",
+            "starting",
+            "running",
+            "validating",
+            "integrating",
+            "wrapper",
+            "supervisor",
+            "unreachable",
+            "unknown",
+            "stop",
+            "unused",
+        ] {
+            let run_status = if [
+                "claimed",
+                "starting",
+                "running",
+                "validating",
+                "integrating",
+            ]
+            .contains(&case)
+            {
+                case
+            } else {
+                "failed"
+            };
+            let steps = Arc::new(InstallSteps {
+                registrations: std::sync::Mutex::new(vec![SupervisorRegistration {
+                    auto_update: true,
+                    runtime_planners: Some(4),
+                    max_load: Some(6.0),
+                    max_load_source: Some(SettingSource::Flag),
+                    ..registration("first", 1, 10_000)
+                }]),
+                schema: Some(SchemaCheck {
+                    pending: vec![PendingMigration {
+                        version: 117,
+                        compatible: false,
+                    }],
+                    opens: true,
+                }),
+                stop_fails: case == "stop",
+                runs: vec![json!({
+                    "id": "remaining", "task_id": 1, "status": run_status,
+                    "requested_provider": "claude", "actual_provider": "claude",
+                    "worker_mode": "headless", "base_commit": "a".repeat(40), "created_at": "now"
+                })],
+                processes: vec![json!({
+                    "run_id": "remaining", "role": "wrapper", "pid": 1,
+                    "heartbeat_at": 0, "exited_at": if case == "wrapper" { Value::Null } else { json!(1) },
+                    "exit_code": null
+                })],
+                ..Default::default()
+            });
+            let files = crate::application::memory_files::MemoryFiles::default();
+            files.put(Path::new("/queue"), UNIX_EPOCH, "queue");
+            files.put(Path::new("/to"), UNIX_EPOCH, "old");
+            let queues =
+                |_: &Path| -> Arc<dyn QueueOpener> { Arc::new(InstallQueue(steps.clone())) };
+            let down = || {
+                steps.note("down");
+                if case != "supervisor" {
+                    steps.registrations.lock().unwrap().clear();
+                }
+                if case == "unreachable" {
+                    steps.service_running.store(false, SeqCst);
+                }
+                if case == "unknown" {
+                    *steps.first_open.lock().unwrap() = Some(OpenFailure::Unknown);
+                    // Model a stale service disappearing as its read fails.
+                    steps.service_running.store(false, SeqCst);
+                }
+                Ok(json!({"queue_service": {"outcome": "kept"}}))
+            };
+            let ports = Ports {
+                binaries: &*steps,
+                files: &files,
+                processes: &OnlyOne,
+                clock: &At(10_000),
+                queues: &queues,
+                down: &down,
+                stop_records: None,
+            };
+            let options = InstallOptions {
+                source: Source::Binary("/source".into()),
+                target: "/to".into(),
+                allow_breaking: true,
+                restart: vec!["--max-waiting=9".into()],
+                handoff_timeout: Duration::ZERO,
+                poll: Duration::ZERO,
+                e2e: E2eGate::NotApplicable,
+            };
+            let result = install(&ports, Some(Path::new("/queue")), &options);
+            let calls = steps.calls.lock().unwrap();
+            if case == "unused" {
+                result.unwrap();
+                let expected = [
+                    "stop_broker",
+                    "record queue_broker_stopped",
+                    "stop_service",
+                    "record queue_service_stopped",
+                    "serve_breaking /source",
+                ];
+                assert!(
+                    calls.windows(expected.len()).any(|w| w == expected),
+                    "{calls:?}"
+                );
+            } else {
+                let text = format!("{:#}", result.unwrap_err());
+                let reason = match case {
+                    "wrapper" => "wrapper of run remaining (pid 1)".to_owned(),
+                    "supervisor" => "supervisor first (pid 1)".to_owned(),
+                    "unreachable" => "no service".to_owned(),
+                    "unknown" => "old service".to_owned(),
+                    "stop" => "old service stop failed".to_owned(),
+                    status => format!("run remaining ({status})"),
+                };
+                assert!(text.contains(&reason), "{case}: {text}");
+                assert!(
+                    !calls.iter().any(|c| c.starts_with("serve_breaking")),
+                    "{calls:?}"
+                );
+                assert!(!calls.iter().any(|c| c == "replace"), "{calls:?}");
+                let up = "run /to --db /queue up --parallel 2 --auto-update --runtime-planners 4 --max-load 6 --max-waiting=9";
+                assert_eq!(calls.last().unwrap(), up);
+                if ["unreachable", "unknown"].contains(&case) {
+                    assert!(text.contains("could not read queue use"), "{text}");
+                    assert!(calls.windows(2).any(|w| w == ["serve /to", up]));
+                    assert!(
+                        text.contains("service: started; supervisor: started"),
+                        "{text}"
+                    );
+                } else {
+                    assert!(
+                        text.contains("service: already_running; supervisor: started"),
+                        "{text}"
+                    );
+                }
+            }
         }
     }
 
@@ -1734,6 +1965,7 @@ mod tests {
                 clock: &At(10_000),
                 queues: &queues,
                 down: &|| bail!("no drain"),
+                stop_records: None,
             };
             let options = InstallOptions {
                 source: if rollback {
@@ -1885,6 +2117,7 @@ mod tests {
                     clock: &At(10_000),
                     queues: &queues,
                     down: &|| bail!("no drain"),
+                    stop_records: None,
                 },
                 Some(Path::new("/queue")),
                 &options,
@@ -2037,6 +2270,7 @@ mod tests {
                 is_ancestor: &|_, _| bail!("no checkout is built"),
             },
             &|| bail!("no drain"),
+            None,
             Some(Path::new("/queue")),
             &options,
             Duration::ZERO,

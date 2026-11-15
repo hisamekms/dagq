@@ -185,6 +185,7 @@ fn run(
             is_ancestor: &update::no_ancestry,
         },
         &down,
+        None,
         Some(&fixture.location.db),
         &InstallOptions {
             source: Source::Binary(binaries.built.clone()),

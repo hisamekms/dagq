@@ -2983,11 +2983,31 @@ fn open_work(
 
 #[derive(Debug, Clone)]
 pub struct DownOptions {
+    /// Leave service and broker running for install to inspect the drained queue.
+    pub keep_service: bool,
     /// Block until the supervisor's registration is gone or its process died.
     pub wait: bool,
     /// SIGKILL after the unload and drop the registration rows.
     pub force: bool,
     pub poll: Duration,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DownServices {
+    Keep,
+    Drain,
+    Stop,
+}
+
+/// Select both the pre-signal stop request and the post-drain stop.
+fn down_services(options: &DownOptions, drained: bool) -> DownServices {
+    if options.keep_service {
+        DownServices::Keep
+    } else if drained || options.force {
+        DownServices::Stop
+    } else {
+        DownServices::Drain
+    }
 }
 
 /// Stop the queue's supervisors, whichever mode started them. The launchd
@@ -3027,6 +3047,8 @@ pub struct DownOptions {
 /// not wait asks for the stop with `queue_service_stop_requested` before
 /// the signal and leaves it to the last supervisor to end its drain. A
 /// service that was not running gets no `queue_service` in the report.
+/// Install's `keep_service` leaves both running, sends no stop request
+/// and reports `kept`: install inspects queue use before stopping them.
 pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Result<Value> {
     let (launchd, processes) = (ports.launchd, ports.processes);
     let queue = (ports.queues)(&location.db).open()?;
@@ -3068,7 +3090,7 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     let broker = (ports.queue_broker)(&location.db, Path::new("dagq"));
     let broker_running =
         broker.probe().state != crate::domain::queue_service::ServiceState::Stopped;
-    if !live.is_empty() && !options.force {
+    if down_services(options, false) == DownServices::Drain && !live.is_empty() {
         let tokens: Vec<LeaseToken> = live.iter().map(|r| r.token.clone()).collect();
         if service_running
             && let Err(error) = queue.record_queue_event(
@@ -3151,6 +3173,11 @@ pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Resu
     let stop_both = |report: &mut Value, drained: bool| {
         if !strays.is_empty() {
             report["stray_agents"] = stray_reports(&strays);
+        }
+        if down_services(options, drained) == DownServices::Keep {
+            report["queue_broker"] = json!({"outcome": "kept"});
+            report["queue_service"] = json!({"outcome": "kept"});
+            return;
         }
         if let Some(queue_broker) = stop_broker(drained) {
             report["queue_broker"] = queue_broker;
@@ -3410,6 +3437,30 @@ fn escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn install_keeps_services_and_cli_down_requests_then_stops_them() {
+        use super::{DownOptions, DownServices, down_services};
+        for wait in [false, true] {
+            for force in [false, true] {
+                for drained in [false, true] {
+                    let mut options = DownOptions {
+                        keep_service: true,
+                        wait,
+                        force,
+                        poll: std::time::Duration::ZERO,
+                    };
+                    assert_eq!(down_services(&options, drained), DownServices::Keep);
+                    options.keep_service = false;
+                    let expected = match (force, drained) {
+                        (false, false) => DownServices::Drain,
+                        _ => DownServices::Stop,
+                    };
+                    assert_eq!(down_services(&options, drained), expected);
+                }
+            }
+        }
+    }
+
     use super::*;
     use crate::application::EventStore;
     use crate::domain::{

@@ -266,6 +266,39 @@ impl Binaries for LocalBinaries {
         Ok(replaced.migrated.unwrap_or(Value::Null))
     }
 
+    fn stop_services(
+        &self,
+        db: &Path,
+        record: &dyn Fn(crate::domain::EventKind, Value) -> Result<()>,
+    ) -> Result<()> {
+        use crate::application::queue_broker::QueueBrokerControl;
+        use crate::application::queue_service::QueueServiceControl;
+        use crate::domain::EventKind;
+        let broker =
+            crate::infrastructure::queue_broker::SystemQueueBroker::new(db, Path::new("dagq"));
+        if let Some(pid) =
+            broker.stop(crate::application::lifecycle::QUEUE_SERVICE_START_TIMEOUT)?
+        {
+            record(
+                EventKind::QueueBrokerStopped,
+                serde_json::json!({"pid": pid, "by": "install"}),
+            )?;
+        }
+        let service =
+            crate::infrastructure::queue_service::SystemQueueService::new(db, Path::new("dagq"));
+        let found = service.probe();
+        if found.state != crate::domain::queue_service::ServiceState::Stopped {
+            record(
+                EventKind::QueueServiceStopped,
+                serde_json::json!({"pid": found.pid, "by": "install"}),
+            )?;
+            service.stop(crate::domain::write_leader::stop_grace(
+                crate::application::lifecycle::QUEUE_SERVICE_START_TIMEOUT,
+            ))?;
+        }
+        Ok(())
+    }
+
     fn hold_service(&self, db: &Path) -> Result<crate::application::queue_service::ServiceHold> {
         use crate::application::queue_service::QueueServiceControl;
         crate::infrastructure::queue_service::SystemQueueService::new(db, Path::new("dagq")).hold()

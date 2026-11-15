@@ -24,7 +24,7 @@ related:
 `dagq install`は固定バイナリを入れ替えて、このqueueのsupervisorを引き継がせ、引き継いだsupervisorを見張る人の入口（ADR-0045の決定11・12・14、[ADR-0073](../../adr/0073-kind-additions-are-compatible.md)の決定13・14）。
 flagと既定はCLI（`src/main.rs`）の`--help`が持つ。
 use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/application/update.rs`の`install_watched`（その後の見張り。下の7）、配線は`src/compose/host.rs`の`OneShot::install`、binaryのビルド・起動・置き換えは`src/infrastructure/binaries.rs`（`Binaries` port）。
-`install`（`--rollback`・`--release`を含む）のプロセスはqueueのDBを開かず、queueの読みと記録（登録の読み・引き継ぎの要求と取り下げ・`update_*`と`install_e2e_finished`・askを開く）は全てqueue serviceの制御側のユースケースの段として呼び出し元のprincipalで送り、serviceが`service.install`で認可する（[hostのCLI](../queue-service-host-cli.md)の「制御側のコマンド」）。
+`install`（`--rollback`・`--release`を含む）のプロセスはqueueのDBを開かず、queueの読みと記録（登録の読み・引き継ぎの要求と取り下げ・`update_*`と`install_e2e_finished`・askを開く）は全てqueue serviceの制御側のユースケースの段として呼び出し元のprincipalで送り、drainとその後の停止記録は`down`の口で、それ以外はserviceが`service.install`で認可する（[hostのCLI](../queue-service-host-cli.md)の「制御側のコマンド」）。
 最初の段の後にserviceに届かない段は受け付けるserviceへ送り直し（記録とupdateのaskは同じidentityで、queueは1度だけ取る）、DBを開くことへは戻らない。
 
 1. **元**: 与えたbinaryかcheckout、省略時はcwdのrepositoryのmain checkout（[Run environment](run-environment.md#main-checkoutの決め方)）をビルドしたもの、戻すときは`<to>.previous`、リリースならcrates.ioのリリース（下の「リリースから」）。
@@ -88,8 +88,11 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    全員の失敗で戻したときのほかは、`<to>`のpathをqueueのbinaryとして記録する（6のdrainも置き換えの後に記録する）。
    引き継ぎの要求と取り下げは`up`のものと違い、要求を送るプロセスの実行fileでなく置いた`<to>`を名指す（`service.install`を持つprincipalは固定バイナリを置き換えられる）。
    全員の失敗と一部の失敗は、CLIでは7の`update_failed`の経路を通る。
-6. **drain**（決定14）: 人が非互換のmigrationを許したとき、liveな登録があれば`down --wait`（serviceを通る。serviceが答えなければ止めるものは無いとし、使用中の判定は下のserviceに任せる）で止め（同じqueueのDBを持つ別のlabelのagentも外す。[up / down](up-down.md)の`down`）、元のserviceを非互換も適用してよい入れ替えの口で起動し（使用中のsupervisor・run・wrapperが無いことの判定と`backups/`への複製と適用を1つのtransactionで行う。使用中のものが残れば適用せず受け付けない）、置き換えて`<to>`のserviceを起動し直し、新しいbinaryの`up`で起動し直す（`--claude`と`--codex`の解決は[Provider executables](../provider-executables.md)）。
-   置き換えの前に非互換のmigrationが拒まれるか失敗したら、旧binaryのserviceが答えなければ起こし、止めた登録があれば同じ引数で旧binaryのsupervisorを起こし直してからerrorで止まる。
+6. **drain**（決定14）: 人が非互換のmigrationを許したときのdrainは`down --wait`で行い、使用中の確認と停止は`install_breaking`のdoc commentを見る（[up / down](up-down.md)の`down`）。
+   使用中のものが残るか読めないか停止が失敗したら、migrationを試みず、残った者か元の理由を名指して下の復旧へ進む。
+   使用中の判定と`backups/`への複製と適用はserviceの1つのtransactionで行い、その判定が最後の関門となる。
+   使用中のものが残れば適用せず受け付けない。
+   置き換えの前の確認・停止・非互換のmigrationが拒まれるか失敗したら、旧binaryのserviceが答えなければ起こし、答えるものはそのまま使い、止めた登録があれば同じ引数で旧binaryのsupervisorを起こし直してからerrorで止まる。
    serviceの起動に失敗したらsupervisorは起こさず、errorは元の理由とservice・supervisorそれぞれの復旧結果を残す。
    止めた登録がin-cmuxでもlaunchd modeで起動する（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
    止めた登録がflagで与えた値（[claimを控える](claim-hold.md)loadの上限を含む）は起動し直す`up`に同じflagで渡るので、drainの後に`up`を打ち直す必要はない（どの値をどう引き継ぐかは`install_breaking`のdoc comment）。

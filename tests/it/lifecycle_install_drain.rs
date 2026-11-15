@@ -39,15 +39,18 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     let drained = Mutex::new(0);
     let down = || -> Result<Value> {
         *drained.lock().unwrap() += 1;
+        processes.dead.lock().unwrap().insert(std::process::id());
         Ok(json!({"outcome": "stopped"}))
+    };
+    let install = |binaries: &FakeBinaries,
+                   options: &dagq::application::install::InstallOptions| {
+        processes.dead.lock().unwrap().clear();
+        install_with(&fixture, binaries, &processes, &down, options)
     };
     let error = format!(
         "{:#}",
-        install_with(
-            &fixture,
+        install(
             &binaries,
-            &processes,
-            &down,
             &install_options(Source::Binary("/built/dagq".into())),
         )
         .unwrap_err()
@@ -65,10 +68,7 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     let refused = FakeBinaries::new(&[(27, true), (28, false)], false);
     *refused.serve_refuses.lock().unwrap() =
         Some("migrate refuses breaking migration(s) 28 while the queue is in use".into());
-    let error = format!(
-        "{:#}",
-        install_with(&fixture, &refused, &processes, &down, &options).unwrap_err()
-    );
+    let error = format!("{:#}", install(&refused, &options).unwrap_err());
     assert!(
         error.contains("could not migrate the queue; nothing was replaced"),
         "{error}"
@@ -90,7 +90,7 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     assert_eq!(*drained.lock().unwrap(), 1);
     *drained.lock().unwrap() = 0;
 
-    let report = install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+    let report = install(&binaries, &options).unwrap();
     assert_eq!(*drained.lock().unwrap(), 1);
     assert_eq!(report["drained"]["outcome"], "stopped", "{report}");
     assert_eq!(report["up"]["supervisor"]["outcome"], "started");
@@ -130,7 +130,7 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
         )
         .unwrap();
     let binaries = FakeBinaries::new(&[(28, false)], false);
-    install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+    install(&binaries, &options).unwrap();
     options.restart = vec![
         "--auto-update".into(),
         "--max-waiting".into(),
@@ -138,7 +138,7 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
         "--runtime-planners".into(),
         "2".into(),
     ];
-    install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+    install(&binaries, &options).unwrap();
     assert_eq!(
         *binaries.up.lock().unwrap(),
         [
@@ -180,7 +180,7 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
             .unwrap();
         let binaries = FakeBinaries::new(&[(28, false)], false);
         options.restart = vec![];
-        install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+        install(&binaries, &options).unwrap();
         assert_eq!(
             binaries.up.lock().unwrap()[0],
             ["--db", db, "up", "--auto-update"],
@@ -194,7 +194,7 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
         .set_max_load(&LeaseToken::new("live"), None, Some(SettingSource::Flag))
         .unwrap();
     let binaries = FakeBinaries::new(&[(28, false)], false);
-    install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+    install(&binaries, &options).unwrap();
     assert_eq!(
         binaries.up.lock().unwrap()[0],
         ["--db", db, "up", "--auto-update", "--max-load", "0"]
@@ -204,16 +204,10 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     let dir = tempfile::tempdir().unwrap();
     let mut options = install_options(Source::Rollback);
     options.target = dir.path().join("dagq");
-    let error = format!(
-        "{:#}",
-        install_with(&fixture, &binaries, &processes, &down, &options).unwrap_err()
-    );
+    let error = format!("{:#}", install(&binaries, &options).unwrap_err());
     assert!(error.contains("no previous binary"), "{error}");
     fs::write(dir.path().join("dagq.previous"), "").unwrap();
-    let error = format!(
-        "{:#}",
-        install_with(&fixture, &binaries, &processes, &down, &options).unwrap_err()
-    );
+    let error = format!("{:#}", install(&binaries, &options).unwrap_err());
     assert!(error.contains("the queue refuses 0.0.1"), "{error}");
     assert_eq!(
         dagq::application::install::parse_version("dagq 1.2.3\n").unwrap(),
@@ -266,8 +260,12 @@ fn no_claude_policy_survives_install_drain_and_restart_arguments() {
             .contains(&"--no-claude".to_owned())
     );
     let processes = FakeProcesses::default();
-    let down = || Ok(json!({"outcome": "stopped"}));
+    let down = || {
+        processes.dead.lock().unwrap().insert(std::process::id());
+        Ok(json!({"outcome": "stopped"}))
+    };
     for explicit in [false, true] {
+        processes.dead.lock().unwrap().clear();
         let binaries = FakeBinaries::new(&[(28, false)], false);
         let mut options = install_options(Source::Binary("/built/dagq".into()));
         options.allow_breaking = true;
@@ -295,7 +293,10 @@ fn install_starts_a_drained_supervisor_again_with_the_provider_links() {
     let fixture = fixture();
     let _queue = handoff_supervisor(&fixture, "live", SupervisorMode::InCmux);
     let processes = FakeProcesses::default();
-    let down = || -> Result<Value> { Ok(json!({"outcome": "stopped"})) };
+    let down = || -> Result<Value> {
+        processes.dead.lock().unwrap().insert(std::process::id());
+        Ok(json!({"outcome": "stopped"}))
+    };
     let claude_version = fixture._dir.path().join("share/claude/versions/2.2.0");
     let codex_version = fixture._dir.path().join("codex/releases/0.2.0/bin/codex");
     for version in [&claude_version, &codex_version] {

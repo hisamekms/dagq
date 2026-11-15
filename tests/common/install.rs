@@ -176,6 +176,25 @@ impl dagq::application::install::Binaries for FakeBinaries {
         }
         Ok(json!({"applied": self.schema.pending.len()}))
     }
+    fn stop_services(
+        &self,
+        _: &Path,
+        record: &dyn Fn(dagq::domain::EventKind, Value) -> Result<()>,
+    ) -> Result<()> {
+        // This adapter's service is a fake; keep stop records on the real
+        // queue while doing no host process control.
+        record(
+            dagq::domain::EventKind::QueueBrokerStopped,
+            json!({"by": "install"}),
+        )?;
+        record(
+            dagq::domain::EventKind::QueueServiceStopped,
+            json!({"by": "install"}),
+        )?;
+        self.service_runs
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
     fn sends_install_steps(&self, _: &Path) -> bool {
         self.sends_steps.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -252,6 +271,7 @@ pub fn install_at(
             clock: &dagq::infrastructure::clock::SystemClock,
             queues: &queues,
             down,
+            stop_records: None,
         },
         db,
         options,

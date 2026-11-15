@@ -5852,6 +5852,7 @@ fn execute(cli: Cli) -> Result<Value> {
             &Launchctl { uid: current_uid() },
             &SystemProcesses,
             &DownOptions {
+                keep_service: false,
                 wait,
                 force,
                 poll: Duration::from_secs(2),

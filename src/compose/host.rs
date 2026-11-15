@@ -1174,11 +1174,27 @@ impl OneShot {
                 launchd,
                 processes,
                 &DownOptions {
+                    keep_service: true,
                     wait: true,
                     force: false,
                     poll: Duration::from_secs(2),
                 },
             )
+        };
+        // The old service already authorizes down's stop records. Do not
+        // require it to know a new install step before it is replaced.
+        let stopping = self.lifecycle_opener(
+            &db,
+            binding.as_deref(),
+            ControlCommand::Down,
+            None,
+            keep_host_ops,
+        );
+        let record_stop = |kind, payload| {
+            stopping
+                .open()?
+                .record_queue_event(kind, payload)
+                .map(|_| ())
         };
         update::install_watched(
             &update::JobPorts {
@@ -1191,6 +1207,7 @@ impl OneShot {
                 is_ancestor: &update::no_ancestry,
             },
             &down,
+            Some(&record_stop),
             Some(&location.db),
             options,
             watch_timeout,

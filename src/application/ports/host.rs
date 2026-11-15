@@ -579,9 +579,21 @@ pub trait SupervisorRegistry: SupervisorReads {
 /// publishes to every context, the asks of the updates, the disk and the
 /// inbox, and the inbox's watcher. [`Queue`] has it as a supertrait, so
 /// the loop's connection upcasts to it.
-pub trait HostOpsQueue: SupervisorRegistry + InboxWatchLog + RunLog + AskStore {}
+pub trait HostOpsQueue:
+    SupervisorRegistry + InboxWatchLog + RunLog + AskStore + super::execution::CoordinationReads
+{
+}
 
-impl<T: SupervisorRegistry + InboxWatchLog + RunLog + AskStore + ?Sized> HostOpsQueue for T {}
+impl<
+    T: SupervisorRegistry
+        + InboxWatchLog
+        + RunLog
+        + AskStore
+        + super::execution::CoordinationReads
+        + ?Sized,
+> HostOpsQueue for T
+{
+}
 
 /// The team version runner's calls to the control side over HTTPS
 /// (ADR-t3987-1 decision 1), with the runner's short token as the bearer.

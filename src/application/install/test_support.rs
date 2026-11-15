@@ -91,6 +91,9 @@ pub(crate) struct InstallSteps {
     pub(crate) in_place: bool,
     pub(crate) breaking_failure: Option<String>,
     pub(crate) up_fails: bool,
+    pub(crate) stop_fails: bool,
+    pub(crate) runs: Vec<Value>,
+    pub(crate) processes: Vec<Value>,
     pub(crate) unsupported_job: Option<PathBuf>,
     pub(crate) previous_version: Option<String>,
     pub(crate) job_checks: std::sync::Mutex<Vec<PathBuf>>,
@@ -122,6 +125,9 @@ impl Default for InstallSteps {
             in_place: false,
             breaking_failure: None,
             up_fails: false,
+            stop_fails: false,
+            runs: vec![],
+            processes: vec![],
             unsupported_job: None,
             previous_version: None,
             job_checks: Default::default(),
@@ -217,6 +223,29 @@ impl Binaries for InstallSteps {
         self.service_running.store(true, SeqCst);
         Ok(json!({"applied": 1}))
     }
+    fn stop_services(
+        &self,
+        _: &Path,
+        record: &dyn Fn(crate::domain::EventKind, Value) -> Result<()>,
+    ) -> Result<()> {
+        use crate::domain::EventKind;
+        self.note("stop_broker");
+        record(
+            EventKind::QueueBrokerStopped,
+            json!({"pid": 20, "by": "install"}),
+        )?;
+        self.note("stop_service");
+        if self.stop_fails {
+            bail!("old service stop failed");
+        }
+        record(
+            EventKind::QueueServiceStopped,
+            json!({"pid": 21, "by": "install"}),
+        )?;
+        self.service_running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
     fn hold_service(&self, _: &Path) -> Result<crate::application::queue_service::ServiceHold> {
         self.note("hold");
         self.hold_active
@@ -301,6 +330,18 @@ impl crate::application::supervisor_service::ServiceCaller for InstallSteps {
         }
         match op {
             "supervisors" => Ok(serde_json::to_value(&*self.registrations.lock().unwrap())?),
+            "runs_page" => {
+                let offset = params["args"][0].as_u64().unwrap() as usize;
+                let limit = params["args"][1].as_u64().unwrap() as usize;
+                Ok(json!(
+                    self.runs
+                        .iter()
+                        .skip(offset)
+                        .take(limit)
+                        .collect::<Vec<_>>()
+                ))
+            }
+            "processes" => Ok(json!(self.processes)),
             "latest_events_of" => Ok(json!([])),
             "request_handoff" => {
                 let token = params["args"][0].as_str().unwrap();

@@ -1323,6 +1323,7 @@ pub mod provider_trial;
 pub mod queue_broker;
 pub mod queue_hold;
 pub mod queue_service;
+pub mod queue_use;
 pub mod reason;
 mod receipt;
 pub mod recheck;

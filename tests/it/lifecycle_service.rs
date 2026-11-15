@@ -61,6 +61,7 @@ fn up_down_and_the_service_s_start_and_stop_reach_the_queue_only_through_it() {
             &launchd,
             &processes,
             &DownOptions {
+                keep_service: false,
                 wait: false,
                 force,
                 poll: Duration::from_millis(20),
@@ -378,6 +379,7 @@ fn down_wait_after_the_drain_stopped_the_service(end: fn(&FakeProcesses, u32)) {
             &launchd,
             &processes,
             &DownOptions {
+                keep_service: false,
                 wait: true,
                 force: false,
                 poll: Duration::from_millis(20),

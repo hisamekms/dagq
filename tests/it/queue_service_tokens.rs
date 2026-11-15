@@ -1905,6 +1905,7 @@ fn a_down_wait_that_stops_the_service_once_the_registration_is_gone_leaves_no_to
                     &launchd,
                     &processes,
                     &dagq::lifecycle::DownOptions {
+                        keep_service: false,
                         wait: true,
                         force: false,
                         poll: Duration::from_millis(20),

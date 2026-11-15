@@ -46,6 +46,7 @@ use super::store_writes;
 #[cfg(test)]
 use crate::domain::actor::ActorContext;
 use crate::domain::event_kind::EventKind;
+use crate::domain::queue_use::{QueueUse, RUNS_IN_USE, queue_users};
 use std::{
     path::{Path, PathBuf},
     str::FromStr,
@@ -1586,25 +1587,6 @@ fn has_table(conn: &Connection, name: &str) -> Result<bool> {
 /// uses the queue: a registered supervisor whose PID is alive, an unfinished
 /// run, a wrapper whose PID is alive (ADR-0045 decision 8). Reads only what
 /// every schema since the tables were added has, so it runs on the old schema.
-/// What uses a queue as a breaking migration judges it: the registered
-/// supervisors (token, pid), the runs not finished (id, status) and the
-/// wrappers not exited (run, pid).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct QueueUse {
-    supervisors: Vec<(String, i64)>,
-    runs: Vec<(String, String)>,
-    wrappers: Vec<(String, i64)>,
-}
-
-/// The statuses of a run whose wrapper or supervisor uses the queue.
-const RUNS_IN_USE: [&str; 5] = [
-    "claimed",
-    "starting",
-    "running",
-    "validating",
-    "integrating",
-];
-
 fn queue_use(conn: &Connection) -> Result<QueueUse> {
     let mut found = QueueUse::default();
     if has_table(conn, "supervisors")? {
@@ -1633,29 +1615,6 @@ fn queue_use(conn: &Connection) -> Result<QueueUse> {
         }
     }
     Ok(found)
-}
-
-/// Who of `found` uses the queue, liveness per `alive`: a supervisor or a
-/// wrapper whose process lives, and every run not finished (its wrapper
-/// may be on another host's view of the pids).
-fn queue_users(found: &QueueUse, alive: &dyn Fn(u32) -> bool) -> Vec<String> {
-    let lives = |pid: i64| u32::try_from(pid).is_ok_and(alive);
-    let supervisors = found
-        .supervisors
-        .iter()
-        .filter(|(_, pid)| lives(*pid))
-        .map(|(token, pid)| format!("supervisor {token} (pid {pid})"));
-    let runs = found
-        .runs
-        .iter()
-        .filter(|(_, status)| RUNS_IN_USE.contains(&status.as_str()))
-        .map(|(id, status)| format!("run {id} ({status})"));
-    let wrappers = found
-        .wrappers
-        .iter()
-        .filter(|(_, pid)| lives(*pid))
-        .map(|(run, pid)| format!("wrapper of run {run} (pid {pid})"));
-    supervisors.chain(runs).chain(wrappers).collect()
 }
 
 /// Refuse the breaking ones of `pending` while [`queue_users`] finds the
