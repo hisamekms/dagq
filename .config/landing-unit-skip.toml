@@ -1,0 +1,53 @@
+# The unit tests the landing verification's unit stage leaves out
+# (scripts/landing-it.sh, ADR-t4979-1). CI's macOS and Linux jobs still run
+# every one of them: CI is the final gate for their breakage.
+#
+# Format: one [[test]] table per test, each key a one-line string:
+#   name     the test's full nextest name in the lib tests of binary dagq
+#            (`cargo nextest list --lib`), e.g. `module::tests::a_case`
+#   reason   why it is left out (its seconds in the landing verification)
+#   task     the task that put it here
+#   restore  the task or goal that makes it light again and takes it out
+# A file that cannot be read (not this format, a key missing or empty, an
+# unknown key, a name twice) stops the landing verification with exit 2.
+# Without this file, or without any [[test]], every unit test runs.
+#
+# Only goal 291's tasks and a person's decision may add a test here. It is
+# not the place for the slow tests of every day: those meet the time gate of
+# the unit tests. A change here is checked by `sh scripts/landing-it.sh --self-test`.
+
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::all_cases_run_in_order_on_the_same_database"
+reason = "1,038〜1,303 s in the unit stage of the landing verification (2026-11-15)"
+task = "4979"
+restore = "goal 291 (2): make it light or split it to run in parallel"
+
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::ledger_report_past_the_queue_and_the_clocks"
+reason = "310〜503 s in the unit stage of the landing verification (2026-11-15)"
+task = "4979"
+restore = "goal 291 (2): make it light or split it to run in parallel"
+
+[[test]]
+name = "infrastructure::sqlite::store_contract_tests::ledger_queue_named_goes_back_whole"
+reason = "135〜274 s in the unit stage of the landing verification (2026-11-15)"
+task = "4979"
+restore = "goal 291 (2): make it light or split it to run in parallel"
+
+[[test]]
+name = "application::supervise::observation::ledger::tests::frozen::rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold"
+reason = "281〜334 s in the unit stage of the landing verification (2026-11-15)"
+task = "4979"
+restore = "goal 291 (2): make it light or split it to run in parallel"
+
+[[test]]
+name = "application::supervise::observation::ledger::tests::omitting::the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads"
+reason = "140〜230 s in the unit stage of the landing verification (2026-11-15)"
+task = "4979"
+restore = "goal 291 (2): make it light or split it to run in parallel"
+
+[[test]]
+name = "application::ports::observation::earlier_visibility_spike::rest::the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units"
+reason = "140〜230 s in the unit stage of the landing verification (2026-11-15)"
+task = "4979"
+restore = "goal 291 (2): make it light or split it to run in parallel"

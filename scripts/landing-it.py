@@ -11,13 +11,13 @@ Usage: python3 scripts/landing-it.py select --diff FILE --tree FILE
                                             [--threads N] [--now TIME]
                                             [--table-error TEXT]
                                             [--full REASON] [--root DIR]
-                                            [--since FILE]
+                                            [--since FILE] [--unit-skip FILE]
        python3 scripts/landing-it.py needs-list --diff FILE --tree FILE
                                                 --table FILE|- [--now TIME]
                                                 [--table-error TEXT]
                                                 [--full REASON] [--root DIR]
                                                 [--since FILE]
-       python3 scripts/landing-it.py self-test FIXTURES
+       python3 scripts/landing-it.py self-test FIXTURES [--unit-skip FILE]
 select prints two filtersets, one per line: the unit stage's, then the IT
 stage's (an empty line when no IT is chosen); landing-it.sh runs them as two
 cargo nextest runs. --root is the checked-out tree the changed helpers' users are read from
@@ -25,6 +25,11 @@ cargo nextest runs. --root is the checked-out tree the changed helpers' users ar
 --since is the files changed on main after the table's commit, one per line,
 which an old table widens when the diff has them (- when they cannot be had:
 an old table then runs every IT).
+--unit-skip is the list of unit tests the unit stage leaves out
+(.config/landing-unit-skip.toml, its format at its top; ADR-t4979-1): a
+missing file or one without entries leaves the unit stage as it is, and one
+that cannot be read stops select with exit 2. The self-test checks that
+file too when given.
 """
 
 import argparse
@@ -95,6 +100,11 @@ IT_FILTER = "kind(test) - binary(e2e)"
 # The unit tests, run in full at every landing: the lib and bin targets of
 # every crate of the workspace.
 UNIT_FILTER = "kind(lib) | kind(bin) | kind(proc-macro)"
+
+# The binary id of the lib tests the unit-skip list names (the root crate).
+UNIT_SKIP_BINARY = "dagq"
+# The keys of each [[test]] of the unit-skip list, all required strings.
+UNIT_SKIP_KEYS = ("name", "reason", "task", "restore")
 
 # Files the integration tests read from the repository, not through the code
 # the table maps (docs/plans/landing-it-selection.md, 「絞った IT の選び方」).
@@ -482,6 +492,77 @@ def left_to_ci(diff, tree, table, widened=()):
     return out
 
 
+class UnitSkipError(Exception):
+    """The unit-skip list cannot be read: select stops with exit 2 rather
+    than run every unit test or leave them all out."""
+
+
+TOML_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"|\'([^\']*)\'')
+
+
+def parse_unit_skip(text):
+    """The entries of the unit-skip list: the subset of TOML it is written in
+    (comments, [[test]] tables, one-line string values). Anything else, a
+    missing or empty key, an unknown key or a name listed twice raises
+    UnitSkipError."""
+    entries = []
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "[[test]]":
+            entries.append({"line": number})
+            continue
+        key, sep, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        m = TOML_STRING.match(value)
+        if not sep or not re.fullmatch(r"[A-Za-z0-9_-]+", key) or not m:
+            raise UnitSkipError("line %d is not key = \"string\": %s" % (number, raw))
+        rest = value[m.end():].strip()
+        if rest and not rest.startswith("#"):
+            raise UnitSkipError("line %d has more after its value: %s" % (number, raw))
+        if not entries:
+            raise UnitSkipError("line %d is outside a [[test]] table: %s" % (number, raw))
+        if key not in UNIT_SKIP_KEYS:
+            raise UnitSkipError("line %d: unknown key %s" % (number, key))
+        if key in entries[-1]:
+            raise UnitSkipError("line %d: %s given twice" % (number, key))
+        if m.group(1) is not None:
+            try:
+                entries[-1][key] = json.loads('"%s"' % m.group(1))
+            except ValueError:
+                raise UnitSkipError("line %d: a bad escape: %s" % (number, raw))
+        else:
+            entries[-1][key] = m.group(2)
+    names = set()
+    for entry in entries:
+        line = entry.pop("line")
+        missing = [k for k in UNIT_SKIP_KEYS if not (entry.get(k) or "").strip()]
+        if missing:
+            raise UnitSkipError("the [[test]] at line %d lacks %s" % (line, ", ".join(missing)))
+        if entry["name"] != entry["name"].strip():
+            raise UnitSkipError("the name at line %d has spaces around it" % line)
+        if entry["name"] in names:
+            raise UnitSkipError("%s is listed twice" % entry["name"])
+        names.add(entry["name"])
+    return entries
+
+
+def read_unit_skip(path):
+    """The unit-skip list at path: [] when path is - or no file is there."""
+    if path in (None, "", "-") or not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, ValueError) as e:
+        raise UnitSkipError("%s cannot be read: %s" % (path, e))
+    try:
+        return parse_unit_skip(text)
+    except UnitSkipError as e:
+        raise UnitSkipError("%s: %s" % (path, e))
+
+
 def known_failures(known):
     """The filtersets to leave out (failures) and the names kept for a fix
     run (kept_for_task), from the JSON of dagq ci failures."""
@@ -517,7 +598,7 @@ def current_its(listing):
 
 
 def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now, forced=None,
-           root=".", since=()):
+           root=".", since=(), unit_skip=()):
     """The tests of the landing's verification and why: a dict with full,
     reasons, the IT filtersets (narrowed), the tests not in the table, the
     excluded and kept known failures, and the nextest filtersets of the two
@@ -528,7 +609,9 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
     so; widened names the files widened (including platform-gated files
     at any age) and the IT each added. Widening adds the neighbours' IT to
     the file's own mapped IT; their union counts towards the estimated wall
-    time threshold, which selects every IT when exceeded."""
+    time threshold, which selects every IT when exceeded. unit_skip is the
+    entries of the unit-skip list: their tests leave the unit stage alone
+    (CI still runs them), before the known failures leave both stages."""
     reasons = full_reasons(diff, tree, table, table_error, now, forced, root)
     narrowed = []
     from_table = set()
@@ -593,6 +676,9 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
     else:
         it = None
     unit = "(%s)" % UNIT_FILTER
+    if unit_skip:
+        unit = "(%s - (%s))" % (unit, " | ".join(
+            one_test(UNIT_SKIP_BINARY, e["name"]) for e in unit_skip))
     if excluded:
         # The same known failures leave both stages, matched by name alone.
         left_out = " | ".join(f for _, f in excluded)
@@ -610,6 +696,7 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
         "excluded": [n for n, _ in excluded],
         "kept": [n for n, _ in kept],
         "fix_run": fix_run,
+        "unit_skipped": [e["name"] for e in unit_skip],
         "unit_filter": unit,
         "it_filter": it,
     }
@@ -633,6 +720,12 @@ def report(choice):
         )
         lines.extend("landing-it:   %s" % f for f in choice["narrowed"])
         lines.extend("landing-it: its IT left to CI: %s" % f for f in choice["left_to_ci"])
+    skipped = choice.get("unit_skipped") or []
+    if skipped:
+        lines.append(
+            "landing-it: the unit stage leaves out the unit-skip list's tests"
+            " (%d; CI runs them):" % len(skipped))
+        lines.extend("landing-it:   %s" % name for name in skipped)
     for name in choice["excluded"]:
         lines.append("landing-it: left out, fails on main already: %s" % name)
     for name in choice["kept"]:
@@ -681,11 +774,17 @@ def cmd_needs_list(args):
 
 
 def cmd_select(args):
+    try:
+        unit_skip = read_unit_skip(args.unit_skip)
+    except UnitSkipError as e:
+        print("landing-it: the unit-skip list cannot be read: %s" % e, file=sys.stderr)
+        sys.exit(2)
     choice = choose(
         read_lines(args.diff), read_lines(args.tree), read_json(args.table),
         args.table_error, read_json(args.list), read_json(args.known),
         args.fix_run == "1", threads_of(args.threads), now_of(args.now), args.full, args.root,
         None if args.since == "-" else read_lines(args.since) if args.since else [],
+        unit_skip,
     )
     print(report(choice), file=sys.stderr)
     # Two lines: the unit stage's filterset, then the IT stage's (empty when
@@ -702,12 +801,28 @@ def cmd_self_test(args):
     tree = read_lines(os.path.join(args.fixtures, "tree.txt"))
     failed = 0
     for case in cases:
+        unit_skip = []
+        if "unit_skip" in case:
+            try:
+                unit_skip = parse_unit_skip(case["unit_skip"])
+            except UnitSkipError as e:
+                unit_skip = str(e)
+            if "unit_skip_error" in case["want"] or isinstance(unit_skip, str):
+                got = unit_skip if isinstance(unit_skip, str) else None
+                if got != case["want"].get("unit_skip_error"):
+                    failed += 1
+                    print("FAIL %s:\n  want error %r\n  got  %r" % (
+                        case["name"], case["want"].get("unit_skip_error"), got), file=sys.stderr)
+                else:
+                    print("ok   %s" % case["name"])
+                continue
         case_table = None if case.get("no_table") else dict(table, **case.get("table_patch", {}))
         choice = choose(
             case["diff"], tree, case_table,
             "gh failed" if case.get("no_table") else None, listing,
             case.get("known"), case.get("fix_run", False), 6, parse_time(case["now"]),
             case.get("full"), os.path.join(args.fixtures, "repo"), case.get("since", []),
+            unit_skip,
         )
         want = case["want"]
         got = {k: report(choice) if k == "report" else choice[k] for k in want}
@@ -718,6 +833,13 @@ def cmd_self_test(args):
                 file=sys.stderr)
         else:
             print("ok   %s" % case["name"])
+    if args.unit_skip:
+        try:
+            entries = read_unit_skip(args.unit_skip)
+            print("ok   %s reads as %d entries" % (args.unit_skip, len(entries)))
+        except UnitSkipError as e:
+            failed += 1
+            print("FAIL the unit-skip list: %s" % e, file=sys.stderr)
     if failed:
         print("landing-it self-test: %d of %d cases failed" % (failed, len(cases)), file=sys.stderr)
         sys.exit(1)
@@ -743,8 +865,10 @@ def main():
             p.add_argument("--known")
             p.add_argument("--fix-run", default="0")
             p.add_argument("--threads", default="6")
+            p.add_argument("--unit-skip", help="the unit tests the unit stage leaves out")
     p = sub.add_parser("self-test")
     p.add_argument("fixtures")
+    p.add_argument("--unit-skip", help="a unit-skip list to check reads")
     args = parser.parse_args()
     {"select": cmd_select, "needs-list": cmd_needs_list, "self-test": cmd_self_test}[args.cmd](args)
 

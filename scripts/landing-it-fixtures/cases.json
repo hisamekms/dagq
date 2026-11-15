@@ -954,5 +954,201 @@
     "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
    ]
   }
+ },
+ {
+  "name": "the unit-skip list's tests leave the unit stage alone and the IT stage's filter stays",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "unit_skip": "# a list\n[[test]]\nname = \"infrastructure::a::tests::heavy\"\nreason = \"900 s\"\ntask = \"1\"\nrestore = \"goal 2\"\n\n[[test]]\nname = \"application::b::tests::slow\"\nreason = \"300 s\"\ntask = \"1\"\nrestore = \"goal 2\"\n",
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [],
+   "kept": [],
+   "unit_filter": "((kind(lib) | kind(bin) | kind(proc-macro)) - ((binary_id(=dagq) & test(=infrastructure::a::tests::heavy)) | (binary_id(=dagq) & test(=application::b::tests::slow))))",
+   "it_filter": "((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))",
+   "unit_skipped": [
+    "infrastructure::a::tests::heavy",
+    "application::b::tests::slow"
+   ]
+  }
+ },
+ {
+  "name": "without a unit-skip list the filters stay as they are",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [],
+   "kept": [],
+   "unit_filter": "(kind(lib) | kind(bin) | kind(proc-macro))",
+   "it_filter": "((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))",
+   "unit_skipped": []
+  }
+ },
+ {
+  "name": "a unit-skip list without entries leaves the filters as they are",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "unit_skip": "# only comments\n\n",
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [],
+   "kept": [],
+   "unit_filter": "(kind(lib) | kind(bin) | kind(proc-macro))",
+   "it_filter": "((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))",
+   "unit_skipped": []
+  }
+ },
+ {
+  "name": "the unit-skip list and the known failures both leave the unit stage",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs"
+  ],
+  "known": {
+   "failures": [
+    {
+     "name": "dagq::it a::two",
+     "kind": "test"
+    },
+    {
+     "name": "dagq app::tests::unit_fails",
+     "kind": "test"
+    },
+    {
+     "name": "job: checks / clippy",
+     "kind": "job_step"
+    }
+   ],
+   "kept_for_task": []
+  },
+  "unit_skip": "# a list\n[[test]]\nname = \"infrastructure::a::tests::heavy\"\nreason = \"900 s\"\ntask = \"1\"\nrestore = \"goal 2\"\n\n[[test]]\nname = \"application::b::tests::slow\"\nreason = \"300 s\"\ntask = \"1\"\nrestore = \"goal 2\"\n",
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "excluded": [
+    "dagq::it a::two",
+    "dagq app::tests::unit_fails"
+   ],
+   "kept": [],
+   "unit_filter": "(((kind(lib) | kind(bin) | kind(proc-macro)) - ((binary_id(=dagq) & test(=infrastructure::a::tests::heavy)) | (binary_id(=dagq) & test(=application::b::tests::slow)))) - ((binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq) & test(=app::tests::unit_fails))))",
+   "it_filter": "(((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table))) - ((binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq) & test(=app::tests::unit_fails))))",
+   "unit_skipped": [
+    "infrastructure::a::tests::heavy",
+    "application::b::tests::slow"
+   ]
+  }
+ },
+ {
+  "name": "a unit-skip list that is no TOML of its format cannot be read",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "unit_skip": "[test]\n",
+  "want": {
+   "unit_skip_error": "line 1 is not key = \"string\": [test]"
+  }
+ },
+ {
+  "name": "a unit-skip list with a key missing cannot be read",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "unit_skip": "[[test]]\nname = \"x::y\"\nreason = \"r\"\ntask = \"1\"\n",
+  "want": {
+   "unit_skip_error": "the [[test]] at line 1 lacks restore"
+  }
+ },
+ {
+  "name": "a unit-skip list with an unknown key cannot be read",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "unit_skip": "[[test]]\nname = \"x::y\"\nreason = \"r\"\ntask = \"1\"\nrestore = \"2\"\nwhy = \"z\"\n",
+  "want": {
+   "unit_skip_error": "line 6: unknown key why"
+  }
+ },
+ {
+  "name": "a unit-skip list naming a test twice cannot be read",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "unit_skip": "[[test]]\nname = \"x::y\"\nreason = \"r\"\ntask = \"1\"\nrestore = \"2\"\n[[test]]\nname = \"x::y\"\nreason = \"r\"\ntask = \"1\"\nrestore = \"2\"\n",
+  "want": {
+   "unit_skip_error": "x::y is listed twice"
+  }
+ },
+ {
+  "name": "a unit-skip name with spaces around it cannot be read",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "unit_skip": "[[test]]\nname = \" x::y\"\nreason = \"r\"\ntask = \"1\"\nrestore = \"2\"\n",
+  "want": {
+   "unit_skip_error": "the name at line 1 has spaces around it"
+  }
  }
 ]
