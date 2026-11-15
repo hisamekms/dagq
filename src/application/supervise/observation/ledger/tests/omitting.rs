@@ -106,6 +106,19 @@ pub(super) fn of_old_form(
     input: &Input,
     label: &str,
 ) -> Vec<(String, Value)> {
+    of_old_form_of(memory, values(memory, input), old, input, label)
+}
+
+/// [`of_old_form`] with `now`, `memory`'s values read by the functions of
+/// now, read already.
+#[track_caller]
+pub(super) fn of_old_form_of(
+    memory: &Memory,
+    mut now: Vec<(String, Value)>,
+    old: Option<&Memory>,
+    input: &Input,
+    label: &str,
+) -> Vec<(String, Value)> {
     let form = old_form(memory, old, ms(input.now));
     let of_form = values(&form, input);
     let rows = of_form
@@ -113,7 +126,6 @@ pub(super) fn of_old_form(
         .find(|(name, _)| name == "queue rows")
         .map(|(_, rows)| rows.clone())
         .unwrap();
-    let mut now = values(memory, input);
     for (name, value) in &mut now {
         if name == "queue rows" {
             *value = rows.clone();
@@ -484,45 +496,76 @@ fn after_a_step_cut_the_values_are_those_of_the_ledger_of_now_s_form() {
 /// input (as a landing moves the store): C is where its first pass reads
 /// from (R, or 0 with no R), the omitted events up to C stay rows, and
 /// after every step (a) and (d) hold against the builder of now alone.
-#[test]
-fn the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads() {
+///
+/// A module of each input, a test of each of its shards: every shard
+/// takes over at every step of its input and holds C and (d) after every
+/// step, while (a), the comparison of the readers' values, is of the
+/// step's shard ([`super::frozen::Shard`]); so together they hold every
+/// check at every step of every input, as one test of all of them did.
+/// An input whose takeovers cover from R past 0 still does so in each
+/// shard; `every_input_has_its_test` keeps every input.
+mod the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads {
+    super::super::frozen::each_frozen_input!(super::super::taken_over;
+        reached => "reached" [s0 = 0, s1 = 1, s2 = 2, s3 = 3],
+        cut => "cut" [s0 = 0, s1 = 1, s2 = 2, s3 = 3, s4 = 4, s5 = 5],
+        on_its_way => "on its way" [s0 = 0, s1 = 1, s2 = 2, s3 = 3, s4 = 4, s5 = 5],
+        store_ahead => "store ahead" [s0 = 0],
+        clock_back => "clock back" [s0 = 0],
+        no_r => "no r" [s0 = 0],
+        queue_and_run => "queue and run" [s0 = 0, s1 = 1, s2 = 2, s3 = 3, s4 = 4, s5 = 5, s6 = 6, s7 = 7, s8 = 8, s9 = 9],
+        timeless => "timeless" [s0 = 0],
+    );
+}
+
+/// The inputs of which a takeover covers from R past 0 (C > 0) at a step.
+const TAKEN_OVER_PAST_ZERO: [&str; 4] = ["reached", "cut", "on its way", "queue and run"];
+
+/// The steps of [`the_set_s_builder_taking_over_the_ledger_of_now_covers_from_where_it_reads`]
+/// for the input named `name`, comparing the readers' values at the steps
+/// of `shard` of `shards`.
+fn taken_over(name: &str, shard: usize, shards: usize) {
+    let input = super::frozen::input_named(name);
+    let shard = super::frozen::Shard::new(shard, shards);
     let mut taken = 0;
-    for input in inputs() {
-        for over in 1..input.steps.len() {
-            let mut old = Side::new(none());
-            let mut new = Side::new(none());
-            let mut from = None;
-            for (n, step) in input.steps.iter().enumerate() {
-                if n == over {
-                    new.omission = version();
-                    new.start(input.now);
-                    from = Some(new.builder.events);
-                }
-                old.step(*step, &input);
-                new.step(*step, &input);
-                if n < over {
-                    // Both the builder of now's, on stores of their own.
-                    continue;
-                }
-                let label = format!("{} over {over} step {n}", input.name);
-                if let Some(coverage) = new.memory.omitted.borrow().as_ref() {
-                    // Where its first pass read from, unless a step read
-                    // from the cursors' start before it.
-                    assert!(
-                        Some(coverage.from) == from || coverage.from == EventId::new(0),
-                        "{label}: C {:?} from {from:?}",
-                        coverage.from
-                    );
-                    if coverage.from > EventId::new(0) {
-                        taken += 1;
-                    }
-                }
-                of_old_form(&new.memory, Some(&old.memory), &input, &label);
-                not_behind((&new.memory, &new.builder), &old.memory, &label);
+    for over in 1..input.steps.len() {
+        let mut old = Side::new(none());
+        let mut new = Side::new(none());
+        let mut from = None;
+        for (n, step) in input.steps.iter().enumerate() {
+            if n == over {
+                new.omission = version();
+                new.start(input.now);
+                from = Some(new.builder.events);
             }
+            old.step(*step, &input);
+            new.step(*step, &input);
+            if n < over {
+                // Both the builder of now's, on stores of their own.
+                continue;
+            }
+            let label = format!("{} over {over} step {n}", input.name);
+            if let Some(coverage) = new.memory.omitted.borrow().as_ref() {
+                // Where its first pass read from, unless a step read
+                // from the cursors' start before it.
+                assert!(
+                    Some(coverage.from) == from || coverage.from == EventId::new(0),
+                    "{label}: C {:?} from {from:?}",
+                    coverage.from
+                );
+                if coverage.from > EventId::new(0) {
+                    taken += 1;
+                }
+            }
+            if shard.next() {
+                of_old_form(&new.memory, Some(&old.memory), &input, &label);
+            }
+            not_behind((&new.memory, &new.builder), &old.memory, &label);
         }
     }
-    assert!(taken > 0);
+    shard.checked_some(name);
+    if TAKEN_OVER_PAST_ZERO.contains(&name) {
+        assert!(taken > 0, "{name}");
+    }
 }
 
 /// The store a builder of the set stops on (R past S, moved by a builder

@@ -3,7 +3,7 @@
 //! the readers' values of the ledger it made held to those fixed
 //! ([`crate::application::ports::frozen`]).
 
-use super::omitting::{ends_cut, none, of_old_form};
+use super::omitting::{ends_cut, none, of_old_form, of_old_form_of};
 use super::*;
 use crate::application::ports::frozen::{check, differs, values};
 use crate::domain::ledger::owner::{self, Owner};
@@ -117,10 +117,15 @@ fn assert_published_omitted_rows_removed(memory: &Memory, through: EventId) {
     );
 }
 
-/// Compare all reader values, giving back only physical queue-row JSON
+/// Compare all reader values (`now`, those of `memory`), giving back only physical queue-row JSON
 /// removed by publication's wider coverage. Windows still read the actual
 /// sparse store. Compare recorded input as rows plus public coverage too.
-fn compare_after_removal(memory: &Memory, reference: &Memory, input: &Input) {
+fn compare_after_removal(
+    memory: &Memory,
+    now: Vec<(String, Value)>,
+    reference: &Memory,
+    input: &Input,
+) {
     let missing: Vec<_> = reference
         .rows
         .borrow()
@@ -131,7 +136,7 @@ fn compare_after_removal(memory: &Memory, reference: &Memory, input: &Input) {
         .map(|(_, row)| row.clone())
         .collect();
     assert_eq!(
-        with_rows_given_back(values(memory, input), memory, &missing),
+        with_rows_given_back(now, memory, &missing),
         values(reference, input),
         "{}",
         input.name
@@ -881,88 +886,230 @@ fn the_token_of_a_run_of_no_row_as_s_is_no_edge() {
     }
 }
 
+/// A module of `#[test]`s of `$check` for each frozen input, named as the
+/// input, so the inputs run in parallel; `every_input_has_its_test` holds
+/// the names to [`inputs`] in their order, so no input is left out. Each
+/// input's shards ([`frozen_shards`]) are its tests.
+macro_rules! each_frozen_input {
+    ($check:path; $($test:ident => $name:literal $shards:tt),* $(,)?) => {
+        $(
+            mod $test {
+                $crate::application::supervise::observation::ledger::tests::frozen::frozen_shards!(
+                    $check, $name, $shards
+                );
+            }
+        )*
+
+        #[test]
+        fn every_input_has_its_test() {
+            let names: Vec<&str> = $crate::domain::ledger::testkit::frozen::inputs()
+                .iter()
+                .map(|input| input.name)
+                .collect();
+            assert_eq!(names, [$($name),*]);
+        }
+    };
+}
+pub(super) use each_frozen_input;
+
+/// One `#[test]` of each shard: `$check(name, shard, shards)` checks the
+/// checkpoints whose index of the input's run is `shard` modulo `shards`
+/// (the number of shards listed), so every checkpoint is the one shard's
+/// and the shards run in parallel. The shards are listed `0..shards` in
+/// order (a const check).
+macro_rules! frozen_shards {
+    ($check:path, $name:literal, [$($shard:ident = $index:literal),* $(,)?]) => {
+        const SHARDS: usize = [$($index),*].len();
+        const _: () = {
+            let listed: [usize; SHARDS] = [$($index),*];
+            let mut k = 0;
+            while k < SHARDS {
+                assert!(listed[k] == k, "shards listed 0.. in order");
+                k += 1;
+            }
+        };
+        $(
+            #[test]
+            fn $shard() {
+                $check($name, $index, SHARDS);
+            }
+        )*
+    };
+}
+pub(super) use frozen_shards;
+
+/// Which checkpoints of a run a shard checks: the `shard`th of each
+/// `shards` in turn. [`Self::next`] numbers the run's checkpoints in order.
+pub(super) struct Shard {
+    shard: usize,
+    shards: usize,
+    next: Cell<usize>,
+    checked: Cell<usize>,
+}
+
+impl Shard {
+    pub(super) fn new(shard: usize, shards: usize) -> Self {
+        assert!(shard < shards);
+        Self {
+            shard,
+            shards,
+            next: Cell::new(0),
+            checked: Cell::new(0),
+        }
+    }
+
+    /// Whether the run's next checkpoint is this shard's.
+    pub(super) fn next(&self) -> bool {
+        let next = self.next.get();
+        let mine = next % self.shards == self.shard;
+        self.next.set(next + 1);
+        self.checked.set(self.checked.get() + usize::from(mine));
+        mine
+    }
+
+    /// The run had a checkpoint of this shard: no shard of the input is
+    /// empty, so its shards are no more than its checkpoints.
+    #[track_caller]
+    pub(super) fn checked_some(&self, label: &str) {
+        assert!(
+            self.checked.get() > 0,
+            "{label}: shard {} of {} checked none of {} checkpoints",
+            self.shard,
+            self.shards,
+            self.next.get()
+        );
+    }
+}
+
+/// The frozen input named `name`.
+pub(super) fn input_named(name: &str) -> Input {
+    inputs()
+        .into_iter()
+        .find(|input| input.name == name)
+        .unwrap_or_else(|| panic!("no frozen input {name}"))
+}
+
+/// [`check_ended_whole`] of one input: its values are those fixed unless
+/// the builder of now left its last pass cut ([`ends_cut`]), and `cut`'s
+/// differ.
+#[track_caller]
+fn check_ended_one(input: &Input, values: &[(String, Value)]) {
+    match differs(input, values) {
+        Some(differs) => assert!(ends_cut(input), "{differs}"),
+        None => assert_ne!(input.name, "cut", "cut's values differ"),
+    }
+}
+
 /// Rebuild each input through the real pass, interleaving its arrivals
 /// with a small private fold. Both sides start from the omitting builder's
 /// sparse ledger with C after the first event. Only the queue-rows output
 /// is normalized with missing rows given back; windows read the real holes.
-#[test]
-fn rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold() {
-    let all = inputs();
-    let mut each = Vec::new();
-    for input in &all {
-        let (Step::Arrive(first), Step::Drain(secs)) = (input.steps[0], input.steps[1]) else {
-            panic!("{} starts with an arrival and drain", input.name);
-        };
-        // Read a prefix with rows, then establish the historical coverage
-        // with the omitting builder. Leave the first arrival's last three
-        // events for real rebuild passes, keeping the canonical log intact.
-        let mut setup = input.clone();
-        setup.steps = vec![
-            Step::Arrive(5),
-            Step::Drain(secs),
-            Step::Start(secs),
-            Step::Arrive(first - 3),
-            Step::Drain(secs),
-        ];
-        let mut sides = [0, 1].map(|_| {
-            let (memory, _) = without_omitted_rows(&setup, 2);
-            let mut builder = start_builder(&memory, ms(secs)).unwrap();
-            builder.set_omission(three());
-            (memory, builder)
-        });
-        let initial = sides[0].0.omitted.borrow().clone().unwrap();
-        assert!(initial.from > input.log.events[0].id, "{}", input.name);
-        assert!(initial.rebuilding.is_none());
-        let protected_prefix: Vec<_> = stored_omitted_queue_keys(&sides[0].0, initial.from)
-            .into_iter()
-            .filter(|key| !sides[0].0.rows.borrow()[&(LedgerKind::Queue, key.clone())].is_final)
-            .collect();
-        if input.name == "timeless" {
-            assert!(!protected_prefix.is_empty());
+///
+/// A module of each input, a test of each of its shards: every shard runs
+/// the input's whole run (the passes do not read what the checks read) and
+/// holds after every pass what needs no reader's value (both sides' marks,
+/// failures, backlogs and S agree; the full fold is published once and
+/// never undone, its summaries and points those counted; S moves before
+/// it), while the comparisons of the readers' values (both sides' values
+/// with the rows given back, and those of the ledger of now's form) and
+/// the values fixed at the input's end ([`check_ended_one`]) are of the
+/// pass's shard ([`Shard`]). So together they hold every check of every
+/// pass of every input, as one test of all of them did;
+/// `every_input_has_its_test` keeps every input.
+mod rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold {
+    super::each_frozen_input!(super::super::rebuilt;
+        reached => "reached" [s0 = 0, s1 = 1, s2 = 2, s3 = 3],
+        cut => "cut" [s0 = 0, s1 = 1, s2 = 2, s3 = 3, s4 = 4, s5 = 5],
+        on_its_way => "on its way" [s0 = 0, s1 = 1, s2 = 2, s3 = 3, s4 = 4, s5 = 5],
+        store_ahead => "store ahead" [s0 = 0, s1 = 1],
+        clock_back => "clock back" [s0 = 0, s1 = 1],
+        no_r => "no r" [s0 = 0, s1 = 1],
+        queue_and_run => "queue and run" [s0 = 0, s1 = 1, s2 = 2, s3 = 3, s4 = 4, s5 = 5, s6 = 6],
+        timeless => "timeless" [s0 = 0, s1 = 1],
+    );
+}
+
+/// The steps of [`rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold`]
+/// for the input named `name`, checking the readers' values at the passes
+/// of `shard` of `shards`.
+fn rebuilt(name: &str, shard: usize, shards: usize) {
+    let input = &input_named(name);
+    let shard = Shard::new(shard, shards);
+    let (Step::Arrive(first), Step::Drain(secs)) = (input.steps[0], input.steps[1]) else {
+        panic!("{} starts with an arrival and drain", input.name);
+    };
+    // Read a prefix with rows, then establish the historical coverage
+    // with the omitting builder. Leave the first arrival's last three
+    // events for real rebuild passes, keeping the canonical log intact.
+    let mut setup = input.clone();
+    setup.steps = vec![
+        Step::Arrive(5),
+        Step::Drain(secs),
+        Step::Start(secs),
+        Step::Arrive(first - 3),
+        Step::Drain(secs),
+    ];
+    let mut sides = [0, 1].map(|_| {
+        let (memory, _) = without_omitted_rows(&setup, 2);
+        let mut builder = start_builder(&memory, ms(secs)).unwrap();
+        builder.set_omission(three());
+        (memory, builder)
+    });
+    let initial = sides[0].0.omitted.borrow().clone().unwrap();
+    assert!(initial.from > input.log.events[0].id, "{}", input.name);
+    assert!(initial.rebuilding.is_none());
+    let protected_prefix: Vec<_> = stored_omitted_queue_keys(&sides[0].0, initial.from)
+        .into_iter()
+        .filter(|key| !sides[0].0.rows.borrow()[&(LedgerKind::Queue, key.clone())].is_final)
+        .collect();
+    if input.name == "timeless" {
+        assert!(!protected_prefix.is_empty());
+    }
+    let records = queue_records(&sides[0].0);
+    let omitted = super::omitting::omitted_of(&sides[0].0);
+    assert!(!omitted.is_empty(), "{}", input.name);
+    assert!(omitted.iter().all(|event| !records.contains(&event.id)));
+    let largest_kind = three()
+        .kinds
+        .iter()
+        .map(|kind| {
+            setup.log.events[..first - 3]
+                .iter()
+                .filter(|e| e.kind.as_str() == kind)
+                .count()
+        })
+        .max()
+        .unwrap();
+    let limit = (largest_kind / 3).clamp(1, 64);
+    sides[0].1.set_rebuild_limit(limit);
+    sides[1].1.set_rebuild_limit(0);
+    let old = built(input);
+    let mut rounds = 0;
+    let mut moving_before_publication = 0;
+    let mut arrival_passes = 0;
+    let mut published = false;
+    let mut run_pass = |sides: &mut [(Memory, Builder); 2], secs| {
+        let previous = sides[0].0.omitted.borrow().clone().unwrap();
+        let new_events = sides[0].0.events.borrow().last().unwrap().id > previous.through;
+        let results = sides
+            .each_mut()
+            .map(|(memory, builder)| pass(memory, builder, secs));
+        assert_eq!(results[0].failure, results[1].failure, "{}", input.name);
+        assert_eq!(results[0].backlog, results[1].backlog, "{}", input.name);
+        rounds += 1;
+        if new_events {
+            arrival_passes += 1;
         }
-        let records = queue_records(&sides[0].0);
-        let omitted = super::omitting::omitted_of(&sides[0].0);
-        assert!(!omitted.is_empty(), "{}", input.name);
-        assert!(omitted.iter().all(|event| !records.contains(&event.id)));
-        let largest_kind = three()
-            .kinds
-            .iter()
-            .map(|kind| {
-                setup.log.events[..first - 3]
-                    .iter()
-                    .filter(|e| e.kind.as_str() == kind)
-                    .count()
-            })
-            .max()
-            .unwrap();
-        let limit = (largest_kind / 3).clamp(1, 64);
-        sides[0].1.set_rebuild_limit(limit);
-        sides[1].1.set_rebuild_limit(0);
-        let old = built(input);
-        let mut rounds = 0;
-        let mut moving_before_publication = 0;
-        let mut arrival_passes = 0;
-        let mut published = false;
-        let mut run_pass = |sides: &mut [(Memory, Builder); 2], secs| {
-            let previous = sides[0].0.omitted.borrow().clone().unwrap();
-            let new_events = sides[0].0.events.borrow().last().unwrap().id > previous.through;
-            let results = sides
-                .each_mut()
-                .map(|(memory, builder)| pass(memory, builder, secs));
-            assert_eq!(results[0].failure, results[1].failure, "{}", input.name);
-            assert_eq!(results[0].backlog, results[1].backlog, "{}", input.name);
-            rounds += 1;
-            if new_events {
-                arrival_passes += 1;
-            }
-            let memory = &sides[0].0;
-            let reference = &sides[1].0;
-            let held = memory.omitted.borrow().clone().unwrap();
-            let normal = reference.omitted.borrow().clone().unwrap();
-            assert_eq!(held.through, normal.through, "{}", input.name);
-            assert_eq!(*memory.rows_mark.borrow(), *reference.rows_mark.borrow());
-            assert_eq!(*memory.mark.borrow(), *reference.mark.borrow());
-            compare_after_removal(memory, reference, input);
+        let memory = &sides[0].0;
+        let reference = &sides[1].0;
+        let held = memory.omitted.borrow().clone().unwrap();
+        let normal = reference.omitted.borrow().clone().unwrap();
+        assert_eq!(held.through, normal.through, "{}", input.name);
+        assert_eq!(*memory.rows_mark.borrow(), *reference.rows_mark.borrow());
+        assert_eq!(*memory.mark.borrow(), *reference.mark.borrow());
+        if shard.next() {
+            let now = values(memory, input);
+            compare_after_removal(memory, now.clone(), reference, input);
             // The row-given-back comparison reads every non-row value
             // from the sparse ledger, before and after publication.
             let form = super::omitting::old_form(memory, Some(&old), ms(input.now));
@@ -974,126 +1121,126 @@ fn rebuilding_each_frozen_input_keeps_every_value_and_publishes_the_full_fold() 
                 .map(|(_, row)| row.clone())
                 .collect();
             assert_eq!(
-                with_rows_given_back(values(memory, input), memory, &taken),
-                of_old_form(memory, Some(&old), input, input.name)
+                with_rows_given_back(now.clone(), memory, &taken),
+                of_old_form_of(memory, now, Some(&old), input, input.name)
             );
-            if held.from == EventId::new(0) {
-                assert_published_omitted_rows_removed(memory, held.through);
-                for key in &protected_prefix {
-                    assert!(
-                        memory
-                            .rows
-                            .borrow()
-                            .contains_key(&(LedgerKind::Queue, key.clone())),
-                        "{}: an unsettled prefix row was removed",
-                        input.name
-                    );
-                }
-                let (summaries, points) = counted(
-                    &memory.events.borrow(),
-                    &three().kinds,
-                    (EventId::new(0), held.through),
-                    EVERY,
+        }
+        if held.from == EventId::new(0) {
+            assert_published_omitted_rows_removed(memory, held.through);
+            for key in &protected_prefix {
+                assert!(
+                    memory
+                        .rows
+                        .borrow()
+                        .contains_key(&(LedgerKind::Queue, key.clone())),
+                    "{}: an unsettled prefix row was removed",
+                    input.name
                 );
-                assert_eq!(held.summaries, summaries, "{}", input.name);
-                assert_eq!(
-                    memory.points.borrow().values().cloned().collect::<Vec<_>>(),
-                    points
-                );
-                assert!(held.rebuilding.is_none());
-                published = true;
-            } else {
-                assert!(!published, "{} cannot undo publication", input.name);
-                let mut public = held.clone();
-                let private = public.rebuilding.take();
-                if let Some(private) = private {
-                    assert!(private.positions.values().all(|p| *p <= held.through));
-                }
-                assert_eq!(public, normal, "{}", input.name);
-                if held.through > previous.through {
-                    moving_before_publication += 1;
+            }
+            let (summaries, points) = counted(
+                &memory.events.borrow(),
+                &three().kinds,
+                (EventId::new(0), held.through),
+                EVERY,
+            );
+            assert_eq!(held.summaries, summaries, "{}", input.name);
+            assert_eq!(
+                memory.points.borrow().values().cloned().collect::<Vec<_>>(),
+                points
+            );
+            assert!(held.rebuilding.is_none());
+            published = true;
+        } else {
+            assert!(!published, "{} cannot undo publication", input.name);
+            let mut public = held.clone();
+            let private = public.rebuilding.take();
+            if let Some(private) = private {
+                assert!(private.positions.values().all(|p| *p <= held.through));
+            }
+            assert_eq!(public, normal, "{}", input.name);
+            if held.through > previous.through {
+                moving_before_publication += 1;
+            }
+        }
+        results[0].backlog == 0 || results[0].failure.is_some()
+    };
+    let mut steps = vec![
+        Step::Arrive(first - 2),
+        Step::Pass(secs),
+        Step::Arrive(first - 1),
+        Step::Pass(secs),
+        Step::Arrive(first),
+    ];
+    steps.extend_from_slice(&input.steps[1..]);
+    for step in steps {
+        match step {
+            Step::Arrive(n) => {
+                for (memory, _) in &sides {
+                    memory.events.replace(input.log.events[..n].to_vec());
                 }
             }
-            results[0].backlog == 0 || results[0].failure.is_some()
-        };
-        let mut steps = vec![
-            Step::Arrive(first - 2),
-            Step::Pass(secs),
-            Step::Arrive(first - 1),
-            Step::Pass(secs),
-            Step::Arrive(first),
-        ];
-        steps.extend_from_slice(&input.steps[1..]);
-        for step in steps {
-            match step {
-                Step::Arrive(n) => {
-                    for (memory, _) in &sides {
-                        memory.events.replace(input.log.events[..n].to_vec());
+            Step::Pass(secs) => {
+                run_pass(&mut sides, secs);
+            }
+            Step::Drain(secs) => {
+                for _ in 0..DRAIN_PASSES {
+                    if run_pass(&mut sides, secs) {
+                        break;
                     }
                 }
-                Step::Pass(secs) => {
-                    run_pass(&mut sides, secs);
+            }
+            Step::SessionWriteFails(secs) => {
+                for (memory, _) in &sides {
+                    memory.batch_fails.set(1);
                 }
-                Step::Drain(secs) => {
-                    for _ in 0..DRAIN_PASSES {
-                        if run_pass(&mut sides, secs) {
-                            break;
-                        }
-                    }
+                run_pass(&mut sides, secs);
+                for (memory, _) in &sides {
+                    memory.batch_fails.set(0);
                 }
-                Step::SessionWriteFails(secs) => {
-                    for (memory, _) in &sides {
-                        memory.batch_fails.set(1);
-                    }
-                    run_pass(&mut sides, secs);
-                    for (memory, _) in &sides {
-                        memory.batch_fails.set(0);
-                    }
+            }
+            Step::MarksGone => {
+                for (memory, _) in &sides {
+                    memory.mark.replace(None);
+                    memory.rows_mark.replace(None);
                 }
-                Step::MarksGone => {
-                    for (memory, _) in &sides {
-                        memory.mark.replace(None);
-                        memory.rows_mark.replace(None);
-                    }
-                }
-                Step::Start(_) | Step::FromTheStart => {
-                    for (n, (memory, builder)) in sides.iter_mut().enumerate() {
-                        *builder = if matches!(step, Step::FromTheStart) {
-                            Builder::default()
-                        } else {
-                            let Step::Start(at) = step else {
-                                unreachable!()
-                            };
-                            start_builder(memory, ms(at)).unwrap()
+            }
+            Step::Start(_) | Step::FromTheStart => {
+                for (n, (memory, builder)) in sides.iter_mut().enumerate() {
+                    *builder = if matches!(step, Step::FromTheStart) {
+                        Builder::default()
+                    } else {
+                        let Step::Start(at) = step else {
+                            unreachable!()
                         };
-                        builder.set_omission(three());
-                        builder.set_rebuild_limit(if n == 0 { limit } else { 0 });
-                    }
+                        start_builder(memory, ms(at)).unwrap()
+                    };
+                    builder.set_omission(three());
+                    builder.set_rebuild_limit(if n == 0 { limit } else { 0 });
                 }
             }
         }
-        // At the canonical input's end, retain the frozen-value anchor
-        // (and its existing same-input allowance for a cut pass).
-        each.push((
-            input,
-            of_old_form(&sides[0].0, Some(&old), input, input.name),
-        ));
-        // Drain private work too: ordinary backlog does not count it.
-        for _ in 0..largest_kind + 3 {
-            run_pass(&mut sides, input.now);
-            if sides[0].0.omitted.borrow().as_ref().unwrap().from == EventId::new(0) {
-                break;
-            }
-        }
-        assert!(published, "{}", input.name);
-        assert!(rounds > 1 && arrival_passes >= 2, "{}", input.name);
-        assert!(
-            moving_before_publication > 0,
-            "{} advances S before publication",
-            input.name
-        );
     }
-    check_ended_whole(&each);
+    // At the canonical input's end, retain the frozen-value anchor
+    // (and its existing same-input allowance for a cut pass).
+    if shard.next() {
+        let ended = of_old_form(&sides[0].0, Some(&old), input, input.name);
+        check_ended_one(input, &ended);
+    }
+    // Drain private work too: ordinary backlog does not count it.
+    for _ in 0..largest_kind + 3 {
+        run_pass(&mut sides, input.now);
+        if sides[0].0.omitted.borrow().as_ref().unwrap().from == EventId::new(0) {
+            break;
+        }
+    }
+    assert!(published, "{}", input.name);
+    assert!(rounds > 1 && arrival_passes >= 2, "{}", input.name);
+    assert!(
+        moving_before_publication > 0,
+        "{} advances S before publication",
+        input.name
+    );
+    shard.checked_some(input.name);
 }
 
 /// A private page or tail-probe failure cannot suppress the normal
@@ -1284,7 +1431,7 @@ fn rebuilding_follows_the_updated_s_while_arrivals_outpace_it_then_catches_up() 
         let held = memory.omitted.borrow().clone().unwrap();
         assert_eq!(held.through, log.last());
         assert_eq!(r_of(&memory).events, log.last());
-        compare_after_removal(&memory, &reference, &input);
+        compare_after_removal(&memory, values(&memory, &input), &reference, &input);
         if round == 0 {
             assert_eq!(held.through, EventId::new(101));
             assert_eq!(

@@ -69,60 +69,128 @@ fn shared_units(settled: usize) -> Log {
     shared_lives(queue_units_only(settled))
 }
 
-/// [`check_part_of`] with `large` units of `answers` for the answers.
-fn final_part(
+/// The part `name` of (ii), its kinds, and the time its read is from.
+fn final_kinds(name: &str) -> (&'static [&'static str], BTreeSet<String>, i64) {
+    let part = QUEUE_PARTS.iter().find(|(n, _)| *n == name).unwrap().1;
+    let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
+    let kinds = part.iter().map(|kind| (*kind).to_owned()).collect();
+    (part, kinds, from_ms)
+}
+
+/// The part's queue rows among `rows`.
+fn final_count(part: &[&str], rows: &[LedgerRow]) -> usize {
+    part.iter().map(|kind| queue_count(rows, kind)).sum()
+}
+
+/// [`check_part_of`]'s counts with `large` units of `answers`: with 30
+/// settled units of `small` every answer is that of every row, and the
+/// part's read returns as many rows with 30 of `small` as with 300 of
+/// `units`, and as many with 30 of `answers` as with `large` of them.
+fn final_counts(
     name: &str,
     small: fn(usize) -> Log,
     units: fn(usize) -> Log,
     answers: fn(usize) -> Log,
     large: usize,
-) -> [usize; 2] {
-    let part = QUEUE_PARTS.iter().find(|(n, _)| *n == name).unwrap().1;
-    let from_ms = time_query(&kpi_questions()[1]).read_from_ms.unwrap();
-    let kinds: BTreeSet<String> = part.iter().map(|kind| (*kind).to_owned()).collect();
-    let count = |rows: &[LedgerRow]| {
-        part.iter()
-            .map(|kind| queue_count(rows, kind))
-            .sum::<usize>()
-    };
+) {
+    let (part, kinds, from_ms) = final_kinds(name);
+    let read =
+        |rows: &[LedgerRow]| final_count(part, &queue_ii(rows, from_ms, &kinds, QUEUE_SHAPED));
     let small = rows_of(&small(30));
     let (misses, _) = part_report(&small, part, QUEUE_SHAPED);
-    let small_read = count(&queue_ii(&small, from_ms, &kinds, QUEUE_SHAPED));
-    let units = rows_of(&units(300));
-    let units_read = count(&queue_ii(&units, from_ms, &kinds, QUEUE_SHAPED));
-    let shared_small = count(&queue_ii(
-        &rows_of(&answers(30)),
-        from_ms,
-        &kinds,
-        QUEUE_SHAPED,
-    ));
+    let small_read = read(&small);
+    let units_read = read(&rows_of(&units(300)));
+    let shared_small = read(&rows_of(&answers(30)));
     let rows = rows_of(&answers(large));
-    let read = count(&queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED));
-    let (large_misses, _) = queue_misses(&rows, &queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED));
+    let large_read = read(&rows);
     eprintln!(
-        "{name}: read {small_read}/{units_read} (30/300), shared lives {shared_small}/{read} \
-         (30/{large}) of {}, misses {misses:?} {large_misses:?}",
-        count(&rows)
+        "{name}: read {small_read}/{units_read} (30/300), shared lives {shared_small}/{large_read} \
+         (30/{large}) of {}, misses {misses:?}",
+        final_count(part, &rows)
     );
     assert_eq!(misses, Vec::<String>::new(), "{name} 30");
-    assert_eq!(large_misses, Vec::<String>::new(), "{name} {large}");
     assert_eq!(small_read, units_read, "{name}");
-    assert_eq!(shared_small, read, "{name}");
-    [small_read, units_read]
+    assert_eq!(shared_small, large_read, "{name}");
 }
 
-#[test]
-fn the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units() {
-    let large = rest_large();
-    final_part(
+/// With `large` settled units of `answers`, the `answer` of the part's
+/// read is that of every row ([`queue_misses_of`]).
+fn final_answer(name: &str, answers: fn(usize) -> Log, large: usize, answer: Answer) {
+    let (_, kinds, from_ms) = final_kinds(name);
+    let rows = rows_of(&answers(large));
+    let (misses, _) = queue_misses_of(
+        &rows,
+        &queue_ii(&rows, from_ms, &kinds, QUEUE_SHAPED),
+        |of| of == answer,
+    );
+    assert_eq!(misses, Vec::<String>::new(), "{name} {large} {answer:?}");
+}
+
+/// A module of `#[test]`s of the part: its counts ([`final_counts`]) and
+/// each answer with [`rest_large`] units ([`final_answer`]: the kpi's
+/// [`KPI_ANSWERS`] questions and `stats`), so they run in parallel.
+macro_rules! final_part {
+    ($test:ident, $name:literal, $small:path, $units:path, $answers:path) => {
+        mod $test {
+            use super::*;
+
+            #[test]
+            fn counts() {
+                final_counts($name, $small, $units, $answers, rest_large());
+            }
+
+            #[test]
+            fn kpi_0() {
+                final_answer($name, $answers, rest_large(), Answer::Kpi(0));
+            }
+
+            #[test]
+            fn kpi_1() {
+                final_answer($name, $answers, rest_large(), Answer::Kpi(1));
+            }
+
+            #[test]
+            fn kpi_2() {
+                final_answer($name, $answers, rest_large(), Answer::Kpi(2));
+            }
+
+            #[test]
+            fn kpi_3() {
+                final_answer($name, $answers, rest_large(), Answer::Kpi(3));
+            }
+
+            #[test]
+            fn kpi_by_area() {
+                const _: () = assert!(KPI_ANSWERS == 5, "a test of each kpi question");
+                final_answer($name, $answers, rest_large(), Answer::Kpi(4));
+            }
+
+            #[test]
+            fn stats() {
+                final_answer($name, $answers, rest_large(), Answer::Stats);
+            }
+        }
+    };
+}
+
+/// The final shapes of the waits, lives, samples and failures answer as
+/// every row with many units: a module of each part (ii-a, ii-f, ii-e)
+/// whose tests together hold what one test of the three parts held, with
+/// 30, 300 and [`rest_large`] settled units: the answers with 30 units and
+/// each answer with [`rest_large`] are those of every row, and the part's
+/// read returns as many rows however many units settled.
+mod the_final_shapes_of_the_waits_lives_samples_and_failures_answer_as_every_row_with_many_units {
+    use super::*;
+
+    final_part!(
+        ii_a,
         "ii-a",
         near_snapshot,
         near_snapshot_units,
-        shared_near_units,
-        large,
+        shared_near_units
     );
-    final_part("ii-f", history_ii, queue_units_only, shared_units, large);
-    final_part("ii-e", history_ii, queue_units_only, shared_units, large);
+    final_part!(ii_f, "ii-f", history_ii, queue_units_only, shared_units);
+    final_part!(ii_e, "ii-e", history_ii, queue_units_only, shared_units);
 }
 
 // The histories of (B)–(E): each settled unit adds a baseline's group of

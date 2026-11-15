@@ -3618,6 +3618,28 @@ fn area_map() -> crate::domain::areas::AreaMap {
 /// of each window main's cover and what befell runs 60 and 65; with the
 /// reads of the day's question.
 fn queue_misses(whole: &[LedgerRow], got: &[LedgerRow]) -> (Vec<String>, Reads) {
+    queue_misses_of(whole, got, |_| true)
+}
+
+/// An answer [`queue_misses`] compares: the kpi's question of the index
+/// (its four questions, then `--by area`; the first with what befell and
+/// the reads), or `stats --since`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Answer {
+    Kpi(usize),
+    Stats,
+}
+
+/// How many of the kpi's questions [`queue_misses`] compares.
+const KPI_ANSWERS: usize = 5;
+
+/// [`queue_misses`] of the answers `of` takes alone, so that each answer
+/// can be compared by a test of its own.
+fn queue_misses_of(
+    whole: &[LedgerRow],
+    got: &[LedgerRow],
+    of: impl Fn(Answer) -> bool,
+) -> (Vec<String>, Reads) {
     let areas = area_map();
     let every = select(whole.to_vec(), &whole_query());
     let mut misses = Vec::new();
@@ -3627,6 +3649,7 @@ fn queue_misses(whole: &[LedgerRow], got: &[LedgerRow]) -> (Vec<String>, Reads) 
         by: vec!["area".parse().unwrap()],
         ..questions[0].clone()
     });
+    assert_eq!(questions.len(), KPI_ANSWERS);
     let befell = |window: &LedgerWindow| {
         let book = window.post_landing_book();
         json!({
@@ -3648,6 +3671,9 @@ fn queue_misses(whole: &[LedgerRow], got: &[LedgerRow]) -> (Vec<String>, Reads) 
         })
     };
     for (n, query) in questions.iter().enumerate() {
+        if !of(Answer::Kpi(n)) {
+            continue;
+        }
         let value = |window: &LedgerWindow, query: &KpiQuery| {
             serde_json::to_value(
                 kpi_of_window(
@@ -3680,6 +3706,9 @@ fn queue_misses(whole: &[LedgerRow], got: &[LedgerRow]) -> (Vec<String>, Reads) 
             &format!("kpi[{n}]"),
             &mut misses,
         );
+    }
+    if !of(Answer::Stats) {
+        return (misses, reads);
     }
     let sources = StatsSources {
         config_file: &|| Ok(None),
