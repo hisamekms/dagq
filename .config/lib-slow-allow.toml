@@ -1,0 +1,26 @@
+# The allow list of the time gate of the unit tests in src (ADR-t4948-1).
+# `sh scripts/check-lib-test-time.sh` fails when a #[test] in src that the
+# diff added or changed took longer than the threshold in the nextest output
+# of binary dagq or dagq::bin/dagq and has no item here. The threshold, the
+# format and the naming rule are in the header of
+# scripts/check-lib-test-time.sh, and the rule on which reasons may put a
+# test here in docs/development/testing.md, section "判断と境界のtest". The
+# script reads this file and every .config/lib-slow-allow.d/*.toml together.
+#
+# A new item goes in .config/lib-slow-allow.d/t<task ID>.toml, the file of
+# the task that adds it; do not add one to this file, so that tasks adding
+# items change no file in common.
+#
+# Each item is one [[test]] with all three keys:
+#
+# [[test]]
+# name = "application::actor_executor::tests::a_test_name"
+# reason = "the boundary it keeps, or the task or goal that shrinks or moves it"
+# task = 4948          # the task that put the item here
+#
+# name is the full nextest name of the test in binary dagq or dagq::bin/dagq,
+# mods and all; an item with the fn's name alone allows nothing.
+#
+# The slow tests that were there before the gate have no item: the gate
+# looks only at the tests a diff added or changed, so the task that touches
+# one shrinks it or gives it an item.

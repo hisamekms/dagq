@@ -1,0 +1,28 @@
+    Starting 24 tests across 3 binaries
+        PASS [   9.000s] (1/24) dagq gate::tests::an_unchanged_slow_test
+        PASS [   8.000s] (2/24) dagq gate::tests::an_allowed_slow_test
+        PASS [   6.000s] (3/24) dagq gate::tests::a_test_whose_body_changed
+        PASS [   9.000s] (4/24) dagq gate::tests::a_test_whose_helper_changed
+        PASS [   6.000s] [1/3] (5/24) dagq gate::tests::a_new_slow_test
+        PASS [   8.000s] [2/3] (5/24) dagq gate::tests::a_new_slow_test
+        PASS [   7.000s] [3/3] (5/24) dagq gate::tests::a_new_slow_test
+        PASS [   0.500s] (6/24) dagq gate::tests::a_new_fast_test
+        PASS [   9.000s] (7/24) dagq::it gate::tests::a_new_fast_test
+        PASS [   5.000s] (8/24) dagq gate::tests::a_test_at_the_threshold
+\033[32;1m        PASS\033[0m [   6.500s] (9/24) \033[35;1mdagq\033[0m \033[36mgate::tests\033[0m\033[36m::\033[0m\033[34;1ma_coloured_slow_test\033[0m
+        PASS [   9.000s] (10/24) dagq::it gate::tests::a_test_only_dagq_it_times
+        PASS [   9.000s] (11/24) dagq gate::tests::an_array_test
+        PASS [   8.000s] (12/24) dagq application::actor::tests::an_actor_test
+        PASS [   8.000s] (13/24) dagq application::actor::inner::tests::a_test_two_files_down
+        PASS [   9.000s] (14/24) dagq store::tests::a_test_under_a_path_attribute
+        PASS [   9.000s] (15/24) dagq store::tests::an_old_test_under_a_path_attribute
+        PASS [   9.000s] (16/24) dagq store::parts::part::a_test_in_an_inline_mods_file
+        PASS [   9.000s] (17/24) dagq orphan::a_test_no_mod_declares
+        PASS [   6.000s] (18/24) dagq::bin/dagq bin_only::a_bin_test
+        PASS [   6.000s] (19/24) dagq::bin/dagq daemon_tests::a_bin_inline_test
+        PASS [   9.000s] (20/24) dagq::bin/dagq daemon_tests::an_old_bin_test
+        PASS [   9.000s] (21/24) dagq store::helped::inner::a_test_under_a_path_files_mod
+        PASS [   9.000s] (22/24) dagq gate::more::a_test_with_a_plus_plus_line
+        PASS [   9.000s] (23/24) dagq gate::more::a_test_after_a_plus_plus_line
+        PASS [   9.000s] (24/24) dagq gate::more::a_test_after_a_c_raw_string
+     Summary [  20.000s] 24 tests run: 24 passed, 0 skipped

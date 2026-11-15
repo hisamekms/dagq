@@ -1,0 +1,12 @@
+# The allow list of the self-test.
+
+[[test]]
+name = "gate::tests::an_allowed_slow_test"
+reason = "B: the boundary of the fixture"
+task = 4948
+
+# An item with a shorter name does not allow the test of the full name.
+[[test]]
+name = "actor::tests::an_actor_test"
+reason = "B: the same fn under fewer mods"
+task = 4948

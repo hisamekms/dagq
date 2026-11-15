@@ -1,6 +1,7 @@
 # Functions that record one run of a worker's local check (ADR-t2589-1
-# decision 1), sourced by scripts/cargo-brief.sh and
-# scripts/check-it-test-time.sh; not run by itself. They write only when
+# decision 1), sourced by scripts/cargo-brief.sh,
+# scripts/check-it-test-time.sh and scripts/check-lib-test-time.sh; not run
+# by itself. They write only when
 # DAGQ_LOCAL_CHECKS_DIR names the records' directory, which dagq gives each
 # of a worker's turns; without it (a person's shell, outside dagq) the
 # scripts call none of them and run as before.

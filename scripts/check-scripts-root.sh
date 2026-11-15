@@ -10,7 +10,8 @@
 # script in $scripts to a temporary place outside the clone, and checks:
 #
 # (a) each copied script exits 0 with the cwd at the root of the unchanged
-#     clone;
+#     clone (with the arguments of script_args, for a script that needs
+#     some);
 # (b) for each case in $cases, one violation put only into the clone makes the
 #     copied script exit 1, while the same script run from this repository's
 #     root still exits 0;
@@ -41,7 +42,7 @@ set -u
 me=check-scripts-root
 
 # The check scripts that take their root from the cwd's git work tree.
-scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-design-identifiers check-test-rules check-it-added-tests check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages check-local-gates check-it-budget"
+scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-design-identifiers check-test-rules check-it-added-tests check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages check-local-gates check-it-budget check-lib-test-time"
 
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
@@ -68,7 +69,8 @@ check-doc-frontmatter doc_frontmatter_unknown_type
 check-plugin-version plugin_version_mismatch
 check-commit-messages commit_message_prefix
 check-local-gates local_gates_declaration_drift
-check-it-budget it_budget_malformed"
+check-it-budget it_budget_malformed
+check-lib-test-time lib_test_slow_without_an_item"
 
 violate_migration_gap() {
   echo 'SELECT 1;' >migrations/9999_scripts_root_gap.sql
@@ -209,6 +211,26 @@ violate_it_budget_malformed() {
   echo 'zz_scripts_root = 1' >>.config/it-budget.toml
 }
 
+# A #[test] in src added in a commit after the cloned head, which the log of
+# script_args times over the threshold. The script reads the committed diff,
+# so the test is committed on a branch of its own; reset_clone takes it out
+# again.
+violate_lib_test_slow_without_an_item() {
+  git checkout --quiet -b zz-scripts-root-commits &&
+    printf '\n#[cfg(test)]\nmod zz_scripts_root_slow {\n    #[test]\n    fn a_slow_test() {}\n}\n' >>src/lib.rs &&
+    git -c user.name="$me" -c user.email="$me@localhost" -c commit.gpgsign=false \
+      commit --quiet --no-verify -m 'test: a slow test fixture' src/lib.rs
+}
+
+# The arguments a script needs, by name: check-lib-test-time diffs from the
+# cloned head and reads a log that times the test of
+# violate_lib_test_slow_without_an_item over its threshold.
+script_args() {
+  case "$1" in
+    check-lib-test-time) printf '%s\n' --base "$head" "$tmp/lib-test-time.log" ;;
+  esac
+}
+
 # A worker's environment names its records' directory: without this,
 # check-local-gates would read records of the worker's tree, outside the
 # clone, and its result would depend on them.
@@ -270,9 +292,25 @@ expect() {
   fi
 }
 
+# expect_script <want-exit> <label> <dir> <script name> <script path>: expect
+# with the arguments of script_args (one per line, so a path may hold spaces).
+expect_script() {
+  es_want=$1 es_label=$2 es_dir=$3 es_name=$4 es_path=$5
+  set -- "$es_path"
+  while IFS= read -r es_arg; do
+    [ -z "$es_arg" ] || set -- "$@" "$es_arg"
+  done <<EOF_ARGS
+$(script_args "$es_name")
+EOF_ARGS
+  expect "$es_want" "$es_label" "$es_dir" "$@"
+}
+
+echo '        PASS [  60.000s] (1/1) dagq zz_scripts_root_slow::a_slow_test' >"$tmp/lib-test-time.log" ||
+  prep_fail "cannot write $tmp/lib-test-time.log"
+
 # (a) The unchanged clone.
 for s in $scripts; do
-  expect 0 "$s on the unchanged clone" "$clone" "$bin/$s.sh"
+  expect_script 0 "$s on the unchanged clone" "$clone" "$s" "$bin/$s.sh"
 done
 
 # (b) One violation only in the clone.
@@ -287,11 +325,12 @@ while read -r s c; do
       ;;
   esac
   (cd "$clone" && "violate_$c") </dev/null || prep_fail "cannot put $c into the clone"
-  # Nothing is committed but by violate_commit_message_prefix and
-  # violate_design_doc_tight_item_removed: the other
+  # Nothing is committed but by violate_commit_message_prefix,
+  # violate_design_doc_tight_item_removed and
+  # violate_lib_test_slow_without_an_item: the other
   # scripts read the working tree.
-  expect 1 "$s with $c in the clone" "$clone" "$bin/$s.sh"
-  expect 0 "$s in $repo while the clone has $c" "$repo" "$repo/scripts/$s.sh"
+  expect_script 1 "$s with $c in the clone" "$clone" "$s" "$bin/$s.sh"
+  expect_script 0 "$s in $repo while the clone has $c" "$repo" "$s" "$repo/scripts/$s.sh"
   reset_clone
 done <<EOF
 $cases
@@ -338,7 +377,7 @@ if git -C "$outside" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "$me: $outside is inside a git work tree; fallback to the script's location not checked"
 else
   for s in $scripts; do
-    expect 2 "$s with the cwd outside a git work tree" "$outside" "$bin/$s.sh"
+    expect_script 2 "$s with the cwd outside a git work tree" "$outside" "$s" "$bin/$s.sh"
   done
 fi
 
