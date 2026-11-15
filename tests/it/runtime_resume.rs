@@ -997,8 +997,7 @@ fn earlier_resumes(queue: &mut SqliteQueue, run: &TaskRun, resumes: usize) {
 #[test]
 fn a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch() {
     let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    backend.resume_timeout = Duration::from_secs(1);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     let source = run.result_commit().cloned().unwrap();
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -1006,7 +1005,8 @@ fn a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch() {
     // The last session does not resolve it: it never goes idle and exits
     // at the /exit of the resume timeout.
     backend.resume_script_for(2, "await_exit");
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let options = resume_timeout_options(supervise_options(4, true), Duration::from_secs(1));
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
 
@@ -2034,11 +2034,11 @@ fn a_resumed_session_that_ignores_its_exit_request_is_let_go_after_the_exit_time
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     let (held, release) = hold_turn_starts(dir.path(), &mut backend);
-    let timeouts = (backend.exit_timeout, backend.resume_timeout);
+    let exit_timeout = backend.exit_timeout;
     backend.exit_timeout = Duration::from_millis(500);
-    backend.resume_timeout = Duration::from_secs(1);
     backend.resume_script_for(2, &format!("await_message; {HOLD}"));
-    let outcome = supervise(&db, &repo, &backend).unwrap();
+    let options = resume_timeout_options(supervise_options(4, true), Duration::from_secs(1));
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(2)).unwrap();
@@ -2072,7 +2072,7 @@ fn a_resumed_session_that_ignores_its_exit_request_is_let_go_after_the_exit_time
     // it left no longer blocks the run.
     fs::write(&held, "").unwrap();
     backend.join();
-    (backend.exit_timeout, backend.resume_timeout) = timeouts;
+    backend.exit_timeout = exit_timeout;
     backend.resume_script_for(
         2,
         &format!("{release}; await_message; resolve; receipt \"$(git rev-parse HEAD)\""),
@@ -2122,7 +2122,7 @@ fn a_resumed_session_whose_wrapper_goes_silent_is_asked_to_exit_once_then_let_go
             rusqlite::params![run.id(), dagq::domain::HEARTBEAT_TIMEOUT_SECS + 5],
         )
         .unwrap();
-    // The silence, not the resume timeout (120 seconds), asks for the exit.
+    // The silence, not the resume timeout (the default 3600 seconds), asks for the exit.
     wait_until(&db, Duration::from_secs(30), |queue| {
         !payloads(&queue.show(TaskId::new(2)).unwrap(), "resume_finished").is_empty()
     });

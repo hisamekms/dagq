@@ -215,11 +215,6 @@ pub trait SessionWrappers {
     fn reopen_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(60)
     }
-    /// How long a resumed session may work on the resolution request
-    /// without going idle before the supervisor asks it to exit.
-    fn resume_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(3600)
-    }
 }
 
 /// What the service manager had under a label when `uninstall` ran.

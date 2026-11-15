@@ -612,9 +612,9 @@ pub(super) fn registration_pending(now: Instant, startup: Instant, timeout: Dura
 pub(super) fn waited_out_after_receipt(
     now: Instant,
     receipt_seen_at: Option<Instant>,
-    timeout: Duration,
+    stall: &StallConfig,
 ) -> bool {
-    receipt_seen_at.is_some_and(|at| passed(now, at, timeout))
+    receipt_seen_at.is_some_and(|at| passed(now, at, stall.resume_timeout()))
 }
 
 /// Whether a watch that follows the `worker_question`s created from
@@ -924,7 +924,7 @@ impl SessionWatch {
         let waited_out = waited_out_after_receipt(
             sv.generators.clock.monotonic(),
             self.receipt_seen_at,
-            sv.sessions.resume_timeout(),
+            &sv.stall,
         );
         if self.receipt_seen
             && self.exit_requested.is_none()
@@ -936,7 +936,7 @@ impl SessionWatch {
                 // like background work after the receipt.
                 Some(idle)
                     if self.stale.is_some_and(|n| {
-                        !n.answered_by(idle.modified()) && !n.waited_out(&*sv.files, sv.sessions)
+                        !n.answered_by(idle.modified()) && !n.waited_out(&*sv.files, &sv.stall)
                     }) =>
                 {
                     None
@@ -1374,7 +1374,7 @@ impl Supervisor<'_> {
             &HandoffMaterial {
                 peak_context,
                 threshold,
-                resume_timeout: self.sessions.resume_timeout().as_secs(),
+                resume_timeout: self.stall.resume_timeout().as_secs(),
                 commits: &commits,
                 changes: &changes,
                 head_tree: head_tree.as_deref(),
@@ -1516,14 +1516,23 @@ mod tests {
     #[test]
     fn background_work_after_the_receipt_is_waited_out_at_the_resume_timeout() {
         let t0 = origin();
+        let default = StallConfig::default();
+        let hour = Duration::from_secs(3600);
+        assert!(!waited_out_after_receipt(
+            t0 + hour - MS,
+            Some(t0),
+            &default
+        ));
+        assert!(waited_out_after_receipt(t0 + hour, Some(t0), &default));
+        let stall = default.with_millis("resume_timeout_secs", 900_000);
         let timeout = Duration::from_secs(900);
-        assert!(!waited_out_after_receipt(t0 + timeout * 2, None, timeout));
+        assert!(!waited_out_after_receipt(t0 + timeout * 2, None, &stall));
         assert!(!waited_out_after_receipt(
             t0 + timeout - MS,
             Some(t0),
-            timeout
+            &stall
         ));
-        assert!(waited_out_after_receipt(t0 + timeout, Some(t0), timeout));
+        assert!(waited_out_after_receipt(t0 + timeout, Some(t0), &stall));
     }
 
     /// An answered `worker_question` of the run, created at `created_at`.

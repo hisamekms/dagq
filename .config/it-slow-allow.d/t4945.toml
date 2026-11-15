@@ -1,0 +1,8 @@
+# The items of task 4945 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 14.9s in a 60s stress under the host's load; 16.3s before this task (docs/plans/it-reduction/it-test-secs-2026-11.tsv), whose change is only where the timeout is read from
+[[test]]
+name = "runtime_review_questions::an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout"
+reason = "B 境界（SQLite・supervisor の配線・実の git）: revise の後に開いた worker_question が SQLite の has_unclosed_worker_question_since で見つかって、supervisor の時計で resume の時間切れを越えても revise を終わらせず exit も求めず、queue の answer が session に運ばれて receipt を書き直し、実の git に着地することを 1 case で確かめる（SQLite の問い合わせと配線はこの通しでしか示せない）。待たせる判断は revise::tests（open_question_hold）、時間切れの値は revise::tests::a_revise_ends_at_its_resume_timeout_since_the_last_send"
+task = 4945

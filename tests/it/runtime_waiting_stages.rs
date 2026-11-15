@@ -174,11 +174,10 @@ fn supervise_in_thread(
 fn a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped() {
     let (_dir, repo, db) = fixture();
     add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second", &[]);
-    let mut backend = TestWorkspace::new(&db, false, REVISE_ASKING_AGENT);
-    backend.resume_timeout = STAGE_TIMEOUT;
+    let backend = TestWorkspace::new(&db, false, REVISE_ASKING_AGENT);
     backend.script_for(2, BESIDE_AGENT);
     let backend = Arc::new(backend);
-    let options = supervise_options(1, true);
+    let options = resume_timeout_options(supervise_options(1, true), STAGE_TIMEOUT);
     let passes = options.passes.clone();
     // The first revise, the second task's pass while the first waits, and
     // the pass of the first once answered.
@@ -502,17 +501,16 @@ fn run_the_stage_clock_out(ahead: &MonotonicAhead, passes: &AtomicU64) {
 #[test]
 fn a_resume_question_waits_in_its_slot_then_outside_it_with_its_clock_stopped() {
     let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "third", &[]);
-    backend.resume_timeout = STAGE_TIMEOUT;
     backend.resume_script_for(2, &resume_asking(true));
     backend.script_for(3, ASKING_AGENT);
     let backend = Arc::new(backend);
     let (options, ahead) = supervise_options_ahead(2, true);
     let options = SuperviseOptions {
         max_waiting: Some(1),
-        ..options
+        ..resume_timeout_options(options, STAGE_TIMEOUT)
     };
     let passes = options.passes.clone();
     let supervisor = supervise_in_thread(&db, &repo, &backend, None, options);

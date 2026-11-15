@@ -163,6 +163,11 @@ fn a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once() 
 const RESOLVES_ON_THE_SECOND_ATTEMPT: &str = "await_message; mark=\"$(dirname \"$RECEIPT\")/attempted\"\n\
     if [ -f \"$mark\" ]; then receipt \"$(git rev-parse HEAD)\"; else : > \"$mark\"; resolve; fi";
 
+/// The resume timeout of [`stale_request_across_a_wait`]: past the 60 s
+/// the request is to be settled within, so a request settled by its timeout
+/// and not by the idle fails at once.
+const STALE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// A resumed session asked to rewrite its stale receipt that asks a
 /// `worker_question` right after the request, waits for the answer outside
 /// its slot and leaves the receipt as it was: the attempt ends unresolved
@@ -190,7 +195,12 @@ esac"#
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || {
             let _waiting = crate::common::within(crate::common::STEP_LIMIT, "supervise to return");
-            supervise_with(&db, &repo, &backend, &supervise_options(1, true))
+            supervise_with(
+                &db,
+                &repo,
+                &backend,
+                &resume_timeout_options(supervise_options(1, true), STALE_TIMEOUT),
+            )
         })
     };
     wait_until(&db, Duration::from_secs(60), |_| {
@@ -226,7 +236,7 @@ esac"#
     let resolved = kinds.iter().position(|k| *k == "stale_receipt_resolved");
     assert!(regained.is_some() && regained < resolved, "{kinds:?}");
     // The session ended its turn right after the answer, so the request is
-    // settled by that idle, not by its 120-second timeout: a restart of
+    // settled by that idle, not by its [`STALE_TIMEOUT`]: a restart of
     // the request's clock after the answer's send left that idle unseen
     // (task 931).
     let at = |kind: &str| {

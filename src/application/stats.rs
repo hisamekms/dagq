@@ -349,3 +349,54 @@ pub struct StatsGitReads {
     #[serde(default)]
     pub history: Option<serde_json::Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{EventId, EventKind, RunEvent};
+    use serde_json::json;
+
+    fn loaded(id: i64, payload: serde_json::Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: EventKind::StallConfigLoaded.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    /// `stats` takes the resume timeout of the latest supervisor's
+    /// `stall_config_loaded`; one recorded before the key existed reads as
+    /// the default 3600 s, whatever the file says.
+    #[test]
+    fn the_resume_timeout_is_the_latest_supervisors_or_its_default() {
+        let file = || {
+            Ok(Some(StallConfig {
+                resume_timeout_secs: 60,
+                ..StallConfig::default()
+            }))
+        };
+        let old = [loaded(
+            1,
+            json!({"turn_limit_secs": 14400, "supervisor": "s"}),
+        )];
+        let report = stall_config(&old, &file).unwrap();
+        assert_eq!(report.source, "supervisor");
+        assert_eq!(report.config.resume_timeout_secs, 3600);
+        let new = [
+            old[0].clone(),
+            loaded(2, json!({"resume_timeout_secs": 7200, "supervisor": "t"})),
+        ];
+        let report = stall_config(&new, &file).unwrap();
+        assert_eq!(report.config.resume_timeout_secs, 7200);
+        let report = stall_config(&[], &file).unwrap();
+        assert_eq!(
+            (report.source, report.config.resume_timeout_secs),
+            ("file", 60)
+        );
+    }
+}

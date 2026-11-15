@@ -4180,7 +4180,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&result.stall_config).unwrap(),
-            json!({"idle_without_receipt_secs": 1200, "send_confirm_secs": 60, "background_alert_secs": 1800, "idle_process_secs": 1800, "screen_idle_secs": 120, "turn_silence_secs": 900, "turn_limit_secs": 14400, "source": "default"})
+            json!({"idle_without_receipt_secs": 1200, "send_confirm_secs": 60, "background_alert_secs": 1800, "idle_process_secs": 1800, "screen_idle_secs": 120, "turn_silence_secs": 900, "turn_limit_secs": 14400, "resume_timeout_secs": 3600, "source": "default"})
         );
     }
 

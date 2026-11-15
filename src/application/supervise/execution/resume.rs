@@ -206,7 +206,7 @@ impl Supervisor<'_> {
             known_failures: self.request_known_failures(&run, &format!("resume-{attempt}")),
             carried_answers,
             answers_file: answers_file(&run, &format!("resume-{attempt}")),
-            resume_timeout: self.sessions.resume_timeout().as_secs(),
+            resume_timeout: self.stall.resume_timeout().as_secs(),
         };
         match self.start_resume(&run, attempt, &request, run_env) {
             Ok(watch) => {
@@ -1555,10 +1555,10 @@ pub(super) fn exit_wait(now: Instant, requested: Instant, timeout: Duration) -> 
 pub(super) fn resume_deadline(
     now: Instant,
     sent: Instant,
-    timeout: Duration,
+    stall: &StallConfig,
     stale_waits: bool,
 ) -> Option<&'static str> {
-    (passed(now, sent, timeout) && !stale_waits)
+    (passed(now, sent, stall.resume_timeout()) && !stale_waits)
         .then_some("did not finish within the resume timeout")
 }
 
@@ -1980,11 +1980,11 @@ impl ResumeWatch {
         // A request to rewrite a stale receipt gets its own timeout.
         let stale_waits = self
             .stale
-            .is_some_and(|n| !n.settled && !n.waited_out(&*sv.files, sv.sessions));
+            .is_some_and(|n| !n.settled && !n.waited_out(&*sv.files, &sv.stall));
         resume_deadline(
             sv.generators.clock.monotonic(),
             sent,
-            sv.sessions.resume_timeout(),
+            &sv.stall,
             stale_waits,
         )
     }
@@ -2055,19 +2055,27 @@ mod tests {
     #[test]
     fn a_resume_is_asked_to_exit_at_its_timeout_unless_a_stale_request_waits() {
         let sent = Instant::now();
+        let default = StallConfig::default();
+        let hour = Duration::from_secs(3600);
+        assert_eq!(
+            resume_deadline(sent + hour - MS, sent, &default, false),
+            None
+        );
+        assert!(resume_deadline(sent + hour, sent, &default, false).is_some());
+        let stall = default.with_millis("resume_timeout_secs", 1_800_000);
         let timeout = Duration::from_secs(1800);
         assert_eq!(
-            resume_deadline(sent + timeout - MS, sent, timeout, false),
+            resume_deadline(sent + timeout - MS, sent, &stall, false),
             None
         );
         assert_eq!(
-            resume_deadline(sent + timeout, sent, timeout, false),
+            resume_deadline(sent + timeout, sent, &stall, false),
             Some("did not finish within the resume timeout")
         );
-        assert_eq!(resume_deadline(sent + timeout, sent, timeout, true), None);
+        assert_eq!(resume_deadline(sent + timeout, sent, &stall, true), None);
         let restarted = sent + timeout - MS;
         assert_eq!(
-            resume_deadline(sent + timeout, restarted, timeout, false),
+            resume_deadline(sent + timeout, restarted, &stall, false),
             None
         );
     }

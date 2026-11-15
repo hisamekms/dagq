@@ -488,9 +488,6 @@ impl SessionWrappers for RecordingSessions<'_> {
     fn reopen_interval(&self) -> Duration {
         self.inner.reopen_interval()
     }
-    fn resume_timeout(&self) -> Duration {
-        self.inner.resume_timeout()
-    }
 }
 
 #[cfg(test)]

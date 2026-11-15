@@ -8316,6 +8316,36 @@ enabled = true
         );
     }
 
+    /// `[stall] resume_timeout_secs` sets how long the supervisor waits for
+    /// a session it typed a request into; no key and no table keep the
+    /// 3600 s default, and a value that is not a positive whole number of
+    /// seconds stops the read as the other keys of the table do.
+    #[test]
+    fn loads_the_resume_timeout_of_the_stall_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |text: &str| {
+            fs::write(dir.path().join(CONFIG_FILE_NAME), text).unwrap();
+            load_stall_config(dir.path())
+        };
+        let set = load("[stall]\nresume_timeout_secs = 7200\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(set.resume_timeout_secs, 7200);
+        assert_eq!(set.resume_timeout(), Duration::from_secs(7200));
+        for text in ["[stall]\nsend_confirm_secs = 30\n", "[supervisor]\n", ""] {
+            let config = load(text).unwrap().unwrap();
+            assert_eq!(config.resume_timeout_secs, 3600, "{text:?}");
+        }
+        for value in ["0", "-1", "1.5", "\"7200\""] {
+            let error =
+                load(&format!("[stall]\nresume_timeout_secs = {value}\n")).expect_err(value);
+            assert!(
+                format!("{error:#}").contains("resume_timeout_secs"),
+                "{value}: {error:#}"
+            );
+        }
+    }
+
     #[test]
     fn loads_the_conflicts_table_of_the_file_in_the_root() {
         let dir = tempfile::tempdir().unwrap();

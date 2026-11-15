@@ -833,6 +833,11 @@ mod tests {
     /// The resume timeout of these tests.
     const TIMEOUT: Duration = Duration::from_secs(1800);
 
+    /// The `[stall]` whose resume timeout is [`TIMEOUT`].
+    fn stall() -> StallConfig {
+        StallConfig::default().with_millis("resume_timeout_secs", 1_800_000)
+    }
+
     /// How long the stage ran before its question: the time left of its
     /// timeout when the wait began is `TIMEOUT - BEFORE`.
     const BEFORE: Duration = Duration::from_secs(600);
@@ -941,7 +946,7 @@ mod tests {
         let back = origin + BEFORE + WAITED;
         // Had the clock run through the wait, the timeout would have ended
         // the resume before it came back.
-        assert!(resume_deadline(origin + TIMEOUT, origin, TIMEOUT, false).is_some());
+        assert!(resume_deadline(origin + TIMEOUT, origin, &stall(), false).is_some());
         assert_eq!(resume_of(&table).message_sent.unwrap().0, origin);
 
         let regained = table.regain(0, &files, back);
@@ -952,10 +957,10 @@ mod tests {
         // The request's own time, which an idle marker is judged by, is kept.
         assert_eq!(sent_at, typed);
         for at in [back, back + (TIMEOUT - BEFORE), back + TIMEOUT - MS] {
-            assert_eq!(resume_deadline(at, sent, TIMEOUT, false), None, "{at:?}");
+            assert_eq!(resume_deadline(at, sent, &stall(), false), None, "{at:?}");
         }
         assert_eq!(
-            resume_deadline(back + TIMEOUT, sent, TIMEOUT, false),
+            resume_deadline(back + TIMEOUT, sent, &stall(), false),
             Some("did not finish within the resume timeout")
         );
         let stale = watch.stale.unwrap();
@@ -1019,7 +1024,7 @@ mod tests {
         use crate::domain::run_phase::Phase as Recorded;
         assert_eq!(phase.recorded(), Recorded::Waiting { in_slot: true });
         let back = origin + BEFORE + WAITED;
-        assert!(revise_deadline(back, origin, TIMEOUT).is_some());
+        assert!(revise_deadline(back, origin, &stall()).is_some());
         phase.restart_stage_clocks(&files, back);
         let Phase::Revise(watch) = &phase else {
             panic!("not a revise");
@@ -1029,9 +1034,12 @@ mod tests {
         assert_eq!(phase.recorded(), Recorded::Revise);
         assert_eq!(watch.sent_at, typed);
         for at in [back, back + (TIMEOUT - BEFORE), back + TIMEOUT - MS] {
-            assert!(revise_deadline(at, watch.sent, TIMEOUT).is_none(), "{at:?}");
+            assert!(
+                revise_deadline(at, watch.sent, &stall()).is_none(),
+                "{at:?}"
+            );
         }
-        assert!(revise_deadline(back + TIMEOUT, watch.sent, TIMEOUT).is_some());
+        assert!(revise_deadline(back + TIMEOUT, watch.sent, &stall()).is_some());
 
         let mut awaiting = Phase::AwaitingSlot;
         awaiting.restart_stage_clocks(&files, back);

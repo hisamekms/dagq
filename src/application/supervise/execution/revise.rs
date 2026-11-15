@@ -216,8 +216,9 @@ pub(super) fn rewritten_after(modified: SystemTime, sent_at: SystemTime) -> bool
 pub(super) fn revise_deadline(
     now: Instant,
     sent: Instant,
-    timeout: Duration,
+    stall: &StallConfig,
 ) -> Option<ReviseOutcome> {
+    let timeout = stall.resume_timeout();
     passed(now, sent, timeout).then(|| {
         ReviseOutcome::Ended(format!(
             "did not rewrite the receipt within {} seconds",
@@ -625,7 +626,7 @@ impl ReviseWatch {
             TurnOutcome::CheckDeadline => Ok(revise_deadline(
                 sv.generators.clock.monotonic(),
                 self.sent,
-                sv.sessions.resume_timeout(),
+                &sv.stall,
             )),
         }
     }
@@ -661,17 +662,22 @@ mod tests {
     #[test]
     fn a_revise_ends_at_its_resume_timeout_since_the_last_send() {
         let ms = Duration::from_millis(1);
-        let timeout = Duration::from_secs(1800);
         let sent = Instant::now();
-        assert!(revise_deadline(sent, sent, timeout).is_none());
-        assert!(revise_deadline(sent + timeout - ms, sent, timeout).is_none());
-        let Some(ReviseOutcome::Ended(why)) = revise_deadline(sent + timeout, sent, timeout) else {
+        let default = StallConfig::default();
+        let hour = Duration::from_secs(3600);
+        assert!(revise_deadline(sent + hour - ms, sent, &default).is_none());
+        assert!(revise_deadline(sent + hour, sent, &default).is_some());
+        let stall = default.with_millis("resume_timeout_secs", 1_800_000);
+        let timeout = Duration::from_secs(1800);
+        assert!(revise_deadline(sent, sent, &stall).is_none());
+        assert!(revise_deadline(sent + timeout - ms, sent, &stall).is_none());
+        let Some(ReviseOutcome::Ended(why)) = revise_deadline(sent + timeout, sent, &stall) else {
             panic!("a revise at its timeout ends");
         };
         assert_eq!(why, "did not rewrite the receipt within 1800 seconds");
         let restarted = sent + timeout - ms;
-        assert!(revise_deadline(sent + timeout, restarted, timeout).is_none());
-        assert!(revise_deadline(restarted + timeout, restarted, timeout).is_some());
+        assert!(revise_deadline(sent + timeout, restarted, &stall).is_none());
+        assert!(revise_deadline(restarted + timeout, restarted, &stall).is_some());
     }
 
     /// Task 1197: an adopted request's `sent_at` is read back to the

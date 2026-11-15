@@ -2,6 +2,7 @@ use super::*;
 use crate::application::memory_files::MemoryFiles;
 use crate::application::review::{LANDING_ANSWERS_INTRO, PersonAnswer, PersonAnswers};
 use crate::domain::local_checks::LocalChecks;
+use crate::domain::stall::StallConfig;
 use crate::domain::unapplied_decisions::{DecisionKind, PersonDecision, RetriedBy, RetryEnd};
 use crate::domain::worker::WorkerMode;
 use crate::domain::{
@@ -466,6 +467,15 @@ const CHECKS_TOUCHED_LINE: &str =
 fn a_resume_not_from_a_failed_verification_and_a_revise_run_the_checks_their_fixes_touch_once() {
     let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
     let worker = run(7, RunStatus::NeedsSession, None);
+    // The seconds the supervisor passes: its `[stall] resume_timeout_secs`,
+    // set (7200) or the default (3600).
+    let seconds = |stall: StallConfig| stall.resume_timeout().as_secs();
+    let set = seconds(StallConfig {
+        resume_timeout_secs: 7200,
+        ..StallConfig::default()
+    });
+    let default = seconds(StallConfig::default());
+    assert_eq!((set, default), (7200, 3600));
     let resume = |kind, resume_timeout| {
         let request = ResumeRequest {
             main: CommitSha::try_from(SHA).unwrap(),
@@ -502,10 +512,10 @@ fn a_resume_not_from_a_failed_verification_and_a_revise_run_the_checks_their_fix
         ResumeKind::Hold,
     ]
     .into_iter()
-    .flat_map(|kind| [(1234, resume(kind, 1234)), (3600, resume(kind, 3600))])
+    .flat_map(|kind| [(set, resume(kind, set)), (default, resume(kind, default))])
     .collect::<Vec<_>>();
-    texts.push((1234, revise(1234)));
-    texts.push((3600, revise(3600)));
+    texts.push((set, revise(set)));
+    texts.push((default, revise(default)));
     for (seconds, text) in &texts {
         let steps = &text[text.find("Steps:").unwrap()..];
         assert!(steps.contains(CHECKS_ONCE_LINE), "{text}");
@@ -516,7 +526,7 @@ fn a_resume_not_from_a_failed_verification_and_a_revise_run_the_checks_their_fix
             )),
             "{text}"
         );
-        let other = if *seconds == 1234 { 3600 } else { 1234 };
+        let other = if *seconds == set { default } else { set };
         assert!(!text.contains(&format!("within {other} seconds")), "{text}");
         let lower = text.to_lowercase();
         for tool in ["cargo", "nextest", "llvm-cov", "check-local-gates"] {
@@ -7640,10 +7650,14 @@ fn a_handoff_shows_only_the_local_checks_on_heads_tree() {
 #[test]
 fn a_handoff_says_to_read_only_what_is_needed_and_the_resume_timeout() {
     let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let stall = StallConfig {
+        resume_timeout_secs: 1234,
+        ..StallConfig::default()
+    };
     let text = handoff_text(
         &run,
         &HandoffMaterial {
-            resume_timeout: 1234,
+            resume_timeout: stall.resume_timeout().as_secs(),
             ..bare_handoff("the request")
         },
     )

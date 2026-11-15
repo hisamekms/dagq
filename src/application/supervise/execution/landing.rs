@@ -2366,7 +2366,7 @@ impl Supervisor<'_> {
             (number, limit),
             &verdict.reasons,
             Some(&findings_file.to_string_lossy()),
-            self.sessions.resume_timeout().as_secs(),
+            self.stall.resume_timeout().as_secs(),
         )?;
         let cut_findings = request.bytes.omitted.contains_key("findings");
         // Past `[fresh_session]`, the request goes to a new session in a
@@ -2729,7 +2729,7 @@ impl Supervisor<'_> {
                         .request_known_failures(run, &format!("conflict-{attempt}")),
                     carried_answers: Vec::new(),
                     answers_file: None,
-                    resume_timeout: self.sessions.resume_timeout().as_secs(),
+                    resume_timeout: self.stall.resume_timeout().as_secs(),
                 };
                 crate::application::run_git::hand_main(&*self.repository, run, &main)?;
                 let message = resume_request(&task, run, &request, &landed)?

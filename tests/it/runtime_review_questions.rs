@@ -155,7 +155,7 @@ fn a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout() {
     let (_dir, repo, db) = fixture();
     // The turn of the revise runs on until it is stopped.
     let backend = TestWorkspace::new(&db, false, &on_revise("while :; do sleep 0.05; done"));
-    let timeout = backend.resume_timeout;
+    let timeout = dagq::domain::stall::StallConfig::default().resume_timeout();
     let backend = Arc::new(backend);
     let reviewer = Arc::new(TestReviewer::new(&[slow_revise(&db)]));
     let (supervisor, passes, ahead) = run_supervisor_ahead(&db, &repo, &backend, &reviewer);
@@ -238,7 +238,7 @@ fn an_open_question_without_a_rewritten_receipt_holds_past_the_resume_timeout() 
              receipt \"$(git rev-parse HEAD)\"",
         ),
     );
-    let timeout = backend.resume_timeout;
+    let timeout = dagq::domain::stall::StallConfig::default().resume_timeout();
     let backend = Arc::new(backend);
     let reviewer = Arc::new(TestReviewer::new(&[
         verdict("revise", &["add a line"], "one gap"),

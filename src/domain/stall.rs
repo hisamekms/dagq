@@ -42,6 +42,8 @@ pub const DEFAULT_SCREEN_IDLE_SECS: i64 = 2 * 60;
 pub const DEFAULT_TURN_SILENCE_SECS: i64 = 15 * 60;
 /// The default of [`StallConfig::turn_limit_secs`].
 pub const DEFAULT_TURN_LIMIT_SECS: i64 = 4 * 60 * 60;
+/// The default of [`StallConfig::resume_timeout_secs`].
+pub const DEFAULT_RESUME_TIMEOUT_SECS: i64 = 60 * 60;
 
 /// The event the supervisor records with the values it loaded at start.
 pub const STALL_CONFIG_LOADED: &str = super::event_kind::STALL_CONFIG_LOADED;
@@ -83,6 +85,17 @@ pub struct StallConfig {
     /// How long one turn of a headless worker may run before its wrapper
     /// stops it; passed like [`Self::turn_silence_secs`].
     pub turn_limit_secs: i64,
+    /// How long the supervisor waits, once it has typed a request into a
+    /// run's session (a review's revise, a resolution request, the answer
+    /// to a worker question, a request to rewrite a stale receipt), for the
+    /// session to rewrite its receipt and go idle, and after a receipt for
+    /// the background work it reported to end, before it asks the session
+    /// to exit and leaves the run to a person; the seconds the worker's
+    /// prompt says it has. Counted from the last request or answer sent;
+    /// the clock stops while the run waits out of its slot and starts over
+    /// once it is back (ADR-0071 decisions 15 and 16). The wait for the
+    /// wrapper to register before a request is sent is not this one.
+    pub resume_timeout_secs: i64,
     /// The thresholds a test set below a second (task 1045), which the
     /// checks use in place of the seconds; `[stall]` never sets them.
     #[serde(skip)]
@@ -93,7 +106,7 @@ pub struct StallConfig {
 /// position of their key in [`StallConfig::KEYS`]: none unless a test
 /// sets one ([`StallConfig::with_millis`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct StallMillis([Option<u64>; 7]);
+pub struct StallMillis([Option<u64>; 8]);
 
 impl Default for StallConfig {
     fn default() -> Self {
@@ -105,6 +118,7 @@ impl Default for StallConfig {
             screen_idle_secs: DEFAULT_SCREEN_IDLE_SECS,
             turn_silence_secs: DEFAULT_TURN_SILENCE_SECS,
             turn_limit_secs: DEFAULT_TURN_LIMIT_SECS,
+            resume_timeout_secs: DEFAULT_RESUME_TIMEOUT_SECS,
             millis: StallMillis::default(),
         }
     }
@@ -112,7 +126,7 @@ impl Default for StallConfig {
 
 impl StallConfig {
     /// The setting names of the `[stall]` table.
-    pub const KEYS: [&str; 7] = [
+    pub const KEYS: [&str; 8] = [
         "idle_without_receipt_secs",
         "send_confirm_secs",
         "background_alert_secs",
@@ -120,6 +134,7 @@ impl StallConfig {
         "screen_idle_secs",
         "turn_silence_secs",
         "turn_limit_secs",
+        "resume_timeout_secs",
     ];
 
     /// The setting `key` set to `secs` (and no longer in milliseconds);
@@ -179,6 +194,7 @@ impl StallConfig {
             "screen_idle_secs" => &mut self.screen_idle_secs,
             "turn_silence_secs" => &mut self.turn_silence_secs,
             "turn_limit_secs" => &mut self.turn_limit_secs,
+            "resume_timeout_secs" => &mut self.resume_timeout_secs,
             _ => return None,
         })
     }
@@ -205,6 +221,11 @@ impl StallConfig {
     /// `idle_process_secs` as a [`Duration`].
     pub fn idle_process(&self) -> Duration {
         self.known("idle_process_secs")
+    }
+
+    /// `resume_timeout_secs` as a [`Duration`].
+    pub fn resume_timeout(&self) -> Duration {
+        self.known("resume_timeout_secs")
     }
 
     /// The limits a headless worker's turns are held to.
@@ -311,6 +332,35 @@ mod tests {
         assert_eq!(StallConfig::default().set("other", 1), None);
     }
 
+    /// A `stall_config_loaded` a supervisor recorded before
+    /// `resume_timeout_secs` was a key reads as the default, 3600 s; one
+    /// that has the key reads as its value.
+    #[test]
+    fn a_loaded_config_without_the_resume_timeout_keeps_its_default() {
+        let old = [event(
+            1,
+            STALL_CONFIG_LOADED,
+            json!({"idle_without_receipt_secs": 600, "turn_limit_secs": 14400}),
+        )];
+        let loaded = StallConfig::loaded(&old).unwrap();
+        assert_eq!(loaded.resume_timeout_secs, DEFAULT_RESUME_TIMEOUT_SECS);
+        assert_eq!(loaded.resume_timeout(), Duration::from_secs(3600));
+        let new = [event(
+            1,
+            STALL_CONFIG_LOADED,
+            serde_json::to_value(StallConfig {
+                resume_timeout_secs: 7200,
+                ..StallConfig::default()
+            })
+            .unwrap(),
+        )];
+        assert_eq!(new[0].payload["resume_timeout_secs"], 7200);
+        assert_eq!(
+            StallConfig::loaded(&new).unwrap().resume_timeout(),
+            Duration::from_secs(7200)
+        );
+    }
+
     /// Task 1045: a test sets a threshold in milliseconds; the checks wait
     /// that long, events keep whole seconds (rounded up), and setting the
     /// seconds again drops the milliseconds. `[stall]`'s seconds are
@@ -322,6 +372,7 @@ mod tests {
         assert_eq!(config.send_confirm(), Duration::from_secs(60));
         assert_eq!(config.background_alert(), Duration::from_secs(30 * 60));
         assert_eq!(config.idle_process(), Duration::from_secs(30 * 60));
+        assert_eq!(config.resume_timeout(), Duration::from_secs(3600));
         assert_eq!(
             config.threshold("screen_idle_secs"),
             Some(Duration::from_secs(2 * 60))
@@ -339,6 +390,7 @@ mod tests {
         assert_eq!(short.idle_without_receipt_secs, 1);
         assert_eq!(short.turn_limits().silence(), Duration::from_millis(200));
         assert_eq!(short.turn_limits().limit(), Duration::from_millis(200));
+        assert_eq!(short.resume_timeout(), Duration::from_millis(200));
         let json = serde_json::to_value(short).unwrap();
         assert_eq!(json["send_confirm_secs"], 1);
         assert!(json.get("millis").is_none(), "{json}");

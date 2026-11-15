@@ -248,15 +248,16 @@ pub(super) fn nudge_stale_receipt(
 impl StaleNudge {
     /// The session did not answer the request within the resume timeout:
     /// the run goes on as before without waiting longer.
-    pub(super) fn waited_out(&self, files: &dyn RunFiles, sessions: &dyn SessionWrappers) -> bool {
-        self.waited_out_at(files.now(), sessions.resume_timeout())
+    pub(super) fn waited_out(&self, files: &dyn RunFiles, stall: &StallConfig) -> bool {
+        self.waited_out_at(files.now(), stall)
     }
 
     /// Whether the request, typed (or its clock restarted by the return
-    /// from a wait) at [`Self::at`], has waited its `timeout` at `now`.
-    pub(super) fn waited_out_at(&self, now: SystemTime, timeout: Duration) -> bool {
+    /// from a wait) at [`Self::at`], has waited the resume timeout of
+    /// `stall` at `now`.
+    pub(super) fn waited_out_at(&self, now: SystemTime, stall: &StallConfig) -> bool {
         now.duration_since(self.at)
-            .is_ok_and(|waited| waited >= timeout)
+            .is_ok_and(|waited| waited >= stall.resume_timeout())
     }
 
     /// Whether the idle marker written at `idle` answers the request: written
@@ -491,6 +492,7 @@ mod tests {
     /// not.
     #[test]
     fn a_receipt_rewritten_during_a_wait_counts_from_when_the_request_was_typed() {
+        let stall = StallConfig::default().with_millis("resume_timeout_secs", 120_000);
         let timeout = Duration::from_secs(120);
         let typed = at_ns(0, 0);
         let returned = typed + Duration::from_secs(300);
@@ -502,9 +504,14 @@ mod tests {
         let during_wait = typed + Duration::from_secs(10);
         assert!(!nudge.answered_by(during_wait));
         assert!(nudge.answered_by(returned + Duration::from_millis(1)));
-        assert!(!nudge.waited_out_at(typed + timeout, timeout));
-        assert!(!nudge.waited_out_at(returned + timeout - Duration::from_millis(1), timeout));
-        assert!(nudge.waited_out_at(returned + timeout, timeout));
+        assert!(!nudge.waited_out_at(typed + timeout, &stall));
+        assert!(!nudge.waited_out_at(returned + timeout - Duration::from_millis(1), &stall));
+        assert!(nudge.waited_out_at(returned + timeout, &stall));
+        let default = StallConfig::default();
+        let hour = Duration::from_secs(3600);
+        assert!(!nudge.waited_out_at(returned + timeout, &default));
+        assert!(!nudge.waited_out_at(returned + hour - Duration::from_millis(1), &default));
+        assert!(nudge.waited_out_at(returned + hour, &default));
         let files = MemoryFiles::default();
         let receipt = Path::new("/run/receipt.json");
         files.put(receipt, typed, "{}");

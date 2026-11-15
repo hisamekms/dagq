@@ -693,7 +693,6 @@ pub struct TestWorkspace {
     /// The background launch of a resume starts no wrapper, so it never
     /// registers (a reopen whose wrapper does not start).
     pub resume_no_session: bool,
-    pub resume_timeout: Duration,
     pub sessions: Mutex<Vec<(String, TestSession)>>,
     pub closed: Mutex<Vec<String>>,
     /// Resumed-session script per task; a resume of any other task fails.
@@ -761,7 +760,6 @@ impl TestWorkspace {
             reopen_interval: Duration::from_secs(60),
             no_session: false,
             resume_no_session: false,
-            resume_timeout: Duration::from_secs(120),
             sessions: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
             resume_scripts: Mutex::new(HashMap::new()),
@@ -983,9 +981,6 @@ impl SessionWrappers for TestWorkspace {
             Some(handle) => self.processes().confirmed_identity_alive(&handle),
             None => Ok(false),
         }
-    }
-    fn resume_timeout(&self) -> Duration {
-        self.resume_timeout
     }
     fn retry_backoff(&self) -> Duration {
         Duration::from_millis(10)
@@ -1371,6 +1366,19 @@ pub fn supervise_options_ahead(parallel: usize, once: bool) -> (SuperviseOptions
         ahead.clone(),
     ));
     (options, ahead)
+}
+
+/// `options` with `stall` set to the default `[stall]` whose
+/// `resume_timeout_secs` is `timeout`: how long a session typed a request
+/// into gets to answer it.
+pub fn resume_timeout_options(options: SuperviseOptions, timeout: Duration) -> SuperviseOptions {
+    let millis = u64::try_from(timeout.as_millis()).unwrap();
+    SuperviseOptions {
+        stall: Some(
+            dagq::domain::stall::StallConfig::default().with_millis("resume_timeout_secs", millis),
+        ),
+        ..options
+    }
 }
 
 /// One pass of the parallel supervisor: claim whatever is ready, finish it, exit.
