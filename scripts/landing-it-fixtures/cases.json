@@ -1150,5 +1150,233 @@
   "want": {
    "unit_skip_error": "the name at line 1 has spaces around it"
   }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "a path group the diff touches none of leaves the unit stage and the IT stage's filter stays",
+  "path_groups": "# groups\n[[group]]\nname = \"ledger\"\nreason = \"900 s\"\ntask = \"1\"\nfilterset = \"test(/^domain::ledger::/)\"\npaths = [\"src/domain/ledger/**\", \"migrations/**\"]\n",
+  "want": {
+   "full": false,
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "unit_filter": "((kind(lib) | kind(bin) | kind(proc-macro)) - (((binary_id(=dagq) | binary_id(=dagq::bin/dagq)) & (test(/^domain::ledger::/)))))",
+   "it_filter": "((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))",
+   "unit_groups_left_out": [
+    "ledger"
+   ],
+   "unit_groups_run": [],
+   "report": "landing-it: narrowed IT: 4 filters (2 not in the table)\nlanding-it:   (binary_id(=dagq::it) & test(=a::one))\nlanding-it:   (binary_id(=dagq::it) & test(=a::two))\nlanding-it:   (binary_id(=dagq::it) & test(=a::added_after_the_table))\nlanding-it:   (binary_id(=dagq::it) & test(=c::renamed_after_the_table))\nlanding-it: the unit stage leaves out the path group ledger: the diff touches none of its paths (CI runs it)"
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "a path group with the unit-skip list and the known failures leaves the unit stage the same way",
+  "path_groups": "# groups\n[[group]]\nname = \"ledger\"\nreason = \"900 s\"\ntask = \"1\"\nfilterset = \"test(/^domain::ledger::/)\"\npaths = [\"src/domain/ledger/**\", \"migrations/**\"]\n",
+  "unit_skip": "[[test]]\nname = \"infrastructure::a::tests::heavy\"\nreason = \"900 s\"\ntask = \"1\"\nrestore = \"goal 2\"\n",
+  "known": {
+   "failures": [
+    {
+     "name": "dagq app::tests::unit_fails",
+     "kind": "test"
+    }
+   ],
+   "kept_for_task": []
+  },
+  "want": {
+   "unit_filter": "((((kind(lib) | kind(bin) | kind(proc-macro)) - ((binary_id(=dagq) & test(=infrastructure::a::tests::heavy)))) - (((binary_id(=dagq) | binary_id(=dagq::bin/dagq)) & (test(/^domain::ledger::/))))) - ((binary_id(=dagq) & test(=app::tests::unit_fails))))",
+   "it_filter": "(((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table))) - ((binary_id(=dagq) & test(=app::tests::unit_fails))))",
+   "unit_groups_left_out": [
+    "ledger"
+   ]
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "src/domain/ledger/read.rs",
+   "migrations/0001_a.sql"
+  ],
+  "name": "a path group the diff touches runs and the output names the paths touched",
+  "path_groups": "# groups\n[[group]]\nname = \"ledger\"\nreason = \"900 s\"\ntask = \"1\"\nfilterset = \"test(/^domain::ledger::/)\"\npaths = [\"src/domain/ledger/**\", \"migrations/**\"]\n",
+  "want": {
+   "unit_filter": "(kind(lib) | kind(bin) | kind(proc-macro))",
+   "unit_groups_left_out": [],
+   "unit_groups_run": [
+    {
+     "name": "ledger",
+     "touched": [
+      "src/domain/ledger/read.rs",
+      "migrations/0001_a.sql"
+     ],
+     "touched_count": 2
+    }
+   ]
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [],
+  "name": "a path group runs when the diff cannot be had, and the output says why",
+  "path_groups": "# groups\n[[group]]\nname = \"ledger\"\nreason = \"900 s\"\ntask = \"1\"\nfilterset = \"test(/^domain::ledger::/)\"\npaths = [\"src/domain/ledger/**\", \"migrations/**\"]\n",
+  "full": "DAGQ_LANDING_BASE is not set",
+  "diff_error": "DAGQ_LANDING_BASE is not set",
+  "want": {
+   "full": true,
+   "unit_filter": "(kind(lib) | kind(bin) | kind(proc-macro))",
+   "it_filter": "(kind(test) - binary(e2e))",
+   "unit_groups_left_out": [],
+   "unit_groups_run": [
+    {
+     "name": "ledger",
+     "touched": null,
+     "touched_count": null
+    }
+   ],
+   "report": "landing-it: every IT runs:\nlanding-it:   DAGQ_LANDING_BASE is not set\nlanding-it: the unit stage runs the path group ledger: the diff cannot be had (DAGQ_LANDING_BASE is not set)"
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "without path groups the filters stay as they are",
+  "want": {
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "unit_filter": "(kind(lib) | kind(bin) | kind(proc-macro))",
+   "it_filter": "((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))",
+   "unit_groups_left_out": [],
+   "unit_groups_run": []
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "a path-group file without a group leaves the filters as they are",
+  "path_groups": "# only comments\n\n",
+  "want": {
+   "unit_filter": "(kind(lib) | kind(bin) | kind(proc-macro))",
+   "it_filter": "((binary_id(=dagq::it) & test(=a::one)) | (binary_id(=dagq::it) & test(=a::two)) | (binary_id(=dagq::it) & test(=a::added_after_the_table)) | (binary_id(=dagq::it) & test(=c::renamed_after_the_table)))",
+   "unit_groups_left_out": [],
+   "unit_groups_run": []
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "a path group with an unknown key cannot be read",
+  "path_groups": "# groups\n[[group]]\nname = \"ledger\"\nreason = \"900 s\"\ntask = \"1\"\nfilterset = \"test(/^domain::ledger::/)\"\npaths = [\"src/domain/ledger/**\", \"migrations/**\"]\nwhy = \"z\"\n",
+  "want": {
+   "path_groups_error": "line 8: unknown key why"
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "a path group with a key missing cannot be read",
+  "path_groups": "[[group]]\nname = \"a\"\nreason = \"r\"\ntask = \"1\"\npaths = [\"x/**\"]\n",
+  "want": {
+   "path_groups_error": "the [[group]] at line 1 lacks filterset"
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "a path group with an empty key cannot be read",
+  "path_groups": "[[group]]\nname = \"a\"\nreason = \"\"\ntask = \"1\"\nfilterset = \"test(/x/)\"\npaths = [\"x/**\"]\n",
+  "want": {
+   "path_groups_error": "the [[group]] at line 1 lacks reason"
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "a path group with no paths cannot be read",
+  "path_groups": "[[group]]\nname = \"a\"\nreason = \"r\"\ntask = \"1\"\nfilterset = \"test(/x/)\"\npaths = []\n",
+  "want": {
+   "path_groups_error": "the [[group]] at line 1 lacks paths"
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "a path group with an empty path cannot be read",
+  "path_groups": "[[group]]\nname = \"a\"\nreason = \"r\"\ntask = \"1\"\nfilterset = \"test(/x/)\"\npaths = [\"x/**\", \"\"]\n",
+  "want": {
+   "path_groups_error": "the [[group]] at line 1 has an empty or padded path"
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "two path groups of one name cannot be read",
+  "path_groups": "# groups\n[[group]]\nname = \"ledger\"\nreason = \"900 s\"\ntask = \"1\"\nfilterset = \"test(/^domain::ledger::/)\"\npaths = [\"src/domain/ledger/**\", \"migrations/**\"]\n# groups\n[[group]]\nname = \"ledger\"\nreason = \"900 s\"\ntask = \"1\"\nfilterset = \"test(/^domain::ledger::/)\"\npaths = [\"src/domain/ledger/**\", \"migrations/**\"]\n",
+  "want": {
+   "path_groups_error": "the group ledger is given twice"
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "a path-group file that is no TOML of its format cannot be read",
+  "path_groups": "[group]\n",
+  "want": {
+   "path_groups_error": "line 1 is not key = value: [group]"
+  }
+ },
+ {
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a.rs",
+   "docs/x.md"
+  ],
+  "name": "a path group whose paths are no array cannot be read",
+  "path_groups": "[[group]]\nname = \"a\"\nreason = \"r\"\ntask = \"1\"\nfilterset = \"test(/x/)\"\npaths = \"x/**\"\n",
+  "want": {
+   "path_groups_error": "line 6 is not key = [\"glob\", ...]: paths = \"x/**\""
+  }
  }
 ]

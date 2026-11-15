@@ -85,6 +85,19 @@
 # (its format is at its top) stops the run with exit 2. The IT stage's
 # choice does not read it.
 #
+# The unit stage also leaves out each group of
+# .config/landing-unit-path-groups.toml ($LANDING_UNIT_PATH_GROUPS for the
+# self-test; ADR-t4997-1) whose paths none of the files of
+# git diff $DAGQ_LANDING_BASE..HEAD touch: its nextest filterset over the lib
+# and bin tests of the crate dagq leaves the unit stage's filterset, and the output names
+# the group and that CI runs it. A group the diff touches runs, and the output
+# names the first paths touched; when the diff cannot be had
+# (DAGQ_LANDING_BASE unset, git diff failing) every group runs, and the
+# output says why. Without the file, or with no group in it, the unit stage
+# is as above; a file that cannot be read (its format is at its top) stops
+# the run with exit 2. The IT stage's choice does not read it. The same holds
+# in the verification's container: the diff is taken there as here.
+#
 # The table: the latest it-coverage-map artifact of a successful run of
 # .github/workflows/it-coverage-map.yml on main (gh run download; the format
 # is at the top of scripts/it-coverage-map.sh). It is kept in
@@ -106,6 +119,7 @@ me=landing-it
 root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(cd "$(dirname "$0")/.." && pwd)
 py="$root/scripts/landing-it.py"
 unit_skip=${LANDING_UNIT_SKIP:-$root/.config/landing-unit-skip.toml}
+path_groups=${LANDING_UNIT_PATH_GROUPS:-$root/.config/landing-unit-path-groups.toml}
 
 # --self-test's hand-over: --prepare on the host copies the cached table into
 # the materials, and a run with the materials (as in the container) reads it
@@ -221,15 +235,63 @@ EOF
       ok=
     fi
   done
+  # The path groups: a diff touching none of a group's paths (DAGQ_LANDING_BASE
+  # at HEAD, an empty diff) takes its filterset out of the unit stage's and
+  # names it with CI before the unit stage; a diff that cannot be had
+  # (DAGQ_LANDING_BASE unset) runs it and says why; one that cannot be read
+  # stops the run with exit 2 before a stage's cargo nextest run.
+  group_fs='test(/^domain::ledger::/)'
+  printf '[[group]]\nname = "g"\nreason = "r"\ntask = "1"\nfilterset = "%s"\npaths = ["src/domain/ledger/**"]\n' \
+    "$group_fs" >"$t/groups.toml"
+  printf '[[group]]\nname = "g"\n' >"$t/bad-groups.toml"
+  for c in "groups.toml HEAD 0" "groups.toml - 0" "bad-groups.toml HEAD 2"; do
+    set -- $c
+    : >"$t/runs"
+    status=0
+    (
+      unset DAGQ_LANDING_BASE DAGQ_CI_KNOWN_FAILURES DAGQ_CI_FIX_RUN
+      [ "$2" = - ] || export DAGQ_LANDING_BASE="$2"
+      PATH="$t/bin:$PATH" LANDING_IT_CACHE="$t/empty" DAGQ_VERIFICATION_MATERIALS="$t/materials" \
+        LANDING_UNIT_SKIP="$t/missing.toml" LANDING_UNIT_PATH_GROUPS="$t/$1" sh "$root/scripts/landing-it.sh"
+    ) >"$t/out" 2>&1 || status=$?
+    if [ "$status" -ne "$3" ]; then
+      echo "$me: self-test: the path groups $1 at base $2: exit $status (want $3)" >&2
+      cat "$t/out" >&2
+      ok=
+    elif [ "$3" -eq 2 ]; then
+      if [ -s "$t/runs" ] || ! grep -qF 'the path groups cannot be read' "$t/out"; then
+        echo "$me: self-test: unreadable path groups ran cargo or did not say why" >&2
+        cat "$t/out" "$t/runs" >&2
+        ok=
+      fi
+    elif [ "$2" = - ]; then
+      if ! sed -n 1p "$t/runs" | grep -qF -- "-E (kind(lib) | kind(bin) | kind(proc-macro))" ||
+        ! sed -n '/unit stage: cargo/q;p' "$t/out" |
+          grep -qF "runs the path group g: the diff cannot be had (DAGQ_LANDING_BASE is not set)"; then
+        echo "$me: self-test: without a diff the unit stage did not run the path group and say why" >&2
+        cat "$t/out" "$t/runs" >&2
+        ok=
+      fi
+    elif ! sed -n 1p "$t/runs" |
+      grep -qF "kind(proc-macro)) - (((binary_id(=dagq) | binary_id(=dagq::bin/dagq)) & ($group_fs))))" ||
+      ! sed -n '/unit stage: cargo/q;p' "$t/out" |
+        grep -qF "leaves out the path group g: the diff touches none of its paths (CI runs it)"; then
+      echo "$me: self-test: the unit stage did not leave out and name the path group the diff misses" >&2
+      cat "$t/out" "$t/runs" >&2
+      ok=
+    fi
+  done
   rm -rf "$t"
   [ -n "$ok" ] && echo "$me: self-test: the unit stage runs first and stops the IT stage when it fails"
   [ -n "$ok" ] && echo "$me: self-test: the unit stage leaves out and names the unit-skip list's tests"
+  [ -n "$ok" ] && echo "$me: self-test: the unit stage leaves out the path groups the diff misses and runs the others"
   [ -n "$ok" ]
 }
 
 if [ "${1:-}" = "--self-test" ]; then
   python3 "$py" self-test "$root/scripts/landing-it-fixtures" \
-    --unit-skip "$root/.config/landing-unit-skip.toml" || exit 1
+    --unit-skip "$root/.config/landing-unit-skip.toml" \
+    --path-groups "$root/.config/landing-unit-path-groups.toml" || exit 1
   self_test_handover
   self_test_stages
   exit $?
@@ -331,6 +393,7 @@ fi
 # The diff, the tree of the table's commit and the files changed on main
 # since that commit (which an old table widens).
 full=
+diff_error=
 : >"$work/diff"
 : >"$work/tree"
 : >"$work/since"
@@ -338,8 +401,10 @@ since=$work/since
 base=${DAGQ_LANDING_BASE:-}
 if [ -z "$base" ]; then
   full="DAGQ_LANDING_BASE is not set"
+  diff_error=$full
 elif ! git diff --name-only --no-renames "$base" HEAD >"$work/diff" 2>/dev/null; then
   full="git diff $base..HEAD failed"
+  diff_error=$full
 fi
 if [ "$table" != - ]; then
   # An unreadable table is left to the choice, which runs every IT for it.
@@ -373,7 +438,11 @@ known=${DAGQ_CI_KNOWN_FAILURES:-}
 if [ -f "$unit_skip" ]; then
   echo "$me: unit-skip list $unit_skip"
 fi
-python3 "$py" select "$@" --list "$list" --unit-skip "$unit_skip" \
+if [ -f "$path_groups" ]; then
+  echo "$me: path groups $path_groups"
+fi
+[ -n "$diff_error" ] && set -- "$@" --diff-error "$diff_error"
+python3 "$py" select "$@" --list "$list" --unit-skip "$unit_skip" --path-groups "$path_groups" \
   --fix-run "${DAGQ_CI_FIX_RUN:-0}" --threads "${NEXTEST_TEST_THREADS:-6}" >"$work/filters" || exit 2
 unit_filter=$(sed -n 1p "$work/filters")
 it_filter=$(sed -n 2p "$work/filters")

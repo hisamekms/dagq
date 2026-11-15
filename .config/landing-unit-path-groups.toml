@@ -1,0 +1,34 @@
+# The groups of unit tests the landing verification's unit stage leaves out
+# when the run's diff (git diff $DAGQ_LANDING_BASE..HEAD) touches none of the
+# group's paths (scripts/landing-it.sh, ADR-t4997-1). A diff that touches one
+# of them, or a diff that cannot be had, runs the group. CI's macOS and
+# Linux jobs run every group at every push to main: CI is the final gate for
+# the breakage of a run that left a group out.
+#
+# Format: one [[group]] table per group, each key on one line:
+#   name       the group's name, printed when it is left out or run
+#   reason     why it is left out (its seconds in the landing verification)
+#   task       the task that put it here
+#   filterset  a nextest filterset of the tests of the group, over the lib
+#              and bin tests of the crate dagq (the unit stage takes
+#              (binary_id(=dagq) | binary_id(=dagq::bin/dagq)) & (filterset)
+#              out of its filterset)
+#   paths      an array of globs from the repository root the diff is
+#              matched against: `*` stays in one directory, `**` spans any
+#              depth, as [recheck]'s paths in dagq.toml (ADR-t2032-1)
+# A file that cannot be read (not this format, a key missing or empty, an
+# unknown key, a group's name twice) stops the landing verification with
+# exit 2. Without this file, or without any [[group]], the unit stage runs
+# as without it.
+#
+# Only goal 294's tasks and a person's decision may add a group, a test or a
+# path here. It is not the place for the slow tests of every day: those meet
+# the time gate of the unit tests. A change here is checked by
+# `sh scripts/landing-it.sh --self-test`.
+
+[[group]]
+name = "ledger_range"
+reason = "the ledger range's tests: 814-1,407 s of the landing verification's unit stage (docs/plans/ledger-range-test-time-spike.md, E)"
+task = "4997"
+filterset = "kind(lib) & (test(/^(infrastructure::runtime_store::ledger::|infrastructure::store_contract::ledger_|domain::ledger::|domain::kpi::|application::supervise::observation::ledger::|application::ports::observation::|application::marks::)/) | test(/^infrastructure::sqlite::store_contract_tests::(ledger_[a-z_]+|all_cases_run_in_order_on_the_same_database)(::.*)?$/))"
+paths = ["src/infrastructure/runtime_store/ledger/**", "src/infrastructure/runtime_store/ledger.rs", "src/infrastructure/store_contract/ledger_*.rs", "src/infrastructure/store_contract/mod.rs", "src/infrastructure/sqlite.rs", "src/domain/ledger/**", "src/domain/ledger.rs", "src/domain/kpi/**", "src/domain/kpi.rs", "src/application/supervise/observation/ledger/**", "src/application/supervise/observation/ledger.rs", "src/application/ports/observation/**", "src/application/ports/observation.rs", "src/application/marks.rs", "migrations/**", "migrations-postgres/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".config/landing-unit-path-groups.toml"]

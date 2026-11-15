@@ -12,12 +12,15 @@ Usage: python3 scripts/landing-it.py select --diff FILE --tree FILE
                                             [--table-error TEXT]
                                             [--full REASON] [--root DIR]
                                             [--since FILE] [--unit-skip FILE]
+                                            [--path-groups FILE]
+                                            [--diff-error TEXT]
        python3 scripts/landing-it.py needs-list --diff FILE --tree FILE
                                                 --table FILE|- [--now TIME]
                                                 [--table-error TEXT]
                                                 [--full REASON] [--root DIR]
                                                 [--since FILE]
        python3 scripts/landing-it.py self-test FIXTURES [--unit-skip FILE]
+                                                     [--path-groups FILE]
 select prints two filtersets, one per line: the unit stage's, then the IT
 stage's (an empty line when no IT is chosen); landing-it.sh runs them as two
 cargo nextest runs. --root is the checked-out tree the changed helpers' users are read from
@@ -30,6 +33,10 @@ an old table then runs every IT).
 missing file or one without entries leaves the unit stage as it is, and one
 that cannot be read stops select with exit 2. The self-test checks that
 file too when given.
+--path-groups is the groups of unit tests the unit stage leaves out when the
+diff touches none of their paths (.config/landing-unit-path-groups.toml, its
+format at its top; ADR-t4997-1), read and checked the same way.
+--diff-error says why the diff cannot be had: no group is left out then.
 """
 
 import argparse
@@ -105,6 +112,16 @@ UNIT_FILTER = "kind(lib) | kind(bin) | kind(proc-macro)"
 UNIT_SKIP_BINARY = "dagq"
 # The keys of each [[test]] of the unit-skip list, all required strings.
 UNIT_SKIP_KEYS = ("name", "reason", "task", "restore")
+
+# The keys of each [[group]] of the path groups: name, reason, task and
+# filterset are one-line strings, paths an array of glob strings on one line.
+PATH_GROUP_STRING_KEYS = ("name", "reason", "task", "filterset")
+PATH_GROUP_KEYS = PATH_GROUP_STRING_KEYS + ("paths",)
+# The test binaries a group's filterset is taken over: the lib and the bin
+# of the root crate dagq.
+PATH_GROUP_BINARIES = "(binary_id(=dagq) | binary_id(=dagq::bin/dagq))"
+# How many of the paths a group's diff touches the output names.
+PATH_GROUP_SHOWN = 5
 
 # Files the integration tests read from the repository, not through the code
 # the table maps (docs/plans/landing-it-selection.md, 「絞った IT の選び方」).
@@ -563,6 +580,116 @@ def read_unit_skip(path):
         raise UnitSkipError("%s: %s" % (path, e))
 
 
+def parse_string_array(value, number, raw):
+    """A one-line TOML array of strings, as a list."""
+    if not value.startswith("[") or not value.endswith("]"):
+        raise UnitSkipError("line %d is not key = [\"glob\", ...]: %s" % (number, raw))
+    body = value[1:-1].strip()
+    out = []
+    while body:
+        m = TOML_STRING.match(body)
+        if not m:
+            raise UnitSkipError("line %d has a value that is no string: %s" % (number, raw))
+        if m.group(1) is not None:
+            try:
+                out.append(json.loads('"%s"' % m.group(1)))
+            except ValueError:
+                raise UnitSkipError("line %d: a bad escape: %s" % (number, raw))
+        else:
+            out.append(m.group(2))
+        body = body[m.end():].strip()
+        if body.startswith(","):
+            body = body[1:].strip()
+        elif body:
+            raise UnitSkipError("line %d has more after a value: %s" % (number, raw))
+    return out
+
+
+def parse_path_groups(text):
+    """The groups of the path-group file: the subset of TOML it is written in
+    (comments, [[group]] tables, one-line strings and one-line arrays of
+    strings). Anything else, a missing or empty key, an unknown key, an
+    empty path or a name given twice raises UnitSkipError."""
+    groups = []
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "[[group]]":
+            groups.append({"line": number})
+            continue
+        key, sep, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep or not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+            raise UnitSkipError("line %d is not key = value: %s" % (number, raw))
+        if not groups:
+            raise UnitSkipError("line %d is outside a [[group]] table: %s" % (number, raw))
+        if key not in PATH_GROUP_KEYS:
+            raise UnitSkipError("line %d: unknown key %s" % (number, key))
+        if key in groups[-1]:
+            raise UnitSkipError("line %d: %s given twice" % (number, key))
+        if key == "paths":
+            groups[-1][key] = parse_string_array(value, number, raw)
+            continue
+        m = TOML_STRING.match(value)
+        if not m:
+            raise UnitSkipError("line %d is not key = \"string\": %s" % (number, raw))
+        rest = value[m.end():].strip()
+        if rest and not rest.startswith("#"):
+            raise UnitSkipError("line %d has more after its value: %s" % (number, raw))
+        if m.group(1) is not None:
+            try:
+                groups[-1][key] = json.loads('"%s"' % m.group(1))
+            except ValueError:
+                raise UnitSkipError("line %d: a bad escape: %s" % (number, raw))
+        else:
+            groups[-1][key] = m.group(2)
+    names = set()
+    for group in groups:
+        line = group.pop("line")
+        missing = [k for k in PATH_GROUP_STRING_KEYS if not (group.get(k) or "").strip()]
+        if not group.get("paths"):
+            missing.append("paths")
+        if missing:
+            raise UnitSkipError("the [[group]] at line %d lacks %s" % (line, ", ".join(missing)))
+        if any(not p.strip() or p != p.strip() for p in group["paths"]):
+            raise UnitSkipError("the [[group]] at line %d has an empty or padded path" % line)
+        if group["name"] in names:
+            raise UnitSkipError("the group %s is given twice" % group["name"])
+        names.add(group["name"])
+    return groups
+
+
+def read_path_groups(path):
+    """The path groups at path: [] when path is - or no file is there."""
+    if path in (None, "", "-") or not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, ValueError) as e:
+        raise UnitSkipError("%s cannot be read: %s" % (path, e))
+    try:
+        return parse_path_groups(text)
+    except UnitSkipError as e:
+        raise UnitSkipError("%s: %s" % (path, e))
+
+
+def path_group_choice(diff, diff_error, groups):
+    """Which groups leave the unit stage: a list of (group, touched), touched
+    the diff's paths in the group's paths (empty: the group is left out).
+    When the diff cannot be had (diff_error) no group is left out, each with
+    touched None."""
+    out = []
+    for group in groups:
+        if diff_error:
+            out.append((group, None))
+            continue
+        touched = [p for p in diff if any(glob_match(p, g) for g in group["paths"])]
+        out.append((group, touched))
+    return out
+
+
 def known_failures(known):
     """The filtersets to leave out (failures) and the names kept for a fix
     run (kept_for_task), from the JSON of dagq ci failures."""
@@ -598,7 +725,7 @@ def current_its(listing):
 
 
 def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now, forced=None,
-           root=".", since=(), unit_skip=()):
+           root=".", since=(), unit_skip=(), path_groups=(), diff_error=None):
     """The tests of the landing's verification and why: a dict with full,
     reasons, the IT filtersets (narrowed), the tests not in the table, the
     excluded and kept known failures, and the nextest filtersets of the two
@@ -611,7 +738,10 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
     the file's own mapped IT; their union counts towards the estimated wall
     time threshold, which selects every IT when exceeded. unit_skip is the
     entries of the unit-skip list: their tests leave the unit stage alone
-    (CI still runs them), before the known failures leave both stages."""
+    (CI still runs them), before the known failures leave both stages.
+    path_groups is the groups of the path-group file: the filterset of each
+    one whose paths the diff touches none of leaves the unit stage the same
+    way; with diff_error (the diff cannot be had) none leaves it."""
     reasons = full_reasons(diff, tree, table, table_error, now, forced, root)
     narrowed = []
     from_table = set()
@@ -679,6 +809,11 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
     if unit_skip:
         unit = "(%s - (%s))" % (unit, " | ".join(
             one_test(UNIT_SKIP_BINARY, e["name"]) for e in unit_skip))
+    groups = path_group_choice(diff, diff_error, path_groups)
+    left_groups = [g for g, touched in groups if touched == []]
+    if left_groups:
+        unit = "(%s - (%s))" % (unit, " | ".join(
+            "(%s & (%s))" % (PATH_GROUP_BINARIES, g["filterset"]) for g in left_groups))
     if excluded:
         # The same known failures leave both stages, matched by name alone.
         left_out = " | ".join(f for _, f in excluded)
@@ -697,6 +832,12 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
         "kept": [n for n, _ in kept],
         "fix_run": fix_run,
         "unit_skipped": [e["name"] for e in unit_skip],
+        "unit_groups_left_out": [g["name"] for g in left_groups],
+        "unit_groups_run": [
+            {"name": g["name"], "touched": touched if touched is None else touched[:PATH_GROUP_SHOWN],
+             "touched_count": None if touched is None else len(touched)}
+            for g, touched in groups if touched != []],
+        "diff_error": diff_error if path_groups else None,
         "unit_filter": unit,
         "it_filter": it,
     }
@@ -726,6 +867,21 @@ def report(choice):
             "landing-it: the unit stage leaves out the unit-skip list's tests"
             " (%d; CI runs them):" % len(skipped))
         lines.extend("landing-it:   %s" % name for name in skipped)
+    for name in choice.get("unit_groups_left_out") or []:
+        lines.append(
+            "landing-it: the unit stage leaves out the path group %s: the diff touches"
+            " none of its paths (CI runs it)" % name)
+    for run in choice.get("unit_groups_run") or []:
+        if run["touched"] is None:
+            lines.append(
+                "landing-it: the unit stage runs the path group %s: the diff cannot be had (%s)"
+                % (run["name"], choice.get("diff_error")))
+        else:
+            more = run["touched_count"] - len(run["touched"])
+            lines.append(
+                "landing-it: the unit stage runs the path group %s: the diff touches %s%s"
+                % (run["name"], ", ".join(run["touched"]),
+                   " and %d more" % more if more > 0 else ""))
     for name in choice["excluded"]:
         lines.append("landing-it: left out, fails on main already: %s" % name)
     for name in choice["kept"]:
@@ -779,12 +935,17 @@ def cmd_select(args):
     except UnitSkipError as e:
         print("landing-it: the unit-skip list cannot be read: %s" % e, file=sys.stderr)
         sys.exit(2)
+    try:
+        path_groups = read_path_groups(args.path_groups)
+    except UnitSkipError as e:
+        print("landing-it: the path groups cannot be read: %s" % e, file=sys.stderr)
+        sys.exit(2)
     choice = choose(
         read_lines(args.diff), read_lines(args.tree), read_json(args.table),
         args.table_error, read_json(args.list), read_json(args.known),
         args.fix_run == "1", threads_of(args.threads), now_of(args.now), args.full, args.root,
         None if args.since == "-" else read_lines(args.since) if args.since else [],
-        unit_skip,
+        unit_skip, path_groups, args.diff_error,
     )
     print(report(choice), file=sys.stderr)
     # Two lines: the unit stage's filterset, then the IT stage's (empty when
@@ -816,13 +977,28 @@ def cmd_self_test(args):
                 else:
                     print("ok   %s" % case["name"])
                 continue
+        path_groups = []
+        if "path_groups" in case:
+            try:
+                path_groups = parse_path_groups(case["path_groups"])
+            except UnitSkipError as e:
+                path_groups = str(e)
+            if "path_groups_error" in case["want"] or isinstance(path_groups, str):
+                got = path_groups if isinstance(path_groups, str) else None
+                if got != case["want"].get("path_groups_error"):
+                    failed += 1
+                    print("FAIL %s:\n  want error %r\n  got  %r" % (
+                        case["name"], case["want"].get("path_groups_error"), got), file=sys.stderr)
+                else:
+                    print("ok   %s" % case["name"])
+                continue
         case_table = None if case.get("no_table") else dict(table, **case.get("table_patch", {}))
         choice = choose(
             case["diff"], tree, case_table,
             "gh failed" if case.get("no_table") else None, listing,
             case.get("known"), case.get("fix_run", False), 6, parse_time(case["now"]),
             case.get("full"), os.path.join(args.fixtures, "repo"), case.get("since", []),
-            unit_skip,
+            unit_skip, path_groups, case.get("diff_error"),
         )
         want = case["want"]
         got = {k: report(choice) if k == "report" else choice[k] for k in want}
@@ -840,6 +1016,13 @@ def cmd_self_test(args):
         except UnitSkipError as e:
             failed += 1
             print("FAIL the unit-skip list: %s" % e, file=sys.stderr)
+    if args.path_groups:
+        try:
+            groups = read_path_groups(args.path_groups)
+            print("ok   %s reads as %d groups" % (args.path_groups, len(groups)))
+        except UnitSkipError as e:
+            failed += 1
+            print("FAIL the path groups: %s" % e, file=sys.stderr)
     if failed:
         print("landing-it self-test: %d of %d cases failed" % (failed, len(cases)), file=sys.stderr)
         sys.exit(1)
@@ -866,9 +1049,13 @@ def main():
             p.add_argument("--fix-run", default="0")
             p.add_argument("--threads", default="6")
             p.add_argument("--unit-skip", help="the unit tests the unit stage leaves out")
+            p.add_argument("--path-groups", help="the unit tests the unit stage leaves out "
+                           "when the diff touches none of their paths")
+            p.add_argument("--diff-error", help="why the diff cannot be had")
     p = sub.add_parser("self-test")
     p.add_argument("fixtures")
     p.add_argument("--unit-skip", help="a unit-skip list to check reads")
+    p.add_argument("--path-groups", help="a path-group file to check reads")
     args = parser.parse_args()
     {"select": cmd_select, "needs-list": cmd_needs_list, "self-test": cmd_self_test}[args.cmd](args)
 

@@ -146,6 +146,14 @@ kind(lib) & (test(/^(infrastructure::runtime_store::ledger::|infrastructure::sto
 `store_contract_tests` の中で `ledger_` で始まるのは対応表の (2) の 25 本だけである。
 `cargo nextest list -E "$FS"` は 842 本を出した。2 回の JUnit の testcase の名前の集合は、どちらも対応表の 842 本と一致した。
 
+着地の検証の組（[.config/landing-unit-path-groups.toml](../../.config/landing-unit-path-groups.toml)、[ADR-t4997-1](../adr/2026-11-16-t4997-1-landing-unit-stage-leaves-out-path-groups-the-diff-misses-and-ci-runs-them.md)）は、この `$FS` の 2 つ目の正規表現の末尾を `(::.*)?$` にした filterset を持つ。
+対象の commit の後に、1 本の test を同じ確かめを保ったまま module の下の複数の test に分けた着地があり、分けた test の名前は元の名前の下の path になったためである。
+commit `eee69f256` の tree では、組の filterset は 968 本を名指す。対応表の 842 本との差の 126 本は、すべてこの分割による。
+分割の内訳: `all_cases_run_in_order_on_the_same_database` が 31 本（+30）、`ledger_report_past_the_queue_and_the_clocks` が 7 本（+6）、`ledger_queue_named_goes_back_whole` が 10 本（+9）。
+`application::supervise::observation::ledger::tests` の frozen の 1 本が 32 本（+31）、omitting の 1 本が 31 本（+30）。
+`application::ports::observation::earlier_visibility_spike` の rest の 1 本が 21 本（+20）。
+分けた test は元の名前を module の path に持つので、対応表の他の 836 本は名前のまま残り、範囲の外の test は入っていない。
+
 16:02:51Z に 1 度流し始めたが、harness が background の command を 10 分で止めたので test の途中で切れた。
 842 本のうち 840 本が通り、2 本が signal で止まった（`all_cases_run_in_order_on_the_same_database` が 660 秒超、`ledger_report_past_the_queue_and_the_clocks` が 420 秒超）。
 この回は JUnit が無く、数えていない。filterset は同じで、2 回の上限は完走した 2 回で数えた。

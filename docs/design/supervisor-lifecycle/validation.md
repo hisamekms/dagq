@@ -85,8 +85,10 @@ askやcontainerの知らせで休むrunを死んだrunとして回収しない�
 何を置き換え、どのtestを選ぶかはrepositoryの設定とscriptが持ち、runtimeはtestの構成や対応表の形を知らない。
 失敗の分類は`domain::verify_failure`と[Toolchain profiles](../toolchain-profiles.md)を入口にする。
 
-このrepositoryの検証はfmt・clippy・レイヤーの依存の検査・task固有の軽い検査・unit test（一覧に載ったものを除く全件）と影響範囲で絞ったITを含み、行カバレッジと全部のtestはmainのCIが見る。
+このrepositoryの検証はfmt・clippy・レイヤーの依存の検査・task固有の軽い検査・unit test（一覧に載ったものと、差分が当たらない組を除く全件）と影響範囲で絞ったITを含み、行カバレッジと全部のtestはmainのCIが見る。
 unitの段から外す一覧は[.config/landing-unit-skip.toml](../../../.config/landing-unit-skip.toml)で、載ったtestもCIのmacOS・Linuxのjobが流す（[ADR-t4979-1](../../adr/2026-11-15-t4979-1-landing-unit-stage-leaves-out-listed-heavy-unit-tests-and-ci-runs-them.md)）。
+[.config/landing-unit-path-groups.toml](../../../.config/landing-unit-path-groups.toml)のtestの組は、runの差分（`git diff $DAGQ_LANDING_BASE..HEAD`）が組のpathに1つも当たらないときだけunitの段から外し、当たるときと差分が取れないときは流す。
+組のtestもCIのmacOS・Linuxのjobが毎回流し、外したrunでの壊れは着地の後のmainのCIが拾う（[ADR-t4997-1](../../adr/2026-11-16-t4997-1-landing-unit-stage-leaves-out-path-groups-the-diff-misses-and-ci-runs-them.md)）。
 ITを選ぶ条件、古い表・OSの条件・helperの扱いとCIへ任せる範囲は[scripts/landing-it.sh](../../../scripts/landing-it.sh)の冒頭、値の根拠は[着地のITの絞り込みの測定](../../plans/landing-it-selection.md#決めたこと段-3b-の-adr-と-design-が使う)を入口にする。
 この境界の決定は[ADR-t2892-1](../../adr/2026-10-20-t2892-1-landing-it-leaves-added-sources-and-broad-entries-to-ci.md)、[ADR-t3920-1](../../adr/2026-11-01-t3920-1-landing-it-keeps-using-an-old-table-and-widens-the-files-it-does-not-know.md)、[ADR-t3927-1](../../adr/2026-11-07-t3927-1-landing-it-widens-platform-gated-files-at-any-table-age.md)、[ADR-t3761-1](../../adr/2026-10-31-t3761-1-landing-it-selects-the-modules-a-changed-test-helper-reaches.md)にある。
 [CI watch](ci-watch.md)の既に落ちているtestは着地の検証から外すが、修正task自身のtestは外さない。
