@@ -24,6 +24,18 @@ pub const TURN_ENV: [&str; 2] = [
     dagq::domain::queue_service::CREDENTIAL_FILE_ENV,
 ];
 
+/// The queue service's replacement grace period
+/// ([`dagq::application::queue_service::REPLACEMENT_WAIT_ENV`]), in
+/// milliseconds, that the `it` binary's process runs with and its `dagq`
+/// children inherit (set as the binary loads, in `tests/it/main.rs`):
+/// short, so that a command or an in-process call that meets a stopped or
+/// missing service says so within half a second instead of production's
+/// 30. A test that waits through a real replacement sets a longer one on
+/// the `dagq` it starts, or on its own in-process call
+/// ([`super::lifecycle::on_socket_through_replacements`]), and on nothing
+/// else in the process.
+pub const TEST_REPLACEMENT_WAIT_MS: u64 = 500;
+
 pub trait WithoutActor {
     /// Drops the [`ACTOR_ENV`] and [`TURN_ENV`] the command would inherit
     /// from the test process. A variable the command sets itself (the worker env of a stub

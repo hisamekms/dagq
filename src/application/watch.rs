@@ -608,17 +608,20 @@ enum FailedLook {
 /// The step after a failed look: `recorded` is the start of the outage the
 /// supervisor recorded (`None`: none), `told` whether a watch of the role
 /// returned it, `remaining` the time left of the watch's timeout (`None`:
-/// it has none), `interval` its wait between looks, and
-/// `replacement_elapsed` the time since the first attempt of this look.
+/// it has none), `interval` its wait between looks,
+/// `replacement_elapsed` the time since the first attempt of this look, and
+/// `grace` the replacement grace period
+/// ([`super::queue_service::replacement_wait`]).
 fn failed_look(
     recorded: Option<i64>,
     told: bool,
     remaining: Option<Duration>,
     interval: Duration,
     replacement_elapsed: Duration,
+    grace: Duration,
 ) -> FailedLook {
     let Some(since) = recorded else {
-        let left = super::queue_service::REPLACEMENT_WAIT.saturating_sub(replacement_elapsed);
+        let left = grace.saturating_sub(replacement_elapsed);
         let left = remaining.map_or(left, |remaining| left.min(remaining));
         return if left.is_zero() {
             FailedLook::Fail
@@ -657,14 +660,12 @@ fn look_through(
             .map(|timeout| super::time_left(clock.since(started), timeout))
     };
     let replacement_started = clock.monotonic();
+    let grace = super::queue_service::replacement_wait();
     let mut retrying_unrecorded = false;
     loop {
         let mut limit = look_limit(remaining());
         if retrying_unrecorded {
-            limit = limit.min(
-                super::queue_service::REPLACEMENT_WAIT
-                    .saturating_sub(clock.since(replacement_started)),
-            );
+            limit = limit.min(grace.saturating_sub(clock.since(replacement_started)));
             if let Some(remaining) = remaining() {
                 limit = limit.min(remaining);
             }
@@ -687,6 +688,7 @@ fn look_through(
             remaining(),
             options.interval,
             clock.since(replacement_started),
+            grace,
         ) {
             FailedLook::Fail => return Err(error),
             FailedLook::Tell { since } => {
@@ -703,7 +705,7 @@ fn look_through(
                 source.wait_out(wait);
                 retrying_unrecorded = recorded.is_none();
                 if retrying_unrecorded
-                    && (clock.since(replacement_started) >= super::queue_service::REPLACEMENT_WAIT
+                    && (clock.since(replacement_started) >= grace
                         || remaining().is_some_and(|left| left.is_zero()))
                 {
                     return Err(error);
@@ -852,6 +854,7 @@ pub trait WatchRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::queue_service::REPLACEMENT_WAIT;
     use crate::domain::EventKind;
 
     /// Events in memory, read as the queue reads them: in the range, of
@@ -1315,7 +1318,14 @@ mod tests {
         let interval = Duration::from_secs(5);
         for told in [false, true] {
             assert_eq!(
-                failed_look(None, told, Some(second), interval, Duration::from_secs(30)),
+                failed_look(
+                    None,
+                    told,
+                    Some(second),
+                    interval,
+                    Duration::from_secs(30),
+                    REPLACEMENT_WAIT
+                ),
                 FailedLook::Fail
             );
         }
@@ -1325,12 +1335,20 @@ mod tests {
                 false,
                 Some(Duration::ZERO),
                 interval,
-                Duration::from_secs(30)
+                Duration::from_secs(30),
+                REPLACEMENT_WAIT
             ),
             FailedLook::Tell { since: 100 }
         );
         assert_eq!(
-            failed_look(Some(100), false, None, interval, Duration::from_secs(30)),
+            failed_look(
+                Some(100),
+                false,
+                None,
+                interval,
+                Duration::from_secs(30),
+                REPLACEMENT_WAIT
+            ),
             FailedLook::Tell { since: 100 }
         );
         assert_eq!(
@@ -1339,7 +1357,8 @@ mod tests {
                 true,
                 Some(60 * second),
                 interval,
-                Duration::from_secs(30)
+                Duration::from_secs(30),
+                REPLACEMENT_WAIT
             ),
             FailedLook::Wait(interval)
         );
@@ -1349,12 +1368,20 @@ mod tests {
                 true,
                 Some(second),
                 interval,
-                Duration::from_secs(30)
+                Duration::from_secs(30),
+                REPLACEMENT_WAIT
             ),
             FailedLook::Wait(second)
         );
         assert_eq!(
-            failed_look(Some(100), true, None, interval, Duration::from_secs(30)),
+            failed_look(
+                Some(100),
+                true,
+                None,
+                interval,
+                Duration::from_secs(30),
+                REPLACEMENT_WAIT
+            ),
             FailedLook::Wait(interval)
         );
         assert_eq!(
@@ -1363,7 +1390,8 @@ mod tests {
                 true,
                 Some(Duration::ZERO),
                 interval,
-                Duration::from_secs(30)
+                Duration::from_secs(30),
+                REPLACEMENT_WAIT
             ),
             FailedLook::WaitedOut { since: 100 }
         );
@@ -1375,27 +1403,57 @@ mod tests {
         let second = Duration::from_secs(1);
         for told in [false, true] {
             assert_eq!(
-                failed_look(None, told, None, 5 * second, second),
+                failed_look(None, told, None, 5 * second, second, REPLACEMENT_WAIT),
                 FailedLook::Wait(5 * second)
             );
             assert_eq!(
-                failed_look(None, told, None, 5 * second, 29 * second),
+                failed_look(None, told, None, 5 * second, 29 * second, REPLACEMENT_WAIT),
                 FailedLook::Wait(second)
             );
             assert_eq!(
-                failed_look(None, told, None, 5 * second, 30 * second),
+                failed_look(None, told, None, 5 * second, 30 * second, REPLACEMENT_WAIT),
                 FailedLook::Fail
             );
             assert_eq!(
-                failed_look(None, told, None, 5 * second, 31 * second),
+                failed_look(None, told, None, 5 * second, 31 * second, REPLACEMENT_WAIT),
                 FailedLook::Fail
             );
             assert_eq!(
-                failed_look(None, told, Some(second), 5 * second, second),
+                failed_look(
+                    None,
+                    told,
+                    Some(second),
+                    5 * second,
+                    second,
+                    REPLACEMENT_WAIT
+                ),
                 FailedLook::Wait(second)
             );
             assert_eq!(
-                failed_look(None, told, Some(Duration::ZERO), 5 * second, second),
+                failed_look(
+                    None,
+                    told,
+                    Some(Duration::ZERO),
+                    5 * second,
+                    second,
+                    REPLACEMENT_WAIT
+                ),
+                FailedLook::Fail
+            );
+            let grace = Duration::from_millis(500);
+            assert_eq!(
+                failed_look(
+                    None,
+                    told,
+                    None,
+                    5 * second,
+                    Duration::from_millis(300),
+                    grace
+                ),
+                FailedLook::Wait(Duration::from_millis(200))
+            );
+            assert_eq!(
+                failed_look(None, told, None, 5 * second, grace, grace),
                 FailedLook::Fail
             );
         }

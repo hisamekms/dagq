@@ -1274,6 +1274,38 @@ impl QueueService<'_> {
 /// shorten a request's answer deadline; a caller's shorter deadline caps it.
 pub const REPLACEMENT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The variable that shortens [`REPLACEMENT_WAIT`] for the process it is
+/// set on and the processes it starts: whole milliseconds, taken up to
+/// [`REPLACEMENT_WAIT`] and never past it. Only the tests' fixtures set it,
+/// so that a command that meets a stopped or missing service does not wait
+/// the whole grace period. Nothing in production sets it, and a value that
+/// does not read as milliseconds leaves the default. A test that waits out
+/// a real replacement sets a longer one on the `dagq` it starts, or in the
+/// environment it gives the in-process host client
+/// ([`crate::infrastructure::queue_service::Client::host`]), which takes
+/// the value that environment names over the process's.
+pub const REPLACEMENT_WAIT_ENV: &str = "DAGQ_REPLACEMENT_WAIT_MS";
+
+/// The replacement grace period that [`REPLACEMENT_WAIT_ENV`]'s `value`
+/// (`None`: unset) gives: [`REPLACEMENT_WAIT`] when unset or unreadable,
+/// else its milliseconds up to [`REPLACEMENT_WAIT`].
+pub fn replacement_wait_from(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(REPLACEMENT_WAIT, |millis| {
+            Duration::from_millis(millis).min(REPLACEMENT_WAIT)
+        })
+}
+
+/// The replacement grace period of this process: [`replacement_wait_from`]
+/// of its [`REPLACEMENT_WAIT_ENV`], read once.
+pub fn replacement_wait() -> Duration {
+    static WAIT: std::sync::LazyLock<Duration> = std::sync::LazyLock::new(|| {
+        replacement_wait_from(std::env::var(REPLACEMENT_WAIT_ENV).ok().as_deref())
+    });
+    *WAIT
+}
+
 /// The connection a use case runs on (ADR-0045 decision 18): a read
 /// (`show`, the proposals', the evals' and the case sets' and the whole
 /// queue's reads) on a read-only one, a watch's look on the live queue
@@ -11082,5 +11114,37 @@ mod ruleset_gate_tests {
         })
         .unwrap();
         assert_eq!(recorded, Some(Err(Unverified::Unreadable)));
+    }
+}
+
+#[cfg(test)]
+mod replacement_wait_tests {
+    use super::*;
+
+    #[test]
+    fn without_the_variable_the_grace_period_is_thirty_seconds() {
+        assert_eq!(replacement_wait_from(None), Duration::from_secs(30));
+        assert_eq!(replacement_wait_from(None), REPLACEMENT_WAIT);
+    }
+
+    #[test]
+    fn the_variable_gives_its_milliseconds_up_to_the_default() {
+        assert_eq!(
+            replacement_wait_from(Some("500")),
+            Duration::from_millis(500)
+        );
+        assert_eq!(replacement_wait_from(Some("0")), Duration::ZERO);
+        assert_eq!(replacement_wait_from(Some("60000")), REPLACEMENT_WAIT);
+    }
+
+    #[test]
+    fn a_value_that_is_not_milliseconds_leaves_the_default() {
+        for value in ["", "fast", "-1", "1.5", "1s"] {
+            assert_eq!(
+                replacement_wait_from(Some(value)),
+                REPLACEMENT_WAIT,
+                "{value:?}"
+            );
+        }
     }
 }

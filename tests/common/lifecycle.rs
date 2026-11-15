@@ -406,6 +406,21 @@ pub fn on_socket() -> OneShot {
     }
 }
 
+/// [`on_socket`] whose host client waits out a replacement for
+/// production's whole grace period: the environment it reads names that
+/// one ([`dagq::application::queue_service::REPLACEMENT_WAIT_ENV`]), for a
+/// test whose service goes away and comes back while the command waits on
+/// it. Nothing else in the process changes.
+pub fn on_socket_through_replacements() -> OneShot {
+    OneShot {
+        lifecycle_route: LifecycleRoute::Socket(|name| {
+            use dagq::application::queue_service::{REPLACEMENT_WAIT, REPLACEMENT_WAIT_ENV};
+            (name == REPLACEMENT_WAIT_ENV).then(|| REPLACEMENT_WAIT.as_millis().to_string())
+        }),
+        ..OneShot::system()
+    }
+}
+
 pub fn up(fixture: &Fixture, launchd: &FakeLaunchd, processes: &FakeProcesses) -> Value {
     one_shot()
         .up(

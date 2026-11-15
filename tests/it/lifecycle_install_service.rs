@@ -203,7 +203,8 @@ fn an_install_s_steps_go_on_across_a_restart_of_the_service() {
             std::thread::sleep(Duration::from_millis(500));
             dagq::compose::queue_service_start(&db, &exe, None, |_| None).unwrap();
         });
-        let error = on_socket()
+        // The install's own calls wait for the service to come back.
+        let error = common::lifecycle::on_socket_through_replacements()
             .install_on(
                 &fixture.location,
                 &FakeLaunchd::new(&db),

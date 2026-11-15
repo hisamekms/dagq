@@ -6,6 +6,34 @@
 //! runtime tests use are in `tests/it/runtime_support`.
 #[path = "../common/mod.rs"]
 mod common;
+
+/// Gives this binary's process the tests' short replacement grace period
+/// ([`common::actor::TEST_REPLACEMENT_WAIT_MS`]) as it loads, before `main`
+/// and so before any thread reads the environment: the queue service's
+/// clients the tests call in this process and every `dagq` they start
+/// (which inherits it) say that a stopped or missing service does not
+/// answer within half a second, not production's 30. A variable already
+/// set (by the person running the tests) is kept.
+#[used]
+#[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
+static SHORT_REPLACEMENT_WAIT: extern "C" fn() = {
+    extern "C" fn shorten() {
+        use dagq::application::queue_service::REPLACEMENT_WAIT_ENV;
+        if std::env::var_os(REPLACEMENT_WAIT_ENV).is_none() {
+            // SAFETY: this runs as the binary loads, before `main` starts
+            // the test harness's threads, so nothing reads the environment
+            // concurrently.
+            unsafe {
+                std::env::set_var(
+                    REPLACEMENT_WAIT_ENV,
+                    common::actor::TEST_REPLACEMENT_WAIT_MS.to_string(),
+                );
+            }
+        }
+    }
+    shorten
+};
 #[macro_use]
 mod runtime_support;
 

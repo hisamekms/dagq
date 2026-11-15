@@ -14,6 +14,7 @@ use std::{
 use serde_json::{Value, json};
 
 use crate::common;
+use common::actor::TEST_REPLACEMENT_WAIT_MS;
 use common::cli::{invoke, invoke_with};
 use common::service::{Queue, call, events, queue, start, token};
 use common::{Bounded, WithoutActor};
@@ -49,6 +50,11 @@ fn as_is(env: &[(&str, &str)], db: &std::path::Path, args: &[&str]) -> std::proc
         .args(args)
         .bounded_output()
         .unwrap()
+}
+
+/// The replacement grace period a test's `dagq` runs with.
+fn test_replacement_wait() -> Duration {
+    Duration::from_millis(TEST_REPLACEMENT_WAIT_MS)
 }
 
 /// The code a refused command printed.
@@ -222,7 +228,8 @@ fn the_user_the_inbox_and_a_planner_go_through_the_service_and_never_open_the_db
     assert_eq!(woken["events"][0]["kind"], "ask_opened", "{woken}");
 
     // One write and the inbox watch represent the stopped service:
-    // neither opens the DB instead, even after the replacement wait.
+    // neither opens the DB instead, even after the replacement wait (the
+    // tests' short one, [`TEST_REPLACEMENT_WAIT_MS`]).
     assert!(invoke(&queue.db, &["service", "stop"]).status.success());
     let output = invoke(&queue.db, &["note", "--task", &task, "--text", "lost"]);
     assert_eq!(code(&output), "unreachable");
@@ -239,8 +246,8 @@ fn the_user_the_inbox_and_a_planner_go_through_the_service_and_never_open_the_db
         &["watch", "--role", "inbox", "--until-attention"],
     );
     let took = started.elapsed();
-    assert!(took >= Duration::from_secs(30), "{took:?}");
-    assert!(took < Duration::from_secs(45), "{took:?}");
+    assert!(took >= test_replacement_wait(), "{took:?}");
+    assert!(took < Duration::from_secs(10), "{took:?}");
     assert_eq!(code(&watched), "unreachable");
     // Nothing reached the queue while the service was gone.
     assert!(
@@ -430,8 +437,8 @@ fn a_status_of_a_service_that_never_answers_is_unreachable_at_once() {
     let status = unserved(&queue.db, &["status"]);
     let took = started.elapsed();
     assert_eq!(code(&status), "unreachable");
-    assert!(took >= Duration::from_secs(29), "{took:?}");
-    assert!(took < Duration::from_secs(45), "{took:?}");
+    assert!(took >= test_replacement_wait(), "{took:?}");
+    assert!(took < Duration::from_secs(10), "{took:?}");
     let _ = fs::remove_file(&socket);
 }
 

@@ -66,9 +66,9 @@ use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::queue_commands::QueueCommand;
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
-    Admin, Issued, Peer, QueueService, QueueServiceControl, REPLACEMENT_WAIT, Replaced,
-    RequestNotes, ServiceAccess, ServiceBackend, ServiceProbe, ServiceQueue, TelemetryTokens,
-    on_write_line,
+    Admin, Issued, Peer, QueueService, QueueServiceControl, REPLACEMENT_WAIT, REPLACEMENT_WAIT_ENV,
+    Replaced, RequestNotes, ServiceAccess, ServiceBackend, ServiceProbe, ServiceQueue,
+    TelemetryTokens, on_write_line, replacement_wait, replacement_wait_from,
 };
 use crate::application::session::{AgentStart, ReasonParams, SessionOp, WrapperStore};
 use crate::application::{
@@ -1319,6 +1319,7 @@ impl RequestedServiceAccess {
     fn revoking(&self) -> Client {
         Client {
             through_replacement: false,
+            grace: None,
             ..self.client.clone()
         }
     }
@@ -1825,6 +1826,7 @@ impl ServiceTelemetrySink {
                 queue: None,
                 binding: None,
                 through_replacement: true,
+                grace: None,
             },
         }
     }
@@ -2125,17 +2127,20 @@ fn retry_delay(
 }
 
 /// Run a transport attempt, keeping one replacement budget across its
-/// failures and waits. The grace period bounds when another attempt may
-/// start; every attempt retains the caller's remaining answer deadline.
+/// failures and waits. The grace period (the caller's, or this process's
+/// [`replacement_wait`]) bounds when another attempt may start; every
+/// attempt retains the caller's remaining answer deadline.
 fn retry_transport<T>(
     reads_only: bool,
     timeout: Duration,
+    grace: Duration,
     attempt: impl FnMut(Duration) -> Result<T>,
 ) -> Result<T> {
     let started = Instant::now();
     retry_transport_with(
         reads_only,
         timeout,
+        grace,
         attempt,
         || started.elapsed(),
         thread::sleep,
@@ -2145,11 +2150,12 @@ fn retry_transport<T>(
 fn retry_transport_with<T>(
     reads_only: bool,
     timeout: Duration,
+    grace: Duration,
     mut attempt: impl FnMut(Duration) -> Result<T>,
     elapsed: impl Fn() -> Duration,
     mut wait_for: impl FnMut(Duration),
 ) -> Result<T> {
-    let limit = timeout.min(REPLACEMENT_WAIT);
+    let limit = timeout.min(grace);
     let mut attempt_limit = timeout;
     loop {
         let error = match attempt(attempt_limit) {
@@ -2172,12 +2178,23 @@ fn call_retry(
     socket: &Path,
     request: &ServiceRequest,
     timeout: Duration,
+    grace: Duration,
 ) -> Result<ServiceResponse> {
     retry_transport(
         crate::application::queue_service::request_reads_only(request.use_case, &request.params),
         timeout,
+        grace,
         |limit| call(socket, request, limit),
     )
+}
+
+/// [`call_retry`] within this process's grace period ([`replacement_wait`]).
+fn call_retry_in_process(
+    socket: &Path,
+    request: &ServiceRequest,
+    timeout: Duration,
+) -> Result<ServiceResponse> {
+    call_retry(socket, request, timeout, replacement_wait())
 }
 
 /// What is left until `deadline`: a timeout once nothing is.
@@ -2518,6 +2535,11 @@ pub struct Client {
     /// (ADR-t4627-1): a client-mode command's does; the broker's own calls
     /// do not, since an absent service is its answer to a run's request.
     through_replacement: bool,
+    /// The replacement grace period of this client's own, when the
+    /// environment [`Client::host`] reads names one
+    /// ([`REPLACEMENT_WAIT_ENV`]); `None`: the process's
+    /// ([`replacement_wait`]).
+    grace: Option<Duration>,
 }
 
 /// What a worker's or a job's client that gets no answer says to do next.
@@ -2580,6 +2602,7 @@ impl Client {
                 queue: None,
                 binding: None,
                 through_replacement: true,
+                grace: None,
             }));
         }
         if let Some(url) = named(CONTROL_URL_ENV) {
@@ -2607,6 +2630,7 @@ impl Client {
                 queue: None,
                 binding: None,
                 through_replacement: true,
+                grace: None,
             }));
         }
         let route = match (named(SOCKET_ENV), named(URL_ENV)) {
@@ -2645,6 +2669,7 @@ impl Client {
             queue: None,
             binding: None,
             through_replacement: true,
+            grace: None,
         }))
     }
 
@@ -2662,6 +2687,7 @@ impl Client {
             queue: None,
             binding: None,
             through_replacement: true,
+            grace: None,
         })
     }
 
@@ -2701,6 +2727,7 @@ impl Client {
             queue: Some(std::path::absolute(db).unwrap_or_else(|_| db.to_path_buf())),
             binding: binding.map(str::to_owned),
             through_replacement: true,
+            grace: env(REPLACEMENT_WAIT_ENV).map(|value| replacement_wait_from(Some(&value))),
         }
     }
 
@@ -2720,6 +2747,7 @@ impl Client {
             // An absent service is the broker's `unreachable` answer to a
             // run's request, given within the run's own wait.
             through_replacement: false,
+            grace: None,
         }
     }
 
@@ -2757,7 +2785,14 @@ impl Client {
         retry: bool,
     ) -> Result<Value> {
         self.check_destination()?;
-        let send = if retry { call_retry } else { call };
+        let grace = self.grace.unwrap_or_else(replacement_wait);
+        let send = |socket: &Path, request: &ServiceRequest, timeout: Duration| {
+            if retry {
+                call_retry(socket, request, timeout, grace)
+            } else {
+                call(socket, request, timeout)
+            }
+        };
         let token = match &self.credential {
             Some(file) => Some(
                 read_token(file)
@@ -2864,7 +2899,12 @@ impl Client {
         if let ClientRoute::Socket(socket) = &self.route {
             let probe = |left: Duration| hello(socket, PROBE_TIMEOUT.min(left));
             if self.through_replacement {
-                retry_transport(true, limit, probe)
+                retry_transport(
+                    true,
+                    limit,
+                    self.grace.unwrap_or_else(replacement_wait),
+                    probe,
+                )
             } else {
                 probe(limit)
             }
@@ -3395,6 +3435,7 @@ impl ServiceWrapperStore {
                 queue: None,
                 binding: None,
                 through_replacement: true,
+                grace: None,
             },
             target,
         }
@@ -6133,7 +6174,7 @@ impl SocketCaller {
     /// 1): the supervisor's issue at its parent's request.
     fn as_user(&self, request: &ServiceRequest) -> Result<Value> {
         let send = if self.through_replacement {
-            call_retry
+            call_retry_in_process
         } else {
             call
         };
@@ -6193,7 +6234,7 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
     fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
         let request = supervisor_request(use_case, params, self.signed_in.token());
         let send = if self.through_replacement {
-            call_retry
+            call_retry_in_process
         } else {
             call
         };
@@ -6561,24 +6602,25 @@ impl crate::application::supervisor_service::ServiceCaller for ControlCaller {
             use_case: UseCase::Control,
             params,
         };
-        let response = call_retry(&self.socket, &request, CLIENT_TIMEOUT).map_err(|error| {
-            use crate::application::supervisor_service::ServiceUnreachable;
-            let failure = self.client.not_answered(&error, UseCase::Control);
-            // A request past the limit was never sent, and an answer past it
-            // was given: neither is a service out of reach, nor sent again.
-            if error.downcast_ref::<RequestPastLimit>().is_some()
-                || error.downcast_ref::<AnswerPastLimit>().is_some()
-            {
-                return anyhow::Error::new(failure);
-            }
-            let lost = if error.downcast_ref::<NotConnected>().is_some() {
-                // Nothing was sent: the service did not do it.
-                ServiceUnreachable::not_done(format!("{error:#}"))
-            } else {
-                ServiceUnreachable::maybe_done(format!("{error:#}"))
-            };
-            anyhow::Error::new(lost).context(failure)
-        })?;
+        let response =
+            call_retry_in_process(&self.socket, &request, CLIENT_TIMEOUT).map_err(|error| {
+                use crate::application::supervisor_service::ServiceUnreachable;
+                let failure = self.client.not_answered(&error, UseCase::Control);
+                // A request past the limit was never sent, and an answer past it
+                // was given: neither is a service out of reach, nor sent again.
+                if error.downcast_ref::<RequestPastLimit>().is_some()
+                    || error.downcast_ref::<AnswerPastLimit>().is_some()
+                {
+                    return anyhow::Error::new(failure);
+                }
+                let lost = if error.downcast_ref::<NotConnected>().is_some() {
+                    // Nothing was sent: the service did not do it.
+                    ServiceUnreachable::not_done(format!("{error:#}"))
+                } else {
+                    ServiceUnreachable::maybe_done(format!("{error:#}"))
+                };
+                anyhow::Error::new(lost).context(failure)
+            })?;
         control_answer(response)
     }
 
@@ -7874,6 +7916,7 @@ mod tests {
             let result = retry_transport_with(
                 reads,
                 Duration::from_millis(500),
+                REPLACEMENT_WAIT,
                 |limit| {
                     assert!(limit <= Duration::from_millis(500));
                     attempts.set(attempts.get() + 1);
@@ -7910,6 +7953,7 @@ mod tests {
             let answer = retry_transport_with(
                 reads,
                 Duration::from_secs(300),
+                REPLACEMENT_WAIT,
                 |limit| {
                     attempts.set(attempts.get() + 1);
                     if attempts.get() == 1 {
@@ -7929,6 +7973,30 @@ mod tests {
             assert_eq!(answer, "finished");
             assert_eq!(attempts.get(), 2);
         }
+    }
+
+    /// A shortened grace period ([`replacement_wait`]) stops the attempts
+    /// once it has passed, well before the caller's answer deadline.
+    #[test]
+    fn a_shortened_grace_period_ends_the_attempts_before_the_deadline() {
+        use crate::application::supervisor_service::ServiceUnreachable;
+        use std::cell::Cell;
+        let elapsed = Cell::new(Duration::ZERO);
+        let attempts = Cell::new(0);
+        let result: Result<()> = retry_transport_with(
+            true,
+            Duration::from_secs(300),
+            Duration::from_millis(500),
+            |_| {
+                attempts.set(attempts.get() + 1);
+                Err(ServiceUnreachable::not_done("absent").into())
+            },
+            || elapsed.get(),
+            |wait| elapsed.set(elapsed.get() + wait),
+        );
+        assert!(result.is_err());
+        assert_eq!(elapsed.get(), Duration::from_millis(500));
+        assert_eq!(attempts.get(), 3);
     }
 
     #[test]
@@ -8115,6 +8183,7 @@ mod tests {
                 queue: None,
                 binding: None,
                 through_replacement: true,
+                grace: None,
             }))
         );
         assert_eq!(
@@ -8134,6 +8203,7 @@ mod tests {
                 queue: None,
                 binding: None,
                 through_replacement: true,
+                grace: None,
             }))
         );
         let both = Client::from_env(env_of(&[
@@ -8178,6 +8248,7 @@ mod tests {
         assert_eq!(
             Client {
                 through_replacement: true,
+                grace: None,
                 ..access.revoking()
             },
             access.client
@@ -8193,6 +8264,30 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(worker.through_replacement);
+    }
+
+    /// A host client takes the replacement grace period the environment
+    /// it reads names, and with none named waits the process's
+    /// ([`replacement_wait`]).
+    #[test]
+    fn a_host_client_waits_the_grace_period_its_environment_names() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let db = dir.path().join("queue.db");
+        assert_eq!(Client::host(&db, None, env_of(&[])).grace, None);
+        assert_eq!(
+            Client::host(&db, None, env_of(&[(REPLACEMENT_WAIT_ENV, "30000")])).grace,
+            Some(REPLACEMENT_WAIT)
+        );
+        assert_eq!(
+            Client::host(&db, None, env_of(&[(REPLACEMENT_WAIT_ENV, "700")])).grace,
+            Some(Duration::from_millis(700))
+        );
+        assert_eq!(
+            Client::host(&db, None, env_of(&[(REPLACEMENT_WAIT_ENV, "soon")])).grace,
+            Some(REPLACEMENT_WAIT)
+        );
+        // The other clients wait the process's.
+        assert_eq!(Client::broker(dir.path()).grace, None);
     }
 
     /// A request past the limit the service reads is not sent: the client
@@ -8751,6 +8846,7 @@ mod tests {
             queue: None,
             binding: None,
             through_replacement: true,
+            grace: None,
         };
         let error = client
             .call_within(UseCase::Stats, json!({}), Duration::from_millis(500))
@@ -8897,6 +8993,7 @@ mod tests {
             queue: None,
             binding: None,
             through_replacement: true,
+            grace: None,
         };
         let answer = serde_json::to_vec(&ServiceResponse::success(json!({"id": 3}))).unwrap();
         let (address, broker) = one_shot_broker(200, answer);
