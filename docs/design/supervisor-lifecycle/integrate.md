@@ -50,9 +50,10 @@ supervisorはreviewがpassしたrunと、上限の後の差し戻しを収束と
 ```text
 reviewのpass → 着地の前のe2e（要るrunだけ） → 着地slot
 承認: 束縛の確認 → runの選択 → leaseと空き容量の確認 → 着地の承認の記録 → slotを取る
-着地: 着地済みか → worktreeの前処理 → receiptの検査 → rebase → 番号の振り直し → pathsの検査 → reviewのプログラム → 検証のコマンド
+着地: 着地済みか → worktreeの前処理 → receiptの検査 → rebase → 番号の振り直し → pathsの検査 → 判断との照合 → reviewのプログラム → 検証のコマンド
       └─ 通れば squash commit → mainを進める → 完了 → 後始末 → push → follow_upsの登録
       └─ 通らなければ needs_session / held（hostの失敗） / failed（receiptが失敗を報告）
+      └─ 照合が違えば slotを返し、判断の経路の再承認へ（changed）
 mainが動く → landing recheck → 着地しなくなった待ちのrunをresumeへ
 ```
 
@@ -80,10 +81,13 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - 同じrunを二重に着地させない: 前の着地が`main`を進めてから記録の前に止まったときは、そのcommitを着地として記録する（`landed_before`）。
 - 検証のコマンドはcommitごとにここで1回だけ流れ、validatingは流さない（ADR-0049の決定1）。
 - squashして載せる差分（main..rebase後のhead）がtaskの`paths`に収まらなければ着地しない（ADR-0029の決定4）。
+- 着地する差分が触るfileの組と各fileのblob hashが、runの最後の着地を許した判断の組と全て同じでなければ着地しない（下の「判断との照合」）。
 
 ## 承認とslot
 
 - 束縛・対象・lease・空き容量（[空き容量](claim-hold.md#人が打つintegrate)）の確かめと承認の記録は`begin`が持ち、supervisorがreviewかresumeで持つrunは人の`integrate`では承認しない。
+- 人とinboxの`integrate`の承認は、その時のrunの差分の組に結んで記録する（`integrate::binding::of_run`）。
+  承認が立っていても差分の組が変わっていれば、打ち直しは今の組で承認し直す（`approved_as_bound`）。
 - 検証のコマンドは自動更新のjobの関門（buildとe2e）と同時に流れず、関門が走るか番を待つ間、supervisorは着地を次のpassに回し、`land_integrating`は番を取れるまで待つ（ADR-t2719-1、[Auto-update](auto-update.md)の「着地の検証との順番」）。
 
 ## receiptの検査とrebase
@@ -97,6 +101,24 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 - rebaseの後にrunが足したmigrationの番号が`main`のものと重なれば、機械で直せる1件だけを振り直し、他は`needs_session`にする（`plan_renumber`・`renumber_migration`、[ADR-0067](../../adr/0067-migrations-are-listed-by-build-and-renumbered-on-landing.md)の決定3）。
 - 振り直しはqueueのrepositoryがdagqのソースのときだけ動く（[Source repository](source-repository.md)）。
+
+## 判断との照合
+
+- 着地を許す判断（reviewのpass・AIのconcernのhighのland・上限の後の収束・人のapprove_landingのland・人やinboxが直接打つ`integrate`）は、その時のrunの差分が触る各fileの変更後のblob hash（消したfileは削除の印）の組に結んで記録する（[ADR-t4840-2](../../adr/2026-11-12-t4840-2-one-audit-service-hash-chained-append-only-records-and-pluggable-stores.md)決定7と8、組と経路の意味は`domain::landing_binding`）。
+- pathsの検査の後に、`main..rebased`が触るfileの組とblob hashを、runの最後の判断（`RunHistory::last_judgment`）の組と比べる（`integrate::binding::compare_landing`）。
+- supervisorが判断の後に起こす着地は新しい判断にならず、その前の判断の組と比べる。
+- approve_landingの`land`はaskを開いた時の差分の組に結び、その差分を記録に持たないaskの`land`は何も承認せず、今の差分でaskを開き直す（`landing_binding::ask_binding`）。
+- receiptが名指さないcommitが判断の後に足されて組が変われば、sessionに戻す前に照合の不一致として判断を使えなくする（`integrate::binding::spend_on_unnamed_commit`）。
+- 持ち越し: 差分の外のfileだけをmainが変えたrebaseでは組が変わらず、tree hashが変わっても着地する。
+  差分が触るfileをmainも変えていれば、衝突が無くてもmerge後のblob hashが変わるので着地しない。
+  衝突の自動解消・reviewの手直し・migrationの番号の振り直しも触るfileの組かblob hashを変えるので、同じく着地しない。
+- 判断の後にbranchを変えるもの（着地のrebase・番号の振り直し・sessionの衝突の解消・reviewの手直し・resumeの解消か直し・sessionを開かずに解決済みとして進むresume）は、前後のheadと組を持つ別の変更として、その状態の変更と同じtransactionで監査に書く（`landing_binding::resume_rewrite`）。
+  前後の組を読めない間はその記録も次への進行もせず、次の周に読み直す（ADR-t4840-2決定6と7）。
+- 違えば着地せず、slotを返して違ったfileを記録し、runを着地の前の状態に戻す（`integrate::binding::compare_landing`）。
+  この記録はその前の判断を全て使えなくし（`landing_binding::unspent`）、判断の経路が再承認を決める: reviewの判断はsupervisorのreviewのやり直し、approve_landingの`land`はそのaskの開き直し、直接の`integrate`はinboxのattentionに出して打ち直しを待つ。
+  照合の記録の後・slotを返す前に止まった着地の復旧も、この再承認の経路を保つ（`RunHistory::recovered_landing`）。
+- 再承認は着地する差分を読む: containerのrunはlanding worktreeでrebaseされるので、止まった着地がrebaseしたheadを再承認の対象にする（`integrate::binding::landing_head`）。
+- 照合とmergeの記録は、それぞれ同じtransactionで監査に書く（[監査](../audit.md)）。
 
 ## reviewのプログラム
 

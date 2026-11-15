@@ -234,10 +234,13 @@ pub const ASK_NOTE_PREFIX: &str = "Landing recheck: ";
 
 /// The paragraph a failure puts in the run's open asks (ADR-0068 decision
 /// 4): what it found, and that the run is resumed without waiting for the
-/// answer, which still applies once the run waits again.
+/// answer, which applies once the run waits again: a `land` approves the
+/// diff the ask showed, so when the resume changed the files of that diff
+/// the landing does not land it and the ask is opened again on the rebased
+/// diff (ADR-t4840-2 decision 7).
 pub fn ask_note(reason: &str, resumed: bool) -> String {
     let next = if resumed {
-        "The supervisor resumes the run to bring it onto main without waiting for this answer; once it waits again, the answer applies to the rebased run."
+        "The supervisor resumes the run to bring it onto main without waiting for this answer; once it waits again, the answer applies to the rebased run, and a land of a diff the rebase changed is asked again on the rebased diff."
     } else {
         "The supervisor parks the run for a resume instead of landing it once its session has exited."
     };
@@ -986,7 +989,7 @@ mod tests {
         assert_eq!(record(&code, Some("/log"), Leaser::Other), None);
         assert!(
             ask_note(reason, true)
-                .ends_with("once it waits again, the answer applies to the rebased run."),
+                .ends_with("once it waits again, the answer applies to the rebased run, and a land of a diff the rebase changed is asked again on the rebased diff."),
         );
     }
 

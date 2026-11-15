@@ -579,6 +579,8 @@ fn a_resume_question_waits_in_its_slot_then_outside_it_with_its_clock_stopped() 
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
     let texts = session_texts(&detail.runs[0]);

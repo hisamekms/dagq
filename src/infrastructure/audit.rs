@@ -158,6 +158,325 @@ pub(super) fn control(tx: &impl SqlWrite, mut input: SenderInput) -> Result<()> 
 pub(super) use crate::application::audit::count_refusal_failure;
 pub use crate::application::audit::lost_refusals;
 
+/// The landing's facts (F, ADR-t4840-2 decisions 7 and 8), written by the
+/// store in the transaction of the run event that states them: a judgment
+/// that lets the run land (`landing.judged` of a review's, `landing.approved`
+/// of a person's or the inbox's, with the set of blob hashes, the diff hash
+/// and the tree hash it is bound to and, as the change, the binding of the
+/// run's judgment before it), the comparison of the merged result with it
+/// (`landing.compared`, with what changed the run's branch since) and the
+/// merge (`landing.merged`). The audit record is no copy of the event: the
+/// use case states both facts at once, and a record that cannot be written
+/// leaves the event unwritten too. Any other event writes none, nor does
+/// Postgres at stage zero.
+pub(super) fn record_landing(
+    tx: &impl SqlWrite,
+    event: crate::domain::EventId,
+    task_id: crate::domain::TaskId,
+    run_id: &crate::domain::RunId,
+    kind: crate::domain::EventKind,
+    payload: &Value,
+) -> Result<()> {
+    use crate::domain::EventKind as K;
+    use crate::domain::landing_binding::{BINDING_KEY, binding_of};
+    if tx.dialect() != SqlDialect::Sqlite {
+        return Ok(());
+    }
+    let (role, id, requested_by): (Option<String>, Option<String>, Option<String>) = tx.query_row(
+        "SELECT actor_role, actor_id, requested_by FROM run_events WHERE id=?1",
+        sql_params![event.as_i64()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let actor = crate::domain::RunEvent {
+        id: event,
+        task_id: Some(task_id),
+        goal_id: None,
+        run_id: Some(run_id.clone()),
+        kind: kind.as_str().into(),
+        payload: payload.clone(),
+        created_at: String::new(),
+        actor: role
+            .clone()
+            .zip(id.clone())
+            .map(|(role, id)| crate::domain::EventActor {
+                role,
+                id,
+                requested_by: requested_by.clone(),
+            }),
+    };
+    let (action, sender, capability, landing, change, outcome) = match kind {
+        K::ReviewFinished | K::ReviseLimitJudged | K::IntegrationApproved
+            if payload.get(BINDING_KEY).is_some() =>
+        {
+            let Some(path) = crate::domain::landing_binding::judgment_of(&actor) else {
+                return Ok(());
+            };
+            let (action, sender, capability) = match path.reapproval() {
+                crate::domain::landing_binding::Reapproval::Review => (
+                    AuditAction::LandingJudged,
+                    Sender::Supervisor,
+                    crate::domain::authorization::Capability::Supervise,
+                ),
+                crate::domain::landing_binding::Reapproval::ApproveLanding => (
+                    AuditAction::LandingApproved,
+                    Sender::QueueService,
+                    crate::domain::authorization::Capability::AskAnswer,
+                ),
+                crate::domain::landing_binding::Reapproval::Integrate => (
+                    AuditAction::LandingApproved,
+                    Sender::QueueService,
+                    crate::domain::authorization::Capability::IntegrationRequest,
+                ),
+            };
+            let facts = binding_of(payload);
+            let before = previous_binding(tx, run_id, event)?;
+            let change = Change {
+                before: before.map(|facts| binding_change(&facts, None)),
+                after: facts
+                    .as_ref()
+                    .map(|facts| binding_change(facts, Some(path.as_str()))),
+                ..Change::default()
+            };
+            (
+                action,
+                sender,
+                capability,
+                facts,
+                Some(change),
+                Outcome {
+                    status: OutcomeStatus::Succeeded,
+                    reason: None,
+                },
+            )
+        }
+        K::IntegrationCompared => {
+            let landed = payload
+                .get("landed")
+                .and_then(|value| serde_json::from_value(value.clone()).ok());
+            let matched = payload["matched"] == true;
+            let outcome = if matched {
+                Outcome {
+                    status: OutcomeStatus::Succeeded,
+                    reason: None,
+                }
+            } else {
+                Outcome {
+                    status: OutcomeStatus::Denied,
+                    reason: Some(format!(
+                        "the landed files differ from the judgment: {}",
+                        payload["differing"]
+                    )),
+                }
+            };
+            let change = Change {
+                before: Some(
+                    json!({"judgment": payload["judgment"], "path": payload["path"], "binding": payload["judged"], "head": payload["head_before"]}),
+                ),
+                after: Some(
+                    json!({"binding": payload["landed"], "head": payload["head_after"], "rebased": payload["rebased"], "renumbered": payload["renumbered"], "conflict_resolved": payload["conflict_resolved"], "differing": payload["differing"], "reapproval": payload["reapproval"]}),
+                ),
+                ..Change::default()
+            };
+            (
+                AuditAction::LandingCompared,
+                Sender::Integrate,
+                crate::domain::authorization::Capability::Land,
+                landed,
+                Some(change),
+                outcome,
+            )
+        }
+        // A rebase, a renumbering, a conflict's resolution (by the live
+        // session, a resume or a skipped resume), a resume's fix or a revise
+        // after the judgment: its own change, with each side's head and
+        // binding (its tree hash and set).
+        K::IntegrationRebased
+        | K::MigrationRenumbered
+        | K::ConflictResolved
+        | K::ResumeFinished
+        | K::ResumeSkipped
+        | K::ReviseFinished
+            if payload.get("binding_after").is_some_and(|b| !b.is_null()) =>
+        {
+            let after: Option<crate::domain::audit::LandingFacts> =
+                serde_json::from_value(payload["binding_after"].clone()).ok();
+            let change = Change {
+                before: Some(
+                    json!({"head": payload["head_before"], "binding": payload["binding_before"]}),
+                ),
+                after: Some(
+                    json!({"head": payload["head_after"], "binding": payload["binding_after"], "main": payload["main"],
+                    "rewrite": match kind {
+                        K::IntegrationRebased => "rebase",
+                        K::MigrationRenumbered => "renumber",
+                        K::ConflictResolved => "conflict_resolution",
+                        // A resume says what it rewrote.
+                        K::ResumeFinished | K::ResumeSkipped => payload["rewrite"].as_str().unwrap_or("resume"),
+                        _ => "revise",
+                    }}),
+                ),
+                ..Change::default()
+            };
+            (
+                AuditAction::LandingRewritten,
+                Sender::Integrate,
+                crate::domain::authorization::Capability::Land,
+                after,
+                Some(change),
+                Outcome {
+                    status: OutcomeStatus::Succeeded,
+                    reason: None,
+                },
+            )
+        }
+        K::RunIntegrated if payload.get("merged").is_some_and(|m| !m.is_null()) => {
+            let merged = &payload["merged"];
+            let landed = merged
+                .get("landed")
+                .and_then(|value| serde_json::from_value(value.clone()).ok());
+            let change = Change {
+                before: Some(json!({"main": payload["main_before"]})),
+                after: Some(json!({
+                    "main": payload["commit"], "source_commit": payload["source_commit"],
+                    "judgment": merged["judgment"], "path": merged["path"],
+                    "rebased": merged["rebased"], "renumbered": merged["renumbered"],
+                    "conflict_resolved": merged["conflict_resolved"],
+                })),
+                ..Change::default()
+            };
+            (
+                AuditAction::LandingMerged,
+                Sender::Integrate,
+                crate::domain::authorization::Capability::Land,
+                landed,
+                Some(change),
+                Outcome {
+                    status: OutcomeStatus::Succeeded,
+                    reason: None,
+                },
+            )
+        }
+        _ => return Ok(()),
+    };
+    let instance = "control";
+    let sender_seq: u64 = tx.query_row(
+        "SELECT COALESCE(MAX(sender_seq),0)+1 FROM audit_records WHERE sender_id=?1",
+        sql_params![format!("{sender}:{instance}")],
+        |row| row.get(0),
+    )?;
+    let principal = |role: Option<String>, id: Option<String>| Principal {
+        role: role.unwrap_or_else(|| "unknown".into()),
+        id: id.unwrap_or_else(|| "unknown".into()),
+    };
+    let mut on_behalf_of: Vec<Principal> = requested_by
+        .map(|by| {
+            let role = by.split(':').next().unwrap_or_default().to_owned();
+            vec![principal(Some(role), Some(by))]
+        })
+        .unwrap_or_default();
+    // A person's `land` answer the supervisor applies is the answerer's
+    // approval: who answered, how it reached the queue and the ask are
+    // kept, the supervisor being only who wrote it.
+    let answered = (kind == K::IntegrationApproved)
+        .then(|| payload["answered_by"].as_str())
+        .flatten();
+    if let Some(by) = answered {
+        on_behalf_of.push(principal(Some(by.to_owned()), Some(by.to_owned())));
+    }
+    let answered_via = answered.and_then(|_| match payload["answer_authority"].as_str() {
+        Some("user") => Some(crate::domain::audit::AnsweredVia::HumanAttested),
+        Some("delegated") => Some(crate::domain::audit::AnsweredVia::RelayedByInbox),
+        _ => None,
+    });
+    let mut evidence: std::collections::BTreeMap<String, String> =
+        [("event".to_owned(), event.as_i64().to_string())].into();
+    if let Some(ask_id) = payload["ask_id"]
+        .as_i64()
+        .filter(|_| kind == K::IntegrationApproved)
+    {
+        evidence.insert("ask".to_owned(), ask_id.to_string());
+    }
+    let at = crate::application::timestamp(std::time::SystemTime::now());
+    let input = SenderInput {
+        sender_seq,
+        at: at.clone(),
+        action,
+        resource: Resource {
+            kind: "run".into(),
+            id: run_id.to_string(),
+        },
+        authority: Authority {
+            capability: Some(capability.to_string()),
+            ..Authority::default()
+        },
+        outcome,
+        change,
+        correlation: Correlation {
+            task_id: Some(task_id.as_i64()),
+            run_id: Some(run_id.to_string()),
+            ..Correlation::default()
+        },
+        answered_via,
+        landing,
+        external: None,
+    };
+    let caller = Caller {
+        sender,
+        sender_instance: instance.into(),
+        principal: principal(role, id),
+        on_behalf_of,
+        auth: "control_side".into(),
+        assurance: AssuranceClaim::Chained(Attestation::Enforced),
+        evidence,
+        clock_source: "host".into(),
+    };
+    append_in(tx, input, caller, at)?;
+    Ok(())
+}
+
+/// The binding of the run's latest judgment event before `event`.
+fn previous_binding(
+    tx: &impl SqlWrite,
+    run_id: &crate::domain::RunId,
+    event: crate::domain::EventId,
+) -> Result<Option<crate::domain::audit::LandingFacts>> {
+    use crate::domain::EventKind as K;
+    let rows: Vec<(i64, String, String, Option<String>)> = tx.query_map(
+        "SELECT id, kind, payload, actor_role FROM run_events WHERE run_id=?1 AND id<?2 AND kind IN (?3,?4,?5) ORDER BY id DESC",
+        sql_params![run_id, event.as_i64(), K::ReviewFinished.as_str(), K::ReviseLimitJudged.as_str(), K::IntegrationApproved.as_str()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    Ok(rows.into_iter().find_map(|(id, kind, text, role)| {
+        let payload: Value = serde_json::from_str(&text).ok()?;
+        let judged = crate::domain::RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: Some(run_id.clone()),
+            kind: kind.as_str().into(),
+            payload,
+            created_at: String::new(),
+            actor: role.map(|role| crate::domain::EventActor {
+                role,
+                id: String::new(),
+                requested_by: None,
+            }),
+        };
+        crate::domain::landing_binding::judgment_of(&judged)?;
+        crate::domain::landing_binding::binding_of(&judged.payload)
+    }))
+}
+
+/// A binding as a record's change shows it: the tree hash and the set
+/// (and the judgment's path, for the new one).
+fn binding_change(facts: &crate::domain::audit::LandingFacts, path: Option<&str>) -> Value {
+    let mut value = json!({"tree_hash": facts.tree_hash, "approved_blobs": facts.approved_blobs});
+    if let Some(path) = path {
+        value["path"] = json!(path);
+    }
+    value
+}
+
 fn startup_input(at: String, config: &[u8]) -> SenderInput {
     SenderInput {
         sender_seq: 1,
@@ -672,5 +991,214 @@ mod tests {
         assert_eq!(result["audit_verified"], false);
         assert_eq!(result["seq"], 2);
         assert_eq!(result["kind"], "Hash");
+    }
+
+    /// A queue with one task's run [`RUN`] and the user as its actor.
+    fn with_run() -> (tempfile::TempDir, SqliteQueue, crate::domain::RunId) {
+        use crate::application::TaskStore;
+        const RUN: &str = "11111111-1111-4111-8111-111111111111";
+        let (dir, queue) = fixture();
+        let mut queue = queue.with_actor(crate::domain::ActorContext::user());
+        let task = queue
+            .add(crate::domain::NewTask {
+                title: "t".into(),
+                description: String::new(),
+                acceptance: String::new(),
+                verification_commands: Vec::new(),
+                required_evidence: Vec::new(),
+                paths: Vec::new(),
+                dependencies: Vec::new(),
+                goal_dependencies: Vec::new(),
+                priority: Default::default(),
+                goal_id: None,
+                context: String::new(),
+                change: None,
+                provider: None,
+                worker_mode: None,
+                wait_for_build: false,
+                execution_class: Default::default(),
+            })
+            .unwrap()
+            .id();
+        queue
+            .conn
+            .execute_batch(&format!(
+                "UPDATE tasks SET status='in_progress' WHERE id={task};
+                 INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit)
+                 VALUES ('{RUN}',{task},'awaiting_integration','claude','claude','{}');",
+                "a".repeat(40),
+            ))
+            .unwrap();
+        (dir, queue, crate::domain::RunId::new(RUN).unwrap())
+    }
+
+    fn landing_records(queue: &SqliteQueue) -> Vec<AuditRecord> {
+        queue
+            .conn
+            .prepare("SELECT record FROM audit_records ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| serde_json::from_str::<AuditRecord>(&r.unwrap()).unwrap())
+            .filter(|r| r.action.as_str().starts_with("landing."))
+            .collect()
+    }
+
+    fn binding(blob: &str, tree: &str) -> Value {
+        json!({"approved_blobs": {"src/a.rs": {"blob": blob}, "old.rs": "removed"}, "diff_hash": "d", "tree_hash": tree})
+    }
+
+    /// Each rewrite of the run's branch after a judgment is audited as its
+    /// own change, named by what rewrote it, with each side's head and
+    /// binding: the landing's rebase and renumbering, the live session's
+    /// conflict resolution, a revise, and a resume's, with a session or
+    /// skipped, by the rewrite it names. One with no binding after it
+    /// writes none.
+    #[test]
+    fn each_rewrite_of_the_branch_is_audited_with_what_rewrote_it() {
+        use crate::domain::EventKind as K;
+        let (_dir, queue, run) = with_run();
+        let record = |kind, rewrite: Option<&str>| {
+            let mut payload = json!({"head_before": "h1", "head_after": "h2",
+                "binding_before": binding("1", "t1"), "binding_after": binding("2", "t2")});
+            if let Some(rewrite) = rewrite {
+                payload["rewrite"] = json!(rewrite);
+            }
+            queue.record_runtime_event(&run, kind, payload).unwrap();
+        };
+        record(K::IntegrationRebased, None);
+        record(K::MigrationRenumbered, None);
+        record(K::ConflictResolved, None);
+        record(K::ReviseFinished, None);
+        record(K::ResumeFinished, Some("conflict_resolution"));
+        record(K::ResumeSkipped, Some("conflict_resolution"));
+        record(K::ResumeFinished, Some("resume"));
+        record(K::ResumeSkipped, Some("resume"));
+        queue
+            .record_runtime_event(&run, K::ResumeFinished, json!({"outcome": "resolved"}))
+            .unwrap();
+        let records = landing_records(&queue);
+        let rewrites: Vec<&str> = records
+            .iter()
+            .map(|r| {
+                assert_eq!(r.action, AuditAction::LandingRewritten);
+                let change = r.change.as_ref().unwrap();
+                assert_eq!(change.before.as_ref().unwrap()["head"], "h1");
+                assert_eq!(
+                    change.before.as_ref().unwrap()["binding"]["tree_hash"],
+                    "t1"
+                );
+                assert_eq!(change.after.as_ref().unwrap()["head"], "h2");
+                assert_eq!(change.after.as_ref().unwrap()["binding"]["tree_hash"], "t2");
+                change.after.as_ref().unwrap()["rewrite"].as_str().unwrap()
+            })
+            .collect();
+        assert_eq!(
+            rewrites,
+            [
+                "rebase",
+                "renumber",
+                "conflict_resolution",
+                "revise",
+                "conflict_resolution",
+                "conflict_resolution",
+                "resume",
+                "resume"
+            ]
+        );
+    }
+
+    /// Each judgment that lets a run land is audited with the set it was
+    /// bound to and, as its change, the binding of the judgment before it;
+    /// the comparison is audited with both sides and what rewrote the
+    /// branch (a rebase), denied when they differ; a verdict that does not
+    /// let the run land, or a judgment with no binding, writes none.
+    #[test]
+    fn a_landings_judgments_and_comparisons_are_audited_with_the_sets_they_hold() {
+        use crate::domain::EventKind as K;
+        let (_dir, queue, run) = with_run();
+        let record = |kind, payload| queue.record_runtime_event(&run, kind, payload).unwrap();
+        record(
+            K::ReviewFinished,
+            json!({"verdict": "revise", "binding": binding("1", "t1")}),
+        );
+        record(K::ReviewFinished, json!({"verdict": "pass"}));
+        assert!(landing_records(&queue).is_empty());
+        record(
+            K::ReviewFinished,
+            json!({"verdict": "pass", "binding": binding("1", "t1")}),
+        );
+        record(
+            K::IntegrationCompared,
+            json!({
+                "judgment": 3, "path": "review_pass", "matched": false, "judged": binding("1", "t1"),
+                "landed": binding("2", "t2"), "head_before": "h1", "head_after": "h2", "rebased": true,
+                "renumbered": false, "conflict_resolved": false, "differing": ["src/a.rs"], "reapproval": "review",
+            }),
+        );
+        record(
+            K::IntegrationApproved,
+            json!({"ask_id": 4, "binding": binding("2", "t2")}),
+        );
+        let records = landing_records(&queue);
+        let actions: Vec<&str> = records.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            ["landing.judged", "landing.compared", "landing.approved"]
+        );
+        let (judged, compared, approved) = (&records[0], &records[1], &records[2]);
+        assert_eq!(judged.sender_id, "supervisor:control");
+        assert_eq!(
+            judged.landing.as_ref().unwrap().tree_hash.as_deref(),
+            Some("t1")
+        );
+        assert_eq!(
+            serde_json::to_value(&judged.landing.as_ref().unwrap().approved_blobs).unwrap(),
+            binding("1", "t1")["approved_blobs"]
+        );
+        assert_eq!(judged.change.as_ref().unwrap().before, None);
+        assert_eq!(judged.correlation.run_id.as_deref(), Some(run.as_str()));
+        assert_eq!(compared.outcome.status, OutcomeStatus::Denied);
+        let change = compared.change.as_ref().unwrap();
+        assert_eq!(
+            change.before.as_ref().unwrap()["binding"]["tree_hash"],
+            "t1"
+        );
+        assert_eq!(change.after.as_ref().unwrap()["binding"]["tree_hash"], "t2");
+        assert_eq!(change.after.as_ref().unwrap()["rebased"], true);
+        assert_eq!(approved.sender_id, "queue_service:control");
+        assert_eq!(approved.principal.role, "user");
+        assert_eq!(approved.authority.capability.as_deref(), Some("ask.answer"));
+        let before = approved.change.as_ref().unwrap().before.as_ref().unwrap();
+        assert_eq!(before["tree_hash"], "t1");
+        assert_eq!(
+            before["approved_blobs"],
+            binding("1", "t1")["approved_blobs"]
+        );
+    }
+
+    /// A judgment whose audit record cannot be written is not recorded
+    /// either: both are one transaction.
+    #[test]
+    fn a_judgment_whose_audit_fails_is_not_recorded() {
+        let (_dir, queue, run) = with_run();
+        queue.conn.execute_batch("CREATE TRIGGER landing_audit_failure AFTER INSERT ON audit_records WHEN NEW.sender_id='supervisor:control' BEGIN SELECT RAISE(ABORT, 'audit failed'); END;").unwrap();
+        let error = queue
+            .record_runtime_event(
+                &run,
+                crate::domain::EventKind::ReviewFinished,
+                json!({"verdict": "pass", "binding": binding("1", "t1")}),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("audit failed"), "{error:#}");
+        let reviews: i64 = queue
+            .conn
+            .query_row(
+                "SELECT count(*) FROM run_events WHERE kind='review_finished'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reviews, 0);
     }
 }

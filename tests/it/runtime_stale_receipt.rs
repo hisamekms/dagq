@@ -137,6 +137,8 @@ fn a_resumed_session_idle_after_its_rebase_with_the_old_receipt_is_asked_once() 
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(2)).unwrap();
     let landed = detail.runs[0].clone();
@@ -228,6 +230,8 @@ esac"#
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
     assert_eq!(nudges(&detail.runs[0]).len(), 1);

@@ -205,14 +205,50 @@ impl<'a> RunHistory<'a> {
     }
 
     /// The events after the run's latest park at a turn's end
-    /// ([`FENCE_PARKS`]), or all of them when it was never parked so.
+    /// ([`FENCE_PARKS`]) and after its latest landing whose content
+    /// differed from its judgment
+    /// ([`crate::domain::landing_binding::unspent`]): what came before
+    /// either approved other work. All of them when neither happened.
     fn since_fence_park(&self) -> &'a [RunEvent] {
         let start = self
             .events
             .iter()
             .rposition(|e| e.kind.is_in(&FENCE_PARKS))
             .map_or(0, |at| at + 1);
-        &self.events[start..]
+        crate::domain::landing_binding::unspent(&self.events[start..])
+    }
+
+    /// The run's last judgment that lets it land, and what it was bound
+    /// to ([`crate::domain::landing_binding::last_judgment`]): what a
+    /// landing compares its merged result with. `Some` exactly when
+    /// [`Self::landable`].
+    pub fn last_judgment(&self) -> Option<crate::domain::landing_binding::Judgment<'a>> {
+        crate::domain::landing_binding::last_judgment(self.since_fence_park())
+    }
+
+    /// The person's re-approval still due of the run's events since its
+    /// latest park at a turn's end
+    /// ([`crate::domain::landing_binding::person_reapproval_due`]): what a
+    /// landing on a review's judgment goes back to instead of landing.
+    pub fn person_reapproval_due(&self) -> Option<crate::domain::landing_binding::Reapproval> {
+        let start = self
+            .events
+            .iter()
+            .rposition(|e| e.kind.is_in(&FENCE_PARKS))
+            .map_or(0, |at| at + 1);
+        crate::domain::landing_binding::person_reapproval_due(&self.events[start..])
+    }
+
+    /// The re-approval a landing whose content differed from its judgment
+    /// sent the run to, while nothing moved the run on since
+    /// ([`Self::moved_on_after`]): a review again, its approve_landing ask
+    /// again, or a person's `integrate` again.
+    pub fn pending_reapproval(
+        &self,
+    ) -> Option<(EventId, crate::domain::landing_binding::Reapproval)> {
+        crate::domain::landing_binding::pending_reapproval(self.events, |id| {
+            self.moved_on_after(id)
+        })
     }
 
     /// The approval of an `approve_landing` answer that queues the run to
@@ -300,8 +336,13 @@ impl<'a> RunHistory<'a> {
     /// person's `recover`) when nothing moved on from it
     /// ([`Self::moved_on_after`]). The run lands again when the Integrator
     /// would land it ([`Self::landable`]), and is reviewed
-    /// otherwise. `None` when the run was not recovered so.
+    /// otherwise, unless the landing had recorded that its content differed
+    /// from its judgment and sent it to a person's re-approval
+    /// ([`Self::pending_reapproval`]: the approve_landing ask again or a
+    /// person's `integrate` again), which the recovery keeps. `None` when
+    /// the run was not recovered so, or is left to that re-approval.
     pub fn recovered_landing(&self) -> Option<RecoveredLanding> {
+        use crate::domain::landing_binding::Reapproval;
         let recovered = self.events.iter().rev().find(|e| {
             e.kind == EventKind::RunRecovered
                 && restore::<RunRecovered>(&e.payload).previous_status
@@ -310,11 +351,13 @@ impl<'a> RunHistory<'a> {
         if self.moved_on_after(recovered.id) {
             return None;
         }
-        Some(if self.landable() {
-            RecoveredLanding::Land(recovered.id)
-        } else {
-            RecoveredLanding::Review(recovered.id)
-        })
+        if self.landable() {
+            return Some(RecoveredLanding::Land(recovered.id));
+        }
+        match self.pending_reapproval() {
+            Some((_, Reapproval::Integrate | Reapproval::ApproveLanding)) => None,
+            _ => Some(RecoveredLanding::Review(recovered.id)),
+        }
     }
 
     /// The event that queues the run to land without a person, the oldest
@@ -356,7 +399,19 @@ impl<'a> RunHistory<'a> {
     /// previous one left, leads from `commit` to `head`. A landing that
     /// stopped after its rebase left the worktree there.
     pub fn landing_rewrote(&self, commit: &str, head: &str) -> bool {
-        let mut current = commit.to_ascii_lowercase();
+        self.landing_head(commit)
+            .is_some_and(|end| end.eq_ignore_ascii_case(head))
+    }
+
+    /// The head earlier landings of the run made of `commit`
+    /// ([`Self::landing_rewrote`]'s chain), the chain started again at each
+    /// rewrite from `commit` itself: a run in a container is rebased again
+    /// from its validated commit by each landing, in its landing worktree,
+    /// so its latest landing's rewrite is what lands. `None` when no
+    /// landing rewrote it.
+    pub fn landing_head(&self, commit: &str) -> Option<String> {
+        let commit = commit.to_ascii_lowercase();
+        let mut current = commit.clone();
         for event in self.events.iter().filter(|e| {
             matches!(
                 e.kind.known(),
@@ -364,13 +419,15 @@ impl<'a> RunHistory<'a> {
             )
         }) {
             let rewritten: HeadRewritten = restore(&event.payload);
-            if rewritten.head_before == Some(current.as_str())
+            let before = rewritten.head_before.map(str::to_ascii_lowercase);
+            if (before.as_deref() == Some(current.as_str())
+                || before.as_deref() == Some(commit.as_str()))
                 && let Some(after) = rewritten.head_after
             {
-                current = after.to_owned();
+                current = after.to_ascii_lowercase();
             }
         }
-        current != commit.to_ascii_lowercase() && current == head
+        (current != commit).then_some(current)
     }
 
     /// Whether the Integrator lands the run at a request (ADR-t728-2
@@ -409,13 +466,25 @@ impl<'a> RunHistory<'a> {
         })
     }
 
-    /// Whether landing the run pushes `main`: unless an approving
-    /// `integrate --no-push` recorded `push: false`.
-    /// `integration_approved` is recorded once; the first one counts.
+    /// Whether landing the run pushes `main`: unless the approval that
+    /// stands, an approving `integrate --no-push`, recorded `push: false`.
+    /// `integration_approved` is recorded again for each diff a person
+    /// approves (`integrate::approved_as_bound`), and a landing whose
+    /// content differed spends the approvals before it: the latest one
+    /// that stands and is a person's judgment counts
+    /// ([`crate::domain::landing_binding::judgment_of`]), or else the latest
+    /// one that stands.
     pub fn landing_pushes(&self) -> bool {
-        self.events
-            .iter()
-            .find(|e| e.kind == EventKind::IntegrationApproved)
+        let standing = self.since_fence_park();
+        let approvals = || {
+            standing
+                .iter()
+                .rev()
+                .filter(|e| e.kind == EventKind::IntegrationApproved)
+        };
+        approvals()
+            .find(|e| crate::domain::landing_binding::judgment_of(e).is_some())
+            .or_else(|| approvals().next())
             .is_none_or(|e| restore::<IntegrationApproved>(&e.payload).push != Some(false))
     }
 
@@ -1045,6 +1114,76 @@ mod tests {
         assert!(!history.landing_pushes());
         let events = vec![event(1, "integration_approved", json!({"push": true}))];
         assert!(RunHistory::from_events(&events).landing_pushes());
+        // A pushing approval spent by a landing whose content differed,
+        // then `integrate --no-push` of the current diff: it does not push.
+        let events = vec![
+            event(1, "integration_approved", json!({"push": true})),
+            event(
+                2,
+                "integration_compared",
+                json!({"matched": false, "reapproval": "integrate"}),
+            ),
+            event(3, "integration_approved", json!({"push": false})),
+        ];
+        assert!(!RunHistory::from_events(&events).landing_pushes());
+        // The latest approval that stands counts, not the first.
+        let events = vec![
+            event(1, "integration_approved", json!({"push": true})),
+            event(2, "integration_approved", json!({"push": false})),
+        ];
+        assert!(!RunHistory::from_events(&events).landing_pushes());
+        // The supervisor's own approval of no ask is no person's judgment:
+        // the person's `--no-push` before it still counts.
+        let mut supervisors = event(3, "integration_approved", json!({}));
+        supervisors.actor = Some(crate::domain::EventActor {
+            role: "supervisor".into(),
+            id: "s".into(),
+            requested_by: None,
+        });
+        let events = vec![
+            event(2, "integration_approved", json!({"push": false})),
+            supervisors,
+        ];
+        assert!(!RunHistory::from_events(&events).landing_pushes());
+    }
+
+    /// The head landings made of a commit: the chain of rewrites, started
+    /// again at each rebase from the commit itself (a run in a container is
+    /// rebased again from its validated commit by each landing), so the
+    /// latest landing's rewrite is the head.
+    #[test]
+    fn the_landing_head_is_the_latest_landings_rewrite_of_the_commit() {
+        let rewrite = |id: i64, kind: &str, before: &str, after: &str| {
+            event(
+                id,
+                kind,
+                json!({"head_before": before, "head_after": after}),
+            )
+        };
+        let history = |events: &[RunEvent]| RunHistory::from_events(events).landing_head("C");
+        assert_eq!(history(&[]), None);
+        // Another head's rebase is not this commit's.
+        assert_eq!(
+            history(&[rewrite(1, "integration_rebased", "Z", "X")]),
+            None
+        );
+        let first = rewrite(1, "integration_rebased", "C", "X1");
+        assert_eq!(history(std::slice::from_ref(&first)), Some("x1".into()));
+        // A renumbering after it continues the chain; a later landing
+        // rebasing the commit again starts it again.
+        let renumbered = rewrite(2, "migration_renumbered", "X1", "X2");
+        assert_eq!(
+            history(&[first.clone(), renumbered.clone()]),
+            Some("x2".into())
+        );
+        let again = rewrite(3, "integration_rebased", "C", "Y1");
+        assert_eq!(
+            history(&[first.clone(), renumbered, again]),
+            Some("y1".into())
+        );
+        let events = [first];
+        assert!(RunHistory::from_events(&events).landing_rewrote("C", "X1"));
+        assert!(!RunHistory::from_events(&events).landing_rewrote("C", "C"));
     }
 
     #[test]
@@ -1077,6 +1216,38 @@ mod tests {
             recovered(3, "integrating"),
         ];
         assert_eq!(of(&events), (land, Some(EventId::new(3))));
+        // A landing that recorded its content differ from a person's
+        // judgment before it was given up keeps that re-approval: the
+        // person's `integrate` again, or the approve_landing ask again,
+        // not a review; one sent to a review is reviewed.
+        for (reapproval, recovered_as) in [
+            ("integrate", None),
+            ("approve_landing", None),
+            ("review", Some(RecoveredLanding::Review(EventId::new(4)))),
+        ] {
+            let events = [
+                event(
+                    1,
+                    "integration_approved",
+                    json!({"binding": {"approved_blobs": {}}}),
+                ),
+                event(2, "integration_started", json!({})),
+                event(
+                    3,
+                    "integration_compared",
+                    json!({"matched": false, "reapproval": reapproval}),
+                ),
+                recovered(4, "integrating"),
+            ];
+            let history = RunHistory::from_events(&events);
+            assert_eq!(history.recovered_landing(), recovered_as, "{reapproval}");
+            assert_eq!(
+                history.pending_reapproval().map(|(id, r)| (id, r.as_str())),
+                Some((EventId::new(3), reapproval)),
+                "{reapproval}"
+            );
+            assert_eq!(history.queued_to_land(), None, "{reapproval}");
+        }
         // A run neither approved nor passed is reviewed, and not queued.
         let events = [passed(1, "concern"), recovered(2, "integrating")];
         assert_eq!(

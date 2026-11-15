@@ -347,9 +347,30 @@ pub fn landing_tree(
     repository.landing_worktree(run, commit)
 }
 
-/// [`landing_tree`] with a refusal as an error, for the review and the e2e.
-pub fn review_tree(repository: &dyn Repository, run: &TaskRun) -> Result<PathBuf> {
-    match landing_tree(repository, run)? {
+/// [`landing_tree`] with a refusal as an error, for the review and the e2e,
+/// at the head that lands: for a run in a container, the head a stopped
+/// landing rebased its validated commit to
+/// ([`crate::domain::RunHistory::landing_head`] of its `events`) when one
+/// did, so a review again after a landing found its merged files differ
+/// reads the files its binding is of.
+pub fn review_tree(
+    repository: &dyn Repository,
+    run: &TaskRun,
+    events: &[crate::domain::RunEvent],
+) -> Result<PathBuf> {
+    let tree = if run.in_container() {
+        let commit = run
+            .result_commit()
+            .with_context(|| format!("run {} has no validated commit to land", run.id()))?;
+        let head = crate::domain::RunHistory::from_events(events)
+            .landing_head(commit.as_str())
+            .and_then(|head| CommitSha::parse(head, "rebased head").ok())
+            .unwrap_or_else(|| commit.clone());
+        repository.landing_worktree(run, &head)?
+    } else {
+        landing_tree(repository, run)?
+    };
+    match tree {
         Ok(tree) => Ok(tree),
         Err(why) => bail!("{why}"),
     }

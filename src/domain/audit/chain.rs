@@ -12,8 +12,8 @@ use std::fmt::Write as _;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::SCHEMA_VERSION;
 use super::record::AuditRecord;
-use super::{ACTION_VERSION, SCHEMA_VERSION};
 
 /// The version of the normalization and the hash's algorithm: v1 is JCS
 /// and SHA-256.
@@ -228,7 +228,7 @@ pub fn verify(anchor: ChainAnchor, records: &[AuditRecord]) -> Result<ChainAncho
             kind,
         };
         if record.schema_version != SCHEMA_VERSION
-            || record.action_version != ACTION_VERSION
+            || !record.action.in_version(record.action_version)
             || record.chain_version != CHAIN_VERSION
         {
             return Err(mismatch(MismatchKind::UnknownVersion));
@@ -304,6 +304,14 @@ mod tests {
                 .push(admit(input(counts[slot], action), admission(seq, &prev, sender)).unwrap());
         }
         records
+    }
+
+    /// `record` as a binary of action version 1 wrote it: stamped 1, with
+    /// its hash for that stamp.
+    fn written_by_v1(mut record: AuditRecord) -> AuditRecord {
+        record.action_version = 1;
+        record.hash = record_hash(&record);
+        record
     }
 
     /// The record's hash and its successors' computed again, as one who
@@ -400,7 +408,7 @@ mod tests {
 
     #[test]
     fn a_record_with_fractions_has_known_bytes_and_hash() {
-        let mut record = chain_of(1).remove(0);
+        let mut record = written_by_v1(chain_of(1).remove(0));
         record.change = Some(Change {
             after: Some(json!({"ratio": 0.5, "tiny": 1.5e-7, "big": 1e21, "zero": -0.0})),
             ..Change::default()
@@ -449,7 +457,7 @@ mod tests {
 
     #[test]
     fn a_known_record_has_known_bytes_and_hash_and_any_field_changes_the_hash() {
-        let record = chain_of(1).remove(0);
+        let record = written_by_v1(chain_of(1).remove(0));
         let bytes = String::from_utf8(hashed_bytes(&record)).unwrap();
         assert_eq!(bytes, KNOWN_BYTES.replace("{genesis}", GENESIS_V1));
         assert_eq!(genesis(), GENESIS_V1);
@@ -604,6 +612,58 @@ mod tests {
             verify(ChainAnchor::genesis(), &late).unwrap_err().kind,
             MismatchKind::SenderSeqGap { expected: 1, .. }
         ));
+    }
+
+    /// The records a binary of action version 1 wrote stay verified after
+    /// the version is raised, and the chain goes on with the current
+    /// version's; a record stamped with a version that lacks its action, or
+    /// with a version this binary does not know, is not verified.
+    #[test]
+    fn a_chain_of_action_version_1_still_verifies_and_goes_on_with_the_current_version() {
+        assert_eq!(super::super::ACTION_VERSION, 2);
+        let mut records = chain_of(4);
+        for record in &mut records[..2] {
+            record.action_version = 1;
+        }
+        rehash_from(&mut records, 0);
+        assert_eq!(records[2].action_version, 2);
+        let next = verify(ChainAnchor::genesis(), &records).unwrap();
+        assert_eq!(next.next_seq, 5);
+        // A v1 record whose bytes and hash the v1 binary wrote reads back
+        // and verifies as it was.
+        let v1 = written_by_v1(chain_of(1).remove(0));
+        assert_eq!(v1.hash, KNOWN_HASH);
+        let read: AuditRecord = serde_json::from_str(&serde_json::to_string(&v1).unwrap()).unwrap();
+        assert!(verify(ChainAnchor::genesis(), &[read]).is_ok());
+        // `landing.rewritten` came with version 2: a v1 record of it is
+        // not one a v1 binary wrote.
+        assert!(!AuditAction::LandingRewritten.in_version(1));
+        assert!(AuditAction::LandingRewritten.in_version(2));
+        assert!(AuditAction::AskAnswered.in_version(1));
+        let mut rewritten = chain_of(2);
+        rewritten[1].action = AuditAction::LandingRewritten;
+        rewritten[1].action_version = 1;
+        rehash_from(&mut rewritten, 1);
+        let mismatch = verify(ChainAnchor::genesis(), &rewritten).unwrap_err();
+        assert_eq!(
+            (mismatch.seq, mismatch.kind),
+            (2, MismatchKind::UnknownVersion)
+        );
+        // A later version than this binary's.
+        let mut later = chain_of(2);
+        later[1].action_version = 3;
+        rehash_from(&mut later, 1);
+        assert_eq!(
+            verify(ChainAnchor::genesis(), &later).unwrap_err().kind,
+            MismatchKind::UnknownVersion
+        );
+        let mut zero = chain_of(1);
+        zero[0].action_version = 0;
+        rehash_from(&mut zero, 0);
+        assert_eq!(
+            verify(ChainAnchor::genesis(), &zero).unwrap_err().kind,
+            MismatchKind::UnknownVersion
+        );
     }
 
     #[test]

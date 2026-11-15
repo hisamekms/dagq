@@ -645,6 +645,7 @@ fn a_landings_record_is_sent_again_until_the_service_answers_and_recorded_once()
         history_ref: format!("refs/dagq/runs/{}", run.id()),
         message: "feat: landed through the service".into(),
         verification_skipped: false,
+        merged: None,
     };
     let (task, landed) = landing_queue
         .finish_integration(run.id(), &token, &landing, "/repo/.git")
@@ -2293,19 +2294,26 @@ fn an_approved_resumes_end_and_the_read_after_it_unanswered_still_land() {
         std::thread::spawn(move || supervise_retrying_by(&db, &repo, &backend, &options, &dagq))
     };
     let task = TaskId::new(2);
+    // Its landing finds the resolved diff differ from what the approval
+    // was bound to (ADR-t4840-2 decision 7) and leaves it awaiting
+    // integration; a person's `integrate` again lands it.
     wait_until(&db, common::STEP_LIMIT, |queue| {
-        queue
-            .show(task)
-            .unwrap()
+        let detail = queue.show(task).unwrap();
+        detail
             .runs
             .first()
-            .is_some_and(|run| run.status() == RunStatus::Integrated)
+            .is_some_and(|run| run.status() == RunStatus::AwaitingIntegration)
+            && detail
+                .events
+                .iter()
+                .any(|e| e.kind == EventKind::IntegrationCompared && e.payload["matched"] == false)
     });
     options.stop.store(true, Ordering::SeqCst);
     let outcome = joined(supervisor, "the supervisor to stop").unwrap();
     backend.join();
     assert_eq!(outcome["outcome"], "stopped", "{outcome}");
     assert_eq!(outcome["errors"], serde_json::json!([]), "{outcome}");
+    crate::runtime_support::integrate_the_changed_diff(&db, 2, &repo);
 
     let lost = losing.lock().unwrap().clone().unwrap();
     assert_eq!(
@@ -2849,6 +2857,7 @@ fn a_supervisor_is_refused_the_integrators_end_of_a_landing() {
         history_ref: format!("refs/dagq/runs/{}", run.id()),
         message: "feat: landed by the supervisor itself".into(),
         verification_skipped: false,
+        merged: None,
     };
     let refused = caller
         .call(

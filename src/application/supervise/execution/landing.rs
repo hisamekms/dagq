@@ -28,6 +28,7 @@ use crate::domain::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
 };
 use crate::domain::headless_job::{JobKind, JobSession, JobStop};
+use crate::domain::landing_binding::Reapproval;
 use crate::domain::provider_trial::{self, RunPair};
 use crate::domain::resume::{SEND_BACK_NO_RESUME, send_back_resumes};
 use crate::domain::review_builtins::ACCEPTANCE_PRECHECK;
@@ -593,7 +594,8 @@ impl Supervisor<'_> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         // A container run's programs work in its landing worktree, with
         // their git guarded (ADR-t2179-1 decisions 5 and 8).
-        let worktree = run_git::review_tree(&*self.repository, run)?;
+        let worktree =
+            run_git::review_tree(&*self.repository, run, &self.queue.run_events(run.id())?)?;
         anyhow::ensure!(
             self.files.is_dir(&worktree),
             "the run's worktree {} is gone",
@@ -948,6 +950,17 @@ impl Supervisor<'_> {
                 return self.unstarted_review_failed(run, session, attempt, error);
             }
         };
+        // The range the attempt reads and what a verdict or a convergence
+        // of it that lets the run land is bound to (ADR-t4840-2 decision
+        // 7), fixed as it starts: a branch or a receipt changed while it
+        // runs is not what it judged.
+        let (range, facts) = match self.review_binding(run, subagents.as_ref()) {
+            Ok(bound) => bound,
+            Err(bind) => {
+                let error = format!("the review's diff could not be bound: {bind:#}");
+                return self.unstarted_review_failed(run, session, attempt, error);
+            }
+        };
         let providers = agent_providers(subagents.as_ref());
         let session = match held_review(
             &route,
@@ -996,9 +1009,10 @@ impl Supervisor<'_> {
             started["code_paths"] = json!(code_paths.globs);
         }
         started[ReviseLimit::RECORDED] = json!(revise_limit.get());
+        crate::application::integrate::binding::put(&mut started, &facts);
         // What the whole review's prompt takes (task 1571, ADR-t1566-1
         // decision 6); each agent job's start records its own.
-        let prepared = self.prepare_review(run, attempt, subagents.as_ref());
+        let prepared = self.prepare_review(run, attempt, subagents.as_ref(), &range);
         if let Ok(prepared) = &prepared {
             started["prompt_bytes"] = json!(prepared.whole.1);
         }
@@ -1787,6 +1801,14 @@ impl Supervisor<'_> {
                 }
             }
         }
+        // A verdict that lets the run land is bound to the run's diff as
+        // the review judged it (ADR-t4840-2 decision 7); its landing is
+        // compared with it.
+        if crate::domain::concern::lets_land(&finished)
+            && let Some(facts) = started_binding(&self.queue.run_events(run.id())?, attempt)
+        {
+            crate::application::integrate::binding::put(&mut finished, &facts);
+        }
         let session = watch.session.clone();
         self.for_job(&job, |sv| {
             sv.queue
@@ -1830,7 +1852,8 @@ impl Supervisor<'_> {
         Ok(limit.unwrap_or_default())
     }
     /// The range `run`'s review reads with the landing branch at `main`:
-    /// from its receipt's commit ([`review_range_at`]).
+    /// to its receipt's commit, or to the head a stopped landing rewrote it
+    /// to ([`review_range_at`]).
     pub(super) fn receipt_range(&self, run: &TaskRun, main: &CommitSha) -> Result<ReviewRange> {
         let receipt_path = Path::new(run.receipt_path().context("missing receipt path")?);
         let receipt = Receipt::parse(
@@ -1839,7 +1862,30 @@ impl Supervisor<'_> {
                 .read_to_string(receipt_path)
                 .with_context(|| format!("read receipt {}", receipt_path.display()))?,
         )?;
-        review_range_at(&*self.repository, run, &receipt, main)
+        let events = self.queue.run_events(run.id())?;
+        review_range_at(&*self.repository, run, &receipt, main, &events)
+    }
+    /// The range a review attempt of `run` reads as it starts (its agents'
+    /// range, or else [`Self::receipt_range`]) and its binding: what a
+    /// verdict or a convergence of the attempt that lets the run land is
+    /// bound to (ADR-t4840-2 decision 7), recorded by its `review_started`
+    /// ([`started_binding`]).
+    fn review_binding(
+        &self,
+        run: &TaskRun,
+        subagents: Option<&SubagentSnapshot>,
+    ) -> Result<(ReviewRange, crate::domain::audit::LandingFacts)> {
+        let range = match subagents {
+            Some(snapshot) => snapshot.range.clone(),
+            None => self.receipt_range(run, &self.repository.main_head()?)?,
+        };
+        // A run in a container's commits are read only by the git kept
+        // from running their hooks and drivers, as `integrate`'s `begin`
+        // reads them (ADR-t2179-1 decision 8).
+        let guarded = run_git::for_run(&*self.repository, run)?;
+        let facts =
+            crate::application::integrate::binding::bind(&*guarded, &range.base, &range.head)?;
+        Ok((range, facts))
     }
     /// Write the review's material and its jobs' prompts, held to their
     /// limits: the whole review's prompt with the known failures and what it takes (task 1571),
@@ -1852,12 +1898,13 @@ impl Supervisor<'_> {
         run: &TaskRun,
         attempt: usize,
         subagents: Option<&SubagentSnapshot>,
+        range: &ReviewRange,
     ) -> Result<PreparedReview> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
-        // The attempt's range as its agents were selected from it, so that
-        // review.md shows the diff that selected them even when main moved
-        // since (none without agents configured: review.md finds its own).
-        let material = (self.review_material)(run.task_id(), subagents.map(|s| &s.range))?;
+        // The attempt's range as it started ([`Self::review_binding`]), so
+        // that review.md shows the diff that selected its agents and that
+        // its verdict is bound to, even when main moved since.
+        let material = (self.review_material)(run.task_id(), Some(range))?;
         let path = material["path"]
             .as_str()
             .context("review wrote no path")?
@@ -1956,7 +2003,8 @@ impl Supervisor<'_> {
             &run_dir.join(format!("review-prompt-{attempt}.txt")),
             fitted.text.as_bytes(),
         )?;
-        let worktree = run_git::review_tree(&*self.repository, run)?;
+        let worktree =
+            run_git::review_tree(&*self.repository, run, &self.queue.run_events(run.id())?)?;
         let mut agents = Vec::new();
         for (snapshot, agent) in subagents
             .iter()
@@ -2019,7 +2067,8 @@ impl Supervisor<'_> {
         self.register_run_job_session(run.id(), session_id);
         let stdout = run_dir.join(format!("{output}.out"));
         let stderr = run_dir.join(format!("{output}.err"));
-        let worktree = run_git::review_tree(&*self.repository, run)?;
+        let worktree =
+            run_git::review_tree(&*self.repository, run, &self.queue.run_events(run.id())?)?;
         // A worktree that is gone is the run's, not its provider's: its
         // spawn would read as a missing executable.
         anyhow::ensure!(
@@ -2545,20 +2594,23 @@ impl Supervisor<'_> {
             .filter(|f| f.is_code_finding(code))
             .collect();
         if !judged {
-            self.queue.record_runtime_event(
-                run.id(),
-                EventKind::ReviseLimitJudged,
-                json!({
-                    "attempt": attempt,
-                    "revises": revises,
-                    ReviseLimit::RECORDED: limit.get(),
-                    "converged": converged,
-                    "code_paths": code.map(|code| &code.globs),
-                    "code_findings": code_findings.iter().map(|f| json!({
-                        "text": f.text, "codes": f.codes, "paths": f.paths, "security": f.security,
-                    })).collect::<Vec<_>>(),
-                }),
-            )?;
+            let mut judgment = json!({
+                "attempt": attempt,
+                "revises": revises,
+                ReviseLimit::RECORDED: limit.get(),
+                "converged": converged,
+                "code_paths": code.map(|code| &code.globs),
+                "code_findings": code_findings.iter().map(|f| json!({
+                    "text": f.text, "codes": f.codes, "paths": f.paths, "security": f.security,
+                })).collect::<Vec<_>>(),
+            });
+            // A convergence lets the run land: it is bound to the run's
+            // diff as it was judged (ADR-t4840-2 decision 7).
+            if converged && let Some(facts) = started_binding(&events, attempt) {
+                crate::application::integrate::binding::put(&mut judgment, &facts);
+            }
+            self.queue
+                .record_runtime_event(run.id(), EventKind::ReviseLimitJudged, judgment)?;
         }
         if converged {
             info!(run_id = %run.id(), "run {} review {attempt}: past {} with no code finding; it lands and its reasons become follow_up drafts", run.id(), revises_sent(revises, limit));
@@ -2916,6 +2968,26 @@ impl Supervisor<'_> {
         {
             info!(run_id = %run.id(), ask_id = %stale.id, "run {}: closed its earlier approve_landing ask {}", run.id(), stale.id);
         }
+        self.open_approve_landing(
+            run,
+            question,
+            options,
+            (recommendation, confidence),
+            reason_category,
+        )
+    }
+    /// Open an `approve_landing` ask of `run`, closing none: an open one of
+    /// the run is returned as a repeat in the ask's own write
+    /// ([`ask::ask`]), so a supervisor opening the ask again after another
+    /// did keeps that ask and its answer.
+    fn open_approve_landing(
+        &mut self,
+        run: &TaskRun,
+        question: String,
+        options: &[&str],
+        (recommendation, confidence): (Option<String>, Option<AskConfidence>),
+        reason_category: AskReason,
+    ) -> Result<AskId> {
         // Through `ask`, like the CLI: the inbox's watch notifies it.
         let outcome = ask::ask(
             &mut *self.queue,
@@ -2968,7 +3040,7 @@ impl Supervisor<'_> {
             else {
                 continue;
             };
-            match self.apply_landing_answer(&run, ask.id, &answer, action) {
+            match self.apply_landing_answer(&run, &ask, &answer, action) {
                 Ok(()) => self.record_rest(run.id(), None, cause),
                 Err(error) => {
                     self.queue.answer_application_failed(ask.id)?;
@@ -3199,18 +3271,34 @@ impl Supervisor<'_> {
     /// on the receipt it has, its session not resumed; what follows is
     /// that of any review (ADR-0027), a wait for its provider included.
     pub(super) fn review_recovered_runs(&mut self, parallel: usize) -> Result<()> {
+        let mut waiting = Vec::new();
         for run in self
             .queue
             .runs_with_status(RunStatus::AwaitingIntegration)?
         {
-            if self.used_slots() >= parallel {
-                break;
+            if self.queue.run_lease(run.id())?.is_some() {
+                continue;
             }
+            let events = self.queue.run_events(run.id())?;
+            let reask = matches!(
+                RunHistory::from_events(&events).pending_reapproval(),
+                Some((_, Reapproval::ApproveLanding))
+            );
+            waiting.push((run, reask));
+        }
+        let (reasks, rest) = split_reasks(waiting);
+        for run in &reasks {
+            self.ask_landing_again(run)?;
+        }
+        for run in rest {
             if self.queue.run_lease(run.id())?.is_some() {
                 continue;
             }
             let events = self.queue.run_events(run.id())?;
             let history = RunHistory::from_events(&events);
+            if self.used_slots() >= parallel {
+                break;
+            }
             let why = if matches!(
                 history.recovered_landing(),
                 Some(RecoveredLanding::Review(_))
@@ -3218,6 +3306,8 @@ impl Supervisor<'_> {
                 "its landing was given up before it was approved or passed"
             } else if history.queued_review_retry().is_some() {
                 "a person answered retry_review to its failed review"
+            } else if matches!(history.pending_reapproval(), Some((_, Reapproval::Review))) {
+                "what its landing would merge differs from what its review judged"
             } else {
                 continue;
             };
@@ -3262,6 +3352,34 @@ impl Supervisor<'_> {
         }
         Ok(())
     }
+    /// Open again the `approve_landing` ask of `run`, whose landing found
+    /// what it would merge differ from what a person's `land` was bound to
+    /// (ADR-t4840-2 decision 8), unless an ask of it is open: the person
+    /// approves the current diff, or not. Its opening moves the run on
+    /// ([`RunHistory::pending_reapproval`]).
+    fn ask_landing_again(&mut self, run: &TaskRun) -> Result<()> {
+        if self
+            .queue
+            .has_unclosed_ask(run.id(), AskKind::ApproveLanding)?
+        {
+            return Ok(());
+        }
+        let question = format!(
+            "Run {} of task {}: what its landing would merge differs from what the `land` you answered was bound to (see its integration_compared for the files). Land its current diff?",
+            run.id(),
+            run.task_id()
+        );
+        // Closing none: the ask another supervisor opened again, and an
+        // answer to it, are kept.
+        self.open_approve_landing(
+            run,
+            question,
+            LANDING_OPTIONS,
+            (None, None),
+            AskReason::Scope,
+        )?;
+        Ok(())
+    }
     /// Apply `answer`, an answer to the `approve_landing` ask `ask_id` of
     /// `run` taken as `action` ([`LandingAnswer::accepted`]). The
     /// `landing_decided` of a `send_back` records the answer as
@@ -3275,10 +3393,11 @@ impl Supervisor<'_> {
     pub(super) fn apply_landing_answer(
         &mut self,
         run: &TaskRun,
-        ask_id: AskId,
+        ask: &crate::domain::Ask,
         answer: &str,
         action: LandingAnswer,
     ) -> Result<()> {
+        let ask_id = ask.id;
         self.record_review_outcome(run, ask_id, answer)?;
         let payload = json!({"ask_id": ask_id, "answer": answer});
         match action {
@@ -3286,11 +3405,53 @@ impl Supervisor<'_> {
                 // Each step is recorded once for the ask, so an answer
                 // applied in part is finished on a later pass.
                 let events = self.queue.run_events(run.id())?;
+                // An ask whose diff is not on record (opened by an older
+                // version, or after a review that failed before it
+                // started) approves nothing: what the person was shown
+                // cannot be held to what lands. The run's current diff is
+                // recorded as a comparison that differed, and its
+                // approve_landing ask is opened again on it
+                // ([`Self::review_recovered_runs`]).
+                let shown = crate::domain::landing_binding::ask_binding(&events, ask_id.as_i64());
+                if shown.is_none() && !RunHistory::from_events(&events).approved_by_ask(ask_id) {
+                    // Read by the guarded git, as `begin` reads it
+                    // (ADR-t2179-1 decision 8).
+                    let guarded = run_git::for_run(&*self.repository, run)?;
+                    let landed =
+                        crate::application::integrate::binding::of_run(&*guarded, run, &events)?;
+                    self.queue.record_runtime_event(
+                        run.id(),
+                        EventKind::IntegrationCompared,
+                        json!({
+                            "judgment": null,
+                            "path": crate::domain::landing_binding::JudgmentPath::HumanLand.as_str(),
+                            "ask_id": ask_id,
+                            "matched": false,
+                            "judged": null,
+                            "landed": landed,
+                            "differing": landed.approved_blobs.keys().collect::<Vec<_>>(),
+                            "reapproval": Reapproval::ApproveLanding.as_str(),
+                            "ask_unbound": true,
+                        }),
+                    )?;
+                    self.queue.close_ask(ask_id)?;
+                    info!(run_id = %run.id(), "run {}: ask {ask_id} holds no diff it showed; its land approves nothing and the ask is opened again on the current diff", run.id());
+                    return Ok(());
+                }
                 if !RunHistory::from_events(&events).approved_by_ask(ask_id) {
+                    // The person's `land` is bound to the diff the ask was
+                    // opened on (ADR-t4840-2 decision 8), not to the diff
+                    // when the answer is applied: a change since goes back
+                    // to the ask. The approval names who answered and with
+                    // what authority, for its audit.
+                    let mut approval = json!({"status": run.status().as_str(), "pid": self.layout.pid, "push": true, "ask_id": ask_id,
+                        "answered_by": ask.answered_by, "answer_authority": ask.answer_authority});
+                    let facts = shown.context("the ask's diff was read above")?;
+                    crate::application::integrate::binding::put(&mut approval, &facts);
                     self.queue.record_runtime_event(
                         run.id(),
                         EventKind::IntegrationApproved,
-                        json!({"status": run.status().as_str(), "pid": self.layout.pid, "push": true, "ask_id": ask_id}),
+                        approval,
                     )?;
                     self.queue.record_runtime_event(
                         run.id(),
@@ -3734,6 +3895,36 @@ pub(super) struct PreparedReview {
     pub(super) agents: Vec<(String, agent_job::BuiltAgentJob)>,
 }
 
+/// The waiting runs, in order, split into those whose approve_landing ask
+/// is opened again (flagged `true`) and the rest, which the review of the
+/// recovered runs goes through while slots are free: asking takes no slot,
+/// so every run to ask again is asked, whatever its place among the runs
+/// and the slots.
+pub(super) fn split_reasks<T>(runs: Vec<(T, bool)>) -> (Vec<T>, Vec<T>) {
+    let (reasks, rest): (Vec<_>, Vec<_>) = runs.into_iter().partition(|(_, reask)| *reask);
+    (
+        reasks.into_iter().map(|(run, _)| run).collect(),
+        rest.into_iter().map(|(run, _)| run).collect(),
+    )
+}
+
+/// The binding the `review_started` of review `attempt` recorded of the
+/// diff it read ([`Supervisor::review_binding`]): what its verdict or its
+/// convergence is bound to, none for an attempt started with none (its
+/// landing then goes back to the review).
+pub(super) fn started_binding(
+    events: &[crate::domain::RunEvent],
+    attempt: usize,
+) -> Option<crate::domain::audit::LandingFacts> {
+    let attempt = u64::try_from(attempt).ok();
+    events
+        .iter()
+        .rev()
+        .filter(|event| event.kind == EventKind::ReviewStarted)
+        .find(|event| restore_payload::<AttemptOf>(&event.payload).attempt == attempt)
+        .and_then(|event| crate::domain::landing_binding::binding_of(&event.payload))
+}
+
 /// Where a job of a review goes once the provider it `failed` on was found
 /// unusable and held, as the review's route reads then
 /// ([`provider::review_moves`]): it starts on the provider the route
@@ -4097,6 +4288,19 @@ fn revise_session(
 mod tests {
     use super::*;
     use crate::domain::{EventId, RunRecord};
+
+    /// Every run to ask again is asked, wherever it stands among the
+    /// waiting runs: a full slot stops only the reviews of the rest
+    /// (`review_recovered_runs` breaks there), never a later run's ask.
+    #[test]
+    fn every_run_to_ask_again_is_asked_before_the_slots_stop_the_rest() {
+        let (reasks, rest) =
+            split_reasks(vec![("a", false), ("b", true), ("c", false), ("d", true)]);
+        assert_eq!(reasks, ["b", "d"]);
+        assert_eq!(rest, ["a", "c"]);
+        let (reasks, rest) = split_reasks::<&str>(Vec::new());
+        assert!(reasks.is_empty() && rest.is_empty());
+    }
 
     const RUN: &str = "r1";
     const DIR: &str = "/runs/r1";

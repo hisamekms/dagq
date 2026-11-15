@@ -260,6 +260,7 @@ event_kinds! {
     InstallE2eFinished => "install_e2e_finished",
     IntegrateProgramsFinished => "integrate_programs_finished",
     IntegrationApproved => "integration_approved",
+    IntegrationCompared => "integration_compared",
     IntegrationDeferred => "integration_deferred",
     IntegrationError => "integration_error",
     IntegrationFailed => "integration_failed",
@@ -1202,6 +1203,7 @@ pub const INBOX_WATCHER_ABSENT: &str = EventKind::InboxWatcherAbsent.as_str();
 pub const INBOX_WATCHER_RETURNED: &str = EventKind::InboxWatcherReturned.as_str();
 pub const INPUT_NOT_READY: &str = EventKind::InputNotReady.as_str();
 pub const INTEGRATION_APPROVED: &str = EventKind::IntegrationApproved.as_str();
+pub const INTEGRATION_COMPARED: &str = EventKind::IntegrationCompared.as_str();
 pub const INTEGRATION_DEFERRED: &str = EventKind::IntegrationDeferred.as_str();
 pub const INTEGRATION_ERROR: &str = EventKind::IntegrationError.as_str();
 pub const INTEGRATION_FAILED: &str = EventKind::IntegrationFailed.as_str();
@@ -1846,6 +1848,7 @@ mod tests {
                 "integrate_programs_finished",
             ),
             (EventKind::IntegrationApproved, "integration_approved"),
+            (EventKind::IntegrationCompared, "integration_compared"),
             (EventKind::IntegrationDeferred, "integration_deferred"),
             (EventKind::IntegrationError, "integration_error"),
             (EventKind::IntegrationFailed, "integration_failed"),

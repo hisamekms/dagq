@@ -292,7 +292,11 @@ impl Supervisor<'_> {
         // A container run's e2e runs in its landing worktree, its git
         // guarded (ADR-t2179-1 decisions 5 and 8); running the tree's code
         // on the host stays the e2e's exception (ADR-t2113-3 decision 3).
-        let worktree = crate::application::run_git::review_tree(&*self.repository, run)?;
+        let worktree = crate::application::run_git::review_tree(
+            &*self.repository,
+            run,
+            &self.queue.run_events(run.id())?,
+        )?;
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
         let now = self.generators.clock.now();
         // Not the run directory's `TMPDIR` the landing's verification on the

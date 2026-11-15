@@ -57,7 +57,8 @@ eventsは運用の状態で整理して消えるが、監査は追記だけで�
 chainと連番は監査サービスが付けるので、置き場を替えても検証の形は変わらない。
 
 着地の来歴は、着地を許した判断（reviewのpass・AIのland・上限の後の収束・人のapprove_landing・直接のintegrate）の記録と、merge後に差分が触る各fileのblob hashの組を照合して結ぶ。
-照合は着地の直前の1か所で、経路ごとに置かない。
+照合は着地の直前の1か所で、経路ごとに置かない（[integrate](supervisor-lifecycle/integrate.md#判断との照合)）。
+判断・照合・mergeの監査の記録は、それを述べるrunのeventを書くstoreが同じtransactionで書く（`infrastructure::audit::record_landing`）。
 守るpathに当たる差分は、この照合でhuman_attestedの承認が要る。
 
 askを開くときに問いのhashと判断の前提を固定し、回答では認証から決まる本人と経路を記録する。

@@ -360,6 +360,16 @@ impl Supervisor<'_> {
         main: &CommitSha,
     ) -> Result<()> {
         let approved = RunHistory::from_events(&self.queue.run_events(run.id())?).approved();
+        // What the earlier resume or the hand that resolved it rewrote,
+        // recorded with the skip: nothing is skipped until its binding can
+        // be read, and the next pass finds the run resolved again.
+        let rewrite = match self.resume_rewrite(run, head) {
+            Ok(rewrite) => rewrite,
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the binding of what resolved it at {head} could not be read: {error:#}; it is skipped the next pass", run.id());
+                return Ok(());
+            }
+        };
         // Not while the cleanup job clears the run's build outputs (task
         // 1289): it lands or is validated from its worktree.
         let cleaning = self.host.cleanup().cleaning();
@@ -368,9 +378,14 @@ impl Supervisor<'_> {
             self.host.defer_cleanup();
             return Ok(());
         }
-        let skipped =
-            self.queue
-                .skip_resume(run.id(), self.registration.token(), head, main, approved)?;
+        let skipped = self.queue.skip_resume(
+            run.id(),
+            self.registration.token(),
+            head,
+            main,
+            approved,
+            rewrite,
+        )?;
         drop(guard);
         let Some(run) = skipped else {
             return Ok(());
@@ -732,6 +747,7 @@ impl Supervisor<'_> {
             stale: None,
             delivered_closed: None,
             awaits_answer: None,
+            unfinished: None,
             recovery: RecoveryWatch::default(),
             live: Box::new(SessionWatch::fixing(
                 run,
@@ -810,6 +826,7 @@ impl Supervisor<'_> {
             stale: adopted_stale_nudge(&*self.queue, run, RESUME_PHASE, Some(attempt))?,
             delivered_closed: None,
             awaits_answer,
+            unfinished: None,
             workspace,
             attempt,
             run_dir,
@@ -900,6 +917,36 @@ impl Supervisor<'_> {
             },
         )
     }
+    /// The rewrite of the run's branch to `head` by a resume that resolved
+    /// it, with or without a session
+    /// ([`landing_binding::resume_rewrite`]): the head and binding before
+    /// and after it and what rewrote it (a `conflict_resolution` or a
+    /// `resume`), its own change for the audit (`landing.rewritten`,
+    /// ADR-t4840-2 decision 7), recorded in the transaction of the resume's
+    /// own event. `None` for a head that did not move or a run nothing
+    /// judged; `Err` while the events or a binding cannot be read, and the
+    /// caller records nothing until they can (decision 6).
+    ///
+    /// [`landing_binding::resume_rewrite`]: crate::domain::landing_binding::resume_rewrite
+    fn resume_rewrite(&self, run: &TaskRun, head: &CommitSha) -> Result<Option<Value>> {
+        let events = self.queue.run_events(run.id())?;
+        let Some((before, rewrite)) =
+            crate::domain::landing_binding::resume_rewrite(&events, run.result_commit(), head)
+        else {
+            return Ok(None);
+        };
+        let main = self.repository.main_head()?;
+        // A run in a container's commits are read only by the git kept
+        // from running their hooks and drivers, as `integrate`'s `begin`
+        // reads them (ADR-t2179-1 decision 8).
+        let guarded = crate::application::run_git::for_run(&*self.repository, run)?;
+        crate::application::integrate::binding::rewrite_record(
+            &*guarded,
+            json!({"rewrite": rewrite, "main": main, "head_before": before, "head_after": head}),
+            (&main, &before, head),
+        )
+        .map(Some)
+    }
     /// The resumed session ended, or resolved the run: record
     /// `resume_finished` and move the run on. A resolved run whose
     /// integrate was approved has exited; its workspace is closed, the
@@ -940,6 +987,22 @@ impl Supervisor<'_> {
         if let Some(why) = &unresolved_because {
             warn!(run_id = %slot.run.id(), "run {}: the resumed session resolved it, but {why}; it stays needs_session", slot.run.id());
         }
+        // What it rewrote, with the binding before and after it: nothing of
+        // the finish is recorded until that can be read.
+        let rewrite = match matches!(verdict.kind, ResumeOutcome::Resolved)
+            .then_some(verdict.head.as_ref())
+            .flatten()
+            .map_or(Ok(None), |head| self.resume_rewrite(&slot.run, head))
+        {
+            Ok(rewrite) => rewrite,
+            Err(error) => {
+                warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: the binding of what resume {attempt} rewrote could not be read: {error:#}; its finish is recorded the next pass", slot.run.id());
+                if let Phase::Resume(watch) = &mut slot.phase {
+                    watch.unfinished = Some(verdict);
+                }
+                return Ok(Step::Continue);
+            }
+        };
         let reviewed = matches!(verdict.kind, ResumeOutcome::Resolved) && !approved;
         // A session let go after the exit timeout still runs: its
         // wrapper stays, and blocks the next attempt until it ends. A
@@ -974,6 +1037,11 @@ impl Supervisor<'_> {
         }
         if let Some(why) = unresolved_because {
             payload["unresolved_because"] = json!(why);
+        }
+        if let Some(Value::Object(rewrite)) = rewrite {
+            for (key, value) in rewrite {
+                payload[key] = value;
+            }
         }
         let id = slot.run.id().clone();
         let run = match (verdict.kind, landing) {
@@ -1400,6 +1468,12 @@ pub(super) struct ResumeWatch {
     /// takeover found it: the run is in the phase `waiting` meanwhile, not
     /// `resume` ([`super::stages::question_moves`]).
     pub(super) awaits_answer: Option<AskId>,
+    /// The verdict the poll found whose finish is not recorded yet: the
+    /// binding of the conflict it resolved could not be read. The next pass
+    /// finishes it again, with no new poll of the session, and nothing of
+    /// the finish is recorded until its audit can be (ADR-t4840-2
+    /// decision 6).
+    pub(super) unfinished: Option<ResumeVerdict>,
 }
 
 /// The resume a run is in, from its events: the last resume event is a

@@ -67,6 +67,25 @@ struct State {
     files: HashMap<String, String>,
     /// The paths every range changes: none unless a test names some.
     changed: Vec<String>,
+    /// The blob ID each changed path has in any range's end: `blob-<path>`
+    /// unless a rebase changed it
+    /// ([`FakeGit::change_blob_at_next_rebase`]).
+    changed_blobs: HashMap<String, String>,
+    /// The blob a changed path gets at the next rebase of a run's worktree
+    /// ([`FakeGit::change_blob_at_next_rebase`]), once.
+    blob_at_next_rebase: Option<(String, String)>,
+    /// The blob a changed path gets once the next binding read the diff
+    /// ([`FakeGit::change_blob_after_next_binding`]), once.
+    blob_after_next_binding: Option<(String, String)>,
+    /// Whether a diff's text cannot be read ([`FakeGit::fail_diff_text`]).
+    diff_text_fails: bool,
+    /// Whether each run's worktree gets a commit once the next binding read
+    /// the diff ([`FakeGit::commit_after_next_binding`]), once.
+    commit_after_next_binding: bool,
+    /// The blob a changed path gets with a commit on each run's worktree
+    /// once the next check of a head's merge with main ran
+    /// ([`FakeGit::commit_after_next_merge_check`]), once.
+    commit_after_next_merge_check: Option<(String, String)>,
     /// The message of each commit of main's a test landed with one
     /// ([`FakeGit::land_with_message`]); any other has none.
     messages: HashMap<CommitSha, String>,
@@ -77,6 +96,25 @@ struct State {
     /// one named conflicts on, once ([`FakeGit::conflict_once_main_moves`]).
     conflict_next_merge: Option<(Vec<String>, CommitSha)>,
     merge_clean: bool,
+    /// The changed path the next rebase of a run's worktree conflicts on,
+    /// once, and the blob the commit that resolves it gives the path
+    /// ([`FakeGit::conflict_at_next_rebase`]).
+    conflict_next_rebase: Option<(String, String)>,
+    /// The paths the last rebase conflicted on.
+    conflicted: Vec<String>,
+    /// The blob the next commit of a run's own gives a changed path: the
+    /// resolution of the conflict the rebase found.
+    blob_at_next_commit: Option<(String, String)>,
+    /// The blobs the changed paths had at a commit a resolution was made
+    /// on, by its name: what its binding reads after the resolution.
+    blobs_at: HashMap<String, HashMap<String, String>>,
+    /// How many commits of a run's own from now on the one is whose first
+    /// binding cannot be read ([`FakeGit::fail_first_binding_of_commit`]).
+    commits_to_failing_binding: Option<usize>,
+    /// The commit whose next binding cannot be read, once.
+    failing_binding: Option<CommitSha>,
+    /// How many bindings could not be read so far.
+    failed_bindings: usize,
 }
 
 /// The repository in memory, its main checkout at `checkout`; clones share
@@ -112,10 +150,23 @@ impl FakeGit {
                 blobs: HashMap::new(),
                 files: HashMap::new(),
                 changed: Vec::new(),
+                changed_blobs: HashMap::new(),
+                blob_at_next_rebase: None,
+                blob_after_next_binding: None,
+                diff_text_fails: false,
+                commit_after_next_binding: false,
+                commit_after_next_merge_check: None,
                 messages: HashMap::new(),
                 refs: HashMap::new(),
                 conflict_next_merge: None,
                 merge_clean: false,
+                conflict_next_rebase: None,
+                conflicted: Vec::new(),
+                blob_at_next_commit: None,
+                blobs_at: HashMap::new(),
+                commits_to_failing_binding: None,
+                failing_binding: None,
+                failed_bindings: 0,
             })),
         }
     }
@@ -142,6 +193,74 @@ impl FakeGit {
 
     pub(super) fn case_bases(&self) -> Vec<(PathBuf, String, Vec<String>)> {
         self.lock().case_bases.clone()
+    }
+
+    /// The next rebase of a run's worktree gives the changed `path` the
+    /// blob `blob`, once: main changed the file the run changes, so the
+    /// merged result's content differs from what the run's judgment saw.
+    pub(super) fn change_blob_at_next_rebase(&self, path: &str, blob: &str) {
+        self.lock().blob_at_next_rebase = Some((path.to_owned(), blob.to_owned()));
+    }
+
+    /// Once the next binding read the diff (its text, after its blobs),
+    /// the changed `path` has the blob `blob`, once: the run's branch moved
+    /// while what read the binding (a review as it starts) went on.
+    pub(super) fn change_blob_after_next_binding(&self, path: &str, blob: &str) {
+        self.lock().blob_after_next_binding = Some((path.to_owned(), blob.to_owned()));
+    }
+
+    /// The changed `path` has the blob `blob` from now on: the run's
+    /// branch moved (a resume's commit).
+    pub(super) fn set_changed_blob(&self, path: &str, blob: &str) {
+        self.lock()
+            .changed_blobs
+            .insert(path.to_owned(), blob.to_owned());
+    }
+
+    /// The next rebase of a run's worktree conflicts on the changed `path`,
+    /// once, and the next commit of a run's own after it (the resolution)
+    /// gives the path the blob `resolved`.
+    pub(super) fn conflict_at_next_rebase(&self, path: &str, resolved: &str) {
+        self.lock().conflict_next_rebase = Some((path.to_owned(), resolved.to_owned()));
+    }
+
+    /// The first binding of the `nth` commit of a run's own from now on
+    /// (its diff's text read up to it) cannot be read, once: a Git that
+    /// failed for a while.
+    pub(super) fn fail_first_binding_of_commit(&self, nth: usize) {
+        self.lock().commits_to_failing_binding = Some(nth);
+    }
+
+    /// How many bindings could not be read so far
+    /// ([`Self::fail_first_binding_of_commit`]).
+    pub(super) fn failed_bindings(&self) -> usize {
+        self.lock().failed_bindings
+    }
+
+    /// No diff's text can be read from now on.
+    pub(super) fn fail_diff_text(&self) {
+        self.lock().diff_text_fails = true;
+    }
+
+    /// Once the next binding read the diff, each run's worktree gets a
+    /// commit its receipt does not name, once: its worker committed while
+    /// what read the binding (a review as it starts) went on.
+    pub(super) fn commit_after_next_binding(&self) {
+        self.lock().commit_after_next_binding = true;
+    }
+
+    /// Once the next check of a head's merge with main ran (the conflict
+    /// precheck after a judgment that lets the run land, before it lands),
+    /// each run's worktree gets a commit its receipt does not name, and the
+    /// changed `path` the blob `blob`, once: its worker committed after the
+    /// judgment.
+    pub(super) fn commit_after_next_merge_check(&self, path: &str, blob: &str) {
+        self.lock().commit_after_next_merge_check = Some((path.to_owned(), blob.to_owned()));
+    }
+
+    /// A diff's text can be read again.
+    pub(super) fn restore_diff_text(&self) {
+        self.lock().diff_text_fails = false;
     }
 
     /// Every commit holds `bytes` at `path`, read only byte-wise.
@@ -206,12 +325,25 @@ impl FakeGit {
                     worktree.display()
                 )
             })?;
-        let made = state.make(Some(head));
+        let made = state.make(Some(head.clone()));
         state
             .worktrees
             .get_mut(worktree)
             .expect("the worktree just read")
             .head = made.clone();
+        if let Some((path, blob)) = state.blob_at_next_commit.take() {
+            let before = state.changed_blobs.clone();
+            state.blobs_at.insert(head.into_string(), before);
+            state.changed_blobs.insert(path, blob);
+        }
+        match state.commits_to_failing_binding {
+            Some(1) => {
+                state.commits_to_failing_binding = None;
+                state.failing_binding = Some(made.clone());
+            }
+            Some(left) => state.commits_to_failing_binding = Some(left - 1),
+            None => {}
+        }
         Ok(made)
     }
 
@@ -459,6 +591,15 @@ impl Repository for FakeGit {
     fn rebase(&self, worktree: &Path, onto: &str) -> Result<std::result::Result<(), String>> {
         let mut state = self.lock();
         ensure!(state.known(onto), "no commit {onto}");
+        if let Some((path, resolved)) = state.conflict_next_rebase.take() {
+            state.conflicted = vec![path.clone()];
+            state.blob_at_next_commit = Some((path, resolved));
+            return Ok(Err("CONFLICT (content): merge conflict".to_owned()));
+        }
+        state.conflicted.clear();
+        if let Some((path, blob)) = state.blob_at_next_rebase.take() {
+            state.changed_blobs.insert(path, blob);
+        }
         let onto = CommitSha::parse(onto, "commit")?;
         let at = state.worktrees.get(worktree).cloned().with_context(|| {
             format!(
@@ -483,11 +624,71 @@ impl Repository for FakeGit {
     }
 
     fn conflicted_files(&self, _: &Path) -> Result<Vec<String>> {
-        Ok(Vec::new())
+        Ok(self.lock().conflicted.clone())
     }
 
     fn changed_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
         Ok(self.lock().changed.clone())
+    }
+
+    /// A diff's text of the changed paths and their blobs, for its hash.
+    fn diff_text(&self, _: &str, to: &str) -> Result<Vec<u8>> {
+        ensure!(
+            !self.lock().diff_text_fails,
+            "the diff's text cannot be read"
+        );
+        {
+            let mut state = self.lock();
+            if state
+                .failing_binding
+                .as_ref()
+                .is_some_and(|failing| failing.as_str() == to)
+            {
+                state.failing_binding = None;
+                state.failed_bindings += 1;
+                bail!("the diff's text up to {to} cannot be read now");
+            }
+        }
+        let text: String = self
+            .landing_blobs("", "")?
+            .iter()
+            .map(|(path, state)| format!("diff --git a/{path} b/{path}\n+{state:?}\n"))
+            .collect();
+        let mut state = self.lock();
+        if let Some((path, blob)) = state.blob_after_next_binding.take() {
+            state.changed_blobs.insert(path, blob);
+        }
+        if std::mem::take(&mut state.commit_after_next_binding) {
+            let heads: Vec<(PathBuf, CommitSha)> = state
+                .worktrees
+                .iter()
+                .map(|(path, worktree)| (path.clone(), worktree.head.clone()))
+                .collect();
+            for (path, head) in heads {
+                let made = state.make(Some(head));
+                state.worktrees.get_mut(&path).expect("a worktree").head = made;
+            }
+        }
+        Ok(text.into_bytes())
+    }
+
+    /// The changed paths, each with the blob a test gave it or
+    /// `blob-<path>`; at a commit a resolution was made on, the blob it had
+    /// there.
+    fn landing_blobs(&self, _: &str, to: &str) -> Result<crate::domain::landing_binding::BlobSet> {
+        let state = self.lock();
+        let blobs = state.blobs_at.get(to).unwrap_or(&state.changed_blobs);
+        Ok(state
+            .changed
+            .iter()
+            .map(|path| {
+                let blob = blobs
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_else(|| format!("blob-{path}"));
+                (path.clone(), crate::domain::audit::BlobState::Blob(blob))
+            })
+            .collect())
     }
 
     fn added_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
@@ -636,6 +837,19 @@ impl Repository for FakeGit {
     }
 
     fn merge_conflicts(&self, _: &str, _: &str) -> Result<Vec<String>> {
+        let mut state = self.lock();
+        if let Some((path, blob)) = state.commit_after_next_merge_check.take() {
+            state.changed_blobs.insert(path, blob);
+            let heads: Vec<(PathBuf, CommitSha)> = state
+                .worktrees
+                .iter()
+                .map(|(path, worktree)| (path.clone(), worktree.head.clone()))
+                .collect();
+            for (path, head) in heads {
+                let made = state.make(Some(head));
+                state.worktrees.get_mut(&path).expect("a worktree").head = made;
+            }
+        }
         Ok(Vec::new())
     }
 

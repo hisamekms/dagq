@@ -1,0 +1,71 @@
+# The items of task 4845 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+# Each is an existing test whose body the binding of landings changed: the
+# resolved or fixed diff now needs a person's `integrate` again
+# (ADR-t4840-2 decision 7), one more real landing in the same test.
+
+# 20.7s: a deferred landing, a resume, the supervisor's landing that finds the fixed diff and a second integrate
+[[test]]
+name = "runtime_evidence::integrate_refuses_a_rebased_diff_outside_the_declared_paths"
+reason = "B 境界（守る境界）: 実の Git の rebase の後の main..rebased が --paths の外に出ることと、session が直した差分が承認の組と違って着地しないことは、実の rebase と commit の tree でしか作れない。照合の判断は domain::landing_binding の unit test"
+task = 4845
+
+# 5.4s: a handoff that hands an approved, resumed run to the next process, then a second integrate
+[[test]]
+name = "runtime_handoff::after_a_handoff_a_run_queued_after_its_resume_lands_without_a_resume"
+reason = "B 境界（復旧と adopt）: handoff で lease ごと引き継いだ process が resume をやり直さずに着地へ戻すことを、実の supervise と SQLite の queue で確かめる。照合の判断は domain::landing_binding の unit test"
+task = 4845
+
+# 18.7s: a conflict on real Git, a skipped resume and the landing of the resolved head after a second integrate
+[[test]]
+name = "runtime_resume::an_approved_run_resolved_by_an_earlier_resume_lands_without_a_session"
+reason = "B 境界（守る境界）: 実の Git の衝突を session の外で解いた head を、resume を開かずに着地へ回すことは、実の rebase の衝突と worktree の head でしか作れない。照合の判断は domain::landing_binding の unit test"
+task = 4845
+
+# 22.4s: a real resume process of a conflicted run with [run.env], then a second integrate
+[[test]]
+name = "runtime_run_env::a_resumed_session_gets_the_run_env_too"
+reason = "B 境界（プロセス）: resume の session の実の process が [run.env] の環境を受けることは、実の process でしか確かめられない。照合の判断は domain::landing_binding の unit test"
+task = 4845
+
+# 7.2s: a run that lands while its task is held, through the supervisor and SQLite
+[[test]]
+name = "runtime_task_hold_end::a_task_held_while_its_run_lands_closes_its_hold_as_it_completes"
+reason = "B 境界（SQLite）: 着地の完了の transaction の中で task の hold を閉じることを、実の SQLite の queue で確かめる（本文の変更は Landing の欄を足しただけ）"
+task = 4845
+
+# 7.6s: a container run's landing worktree made again from its bundle, through the real Git
+[[test]]
+name = "runtime_clone::an_approved_container_runs_resolved_head_lands_from_a_new_landing_worktree"
+reason = "B 境界（実の Git）: container の run の着地の worktree を実の Git で作り直して着地することは、実の Git でしか確かめられない（本文の変更は review_tree の引数だけ）。照合の判断は domain::landing_binding の unit test"
+task = 4845
+
+# 12.2s: a container run's migration renumbered in its landing worktree, approved again and landed, through the real Git
+[[test]]
+name = "runtime_clone::a_container_runs_commit_runs_no_tracked_hook_and_no_driver_on_the_control_side"
+reason = "B 境界（実の Git）: landing worktree の振り直しで組が変わり、もう一度の integrate が rebase した head に承認し直して着地することを、実の Git の hook と driver を守った control side で確かめる"
+task = 4845
+
+# 7.6s: a container run's conflict on main's bundle, a skipped resume and its landing, through the real Git
+[[test]]
+name = "runtime_clone::a_conflicting_container_run_rebases_on_mains_bundle_and_lands_again"
+reason = "B 境界（実の Git）: container の run が main の bundle に rebase して衝突し、解いた head が resume を開かずに着地へ戻ることは、実の Git の bundle と clone でしか作れない（本文の変更は skip_resume の引数だけ）。前後の組の記録の判断は domain::landing_binding の unit test"
+task = 4845
+
+# 13.1s: a skipped resume whose supervisor died, adopted by the next one, through the real Git and SQLite
+[[test]]
+name = "runtime_resume::a_skipped_run_whose_supervisor_died_is_adopted"
+reason = "B 境界（復旧と adopt）: resume を開かずに進めた run の supervisor が死んだ後に次の process が lease ごと引き取ることを、実の Git の worktree と SQLite の queue で確かめる（本文の変更は skip_resume の引数だけ）。前後の組の記録の判断は domain::landing_binding の unit test"
+task = 4845
+
+# 9.7s: a passed run, a real conflict with main resolved by its live session, a second review and its landing
+[[test]]
+name = "runtime_review_conflict::a_passed_run_that_conflicts_with_main_is_rebased_by_its_live_session_and_lands"
+reason = "B 境界（実の Git）: review の pass の後の着地の前の衝突を session が実の rebase で解き、解いた head に review をかけ直して着地することは、実の Git の衝突でしか作れない（本文の変更は conflict_resolved の欄の比べ方だけ）。前後の組の記録の判断は domain::landing_binding の unit test"
+task = 4845
+
+# 6.9s: an adopted headless run with a pending conflict request on real Git, and its landing
+[[test]]
+name = "runtime_review_conflict::an_adopted_headless_run_with_a_pending_conflict_request_waits_without_sending_it_again"
+reason = "B 境界（復旧と adopt）: 送った衝突の解消の依頼を持つ run を次の process が引き取り、依頼を送り直さずに待って着地することを、実の supervise と SQLite の queue と実の Git で確かめる（本文の変更は conflict_resolved の欄の比べ方だけ）。前後の組の記録の判断は domain::landing_binding の unit test"
+task = 4845

@@ -2151,6 +2151,7 @@ mod tests {
             history_ref: String::new(),
             message: String::new(),
             verification_skipped: false,
+            merged: None,
         }
     }
 

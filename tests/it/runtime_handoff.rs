@@ -1121,6 +1121,8 @@ fn a_handoff_without_its_state_during_a_resume_still_watches_the_session() {
     let outcome = joined(next, "the supervisor after the handoff").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_eq!(detail.task.status(), TaskStatus::Completed);
     let kinds = event_kinds(&detail);
@@ -1214,6 +1216,8 @@ fn a_supervisor_that_stops_during_a_resume_leaves_the_session_to_its_adopter() {
     let outcome = joined(next, "the adopting supervisor").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_eq!(detail.task.status(), TaskStatus::Completed);
     let kinds = event_kinds(&detail);
@@ -1358,9 +1362,16 @@ fn after_a_handoff_a_run_queued_after_its_resume_lands_without_a_resume() {
         )
         .unwrap();
     // A person's `land` approved it, its landing parked it and its
-    // resume resolved what the landing found.
+    // resume resolved what the landing found; the approval is bound to the
+    // diff the landing lands (ADR-t4840-2 decision 7).
+    let git = dagq::infrastructure::adapters::GitRepository::inspect(&repo).unwrap();
+    let mut approval = json!({"ask_id": 1});
+    dagq::application::integrate::binding::put(
+        &mut approval,
+        &dagq::application::integrate::binding::of_run(&git, &run, &[]).unwrap(),
+    );
     for (kind, payload) in [
-        (EventKind::IntegrationApproved, json!({"ask_id": 1})),
+        (EventKind::IntegrationApproved, approval),
         (EventKind::IntegrationStarted, json!({})),
         (EventKind::ResumeStarted, json!({"attempt": 1})),
         (EventKind::ResumeFinished, json!({"outcome": "resolved"})),
@@ -2442,6 +2453,8 @@ fn handoff_before_the_resume_request(unsent: Unsent) {
     joined(wrapper, "the resumed session's wrapper to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(2))
@@ -2592,6 +2605,8 @@ fn a_handoff_before_a_new_sessions_request_lets_the_next_supervisor_send_it_once
     joined(wrapper, "the resumed session's wrapper to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(2))

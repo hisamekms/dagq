@@ -347,7 +347,7 @@ fn a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base() {
     );
 
     let repository = GitRepository::inspect(&repo).unwrap();
-    let range = |main: &CommitSha| review_range_at(&repository, &run, &receipt, main);
+    let range = |main: &CommitSha| review_range_at(&repository, &run, &receipt, main, &[]);
     let parse = |text: &str| Ok(dagq::infrastructure::run_env::parse_config(text)?.review_agents());
     let snapshot = snapshot_subagents(&repository, &parse, &range)
         .unwrap()
@@ -416,7 +416,8 @@ fn a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base() {
     let (base, fixed) =
         material(dagq::compose::review_in(&db, TaskId::new(1), Some(&snapshot.range)).unwrap());
     assert_eq!((base, fixed), (b.clone(), text));
-    // A range that does not end at the receipt's commit is refused.
+    // A range that does not end at the reviewed head (the receipt's
+    // commit here) is refused.
     let wrong = dagq::application::review::ReviewRange {
         base: b.clone(),
         head: head.clone(),
@@ -425,7 +426,7 @@ fn a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base() {
         "{:#}",
         dagq::compose::review_in(&db, TaskId::new(1), Some(&wrong)).unwrap_err()
     );
-    assert!(error.contains("not at the receipt's commit"), "{error}");
+    assert!(error.contains("not at the reviewed head"), "{error}");
     git(
         &repo,
         &["worktree", "remove", "--force", rebasing.to_str().unwrap()],

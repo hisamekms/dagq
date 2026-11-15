@@ -1732,6 +1732,7 @@ impl RunRecovery for SupervisorQueue {
         head: &CommitSha,
         main: &CommitSha,
         approved: bool,
+        rewrite: Option<serde_json::Value>,
     ) -> Result<Option<TaskRun>> {
         self.remote(
             "skip_resume",
@@ -1741,6 +1742,7 @@ impl RunRecovery for SupervisorQueue {
                 to_value(head)?,
                 to_value(main)?,
                 to_value(approved)?,
+                to_value(rewrite)?,
             ],
         )
     }

@@ -251,8 +251,8 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
     let reason = run.last_error().unwrap().to_owned();
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_eq!(
-        payloads(&detail, "integration_approved"),
-        [&json!({"status": "awaiting_integration", "pid": std::process::id(), "push": true})]
+        unbound(payloads(&detail, "integration_approved")),
+        [json!({"status": "awaiting_integration", "pid": std::process::id(), "push": true})]
     );
     // The inbox is told the runtime takes it from here.
     let status = runtime::status(&db).unwrap();
@@ -274,6 +274,11 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to; the
+    // sweep of the next pass ends what the run held.
+    integrate_the_changed_diff(&db, 2, &repo);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
 
     let detail = queue.show(TaskId::new(2)).unwrap();
     let landed = detail.runs[0].clone();
@@ -351,6 +356,9 @@ fn approved_needs_session_run_is_resumed_until_the_runtime_lands_it() {
             "integration_deferred",
             "resume_started",
             "resume_finished",
+            // The supervisor's landing of the resolved diff, then the
+            // person's that approved it.
+            "integration_started",
             "integration_started",
             "run_integrated",
         ]
@@ -575,9 +583,20 @@ fn unapproved_resumed_run_is_validated_and_reviewed_with_its_session_open() {
         integrate(&db, 2, &repo).unwrap()["outcome"],
         "needs_session"
     );
+    // The approval is bound to the run's diff (ADR-t4840-2 decision 8).
+    let approved: Vec<Value> =
+        payloads(&queue.show(TaskId::new(2)).unwrap(), "integration_approved")
+            .into_iter()
+            .map(|p| {
+                let mut p = p.clone();
+                assert!(p["binding"]["approved_blobs"].is_object(), "{p}");
+                p.as_object_mut().unwrap().remove("binding");
+                p
+            })
+            .collect();
     assert_eq!(
-        payloads(&queue.show(TaskId::new(2)).unwrap(), "integration_approved"),
-        [&json!({"status": "awaiting_integration", "pid": std::process::id(), "push": true})]
+        approved,
+        [json!({"status": "awaiting_integration", "pid": std::process::id(), "push": true})]
     );
 }
 
@@ -651,6 +670,8 @@ fn an_approved_run_resolved_by_an_earlier_resume_lands_without_a_session() {
     let cursor = queue.latest_event_id().unwrap().as_i64();
     let outcome = supervise(&db, &repo, &backend).unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
 
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
@@ -658,11 +679,27 @@ fn an_approved_run_resolved_by_an_earlier_resume_lands_without_a_session() {
     assert!(runtime_support::headless::resume_launches(&backend).is_empty());
     assert!(session_texts(&detail.runs[0]).is_empty());
     assert_eq!(payloads(&detail, "resume_started").len(), 1);
-    assert_eq!(
-        payloads(&detail, "resume_skipped"),
-        [
-            &json!({"head": resolved, "main": first_landed, "approved": true, "status": "needs_session"})
-        ]
+    // The skip records what resolving the conflict rewrote: the conflicted
+    // head and the resolved one, each with its binding.
+    let skipped = payloads(&detail, "resume_skipped");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    for (key, value) in [
+        ("head", json!(resolved)),
+        ("main", json!(first_landed)),
+        ("approved", json!(true)),
+        ("status", json!("needs_session")),
+        ("rewrite", json!("conflict_resolution")),
+        ("head_after", json!(resolved)),
+    ] {
+        assert_eq!(skipped[0][key], value, "{}", skipped[0]);
+    }
+    assert_ne!(skipped[0]["head_before"], json!(resolved), "{}", skipped[0]);
+    for side in ["binding_before", "binding_after"] {
+        assert!(skipped[0][side]["tree_hash"].is_string(), "{}", skipped[0]);
+    }
+    assert_ne!(
+        skipped[0]["binding_before"]["tree_hash"],
+        skipped[0]["binding_after"]["tree_hash"]
     );
     let kinds = event_kinds(&detail);
     let after: Vec<&str> = kinds
@@ -685,6 +722,9 @@ fn an_approved_run_resolved_by_an_earlier_resume_lands_without_a_session() {
         [
             "resume_finished",
             "resume_skipped",
+            // The supervisor's landing of the resolved diff, then the
+            // person's that approved it.
+            "integration_started",
             "integration_started",
             "run_integrated"
         ]
@@ -730,11 +770,27 @@ fn an_unapproved_run_resolved_by_an_earlier_resume_is_validated_without_a_sessio
     assert_eq!(git_out(&repo, &["rev-parse", "main"]), first_landed);
     assert!(runtime_support::headless::resume_launches(&backend).is_empty());
     assert_eq!(payloads(&detail, "resume_started").len(), 1);
-    assert_eq!(
-        payloads(&detail, "resume_skipped"),
-        [
-            &json!({"head": resolved, "main": first_landed, "approved": false, "status": "validating"})
-        ]
+    // The skip records what resolving the conflict rewrote: the conflicted
+    // head and the resolved one, each with its binding.
+    let skipped = payloads(&detail, "resume_skipped");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    for (key, value) in [
+        ("head", json!(resolved)),
+        ("main", json!(first_landed)),
+        ("approved", json!(false)),
+        ("status", json!("validating")),
+        ("rewrite", json!("conflict_resolution")),
+        ("head_after", json!(resolved)),
+    ] {
+        assert_eq!(skipped[0][key], value, "{}", skipped[0]);
+    }
+    assert_ne!(skipped[0]["head_before"], json!(resolved), "{}", skipped[0]);
+    for side in ["binding_before", "binding_after"] {
+        assert!(skipped[0][side]["tree_hash"].is_string(), "{}", skipped[0]);
+    }
+    assert_ne!(
+        skipped[0]["binding_before"]["tree_hash"],
+        skipped[0]["binding_after"]["tree_hash"]
     );
     let kinds = event_kinds(&detail);
     let after: Vec<&str> = kinds
@@ -799,6 +855,7 @@ fn a_skipped_run_whose_supervisor_died_is_adopted() {
             &sha(&resolved),
             &sha(&first_landed),
             false,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -811,7 +868,8 @@ fn a_skipped_run_whose_supervisor_died_is_adopted() {
                 &LeaseToken::new("other"),
                 &sha(&resolved),
                 &sha(&first_landed),
-                false
+                false,
+                None,
             )
             .unwrap()
             .is_none()
@@ -1179,6 +1237,8 @@ fn an_approved_run_resolved_by_its_resume_lands_the_resolved_head() {
     let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
 
     let detail = queue.show(TaskId::new(2)).unwrap();
     let finished = payloads(&detail, "resume_finished");
@@ -1489,6 +1549,8 @@ fn a_session_nobody_watches_blocks_the_resume_until_it_ends() {
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
     let started = payloads(&detail, "resume_started");
@@ -1704,6 +1766,8 @@ fn stats_ties_a_deferred_landing_to_the_landing_that_broke_it() {
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let first = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(1))
@@ -1736,8 +1800,9 @@ fn stats_ties_a_deferred_landing_to_the_landing_that_broke_it() {
     assert_eq!(landing["broke_runs"], 1);
     assert_eq!(landing["integrate_attempts"], 1);
     assert_eq!(broken["broke_runs"], 0);
-    // Deferred at the first landing and after the first resume, landed at the third.
-    assert_eq!(broken["integrate_attempts"], 3);
+    // Deferred at the first landing and after the first resume, stopped by
+    // the resolved diff at the third, landed by the fourth.
+    assert_eq!(broken["integrate_attempts"], 4);
     assert_eq!(broken["deferrals"], json!({"rebase_conflict": 2}));
     assert_eq!(broken["conflict_files"], json!(["change.txt"]));
     assert_eq!(
@@ -2080,6 +2145,8 @@ fn a_resumed_session_that_ignores_its_exit_request_is_let_go_after_the_exit_time
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     assert!(!backend.closed().contains(&kept));
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);

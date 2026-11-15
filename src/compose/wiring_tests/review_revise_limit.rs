@@ -272,12 +272,29 @@ fn a_review_past_the_limit_with_no_code_finding_lands_and_follows_up_its_reasons
     assert_eq!(payloads(&detail, "revise_requested").len(), 2);
     assert_eq!(payloads(&detail, "review_finished").len(), 3);
     assert!(payloads(&detail, "integration_approved").is_empty());
+    // The convergence lets the run land: it is bound to the run's diff
+    // (ADR-t4840-2 decision 7), which its landing is compared with.
+    let judged: Vec<Value> = payloads(&detail, "revise_limit_judged")
+        .into_iter()
+        .map(|p| {
+            let mut p = p.clone();
+            assert!(p["binding"]["approved_blobs"].is_object(), "{p}");
+            p.as_object_mut().unwrap().remove("binding");
+            p
+        })
+        .collect();
     assert_eq!(
-        payloads(&detail, "revise_limit_judged"),
+        judged,
         [
-            &json!({"attempt": 3, "revises": 2, "revise_limit": 2, "converged": true, "code_paths": null,
+            json!({"attempt": 3, "revises": 2, "revise_limit": 2, "converged": true, "code_paths": null,
                  "code_findings": []})
         ]
+    );
+    let compared = payloads(&detail, "integration_compared");
+    assert_eq!(compared.len(), 1);
+    assert_eq!(
+        (&compared[0]["path"], &compared[0]["matched"]),
+        (&json!("converged"), &json!(true))
     );
     let kinds = kinds(&detail);
     for (earlier, later) in [

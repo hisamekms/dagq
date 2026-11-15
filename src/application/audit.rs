@@ -447,7 +447,7 @@ pub const USE_CASES: &[UseCaseRow] = &[
     row(U::InboxOpen, &[C::ServiceLifecycle], NotWritten("opening the inbox starts no service and grants nothing; opening it without its guardrail is GuardrailDisable")),
     row(U::ServiceStartStop, &[C::ServiceLifecycle], Writes(&[A::ServiceLifecycle])),
     row(U::BrokerStartStop, &[C::ServiceLifecycle], NotWritten("the queue broker is a sender from stage 1; at stage 0 it records its refusals as events")),
-    row(U::Integrate, &[C::IntegrationRequest, C::Land], Writes(&[A::LandingApproved, A::LandingCompared, A::LandingMerged, A::ConfigChanged])),
+    row(U::Integrate, &[C::IntegrationRequest, C::Land], Writes(&[A::LandingApproved, A::LandingCompared, A::LandingRewritten, A::LandingMerged, A::ConfigChanged])),
     row(U::Push, &[C::Push], Writes(&[A::PushAttempted, A::PushCompleted])),
     row(U::Refusal, &[], Writes(&[A::AuthzDenied])),
     row(U::AuditPolicyChange, &[], Writes(&[A::AuditPolicyChanged])),

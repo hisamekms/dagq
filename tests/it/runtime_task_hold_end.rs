@@ -206,6 +206,7 @@ fn a_task_held_while_its_run_lands_closes_its_hold_as_it_completes() {
                 history_ref: String::new(),
                 message: String::new(),
                 verification_skipped: false,
+                merged: None,
             },
             "",
         )

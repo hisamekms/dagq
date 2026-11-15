@@ -27,7 +27,7 @@ related:
 ## 1件の形
 
 欄と意味は`src/domain/audit/record.rs`の`AuditRecord`・`SenderInput`・`Admission`のdoc commentが持つ。
-照合を実装するtaskは、同じfileの中の同じ文脈の箇所を入れ替える手直し（diff hashが同じになるもの）が再承認になるtestを足す（ADR-t4840-2決定7）。
+着地の判断の組・照合・再承認の行き先は`src/domain/landing_binding.rs`、同じfileの中の同じ文脈の箇所を入れ替える手直しが再承認になるtestはそのunit testが持つ（ADR-t4840-2決定7）。
 
 ## action enum v1
 
@@ -43,7 +43,7 @@ actionの意味・分類・OCSFのclassは`src/domain/audit/mod.rs`の`AuditActi
 
 | 分類 | path |
 | --- | --- |
-| P1 監査 | 監査サービス・記録の型・chainとverify・照合を足すmodule（実装のtaskが足したpathを同じ変更で一覧に足す） |
+| P1 監査 | 監査サービス・記録の型・chainとverify・照合を足すmodule（`src/domain/landing_binding.rs`、`src/application/integrate/binding.rs`。実装のtaskが足したpathを同じ変更で一覧に足す） |
 | P2 認可のpolicy | `src/domain/authorization.rs`、`src/domain/landing_approval.rs`、`src/application/integrate.rs`の着地の拒否の判定（実装のtaskがその判定と照合を別のmoduleに切り出し、そのmoduleだけを挙げる。integrateの全体を挙げると変わる回数が多く承認が形だけになる）、`.dagq/agents/security/`（securityのreviewのagentの定義） |
 | P3 queue brokerの許可の範囲 | `src/domain/queue_broker.rs`（宛先の分類の`Destination`・`RegistryHost`・`judge_tunnel`）、`src/application/queue_broker.rs`（tunnelを開く許可の読み） |
 | P4 updaterの検証 | `src/application/update.rs`、`src/application/install.rs`、`src/application/release_update.rs`、`src/domain/release_update.rs` |

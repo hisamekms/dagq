@@ -355,6 +355,11 @@ pub(super) fn event_id(
     )?);
     // The Claude session spans this event starts or ends (ADR-0048).
     super::sessions::follow(tx, id, Some(task_id), run_id, kind, &payload)?;
+    // A landing's judgment, comparison and merge are audited in the same
+    // transaction (ADR-t4840-2 decisions 7 and 8).
+    if let Some(run_id) = run_id {
+        super::audit::record_landing(tx, id, task_id, run_id, kind, &payload)?;
+    }
     Ok(id)
 }
 

@@ -136,6 +136,11 @@ await_message; resolve; receipt "$(git rev-parse HEAD)"; idle; await_exit"#,
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to; the
+    // sweep of the next pass ends what the run held.
+    integrate_the_changed_diff(&db, 2, &repo);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(2))
@@ -167,9 +172,9 @@ await_message; resolve; receipt "$(git rev-parse HEAD)"; idle; await_exit"#,
         assert_eq!(note.payload["by"], "worker");
     }
     // The runs ended (both tasks landed), and their workers' tokens left
-    // the disk: the one the resume issued again with the run's landing, the
-    // first task's (landed by `integrate`, not by the supervisor) with the
-    // supervisor's sweep.
+    // the disk with the supervisor's sweep: both tasks were landed by
+    // `integrate`, not by the supervisor (the second's resolved diff
+    // needed its approval again).
     assert_no_tokens(db.parent().unwrap());
 
     // The run's executor's telemetry token: issued at the claim, issued

@@ -101,7 +101,7 @@ fn validate(db: &Path, repo: &Path, run: &mut ContainerRun) -> CommitSha {
 /// reads that configuration too ([`guard_env_in_child`]).
 fn start_in_tree(repo: &Path, run: &ContainerRun, global: Option<&Path>) -> PathBuf {
     let repository = GitRepository::inspect(repo).unwrap();
-    let tree = run_git::review_tree(&repository, &run.run).unwrap();
+    let tree = run_git::review_tree(&repository, &run.run, &[]).unwrap();
     let env = match global {
         None => run_git::tree_env(&repository, &run.run, &tree).unwrap(),
         Some(global) => guard_env_in_child(repo, &tree, global),
@@ -700,7 +700,7 @@ fn an_approved_container_runs_resolved_head_lands_from_a_new_landing_worktree() 
     // Asked again at that commit, it is reused as it is.
     let marker = anew.join("untracked-marker");
     fs::write(&marker, "").unwrap();
-    let again = run_git::review_tree(&repository, &run.run).unwrap();
+    let again = run_git::review_tree(&repository, &run.run, &[]).unwrap();
     assert_eq!(again, anew);
     assert!(marker.exists());
     fs::remove_file(&marker).unwrap();
@@ -927,7 +927,14 @@ fn a_conflicting_container_run_rebases_on_mains_bundle_and_lands_again() {
     write_receipt(&run, &head);
     let skipped = SqliteQueue::open(&db)
         .unwrap()
-        .skip_resume(run.run.id(), &run.token, &sha(&head), &sha(&main), false)
+        .skip_resume(
+            run.run.id(),
+            &run.token,
+            &sha(&head),
+            &sha(&main),
+            false,
+            None,
+        )
         .unwrap();
     assert!(skipped.is_some());
     validate(&db, &repo, &mut run);
@@ -1495,6 +1502,15 @@ fn a_container_runs_commit_runs_no_tracked_hook_and_no_driver_on_the_control_sid
     git_unfiltered(&repo, &["commit", "-q", "-m", "main's migration"]);
     validate(&db, &repo, &mut run);
     start_in_tree(&repo, &run, Some(&global));
+    // The renumbering changes the files the person's integrate was bound
+    // to: nothing lands, and integrate again approves the renumbered diff
+    // its landing worktree holds, which lands.
+    let outcome = integrate_with_global(&db, &repo, run.task, &global);
+    assert_eq!(
+        (&outcome["outcome"], &outcome["reapproval"]),
+        (&json!("changed"), &json!("integrate")),
+        "{outcome}"
+    );
     let outcome = integrate_with_global(&db, &repo, run.task, &global);
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     assert_eq!(

@@ -898,6 +898,7 @@ impl<E: TransactionEntries> StoreQueue<E> {
         head: &CommitSha,
         main: &CommitSha,
         approved: bool,
+        rewrite: Option<serde_json::Value>,
     ) -> Result<Option<TaskRun>> {
         let tx = self.write_entry("skip_resume")?;
         let now = self.generators.clock.now();
@@ -923,12 +924,16 @@ impl<E: TransactionEntries> StoreQueue<E> {
             EventKind::LeaseAcquired,
             json!({"pid": holder_pid(&tx, token)?, "reason": "resume_skipped", "previous_token": previous}),
         )?;
-        run_event(
-            &tx,
-            id,
-            EventKind::ResumeSkipped,
-            json!({"head": head, "main": main, "approved": approved, "status": status.as_str()}),
-        )?;
+        let mut skipped =
+            json!({"head": head, "main": main, "approved": approved, "status": status.as_str()});
+        // What resolving it rewrote: its own change for the audit, written
+        // in this transaction (ADR-t4840-2 decision 7).
+        if let Some(serde_json::Value::Object(rewrite)) = rewrite {
+            for (key, value) in rewrite {
+                skipped[key] = value;
+            }
+        }
+        run_event(&tx, id, EventKind::ResumeSkipped, skipped)?;
         tx.commit()?;
         Ok(Some(run.relocated(&self.runs_dir)))
     }
@@ -1998,8 +2003,9 @@ impl<E: TransactionEntries> RunRecovery for StoreQueue<E> {
         head: &CommitSha,
         main: &CommitSha,
         approved: bool,
+        rewrite: Option<serde_json::Value>,
     ) -> Result<Option<TaskRun>> {
-        StoreQueue::skip_resume(self, id, token, head, main, approved)
+        StoreQueue::skip_resume(self, id, token, head, main, approved, rewrite)
     }
     fn exhaust_resumes(
         &mut self,

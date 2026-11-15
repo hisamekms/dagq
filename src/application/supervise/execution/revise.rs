@@ -47,6 +47,12 @@ pub(super) struct ReviseWatch {
     /// question than the one before is an answer and the next question
     /// ([`super::stages::question_moves`]).
     pub(super) awaits_answer: Option<AskId>,
+    /// The head of a rewritten receipt whose rewrite is not recorded yet:
+    /// the binding after it could not be read. The next pass records it
+    /// again, with no new poll of the session, and the run goes on to
+    /// validation only once its audit can be written (ADR-t4840-2
+    /// decision 6).
+    pub(super) unrecorded: Option<CommitSha>,
 }
 
 /// What the live session was asked to fix (ADR-0027 decisions 2 and 4).
@@ -386,6 +392,7 @@ impl ReviseWatch {
             questions_from: 0,
             delivered_closed: None,
             awaits_answer: None,
+            unrecorded: None,
         })
     }
 

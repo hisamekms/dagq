@@ -1958,6 +1958,16 @@ fn integrate_renumbers_a_migration_whose_number_main_took() {
     let main = git_out(&repo, &["rev-parse", "main"]);
 
     let run = queue.show(second).unwrap().runs[0].clone();
+    // The renumbering rewrote the diff the approval was bound to
+    // (ADR-t4840-2 decision 7): nothing lands, and `integrate` again
+    // approves the renumbered diff and lands it.
+    let outcome = integrate(&db, second.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "changed", "{outcome}");
+    assert_eq!(
+        outcome["differing"],
+        json!(["migrations/0002_asks.sql", "migrations/0003_asks.sql"])
+    );
+    assert_eq!(git_out(&repo, &["rev-parse", "main"]), main);
     let outcome = integrate(&db, second.as_i64(), &repo).unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     assert_eq!(

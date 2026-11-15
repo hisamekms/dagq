@@ -414,6 +414,22 @@ fn integrate_refuses_a_rebased_diff_outside_the_declared_paths() {
         text.contains("changes paths outside the task's --paths (*.txt)"),
         "{text}"
     );
+    // The session's fix changed the diff the person's `integrate` approved
+    // (ADR-t4840-2 decision 7): nothing lands, and `integrate` again
+    // approves the fixed diff and lands it.
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    assert_eq!(
+        detail.runs[0].status(),
+        RunStatus::AwaitingIntegration,
+        "{:?}",
+        event_kinds(&detail)
+    );
+    let compared = payloads(&detail, "integration_compared");
+    assert_eq!(compared.last().unwrap()["reapproval"], "integrate");
+    assert_eq!(compared.last().unwrap()["differing"], json!(["src/lib.rs"]));
+    assert_eq!(git_out(&repo, &["rev-parse", "main"]), main);
+    let landed = integrate(&db, 2, &repo).unwrap();
+    assert_eq!(landed["outcome"], "integrated", "{landed}");
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_eq!(
         detail.task.status(),

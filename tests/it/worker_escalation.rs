@@ -130,6 +130,8 @@ fn a_raised_resume_starts_the_session_higher_and_stats_reads_it() {
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);

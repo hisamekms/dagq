@@ -80,7 +80,11 @@ fn a_passed_run_that_conflicts_with_main_is_rebased_by_its_live_session_and_land
         &repo,
         &["rev-parse", &format!("refs/dagq/runs/{}", run.id())],
     );
-    assert_eq!(resolved, [&json!({"attempt": 1, "head": head})]);
+    // The resolution is its own rewrite of the branch after the pass,
+    // with the binding the review read and the one after it.
+    assert_eq!(resolved[0]["head_after"], json!(head), "{resolved:?}");
+    assert!(resolved[0]["binding_before"]["tree_hash"].is_string());
+    assert_eq!(unrewritten(resolved), [json!({"attempt": 1, "head": head})]);
     assert_eq!(
         git_out(&repo, &["rev-parse", &format!("{head}~1")]),
         moved,
@@ -291,8 +295,8 @@ fn an_adopted_headless_run_with_a_pending_conflict_request_waits_without_sending
         &["rev-parse", &format!("refs/dagq/runs/{}", run.id())],
     );
     assert_eq!(
-        payloads(&detail, "conflict_resolved"),
-        [&json!({"attempt": 1, "head": head})]
+        unrewritten(payloads(&detail, "conflict_resolved")),
+        [json!({"attempt": 1, "head": head})]
     );
     assert_eq!(
         git_out(&repo, &["rev-parse", &format!("{head}~1")]),

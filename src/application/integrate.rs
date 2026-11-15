@@ -54,6 +54,7 @@ use crate::domain::{
 };
 use crate::migration_numbers;
 
+pub mod binding;
 mod programs;
 pub use programs::LandingPrograms;
 
@@ -1154,12 +1155,23 @@ fn begin(
     // parks as `needs_session` is landed by the supervisor once a resumed
     // session resolved it (ADR-0019 decision 1). Its prerequisites are
     // checked again in the approval's own write ([`approvable`]).
+    // The approval is bound to the run's diff as it is now (ADR-t4840-2
+    // decision 8): what lands is compared with it.
+    let mut approval =
+        json!({"status": run.status().as_str(), "pid": ctx.pid, "push": ctx.remote.is_some()});
+    // A run in a container is read only by the git kept from running its
+    // commits' hooks and drivers: one that cannot be made stops here,
+    // before anything is read or approved (ADR-t2179-1 decision 8).
+    let guarded = super::run_git::for_run(ctx.repository, &run)?;
+    let repository: &dyn Repository = &*guarded;
+    binding::put(
+        &mut approval,
+        &binding::of_run(repository, &run, &queue.run_events(run.id())?)?,
+    );
     let (processes, clock) = (ctx.processes, ctx.clock);
-    queue.approve_integration(
-        run.id(),
-        json!({"status": run.status().as_str(), "pid": ctx.pid, "push": ctx.remote.is_some()}),
-        &|lease| !heartbeat_stale(processes.alive(lease.pid), clock.now() - lease.heartbeat_at),
-    )?;
+    queue.approve_integration(run.id(), approval, &|lease| {
+        !heartbeat_stale(processes.alive(lease.pid), clock.now() - lease.heartbeat_at)
+    })?;
     let previous = run.status();
     let token = ctx.ids.lease_token();
     let main = ctx.repository.main_head()?;
@@ -1181,8 +1193,9 @@ fn begin(
 /// Whether the approval to land run `id` of `payload` is recorded now,
 /// from the run, lease and events read in the approval's own write
 /// ([`RunTransitions::approve_integration`]): `false` for a run approved
-/// already. Refused is a run whose status is not the one `payload` names
-/// (it changed since the caller read it), one that awaits neither
+/// already, bound to the same diff ([`approved_as_bound`]). Refused is a
+/// run whose status is not the one `payload` names (it changed since the
+/// caller read it), one that awaits neither
 /// integration nor a session, and one a lease `held` says is held (the
 /// supervisor's review, ADR-0027, or its resume): a call that cannot land
 /// it does not approve it.
@@ -1194,7 +1207,7 @@ pub fn approvable(
     held: &dyn Fn(&crate::domain::RunLease) -> bool,
 ) -> Result<bool> {
     let leased = lease.is_some_and(held);
-    let approved = RunHistory::from_events(events).approved();
+    let approved = approved_as_bound(events, payload);
     approval_due(
         run.id(),
         run.status(),
@@ -1202,6 +1215,31 @@ pub fn approvable(
         leased,
         approved,
     )
+}
+
+/// Whether run's `events` hold an approval to land that stands
+/// ([`RunHistory::approved`]) and that the landing compares with, bound to
+/// the diff `payload` is bound to (ADR-t4840-2 decision 8): the run's last
+/// judgment ([`RunHistory::last_judgment`]) is an approval bound to the
+/// same set. A person's `integrate` of a diff other than the one the last
+/// judgment was bound to approves the diff as it is now, even when an
+/// earlier approval was bound to it. A payload bound to nothing takes any
+/// approval that stands.
+fn approved_as_bound(events: &[crate::domain::RunEvent], payload: &Value) -> bool {
+    use crate::domain::landing_binding::binding_of;
+    let history = RunHistory::from_events(events);
+    if !history.approved() {
+        return false;
+    }
+    let Some(binding) = binding_of(payload) else {
+        return true;
+    };
+    history.last_judgment().is_some_and(|judgment| {
+        judgment.event.kind == EventKind::IntegrationApproved
+            && judgment
+                .binding
+                .is_some_and(|bound| bound.approved_blobs == binding.approved_blobs)
+    })
 }
 
 /// [`approvable`]'s decision on what it read of run `id`: its `status`,
@@ -1599,6 +1637,46 @@ fn land_integrating(
                 run: Box::new(run),
                 main: main.clone(),
                 reason,
+            }
+        }
+        Verdict::Changed {
+            reason,
+            reapproval,
+            differing,
+        } => {
+            warn!(
+                op = "integrate",
+                reason = %reason,
+                "run {} did not land: {reason}",
+                run.id()
+            );
+            // The slot goes back and the run awaits integration for its
+            // re-approval, its session's work done (a run that was waiting
+            // for a session was queued after it resolved); the comparison's
+            // record spends the judgment
+            // ([`crate::domain::landing_binding::unspent`]).
+            let run = queue.abort_integration(
+                run.id(),
+                token,
+                RunStatus::AwaitingIntegration.as_str(),
+                &reason,
+                &Reason::new(ReasonCode::LandingChanged)
+                    .with("reapproval", reapproval.as_str())
+                    .with("differing", json!(differing))
+                    .with("build", ctx.build),
+            )?;
+            record_landing_left(
+                &*queue,
+                &request.requester,
+                &run,
+                EventKind::IntegrationError,
+            );
+            IntegrationOutcome::Changed {
+                run: Box::new(run),
+                main: main.clone(),
+                reason,
+                reapproval: reapproval.as_str().to_owned(),
+                differing,
             }
         }
         Verdict::ReceiptFailed { reason, receipt } => {
@@ -2252,6 +2330,14 @@ enum Verdict {
     /// drains for a handoff (ADR-t3344-1): the run waits for the landing
     /// slot again, its lease kept, and the next process lands it anew.
     HandedOver { reason: String, detail: Value },
+    /// What the merged result touches differs from the run's last
+    /// judgment that lets it land (ADR-t4840-2 decision 7): nothing lands
+    /// and the run goes back to that judgment's path to be approved again.
+    Changed {
+        reason: String,
+        reapproval: crate::domain::landing_binding::Reapproval,
+        differing: Vec<String>,
+    },
 }
 
 /// Rebase, re-validate and land one run. `Ok(Deferred)` and
@@ -2409,6 +2495,11 @@ fn land(
         && !RunHistory::from_events(&queue.run_events(run.id())?)
             .landing_rewrote(receipt.commit(), head.as_str())
     {
+        // A commit the receipt does not name, after the run's judgment
+        // that lets it land, changes what it would land: the comparison is
+        // recorded and spends the judgment before the session is asked for
+        // a receipt of its head (ADR-t4840-2 decision 7).
+        binding::spend_on_unnamed_commit(&*queue, repository, run, main, &head)?;
         return defer(
             ReasonCode::CommitMismatch.into(),
             format!(
@@ -2463,7 +2554,11 @@ fn land(
     queue.record_runtime_event(
         run.id(),
         EventKind::IntegrationRebased,
-        json!({"main": main, "head_before": head, "head_after": rebased}),
+        binding::rewrite_record(
+            repository,
+            json!({"main": main, "head_before": head, "head_after": rebased}),
+            (main, &head, &rebased),
+        )?,
     )?;
     if rebased == *main {
         return defer(
@@ -2492,9 +2587,14 @@ fn land(
     // A migration the run adds under a number main took meanwhile would
     // fail the build with two files of one number (ADR-0067 decision 3);
     // dagq's source repository only (ADR-t614-1).
+    let moved_by_rebase = rebased != head;
+    let mut renumbered = false;
     let rebased = match renumber_migration(queue, repository, run, worktree, main, &rebased)? {
         Renumbering::Unchanged => rebased,
-        Renumbering::Renumbered(head) => head,
+        Renumbering::Renumbered(head) => {
+            renumbered = true;
+            head
+        }
         Renumbering::Blocked { reason, detail } => {
             return defer(ReasonCode::MigrationNumberTaken.into(), reason, detail);
         }
@@ -2516,6 +2616,44 @@ fn land(
             json!({"main": main, "head": rebased, "scope_violation": outside, "allowed": task.paths()}),
         );
     }
+    // What lands is held to what the run's last judgment that lets it land
+    // was bound to, before anything costly runs (ADR-t4840-2 decisions 7
+    // and 8): the set of the files the merged result touches and their
+    // blob hashes, the same or nothing lands.
+    let merged = match binding::compare_landing(
+        &*queue,
+        repository,
+        run,
+        binding::Rewrites {
+            main,
+            head: &head,
+            rebased: &rebased,
+            moved_by_rebase,
+            renumbered,
+        },
+    )? {
+        binding::Compared::Matched { merged } => merged,
+        binding::Compared::Changed {
+            reason,
+            reapproval,
+            differing,
+        } => {
+            // A run in a container is rebased in its landing worktree,
+            // made again at its validated commit by the next landing or
+            // review: the rebased head its re-approval reads is kept.
+            if run.in_container()
+                && let Err(error) =
+                    repository.update_ref(&binding::rewritten_ref(run), rebased.as_str())
+            {
+                warn!(op = "integrate", error = %format_args!("{error:#}"), "run {}: the rebased head {rebased} is not kept under {}: {error:#}", run.id(), binding::rewritten_ref(run));
+            }
+            return Ok(Verdict::Changed {
+                reason,
+                reapproval,
+                differing,
+            });
+        }
+    };
     // The review programs the diff that lands requires, the cheap gate
     // before the commands (ADR-t3749-1): one that fails sends the run back
     // before any command runs.
@@ -2845,6 +2983,7 @@ fn land(
     let history_ref = format!("refs/dagq/runs/{}", run.id());
     repository.update_ref(&history_ref, rebased.as_str())?;
     repository.advance_main(landing_branch, main.as_str(), commit.as_str())?;
+    let merged = binding::merged_record(merged, &commit);
     Ok(Verdict::Landed(
         Landing {
             commit,
@@ -2853,6 +2992,7 @@ fn land(
             history_ref,
             message: paragraphs.join("\n\n"),
             verification_skipped: false,
+            merged: Some(merged),
         },
         receipt.into_follow_ups(),
     ))
@@ -2937,6 +3077,15 @@ fn landed_before(
         .filter(|worktree| files.is_dir(worktree))
         .and_then(|_| super::run_git::head(repository, run).ok())
         .unwrap_or_else(|| commit.clone());
+    // The merge the stopped landing made, from its comparison that matched
+    // and the landed commit, audited with the run's landing as any merge.
+    let landed = binding::bind(repository, parent.as_str(), commit.as_str()).ok();
+    let merged = binding::recovered_merged(
+        &queue.run_events(run.id())?,
+        landed.as_ref(),
+        &parent,
+        &commit,
+    );
     Ok(Verdict::Landed(
         Landing {
             message: receipt
@@ -2948,6 +3097,7 @@ fn landed_before(
             main_before: parent,
             history_ref: format!("refs/dagq/runs/{}", run.id()),
             verification_skipped: false,
+            merged,
         },
         receipt.and_then(Receipt::into_follow_ups),
     ))
@@ -3789,15 +3939,19 @@ fn renumber_migration(
     queue.record_runtime_event(
         run.id(),
         EventKind::MigrationRenumbered,
-        json!({
-            "main": main,
-            "from": old,
-            "to": new,
-            "old_number": old_digits,
-            "new_number": next_digits,
-            "head_before": rebased,
-            "head_after": head,
-        }),
+        binding::rewrite_record(
+            repository,
+            json!({
+                "main": main,
+                "from": old,
+                "to": new,
+                "old_number": old_digits,
+                "new_number": next_digits,
+                "head_before": rebased,
+                "head_after": head,
+            }),
+            (main, rebased, &head),
+        )?,
     )?;
     info!(
         op = "integrate",
@@ -4397,6 +4551,39 @@ mod tests {
                 "{status:?}: {refused:#}"
             );
         }
+    }
+
+    /// A person's `integrate` is recorded again unless the last judgment
+    /// the landing compares with is an approval bound to the same set: one
+    /// of diff A, then one of diff B whose landing stopped for another
+    /// reason, then the diff back at A approves A again (the earlier
+    /// approval of A is not what the landing compares with).
+    #[test]
+    fn a_direct_integrate_is_recorded_again_unless_the_last_judgment_is_its_own_set() {
+        let bound = |blob: &str| json!({"binding": {"approved_blobs": {"f": {"blob": blob}}}});
+        let approval = |id: i64, blob: &str| RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: EventKind::IntegrationApproved.as_str().into(),
+            payload: bound(blob),
+            created_at: String::new(),
+            actor: Some(crate::domain::EventActor {
+                role: "user".into(),
+                id: "u".into(),
+                requested_by: None,
+            }),
+        };
+        let a_then_b = [approval(1, "A"), approval(2, "B")];
+        assert!(!approved_as_bound(&a_then_b, &bound("A")));
+        assert!(approved_as_bound(&a_then_b, &bound("B")));
+        assert!(approved_as_bound(&a_then_b[..1], &bound("A")));
+        assert!(!approved_as_bound(&[], &bound("A")));
+        // Then A again: the last judgment is A's approval.
+        let a_b_a = [approval(1, "A"), approval(2, "B"), approval(3, "A")];
+        assert!(approved_as_bound(&a_b_a, &bound("A")));
+        assert!(!approved_as_bound(&a_b_a, &bound("B")));
     }
 
     /// A landed run's `worktree_removed` holds the bytes measured before

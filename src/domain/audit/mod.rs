@@ -32,8 +32,11 @@ pub use redact::{REDACTED, is_credential_name, redact_value};
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// The version of the action enum: an action added, removed or given a new
-/// meaning raises it, apart from the record's [`SCHEMA_VERSION`].
-pub const ACTION_VERSION: u32 = 1;
+/// meaning raises it, apart from the record's [`SCHEMA_VERSION`]. A record
+/// keeps the version it was written with, and a reader takes every version
+/// from 1 to this one whose actions hold the record's
+/// ([`AuditAction::in_version`]).
+pub const ACTION_VERSION: u32 = 2;
 
 /// A category of what is recorded (ADR-t4840-1): what question a record
 /// answers. Stage 0 writes F, D, B's refusals, G and I.
@@ -147,6 +150,10 @@ string_enum!(
     /// the diff hash, the set of blob hashes, and whether a rebase or an
     /// automatic resolution of a conflict happened.
     LandingMerged => "landing.merged",
+    /// A change of the run's branch after its judgment, apart from it: a
+    /// landing's rebase or a migration's renumbering, with the head, the
+    /// tree hash and the set of blob hashes before and after it.
+    LandingRewritten => "landing.rewritten",
     /// A push about to be made: the remote, the ref and its old sha. The
     /// push waits for this record's ack.
     PushAttempted => "push.attempted",
@@ -189,12 +196,28 @@ string_enum!(
 });
 
 impl AuditAction {
+    /// The first version of the action enum that has the action.
+    pub const fn since(self) -> u32 {
+        match self {
+            Self::LandingRewritten => 2,
+            _ => 1,
+        }
+    }
+
+    /// Whether a record of the action enum's `version` can hold the
+    /// action: a version this binary reads (1 to [`ACTION_VERSION`]) that
+    /// has it.
+    pub const fn in_version(self, version: u32) -> bool {
+        version <= ACTION_VERSION && self.since() <= version
+    }
+
     /// Every action of version [`ACTION_VERSION`].
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::LandingJudged,
         Self::LandingApproved,
         Self::LandingCompared,
         Self::LandingMerged,
+        Self::LandingRewritten,
         Self::PushAttempted,
         Self::PushCompleted,
         Self::AskAnswered,
@@ -214,7 +237,10 @@ impl AuditAction {
     pub const fn categories(self) -> &'static [Category] {
         use Category::*;
         match self {
-            Self::LandingJudged | Self::LandingCompared | Self::LandingMerged => &[Provenance],
+            Self::LandingJudged
+            | Self::LandingCompared
+            | Self::LandingMerged
+            | Self::LandingRewritten => &[Provenance],
             Self::LandingApproved => &[Judgment, Provenance],
             Self::PushAttempted | Self::PushCompleted => &[Provenance, ExternalWrite],
             Self::AskAnswered | Self::AnswerApplied => &[Judgment],
@@ -235,6 +261,7 @@ impl AuditAction {
             Self::LandingJudged => &[Supervisor],
             Self::LandingCompared
             | Self::LandingMerged
+            | Self::LandingRewritten
             | Self::PushAttempted
             | Self::PushCompleted
             | Self::ConfigChanged => &[Integrate],

@@ -1294,7 +1294,10 @@ fn two_independent_tasks_run_one_at_a_time_on_a_new_queue_and_a_dependent_follow
 
     // The integrate call approved it, so the next supervisor pass resumes
     // its session (the stub plays Claude), which resolves the conflict on
-    // top of main and rewrites the receipt; the runtime then lands it.
+    // top of main and rewrites the receipt. The resolution rewrote e2e.txt,
+    // a file of the diff the approval was bound to (ADR-t4840-2 decision
+    // 7): the runtime's landing lands nothing and leaves the run for a
+    // person's integrate of the diff as it is now.
     let run = dagq(env, &["show", &third, "--full"])["runs"][0].clone();
     assert_eq!(run["status"], "needs_session");
     let worktree = Path::new(run["worktree_path"].as_str().unwrap());
@@ -1323,6 +1326,40 @@ fn two_independent_tasks_run_one_at_a_time_on_a_new_queue_and_a_dependent_follow
         "{}",
         pass.stderr
     );
+    let detail = dagq(env, &["show", &third, "--full"]);
+    let run = &detail["runs"][0];
+    assert_eq!(run["status"], "awaiting_integration", "{detail}");
+    assert_eq!(git(repo, &["rev-parse", "main"]), second_landed);
+    let compared = detail["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["kind"] == "integration_compared")
+        .unwrap_or_else(|| panic!("{detail}"));
+    assert_eq!(compared["payload"]["path"], "integrate", "{compared}");
+    assert_eq!(compared["payload"]["matched"], false, "{compared}");
+    assert_eq!(compared["payload"]["reapproval"], "integrate", "{compared}");
+    assert_eq!(
+        compared["payload"]["differing"],
+        json!(["e2e.txt"]),
+        "{compared}"
+    );
+    let status = dagq(env, &["status"]);
+    let attention = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["run_id"] == run["id"] && a["last_error_code"] == "landing_changed")
+        .cloned()
+        .unwrap_or_else(|| panic!("{status}"));
+    assert!(
+        attention["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("dagq integrate"),
+        "{attention}"
+    );
+    assert_eq!(dagq(env, &["integrate", &third])["outcome"], "integrated");
     let detail = dagq(env, &["show", &third, "--full"]);
     let run = &detail["runs"][0];
     assert_eq!(run["status"], "integrated", "{detail}");

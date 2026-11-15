@@ -751,8 +751,21 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
             ))
         }
         "skip_resume" => {
-            let (id, token, head, main, approved): (RunId, LeaseToken, CommitSha, CommitSha, bool) =
-                read(op, args)?;
+            // A supervisor of a build before the rewrite sends five.
+            let mut args = args;
+            if let Value::Array(items) = &mut args
+                && items.len() == 5
+            {
+                items.push(Value::Null);
+            }
+            let (id, token, head, main, approved, rewrite): (
+                RunId,
+                LeaseToken,
+                CommitSha,
+                CommitSha,
+                bool,
+                Option<Value>,
+            ) = read(op, args)?;
             own(&token)?;
             answer(RunRecovery::skip_resume(
                 &mut *store,
@@ -761,6 +774,7 @@ pub(super) fn dispatch<S: SupervisorStore + ?Sized>(
                 &head,
                 &main,
                 approved,
+                rewrite,
             ))
         }
         "exhaust_resumes" => {

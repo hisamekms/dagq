@@ -233,6 +233,8 @@ fn a_resume_past_the_threshold_opens_a_new_session() {
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(2))
@@ -288,6 +290,8 @@ fn a_resume_at_the_threshold_reopens_the_runs_session() {
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(2))
@@ -336,6 +340,8 @@ fn a_new_session_recorded_without_its_request_is_the_one_the_resume_opens() {
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(2))

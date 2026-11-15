@@ -98,15 +98,16 @@ pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -
     let repository = open_repository(Path::new(checkout))?;
     let ReviewRange { base, head } = match range {
         Some(range) => {
+            let reviewed = reviewed_head(&*repository, &run, &receipt, &detail.events);
             anyhow::ensure!(
-                range.head.eq_ignore_ascii_case(receipt.commit()),
-                "the review's range ends at {}, not at the receipt's commit {}",
+                range.head.eq_ignore_ascii_case(&reviewed),
+                "the review's range ends at {}, not at the reviewed head {reviewed} (the receipt's commit {})",
                 range.head,
                 receipt.commit()
             );
             range.clone()
         }
-        None => review_range(&*repository, &run, &receipt)?,
+        None => review_range(&*repository, &run, &receipt, &detail.events)?,
     };
     let log = repository.log_oneline(&base, &head)?;
     let stat = repository.diff_stat(&base, &head)?;
@@ -296,9 +297,10 @@ pub fn review_range(
     repository: &dyn Repository,
     run: &TaskRun,
     receipt: &Receipt,
+    events: &[crate::domain::RunEvent],
 ) -> Result<ReviewRange> {
     let main = repository.main_head()?;
-    review_range_at(repository, run, receipt, &main)
+    review_range_at(repository, run, receipt, &main, events)
 }
 
 /// [`review_range`] with `main`, the landing branch's commit, read
@@ -308,10 +310,54 @@ pub fn review_range_at(
     run: &TaskRun,
     receipt: &Receipt,
     main: &CommitSha,
+    events: &[crate::domain::RunEvent],
 ) -> Result<ReviewRange> {
-    let head = receipt.commit().to_ascii_lowercase();
+    let head = reviewed_head(repository, run, receipt, events);
     let base = range_base(repository, run, main, &head)?;
     Ok(ReviewRange { base, head })
+}
+
+/// The head a review of `run` reads and its verdict is bound to: the
+/// receipt's commit, or the head a landing that stopped before main moved
+/// rewrote it to in the run's branch (its rebase or a migration's
+/// renumbering, [`crate::domain::RunHistory::landing_rewrote`] of the run's
+/// `events`). That head's diff is what lands, so a review again after its
+/// landing found the merged files differ from its judgment (ADR-t4840-2
+/// decision 7) judges it, and not the receipt's diff before the rebase.
+pub fn reviewed_head(
+    repository: &dyn Repository,
+    run: &TaskRun,
+    receipt: &Receipt,
+    events: &[crate::domain::RunEvent],
+) -> String {
+    let commit = receipt.commit().to_ascii_lowercase();
+    let Some(rewritten) = crate::domain::RunHistory::from_events(events).landing_head(&commit)
+    else {
+        return commit;
+    };
+    // A run in a container lands its validated commit as its landing
+    // rebased it, whatever its bundle's head is now: the review reads that,
+    // as its binding and its tree do
+    // ([`crate::application::integrate::binding::landing_head`],
+    // [`super::run_git::review_tree`]).
+    if run.in_container() {
+        return rewritten;
+    }
+    match super::run_git::head(repository, run) {
+        Ok(current) if lands_rewritten(run, current.as_str(), &commit, &rewritten) => rewritten,
+        _ => commit,
+    }
+}
+
+/// Whether what lands of `run`, whose branch is at `current`, is the head
+/// `rewritten` a stopped landing made of `commit`: on the host the rebase
+/// moved the run's own branch there; a run in a container lands in its
+/// landing worktree, rebased from `commit` again at each landing, so its
+/// branch from the bundle still at `commit` lands as `rewritten`
+/// (ADR-t2179-1 decision 5).
+pub fn lands_rewritten(run: &TaskRun, current: &str, commit: &str, rewritten: &str) -> bool {
+    current.eq_ignore_ascii_case(rewritten)
+        || run.in_container() && current.eq_ignore_ascii_case(commit)
 }
 
 /// Where `run`'s own commits up to `head` start: the merge base of `main`,
@@ -2442,7 +2488,8 @@ mod tests {
                 &repository,
                 &run_on(CLAIMED),
                 &receipt,
-                &CommitSha::try_from(SHA).unwrap()
+                &CommitSha::try_from(SHA).unwrap(),
+                &[],
             )
             .unwrap(),
             ReviewRange {
@@ -2450,6 +2497,118 @@ mod tests {
                 head: HEAD.to_owned(),
             }
         );
+    }
+
+    /// A review reads the head a stopped landing rewrote the receipt's
+    /// commit to (its rebase), the diff that lands and that its verdict is
+    /// bound to; a head the run's own session moved without a rewrite of
+    /// the landing's, or no rewrite at all, leaves the receipt's commit.
+    #[test]
+    fn a_review_reads_the_head_a_stopped_landing_rebased_the_receipt_to() {
+        use crate::domain::{EventId, EventKind, RunEvent};
+        let receipt = Receipt::parse(
+            &json!({
+                "run_id": RUN, "result": "succeeded", "commit": MIDWAY,
+                "tests": {"status": "passed", "evidence_or_reason": "unit"},
+                "e2e": {"status": "not_applicable", "evidence_or_reason": "none"},
+                "subagent_review": {"status": "not_applicable", "evidence_or_reason": "small"},
+                "summary": "done",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let run = TaskRun::restore(RunRecord {
+            worktree_path: Some("/worktree".into()),
+            ..record_on(CLAIMED)
+        })
+        .unwrap();
+        let repository = Committed {
+            head: Some(HEAD),
+            ..Committed::default()
+        };
+        let rebased = [RunEvent {
+            id: EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: EventKind::IntegrationRebased.as_str().into(),
+            payload: json!({"head_before": MIDWAY, "head_after": HEAD}),
+            created_at: String::new(),
+            actor: None,
+        }];
+        assert_eq!(reviewed_head(&repository, &run, &receipt, &rebased), HEAD);
+        assert_eq!(reviewed_head(&repository, &run, &receipt, &[]), MIDWAY);
+    }
+
+    /// What lands of a run a stopped landing rewrote: on the host the run's
+    /// own branch moved to the rewritten head, which lands; a run in a
+    /// container lands its landing worktree's rewrite while its branch from
+    /// the bundle stays at the receipt's commit, so a re-approval reads the
+    /// rewrite; a branch moved elsewhere (a later session) lands neither.
+    #[test]
+    fn a_container_runs_reapproval_reads_the_head_its_landing_worktree_was_rebased_to() {
+        let on = |worktree: &str| {
+            TaskRun::restore(RunRecord {
+                worktree_path: Some(worktree.into()),
+                ..record_on(CLAIMED)
+            })
+            .unwrap()
+        };
+        let host = on("/worktree");
+        let container = on(&format!(
+            "/q/{}/{RUN}",
+            crate::domain::run_clone::CLONES_DIR
+        ));
+        assert!(!host.in_container());
+        assert!(container.in_container());
+        for (run, current, lands) in [
+            (&host, HEAD, true),
+            (&host, MIDWAY, false),
+            (&host, CLAIMED, false),
+            (&container, HEAD, true),
+            (&container, MIDWAY, true),
+            (&container, CLAIMED, false),
+        ] {
+            assert_eq!(
+                lands_rewritten(run, current, MIDWAY, HEAD),
+                lands,
+                "{} at {current}",
+                run.in_container()
+            );
+        }
+        // A container run's review reads its validated commit's rewrite
+        // even when its bundle's head moved elsewhere since (a worker's
+        // later commit), as its binding and its tree do.
+        let receipt = Receipt::parse(
+            &json!({
+                "run_id": RUN, "result": "succeeded", "commit": MIDWAY,
+                "tests": {"status": "passed", "evidence_or_reason": "unit"},
+                "e2e": {"status": "not_applicable", "evidence_or_reason": "none"},
+                "subagent_review": {"status": "not_applicable", "evidence_or_reason": "small"},
+                "summary": "done",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let rebased = [crate::domain::RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: crate::domain::EventKind::IntegrationRebased.as_str().into(),
+            payload: json!({"head_before": MIDWAY, "head_after": HEAD}),
+            created_at: String::new(),
+            actor: None,
+        }];
+        let elsewhere = Committed {
+            head: Some(CLAIMED),
+            ..Committed::default()
+        };
+        assert_eq!(
+            reviewed_head(&elsewhere, &container, &receipt, &rebased),
+            HEAD
+        );
+        assert_eq!(reviewed_head(&elsewhere, &container, &receipt, &[]), MIDWAY);
     }
 
     /// A new session of a run rebased onto a midway main is handed the

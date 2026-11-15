@@ -25,6 +25,7 @@ mod eval_isolation;
 mod fresh_session_decisions;
 mod full_disk;
 mod landing_answers;
+mod landing_binding;
 mod main_log;
 mod pass_reads;
 mod previous_run_decisions;

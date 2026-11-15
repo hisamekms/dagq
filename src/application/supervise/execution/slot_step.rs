@@ -166,6 +166,35 @@ impl Supervisor<'_> {
         Ok(Step::Continue)
     }
 
+    /// The record of a revise or a conflict's resolution that rewrote
+    /// `run`'s branch to `head`: the binding before it (what the latest
+    /// review read) and after it (ADR-t4840-2 decision 7). `Err` while the
+    /// events or the binding after it cannot be read.
+    fn revise_rewrite(&self, run: &TaskRun, attempt: usize, head: &CommitSha) -> Result<Value> {
+        let mut rewritten = json!({"attempt": attempt, "head": head, "head_after": head});
+        let events = self.queue.run_events(run.id())?;
+        if let Some(before) = events
+            .iter()
+            .rev()
+            .find(|e| e.kind == EventKind::ReviewStarted)
+            .and_then(|e| crate::domain::landing_binding::binding_of(&e.payload))
+        {
+            rewritten["binding_before"] = json!(before);
+        }
+        let main = self.repository.main_head()?;
+        // A run in a container's commits are read only by the git kept
+        // from running their hooks and drivers, as `integrate`'s `begin`
+        // reads them (ADR-t2179-1 decision 8).
+        let guarded = crate::application::run_git::for_run(&*self.repository, run)?;
+        let base = crate::application::review::range_base(&*guarded, run, &main, head.as_ref())?;
+        rewritten["binding_after"] = json!(crate::application::integrate::binding::bind(
+            &*guarded,
+            &base,
+            head.as_ref(),
+        )?);
+        Ok(rewritten)
+    }
+
     pub(super) fn step(&mut self, slot: &mut Slot) -> Result<Step> {
         // A landing releases the lease itself when it ends, so it is joined
         // before the lease is checked.
@@ -233,10 +262,18 @@ impl Supervisor<'_> {
         }
         match &mut slot.phase {
             Phase::Resume(watch) => {
-                let awaited = watch.awaits_answer;
-                let polled = watch.poll(self, &slot.run)?;
-                // As a revise's: its own questions stop it in its slot.
-                slot.note_questions(awaited, &*self.queue);
+                // A finish not recorded the last pass is finished again
+                // with its verdict, not polled anew.
+                let polled = match watch.unfinished.take() {
+                    Some(verdict) => Some(verdict),
+                    None => {
+                        let awaited = watch.awaits_answer;
+                        let polled = watch.poll(self, &slot.run)?;
+                        // As a revise's: its own questions stop it in its slot.
+                        slot.note_questions(awaited, &*self.queue);
+                        polled
+                    }
+                };
                 let Some(verdict) = polled else {
                     return Ok(Step::Continue);
                 };
@@ -467,12 +504,21 @@ impl Supervisor<'_> {
                 Ok(Step::Continue)
             }
             Phase::Revise(watch) => {
-                let awaited = watch.awaits_answer;
-                let polled = watch.poll(self, &slot.run)?;
-                // Its own questions stop it, each from the pass that finds
-                // it until the answer lets it go on: an outcome the poll
-                // found after an answer moves it on from its revise.
-                slot.note_questions(awaited, &*self.queue);
+                // A rewrite not recorded the last pass is recorded again
+                // with its head, not polled anew.
+                let polled = match watch.unrecorded.take() {
+                    Some(head) => Some(ReviseOutcome::Rewritten(head)),
+                    None => {
+                        let awaited = watch.awaits_answer;
+                        let polled = watch.poll(self, &slot.run)?;
+                        // Its own questions stop it, each from the pass that
+                        // finds it until the answer lets it go on: an outcome
+                        // the poll found after an answer moves it on from its
+                        // revise.
+                        slot.note_questions(awaited, &*self.queue);
+                        polled
+                    }
+                };
                 let Some(outcome) = polled else {
                     return Ok(Step::Continue);
                 };
@@ -487,11 +533,22 @@ impl Supervisor<'_> {
                             Fix::Revise { .. } => EventKind::ReviseFinished,
                             Fix::Conflict(_) => EventKind::ConflictResolved,
                         };
-                        self.queue.record_runtime_event(
-                            slot.run.id(),
-                            kind,
-                            json!({"attempt": watch.attempt, "head": head}),
-                        )?;
+                        // The change of the run's branch after its review, with
+                        // the binding before it (what the review read) and
+                        // after it, its own change for the audit
+                        // (ADR-t4840-2 decision 7). Nothing of it is recorded,
+                        // nor does the run go on, until both can be read
+                        // (decision 6): the next pass records it again.
+                        let rewritten = match self.revise_rewrite(&slot.run, watch.attempt, &head) {
+                            Ok(rewritten) => rewritten,
+                            Err(error) => {
+                                warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: the binding after {label} could not be read: {error:#}; it is recorded the next pass", slot.run.id());
+                                watch.unrecorded = Some(head);
+                                return Ok(Step::Continue);
+                            }
+                        };
+                        self.queue
+                            .record_runtime_event(slot.run.id(), kind, rewritten)?;
                         info!(run_id = %slot.run.id(), "run {} rewrote its receipt for {label} (head {head}); validating again", slot.run.id());
                         let run = self
                             .queue

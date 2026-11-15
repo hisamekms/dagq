@@ -327,6 +327,24 @@ impl Wiring {
     /// A person's integrate on this wiring's ports, including the approval,
     /// the landing and the closing of asks; no external command runs.
     pub(super) fn integrate(&self, task: TaskId) {
+        assert_eq!(self.integrate_outcome(task)["outcome"], "integrated");
+    }
+
+    /// The audit records of the queue, oldest first.
+    pub(super) fn audit_records(&self) -> Vec<Value> {
+        let conn = connect(&self.db);
+        let mut rows = conn
+            .prepare("SELECT record FROM audit_records ORDER BY seq")
+            .expect("read the audit records");
+        rows.query_map([], |row| row.get::<_, String>(0))
+            .expect("read the audit records")
+            .map(|text| serde_json::from_str(&text.expect("a record")).expect("a record's JSON"))
+            .collect()
+    }
+
+    /// A person's `integrate` of `task`'s run awaiting integration, with
+    /// what its landing came to.
+    pub(super) fn integrate_outcome(&self, task: TaskId) -> Value {
         use crate::application::integrate::{IntegrateTarget, Integration, Integrator};
         let mut queue = self.queue();
         let mut ctx = Integration {
@@ -364,10 +382,7 @@ impl Wiring {
             .expect("approve the landing")
             .expect("a run awaits integration");
         let outcome = integrator.land(&mut ctx, &request).expect("land the run");
-        assert_eq!(
-            serde_json::to_value(outcome).unwrap()["outcome"],
-            "integrated"
-        );
+        serde_json::to_value(outcome).unwrap()
     }
 
     /// The repository rules table read by each pass of the real supervisor.

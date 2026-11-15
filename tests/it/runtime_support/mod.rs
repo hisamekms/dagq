@@ -2033,6 +2033,105 @@ pub fn integration_receipts(detail: &dagq::domain::TaskDetail) -> Vec<&Value> {
         .collect()
 }
 
+/// `payload` of a judgment event of `kind` (a review's verdict, a judgment
+/// past the revise limit, an approval to land) bound to `run`'s diff in
+/// `repo` as this binary binds what it judges (ADR-t4840-2 decision 7);
+/// any other event's as it is. A test that records the events a
+/// supervisor would have recorded records them so.
+pub fn bound_as_judged(repo: &Path, run: &TaskRun, kind: EventKind, mut payload: Value) -> Value {
+    if matches!(
+        kind,
+        EventKind::ReviewFinished | EventKind::ReviseLimitJudged | EventKind::IntegrationApproved
+    ) && payload.get("binding").is_none()
+    {
+        let git = dagq::infrastructure::adapters::GitRepository::inspect(repo).unwrap();
+        dagq::application::integrate::binding::put(
+            &mut payload,
+            &dagq::application::integrate::binding::of_run(&git, run, &[]).unwrap(),
+        );
+    }
+    payload
+}
+
+/// `payloads` without the binding each judgment carries (ADR-t4840-2
+/// decision 7), which every one of them must have: what a test compares
+/// whole.
+pub fn unbound(payloads: Vec<&Value>) -> Vec<Value> {
+    payloads
+        .into_iter()
+        .map(|payload| {
+            let mut payload = payload.clone();
+            assert!(
+                payload["binding"]["approved_blobs"].is_object(),
+                "{payload}"
+            );
+            payload.as_object_mut().unwrap().remove("binding");
+            payload
+        })
+        .collect()
+}
+
+/// `payloads` of changes that rewrote the run's branch (a conflict's
+/// resolution, a resume's), without what each records of the rewrite for
+/// the audit (ADR-t4840-2 decision 7), which every one of them must have:
+/// the head after it and the binding after it with its tree hash. What a
+/// test compares whole.
+pub fn unrewritten(payloads: Vec<&Value>) -> Vec<Value> {
+    payloads
+        .into_iter()
+        .map(|payload| {
+            let mut payload = payload.clone();
+            assert!(payload["head_after"].is_string(), "{payload}");
+            assert!(
+                payload["binding_after"]["tree_hash"].is_string(),
+                "{payload}"
+            );
+            let fields = payload.as_object_mut().unwrap();
+            for field in [
+                "rewrite",
+                "head_before",
+                "head_after",
+                "binding_before",
+                "binding_after",
+            ] {
+                fields.remove(field);
+            }
+            payload
+        })
+        .collect()
+}
+
+/// A person's `integrate` approved task `task`'s run before a session
+/// changed its diff (a resume that resolved what its landing found): the
+/// supervisor's landing found the merged files differ from what the
+/// approval was bound to (ADR-t4840-2 decision 7) and left the run awaiting
+/// integration, and a person's `integrate` again approves the diff as it
+/// is now and lands it.
+pub fn integrate_the_changed_diff(db: &Path, task: i64, repo: &Path) -> Value {
+    let detail = SqliteQueue::open(db)
+        .unwrap()
+        .show(TaskId::new(task))
+        .unwrap();
+    let kinds: Vec<&str> = detail.events.iter().map(|e| e.kind.as_str()).collect();
+    assert_eq!(
+        detail.runs[0].status(),
+        RunStatus::AwaitingIntegration,
+        "{kinds:?}"
+    );
+    let compared = payloads(&detail, "integration_compared");
+    let last = compared
+        .last()
+        .unwrap_or_else(|| panic!("no comparison: {kinds:?}"));
+    assert_eq!(
+        (&last["matched"], &last["reapproval"]),
+        (&json!(false), &json!("integrate")),
+        "{last}"
+    );
+    let outcome = integrate(db, task, repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    outcome
+}
+
 /// Assert that `main` is linear, `commits` long on top of `seed`, and that
 /// its head carries the landing of `run` with the same tree as `source`.
 pub fn assert_landed(repo: &Path, run: &TaskRun, task_title: &str, expected_parent: &str) {

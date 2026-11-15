@@ -50,8 +50,11 @@ fn waiting_then_landing(
 /// <reason>`, taken as `land`) is not delivered then (`runtime_delivers:
 /// false`, the run is not awaiting integration); the ask, which the
 /// recheck's paragraph now explains, stays unclosed, and once the rebased
-/// run waits again after its validation the supervisor applies it, and the
-/// run lands without a third review. `status` shows the recheck.
+/// run waits again after its validation the supervisor applies it. The
+/// land approved the diff the ask showed, which the resolution changed, so
+/// the landing lands nothing and the ask is opened again on the rebased
+/// diff (ADR-t4840-2 decision 7), whose land lands the run without a third
+/// review. `status` shows the recheck.
 #[test]
 fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
     let (dir, repo, db) = fixture();
@@ -91,6 +94,38 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
     // A later pass applies it if the first supervisor ended before it.
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The landing of that land found change.txt differ from the diff the
+    // ask showed, and the ask is opened again on the rebased diff.
+    let reopened = || {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .asks(Default::default())
+            .unwrap()
+            .into_iter()
+            .find(|a| a.kind == AskKind::ApproveLanding && a.id != ask.id && a.closed_at.is_none())
+    };
+    let mut again = reopened();
+    for _ in 0..2 {
+        if again.is_some() {
+            break;
+        }
+        let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+        again = reopened();
+    }
+    let again = again.unwrap_or_else(|| {
+        let detail = SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(1))
+            .unwrap();
+        panic!("no ask opened again: {:?}", event_kinds(&detail))
+    });
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(again.id, "land")
+        .unwrap();
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
 
     let mut queue = SqliteQueue::open(&db).unwrap();
     let second = queue.show(TaskId::new(2)).unwrap();
@@ -128,10 +163,12 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
         "review_started",
         "integration_approved",
         "landing_queued",
+        "integration_compared",
         "run_integrated",
     ];
+    let seen = kinds_from(&detail, "landing_recheck_failed", &kinds);
     assert_eq!(
-        kinds_from(&detail, "landing_recheck_failed", &kinds),
+        seen[..9],
         [
             "landing_recheck_failed",
             "ask_updated",
@@ -141,9 +178,27 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
             "validation_finished",
             "integration_approved",
             "landing_queued",
-            "run_integrated",
-        ]
+            "integration_compared",
+        ],
+        "{seen:?}"
     );
+    // Then the land of the ask opened again, and the landing.
+    let rest = &seen[9..];
+    assert!(rest.contains(&"ask_answered"), "{seen:?}");
+    assert!(rest.contains(&"integration_approved"), "{seen:?}");
+    assert_eq!(rest.last(), Some(&"run_integrated"), "{seen:?}");
+    assert!(!seen.contains(&"review_started"), "{seen:?}");
+    let compared = payloads(&detail, "integration_compared");
+    assert_eq!(compared.len(), 2, "{compared:?}");
+    for (key, value) in [
+        ("path", json!("approve_landing")),
+        ("matched", json!(false)),
+        ("reapproval", json!("approve_landing")),
+        ("differing", json!(["change.txt"])),
+    ] {
+        assert_eq!(compared[0][key], value, "{}", compared[0]);
+    }
+    assert_eq!(compared[1]["matched"], true, "{}", compared[1]);
     let text = &session_texts(&run)[0];
     assert!(
         text.contains("the supervisor's landing recheck found that it no longer lands"),
@@ -154,7 +209,7 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
     assert!(
         noted
             .question
-            .ends_with(&format!("Landing recheck: {reason}. The supervisor resumes the run to bring it onto main without waiting for this answer; once it waits again, the answer applies to the rebased run.")),
+            .ends_with(&format!("Landing recheck: {reason}. The supervisor resumes the run to bring it onto main without waiting for this answer; once it waits again, the answer applies to the rebased run, and a land of a diff the rebase changed is asked again on the rebased diff.")),
         "{}",
         noted.question
     );
@@ -192,16 +247,23 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
         assert_eq!(rechecks["resumed"], 1);
     }
 
-    // The rebased run lands from its answer.
+    // The rebased run lands from the answer to the ask opened again on it.
     assert_eq!(detail.task.status(), TaskStatus::Completed);
     assert_eq!(run.status(), RunStatus::Integrated);
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    assert!(queue.read_ask(again.id).unwrap().closed_at.is_some());
     let approved = payloads(&detail, "integration_approved");
-    assert_eq!(approved.len(), 1);
+    assert_eq!(approved.len(), 2, "{approved:?}");
     assert_eq!(approved[0]["ask_id"], ask.id.as_i64());
+    assert_eq!(approved[1]["ask_id"], again.id.as_i64());
+    let queued = payloads(&detail, "landing_queued");
     assert_eq!(
-        payloads(&detail, "landing_queued"),
-        [&json!({"via": "approve", "ask_id": ask.id})]
+        queued.first(),
+        Some(&&json!({"via": "approve", "ask_id": ask.id}))
+    );
+    assert_eq!(
+        queued.last(),
+        Some(&&json!({"via": "approve", "ask_id": again.id}))
     );
     assert_eq!(
         fs::read_to_string(repo.join("change.txt")).unwrap(),

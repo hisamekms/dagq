@@ -561,6 +561,18 @@ pub enum IntegrationOutcome {
         main: CommitSha,
         reason: String,
     },
+    /// The files the merged result touches, or their blob hashes, differ
+    /// from those the run's last judgment that let it land was bound to
+    /// (ADR-t4840-2 decision 7): nothing landed, the run is back where it
+    /// was, and `reapproval` says where it is approved again
+    /// ([`crate::domain::landing_binding::Reapproval`]).
+    Changed {
+        run: Box<TaskRun>,
+        main: CommitSha,
+        reason: String,
+        reapproval: String,
+        differing: Vec<String>,
+    },
     NoRunAwaiting,
 }
 

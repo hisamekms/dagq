@@ -971,6 +971,14 @@ pub struct Landing {
     pub history_ref: String,
     pub message: String,
     pub verification_skipped: bool,
+    /// What the merge was (ADR-t4840-2 decision 7): the judgment it was
+    /// compared with, the set of blob hashes, the diff hash and the tree
+    /// hash it landed, main's commit before and after, and whether a
+    /// rebase, a migration's renumbering or a session's resolution of a
+    /// conflict changed the run's branch since the judgment. `None` for a
+    /// landing recorded before it was compared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged: Option<serde_json::Value>,
 }
 
 pub use crate::domain::validation::Validation;
@@ -1799,7 +1807,9 @@ pub trait RunRecovery {
         head: &CommitSha,
         payload: serde_json::Value,
     ) -> Result<TaskRun>;
-    /// Move a run an earlier resume resolved on without a session.
+    /// Move a run an earlier resume resolved on without a session, with
+    /// `rewrite`, what resolving it rewrote (its heads and bindings before
+    /// and after), written on its `resume_skipped`.
     fn skip_resume(
         &mut self,
         id: &RunId,
@@ -1807,6 +1817,7 @@ pub trait RunRecovery {
         head: &CommitSha,
         main: &CommitSha,
         approved: bool,
+        rewrite: Option<serde_json::Value>,
     ) -> Result<Option<TaskRun>>;
     /// Fail a run whose resumes are used up, naming the ask for a person
     /// or retrying its task with its branch carried over.
@@ -2370,6 +2381,40 @@ pub trait Repository: RepositoryReads {
     fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>>;
     /// Paths `to` adds over `from`.
     fn added_paths(&self, from: &str, to: &str) -> Result<Vec<String>>;
+    /// Each file the diff from `from` to `to` touches (no rename: a moved
+    /// file is a removal and an addition), with its blob ID in `to` or its
+    /// removal: what a landing's judgment is bound to and compared with
+    /// (ADR-t4840-2 decision 7).
+    fn landing_blobs(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<crate::domain::landing_binding::BlobSet> {
+        use crate::domain::audit::BlobState;
+        let changed = self.changed_paths(from, to)?;
+        let paths: Vec<&str> = changed.iter().map(String::as_str).collect();
+        let present: std::collections::HashMap<String, String> = if paths.is_empty() {
+            Default::default()
+        } else {
+            self.blobs_in(to, &paths)?.into_iter().collect()
+        };
+        Ok(changed
+            .into_iter()
+            .map(|path| {
+                let state = present
+                    .get(&path)
+                    .map_or(BlobState::Removed, |blob| BlobState::Blob(blob.clone()));
+                (path, state)
+            })
+            .collect())
+    }
+    /// The bytes of the diff from `from` to `to` as Git writes them (no
+    /// rename, no external diff or text conversion), for its recorded hash
+    /// only.
+    fn diff_text(&self, from: &str, to: &str) -> Result<Vec<u8>> {
+        let _ = (from, to);
+        anyhow::bail!("this repository reads no diff's text")
+    }
     /// The hunks of the diff of the file `path` between two commits, on
     /// `to`'s side, with no context and no rename (a local gate's
     /// changed lines, ADR-t2589-1 decision 6); none for a change of its

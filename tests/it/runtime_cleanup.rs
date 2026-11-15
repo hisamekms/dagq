@@ -1032,8 +1032,13 @@ fn a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs() {
         before[1],
         "a resume began"
     );
+    // The skip records the conflict's resolution as its own rewrite of the
+    // branch (ADR-t4840-2 decision 7).
+    let skipped = payloads_of(&queue, &run, "resume_skipped");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0]["rewrite"], "conflict_resolution", "{skipped:?}");
     assert_eq!(
-        payloads_of(&queue, &run, "resume_skipped"),
+        unrewritten(skipped.iter().collect()),
         [
             json!({"head": resolved, "main": first_landed, "approved": true, "status": "needs_session"})
         ]

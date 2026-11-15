@@ -46,12 +46,17 @@ fn dead_landing(verdict: Option<&str>) -> (Fixture, PathBuf, PathBuf, TaskRun, T
         queue.close_ask(ask.id).unwrap();
     }
     if let Some(verdict) = verdict {
+        // Bound to the run's diff as a review's verdict is (ADR-t4840-2
+        // decision 7), so its landing compares with it.
+        let git = dagq::infrastructure::adapters::GitRepository::inspect(&repo).unwrap();
+        let mut finished =
+            json!({"attempt": 2, "verdict": verdict, "reasons": [], "summary": "reviewed again"});
+        dagq::application::integrate::binding::put(
+            &mut finished,
+            &dagq::application::integrate::binding::of_run(&git, &run, &[]).unwrap(),
+        );
         queue
-            .record_runtime_event(
-                run.id(),
-                EventKind::ReviewFinished,
-                json!({"attempt": 2, "verdict": verdict, "reasons": [], "summary": "reviewed again"}),
-            )
+            .record_runtime_event(run.id(), EventKind::ReviewFinished, finished)
             .unwrap();
     }
     add_ready_task(&mut queue, "second", &[]);

@@ -737,6 +737,38 @@ fn remove_untrusted(path: &Path) -> Result<()> {
     removed.with_context(|| format!("remove {}", path.display()))
 }
 
+/// The files of `git diff --raw -z --no-abbrev` output, each with its
+/// destination blob ID or its removal (a destination of zeros).
+fn parse_raw_blobs(raw: &str) -> Result<crate::domain::landing_binding::BlobSet> {
+    use crate::domain::audit::BlobState;
+    let mut fields = raw.split('\0').filter(|field| !field.is_empty());
+    let mut blobs = crate::domain::landing_binding::BlobSet::new();
+    while let Some(meta) = fields.next() {
+        let path = fields
+            .next()
+            .with_context(|| format!("git diff --raw gave no path after {meta:?}"))?;
+        let mut parts = meta.trim_start_matches(':').split_whitespace();
+        let (_, _, _, to, status) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        );
+        let to = to.with_context(|| format!("git diff --raw line {meta:?}"))?;
+        let removed = status == Some("D") || to.bytes().all(|b| b == b'0');
+        blobs.insert(
+            path.to_owned(),
+            if removed {
+                BlobState::Removed
+            } else {
+                BlobState::Blob(to.to_owned())
+            },
+        );
+    }
+    Ok(blobs)
+}
+
 pub fn output(command: &mut Command) -> Result<String> {
     let (status, stdout, stderr) = capture(command, OUTPUT_TIMEOUT)?;
     ensure!(
@@ -2584,6 +2616,51 @@ impl GitRepository {
         Ok(split_nul(&names))
     }
 
+    /// Each file the diff from `from` to `to` touches with its blob ID in
+    /// `to`, or its removal (`git diff --raw --no-renames`, full IDs; a
+    /// destination ID of zeros is a removal), never quoted.
+    pub fn landing_blobs(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<crate::domain::landing_binding::BlobSet> {
+        let raw = output(self.command().arg("-C").arg(&self.root).args([
+            "diff",
+            "--raw",
+            "-z",
+            "--no-abbrev",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            from,
+            to,
+            "--",
+        ]))?;
+        parse_raw_blobs(&raw)
+    }
+
+    /// The text of the diff from `from` to `to` (no rename, no external
+    /// diff, no text conversion, no color, full index lines dropped later
+    /// by the hash).
+    pub fn diff_text(&self, from: &str, to: &str) -> Result<Vec<u8>> {
+        let mut command = self.command();
+        command.arg("-C").arg(&self.root).args([
+            "diff",
+            "--no-color",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            from,
+            to,
+            "--",
+        ]);
+        // The bytes as Git wrote them: a file that is not UTF-8 is hashed
+        // as it is, not as a lossy text of it.
+        let (status, stdout, stderr) = capture_bytes(&mut command, REVIEW_TIMEOUT)?;
+        ensure!(status.success(), "git diff failed ({status}): {stderr}");
+        Ok(stdout)
+    }
+
     /// The paths of the files directly in `directory` of `commit`'s tree,
     /// never quoted; none when the directory is not there.
     pub fn paths_in(&self, commit: &str, directory: &str) -> Result<Vec<String>> {
@@ -3553,6 +3630,16 @@ impl Repository for GitRepository {
     }
     fn added_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
         GitRepository::added_paths(self, from, to)
+    }
+    fn landing_blobs(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<crate::domain::landing_binding::BlobSet> {
+        GitRepository::landing_blobs(self, from, to)
+    }
+    fn diff_text(&self, from: &str, to: &str) -> Result<Vec<u8>> {
+        GitRepository::diff_text(self, from, to)
     }
     fn paths_in(&self, commit: &str, directory: &str) -> Result<Vec<String>> {
         GitRepository::paths_in(self, commit, directory)
@@ -4915,6 +5002,34 @@ pub const HEADLESS_DENIED_TOOLS: [&str; 1] = ["AskUserQuestion"];
 /// headless jobs refuse them with `--disallowedTools`, a turn with its
 /// settings' `permissions.deny` ([`headless_worker_settings`]).
 pub const PRINT_MODE_DENIED_TOOLS: [&str; 2] = ["ScheduleWakeup", "CronCreate"];
+
+#[cfg(test)]
+mod landing_blobs_tests {
+    use super::*;
+    use crate::domain::audit::BlobState;
+
+    /// `git diff --raw -z --no-abbrev` names each file with its
+    /// destination blob, a removal by its zeros.
+    #[test]
+    fn a_raw_diff_gives_each_file_its_destination_blob_or_its_removal() {
+        let zeros = "0".repeat(40);
+        let (a, b) = ("1".repeat(40), "2".repeat(40));
+        let raw = format!(
+            ":100644 100644 {a} {b} M\0src/a.rs\0:000000 100644 {zeros} {b} A\0new file.rs\0:100644 000000 {a} {zeros} D\0gone.rs\0"
+        );
+        let blobs = parse_raw_blobs(&raw).unwrap();
+        assert_eq!(
+            blobs.into_iter().collect::<Vec<_>>(),
+            [
+                ("gone.rs".to_owned(), BlobState::Removed),
+                ("new file.rs".to_owned(), BlobState::Blob(b.clone())),
+                ("src/a.rs".to_owned(), BlobState::Blob(b)),
+            ]
+        );
+        assert!(parse_raw_blobs(":100644 100644 x y M").is_err());
+        assert!(parse_raw_blobs("").unwrap().is_empty());
+    }
+}
 
 #[cfg(test)]
 mod tests {

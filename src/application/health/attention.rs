@@ -260,6 +260,31 @@ pub fn attention(
             // after it would look abandoned: judge it by its status now.
             run = queue.run(run.id())?;
         }
+        // A run whose landing found what it would merge differ from the
+        // direct `integrate` that approved it waits for `integrate` again
+        // (ADR-t4840-2 decision 8), whatever ask of it is open: its error
+        // says so.
+        if run.status() == RunStatus::AwaitingIntegration && !leased {
+            let events = queue.run_events(run.id())?;
+            if matches!(
+                RunHistory::from_events(&events).pending_reapproval(),
+                Some((_, crate::domain::landing_binding::Reapproval::Integrate))
+            ) {
+                attention.push(Attention {
+                    run_id: Some(run.id().clone()),
+                    task_id: Some(run.task_id()),
+                    pid: None,
+                    ask_id: None,
+                    reason_category: None,
+                    status: run.status().as_str().into(),
+                    kind: event_kind::INTEGRATION_COMPARED.to_owned(),
+                    last_error: run.last_error().map(truncate_reason),
+                    last_error_code: Some(crate::domain::ReasonCode::LandingChanged),
+                    next: AttentionNext::ReviewAndIntegrate,
+                });
+                continue;
+            }
+        }
         // A run whose review raised a concern waits in its
         // `approve_landing` ask, which is the attention (ADR-0027).
         if run.status() == RunStatus::AwaitingIntegration
@@ -1219,6 +1244,11 @@ fn runtime_wait(
         Some((event_kind::RUN_RECOVERED, AttentionNext::Reviewing))
     } else if history.queued_review_retry().is_some() {
         Some((event_kind::REVIEW_RETRY_QUEUED, AttentionNext::Reviewing))
+    } else if matches!(
+        history.pending_reapproval(),
+        Some((_, crate::domain::landing_binding::Reapproval::Review))
+    ) {
+        Some((event_kind::INTEGRATION_COMPARED, AttentionNext::Reviewing))
     } else if judge(seen, events, Some(crate::VERSION)) == Stranded::TakeUp {
         Some((event_kind::LEASE_RELEASED, AttentionNext::QueuedToLand))
     } else {

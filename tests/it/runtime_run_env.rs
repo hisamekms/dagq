@@ -109,6 +109,8 @@ fn a_resumed_session_gets_the_run_env_too() {
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(2))
@@ -166,6 +168,8 @@ fn a_missing_run_env_program_holds_resumes_until_it_is_found() {
     let outcome = supervise(&db, &repo, &backend).unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // The resolution changed the diff the approval was bound to.
+    integrate_the_changed_diff(&db, 2, &repo);
     let detail = SqliteQueue::open(&db)
         .unwrap()
         .show(TaskId::new(2))

@@ -370,6 +370,7 @@ fn left_by_a_dead_supervisor(
         json!({"status": "awaiting_integration"}),
     );
     for (kind, payload) in std::iter::once(validated).chain(events) {
+        let payload = bound_as_judged(repo, &run, kind, payload);
         queue.record_runtime_event(run.id(), kind, payload).unwrap();
     }
     age_lease(db, &run, 31);

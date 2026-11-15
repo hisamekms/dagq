@@ -21,7 +21,7 @@ fn own_change(n: i64) -> String {
 
 /// A later review of `run` passed, its session left, and it was queued to
 /// land, as before a supervisor that stopped gave its lease back.
-fn passed_and_queued(queue: &SqliteQueue, run: &TaskRun) {
+fn passed_and_queued(queue: &SqliteQueue, repo: &Path, run: &TaskRun) {
     for (kind, payload) in [
         (
             EventKind::ReviewFinished,
@@ -30,6 +30,7 @@ fn passed_and_queued(queue: &SqliteQueue, run: &TaskRun) {
         (EventKind::ExitRequested, json!({})),
         (EventKind::LandingQueued, json!({"via": "exit"})),
     ] {
+        let payload = bound_as_judged(repo, run, kind, payload);
         queue.record_runtime_event(run.id(), kind, payload).unwrap();
     }
 }
@@ -67,7 +68,7 @@ fn a_run_left_awaiting_integration_is_taken_up_by_one_supervisor_and_lands() {
     for run in [&run, &held] {
         assert_eq!(run.status(), RunStatus::AwaitingIntegration);
         assert!(queue.run_lease(run.id()).unwrap().is_none());
-        passed_and_queued(&queue, run);
+        passed_and_queued(&queue, &repo, run);
     }
     let asks = queue.asks(Default::default()).unwrap();
     assert!(!asks.is_empty());

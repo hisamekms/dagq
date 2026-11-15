@@ -118,10 +118,11 @@ fn an_acceptance_unmet_off_the_code_paths_lands_whatever_the_runs_branch_says() 
         finished[2]["reason_paths"],
         json!([["docs/design/review.md"], [], ["docs/a.md"]])
     );
+    // The convergence is bound to the run's diff (ADR-t4840-2 decision 7).
     assert_eq!(
-        payloads(&detail, "revise_limit_judged"),
+        unbound(payloads(&detail, "revise_limit_judged")),
         [
-            &json!({"attempt": 3, "revises": 2, "revise_limit": 2, "converged": true, "code_paths": code,
+            json!({"attempt": 3, "revises": 2, "revise_limit": 2, "converged": true, "code_paths": code,
                  "code_findings": []})
         ]
     );

@@ -899,6 +899,7 @@ mod tests {
             }),
             delivered_closed: None,
             awaits_answer: None,
+            unfinished: None,
             recovery: RecoveryWatch::default(),
             live: Box::new(SessionWatch::fixing(&run, "ws", typed, sent).unwrap()),
         }
@@ -1020,6 +1021,7 @@ mod tests {
             questions_from: 1_000,
             delivered_closed: None,
             awaits_answer: Some(AskId::new(7)),
+            unrecorded: None,
         });
         use crate::domain::run_phase::Phase as Recorded;
         assert_eq!(phase.recorded(), Recorded::Waiting { in_slot: true });
