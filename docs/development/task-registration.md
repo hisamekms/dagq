@@ -61,7 +61,7 @@ related:
 
 llvm-covとcargo testの重ね方:
 
-- llvm-covをverificationに含めるtaskでは`cargo test --locked`をverificationに重ねない。着地ではllvm-covの行がunit test全件と絞ったITに置き換わり（[testの制約](testing.md)の「test binary」）、`cargo test --locked`を並べると置き換えの外でITを全部流し直すので、着地の検証を軽くした分が戻る。
+- llvm-covをverificationに含めるtaskでは`cargo test --locked`をverificationに重ねない。着地ではllvm-covの行が、unit test（[.config/landing-unit-skip.toml](../../.config/landing-unit-skip.toml)に載ったものを除く全件、[ADR-t4979-1](../adr/2026-11-15-t4979-1-landing-unit-stage-leaves-out-listed-heavy-unit-tests-and-ci-runs-them.md)）と絞ったITに置き換わり（[testの制約](testing.md)の「test binary」）、`cargo test --locked`を並べると置き換えの外でITを全部流し直すので、着地の検証を軽くした分が戻る。
 - llvm-covを含めないtask（docs・pluginの文書など）は、必要なら`cargo test --locked`をverificationに残す。
 
 ## 受け入れ条件とITの名指し方
@@ -71,7 +71,7 @@ runtimeのtaskの受け入れ条件と`--verify`の書き方。判断はunit tes
 - 受け入れ条件は判断の結果で書く: どの入力（状態・設定・時刻の値・answer）からどの出力・操作・状態の遷移になるかを並べ、「ITで〜を確かめる」のようにtestの層で書かない。効果を求める条件は、観測できる値と、それを確かめるコマンド・event・testの名前を名指す。ITを名指してよいのは、登録簿のidで確かめる境界（SQLite・Git・プロセス・復旧とadopt）だけにする。
 - 比べるtestを求める受け入れ条件は、既存の実装・固定の値・外部の仕様など、比べる基準を名指す。試す対象の新しいコード同士を比べるだけの条件にしない。
 - 新しい処理を求める受け入れ条件は、その処理がどの入口・起動処理から呼ばれるかを名指す。
-- supervisorの配線（判断の結果がevent・ask・statusに届くこと）を確かめる受け入れ条件は、プロセスの中の配線のtestの層（[testの制約](testing.md)の「判断と境界のtest」、[ADR-t3841-1](../adr/2026-11-01-t3841-1-supervisor-wiring-tests-run-in-process-on-a-memdb-queue-with-port-fakes.md)）のtestで書き、ITと登録簿の境界の種類「supervisorの配線」の新しいidを名指さない。例: acceptanceに「(2) 配線の層（`src/compose`の`#[cfg(test)]`）のtestで、ready のtaskのclaimからreceiptの`already_satisfied`までを回すと`approve_close`のaskが開きleaseが解ける」。層のtestはlibのtestとして着地のunit test全件で流れるので、`--verify`はruntimeの組み合わせのllvm-covの行のままにする。既存の配線のITを層へ移すtaskは、移すtestの中身の行き先（層のtest・unit test・残すIT）の対応づけと、外す登録簿の項目と時間の関門の許可の一覧の項目をacceptanceに書く。
+- supervisorの配線（判断の結果がevent・ask・statusに届くこと）を確かめる受け入れ条件は、プロセスの中の配線のtestの層（[testの制約](testing.md)の「判断と境界のtest」、[ADR-t3841-1](../adr/2026-11-01-t3841-1-supervisor-wiring-tests-run-in-process-on-a-memdb-queue-with-port-fakes.md)）のtestで書き、ITと登録簿の境界の種類「supervisorの配線」の新しいidを名指さない。例: acceptanceに「(2) 配線の層（`src/compose`の`#[cfg(test)]`）のtestで、ready のtaskのclaimからreceiptの`already_satisfied`までを回すと`approve_close`のaskが開きleaseが解ける」。層のtestはlibのtestとして着地の検証のunitの段で流れるので、`--verify`はruntimeの組み合わせのllvm-covの行のままにする。既存の配線のITを層へ移すtaskは、移すtestの中身の行き先（層のtest・unit test・残すIT）の対応づけと、外す登録簿の項目と時間の関門の許可の一覧の項目をacceptanceに書く。
 - 新しい機能のtaskは、判断を`src/`の副作用のない関数に切り出して`#[cfg(test)]`のunit testで確かめる形でdescriptionを書く（関数の入力と出力、判断のcaseはunit testに並べること）。supervisorやfixtureを起動して判断のcaseを並べるITを前提にしない。
 - `--verify`や受け入れ条件に新しいITを名指すときは、そのITが代表する登録簿のidを添える。既存のidなら、その代表を入れ替えることと元の代表の行き先（消す・別のidの代表にする・unit testへ移す）を書く。新しいidを足すなら、descriptionかacceptanceにそのidと境界の種類と、既存のidで代表できない理由を書く（taskの文面がidを名指すことが新しいidの承認の一部で、`reason`が境界を書いていることはtest-rulesのreviewが見る（[testの制約](testing.md)の「判断と境界のtest」）。項目は足すtaskの`.config/it-boundaries.d/t<task ID>.toml`に入る）。
 - 例（新しいidを足す）: descriptionに「判断（上限の値の読みと既定との選び方）は`src/`の副作用のない関数にしてunit testで確かめる」、acceptanceに「(3) 登録簿に新しいid `verify-command-killed-in-its-process-group`（境界の種類: プロセス。integrateの検証のコマンドの実のprocess groupを上限でkillすることで、既存のidはprocess groupのkillを代表しない）を足し、代表のtest `<module>::<name>`で確かめる」。`--verify`はruntimeの組み合わせのllvm-covの行のままにする（着地では`[landing_verification]`が差分で足したITを選ぶ）。ITを1本だけ流す`--verify`を足すなら（1本に絞るので上の重ね方の`cargo test --locked`には当たらない）「`cargo nextest run --locked --test it -E 'test(=<module>::<name>)'`（id `verify-command-killed-in-its-process-group`）」のようにidを添える。

@@ -145,11 +145,13 @@ max_age_hours = 48
 warn_before_hours = 12
 
 [landing_verification]
-# 着地の検証で、task の coverage の関門のコマンドを unit test 全件と影響範囲で絞った IT に置き換える（ADR-t1925-1、task 1927、goal 157 の段 3b）。
+# 着地の検証で、task の coverage の関門のコマンドを、.config/landing-unit-skip.toml に載ったものを除く unit test 全件と影響範囲で絞った IT に置き換える
+# （ADR-t1925-1、task 1927、goal 157 の段 3b。一覧で外すのは ADR-t4979-1 で、外した test は CI（ci.yml の macOS・Linux の job）が流し続ける）。
 # 置き換えと env の受け渡しは runtime（domain::landing_verification の doc comment）、IT の選び方・表の cache・閾値などの値は scripts/landing-it.sh と
 # scripts/landing-it.py の冒頭が持ち、値の根拠は docs/plans/landing-it-selection.md の「決めたこと」。登録済みの task の --verify は書き換えない。
 # replaces は旧と今の関門（cargo llvm-cov nextest ... と cargo llvm-cov --locked --fail-under-lines 80）に当たる。
-# command は unit test 全件（workspace の lib・bin）を先に、通ったときだけ絞った IT を、2 回の cargo nextest run で流し、既に落ちているテストを両方から外す。
+# command は unit test（workspace の lib・bin の、.config/landing-unit-skip.toml に載ったものを除く全件。外した名前と件数を段の前に出す）を先に、
+# 通ったときだけ絞った IT を、2 回の cargo nextest run で流し、既に落ちているテストを両方から外す。
 # fmt・clippy と task に固有の検査は task の --verify にあるものが登録のまま流れるので、ここに重ねない。
 # 行カバレッジの関門は CI（ci.yml）だけが見る。外すときはこの節を消せば、次の着地から登録のコマンドに戻る。
 # [landing_verification] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1926 を含んでから足した。
