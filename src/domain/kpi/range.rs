@@ -6,9 +6,12 @@
 //! forecast's scoring of the finishes in it ([`forecast_events`]) and the
 //! groups of a comparison ([`cohort`]).
 //!
-//! Not wired yet: the reads are the store's small reads (the
-//! `LedgerWindowRead` port's `mark_events` to `comparison_events`), passed
-//! in as [`RangeReads`]. What the events
+//! The reads are the store's small reads (the `LedgerWindowRead` port's
+//! `mark_events` to `comparison_events`), passed in as [`RangeReads`].
+//! `kpi` (`crate::application::kpi::kpi`) takes [`plan`] of them, which
+//! reads an event id cursor's time and a comparison's cohort, and reads the
+//! window from the range's start; the store's read from a time gives what
+//! the range's marks and forecast look back to. What the events
 //! answer is decided by the functions that answer of every event
 //! ([`marks::marks`], [`super::compare`]'s routine and groups,
 //! [`score::score`]): this module only selects which events they are

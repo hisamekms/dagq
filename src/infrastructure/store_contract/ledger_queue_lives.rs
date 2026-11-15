@@ -429,10 +429,28 @@ fn answers_with(tx: &impl SqlRead, nonempty: bool) -> Result<Vec<super::ledger_r
         default.clone(),
         KpiQuery {
             by: vec!["area".parse().map_err(anyhow::Error::msg)?],
+            ..default.clone()
+        },
+        // The window of `--since` and `--until`, read by the range planned
+        // of it as the periods are.
+        KpiQuery {
+            since: Some(crate::domain::stats::Cursor::Time(
+                (fixture::NOW - 3 * crate::domain::ledger::testkit::DAY) * 1000,
+            )),
+            until: Some(crate::domain::stats::Cursor::Time(fixture::NOW * 1000)),
             ..default
         },
     ] {
-        let (window, read) = counted_window(tx, &fixture::time_query(&query))?;
+        let (got, read) = super::ledger_range::counted_kpi(
+            tx,
+            &query,
+            crate::application::kpi::Host {
+                utc_offset_secs: 0,
+                cores: Some(4),
+                rust_toolchain: false,
+            },
+            Some(&areas),
+        )?;
         let expected = value(
             &whole,
             &KpiQuery {
@@ -440,7 +458,6 @@ fn answers_with(tx: &impl SqlRead, nonempty: bool) -> Result<Vec<super::ledger_r
                 ..query.clone()
             },
         )?;
-        let got = value(&window, &query)?;
         for metric in [
             "ask_apply_wait",
             "ask_seen_wait",
@@ -848,4 +865,212 @@ pub fn ledger_queue_lives_keeps_an_old_snapshot<S: ContractStore, F: Fn() -> Res
     clear(&tx, &laid)?;
     reset(&tx)?;
     Ok(())
+}
+
+/// The target of [`forecast_log`]'s forecast: a task opened before the
+/// range, forecast by one snapshot after it opened, completed in the range.
+const TARGET: i64 = 950;
+
+/// A history whose forecast KPIs `kpi` reads in its second stage: task
+/// [`TARGET`] opens 40 days before now, a snapshot forecasts it 100
+/// seconds later, `open_marks` marks are recorded between the snapshot and
+/// the range (in its open period), one more in the range, and it completes
+/// the day before now. Before it opened, `before_open` settled units each
+/// of a task created, forecast, completed and a mark: the history before
+/// the target opened.
+fn forecast_log(before_open: usize, open_marks: usize) -> Log {
+    let mut log = history(0, 0);
+    for event in &mut log.events {
+        if event.kind == crate::domain::EventKind::ForecastRecorded {
+            event.payload["tasks"] = json!([]);
+        }
+    }
+    let forecast = |task: i64, secs: i64| {
+        json!({"at_secs": T0 + secs, "method": 1, "goals": [],
+               "tasks": [{"id": task, "p50_secs": 3600, "p90_secs": 7200}]})
+    };
+    let completed = json!({"from": "ready", "to": "completed"});
+    for n in 0..before_open {
+        let n = i64::try_from(n).unwrap_or(0);
+        let task = 960_000 + n;
+        let at = 11 * DAY + n * 100 * DAY / i64::try_from(before_open).unwrap_or(1);
+        log.add(Some(task), None, "task_created", json!({}), at)
+            .add(
+                None,
+                None,
+                "forecast_recorded",
+                forecast(task, at + 1),
+                at + 1,
+            )
+            .add(
+                Some(task),
+                None,
+                "task_status_changed",
+                completed.clone(),
+                at + 2,
+            )
+            .add(
+                None,
+                None,
+                "mark_recorded",
+                json!({"label": format!("before{n}"), "by": "person"}),
+                at + 3,
+            );
+    }
+    let opened = (READ_AT_DAY - 40) * DAY;
+    log.add(Some(TARGET), None, "task_created", json!({}), opened)
+        .add(
+            None,
+            None,
+            "forecast_recorded",
+            forecast(TARGET, opened + 100),
+            opened + 100,
+        );
+    for n in 0..open_marks {
+        let n = i64::try_from(n).unwrap_or(0);
+        log.add(
+            None,
+            None,
+            "mark_recorded",
+            json!({"label": format!("open{n}"), "by": "person"}),
+            opened + 200 + n * 1000,
+        );
+    }
+    let near = (READ_AT_DAY - 1) * DAY;
+    log.add(
+        None,
+        None,
+        "mark_recorded",
+        json!({"label": "in range", "by": "person"}),
+        near,
+    )
+    .add(
+        Some(TARGET),
+        None,
+        "task_status_changed",
+        completed,
+        near + 50,
+    );
+    renumber(log)
+}
+
+/// The questions of the forecast's KPIs: the days to now, a window that
+/// holds the finish and the days of an `--at` past it.
+fn forecast_questions() -> Vec<crate::domain::kpi::KpiQuery> {
+    use crate::domain::kpi::{KpiQuery, Period};
+    use crate::domain::stats::Cursor;
+    let at = |day: i64| Cursor::Time((T0 + day * DAY) * 1000);
+    vec![
+        KpiQuery::default(),
+        KpiQuery {
+            since: Some(at(READ_AT_DAY - 3)),
+            until: Some(at(READ_AT_DAY)),
+            ..KpiQuery::default()
+        },
+        KpiQuery {
+            period: Period::Day,
+            last: 2,
+            at: Some(at(READ_AT_DAY - 1)),
+            ..KpiQuery::default()
+        },
+    ]
+}
+
+/// The answers of [`forecast_questions`] of `log` read by `kpi`'s entry,
+/// each against an independent read of every row, with what each returned
+/// in all (rows, earlier records, queue rows and small reads). Each answer
+/// holds the target's sample with the marks between its snapshot and its
+/// finish: `open_marks` and the one in the range.
+fn forecast_reads<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    log: &Log,
+    open_marks: usize,
+) -> Result<Vec<usize>> {
+    use crate::domain::kpi::{KpiConfig, KpiQuery};
+    let host = crate::application::kpi::Host {
+        utc_offset_secs: 0,
+        cores: Some(4),
+        rust_toolchain: false,
+    };
+    let store = open()?;
+    let tx = store.write_entry("contract_kpi_forecast")?;
+    let laid = lay_down(&tx, log)?;
+    fill(&tx)?;
+    let whole = view::window(&tx, &fixture::whole_query())?;
+    let mut totals = Vec::new();
+    for (n, query) in forecast_questions().iter().enumerate() {
+        let expected = serde_json::to_value(crate::application::kpi::of_window(
+            &whole,
+            fixture::NOW,
+            host,
+            &KpiConfig::default(),
+            None,
+            &KpiQuery {
+                read_whole_ledger: true,
+                ..query.clone()
+            },
+        )?)?;
+        let held = expected["periods"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|period| {
+                let forecast = &period["details"]["forecast"];
+                forecast["samples"].as_u64() == Some(1)
+                    && forecast["with_marks"].as_u64() == Some(1)
+                    && forecast["marks_between"]["max"].as_f64()
+                        == Some(f64::from(u32::try_from(open_marks + 1).unwrap_or(0)))
+                    && period["kpis"]["forecast.p50_error"]["all"]["n"].as_u64() == Some(1)
+            });
+        ensure!(held, "forecast[{n}]: the target's sample with its marks");
+        let (got, read) = super::ledger_range::counted_kpi(&tx, query, host, None)?;
+        ensure!(
+            read.by_range > 0,
+            "forecast[{n}] reads by its range: {read:?}"
+        );
+        let mut misses = Vec::new();
+        fixture::differences(&got, &expected, &format!("forecast[{n}]"), &mut misses);
+        ensure!(misses.is_empty(), "{query:?}: {misses:?}");
+        totals.push(read.rows + read.earlier + read.by_range + read.whole + read.small);
+    }
+    clear(&tx, &laid)?;
+    reset(&tx)?;
+    Ok(totals)
+}
+
+/// `kpi`'s forecast KPIs (`forecast.*`, `details.forecast`'s `with_marks`
+/// and `marks_between`) read by the range answer as every row. What is
+/// read does not grow with the history before the target opened (`small`
+/// and `large` units of it), and grows with the marks of the target's open
+/// period alone, the one read the range does not bound: linearly, as the
+/// marks between its snapshot and the range are 10, 20 and 40.
+pub(crate) fn ledger_queue_lives_forecast_with<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+    small: usize,
+    large: usize,
+) -> Result<()> {
+    let few = forecast_reads(open, &forecast_log(small, 10), 10)?;
+    let many = forecast_reads(open, &forecast_log(large, 10), 10)?;
+    ensure!(
+        few == many,
+        "the history before the target opened grew the reads: {few:?} of {small}, {many:?} of {large}"
+    );
+    let twice = forecast_reads(open, &forecast_log(small, 20), 20)?;
+    let four = forecast_reads(open, &forecast_log(small, 40), 40)?;
+    for n in 0..few.len() {
+        let (a, b, c) = (few[n], twice[n], four[n]);
+        ensure!(
+            b > a && c - b == 2 * (b - a),
+            "forecast[{n}]: the reads of 10, 20 and 40 marks of the open period: {a}, {b}, {c}"
+        );
+    }
+    Ok(())
+}
+
+/// [`ledger_queue_lives_forecast_with`] of 30 and 300 units before the
+/// target opened.
+pub fn ledger_queue_lives_forecast_through_kpi<S: ContractStore, F: Fn() -> Result<S>>(
+    open: &F,
+) -> Result<()> {
+    ledger_queue_lives_forecast_with(open, 30, 300)
 }

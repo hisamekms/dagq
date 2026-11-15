@@ -1728,6 +1728,9 @@ impl<T: SqlRead> crate::application::LedgerWindowRead for LedgerSnapshot<'_, T> 
     ) -> Result<crate::application::WindowRead<crate::application::CursorRecordTime>> {
         small::cursor_time_through(self.tx, cursor, end_ms)
     }
+    fn goal_events(&self) -> Result<crate::application::WindowRead<Vec<RunEvent>>> {
+        small::goal_events(self.tx)
+    }
     fn forecast_events(
         &self,
         start_ms: i64,

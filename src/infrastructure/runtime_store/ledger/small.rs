@@ -668,6 +668,19 @@ pub(super) fn cursor_time_through(
 ) -> Result<WindowRead<CursorRecordTime>> {
     read(tx, |r| r.cursor_through(cursor, end_ms))
 }
+pub(super) fn goal_events(tx: &impl SqlRead) -> Result<WindowRead<Vec<RunEvent>>> {
+    read(tx, |r| {
+        let mut events = Vec::new();
+        for kind in crate::domain::ledger::attributes::GOAL_KINDS {
+            events.extend(r.all(
+                "events_by_kind",
+                &format!("kind = '{}'", kind.as_str()),
+                sql_params![],
+            )?);
+        }
+        Ok(dedup(events))
+    })
+}
 pub(super) fn forecast_events(
     tx: &impl SqlRead,
     start: i64,

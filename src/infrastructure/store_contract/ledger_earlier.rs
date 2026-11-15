@@ -760,6 +760,23 @@ pub(crate) fn kpi_value(window: &LedgerWindow, query: &KpiQuery) -> Result<Value
     )?)?)
 }
 
+/// The answer of `query` read of `tx` by `kpi`'s entry
+/// ([`crate::application::kpi::kpi`]: the range it plans of the query and
+/// the window of that range, in one snapshot of `tx`).
+pub(crate) fn kpi_read(tx: &impl SqlRead, query: &KpiQuery) -> Result<Value> {
+    let open = |read: &mut dyn FnMut(&dyn crate::application::LedgerWindowRead) -> Result<()>| {
+        view::with_snapshot(tx, |snapshot| read(snapshot))
+    };
+    Ok(serde_json::to_value(crate::application::kpi::kpi(
+        &super::OfSnapshot { open: &open },
+        NOW,
+        HOST,
+        &KpiConfig::default(),
+        None,
+        query,
+    )?)?)
+}
+
 /// The paths of `a` and `b` whose values differ, at most a few.
 pub(crate) fn differences(a: &Value, b: &Value, path: &str, out: &mut Vec<String>) {
     if out.len() >= 16 {
@@ -800,8 +817,11 @@ pub(crate) fn answers_as_every_row(tx: &impl SqlRead) -> Result<view::Sought> {
                 ..query.clone()
             },
         )?;
-        let window = view::window(tx, &time_query(query))?;
-        let got = kpi_value(&window, query)?;
+        ensure!(
+            time_query(query).read_from_ms.is_some(),
+            "kpi[{n}] by its range"
+        );
+        let got = kpi_read(tx, query)?;
         let mut misses = Vec::new();
         differences(&got, &expected, &format!("kpi[{n}]"), &mut misses);
         ensure!(misses.is_empty(), "{misses:?}");

@@ -1340,6 +1340,114 @@ pub fn record_time(read: WindowRead<CursorRecordTime>) -> Option<Option<i64>> {
     }
 }
 
+/// One snapshot of the ledger a reader works out the query of its window
+/// of before it reads the window ([`ledger_window_planned`]): the small
+/// reads of the snapshot ([`Self::snapshot`]), the time an event id
+/// cursor's bound answers of it ([`Self::cursor_time`]) and the windows
+/// read of it ([`Self::window`]), all of the same state of the rows.
+pub struct PlannedRead<'a> {
+    snapshot: &'a dyn LedgerWindowRead,
+    edges: &'a OmittedEdges<'a, anyhow::Error>,
+    reads: &'a OmittedReads<'a>,
+    expected: usize,
+}
+
+impl PlannedRead<'_> {
+    /// The snapshot's reads.
+    pub fn snapshot(&self) -> &dyn LedgerWindowRead {
+        self.snapshot
+    }
+
+    /// The time [`crate::domain::ledger::window::bounds::Bound::TimeThrough`]
+    /// of `cursor` answers in a window of every row that ends at `end_ms`
+    /// (now): the latest time of the visible records at or before the id
+    /// ([`LedgerWindowRead::cursor_record_time`]) with that of the omitted
+    /// queue events through it, the latter, past `end_ms`, the latest of
+    /// those at or before `end_ms`, as the bound's answer takes them.
+    /// [`WindowRead::Complete`] of none when no event is at or before the
+    /// id. A record's time past `end_ms` (a clock ahead of now) is no
+    /// record of such a window: the records' time is then the latest at or
+    /// before `end_ms` ([`LedgerWindowRead::cursor_record_time_through`],
+    /// of the same snapshot), and the caller reads every row only when that
+    /// walk ran out or the store has no such read.
+    pub fn cursor_time(&self, cursor: EventId, end_ms: i64) -> Result<WindowRead<Option<i64>>> {
+        let mut records = match self.snapshot.cursor_record_time(cursor)? {
+            WindowRead::Complete(time) => (time.millis != i64::MIN).then_some(time.millis),
+            WindowRead::Unavailable => return Ok(WindowRead::Unavailable),
+            WindowRead::Exhausted => return Ok(WindowRead::Exhausted),
+            WindowRead::OffTimeForm => return Ok(WindowRead::OffTimeForm),
+        };
+        if records.is_some_and(|ms| ms > end_ms) {
+            records = match self.snapshot.cursor_record_time_through(cursor, end_ms)? {
+                WindowRead::Complete(time) => (time.millis != i64::MIN).then_some(time.millis),
+                WindowRead::Unavailable | WindowRead::OffTimeForm => {
+                    return Ok(WindowRead::OffTimeForm);
+                }
+                WindowRead::Exhausted => return Ok(WindowRead::Exhausted),
+            };
+        }
+        let omitted = match self.edges.max_ms_through(cursor)? {
+            Some(ms) if ms > end_ms => self.edges.at_or_before_through(end_ms, cursor)?.1,
+            ms => ms,
+        };
+        Ok(WindowRead::Complete(records.max(omitted)))
+    }
+
+    /// The window `query` asks of the snapshot, read as
+    /// [`LedgerStore::ledger_window`] reads it, its bounds answered.
+    pub fn window(&self, query: &WindowQuery) -> Result<LedgerWindow> {
+        use crate::domain::ledger::window::WindowRows;
+        let expected = match query.read_from_ms {
+            None => self.expected,
+            Some(_) => 0,
+        };
+        let edges = Edges(Some(self.reads));
+        let read = window_rows(
+            self.snapshot,
+            query,
+            WindowRows::new(query, expected),
+            &edges,
+        )?;
+        let mut window = read.into_window(query);
+        crate::domain::ledger::window::bounds::answer(&mut window, query, &edges.now()?)?;
+        Ok(window)
+    }
+}
+
+/// `read` of one snapshot of `store` ([`LedgerStore::ledger_read_snapshot`]),
+/// through which it works out the queries of the windows it reads and
+/// reads them ([`PlannedRead`]). A service client may call `read` twice;
+/// its result is the last call's.
+pub fn ledger_window_planned<S: LedgerStore + ?Sized, T>(
+    store: &S,
+    mut read: impl FnMut(&PlannedRead<'_>) -> Result<T>,
+) -> Result<T> {
+    let expected = store.ledger_events_expected()?;
+    let mut taken = None;
+    store.ledger_read_snapshot(&mut |snapshot| {
+        taken = Some(planned_in(snapshot, expected, &mut read)?);
+        Ok(())
+    })?;
+    taken.ok_or_else(|| anyhow::anyhow!("the ledger's snapshot read nothing"))
+}
+
+/// `read` of `snapshot`, as [`ledger_window_planned`] reads it (`expected`
+/// the room for every event a read of every row makes).
+pub(crate) fn planned_in<T>(
+    snapshot: &dyn LedgerWindowRead,
+    expected: usize,
+    read: &mut impl FnMut(&PlannedRead<'_>) -> Result<T>,
+) -> Result<T> {
+    let reads = OmittedReads(snapshot);
+    let edges = OmittedEdges::of(&reads)?;
+    read(&PlannedRead {
+        snapshot,
+        edges: &edges,
+        reads: &reads,
+        expected,
+    })
+}
+
 /// The window `query` asks of `store` read as [`LedgerStore::ledger_window`]
 /// reads it, with the payloads of its records held as their text and not
 /// decoded: the prototype
@@ -1702,6 +1810,16 @@ pub trait LedgerWindowRead {
     /// No ledger row's records are read except visibility's certificates.
     /// This intentionally scales with all claims/marks, not a time window.
     fn comparison_events(&self) -> Result<WindowRead<Vec<RunEvent>>> {
+        Ok(WindowRead::Unavailable)
+    }
+
+    /// Visible events of `attributes::GOAL_KINDS` (a task's creation, the
+    /// baselines with their marks, its goal's changes) throughout history,
+    /// which put each task whose run finished in its goal for a `--compare
+    /// --goal` cohort. No ledger row's records are read except visibility's
+    /// certificates; like [`Self::comparison_events`] this scales with all
+    /// tasks, not a time window.
+    fn goal_events(&self) -> Result<WindowRead<Vec<RunEvent>>> {
         Ok(WindowRead::Unavailable)
     }
 

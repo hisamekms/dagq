@@ -168,6 +168,18 @@ fn landed(n: u8, secs: i64) -> Vec<RunEvent> {
     log.events
 }
 
+/// The place in `events` (by id) of the first event of a time after
+/// `secs`: where an event of that time falls among them. A linear search,
+/// as the clocks' cases leave `events` out of time order, so that the place
+/// is the same whatever the settled units before them.
+fn after(events: &[RunEvent], secs: i64) -> usize {
+    let at = utc_text(ms(secs));
+    events
+        .iter()
+        .position(|e| e.created_at > at)
+        .unwrap_or(events.len())
+}
+
 /// The histories of a clock turned back or drifting, each put among the
 /// events of `history` where its ids fall (Spike 4670's (vi) and 4754's
 /// (iii-d)):
@@ -182,8 +194,13 @@ fn landed(n: u8, secs: i64) -> Vec<RunEvent> {
 /// - Task 78's run, on its way, claimed after E with no Execution on its
 ///   task's row, and a worker's turn on codex with its `tokens_source`.
 fn clock_cases(events: &mut Vec<RunEvent>) {
-    let at = events.partition_point(|e| e.created_at <= utc_text(ms(E - 200)));
+    let at = after(events, E - 200);
     let mut ahead = landed(76, E + 3000);
+    for e in &mut ahead {
+        if e.kind.as_str() == "run_claimed" {
+            e.payload["dagq_version"] = json!("2.1");
+        }
+    }
     ahead.push(event(
         None,
         None,
@@ -196,7 +213,7 @@ fn clock_cases(events: &mut Vec<RunEvent>) {
     // clock right again, before the last alert ended before S.
     let mut skewed = alert();
     skewed["kind"] = json!("skewed");
-    let at = events.partition_point(|e| e.created_at <= utc_text(ms(S - 600)));
+    let at = after(events, S - 600);
     events.splice(
         at..at,
         [
@@ -204,7 +221,54 @@ fn clock_cases(events: &mut Vec<RunEvent>) {
             event(None, None, "live_alert_ended", skewed, S - 500),
         ],
     );
+    // Two supervisors' starts before S whose order by id is not that by
+    // time: the later in time has the earlier id. Routine compares the
+    // range's first start with the last before S by time.
+    let start = |supervisor: &str, version: &str, secs: i64| {
+        event(
+            None,
+            None,
+            "supervisor_started",
+            json!({"supervisor": supervisor, "parallel": 2, "dagq_version": version}),
+            secs,
+        )
+    };
+    let at = after(events, S - 5000);
+    events.insert(at, start("s5", "2.0", S - 1000));
+    let at = after(events, S - 500);
+    events.insert(at, start("s6", "1.9", S - 2000));
     events.extend(landed(77, S + 500));
+    // A claim and a recorded mark of a clock turned back: each put among
+    // the events where its ids fall, after events of later times. Run 79's
+    // claim, of a new version (a derived mark against the claim before it),
+    // bears a time 1900 seconds before its place; the mark 1500 seconds.
+    let mut back = landed(79, S + 2000);
+    for e in &mut back {
+        if e.kind.as_str() == "run_claimed" {
+            e.payload["dagq_version"] = json!("2.2");
+        }
+    }
+    let at = after(events, S + 2000);
+    let tail = events.split_off(at);
+    for mut e in back {
+        if e.kind.as_str() == "run_claimed" {
+            e.created_at = utc_text(ms(S + 100));
+        }
+        events.push(e);
+    }
+    let mut tail = tail;
+    let at = after(&tail, S + 3000);
+    tail.insert(
+        at,
+        event(
+            None,
+            None,
+            "mark_recorded",
+            json!({"label": "turned back", "by": "person", "at": utc_text(ms(S + 1500))}),
+            S + 1500,
+        ),
+    );
+    events.extend(tail);
     let r = run(78);
     let mut on_its_way = Log::default();
     on_its_way
@@ -227,6 +291,11 @@ fn clock_cases(events: &mut Vec<RunEvent>) {
         }
     }
     events.extend(on_its_way.events);
+    // A supervisor started at S + 900, in its time's place among the ids.
+    // One written last (the latest id) with a time before the range is a
+    // case of the store's read from a time, not of the range kpi plans.
+    let at = after(events, S + 900);
+    events.insert(at, start("s7", "2.1", S + 900));
 }
 
 /// `events` numbered by their place, each `opened_event_id` following its
@@ -435,6 +504,13 @@ impl LedgerWindowRead for Counted<'_> {
         }
         Ok(read)
     }
+    fn goal_events(&self) -> Result<WindowRead<Vec<RunEvent>>> {
+        let read = self.snapshot.goal_events()?;
+        if let WindowRead::Complete(events) = &read {
+            self.small.set(self.small.get() + events.len());
+        }
+        Ok(read)
+    }
     fn rows_after(
         &self,
         kind: LedgerKind,
@@ -594,6 +670,36 @@ pub(crate) fn counted_window(
     })
 }
 
+/// The KPIs of `query` read of `tx` by `kpi`'s entry
+/// ([`crate::application::kpi::kpi`]: the range it plans of the query and
+/// the window of that range, in one snapshot), on a store whose snapshot
+/// counts what it returns ([`super::OfSnapshot`]), with what was returned.
+pub(crate) fn counted_kpi(
+    tx: &impl SqlRead,
+    query: &crate::domain::kpi::KpiQuery,
+    host: crate::application::kpi::Host,
+    areas: Option<&crate::domain::areas::AreaMap>,
+) -> Result<(Value, Returned)> {
+    let returned = Cell::new(Returned::default());
+    let open = |read: &mut dyn FnMut(&dyn LedgerWindowRead) -> Result<()>| {
+        view::with_snapshot(tx, |snapshot| {
+            let counted = Counted::new(snapshot);
+            let result = read(&counted);
+            returned.set(counted.returned());
+            result
+        })
+    };
+    let kpi = crate::application::kpi::kpi(
+        &super::OfSnapshot { open: &open },
+        NOW,
+        host,
+        &crate::domain::kpi::KpiConfig::default(),
+        areas,
+        query,
+    )?;
+    Ok((serde_json::to_value(kpi)?, returned.get()))
+}
+
 /// The answers a window gives `stats` of `query`: its JSON and the tokens
 /// of the Executions ([`LedgerWindow::execution_tokens`]).
 pub(super) fn answers(window: &LedgerWindow, query: &StatsQuery) -> Result<(Value, Value)> {
@@ -651,6 +757,115 @@ pub(crate) fn stats_as_every_row(tx: &impl SqlRead) -> Result<Vec<Returned>> {
     Ok(returned)
 }
 
+/// Whether `kpi` read as it reads ([`counted_kpi`]) answers as every row
+/// on `tx`'s history of the clocks' cases, with what each question
+/// returned: `--at` and `--since` / `--until` of the times and of the event
+/// ids of the range's ends, of the end of run 76 (recorded wholly after E
+/// in time, its ids before an event of a time before E), of run 77's
+/// landing (the latest ids and times, as a clock turned back just before
+/// the read, with its claim of a clock turned back), the starts whose
+/// order by id and by time differ before S, a recorded mark of a clock
+/// turned back, and `--at` a time past now (a CLI's clock ahead of the DB's).
+pub(crate) fn kpi_as_every_row(tx: &impl SqlRead) -> Result<Vec<(Returned, Value)>> {
+    use crate::domain::kpi::{KpiQuery, Period};
+    const HOST: crate::application::kpi::Host = crate::application::kpi::Host {
+        utc_offset_secs: 0,
+        cores: Some(4),
+        rust_toolchain: false,
+    };
+    let whole = view::window(tx, &super::ledger_earlier::whole_query())?;
+    let events = whole.events();
+    let time = |secs: i64| Cursor::Time(ms(secs));
+    // The first event by id of a time at or after `secs`: the clocks'
+    // cases put events of earlier times after it.
+    let id = |secs: i64| {
+        events
+            .iter()
+            .find(|e| {
+                crate::domain::stats::timestamp_millis(&e.created_at)
+                    .is_some_and(|at| at >= ms(secs))
+            })
+            .map_or(Cursor::Event(EventId::new(0)), |e| Cursor::Event(e.id))
+    };
+    let end_of = |n: u8| -> Result<Cursor> {
+        let run = run(n);
+        events
+            .iter()
+            .filter(|e| e.kind.as_str() == "run_integrated")
+            .find(|e| e.run_id.as_ref().is_some_and(|r| r.as_str() == run))
+            .map(|e| Cursor::Event(e.id))
+            .ok_or_else(|| anyhow::anyhow!("run {n}'s landing"))
+    };
+    let day_two = KpiQuery {
+        period: Period::Day,
+        last: 2,
+        ..KpiQuery::default()
+    };
+    let questions = [
+        KpiQuery {
+            since: Some(time(S)),
+            until: Some(time(E)),
+            ..KpiQuery::default()
+        },
+        KpiQuery {
+            since: Some(id(S)),
+            until: Some(id(E)),
+            ..KpiQuery::default()
+        },
+        KpiQuery {
+            since: Some(time(S)),
+            until: Some(end_of(76)?),
+            ..KpiQuery::default()
+        },
+        KpiQuery {
+            at: Some(end_of(76)?),
+            ..day_two.clone()
+        },
+        KpiQuery {
+            at: Some(end_of(77)?),
+            ..day_two.clone()
+        },
+        KpiQuery {
+            since: Some(end_of(76)?),
+            ..KpiQuery::default()
+        },
+        KpiQuery {
+            period: Period::Week,
+            last: 1,
+            at: Some(id(E)),
+            ..KpiQuery::default()
+        },
+        KpiQuery {
+            at: Some(time(READ_AT_DAY * DAY + 3 * DAY)),
+            ..day_two
+        },
+    ];
+    let mut returned = Vec::new();
+    for (n, query) in questions.iter().enumerate() {
+        let expected = serde_json::to_value(
+            crate::application::kpi::of_window(
+                &whole,
+                NOW,
+                HOST,
+                &crate::domain::kpi::KpiConfig::default(),
+                None,
+                &crate::domain::kpi::KpiQuery {
+                    read_whole_ledger: true,
+                    ..query.clone()
+                },
+            )
+            .map_err(|error| anyhow::anyhow!("kpi[{n}] {query:?}: {error}"))?,
+        )?;
+        let (got, read) = counted_kpi(tx, query, HOST, None)?;
+        ensure!(read.by_range > 0, "kpi[{n}] reads by its range: {read:?}");
+        let mut misses = Vec::new();
+        differences(&got, &expected, &format!("kpi[{n}]"), &mut misses);
+        ensure!(misses.is_empty(), "{query:?}: {misses:?}");
+        returned.push((read, got));
+    }
+    Ok(returned)
+}
+
 /// The range read of `stats` and of `kpi`'s periods answers as every row on
 /// a history with the clocks' cases, a run on its way and the queue's
 /// cases, and the questions read by their range read the run on its way,
@@ -674,11 +889,19 @@ pub(crate) fn ledger_range_with<S: ContractStore, F: Fn() -> Result<S>>(
     large: usize,
 ) -> Result<()> {
     let mut reads = Vec::new();
+    let mut kpi_answers = Vec::new();
     for settled in [small, large] {
         let store = open()?;
         let tx = store.write_entry("contract_ledger_range")?;
         let laid = lay_down(&tx, &range_history(settled))?;
-        let returned = stats_as_every_row(&tx)?;
+        let mut returned = stats_as_every_row(&tx)?;
+        let kpi = kpi_as_every_row(&tx)?;
+        returned.extend(kpi.iter().map(|(read, _)| *read));
+        kpi_answers.push(
+            kpi.into_iter()
+                .map(|(_, answer)| answer)
+                .collect::<Vec<_>>(),
+        );
         // `kpi`'s periods, read from their time through the same read, answer
         // as every row on this history too.
         super::ledger_earlier::answers_as_every_row(&tx)?;
@@ -731,13 +954,21 @@ pub(crate) fn ledger_range_with<S: ContractStore, F: Fn() -> Result<S>>(
         .iter()
         .zip(large_reads)
         .enumerate()
-        .take(before_the_units)
+        .filter(|(n, _)| *n != before_the_units)
     {
         ensure!(
             (a.rows, a.earlier, a.by_range) == (b.rows, b.earlier, b.by_range),
-            "stats[{n}] returns {a:?} of {small} units and {b:?} of {large}"
+            "[{n}] returns {a:?} of {small} units and {b:?} of {large}"
+        );
+        // `kpi`'s, after `stats`', with the events of its small reads too.
+        ensure!(
+            n < stats_questions().len() || a.small == b.small,
+            "kpi[{n}] reads {a:?} of {small} units and {b:?} of {large}"
         );
     }
+    // The settled units are before every range: `kpi` answers each question
+    // of the large history as of the small one, as well as as every row.
+    super::same_answers(&kpi_answers[0], &kpi_answers[1], small, large)?;
     // The kinds read by their range are read so, a few rows each.
     ensure!(
         small_reads.iter().all(|read| read.by_range > 0),

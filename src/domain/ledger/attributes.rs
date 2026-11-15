@@ -87,6 +87,32 @@ pub fn reconcile_due(since_last: Option<std::time::Duration>) -> bool {
     since_last.is_none_or(|since| since.as_secs() >= RECONCILE_INTERVAL_SECS)
 }
 
+/// The kinds of the events [`fold`] puts a task in a goal by: its creation
+/// record, the baselines (with the queue's marks that close them) and the
+/// changes of its goal. [`task_goals_of`] of these alone is every task's
+/// goal, as the fold of every kind gives it.
+pub const GOAL_KINDS: [EventKind; 3] = [
+    EventKind::TaskCreated,
+    EventKind::AttributesBaseline,
+    EventKind::TaskGoalChanged,
+];
+
+/// The goal of every task [`fold_within`] of `events` (ascending id) knows
+/// at the time `end_ms` (none for every event), with no bound of an id: of
+/// the events of [`GOAL_KINDS`], those of a window of every event to that
+/// time, a baseline's records taken with its group's mark whatever their
+/// own times; none before the first baseline's mark.
+pub fn task_goals_of(events: &[RunEvent], end_ms: Option<i64>) -> HashMap<TaskId, Option<GoalId>> {
+    let end = super::WindowEnd {
+        upto: None,
+        ms: end_ms,
+    };
+    match fold_within(events, end) {
+        Folded::Attributes(known) => known.task_goals(),
+        Folded::BeforeBaseline => HashMap::new(),
+    }
+}
+
 /// The kinds [`fold`] reads: a reader may give it only these.
 pub const KINDS: &[EventKind] = &[
     EventKind::AttributesBaseline,

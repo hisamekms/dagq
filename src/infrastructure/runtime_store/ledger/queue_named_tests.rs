@@ -234,3 +234,15 @@ fn the_report_s_reads_return_as_many_with_300_settled_units() {
     )
     .unwrap();
 }
+
+/// `kpi`'s entry on a SQLite store answers as every row, read by the range
+/// it plans (the store contract's case of the entry).
+#[test]
+fn the_kpi_entry_reads_by_its_range_and_answers_as_every_row() {
+    let uri = format!("file:/kpi-entry-{}?vfs=memdb", uuid::Uuid::new_v4());
+    let _keeper = SqliteQueue::init(&uri).unwrap();
+    crate::infrastructure::store_contract::ledger_queue_named::kpi_entry_answers_as_every_row(
+        &|| SqliteQueue::open(&uri),
+    )
+    .unwrap();
+}

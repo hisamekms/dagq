@@ -260,6 +260,86 @@ fn own_priorities_and_goal_priorities_resolve_as_the_store_does() {
     );
 }
 
+/// Every task's goal of the events of [`GOAL_KINDS`] alone is that of the
+/// fold of every event: of an older binary's creation, a baseline and its
+/// mark, a goal set and unset after them, and the other kinds between.
+#[test]
+fn the_goals_kinds_alone_give_every_tasks_goal() {
+    let mut log = Log::default();
+    log.task(10, event_kind::TASK_CREATED, json!({"goal_id": 1}))
+        .task(10, event_kind::TASK_STATUS_CHANGED, json!({"to": "ready"}))
+        .goal(
+            1,
+            event_kind::GOAL_CREATED,
+            json!({"goal": goal_json("g", "open", "high")}),
+        )
+        .task(
+            10,
+            event_kind::ATTRIBUTES_BASELINE,
+            json!({"status": "ready", "goal_id": null, "title": "old"}),
+        );
+    log.push(
+        None,
+        None,
+        event_kind::ATTRIBUTES_BASELINE,
+        json!({"tasks": 1}),
+    );
+    log.task(11, event_kind::TASK_CREATED, created("second", Some(2)))
+        .task(12, event_kind::TASK_CREATED, created("third", None))
+        .task(
+            10,
+            event_kind::TASK_GOAL_CHANGED,
+            json!({"from": null, "to": 1}),
+        )
+        .task(
+            11,
+            event_kind::TASK_EDITED,
+            json!({"from": {}, "to": {"title": "renamed"}}),
+        )
+        .task(
+            11,
+            event_kind::TASK_GOAL_CHANGED,
+            json!({"from": 2, "to": null}),
+        )
+        .task(
+            12,
+            event_kind::TASK_GOAL_CHANGED,
+            json!({"from": null, "to": 1}),
+        )
+        .task(12, event_kind::TASK_STATUS_CHANGED, json!({"to": "ready"}));
+    let every = log.folded().task_goals();
+    let goals: Vec<RunEvent> = log
+        .events
+        .iter()
+        .filter(|e| e.kind.is_in(&GOAL_KINDS))
+        .cloned()
+        .collect();
+    assert!(goals.len() < log.events.len());
+    assert_eq!(task_goals_of(&goals, None), every);
+    // At every time, a baseline's record before it and its mark after it
+    // included: what a window of every event to that time folds.
+    for event in &log.events {
+        let ms = crate::domain::stats::timestamp_millis(&event.created_at).unwrap();
+        let end = crate::domain::ledger::WindowEnd {
+            upto: None,
+            ms: Some(ms),
+        };
+        let every = match super::fold_within(&log.events, end) {
+            Folded::Attributes(known) => known.task_goals(),
+            Folded::BeforeBaseline => HashMap::new(),
+        };
+        assert_eq!(task_goals_of(&goals, Some(ms)), every, "at {ms}");
+    }
+    assert_eq!(
+        every,
+        HashMap::from([
+            (TaskId::new(10), Some(GoalId::new(1))),
+            (TaskId::new(11), None),
+            (TaskId::new(12), Some(GoalId::new(1))),
+        ])
+    );
+}
+
 #[test]
 fn a_task_without_its_attributes_is_known_from_its_baseline_and_earlier_windows_are_before_it() {
     let mut log = Log::default();

@@ -251,3 +251,19 @@ fn the_last_supervisor_seek_includes_the_largest_event_id() {
     .unwrap();
     assert_eq!(id, i64::MAX);
 }
+
+/// `kpi`'s forecast KPIs read by the range through its entry answer as
+/// every row: the reads do not grow with 30 or 300 units before the
+/// target opened, and grow linearly with the marks of its open period
+/// (the store contract's case).
+#[test]
+fn the_forecast_reads_grow_with_the_open_period_alone() {
+    let uri = format!("file:/kpi-forecast-{}?vfs=memdb", uuid::Uuid::new_v4());
+    let _keeper = SqliteQueue::init(&uri).unwrap();
+    crate::infrastructure::store_contract::ledger_queue_lives::ledger_queue_lives_forecast_with(
+        &|| SqliteQueue::open(&uri),
+        30,
+        300,
+    )
+    .unwrap();
+}

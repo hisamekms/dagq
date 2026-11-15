@@ -278,6 +278,14 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
             "ledger report past a target's ends",
             ledger_report_past_a_target_s_ends::<S, F>,
         ),
+        (
+            "kpi compare groups",
+            ledger_queue_named::kpi_compare_groups_read_by_their_range::<S, F>,
+        ),
+        (
+            "kpi forecast through the entry",
+            ledger_queue_lives_forecast_through_kpi::<S, F>,
+        ),
         ("shared spellings", shared_spellings::<S, F>),
         ("large ids", large_ids::<S, F>),
         ("source search writes", source_search_writes::<S, F>),
@@ -286,6 +294,147 @@ pub fn run<S: ContractStore, F: Fn() -> Result<S>>(open: &F) -> Result<()> {
         ("short non-ASCII", short_non_ascii::<S, F>),
     ];
     sequence(cases, |case| case(open))
+}
+
+/// What [`OfSnapshot`] opens: `read` of one snapshot of a contract's
+/// transaction, as a store's [`crate::application::LedgerStore::ledger_read_snapshot`]
+/// gives it.
+pub(crate) type OpenSnapshot<'a> = dyn Fn(&mut dyn FnMut(&dyn crate::application::LedgerWindowRead) -> Result<()>) -> Result<()>
+    + 'a;
+
+/// A ledger store whose one read is a snapshot of a contract's transaction
+/// (`open`, through a counting read when the contract counts what is
+/// returned): what `kpi`'s entry ([`crate::application::kpi::kpi`]) is
+/// called on, so that the contract drives the entry's own read
+/// ([`crate::application::ledger_window_planned`] and
+/// `ledger_read_snapshot`). It writes nothing and reads nothing apart from
+/// its snapshot.
+pub(crate) struct OfSnapshot<'a> {
+    pub(crate) open: &'a OpenSnapshot<'a>,
+}
+
+impl crate::application::LedgerStore for OfSnapshot<'_> {
+    fn ledger_read_snapshot(
+        &self,
+        read: &mut dyn FnMut(&dyn crate::application::LedgerWindowRead) -> Result<()>,
+    ) -> Result<()> {
+        (self.open)(read)
+    }
+    fn write_ledger_row(&self, _: &crate::domain::ledger::LedgerRow) -> Result<bool> {
+        anyhow::bail!("a snapshot writes nothing")
+    }
+    fn write_ledger_row_over(
+        &self,
+        _: &crate::domain::ledger::LedgerRow,
+        _: Option<&crate::domain::ledger::LedgerRow>,
+    ) -> Result<Option<bool>> {
+        anyhow::bail!("a snapshot writes nothing")
+    }
+    fn write_session_rows_over(
+        &self,
+        _: &[(
+            crate::domain::ledger::LedgerRow,
+            Option<crate::domain::ledger::LedgerRow>,
+        )],
+        _: Option<&crate::domain::ledger::session::written::SessionsWritten>,
+    ) -> Result<bool> {
+        anyhow::bail!("a snapshot writes nothing")
+    }
+    fn sessions_written(
+        &self,
+    ) -> Result<Option<crate::domain::ledger::session::written::SessionsWritten>> {
+        anyhow::bail!("read only through its snapshot")
+    }
+    fn ledger_row(
+        &self,
+        _: crate::domain::ledger::LedgerKind,
+        _: &str,
+    ) -> Result<Option<crate::domain::ledger::LedgerRow>> {
+        anyhow::bail!("read only through its snapshot")
+    }
+    fn ledger_rows(
+        &self,
+        _: crate::domain::ledger::LedgerKind,
+    ) -> Result<Vec<crate::domain::ledger::LedgerRow>> {
+        anyhow::bail!("read only through its snapshot")
+    }
+    fn ledger_legacy_runs_without_row(&self) -> Result<Vec<crate::domain::RunId>> {
+        anyhow::bail!("read only through its snapshot")
+    }
+    fn ledger_runs_claimed(&self, _: crate::domain::TaskId) -> Result<Vec<crate::domain::RunId>> {
+        anyhow::bail!("read only through its snapshot")
+    }
+    fn ledger_runs_past_their_rows(
+        &self,
+        _: crate::domain::EventId,
+    ) -> Result<Vec<crate::domain::RunId>> {
+        anyhow::bail!("read only through its snapshot")
+    }
+    fn remove_node_rows(&self, _: i64) -> Result<usize> {
+        anyhow::bail!("a snapshot writes nothing")
+    }
+    fn remove_omitted_queue_rows(&self) -> Result<usize> {
+        anyhow::bail!("a snapshot writes nothing")
+    }
+    fn ledger_run_events(&self, _: &crate::domain::RunId) -> Result<Vec<crate::domain::RunEvent>> {
+        anyhow::bail!("read only through its snapshot")
+    }
+    fn last_event_naming_supervisor(
+        &self,
+        _: &str,
+        _: crate::domain::EventId,
+    ) -> Result<Option<crate::domain::RunEvent>> {
+        anyhow::bail!("read only through its snapshot")
+    }
+}
+
+/// Whether the answers of a history of `small` settled units before every
+/// range are, question by question, those of `large` units, but for the
+/// event ids the units shift ([`without_event_ids`]): the units change
+/// neither what a question reads ([`ledger_queue_named::Returned`]) nor
+/// what it answers.
+pub(crate) fn same_answers(
+    small: &[serde_json::Value],
+    large: &[serde_json::Value],
+    small_units: usize,
+    large_units: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        small.len() == large.len(),
+        "{} of {}",
+        small.len(),
+        large.len()
+    );
+    for (n, (a, b)) in small.iter().zip(large).enumerate() {
+        let mut misses = Vec::new();
+        ledger_earlier::differences(
+            &without_event_ids(a),
+            &without_event_ids(b),
+            &format!("[{n}] of {small_units} and {large_units} units"),
+            &mut misses,
+        );
+        anyhow::ensure!(misses.is_empty(), "{misses:?}");
+    }
+    Ok(())
+}
+
+/// `value` without the event ids an answer names (a mark's `id`, its
+/// claim's `claim_event` and any `*event_id`), which the settled units
+/// before them shift.
+fn without_event_ids(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, _)| {
+                    !matches!(key.as_str(), "id" | "claim_event") && !key.ends_with("event_id")
+                })
+                .map(|(key, value)| (key.clone(), without_event_ids(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_event_ids).collect()),
+        other => other.clone(),
+    }
 }
 
 #[cfg(test)]
