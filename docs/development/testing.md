@@ -1,7 +1,7 @@
 ---
 id: development-testing
 type: development
-title: このrepositoryのtestの制約（coverageと着地の検証・test binary・置き場所・書き方・macOSに固有のtest・CI・判断と境界のtest・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
+title: このrepositoryのtestの制約（coverageと着地の検証・test binary・置き場所・書き方・macOSに固有のtest・CI・判断と境界のtest・unitの段の時間の予算と量の層・ファイルの行数・待ちの上限・e2eとその印・手動スモーク）
 status: current
 created: 2026-10-03
 owners:
@@ -17,6 +17,7 @@ related:
   - adr-t3762-1
   - adr-t3841-1
   - adr-t2895-1
+  - adr-t5020-1
   - development-local-checks
   - development-task-registration
   - development-migrations
@@ -101,7 +102,7 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
   - 規則: 外部プロセス・実Git・SQLiteのファイルを使わない。testの行にsleepと実時間の時計を置かない。productionの実時間の待ちは上限つきの1つの期限（`tests/it`の`common::within`に当たるもの。下の「待ちの上限」）で包み、過ぎればtestの名前と待っていた条件を出して落ちる。起こしたthread（sessionのwrapperを含む）はtestの終わりまでにjoinする。process-globalの可変のstaticをtestの間で共有しない。
   - portのfake: Git・session・agent・`Verifier`・`ProcessControl`などのportは状態を持つfakeにし（生成した`unreachable!`のstubを並べない）、productionのevent・payload・ask・文面・閾値の意味を変えない。productionに足してよい口はtestから構成を渡すもの（`InProcessCaller`のtokenの置き場、`MemoryFiles`の公開、待ちの間隔）だけ。
   - 流れる場所: libのtestとして、着地のunit test（上の「test binary」の`scripts/landing-it.sh`、一覧に載ったものを除く全件）とCIのcoverageで流れる。`tests/it`ではないので、境界の登録簿・moduleの本数のratchet・`tests/it`の時間の関門の対象にならず、下の`--lib`の時間の関門の対象になる。
-  - 1本の時間の目安: おおむね3秒以内（Spikeで1.6〜3.0秒）。5秒を超えるものは待ちの間隔の口で縮めるか1本の配線を分ける。`cargo test --lib`の1本の秒で測る。
+  - 1本の時間の上限: composeの層の1秒（下の「unitの段の時間の予算と量の層」）。超えるものは待ちの間隔の口で縮めるか1本の配線を分ける。
   - 機械で見る部分: `scripts/check-test-rules.sh`はこの層の行も他の`src/`の`#[cfg(test)]`の行と同じ形で見る（層の規則も実時間の時計・sleep・外部プロセスをtestの行に置かないので、同じ形でよい）。productionが実時間で待つことと起こすthreadはtestの行に現れないので、test-rulesのreviewはこの層のtestをunit testの規則で差し戻さず、上の規則（期限で包むこと・joinすること・staticを共有しないこと）で判定する。
   - 配線を確かめる新しいtestはこの層に置き、`tests/it`の登録簿に境界の種類「supervisorの配線」のidを新しく足さない。移し替えの間、既存の「supervisorの配線」のidとそのIT・時間の関門の許可の一覧の項目は残し、移すtaskが確かめていた中身の行き先を対応づけて同じ変更で外す。境界の種類「supervisorの配線」の退役は移し替えの後の別のtaskが行う。それまで`scripts/check-it-added-tests.sh`はその種類の値を通すので、新しいidを足さないことはplan reviewとtest-rulesのreviewが見る。
 - 機械で見る部分: `scripts/check-test-rules.sh`が、差分が足した・変えた`src/`の`#[cfg(test)]`の行のうち、行だけで見分けられる実時間の時計・sleep・外部プロセスの形を、runのプログラムのreviewとCIで検出する。見る形と見ない形、1か所を外す`test-rules: allow`の印はscriptの冒頭のコメントが持つ。SQLiteのファイル（上のadapterのtestの例外に当たるかを含む）と、行だけで見分けられない形（ITでの判断のcaseの並べ直しなど）はtest-rulesのreviewが見る。
@@ -113,8 +114,8 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
   - 閾値は本番の関門の`dagq::it`の1本の平均の数倍に置く。CIのrunnerと本番の関門は並列度が違い同じtestの秒が違うので、CIで落ちたtestが本番の関門のlogの秒では閾値の内なら、その秒を添えて直すか項目を足すかをplannerが決める。
   - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「itのtestの時間の関門」）、runのreviewのtestの規則の検査、CIのpushとpull_request（mainへのpushで落ちればci-failureのissue）。`integrate`の検証には足さない。
   - helperやfixtureだけの変更は対象にならず（それを使うtestが遅くなっても捕まえない）、CIのrunnerと本番の関門では秒が違う。
-- `--lib`の時間の関門（[ADR-t4948-1](../adr/2026-11-16-t4948-1-time-gate-for-added-or-changed-lib-tests-and-the-lib-budget.md)がADR-t1707-1を`--lib`についてamends）: baseからの差分で足した・本文を変えた`src/`の`#[cfg(test)]`の`#[test]`（nextestのbinaryの`dagq`と`dagq::bin/dagq`）の1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。許可の一覧は`.config/lib-slow-allow.toml`と`.config/lib-slow-allow.d/*.toml`を合わせたもので、新しい項目は足すtaskのファイル`.config/lib-slow-allow.d/t<task ID>.toml`に足す（`tests/it`の一覧と同じ理由と書式）。閾値・testの名前の求め方・scriptの引数・見えないものは`scripts/check-lib-test-time.sh`の冒頭のコメントが持つ。
-  - 超えたら、まずtestを直す（判断のcaseを副作用のない関数のunit testに分ける、件数を小さくする、1本を分けて並列にする）。直さずに項目を足してよいのは、理由が次のどちらかのときだけ: (a) そのtestが守る境界（SQLiteのstoreの契約・adapterなど、unitの層で実物を使う理由）を書ける、(b) 縮める・移す予定のtaskかgoalを書ける。判断のcaseを並べただけのtestと件数を大きくしただけのtestは(a)に当たらない。項目には足したtaskのIDを書く。
+- `--lib`の時間の関門（[ADR-t4948-1](../adr/2026-11-16-t4948-1-time-gate-for-added-or-changed-lib-tests-and-the-lib-budget.md)がADR-t1707-1を`--lib`についてamends）: baseからの差分で足した・本文を変えた`src/`の`#[cfg(test)]`の`#[test]`（nextestのbinaryの`dagq`と`dagq::bin/dagq`）の1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。許可の一覧は`.config/lib-slow-allow.toml`と`.config/lib-slow-allow.d/*.toml`を合わせたもので、新しい項目は足すtaskのファイル`.config/lib-slow-allow.d/t<task ID>.toml`に足す（`tests/it`の一覧と同じ理由と書式）。閾値の規則はtestの層ごとの1本の上限（下の「unitの段の時間の予算と量の層」、[ADR-t5020-1](../adr/2026-11-16-t5020-1-unit-tests-are-bound-by-a-time-budget-and-per-layer-limits-with-a-volume-layer.md)決定2）で、本番の着地の検証のログの負荷の下の1本の秒と比べ、等しいものは超えない。scriptが使う閾値の値・testの名前の求め方・scriptの引数・見えないものは`scripts/check-lib-test-time.sh`の冒頭のコメントが持つ。
+  - 超えたら、まずtestを直す（判断のcaseを副作用のない関数のunit testに分ける、件数を小さくする、1本を分けて並列にする）。直さずに項目を足してよいのは、理由が次のどちらかのときだけ: (a) そのtestが守る境界（SQLiteのstoreの契約・adapterなど、unitの層で実物を使う理由）を書ける、(b) 縮める・移す予定のtaskかgoalを書ける。判断のcaseを並べただけのtestと件数を大きくしただけのtestは(a)に当たらない。量の層のtestは、同じ約束の小さい版がunitの層にあるときだけ件数を大きくしただけのtestに当たらず、項目は(a)の理由に小さい版のtestの名前を添える（小さい版の無い量のtestは載せられない）。項目には足したtaskのIDを書く。
   - 既存の遅いtestは一覧に載せない。差分で触れたtestだけが対象なので、触れたtaskが直すか理由つきの項目を足す。項目のtestを直す・消す・名前を変えるtaskは、同じ変更で自分の項目を外すか理由を直す（残すと後で同じ名前のtestが素通りする。scriptはHEADに無い項目を警告するだけで落とさない）。
   - 関門の場所: 着地の検証（`scripts/landing-it.sh`のunitの段が出したログを読むだけで、testを流し増やさない。落ちればcodeの失敗としてworkerに返る）、CIのmacOSのjob、workerの手元（local_checksのgate）、runのreviewのtestの規則の検査。秒の正は本番の着地の検証のログで、CIと手元の秒は早く気づくためのもの。
   - 全体の重さ（`--lib`の本数・秒の合計・上位の秒）は毎晩mainで予算と比べ、超えれば夜のjobが落ちてfindingになる。着地は止めない。
@@ -126,6 +127,25 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
   - 新しいidの承認: 項目に足したtaskのIDを書き、そのtaskのacceptanceかdescriptionがidを名指していること（plan reviewが見る）と、`reason`が境界を書いていること（test-rulesのreviewが見る）で承認とする。機械は項目の形と数だけを見る。taskの受け入れ条件と`--verify`でidを名指す書き方と、plan reviewが差し戻す形は[taskの登録](task-registration.md)の「受け入れ条件とITの名指し方」と「plan reviewが当てはめる規則」が持つ。
   - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「testの規則の点検」）、runのプログラムのreview、CIのpushとpull_request。`integrate`の検証には足さない（時間の関門と同じく、着地の時間を増やさないため）。
   - testを消すか名前を変えるtaskは、そのtestを代表に持つ項目を同じ変更で直す（scriptは無いtestの代表を警告するだけで落とさない）。
+
+## unitの段の時間の予算と量の層
+
+[ADR-t5020-1](../adr/2026-11-16-t5020-1-unit-tests-are-bound-by-a-time-budget-and-per-layer-limits-with-a-volume-layer.md)。`src/`の`#[cfg(test)]`を足す・変えるworkerと、そのtaskを登録するplannerが守る。
+
+- 予算: unit testは本数の目標を置かず、着地の検証のunitの段の時間で縛る。壁時計5分以内、`NEXTEST_TEST_THREADS=6`でCPU時間の合計30分（1,800秒）以内。段の時間は遅い1本ではなくCPU合計を並列度で割った値で決まり、合計の大半は1秒を超える少数のtestが持つ。
+  - 数えるのはunitの層（下の量の層を除いた`--lib`のtest）で、秒は本番の着地の検証のログ（nextestのSummaryの秒と1本ごとの秒の和）の負荷の下の秒。量の層を流したrunは量の層の分を除いて比べる。
+  - 予算は着地を止めない。近づける手段は層ごとの上限・量の層・下のSQLiteのtestの形と、それに従う直し。
+  - 上の「判断と境界のtest」の`--lib`の毎晩の予算（CIのrunner）は今の値を超えないための天井で、この予算そのものではない。直しが着地するごとに今の値からこの予算の方へ下げていく。
+- 層ごとの1本の上限（`--lib`の時間の関門の閾値）: domain（副作用の無い判断）50 ms、application（fakeを使う）200 ms、infrastructureとcompose（実のSQLite・配線）1秒。層はnextestのtestの名前の先頭のmodule（`domain::`・`application::`・`infrastructure::`・`compose::`）で決め、どれでもないもの（binのtestを含む）はinfrastructureと同じ。超えたときの扱いと許可の一覧は上の「判断と境界のtest」の`--lib`の時間の関門。
+- 量の層: 量で約束を確かめるtest（範囲の外の履歴を150〜300単位積む・本番の規模で作る・storeの契約の全caseを同じDBで通す）はunitの層に置かず、`mod volume`の中に置く（testの全名に`::volume::`が入り、filtersetが名前で拾う）。
+  - 同じ約束の小さい版（下の形）をunitの層に残し、確かめる約束を弱めない。
+  - 流れる場所: 着地の検証のunitの段では、差分が[.config/landing-unit-path-groups.toml](../../.config/landing-unit-path-groups.toml)の組のpathに当たるrunだけで流れ、CIのmacOS・Linuxのjobは毎回全部流す（上の「test binary」）。
+  - 組への出入り: unitの層の版は組のfilterset（moduleのpathと`store_contract_tests`の名前）のままで、量の層へ移すことで組を狭めも広げもしない。量の層は`mod volume`のtestを組のfiltersetに足すだけにし、それはgoal 297のtaskにも許す。組・組のpathを足すこと、`mod volume`に無いtestを組に足すことは、組を作ったgoal 294のtaskと人の決定だけ（[ADR-t4997-1](../adr/2026-11-16-t4997-1-landing-unit-stage-leaves-out-path-groups-the-diff-misses-and-ci-runs-them.md)決定3）。
+- SQLiteのtestの形（上の「判断と境界のtest」のSQLiteのadapterのtestとstoreの約束の組に当たる）:
+  - 範囲の読みと全件の読みの等価は、小さな履歴（数〜数十単位）と境目（範囲の端・時計の戻り・古い書き手）で比べる。
+  - 読む量が範囲の外の履歴に比例しないことは、読んだ行数（読みのportの行数）か、`EXPLAIN QUERY PLAN`の索引の範囲検索で確かめ、履歴は10単位と20単位でよい（例: `src/infrastructure/runtime_store/ledger/queue_from_tests.rs`の`assert_seeks`）。
+  - 同じDBで順に流す干渉の検査は、unitの層では小さい件数で通し、全caseの通しは量の層に置く。
+- schemaの用意（1本ごとにmemdbへ`SqliteQueue::init`でmigrationを全部当てる）を最新schemaのDBの写しに替えるかは、1本の内訳で用意が占める割合とunitの段のCPU合計の削減の見込みで決め、見込みがCPU合計の5%以上なら入れる（ADR-t5020-1決定5）。
 
 ## testファイルの行数
 

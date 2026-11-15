@@ -10,6 +10,8 @@ amends:
   - adr-t4979-1 decision 1
   - adr-t4979-1 decision 3
   - adr-t1925-1 decision 1
+amended_by:
+  - adr-t5020-1
 owners:
   - hisamekms
 tags:

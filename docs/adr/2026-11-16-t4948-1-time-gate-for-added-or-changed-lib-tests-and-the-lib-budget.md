@@ -12,6 +12,8 @@ amends:
   - adr-t1707-1 decision 3
   - adr-t1707-1 decision 5
   - adr-t1707-1 decision 6
+amended_by:
+  - adr-t5020-1
 owners:
   - hisamekms
 tags:
